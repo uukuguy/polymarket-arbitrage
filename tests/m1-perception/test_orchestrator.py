@@ -593,3 +593,65 @@ async def test_subset_persists_only_target_markets(tmp_path: Path) -> None:
     db_count = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
     con.close()
     assert db_count == 0, f"Persist scope leaked: SQLite has {db_count} rows for empty subset"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase timing visibility — every phase emits a 'done in <duration>' line
+# and the overall run prints a 'Snapshot complete in <duration>' summary.
+#
+# Backstory: LIVE-RUN-003/004 hung silently because logs only showed the phase
+# label, never per-phase timings. This pins the contract that every phase
+# emits a measurable duration so future stalls localize to a specific phase.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_phase_timing_lines_emitted(tmp_path: Path) -> None:
+    from loguru import logger
+
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+
+    fake_gamma = AsyncMock()
+    fake_gamma.fetch_all_active_markets.return_value = gamma_data
+    fake_gamma.aclose = AsyncMock()
+    fake_gamma.__aenter__.return_value = fake_gamma
+    fake_gamma.__aexit__.return_value = None
+
+    captured: list[str] = []
+    sink_id = logger.add(lambda msg: captured.append(msg.record["message"]), level="INFO")
+
+    try:
+        with patch(
+            "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+        ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+            clob_inst = ClobMock.return_value
+            clob_inst.get_books = AsyncMock(
+                return_value=_books_as_objects(clob_data["books"])
+            )
+            clob_inst.get_prices_buy_sell = AsyncMock(
+                return_value={
+                    "buy": clob_data["prices_buy"],
+                    "sell": clob_data["prices_sell"],
+                }
+            )
+            await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+    finally:
+        logger.remove(sink_id)
+
+    # Each phase must emit one 'start' and one 'done in <duration>' line
+    # tagged with its phase label (e.g. '1/7', '4/7').
+    for phase_num in range(1, 8):
+        starts = [m for m in captured if f"Phase {phase_num}/7" in m and "start" in m]
+        dones = [m for m in captured if f"Phase {phase_num}/7" in m and "done in" in m]
+        assert len(starts) == 1, (
+            f"phase {phase_num}/7 missing 'start' (or duplicated): {[m for m in captured if f'Phase {phase_num}/7' in m]}"
+        )
+        assert len(dones) == 1, (
+            f"phase {phase_num}/7 missing 'done in' (or duplicated): {[m for m in captured if f'Phase {phase_num}/7' in m]}"
+        )
+
+    # Overall completion summary must be present
+    overall = [m for m in captured if "Snapshot complete in" in m]
+    assert len(overall) == 1, f"missing overall summary line, got: {captured}"

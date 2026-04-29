@@ -343,6 +343,33 @@ INFO    | Phase 2/7: Normalize + dedupe
 
 每个 step 也都打 `Phase N/7:` banner（对应教学文档的 7 步划分）。失败/卡住时**最后一行**直接告诉你"卡在第几页 / 第几个 chunk"，不再黑屏猜进度。
 
+**时间戳 + 每 phase elapsed**（LIVE-RUN-004 暴露：13 分钟无法判断 Polymarket Gamma API 是慢还是 hang）：
+
+每行都带 `HH:mm:ss` 时间戳（loguru format 改造）。每个 phase 用 contextmanager 包起来，自动产出 start / done 配对：
+
+```
+00:08:23 | INFO    | snapshot starting — mode=subset, cache=on, taken_at_ms=...
+00:08:23 | INFO    | Phase 1/7: Gamma fetch (active markets) — start
+00:08:24 | INFO    | Gamma: starting paginated fetch (page_limit=100)
+00:08:24 | INFO    | Gamma: page 1 fetched (100 markets so far)
+00:08:54 | INFO    | Gamma: page 50 fetched (5000 markets so far)
+...
+00:11:42 | INFO    | Gamma fetched 48985 active markets in 490 pages (final)
+00:11:42 | INFO    | ► Phase 1/7: Gamma fetch (active markets) — done in 3m 19s
+00:11:42 | INFO    | Phase 2/7: Normalize + dedupe — start
+00:11:42 | INFO    | Deduped 1960 markets ...
+00:11:42 | INFO    | ► Phase 2/7: Normalize + dedupe — done in 0.5s
+...
+00:34:51 | INFO    | Snapshot complete in 26m 28s (snapshot_id=3)
+00:34:51 | OK      | 17259 markets | mode=subset | 28229 issues | -> ...
+```
+
+`►` 是 done 行的 sentinel —— 复盘时 `grep '► Phase' /tmp/snap.log` 就能拿到每 phase 耗时摘要。
+
+**`Snapshot complete in X` 总耗时行**：snapshot 完成时打一行，下次再看哪次跑得慢一目了然。
+
+测试覆盖：`test_phase_timing_lines_emitted` pin 住"phase 1-7 各自一组 start+done + 全局 complete 行"契约，未来改 phase 边界时不会忘记打 timing。
+
 **测试覆盖**：`tests/m1-perception/test_snapshot_cache.py` 20 个 case
 - 指纹稳定性 + drift 检测（settings / tokens / mode / age / corrupted meta）
 - chunk save/load roundtrip（dict + dataclass-like SDK 对象）

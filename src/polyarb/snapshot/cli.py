@@ -50,11 +50,15 @@ def snapshot(
 ) -> None:
     """Capture a one-shot Polymarket market snapshot."""
     # Re-route loguru: default is INFO; --verbose drops to DEBUG.
+    # Timestamp prefix lets the user (and post-mortem readers of /tmp logs)
+    # measure phase durations and locate slow steps, surfaced after
+    # LIVE-RUN-003/004 showed Gamma can be 10x slower than baseline without
+    # any visible signal beyond "page N fetched" lines.
     logger.remove()
     logger.add(
         sys.stderr,
         level="DEBUG" if verbose else "INFO",
-        format="<level>{level:<7}</level> | {message}",
+        format="<green>{time:HH:mm:ss}</green> | <level>{level:<7}</level> | {message}",
     )
 
     settings = load_settings(config)

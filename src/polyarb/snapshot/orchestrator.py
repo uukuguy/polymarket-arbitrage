@@ -38,10 +38,40 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format a duration as '12.3s' / '1m 23s' / '1h 02m 03s' for log readability."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        m = int(seconds // 60)
+        s = int(seconds % 60)
+        return f"{m}m {s:02d}s"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h}h {m:02d}m {s:02d}s"
+
+
+@contextmanager
+def _phase(label: str):
+    """Bracket a pipeline phase with start/done log lines and elapsed timing.
+
+    The 'done' line uses a ► glyph so post-run grep can isolate phase summaries:
+        grep '► Phase' /tmp/snap.log
+    """
+    logger.info(f"Phase {label} — start")
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        logger.info(f"► Phase {label} — done in {_format_elapsed(time.monotonic() - t0)}")
 
 from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient
@@ -137,246 +167,255 @@ async def run_snapshot(
         f"taken_at_ms={taken_at_ms}"
     )
 
+    overall_t0 = time.monotonic()
+
     # ── 1. Gamma fetch ────────────────────────────────────────────────────────
-    logger.info("Phase 1/7: Gamma fetch (active markets)")
-    async with GammaClient(settings) as gamma:
-        try:
-            raw_markets = await gamma.fetch_all_active_markets()
-            gamma_count_reported = len(raw_markets)
-            logger.info(f"Gamma: fetched {gamma_count_reported} active markets")
-        except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
-            logger.error(f"Gamma fetch failed: {e!r}")
-            # F-5: cap exception detail to 200 chars (HTML 4xx body could be huge).
-            issues.append(
-                Issue(
-                    layer=1,
-                    category=Category.API_UNREACHABLE,
-                    market_id=None,
-                    detail=f"Gamma unreachable: {str(e)[:200]}",
+    with _phase("1/7: Gamma fetch (active markets)"):
+        async with GammaClient(settings) as gamma:
+            try:
+                raw_markets = await gamma.fetch_all_active_markets()
+                gamma_count_reported = len(raw_markets)
+                logger.info(f"Gamma: fetched {gamma_count_reported} active markets")
+            except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
+                logger.error(f"Gamma fetch failed: {e!r}")
+                # F-5: cap exception detail to 200 chars (HTML 4xx body could be huge).
+                issues.append(
+                    Issue(
+                        layer=1,
+                        category=Category.API_UNREACHABLE,
+                        market_id=None,
+                        detail=f"Gamma unreachable: {str(e)[:200]}",
+                    )
                 )
-            )
-            raw_markets = []
+                raw_markets = []
 
     # ── 2. Normalize (drop unrecoverable rows) ────────────────────────────────
-    logger.info("Phase 2/7: Normalize + dedupe")
-    markets: list[dict] = [m for m in (normalize_market(r) for r in raw_markets) if m is not None]
+    with _phase("2/7: Normalize + dedupe"):
+        markets: list[dict] = [
+            m for m in (normalize_market(r) for r in raw_markets) if m is not None
+        ]
 
-    # Dedupe by market_id — Gamma /markets returns ~4% duplicates across pagination
-    # boundaries (live empirical: 1,960 dups in 48,985 rows on 2026-04-29). The only
-    # observed differing field is liquidity_usd (drifts between page fetches), so
-    # keeping the FIRST occurrence is safe and stable. Without this, SQLite's UNIQUE
-    # constraint on markets.market_id rolls back the entire snapshot insert.
-    seen_ids: set[str] = set()
-    deduped: list[dict] = []
-    for m in markets:
-        mid = m.get("market_id")
-        if mid is None or mid in seen_ids:
-            continue
-        seen_ids.add(mid)
-        deduped.append(m)
-    dup_count = len(markets) - len(deduped)
-    if dup_count > 0:
-        logger.info(f"Deduped {dup_count} markets by market_id (Gamma pagination overlap)")
-    markets = deduped
-    logger.info(f"Normalized: {len(markets)}/{len(raw_markets)} unique markets kept")
+        # Dedupe by market_id — Gamma /markets returns ~4% duplicates across pagination
+        # boundaries (live empirical: 1,960 dups in 48,985 rows on 2026-04-29). The only
+        # observed differing field is liquidity_usd (drifts between page fetches), so
+        # keeping the FIRST occurrence is safe and stable. Without this, SQLite's UNIQUE
+        # constraint on markets.market_id rolls back the entire snapshot insert.
+        seen_ids: set[str] = set()
+        deduped: list[dict] = []
+        for m in markets:
+            mid = m.get("market_id")
+            if mid is None or mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            deduped.append(m)
+        dup_count = len(markets) - len(deduped)
+        if dup_count > 0:
+            logger.info(f"Deduped {dup_count} markets by market_id (Gamma pagination overlap)")
+        markets = deduped
+        logger.info(f"Normalized: {len(markets)}/{len(raw_markets)} unique markets kept")
 
     # ── 3. Mode filter → token list ───────────────────────────────────────────
-    logger.info("Phase 3/7: Mode filter")
-    if mode == "subset":
-        target_markets = [
-            m for m in markets if (m.get("liquidity_usd") or 0) > settings.liquidity_threshold_usd
-        ]
-    else:
-        target_markets = markets
+    with _phase("3/7: Mode filter"):
+        if mode == "subset":
+            target_markets = [
+                m for m in markets
+                if (m.get("liquidity_usd") or 0) > settings.liquidity_threshold_usd
+            ]
+        else:
+            target_markets = markets
 
-    token_ids: list[str] = []
-    for m in target_markets:
-        for k in ("yes_token_id", "no_token_id"):
-            tid = m.get(k)
-            if tid:
-                token_ids.append(tid)
+        token_ids: list[str] = []
+        for m in target_markets:
+            for k in ("yes_token_id", "no_token_id"):
+                tid = m.get(k)
+                if tid:
+                    token_ids.append(tid)
 
-    logger.info(
-        f"Mode={mode}: {len(target_markets)}/{len(markets)} markets, "
-        f"{len(token_ids)} tokens to fetch from CLOB"
-    )
+        logger.info(
+            f"Mode={mode}: {len(target_markets)}/{len(markets)} markets, "
+            f"{len(token_ids)} tokens to fetch from CLOB"
+        )
 
     # ── 4. CLOB batch fetch (best-effort: failure → Issue, not raise) ─────────
-    logger.info("Phase 4/7: CLOB fetch (books + buy/sell prices)")
     # Cache wires in here: try_resume() either rebinds to a reusable cache from
     # a prior interrupted run (matching settings + token list + age <30min) or
     # initializes a fresh dir. ChunkCache is per-(taken_at_ms, token_set), so an
     # entirely fresh run with new tokens never accidentally reuses stale data.
-    cache: ChunkCache | None = None
-    if use_cache:
-        cache = ChunkCache(
-            cache_root=settings.cache_root,
-            taken_at_ms=taken_at_ms,
-            settings=settings,
-            token_ids=token_ids,
-            mode=mode,
-        )
-        cache.try_resume()
-        # If we resumed an older cache, its taken_at_ms differs from ours.
-        # We DON'T adopt the cached taken_at_ms — the run's taken_at_ms is
-        # the moment THIS run started, used for parquet path + DB row.
-        # Cache is just intermediate IO; final timestamps stay fresh.
-    else:
-        purged = ChunkCache.purge_all(settings.cache_root)
-        if purged > 0:
-            logger.info(f"--no-cache: purged {purged} cache directories")
-
     books_by_token: dict[str, dict] = {}
     prices_buy: dict = {}
     prices_sell: dict = {}
-    clob = ClobReaderClient(settings)
-    try:
-        books = await clob.get_books(token_ids, cache=cache)
-        prices = await clob.get_prices_buy_sell(token_ids, cache=cache)
-        prices_buy = prices.get("buy", {})
-        prices_sell = prices.get("sell", {})
-        books_by_token = _index_books_by_token(books)
-        logger.info(
-            f"CLOB: {len(books_by_token)} books indexed, "
-            f"{len(prices_buy)}/{len(prices_sell)} buy/sell prices"
-        )
-    except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
-        logger.error(f"CLOB fetch failed: {e!r}")
-        # F-5: cap exception detail to 200 chars.
-        issues.append(
-            Issue(
-                layer=4,
-                category=Category.API_UNREACHABLE,
-                market_id=None,
-                detail=f"CLOB unreachable: {str(e)[:200]}",
+    cache: ChunkCache | None = None
+    with _phase("4/7: CLOB fetch (books + buy/sell prices)"):
+        if use_cache:
+            cache = ChunkCache(
+                cache_root=settings.cache_root,
+                taken_at_ms=taken_at_ms,
+                settings=settings,
+                token_ids=token_ids,
+                mode=mode,
             )
-        )
+            cache.try_resume()
+            # If we resumed an older cache, its taken_at_ms differs from ours.
+            # We DON'T adopt the cached taken_at_ms — the run's taken_at_ms is
+            # the moment THIS run started, used for parquet path + DB row.
+            # Cache is just intermediate IO; final timestamps stay fresh.
+        else:
+            purged = ChunkCache.purge_all(settings.cache_root)
+            if purged > 0:
+                logger.info(f"--no-cache: purged {purged} cache directories")
+
+        clob = ClobReaderClient(settings)
+        try:
+            books = await clob.get_books(token_ids, cache=cache)
+            prices = await clob.get_prices_buy_sell(token_ids, cache=cache)
+            prices_buy = prices.get("buy", {})
+            prices_sell = prices.get("sell", {})
+            books_by_token = _index_books_by_token(books)
+            logger.info(
+                f"CLOB: {len(books_by_token)} books indexed, "
+                f"{len(prices_buy)}/{len(prices_sell)} buy/sell prices"
+            )
+        except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
+            logger.error(f"CLOB fetch failed: {e!r}")
+            # F-5: cap exception detail to 200 chars.
+            issues.append(
+                Issue(
+                    layer=4,
+                    category=Category.API_UNREACHABLE,
+                    market_id=None,
+                    detail=f"CLOB unreachable: {str(e)[:200]}",
+                )
+            )
 
     # ── 5. Stamp fetched_at_ms + attach top-of-book (yes side; F-1 wrapped) ──
-    logger.info("Phase 5/7: Stamp + attach top-of-book")
     # Only target_markets are persisted, so only stamp/attach those. Filtered-out
     # markets stay in `markets` for layer-1 count comparison only — we never
     # write them anywhere. (Closes the "fetched_at_ms semantically wrong on
     # filter-excluded rows" gap from 01-4-SUMMARY.)
     clob_done_ms = int(time.time() * 1000)
-    for m in target_markets:
-        m["fetched_at_ms"] = clob_done_ms
+    with _phase("5/7: Stamp + attach top-of-book"):
+        for m in target_markets:
+            m["fetched_at_ms"] = clob_done_ms
 
-        # Attach top-of-book using yes_token_id only (single-side row).
-        tid = m.get("yes_token_id")
-        if not tid or tid not in books_by_token:
-            continue
-        book = books_by_token[tid]
-        asks = book.get("asks") or []
-        bids = book.get("bids") or []
+            # Attach top-of-book using yes_token_id only (single-side row).
+            tid = m.get("yes_token_id")
+            if not tid or tid not in books_by_token:
+                continue
+            book = books_by_token[tid]
+            asks = book.get("asks") or []
+            bids = book.get("bids") or []
 
-        # F-1 SECURITY: CLOB book is attacker-controlled external input.
-        # Malformed price/size strings (NaN, missing key, null) must NOT crash
-        # the snapshot — log as Issue(layer=4, category=UNKNOWN) and continue.
-        # Honors D-D3 (校验失败仍落库). raw_payload truncated to 500 bytes (F-5).
-        if asks:
-            try:
-                m["best_ask_price"] = float(asks[0]["price"])
-                m["best_ask_size"] = float(asks[0]["size"])
-            except (KeyError, TypeError, ValueError, IndexError) as e:
-                issues.append(
-                    Issue(
-                        layer=4,
-                        category=Category.UNKNOWN,
-                        market_id=m.get("market_id"),
-                        detail=f"unparseable ask for {tid}: {str(e)[:200]}",
-                        raw_payload=json.dumps(book, default=str)[:500],
+            # F-1 SECURITY: CLOB book is attacker-controlled external input.
+            # Malformed price/size strings (NaN, missing key, null) must NOT crash
+            # the snapshot — log as Issue(layer=4, category=UNKNOWN) and continue.
+            # Honors D-D3 (校验失败仍落库). raw_payload truncated to 500 bytes (F-5).
+            if asks:
+                try:
+                    m["best_ask_price"] = float(asks[0]["price"])
+                    m["best_ask_size"] = float(asks[0]["size"])
+                except (KeyError, TypeError, ValueError, IndexError) as e:
+                    issues.append(
+                        Issue(
+                            layer=4,
+                            category=Category.UNKNOWN,
+                            market_id=m.get("market_id"),
+                            detail=f"unparseable ask for {tid}: {str(e)[:200]}",
+                            raw_payload=json.dumps(book, default=str)[:500],
+                        )
                     )
-                )
-        if bids:
-            try:
-                m["best_bid_price"] = float(bids[0]["price"])
-                m["best_bid_size"] = float(bids[0]["size"])
-            except (KeyError, TypeError, ValueError, IndexError) as e:
-                issues.append(
-                    Issue(
-                        layer=4,
-                        category=Category.UNKNOWN,
-                        market_id=m.get("market_id"),
-                        detail=f"unparseable bid for {tid}: {str(e)[:200]}",
-                        raw_payload=json.dumps(book, default=str)[:500],
+            if bids:
+                try:
+                    m["best_bid_price"] = float(bids[0]["price"])
+                    m["best_bid_size"] = float(bids[0]["size"])
+                except (KeyError, TypeError, ValueError, IndexError) as e:
+                    issues.append(
+                        Issue(
+                            layer=4,
+                            category=Category.UNKNOWN,
+                            market_id=m.get("market_id"),
+                            detail=f"unparseable bid for {tid}: {str(e)[:200]}",
+                            raw_payload=json.dumps(book, default=str)[:500],
+                        )
                     )
-                )
 
     # ── 6. Validate (Layer 1 / 2 / 4) ─────────────────────────────────────────
-    logger.info("Phase 6/7: Validate (Layer 1/2/4)")
-    if gamma_count_reported is not None:
-        # Layer 1 compares Gamma's reported active count vs how many we kept
-        # post-normalize. A diff means either a bug in normalize OR API jitter.
-        issues.extend(layer1_count(gamma_count_reported, len(markets)))
+    with _phase("6/7: Validate (Layer 1/2/4)"):
+        if gamma_count_reported is not None:
+            # Layer 1 compares Gamma's reported active count vs how many we kept
+            # post-normalize. A diff means either a bug in normalize OR API jitter.
+            issues.extend(layer1_count(gamma_count_reported, len(markets)))
 
-    # Layer 2/4 validate ONLY persisted markets. Filtered-out markets aren't
-    # part of this snapshot's "completeness" claim — they'd flood
-    # validation_issues with thousands of phantom warnings.
-    issues.extend(layer2_fields(target_markets, now_ms=taken_at_ms))
+        # Layer 2/4 validate ONLY persisted markets. Filtered-out markets aren't
+        # part of this snapshot's "completeness" claim — they'd flood
+        # validation_issues with thousands of phantom warnings.
+        issues.extend(layer2_fields(target_markets, now_ms=taken_at_ms))
 
-    # Layer 4 expects {token_id: {"buy": <price-as-str-or-num>, "sell": ...}}
-    # The CLOB SDK gives us {tid: {"BUY": "0.46"}} on each side — unwrap that
-    # inner side-keyed dict so the validator can _safe_float() the value
-    # directly. This shape contract is verified by validator tests.
-    all_tids = set(prices_buy) | set(prices_sell)
+        # Layer 4 expects {token_id: {"buy": <price-as-str-or-num>, "sell": ...}}
+        # The CLOB SDK gives us {tid: {"BUY": "0.46"}} on each side — unwrap that
+        # inner side-keyed dict so the validator can _safe_float() the value
+        # directly. This shape contract is verified by validator tests.
+        all_tids = set(prices_buy) | set(prices_sell)
 
-    def _unwrap_side(side_dict: dict | None, key: str) -> str | None:
-        if not isinstance(side_dict, dict):
-            return None
-        return side_dict.get(key)
+        def _unwrap_side(side_dict: dict | None, key: str) -> str | None:
+            if not isinstance(side_dict, dict):
+                return None
+            return side_dict.get(key)
 
-    prices_combined = {
-        tid: {
-            "buy": _unwrap_side(prices_buy.get(tid), "BUY"),
-            "sell": _unwrap_side(prices_sell.get(tid), "SELL"),
+        prices_combined = {
+            tid: {
+                "buy": _unwrap_side(prices_buy.get(tid), "BUY"),
+                "sell": _unwrap_side(prices_sell.get(tid), "SELL"),
+            }
+            for tid in all_tids
         }
-        for tid in all_tids
-    }
-    issues.extend(layer4_cross_source(target_markets, books_by_token, prices_combined))
+        issues.extend(layer4_cross_source(target_markets, books_by_token, prices_combined))
 
-    is_valid = is_valid_overall(issues)
-    logger.info(
-        f"Validated: is_valid={is_valid}, {len(issues)} total issues "
-        f"({sum(1 for i in issues if i.layer == 1)} L1, "
-        f"{sum(1 for i in issues if i.layer == 2)} L2, "
-        f"{sum(1 for i in issues if i.layer == 4)} L4)"
-    )
+        is_valid = is_valid_overall(issues)
+        logger.info(
+            f"Validated: is_valid={is_valid}, {len(issues)} total issues "
+            f"({sum(1 for i in issues if i.layer == 1)} L1, "
+            f"{sum(1 for i in issues if i.layer == 2)} L2, "
+            f"{sum(1 for i in issues if i.layer == 4)} L4)"
+        )
 
     # ── 7. Persist (Parquet atomic FIRST, then SQLite single-tx) ──────────────
-    logger.info("Phase 7/7: Persist (Parquet then SQLite)")
     finished_at_ms = int(time.time() * 1000)
     parquet_path = compute_snapshot_path(settings.parquet_root, taken_at_ms)
+    with _phase("7/7: Persist (Parquet then SQLite)"):
+        # Build parquet rows — must match SNAPSHOT_SCHEMA (22 fields including
+        # snapshot_taken_at_ms + snapshot_id parquet-only fields). Persist ONLY
+        # target_markets (the mode-filtered set). Filtered-out markets aren't part
+        # of this snapshot's claim.
+        parquet_rows: list[dict] = []
+        for m in target_markets:
+            row = dict(m)
+            row["snapshot_taken_at_ms"] = taken_at_ms
+            row["snapshot_id"] = 0  # placeholder — Parquet has no FK; SQLite assigns the real id
+            row.setdefault("fetched_at_ms", clob_done_ms)
+            parquet_rows.append(row)
+        write_parquet_atomic(parquet_rows, parquet_path)
 
-    # Build parquet rows — must match SNAPSHOT_SCHEMA (22 fields including
-    # snapshot_taken_at_ms + snapshot_id parquet-only fields). Persist ONLY
-    # target_markets (the mode-filtered set). Filtered-out markets aren't part
-    # of this snapshot's claim.
-    parquet_rows: list[dict] = []
-    for m in target_markets:
-        row = dict(m)
-        row["snapshot_taken_at_ms"] = taken_at_ms
-        row["snapshot_id"] = 0  # placeholder — Parquet has no FK; SQLite assigns the real id
-        row.setdefault("fetched_at_ms", clob_done_ms)
-        parquet_rows.append(row)
-    write_parquet_atomic(parquet_rows, parquet_path)
+        store = SQLiteStore(settings.db_path)
+        store.init_schema()
+        snapshot_id = store.write_snapshot(
+            taken_at_ms=taken_at_ms,
+            finished_at_ms=finished_at_ms,
+            mode=mode,
+            parquet_path=str(parquet_path),
+            is_valid=is_valid,
+            market_rows=target_markets,
+            issues=issues,
+        )
 
-    store = SQLiteStore(settings.db_path)
-    store.init_schema()
-    snapshot_id = store.write_snapshot(
-        taken_at_ms=taken_at_ms,
-        finished_at_ms=finished_at_ms,
-        mode=mode,
-        parquet_path=str(parquet_path),
-        is_valid=is_valid,
-        market_rows=target_markets,
-        issues=issues,
+        # Cache cleanup happens ONLY after a successful SQLite commit. If step 7
+        # failed mid-way, the cache is left intact so the next run can resume.
+        if cache is not None:
+            cache.cleanup()
+
+    logger.info(
+        f"Snapshot complete in {_format_elapsed(time.monotonic() - overall_t0)} "
+        f"(snapshot_id={snapshot_id})"
     )
-
-    # Cache cleanup happens ONLY after a successful SQLite commit. If step 7
-    # failed mid-way, the cache is left intact so the next run can resume.
-    if cache is not None:
-        cache.cleanup()
 
     # Aggregate issues by category for the summary line.
     cat_counts: dict[str, int] = {}
