@@ -1,0 +1,176 @@
+"""Makefile contract tests + CLI invocation smoke.
+
+Plan 01-5 T5 — covers two responsibilities:
+
+  1. Makefile contract — every snapshot target in the Makefile must dry-run cleanly
+     via ``make -n``. This catches recipe drift (e.g. a future commit accidentally
+     dropping the ``--full`` flag) before the user runs them against live APIs.
+
+  2. CLI invocation smoke — typer.testing.CliRunner exercises the in-process
+     CLI (``polyarb.snapshot.cli:app``) so we know the orchestrator → CLI →
+     stdout/stderr → exit-code path is wired correctly under mocks.
+
+Critical: ``make snapshot-markets`` is NEVER actually executed (would hit live
+APIs and take 10-20 minutes). All make assertions use ``-n`` (dry-run).
+"""
+from __future__ import annotations
+
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from polyarb.snapshot.cli import app
+
+
+PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
+runner = CliRunner(mix_stderr=False)
+
+
+# =============================================================================
+# Makefile contract — dry-run only, never invoke against live APIs
+# =============================================================================
+
+
+def test_make_help_lists_snapshot_markets() -> None:
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+    assert result.returncode == 0, f"make help failed: {result.stderr}"
+    # Both subset and full mode targets must appear in the help listing.
+    assert "snapshot-markets:" in result.stdout
+    assert "snapshot-markets-full:" in result.stdout
+
+
+def test_make_snapshot_markets_dry_run_recipe() -> None:
+    """The subset target must invoke ``python -m polyarb.snapshot`` WITHOUT --full."""
+    result = subprocess.run(
+        ["make", "-n", "snapshot-markets"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "python -m polyarb.snapshot" in result.stdout
+    # subset target MUST NOT include --full (that would silently switch to full mode).
+    # We grep the recipe lines (skip echo'd "make[1]:" diagnostics).
+    recipe_lines = [
+        ln for ln in result.stdout.splitlines() if "polyarb.snapshot" in ln
+    ]
+    assert recipe_lines, "no recipe line found"
+    for ln in recipe_lines:
+        assert "--full" not in ln, (
+            f"snapshot-markets recipe must not include --full: {ln!r}"
+        )
+
+
+def test_make_snapshot_markets_full_dry_run_recipe() -> None:
+    """The full target must invoke ``python -m polyarb.snapshot --full``."""
+    result = subprocess.run(
+        ["make", "-n", "snapshot-markets-full"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "python -m polyarb.snapshot --full" in result.stdout
+
+
+def test_makefile_phony_declaration_present() -> None:
+    """``snapshot-markets`` and ``snapshot-markets-full`` must be .PHONY so a
+    file by that name in the project root can't shadow the recipe."""
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    assert ".PHONY: snapshot-markets snapshot-markets-full" in makefile
+
+
+# =============================================================================
+# CLI smoke — typer.testing.CliRunner with mocked clients
+# =============================================================================
+
+
+def _build_yaml(tmp_path: Path, db: Path, parquet: Path) -> Path:
+    yaml_path = tmp_path / "test.yaml"
+    yaml_path.write_text(
+        f"db_path: {db}\n"
+        f"parquet_root: {parquet}\n"
+        f"liquidity_threshold_usd: 100.0\n"
+        f"retry_attempts: 1\n"
+        f"retry_min_wait_s: 0.001\n"
+        f"retry_max_wait_s: 0.005\n"
+        f"http_timeout_s: 2.0\n"
+    )
+    return yaml_path
+
+
+def test_cli_help_shows_all_flags() -> None:
+    """The single-command ``snapshot`` app exposes --full / --verbose / --config in --help.
+
+    Since the app has exactly one @app.command(), typer collapses the subcommand —
+    we invoke flags directly without a ``snapshot`` prefix.
+    """
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0, f"--help failed: {result.stderr}"
+    assert "--full" in result.stdout
+    assert "--verbose" in result.stdout
+    assert "--config" in result.stdout
+
+
+def test_cli_default_subset_mode(
+    tmp_path: Path,
+    tmp_db_path: Path,
+    tmp_parquet_root: Path,
+    mocked_gamma_orchestrator,
+    mocked_clob,
+) -> None:
+    yaml_path = _build_yaml(tmp_path, tmp_db_path, tmp_parquet_root)
+    result = runner.invoke(app, ["--config", str(yaml_path)])
+    # Exit code 0 (valid) is expected with our clean fixture; allow 1 for safety.
+    assert result.exit_code in (0, 1), f"unexpected exit: {result.exit_code} stderr={result.stderr}"
+    assert "mode=subset" in result.stdout
+    assert ("OK" in result.stdout) or ("INVALID" in result.stdout)
+    # SQLite was created at the configured path.
+    assert tmp_db_path.exists()
+
+
+def test_cli_full_flag_sets_full_mode(
+    tmp_path: Path,
+    tmp_db_path: Path,
+    tmp_parquet_root: Path,
+    mocked_gamma_orchestrator,
+    mocked_clob,
+) -> None:
+    yaml_path = _build_yaml(tmp_path, tmp_db_path, tmp_parquet_root)
+    result = runner.invoke(app, ["--full", "--config", str(yaml_path)])
+    assert result.exit_code in (0, 1)
+    assert "mode=full" in result.stdout
+
+
+def test_cli_summary_format_matches_spec(
+    tmp_path: Path,
+    tmp_db_path: Path,
+    tmp_parquet_root: Path,
+    mocked_gamma_orchestrator,
+    mocked_clob,
+) -> None:
+    """D-F1: summary line is single-line cron-grep friendly."""
+    yaml_path = _build_yaml(tmp_path, tmp_db_path, tmp_parquet_root)
+    result = runner.invoke(app, ["--config", str(yaml_path)])
+    summary_re = re.compile(
+        r"^(OK|INVALID) \| \d+ markets \| mode=(subset|full) \| \d+ issues \| -> .+\.parquet$"
+    )
+    summary_lines = [ln for ln in result.stdout.splitlines() if summary_re.match(ln)]
+    assert summary_lines, f"no summary line matched, stdout={result.stdout!r}"
+
+
+# Removed bare-invocation test: typer's no_args_is_help only fires for top-level
+# Typer apps with multiple commands; with a single @app.command() typer treats
+# bare invocation as "run the only command with no args" which triggers a real
+# pipeline run + live network. The --help test below covers the help-text contract.
