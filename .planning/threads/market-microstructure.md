@@ -195,3 +195,56 @@ $5000 投入到期变 ~$4170，亏 17%
 - **2026-02**：Polymarket 移除 ~500ms taker 延迟
 - **IMDEA 论文**：86M 笔交易、$40M 套利历史、Top 3 钱包合计 $4.2M
 - **Paris 吹风机事件**：oracle 单点错判，提示 RPC/UMA 状态必须接入风控
+
+---
+
+## SESSION 06 — Polymarket Issue #180 实测：72% liquid 市场 `/book` 给假价（2026-04-29）
+
+第一次 live API run（17,259 markets, liquidity > $1k）真实数字：
+
+| 类目 | 计数 | 占 L4 issues |
+|---|---|---|
+| ghost_book | 24,949 | **89.1%** |
+| clob_missing | 3,063 | 10.9% |
+
+24,949 ghost_book ÷ 34,518 subset tokens ≈ **72% 的 active liquid 市场** `/book` 端点返回的是幽灵 0.01/0.99 而不是真价。
+
+**这不是"边缘 bug"，这是 Polymarket CLOB 的当前默认行为。**
+
+### 对策略层的硬约束（每个下游 phase 都必须遵守）
+
+1. **mid 价 vs ask 价 vs `/book` 价 vs `/prices` 价 — 优先级**
+   - 套利计算的"真价"：`get_prices(BUY)` 和 `get_prices(SELL)`，**不是** `/book.bids[0].price` 或 `/book.asks[0].price`
+   - 流动性瓶颈 / 冲击成本：仍用 `/book.bids[0].size` 和 `/book.asks[0].size`（**size 是真的，price 是假的**）
+   - mid 价（Gamma `bestBid` + `bestAsk`）：只用作 sanity check，不进套利公式
+
+2. **跨源对比是默认操作，不是可选项**
+   - Phase 1 layer4_cross_source 已经做了：`abs(book_mid - prices_mid) > 0.05` 触发 `ghost_book`
+   - Phase 3 异常检测：所有"真实可成交价差"必须先经过这个 cross-check，否则全是噪声
+
+3. **WebSocket 增量（Phase 2）**：
+   - 订 `book` 频道做 size 跟踪
+   - 订 `prices` 频道（如果有）做价格信号
+   - 千万别让 `book` 价更新触发 trade decision
+
+4. **真实 tradeable universe ≈ 17k market**（subset >$1k），不是 49k 全集
+
+### 实际数字 vs RESEARCH.md 早期估计
+
+| 指标 | RESEARCH.md 推测 | Live 实测 |
+|---|---|---|
+| Active markets total | ~12,000 | **48,985** |
+| Subset (>$1k) | "几百到一两千" | **17,259** |
+| `/book` 异常率 | "Issue #180 偶发" | **72% 持续异常** |
+
+→ 早期估计严重低估市场规模和数据质量噪声。后续所有 phase 用这份 LIVE-RUN 数字。
+
+### 套利者的工程公理（更新）
+
+旧版（discuss SESSION 04）：
+> mid 价 vs ask 价 — 套利计算必须用 ask 价（来自订单簿）
+
+更新版（live SESSION 06）：
+> mid 价 vs `/prices` 价 — 套利计算必须用 `/prices`，**不能信** `/book.asks[0].price`
+> 真实可成交价 = `get_prices(SELL)` (你买入时对手 ask)
+> 流动性瓶颈 = `/book.asks[0].size` × 价差（size 仍可信）

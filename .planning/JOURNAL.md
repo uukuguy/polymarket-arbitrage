@@ -238,3 +238,58 @@
     **推荐 A** —— Phase 1 是观察基础设施，没真跑过 live 不等于过关。但 mocked gate 已经 green，所以不阻塞下一步规划。
 
 ---
+
+## 2026-04-29 续2
+
+- [SESSION 07] **Live API 烟雾测试 — 一次性发现 4 个真 bug + 1 个非工程重大事实**
+- [LEARNING] 95/95 mocked tests 全过，第一次 live run 立刻暴露 mocked 漏掉的：
+    - **#1 Gamma 分页重复 market_id（~4%）** → SQLite UNIQUE 整 snapshot 回滚
+    - **#2 orchestrator 持久化全集 47k 而非 subset 17k** → Layer 4 拉出 91k 幽灵 issues
+    - **#3 dev-time `data/state.db` 污染**（实际是 Wave 4 agent 自己跑命令时落的，不是测试 bug；已 stash）
+    - **#4 L4 issue 体积 sanity check** → 修了 #1+#2 后从 91k 降到 28k
+- [DECISION] Surgical fixes 不重新走 plan-phase
+    - `f7e4744` fix(01-4): dedupe + target_markets-only persist
+    - 加 2 个回归测试（test_gamma_duplicate_market_id_deduped + test_subset_persists_only_target_markets）
+    - 97/97 tests pass，Wave 1-4 工作不重做
+- [LEARNING] **★ Polymarket Issue #180 是默认行为，不是边缘 bug**
+    - **72% 的 liquid (>$1k) market `/book` 返回幽灵 0.01/0.99**（24,949 / 34,518 subset tokens）
+    - 这不是修复目标，是设计前提
+    - 所有下游 phase 必须用 `get_prices` 不能用 `/book.price`；`/book.size` 仍可信
+    - 已写进 `threads/market-microstructure.md` SESSION 06
+- [LEARNING] Polymarket 真实规模超出早期估计
+    - Active markets total: **48,985**（vs RESEARCH 估计 ~12k）
+    - Subset (>$1k): **17,259**（vs RESEARCH 估计"几百到一两千"）
+    - 105 markets >$1M / 850 markets $100k-$1M / 5,931 markets $10k-$100k
+- [DECISION] Phase 1 D-D3 设计成功验证
+    - is_valid=False 触发非零 exit（make exit 1）
+    - SQLite + Parquet 仍完整落库（17,259 rows / 4.7 MB / 28,229 categorized issues）
+    - "校验失败仍持续" 工作如预期
+    - **make 报错不是失败，是 categorized success**
+- [DECISION] LIVE-RUN-001 报告固化到 `phases/01-/01-LIVE-RUN-001.md`，包含：
+    - 4 个 bug 的根因 + 修复 commit
+    - 关键经验数字（subset 大小、CLOB 命中率、ghost_book 占比）
+    - 4 条对下游 phase 的硬约束
+- [NEXT] Phase 1 真正完成。下次会话三个分叉：
+
+    **A. 启动 Phase 2 — WebSocket 增量数据流**
+    ```
+    /gsd-discuss-phase 2 --ws m1-perception
+    ```
+    Phase 2 焦点：实时性 + `/book` size 频道 + `/prices` 频道（替代轮询）
+
+    **B. 切到 m4-smart-strategies 用 m1 现有数据**
+    ```
+    gsd-tools workstream set m4-smart-strategies
+    /gsd-resume-work --ws m4-smart-strategies
+    ```
+    m1 已有 17k market snapshot + 28k categorized issues — 够 m4 启动评估基线
+
+    **C. 再跑 1-2 次 snapshot 累积时间序列样本**（仍在 m1-perception，无需新 phase）
+    ```
+    make snapshot-markets   # 每次跑出新 parquet，data/snapshots/YYYY/MM/DD/ 累积
+    ```
+    适合"先静观市场流动性 + ghost_book 比例是否随时间变化"
+
+    **推荐 A**：mocked gate + live gate 都过了，Phase 2 是 m1-perception 的下一个明确产出（WS 增量替代轮询，让快照成本从 10 分钟降到秒级）。
+
+---

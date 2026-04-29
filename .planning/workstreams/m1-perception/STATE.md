@@ -9,7 +9,7 @@ created: 2026-04-28
 **Status:** Phase 1 Verified (mocked-pipeline gate green)
 **Current Phase:** Phase 1 — 完整市场快照工具 ✅ COMPLETE
 **Last Activity:** 2026-04-29
-**Last Activity Description:** Phase 1 executed end-to-end (Wave 1-4), 95/95 tests passing in 0.75s, all 10 must_haves verified
+**Last Activity Description:** Phase 1 live-run #001 verified (post 2 surgical fixes for dedupe + subset-persist); 97/97 tests; 17,259 markets in SQLite + Parquet; major finding: 72% liquid markets affected by Issue #180 ghost_book
 
 ## Progress
 **Phases Complete:** 1
