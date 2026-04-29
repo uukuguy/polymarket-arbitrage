@@ -1,0 +1,27 @@
+# Vendored references (large, fetched separately)
+3th-party/
+
+# Research outputs (working notes, not source)
+.research/
+
+# Python — the canonical .gitignore for src code is rebuilt by Plan 1 T5
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Data — generated, not source
+data/state.db
+data/state.db-wal
+data/state.db-shm
+data/snapshots/
+
+# OS
+.DS_Store
