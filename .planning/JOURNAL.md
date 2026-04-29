@@ -185,3 +185,56 @@
 - [NEXT] 下次会话恢复方式不变（同上 SESSION 05 第 1 步 + 第 2 步），plan 此时是"PASS for execution"
 
 ---
+
+## 2026-04-29 续
+
+- [SESSION 06] **Phase 1 执行完成 — 32 task / 4 wave / 95 tests / 0.75s green**
+- [DECISION] 因 sdk v0.1.0 不支持 `query init.execute-phase`，手动驱动 5 个 gsd-executor agent（每 plan 一个），自包含 prompt 注入 init/状态/继承上下文
+- [DECISION] **`git init` + 初始 baseline commit** —— 项目从此进入 git 时代。每个 task 一个原子 commit，36 个 phase-1 commit + 1 baseline，可 `git revert` 任意 task
+- [LEARNING] **Wave 2 socket 中断 + Pattern C 续接的真实演练**
+    - 2 个并行 agent 在 background 模式下被 socket 错误打断（API 连接异常）
+    - 但 per-task atomic commit 保护了已完成的进度（5 个 commit 已落库）
+    - Pattern C 续接 = fresh agent 用 `<completed_tasks>` 块带上下文进入，从 T5 / T2 继续
+    - **结论：原子 commit 不是仪式，是分布式系统该死的容错机制**
+- [LEARNING] **Wave 3 集成时发现的真 bug（Rule 1 自动修）**
+    - orchestrator 把 `prices_combined` 双层包：`{tid: {"buy": {"BUY": "0.46"}}}`
+    - layer4_cross_source 期望平：`{tid: {"buy": "0.46", "sell": "0.47"}}`
+    - 单元测试都通过，因为各自的 mock 用各自的 shape；集成测试一接入立刻露馅
+    - 修复 commit `c76bb9f`，加 `_unwrap_side_dict` helper
+    - **结论：单元测试是局部正确性，集成测试是契约一致性。两者不可替代。**
+- [LEARNING] **CLOB 字段名经验事实**（Plan 02 经过真实 API 拉取确认）
+    - `OrderBookSummary.asset_id` = token_id（不是 `market` —— `market` 是 conditionId）
+    - `get_prices` 返回 `{token_id: {"BUY"|"SELL": "0.46"}}` 嵌套，**值是 string**
+    - Polymarket fixtures 已落 `tests/m1-perception/fixtures/{gamma,clob}_sample.json`，未来所有 mock 直接用
+- [LEARNING] **"Pytest: No tests collected" 是 shell 拦截，不是真失败**
+    - 用 `python -m pytest` 或 `.venv/bin/python -m pytest` 绕过
+    - 该 quirk 已写入两个 SUMMARY 给后续 executor 留笔
+- [LEARNING] **Pyright 静态分析的"Import could not be resolved"是项目首次会话的噪声**
+    - editable install 不被 Pyright 默认看到，需要 `pyrightconfig.json` 显式指 `.venv` 或 `extraPaths`
+    - 本会话忽略这些诊断 —— 95/95 runtime test green 才是真信号
+    - 未来某个 phase 把 pyright 加入 CI 之前需要补 config
+- [DECISION] 每个 plan 的 SUMMARY 落到 `.planning/workstreams/m1-perception/phases/01-/01-{N}-SUMMARY.md`，里头有：每 task commit hash / 经验发现 / API surface 给下游 / deviations。任何下游 phase 用 grep SUMMARY 就能查清 phase 1 留下的契约
+- [DECISION] 95 个测试 0.75 秒跑完 —— 远低于 30 秒预算。CI 可以放心（虽然 CI 配置在 m5 才做）
+- [NEXT] 下次会话第一条命令（按用户意图选其一）：
+
+    **A. 跑活的 Polymarket API 烟雾测试（验证 mock pipeline 的真实可达性）**：
+    ```
+    source .venv/bin/activate && make snapshot-markets
+    ```
+    第一次跑 subset 模式（liquidity > $1k 子集，10-20 min）。如果数据落库 + Parquet 写出 + is_valid=true，Phase 1 就真过了。
+
+    **B. 启动 Phase 2（实时 WebSocket 增量）**：
+    ```
+    /gsd-resume-work --ws m1-perception
+    ```
+    然后 `/gsd-discuss-phase 2 --ws m1-perception`
+
+    **C. 切换 workstream 到 m2/m3/m4/m5 之一**：
+    ```
+    gsd-tools workstream set m2-combinatorial
+    /gsd-resume-work --ws m2-combinatorial
+    ```
+
+    **推荐 A** —— Phase 1 是观察基础设施，没真跑过 live 不等于过关。但 mocked gate 已经 green，所以不阻塞下一步规划。
+
+---
