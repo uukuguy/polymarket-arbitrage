@@ -192,3 +192,38 @@ updated: YYYY-MM-DD
 - 解决：env var 逃生口 `POLYARB_ALLOW_EXTERNAL_PATHS=1`，conftest 在 module top 设置
 - **设计原则**：security 默认严格，测试通过显式 opt-in 信号绕过。绝不让生产代码读这个 env var
 - 同样的模式以后会反复用（数据库白名单、文件路径、URL 白名单、命令注入防御）— 记下范式
+
+## 2026-04-29 LIVE-RUN-002 (CST 22:27 那次)
+
+### 规模假设错 → 原子性策略代价非线性放大
+- Phase 1 D-C1 决策"markets 表必须原子覆盖"，CONTEXT 写时假设市场数 ~1k（30 秒跑完，重跑无所谓）
+- live run 真实规模 17k subset / 49k full —— 一次 snapshot ~26 分钟
+- **没有 cache + 不能续传**让"原子性"代价从 30 秒 → 26 分钟（~50x 放大）
+- 教训：**任何 atomicity / persistence 决策必须显式记"假设的工作单元规模上限"**。CONTEXT 模板加一行"Scale assumption: ~N units, ~T seconds per run"
+- 触发回看：当 phase 实际规模 > 假设规模 2x 时，自动重审 atomicity 策略
+
+### 可观测性是状态判断的根，不是 UX 装饰
+- 这次 Claude 自己搞错了 3 次状态判断：
+    - 第 1 次把 SQLite id=1 的旧记录当成"刚跑完的本次"
+    - 第 2 次以为 stash 掉了 db（其实 db 留着）
+    - 第 3 次 epoch ms 解析错时区
+- 根因都是**没有 `make snapshot-status` 这种"一条命令告诉我现在状态"的工具**
+- 用户和 Claude 都靠"猜 + 拼凑 ps + sqlite + ls" 拼真相
+- 教训：**任何 ≥30 秒的 make target，必须配套提供 status 命令**（推断"现在哪个阶段"、"何时启动"、"最近一次何时跑完"）。如果适用，加 cancel / resume
+
+### make 是壳子不是流水线
+- `make snapshot-markets` 当成"一条命令搞定"是错的认知
+- 正确认知：长任务 = 进程 + 状态文件 + 中间产物；make 只是入口
+- **下次给任何 long-running make target 时，配套设计**：
+    - `make {verb}-{noun}` 入口（quiet 模式，cron 友好）
+    - `make {verb}-{noun}-v` 详细模式（人盯着等）
+    - `make {verb}-status` 状态查询
+    - 如果可恢复，`make {verb}-resume` 续传
+    - 如果可取消，`make {verb}-cancel` 优雅中止
+- Phase 1 后置补这套已经在做（snapshot-markets-v / snapshot-status / [TODO] snapshot-resume）
+
+### 教学文档必须主动产出，不能等用户问
+- agent 并行执行让代码进度跑过用户理解曲线
+- 用户读不懂自己代码 = 教学失败 = CLAUDE.md 第 1 条原则"研发即学习"被违反
+- 这次用户主动指出"那些字段从未教过"才暴露
+- 已写入项目 CLAUDE.md "教学文档持续产出（教练角色的具象化）"小节作为长期约束
