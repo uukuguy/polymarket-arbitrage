@@ -25,3 +25,10 @@ data/snapshots/
 
 # OS
 .DS_Store
+
+# polyarb (added by m1-perception phase 01)
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
