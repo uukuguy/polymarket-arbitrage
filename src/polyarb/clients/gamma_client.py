@@ -141,6 +141,15 @@ class GammaClient:
         out: list[dict] = []
         offset = 0
         pages_fetched = 0
+        # Progress cadence: ~30s of API calls per emit at typical 280-req/10s
+        # rate (≈ 1.7 pages/sec). Choosing 50 keeps the user informed without
+        # spamming, and surfaces a 'stuck after page N' signal — when API hangs,
+        # the LAST progress line tells us where it died.
+        PROGRESS_EVERY = 50
+
+        # Emit a 'starting' line so the user sees something within seconds of
+        # process start, not 3-5 minutes after the first batch lands.
+        logger.info(f"Gamma: starting paginated fetch (page_limit={self.PAGE_LIMIT})")
 
         while True:
             params = {
@@ -159,6 +168,12 @@ class GammaClient:
             out.extend(page)
             pages_fetched += 1
 
+            # Periodic progress (incl. page 1 so 'is this hung?' is answered fast).
+            if pages_fetched == 1 or pages_fetched % PROGRESS_EVERY == 0:
+                logger.info(
+                    f"Gamma: page {pages_fetched} fetched ({len(out)} markets so far)"
+                )
+
             # Short page → end of stream
             if len(page) < self.PAGE_LIMIT:
                 break
@@ -172,5 +187,7 @@ class GammaClient:
 
             offset += self.PAGE_LIMIT
 
-        logger.info(f"Gamma fetched {len(out)} active markets in {pages_fetched} pages")
+        logger.info(
+            f"Gamma fetched {len(out)} active markets in {pages_fetched} pages (final)"
+        )
         return out

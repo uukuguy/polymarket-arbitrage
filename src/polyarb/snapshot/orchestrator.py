@@ -132,7 +132,13 @@ async def run_snapshot(
     gamma_count_reported: int | None = None
     raw_markets: list[dict] = []
 
+    logger.info(
+        f"snapshot starting — mode={mode}, cache={'on' if use_cache else 'off'}, "
+        f"taken_at_ms={taken_at_ms}"
+    )
+
     # ── 1. Gamma fetch ────────────────────────────────────────────────────────
+    logger.info("Phase 1/7: Gamma fetch (active markets)")
     async with GammaClient(settings) as gamma:
         try:
             raw_markets = await gamma.fetch_all_active_markets()
@@ -152,6 +158,7 @@ async def run_snapshot(
             raw_markets = []
 
     # ── 2. Normalize (drop unrecoverable rows) ────────────────────────────────
+    logger.info("Phase 2/7: Normalize + dedupe")
     markets: list[dict] = [m for m in (normalize_market(r) for r in raw_markets) if m is not None]
 
     # Dedupe by market_id — Gamma /markets returns ~4% duplicates across pagination
@@ -174,6 +181,7 @@ async def run_snapshot(
     logger.info(f"Normalized: {len(markets)}/{len(raw_markets)} unique markets kept")
 
     # ── 3. Mode filter → token list ───────────────────────────────────────────
+    logger.info("Phase 3/7: Mode filter")
     if mode == "subset":
         target_markets = [
             m for m in markets if (m.get("liquidity_usd") or 0) > settings.liquidity_threshold_usd
@@ -194,6 +202,7 @@ async def run_snapshot(
     )
 
     # ── 4. CLOB batch fetch (best-effort: failure → Issue, not raise) ─────────
+    logger.info("Phase 4/7: CLOB fetch (books + buy/sell prices)")
     # Cache wires in here: try_resume() either rebinds to a reusable cache from
     # a prior interrupted run (matching settings + token list + age <30min) or
     # initializes a fresh dir. ChunkCache is per-(taken_at_ms, token_set), so an
@@ -244,6 +253,7 @@ async def run_snapshot(
         )
 
     # ── 5. Stamp fetched_at_ms + attach top-of-book (yes side; F-1 wrapped) ──
+    logger.info("Phase 5/7: Stamp + attach top-of-book")
     # Only target_markets are persisted, so only stamp/attach those. Filtered-out
     # markets stay in `markets` for layer-1 count comparison only — we never
     # write them anywhere. (Closes the "fetched_at_ms semantically wrong on
@@ -294,6 +304,7 @@ async def run_snapshot(
                 )
 
     # ── 6. Validate (Layer 1 / 2 / 4) ─────────────────────────────────────────
+    logger.info("Phase 6/7: Validate (Layer 1/2/4)")
     if gamma_count_reported is not None:
         # Layer 1 compares Gamma's reported active count vs how many we kept
         # post-normalize. A diff means either a bug in normalize OR API jitter.
@@ -333,6 +344,7 @@ async def run_snapshot(
     )
 
     # ── 7. Persist (Parquet atomic FIRST, then SQLite single-tx) ──────────────
+    logger.info("Phase 7/7: Persist (Parquet then SQLite)")
     finished_at_ms = int(time.time() * 1000)
     parquet_path = compute_snapshot_path(settings.parquet_root, taken_at_ms)
 

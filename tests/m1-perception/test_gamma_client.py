@@ -167,3 +167,56 @@ async def test_aclose_closes_http_client() -> None:
     assert client._http.is_closed is False
     await client.aclose()
     assert client._http.is_closed is True
+
+
+# ---------------------------------------------------------------------------
+# Test 7: progress logging — periodic INFO emit during paginated fetch.
+#
+# Backstory: LIVE-RUN-003 hung at 15min with zero output because the original
+# fetch_all_active_markets() only logged a single line *after* all 490 pages
+# completed. This test pins the new contract: a 'starting' line, the 1st page
+# emits, then every 50th page, plus a 'final' line.
+# ---------------------------------------------------------------------------
+async def test_fetch_all_emits_periodic_progress() -> None:
+    """Pagination over 110 pages must emit progress lines, not silent for ~3min."""
+    from loguru import logger
+
+    settings = _fast_settings()
+    # 110 full pages + 1 short page → 111 calls, terminates on the short one.
+    full_pages = [
+        [_make_market_dict(i + 100 * p) for i in range(100)] for p in range(110)
+    ]
+    short_page = [_make_market_dict(11000 + i) for i in range(7)]
+
+    captured: list[str] = []
+    sink_id = logger.add(lambda msg: captured.append(msg.record["message"]), level="INFO")
+
+    try:
+        with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+            router.get("/markets").mock(
+                side_effect=[httpx.Response(200, json=p) for p in full_pages]
+                + [httpx.Response(200, json=short_page)]
+            )
+            client = GammaClient(settings)
+            try:
+                out = await client.fetch_all_active_markets()
+            finally:
+                await client.aclose()
+    finally:
+        logger.remove(sink_id)
+
+    assert len(out) == 110 * 100 + 7
+
+    # Contract assertions — order matters but exact phrasing is intentionally
+    # loose so future tweaks to wording don't break the test.
+    starting = [m for m in captured if "starting paginated fetch" in m]
+    page_1 = [m for m in captured if "page 1 fetched" in m]
+    page_50 = [m for m in captured if "page 50 fetched" in m]
+    page_100 = [m for m in captured if "page 100 fetched" in m]
+    final = [m for m in captured if "final" in m]
+
+    assert len(starting) == 1, f"expected 1 'starting' line, got {captured}"
+    assert len(page_1) == 1, f"expected page-1 progress, got {captured}"
+    assert len(page_50) == 1, f"expected page-50 progress, got {captured}"
+    assert len(page_100) == 1, f"expected page-100 progress, got {captured}"
+    assert len(final) == 1, f"expected final summary line, got {captured}"

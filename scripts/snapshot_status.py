@@ -33,40 +33,78 @@ def _humanize_seconds(s: float) -> str:
     return f"{s // 3600}h {(s % 3600) // 60:02d}m"
 
 
-def show_running() -> None:
-    """Detect a live `python -m polyarb.snapshot` process via ps -axo."""
-    print("CURRENT:")
-    # Try `ps -axo pid,etimes,command` first. Some sandboxes / minimal envs
-    # restrict `ps` — fall through silently and tell the user how to check
-    # manually instead of pretending nothing is running.
-    rows: list[tuple[str, int, str]] = []
-    ps_failed = False
+def _parse_etime(s: str) -> int | None:
+    """Parse BSD/macOS `ps -o etime` format → seconds.
+
+    Format: ``[[dd-]hh:]mm:ss``. Examples: ``"03:42"`` → 222s,
+    ``"1:23:45"`` → 5025s, ``"2-03:42:15"`` → 186135s.
+    """
+    s = s.strip()
+    if not s:
+        return None
+    # Split off days if present.
+    days = 0
+    if "-" in s:
+        d_str, s = s.split("-", 1)
+        try:
+            days = int(d_str)
+        except ValueError:
+            return None
+    parts = s.split(":")
     try:
-        ps_out = subprocess.run(
-            ["ps", "-axo", "pid,etimes,command"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=3,
-        ).stdout
-        for line in ps_out.splitlines():
-            if "polyarb.snapshot" not in line:
-                continue
-            if "snapshot_status" in line or "grep" in line:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+    # mm:ss / hh:mm:ss only (BSD etime never emits ss alone).
+    if len(nums) == 2:
+        h, m, sec = 0, nums[0], nums[1]
+    elif len(nums) == 3:
+        h, m, sec = nums
+    else:
+        return None
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
+def show_running() -> None:
+    """Detect a live `python -m polyarb.snapshot` process.
+
+    Tries Linux-flavor ``etimes`` (seconds, easy parse) first, then falls
+    back to BSD/macOS ``etime`` ([[dd-]hh:]mm:ss). If both fail, prints a
+    manual-check hint instead of lying about state.
+    """
+    print("CURRENT:")
+    rows: list[tuple[str, int, str]] = []
+
+    # Try Linux etimes first (integer seconds).
+    out = _run_ps(["ps", "-axo", "pid,etimes,command"])
+    if out is not None and "etimes: keyword not found" not in out:
+        for line in out.splitlines():
+            if "polyarb.snapshot" not in line or "snapshot_status" in line:
                 continue
             parts = line.strip().split(None, 2)
             if len(parts) < 3:
                 continue
-            pid_s, etime_s, cmd = parts
             try:
-                elapsed = int(etime_s)
+                elapsed = int(parts[1])
             except ValueError:
                 continue
-            rows.append((pid_s, elapsed, cmd))
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-        ps_failed = True
+            rows.append((parts[0], elapsed, parts[2]))
+    else:
+        # BSD/macOS fallback.
+        out = _run_ps(["ps", "-axo", "pid,etime,command"])
+        if out is not None:
+            for line in out.splitlines():
+                if "polyarb.snapshot" not in line or "snapshot_status" in line:
+                    continue
+                parts = line.strip().split(None, 2)
+                if len(parts) < 3:
+                    continue
+                elapsed = _parse_etime(parts[1])
+                if elapsed is None:
+                    continue
+                rows.append((parts[0], elapsed, parts[2]))
 
-    if ps_failed:
+    if out is None:
         print("  (cannot inspect processes here — try in your shell:")
         print("     ps aux | grep polyarb.snapshot | grep -v grep)")
     elif not rows:
@@ -77,6 +115,20 @@ def show_running() -> None:
                 f"  PID {pid_s} running for {_humanize_seconds(elapsed)} — {cmd[:80]}"
             )
     print()
+
+
+def _run_ps(argv: list[str]) -> str | None:
+    """Run ps and return stdout, or None on hard failure."""
+    try:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,  # macOS errors go to stderr but exit 0
+            timeout=3,
+        ).stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
 
 
 def show_recent_snapshots(limit: int = 5) -> None:

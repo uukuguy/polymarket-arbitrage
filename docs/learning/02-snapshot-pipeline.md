@@ -326,6 +326,23 @@ python -m polyarb.snapshot --no-cache --verbose
 
 **chunk progress 现在默认可见**：从 `logger.debug` 升到 `logger.info`，无需 `-v` 也能看到 `CLOB books chunk 24/70: fetched (500 tokens)` 或 `CLOB books chunk 24/70: cached (498 books)`。
 
+**Gamma 翻页进度**（LIVE-RUN-003 暴露：原版 Gamma 翻页 3-5 分钟期间零输出，无法判断"慢 vs hang"）：
+
+```
+INFO    | snapshot starting — mode=subset, cache=on, taken_at_ms=...
+INFO    | Phase 1/7: Gamma fetch (active markets)
+INFO    | Gamma: starting paginated fetch (page_limit=100)
+INFO    | Gamma: page 1 fetched (100 markets so far)        ← 启动 30 秒内必现
+INFO    | Gamma: page 50 fetched (5000 markets so far)      ← 每 50 页一行（~30 秒间隔）
+INFO    | Gamma: page 100 fetched (10000 markets so far)
+...
+INFO    | Gamma fetched 48985 active markets in 490 pages (final)
+INFO    | Phase 2/7: Normalize + dedupe
+...
+```
+
+每个 step 也都打 `Phase N/7:` banner（对应教学文档的 7 步划分）。失败/卡住时**最后一行**直接告诉你"卡在第几页 / 第几个 chunk"，不再黑屏猜进度。
+
 **测试覆盖**：`tests/m1-perception/test_snapshot_cache.py` 20 个 case
 - 指纹稳定性 + drift 检测（settings / tokens / mode / age / corrupted meta）
 - chunk save/load roundtrip（dict + dataclass-like SDK 对象）
