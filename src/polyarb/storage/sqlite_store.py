@@ -1,0 +1,160 @@
+"""SQLite writer for the snapshot pipeline.
+
+Per CONTEXT.md D-D3, write_snapshot persists the row even when is_valid=False so
+validation failures become queryable. The caller (orchestrator) is responsible for
+setting a non-zero process exit code based on is_valid.
+
+Design notes (anti-patterns avoided):
+- Uses stdlib sqlite3 + parameterized DDL/SQL — NO SQLAlchemy ORM.
+- BEGIN IMMEDIATE + DELETE FROM markets + executemany INSERT — never INSERT OR
+  REPLACE alone, which would leak rows from prior snapshots.
+- isolation_level=None gives explicit transaction control (Pitfall 4).
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from loguru import logger
+
+from polyarb.storage.schemas import (
+    DDL,
+    MARKETS_COLUMN_ORDER,
+    MARKETS_INSERT_SQL,
+)
+from polyarb.validator.category import Issue
+
+_VALID_MODES = ("subset", "full")
+
+# Booleans that are stored as INTEGER 0/1 in SQLite — convert before insert.
+_BOOL_COLUMNS = ("active", "closed", "neg_risk", "incomplete")
+
+
+def _row_to_tuple(row: dict, snapshot_id: int) -> tuple:
+    """Project a market dict into the column order required by MARKETS_INSERT_SQL.
+
+    Always overrides the row's snapshot_id with the new id (the orchestrator may
+    pass 0 as a placeholder before the snapshot_id is known).
+    """
+    out: list = []
+    for col in MARKETS_COLUMN_ORDER:
+        if col == "snapshot_id":
+            out.append(snapshot_id)
+            continue
+        v = row.get(col)
+        if col in _BOOL_COLUMNS and v is not None:
+            v = int(bool(v))
+        out.append(v)
+    return tuple(out)
+
+
+class SQLiteStore:
+    """Single-connection SQLite writer for snapshot runs.
+
+    Usage:
+        store = SQLiteStore(Path("data/state.db"))
+        store.init_schema()
+        store.write_snapshot(taken_at_ms=..., finished_at_ms=..., mode="subset", ...)
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = Path(db_path)
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
+    def init_schema(self) -> None:
+        """Create tables, indexes, set WAL mode. Idempotent — safe to re-run."""
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.executescript(DDL)
+        finally:
+            con.close()
+
+    def write_snapshot(
+        self,
+        *,
+        taken_at_ms: int,
+        finished_at_ms: int,
+        mode: str,
+        parquet_path: str,
+        is_valid: bool,
+        market_rows: list[dict],
+        issues: list[Issue],
+        notes: str | None = None,
+    ) -> int:
+        """Persist one snapshot atomically.
+
+        Wraps DELETE FROM markets + INSERT snapshot meta + executemany markets +
+        executemany issues in a single BEGIN IMMEDIATE transaction. Any exception
+        triggers ROLLBACK and re-raises (we never swallow).
+
+        Returns the new `snapshots.id`.
+        """
+        if mode not in _VALID_MODES:
+            raise ValueError(f"mode must be one of {_VALID_MODES}, got {mode!r}")
+
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        # Per-connection PRAGMAs (some are persistent like journal_mode=WAL after
+        # init_schema, but setting again is cheap and safe).
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            con.execute("DELETE FROM markets")  # full overwrite (D-C1)
+            cur = con.execute(
+                "INSERT INTO snapshots("
+                "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes"
+                ") VALUES (?,?,?,?,?,?,?)",
+                (
+                    taken_at_ms,
+                    finished_at_ms,
+                    mode,
+                    len(market_rows),
+                    int(is_valid),
+                    parquet_path,
+                    notes,
+                ),
+            )
+            snapshot_id = cur.lastrowid
+            assert snapshot_id is not None  # AUTOINCREMENT guarantees this
+
+            market_tuples = [_row_to_tuple(r, snapshot_id) for r in market_rows]
+            if market_tuples:
+                con.executemany(MARKETS_INSERT_SQL, market_tuples)
+
+            issue_tuples = [
+                (
+                    snapshot_id,
+                    issue.layer,
+                    issue.category.value,
+                    issue.market_id,
+                    issue.detail,
+                    issue.raw_payload,
+                )
+                for issue in issues
+            ]
+            if issue_tuples:
+                con.executemany(
+                    "INSERT INTO validation_issues("
+                    "snapshot_id,layer,category,market_id,detail,raw_payload"
+                    ") VALUES (?,?,?,?,?,?)",
+                    issue_tuples,
+                )
+
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            logger.exception("SQLite write_snapshot rolled back")
+            raise
+        finally:
+            con.close()
+
+        logger.info(
+            f"SQLite snapshot id={snapshot_id} mode={mode} markets={len(market_rows)} "
+            f"issues={len(issues)} is_valid={is_valid}"
+        )
+        return snapshot_id
