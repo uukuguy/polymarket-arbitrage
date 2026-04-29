@@ -292,4 +292,15 @@
 
     **推荐 A**：mocked gate + live gate 都过了，Phase 2 是 m1-perception 的下一个明确产出（WS 增量替代轮询，让快照成本从 10 分钟降到秒级）。
 
+- [SESSION 07 END] **会话收尾，2026-04-29**
+    - Phase 1 完整状态：39 commits / 97 tests / 1 live snapshot / 4 bugs caught + fixed
+    - 工作树干净：`git status` 应该 clean（除 docs/ 是预先存在的 untracked）
+    - 下次会话恢复入口：
+
+      ```
+      /gsd-resume-work --ws m1-perception
+      ```
+
+      读完 STATE.md + 本 JOURNAL 的 SESSION 07 三条 [NEXT] 选项后，问用户选 A / B / C
+
 ---
