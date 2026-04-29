@@ -39,11 +39,15 @@ journal:
 	@$${EDITOR:-cat} .planning/JOURNAL.md
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase commands (populated as phases are implemented)
+# M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-# M1-P01 targets will be added here after discuss/plan completes.
-# Example placeholder:
-#   ## snapshot-markets: Capture full Polymarket market snapshot to parquet
-#   snapshot-markets:
-#       python -m polymarket.snapshot --output data/snapshots/$(shell date +%Y-%m-%dT%H%M).parquet
+.PHONY: snapshot-markets snapshot-markets-full
+
+## snapshot-markets: Capture Polymarket snapshot (subset mode, liquidity > $1k, ~10-20 min)
+snapshot-markets:
+	python -m polyarb.snapshot
+
+## snapshot-markets-full: Capture Polymarket snapshot (FULL mode, all markets, ~1-2 hours)
+snapshot-markets-full:
+	python -m polyarb.snapshot --full
