@@ -249,10 +249,23 @@ async def run_snapshot(
 
     issues.extend(layer2_fields(markets, now_ms=taken_at_ms))
 
-    # Layer 4 expects {token_id: {"buy": ..., "sell": ...}} — merge per token.
+    # Layer 4 expects {token_id: {"buy": <price-as-str-or-num>, "sell": ...}}
+    # The CLOB SDK gives us {tid: {"BUY": "0.46"}} on each side — unwrap that
+    # inner side-keyed dict so the validator can _safe_float() the value
+    # directly. This shape contract is verified by validator tests.
     all_tids = set(prices_buy) | set(prices_sell)
+
+    def _unwrap_side(side_dict: dict | None, key: str) -> str | None:
+        if not isinstance(side_dict, dict):
+            return None
+        return side_dict.get(key)
+
     prices_combined = {
-        tid: {"buy": prices_buy.get(tid), "sell": prices_sell.get(tid)} for tid in all_tids
+        tid: {
+            "buy": _unwrap_side(prices_buy.get(tid), "BUY"),
+            "sell": _unwrap_side(prices_sell.get(tid), "SELL"),
+        }
+        for tid in all_tids
     }
     issues.extend(layer4_cross_source(markets, books_by_token, prices_combined))
 
