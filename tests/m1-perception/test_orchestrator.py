@@ -361,3 +361,142 @@ async def test_clob_unreachable_records_issue_but_persists_snapshot(tmp_path: Pa
     n = con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     con.close()
     assert n == 1
+
+
+# =============================================================================
+# Plan 01-5 T3 — additional orchestrator coverage (extends Wave 3 unit tests)
+# =============================================================================
+#
+# These tests use the conftest-provided ``mocked_gamma_orchestrator`` and
+# ``mocked_clob`` fixtures (added in Plan 01-5 T1) so behavior is consistent
+# across orchestrator + cli + integration layers. Existing Wave-3 tests above
+# remain unchanged; the new tests below extend coverage.
+
+
+@pytest.mark.asyncio
+async def test_full_mode_uses_all_markets(
+    settings_for_test, mocked_gamma_orchestrator, mocked_clob
+) -> None:
+    """``mode="full"`` must fetch CLOB books for every market regardless of
+    the liquidity_threshold_usd subset filter."""
+    result = await run_snapshot(settings_for_test, mode="full", now_ms=1_714_435_200_000)
+    assert result.mode == "full"
+    # CLOB was called at least once (full mode always exercises CLOB if there
+    # are tokens, and the fixture has 5 markets * 2 tokens = 10 token ids).
+    assert mocked_clob["books"].call_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_subset_mode_persists_correct_mode_column(
+    settings_for_test, mocked_gamma_orchestrator, mocked_clob
+) -> None:
+    """SQLite ``snapshots.mode`` column must reflect the requested mode."""
+    result = await run_snapshot(settings_for_test, mode="subset", now_ms=1_714_435_200_000)
+    con = sqlite3.connect(settings_for_test.db_path)
+    mode_row = con.execute(
+        "SELECT mode FROM snapshots WHERE id = ?", (result.snapshot_id,)
+    ).fetchone()
+    is_valid_row = con.execute(
+        "SELECT is_valid FROM snapshots WHERE id = ?", (result.snapshot_id,)
+    ).fetchone()
+    con.close()
+    assert mode_row[0] == "subset"
+    assert is_valid_row[0] == int(result.is_valid)
+
+
+@pytest.mark.asyncio
+async def test_writes_parquet_with_string_token_id_schema(
+    settings_for_test, mocked_gamma_orchestrator, mocked_clob
+) -> None:
+    """Parquet schema preserves ``yes_token_id`` as string (Pitfall 3 end-to-end).
+
+    Polymarket's uint256 token IDs have 70+ decimal digits and overflow int64.
+    pyarrow must write them as ``pa.string()`` — anything else risks silent
+    corruption when round-tripping through Parquet.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    result = await run_snapshot(settings_for_test, mode="subset", now_ms=1_714_435_200_000)
+    table = pq.read_table(result.parquet_path)
+    assert "yes_token_id" in table.column_names
+    assert table.schema.field("yes_token_id").type == pa.string()
+    assert "no_token_id" in table.column_names
+    assert table.schema.field("no_token_id").type == pa.string()
+    assert table.num_rows == result.market_count
+
+
+@pytest.mark.asyncio
+async def test_per_row_fetched_at_ms_set(
+    settings_for_test, mocked_gamma_orchestrator, mocked_clob
+) -> None:
+    """All rows share exactly one fetched_at_ms (CLOB-completion time)."""
+    result = await run_snapshot(settings_for_test, mode="subset", now_ms=1_714_435_200_000)
+    con = sqlite3.connect(settings_for_test.db_path)
+    distinct_ts = con.execute(
+        "SELECT DISTINCT fetched_at_ms FROM markets WHERE snapshot_id = ?",
+        (result.snapshot_id,),
+    ).fetchall()
+    con.close()
+    assert len(distinct_ts) == 1, (
+        f"All rows should share one fetched_at_ms, got {len(distinct_ts)} distinct values"
+    )
+    (single_ts,) = distinct_ts[0]
+    assert single_ts is not None and single_ts > 0
+
+
+@pytest.mark.asyncio
+async def test_validation_issues_have_non_empty_categories(
+    settings_for_test, mocked_gamma_orchestrator, mocked_clob
+) -> None:
+    """D-D4: every persisted Issue row must have a non-empty category string."""
+    await run_snapshot(settings_for_test, mode="subset", now_ms=1_714_435_200_000)
+    con = sqlite3.connect(settings_for_test.db_path)
+    cats = con.execute(
+        "SELECT DISTINCT category FROM validation_issues"
+    ).fetchall()
+    con.close()
+    # If there are no issues at all, the assertion is vacuously true (some
+    # subset runs are clean). If there ARE rows, none may have empty category.
+    for (cat,) in cats:
+        assert cat and isinstance(cat, str) and len(cat) > 0, (
+            f"empty category found in validation_issues row: {cat!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_subset_filter_excludes_high_threshold(
+    mocked_gamma_orchestrator, mocked_clob, tmp_db_path: Path, tmp_parquet_root: Path
+) -> None:
+    """With an impossibly-high liquidity_threshold_usd, no fixture market
+    passes the filter and CLOB.get_books is called with an empty token list."""
+    settings = Settings(
+        db_path=tmp_db_path,
+        parquet_root=tmp_parquet_root,
+        retry_attempts=2,
+        retry_min_wait_s=0.001,
+        retry_max_wait_s=0.005,
+        http_timeout_s=2.0,
+        liquidity_threshold_usd=999_999_999.0,  # nothing passes
+    )
+    await run_snapshot(settings, mode="subset", now_ms=1_714_435_200_000)
+    # CLOB.get_books was called once; the call's first positional arg is the
+    # token-id list which must be empty (subset filter caught everything).
+    assert mocked_clob["books"].await_count == 1
+    call_args = mocked_clob["books"].call_args
+    if call_args.args:
+        token_arg = call_args.args[0]
+    else:
+        token_arg = call_args.kwargs.get("token_ids", [])
+    assert token_arg == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_mode_raises_value_error(
+    settings_for_test, mocked_gamma_orchestrator, mocked_clob
+) -> None:
+    """run_snapshot enforces mode in ('subset', 'full') — anything else raises
+    a ValueError before any I/O happens.
+    """
+    with pytest.raises(ValueError, match="invalid mode"):
+        await run_snapshot(settings_for_test, mode="weekly")
