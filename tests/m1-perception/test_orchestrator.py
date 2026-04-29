@@ -500,3 +500,96 @@ async def test_invalid_mode_raises_value_error(
     """
     with pytest.raises(ValueError, match="invalid mode"):
         await run_snapshot(settings_for_test, mode="weekly")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T6.6 (post-live-run regression) — Gamma duplicate market_id is deduped
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_gamma_duplicate_market_id_deduped(tmp_path: Path) -> None:
+    """Live empirical (2026-04-29): Gamma /markets returns ~4% duplicate market_ids
+    across pagination boundaries (1,960 dups in 48,985 rows). Without dedupe,
+    SQLite UNIQUE constraint on markets.market_id rolls back the entire snapshot.
+    The orchestrator MUST dedupe by market_id (keep first) before persist.
+    """
+    settings = _make_settings(tmp_path)
+    raw = _load_gamma_fixture()
+    # Synthesize a duplicate: append the first market again with drifted liquidity.
+    duplicated = raw + [{**raw[0], "liquidityNum": float(raw[0].get("liquidityNum", 0)) + 100}]
+
+    fake_gamma = AsyncMock()
+    fake_gamma.fetch_all_active_markets.return_value = duplicated
+    fake_gamma.aclose = AsyncMock()
+    fake_gamma.__aenter__.return_value = fake_gamma
+    fake_gamma.__aexit__.return_value = None
+
+    clob_data = _load_clob_fixture()
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    # Despite Gamma returning 6 rows (5 originals + 1 dup), persisted count must be 5.
+    assert result.market_count == 5, (
+        f"Dedupe failed — expected 5 unique markets persisted, got {result.market_count}"
+    )
+
+    con = sqlite3.connect(settings.db_path)
+    db_count = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+    distinct = con.execute("SELECT COUNT(DISTINCT market_id) FROM markets").fetchone()[0]
+    con.close()
+    assert db_count == 5
+    assert distinct == 5
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T6.7 (post-live-run regression) — only target_markets persisted in subset
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_subset_persists_only_target_markets(tmp_path: Path) -> None:
+    """Live empirical (2026-04-29): orchestrator was persisting ALL normalized
+    markets (48,985) instead of just target_markets (subset = 17,955). This
+    regressed validation_issues by flooding 91k+ L4 phantom warnings on tokens
+    we never even fetched from CLOB. Subset persist scope must equal target_markets.
+    """
+    settings = _make_settings(tmp_path)
+    # Set high threshold so only one fixture market passes subset.
+    settings = Settings(
+        db_path=tmp_path / "state.db",
+        parquet_root=tmp_path / "snapshots",
+        liquidity_threshold_usd=10_000_000.0,  # only the highest-liquidity fixture passes (or none)
+    )
+    gamma_data = _load_gamma_fixture()
+
+    fake_gamma = AsyncMock()
+    fake_gamma.fetch_all_active_markets.return_value = gamma_data
+    fake_gamma.aclose = AsyncMock()
+    fake_gamma.__aenter__.return_value = fake_gamma
+    fake_gamma.__aexit__.return_value = None
+
+    clob_data = _load_clob_fixture()
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    # All 5 fixture markets are below 10M liquidity → 0 persisted (subset is empty).
+    assert result.market_count == 0
+    con = sqlite3.connect(settings.db_path)
+    db_count = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+    con.close()
+    assert db_count == 0, f"Persist scope leaked: SQLite has {db_count} rows for empty subset"

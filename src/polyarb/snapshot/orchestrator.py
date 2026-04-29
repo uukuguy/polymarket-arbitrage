@@ -144,7 +144,25 @@ async def run_snapshot(
 
     # ── 2. Normalize (drop unrecoverable rows) ────────────────────────────────
     markets: list[dict] = [m for m in (normalize_market(r) for r in raw_markets) if m is not None]
-    logger.info(f"Normalized: {len(markets)}/{len(raw_markets)} rows kept")
+
+    # Dedupe by market_id — Gamma /markets returns ~4% duplicates across pagination
+    # boundaries (live empirical: 1,960 dups in 48,985 rows on 2026-04-29). The only
+    # observed differing field is liquidity_usd (drifts between page fetches), so
+    # keeping the FIRST occurrence is safe and stable. Without this, SQLite's UNIQUE
+    # constraint on markets.market_id rolls back the entire snapshot insert.
+    seen_ids: set[str] = set()
+    deduped: list[dict] = []
+    for m in markets:
+        mid = m.get("market_id")
+        if mid is None or mid in seen_ids:
+            continue
+        seen_ids.add(mid)
+        deduped.append(m)
+    dup_count = len(markets) - len(deduped)
+    if dup_count > 0:
+        logger.info(f"Deduped {dup_count} markets by market_id (Gamma pagination overlap)")
+    markets = deduped
+    logger.info(f"Normalized: {len(markets)}/{len(raw_markets)} unique markets kept")
 
     # ── 3. Mode filter → token list ───────────────────────────────────────────
     if mode == "subset":
@@ -194,10 +212,12 @@ async def run_snapshot(
         )
 
     # ── 5. Stamp fetched_at_ms + attach top-of-book (yes side; F-1 wrapped) ──
+    # Only target_markets are persisted, so only stamp/attach those. Filtered-out
+    # markets stay in `markets` for layer-1 count comparison only — we never
+    # write them anywhere. (Closes the "fetched_at_ms semantically wrong on
+    # filter-excluded rows" gap from 01-4-SUMMARY.)
     clob_done_ms = int(time.time() * 1000)
-    for m in markets:
-        # Phase-1 simplification: stamp ALL normalized markets even those
-        # filtered out of the subset (documented in SUMMARY known limitations).
+    for m in target_markets:
         m["fetched_at_ms"] = clob_done_ms
 
         # Attach top-of-book using yes_token_id only (single-side row).
@@ -247,7 +267,10 @@ async def run_snapshot(
         # post-normalize. A diff means either a bug in normalize OR API jitter.
         issues.extend(layer1_count(gamma_count_reported, len(markets)))
 
-    issues.extend(layer2_fields(markets, now_ms=taken_at_ms))
+    # Layer 2/4 validate ONLY persisted markets. Filtered-out markets aren't
+    # part of this snapshot's "completeness" claim — they'd flood
+    # validation_issues with thousands of phantom warnings.
+    issues.extend(layer2_fields(target_markets, now_ms=taken_at_ms))
 
     # Layer 4 expects {token_id: {"buy": <price-as-str-or-num>, "sell": ...}}
     # The CLOB SDK gives us {tid: {"BUY": "0.46"}} on each side — unwrap that
@@ -267,7 +290,7 @@ async def run_snapshot(
         }
         for tid in all_tids
     }
-    issues.extend(layer4_cross_source(markets, books_by_token, prices_combined))
+    issues.extend(layer4_cross_source(target_markets, books_by_token, prices_combined))
 
     is_valid = is_valid_overall(issues)
     logger.info(
@@ -282,13 +305,14 @@ async def run_snapshot(
     parquet_path = compute_snapshot_path(settings.parquet_root, taken_at_ms)
 
     # Build parquet rows — must match SNAPSHOT_SCHEMA (22 fields including
-    # snapshot_taken_at_ms + snapshot_id parquet-only fields).
+    # snapshot_taken_at_ms + snapshot_id parquet-only fields). Persist ONLY
+    # target_markets (the mode-filtered set). Filtered-out markets aren't part
+    # of this snapshot's claim.
     parquet_rows: list[dict] = []
-    for m in markets:
+    for m in target_markets:
         row = dict(m)
         row["snapshot_taken_at_ms"] = taken_at_ms
         row["snapshot_id"] = 0  # placeholder — Parquet has no FK; SQLite assigns the real id
-        # Ensure required-by-schema fields exist (defensive — normalizer guarantees these).
         row.setdefault("fetched_at_ms", clob_done_ms)
         parquet_rows.append(row)
     write_parquet_atomic(parquet_rows, parquet_path)
@@ -301,7 +325,7 @@ async def run_snapshot(
         mode=mode,
         parquet_path=str(parquet_path),
         is_valid=is_valid,
-        market_rows=markets,
+        market_rows=target_markets,
         issues=issues,
     )
 
@@ -312,7 +336,7 @@ async def run_snapshot(
 
     return SnapshotResult(
         snapshot_id=snapshot_id,
-        market_count=len(markets),
+        market_count=len(target_markets),  # what got persisted, not full normalize count
         is_valid=is_valid,
         mode=mode,
         issue_count=len(issues),
