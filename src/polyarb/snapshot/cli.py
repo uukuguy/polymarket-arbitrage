@@ -37,6 +37,11 @@ def snapshot(
         "-v",
         help="Show progress + phase timings (DEBUG-level logs to stderr).",
     ),
+    no_cache: bool = typer.Option(
+        False,
+        "--no-cache",
+        help="Disable CLOB chunk cache (purges existing caches and forces full refetch).",
+    ),
     config: Path | None = typer.Option(
         None,
         "--config",
@@ -55,7 +60,7 @@ def snapshot(
     settings = load_settings(config)
     mode = "full" if full else "subset"
 
-    result = asyncio.run(run_snapshot(settings, mode=mode))
+    result = asyncio.run(run_snapshot(settings, mode=mode, use_cache=not no_cache))
 
     # D-F1: single-line summary on stdout (cron / make can grep this).
     status = "OK" if result.is_valid else "INVALID"

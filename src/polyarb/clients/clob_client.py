@@ -61,7 +61,12 @@ class ClobReaderClient:
         self._client = ClobClient(settings.clob_url)
         self._limiter = AsyncLimiter(settings.clob_batch_rate_per_10s, 10)
 
-    async def get_books(self, token_ids: list[str]) -> list[Any]:
+    async def get_books(
+        self,
+        token_ids: list[str],
+        *,
+        cache: Any | None = None,
+    ) -> list[Any]:
         """Fetch order books for ``token_ids`` (chunked at ``clob_batch_size``).
 
         Returns a list of ``OrderBookSummary`` objects (dataclass-like; key
@@ -69,6 +74,13 @@ class ClobReaderClient:
         Plan 4 normalizes; this layer returns raw SDK output.
 
         Empty input returns ``[]`` without making any network call.
+
+        When ``cache`` is provided (a ``ChunkCache`` instance), each chunk is
+        persisted to disk after fetch and skipped on subsequent calls if a
+        valid cached chunk is already present. cached chunks come back as
+        plain dicts (the SDK's ``OrderBookSummary`` is rehydrated as
+        ``__dict__`` form), which downstream ``_index_books_by_token``
+        already accepts.
         """
         out: list[Any] = []
         if not token_ids:
@@ -77,14 +89,26 @@ class ClobReaderClient:
         chunks = _chunked(token_ids, self._settings.clob_batch_size)
         n_chunks = len(chunks)
         for i, chunk in enumerate(chunks, start=1):
+            if cache is not None and cache.has_books_chunk(i):
+                cached = cache.load_books_chunk(i)
+                out.extend(cached)
+                logger.info(f"CLOB books chunk {i}/{n_chunks}: cached ({len(cached)} books)")
+                continue
             params = [BookParams(token_id=t) for t in chunk]
             async with self._limiter:
                 books = await asyncio.to_thread(self._client.get_order_books, params)
             out.extend(books)
-            logger.debug(f"CLOB books chunk {i}/{n_chunks}: {len(chunk)} tokens")
+            if cache is not None:
+                cache.save_books_chunk(i, books)
+            logger.info(f"CLOB books chunk {i}/{n_chunks}: fetched ({len(chunk)} tokens)")
         return out
 
-    async def get_prices_buy_sell(self, token_ids: list[str]) -> dict[str, dict[str, Any]]:
+    async def get_prices_buy_sell(
+        self,
+        token_ids: list[str],
+        *,
+        cache: Any | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """Fetch BUY and SELL prices for every token, returning a side-keyed dict.
 
         Shape (matches recorded fixture):
@@ -98,6 +122,9 @@ class ClobReaderClient:
         on one side surfaces clearly.
 
         Empty input returns ``{"buy": {}, "sell": {}}`` without any network call.
+
+        ``cache`` (optional ``ChunkCache``) persists each chunk to disk and
+        skips already-cached chunks on resume.
         """
         result: dict[str, dict[str, Any]] = {"buy": {}, "sell": {}}
         if not token_ids:
@@ -108,6 +135,14 @@ class ClobReaderClient:
         for side, side_label in (("BUY", "buy"), ("SELL", "sell")):
             acc: dict[str, Any] = {}
             for i, chunk in enumerate(chunks, start=1):
+                if cache is not None and cache.has_prices_chunk(side, i):
+                    cached = cache.load_prices_chunk(side, i)
+                    acc.update(cached)
+                    logger.info(
+                        f"CLOB prices {side} chunk {i}/{n_chunks}: cached "
+                        f"({len(cached)} entries)"
+                    )
+                    continue
                 params = [BookParams(token_id=t, side=side) for t in chunk]
                 async with self._limiter:
                     page = await asyncio.to_thread(self._client.get_prices, params)
@@ -115,8 +150,10 @@ class ClobReaderClient:
                 # If a future SDK version returns a list, callers see TypeError
                 # immediately rather than silent data loss.
                 acc.update(page)
-                logger.debug(
-                    f"CLOB prices {side} chunk {i}/{n_chunks}: {len(chunk)} tokens"
+                if cache is not None:
+                    cache.save_prices_chunk(side, i, page)
+                logger.info(
+                    f"CLOB prices {side} chunk {i}/{n_chunks}: fetched ({len(chunk)} tokens)"
                 )
             result[side_label] = acc
         return result

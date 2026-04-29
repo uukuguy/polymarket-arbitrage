@@ -42,12 +42,44 @@ journal:
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: snapshot-markets snapshot-markets-full
+.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-fresh snapshot-cache-purge
 
-## snapshot-markets: Capture Polymarket snapshot (subset mode, liquidity > $1k, ~10-20 min)
+## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly.
 snapshot-markets:
+	@echo ">> snapshot-markets (quiet mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
+	@echo ">> tip: open another terminal and run 'make snapshot-status' to check progress"
+	@echo ""
 	python -m polyarb.snapshot
 
-## snapshot-markets-full: Capture Polymarket snapshot (FULL mode, all markets, ~1-2 hours)
+## snapshot-markets-v: Same as snapshot-markets but with progress logs (recommended for interactive runs)
+snapshot-markets-v:
+	@echo ">> snapshot-markets-v (verbose mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
+	@echo ""
+	python -m polyarb.snapshot --verbose
+
+## snapshot-markets-full: Capture snapshot (FULL mode, all markets, ~1-2 hours). Quiet.
 snapshot-markets-full:
+	@echo ">> snapshot-markets-full (quiet mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
+	@echo ">> tip: this may take 1-2 hours. Use 'make snapshot-status' to check progress."
+	@echo ""
 	python -m polyarb.snapshot --full
+
+## snapshot-markets-full-v: FULL mode with progress logs
+snapshot-markets-full-v:
+	@echo ">> snapshot-markets-full-v (verbose mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
+	@echo ""
+	python -m polyarb.snapshot --full --verbose
+
+## snapshot-status: One-glance status — running process, recent SQLite rows, latest parquet (local time)
+snapshot-status:
+	@python3 scripts/snapshot_status.py
+
+## snapshot-fresh: Force full refetch (purge all caches, then run verbose)
+snapshot-fresh:
+	@echo ">> snapshot-fresh — purging caches, then verbose run"
+	@echo ""
+	python -m polyarb.snapshot --no-cache --verbose
+
+## snapshot-cache-purge: Delete all data/.cache/snapshot-* directories without running
+snapshot-cache-purge:
+	@python3 -c "from pathlib import Path; from polyarb.snapshot.cache import ChunkCache; n = ChunkCache.purge_all(Path('data/.cache')); print(f'purged {n} cache directories')"

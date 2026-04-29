@@ -85,10 +85,22 @@ def test_make_snapshot_markets_full_dry_run_recipe() -> None:
 
 
 def test_makefile_phony_declaration_present() -> None:
-    """``snapshot-markets`` and ``snapshot-markets-full`` must be .PHONY so a
-    file by that name in the project root can't shadow the recipe."""
+    """Core snapshot recipe names must be declared .PHONY so a file by that name
+    in the project root can't shadow the recipe.
+
+    Looks at every .PHONY line and verifies the contract targets show up at
+    least once across all of them — the actual grouping (one big line vs many
+    small lines) is an implementation detail.
+    """
     makefile = (PROJECT_ROOT / "Makefile").read_text()
-    assert ".PHONY: snapshot-markets snapshot-markets-full" in makefile
+    phony_targets: set[str] = set()
+    for line in makefile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(".PHONY:"):
+            phony_targets.update(stripped[len(".PHONY:"):].split())
+    required = {"snapshot-markets", "snapshot-markets-full"}
+    missing = required - phony_targets
+    assert not missing, f"missing .PHONY declarations for: {missing}"
 
 
 # =============================================================================

@@ -46,6 +46,7 @@ from loguru import logger
 from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
+from polyarb.snapshot.cache import ChunkCache
 from polyarb.snapshot.normalizer import normalize_market
 from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_atomic
 from polyarb.storage.sqlite_store import SQLiteStore
@@ -99,6 +100,7 @@ async def run_snapshot(
     *,
     mode: str = "subset",
     now_ms: int | None = None,
+    use_cache: bool = True,
 ) -> SnapshotResult:
     """Run one Polymarket snapshot end-to-end.
 
@@ -114,6 +116,13 @@ async def run_snapshot(
         Issues). Re-raises only for unexpected internal errors (e.g. SQLite
         rollback, Parquet schema mismatch — these should never happen with
         the normalizer's contract).
+
+    use_cache:
+        When True (default) the CLOB chunk cache (``settings.cache_root``)
+        is consulted at startup; an in-progress run that died mid-CLOB can
+        resume from the last completed chunk. The cache is cleaned up on
+        successful persistence (step 7). When False, all existing caches
+        under ``cache_root`` are purged at start and chunks are not saved.
     """
     if mode not in ("subset", "full"):
         raise ValueError(f"invalid mode: {mode!r} (must be 'subset' or 'full')")
@@ -185,13 +194,36 @@ async def run_snapshot(
     )
 
     # ── 4. CLOB batch fetch (best-effort: failure → Issue, not raise) ─────────
+    # Cache wires in here: try_resume() either rebinds to a reusable cache from
+    # a prior interrupted run (matching settings + token list + age <30min) or
+    # initializes a fresh dir. ChunkCache is per-(taken_at_ms, token_set), so an
+    # entirely fresh run with new tokens never accidentally reuses stale data.
+    cache: ChunkCache | None = None
+    if use_cache:
+        cache = ChunkCache(
+            cache_root=settings.cache_root,
+            taken_at_ms=taken_at_ms,
+            settings=settings,
+            token_ids=token_ids,
+            mode=mode,
+        )
+        cache.try_resume()
+        # If we resumed an older cache, its taken_at_ms differs from ours.
+        # We DON'T adopt the cached taken_at_ms — the run's taken_at_ms is
+        # the moment THIS run started, used for parquet path + DB row.
+        # Cache is just intermediate IO; final timestamps stay fresh.
+    else:
+        purged = ChunkCache.purge_all(settings.cache_root)
+        if purged > 0:
+            logger.info(f"--no-cache: purged {purged} cache directories")
+
     books_by_token: dict[str, dict] = {}
     prices_buy: dict = {}
     prices_sell: dict = {}
     clob = ClobReaderClient(settings)
     try:
-        books = await clob.get_books(token_ids)
-        prices = await clob.get_prices_buy_sell(token_ids)
+        books = await clob.get_books(token_ids, cache=cache)
+        prices = await clob.get_prices_buy_sell(token_ids, cache=cache)
         prices_buy = prices.get("buy", {})
         prices_sell = prices.get("sell", {})
         books_by_token = _index_books_by_token(books)
@@ -328,6 +360,11 @@ async def run_snapshot(
         market_rows=target_markets,
         issues=issues,
     )
+
+    # Cache cleanup happens ONLY after a successful SQLite commit. If step 7
+    # failed mid-way, the cache is left intact so the next run can resume.
+    if cache is not None:
+        cache.cleanup()
 
     # Aggregate issues by category for the summary line.
     cat_counts: dict[str, int] = {}

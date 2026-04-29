@@ -38,10 +38,11 @@ class Settings(BaseSettings):
 
     db_path: Path = Path("data/state.db")
     parquet_root: Path = Path("data/snapshots")
+    cache_root: Path = Path("data/.cache")
 
     model_config = SettingsConfigDict(env_prefix="POLYARB_", env_file=".env", extra="ignore")
 
-    @field_validator("db_path", "parquet_root")
+    @field_validator("db_path", "parquet_root", "cache_root")
     @classmethod
     def _within_project(cls, v: Path) -> Path:
         # Test escape hatch: pytest's tmp_path is outside project root by design.

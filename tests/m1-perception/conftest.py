@@ -89,7 +89,15 @@ def tmp_parquet_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def settings_for_test(tmp_db_path: Path, tmp_parquet_root: Path) -> Settings:
+def tmp_cache_root(tmp_path: Path) -> Path:
+    """Per-test cache root under tmp_path (CLOB chunk cache)."""
+    return tmp_path / ".cache"
+
+
+@pytest.fixture
+def settings_for_test(
+    tmp_db_path: Path, tmp_parquet_root: Path, tmp_cache_root: Path
+) -> Settings:
     """Settings tuned for fast tests: tiny retries + low liquidity threshold.
 
     The lowered ``liquidity_threshold_usd=100.0`` ensures all 5 fixture
@@ -99,6 +107,7 @@ def settings_for_test(tmp_db_path: Path, tmp_parquet_root: Path) -> Settings:
     return Settings(
         db_path=tmp_db_path,
         parquet_root=tmp_parquet_root,
+        cache_root=tmp_cache_root,
         retry_attempts=2,
         retry_min_wait_s=0.001,
         retry_max_wait_s=0.005,

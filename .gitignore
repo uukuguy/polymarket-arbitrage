@@ -22,6 +22,7 @@ data/state.db
 data/state.db-wal
 data/state.db-shm
 data/snapshots/
+data/.cache/
 
 # OS
 .DS_Store
