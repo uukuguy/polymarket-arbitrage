@@ -304,3 +304,64 @@
       读完 STATE.md + 本 JOURNAL 的 SESSION 07 三条 [NEXT] 选项后，问用户选 A / B / C
 
 ---
+
+## 2026-04-30 凌晨
+
+- [SESSION 08] **Phase 1 工具体验加固 + 教学文档体系建立 — 4 commit / 22 新 tests**
+- [SESSION 08 起因] 用户跑 `make snapshot-markets` 体验差：没进度 / 不能续传 / Claude 自己搞错状态判断 3 次
+- [LEARNING] **agent 并行执行让用户理解曲线被甩开** — Phase 1 完成时用户读不懂自己代码（"MarketSnapshot / book / get_prices 字段从未教过"）
+    - 修复：写 6 章 `docs/learning/` 教学文档体系（00-INDEX / 01-数据双源 / 02-pipeline / 03-shape / 04-validators / 05-ghost_book / 06-security）
+    - 项目 CLAUDE.md 加 "教学文档持续产出" 纪律：phase 末或重大功能落地后**主动**产出
+- [LEARNING] **规模假设错 → 原子性策略代价非线性放大**
+    - Phase 1 D-C1 写决策时假设市场数 ~1k（30 秒重跑无所谓）；live run 真规模 17k（26 分钟重跑很疼）
+    - 50x cost amplification 是 CONTEXT 模板缺"Scale assumption"行的代价
+    - 写入 `threads/learnings-meta.md` 作为元教训，下个 phase CONTEXT 必须显式记 scale 假设
+- [DECISION] CLOB chunk 缓存落地（不进 phase，用 quick fix 模式）
+    - `src/polyarb/snapshot/cache.py` ChunkCache class（指纹校验 settings + tokens + mode + 30min TTL）
+    - 每 chunk 拉完立刻落 `data/.cache/snapshot-{taken_at_ms}/{books|prices/{buy,sell}}/chunk-NNN.json`
+    - step 7 SQLite commit 成功后 cleanup；失败则保留供下次复用
+    - 20 个新 cache test 全过
+- [DECISION] 可观测性套件 — make 长任务的"配套设备"
+    - `make snapshot-status` 单条命令显示进程 / 最近 SQLite / 最新 Parquet（**本地时间**，不再让用户做 epoch ms 时区转换）
+    - `make snapshot-markets-v` / `snapshot-fresh` / `snapshot-cache-purge` 4 个新 target
+    - 旧 target 加 PID + start time banner
+    - 教训：**任何 ≥30 秒的 make target 必须配套提供 status 命令**，写入 `threads/learnings-meta.md`
+- [LEARNING] **LIVE-RUN-003/004 暴露 Gamma 翻页 3-5 分钟黑屏问题**
+    - 原代码只在翻页**结束之后**打一行 INFO，期间 0 反馈
+    - 修复：每 50 页打一行 `Gamma: page N fetched (M markets so far)`
+    - 加 `Gamma: starting paginated fetch` 启动行（30 秒内必现）
+- [LEARNING] **macOS ps `etimes` 不存在** — 我用 Linux 流派 keyword 让 `make snapshot-status` 在用户 macOS 终端 fallback 到 "cannot inspect processes"
+    - 修复：先 try `etimes`，失败 fallback 到 BSD `etime` ([[dd-]hh:]mm:ss) + 自己写 parser
+- [DECISION] 时间戳 + 每 phase elapsed（最后一道补丁）
+    - 用户反馈："运行输出应该有时间戳，每步运行时间等"
+    - cli.py loguru format 改成 `<HH:mm:ss> | <level> | <message>`
+    - orchestrator 加 `_phase()` contextmanager，每 phase 自动 start + done 配对
+    - done 行用 `►` glyph，方便 grep `► Phase` 拿一次跑的所有 phase 耗时摘要
+    - 加 "Snapshot complete in X" 总耗时行
+- [LEARNING] **Polymarket Gamma API 在 CST 22-24 时段明显慢**
+    - LIVE-RUN-001 (18:27): 26m25s
+    - LIVE-RUN-002 (22:27): 24m52s
+    - LIVE-RUN-003 (23:38): 翻页中段 hang，杀
+    - LIVE-RUN-004 (00:00): 13 分钟翻 100 页（正常 1 分钟），杀
+    - 推测：北美东部白天高峰 → API 慢；北京时间 22 点对应美东上午 10 点
+    - 不是 bug，是市场环境事实。建议 live 测试避开高峰时段
+- [LEARNING] **Buffer 假设错了** — 我以为是 stdout buffer 卡住进度行，写脚本测了发现 stdout/stderr 直接 unbuffered 工作
+    - 真原因：用户 `ps -p 89031 / 98453` 查的是 make 父进程，不是 python 子进程；python 子进程其实活着
+    - 教训：未来 ps 查进程时**先 pgrep 找真 PID** 再 `-p` 查
+- [DECISION] LIVE-RUN-005 留待早上 / API 流量低峰
+    - 4 commit 已经在本地（main 领先 origin/main 4 个），未 push
+    - 工程改动 119 tests 已经覆盖；live 验证可以推迟到明天
+- [NEXT] 下次会话第一条命令：
+
+    ```
+    /gsd-resume-work --ws m1-perception
+    ```
+
+    然后按 STATE.md "Recommended Next Action" 三选项（推荐 A：跑 LIVE-RUN-005 验证可观测性 + push 4 commit）
+
+- [SESSION 08 END] 2026-04-30 00:20 CST 收手
+    - main 领先 origin/main: 4 commit
+    - 工作树状态: 干净（除 STATE.md / JOURNAL.md 本次更新）
+    - 下次会话 `/gsd-resume-work --ws m1-perception` 会读到这条 [NEXT]
+
+---
