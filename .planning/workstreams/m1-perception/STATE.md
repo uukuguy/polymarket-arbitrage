@@ -8,14 +8,14 @@ created: 2026-04-28
 ## Current Position
 **Status:** Phase 1 Verified (mocked-pipeline gate green)
 **Current Phase:** Phase 1 — 完整市场快照工具 ✅ COMPLETE
-**Last Activity:** 2026-04-29
-**Last Activity Description:** Phase 1 live-run #001 verified (post 2 surgical fixes for dedupe + subset-persist); 97/97 tests; 17,259 markets in SQLite + Parquet; major finding: 72% liquid markets affected by Issue #180 ghost_book
+**Last Activity:** 2026-05-01
+**Last Activity Description:** LIVE-RUN-005 verified (20353 markets, 32916 issues, 72% ghost_book stable); 6m12s total (vs 26m25s in RUN-001 — API idle period effect); all observability features confirmed working (timestamp/phase-elapsed/progress/cache cleanup)
 
 ## Progress
 **Phases Complete:** 1
 **Total commits:** 36 (1 baseline + 35 phase-1 work)
 **Phase 1 task count:** 32 tasks across 5 plans, 4 waves
-**Test count:** 95 (skeleton 5 / gamma 6 / clob 5 / sqlite 10 / parquet 7 / validator 18 / normalizer 13 / orchestrator 13 / settings 10 / makefile 8)
+**Test count:** 119 (skeleton 5 / gamma 6 / clob 5 / sqlite 10 / parquet 7 / validator 18 / normalizer 13 / orchestrator 13 / settings 10 / makefile 8 / cache 22)
 
 ## Phase 1 Deliverables (verified)
 - ✅ `make snapshot-markets` (subset, default) → `python -m polyarb.snapshot`
@@ -36,8 +36,8 @@ created: 2026-04-28
 - **`record_fixtures.py`** at project root is a working artifact (not committed, not gitignored). User can delete or commit as a tool.
 
 ## Session Continuity
-**Stopped At:** Phase 1 + observability/cache hardening complete (4 unpushed commits)
-**Last Activity:** 2026-04-30 00:20 CST — SESSION 08 完成 snapshot 工具可观测性 + cache 续传 + 教学文档落地
+**Stopped At:** Phase 1 complete — LIVE-RUN-005 verified, 4 commits on origin
+**Last Activity:** 2026-05-01 10:04 CST — LIVE-RUN-005 verified (6m12s, 20353 markets, 72% ghost_book), observability all confirmed, 4 commits on origin/main
 
 **SESSION 08 deliverables (4 unpushed commits)**:
 1. `8bbdc47 docs(learning):` — Phase 1 教学文档 6 章 (`docs/learning/`) + CLAUDE.md "教学文档持续产出" 纪律
@@ -45,29 +45,35 @@ created: 2026-04-28
 3. `50c4299 fix(01):` — Gamma 翻页进度 + Phase N/7 banner + macOS `ps -o etime` 兼容
 4. `63797ad feat(01):` — 时间戳 prefix + 每 phase elapsed timing (`► Phase X — done in Ys`)
 - Tests: 119/119 green (97 → 119, +22 new tests across cache / progress / phase timing)
-- Live data points: LIVE-RUN-001/002 入账（17259 / 17377 markets, ~26 分钟 each）
+
+**SESSION 09 results** (2026-05-01):
+- LIVE-RUN-005: 20353 markets, 32916 issues, 72% ghost_book stable
+- 6m12s total (vs 26m25s RUN-001) — API idle period effect
+- All observability features confirmed: timestamp/phase-elapsed/progress/cache cleanup
+- 4 commits already on origin/main (previous push succeeded)
+- Snapshot ID 3 in SQLite
 
 **Recommended Next Action** (下次会话首选项)：
 
-A. **跑 LIVE-RUN-005 验证新可观测性 + push 4 commit**
-   - `make snapshot-markets-v 2>&1 | tee /tmp/snap-$(date +%H%M).log`
-   - 看新格式（时间戳 / phase elapsed / Gamma 进度 / chunk cache cleanup）
-   - 跑完 push 4 commit 到 origin/main
+A. **启动 Phase 2 — WebSocket 增量数据流**
+   - `/gsd-discuss-phase 2 --ws m1-perception`
+   - 焦点：实时性 + /book size WebSocket + /prices 替代轮询
 
-B. **直接 push + 跑 Phase 2 research**
-   - 工程改动已 119 tests 验证；live 验证可以推迟
-   - `git push origin main` → `/gsd-research-phase 2 --ws m1-perception`
+B. **查 220 个无 endDate market**
+   - `make snapshot-status` 先看当前 DB
+   - SQL 查 Layer 2 UNKNOWN，不开 phase
 
-C. **看一下 LIVE-RUN-002 暴露的 220 个无 endDate market**
-   - 数据已在 SQLite, layer 2 UNKNOWN，CLAUDE.md D-D4 红线
-   - 写 SQL + 简短分析（不开 phase）
+C. **切到 m4-smart-strategies**
+   - `gsd-tools workstream set m4-smart-strategies`
+   - 用现有 20353 market snapshot 数据
 
-**推荐 A**：四个 commit 都是 user-facing 工具行为改动，需要 live 验证一次再 push 才踏实。
+**推荐 A**：Phase 1 完整状态（5 live runs / 119 tests / 72% ghost_book confirmed），Phase 2 是下一个明确产出
 
 **Carry-over open items**:
 - 220 个市场无 endDate（Layer 2 UNKNOWN）— 需要分类调查（是 perpetual market？）
 - clob_missing 在 4 小时内 +33%（CLOB 可达性漂移）— 需要时序观察
 - Polymarket Gamma API 在 CST 22-24 时段明显慢（page 速度从 1.7/s 降到 0.3/s）— 暂未触发任何代码改动，但记录为环境事实
+- **新观察**: Gamma 翻页速度在北京时间 10 点（美东 22 点）极快（6m12s 总耗时），但在 22-24 点（美东 10-12 点）慢（26m25s）— 推测 API 有北美白天高峰
 
 ## Phase 1 Artifacts
 - `.planning/workstreams/m1-perception/phases/01-/01-CONTEXT.md` — locked decisions
