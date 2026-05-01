@@ -22,18 +22,26 @@
 ### Phase 1.1: 市场观察工具与中文化（Observation Toolkit + Translation）
 
 **Goal:** 把 Phase 1 的原始 snapshot 数据转成"可观察的市场"——配方化扫描命令、跨快照对比、单市场详情、中英对照、类别统计、watchlist。让初学者能 30 秒判断一个市场该不该碰。
-**Status:** ⏳ Discuss 待启动
+**Status:** ⏳ Plan complete (2026-05-01 SESSION 12) — 待 execute
 **Depends on:** Phase 1
-**Plans:** 0 plans (run /gsd-discuss-phase 1.1 first)
+**Plans:** 6 plans (4 waves)
+
+Plans:
+- [ ] 01.1-01-PLAN.md — Wave 1: schema 升级（category/tags + question_translations）+ normalizer + deps + 老数据清空 + 新基线 snapshot（含 human-action checkpoint）
+- [ ] 01.1-02-PLAN.md — Wave 2: T2 翻译完整 vertical slice（OpenAI 兼容 SDK + 缓存表 + 批量 orchestrator + CLI + Makefile + .env.example）
+- [ ] 01.1-03-PLAN.md — Wave 2: T3 scanner 引擎 + 6 内置配方 Batch 1 + 自定义 yaml 加载（4 层防御：read-only URI / 字符黑名单 / ORDER BY 正则 / LIMIT int）
+- [ ] 01.1-04-PLAN.md — Wave 3: T4 跨 snapshot diff（duckdb FULL OUTER JOIN）+ 单市场时序 tracker（read_parquet glob + union_by_name）
+- [ ] 01.1-05-PLAN.md — Wave 3: T5 show-market 多源拼装 + T7 watchlist（yaml.safe_load + 受限 AST 求值，禁内置任意求值器）
+- [ ] 01.1-06-PLAN.md — Wave 4: 教学文档 07-观察市场.md + Makefile help 整理 + 端到端 9 步验收 + 对手测试 5 题（含 human-verify checkpoint）
 
 Goals:
-- [ ] T1 markets 表补 category/tags 字段（Gamma API 已有）
-- [ ] T2 question 中文翻译（独立 question_translations 表，OpenAI 兼容 API）
-- [ ] T3 配方化扫描命令（thick-but-slippery / near-end / ghost-suspicious / dead-volume / ...）
-- [ ] T4 跨 snapshot 对比命令（duckdb 跨 parquet）
-- [ ] T5 单市场详情命令（中英对照 + 完整字段 + 时间维度）
-- [ ] T6 类别统计命令
-- [ ] T7 watchlist（YAML 或 SQLite 表）
+- [ ] T1 markets 表补 category/tags 字段（Gamma API 已有）— covered by plan 01
+- [ ] T2 question 中文翻译（独立 question_translations 表，OpenAI 兼容 API）— covered by plan 02
+- [ ] T3 配方化扫描命令（thick-but-slippery / near-end / ghost-suspicious / coin-flip / neg-risk-incomplete / by-category）— covered by plan 03
+- [ ] T4 跨 snapshot 对比命令（duckdb 跨 parquet）— covered by plan 04
+- [ ] T5 单市场详情命令（中英对照 + 完整字段 + 时间维度）— covered by plan 05
+- [ ] T6 类别统计命令 — covered by plan 03 (scan-by-category)
+- [ ] T7 watchlist（YAML 或 SQLite 表）— covered by plan 05
 
 ### Phase 2: WebSocket 增量数据流
 
