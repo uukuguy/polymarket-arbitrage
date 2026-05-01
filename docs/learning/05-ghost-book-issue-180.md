@@ -28,7 +28,7 @@ unparseable book:           0
 api_jitter (Layer 1):       1    ← 因 dedupe 4% 几乎必触发
 ```
 
-下游每写一个策略，都必须先读这份数据。详见 `phases/01-/01-LIVE-RUN-001.md`。
+下游每写一个策略，都必须先读这份数据。详见 `phases/01-market-snapshot/01-LIVE-RUN-001.md`。
 
 ## 为什么会发生？
 
@@ -134,7 +134,7 @@ GHOST_BOOK = "ghost_book"  # ⚠️ issue #180 defense (RESEARCH.md Pitfall 1)
 
 这个发现已经写入：
 - `.planning/threads/market-microstructure.md` SESSION 06（永久参考）
-- `.planning/workstreams/m1-perception/phases/01-/01-LIVE-RUN-001.md`（实战报告）
+- `.planning/workstreams/m1-perception/phases/01-market-snapshot/01-LIVE-RUN-001.md`（实战报告）
 - `.planning/JOURNAL.md` SESSION 07 [LEARNING] 段（决策时间线）
 
 任何未来的 phase（M2 / M3 / M4 / M5）做策略前，**都要遵守这条硬约束**。CLAUDE.md 第 3 项原则"代码是主线，paper 是验证手段"在这里具象化：我们的代码里已经把这个事实编码进去了，不是"以后注意"，是"基础设施级别就处理了"。

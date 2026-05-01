@@ -39,8 +39,8 @@
 
 - 项目章程 / 角色契约 → `CLAUDE.md`
 - 决策时间线 → `.planning/JOURNAL.md`
-- Phase 1 决策记录 → `.planning/workstreams/m1-perception/phases/01-/01-CONTEXT.md`
-- live run 实战发现 → `.planning/workstreams/m1-perception/phases/01-/01-LIVE-RUN-001.md`
+- Phase 1 决策记录 → `.planning/workstreams/m1-perception/phases/01-market-snapshot/01-CONTEXT.md`
+- live run 实战发现 → `.planning/workstreams/m1-perception/phases/01-market-snapshot/01-LIVE-RUN-001.md`
 - 跨 phase 经验沉淀 → `.planning/threads/market-microstructure.md`
 
 教学文档只负责**让你看懂代码**。"为什么我们当时选 A 不选 B" 看 CONTEXT.md / JOURNAL.md。

@@ -76,9 +76,9 @@ C. **切到 m4-smart-strategies**
 - **新观察**: Gamma 翻页速度在北京时间 10 点（美东 22 点）极快（6m12s 总耗时），但在 22-24 点（美东 10-12 点）慢（26m25s）— 推测 API 有北美白天高峰
 
 ## Phase 1 Artifacts
-- `.planning/workstreams/m1-perception/phases/01-/01-CONTEXT.md` — locked decisions
-- `.planning/workstreams/m1-perception/phases/01-/01-RESEARCH.md` — 970 lines tech research
-- `.planning/workstreams/m1-perception/phases/01-/01-PATTERNS.md` — 32 file analogs
-- `.planning/workstreams/m1-perception/phases/01-/01-SECURITY-REVIEW.md` — 1 HIGH + 3 MED + 3 LOW (resolved)
-- `.planning/workstreams/m1-perception/phases/01-/01-{1..5}-PLAN.md` — 5 executable plans
-- `.planning/workstreams/m1-perception/phases/01-/01-{1..5}-SUMMARY.md` — per-plan executor output
+- `.planning/workstreams/m1-perception/phases/01-market-snapshot/01-CONTEXT.md` — locked decisions
+- `.planning/workstreams/m1-perception/phases/01-market-snapshot/01-RESEARCH.md` — 970 lines tech research
+- `.planning/workstreams/m1-perception/phases/01-market-snapshot/01-PATTERNS.md` — 32 file analogs
+- `.planning/workstreams/m1-perception/phases/01-market-snapshot/01-SECURITY-REVIEW.md` — 1 HIGH + 3 MED + 3 LOW (resolved)
+- `.planning/workstreams/m1-perception/phases/01-market-snapshot/01-{1..5}-PLAN.md` — 5 executable plans
+- `.planning/workstreams/m1-perception/phases/01-market-snapshot/01-{1..5}-SUMMARY.md` — per-plan executor output

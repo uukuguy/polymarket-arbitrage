@@ -6,7 +6,7 @@
 
 不是 paranoia，是写完一遍 → 安全审计员（gsd-security-auditor agent）找出来的真问题 → 我们补上的。
 
-存档在：`.planning/workstreams/m1-perception/phases/01-/01-SECURITY-REVIEW.md`（含每个 F 的根因 + 选定方案 + 替代方案）
+存档在：`.planning/workstreams/m1-perception/phases/01-market-snapshot/01-SECURITY-REVIEW.md`（含每个 F 的根因 + 选定方案 + 替代方案）
 
 ## 8 条约束概览
 
