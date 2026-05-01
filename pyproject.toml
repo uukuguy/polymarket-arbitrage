@@ -23,6 +23,15 @@ dependencies = [
   "click>=8.1,<8.2",
   "tqdm>=4.66,<5",
   "loguru>=0.7,<0.8",
+  # Phase 1.1 T2 — translation client (AsyncOpenAI). Pinning <3 to avoid major-
+  # version drift in the retry/timeout interface. Project supports any
+  # OpenAI-compatible endpoint via TRANSLATION_API_BASE.
+  "openai>=2.0,<3",
+  # Phase 1.1 T3/T5 — terminal table rendering for scan / show output.
+  "rich>=13,<14",
+  # Phase 1.1 T4 — cross-snapshot parquet queries (diff/tracker). Promoted from
+  # dev to main deps because production observation paths now depend on it.
+  "duckdb>=1.0,<2",
 ]
 
 [project.optional-dependencies]
@@ -30,7 +39,6 @@ dev = [
   "pytest>=8.2,<9",
   "pytest-asyncio>=0.23,<0.24",
   "respx>=0.21,<0.22",
-  "duckdb>=1.0,<2",
   "freezegun>=1.5,<2",
   "ruff>=0.5,<1",
 ]

@@ -37,3 +37,10 @@ pytestdebug.log
 # Claude Code harness state
 .claude/
 
+# Phase 1.1 user-local config (template watchlist.yaml.example committed; actual
+# watchlist.yaml is per-user, sync via git only if user opts in).
+watchlist.yaml
+
+# Phase 1.1 scan outputs (large, regenerable from snapshot data).
+data/scans/
+

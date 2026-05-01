@@ -136,4 +136,10 @@ def normalize_market(raw: dict) -> dict | None:
         # Stamped by orchestrator at CLOB-fetch completion (Pitfall 6):
         "fetched_at_ms": None,
         "incomplete": False,
+        # Phase 1.1 T1 — Gamma already returns these; previous Phase 1 dropped them.
+        # category is a single string; tags is a list[str] serialized as JSON.
+        # ensure_ascii=False keeps CJK readable; T-01.1-01 tampering risk accepted
+        # (we don't parse/render here — just store).
+        "category": raw.get("category"),
+        "tags": json.dumps(raw.get("tags") or [], ensure_ascii=False),
     }

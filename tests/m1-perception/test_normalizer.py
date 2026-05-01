@@ -12,6 +12,7 @@ from polyarb.snapshot.normalizer import normalize_market
 
 
 # Expected output keys (everything in MARKETS_COLUMN_ORDER except snapshot_id).
+# Phase 1.1 T1 added: category + tags.
 EXPECTED_KEYS = {
     "market_id",
     "condition_id",
@@ -33,6 +34,8 @@ EXPECTED_KEYS = {
     "neg_risk_market_id",
     "fetched_at_ms",
     "incomplete",
+    "category",  # Phase 1.1 T1
+    "tags",      # Phase 1.1 T1
 }
 
 
@@ -236,3 +239,61 @@ def test_normalize_real_fixture_sample(gamma_fixture: list[dict]) -> None:
             assert isinstance(out["yes_token_id"], str)
         if out["no_token_id"] is not None:
             assert isinstance(out["no_token_id"], str)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1.1 T1: category + tags extraction
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_category_extracted() -> None:
+    """category is a single string from raw['category']."""
+    out = normalize_market(make_raw(category="Politics"))
+    assert out is not None
+    assert out["category"] == "Politics"
+
+
+def test_category_missing_returns_none() -> None:
+    """Missing category → None (downstream LEFT JOIN handles NULL)."""
+    raw = make_raw()
+    raw.pop("category", None)
+    out = normalize_market(raw)
+    assert out is not None
+    assert out["category"] is None
+
+
+def test_tags_serialized_as_json() -> None:
+    """tags is a list[str] from Gamma — stored as JSON-encoded string."""
+    out = normalize_market(make_raw(tags=["a", "b"]))
+    assert out is not None
+    # ensure_ascii=False but ASCII inputs serialize the same way: '["a", "b"]'.
+    import json
+    parsed = json.loads(out["tags"])
+    assert parsed == ["a", "b"]
+
+
+def test_tags_missing_returns_empty_array_string() -> None:
+    """Missing tags → '[]' (empty array string), not None — schema column is TEXT non-null in payload."""
+    raw = make_raw()
+    raw.pop("tags", None)
+    out = normalize_market(raw)
+    assert out is not None
+    assert out["tags"] == "[]"
+
+
+def test_tags_unicode_preserved() -> None:
+    """ensure_ascii=False keeps CJK chars readable in the stored string."""
+    out = normalize_market(make_raw(tags=["体育", "Politics"]))
+    assert out is not None
+    assert "体育" in out["tags"]
+    # Must still be valid JSON.
+    import json
+    parsed = json.loads(out["tags"])
+    assert parsed == ["体育", "Politics"]
+
+
+def test_tags_none_returns_empty_array_string() -> None:
+    """raw['tags']=None should not crash json.dumps — defaults to []."""
+    out = normalize_market(make_raw(tags=None))
+    assert out is not None
+    assert out["tags"] == "[]"
