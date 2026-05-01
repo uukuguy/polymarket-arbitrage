@@ -47,12 +47,6 @@ def snapshot(
         "--config",
         help="Path to YAML config (overrides config/snapshot.yaml).",
     ),
-    incremental_since_ms: int | None = typer.Option(
-        None,
-        "--incremental-since-ms",
-        help="Unix epoch milliseconds. When set, only markets updated since that "
-        "time are fetched (incremental mode).",
-    ),
 ) -> None:
     """Capture a one-shot Polymarket market snapshot."""
     # Re-route loguru: default is INFO; --verbose drops to DEBUG.
@@ -70,20 +64,12 @@ def snapshot(
     settings = load_settings(config)
     mode = "full" if full else "subset"
 
-    result = asyncio.run(
-        run_snapshot(
-            settings,
-            mode=mode,
-            use_cache=not no_cache,
-            incremental_since_ms=incremental_since_ms,
-        )
-    )
+    result = asyncio.run(run_snapshot(settings, mode=mode, use_cache=not no_cache))
 
     # D-F1: single-line summary on stdout (cron / make can grep this).
     status = "OK" if result.is_valid else "INVALID"
-    mode_tag = f"incremental" if result.is_incremental else result.mode
     summary = (
-        f"{status} | {result.market_count} markets | mode={mode_tag} | "
+        f"{status} | {result.market_count} markets | mode={result.mode} | "
         f"{result.issue_count} issues | -> {result.parquet_path}"
     )
     print(summary)

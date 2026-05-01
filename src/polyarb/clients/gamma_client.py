@@ -128,22 +128,15 @@ class GammaClient:
         # block above. Mypy/pyright happiness only.
         raise RuntimeError("AsyncRetrying exited without yielding — unreachable")
 
-    async def fetch_all_active_markets(self, changed_since: int | None = None) -> list[dict]:
+    async def fetch_all_active_markets(self) -> list[dict]:
         """Paginate ``/markets`` and return every active+open+non-archived market dict.
 
-        Args:
-            changed_since: Unix epoch milliseconds. When provided, passes
-                ``filterDate`` to the Gamma API so the server filters markets
-                whose ``updatedAt`` timestamp is at-or-after this value.
-                This is the primary lever for M1-Phase 2 incremental snapshots.
+        Returns RAW dicts as Polymarket sent them — including the
+        ``clobTokenIds`` JSON-string field (Pitfall 2; Plan 4 normalizes).
 
-        Returns:
-            RAW market dicts as Polymarket sent them — including the
-            ``clobTokenIds`` JSON-string field (Pitfall 2; Plan 4 normalizes).
-
-        Raises:
-            RuntimeError: if pagination exceeds ``MAX_PAGES`` (F-2) or
-                a page is not a list (defensive guard).
+        Raises ``RuntimeError`` if pagination exceeds ``MAX_PAGES`` (F-2) or
+        if a page is not a list (defensive — Polymarket should always
+        return ``list[dict]`` here).
         """
         out: list[dict] = []
         offset = 0
@@ -159,15 +152,13 @@ class GammaClient:
         logger.info(f"Gamma: starting paginated fetch (page_limit={self.PAGE_LIMIT})")
 
         while True:
-            params: dict[str, str | int] = {
+            params = {
                 "active": "true",
                 "closed": "false",
                 "archived": "false",
                 "limit": self.PAGE_LIMIT,
                 "offset": offset,
             }
-            if changed_since is not None:
-                params["filterDate"] = str(changed_since)
             page = await self._get("/markets", params)
             if not isinstance(page, list):
                 raise RuntimeError(
@@ -200,30 +191,3 @@ class GammaClient:
             f"Gamma fetched {len(out)} active markets in {pages_fetched} pages (final)"
         )
         return out
-
-    async def get_market(self, token_id: str) -> dict | None:
-        """Fetch a single market by its CLOB token ID.
-
-        Returns ``None`` if the market is not found (404) or if the response
-        is not a dict (defensive). Raises ``_NonRetryableHTTPError`` for 4xx
-        (non-404), and propagates other exceptions per the retry policy.
-
-        This method is the building block for incremental snapshots: the
-        orchestrator calls it in a gather loop for markets that need refreshing
-        based on their ``updated_at`` timestamp.
-        """
-        try:
-            result = await self._get(f"/markets/{token_id}", {})
-        except _NonRetryableHTTPError as e:
-            # 404 means the market was delisted — treat as absent.
-            if e.__cause__ and getattr(e.__cause__, "response", None):
-                if e.__cause__.response.status_code == 404:
-                    return None
-            raise
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return None
-            raise
-        if not isinstance(result, dict):
-            return None
-        return result

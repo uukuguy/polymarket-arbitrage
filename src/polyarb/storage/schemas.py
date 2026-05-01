@@ -53,14 +53,12 @@ CREATE TABLE IF NOT EXISTS markets (
   neg_risk           INTEGER,
   neg_risk_market_id TEXT,
   fetched_at_ms      INTEGER NOT NULL,
-  updated_at_ms      INTEGER,
   snapshot_id        INTEGER NOT NULL REFERENCES snapshots(id),
   incomplete         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_markets_liquidity ON markets(liquidity_usd);
 CREATE INDEX IF NOT EXISTS idx_markets_end_time ON markets(end_time_ms);
-CREATE INDEX IF NOT EXISTS idx_markets_updated_at ON markets(updated_at_ms);
 
 CREATE TABLE IF NOT EXISTS validation_issues (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +96,6 @@ MARKETS_COLUMN_ORDER: tuple[str, ...] = (
     "neg_risk",
     "neg_risk_market_id",
     "fetched_at_ms",
-    "updated_at_ms",
     "snapshot_id",
     "incomplete",
 )
@@ -108,8 +105,8 @@ MARKETS_INSERT_SQL = (
     "market_id,condition_id,slug,question,yes_token_id,no_token_id,"
     "mid_price,liquidity_usd,volume_usd,best_bid_price,best_bid_size,best_ask_price,"
     "best_ask_size,end_time_ms,active,closed,neg_risk,neg_risk_market_id,"
-    "fetched_at_ms,updated_at_ms,snapshot_id,incomplete) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    "fetched_at_ms,snapshot_id,incomplete) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 # Pyarrow schema for Parquet — token IDs are pa.string() (Pitfall 3: uint256 > int64).
@@ -136,7 +133,6 @@ SNAPSHOT_SCHEMA: pa.Schema = pa.schema(
         pa.field("neg_risk", pa.bool_()),
         pa.field("neg_risk_market_id", pa.string(), nullable=True),
         pa.field("fetched_at_ms", pa.int64()),
-        pa.field("updated_at_ms", pa.int64(), nullable=True),
         pa.field("snapshot_taken_at_ms", pa.int64()),
         pa.field("snapshot_id", pa.int64()),
         pa.field("incomplete", pa.bool_()),
