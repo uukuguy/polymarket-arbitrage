@@ -1,15 +1,18 @@
 """Storage schemas: SQLite DDL + pyarrow.Schema (column-aligned).
 
 MARKETS_COLUMN_ORDER, MARKETS_INSERT_SQL, and SNAPSHOT_SCHEMA must stay in lockstep.
-Adding a column requires updating ALL THREE plus the DDL.
+Adding a column requires updating ALL FOUR (DDL/MARKETS_COLUMN_ORDER/MARKETS_INSERT_SQL/
+SNAPSHOT_SCHEMA). Phase 1.1 added a fifth sync point: the question_translations table
+DDL block must exist for translation cache CRUD to work.
 
 Tables:
-- snapshots         — append-only metadata per snapshot run
-- markets           — atomically overwritten on each snapshot (D-C1)
-- validation_issues — categorized validation failures per snapshot
+- snapshots             — append-only metadata per snapshot run
+- markets               — atomically overwritten on each snapshot (D-C1)
+- validation_issues     — categorized validation failures per snapshot
+- question_translations — append-only translation cache (T2, never DELETE FROM)
 
-The pyarrow SNAPSHOT_SCHEMA mirrors the markets table plus 2 parquet-only fields
-(snapshot_taken_at_ms, snapshot_id). Token IDs are pa.string() because Polymarket
+The pyarrow SNAPSHOT_SCHEMA mirrors the markets table plus 1 parquet-only field
+(snapshot_taken_at_ms). Token IDs are pa.string() because Polymarket
 uint256 token IDs (70+ decimal digits) overflow pa.int64() — see RESEARCH.md Pitfall 3.
 """
 
@@ -54,7 +57,9 @@ CREATE TABLE IF NOT EXISTS markets (
   neg_risk_market_id TEXT,
   fetched_at_ms      INTEGER NOT NULL,
   snapshot_id        INTEGER NOT NULL REFERENCES snapshots(id),
-  incomplete         INTEGER NOT NULL DEFAULT 0
+  incomplete         INTEGER NOT NULL DEFAULT 0,
+  category           TEXT,
+  tags               TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_markets_liquidity ON markets(liquidity_usd);
@@ -72,6 +77,27 @@ CREATE TABLE IF NOT EXISTS validation_issues (
 
 CREATE INDEX IF NOT EXISTS idx_issues_snapshot ON validation_issues(snapshot_id);
 CREATE INDEX IF NOT EXISTS idx_issues_category ON validation_issues(category);
+
+-- Phase 1.1 T2: append-only translation cache.
+-- Invariants:
+--  * never DELETE FROM (cumulative across snapshots)
+--  * question_hash = sha256(question_en) for de-dup
+--  * is_dead=1 marks a question that exceeded retry_count > 3 (manual reset to retry)
+--  * idx_qt_question_en UNIQUE protects scan-time LEFT JOIN ON m.question = qt.question_en
+--    from producing duplicate rows.
+CREATE TABLE IF NOT EXISTS question_translations (
+  question_hash    TEXT PRIMARY KEY,
+  question_en      TEXT NOT NULL,
+  question_zh      TEXT NOT NULL,
+  translator_model TEXT NOT NULL,
+  translated_at_ms INTEGER NOT NULL,
+  token_cost       INTEGER,
+  retry_count      INTEGER NOT NULL DEFAULT 0,
+  is_dead          INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_qt_dead ON question_translations(is_dead);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_qt_question_en ON question_translations(question_en);
 """
 
 # Order MUST match the DDL `CREATE TABLE markets(...)` declaration
@@ -98,6 +124,8 @@ MARKETS_COLUMN_ORDER: tuple[str, ...] = (
     "fetched_at_ms",
     "snapshot_id",
     "incomplete",
+    "category",  # Phase 1.1 T1
+    "tags",      # Phase 1.1 T1 (json.dumps(list[str]) string)
 )
 
 MARKETS_INSERT_SQL = (
@@ -105,8 +133,8 @@ MARKETS_INSERT_SQL = (
     "market_id,condition_id,slug,question,yes_token_id,no_token_id,"
     "mid_price,liquidity_usd,volume_usd,best_bid_price,best_bid_size,best_ask_price,"
     "best_ask_size,end_time_ms,active,closed,neg_risk,neg_risk_market_id,"
-    "fetched_at_ms,snapshot_id,incomplete) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    "fetched_at_ms,snapshot_id,incomplete,category,tags) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 # Pyarrow schema for Parquet — token IDs are pa.string() (Pitfall 3: uint256 > int64).
@@ -136,5 +164,7 @@ SNAPSHOT_SCHEMA: pa.Schema = pa.schema(
         pa.field("snapshot_taken_at_ms", pa.int64()),
         pa.field("snapshot_id", pa.int64()),
         pa.field("incomplete", pa.bool_()),
+        pa.field("category", pa.string(), nullable=True),  # Phase 1.1 T1
+        pa.field("tags", pa.string(), nullable=True),      # Phase 1.1 T1
     ]
 )
