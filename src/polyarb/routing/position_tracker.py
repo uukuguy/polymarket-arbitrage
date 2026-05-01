@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from polyarb.config.settings import PositionConfig
+from polyarb.routing.config import PositionConfig
 
 logger = logging.getLogger(__name__)
 

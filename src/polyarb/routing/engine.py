@@ -12,7 +12,7 @@ from polyarb.models.signal import (
     RoutingDecision,
     LegSide,
 )
-from polyarb.config.settings import RoutingConfig
+from polyarb.routing.config import RoutingConfig
 
 logger = logging.getLogger(__name__)
 

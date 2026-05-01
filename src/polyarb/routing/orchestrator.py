@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from polyarb.config.settings import AppConfig
+from polyarb.routing.config import AppConfig
 from polyarb.models.signal import ArbitrageSignal, RoutingDecision
 from polyarb.routing.engine import RoutingEngine
 from polyarb.routing.position_tracker import PositionTracker

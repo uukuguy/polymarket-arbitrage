@@ -2,7 +2,7 @@
 import pytest
 from polyarb.models.signal import ArbitrageSignal, MarketSignal, MarketOutcome, Outcome
 from polyarb.routing.engine import RoutingEngine
-from polyarb.config.settings import RoutingConfig
+from polyarb.routing.config import RoutingConfig
 
 
 def make_signal(

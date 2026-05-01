@@ -9,7 +9,7 @@ from enum import Enum
 
 from polyarb.models.signal import RoutingDecision, ExecutionLeg
 from polyarb.routing.position_tracker import PositionTracker
-from polyarb.config.settings import ExecutionConfig
+from polyarb.routing.config import ExecutionConfig
 
 logger = logging.getLogger(__name__)
 
