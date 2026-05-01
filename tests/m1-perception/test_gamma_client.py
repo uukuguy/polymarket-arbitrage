@@ -220,3 +220,84 @@ async def test_fetch_all_emits_periodic_progress() -> None:
     assert len(page_50) == 1, f"expected page-50 progress, got {captured}"
     assert len(page_100) == 1, f"expected page-100 progress, got {captured}"
     assert len(final) == 1, f"expected final summary line, got {captured}"
+
+
+# ---------------------------------------------------------------------------
+# Test 8: incremental fetch — changed_since adds filterDate query param.
+#
+# Phase 1.5: server-side delta filter is the primary lever for incremental
+# snapshots. When changed_since is None (default) the param must NOT appear,
+# so we don't accidentally turn on filtering for full-snapshot callers.
+# ---------------------------------------------------------------------------
+async def test_fetch_all_passes_filterdate_when_changed_since_provided() -> None:
+    settings = _fast_settings()
+    page = [_make_market_dict(i) for i in range(3)]  # short → terminate after 1 call
+
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        route = router.get("/markets").mock(return_value=httpx.Response(200, json=page))
+        client = GammaClient(settings)
+        try:
+            await client.fetch_all_active_markets(changed_since=1730000000000)
+        finally:
+            await client.aclose()
+
+    assert route.call_count == 1
+    sent = route.calls[0].request.url.params
+    assert sent.get("filterDate") == "1730000000000"
+
+
+async def test_fetch_all_omits_filterdate_when_changed_since_none() -> None:
+    settings = _fast_settings()
+    page = [_make_market_dict(i) for i in range(3)]
+
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        route = router.get("/markets").mock(return_value=httpx.Response(200, json=page))
+        client = GammaClient(settings)
+        try:
+            await client.fetch_all_active_markets()
+        finally:
+            await client.aclose()
+
+    sent = route.calls[0].request.url.params
+    assert "filterDate" not in sent, "must not send filterDate when caller didn't ask for it"
+
+
+# ---------------------------------------------------------------------------
+# Test 9-10: get_market(token_id) — single market lookup with 404 handling.
+# Hot-path for the orchestrator's per-token refresh logic in incremental mode.
+# ---------------------------------------------------------------------------
+async def test_get_market_returns_dict_on_200() -> None:
+    settings = _fast_settings()
+    market = {"id": "540001", "question": "test", "active": True}
+
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        route = router.get("/markets/540001").mock(
+            return_value=httpx.Response(200, json=market)
+        )
+        client = GammaClient(settings)
+        try:
+            out = await client.get_market("540001")
+        finally:
+            await client.aclose()
+
+    assert out == market
+    assert route.call_count == 1
+
+
+async def test_get_market_returns_none_on_404() -> None:
+    """Delisted markets return None (callers can drop them gracefully)."""
+    settings = _fast_settings()
+
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        route = router.get("/markets/missing").mock(
+            return_value=httpx.Response(404, json={"error": "not found"})
+        )
+        client = GammaClient(settings)
+        try:
+            out = await client.get_market("missing")
+        finally:
+            await client.aclose()
+
+    assert out is None
+    # 404 is non-retryable — exactly 1 call.
+    assert route.call_count == 1

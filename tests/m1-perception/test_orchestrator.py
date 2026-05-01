@@ -655,3 +655,88 @@ async def test_phase_timing_lines_emitted(tmp_path: Path) -> None:
     # Overall completion summary must be present
     overall = [m for m in captured if "Snapshot complete in" in m]
     assert len(overall) == 1, f"missing overall summary line, got: {captured}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Incremental mode — passes changed_since to gamma + sets is_incremental flag.
+# Phase 1.5 scaffolding: server-side delta filter via Gamma filterDate.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_incremental_mode_propagates_changed_since(tmp_path: Path) -> None:
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+
+    fake_gamma = AsyncMock()
+    fake_gamma.fetch_all_active_markets.return_value = gamma_data
+    fake_gamma.aclose = AsyncMock()
+    fake_gamma.__aenter__.return_value = fake_gamma
+    fake_gamma.__aexit__.return_value = None
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(
+            return_value=_books_as_objects(clob_data["books"])
+        )
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={
+                "buy": clob_data["prices_buy"],
+                "sell": clob_data["prices_sell"],
+            }
+        )
+
+        result = await run_snapshot(
+            settings,
+            mode="subset",
+            now_ms=1_777_448_000_000,
+            incremental_since_ms=1_730_000_000_000,
+        )
+
+    # Result carries the incremental marker so downstream (cli summary, future
+    # snapshot diff tooling) can distinguish it from a full snapshot.
+    assert result.is_incremental is True
+
+    # The orchestrator must thread changed_since through to the Gamma client
+    # — that's the single point where the delta filter actually takes effect.
+    fake_gamma.fetch_all_active_markets.assert_called_once_with(
+        changed_since=1_730_000_000_000
+    )
+
+
+@pytest.mark.asyncio
+async def test_full_mode_default_is_not_incremental(tmp_path: Path) -> None:
+    """Without incremental_since_ms, the run is a full snapshot — is_incremental
+    must default to False so the CLI/summary doesn't mis-tag full runs."""
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+
+    fake_gamma = AsyncMock()
+    fake_gamma.fetch_all_active_markets.return_value = gamma_data
+    fake_gamma.aclose = AsyncMock()
+    fake_gamma.__aenter__.return_value = fake_gamma
+    fake_gamma.__aexit__.return_value = None
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(
+            return_value=_books_as_objects(clob_data["books"])
+        )
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={
+                "buy": clob_data["prices_buy"],
+                "sell": clob_data["prices_sell"],
+            }
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    assert result.is_incremental is False
+    # Sanity: changed_since not passed → gamma called with None.
+    fake_gamma.fetch_all_active_markets.assert_called_once_with(changed_since=None)

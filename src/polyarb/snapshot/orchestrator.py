@@ -102,6 +102,7 @@ class SnapshotResult:
     parquet_path: Path
     taken_at_ms: int
     finished_at_ms: int
+    is_incremental: bool = False
 
 
 def _index_books_by_token(books: list) -> dict[str, dict]:
@@ -131,6 +132,7 @@ async def run_snapshot(
     mode: str = "subset",
     now_ms: int | None = None,
     use_cache: bool = True,
+    incremental_since_ms: int | None = None,
 ) -> SnapshotResult:
     """Run one Polymarket snapshot end-to-end.
 
@@ -140,6 +142,8 @@ async def run_snapshot(
               or ``"full"`` (all markets).
         now_ms: Override for the snapshot's ``taken_at_ms`` timestamp (test hook).
                 Defaults to ``int(time.time() * 1000)`` at function entry.
+        incremental_since_ms: Unix epoch milliseconds. When set, only markets
+            updated since that time are fetched (Gamma ``filterDate`` param).
 
     Returns:
         SnapshotResult — never raises for transport failures (those become
@@ -162,9 +166,10 @@ async def run_snapshot(
     gamma_count_reported: int | None = None
     raw_markets: list[dict] = []
 
+    is_incremental = incremental_since_ms is not None
     logger.info(
         f"snapshot starting — mode={mode}, cache={'on' if use_cache else 'off'}, "
-        f"taken_at_ms={taken_at_ms}"
+        f"incremental={is_incremental}, taken_at_ms={taken_at_ms}"
     )
 
     overall_t0 = time.monotonic()
@@ -173,9 +178,14 @@ async def run_snapshot(
     with _phase("1/7: Gamma fetch (active markets)"):
         async with GammaClient(settings) as gamma:
             try:
-                raw_markets = await gamma.fetch_all_active_markets()
+                raw_markets = await gamma.fetch_all_active_markets(
+                    changed_since=incremental_since_ms
+                )
                 gamma_count_reported = len(raw_markets)
-                logger.info(f"Gamma: fetched {gamma_count_reported} active markets")
+                mode_tag = "incremental" if is_incremental else "full"
+                logger.info(
+                    f"Gamma [{mode_tag}]: fetched {gamma_count_reported} active markets"
+                )
             except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
                 logger.error(f"Gamma fetch failed: {e!r}")
                 # F-5: cap exception detail to 200 chars (HTML 4xx body could be huge).
@@ -432,4 +442,5 @@ async def run_snapshot(
         parquet_path=parquet_path,
         taken_at_ms=taken_at_ms,
         finished_at_ms=finished_at_ms,
+        is_incremental=is_incremental,
     )
