@@ -618,3 +618,84 @@
   **推荐 A**：m1 现在是 polling-only 完整 baseline + 已知 lever 失效，Phase 2 WebSocket 是清晰的下一步
 
 ---
+
+## 2026-05-01 续 (SESSION 12 — Phase 1.1 discuss 完成)
+
+- [SESSION 12] **方向重定 + Phase 1.1 (observation-toolkit) discuss 完成**
+- [DECISION] **方向调整**：用户明确反对 demo 路线，要"为进入市场做准备"的成熟观察体系
+  - 原计划：直接上 m1 Phase 2 WebSocket（高频管道）
+  - 调整为：插入 Phase 1.1 (observation-toolkit) 在 Phase 1 和 Phase 2 之间
+  - 理由：低频观察直觉是高频管道的前置条件。WebSocket 频道选择本身需要"已经在用 CLI 观察"的输入
+- [DECISION] **Phase 1.1 path** = 1.6 → 1.1（gsd 用 insert-phase decimal 编号）
+  - 目录：`.planning/workstreams/m1-perception/phases/01.1-observation-toolkit/`
+  - ROADMAP.md 已更新（Phase 1 标记 ✅ COMPLETE，Phase 1.1 插入，Phase 2 改为 Pending Phase 1.1）
+
+- [LEARNING] **★ visidata 30 分钟实战 = 真实需求挖掘**
+  - 用户跑了第一次复杂查询（`liquidity_usd > 100000 AND spread > 0.10`）
+  - **发现 1**：946 行 thick-but-slippery 市场（4.6%），4.6% 是 Polymarket 第一条结构性事实
+  - **发现 2**：体育话题在该集群占主导（用户主观印象）
+  - **发现 3**：question "Will the X by Y" 句式 + 时间锚点是 Polymarket 核心维度
+  - **发现 4 ★**：用户中文母语，英文阅读速度跟不上扫描速度 → 翻译列必备（这个 Claude 自己想不出来，必须靠用户实地体验暴露）
+
+- [LEARNING] **★ TUI 设计教训（visidata 体验直接产出）—— 留给 Phase 1.9**
+  - 终端表格列多 = 信息密度低 → 主列表+详情面板分屏
+  - hide vs delete 语义混淆（visidata 的 `-` vs `gd` 在不同 sheet 不同行为）→ TUI 撤销机制要明确
+  - 快捷键上下文相关 = 认知负担 → 全局快捷键应一致
+
+- [DECISION] **Phase 1.1 锁定决策（详见 01.1-CONTEXT.md）**：
+  - **T1**：markets 表补 category/tags（Gamma API 已有）
+  - **T2**：question 中文翻译 → 独立 `question_translations` 表 + OpenAI 兼容 API（用户提供 .env BASE/KEY/MODEL）
+  - **T3**：6 个 Batch 1 配方（thick-but-slippery / near-end / ghost-suspicious / coin-flip / neg-risk-incomplete / by-category）+ 9 个 Batch 2 备用 + 自定义配方机制（SQL where 子句，主流标准）
+  - **T4**：跨 snapshot 对比 A+B 都做（duckdb 跨 parquet）
+  - **T5**：单市场详情（中英对照）
+  - **T7**：watchlist YAML（git diff 友好）
+  - **输出格式**：A+C（终端彩色表格 + 自动 parquet 落盘）
+  - **收尾**：清空老 3 个 snapshot，重建带 category 的新基线
+
+- [DECISION] **翻译方案锁定**：
+  - OpenAI 兼容 SDK，不绑 Anthropic
+  - `.env` 配置：TRANSLATION_API_BASE / TRANSLATION_API_KEY / TRANSLATION_MODEL
+  - 独立 `question_translations` 表（不在 markets 表加列，避免被 snapshot 覆写）
+  - 批量 20 条/请求，并发 10，retry 3 次后标记 dead
+  - 第一版不做反向翻译质量检测（节省成本）
+
+- [LEARNING] **gsd 工具链状态**：
+  - `gsd-tools` (node CLI) 不在当前环境（之前 SESSION 11 用过的现已找不到）
+  - `/opt/homebrew/bin/gsd-sdk` 是另一个独立项目（v0.1.0），跟 workflows 文档假设的 `gsd-sdk query xxx` 接口不兼容
+  - **应对**：Phase 1.1 discuss 由 Claude + 用户对话直接产出 CONTEXT.md（合规格式，下游 plan/execute 仍可读）
+  - 后续 phase 流程要么靠手工，要么找回 gsd-tools，或者降低对 gsd 命令的依赖
+
+- [DECISION] **工具链增装**：
+  - `pipx install visidata harlequin`（已装）
+  - `brew install duckdb`（已有）
+  - 这三个工具不打包进项目，是用户日常浏览搭配
+  - visidata = 浏览/扫一眼；harlequin = 写 SQL；duckdb = 跨 parquet 查询
+
+- [SESSION 12 commit 列表]（待提交）：
+  - 新建 `.planning/workstreams/m1-perception/phases/01.1-observation-toolkit/01.1-CONTEXT.md`
+  - 更新 ROADMAP.md 标记 Phase 1 完成，插入 Phase 1.1，Phase 2 改 Pending
+  - 更新 STATE.md（待 SESSION 12 EOD）
+  - 更新 JOURNAL.md（本条目）
+
+- [NEXT] 下次会话恢复方式：
+
+  **第 1 步**（恢复上下文）：
+  ```
+  /gsd-resume-work --ws m1-perception
+  ```
+
+  **第 2 步**（启动 Phase 1.1 plan）：
+  - 优先尝试 `/gsd-plan-phase 1.1 --ws m1-perception`
+  - 如果 SDK 兼容问题再次出现（probable），降级为 Claude 手工 plan：
+    - 读 `01.1-CONTEXT.md` + Phase 1 已有代码（intel + patterns）
+    - 写 `01.1-PLAN.md`（按 T1→T2→T3→T4→T5→T7 顺序）
+    - 直接进入执行
+
+  **核心动作清单**（下次会话目标）：
+  1. T1（schema 升级 + Gamma 抓 category） — 1 小时
+  2. T2（翻译模块 + .env 配置） — 半天
+  3. 老数据清空 + 重跑 snapshot 拿到带 category 的新基线 — 30 分钟
+  4. T3 Batch 1 第一个配方（scan-thick-but-slippery）走通端到端 — 半天
+  5. 教学文档 `docs/learning/07-观察市场.md` 起骨架
+
+---

@@ -6,10 +6,10 @@ created: 2026-04-28
 # Project State
 
 ## Current Position
-**Status:** Phase 1 Verified ✅ / Phase 1.5 假设证伪并 reverted — Phase 2 (WebSocket) 待启动
-**Current Phase:** Phase 1 ✅ COMPLETE / Phase 1.5 ❌ DEAD（filterDate 假设不成立）
-**Last Activity:** 2026-05-01 EOD
-**Last Activity Description:** SESSION 11 cleanup + Phase 1.5 live test 灭杀 — Phase 目录改名、commit + revert Phase 1.5 scaffolding。Gamma `/markets` 不支持 server-side incremental filter（详见 threads/data-quality.md）
+**Status:** Phase 1 Verified ✅ / Phase 1.1 (observation-toolkit) DISCUSS COMPLETE，待 plan
+**Current Phase:** Phase 1.1 ⏳ Plan 待启动
+**Last Activity:** 2026-05-01 SESSION 12
+**Last Activity Description:** Phase 1.1 discuss 完成 — 用户 visidata 30 分钟实战暴露真实需求（中文化是关键 gap），CONTEXT.md 锁定 T1-T7 决策。方向重定：先做低频观察工具（Phase 1.1）再上 WebSocket（Phase 2）
 
 ## Progress
 **Phases Complete:** 1
@@ -54,20 +54,16 @@ created: 2026-04-28
 
 **Recommended Next Action** (下次会话首选项)：
 
-A. **启动 m1 Phase 2 — WebSocket 增量数据流**（推荐 — Phase 1.5 死路证伪后的下一站）
-   - `/gsd-discuss-phase 2 --ws m1-perception`
-   - 焦点：
-     - WebSocket 长连接维持 + 自动重连
-     - `/book` channel: BBO 变化推送（替代 REST 轮询）
-     - `/prices` channel: market mid-price 推送
-     - State diff: WS 增量与 REST baseline 的合并策略
-   - 这是 Polymarket 官方推荐的实时方案，py-clob-client 已有 WS 客户端
+**A. 启动 Phase 1.1 plan（observation-toolkit + 中文化）**（推荐 — discuss 已完成）
+   - `/gsd-plan-phase 1.1 --ws m1-perception`
+   - 如果 SDK 兼容问题再次出现，降级为 Claude 手工 plan
+   - CONTEXT.md 已锁定 T1-T7 全部决策，plan 阶段只需排执行顺序
+   - 第一目标：T1 (schema+category) + T2 (翻译) + T3 第一个配方 走通
 
-B. **切到 m2-combinatorial 推 Phase 2 T2-T8**
-   - `gsd-tools workstream set m2-combinatorial`
-   - T1 已 commit 落地，T2 Slippage Model 缺 PolymarketDepthCurve（Phase 1 OrderBookSummary 数据已可用）
+**B. 切到 m2-combinatorial 推 T2 Slippage Model**（避开 m1 完成 m2）
+   - T1 已 commit 落地，T2 缺 PolymarketDepthCurve
 
-**推荐 A**：m1 polling 已是完整 baseline，WebSocket 是清晰的下一步增量来源
+**推荐 A**：方向已重定 — 用户明确反对 demo 路线，要"为进入市场做准备"的成熟观察体系。Phase 1.1 是真正的下一步，Phase 2 WebSocket 推迟到 1.1 完成
 
 **Carry-over open items**:
 - 220 个市场无 endDate（Layer 2 UNKNOWN）— 需要分类调查（是 perpetual market？）
