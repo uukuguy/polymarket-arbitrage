@@ -365,3 +365,47 @@
     - 下次会话 `/gsd-resume-work --ws m1-perception` 会读到这条 [NEXT]
 
 ---
+
+## 2026-05-01
+
+- [SESSION 09] **LIVE-RUN-005 验证 — 4 commit 已在 origin，6m12s 新记录**
+- [SESSION 09 起因] 执行 SESSION 08 推荐的选项 A：跑 LIVE-RUN-005 验证可观测性 + push
+- [LEARNING] **origin/main 已经包含 4 个 commit**（上次某次 push 成功了，不是"本地有远程无"的状态）
+    - 4 个 commit（8bbdc47 ~ 0a5ed86）已在 origin/main
+    - `git push` 返回 up-to-date，确认无需再推
+- [LIVE-RUN-005 验证结果] 2026-05-01 09:57 CST（新时间点 + 新数据规模）：
+    - ✅ 所有新可观测性功能正常：时间戳 prefix / phase elapsed / Gamma 进度 / chunk 进度 / cache cleanup
+    - **6m 12s** 总耗时（vs LIVE-RUN-001 的 26m25s，快 4x）
+    - 原因：北京时间 10 点 = 美东 22 点，API 空闲期
+    - 20,353 markets in subset（vs 17,259），Polymarket 正常增长
+    - 32,916 issues：ghost_book 32,668 (~72%) 稳定
+    - is_valid=False → exit 1，行为正确（make 报错 = categorized success）
+- [DECISION] LIVE-RUN-005 报告固化到 `phases/01-/01-LIVE-RUN-005.md`
+- [NEXT] 下次会话第一条命令：
+
+    **A. 启动 Phase 2 — WebSocket 增量数据流**
+    ```
+    /gsd-discuss-phase 2 --ws m1-perception
+    ```
+    Phase 2 焦点：实时性 + `/book` size WebSocket 频道 + `/prices` 频道替代轮询
+
+    **B. 查 220 个无 endDate market**
+    ```
+    make snapshot-status  # 先看当前 DB 状态
+    ```
+    SQL 查 Layer 2 UNKNOWN，不开 phase
+
+    **C. 切到 m4-smart-strategies**
+    ```
+    gsd-tools workstream set m4-smart-strategies
+    /gsd-resume-work --ws m4-smart-strategies
+    ```
+
+    **推荐 A** — Phase 1 完整状态（5 个 live run / 119 tests / 4 bugs caught），Phase 2 是下一个明确产出
+
+- [SESSION 09 END] 2026-05-01 10:04 CST 收手
+    - 工作树: clean
+    - 4 commit 已在 origin/main
+    - 下次会话 `/gsd-resume-work --ws m1-perception`
+
+---
