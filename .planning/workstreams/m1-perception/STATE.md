@@ -6,16 +6,15 @@ created: 2026-04-28
 # Project State
 
 ## Current Position
-**Status:** Phase 1 Verified (mocked-pipeline gate green)
-**Current Phase:** Phase 1 — 完整市场快照工具 ✅ COMPLETE
+**Status:** Phase 1 Verified + Phase 1.5 incremental scaffolding committed (no live test yet)
+**Current Phase:** Phase 1 ✅ COMPLETE / Phase 1.5 (incremental snapshot) — scaffolding committed
 **Last Activity:** 2026-05-01
-**Last Activity Description:** LIVE-RUN-005 verified (20353 markets, 32916 issues, 72% ghost_book stable); 6m12s total (vs 26m25s in RUN-001 — API idle period effect); all observability features confirmed working (timestamp/phase-elapsed/progress/cache cleanup)
+**Last Activity Description:** SESSION 11 cleanup — Phase 目录改名（`01-` → `01-market-snapshot/`），commit m1 增量快照 scaffolding（gamma changed_since + get_market + cli --incremental-since-ms + schemas updated_at_ms），修复 SESSION 10 留下的 sqlite_store ORM 半成品 + config namespace 冲突
 
 ## Progress
 **Phases Complete:** 1
-**Total commits:** 36 (1 baseline + 35 phase-1 work)
-**Phase 1 task count:** 32 tasks across 5 plans, 4 waves
-**Test count:** 119 (skeleton 5 / gamma 6 / clob 5 / sqlite 10 / parquet 7 / validator 18 / normalizer 13 / orchestrator 13 / settings 10 / makefile 8 / cache 22)
+**Phase 1.5 status:** scaffolding only — exposes lever, no orchestration yet, no live API verification
+**Test count:** 125 m1 tests green (119 phase 1 + 6 incremental scaffolding)
 
 ## Phase 1 Deliverables (verified)
 - ✅ `make snapshot-markets` (subset, default) → `python -m polyarb.snapshot`
@@ -55,19 +54,21 @@ created: 2026-04-28
 
 **Recommended Next Action** (下次会话首选项)：
 
-A. **启动 Phase 2 — WebSocket 增量数据流**
+A. **跑一次 incremental live test 验证 Phase 1.5 scaffolding**
+   - 先 `make snapshot-markets` 跑一次记录 baseline taken_at_ms
+   - 再 `python -m polyarb.snapshot --incremental-since-ms <baseline>` 验证 filterDate 真的让 gamma 返回更少市场
+   - 如果通过，说明 Phase 1.5 的 lever 真实可用，可以推 Phase 2（增量 orchestration / WebSocket）
+
+B. **启动 m1 Phase 2 — WebSocket 增量数据流（更深的实时层）**
    - `/gsd-discuss-phase 2 --ws m1-perception`
    - 焦点：实时性 + /book size WebSocket + /prices 替代轮询
+   - 注意：跟 Phase 1.5 的 server-side filterDate 是两个独立 lever，可以并存
 
-B. **查 220 个无 endDate market**
-   - `make snapshot-status` 先看当前 DB
-   - SQL 查 Layer 2 UNKNOWN，不开 phase
+C. **切到 m2-combinatorial 推 Phase 2 T2-T8**
+   - `gsd-tools workstream set m2-combinatorial`
+   - T1 已经 commit 落地（17 routing tests + 4 slippage tests 都 green）
 
-C. **切到 m4-smart-strategies**
-   - `gsd-tools workstream set m4-smart-strategies`
-   - 用现有 20353 market snapshot 数据
-
-**推荐 A**：Phase 1 完整状态（5 live runs / 119 tests / 72% ghost_book confirmed），Phase 2 是下一个明确产出
+**推荐 A**：Phase 1.5 scaffolding 没经过 live 验证就是死字。先跑一次确认 lever 工作，再决定 m1 还是 m2 优先
 
 **Carry-over open items**:
 - 220 个市场无 endDate（Layer 2 UNKNOWN）— 需要分类调查（是 perpetual market？）

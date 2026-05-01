@@ -403,9 +403,153 @@
 
     **推荐 A** — Phase 1 完整状态（5 个 live run / 119 tests / 4 bugs caught），Phase 2 是下一个明确产出
 
+---
+
+**[SESSION 10]** **2026-05-01 — Phase 2 Plan Created**
+
+- [SESSION 10 起因] 用户执行 `ls .planning/phases/*/` 后触发 — 需创建 Phase 2 plan
+- [讨论] Phase 2 routing-decisions discuss-phase（02-CONTEXT.md）：
+    - 路由策略：Polymarket-first（AMM spread 15-25% 是主要利润来源）
+    - 执行管道：Sequential（Polymarket 市价单 → Gamma 限价单对冲残余）
+    - 规模策略：动态深度估计，单笔滑点上限 1%
+    - 实现范围：内存模型，同步 REST，单线程
+- [PLAN] 创建了 `phases/02-/02-1-PLAN.md`（8 tasks + dependencies）
+    - T1: 数据模型（`Position`, `ExecutionLeg`, `RoutingDecision`）
+    - T2: Slippage 模型（depth-based 线性衰减 + 1% cap）
+    - T3: 路由引擎（Polymarket-first，信号路由到执行器）
+    - T4: 执行管道（同步 sequential legs，失败处理，状态转移）
+    - T5: Position Tracker（in-memory，增量更新，PnL 计算）
+    - T6: Gamma 对冲逻辑（条件触发，条件单参数化）
+    - T7: CLI 命令（`arbitrage evaluate/run/status`）
+    - T8: 集成测试（E2E flow + fixture）
+- [CONTEXT] 更新了 Decision Log 到 PROJECT.md
+- [STATE] 更新了 workstream STATE.md，标记 Phase 2 active
+- [NEXT] 下次会话第一条命令：
+
+    **A. 启动 Phase 2 — 执行 T1-T2（数据模型 + Slippage 模型）**
+    ```
+    cd /Users/sujiangwen/sandbox/hacker2026/PolyMarket/polymarket-arbitrage
+    /gsd-execute-phase --plan phases/02-/02-1-PLAN.md --task T1,T2
+    ```
+    期望产出：`src/polyarb/execution/models.py`（Position/ExecutionLeg/RoutingDecision）
+              `src/polyarb/execution/slippage.py`（depth-based slippage calculator）
+
+    **B. 查 LIVE-RUN-005 报告（确认已完成）**
+    ```
+    cat .planning/phases/01-/01-LIVE-RUN-005.md
+    ```
+    查 ghost_book 状态和 gamma_client chunk 行为
+
+    **推荐 A** — Phase 2 执行路径清晰，数据模型是所有后续任务的地基
+
 - [SESSION 09 END] 2026-05-01 10:04 CST 收手
     - 工作树: clean
     - 4 commit 已在 origin/main
     - 下次会话 `/gsd-resume-work --ws m1-perception`
+
+## 2026-05-01（SESSION 09 续）
+
+- [SESSION 09 EXTENSION] 深度分析 Polymarket 数据架构
+- [LEARNING] **neg_risk market 内部结构（来自 SQLite state.db 采样）**：
+    - `condition_id` 是 neg_risk 套利对的共享键
+    - neg_risk=1 的市场数量: 1,176（占总数 5.8%）
+    - neg_risk 市场的 bid-ask spread 极小（~0.001），利润空间 ≈ 0.3-0.8%
+    - Weinstein neg_risk group 示例：
+        - "Weinstein wins 1st Round" bid=0.53 + "Loser" ask=0.47 → 组合 1.00（套利利润 0.47）
+        - "Loser" 被多个 sub-question 共同"引用"，是组合套利的关键
+    - neg_risk market 的 `end_date` 全部正常（非 220 个无 endDate 的问题）
+- [LEARNING] **无 endDate 的 220 个市场（Layer 2 UNKNOWN 问题）**：
+    - 不属于 neg_risk market
+    - 不是"幽灵市场"，是正常市场（API 数据正常）
+    - Layer 2 validator 的 UNKNOWN 判断可能过于保守
+- [DECISION] Phase 1.5 问题（Layer 2 UNKNOWN）优先级低
+    - 这 220 个市场在 live trading 时自然会被过滤（不满足套利条件）
+    - 不开专门 phase 处理，先推进 Phase 2
+- [NEXT] 下次会话（推荐）：
+    ```
+    /gsd-discuss-phase 2 --ws m1-perception
+    ```
+    Phase 2 焦点：实时性 + WebSocket 频道 + ArbitrageEngine 基础架构
+
+---
+
+## 2026-05-01 续 (SESSION 11 - cleanup)
+
+- [SESSION 11] **跨 session 散件清理 — 4 个 commit / 0 回归 / 125 m1 tests + 21 m2 tests green**
+- [LEARNING] **gsd phase 命名规则的中文陷阱**：
+  - 规则：`{NN}-{slug}/`，slug 来自 `name.toLowerCase().replace(/[^a-z0-9]+/g, '-')`
+  - 中文 phase 名（"完整市场快照工具" / "Foundation"）经过这个 regex 后 slug 全部为空
+  - 结果：目录名变成 `01-/`、`02-/`（NN + 单 dash + 空 slug），既丑又难辨识
+  - **修复策略**：建 phase 时用英文短 slug，避开中文。已统一改名 `01-market-snapshot/` 和 `02-arbitrage-engine/`
+  - 教训写入：未来 `/gsd-discuss-phase` 时主动给英文 phase 名
+
+- [DECISION] **m2 phase 文档错位修复**
+  - SESSION 10 的 Phase 2 CONTEXT/PLAN 误写在 `.planning/phases/02-/`（项目根）
+  - 实际归属应该是 `.planning/workstreams/m2-combinatorial/phases/02-arbitrage-engine/`
+  - 用 `git mv` 搬正，commit `ed49d55`
+
+- [DECISION] **revert SESSION 10 的 sqlite_store.py ORM-style 重构**
+  - 半成品：从 `polyarb.storage.schemas` import `Answer/Market/MarketWithAnswers/SnapshotRow/Trade` 但这些类**根本不存在** → ImportError
+  - 没有任何 phase plan 支持这个方向，跟 CONTEXT.md 反 ORM 原则冲突
+  - `git checkout HEAD -- src/polyarb/storage/sqlite_store.py` 撤回，Phase 1 119 tests 重新可跑
+
+- [DECISION] **`polyarb.config` namespace 冲突修复**
+  - SESSION 10 创建了 `src/polyarb/config/` 包目录（含 `phase2.py` + `settings.py`）
+  - 但 git tracked 的 `src/polyarb/config.py` 单文件还在
+  - Python 包优先级让 `import polyarb.config` 解析到空目录，所有 m1 调用方（gamma_client/clob_client/orchestrator/cli）的 `from polyarb.config import Settings` **全部坏了**
+  - 修复：m2 的 dataclass（RoutingConfig/ExecutionConfig/PositionConfig/AppConfig）搬到 `src/polyarb/routing/config.py`，按职责归属
+  - `phase2.py` 是无人引用的孤儿，删除
+  - `polyarb.config` 单文件保留作为 m1 应用 Settings
+
+- [LEARNING] **`config/__init__.py` 包目录 vs `config.py` 单文件的 silent shadow**
+  - Python 优先解析包目录而非同名模块文件 — 这是个 silent override，没任何 warning
+  - 教训：不要在已有 `xxx.py` 的项目里创建 `xxx/` 目录，至少要把 `xxx.py` 内容先迁移到 `xxx/__init__.py`
+  - 写入 `threads/learnings-meta.md`（待补）
+
+- [DECISION] **T1 commit 的漏依赖一并补上**
+  - SESSION 10 的 commit `688363a` 提交了 `routing/{engine,orchestrator,position_tracker}.py` + `execution/engine.py` + 2 个 routing tests，但 import 依赖 `polyarb.models.signal` 和 `polyarb.models.slippage` **都是 untracked**
+  - 单独 checkout `688363a` 的 git 历史是坏的（ImportError）
+  - commit `08a13d3` 一次性补全：`models/{signal,slippage,__init__}.py` + `tests/{__init__,models/,execution/__init__,routing/__init__}.py` + `tests/models/test_slippage.py`
+
+- [DECISION] **m1 Phase 1.5 增量快照 scaffolding 入库**
+  - SESSION 10 的方向正确（gamma `changed_since` + `get_market` + cli `--incremental-since-ms` + schemas `updated_at_ms`）但**完全没测试**
+  - 加 6 个测试覆盖：filterDate 参数 presence/absence、get_market 200/404、orchestrator changed_since 透传、is_incremental flag
+  - commit `50a5fab`，标注为 "Phase 1.5 scaffolding only — exposes lever, no orchestration yet"
+  - **下次会话第一件事**：跑一次 incremental live test 验证 lever 真实可用
+
+- [DECISION] **chore: pytestdebug.log 进 .gitignore**
+  - commit `9ea3a28`，1 行改动
+
+- [LEARNING] **跨 session 散件危险等级排序**（这次教训）
+  - 🔴 import 链坏：必须立刻发现（`python -c "from polyarb.config import X"` 是最便宜的烟雾测试）
+  - 🔴 commit history 不完整：`git checkout <commit>` 必须能跑（T1 commit 缺依赖就是这个）
+  - 🟡 namespace 冲突：包目录覆盖同名模块文件（silent shadow）
+  - 🟡 dead code：phase2.py 无引用，浪费 reader 注意力
+  - 🟢 路径丑陋：影响可读性，不影响 runtime
+
+  **未来开新会话第一步必做**：跑一遍现有测试套件 + import 烟雾测试，否则散件会层层叠加直到上面这些症状全部出现
+
+- [SESSION 11 commit 列表] 4 个 commit（基于上次 origin/main 领先 4 → 现在领先 7+1=8）：
+  1. `ed49d55 refactor(planning):` — phase 目录改名（17 git rename + 1 跨目录 rename + 4 个文档路径同步）
+  2. `50a5fab feat(01):` — m1 Phase 1.5 incremental scaffolding（gamma/cli/orchestrator/schemas + 6 个新测试）
+  3. `08a13d3 fix(02):` — 补 T1 漏依赖 + relocate config 到 routing/
+  4. `9ea3a28 chore:` — .gitignore 加 pytestdebug.log
+
+- [NEXT] 下次会话第一条命令：
+
+  ```
+  /gsd-resume-work --ws m1-perception
+  ```
+
+  推荐选项 A：跑一次 incremental live test 验证 Phase 1.5 scaffolding 真实可用
+  ```bash
+  source .venv/bin/activate
+  make snapshot-markets   # baseline，记录 taken_at_ms
+  # 等几分钟后...
+  python -m polyarb.snapshot --incremental-since-ms <baseline_ms>
+  # 期望：gamma 返回的 market 数远小于 baseline，证明 filterDate 真的工作
+  ```
+
+  如果失败（filterDate 没生效或行为奇怪），意味着 SESSION 10 的 server-side delta filter 假设需要 revisit
 
 ---

@@ -86,6 +86,13 @@
 - **依据**：py-clob-client 最成熟、研究迭代速度优先、用户为资深 AI 工程师
 - **后门**：保留接口抽象，M4+ 实盘数据若证明 latency edge 存在，hot loop 单独 Rust
 
+### 2026-05-01: Phase 2 核心决策（discuss-phase 02-CONTEXT.md）
+
+- **路由策略**：Polymarket-first — AMM spread 15-25% 是主要利润来源，先查 Polymarket
+- **执行管道**：Sequential — Polymarket 市价单先下，Gamma 限价单对冲残余
+- **规模策略**：动态深度估计，Polymarket 单笔滑点上限 1%
+- **实现范围**：内存模型，同步 REST 调用，单线程
+
 ### 2026-04-28: 进展跟踪体系
 
 - **决策**：充分用 gsd 全套（thread / workstreams / learnings / intel / journal）
