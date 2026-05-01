@@ -34,3 +34,6 @@ dist/
 .ruff_cache/
 pytestdebug.log
 
+# Claude Code harness state
+.claude/
+
