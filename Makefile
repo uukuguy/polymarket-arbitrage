@@ -8,7 +8,7 @@
 # `make help` always lists all available commands.
 
 .DEFAULT_GOAL := help
-.PHONY: help
+.PHONY: help test
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -42,7 +42,7 @@ journal:
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-fresh snapshot-cache-purge
+.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-fresh snapshot-cache-purge test test-snapshot test-signal test-slippage
 
 ## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly.
 snapshot-markets:
@@ -83,3 +83,15 @@ snapshot-fresh:
 ## snapshot-cache-purge: Delete all data/.cache/snapshot-* directories without running
 snapshot-cache-purge:
 	@python3 -c "from pathlib import Path; from polyarb.snapshot.cache import ChunkCache; n = ChunkCache.purge_all(Path('data/.cache')); print(f'purged {n} cache directories')"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+## test: Run all tests
+test:
+	@PYTHONPATH=src python -c "import pytest; pytest.main(['-v', 'tests/'])"
+
+## test-slippage: Run slippage model tests
+test-slippage:
+	@PYTHONPATH=src python -c "import pytest; pytest.main(['-v', 'tests/models/test_slippage.py'])"
