@@ -553,3 +553,68 @@
   如果失败（filterDate 没生效或行为奇怪），意味着 SESSION 10 的 server-side delta filter 假设需要 revisit
 
 ---
+
+## 2026-05-01 续 (SESSION 11 EOD - filterDate 真相)
+
+- [SESSION 11 EOD] **Phase 1.5 scaffolding 被 live test 灭杀 — revert，方向重定**
+- [LEARNING] **★ filterDate 是凭空假设，Gamma /markets 不支持任何 update-time filter**
+    - SESSION 10 的 commit `50a5fab` 写了 `gamma.fetch_all_active_markets(changed_since=...)`，把 ms 时间戳作为 `filterDate` query param 发给 Gamma
+    - 今天 live test 直接打 raw API 验证：1h / 7h / 1d 三种时间戳全部返回 48664（≈ 全量）
+    - 探查了 6 种参数 + 格式（filterDate ms/s/ISO、updated_since、start_date_min、liquidity_num_min sanity）
+    - 官方文档明确列出的参数：`active / closed / archived / limit / offset / order / ascending / tag_id / slug` — **没有任何 update-time 过滤**
+    - 唯一相关的 `start_date_min` 只在 `/events` endpoint 生效，不在 `/markets`
+
+- [LEARNING] **★ Polymarket Gamma `updatedAt` 字段是服务器 batch 时间戳，不是业务变更时间**
+    - `order=updatedAt&ascending=false` → 第 1 条和第 100 条的 updatedAt **跨度只有 0.2 秒**
+    - offset=500（page 6）的 updatedAt 仍然是同一秒
+    - 推断：服务器有个内部 cron 每隔几分钟刷一遍所有市场的 updatedAt（同步 CLOB 价格时一并刷新）
+    - 因此 `updatedAt` 对 incremental query **完全没有意义** — 整个数据库的市场 updatedAt 永远是"最近几秒到几分钟"
+    - 真正反映新事件的字段是 `createdAt`（用于追新创建的 market，但不追价格变更）
+
+- [DECISION] **revert Phase 1.5 scaffolding**（commit `5bfc864`）
+    - 撤回所有 6 个文件 245 行（gamma_client / cli / orchestrator / schemas + 2 个测试）
+    - 原因：lever 不存在，scaffolding 是死字
+    - 备选路径：WebSocket /book 频道（已在 m1 Phase 2 roadmap），是 Polymarket 推荐的实时增量方案
+
+- [LEARNING] **★ 元教训：mocked test pass ≠ live API 行为正确**
+    - 50a5fab 的 6 个测试全是 respx mock，测的是"代码路径走对了"
+    - 但**没有任何测试证明 filterDate 在真 API 上有效果**
+    - 这是 SESSION 10 的根本问题 — 引入新 API 假设却没做一次 raw curl 验证
+    - 修正：未来引入新 query param 或 endpoint 前，**必须先 raw httpx 打 1 次 live API 看真实响应**，再写代码 + mock 测试
+
+- [LEARNING] **chain-first diagnosis 在这次起作用**
+    - 不是"test 通过就以为没事"，是真去看 gamma 返回的市场数
+    - 观察"耗时跟全量一样长"已经是 yellow flag，不是单纯"网络慢"
+    - 比对 1h_ago vs 7h_ago vs 1d_ago 三个数值 ≈ 48664 锁定结论 = filterDate 完全无效
+    - 这次省下了"如果继续相信 scaffolding 工作 → m1 Phase 2 也基于错误前提" 的连锁错误
+
+- [DECISION] m1 Phase 2 路径明确化 — **不是"改进 server-side incremental"，是 WebSocket /book + /prices 频道替代轮询**
+    - 当前 polling 模式：每次 6-26 分钟拉一次 48k market（全量）
+    - WebSocket 的真实增量 = "只接收变化的 BBO 推送"
+    - 设计目标：长连接维持 + 重连机制 + 状态分流（market list 仍由 REST 周期拉，BBO 变化由 WS 实时收）
+    - 这个方向有 Polymarket 官方支持 + py-clob-client 已有 WS 客户端
+
+- [SESSION 11 EOD commit 列表]：
+    - `5bfc864 revert:` — Phase 1.5 scaffolding（filterDate 假设被 live test 灭杀）
+
+- [NEXT] 下次会话首选项：
+
+  **A. 启动 m1 Phase 2 — WebSocket 增量数据流**（推荐 — Phase 1.5 死路证伪后的下一站）
+  ```
+  /gsd-discuss-phase 2 --ws m1-perception
+  ```
+  焦点：
+  - WebSocket 长连接维持 + 自动重连
+  - /book channel: BBO 变化推送
+  - /prices channel: market mid-price 推送
+  - State diff: WS 增量与 REST baseline 的合并策略
+
+  **B. 切到 m2-combinatorial 推 Phase 2 T2-T8**（避开 m1 完成 m2 ）
+  ```
+  gsd-tools workstream set m2-combinatorial
+  /gsd-resume-work --ws m2-combinatorial
+  ```
+
+  **推荐 A**：m1 现在是 polling-only 完整 baseline + 已知 lever 失效，Phase 2 WebSocket 是清晰的下一步
+
+---

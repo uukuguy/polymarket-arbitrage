@@ -3,7 +3,7 @@ slug: data-quality
 title: Data Quality Discipline (snapshots / validation / 冷热分离)
 status: open
 created: 2026-04-28
-updated: 2026-04-28
+updated: 2026-05-01
 ---
 
 # Thread: Data Quality
@@ -80,6 +80,37 @@ snapshot 漏了 5 个市场不是"算了"，是问"哪 5 个？为什么是这 5
 一份 1 小时前的 snapshot 如果没人再问"现在状态"了，它对系统就是冷数据，进 Parquet。SQLite 永远只服务"现在"。
 
 **反模式**：所有 snapshot 都进 SQLite（按 timestamp 索引）— 表迅速膨胀到上亿行，列式聚合崩溃。
+
+---
+
+## ★ Polymarket Gamma `/markets` 不支持 server-side incremental（SESSION 11 EOD live-tested）
+
+**结论**：Gamma `/markets` endpoint **没有任何 update-time filter 参数**。`filterDate` / `updated_since` / `start_date_min` / `modified_since` 全部无效（试过 ms / s / ISO 三种格式）。
+
+**唯一相关的 `start_date_min` 只在 `/events` endpoint 生效，不在 `/markets`。**
+
+更深的问题：**`updatedAt` 字段是服务器 batch sync 时间戳，不是业务变更时间**：
+- `order=updatedAt&ascending=false` 显示前 100 个 market 的 updatedAt 跨度仅 0.2 秒
+- offset=500 处仍然是同一秒
+- 推断：服务器内部有个 cron 每隔几分钟刷一遍所有市场的 updatedAt（同步 CLOB 价格时一并刷）
+- 因此 updatedAt 对 incremental query **完全没意义** — 整个 ~48k 市场永远显示"最近几秒到几分钟"
+
+**真实可用的过滤**：
+| 字段 | 用途 |
+|---|---|
+| `createdAt` | 追"新创建"的 market（5m updown 高频盘每 5 分钟生一批） |
+| `liquidity_num_min` | 流动性过滤（已验证生效） |
+| `active / closed / archived` | 生命周期过滤（已验证生效） |
+| ❌ `updatedAt` | server batch noise，不可用作 incremental |
+
+**实战教训**：
+- SESSION 10 的 `feat(01): incremental snapshot scaffolding` (commit 50a5fab) 凭空假设 `filterDate` 存在，写了完整的 client + cli + orchestrator + 6 个 mock 测试
+- mock 测试全过，但**没有任何测试证明 filterDate 在真 API 上有效果**
+- 直到 SESSION 11 EOD live test 才发现：lever 不存在
+- **修正**：未来引入新 API 假设前，**必须先 raw httpx 打 1 次 live API 看真实响应**，再写代码 + mock 测试
+- 已 revert 整个 scaffolding（commit 5bfc864）
+
+**前进路径**：增量数据流的正确方向不是 REST delta，是 **WebSocket /book + /prices 频道**（这是 Polymarket 官方推荐的实时方案）。已记入 m1 Phase 2 roadmap。
 
 ---
 

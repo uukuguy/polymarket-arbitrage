@@ -6,15 +6,15 @@ created: 2026-04-28
 # Project State
 
 ## Current Position
-**Status:** Phase 1 Verified + Phase 1.5 incremental scaffolding committed (no live test yet)
-**Current Phase:** Phase 1 ✅ COMPLETE / Phase 1.5 (incremental snapshot) — scaffolding committed
-**Last Activity:** 2026-05-01
-**Last Activity Description:** SESSION 11 cleanup — Phase 目录改名（`01-` → `01-market-snapshot/`），commit m1 增量快照 scaffolding（gamma changed_since + get_market + cli --incremental-since-ms + schemas updated_at_ms），修复 SESSION 10 留下的 sqlite_store ORM 半成品 + config namespace 冲突
+**Status:** Phase 1 Verified ✅ / Phase 1.5 假设证伪并 reverted — Phase 2 (WebSocket) 待启动
+**Current Phase:** Phase 1 ✅ COMPLETE / Phase 1.5 ❌ DEAD（filterDate 假设不成立）
+**Last Activity:** 2026-05-01 EOD
+**Last Activity Description:** SESSION 11 cleanup + Phase 1.5 live test 灭杀 — Phase 目录改名、commit + revert Phase 1.5 scaffolding。Gamma `/markets` 不支持 server-side incremental filter（详见 threads/data-quality.md）
 
 ## Progress
 **Phases Complete:** 1
-**Phase 1.5 status:** scaffolding only — exposes lever, no orchestration yet, no live API verification
-**Test count:** 125 m1 tests green (119 phase 1 + 6 incremental scaffolding)
+**Phase 1.5 status:** ❌ REVERTED — `filterDate` API 参数不存在，`updatedAt` 是 server batch 时间戳无业务语义。增量方向重定为 WebSocket
+**Test count:** 119 m1 tests green (Phase 1 完整套件)
 
 ## Phase 1 Deliverables (verified)
 - ✅ `make snapshot-markets` (subset, default) → `python -m polyarb.snapshot`
@@ -54,21 +54,20 @@ created: 2026-04-28
 
 **Recommended Next Action** (下次会话首选项)：
 
-A. **跑一次 incremental live test 验证 Phase 1.5 scaffolding**
-   - 先 `make snapshot-markets` 跑一次记录 baseline taken_at_ms
-   - 再 `python -m polyarb.snapshot --incremental-since-ms <baseline>` 验证 filterDate 真的让 gamma 返回更少市场
-   - 如果通过，说明 Phase 1.5 的 lever 真实可用，可以推 Phase 2（增量 orchestration / WebSocket）
-
-B. **启动 m1 Phase 2 — WebSocket 增量数据流（更深的实时层）**
+A. **启动 m1 Phase 2 — WebSocket 增量数据流**（推荐 — Phase 1.5 死路证伪后的下一站）
    - `/gsd-discuss-phase 2 --ws m1-perception`
-   - 焦点：实时性 + /book size WebSocket + /prices 替代轮询
-   - 注意：跟 Phase 1.5 的 server-side filterDate 是两个独立 lever，可以并存
+   - 焦点：
+     - WebSocket 长连接维持 + 自动重连
+     - `/book` channel: BBO 变化推送（替代 REST 轮询）
+     - `/prices` channel: market mid-price 推送
+     - State diff: WS 增量与 REST baseline 的合并策略
+   - 这是 Polymarket 官方推荐的实时方案，py-clob-client 已有 WS 客户端
 
-C. **切到 m2-combinatorial 推 Phase 2 T2-T8**
+B. **切到 m2-combinatorial 推 Phase 2 T2-T8**
    - `gsd-tools workstream set m2-combinatorial`
-   - T1 已经 commit 落地（17 routing tests + 4 slippage tests 都 green）
+   - T1 已 commit 落地，T2 Slippage Model 缺 PolymarketDepthCurve（Phase 1 OrderBookSummary 数据已可用）
 
-**推荐 A**：Phase 1.5 scaffolding 没经过 live 验证就是死字。先跑一次确认 lever 工作，再决定 m1 还是 m2 优先
+**推荐 A**：m1 polling 已是完整 baseline，WebSocket 是清晰的下一步增量来源
 
 **Carry-over open items**:
 - 220 个市场无 endDate（Layer 2 UNKNOWN）— 需要分类调查（是 perpetual market？）
