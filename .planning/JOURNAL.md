@@ -699,3 +699,65 @@
   5. 教学文档 `docs/learning/07-观察市场.md` 起骨架
 
 ---
+
+## 2026-05-02 (Phase 1.1 plan 03 execute — observation toolkit landed)
+
+- [SESSION] **Phase 1.1 plan 03 完成 — T3 scanner + 6 内置配方 + cli + 8 Makefile targets**
+
+  上下文：plan 01（Amendment 01：events / event_tags 替代 category/tags）与 plan 02（翻译 vertical slice）此前已完成。本次执行 plan 03 — 把"原始 SQLite 表"变成"6 条带名字的扫描配方 + 防注入 + 双形态输出"。
+
+  **关键产出**:
+  - `src/polyarb/observation/recipes.py` — Recipe dataclass + 6 内置配方（trust split: from_builtin → _is_trusted=True / from_yaml → False）
+  - `src/polyarb/observation/scanner.py` — 4 层防御 + grouped 路径无绕过（Blocker #3）+ yaml.safe_load + 同名 yaml 不覆盖 builtin
+  - `src/polyarb/observation/formatter.py` — rich.Table（含 ANSI 预剥离）+ 原子 parquet 落盘
+  - `src/polyarb/cli_observation.py` — typer app（scan / list-recipes / scans-purge），单文件不建 cli/ 目录
+  - `config/scan_recipes.yaml` — 用户自定义配方模板（my-watchtower 示例）
+  - Makefile +9 targets（8 named + generic `scan name=...`）
+
+  **关键决策（直接实施 amendment 01 修订）**:
+  - `scan-by-category` → `scan-by-tag`：markets.category 列已被 amendment 01 删除，tag 信息流到 event_tags 表，按 tag_label 分组要 JOIN markets→event_tags via event_id
+  - ghost-suspicious 笔误纠正：CONTEXT 写 `incomplete=1` 是错的，真信号在 validation_issues.category='ghost_book'（Layer 4）
+  - neg-risk-incomplete 容差 ±0.02 直接编码进 group_by 的 HAVING 尾部（builtin-only，被当作不透明 SQL 片段）
+
+  **测试**:
+  - 110 新测（19 recipes + 61 scanner + 19 formatter + 11 makefile contract）
+  - m1-perception: 223 → 333 全绿
+  - 整套: 244 → 354 全绿
+  - pyright 0 errors（observation/ + cli_observation）
+
+  **真实 baseline 跑验证（snapshot_id=1, 20589 markets）**:
+  - 6 个 builtin scan 全部跑通，每个返回 50 行（被 LIMIT 50 截顶）
+  - neg-risk: 1994 组中 916 组超 ±0.02 容差
+  - ghost_book validation_issues: 32853 行
+  - unique tags: 1773（top 50 by market_count = by-tag 输出）
+
+  **Auto-fixed deviations**:
+  - Rule 2 critical: pandas 不在 pyproject.toml deps（之前是 pyarrow 间接拉），加显式 `pandas>=2.0,<3`
+  - Rule 1 bug: CLI test fixture 通过 monkeypatch env 设 DB 不生效（load_settings 读 yaml 优先），改成 patch `polyarb.cli_observation.load_settings`
+
+- [SESSION commit 列表]:
+  - `c47815a feat(01.1-03):` — scanner engine + 6 builtin recipes + 4-layer SQL injection defense
+  - `f56010a feat(01.1-03):` — observation formatter + cli + 8 Makefile targets
+  - 本 commit `docs(01.1):` plan 03 SUMMARY + STATE/ROADMAP/JOURNAL 更新
+
+- [NEXT] 下次会话从这里开始：
+
+  **第 1 步**（恢复）：
+  ```
+  /gsd-resume-work --ws m1-perception
+  ```
+
+  **第 2 步**（推 plan 04）— Wave 4：
+  - T4 跨 snapshot diff（duckdb FULL OUTER JOIN 两个 parquet）
+  - T4 单市场时序 tracker（read_parquet glob + union_by_name）
+  - 注意：当前只有 1 个 baseline snapshot —— plan 04 之前需要再跑 1-2 次 `make snapshot-markets-v` 拿到时序数据
+
+  **可选并行**: 写 `docs/learning/07-观察市场.md`（CLAUDE.md "教学文档持续产出" 纪律 — plan 03 已落地核心代码概念，应该有教学）
+
+  **核心动作清单**:
+  1. （可选）补 1 次 snapshot 准备 plan 04 时序输入
+  2. plan 04 execute（duckdb 跨 parquet + tracker）
+  3. plan 05 execute（show-market + watchlist）
+  4. plan 06 execute（教学文档 + 端到端验收）
+
+---
