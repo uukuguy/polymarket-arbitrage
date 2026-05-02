@@ -20,6 +20,10 @@ from loguru import logger
 
 from polyarb.storage.schemas import (
     DDL,
+    EVENT_TAGS_COLUMN_ORDER,
+    EVENT_TAGS_INSERT_SQL,
+    EVENTS_COLUMN_ORDER,
+    EVENTS_INSERT_SQL,
     MARKETS_COLUMN_ORDER,
     MARKETS_INSERT_SQL,
 )
@@ -29,6 +33,8 @@ _VALID_MODES = ("subset", "full")
 
 # Booleans that are stored as INTEGER 0/1 in SQLite — convert before insert.
 _BOOL_COLUMNS = ("active", "closed", "neg_risk", "incomplete")
+# events table also has bool fields stored as INTEGER 0/1.
+_EVENT_BOOL_COLUMNS = ("active", "closed")
 
 
 def _row_to_tuple(row: dict, snapshot_id: int) -> tuple:
@@ -46,6 +52,31 @@ def _row_to_tuple(row: dict, snapshot_id: int) -> tuple:
         if col in _BOOL_COLUMNS and v is not None:
             v = int(bool(v))
         out.append(v)
+    return tuple(out)
+
+
+def _event_row_to_tuple(row: dict, snapshot_id: int) -> tuple:
+    """Project an event dict into EVENTS_COLUMN_ORDER for insert."""
+    out: list = []
+    for col in EVENTS_COLUMN_ORDER:
+        if col == "snapshot_id":
+            out.append(snapshot_id)
+            continue
+        v = row.get(col)
+        if col in _EVENT_BOOL_COLUMNS and v is not None:
+            v = int(bool(v))
+        out.append(v)
+    return tuple(out)
+
+
+def _event_tag_row_to_tuple(row: dict, snapshot_id: int) -> tuple:
+    """Project an event_tag dict into EVENT_TAGS_COLUMN_ORDER for insert."""
+    out: list = []
+    for col in EVENT_TAGS_COLUMN_ORDER:
+        if col == "snapshot_id":
+            out.append(snapshot_id)
+            continue
+        out.append(row.get(col))
     return tuple(out)
 
 
@@ -85,17 +116,32 @@ class SQLiteStore:
         market_rows: list[dict],
         issues: list[Issue],
         notes: str | None = None,
+        event_rows: list[dict] | None = None,
+        event_tag_rows: list[dict] | None = None,
     ) -> int:
         """Persist one snapshot atomically.
 
-        Wraps DELETE FROM markets + INSERT snapshot meta + executemany markets +
-        executemany issues in a single BEGIN IMMEDIATE transaction. Any exception
-        triggers ROLLBACK and re-raises (we never swallow).
+        Wraps DELETE FROM markets + INSERT snapshot meta + executemany events +
+        executemany event_tags + executemany markets + executemany issues in a
+        single BEGIN IMMEDIATE transaction. Any exception triggers ROLLBACK and
+        re-raises (we never swallow).
+
+        FK ordering matters: snapshots → events → event_tags → markets. A market
+        that references an event_id which is NOT in events for this snapshot is
+        still inserted (markets.event_id has no FK CHECK constraint enforced —
+        we want orphan-tolerance per Amendment 01 design).
+
+        Phase 1.1 Amendment 01: events / event_tags persisted alongside markets.
+        Both default to empty lists for backward compat with tests that don't
+        supply them.
 
         Returns the new `snapshots.id`.
         """
         if mode not in _VALID_MODES:
             raise ValueError(f"mode must be one of {_VALID_MODES}, got {mode!r}")
+
+        event_rows = event_rows or []
+        event_tag_rows = event_tag_rows or []
 
         con = sqlite3.connect(self._db_path, isolation_level=None)
         # Per-connection PRAGMAs (some are persistent like journal_mode=WAL after
@@ -122,6 +168,21 @@ class SQLiteStore:
             snapshot_id = cur.lastrowid
             assert snapshot_id is not None  # AUTOINCREMENT guarantees this
 
+            # ── Amendment 01: events first (FK target for markets.event_id) ─
+            event_tuples = [
+                _event_row_to_tuple(r, snapshot_id) for r in event_rows
+            ]
+            if event_tuples:
+                con.executemany(EVENTS_INSERT_SQL, event_tuples)
+
+            # ── Amendment 01: event_tags (FK references events.id) ─────────
+            event_tag_tuples = [
+                _event_tag_row_to_tuple(r, snapshot_id) for r in event_tag_rows
+            ]
+            if event_tag_tuples:
+                con.executemany(EVENT_TAGS_INSERT_SQL, event_tag_tuples)
+
+            # ── markets (references events.id via event_id, FK not enforced) ─
             market_tuples = [_row_to_tuple(r, snapshot_id) for r in market_rows]
             if market_tuples:
                 con.executemany(MARKETS_INSERT_SQL, market_tuples)
@@ -155,6 +216,7 @@ class SQLiteStore:
 
         logger.info(
             f"SQLite snapshot id={snapshot_id} mode={mode} markets={len(market_rows)} "
+            f"events={len(event_rows)} event_tags={len(event_tag_rows)} "
             f"issues={len(issues)} is_valid={is_valid}"
         )
         return snapshot_id

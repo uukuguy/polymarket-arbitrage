@@ -66,6 +66,44 @@ def _books_as_objects(book_dicts: list[dict]) -> list[SimpleNamespace]:
     return [SimpleNamespace(**bd) for bd in book_dicts]
 
 
+def _make_fake_gamma(
+    markets: list[dict], events: list[dict] | None = None
+) -> AsyncMock:
+    """Build a fake_gamma with both /markets and /events return values configured.
+
+    Phase 1.1 Amendment 01: orchestrator phase 1 fetches /events first then
+    /markets. Tests that don't care about events can pass events=None (default
+    empty list) — markets still get event_id=None which is acceptable.
+    """
+    fake = AsyncMock()
+    fake.fetch_all_active_markets.return_value = markets
+    fake.fetch_all_active_events.return_value = events if events is not None else []
+    fake.aclose = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.__aexit__.return_value = None
+    return fake
+
+
+def _events_for_markets(markets: list[dict]) -> list[dict]:
+    """Synthesize one event per market so each market gets a populated event_id."""
+    return [
+        {
+            "id": f"EV-{m['id']}",
+            "slug": f"event-{m['id']}",
+            "title": f"Event for {m['id']}",
+            "ticker": "TKR",
+            "active": True,
+            "closed": False,
+            "liquidity": 1000.0,
+            "volume": 5000.0,
+            "endDate": "2026-12-31T00:00:00Z",
+            "tags": [{"id": "120", "label": "Test", "slug": "test"}],
+            "markets": [{"id": m["id"]}],
+        }
+        for m in markets
+    ]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # T6.1 — Full pipeline produces SQLite + Parquet with mocks
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,12 +115,7 @@ async def test_full_pipeline_writes_sqlite_and_parquet(tmp_path: Path) -> None:
     gamma_data = _load_gamma_fixture()
     clob_data = _load_clob_fixture()
 
-    fake_gamma = AsyncMock()
-    fake_gamma.fetch_all_active_markets.return_value = gamma_data
-    fake_gamma.aclose = AsyncMock()
-    # Async context manager protocol: __aenter__ returns the mock itself
-    fake_gamma.__aenter__.return_value = fake_gamma
-    fake_gamma.__aexit__.return_value = None
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
     with patch(
         "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
@@ -135,18 +168,15 @@ async def test_layer1_count_mismatch_flips_is_valid_false(
     real_normalize = orch_mod.normalize_market
     seen = {"count": 0}
 
-    def fake_normalize(raw: dict):
+    def fake_normalize(raw: dict, market_to_event_map=None):
         seen["count"] += 1
         if seen["count"] >= 5:
             return None  # drop the 5th — orchestrator now sees 4/5 → Layer 1 fires
-        return real_normalize(raw)
+        return real_normalize(raw, market_to_event_map)
 
     monkeypatch.setattr(orch_mod, "normalize_market", fake_normalize)
 
-    fake_gamma = AsyncMock()
-    fake_gamma.fetch_all_active_markets.return_value = gamma_data
-    fake_gamma.__aenter__.return_value = fake_gamma
-    fake_gamma.__aexit__.return_value = None
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
     with patch(
         "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
@@ -194,10 +224,7 @@ async def test_ghost_book_detected_in_validation_issues(tmp_path: Path) -> None:
         "asks": [{"price": "0.99", "size": "1.0"}],
     }
 
-    fake_gamma = AsyncMock()
-    fake_gamma.fetch_all_active_markets.return_value = gamma_data
-    fake_gamma.__aenter__.return_value = fake_gamma
-    fake_gamma.__aexit__.return_value = None
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
     with patch(
         "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
@@ -251,10 +278,7 @@ async def test_f1_unparseable_price_does_not_crash(tmp_path: Path) -> None:
         "asks": [{"price": "NaN-bad", "size": "1.0"}],
     }
 
-    fake_gamma = AsyncMock()
-    fake_gamma.fetch_all_active_markets.return_value = gamma_data
-    fake_gamma.__aenter__.return_value = fake_gamma
-    fake_gamma.__aexit__.return_value = None
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
     with patch(
         "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
@@ -298,10 +322,7 @@ async def test_fetched_at_ms_stamped_on_db_rows(tmp_path: Path) -> None:
     gamma_data = _load_gamma_fixture()
     clob_data = _load_clob_fixture()
 
-    fake_gamma = AsyncMock()
-    fake_gamma.fetch_all_active_markets.return_value = gamma_data
-    fake_gamma.__aenter__.return_value = fake_gamma
-    fake_gamma.__aexit__.return_value = None
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
     with patch(
         "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
@@ -340,10 +361,7 @@ async def test_clob_unreachable_records_issue_but_persists_snapshot(tmp_path: Pa
     settings = _make_settings(tmp_path)
     gamma_data = _load_gamma_fixture()
 
-    fake_gamma = AsyncMock()
-    fake_gamma.fetch_all_active_markets.return_value = gamma_data
-    fake_gamma.__aenter__.return_value = fake_gamma
-    fake_gamma.__aexit__.return_value = None
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
     with patch(
         "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
@@ -519,11 +537,7 @@ async def test_gamma_duplicate_market_id_deduped(tmp_path: Path) -> None:
     # Synthesize a duplicate: append the first market again with drifted liquidity.
     duplicated = raw + [{**raw[0], "liquidityNum": float(raw[0].get("liquidityNum", 0)) + 100}]
 
-    fake_gamma = AsyncMock()
-    fake_gamma.fetch_all_active_markets.return_value = duplicated
-    fake_gamma.aclose = AsyncMock()
-    fake_gamma.__aenter__.return_value = fake_gamma
-    fake_gamma.__aexit__.return_value = None
+    fake_gamma = _make_fake_gamma(duplicated, _events_for_markets(duplicated))
 
     clob_data = _load_clob_fixture()
     with patch(
@@ -570,11 +584,7 @@ async def test_subset_persists_only_target_markets(tmp_path: Path) -> None:
     )
     gamma_data = _load_gamma_fixture()
 
-    fake_gamma = AsyncMock()
-    fake_gamma.fetch_all_active_markets.return_value = gamma_data
-    fake_gamma.aclose = AsyncMock()
-    fake_gamma.__aenter__.return_value = fake_gamma
-    fake_gamma.__aexit__.return_value = None
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
     clob_data = _load_clob_fixture()
     with patch(
@@ -613,11 +623,7 @@ async def test_phase_timing_lines_emitted(tmp_path: Path) -> None:
     gamma_data = _load_gamma_fixture()
     clob_data = _load_clob_fixture()
 
-    fake_gamma = AsyncMock()
-    fake_gamma.fetch_all_active_markets.return_value = gamma_data
-    fake_gamma.aclose = AsyncMock()
-    fake_gamma.__aenter__.return_value = fake_gamma
-    fake_gamma.__aexit__.return_value = None
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
     captured: list[str] = []
     sink_id = logger.add(lambda msg: captured.append(msg.record["message"]), level="INFO")
@@ -655,3 +661,247 @@ async def test_phase_timing_lines_emitted(tmp_path: Path) -> None:
     # Overall completion summary must be present
     overall = [m for m in captured if "Snapshot complete in" in m]
     assert len(overall) == 1, f"missing overall summary line, got: {captured}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1.1 Amendment 01 — events / event_tags / event_id flow through pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_amendment_01_events_persisted_to_sqlite(tmp_path: Path) -> None:
+    """End-to-end: /events response → SQLite events + event_tags tables.
+
+    Verifies the new Phase 1 sub-step (events fetch) produces persisted rows
+    that carry the snapshot_id FK and downstream queries can join on it.
+    """
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+    events_data = _events_for_markets(gamma_data)
+
+    fake_gamma = _make_fake_gamma(gamma_data, events_data)
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    con = sqlite3.connect(settings.db_path)
+    try:
+        events_count = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        event_tags_count = con.execute("SELECT COUNT(*) FROM event_tags").fetchone()[0]
+        # Events linked to this snapshot
+        ev_for_snap = con.execute(
+            "SELECT COUNT(*) FROM events WHERE snapshot_id = ?",
+            (result.snapshot_id,),
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert events_count == 5, f"expected 5 events, got {events_count}"
+    # 5 events × 1 tag each = 5 event_tags rows
+    assert event_tags_count == 5, f"expected 5 event_tags, got {event_tags_count}"
+    assert ev_for_snap == 5
+
+
+@pytest.mark.asyncio
+async def test_amendment_01_event_id_populated_on_markets(tmp_path: Path) -> None:
+    """Each persisted market row must carry an event_id flowing from /events."""
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+    events_data = _events_for_markets(gamma_data)
+
+    fake_gamma = _make_fake_gamma(gamma_data, events_data)
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    con = sqlite3.connect(settings.db_path)
+    try:
+        rows = con.execute(
+            "SELECT market_id, event_id FROM markets ORDER BY market_id"
+        ).fetchall()
+        # JOIN check — every market_row's event_id must exist in events table.
+        joined = con.execute(
+            "SELECT COUNT(*) FROM markets m "
+            "INNER JOIN events e ON m.event_id = e.id"
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert len(rows) == 5
+    # Every market gets event_id (the synthetic events fixture maps 1:1).
+    for market_id, event_id in rows:
+        assert event_id == f"EV-{market_id}", (
+            f"market {market_id} got event_id={event_id}, expected EV-{market_id}"
+        )
+    # JOIN sanity: all 5 markets join to events.
+    assert joined == 5
+
+
+@pytest.mark.asyncio
+async def test_amendment_01_orphan_market_event_id_is_null(tmp_path: Path) -> None:
+    """If /events doesn't list a market, its event_id stays None (orphan tolerated).
+
+    Real Gamma data has /markets entries that aren't in /events at all (closed
+    parents, archived events). The pipeline must accept event_id=NULL rather
+    than dropping the market.
+    """
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+    # /events fixture mentions ONLY the first market — markets 1-4 are orphans
+    partial_events = _events_for_markets([gamma_data[0]])
+
+    fake_gamma = _make_fake_gamma(gamma_data, partial_events)
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    con = sqlite3.connect(settings.db_path)
+    try:
+        with_event = con.execute(
+            "SELECT COUNT(*) FROM markets WHERE event_id IS NOT NULL"
+        ).fetchone()[0]
+        without_event = con.execute(
+            "SELECT COUNT(*) FROM markets WHERE event_id IS NULL"
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    # 1 market in /events fixture → 1 with event_id; 4 orphans → 4 NULL
+    assert with_event == 1
+    assert without_event == 4
+
+
+@pytest.mark.asyncio
+async def test_amendment_01_events_failure_does_not_kill_snapshot(tmp_path: Path) -> None:
+    """If /events fetch fails, snapshot still completes — markets get event_id NULL.
+
+    /events is the secondary source (category/tags); /markets is the mainline.
+    A /events outage is recorded as Issue but doesn't block the run.
+    """
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+
+    fake_gamma = AsyncMock()
+    fake_gamma.fetch_all_active_markets.return_value = gamma_data
+    fake_gamma.fetch_all_active_events.side_effect = RuntimeError(
+        "simulated /events outage"
+    )
+    fake_gamma.aclose = AsyncMock()
+    fake_gamma.__aenter__.return_value = fake_gamma
+    fake_gamma.__aexit__.return_value = None
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    # Snapshot completed; api_unreachable Issue recorded for /events.
+    assert result.market_count == 5
+    assert "api_unreachable" in result.issue_categories
+
+    con = sqlite3.connect(settings.db_path)
+    try:
+        events_count = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        without_event = con.execute(
+            "SELECT COUNT(*) FROM markets WHERE event_id IS NULL"
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert events_count == 0
+    assert without_event == 5  # all markets event_id NULL when /events fails
+
+
+@pytest.mark.asyncio
+async def test_amendment_01_event_tags_writeable_with_multiple_tags(tmp_path: Path) -> None:
+    """Verify event_tags table can hold multiple tags per event (many-to-many)."""
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+    # Synthesize events with 3 tags each (Finance/Crypto/Tech) instead of just 1
+    events_data = []
+    for m in gamma_data:
+        ev = {
+            "id": f"EV-{m['id']}",
+            "slug": f"event-{m['id']}",
+            "title": f"Event for {m['id']}",
+            "ticker": "TKR",
+            "active": True,
+            "closed": False,
+            "liquidity": 1000.0,
+            "volume": 5000.0,
+            "endDate": "2026-12-31T00:00:00Z",
+            "tags": [
+                {"id": "120", "label": "Finance", "slug": "finance"},
+                {"id": "121", "label": "Crypto", "slug": "crypto"},
+                {"id": "122", "label": "Tech", "slug": "tech"},
+            ],
+            "markets": [{"id": m["id"]}],
+        }
+        events_data.append(ev)
+
+    fake_gamma = _make_fake_gamma(gamma_data, events_data)
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    con = sqlite3.connect(settings.db_path)
+    try:
+        # 5 events × 3 tags = 15 event_tags rows
+        et_count = con.execute("SELECT COUNT(*) FROM event_tags").fetchone()[0]
+        # Verify "Finance" tag is searchable via the index
+        finance_count = con.execute(
+            "SELECT COUNT(*) FROM event_tags WHERE tag_label = 'Finance'"
+        ).fetchone()[0]
+        # Distinct tag labels
+        distinct_labels = con.execute(
+            "SELECT COUNT(DISTINCT tag_label) FROM event_tags"
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert et_count == 15
+    assert finance_count == 5
+    assert distinct_labels == 3

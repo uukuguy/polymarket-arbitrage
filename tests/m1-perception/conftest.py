@@ -181,9 +181,35 @@ def mocked_gamma_orchestrator(gamma_fixture: list[dict]) -> Any:
     Returns the AsyncMock instance. The mocked client supports the async
     context-manager protocol (``__aenter__`` / ``__aexit__``) and exposes
     ``fetch_all_active_markets`` returning the recorded fixture.
+
+    Phase 1.1 Amendment 01: also exposes ``fetch_all_active_events`` returning
+    a synthesized list of events that maps each fixture market to a synthetic
+    event so event_id flows through end-to-end. This keeps tests realistic
+    (event_id is populated for every fixture market) while not requiring a
+    separate events_sample.json fixture.
     """
     fake = AsyncMock()
     fake.fetch_all_active_markets.return_value = gamma_fixture
+    # Synthesize one event per fixture market so each market gets event_id.
+    synthetic_events = [
+        {
+            "id": f"EV-{m['id']}",
+            "slug": f"event-{m['id']}",
+            "title": f"Event for {m.get('slug', m['id'])}",
+            "ticker": "TKR",
+            "active": True,
+            "closed": False,
+            "liquidity": 1000.0,
+            "volume": 5000.0,
+            "endDate": "2026-12-31T00:00:00Z",
+            "tags": [
+                {"id": "120", "label": "Test", "slug": "test"},
+            ],
+            "markets": [{"id": m["id"]}],
+        }
+        for m in gamma_fixture
+    ]
+    fake.fetch_all_active_events.return_value = synthetic_events
     fake.aclose = AsyncMock()
     fake.__aenter__.return_value = fake
     fake.__aexit__.return_value = None

@@ -184,6 +184,7 @@ def normalize_events(
     events_rows: list[dict] = []
     event_tags_rows: list[dict] = []
     market_to_event_map: dict[str, str] = {}
+    seen_event_ids: set[str] = set()
 
     for raw in raw_events:
         event_id_raw = raw.get("id")
@@ -193,6 +194,14 @@ def normalize_events(
             )
             continue
         event_id = str(event_id_raw)
+
+        # Dedupe by event_id — Gamma /events can return duplicates across pagination
+        # boundaries (similar to /markets ~4% dup rate observed in Phase 1).
+        # Without this, the events table PK (id, snapshot_id) rejects the insert
+        # and rolls back the whole snapshot.
+        if event_id in seen_event_ids:
+            continue
+        seen_event_ids.add(event_id)
 
         # Slug is required by the schema (NOT NULL); fall back to event_id if absent
         # (defensive — real events always have a slug).

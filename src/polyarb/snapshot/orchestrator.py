@@ -2,13 +2,16 @@
 
 The 7-step pipeline (per RESEARCH.md "Atomic SQLite + Parquet 编排" spec):
 
-    1. Gamma fetch       — full active-market list
-    2. Normalize         — Gamma raw → storage row contract (drop unrecoverable)
+    1. Gamma fetch       — /events first (for category/tags), then /markets
+                           (Phase 1.1 Amendment 01: dual-source fetch)
+    2. Normalize         — Gamma raw → storage row contract (drop unrecoverable);
+                           markets get event_id FK from events' nested markets list
     3. Mode filter       — subset (liquidity>$1k) | full (all markets)
     4. CLOB batch fetch  — order books + buy/sell prices for the filtered tokens
     5. Stamp + attach    — fetched_at_ms (Pitfall 6) + best_bid/best_ask top-of-book
     6. Validate          — Layer 1 count, Layer 2 fields, Layer 4 cross-source
     7. Persist           — Parquet atomic write FIRST, then SQLite single-tx write
+                           (snapshots → events → event_tags → markets FK order)
 
 Every step records errors as ``Issue`` objects rather than raising. The
 orchestrator NEVER calls ``sys.exit`` — the CLI is responsible for setting the
@@ -77,7 +80,7 @@ from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
 from polyarb.snapshot.cache import ChunkCache
-from polyarb.snapshot.normalizer import normalize_market
+from polyarb.snapshot.normalizer import normalize_events, normalize_market
 from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_atomic
 from polyarb.storage.sqlite_store import SQLiteStore
 from polyarb.validator.category import Category, Issue
@@ -161,6 +164,10 @@ async def run_snapshot(
     issues: list[Issue] = []
     gamma_count_reported: int | None = None
     raw_markets: list[dict] = []
+    raw_events: list[dict] = []
+    event_rows: list[dict] = []
+    event_tag_rows: list[dict] = []
+    market_to_event_map: dict[str, str] = {}
 
     logger.info(
         f"snapshot starting — mode={mode}, cache={'on' if use_cache else 'off'}, "
@@ -169,16 +176,37 @@ async def run_snapshot(
 
     overall_t0 = time.monotonic()
 
-    # ── 1. Gamma fetch ────────────────────────────────────────────────────────
-    with _phase("1/7: Gamma fetch (active markets)"):
+    # ── 1. Gamma fetch (events FIRST for category/tags, then markets) ─────────
+    # Phase 1.1 Amendment 01: /events is the only source of category/tags. We
+    # fetch /events first to build market→event_id reverse map, then /markets,
+    # so the normalizer can stamp event_id on every market row.
+    # If /events fails we still proceed with /markets (event_id will be None for
+    # all markets — graceful degradation, single Issue recorded).
+    with _phase("1/7: Gamma fetch (active events + markets)"):
         async with GammaClient(settings) as gamma:
+            # Step 1a: events (best-effort — failure → empty map)
+            try:
+                raw_events = await gamma.fetch_all_active_events()
+                logger.info(f"Gamma: fetched {len(raw_events)} active events")
+            except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
+                logger.error(f"Gamma /events fetch failed: {e!r}")
+                issues.append(
+                    Issue(
+                        layer=1,
+                        category=Category.API_UNREACHABLE,
+                        market_id=None,
+                        detail=f"Gamma /events unreachable: {str(e)[:200]}",
+                    )
+                )
+                raw_events = []
+
+            # Step 1b: markets (mainline — failure → empty markets)
             try:
                 raw_markets = await gamma.fetch_all_active_markets()
                 gamma_count_reported = len(raw_markets)
                 logger.info(f"Gamma: fetched {gamma_count_reported} active markets")
             except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
-                logger.error(f"Gamma fetch failed: {e!r}")
-                # F-5: cap exception detail to 200 chars (HTML 4xx body could be huge).
+                logger.error(f"Gamma /markets fetch failed: {e!r}")
                 issues.append(
                     Issue(
                         layer=1,
@@ -189,10 +217,23 @@ async def run_snapshot(
                 )
                 raw_markets = []
 
-    # ── 2. Normalize (drop unrecoverable rows) ────────────────────────────────
+    # ── 2. Normalize (events first to build map, then markets with map injection)
     with _phase("2/7: Normalize + dedupe"):
+        # Step 2a: events → events_rows + event_tags + market→event_id map
+        event_rows, event_tag_rows, market_to_event_map = normalize_events(raw_events)
+        logger.info(
+            f"Events normalized: {len(event_rows)} events, "
+            f"{len(event_tag_rows)} event_tags, "
+            f"{len(market_to_event_map)} market→event mappings"
+        )
+
+        # Step 2b: markets, injecting event_id from the reverse map
         markets: list[dict] = [
-            m for m in (normalize_market(r) for r in raw_markets) if m is not None
+            m
+            for m in (
+                normalize_market(r, market_to_event_map) for r in raw_markets
+            )
+            if m is not None
         ]
 
         # Dedupe by market_id — Gamma /markets returns ~4% duplicates across pagination
@@ -395,6 +436,13 @@ async def run_snapshot(
             parquet_rows.append(row)
         write_parquet_atomic(parquet_rows, parquet_path)
 
+        # Phase 1.1 Amendment 01: stamp events with finished_at_ms (NOT
+        # clob_done_ms — events are fetched by Gamma in phase 1, not CLOB).
+        # We use finished_at_ms as the conventional "events landed at" time.
+        for ev in event_rows:
+            if ev.get("fetched_at_ms") is None:
+                ev["fetched_at_ms"] = finished_at_ms
+
         store = SQLiteStore(settings.db_path)
         store.init_schema()
         snapshot_id = store.write_snapshot(
@@ -405,6 +453,8 @@ async def run_snapshot(
             is_valid=is_valid,
             market_rows=target_markets,
             issues=issues,
+            event_rows=event_rows,
+            event_tag_rows=event_tag_rows,
         )
 
         # Cache cleanup happens ONLY after a successful SQLite commit. If step 7

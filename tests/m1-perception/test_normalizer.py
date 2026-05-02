@@ -416,6 +416,15 @@ def test_normalize_events_empty_input() -> None:
     assert m2e == {}
 
 
+def test_normalize_events_dedupe_event_id_across_batch() -> None:
+    """Same event_id appearing twice in raw_events → single events_row (defense
+    against Gamma /events pagination duplicates, parallel to /markets ~4% dups).
+    """
+    raw_events = [make_event(0), make_event(0)]  # same id twice
+    events, _, _ = normalize_events(raw_events)
+    assert len(events) == 1
+
+
 def test_normalize_events_slug_fallback_to_id() -> None:
     """If event has no slug, use id (defensive — schema requires NOT NULL slug)."""
     raw = make_event(0)
