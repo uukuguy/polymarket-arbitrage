@@ -1,0 +1,30 @@
+# Phase 1.1 自定义 scan 配方
+#
+# ⚠ 安全：where / order_by 不能含 ; -- /* DDL/DML/UNION/SELECT 等
+# ⚠ order_by 仅支持简单列名 + 可选 ASC/DESC
+#         OK:    "liquidity_usd"
+#         OK:    "liquidity_usd DESC"
+#         OK:    "category, volume_usd DESC"
+#         拒绝: "liquidity_usd * (best_ask_price - best_bid_price) DESC"
+#         拒绝: "ABS(SUM(mid_price) - 1.0) DESC"
+# ⚠ group_by 字段 builtin-only，yaml 写了会被忽略 + 警告
+# 默认 limit 50，最大 10000
+#
+# Schema 提示（Phase 1.1 Amendment 01 后）:
+#   markets 表 22 列，事件外键是 event_id（不再有 markets.category）
+#   想按 tag 过滤 → 用现成的 builtin 配方 by-tag（make scan-by-tag）
+#                  或自己复制 builtin 写法到这里（需要 SELECT 子查询 → trust 路径限制）
+#                  当前 yaml 路径不允许 SELECT，所以 yaml 配方暂时只能基于 markets 列做过滤
+#
+# 用法:
+#   make scan name=my-watchtower
+
+recipes:
+  my-watchtower:
+    description: 我每天早上看的市场（liq>$50k + 7 天内 + neg-risk 多腿）
+    where: |
+      liquidity_usd > 50000
+      AND end_time_ms < strftime('%s', 'now', '+7 days') * 1000
+      AND neg_risk_market_id IS NOT NULL
+    order_by: liquidity_usd DESC
+    limit: 50

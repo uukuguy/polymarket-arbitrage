@@ -32,6 +32,10 @@ dependencies = [
   # Phase 1.1 T4 — cross-snapshot parquet queries (diff/tracker). Promoted from
   # dev to main deps because production observation paths now depend on it.
   "duckdb>=1.0,<2",
+  # Phase 1.1 T3 plan 03 — scanner returns DataFrame; formatter renders rich.Table
+  # from DataFrame. pandas was a transitive dep before; pin it here so future
+  # dependency changes don't accidentally drop it.
+  "pandas>=2.0,<3",
 ]
 
 [project.optional-dependencies]
