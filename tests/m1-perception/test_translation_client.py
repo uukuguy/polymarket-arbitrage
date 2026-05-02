@@ -255,7 +255,7 @@ async def test_bad_request_error_propagates(mock_openai_class) -> None:
 @pytest.mark.asyncio
 async def test_aclose_idempotent(mock_openai_class) -> None:
     """Calling aclose twice must not raise — context manager exit + manual close."""
-    create_mock, instance = mock_openai_class
+    _, instance = mock_openai_class
     t = TranslationClient(
         base_url="https://api.example.com/v1",
         api_key="sk-test",
@@ -268,7 +268,7 @@ async def test_aclose_idempotent(mock_openai_class) -> None:
 
 @pytest.mark.asyncio
 async def test_async_context_manager_closes(mock_openai_class) -> None:
-    create_mock, instance = mock_openai_class
+    _, instance = mock_openai_class
     async with TranslationClient(
         base_url="https://api.example.com/v1",
         api_key="sk-test",

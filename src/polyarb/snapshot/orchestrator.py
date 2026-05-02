@@ -499,8 +499,10 @@ async def run_snapshot(
                 translate_pending,
             )
 
+            # pydantic-settings injects TRANSLATION_* env vars; pyright
+            # doesn't model that, so the bare-call form is correct.
             try:
-                trans_cfg = TranslationConfig()
+                trans_cfg = TranslationConfig()  # pyright: ignore[reportCallIssue]
             except ValidationError as e:
                 logger.error(
                     f"translate_pending config validation failed (.env 检查): {e!r}"

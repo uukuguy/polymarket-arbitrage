@@ -306,17 +306,9 @@ def test_cache_module_does_not_delete_from_question_translations() -> None:
         / "translation"
         / "cache.py"
     ).read_text()
-    code_lines = [
-        ln
-        for ln in src.splitlines()
-        if not ln.strip().startswith("#")
-        and not ln.strip().startswith('"')
-        and "DELETE" not in ln  # noqa: E501 — we accept that string-literal occurrences elsewhere fail this test
-    ]
-    # Re-parse: we want the production *executable* code to never contain
-    # the literal "DELETE FROM question_translations". docstring text in the
-    # module top docstring contains a description of the invariant — exclude
-    # those by checking only lines outside triple-quoted blocks.
+    # We want the production *executable* code to never contain the literal
+    # "DELETE FROM question_translations". Module top docstring describes the
+    # invariant — exclude triple-quoted blocks via a stateful pass.
     in_doc = False
     forbidden = []
     for ln in src.splitlines():

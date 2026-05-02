@@ -90,8 +90,10 @@ def translate_pending_cmd(
         raise typer.Exit(1)
 
     # Load TranslationConfig — ValidationError → exit 1 with config hint.
+    # pyright doesn't model pydantic-settings env injection; the args come
+    # from TRANSLATION_* env vars (see TranslationConfig.model_config).
     try:
-        cfg = TranslationConfig()
+        cfg = TranslationConfig()  # pyright: ignore[reportCallIssue]
     except ValidationError as e:
         typer.echo(
             f"TranslationConfig invalid (.env 配错？): {e}\n"
