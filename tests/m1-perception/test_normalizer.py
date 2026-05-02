@@ -5,14 +5,19 @@ Plan 01-5 T2 — Gamma raw dict edge cases:
   - Pitfall 3: token IDs MUST stay as str (uint256 overflow int64)
   - F-8: naive endDate datetime treated as UTC
   - liquidity field fallback (Open Q#5)
+
+Phase 1.1 Amendment 01:
+  - normalize_market drops category/tags extraction (these never had data)
+  - normalize_market accepts market_to_event_map → writes event_id column
+  - new normalize_events: Gamma /events raw → events + event_tags + reverse map
 """
 from __future__ import annotations
 
-from polyarb.snapshot.normalizer import normalize_market
+from polyarb.snapshot.normalizer import normalize_events, normalize_market
 
 
 # Expected output keys (everything in MARKETS_COLUMN_ORDER except snapshot_id).
-# Phase 1.1 T1 added: category + tags.
+# Phase 1.1 Amendment 01: -category -tags +event_id
 EXPECTED_KEYS = {
     "market_id",
     "condition_id",
@@ -34,8 +39,7 @@ EXPECTED_KEYS = {
     "neg_risk_market_id",
     "fetched_at_ms",
     "incomplete",
-    "category",  # Phase 1.1 T1
-    "tags",      # Phase 1.1 T1
+    "event_id",  # Phase 1.1 Amendment 01
 }
 
 
@@ -68,7 +72,7 @@ def make_raw(**overrides) -> dict:
 def test_normalize_happy_path() -> None:
     out = normalize_market(make_raw())
     assert out is not None
-    # Key-set contract: every output dict has exactly the 20 EXPECTED_KEYS.
+    # Key-set contract: every output dict has exactly the EXPECTED_KEYS.
     assert set(out.keys()) == EXPECTED_KEYS
     assert out["market_id"] == "M-1"
     # uint256 preserved as 70-char string (Pitfall 3).
@@ -95,6 +99,8 @@ def test_normalize_happy_path() -> None:
     assert out["active"] is True
     assert out["closed"] is False
     assert out["neg_risk"] is False
+    # Phase 1.1 Amendment 01: no map → event_id is None
+    assert out["event_id"] is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,58 +248,190 @@ def test_normalize_real_fixture_sample(gamma_fixture: list[dict]) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 1.1 T1: category + tags extraction
+# Phase 1.1 Amendment 01 — event_id injection from market_to_event_map
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_category_extracted() -> None:
-    """category is a single string from raw['category']."""
-    out = normalize_market(make_raw(category="Politics"))
+def test_normalize_with_event_map_assigns_event_id() -> None:
+    """When market_to_event_map has the market_id, event_id flows through."""
+    out = normalize_market(make_raw(id="M-42"), market_to_event_map={"M-42": "EV-7"})
     assert out is not None
-    assert out["category"] == "Politics"
+    assert out["event_id"] == "EV-7"
 
 
-def test_category_missing_returns_none() -> None:
-    """Missing category → None (downstream LEFT JOIN handles NULL)."""
-    raw = make_raw()
-    raw.pop("category", None)
-    out = normalize_market(raw)
+def test_normalize_with_event_map_missing_market_returns_none_event_id() -> None:
+    """Market not in the map → event_id None (orphan markets are tolerated)."""
+    out = normalize_market(
+        make_raw(id="M-orphan"), market_to_event_map={"M-other": "EV-1"}
+    )
     assert out is not None
-    assert out["category"] is None
+    assert out["event_id"] is None
 
 
-def test_tags_serialized_as_json() -> None:
-    """tags is a list[str] from Gamma — stored as JSON-encoded string."""
-    out = normalize_market(make_raw(tags=["a", "b"]))
+def test_normalize_no_map_arg_yields_none_event_id() -> None:
+    """Default (no map) → event_id None for backward compat with mocked tests."""
+    out = normalize_market(make_raw())
     assert out is not None
-    # ensure_ascii=False but ASCII inputs serialize the same way: '["a", "b"]'.
-    import json
-    parsed = json.loads(out["tags"])
-    assert parsed == ["a", "b"]
+    assert out["event_id"] is None
 
 
-def test_tags_missing_returns_empty_array_string() -> None:
-    """Missing tags → '[]' (empty array string), not None — schema column is TEXT non-null in payload."""
-    raw = make_raw()
-    raw.pop("tags", None)
-    out = normalize_market(raw)
-    assert out is not None
-    assert out["tags"] == "[]"
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1.1 Amendment 01 — normalize_events
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_tags_unicode_preserved() -> None:
-    """ensure_ascii=False keeps CJK chars readable in the stored string."""
-    out = normalize_market(make_raw(tags=["体育", "Politics"]))
-    assert out is not None
-    assert "体育" in out["tags"]
-    # Must still be valid JSON.
-    import json
-    parsed = json.loads(out["tags"])
-    assert parsed == ["体育", "Politics"]
+def make_event(idx: int, n_markets: int = 2, n_tags: int = 3) -> dict:
+    """Lightweight Gamma /events row for testing."""
+    return {
+        "id": str(16000 + idx),
+        "slug": f"event-{idx}",
+        "title": f"Event {idx}",
+        "ticker": f"TKR-{idx}",
+        "active": True,
+        "closed": False,
+        "liquidity": 1234.5,
+        "volume": 6789.0,
+        "endDate": "2026-12-31T00:00:00Z",
+        "tags": [
+            {"id": str(100 + j), "label": f"Tag{j}", "slug": f"tag{j}"}
+            for j in range(n_tags)
+        ],
+        "markets": [
+            {"id": str(540000 + idx * 10 + k)} for k in range(n_markets)
+        ],
+    }
 
 
-def test_tags_none_returns_empty_array_string() -> None:
-    """raw['tags']=None should not crash json.dumps — defaults to []."""
-    out = normalize_market(make_raw(tags=None))
-    assert out is not None
-    assert out["tags"] == "[]"
+def test_normalize_events_happy_path() -> None:
+    """3 events × 2 markets × 3 tags → 3 events_rows + 9 event_tags + 6-entry map."""
+    raw_events = [make_event(i) for i in range(3)]
+    events, event_tags, m2e = normalize_events(raw_events)
+
+    assert len(events) == 3
+    assert len(event_tags) == 9   # 3 events × 3 tags each
+    assert len(m2e) == 6          # 3 events × 2 markets each
+
+    # Spot-check event row shape
+    ev = events[0]
+    assert ev["id"] == "16000"
+    assert ev["slug"] == "event-0"
+    assert ev["title"] == "Event 0"
+    assert ev["ticker"] == "TKR-0"
+    assert ev["active"] is True
+    assert ev["closed"] is False
+    assert ev["liquidity_usd"] == 1234.5
+    assert ev["volume_usd"] == 6789.0
+    assert ev["end_time_ms"] is not None
+    assert ev["fetched_at_ms"] is None  # orchestrator stamps later
+
+    # Tag row shape
+    tag = event_tags[0]
+    assert set(tag.keys()) == {"event_id", "tag_id", "tag_label", "tag_slug"}
+    assert tag["event_id"] == "16000"
+
+    # market→event map sanity
+    assert m2e["540000"] == "16000"
+    assert m2e["540001"] == "16000"
+    assert m2e["540010"] == "16001"
+
+
+def test_normalize_events_missing_id_skipped() -> None:
+    """Event with no id is skipped; valid events still processed."""
+    raw_events = [
+        {"id": None, "slug": "bad"},
+        make_event(1),
+        {"slug": "no-id-key"},
+    ]
+    events, event_tags, m2e = normalize_events(raw_events)
+    assert len(events) == 1
+    assert events[0]["id"] == "16001"
+    # 3 tags from the one good event + 2 markets in map
+    assert len(event_tags) == 3
+    assert len(m2e) == 2
+
+
+def test_normalize_events_no_tags_array() -> None:
+    """Event with missing/non-list tags → no event_tags rows but event still recorded."""
+    raw = make_event(0)
+    raw["tags"] = None
+    events, event_tags, _ = normalize_events([raw])
+    assert len(events) == 1
+    assert len(event_tags) == 0
+
+
+def test_normalize_events_skips_incomplete_tags() -> None:
+    """Tag missing label/slug/id is silently dropped (NOT NULL schema)."""
+    raw = make_event(0, n_tags=0)
+    raw["tags"] = [
+        {"id": "1", "label": "Good", "slug": "good"},
+        {"id": "2", "label": None, "slug": "no-label"},  # incomplete
+        {"id": None, "label": "X", "slug": "no-id"},     # incomplete
+        {"id": "4", "label": "Y", "slug": ""},            # incomplete (empty slug)
+        "not-a-dict",                                     # garbage
+    ]
+    _, event_tags, _ = normalize_events([raw])
+    assert len(event_tags) == 1
+    assert event_tags[0]["tag_id"] == "1"
+
+
+def test_normalize_events_no_markets_array() -> None:
+    """Event with missing markets array → no map entries, but event recorded."""
+    raw = make_event(0)
+    raw["markets"] = None
+    events, _, m2e = normalize_events([raw])
+    assert len(events) == 1
+    assert len(m2e) == 0
+
+
+def test_normalize_events_dedupe_tag_within_event() -> None:
+    """Same tag_id appearing twice in one event's tags → only one event_tags row."""
+    raw = make_event(0, n_tags=0)
+    raw["tags"] = [
+        {"id": "120", "label": "Finance", "slug": "finance"},
+        {"id": "120", "label": "Finance", "slug": "finance"},  # duplicate
+    ]
+    _, event_tags, _ = normalize_events([raw])
+    assert len(event_tags) == 1
+
+
+def test_normalize_events_first_event_wins_for_market() -> None:
+    """If a market_id appears in multiple events, FIRST event_id is kept (defensive)."""
+    raw0 = make_event(0, n_markets=0)
+    raw0["id"] = "EV-A"
+    raw0["markets"] = [{"id": "M-shared"}]
+
+    raw1 = make_event(1, n_markets=0)
+    raw1["id"] = "EV-B"
+    raw1["markets"] = [{"id": "M-shared"}]
+
+    _, _, m2e = normalize_events([raw0, raw1])
+    assert m2e["M-shared"] == "EV-A"
+
+
+def test_normalize_events_empty_input() -> None:
+    """Empty input → all empty outputs."""
+    events, event_tags, m2e = normalize_events([])
+    assert events == []
+    assert event_tags == []
+    assert m2e == {}
+
+
+def test_normalize_events_slug_fallback_to_id() -> None:
+    """If event has no slug, use id (defensive — schema requires NOT NULL slug)."""
+    raw = make_event(0)
+    raw["slug"] = None
+    events, _, _ = normalize_events([raw])
+    assert len(events) == 1
+    assert events[0]["slug"] == "16000"
+
+
+def test_normalize_events_liquidity_fallback() -> None:
+    """liquidityNum / volumeNum used as fallback when liquidity / volume absent."""
+    raw = make_event(0)
+    raw["liquidity"] = None
+    raw["liquidityNum"] = 9999.9
+    raw["volume"] = None
+    raw["volumeNum"] = 8888.8
+    events, _, _ = normalize_events([raw])
+    assert events[0]["liquidity_usd"] == 9999.9
+    assert events[0]["volume_usd"] == 8888.8
