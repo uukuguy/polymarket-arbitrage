@@ -1,19 +1,33 @@
 """Storage schemas: SQLite DDL + pyarrow.Schema (column-aligned).
 
+Phase 1.1 Amendment 01 (2026-05-02):
+    Wave-1 Step-4 schema 验证证伪了 "Gamma /markets returns category/tags".
+    实际：那俩字段只在 /events 上。Path C 决议：抓 /events 建 events + event_tags
+    表，删 markets 的 category/tags 列改用 event_id 外键。
+
 MARKETS_COLUMN_ORDER, MARKETS_INSERT_SQL, and SNAPSHOT_SCHEMA must stay in lockstep.
-Adding a column requires updating ALL FOUR (DDL/MARKETS_COLUMN_ORDER/MARKETS_INSERT_SQL/
-SNAPSHOT_SCHEMA). Phase 1.1 added a fifth sync point: the question_translations table
-DDL block must exist for translation cache CRUD to work.
+Adding/removing a column requires updating ALL FOUR sync points (DDL/MARKETS_COLUMN_ORDER/
+MARKETS_INSERT_SQL/SNAPSHOT_SCHEMA). Phase 1.1 added a fifth sync point: the
+question_translations table DDL block must exist for translation cache CRUD to
+work. Amendment 01 added two more tables (events / event_tags) with their own
+INSERT_SQL constants — these are SQLite-only (NOT in SNAPSHOT_SCHEMA, parquet
+不存 events).
 
 Tables:
 - snapshots             — append-only metadata per snapshot run
-- markets               — atomically overwritten on each snapshot (D-C1)
+- events                — Polymarket /events rows (per snapshot, not append-only)
+- event_tags            — many-to-many event→tag, PK (event_id, tag_id, snapshot_id)
+- markets               — atomically overwritten on each snapshot (D-C1); FK event_id
 - validation_issues     — categorized validation failures per snapshot
 - question_translations — append-only translation cache (T2, never DELETE FROM)
 
 The pyarrow SNAPSHOT_SCHEMA mirrors the markets table plus 1 parquet-only field
 (snapshot_taken_at_ms). Token IDs are pa.string() because Polymarket
 uint256 token IDs (70+ decimal digits) overflow pa.int64() — see RESEARCH.md Pitfall 3.
+
+Events / event_tags are NOT serialized to parquet — they are a SQLite-only relational
+view used for tag-based query and event-level aggregation; users wanting cross-snapshot
+event analysis can re-derive from the SQLite db directly.
 """
 
 from __future__ import annotations
@@ -35,6 +49,44 @@ CREATE TABLE IF NOT EXISTS snapshots (
   parquet_path    TEXT NOT NULL,
   notes           TEXT
 );
+
+-- Phase 1.1 Amendment 01: events table fed from Gamma /events endpoint.
+-- Each snapshot's events are inserted with its snapshot_id; events are NOT
+-- DELETE FROM-overwritten like markets — they are append-only-per-snapshot
+-- so we can join historical markets back to their event metadata.
+CREATE TABLE IF NOT EXISTS events (
+  id              TEXT NOT NULL,
+  slug            TEXT NOT NULL,
+  title           TEXT,
+  ticker          TEXT,
+  active          INTEGER NOT NULL DEFAULT 1,
+  closed          INTEGER NOT NULL DEFAULT 0,
+  liquidity_usd   REAL,
+  volume_usd      REAL,
+  end_time_ms     INTEGER,
+  fetched_at_ms   INTEGER NOT NULL,
+  snapshot_id     INTEGER NOT NULL REFERENCES snapshots(id),
+  PRIMARY KEY (id, snapshot_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_slug ON events(slug);
+CREATE INDEX IF NOT EXISTS idx_events_snapshot ON events(snapshot_id);
+
+-- Phase 1.1 Amendment 01: many-to-many event→tag relation.
+-- tag_id is Polymarket's stable tag identifier; tag_label is the human-readable
+-- form ("Finance" / "Crypto" / "AL West" / etc.); tag_slug is the URL slug form.
+CREATE TABLE IF NOT EXISTS event_tags (
+  event_id    TEXT NOT NULL,
+  tag_id      TEXT NOT NULL,
+  tag_label   TEXT NOT NULL,
+  tag_slug    TEXT NOT NULL,
+  snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+  PRIMARY KEY (event_id, tag_id, snapshot_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_tags_label ON event_tags(tag_label);
+CREATE INDEX IF NOT EXISTS idx_event_tags_slug ON event_tags(tag_slug);
+CREATE INDEX IF NOT EXISTS idx_event_tags_snapshot ON event_tags(snapshot_id);
 
 CREATE TABLE IF NOT EXISTS markets (
   market_id          TEXT PRIMARY KEY,
@@ -58,12 +110,12 @@ CREATE TABLE IF NOT EXISTS markets (
   fetched_at_ms      INTEGER NOT NULL,
   snapshot_id        INTEGER NOT NULL REFERENCES snapshots(id),
   incomplete         INTEGER NOT NULL DEFAULT 0,
-  category           TEXT,
-  tags               TEXT
+  event_id           TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_markets_liquidity ON markets(liquidity_usd);
 CREATE INDEX IF NOT EXISTS idx_markets_end_time ON markets(end_time_ms);
+CREATE INDEX IF NOT EXISTS idx_markets_event_id ON markets(event_id);
 
 CREATE TABLE IF NOT EXISTS validation_issues (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,8 +176,7 @@ MARKETS_COLUMN_ORDER: tuple[str, ...] = (
     "fetched_at_ms",
     "snapshot_id",
     "incomplete",
-    "category",  # Phase 1.1 T1
-    "tags",      # Phase 1.1 T1 (json.dumps(list[str]) string)
+    "event_id",  # Phase 1.1 Amendment 01: FK to events(id)
 )
 
 MARKETS_INSERT_SQL = (
@@ -133,13 +184,56 @@ MARKETS_INSERT_SQL = (
     "market_id,condition_id,slug,question,yes_token_id,no_token_id,"
     "mid_price,liquidity_usd,volume_usd,best_bid_price,best_bid_size,best_ask_price,"
     "best_ask_size,end_time_ms,active,closed,neg_risk,neg_risk_market_id,"
-    "fetched_at_ms,snapshot_id,incomplete,category,tags) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    "fetched_at_ms,snapshot_id,incomplete,event_id) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1.1 Amendment 01: events / event_tags column orders + INSERT SQL
+# ─────────────────────────────────────────────────────────────────────────────
+
+EVENTS_COLUMN_ORDER: tuple[str, ...] = (
+    "id",
+    "slug",
+    "title",
+    "ticker",
+    "active",
+    "closed",
+    "liquidity_usd",
+    "volume_usd",
+    "end_time_ms",
+    "fetched_at_ms",
+    "snapshot_id",
+)
+
+EVENTS_INSERT_SQL = (
+    "INSERT INTO events("
+    "id,slug,title,ticker,active,closed,liquidity_usd,volume_usd,"
+    "end_time_ms,fetched_at_ms,snapshot_id) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+)
+
+EVENT_TAGS_COLUMN_ORDER: tuple[str, ...] = (
+    "event_id",
+    "tag_id",
+    "tag_label",
+    "tag_slug",
+    "snapshot_id",
+)
+
+EVENT_TAGS_INSERT_SQL = (
+    "INSERT INTO event_tags(event_id,tag_id,tag_label,tag_slug,snapshot_id) "
+    "VALUES (?,?,?,?,?)"
 )
 
 # Pyarrow schema for Parquet — token IDs are pa.string() (Pitfall 3: uint256 > int64).
 # bool fields are pa.bool_() in Parquet but stored as INTEGER in SQLite; the writer
 # is responsible for the bool↔int translation per side.
+#
+# NOTE (Amendment 01): events / event_tags are SQLite-only and NOT serialized
+# to parquet. This is by design — parquet is the historical market snapshot
+# wire format; event metadata is denormalized via the event_id FK on markets,
+# which IS in the parquet (so cross-snapshot tag analysis can rejoin via SQLite).
 SNAPSHOT_SCHEMA: pa.Schema = pa.schema(
     [
         pa.field("market_id", pa.string()),
@@ -164,7 +258,6 @@ SNAPSHOT_SCHEMA: pa.Schema = pa.schema(
         pa.field("snapshot_taken_at_ms", pa.int64()),
         pa.field("snapshot_id", pa.int64()),
         pa.field("incomplete", pa.bool_()),
-        pa.field("category", pa.string(), nullable=True),  # Phase 1.1 T1
-        pa.field("tags", pa.string(), nullable=True),      # Phase 1.1 T1
+        pa.field("event_id", pa.string(), nullable=True),  # Phase 1.1 Amendment 01
     ]
 )

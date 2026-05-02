@@ -6,6 +6,12 @@ MARKETS_COLUMN_ORDER / MARKETS_INSERT_SQL placeholder count / SNAPSHOT_SCHEMA
 non-parquet-only fields) MUST agree on column count and names. If they drift,
 silent data corruption follows (rows inserted with wrong column mapping).
 
+Phase 1.1 Amendment 01 (2026-05-02) reshaped this:
+  * markets dropped category/tags columns (Gamma /markets never returned them)
+  * markets gained event_id column (FK to events.id)
+  * Two new tables: events + event_tags (sourced from Gamma /events endpoint)
+  * events / event_tags are SQLite-only (NOT in SNAPSHOT_SCHEMA / parquet)
+
 These tests are designed to fail loudly the moment a future contributor adds a
 column to one place but forgets the other four.
 """
@@ -23,6 +29,10 @@ import pytest
 
 from polyarb.storage.schemas import (
     DDL,
+    EVENT_TAGS_COLUMN_ORDER,
+    EVENT_TAGS_INSERT_SQL,
+    EVENTS_COLUMN_ORDER,
+    EVENTS_INSERT_SQL,
     MARKETS_COLUMN_ORDER,
     MARKETS_INSERT_SQL,
     SNAPSHOT_SCHEMA,
@@ -35,30 +45,32 @@ from polyarb.storage.sqlite_store import SQLiteStore
 PARQUET_ONLY_FIELDS = {"snapshot_taken_at_ms"}
 
 
-def _ddl_markets_columns() -> list[str]:
-    """Extract column names from the CREATE TABLE markets (...) block in DDL."""
+def _ddl_table_columns(table_name: str) -> list[str]:
+    """Extract column names from CREATE TABLE <table_name> (...) block in DDL."""
     m = re.search(
-        r"CREATE TABLE IF NOT EXISTS markets\s*\((.+?)\);",
+        rf"CREATE TABLE IF NOT EXISTS {re.escape(table_name)}\s*\((.+?)\);",
         DDL,
         re.DOTALL,
     )
-    assert m is not None, "markets CREATE TABLE block not found in DDL"
+    assert m is not None, f"{table_name} CREATE TABLE block not found in DDL"
     body = m.group(1)
     cols: list[str] = []
     for line in body.splitlines():
         line = line.strip().rstrip(",")
         if not line:
             continue
-        # Skip pure comment lines (none currently, but defensive).
         if line.startswith("--"):
             continue
-        # First whitespace-separated token is the column name.
         first = line.split()[0]
-        # Heuristic: skip table-level constraints like CHECK(...), FOREIGN KEY, etc.
+        # Skip table-level constraints like PRIMARY KEY (a, b), CHECK(...), etc.
         if first.upper() in {"CHECK", "FOREIGN", "PRIMARY", "UNIQUE", "CONSTRAINT"}:
             continue
         cols.append(first)
     return cols
+
+
+def _ddl_markets_columns() -> list[str]:
+    return _ddl_table_columns("markets")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,30 +124,50 @@ def test_snapshot_schema_includes_all_markets_columns() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. category field present in all 4 sync points
+# 2. Amendment 01: markets has event_id (no category/tags)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_category_field_in_all_4_sync_points() -> None:
-    """Phase 1.1 T1: category column added — must appear in DDL + ORDER + SQL + schema."""
+def test_event_id_field_in_all_4_sync_points() -> None:
+    """Phase 1.1 Amendment 01: event_id column added (replaces category/tags)."""
     ddl_cols = _ddl_markets_columns()
     schema_names = {f.name for f in SNAPSHOT_SCHEMA}
 
-    assert "category" in ddl_cols, "category not in DDL markets CREATE TABLE"
-    assert "category" in MARKETS_COLUMN_ORDER, "category not in MARKETS_COLUMN_ORDER"
-    assert "category" in MARKETS_INSERT_SQL, "category not in MARKETS_INSERT_SQL"
-    assert "category" in schema_names, "category not in SNAPSHOT_SCHEMA"
+    assert "event_id" in ddl_cols, "event_id not in DDL markets CREATE TABLE"
+    assert "event_id" in MARKETS_COLUMN_ORDER, "event_id not in MARKETS_COLUMN_ORDER"
+    assert "event_id" in MARKETS_INSERT_SQL, "event_id not in MARKETS_INSERT_SQL"
+    assert "event_id" in schema_names, "event_id not in SNAPSHOT_SCHEMA"
 
 
-def test_tags_field_in_all_4_sync_points() -> None:
-    """Phase 1.1 T1: tags column added — must appear in DDL + ORDER + SQL + schema."""
+def test_category_and_tags_removed_from_markets() -> None:
+    """Phase 1.1 Amendment 01: category and tags columns must be GONE from markets.
+
+    They never had real data — Gamma /markets returns NULL/[] for these fields.
+    They live on events instead (via event_tags many-to-many).
+    """
     ddl_cols = _ddl_markets_columns()
     schema_names = {f.name for f in SNAPSHOT_SCHEMA}
 
-    assert "tags" in ddl_cols, "tags not in DDL markets CREATE TABLE"
-    assert "tags" in MARKETS_COLUMN_ORDER, "tags not in MARKETS_COLUMN_ORDER"
-    assert "tags" in MARKETS_INSERT_SQL, "tags not in MARKETS_INSERT_SQL"
-    assert "tags" in schema_names, "tags not in SNAPSHOT_SCHEMA"
+    assert "category" not in ddl_cols, "category should be removed from markets DDL"
+    assert "category" not in MARKETS_COLUMN_ORDER, (
+        "category should be removed from MARKETS_COLUMN_ORDER"
+    )
+    # MARKETS_INSERT_SQL is a substring search — must NOT mention category
+    assert "category" not in MARKETS_INSERT_SQL, (
+        "category should be removed from MARKETS_INSERT_SQL"
+    )
+    assert "category" not in schema_names, (
+        "category should be removed from SNAPSHOT_SCHEMA"
+    )
+
+    assert "tags" not in ddl_cols, "tags should be removed from markets DDL"
+    assert "tags" not in MARKETS_COLUMN_ORDER, (
+        "tags should be removed from MARKETS_COLUMN_ORDER"
+    )
+    assert "tags" not in MARKETS_INSERT_SQL, (
+        "tags should be removed from MARKETS_INSERT_SQL"
+    )
+    assert "tags" not in schema_names, "tags should be removed from SNAPSHOT_SCHEMA"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,8 +238,6 @@ def test_question_translations_unique_question_en(tmp_path: Path) -> None:
     store.init_schema()
     con = sqlite3.connect(store.db_path)
     try:
-        # Insert one translation, then try to insert another row with the same question_en
-        # but different question_hash — UNIQUE index on question_en should block it.
         con.execute(
             "INSERT INTO question_translations("
             "question_hash, question_en, question_zh, translator_model, translated_at_ms"
@@ -226,15 +256,169 @@ def test_question_translations_unique_question_en(tmp_path: Path) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Phase 1.1 baseline numbers — exact values lock against silent reordering
+# 4. Amendment 01 — events table
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_markets_column_count_is_23_after_phase_1_1() -> None:
-    """After Phase 1.1 T1, markets table has 23 columns (Phase 1 had 21 + category + tags)."""
-    assert len(MARKETS_COLUMN_ORDER) == 23, (
-        f"Expected 23 columns after Phase 1.1, got {len(MARKETS_COLUMN_ORDER)}"
+def test_events_table_exists(tmp_path: Path) -> None:
+    """init_schema() must create events table."""
+    store = SQLiteStore(tmp_path / "ev.db")
+    store.init_schema()
+    con = sqlite3.connect(store.db_path)
+    try:
+        tables = {
+            r[0]
+            for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    finally:
+        con.close()
+    assert "events" in tables, "events table not created by init_schema()"
+
+
+def test_events_columns_match_constants(tmp_path: Path) -> None:
+    """events DDL columns must match EVENTS_COLUMN_ORDER + EVENTS_INSERT_SQL."""
+    ddl_cols = _ddl_table_columns("events")
+    placeholder_count = EVENTS_INSERT_SQL.count("?")
+
+    assert tuple(ddl_cols) == EVENTS_COLUMN_ORDER, (
+        f"events DDL columns don't match EVENTS_COLUMN_ORDER:\n"
+        f"  DDL: {ddl_cols}\n  ORDER: {list(EVENTS_COLUMN_ORDER)}"
     )
-    assert MARKETS_COLUMN_ORDER[-2:] == ("category", "tags"), (
-        f"category/tags must be the last two columns, got {MARKETS_COLUMN_ORDER[-2:]}"
+    assert placeholder_count == len(EVENTS_COLUMN_ORDER), (
+        f"EVENTS_INSERT_SQL placeholder count {placeholder_count} != "
+        f"len(EVENTS_COLUMN_ORDER) {len(EVENTS_COLUMN_ORDER)}"
+    )
+
+
+def test_events_composite_primary_key(tmp_path: Path) -> None:
+    """events PK is (id, snapshot_id) — same event id can recur across snapshots."""
+    store = SQLiteStore(tmp_path / "ev.db")
+    store.init_schema()
+    con = sqlite3.connect(store.db_path)
+    try:
+        # Insert prereq snapshot row.
+        con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path"
+            ") VALUES (?,?,?,?,?,?)",
+            (1, 2, "subset", 0, 1, "/tmp/x.parquet"),
+        )
+        con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path"
+            ") VALUES (?,?,?,?,?,?)",
+            (3, 4, "subset", 0, 1, "/tmp/y.parquet"),
+        )
+        # Same event_id "EV-1" in TWO different snapshots — must NOT collide.
+        con.execute(EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, 1))
+        con.execute(EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, 2))
+        # But same (id, snapshot_id) must be rejected.
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, 1)
+            )
+    finally:
+        con.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Amendment 01 — event_tags table
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_event_tags_table_exists(tmp_path: Path) -> None:
+    """init_schema() must create event_tags table."""
+    store = SQLiteStore(tmp_path / "et.db")
+    store.init_schema()
+    con = sqlite3.connect(store.db_path)
+    try:
+        tables = {
+            r[0]
+            for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    finally:
+        con.close()
+    assert "event_tags" in tables, "event_tags table not created by init_schema()"
+
+
+def test_event_tags_columns_match_constants() -> None:
+    """event_tags DDL columns must match EVENT_TAGS_COLUMN_ORDER + EVENT_TAGS_INSERT_SQL."""
+    ddl_cols = _ddl_table_columns("event_tags")
+    placeholder_count = EVENT_TAGS_INSERT_SQL.count("?")
+
+    assert tuple(ddl_cols) == EVENT_TAGS_COLUMN_ORDER, (
+        f"event_tags DDL columns don't match EVENT_TAGS_COLUMN_ORDER:\n"
+        f"  DDL: {ddl_cols}\n  ORDER: {list(EVENT_TAGS_COLUMN_ORDER)}"
+    )
+    assert placeholder_count == len(EVENT_TAGS_COLUMN_ORDER), (
+        f"EVENT_TAGS_INSERT_SQL placeholder count {placeholder_count} != "
+        f"len(EVENT_TAGS_COLUMN_ORDER) {len(EVENT_TAGS_COLUMN_ORDER)}"
+    )
+
+
+def test_event_tags_composite_primary_key(tmp_path: Path) -> None:
+    """event_tags PK = (event_id, tag_id, snapshot_id)."""
+    store = SQLiteStore(tmp_path / "et.db")
+    store.init_schema()
+    con = sqlite3.connect(store.db_path)
+    try:
+        con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path"
+            ") VALUES (?,?,?,?,?,?)",
+            (1, 2, "subset", 0, 1, "/tmp/x.parquet"),
+        )
+        # Different tag_id on same event in same snapshot — OK.
+        con.execute(EVENT_TAGS_INSERT_SQL, ("EV-1", "120", "Finance", "finance", 1))
+        con.execute(EVENT_TAGS_INSERT_SQL, ("EV-1", "100328", "Economy", "economy", 1))
+        # Duplicate (event_id, tag_id, snapshot_id) must be rejected.
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                EVENT_TAGS_INSERT_SQL, ("EV-1", "120", "Finance", "finance", 1)
+            )
+    finally:
+        con.close()
+
+
+def test_event_tags_indexes_exist(tmp_path: Path) -> None:
+    """idx_event_tags_label and idx_event_tags_slug must exist for tag lookups."""
+    store = SQLiteStore(tmp_path / "et.db")
+    store.init_schema()
+    con = sqlite3.connect(store.db_path)
+    try:
+        idx_names = {
+            r[0]
+            for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+    finally:
+        con.close()
+    assert "idx_event_tags_label" in idx_names
+    assert "idx_event_tags_slug" in idx_names
+    assert "idx_event_tags_snapshot" in idx_names
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Phase 1.1 Amendment 01 baseline — exact column count
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_markets_column_count_is_22_after_amendment_01() -> None:
+    """After Amendment 01, markets table has 22 columns.
+
+    Phase 1: 21 columns
+    Phase 1.1 pre-amendment: 23 columns (added category + tags)
+    Phase 1.1 Amendment 01: 22 columns (-category -tags +event_id)
+    """
+    assert len(MARKETS_COLUMN_ORDER) == 22, (
+        f"Expected 22 columns after Amendment 01, got {len(MARKETS_COLUMN_ORDER)}"
+    )
+    # event_id is last column
+    assert MARKETS_COLUMN_ORDER[-1] == "event_id", (
+        f"event_id must be the last markets column, got {MARKETS_COLUMN_ORDER[-1]}"
     )
