@@ -138,56 +138,85 @@ class GammaClient:
         if a page is not a list (defensive — Polymarket should always
         return ``list[dict]`` here).
         """
-        out: list[dict] = []
-        offset = 0
-        pages_fetched = 0
-        # Progress cadence: ~30s of API calls per emit at typical 280-req/10s
-        # rate (≈ 1.7 pages/sec). Choosing 50 keeps the user informed without
-        # spamming, and surfaces a 'stuck after page N' signal — when API hangs,
-        # the LAST progress line tells us where it died.
-        PROGRESS_EVERY = 50
-
-        # Emit a 'starting' line so the user sees something within seconds of
-        # process start, not 3-5 minutes after the first batch lands.
-        logger.info(f"Gamma: starting paginated fetch (page_limit={self.PAGE_LIMIT})")
-
-        while True:
-            params = {
+        return await self._paginate(
+            path="/markets",
+            params={
                 "active": "true",
                 "closed": "false",
                 "archived": "false",
-                "limit": self.PAGE_LIMIT,
-                "offset": offset,
-            }
-            page = await self._get("/markets", params)
+            },
+            label="markets",
+        )
+
+    async def fetch_all_active_events(self) -> list[dict]:
+        """Paginate ``/events`` and return every active+open event dict.
+
+        Phase 1.1 Amendment 01: Gamma's /events endpoint is the only source of
+        category/tags information (the /markets endpoint never returns them).
+        Each event row contains:
+            id, slug, title, ticker, liquidity, volume, endDate
+            tags: list[{id, label, slug, ...}]
+            markets: list[{id, ...}]   -- nested: lets us derive market→event_id
+
+        Empirically /events?active=true&closed=false 返回 ~5000 events containing
+        ~48k markets total (more than /markets — events is a richer view).
+
+        Returns RAW dicts verbatim — normalization is owned by
+        polyarb.snapshot.normalizer.normalize_events.
+        """
+        return await self._paginate(
+            path="/events",
+            params={
+                "active": "true",
+                "closed": "false",
+            },
+            label="events",
+        )
+
+    async def _paginate(self, *, path: str, params: dict, label: str) -> list[dict]:
+        """Shared pagination loop for /markets and /events.
+
+        ``params`` is a base dict (filters); we layer ``limit`` + ``offset`` on
+        each call. ``label`` is just for log readability.
+        """
+        out: list[dict] = []
+        offset = 0
+        pages_fetched = 0
+        PROGRESS_EVERY = 50
+
+        logger.info(
+            f"Gamma: starting paginated fetch of {label} (page_limit={self.PAGE_LIMIT})"
+        )
+
+        while True:
+            page_params = {**params, "limit": self.PAGE_LIMIT, "offset": offset}
+            page = await self._get(path, page_params)
             if not isinstance(page, list):
                 raise RuntimeError(
-                    f"Gamma /markets returned {type(page).__name__}, expected list"
+                    f"Gamma {path} returned {type(page).__name__}, expected list"
                 )
 
             out.extend(page)
             pages_fetched += 1
 
-            # Periodic progress (incl. page 1 so 'is this hung?' is answered fast).
             if pages_fetched == 1 or pages_fetched % PROGRESS_EVERY == 0:
                 logger.info(
-                    f"Gamma: page {pages_fetched} fetched ({len(out)} markets so far)"
+                    f"Gamma: {label} page {pages_fetched} fetched "
+                    f"({len(out)} {label} so far)"
                 )
 
-            # Short page → end of stream
             if len(page) < self.PAGE_LIMIT:
                 break
 
-            # F-2 SECURITY: ceiling check AFTER the increment. With PAGE_LIMIT=100
-            # and MAX_PAGES=1000 this allows up to 100k markets before failing.
             if pages_fetched >= self.MAX_PAGES:
                 raise RuntimeError(
-                    f"Gamma pagination exceeded {self.MAX_PAGES} pages — possible runaway response"
+                    f"Gamma {label} pagination exceeded {self.MAX_PAGES} pages "
+                    f"— possible runaway response"
                 )
 
             offset += self.PAGE_LIMIT
 
         logger.info(
-            f"Gamma fetched {len(out)} active markets in {pages_fetched} pages (final)"
+            f"Gamma fetched {len(out)} active {label} in {pages_fetched} pages (final)"
         )
         return out
