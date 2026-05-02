@@ -145,7 +145,7 @@ def test_neg_risk_incomplete_uses_group_by() -> None:
 def test_neg_risk_tolerance_002() -> None:
     """CONTEXT Open Question #2 decision: ±0.02 tolerance."""
     r = BUILTIN_RECIPES["neg-risk-incomplete"]
-    assert "0.02" in r.group_by
+    assert r.group_by is not None and "0.02" in r.group_by
 
 
 def test_by_tag_uses_group_by_tag_label() -> None:

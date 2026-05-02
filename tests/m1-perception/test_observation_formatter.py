@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
-from rich.console import Console
 from typer.testing import CliRunner
 
 from polyarb.cli_observation import app as obs_app
