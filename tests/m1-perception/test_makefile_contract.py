@@ -279,3 +279,104 @@ def test_makefile_translation_targets_phony() -> None:
     required = {"translate-pending", "translate-pending-sample", "translation-stats"}
     missing = required - phony_targets
     assert not missing, f"missing .PHONY for translation targets: {missing}"
+
+
+# =============================================================================
+# Phase 1.1 plan-03 — observation Makefile targets (8 targets)
+# =============================================================================
+
+
+_OBSERVATION_TARGETS = [
+    "scan-thick-but-slippery",
+    "scan-near-end",
+    "scan-ghost-suspicious",
+    "scan-coin-flip",
+    "scan-neg-risk-incomplete",
+    "scan-by-tag",
+    "list-recipes",
+    "scans-purge",
+]
+
+
+@pytest.mark.parametrize("target", _OBSERVATION_TARGETS)
+def test_make_observation_target_dry_run(target: str) -> None:
+    """Each observation target must dry-run cleanly."""
+    result = subprocess.run(
+        ["make", "-n", target],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, (
+        f"make -n {target} failed: {result.stderr}"
+    )
+    assert "polyarb.cli_observation" in result.stdout
+
+
+def test_make_scan_generic_dry_run() -> None:
+    """`make -n scan name=thick-but-slippery` resolves to the cli scan command."""
+    result = subprocess.run(
+        ["make", "-n", "scan", "name=thick-but-slippery"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n scan failed: {result.stderr}"
+    assert "polyarb.cli_observation scan" in result.stdout
+    assert "--name thick-but-slippery" in result.stdout
+
+
+def test_make_help_lists_observation_targets() -> None:
+    """make help must surface all 8 observation targets."""
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+    assert result.returncode == 0, f"make help failed: {result.stderr}"
+    expected = [
+        "scan-thick-but-slippery:",
+        "scan-near-end:",
+        "scan-ghost-suspicious:",
+        "scan-coin-flip:",
+        "scan-neg-risk-incomplete:",
+        "scan-by-tag:",
+        "list-recipes:",
+        "scans-purge:",
+    ]
+    for target in expected:
+        assert target in result.stdout, f"missing in `make help`: {target}"
+
+
+def test_makefile_observation_targets_phony() -> None:
+    """All 8 observation targets + the generic `scan` target must be .PHONY."""
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    phony_targets: set[str] = set()
+    for line in makefile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(".PHONY:"):
+            phony_targets.update(stripped[len(".PHONY:"):].split())
+    required = {*_OBSERVATION_TARGETS, "scan"}
+    missing = required - phony_targets
+    assert not missing, f"missing .PHONY for observation targets: {missing}"
+
+
+def test_makefile_scan_by_tag_replaces_by_category() -> None:
+    """Amendment 01: there is NO scan-by-category target; it was renamed to scan-by-tag."""
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    assert "scan-by-tag:" in makefile
+    # Recipe lines (target definitions, not comments) should not reference
+    # the old `by-category` recipe name.
+    recipe_lines = [
+        ln
+        for ln in makefile.splitlines()
+        if ln.startswith("scan-") and ln.endswith(":")
+    ]
+    for ln in recipe_lines:
+        assert "by-category" not in ln, (
+            f"stale by-category target should be by-tag: {ln!r}"
+        )

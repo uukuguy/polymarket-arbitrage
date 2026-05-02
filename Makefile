@@ -108,6 +108,48 @@ translation-stats:
 	uv run python -m polyarb.cli_translation translation-stats
 
 # ─────────────────────────────────────────────────────────────────────────────
+# M1-perception Phase 01.1: observation toolkit (plan 03)
+# ─────────────────────────────────────────────────────────────────────────────
+
+.PHONY: scan scan-thick-but-slippery scan-near-end scan-ghost-suspicious scan-coin-flip scan-neg-risk-incomplete scan-by-tag list-recipes scans-purge
+
+## scan: Generic recipe runner — usage: make scan name=<recipe>
+scan:
+	uv run python -m polyarb.cli_observation scan --name $(name) --verbose
+
+## scan-thick-but-slippery: Trap markets — high liq ($100k+) but wide spread (>$0.10)
+scan-thick-but-slippery:
+	uv run python -m polyarb.cli_observation scan --name thick-but-slippery --verbose
+
+## scan-near-end: Markets resolving within 72h — densest arbitrage windows
+scan-near-end:
+	uv run python -m polyarb.cli_observation scan --name near-end --verbose
+
+## scan-ghost-suspicious: CLOB/Gamma cross-validation failures (ghost_book signal)
+scan-ghost-suspicious:
+	uv run python -m polyarb.cli_observation scan --name ghost-suspicious --verbose
+
+## scan-coin-flip: High-uncertainty markets (mid 0.45-0.55, 7-day end window)
+scan-coin-flip:
+	uv run python -m polyarb.cli_observation scan --name coin-flip --verbose
+
+## scan-neg-risk-incomplete: Neg-risk groups whose mid sum deviates from 1.0 by >0.02 (M2 arb signal)
+scan-neg-risk-incomplete:
+	uv run python -m polyarb.cli_observation scan --name neg-risk-incomplete --verbose
+
+## scan-by-tag: Tag-level aggregates (market count / total liq / avg spread per tag)
+scan-by-tag:
+	uv run python -m polyarb.cli_observation scan --name by-tag --verbose
+
+## list-recipes: Show all available scan recipes (builtin + user yaml)
+list-recipes:
+	uv run python -m polyarb.cli_observation list-recipes
+
+## scans-purge: Delete data/scans/ parquet files older than 30 days
+scans-purge:
+	uv run python -m polyarb.cli_observation scans-purge --older-than-days 30
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
