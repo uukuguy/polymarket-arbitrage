@@ -204,7 +204,12 @@ CLAUDE.md 是**契约**，状态在别处：
 
 ## 技术栈（已锁定）
 
-- Python 3.12+ 主线
+- Python 3.12+ 主线（pin 在 `.python-version`）
+- 包管理：**uv**（`uv.lock` 是 source of truth；`pyproject.toml` 用 hatchling build backend）
+  - 加依赖：`uv add <pkg>`（自动改 pyproject + 更新 lock + 装包）
+  - 装环境：`uv sync --extra dev`
+  - 跑命令：`uv run python -m polyarb.xxx`（免 activate；自动 sync lock）
+  - **不要**用 `pip install` 直装（会脱离 lockfile 一致性）
 - Claude (Anthropic SDK) — 不引 LangChain/LangGraph 等中间层
 - SQLite (热) + Parquet (冷) + YAML (配置)
 - Rust 升级仅在 M3+ 实盘数据证明需要时考虑
