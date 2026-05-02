@@ -186,3 +186,96 @@ def test_cli_summary_format_matches_spec(
 # Typer apps with multiple commands; with a single @app.command() typer treats
 # bare invocation as "run the only command with no args" which triggers a real
 # pipeline run + live network. The --help test below covers the help-text contract.
+
+
+# =============================================================================
+# Phase 1.1 plan-02 — translation Makefile targets
+# =============================================================================
+
+
+def test_make_translate_pending_dry_run() -> None:
+    """`make -n translate-pending` resolves to the cli_translation entry."""
+    result = subprocess.run(
+        ["make", "-n", "translate-pending"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "polyarb.cli_translation translate-pending" in result.stdout
+    # Without FORCE=1 the recipe must NOT include --force-full
+    recipe_lines = [
+        ln for ln in result.stdout.splitlines() if "cli_translation" in ln
+    ]
+    for ln in recipe_lines:
+        assert "--force-full" not in ln, (
+            f"translate-pending without FORCE=1 must not pass --force-full: {ln!r}"
+        )
+
+
+def test_make_translate_pending_force_full_dry_run() -> None:
+    """`make -n translate-pending FORCE=1` adds --force-full to the recipe."""
+    result = subprocess.run(
+        ["make", "-n", "translate-pending", "FORCE=1"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "polyarb.cli_translation translate-pending" in result.stdout
+    assert "--force-full" in result.stdout
+
+
+def test_make_translate_pending_sample_dry_run() -> None:
+    """`make -n translate-pending-sample` includes --limit 50."""
+    result = subprocess.run(
+        ["make", "-n", "translate-pending-sample"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "--limit 50" in result.stdout
+
+
+def test_make_translation_stats_dry_run() -> None:
+    result = subprocess.run(
+        ["make", "-n", "translation-stats"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "polyarb.cli_translation translation-stats" in result.stdout
+
+
+def test_make_help_lists_translation_targets() -> None:
+    """make help must surface all 3 translation targets."""
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+    assert result.returncode == 0, f"make help failed: {result.stderr}"
+    assert "translate-pending:" in result.stdout
+    assert "translate-pending-sample:" in result.stdout
+    assert "translation-stats:" in result.stdout
+
+
+def test_makefile_translation_targets_phony() -> None:
+    """All 3 translation targets must be declared .PHONY."""
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    phony_targets: set[str] = set()
+    for line in makefile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(".PHONY:"):
+            phony_targets.update(stripped[len(".PHONY:"):].split())
+    required = {"translate-pending", "translate-pending-sample", "translation-stats"}
+    missing = required - phony_targets
+    assert not missing, f"missing .PHONY for translation targets: {missing}"

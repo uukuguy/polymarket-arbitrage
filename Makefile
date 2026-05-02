@@ -89,6 +89,25 @@ snapshot-cache-purge:
 	@uv run python -c "from pathlib import Path; from polyarb.snapshot.cache import ChunkCache; n = ChunkCache.purge_all(Path('data/.cache')); print(f'purged {n} cache directories')"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# M1-perception Phase 01.1: translation
+# ─────────────────────────────────────────────────────────────────────────────
+
+.PHONY: translate-pending translate-pending-sample translation-stats
+
+## translate-pending: Translate all markets where question_zh is missing.
+##                    Use FORCE=1 to bypass the first-run sample-first guard.
+translate-pending:
+	uv run python -m polyarb.cli_translation translate-pending --verbose $(if $(FORCE),--force-full,)
+
+## translate-pending-sample: Dry-run — translate 50 questions to verify .env config first
+translate-pending-sample:
+	uv run python -m polyarb.cli_translation translate-pending --limit 50 --verbose
+
+## translation-stats: Show cumulative translation stats grouped by translator_model
+translation-stats:
+	uv run python -m polyarb.cli_translation translation-stats
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
 

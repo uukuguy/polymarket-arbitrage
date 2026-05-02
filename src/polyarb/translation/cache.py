@@ -109,9 +109,14 @@ class TranslationCache:
     ) -> list[tuple[str, str]]:
         """Return ``[(question_hash, question_en), ...]`` for markets lacking a translation.
 
-        A question is "untranslated" if NO row in question_translations exists with
-        is_dead=0 for that question text. Dead translations (is_dead=1) are NOT
-        re-attempted automatically; user must manually reset to retry.
+        A question is "untranslated" if either:
+          (a) NO row exists in question_translations for this question_en, OR
+          (b) A row exists with question_zh='' (retry placeholder) AND is_dead=0
+              — the question was attempted but failed and is still retryable.
+
+        Dead translations (is_dead=1) are NEVER re-attempted automatically;
+        manually clear is_dead=0 to retry. Successful translations
+        (question_zh != '') are NEVER re-attempted.
 
         Returns at most ``limit`` rows when given (None = unlimited). Hash is
         computed in Python (sha256) so it matches the upsert path exactly.
@@ -123,7 +128,10 @@ class TranslationCache:
                 "LEFT JOIN question_translations qt "
                 "  ON qt.question_en = m.question "
                 "WHERE m.question IS NOT NULL "
-                "  AND qt.question_hash IS NULL"
+                "  AND ("
+                "    qt.question_hash IS NULL "       # never attempted
+                "    OR (qt.question_zh = '' AND qt.is_dead = 0)"  # placeholder, retryable
+                "  )"
             )
             if limit is not None:
                 sql += f" LIMIT {int(limit)}"
