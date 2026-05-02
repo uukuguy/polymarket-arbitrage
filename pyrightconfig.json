@@ -1,0 +1,18 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "include": ["src", "tests", "scripts"],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "data",
+    "3th-party",
+    ".planning"
+  ],
+  "reportMissingImports": "error",
+  "reportUnusedImport": "warning",
+  "reportUnusedVariable": "none",
+  "reportUnusedFunction": "none",
+  "reportUnusedParameter": "none"
+}

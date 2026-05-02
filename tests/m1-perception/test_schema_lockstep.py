@@ -277,7 +277,7 @@ def test_events_table_exists(tmp_path: Path) -> None:
     assert "events" in tables, "events table not created by init_schema()"
 
 
-def test_events_columns_match_constants(tmp_path: Path) -> None:
+def test_events_columns_match_constants() -> None:
     """events DDL columns must match EVENTS_COLUMN_ORDER + EVENTS_INSERT_SQL."""
     ddl_cols = _ddl_table_columns("events")
     placeholder_count = EVENTS_INSERT_SQL.count("?")
