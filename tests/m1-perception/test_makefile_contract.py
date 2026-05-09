@@ -455,3 +455,71 @@ def test_makefile_plan04_targets_phony() -> None:
             phony_targets.update(stripped[len(".PHONY:"):].split())
     missing = set(_PLAN04_TARGETS) - phony_targets
     assert not missing, f"missing .PHONY for plan-04 targets: {missing}"
+
+
+# =============================================================================
+# Phase 1.1 plan-05 — show-market + watchlist + watchlist-alerts (3 targets)
+# =============================================================================
+
+
+_PLAN05_TARGETS = ["show-market", "watchlist", "watchlist-alerts"]
+
+
+@pytest.mark.parametrize("target", _PLAN05_TARGETS)
+def test_make_plan05_target_dry_run(target: str) -> None:
+    result = subprocess.run(
+        ["make", "-n", target, "slug=test"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n {target} failed: {result.stderr}"
+    assert "polyarb.cli_observation" in result.stdout
+
+
+def test_make_show_market_dry_run() -> None:
+    result = subprocess.run(
+        ["make", "-n", "show-market", "slug=will-x-happen"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "--slug will-x-happen" in result.stdout
+
+
+def test_make_watchlist_dry_run() -> None:
+    result = subprocess.run(
+        ["make", "-n", "watchlist"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "watchlist" in result.stdout
+
+
+def test_make_watchlist_alerts_dry_run() -> None:
+    result = subprocess.run(
+        ["make", "-n", "watchlist-alerts"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "watchlist-alerts" in result.stdout
+
+
+def test_makefile_plan05_targets_phony() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    phony_targets: set[str] = set()
+    for line in makefile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(".PHONY:"):
+            phony_targets.update(stripped[len(".PHONY:"):].split())
+    missing = set(_PLAN05_TARGETS) - phony_targets
+    assert not missing, f"missing .PHONY for plan-05 targets: {missing}"

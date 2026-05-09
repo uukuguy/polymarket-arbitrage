@@ -111,7 +111,7 @@ translation-stats:
 # M1-perception Phase 01.1: observation toolkit (plan 03)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: scan scan-thick-but-slippery scan-near-end scan-ghost-suspicious scan-coin-flip scan-neg-risk-incomplete scan-by-tag list-recipes scans-purge compare-snapshots track-market
+.PHONY: scan scan-thick-but-slippery scan-near-end scan-ghost-suspicious scan-coin-flip scan-neg-risk-incomplete scan-by-tag list-recipes scans-purge compare-snapshots track-market show-market watchlist watchlist-alerts
 
 ## scan: Generic recipe runner — usage: make scan name=<recipe>
 scan:
@@ -156,6 +156,18 @@ compare-snapshots:
 ## track-market: Single market time-series across all snapshots. Usage: make track-market slug=<X>
 track-market:
 	uv run python -m polyarb.cli_observation track-market --slug $(slug) --verbose
+
+## show-market: Full detail for one market (bilingual + time-dim + neg-risk siblings + 5-snapshot history). Usage: make show-market slug=<X>
+show-market:
+	uv run python -m polyarb.cli_observation show-market --slug $(slug) --verbose
+
+## watchlist: List all markets in watchlist.yaml with current status
+watchlist:
+	uv run python -m polyarb.cli_observation watchlist --verbose
+
+## watchlist-alerts: Check alert_when conditions and print triggered entries
+watchlist-alerts:
+	uv run python -m polyarb.cli_observation watchlist-alerts --verbose
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests

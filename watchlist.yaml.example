@@ -1,0 +1,25 @@
+# Phase 1.1 watchlist
+# 复制本文件为 watchlist.yaml（已 gitignore），在那里管理你的真实 watchlist。
+#
+# alert_when 表达式语法：
+#   变量：mid / bid / ask / spread / liq / vol
+#   （或全名 mid_price / best_bid_price / best_ask_price / liquidity_usd / volume_usd）
+#   算术：+ - * /
+#   比较：< <= > >= == !=
+#   布尔：and or not
+#   禁止：函数调用 / 属性访问 / 字符串 / 任何其它 Python 语法
+#
+# 示例：
+#   spread < 0.02          — bid/ask 价差 < 2 分
+#   mid > 0.6 and liq > 5000  — 买盘持续上升
+#   mid < 0.4 or mid > 0.6    — 偏离 50/50 区域
+
+- slug: will-trump-be-elected-2024
+  reason: 临近大选，跟踪长尾
+  alert_when: spread < 0.02
+  added: 2026-05-01
+
+- slug: example-coin-flip-market
+  reason: 50/50 长期持有
+  alert_when: mid < 0.4 or mid > 0.6
+  added: 2026-05-01
