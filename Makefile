@@ -111,7 +111,7 @@ translation-stats:
 # M1-perception Phase 01.1: observation toolkit (plan 03)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: scan scan-thick-but-slippery scan-near-end scan-ghost-suspicious scan-coin-flip scan-neg-risk-incomplete scan-by-tag list-recipes scans-purge
+.PHONY: scan scan-thick-but-slippery scan-near-end scan-ghost-suspicious scan-coin-flip scan-neg-risk-incomplete scan-by-tag list-recipes scans-purge compare-snapshots track-market
 
 ## scan: Generic recipe runner — usage: make scan name=<recipe>
 scan:
@@ -148,6 +148,14 @@ list-recipes:
 ## scans-purge: Delete data/scans/ parquet files older than 30 days
 scans-purge:
 	uv run python -m polyarb.cli_observation scans-purge --older-than-days 30
+
+## compare-snapshots: Diff two snapshots (default: N-1 → N). Usage: make compare-snapshots [from=N to=M]
+compare-snapshots:
+	uv run python -m polyarb.cli_observation compare-snapshots $(if $(from),--from $(from)) $(if $(to),--to $(to)) --verbose
+
+## track-market: Single market time-series across all snapshots. Usage: make track-market slug=<X>
+track-market:
+	uv run python -m polyarb.cli_observation track-market --slug $(slug) --verbose
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests

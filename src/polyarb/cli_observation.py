@@ -29,6 +29,11 @@ import typer
 from loguru import logger
 
 from polyarb.config import load_settings
+from polyarb.observation.diff import (
+    compare_snapshots,
+    latest_snapshot_pair,
+    resolve_snapshot_path,
+)
 from polyarb.observation.formatter import render_table, write_scan_parquet
 from polyarb.observation.recipes import BUILTIN_RECIPES
 from polyarb.observation.scanner import (
@@ -36,6 +41,7 @@ from polyarb.observation.scanner import (
     run_recipe,
     run_recipe_grouped,
 )
+from polyarb.observation.tracker import track_market
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
@@ -132,6 +138,74 @@ def scans_purge_cmd(
         except OSError as e:
             logger.warning(f"could not unlink {f}: {e}")
     typer.echo(f"purged {deleted} parquet files older than {older_than_days} days")
+
+
+@app.command(name="compare-snapshots")
+def compare_snapshots_cmd(
+    from_id: int | None = typer.Option(
+        None, "--from", help="Snapshot ID (default: N-1)"
+    ),
+    to_id: int | None = typer.Option(None, "--to", help="Snapshot ID (default: N)"),
+    limit: int = typer.Option(50, "--limit", help="Top N rows by drift magnitude"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Diff two snapshots — show appeared / vanished / drifted markets."""
+    _setup_logger(verbose)
+    settings = load_settings()
+    try:
+        if from_id is None or to_id is None:
+            from_id, to_id = latest_snapshot_pair(settings.db_path)
+            logger.info(f"defaulting to latest pair: from={from_id} to={to_id}")
+        from_path = resolve_snapshot_path(from_id, settings.db_path)
+        to_path = resolve_snapshot_path(to_id, settings.db_path)
+    except ValueError as e:
+        typer.echo(f"compare-snapshots failed: {e}", err=True)
+        raise typer.Exit(1)
+    df = compare_snapshots(from_path, to_path).head(limit)
+    render_table(
+        df,
+        title=f"compare snapshots {from_id} → {to_id}",
+        columns=(
+            "slug",
+            "category",
+            "state",
+            "mid_from",
+            "mid_to",
+            "mid_drift",
+            "liq_from",
+            "liq_to",
+        ),
+    )
+    typer.echo(f"OK | from={from_id} to={to_id} | rows={len(df)}")
+
+
+@app.command(name="track-market")
+def track_market_cmd(
+    slug: str = typer.Option(..., "--slug"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Track a single market across all snapshot parquets."""
+    _setup_logger(verbose)
+    settings = load_settings()
+    df = track_market(slug, settings.parquet_root)
+    if df.empty:
+        typer.echo(f"no history for slug={slug}", err=True)
+        raise typer.Exit(1)
+    render_table(
+        df,
+        title=f"track-market: {slug}",
+        columns=(
+            "taken_at_ms",
+            "snapshot_id",
+            "mid_price",
+            "best_bid_price",
+            "best_ask_price",
+            "spread",
+            "liquidity_usd",
+            "volume_usd",
+        ),
+    )
+    typer.echo(f"OK | slug={slug} | snapshots={len(df)}")
 
 
 if __name__ == "__main__":

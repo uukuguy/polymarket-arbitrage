@@ -380,3 +380,78 @@ def test_makefile_scan_by_tag_replaces_by_category() -> None:
         assert "by-category" not in ln, (
             f"stale by-category target should be by-tag: {ln!r}"
         )
+
+
+# =============================================================================
+# Phase 1.1 plan-04 — compare-snapshots + track-market Makefile targets (2 targets)
+# =============================================================================
+
+
+_PLAN04_TARGETS = ["compare-snapshots", "track-market"]
+
+
+@pytest.mark.parametrize("target", _PLAN04_TARGETS)
+def test_make_plan04_target_dry_run(target: str) -> None:
+    """Each plan-04 target must dry-run cleanly."""
+    result = subprocess.run(
+        ["make", "-n", target],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n {target} failed: {result.stderr}"
+    assert "polyarb.cli_observation" in result.stdout
+
+
+def test_make_compare_snapshots_with_args() -> None:
+    """`make -n compare-snapshots from=1 to=2` passes --from 1 --to 2."""
+    result = subprocess.run(
+        ["make", "-n", "compare-snapshots", "from=1", "to=2"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "--from" in result.stdout
+    assert "--to" in result.stdout
+
+
+def test_make_track_market_with_slug() -> None:
+    """`make -n track-market slug=will-x-happen` passes --slug will-x-happen."""
+    result = subprocess.run(
+        ["make", "-n", "track-market", "slug=will-x-happen"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert "--slug will-x-happen" in result.stdout
+
+
+def test_make_help_lists_plan04_targets() -> None:
+    """make help must surface both plan-04 targets."""
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+    assert result.returncode == 0, f"make help failed: {result.stderr}"
+    assert "compare-snapshots:" in result.stdout
+    assert "track-market:" in result.stdout
+
+
+def test_makefile_plan04_targets_phony() -> None:
+    """Both plan-04 targets must be declared .PHONY."""
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    phony_targets: set[str] = set()
+    for line in makefile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(".PHONY:"):
+            phony_targets.update(stripped[len(".PHONY:"):].split())
+    missing = set(_PLAN04_TARGETS) - phony_targets
+    assert not missing, f"missing .PHONY for plan-04 targets: {missing}"
