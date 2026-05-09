@@ -15,6 +15,7 @@
 | 04 | [Validator 三层防御](04-validator-layers.md) | Layer 1/2/4 各防什么、为什么没有 Layer 3、ghost_book 在第几层、为什么 is_valid 只看 Layer 1 |
 | 05 | [Issue #180 ghost_book 实战](05-ghost-book-issue-180.md) | 这个问题的根源、为什么影响 72%、下游策略写代码时的硬约束 |
 | 06 | [代码安全约束（F-1 ~ F-8）](06-security-invariants.md) | 为什么每个 `float()` 都包 try、为什么 `MAX_PAGES=1000`、F 编号代表什么 |
+| 07 | [观察市场（Observation Toolkit + Translation）](07-观察市场.md) | 6 个配方分别看什么、workflow 怎么走、翻译/AST/diff 三个设计取舍、5 道自检题 |
 
 ## 每篇文档的体例
 

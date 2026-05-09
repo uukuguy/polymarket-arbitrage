@@ -108,7 +108,20 @@ translation-stats:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
-# M1-perception Phase 01.1: observation toolkit
+# M1-perception Phase 01.1: observation toolkit + translation
+#
+# Typical daily workflow:
+#   1. make snapshot-markets-v          # 拿当天数据（自动翻译）
+#   2. make scan-near-end               # 找候选（或其它 scan-*）
+#   3. make show-market slug=<X>        # 深看候选
+#   4. (edit watchlist.yaml)            # 加入自选
+#   5. make watchlist-alerts            # 查触发
+#   6. make track-market slug=<X>       # 看时序
+#   7. make compare-snapshots           # 对比漂移
+#
+# See docs/learning/07-观察市场.md for detailed mental model.
+#
+# Plans 02-05 出处。Phase 1.2 / Phase 2 添加新段时勿混入本段。
 # ─────────────────────────────────────────────────────────────────────────────
 # Recipe scans (plan 03) + cross-snapshot diff & tracker (plan 04) +
 # show-market & watchlist (plan 05)
