@@ -46,7 +46,7 @@ journal:
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-fresh snapshot-cache-purge test test-snapshot test-signal test-slippage
+.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-fresh snapshot-cache-purge
 
 ## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly.
 snapshot-markets:
@@ -94,8 +94,7 @@ snapshot-cache-purge:
 
 .PHONY: translate-pending translate-pending-sample translation-stats
 
-## translate-pending: Translate all markets where question_zh is missing.
-##                    Use FORCE=1 to bypass the first-run sample-first guard.
+## translate-pending: Translate all markets missing Chinese translation. FORCE=1 to skip sample-first guard.
 translate-pending:
 	uv run python -m polyarb.cli_translation translate-pending --verbose $(if $(FORCE),--force-full,)
 
@@ -108,8 +107,11 @@ translation-stats:
 	uv run python -m polyarb.cli_translation translation-stats
 
 # ─────────────────────────────────────────────────────────────────────────────
-# M1-perception Phase 01.1: observation toolkit (plan 03)
 # ─────────────────────────────────────────────────────────────────────────────
+# M1-perception Phase 01.1: observation toolkit
+# ─────────────────────────────────────────────────────────────────────────────
+# Recipe scans (plan 03) + cross-snapshot diff & tracker (plan 04) +
+# show-market & watchlist (plan 05)
 
 .PHONY: scan scan-thick-but-slippery scan-near-end scan-ghost-suspicious scan-coin-flip scan-neg-risk-incomplete scan-by-tag list-recipes scans-purge compare-snapshots track-market show-market watchlist watchlist-alerts
 
@@ -173,9 +175,19 @@ watchlist-alerts:
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+.PHONY: test test-m1 test-observation test-slippage
+
 ## test: Run all tests
 test:
 	@uv run pytest -v tests/
+
+## test-m1: Run all M1 market perception tests
+test-m1:
+	@uv run pytest -v tests/m1-perception/
+
+## test-observation: Run observation module tests (scanner / diff / tracker / show / watchlist / recipes / formatter)
+test-observation:
+	@uv run pytest -v tests/m1-perception/test_observation_*.py
 
 ## test-slippage: Run slippage model tests
 test-slippage:
