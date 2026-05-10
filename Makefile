@@ -42,6 +42,10 @@ status:
 journal:
 	@$${EDITOR:-cat} .planning/JOURNAL.md
 
+## planning-status: Audit .planning/ vs git — surface "code shipped, doc didn't follow" drift
+planning-status:
+	@uv run python scripts/planning_status.py
+
 # ─────────────────────────────────────────────────────────────────────────────
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────

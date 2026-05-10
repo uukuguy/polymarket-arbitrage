@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# pre-commit hook — enforce planning hygiene
+#
+# Rule: any commit whose subject matches `feat(NN.N-MM)` or `feat(NN-MM)`
+# must have the corresponding SUMMARY.md present in the working tree
+# (either added in this same commit, or already on disk).
+#
+# Why: code-vs-doc drift kills the project's "可检索不失忆" property.
+# Plan 04/05/06 of phase 01.1 shipped without SUMMARY because the executor
+# bypassed /gsd-execute-plan. This hook ensures it can't happen silently again.
+#
+# Bypass: `git commit --no-verify` (use sparingly; you'll be reminded next session).
+
+set -euo pipefail
+
+# Read the prepared commit message (first line is subject)
+COMMIT_MSG_FILE="${1:-}"
+if [ -n "$COMMIT_MSG_FILE" ] && [ -f "$COMMIT_MSG_FILE" ]; then
+  SUBJECT=$(head -n1 "$COMMIT_MSG_FILE")
+else
+  # When invoked as plain pre-commit (no args), there's no message yet.
+  # We piggy-back on the prepare-commit-msg hook OR rely on the next push.
+  # For robustness, also peek at COMMIT_EDITMSG if it exists.
+  if [ -f .git/COMMIT_EDITMSG ]; then
+    SUBJECT=$(head -n1 .git/COMMIT_EDITMSG)
+  else
+    exit 0
+  fi
+fi
+
+# Extract phase/plan from subject like:
+#   feat(01.1-04): xxx     → phase=01.1 plan=04
+#   feat(01-3):  xxx       → phase=01   plan=3
+#   chore(01.1): xxx       → no plan, skip
+#   feat: xxx              → no scope,  skip
+PHASE_PLAN=$(printf '%s\n' "$SUBJECT" \
+  | grep -oE '^(feat|fix|refactor|test|perf)\(([0-9]+\.?[0-9]*)-([0-9]+)\)' \
+  | head -n1 \
+  | sed -E 's/^[a-z]+\(([0-9]+\.?[0-9]*)-([0-9]+)\)/\1 \2/' \
+  || true)
+
+if [ -z "$PHASE_PLAN" ]; then
+  exit 0  # no plan-scoped commit, nothing to enforce
+fi
+
+PHASE=$(printf '%s' "$PHASE_PLAN" | awk '{print $1}')
+PLAN=$(printf '%s' "$PHASE_PLAN" | awk '{print $2}')
+
+# Locate the phase directory under any workstream
+PHASE_DIR=$(find .planning/workstreams -type d -name "${PHASE}-*" 2>/dev/null | head -n1 || true)
+
+if [ -z "$PHASE_DIR" ]; then
+  # Fallback to legacy non-workstream layout
+  PHASE_DIR=$(find .planning/phases -maxdepth 1 -type d -name "${PHASE}-*" 2>/dev/null | head -n1 || true)
+fi
+
+if [ -z "$PHASE_DIR" ]; then
+  printf '\033[33m⚠ pre-commit: phase dir for %s not found; skipping SUMMARY check\033[0m\n' "$PHASE" >&2
+  exit 0
+fi
+
+# Expected SUMMARY filename uses the same phase notation as PLAN files.
+# Try a few common patterns (project varies between 01.1-04-SUMMARY.md and 01-04-SUMMARY.md):
+SUMMARY_CANDIDATES=(
+  "${PHASE_DIR}/${PHASE}-${PLAN}-SUMMARY.md"
+  "${PHASE_DIR}/${PHASE}-$(printf '%02d' "$PLAN")-SUMMARY.md"
+)
+
+SUMMARY_FOUND=""
+for c in "${SUMMARY_CANDIDATES[@]}"; do
+  if [ -f "$c" ]; then
+    SUMMARY_FOUND="$c"
+    break
+  fi
+done
+
+# Also accept SUMMARY being staged in this same commit
+if [ -z "$SUMMARY_FOUND" ]; then
+  for c in "${SUMMARY_CANDIDATES[@]}"; do
+    if git diff --cached --name-only | grep -qxF "$c"; then
+      SUMMARY_FOUND="$c"
+      break
+    fi
+  done
+fi
+
+if [ -z "$SUMMARY_FOUND" ]; then
+  printf '\n\033[31m✗ pre-commit BLOCKED\033[0m\n' >&2
+  printf '\n  Commit subject:  %s\n' "$SUBJECT" >&2
+  printf '  Phase:           %s\n' "$PHASE" >&2
+  printf '  Plan:            %s\n' "$PLAN" >&2
+  printf '  Phase dir:       %s\n' "$PHASE_DIR" >&2
+  printf '  Looked for:      %s\n' "${SUMMARY_CANDIDATES[*]}" >&2
+  printf '\n  Reason:\n' >&2
+  printf '    A plan-scoped commit (feat/fix/refactor/test/perf with NN.N-MM scope)\n' >&2
+  printf '    must have a corresponding SUMMARY.md — either already on disk or\n' >&2
+  printf '    staged in this same commit.\n' >&2
+  printf '\n  Why this rule exists:\n' >&2
+  printf '    Plan SUMMARY is the project'"'"'s "可检索不失忆" anchor. Without it,\n' >&2
+  printf '    code lands but knowledge evaporates. Plan 04/05/06 of phase 01.1\n' >&2
+  printf '    drifted exactly this way (2026-05-09).\n' >&2
+  printf '\n  Fix:\n' >&2
+  printf '    1. Write the SUMMARY (template: ~/.claude/get-shit-done/templates/summary.md)\n' >&2
+  printf '    2. git add it, then re-commit\n' >&2
+  printf '\n  Bypass (use sparingly):\n' >&2
+  printf '    git commit --no-verify   # you will be reminded next session\n\n' >&2
+  exit 1
+fi
+
+# Found — log it and proceed
+printf '\033[32m✓ pre-commit: SUMMARY check passed (%s)\033[0m\n' "$SUMMARY_FOUND" >&2
+exit 0
