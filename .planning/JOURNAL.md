@@ -822,8 +822,20 @@
 
   扫描结果：所有 12 个 plan 全 OK（无 DRIFT）。
 
-- [SESSION commit 列表（待）]:
-  - 上述 SUMMARY + 基础设施 + STATE/JOURNAL 更新 — 本 commit 块（待 commit）
+- [SESSION 14 续 — 用户追加部署形态约束（架构 thread §0.2.1）]:
+
+  > "现在就要设计可直接实施的部署架构，使用面向创业公司的云基础设施 — 服务器、
+  > 数据库、监控网站等。日级全量 / 定向 / 单市场 K 线采集服务和监测管理服务，
+  > 完全可以本地研发完成直接一键部署云端开始工作。具体选型可以深度研究一下，
+  > 选主流稳定价格合适的。"
+
+  **影响**：
+  - thread §0.2.1 锁部署形态（本地研发 → 一键部署 → 云上 7×24，**不是**先本地后迁移）
+  - thread §0.3 加结论 8/9（云原生优先 + 一键部署是工程纪律）
+  - thread §1.5 抽象 B 时序后端选型方向收敛（PaaS-friendly 优先）
+  - **新增 §2.6 云原生部署架构选型** — 6 维度（compute / db / observability / deployment / dashboard / 跨方向约束）+ 5-8 候选对比 + 价格分档
+  - thread §5 Phase 02 范围扩展（云上 7×24 + 一键部署链路打通 + 监控网站雏形）
+  - 新建 `threads/deployment-architecture.md`（待 §2.6 调研产出）
 
 - [NEXT] 下次会话从这里开始：
 
@@ -833,25 +845,48 @@
   make planning-status   # 应全 OK；任何 DRIFT 先补再开新工作
   ```
 
-  **第 2 步**（推进 Phase 02 调研循环）— 见 `.planning/threads/market-observation-architecture.md` §2：
-  - **2.1 实证调研**（1 小时内可出结果）— 当前快照"时间一致性"的真实情况：
-    - 读 `src/polyarb/snapshot/orchestrator.py` + `clients/gamma_client.py` 看 `fetched_at_ms` 怎么 stamp
-    - 拉一个真实 snapshot，导 parquet，按市场 group_by 看 `fetched_at_ms` 分布
-    - 跑一次重复 snapshot（10 分钟内连跑 2 次），对同一市场比 mid 价差
-  - **2.5 同窗口**（评估 L1 生产级缺口）
-  - **2.4** （看 `3th-party/polymarket-kalshi-weather-bot` 现成实现）
-  - **2.2 + 2.3** 推迟（影响 L2/L3 架构，框架启动期不需要）
+  **第 2 步**（推进 thread §2 调研循环 — 三窗口）：
 
-  **第 3 步**（架构方案 v1 + Phase 02 开干）：
-  - 调研结果回写 thread 对应章节
-  - 基于 thread §3/§4 答案产出 "三层架构方案 v1"
-  - 开 Phase 02 = L1 生产级长跑（cron + 失败告警 + 日志 rotate + 健康监控）+ 框架抽象 A 落地
+  - **窗口 A（1 小时，实证）**：§2.1 时间一致性 + §2.5 生产级缺口
+    - 读 `src/polyarb/snapshot/orchestrator.py` + `clients/gamma_client.py` 看 `fetched_at_ms` 怎么 stamp
+    - 拉真实 snapshot，导 parquet，按市场 group_by 看 `fetched_at_ms` 分布
+    - 跑一次重复 snapshot（10 分钟内连跑 2 次），对同一市场比 mid 价差
+    - 评估当前 L1 距云上 7×24 的具体缺口（调度 / 日志 / 告警 / 健康监控）
+    - 回写 thread §2.1 + §2.5
+
+  - **窗口 B（2-3 小时，最深度调研）**：§2.6 云栈选型
+    - **这是框架启动期最重要的单点决策** — 错了切换成本巨大
+    - 5 维度对比矩阵（compute / db / observability / deployment / dashboard）× 5-8 候选
+    - 主候选：Fly.io / Render / Railway / DO App Platform / Hetzner Cloud
+    - 数据库：Supabase / Neon / Render Postgres / TimescaleDB Cloud
+    - 监控：Better Stack / Grafana Cloud / Axiom + Sentry
+    - 价格分档（< $25/$50/$100 月）+ CN 信用卡兼容性 + 部署地区合规
+    - 产出独立 `.planning/threads/deployment-architecture.md`
+
+  - **窗口 C（1 小时，参考已有）**：§2.4
+    - 看 `3th-party/polymarket-kalshi-weather-bot/` 是否有 Dockerfile / fly.toml / render.yaml
+    - 看 `docs/research/polymarket-oss-landscape-2026-04.md` top star 项目部署形态
+
+  - **暂缓**：§2.2 + §2.3（WebSocket / K 线 — L2/L3 才需要，启动期不上）
+
+  **第 3 步**（双方案 v1 + Phase 02 开干）：
+  - 三层架构方案 v1（基于 §2.1 / §2.5）
+  - 云栈选型 v1（基于 §2.6）
+  - 跑 `/gsd-extract_learnings 01.1`（thread 调研完成后跑，复盘内容更准）
+  - `/gsd-discuss-phase 02 --ws m1-perception` — Phase 02 = 云原生 L1 + 一键部署链路 + 抽象 A
 
   **核心动作清单**：
   1. `make planning-status` 确认无 DRIFT
-  2. thread §2.1 调研 → 回写 thread
-  3. thread §2.5 调研 → 回写 thread
-  4. （可选）跑 `/gsd-extract_learnings 01.1` 复盘（thread §2 调研后再跑会更准）
-  5. `/gsd-discuss-phase 02 --ws m1-perception` 启动 Phase 02
+  2. 窗口 A：thread §2.1 + §2.5 实证调研 → 回写
+  3. 窗口 B：§2.6 云栈深度选型 → 产出 `threads/deployment-architecture.md`（最关键）
+  4. 窗口 C：§2.4 参考已有项目 → 回写 thread
+  5. 跑 `/gsd-extract_learnings 01.1`
+  6. `/gsd-discuss-phase 02 --ws m1-perception`
+
+  **会话开头补问用户的事**（影响 §2.6 决策可行域，用户没说之前不要瞎选）：
+  - 信用卡支付偏好（CN 卡 vs 美区 / 已有云账号）
+  - 预算档（$30 / $100 / $300 月级）
+  - 未来是否上交易执行（影响私钥安全 + 低延迟需求）
+  - 数据出境合规关切（如果有，影响部署地区）
 
 ---

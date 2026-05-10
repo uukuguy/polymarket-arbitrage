@@ -31,6 +31,19 @@ updated: 2026-05-10
 > 能力打下坚实的基础。我们需要建立一个稳定高效反应迅速的市场观察分析
 > 平台框架，为实盘进入市场做好准备。"
 
+### 0.2.1 部署形态约束（同次会话再补充）
+
+> "现在就要设计可直接实施的部署架构，我认为完全可以使用面向创业公司的云
+> 基础设施，部署服务器、数据库、监控网站等。现在的日级全量快照、定向快照、
+> 单市场 K 线等的采集服务和监测管理服务等，完全可以本地研发完成直接一键
+> 部署云端开始工作。具体选型可以深度研究一下，这个的市场可选很久，选主流
+> 稳定价格合适的。"
+
+**部署范式锁定**：本地研发 → 一键部署 → 云上 7×24 自主跑。**不是"先本地跑后迁移"** —
+L1/L2/L3 一开始就按云原生形态设计（数据库选型、长跑调度、日志聚合、监控告警都
+按云上现成服务来选）。这个约束直接影响 §1.5 抽象 B 的时序后端选型、§2 调研
+问题的范围、§5 Phase 02 的边界。
+
 ### 0.3 直接结论
 
 1. 全量快照只能用于"日级市场画像"，不能做策略主角
@@ -40,6 +53,8 @@ updated: 2026-05-10
 5. **平台框架，不是工具集合** — 三层之间共享统一的数据抽象、时序模型、事件机制
 6. **生产级 = 可长跑 7×24** — 单次跑通不算数，挂了能恢复、状态可观测才算
 7. **稳定推进 = 每层做到生产级再进下一层**，不一次性把三层都铺开
+8. **云原生优先 = 选型时优先 PaaS / managed services**（compute + DB + log + metrics 一站式），不自己造运维基础设施
+9. **一键部署是工程纪律** — 部署成本低 = 迭代成本低；任何"在本地跑得起来但部署上去要改一堆"的设计都不合格
 
 ---
 
@@ -94,7 +109,8 @@ updated: 2026-05-10
 
 ### B. 时序模型（Time-Series）
 
-任意层级写入的市场状态都进入**统一的时序后端**（候选：DuckDB / TimescaleDB / 自建 parquet+SQLite hybrid，待 §2 调研）：
+任意层级写入的市场状态都进入**统一的时序后端**（候选见 §2.6.B 云原生选型 — 大概率是
+managed Postgres + TimescaleDB extension，因为 §0.2.1 的部署约束要求选 PaaS 友好的方案）：
 
 - 时间维度：`fetched_at_ms`（采集时刻）
 - 主键：`(market_id, fetched_at_ms, source)`
@@ -199,7 +215,86 @@ L3 信号 → emit("signal.detected", market_id, strategy_hint)
 
 **为什么先答**：避免重复造轮子。已有的 production 实现一定踩过我们将要踩的坑。
 
-### 2.5 生产级长跑要求（"7×24 跑得起来"）
+### 2.6 云原生部署架构选型（最深度的调研项）
+
+**问题**：从"本地 Python + SQLite + Makefile"到"云上 7×24 跑 + 监控 + 一键部署"，
+最适合本项目（个人开发 / 创业公司预算 / Polymarket 数据采集 / Python 主力）的
+**完整云栈组合**是什么？
+
+具体子问题（按调研维度）：
+
+**A. Compute（长跑 daemon 跑哪）**
+- Fly.io（边缘部署 + 全球 region + 应用容器） vs
+- Render（Heroku 体验 + 北美主导） vs
+- Railway（开发者体验最好 + 单 region） vs
+- DigitalOcean App Platform（老牌稳定） vs
+- Hetzner Cloud + 自管 docker-compose（最便宜但运维成本高）
+- 关键约束：
+  - Polymarket Gamma API 的友好 IP 段（北美 / 欧盟优先）
+  - 长跑 daemon 模式（不是 serverless 冷启动）
+  - 容器化（Dockerfile + 一键部署）
+  - 价格 < ~$25/月 单服务
+
+**B. 数据库（时序 + 关系数据混合）**
+- managed Postgres + TimescaleDB extension（Supabase / Neon / Render Postgres / Crunchy Bridge）
+- DuckDB on attached volume（Fly volumes / Render disk）
+- ClickHouse Cloud（时序专门、定价对小用量友好）
+- 决策点：
+  - 我们当前 SQLite + parquet 怎么映射？
+  - L2 时序数据预计量级（每天一个 watchlist 50 个市场 × 1 分钟 × 24h = 72k 行/天 × 365 天 = 26M/年 — 单表完全够用，不要过度选型）
+  - 价格 < ~$20/月 managed 实例
+
+**C. Observability（日志 + 指标 + 告警）**
+- Better Stack（日志 + uptime + status page + 价格友好）
+- Grafana Cloud Free（10k metrics / 50GB log / 14 天保留 — 慷慨）
+- Axiom（日志专门 + 慷慨 free tier）
+- Sentry（错误聚合，已经成熟）
+- 决策点：
+  - 异常立即可见 → 邮件 / Slack / 桌面通知
+  - 健康看板（uptime + last successful snapshot）
+  - 价格：起步阶段 free tier 即可
+
+**D. Deployment（一键部署链路）**
+- GitHub Actions → Fly Deploy / Render Deploy / Railway Deploy
+- 单一 `fly deploy` / `git push` 触发
+- Secrets 管理（API key / DB password 不进 git）
+- 决策点：
+  - PR-based preview env？还是单一 prod？（启动期单一 prod 即可）
+  - 蓝绿 / canary 还是直接替换？（启动期直接替换）
+
+**E. Frontend / Dashboard（监控网站）**
+- 当前 `make overview` 是 CLI rich.Table。云上需要 web 形态：
+  - Streamlit Cloud（最快搭起来 + Python 原生）
+  - 自己写 FastAPI + HTMX + Tailwind（控制权强但工作量大）
+  - Grafana dashboard over Postgres（如果 B 选 Postgres，零额外代码）
+- 决策点：
+  - 框架启动期，"零代码 dashboard"（Grafana over Postgres）可能最经济
+  - 但 Streamlit 对自定义业务逻辑（候选池审阅 + watchlist 编辑）更灵活
+
+**F. 跨方向约束（影响 ABCDE 同时）**
+- 部署地区 → Polymarket 限制 / 中国大陆访问 / 用户操作面板时延
+- 信用卡支付 — 哪些云收 CN 信用卡 / 哪些只收美区
+- 数据出境合规（如果未来要做 KYC 类合规，敏感）
+- "未来会上交易"的扩展性：是否需要私钥安全（Vault / KMS）和低延迟到 Polygon RPC
+
+**调研方式**：
+- jina/web 搜每家最新定价 + 用户评测（注意时效，市场变化快）
+- 已部署 polymarket-bot / quant 类项目的 OSS 工程文件（Dockerfile / fly.toml / render.yaml）
+- `3th-party/polymarket-kalshi-weather-bot/` 是否包含部署配置
+- Hacker News / r/SaaS 最近 6 个月相关讨论
+- 最关键：**做一个对比矩阵**（5 个候选 × 6 个维度 × 价格分档），不靠单点意见
+
+**预期产出**：
+- 一份 `.planning/threads/deployment-architecture.md`（独立 thread）— 选型矩阵 + 推荐栈 + 部署蓝图（Dockerfile 草稿 + 一键部署脚本骨架）
+- 更新本 thread §1.5 抽象 B（时序后端选型基于 §2.6.B 的结论锁定）
+- 更新本 thread §5（Phase 02 范围扩到"L1 云上 7×24 跑通 + 一键部署链路打通"）
+
+**为什么必须先答（且要深度调研）**：
+- 一旦本地写了 SQLite-only 代码再迁移 Postgres，是可避免的工程债
+- 一旦选型错误（某家厂商 6 个月后涨价 / 倒闭 / 限制 CN 用户），切换成本巨大
+- 这是**框架启动期最重要的一次单点决策** — 影响后续所有 phase 的形态
+
+
 
 **问题**：当前 `make snapshot-markets` 是 ad-hoc 命令，离生产级长跑差什么？
 
@@ -265,17 +360,20 @@ L3 信号 → emit("signal.detected", market_id, strategy_hint)
 
 按"稳定推进、每层做到生产级再进下一层"的纪律，**只预测最近的 2 个 phase**：
 
-- **m1-perception Phase 02 — L1 生产级长跑 + 框架抽象 A 落地**
-  - L1 调度自动化（cron / systemd）+ 失败告警 + 日志 rotate + 磁盘自动 purge
+- **m1-perception Phase 02 — 云原生 L1 长跑 + 一键部署链路 + 框架抽象 A 落地**
+  - 云栈选型决策（基于 §2.6 调研产出）+ 部署蓝图落地
+  - L1 调度迁移到云调度（不再是 macOS cron）+ 失败告警（Better Stack / Slack webhook）+ 日志聚合
   - 统一市场状态 dataclass（抽象 A）+ 现有代码迁移
-  - 健康监控（自动健康检查 + 异常立即可见的入口）
-  - 完成判定：连续 7 天无人值守正确产出 snapshot，所有失败有告警
+  - SQLite → managed Postgres + TimescaleDB（如果 §2.6 决策为此） / 或继续 SQLite-on-volume（如果决策为此）
+  - 监控网站雏形（最低限度：snapshot 状态 + 健康度 + 最近 N 次跑结果）
+  - 一键部署脚本（`fly deploy` / `git push` / Makefile target）
+  - 完成判定：从本地一键 deploy 到云上，连续 7 天无人值守正确产出 snapshot，所有失败 Slack 可见，dashboard 一打开就知道当前健康度
 
-- **m1-perception Phase 03 — L2 定向跟踪 + 框架抽象 B 落地**
-  - 时序后端选型 + 实施（基于 §2 调研结果）
-  - L2 daemon（订阅候选池 + watchlist，分钟级刷新）
+- **m1-perception Phase 03 — L2 定向跟踪 + 框架抽象 B 落地（云上）**
+  - L2 daemon（同一云栈）订阅候选池 + watchlist，分钟级刷新
   - 候选池模型（L1 → L2 升级规则）
-  - 完成判定：daemon 7×24 跑通，时序查询 <1s 响应，断网自愈
+  - 监控网站扩展：候选池可视化 + 时序图
+  - 完成判定：daemon 7×24 云上跑通，时序查询 <1s 响应，断网自愈
 
 L3（WebSocket / OHLC）和事件总线（抽象 C）暂不预测，等 L1+L2 跑稳后再回头评估。
 
@@ -289,19 +387,23 @@ L3（WebSocket / OHLC）和事件总线（抽象 C）暂不预测，等 L1+L2 �
 
 ## Status / Next
 
-**Status**: drafting (骨架完成 + 项目定位锁定 + 抽象层补齐，待调研填充 §2.1-2.5)
+**Status**: drafting (骨架完成 + 三大约束锁定：项目定位 / 抽象层 / 部署形态。待调研填充 §2.1-2.6)
 
-**Next actions**:
+**Next actions** (按"实证优先 / 架构决策次之 / 实现细节最后" 排序)：
 1. ✅ 骨架先给用户看，对方向（2026-05-10）
 2. ✅ 加入"框架启动期 + 生产级 + 工程可落地"约束（2026-05-10）
-3. 进入 §2 调研循环（建议串行 + 实证优先）：
-   - **2.1**（读自己代码 + 跑实测，1 小时内出结果）
-   - **2.5**（评估 L1 生产级缺口 — 与 2.1 同窗口可一起做）
-   - **2.4**（看 `3th-party/polymarket-kalshi-weather-bot` 现成实现）
-   - **2.2 + 2.3**（外部调研，Context7 + jina）
-4. 调研结果回写本文档对应章节
-5. 调研完成后产出"三层架构方案 v1"（§3 重新归类 + §4 决策对答案）
-6. 基于方案决定 m1-perception Phase 02（L1 生产级长跑）怎么开
+3. ✅ 加入"云原生部署 + 一键部署"约束（2026-05-10）
+4. 进入 §2 调研循环：
+   - **第一窗口（实证，1 小时）**：§2.1 时间一致性实情（读自己代码 + 跑实测）+ §2.5 生产级长跑缺口评估
+   - **第二窗口（深度选型，2-3 小时）**：§2.6 云原生部署架构选型 — **本架构最重决策点**，要做矩阵对比，产出独立 thread `deployment-architecture.md`
+   - **第三窗口（参考已有，1 小时）**：§2.4 看 `3th-party/polymarket-kalshi-weather-bot` 现成实现
+   - **暂缓**：§2.2 + 2.3（WebSocket / K 线源 — 影响 L2/L3，框架启动期不需要）
+5. 调研结果回写本文档对应章节 + 部署 thread
+6. 产出"三层架构方案 v1 + 云栈选型 v1"双成果
+7. 基于双成果开 Phase 02：云原生 L1 + 一键部署链路 + 抽象 A
+
+**Related threads created from this one**:
+- `.planning/threads/deployment-architecture.md` (待 §2.6 调研产出)
 
 **Related**:
 - `.planning/threads/market-microstructure.md` — Polymarket 微观结构基础（先决知识）
