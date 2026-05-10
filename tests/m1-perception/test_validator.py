@@ -18,10 +18,11 @@ import os
 
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 
-from polyarb.validator.category import Category, Issue
+from polyarb.validator.category import Category, Issue, SnapshotStatus
 from polyarb.validator.layers import (
     RESOLVING_WINDOW_MS,
     ZOMBIE_LIQUIDITY_USD,
+    determine_snapshot_status,
     is_valid_overall,
     layer1_count,
     layer2_fields,
@@ -215,9 +216,43 @@ def test_is_valid_true_when_no_issues() -> None:
     assert is_valid_overall([]) is True
 
 
-def test_is_valid_false_when_layer1_issue() -> None:
-    issues = layer1_count(100, 99)  # produces 1 Layer 1 issue
+def test_is_valid_false_when_large_mismatch() -> None:
+    """>1% count mismatch → FAILED → is_valid=False."""
+    issues = layer1_count(100, 95)  # 5% discrepancy
     assert is_valid_overall(issues) is False
+
+
+def test_is_valid_true_when_small_mismatch() -> None:
+    """≤1% count mismatch → DEGRADED → is_valid=True."""
+    issues = layer1_count(100, 99)  # 1% exactly at boundary
+    assert is_valid_overall(issues) is True
+
+
+def test_is_valid_false_when_api_unreachable() -> None:
+    """API_UNREACHABLE at Layer 1 → FAILED regardless of count."""
+    issues = [Issue(layer=1, category=Category.API_UNREACHABLE, market_id=None, detail="Gamma timeout")]
+    assert is_valid_overall(issues) is False
+
+
+def test_determine_status_ok_when_no_issues() -> None:
+    assert determine_snapshot_status([]) == SnapshotStatus.OK
+
+
+def test_determine_status_degraded_when_small_jitter() -> None:
+    """≤1% count jitter → DEGRADED."""
+    issues = layer1_count(100, 99)
+    assert determine_snapshot_status(issues) == SnapshotStatus.DEGRADED
+
+
+def test_determine_status_failed_when_large_jitter() -> None:
+    """>1% count jitter → FAILED."""
+    issues = layer1_count(100, 95)
+    assert determine_snapshot_status(issues) == SnapshotStatus.FAILED
+
+
+def test_determine_status_failed_when_api_unreachable() -> None:
+    issues = [Issue(layer=1, category=Category.API_UNREACHABLE, market_id=None, detail="down")]
+    assert determine_snapshot_status(issues) == SnapshotStatus.FAILED
 
 
 def test_is_valid_true_when_only_layer2_4_issues() -> None:

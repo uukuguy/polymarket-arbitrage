@@ -23,6 +23,20 @@ class Category(str, Enum):
     UNKNOWN = "unknown"  # never tolerate persistent unknowns — converge to specifics
 
 
+class SnapshotStatus(str, Enum):
+    """Overall snapshot health — beyond the binary is_valid int.
+
+    OK:       No Layer 1 issues. Count matches within tolerance.
+    DEGRADED: Minor count discrepancy (≤ 1%). Data is usable, API was reachable.
+    FAILED:   API_UNREACHABLE at Layer 1, or count discrepancy > 1%.
+              Core data source was unavailable or severely degraded.
+    """
+
+    OK = "ok"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class Issue:
     """A single validation finding — one row in the validation_issues table.

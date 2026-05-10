@@ -20,6 +20,41 @@ DB_PATH = Path("data/state.db")
 PARQUET_ROOT = Path("data/snapshots")
 
 
+def _db_uri() -> str:
+    return f"file:{DB_PATH}?mode=ro"
+
+
+def _compute_status(is_valid: int, l1_issues: list[tuple[str, str]]) -> str:
+    """Compute OK/DEGRADED/FAILED from is_valid and Layer 1 issues."""
+    import re
+
+    if not is_valid:
+        # Check if it's a minor jitter (DEGRADED) or truly FAILED
+        for cat, detail in l1_issues:
+            if cat == "api_unreachable":
+                return "FAILED"
+            if cat == "api_jitter":
+                m = re.search(r"reported (\d+).*?fetched (\d+)", detail)
+                if m:
+                    reported = int(m.group(1))
+                    fetched = int(m.group(2))
+                    if reported > 0 and abs(reported - fetched) / reported <= 0.01:
+                        return "DEGRADED"
+        return "FAILED"
+
+    # is_valid=1 — check for minor jitter
+    for cat, detail in l1_issues:
+        if cat == "api_jitter":
+            m = re.search(r"reported (\d+).*?fetched (\d+)", detail)
+            if m:
+                reported = int(m.group(1))
+                fetched = int(m.group(2))
+                if reported > 0 and abs(reported - fetched) / reported <= 0.01:
+                    return "DEGRADED"
+
+    return "OK"
+
+
 def _local_str(epoch_ms: int) -> str:
     return datetime.fromtimestamp(epoch_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -166,13 +201,32 @@ def show_recent_snapshots(limit: int = 5) -> None:
         print()
         return
 
+    # Query Layer 1 issues for status display
+    con = sqlite3.connect(_db_uri(), uri=True)
+    l1_by_sid: dict[int, list[tuple[str, str]]] = {}
+    try:
+        if rows:
+            sids = tuple(r[0] for r in rows)
+            placeholders = ",".join("?" for _ in sids)
+            cur2 = con.execute(
+                f"SELECT snapshot_id, category, detail FROM validation_issues "
+                f"WHERE layer = 1 AND snapshot_id IN ({placeholders})",
+                sids,
+            )
+            for sid, cat, detail in cur2.fetchall():
+                l1_by_sid.setdefault(sid, []).append((cat, detail))
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        con.close()
+
     for sid, taken, finished, mode, count, valid, pq in rows:
         duration = (finished - taken) / 1000
-        valid_str = "valid" if valid else "INVALID"
+        status_str = _compute_status(valid, l1_by_sid.get(sid, []))
         pq_short = Path(pq).name if pq else "—"
         print(
             f"  id={sid:<3} {_local_str(taken)}  {_humanize_seconds(duration):>7}  "
-            f"{count:>6} markets  mode={mode}  {valid_str:7}  {pq_short}"
+            f"{count:>6} markets  mode={mode}  {status_str:9}  {pq_short}"
         )
     print()
 

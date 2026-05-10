@@ -48,6 +48,8 @@ from openai import (
     RateLimitError,
 )
 
+from tqdm import tqdm
+
 from polyarb.translation.cache import (
     TranslationCache,
     TranslationRow,
@@ -154,6 +156,13 @@ async def translate_pending(
             for i in range(0, len(pending), cfg.batch_size)
         ]
 
+        pbar = tqdm(
+            total=len(pending),
+            desc="translating",
+            unit="q",
+            dynamic_ncols=True,
+        )
+
         for batch in batches:
             hashes = [h for h, _ in batch]
             ens = [en for _, en in batch]
@@ -177,6 +186,8 @@ async def translate_pending(
                 cache.insert_retry_placeholders(batch, translator_model=cfg.model)
                 cache.increment_retry(hashes)
                 summary.skipped += len(batch)
+                pbar.update(len(batch))
+                pbar.set_postfix(ok=summary.translated, skip=summary.skipped)
                 continue
             except (
                 APIConnectionError,
@@ -188,6 +199,8 @@ async def translate_pending(
                 cache.insert_retry_placeholders(batch, translator_model=cfg.model)
                 cache.increment_retry(hashes)
                 summary.skipped += len(batch)
+                pbar.update(len(batch))
+                pbar.set_postfix(ok=summary.translated, skip=summary.skipped)
                 continue
             except ValueError as e:
                 # Schema/parse error from translate_batch (empty content,
@@ -196,6 +209,8 @@ async def translate_pending(
                 cache.insert_retry_placeholders(batch, translator_model=cfg.model)
                 cache.increment_retry(hashes)
                 summary.skipped += len(batch)
+                pbar.update(len(batch))
+                pbar.set_postfix(ok=summary.translated, skip=summary.skipped)
                 continue
 
             # Success path: write the real zh translations.
@@ -221,7 +236,10 @@ async def translate_pending(
             _overwrite_placeholders(cache, rows)
             summary.translated += len(rows)
             summary.total_tokens += tokens
+            pbar.update(len(rows))
+            pbar.set_postfix(ok=summary.translated, skip=summary.skipped)
 
+    pbar.close()
     summary.dead = cache.count_dead()
     return summary
 

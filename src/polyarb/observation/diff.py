@@ -33,7 +33,7 @@ def latest_snapshot_pair(db_path: Path) -> tuple[int, int]:
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = con.execute(
-            "SELECT id FROM snapshots ORDER BY id DESC LIMIT 2"
+            "SELECT id FROM snapshots WHERE market_count > 0 ORDER BY id DESC LIMIT 2"
         ).fetchall()
         if len(rows) < 2:
             raise ValueError("need at least 2 snapshots to compare; only "

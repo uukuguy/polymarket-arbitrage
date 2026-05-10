@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from polyarb.validator.category import Category, Issue
+from polyarb.validator.category import Category, Issue, SnapshotStatus
 
 REQUIRED_FIELDS: tuple[str, ...] = (
     "market_id",
@@ -53,6 +53,10 @@ RESOLVING_WINDOW_MS: int = 24 * 60 * 60 * 1000  # 24 hours
 _DETAIL_MAX_CHARS: int = 200
 _RAW_PAYLOAD_MAX_BYTES: int = 1024
 _BOOK_PAYLOAD_MAX_BYTES: int = 500  # smaller cap for ghost-book payloads
+
+# Layer 1 count mismatch tolerance (ratio). Observed in production:
+# 200/58835 = 0.34%. Below this, the discrepancy is DEGRADED not FAILED.
+L1_COUNT_TOLERANCE: float = 0.01  # 1%
 
 
 def _safe_float(v: Any) -> float | None:
@@ -272,9 +276,49 @@ def layer4_cross_source(
     return issues
 
 
-def is_valid_overall(issues: list[Issue]) -> bool:
-    """Return True iff no Layer 1 issue is present (resolved Q5).
+def determine_snapshot_status(issues: list[Issue]) -> SnapshotStatus:
+    """Return snapshot health based on Layer 1 issue severity.
 
-    Layer 2 + Layer 4 issues are recorded but DO NOT flip is_valid in Phase 1.
+    - API_UNREACHABLE at Layer 1 → FAILED (core data source down)
+    - Count mismatch > L1_COUNT_TOLERANCE → FAILED
+    - Count mismatch ≤ L1_COUNT_TOLERANCE → DEGRADED
+    - No Layer 1 issues → OK
+
+    Layer 2/4 issues are recorded but never affect the status.
     """
-    return not any(i.layer == 1 for i in issues)
+    l1_issues = [i for i in issues if i.layer == 1]
+    if not l1_issues:
+        return SnapshotStatus.OK
+
+    for i in l1_issues:
+        if i.category == Category.API_UNREACHABLE:
+            return SnapshotStatus.FAILED
+
+    # Count jitter — parse reported vs fetched from the detail string
+    for i in l1_issues:
+        if i.category == Category.API_JITTER:
+            # detail format: "Gamma reported N active markets, fetched M"
+            import re
+
+            m = re.search(r"reported (\d+).*?fetched (\d+)", i.detail)
+            if m:
+                reported = int(m.group(1))
+                fetched = int(m.group(2))
+                if reported > 0:
+                    discrepancy = abs(reported - fetched) / reported
+                    if discrepancy > L1_COUNT_TOLERANCE:
+                        return SnapshotStatus.FAILED
+            # If we can't parse the counts, default to DEGRADED
+            return SnapshotStatus.DEGRADED
+
+    # Unknown L1 category — conservative fallback
+    return SnapshotStatus.DEGRADED
+
+
+def is_valid_overall(issues: list[Issue]) -> bool:
+    """Return True if snapshot is usable (OK or DEGRADED).
+
+    Only FAILED status flips is_valid to False. DEGRADED (minor count jitter
+    ≤ 1%) still returns True — the data is usable but should be noted.
+    """
+    return determine_snapshot_status(issues) != SnapshotStatus.FAILED

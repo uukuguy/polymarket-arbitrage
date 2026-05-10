@@ -122,17 +122,12 @@ def _build_yaml(tmp_path: Path, db: Path, parquet: Path) -> Path:
     return yaml_path
 
 
-def test_cli_help_shows_all_flags() -> None:
-    """The single-command ``snapshot`` app exposes --full / --verbose / --config in --help.
-
-    Since the app has exactly one @app.command(), typer collapses the subcommand —
-    we invoke flags directly without a ``snapshot`` prefix.
-    """
+def test_cli_help_shows_all_commands() -> None:
+    """Snapshot CLI shows 'snapshot' and 'snapshots-purge' commands in --help."""
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0, f"--help failed: {result.stderr}"
-    assert "--full" in result.stdout
-    assert "--verbose" in result.stdout
-    assert "--config" in result.stdout
+    assert "snapshot" in result.stdout
+    assert "snapshots-purge" in result.stdout
 
 
 def test_cli_default_subset_mode(
@@ -143,11 +138,11 @@ def test_cli_default_subset_mode(
     mocked_clob,
 ) -> None:
     yaml_path = _build_yaml(tmp_path, tmp_db_path, tmp_parquet_root)
-    result = runner.invoke(app, ["--config", str(yaml_path)])
+    result = runner.invoke(app, ["snapshot", "--config", str(yaml_path)])
     # Exit code 0 (valid) is expected with our clean fixture; allow 1 for safety.
     assert result.exit_code in (0, 1), f"unexpected exit: {result.exit_code} stderr={result.stderr}"
     assert "mode=subset" in result.stdout
-    assert ("OK" in result.stdout) or ("INVALID" in result.stdout)
+    assert ("OK" in result.stdout) or ("DEGRADED" in result.stdout) or ("FAILED" in result.stdout)
     # SQLite was created at the configured path.
     assert tmp_db_path.exists()
 
@@ -160,7 +155,7 @@ def test_cli_full_flag_sets_full_mode(
     mocked_clob,
 ) -> None:
     yaml_path = _build_yaml(tmp_path, tmp_db_path, tmp_parquet_root)
-    result = runner.invoke(app, ["--full", "--config", str(yaml_path)])
+    result = runner.invoke(app, ["snapshot", "--full", "--config", str(yaml_path)])
     assert result.exit_code in (0, 1)
     assert "mode=full" in result.stdout
 
@@ -174,9 +169,9 @@ def test_cli_summary_format_matches_spec(
 ) -> None:
     """D-F1: summary line is single-line cron-grep friendly."""
     yaml_path = _build_yaml(tmp_path, tmp_db_path, tmp_parquet_root)
-    result = runner.invoke(app, ["--config", str(yaml_path)])
+    result = runner.invoke(app, ["snapshot", "--config", str(yaml_path)])
     summary_re = re.compile(
-        r"^(OK|INVALID) \| \d+ markets \| mode=(subset|full) \| \d+ issues \| -> .+\.parquet$"
+        r"^(OK|DEGRADED|FAILED) \| \d+ markets \| mode=(subset|full) \| \d+ issues \| -> .+\.parquet$"
     )
     summary_lines = [ln for ln in result.stdout.splitlines() if summary_re.match(ln)]
     assert summary_lines, f"no summary line matched, stdout={result.stdout!r}"

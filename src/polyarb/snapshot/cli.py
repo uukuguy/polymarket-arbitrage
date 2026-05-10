@@ -67,14 +67,14 @@ def snapshot(
     result = asyncio.run(run_snapshot(settings, mode=mode, use_cache=not no_cache))
 
     # D-F1: single-line summary on stdout (cron / make can grep this).
-    status = "OK" if result.is_valid else "INVALID"
+    status = result.status.upper()  # "ok" → "OK", "degraded" → "DEGRADED", etc.
     summary = (
         f"{status} | {result.market_count} markets | mode={result.mode} | "
         f"{result.issue_count} issues | -> {result.parquet_path}"
     )
     print(summary)
 
-    # D-F3: stderr summary when invalid + exit 1.
+    # D-F3: stderr summary on FAILED + exit 1.
     if not result.is_valid:
         print("---", file=sys.stderr)
         print(f"VALIDATION FAILED: snapshot_id={result.snapshot_id}", file=sys.stderr)
@@ -83,6 +83,47 @@ def snapshot(
             print(f"  {cat}: {n}", file=sys.stderr)
         raise typer.Exit(code=1)
     raise typer.Exit(code=0)
+
+
+@app.command(name="snapshots-purge")
+def snapshots_purge_cmd(
+    older_than_days: int = typer.Option(
+        7, "--older-than-days", help="Delete snapshots older than N days."
+    ),
+    keep_last: int = typer.Option(
+        5, "--keep-last", help="Always keep the last M snapshots."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be deleted without doing it."
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Delete old snapshots (SQLite rows + Parquet files)."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level="DEBUG" if verbose else "INFO",
+        format="<green>{time:HH:mm:ss}</green> | <level>{level:<7}</level> | {message}",
+    )
+
+    settings = load_settings()
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+
+    n, ids = store.purge_old_snapshots(
+        older_than_days=older_than_days,
+        keep_last=keep_last,
+        parquet_root=settings.parquet_root,
+        dry_run=dry_run,
+    )
+
+    if dry_run:
+        print(f"DRY-RUN: would delete {len(ids)} snapshots (ids={ids})")
+    else:
+        print(f"OK | deleted {n} old snapshots (ids={ids})")
+        print(f"  kept most recent {keep_last}, deleted everything older than {older_than_days}d")
 
 
 if __name__ == "__main__":

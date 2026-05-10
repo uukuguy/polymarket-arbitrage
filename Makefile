@@ -46,7 +46,7 @@ journal:
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-fresh snapshot-cache-purge
+.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-fresh snapshots-purge snapshot-cache-purge
 
 ## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly.
 snapshot-markets:
@@ -84,6 +84,10 @@ snapshot-fresh:
 	@echo ""
 	uv run python -m polyarb.snapshot --no-cache --verbose
 
+## snapshots-purge: Delete old snapshots (SQLite + Parquet). Usage: make snapshots-purge [DAYS=7] [KEEP=5]
+snapshots-purge:
+	uv run python -m polyarb.snapshot snapshots-purge --older-than-days $(or $(DAYS),7) --keep-last $(or $(KEEP),5) --verbose
+
 ## snapshot-cache-purge: Delete all data/.cache/snapshot-* directories without running
 snapshot-cache-purge:
 	@uv run python -c "from pathlib import Path; from polyarb.snapshot.cache import ChunkCache; n = ChunkCache.purge_all(Path('data/.cache')); print(f'purged {n} cache directories')"
@@ -111,7 +115,7 @@ translation-stats:
 # M1-perception Phase 01.1: observation toolkit + translation
 #
 # Typical daily workflow:
-#   1. make snapshot-markets-v          # 拿当天数据（自动翻译）
+#   1. make snapshot-markets-v          # 拿当天数据
 #   2. make scan-near-end               # 找候选（或其它 scan-*）
 #   3. make show-market slug=<X>        # 深看候选
 #   4. (edit watchlist.yaml)            # 加入自选

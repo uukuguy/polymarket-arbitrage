@@ -1,6 +1,6 @@
 """Snapshot orchestrator — wires Gamma + CLOB + validator + storage together.
 
-The 8-step pipeline (per RESEARCH.md "Atomic SQLite + Parquet 编排" spec):
+The 7-step pipeline:
 
     1. Gamma fetch       — /events first (for category/tags), then /markets
                            (Phase 1.1 Amendment 01: dual-source fetch)
@@ -12,11 +12,6 @@ The 8-step pipeline (per RESEARCH.md "Atomic SQLite + Parquet 编排" spec):
     6. Validate          — Layer 1 count, Layer 2 fields, Layer 4 cross-source
     7. Persist           — Parquet atomic write FIRST, then SQLite single-tx write
                            (snapshots → events → event_tags → markets FK order)
-    8. Translate         — Phase 1.1 plan-02 sidecar: translate_pending(). Failures
-                           NEVER flip is_valid. ConfigError records reason and
-                           continues; TransientError logged WARNING only. The
-                           SnapshotResult exposes translation_skipped_reason so
-                           downstream tooling can surface a misconfigured .env.
 
 Every step records errors as ``Issue`` objects rather than raising. The
 orchestrator NEVER calls ``sys.exit`` — the CLI is responsible for setting the
@@ -90,6 +85,7 @@ from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_
 from polyarb.storage.sqlite_store import SQLiteStore
 from polyarb.validator.category import Category, Issue
 from polyarb.validator.layers import (
+    determine_snapshot_status,
     is_valid_overall,
     layer1_count,
     layer2_fields,
@@ -101,25 +97,18 @@ from polyarb.validator.layers import (
 class SnapshotResult:
     """Return value of ``run_snapshot`` — what the CLI prints + what tests assert on.
 
-    translation_skipped_reason (Phase 1.1 plan-02):
-        None       — translation step ran (success OR no-op due to empty cache).
-        "config_invalid" — TranslationConfig / ConfigError; user must fix .env.
-        "transient_or_unknown" — network / 5xx / unexpected error; retry next run.
-
-    The field is informational only; is_valid is NOT flipped by translation
-    failures (sidecar semantics).
     """
 
     snapshot_id: int
     market_count: int
     is_valid: bool
+    status: str  # "ok" / "degraded" / "failed" (SnapshotStatus enum value)
     mode: str
     issue_count: int
     issue_categories: dict[str, int]  # {category_value: count}
     parquet_path: Path
     taken_at_ms: int
     finished_at_ms: int
-    translation_skipped_reason: str | None = None
 
 
 def _index_books_by_token(books: list) -> dict[str, dict]:
@@ -197,7 +186,7 @@ async def run_snapshot(
     # so the normalizer can stamp event_id on every market row.
     # If /events fails we still proceed with /markets (event_id will be None for
     # all markets — graceful degradation, single Issue recorded).
-    with _phase("1/8: Gamma fetch (active events + markets)"):
+    with _phase("1/7: Gamma fetch (active events + markets)"):
         async with GammaClient(settings) as gamma:
             # Step 1a: events (best-effort — failure → empty map)
             try:
@@ -233,7 +222,7 @@ async def run_snapshot(
                 raw_markets = []
 
     # ── 2. Normalize (events first to build map, then markets with map injection)
-    with _phase("2/8: Normalize + dedupe"):
+    with _phase("2/7: Normalize + dedupe"):
         # Step 2a: events → events_rows + event_tags + market→event_id map
         event_rows, event_tag_rows, market_to_event_map = normalize_events(raw_events)
         logger.info(
@@ -271,7 +260,7 @@ async def run_snapshot(
         logger.info(f"Normalized: {len(markets)}/{len(raw_markets)} unique markets kept")
 
     # ── 3. Mode filter → token list ───────────────────────────────────────────
-    with _phase("3/8: Mode filter"):
+    with _phase("3/7: Mode filter"):
         if mode == "subset":
             target_markets = [
                 m for m in markets
@@ -301,7 +290,7 @@ async def run_snapshot(
     prices_buy: dict = {}
     prices_sell: dict = {}
     cache: ChunkCache | None = None
-    with _phase("4/8: CLOB fetch (books + buy/sell prices)"):
+    with _phase("4/7: CLOB fetch (books + buy/sell prices)"):
         if use_cache:
             cache = ChunkCache(
                 cache_root=settings.cache_root,
@@ -349,7 +338,7 @@ async def run_snapshot(
     # write them anywhere. (Closes the "fetched_at_ms semantically wrong on
     # filter-excluded rows" gap from 01-4-SUMMARY.)
     clob_done_ms = int(time.time() * 1000)
-    with _phase("5/8: Stamp + attach top-of-book"):
+    with _phase("5/7: Stamp + attach top-of-book"):
         for m in target_markets:
             m["fetched_at_ms"] = clob_done_ms
 
@@ -395,7 +384,7 @@ async def run_snapshot(
                     )
 
     # ── 6. Validate (Layer 1 / 2 / 4) ─────────────────────────────────────────
-    with _phase("6/8: Validate (Layer 1/2/4)"):
+    with _phase("6/7: Validate (Layer 1/2/4)"):
         if gamma_count_reported is not None:
             # Layer 1 compares Gamma's reported active count vs how many we kept
             # post-normalize. A diff means either a bug in normalize OR API jitter.
@@ -426,9 +415,10 @@ async def run_snapshot(
         }
         issues.extend(layer4_cross_source(target_markets, books_by_token, prices_combined))
 
-        is_valid = is_valid_overall(issues)
+        status = determine_snapshot_status(issues)
+        is_valid = is_valid_overall(issues)  # True for OK/DEGRADED, False for FAILED
         logger.info(
-            f"Validated: is_valid={is_valid}, {len(issues)} total issues "
+            f"Validated: status={status.value}, is_valid={is_valid}, {len(issues)} total issues "
             f"({sum(1 for i in issues if i.layer == 1)} L1, "
             f"{sum(1 for i in issues if i.layer == 2)} L2, "
             f"{sum(1 for i in issues if i.layer == 4)} L4)"
@@ -437,7 +427,7 @@ async def run_snapshot(
     # ── 7. Persist (Parquet atomic FIRST, then SQLite single-tx) ──────────────
     finished_at_ms = int(time.time() * 1000)
     parquet_path = compute_snapshot_path(settings.parquet_root, taken_at_ms)
-    with _phase("7/8: Persist (Parquet then SQLite)"):
+    with _phase("7/7: Persist (Parquet then SQLite)"):
         # Build parquet rows — must match SNAPSHOT_SCHEMA (22 fields including
         # snapshot_taken_at_ms + snapshot_id parquet-only fields). Persist ONLY
         # target_markets (the mode-filtered set). Filtered-out markets aren't part
@@ -477,66 +467,6 @@ async def run_snapshot(
         if cache is not None:
             cache.cleanup()
 
-    # ── 8. Translate pending questions (sidecar — failures NEVER flip is_valid)
-    # Two-path semantics (plan 01.1-02):
-    #   - ConfigError / pydantic.ValidationError → user-actionable (.env wrong)
-    #     → record reason="config_invalid", log ERROR, snapshot stays valid.
-    #   - TransientError / unexpected → record reason="transient_or_unknown",
-    #     log WARNING, snapshot stays valid.
-    # Standalone CLI (`make translate-pending`) handles the same ConfigError
-    # via exit 1 — that is the user-facing failure surface.
-    translation_skipped_reason: str | None = None
-    with _phase("8/8: Translate pending questions"):
-        try:
-            # Imported lazily so the snapshot pipeline doesn't pay the openai
-            # import cost when translate-pending will obviously skip.
-            from pydantic import ValidationError
-
-            from polyarb.translation.config import TranslationConfig
-            from polyarb.translation.translator import (
-                ConfigError,
-                TransientError,
-                translate_pending,
-            )
-
-            # pydantic-settings injects TRANSLATION_* env vars; pyright
-            # doesn't model that, so the bare-call form is correct.
-            try:
-                trans_cfg = TranslationConfig()  # pyright: ignore[reportCallIssue]
-            except ValidationError as e:
-                logger.error(
-                    f"translate_pending config validation failed (.env 检查): {e!r}"
-                )
-                translation_skipped_reason = "config_invalid"
-            else:
-                try:
-                    summary = await translate_pending(trans_cfg, db_path=settings.db_path)
-                    logger.info(
-                        f"translation: +{summary.translated} translated, "
-                        f"{summary.skipped} skipped, {summary.dead} dead, "
-                        f"{summary.total_tokens} tokens"
-                    )
-                except ConfigError as e:
-                    logger.error(
-                        f"translate_pending config invalid (.env 检查): {e!r}"
-                    )
-                    translation_skipped_reason = "config_invalid"
-                except TransientError as e:
-                    logger.warning(
-                        f"translate_pending transient: {e!r}"
-                    )
-                    translation_skipped_reason = "transient_or_unknown"
-                except Exception as e:  # noqa: BLE001 — sidecar swallow
-                    logger.warning(
-                        f"translate_pending unexpected (skipped, snapshot still valid): {e!r}"
-                    )
-                    translation_skipped_reason = "transient_or_unknown"
-        except Exception as e:  # noqa: BLE001 — import-time failure path
-            logger.warning(
-                f"translate_pending import/setup failure: {e!r}"
-            )
-            translation_skipped_reason = "transient_or_unknown"
-
     logger.info(
         f"Snapshot complete in {_format_elapsed(time.monotonic() - overall_t0)} "
         f"(snapshot_id={snapshot_id})"
@@ -551,11 +481,11 @@ async def run_snapshot(
         snapshot_id=snapshot_id,
         market_count=len(target_markets),  # what got persisted, not full normalize count
         is_valid=is_valid,
+        status=status.value,
         mode=mode,
         issue_count=len(issues),
         issue_categories=cat_counts,
         parquet_path=parquet_path,
         taken_at_ms=taken_at_ms,
         finished_at_ms=finished_at_ms,
-        translation_skipped_reason=translation_skipped_reason,
     )

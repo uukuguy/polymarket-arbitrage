@@ -318,6 +318,39 @@ def test_diff_resolve_snapshot_path_non_int_raises(db_with_snapshots: Path) -> N
 # =============================================================================
 
 
+def test_diff_latest_pair_skips_empty_snapshots(tmp_path: Path, snap_a: Path, snap_b: Path) -> None:
+    """If the newest snapshot has market_count=0, it should be skipped."""
+    db_path = tmp_path / "state.db"
+    con = sqlite3.connect(str(db_path))
+    con.executescript("""
+        CREATE TABLE snapshots (
+            id INTEGER PRIMARY KEY,
+            taken_at_ms INTEGER NOT NULL,
+            finished_at_ms INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            market_count INTEGER NOT NULL,
+            is_valid INTEGER NOT NULL,
+            parquet_path TEXT NOT NULL,
+            notes TEXT
+        );
+    """)
+    # id=1: valid, 5 markets
+    con.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?)",
+                (1, 1700000000000, 1700000060000, "subset", 5, 1, str(snap_a), None))
+    # id=2: EMPTY (market_count=0 — failed run)
+    con.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?)",
+                (2, 1700000100000, 1700000160000, "subset", 0, 0, str(snap_b), None))
+    # id=3: valid, 5 markets
+    con.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?)",
+                (3, 1700000200000, 1700000260000, "subset", 5, 1, str(snap_b), None))
+    con.commit()
+    con.close()
+
+    older, newer = latest_snapshot_pair(db_path)
+    assert older == 1  # id=2 (empty) skipped
+    assert newer == 3
+
+
 def test_diff_latest_pair_selects_two_most_recent(db_with_snapshots: Path) -> None:
     older, newer = latest_snapshot_pair(db_with_snapshots)
     assert older == 2

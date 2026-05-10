@@ -220,3 +220,117 @@ class SQLiteStore:
             f"issues={len(issues)} is_valid={is_valid}"
         )
         return snapshot_id
+
+    def purge_old_snapshots(
+        self,
+        *,
+        older_than_days: int = 7,
+        keep_last: int = 5,
+        parquet_root: Path | None = None,
+        dry_run: bool = False,
+    ) -> tuple[int, list[int]]:
+        """Delete snapshots older than N days, keeping at least M most recent.
+
+        Deletes in FK-safe order: validation_issues → markets → event_tags →
+        events → snapshots. Also deletes parquet files.
+
+        Returns (deleted_count, deleted_ids).
+        """
+        import time as _time
+
+        cutoff_ms = int((_time.time() - older_than_days * 86_400) * 1000)
+
+        con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        try:
+            # Find IDs to delete: older than cutoff AND not in the last M
+            keep_ids = [
+                r[0]
+                for r in con.execute(
+                    "SELECT id FROM snapshots ORDER BY id DESC LIMIT ?",
+                    (keep_last,),
+                ).fetchall()
+            ]
+            placeholders = ",".join("?" for _ in keep_ids)
+            to_delete = [
+                r[0]
+                for r in con.execute(
+                    f"SELECT id FROM snapshots "
+                    f"WHERE taken_at_ms < ? AND id NOT IN ({placeholders}) "
+                    f"ORDER BY id",
+                    [cutoff_ms, *keep_ids],
+                ).fetchall()
+            ]
+            # Also fetch parquet paths for cleanup
+            parquet_paths = [
+                r[0]
+                for r in con.execute(
+                    f"SELECT parquet_path FROM snapshots "
+                    f"WHERE id IN ({','.join('?' for _ in to_delete)})",
+                    to_delete,
+                ).fetchall()
+            ] if parquet_root is not None and to_delete else []
+        finally:
+            con.close()
+
+        if not to_delete:
+            logger.info("purge_old_snapshots: nothing to delete")
+            return (0, [])
+
+        if dry_run:
+            logger.info(
+                f"purge_old_snapshots DRY-RUN: would delete {len(to_delete)} "
+                f"snapshots (ids={to_delete}), {len(parquet_paths)} parquet files"
+            )
+            return (0, to_delete)
+
+        # Delete in FK-safe order
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                id_placeholders = ",".join("?" for _ in to_delete)
+                con.execute(
+                    f"DELETE FROM validation_issues WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    f"DELETE FROM markets WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    f"DELETE FROM event_tags WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    f"DELETE FROM events WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    f"DELETE FROM snapshots WHERE id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                logger.exception("purge_old_snapshots rolled back")
+                raise
+        finally:
+            con.close()
+
+        # Delete parquet files (after SQLite commit succeeds)
+        deleted_files = 0
+        for pp in parquet_paths:
+            try:
+                p = Path(pp)
+                if p.exists():
+                    p.unlink()
+                    deleted_files += 1
+            except OSError:
+                logger.warning(f"purge: could not delete parquet file {pp}")
+
+        logger.info(
+            f"purge_old_snapshots: deleted {len(to_delete)} snapshots "
+            f"(ids={to_delete}), {deleted_files} parquet files"
+        )
+        return (len(to_delete), to_delete)
