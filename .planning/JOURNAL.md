@@ -761,3 +761,97 @@
   4. plan 06 execute（教学文档 + 端到端验收）
 
 ---
+
+## 2026-05-09 (SESSION 13 — plan 04/05/06 偷跑落地)
+
+> ⚠️ **此次会话存在过程缺陷**：直接走 `/gsd-quick` 或手工 commit，未走 `/gsd-execute-plan` 工作流，**导致 SUMMARY 04/05/06 未生成**。问题在 5-10 才发现并补救。
+
+- [SESSION] **plan 04 落地** (`f7a02cf feat(01.1-04)`) — DuckDB 跨 snapshot diff + 单市场 tracker
+  - `src/polyarb/observation/diff.py` (95 行) — `compare_snapshots` FULL OUTER JOIN + `resolve_snapshot_path` + `latest_snapshot_pair`
+  - `src/polyarb/observation/tracker.py` (64 行) — `track_market` 用 `read_parquet(glob, union_by_name=true)` + 200-file OOM warning
+  - `make compare-snapshots` / `make track-market` 两条 target，2 个 typer 子命令
+  - 17 新单测 + 6 makefile contract 测试
+
+- [SESSION] **plan 05 落地** (`049705d feat(01.1-05)`) — show-market 多源详情 + watchlist
+  - `src/polyarb/observation/show.py` (110 行) — 中英对照 + 时间维度 + neg-risk 兄弟市场 + 5-snapshot 历史
+  - `src/polyarb/observation/watchlist.py` (230 行) — yaml.safe_load + 受限 AST 表达式求值（禁 Python eval/exec，frozenset 节点白名单）
+  - `make show-market` / `make watchlist` / `make watchlist-alerts` 三条 target
+  - 37 新单测；全套 409/409 绿
+  - **安全决策记录**：watchlist alert_when 表达式不走 `eval()`，自实现 AST walker 只允许 Compare / BoolOp / BinOp / Constant / Name 节点
+
+- [SESSION] **plan 06 Task 1+2** (`ac4f334 docs(01.1-06)` + `f694ec1 chore`) — 教学文档 + Makefile cleanup
+  - `docs/learning/07-观察市场.md` 347 行 — 6 配方 + 4 设计取舍 + 5 对手题 + 验证过的 file:line 引用
+  - Makefile 加 daily workflow quick-ref + phase attribution header
+  - **Plan 06 Task 3**（human-verify checkpoint，对手测试 5 题）**未做** — 需要用户参与，且后续被证明应升级为架构纠偏，不是 5 题 Q&A
+
+---
+
+## 2026-05-10 (SESSION 14 — Phase 01.1 验收 + 架构纠偏 + 流程基础设施补强)
+
+- [SESSION] **plan 06 验收期间发现 snapshot 流水线生产级缺口** — 触发 3 个 amendment commits：
+  1. `24f52ba feat(snapshot)` — 解耦 translation sidecar（snapshot 纯 7 步，不再被 LLM 拖累）+ 三态 OK/DEGRADED/FAILED 状态枚举（≤1% jitter 算 DEGRADED）+ `make snapshots-purge` 数据保留 + tqdm 翻译进度
+  2. `0641651 feat(observation)` — `make overview` 一屏市场总览 dashboard（snapshot 状态 + 总流动性 + Top tags + 时间分布 + Top movers + 翻译覆盖）
+  3. `8d2847f docs` — `docs/E2E_ACCEPTANCE_GUIDE.md` 164 行端到端验收手册
+
+- [SESSION] **架构方向纠偏 — 用户洞察**：
+  > "全量快照是跨越下载时长（8 分钟以上）的模糊影像，应该只能参考作用，并非主角。定向快照的设计应该是生产上线工作流的级别，应该有前因后果。然后锁定单市场，又是一套快照追踪设计，然后 K 线。"
+
+  + 项目定位补充：
+  > "目前是框架启动的初期，不求大而全，而是求稳定推进保证生产级水准，工程可落地。需要建立一个稳定高效反应迅速的市场观察分析平台框架，为实盘进入市场做好准备。"
+
+  → 草拟 `.planning/threads/market-observation-architecture.md`（310 行）：
+   - §1 三层金字塔（L1 日级全量 / L2 定向跟踪 / L3 单市场 K 线）+ 每层"生产级判定标准"
+   - §1.5 平台框架抽象层（A 统一市场状态模型 / B 时序模型 / C 事件驱动）— 防止"工具集合"心态
+   - §2 五个调研问题（2.1 时间一致性 / 2.2 WS 能力 / 2.3 K 线源 / 2.4 业内做法 / 2.5 生产级长跑）
+   - §3 现有 7 个 make target 在三层架构中的重新归类 + 生产级缺口
+   - §5 保守预测：m1-perception Phase 02 = L1 生产级长跑 + 抽象 A 落地
+
+- [SESSION] **流程缺陷暴露 + 基础设施补强**（用户提问"为什么没记？如何保证不再遗忘？"）
+
+  根因分析：
+  - L1 触发性失败：5-09 会话绕过 `/gsd-execute-plan` 工作流，跳过 `<step name="create_summary">` 强制步骤
+  - L2 我（5-10 会话）也漏补：开会话发现 STATE 与 git 不一致，但当成"小事"延后
+  - L3 纪律设计漏洞：CLAUDE.md "Phase 末"强制写了，"Plan 末"没写；gsd 工作流只在 execute-plan 内强制
+  - L4 无运维兜底：没有 git hook、没有索引脚本检查一致性
+
+  补救（本次会话落地）：
+  - 补 SUMMARY 04/05/06（3 agent 并行）
+  - `.githooks/pre-commit` — plan-scoped commit (`feat(NN.N-MM)`) 缺 SUMMARY 直接拒绝；测试通过
+  - `scripts/planning_status.py` + `make planning-status` — 跑一次扫全项目暴露 DRIFT
+  - CLAUDE.md 加 "每个 Plan 末（强制）" 段 + 反模式补 2 条 + 会话开头加 hook 自检
+
+  扫描结果：所有 12 个 plan 全 OK（无 DRIFT）。
+
+- [SESSION commit 列表（待）]:
+  - 上述 SUMMARY + 基础设施 + STATE/JOURNAL 更新 — 本 commit 块（待 commit）
+
+- [NEXT] 下次会话从这里开始：
+
+  **第 1 步**（恢复）：
+  ```
+  /gsd-resume-work --ws m1-perception
+  make planning-status   # 应全 OK；任何 DRIFT 先补再开新工作
+  ```
+
+  **第 2 步**（推进 Phase 02 调研循环）— 见 `.planning/threads/market-observation-architecture.md` §2：
+  - **2.1 实证调研**（1 小时内可出结果）— 当前快照"时间一致性"的真实情况：
+    - 读 `src/polyarb/snapshot/orchestrator.py` + `clients/gamma_client.py` 看 `fetched_at_ms` 怎么 stamp
+    - 拉一个真实 snapshot，导 parquet，按市场 group_by 看 `fetched_at_ms` 分布
+    - 跑一次重复 snapshot（10 分钟内连跑 2 次），对同一市场比 mid 价差
+  - **2.5 同窗口**（评估 L1 生产级缺口）
+  - **2.4** （看 `3th-party/polymarket-kalshi-weather-bot` 现成实现）
+  - **2.2 + 2.3** 推迟（影响 L2/L3 架构，框架启动期不需要）
+
+  **第 3 步**（架构方案 v1 + Phase 02 开干）：
+  - 调研结果回写 thread 对应章节
+  - 基于 thread §3/§4 答案产出 "三层架构方案 v1"
+  - 开 Phase 02 = L1 生产级长跑（cron + 失败告警 + 日志 rotate + 健康监控）+ 框架抽象 A 落地
+
+  **核心动作清单**：
+  1. `make planning-status` 确认无 DRIFT
+  2. thread §2.1 调研 → 回写 thread
+  3. thread §2.5 调研 → 回写 thread
+  4. （可选）跑 `/gsd-extract_learnings 01.1` 复盘（thread §2 调研后再跑会更准）
+  5. `/gsd-discuss-phase 02 --ws m1-perception` 启动 Phase 02
+
+---

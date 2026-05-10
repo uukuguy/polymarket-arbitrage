@@ -3,32 +3,54 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 01.1
-status: executing
-stopped_at: Phase 01.1 plan 03 complete — observation toolkit (scanner + 6 builtin recipes + 4-layer SQL defense + cli + 8 Makefile targets)
-last_updated: "2026-05-02T00:00:00.000Z"
-last_activity: 2026-05-02
+status: closing
+stopped_at: Phase 01.1 substantively complete (plans 01-06 code shipped + acceptance amendments). Architecture course-correction triggered → threads/market-observation-architecture.md drafted. Awaiting extract_learnings before Phase 02.
+last_updated: "2026-05-10T00:00:00.000Z"
+last_activity: 2026-05-10
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 11
-  completed_plans: 7
-  percent: 64
+  completed_plans: 11
+  percent: 100
 ---
 
 # Project State
 
 ## Current Position
 
-**Status:** Executing Phase 01.1 (3 of 6 plans complete)
+**Status:** Phase 01.1 closing (all 6 plans shipped + acceptance amendments + architecture thread drafted)
 **Current Phase:** 01.1 (observation-toolkit)
-**Last Activity:** 2026-05-02
-**Last Activity Description:** Phase 01.1 plan 03 complete — observation toolkit landed (T3 scanner + 6 builtin recipes + 4-layer SQL defense + trust split + cli + 8 Makefile targets). m1-perception 333/333 tests green; total 354/354.
+**Last Activity:** 2026-05-10
+**Last Activity Description:** Acceptance review of plan 06 surfaced production-grade gaps → 3 amendment commits (decouple translation / tri-state status / `make overview`). User course-correction: "全量快照是模糊影像，不能做主角；需要三层金字塔架构（日级全量 → 定向跟踪 → 单市场 K线）". Drafted `threads/market-observation-architecture.md`. Discovered + fixed planning-process drift: plan 04/05/06 SUMMARY 补回；加 pre-commit hook + `make planning-status` 索引脚本 + CLAUDE.md plan-末纪律.
 
 ## Progress
 
-**Phases Complete:** 1
-**Phase 1.5 status:** ❌ REVERTED — `filterDate` API 参数不存在，`updatedAt` 是 server batch 时间戳无业务语义。增量方向重定为 WebSocket
-**Test count:** 119 m1 tests green (Phase 1 完整套件)
+**Phases Complete:** 1 (Phase 01)
+**Phase 01.1 status:** 🟡 closing — code shipped (plans 01-06) + acceptance amendments + architecture thread drafted; **awaiting** `/gsd-extract_learnings 01.1` and Phase 02 discuss
+**Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket（推迟到三层金字塔架构定型后）
+**Test count:** 402 m1-perception tests green (2026-05-10)
+
+## Phase 01.1 Deliverables (2026-05-10 全部 committed)
+
+- ✅ Schema 升级（events / event_tags / question_translations + Amendment 01：删 markets.category/tags 加 event_id FK） — plan 01
+- ✅ 翻译 vertical slice（OpenAI 兼容 SDK + 缓存表 + tqdm 进度 + Makefile + .env.example）— plan 02 + 5-10 amendment
+- ✅ Scanner 引擎 + 6 内置配方 + YAML 自定义配方 + 4 层 SQL 注入防御 — plan 03
+- ✅ 跨 snapshot diff（DuckDB FULL OUTER JOIN）+ 单市场 tracker（union_by_name）— plan 04
+- ✅ show-market 多源详情 + watchlist YAML + 受限 AST 表达式求值（无 eval/exec）— plan 05
+- ✅ 教学文档 `docs/learning/07-观察市场.md`（347 行）+ Makefile 工作流 quick-ref — plan 06 Task 1+2
+- ✅ **Acceptance-driven amendments**（5-10）：解耦翻译 sidecar / 三态 OK-DEGRADED-FAILED 状态 / `make overview` 总览 dashboard / `make snapshots-purge` 数据保留 / E2E 验收手册
+- ⏸️ Plan 06 Task 3（human-verify checkpoint，5 对手题）→ 升级为架构方向纠偏（见 thread）
+
+## Phase 01.1 后续
+
+- **架构 thread**: `.planning/threads/market-observation-architecture.md` — 三层金字塔（L1 日级全量 / L2 定向 / L3 单市场 K 线）+ 平台框架抽象层 A/B/C + 5 个调研问题（§2.1-2.5）
+- **下次会话该做的**: §2.1 实证调研（当前快照时间一致性实情）→ §2.5（生产级长跑要求评估）→ 然后基于调研结果开 Phase 02
+- **基础设施补强（5-10）**: `.githooks/pre-commit`（plan-scoped commit 强制 SUMMARY 检查）+ `scripts/planning_status.py` + `make planning-status` + CLAUDE.md plan-末纪律
+
+---
+
+## Phase 1 历史快照（已完成，保留作参考）
 
 ## Phase 1 Deliverables (verified)
 
