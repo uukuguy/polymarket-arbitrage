@@ -130,7 +130,7 @@ translation-stats:
 # Recipe scans (plan 03) + cross-snapshot diff & tracker (plan 04) +
 # show-market & watchlist (plan 05)
 
-.PHONY: scan scan-thick-but-slippery scan-near-end scan-ghost-suspicious scan-coin-flip scan-neg-risk-incomplete scan-by-tag list-recipes scans-purge compare-snapshots track-market show-market watchlist watchlist-alerts
+.PHONY: scan scan-thick-but-slippery scan-near-end scan-ghost-suspicious scan-coin-flip scan-neg-risk-incomplete scan-by-tag list-recipes scans-purge compare-snapshots track-market show-market watchlist overview watchlist-alerts
 
 ## scan: Generic recipe runner — usage: make scan name=<recipe>
 scan:
@@ -183,6 +183,10 @@ show-market:
 ## watchlist: List all markets in watchlist.yaml with current status
 watchlist:
 	uv run python -m polyarb.cli_observation watchlist --verbose
+
+## overview: Market overview dashboard — one-glance whole-picture view
+overview:
+	uv run python -m polyarb.cli_observation overview --verbose
 
 ## watchlist-alerts: Check alert_when conditions and print triggered entries
 watchlist-alerts:

@@ -43,6 +43,7 @@ from polyarb.observation.scanner import (
 )
 from polyarb.observation.show import show_market
 from polyarb.observation.tracker import track_market
+from polyarb.observation.overview import build_overview
 from polyarb.observation.watchlist import check_alerts, load_watchlist
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -369,6 +370,135 @@ def watchlist_alerts_cmd(
         console.print()
 
     typer.echo(f"ALERT | {len(triggered)} triggered")
+
+
+@app.command(name="overview")
+def overview_cmd(
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Market overview — one-glance whole-picture dashboard."""
+    from rich.console import Console
+    from rich.table import Table
+
+    _setup_logger(verbose)
+    settings = load_settings()
+
+    try:
+        data = build_overview(settings.db_path, settings.parquet_root)
+    except (ValueError, sqlite3.OperationalError) as e:
+        typer.echo(f"overview failed: {e}", err=True)
+        raise typer.Exit(1)
+
+    console = Console()
+
+    # ── Section 1: Snapshot Summary ──
+    console.rule("[bold cyan]Snapshot 概况[/bold cyan]")
+    s = data.snapshot_summary
+    if "error" in s:
+        console.print(f"  [red]{s['error']}[/red]")
+    else:
+        status_color = {"OK": "green", "DEGRADED": "yellow", "FAILED": "red"}.get(
+            s["status"], "white"
+        )
+        console.print(
+            f"  ID #{s['snapshot_id']}  |  {s['taken_at']}  |  "
+            f"{s['market_count']} markets  |  mode={s['mode']}  |  "
+            f"status=[{status_color}]{s['status']}[/{status_color}]"
+        )
+        if s.get("issues"):
+            issues_str = "  ".join(f"{k}={v}" for k, v in s["issues"].items())
+            console.print(f"  Issues: {issues_str}")
+        console.print("  -> Run [bold]make snapshot-markets-v[/bold] to refresh")
+
+    # ── Section 2: Market Breakdown ──
+    console.rule("[bold cyan]市场总览[/bold cyan]")
+    b = data.market_breakdown
+    console.print(
+        f"  {b['total_markets']:,} markets  |  "
+        f"总流动性 ${b['total_liquidity_usd']:,.0f}  |  "
+        f"总成交量 ${b['total_volume_usd']:,.0f}"
+    )
+
+    # ── Section 3: Top Tags ──
+    console.rule("[bold cyan]热门标签 Top 10[/bold cyan]")
+    if data.top_tags:
+        tag_table = Table(show_header=True, box=None)
+        tag_table.add_column("Tag", style="cyan")
+        tag_table.add_column("Markets", justify="right")
+        tag_table.add_column("Liquidity", justify="right")
+        for t in data.top_tags:
+            tag_table.add_row(
+                t["tag"],
+                f"{t['markets']:,}",
+                f"${t['liquidity_usd']:,.0f}",
+            )
+        console.print(tag_table)
+    else:
+        console.print("  (no tags)")
+
+    # ── Section 4: Time Distribution ──
+    console.rule("[bold cyan]结算时间分布[/bold cyan]")
+    if data.time_distribution:
+        time_table = Table(show_header=True, box=None)
+        time_table.add_column("窗口", style="cyan")
+        time_table.add_column("数量", justify="right")
+        time_table.add_column("占比", justify="right")
+        total = sum(d["count"] for d in data.time_distribution)
+        for d in data.time_distribution:
+            pct = f"{d['count'] / total * 100:.1f}%" if total > 0 else "—"
+            time_table.add_row(d["bucket"], f"{d['count']:,}", pct)
+        console.print(time_table)
+        near_end = next(
+            (d["count"] for d in data.time_distribution if d["bucket"] == "< 24h"), 0
+        )
+        if near_end > 0:
+            console.print(
+                f"  -> [bold]{near_end}[/bold] markets resolving within 24h. "
+                "Run [bold]make scan-near-end[/bold] for details"
+            )
+
+    # ── Section 5: Top Movers ──
+    console.rule("[bold cyan]漂移 Top 10 (vs 上次 snapshot)[/bold cyan]")
+    if data.top_movers:
+        mover_table = Table(show_header=True, box=None)
+        mover_table.add_column("Slug", style="cyan", overflow="fold", max_width=30)
+        mover_table.add_column("Question", overflow="fold", max_width=40)
+        mover_table.add_column("From", justify="right")
+        mover_table.add_column("To", justify="right")
+        mover_table.add_column("Drift", justify="right")
+        for m in data.top_movers:
+            drift_color = "green" if m["drift"] > 0 else "red"
+            mover_table.add_row(
+                m["slug"],
+                m["question"],
+                f"{m['mid_from']:.4f}",
+                f"{m['mid_to']:.4f}",
+                f"[{drift_color}]{m['drift']:+.4f}[/{drift_color}]",
+            )
+        console.print(mover_table)
+        console.print(
+            "  -> Run [bold]make compare-snapshots[/bold] for full drift details"
+        )
+    else:
+        console.print("  (need at least 2 snapshots to compute drift)")
+
+    # ── Section 6: Translation Coverage ──
+    console.rule("[bold cyan]翻译覆盖[/bold cyan]")
+    tc = data.translation_coverage
+    if tc["total_markets"] > 0:
+        console.print(
+            f"  {tc['translated']:,} / {tc['total_markets']:,} translated "
+            f"({tc['pct']}%)"
+        )
+        if tc["pct"] < 50:
+            console.print(
+                "  [yellow]-> Coverage low. Run [bold]make translate-pending FORCE=1[/bold]"
+                "[/yellow]"
+            )
+    else:
+        console.print("  (no markets)")
+
+    typer.echo("")
 
 
 if __name__ == "__main__":
