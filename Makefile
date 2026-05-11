@@ -57,26 +57,26 @@ snapshot-markets:
 	@echo ">> snapshot-markets (quiet mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
 	@echo ">> tip: open another terminal and run 'make snapshot-status' to check progress"
 	@echo ""
-	uv run python -m polyarb.snapshot
+	uv run python -m polyarb.snapshot snapshot
 
 ## snapshot-markets-v: Same as snapshot-markets but with progress logs (recommended for interactive runs)
 snapshot-markets-v:
 	@echo ">> snapshot-markets-v (verbose mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
 	@echo ""
-	uv run python -m polyarb.snapshot --verbose
+	uv run python -m polyarb.snapshot snapshot --verbose
 
 ## snapshot-markets-full: Capture snapshot (FULL mode, all markets, ~1-2 hours). Quiet.
 snapshot-markets-full:
 	@echo ">> snapshot-markets-full (quiet mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
 	@echo ">> tip: this may take 1-2 hours. Use 'make snapshot-status' to check progress."
 	@echo ""
-	uv run python -m polyarb.snapshot --full
+	uv run python -m polyarb.snapshot snapshot --full
 
 ## snapshot-markets-full-v: FULL mode with progress logs
 snapshot-markets-full-v:
 	@echo ">> snapshot-markets-full-v (verbose mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
 	@echo ""
-	uv run python -m polyarb.snapshot --full --verbose
+	uv run python -m polyarb.snapshot snapshot --full --verbose
 
 ## snapshot-status: One-glance status — running process, recent SQLite rows, latest parquet (local time)
 snapshot-status:
@@ -86,7 +86,7 @@ snapshot-status:
 snapshot-fresh:
 	@echo ">> snapshot-fresh — purging caches, then verbose run"
 	@echo ""
-	uv run python -m polyarb.snapshot --no-cache --verbose
+	uv run python -m polyarb.snapshot snapshot --no-cache --verbose
 
 ## snapshots-purge: Delete old snapshots (SQLite + Parquet). Usage: make snapshots-purge [DAYS=7] [KEEP=5]
 snapshots-purge:
