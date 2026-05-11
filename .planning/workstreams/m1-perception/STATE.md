@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 01.1
 status: closing
-stopped_at: Phase 01.1 substantively complete + 5-11 三窗口调研全部完成（A 实证 / B 云栈 / C OSS）。Two threads now have empirical content backing the 3-layer pyramid + cloud-native deployment architecture. Awaiting user decision on deployment thread §7 four open questions → then extract_learnings → Phase 02 discuss.
-last_updated: "2026-05-11T20:35:00.000Z"
+stopped_at: Phase 01.1 substantively complete + 5-11 三窗口调研全部完成（A 实证 / B 云栈 / C OSS）+ SESSION 15 EOD subset/full 决策实证锁定。L1 语义统一为 subset。Makefile silent failure 已修。Awaiting user decision on deployment thread §7 four open questions → then extract_learnings → Phase 02 discuss.
+last_updated: "2026-05-11T22:50:00.000Z"
 last_activity: 2026-05-11
 progress:
   total_phases: 3

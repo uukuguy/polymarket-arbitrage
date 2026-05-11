@@ -986,3 +986,69 @@
   4. `/gsd-discuss-phase 02 --ws m1-perception` 启动 Phase 02
 
 ---
+
+## 2026-05-11 续 (SESSION 15 EOD — Makefile fix + subset/full 决策实证)
+
+- [LEARNING] **Makefile snapshot 系列 5 target silent failure 修复**（commit b2a2e0d）：
+  - 根因：CLI 升级为 typer 多 subcommand 后，5 个 Makefile target 仍调旧入口 → typer help → exit 0
+  - 修复：`python -m polyarb.snapshot` → `python -m polyarb.snapshot snapshot`
+  - 用户批评对：知道根因还不修是工程纪律失守。**规则记下**：根因清楚 + 修复 < 10 行 + 不引入新决策 → 当场修
+
+- [LEARNING] **subset vs full 跨模式实测**（用户主动触发）：
+  - sid=7 full: 54,424 markets, 15m19s（远低于 CLI 注释的 1-2h）
+  - sid=8 subset: 23,448 markets, 9m42s（修 Makefile 后第一次工作正常的 subset）
+  - 字面差别：full 多抓 ~31k 个市场（27k 小池子 + 6k 死市场，全是 liquidity ≤ $1k）
+  - 策略相关性：subset 100% 覆盖策略目标（IMDEA 论文 $40M 套利全在头部）
+  - 时间错位：full 拖尾窗口翻倍（15min vs 10min），且 31k 长尾市场漂移分布未实测且更不稳
+
+- [LEARNING] **2 小时漂移分布实测**（sid=6 vs sid=8，间隔 124min，n=18,509）：
+  - 完全不变: 97.77%（9min 是 99.15%，缩小 1.4pp）
+  - 0.5-1¢: 0.72%（9min 0.29%，**2.5×**）
+  - 1-5¢: 0.93%（9min 0.34%，**2.7×**）
+  - > 5¢: 0.30%（9min 0.10%，**3.0×**）
+  - 含义：漂移随时间近似线性放大；2h 内仍 95%+ 市场完全静止
+  - Top movers 模式：0.50 锚价跳出是主要漂移源（新流动性进/退出，非内生波动）
+
+- [DECISION] **L1 "日级全量"语义锁定 = subset**（§0.3 结论 10 + §2.7 整节）：
+  - L1 日常主力: `make snapshot-markets-v`（每天 1-2 次，10min，~23k 高流动性市场）
+  - L1 周/月审计: `make snapshot-markets-full-v`（可选，15min，~54k 全市场）
+  - **反模式**：用 full 当日常 L1 / "先跑一次 full 当基线" / 拿 full 长尾价当套利信号
+  - 全量"语义"统一：今后 thread / SUMMARY 提"L1 日级全量"默认指 subset
+
+- [LEARNING] **既往判断订正**（§2.7.f）：
+  - ❌ "subset 元数据不全" → 字面看是对的，但对策略目标 100% 完整，原表述误导
+  - ❌ "full 模式接近死代码" → 用户立场对，功能完整 + 维护成本≈0 就该留，**保留但限定用途**
+  - ❌ CLI 注释 "~1-2 hours" → 实测 typical 15-20min，notes outdated
+
+- [DECISION] thread 主文件新增节：
+  - §0.3 结论 10（L1 语义锁定）
+  - §2.1.a 第 4 块（2h 漂移实证 + Top movers 锚价模式）
+  - §2.7 完整新节（subset vs full 决策实证 — 6 个子节）
+  - §3 工具栈表拆分 subset / full 两行
+  - §4 trade-off #1 划掉（已锁定）
+
+- [NEXT] 下次会话从这里开始（更新自 SESSION 15 初版）：
+
+  **第 1 步**（恢复）：
+  ```
+  /gsd-resume-work --ws m1-perception
+  make planning-status
+  ```
+
+  **第 2 步**（决策点）：
+  - 读 `threads/deployment-architecture.md` §7（4 个开放问题）
+  - 你答完 → thread 状态 drafting → locked
+
+  **第 3 步**（Phase 01.1 关闭）：
+  - `/gsd-extract_learnings 01.1` — 调研 + 实证完整，复盘内容厚实
+
+  **第 4 步**（Phase 02 启动）：
+  - `/gsd-discuss-phase 02 --ws m1-perception`
+  - Phase 02 范围（5 个动作清单已基本清晰）：
+    1. 修 Makefile CLI 入口断裂已完成（b2a2e0d）→ 加 snapshot 健康判定（parquet + SQLite 双校验）
+    2. 落地框架抽象 A（统一市场状态模型 + 真实 page-level 时间）
+    3. 一键部署链路（Dockerfile + fly.toml + GHA）
+    4. L1 云上 7×24 长跑（subset 日常 + full 周/月）+ 健康监控
+    5. dashboard 雏形（Cloudflare Pages + Supabase view）
+
+---
