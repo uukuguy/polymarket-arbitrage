@@ -1,18 +1,38 @@
 ---
 slug: deployment-architecture
 title: Cloud-Native Deployment Stack for Polymarket Arbitrage (M1-M3 horizon)
-status: drafting
+status: locked
 created: 2026-05-11
 updated: 2026-05-11
+locked_at: 2026-05-11
 researcher: subagent (parallel-window-B)
 ---
 
 # Thread: Cloud-Native Deployment Stack
 
-> 选型调研。不锁决策。给用户看完对比表自己定。
+> 选型调研 + 用户决策 4 个方向锚点。Phase 02 起作为部署相关 plan 的契约依据。
 >
 > 适用 horizon：M1 市场感知（当下 Phase 02+）→ M2 combinatorial → M3 cross-platform/trading
 > （6-12 月内含交易执行）。M4/M5 不在本文范围。
+
+---
+
+## 0.1 用户决策 4 锚点（2026-05-11 锁定）
+
+§7 四个开放问题的最终结论。Phase 02 起的部署相关 plan 必须依此推导：
+
+| 维度 | 决策 | 推论（Phase 02 该怎么落） |
+|---|---|---|
+| **PaaS vs DIY** | **混合：staging PaaS + prod 后期 DIY** | Phase 02 staging/prod 都走 PaaS（Fly/Railway/Render 三选一定一个）。等到 L1 稳定跑 + 流量/成本撞点再迁 VPS。**Phase 02 内不做迁移规划**，只挑一个能 1 周内打通的 PaaS。 |
+| **CN 访问** | **有常开 VPN，不存在 CN 必友好硬约束** | dashboard 栈解锁：Vercel/Supabase 主流方案直接可用，不强求 Cloudflare CN 友好回源。region 选择按"延迟靠近数据源 / 合规"两向量。Polymarket 在 AWS eu-west-2 London → 后端首选 Fly AMS / Render Frankfurt / Hetzner FSN1。 |
+| **DB topology** | **启动阶段保持能用（合并到单库），正常投运再用成本换体验** | Phase 02 用单一 Supabase Pro $25/月（Postgres 兼跑 OLTP + 简单时序）。**不**起 Tiger Cloud 双库栈。Parquet 冷存照旧（R2/S3）。性能撞墙的具体指标作为后期分库触发器，不预判。 |
+| **AWS KMS** | **M3 实盘前再接** | Phase 02 完全不动 KMS 栈。L1/L2/L3 全是只读，secrets 走 .env + PaaS 平台 secrets manager 即可。M3 进 discuss 时把 KMS 作为 Phase 03+ 前置依赖。 |
+
+**衍生约束（Phase 02 进 discuss 前要记着）**：
+- 后端 region = eu 主流（Fly AMS / Render Frankfurt 二选一，启动用免费 / 入门档）
+- dashboard = Vercel + Supabase（不锁 Cloudflare 回源）
+- DB = Supabase 单库（Pro $25 起步，免费 tier 也可先跑）
+- 私钥相关代码 / 配置不进 Phase 02 scope
 
 ---
 
@@ -818,14 +838,18 @@ researcher: subagent (parallel-window-B)
 
 ---
 
-## 7. 待用户决策的 4 个开放问题
+## 7. 用户决策 4 个开放问题（2026-05-11 已锁定 → 见 §0.1）
 
-> 这些不预判，留给用户在看完上面对比表后定。
+> 历史记录。最终结论在 §0.1 用户决策 4 锚点。下面四问保留是为了让"为什么这么选"有迹可循。
 
 1. **PaaS vs DIY 偏好**：愿意每月多花 $30-50 买 PaaS 抽象，还是省钱选 Hetzner DIY 路线（运维成本会很真实）？
+   → 决策：**混合（staging PaaS + prod 后期 DIY）**。Phase 02 用 PaaS。
 2. **CN 访问优先级**：dashboard 在 CN 直连慢能容忍吗（Vercel/Supabase 偶有抖动），还是必须 Cloudflare CN 友好路线？
+   → 决策：**有常开 VPN，无 CN 必友好约束**。dashboard 走 Vercel/Supabase 主流路线。
 3. **DB 合并 vs 拆**：Phase 1 阶段是否容忍 OLTP（Supabase）+ 时序（Tiger Cloud）双库 ~$80/月，还是先合并到 Supabase Pro $25/月跑到撞墙再拆？
+   → 决策：**先合并（Supabase 单库）**，撞墙再拆，作为"用成本换体验"的具体取舍。
 4. **AWS KMS 提前接还是 M3 再接**：M3 才接的话栈不需要现在动；但提前接可以在 staging 中演练签名链路 — 多 $5/月 +1 周学习成本。
+   → 决策：**M3 实盘前再接**。Phase 02 不动 KMS。
 
 ---
 
