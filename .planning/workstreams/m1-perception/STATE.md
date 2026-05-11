@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 01.1
-status: closing
-stopped_at: Phase 01.1 substantively complete + 5-11 三窗口调研全部完成（A 实证 / B 云栈 / C OSS）+ SESSION 15 EOD subset/full 决策实证锁定。L1 语义统一为 subset。Makefile silent failure 已修。Awaiting user decision on deployment thread §7 four open questions → then extract_learnings → Phase 02 discuss.
-last_updated: "2026-05-11T22:50:00.000Z"
-last_activity: 2026-05-11
+current_phase: 01.1 (observation-toolkit)
+status: Phase 01.1 closing (plans 01-06 shipped + 三窗口调研完整 + 两份 thread 实证落地)
+stopped_at: Phase 1 complete — LIVE-RUN-005 verified, 4 commits on origin
+last_updated: "2026-05-11T16:04:43.114Z"
+last_activity: 2026-05-12
 progress:
   total_phases: 3
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 11
   completed_plans: 11
   percent: 100
@@ -21,7 +21,7 @@ progress:
 
 **Status:** Phase 01.1 closing (plans 01-06 shipped + 三窗口调研完整 + 两份 thread 实证落地)
 **Current Phase:** 01.1 (observation-toolkit)
-**Last Activity:** 2026-05-11
+**Last Activity:** 2026-05-12
 **Last Activity Description:** SESSION 15 — 三窗口 A+B+C 并行调研完成。A 实证：fetched_at_ms schema-level 拖尾不可见（stage 5 一次性 stamp）+ 8 分钟 elapsed 6 次再验 + L1 9 分钟漂移 99.15% 市场 drift=0 但 1% 长尾 > 0.5¢（修正"模糊影像"假设为"99% 清晰 + 1% 严重失真"）+ 5 维度生产级缺口（含 CLI 入口断裂 silent failure 新发现）。B 调研：deployment-architecture.md 872 行落地，最大方向纠偏 Polymarket 在 AWS eu-west-2 London（非美东）+ 4 档预算推荐组合 + Fly AMS / Supabase Dublin 主推。C 扫描：业内主流模式 A（Vercel + Railway/Nixpacks + SQLite）+ clawfirm Dockerfile + systemd 范本 + 反模式集合。Thread 主文件加 §0.2.1.a/b + §2.1.a + §2.5.a 四节。
 
 ## Progress
