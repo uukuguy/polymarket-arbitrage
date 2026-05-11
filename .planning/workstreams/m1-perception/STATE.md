@@ -4,9 +4,9 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 01.1
 status: closing
-stopped_at: Phase 01.1 substantively complete (plans 01-06 code shipped + acceptance amendments). Architecture course-correction triggered → threads/market-observation-architecture.md drafted. Awaiting extract_learnings before Phase 02.
-last_updated: "2026-05-10T00:00:00.000Z"
-last_activity: 2026-05-10
+stopped_at: Phase 01.1 substantively complete + 5-11 三窗口调研全部完成（A 实证 / B 云栈 / C OSS）。Two threads now have empirical content backing the 3-layer pyramid + cloud-native deployment architecture. Awaiting user decision on deployment thread §7 four open questions → then extract_learnings → Phase 02 discuss.
+last_updated: "2026-05-11T20:35:00.000Z"
+last_activity: 2026-05-11
 progress:
   total_phases: 3
   completed_phases: 1
@@ -19,10 +19,10 @@ progress:
 
 ## Current Position
 
-**Status:** Phase 01.1 closing (all 6 plans shipped + acceptance amendments + architecture thread drafted)
+**Status:** Phase 01.1 closing (plans 01-06 shipped + 三窗口调研完整 + 两份 thread 实证落地)
 **Current Phase:** 01.1 (observation-toolkit)
-**Last Activity:** 2026-05-10
-**Last Activity Description:** Acceptance review of plan 06 surfaced production-grade gaps → 3 amendment commits (decouple translation / tri-state status / `make overview`). User course-correction: "全量快照是模糊影像，不能做主角；需要三层金字塔架构（日级全量 → 定向跟踪 → 单市场 K线）". Drafted `threads/market-observation-architecture.md`. Discovered + fixed planning-process drift: plan 04/05/06 SUMMARY 补回；加 pre-commit hook + `make planning-status` 索引脚本 + CLAUDE.md plan-末纪律.
+**Last Activity:** 2026-05-11
+**Last Activity Description:** SESSION 15 — 三窗口 A+B+C 并行调研完成。A 实证：fetched_at_ms schema-level 拖尾不可见（stage 5 一次性 stamp）+ 8 分钟 elapsed 6 次再验 + L1 9 分钟漂移 99.15% 市场 drift=0 但 1% 长尾 > 0.5¢（修正"模糊影像"假设为"99% 清晰 + 1% 严重失真"）+ 5 维度生产级缺口（含 CLI 入口断裂 silent failure 新发现）。B 调研：deployment-architecture.md 872 行落地，最大方向纠偏 Polymarket 在 AWS eu-west-2 London（非美东）+ 4 档预算推荐组合 + Fly AMS / Supabase Dublin 主推。C 扫描：业内主流模式 A（Vercel + Railway/Nixpacks + SQLite）+ clawfirm Dockerfile + systemd 范本 + 反模式集合。Thread 主文件加 §0.2.1.a/b + §2.1.a + §2.5.a 四节。
 
 ## Progress
 
@@ -44,9 +44,15 @@ progress:
 
 ## Phase 01.1 后续
 
-- **架构 thread**: `.planning/threads/market-observation-architecture.md` — 三层金字塔（L1 日级全量 / L2 定向 / L3 单市场 K 线）+ 平台框架抽象层 A/B/C + 5 个调研问题（§2.1-2.5）
-- **下次会话该做的**: §2.1 实证调研（当前快照时间一致性实情）→ §2.5（生产级长跑要求评估）→ 然后基于调研结果开 Phase 02
-- **基础设施补强（5-10）**: `.githooks/pre-commit`（plan-scoped commit 强制 SUMMARY 检查）+ `scripts/planning_status.py` + `make planning-status` + CLAUDE.md plan-末纪律
+- **架构 thread**: `.planning/threads/market-observation-architecture.md` — 三层金字塔 + 平台框架抽象层 A/B/C
+  - 5-11 已加四节实证：§0.2.1.a/b 用户硬约束 + §2.1.a stamp/elapsed/漂移实证 + §2.5.a 5 维度生产级缺口
+- **部署 thread**: `.planning/threads/deployment-architecture.md` — 872 行云栈选型调研
+  - drafting 状态 → 用户答 §7 四个开放问题后转 locked
+- **下次会话该做的**:
+  1. 读 deployment thread §7 → 用户决策 4 问 → thread 锁定
+  2. `/gsd-extract_learnings 01.1`（调研已完整，复盘有内容）
+  3. `/gsd-discuss-phase 02 --ws m1-perception`
+- **基础设施补强（5-10）**: `.githooks/pre-commit` + `scripts/planning_status.py` + `make planning-status` + CLAUDE.md plan-末纪律
 
 ---
 

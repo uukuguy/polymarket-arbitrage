@@ -890,3 +890,99 @@
   - 数据出境合规关切（如果有，影响部署地区）
 
 ---
+
+## 2026-05-11 (SESSION 15 — 三窗口 A+B+C 并行调研)
+
+- [SESSION] 会话开头四问用户答复（写入主 thread §0.2.1.a）：
+  - 支付：CN + 美区 + PayPal 都可以；启动用免费额度
+  - 预算：启动期先不定（要求分档推荐）
+  - 云上交易：**是，要预留方案**（trading-readiness 升为一级维度）
+  - 地区合规：具体分析，按延迟+合规对比表给
+
+- [DECISION] 三窗口并行调研启动：
+  - 窗口 A（主线）：fetched_at_ms stamp 机制 + 实证漂移 + 生产级缺口
+  - 窗口 B（subagent）：5-8 候选云栈 × 6 维度深度选型
+  - 窗口 C（Explore subagent）：35+ OSS 项目部署形态扫描
+
+- [LEARNING] **A-1/A-2 实证 — fetched_at_ms schema-level 拖尾不可见**：
+  - 代码证据：orchestrator.py:340-343 stage 5 一次性 stamp，所有 target_markets 共用 clob_done_ms
+  - 实证：4 历史 snapshot + 2 新 snapshot 全部 COUNT(DISTINCT fetched_at_ms)=1
+  - 真实 elapsed 6 次均值 ~7-9 分钟（cache 热到 ~1.5min）
+  - 含义：下游消费者无法从 schema 知道某条 row 在 8 分钟里哪一秒抓
+
+- [LEARNING] **A-3 实证 — L1 9 分钟漂移分布反直觉**：
+  - 2026-05-11 双 snapshot 实测：RUN1（8m41s）+ RUN2（8m31s）间隔 9 分钟
+  - n=19,081 市场（同时存在 + 双侧 bid/ask）
+  - **99.15% 市场 drift=0**（mid 价完全不变）
+  - 0.83% drift > 0.5¢，0.44% drift > 1¢，0.10% drift > 5¢，max=30¢
+  - Top movers 都是新开市场从默认 50¢ 锚跳出
+  - **修正先前假设**："L1 是 8 分钟模糊影像" → 实际是"99% 清晰 + 1% 严重失真"
+  - **三层金字塔架构有实证支持**：99% 适合 L1 画像、1% 长尾必须 L2/L3 高频跟踪
+
+- [LEARNING] **A-4 生产级缺口清单** — 7 维度对照：
+  - 🔴 阻断：调度（无 cron）/ 健康检查（无 /health）/ 部署物（无 Dockerfile/fly.toml/GHA）
+  - 🟡 必补：日志聚合（无远程 sink）/ 告警（无 webhook/Sentry）
+  - ✅ 已做：tenacity 重试 + snapshots-purge 子命令
+  - **🔴 新发现 — CLI 入口断裂 silent failure**：
+    - `make snapshot-markets` 调 `polyarb.snapshot` (无 subcommand) → typer 显示 help → exit 0
+    - cron / systemd / k8s readiness probe 全部会被骗
+    - **健康判定语义必须 >  exit 0 单一信号**（要加：parquet 文件落盘 + SQLite snapshots 行 +1）
+    - Makefile 修复留给 Phase 02
+
+- [LEARNING] **窗口 B 调研最大方向纠偏 — Polymarket 服务器在 AWS eu-west-2 London**：
+  - 来源：NYCServers 2026-04-07 traceroute 分析
+  - 不是早期预设的 us-east
+  - 含义：所有数据抓取层必须在 Dublin / Amsterdam / Helsinki（低延迟 + 非封锁）
+  - Polymarket IP 黑名单 33 国（含 US/UK/SG/HK/CN）
+  - **直接影响候选栈**：Render 全区废、Railway us-only 废、Fly.io AMS 命中、Supabase Dublin 命中
+
+- [LEARNING] **窗口 B 产出 — deployment-architecture.md（872 行）**：
+  - 5 硬约束 + 6 评估维度（含 trading-readiness 一级维度）
+  - 5 Compute + 6 DB + 5 Observability + 4 Dashboard 候选对比
+  - 4 档预算推荐组合（$0 / $30 / $100 / $300）
+  - 地区三向量对比表（数据源延迟 / CN 操控延迟 / 合规）
+  - 关键决策树 + 排除项 + 4 个待用户开放问题
+  - **TL;DR**：$0 启动 = Fly trial + Supabase Free Dublin + Axiom/Sentry/Better Stack Free + Cloudflare Pages
+
+- [LEARNING] **窗口 C 调研 — 业内 OSS 部署模式**：
+  - 模式 A 主流：Vercel 前端 + Railway/Nixpacks 后端 + SQLite（polymarket-kalshi-weather-bot）
+  - 模式 B 工程纪律范本：Docker + systemd + SQLite WAL（clawfirm）
+  - 模式 C 仅 HFT：AWS eu-west-1（polymarket-hft-engine 45★）
+  - **反模式**：缺健康检查、缺 deadletter、APScheduler 静默挂死、部署文档碎片化
+  - **本项目启示**：学模式 A 的"分离制 + PaaS"思路但换厂商（Fly AMS vs Railway us）
+
+- [DECISION] thread 主文件加四节实证回写：
+  - §0.2.1.a — 用户硬约束（4 维度）
+  - §0.2.1.b — §2.6 调研事实修正（London 不在美东 + 4 档预算）
+  - §2.1.a — 实证（stamp 机制 + elapsed + 漂移分布）
+  - §2.5.a — 缺口清单（7 维度 + CLI 入口断裂 silent failure）
+
+- [NEXT] 下次会话从这里开始：
+
+  **第 1 步**（恢复）：
+  ```
+  /gsd-resume-work --ws m1-perception
+  make planning-status  # 应全 OK
+  ```
+
+  **第 2 步**（合并 + 决策）：
+  - 读 `.planning/threads/deployment-architecture.md` §7 "4 个开放问题"
+  - 用户决策：PaaS-managed vs DIY-VPS / CN 访问优先级 / DB 合并 vs 拆 / KMS 时机
+  - 决策后 thread 状态 drafting → locked
+
+  **第 3 步**（Phase 01.1 关闭 + Phase 02 启动）：
+  - `/gsd-extract_learnings 01.1` — 现在调研完整，复盘会含架构纠偏 + 云原生约束 + 三层实证
+  - `/gsd-discuss-phase 02 --ws m1-perception` — Phase 02 范围（基于实证）：
+    1. 修 Makefile CLI 入口断裂 + 加 snapshot 健康判定（parquet 落盘 + SQLite 行）
+    2. 落地框架抽象 A（统一市场状态模型 + 真实 page-level 时间）
+    3. 一键部署链路（Dockerfile + fly.toml + GHA workflow）
+    4. L1 云上 7×24 长跑 + 健康监控
+    5. dashboard 雏形（Cloudflare Pages + Supabase view）
+
+  **核心动作清单**：
+  1. `make planning-status` 验证无 DRIFT
+  2. 用户答 deployment thread §7 四问 → thread 状态 locked
+  3. `/gsd-extract_learnings 01.1` 落 learnings
+  4. `/gsd-discuss-phase 02 --ws m1-perception` 启动 Phase 02
+
+---

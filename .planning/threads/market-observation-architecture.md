@@ -44,6 +44,41 @@ L1/L2/L3 一开始就按云原生形态设计（数据库选型、长跑调度�
 按云上现成服务来选）。这个约束直接影响 §1.5 抽象 B 的时序后端选型、§2 调研
 问题的范围、§5 Phase 02 的边界。
 
+#### 0.2.1.a 用户侧硬约束（2026-05-11 会话开头补问，§2.6 调研可行域）
+
+| 维度 | 用户答复 | §2.6 调研含义 |
+|---|---|---|
+| **支付能力** | "CN + 美区 + PayPal 都可以；启动阶段先用免费额度" | 可行域全开 — Fly/Render/Railway/DO/Hetzner/Supabase/Neon/Better Stack/Grafana Cloud 全部可候选；**启动期优先免费/试用层组合**，把硬付费推迟到产生明确价值 |
+| **预算档** | "启动阶段先不定" | 不锁预算，但调研产出必须分档列（< $25 / $50-100 / $150-300）让用户后续按价值决策 |
+| **未来云上交易执行（6-12 月）** | "**是，要预留方案**" | **§2.6 必须把"私钥管理 + 低延迟出网 + 合规模型"列为一类一级维度**，不能只按观察栈选；选型时排除"未来加交易要彻底重选"的栈（如纯 serverless / 无 VPC / 无 secrets manager 的栈）；推荐候选必须能演进出 KMS/Vault/TEE 路径 + 私网出站 + 固定 IP 白名单 |
+| **数据出境 / 部署地区** | "具体分析，都有倾向" | §2.6 region 选择不预设结论，而是按**延迟（数据源在美东）/ 本人监控延迟（CN 操控 dashboard）/ 合规出境**三向量做分析，给出"美东 / 新加坡 / 日本东京 / 香港"对比表，让用户基于实际优先级选 |
+
+**对 §2.6 调研的直接影响**：
+- 候选栈必须**预留交易执行演进路径**（私钥安全 / 私网 / 固定 IP）— 这会过滤掉一些纯 PaaS 选项
+- 启动期方案优先**免费/试用层堆叠**（Fly free tier + Supabase free + Better Stack free + Grafana Cloud free），把"开始花钱"作为价值产生后的决策
+- 地区选型不预判，列对比表让用户决策
+- 不锁预算 = 调研产出必须给"按预算分档的推荐组合"，不是单一推荐
+
+#### 0.2.1.b §2.6 调研产出 — 关键事实修正（2026-05-11 窗口 B）
+
+完整对比矩阵 + 4 档预算推荐 + 决策树见 `.planning/threads/deployment-architecture.md`（872 行）。
+
+**最大方向纠偏 — Polymarket 服务器在 AWS eu-west-2 London**：
+- 早期 §0.2.1.a "数据源在美东"是错误预设
+- 实测来源：[NYCServers 2026-04-07](https://newyorkcityservers.com/blog/polymarket-server-location-latency-guide)
+- 含义：**所有数据抓取层必须部署在 Dublin / Amsterdam / Helsinki**（低延迟 + 非封锁）
+- Polymarket IP 黑名单 33 国（US / UK / SG / HK / CN 全在内）→ 直接影响候选栈：**Render 全区废、Railway us-only 废、Fly.io AMS 命中、Supabase Dublin 命中**
+
+**4 档推荐**（详见 deployment thread）：
+- $0 免费堆叠：Fly trial + Supabase Free + Axiom/Sentry/Better Stack Free + Cloudflare Pages
+- $30：Fly AMS + dedicated egress + Supabase Pro Dublin
+- $100：上面 + Sentry Team + Supabase compute add-on
+- $300：多 region + Tiger Cloud Dublin + AWS KMS（trading）
+
+**Polymarket Auth 关键事实**（影响交易执行预留）：
+- Auth 必须是 EOA secp256k1（EIP-712 L1），AWS KMS / Vault Cloud BYOK 可托管
+- 真正卡 trading-readiness 的不是 KMS，而是**出口固定 IP**（Cloudflare 限流白名单）→ Fly.io $3.60/月 dedicated egress IPv4 是刚需
+
 ### 0.3 直接结论
 
 1. 全量快照只能用于"日级市场画像"，不能做策略主角
@@ -171,6 +206,97 @@ L3 信号 → emit("signal.detected", market_id, strategy_hint)
 - 跑一次重复 snapshot（10 分钟内连跑 2 次），对同一个市场比 mid 价差
 
 **为什么先答**：决定 L1 数据**能不能拿来做"即时套利信号"**还是**只能做"画像 + 候选池"**。如果同市场 8 分钟漂移 > 0.005，做套利是骗自己。
+
+#### 2.1.a 实证结果（2026-05-11 窗口 A）
+
+**1. fetched_at_ms stamp 机制 — schema-level 拖尾不可见**
+
+代码证据：`src/polyarb/snapshot/orchestrator.py:340-343`
+
+```python
+clob_done_ms = int(time.time() * 1000)
+with _phase("5/7: Stamp + attach top-of-book"):
+    for m in target_markets:
+        m["fetched_at_ms"] = clob_done_ms
+```
+
+- `fetched_at_ms` 是 **stage 5（CLOB fetch 完成后）一次性 stamp**，所有 target_markets 共用同一毫秒值
+- 不是逐市场 / 逐 page 抓取时的真实时间戳
+- events 表用更晚的 `finished_at_ms`（stage 7 时戳），但同样**所有 row 同值**
+- DuckDB 验证（4 个历史 snapshot）：`COUNT(DISTINCT fetched_at_ms) = 1` per snapshot
+
+**含义**：下游消费者**无法**从 schema 知道某条 row 是在 8 分钟里哪一秒抓的。
+所有时序分析、漂移检测、套利信号都建立在"该 snapshot 内时间一致"的虚假前提上。
+
+**2. 真实 elapsed（snapshot_taken_at_ms → finished_at_ms）— "8 分钟"是实测平均**
+
+```
+sid | mode   | mkts   | elapsed | 备注
+----+--------+--------+---------+------
+  1 | subset |  20589 |  496.6s | 2026-05-02 早期跑
+  2 | subset |  17486 |  418.8s | 2026-05-04
+  3 | subset |     ?  |   96.0s | 2026-05-10 cache 热跑（fixture / quick）
+  4 | subset |  24032 |  527.3s | 2026-05-10 完整跑（最近一次）
+```
+
+- 平均 ~7-9 分钟，单次最长 8 分 47 秒
+- cache 热的情况下能压到 ~1.5 分钟（sid=3），但**不能依赖** — cache miss / 24h 后 cache 失效就回到 ~8 分钟
+- 与用户洞察"8 分钟以上"完全吻合 — 不是夸张，是实测
+
+**3. 跨 snapshot mid 价漂移（A-3 双跑实证，2026-05-11）**
+
+测试方法：subset snapshot 连跑两次（RUN1 20:18→20:26、RUN2 20:26→20:35，间隔约 9 分钟），
+对同时存在于两次 snapshot 且都有 best_bid/best_ask 的市场（n=19,081，~80% subset 覆盖），
+计算 `mid = (bid+ask)/2`，统计 `|mid_run2 - mid_run1|`。
+
+**结果分布**：
+
+| 漂移区间 | 占比 | 含义 |
+|---|---|---|
+| 恰好 0 | **99.15%** | 9 分钟内 mid 价完全不变 |
+| 0 - 0.1¢ | 0.04% | 微噪声 |
+| 0.1¢ - 0.5¢ | 0.07% | 一般噪声 |
+| 0.5¢ - 1¢ | 0.29% | 临界 |
+| 1¢ - 5¢ | 0.34% | 实质性移动 |
+| > 5¢ | 0.10% | 显著移动（含新开市场从 50¢ 默认价跳到真实价） |
+
+汇总统计：mean=0.02¢，p50/p75/p90/p95/p99=0，max=30¢。
+
+**Top 10 movers 模式**：基本都是 `mid_r1 = 0.50` → `mid_r2 ≠ 0.50`，
+即"新开市场默认 50¢ 锚 → 流动性进来后跳到真实价"。不是已有市场的内生波动。
+
+**修正先前假设**：
+- 原假设："L1 是 8 分钟模糊影像，价格漂移影响所有市场"
+- 实证：**99% 市场内部一致性极强（漂移 = 0），1% 长尾市场才显著漂移**
+- 这是 Polymarket 薄市场结构的体现 — 多数市场全天无 trade，价格挂着不动
+
+**含义重组**：
+- ✅ **L1 全量快照内部一致性不差** — 用于"画像 / 候选池" 完全够
+- ⚠️ **不能假定 1% 长尾市场"无关紧要"** — 它们恰好是流动性 + 价格变化双高的市场，套利信号最可能来自这类
+- ⚠️ **9 分钟拖尾 vs 9 分钟实测漂移 — 同量级**，但**漂移集中在少数市场**，全样本看上去"一致"
+- ❌ **不能基于 L1 做分钟级套利** — 即使 99% 市场稳定，1% 出错就是亏损来源
+- ✅ **L2 定向跟踪的价值证据强** — 把这 1% 长尾市场切出来给分钟级 cadence 完全合理
+
+**架构含义 — 三层金字塔的实证基础**：
+
+| 层 | 时间窗口 | 实证支持 |
+|---|---|---|
+| L1（日级全量） | 9 分钟拖尾内 99% 市场零漂移 | ✅ 做画像、候选池筛选 |
+| L2（定向分钟级） | 1% 长尾市场漂移 > 0.5¢ | ✅ 必须切出来高频跟踪 |
+| L3（单市场 K 线） | top movers 30¢/9min = 200¢/h 量级 | ✅ 真正活跃的市场需要 tick 流 |
+
+**结论（§2.1 完整锁定）**：
+
+- ✅ **fetched_at_ms schema-level 拖尾不可见** — 框架抽象 A 必须显式标注"stamp 时间 vs 抓取时间"
+- ✅ **8 分钟拖尾物理事实** — 实测平均 7-9 分钟（4 次历史 + 2 次 5-11 复跑）
+- ✅ **L1 可用于日级 / 不可用于分钟级** — 99% 一致 但 1% 长尾恰是策略目标
+- ✅ **三层金字塔架构在数据特征上有实证支持** — 不是工程美学，是数据驱动的必要拆分
+
+**结论（2.1 部分锁定）**：
+
+- ✅ **schema 层无法表达"snapshot 内时间不一致"** — 这是**框架抽象 A**（统一市场状态模型）的关键设计点：要么 stamp 真实 page-level 时间（改 normalizer），要么明确标注"这是 stamp 时间不是抓取时间"
+- ✅ **8 分钟拖尾窗口是物理事实** — 全量 L1 只能日级用途；任何分钟级以下决策必须走 L2/L3
+- ⏳ 单市场漂移分布待 A-3 数据出来后定 v1
 
 ### 2.2 Polymarket WebSocket 的真实能力边界
 
@@ -312,6 +438,42 @@ L3 信号 → emit("signal.detected", market_id, strategy_hint)
 - 评估当前代码距 daemon 化还差什么（asyncio loop 是否能直接长跑？资源回收？）
 
 **为什么先答**：生产级是本阶段的核心目标。如果 L1 都不能 7×24 跑，做 L2/L3 是空中楼阁。
+
+#### 2.5.a 实证缺口清单（2026-05-11 窗口 A）
+
+代码扫描 `src/polyarb/` + 根目录部署物，对照 7 维度：
+
+| 维度 | 现状 | 缺口 | 严重度 | 触发场景 |
+|---|---|---|---|---|
+| **调度** | 仅 Makefile target 人工触发 | 无 cron / APScheduler / systemd timer / k8s CronJob | 🔴 阻断 | 云上 7×24 必须自动跑 |
+| **健康检查** | `grep -r /health src/polyarb/` 零结果 | 无 HTTP `/health` endpoint | 🔴 阻断 | Fly/Render/Railway readiness probe 接不上 |
+| **日志聚合** | loguru → stderr 文本 | 未 structlog 化；无远程 sink 配置 | 🟡 必须补 | Better Stack / Axiom / Grafana Loki 需 JSON 格式 |
+| **告警** | `watchlist-alerts` 子命令仅 stdout 输出 | 无 webhook / Sentry / Slack / 邮件 | 🟡 必须补 | snapshot 连续失败 / API quota 用尽 / 磁盘满 无人知晓 |
+| **部署物** | 项目根无 Dockerfile / fly.toml / render.yaml / `.github/workflows/` | 整个一键部署链路缺失 | 🔴 阻断 | 用户约束 §0.2.1 明文要求 |
+| **重试** | ✅ `clients/gamma_client.py` + `clob_client.py` 用 tenacity exponential backoff | 已经做好 | ✅ | — |
+| **数据保留** | ✅ `snapshots-purge` 子命令存在 | 仍需被调度（依赖 #1） | 🟡 部分 | 长跑 30 天后磁盘满 |
+
+**额外发现 — CLI 入口契约破裂（本会话触发）**：
+
+5-11 跑 `make snapshot-markets` 两次，每次 1 秒退出 `exit 0`。**没有任何 snapshot 落地**。
+
+根因：
+- `polyarb/snapshot/cli.py` 已升级为 typer 多 subcommand 结构（`snapshot` / `snapshots-purge`）
+- 但 `Makefile:56-60` 仍调 `uv run python -m polyarb.snapshot`（无 subcommand）
+- typer 显示帮助页 + 正常退出 — **cron 看到 exit 0 以为成功**
+
+含义：
+- 这是"生产级长跑"最危险的一类故障 — **silent failure with success exit code**
+- 任何只看 exit code 的健康检查（systemd `Restart=on-failure` / k8s livenessProbe / 监控告警）都会被骗
+- 必须在 Phase 02 加入：**snapshot 成功 = "exit 0 + parquet 文件落盘 + SQLite snapshots 行 +1"** 三联校验，不能只看 exit
+- 同步：**修 Makefile target 调 `polyarb.snapshot snapshot`**（这次会话顺手补，见 commit）
+
+**结论（2.5 部分锁定）**：
+
+- 🔴 当前 L1 距云上 7×24 还差 **5 个核心维度**（调度 / 健康 / 日志 / 告警 / 部署物）
+- ✅ 重试 + 数据清理已经做好（不再是缺口）
+- 🔴 **健康判定语义必须比 "exit 0" 更强** — 否则 silent failure 没人发现
+- ✅ 这 5 个缺口正好对应 §2.6 调研报告（`threads/deployment-architecture.md`）的 5 个候选栈维度，**两套调研产出可以一对一映射到 Phase 02 plan**
 
 ---
 
