@@ -312,12 +312,13 @@ def test_events_composite_primary_key(tmp_path: Path) -> None:
             (3, 4, "subset", 0, 1, "/tmp/y.parquet"),
         )
         # Same event_id "EV-1" in TWO different snapshots — must NOT collide.
-        con.execute(EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, 1))
-        con.execute(EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, 2))
+        # Phase 02 Plan 01: EVENTS_INSERT_SQL now has 12 columns (added page_fetched_at_ms)
+        con.execute(EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, None, 1))
+        con.execute(EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, None, 2))
         # But same (id, snapshot_id) must be rejected.
         with pytest.raises(sqlite3.IntegrityError):
             con.execute(
-                EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, 1)
+                EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, None, 1)
             )
     finally:
         con.close()
@@ -408,19 +409,23 @@ def test_event_tags_indexes_exist(tmp_path: Path) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_markets_column_count_is_22_after_amendment_01() -> None:
-    """After Amendment 01, markets table has 22 columns.
+def test_markets_column_count_is_23_after_phase_02_plan_01() -> None:
+    """After Phase 02 Plan 01, markets table has 23 columns.
 
     Phase 1: 21 columns
     Phase 1.1 pre-amendment: 23 columns (added category + tags)
     Phase 1.1 Amendment 01: 22 columns (-category -tags +event_id)
+    Phase 02 Plan 01: 23 columns (+page_fetched_at_ms, fixes L2 schema misunderstanding)
     """
-    assert len(MARKETS_COLUMN_ORDER) == 22, (
-        f"Expected 22 columns after Amendment 01, got {len(MARKETS_COLUMN_ORDER)}"
+    assert len(MARKETS_COLUMN_ORDER) == 23, (
+        f"Expected 23 columns after Phase 02 Plan 01, got {len(MARKETS_COLUMN_ORDER)}"
     )
-    # event_id is last column
+    # event_id is last column; page_fetched_at_ms is just before snapshot_id
     assert MARKETS_COLUMN_ORDER[-1] == "event_id", (
         f"event_id must be the last markets column, got {MARKETS_COLUMN_ORDER[-1]}"
+    )
+    assert "page_fetched_at_ms" in MARKETS_COLUMN_ORDER, (
+        "page_fetched_at_ms must be in MARKETS_COLUMN_ORDER after Phase 02 Plan 01"
     )
 
 
@@ -459,9 +464,20 @@ def test_page_fetched_at_ms_in_all_four_sync_points() -> None:
     )
     assert m is not None
     ddl_body = m.group(1)
-    # The column line must not have NOT NULL
-    page_col_match = re.search(r"page_fetched_at_ms\s+(\w+)(.*?)(?:,|\n|$)", ddl_body)
-    assert page_col_match is not None, "page_fetched_at_ms column definition not found in DDL"
+    # The column definition line must be non-comment: e.g. "  page_fetched_at_ms INTEGER,"
+    # Filter out comment lines and search only in non-comment lines.
+    non_comment_lines = [
+        ln for ln in ddl_body.splitlines() if not ln.strip().startswith("--")
+    ]
+    non_comment_body = "\n".join(non_comment_lines)
+    page_col_match = re.search(
+        r"^\s*page_fetched_at_ms\s+(\w+)(.*?)$",
+        non_comment_body,
+        re.MULTILINE,
+    )
+    assert page_col_match is not None, (
+        "page_fetched_at_ms column definition not found in DDL (non-comment lines)"
+    )
     assert page_col_match.group(1).upper() == "INTEGER", (
         f"page_fetched_at_ms must be INTEGER type, got {page_col_match.group(1)}"
     )

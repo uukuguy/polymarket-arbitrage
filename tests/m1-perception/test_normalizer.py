@@ -18,6 +18,7 @@ from polyarb.snapshot.normalizer import normalize_events, normalize_market
 
 # Expected output keys (everything in MARKETS_COLUMN_ORDER except snapshot_id).
 # Phase 1.1 Amendment 01: -category -tags +event_id
+# Phase 02 Plan 01: +page_fetched_at_ms (per-page real fetch time, fixes L2)
 EXPECTED_KEYS = {
     "market_id",
     "condition_id",
@@ -38,6 +39,7 @@ EXPECTED_KEYS = {
     "neg_risk",
     "neg_risk_market_id",
     "fetched_at_ms",
+    "page_fetched_at_ms",  # Phase 02 Plan 01: per-page real fetch time (nullable)
     "incomplete",
     "event_id",  # Phase 1.1 Amendment 01
 }

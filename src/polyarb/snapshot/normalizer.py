@@ -154,7 +154,11 @@ def normalize_market(
         "neg_risk": bool(raw.get("negRisk", False)),
         "neg_risk_market_id": raw.get("negRiskMarketID"),
         # Stamped by orchestrator at CLOB-fetch completion (Pitfall 6):
+        # Phase 02: stage stamp filled by orchestrator stage 5; see schemas.py for semantic note
         "fetched_at_ms": None,
+        # Phase 02 Plan 01: per-page real fetch time from _page_fetched_at_ms private key
+        # injected by GammaClient._paginate(). None for rows from pre-02 snapshots.
+        "page_fetched_at_ms": raw.get("_page_fetched_at_ms"),
         "incomplete": False,
         # Phase 1.1 Amendment 01 — FK to events(id), or None if not in /events response
         "event_id": event_id,
@@ -233,6 +237,9 @@ def normalize_events(
                 "end_time_ms": end_time_ms,
                 # fetched_at_ms is stamped by orchestrator (None placeholder).
                 "fetched_at_ms": None,
+                # Phase 02 Plan 01: per-page real fetch time from _page_fetched_at_ms
+                # private key injected by GammaClient._paginate(). None for pre-02 snapshots.
+                "page_fetched_at_ms": raw.get("_page_fetched_at_ms"),
             }
         )
 

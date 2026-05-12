@@ -5,6 +5,12 @@ Phase 1.1 Amendment 01 (2026-05-02):
     实际：那俩字段只在 /events 上。Path C 决议：抓 /events 建 events + event_tags
     表，删 markets 的 category/tags 列改用 event_id 外键。
 
+Phase 02 Plan 01 (2026-05-12):
+    Added page_fetched_at_ms (nullable INTEGER) to markets and events tables.
+    Semantic note (Phase 02): fetched_at_ms is the STAGE 5 completion stamp,
+    same value for all rows within a snapshot. Use page_fetched_at_ms for per-page
+    real fetch time (nullable for pre-02 snapshots). See L2 in LEARNINGS.
+
 MARKETS_COLUMN_ORDER, MARKETS_INSERT_SQL, and SNAPSHOT_SCHEMA must stay in lockstep.
 Adding/removing a column requires updating ALL FOUR sync points (DDL/MARKETS_COLUMN_ORDER/
 MARKETS_INSERT_SQL/SNAPSHOT_SCHEMA). Phase 1.1 added a fifth sync point: the
@@ -64,7 +70,11 @@ CREATE TABLE IF NOT EXISTS events (
   liquidity_usd   REAL,
   volume_usd      REAL,
   end_time_ms     INTEGER,
+  -- Semantic note (Phase 02): fetched_at_ms is the STAGE 5 completion stamp,
+  -- same value for all rows within a snapshot. Use page_fetched_at_ms for per-page
+  -- real fetch time (nullable for pre-02 snapshots).
   fetched_at_ms   INTEGER NOT NULL,
+  page_fetched_at_ms INTEGER,
   snapshot_id     INTEGER NOT NULL REFERENCES snapshots(id),
   PRIMARY KEY (id, snapshot_id)
 );
@@ -107,7 +117,11 @@ CREATE TABLE IF NOT EXISTS markets (
   closed             INTEGER,
   neg_risk           INTEGER,
   neg_risk_market_id TEXT,
+  -- Semantic note (Phase 02): fetched_at_ms is the STAGE 5 completion stamp,
+  -- same value for all rows within a snapshot. Use page_fetched_at_ms for per-page
+  -- real fetch time (nullable for pre-02 snapshots).
   fetched_at_ms      INTEGER NOT NULL,
+  page_fetched_at_ms INTEGER,
   snapshot_id        INTEGER NOT NULL REFERENCES snapshots(id),
   incomplete         INTEGER NOT NULL DEFAULT 0,
   event_id           TEXT
@@ -154,6 +168,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_qt_question_en ON question_translations(qu
 
 # Order MUST match the DDL `CREATE TABLE markets(...)` declaration
 # AND the placeholders in MARKETS_INSERT_SQL.
+# Semantic note (Phase 02): fetched_at_ms is the STAGE 5 completion stamp,
+# same value for all rows within a snapshot. Use page_fetched_at_ms for per-page
+# real fetch time (nullable for pre-02 snapshots).
 MARKETS_COLUMN_ORDER: tuple[str, ...] = (
     "market_id",
     "condition_id",
@@ -174,6 +191,7 @@ MARKETS_COLUMN_ORDER: tuple[str, ...] = (
     "neg_risk",
     "neg_risk_market_id",
     "fetched_at_ms",
+    "page_fetched_at_ms",  # Phase 02 Plan 01: per-page real fetch time (nullable, fixes L2)
     "snapshot_id",
     "incomplete",
     "event_id",  # Phase 1.1 Amendment 01: FK to events(id)
@@ -184,8 +202,8 @@ MARKETS_INSERT_SQL = (
     "market_id,condition_id,slug,question,yes_token_id,no_token_id,"
     "mid_price,liquidity_usd,volume_usd,best_bid_price,best_bid_size,best_ask_price,"
     "best_ask_size,end_time_ms,active,closed,neg_risk,neg_risk_market_id,"
-    "fetched_at_ms,snapshot_id,incomplete,event_id) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    "fetched_at_ms,page_fetched_at_ms,snapshot_id,incomplete,event_id) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -202,15 +220,19 @@ EVENTS_COLUMN_ORDER: tuple[str, ...] = (
     "liquidity_usd",
     "volume_usd",
     "end_time_ms",
+    # Semantic note (Phase 02): fetched_at_ms is the STAGE 5 completion stamp,
+    # same value for all rows within a snapshot. Use page_fetched_at_ms for per-page
+    # real fetch time (nullable for pre-02 snapshots).
     "fetched_at_ms",
+    "page_fetched_at_ms",  # Phase 02 Plan 01: per-page real fetch time (nullable, fixes L2)
     "snapshot_id",
 )
 
 EVENTS_INSERT_SQL = (
     "INSERT INTO events("
     "id,slug,title,ticker,active,closed,liquidity_usd,volume_usd,"
-    "end_time_ms,fetched_at_ms,snapshot_id) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+    "end_time_ms,fetched_at_ms,page_fetched_at_ms,snapshot_id) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 EVENT_TAGS_COLUMN_ORDER: tuple[str, ...] = (
@@ -254,7 +276,11 @@ SNAPSHOT_SCHEMA: pa.Schema = pa.schema(
         pa.field("closed", pa.bool_()),
         pa.field("neg_risk", pa.bool_()),
         pa.field("neg_risk_market_id", pa.string(), nullable=True),
+        # Semantic note (Phase 02): fetched_at_ms is the STAGE 5 completion stamp,
+        # same value for all rows within a snapshot. Use page_fetched_at_ms for
+        # per-page real fetch time (nullable for pre-02 snapshots).
         pa.field("fetched_at_ms", pa.int64()),
+        pa.field("page_fetched_at_ms", pa.int64(), nullable=True),  # Phase 02 Plan 01: fixes L2
         pa.field("snapshot_taken_at_ms", pa.int64()),
         pa.field("snapshot_id", pa.int64()),
         pa.field("incomplete", pa.bool_()),

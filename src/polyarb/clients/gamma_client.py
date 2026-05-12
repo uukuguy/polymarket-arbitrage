@@ -31,6 +31,7 @@ Anti-patterns deliberately avoided:
 
 from __future__ import annotations
 
+import time
 import httpx
 from aiolimiter import AsyncLimiter
 from loguru import logger
@@ -195,6 +196,15 @@ class GammaClient:
                 raise RuntimeError(
                     f"Gamma {path} returned {type(page).__name__}, expected list"
                 )
+
+            # Phase 02 Plan 01: stamp per-page fetch time on each raw dict.
+            # The private key _page_fetched_at_ms carries the real per-page
+            # timestamp through to normalize_market → page_fetched_at_ms column.
+            # Using a private _ prefix to distinguish from Polymarket API fields.
+            page_fetched_at_ms = int(time.time() * 1000)
+            for raw in page:
+                if isinstance(raw, dict):
+                    raw["_page_fetched_at_ms"] = page_fetched_at_ms
 
             out.extend(page)
             pages_fetched += 1
