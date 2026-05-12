@@ -1094,10 +1094,11 @@
 
 ### Git 状态
 
-- 9 unpushed commits on `main` (origin/main..HEAD)
+- 3 unpushed commits on `main` (origin/main..HEAD)：`2ad335b` (revision iter 1) + `1578ae1` (revision iter 2) + `ecc3f47` (SESSION 16 closeout)
+- 本会话累积 10 commits（origin/main 之前的已经 push）
 - Working tree 干净
-- `make planning-status`: 零 drift
-- pre-commit hook 正常工作
+- `make planning-status`: 零 drift（Phase 02 plans 标 NOT-STARTED 是预期的，pre-commit hook 不阻断未实施的 plan）
+- pre-commit hook 正常工作（本会话 0 次 --no-verify 绕过）
 
 ### Outstanding
 
