@@ -444,3 +444,37 @@ def test_normalize_events_liquidity_fallback() -> None:
     events, _, _ = normalize_events([raw])
     assert events[0]["liquidity_usd"] == 9999.9
     assert events[0]["volume_usd"] == 8888.8
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 02 Plan 01 — page_fetched_at_ms per-page stamp (Wave 0 RED tests)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_page_fetched_at_ms_carried_from_raw() -> None:
+    """Phase 02: _page_fetched_at_ms private key on raw dict must flow through
+    to page_fetched_at_ms in the normalized market row (per-page stamp, fixes L2).
+
+    Test 1.1 from 02-01-PLAN.md Wave 0 requirements.
+    """
+    # Case 1: raw dict has _page_fetched_at_ms → carried through
+    raw_with_stamp = make_raw(_page_fetched_at_ms=1715500000000)
+    out = normalize_market(raw_with_stamp)
+    assert out is not None
+    assert "page_fetched_at_ms" in out, (
+        "normalize_market must include page_fetched_at_ms key in output"
+    )
+    assert out["page_fetched_at_ms"] == 1715500000000, (
+        f"Expected 1715500000000, got {out['page_fetched_at_ms']}"
+    )
+
+    # Case 2: raw dict WITHOUT _page_fetched_at_ms → page_fetched_at_ms is None (nullable)
+    raw_no_stamp = make_raw()
+    out_no_stamp = normalize_market(raw_no_stamp)
+    assert out_no_stamp is not None
+    assert "page_fetched_at_ms" in out_no_stamp, (
+        "normalize_market must always include page_fetched_at_ms key (nullable)"
+    )
+    assert out_no_stamp["page_fetched_at_ms"] is None, (
+        f"Expected None when _page_fetched_at_ms absent, got {out_no_stamp['page_fetched_at_ms']}"
+    )

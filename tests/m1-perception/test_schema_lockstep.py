@@ -422,3 +422,99 @@ def test_markets_column_count_is_22_after_amendment_01() -> None:
     assert MARKETS_COLUMN_ORDER[-1] == "event_id", (
         f"event_id must be the last markets column, got {MARKETS_COLUMN_ORDER[-1]}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 02 Plan 01 — 4-point lockstep for page_fetched_at_ms (Wave 0 RED test)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_page_fetched_at_ms_in_all_four_sync_points() -> None:
+    """Phase 02 Plan 01: page_fetched_at_ms must be present in all 4 sync points
+    for the markets table, and 3 sync points for the events table (no parquet schema).
+
+    This test will fail (RED) until Task 2 implements the 4-point lockstep in schemas.py.
+
+    Sync points for markets:
+    1. DDL CREATE TABLE markets - must have page_fetched_at_ms INTEGER (nullable)
+    2. MARKETS_COLUMN_ORDER - must include "page_fetched_at_ms"
+    3. MARKETS_INSERT_SQL - must include column name and matching ? placeholder
+    4. SNAPSHOT_SCHEMA (pyarrow) - must have pa.field("page_fetched_at_ms", pa.int64(), nullable=True)
+
+    Sync points for events (no parquet schema — 3 points only):
+    1. DDL CREATE TABLE events - must have page_fetched_at_ms INTEGER (nullable)
+    2. EVENTS_COLUMN_ORDER - must include "page_fetched_at_ms"
+    3. EVENTS_INSERT_SQL - must include column name and matching ? placeholder
+    """
+    # ── 1. markets DDL ────────────────────────────────────────────────────────
+    markets_ddl_cols = _ddl_markets_columns()
+    assert "page_fetched_at_ms" in markets_ddl_cols, (
+        "page_fetched_at_ms not found in DDL CREATE TABLE markets"
+    )
+    # Verify it appears as INTEGER (nullable — no NOT NULL constraint)
+    m = re.search(
+        r"CREATE TABLE IF NOT EXISTS markets\s*\((.+?)\);",
+        DDL,
+        re.DOTALL,
+    )
+    assert m is not None
+    ddl_body = m.group(1)
+    # The column line must not have NOT NULL
+    page_col_match = re.search(r"page_fetched_at_ms\s+(\w+)(.*?)(?:,|\n|$)", ddl_body)
+    assert page_col_match is not None, "page_fetched_at_ms column definition not found in DDL"
+    assert page_col_match.group(1).upper() == "INTEGER", (
+        f"page_fetched_at_ms must be INTEGER type, got {page_col_match.group(1)}"
+    )
+    # Must NOT have NOT NULL (it's nullable for pre-02 snapshots backward compat)
+    assert "NOT NULL" not in page_col_match.group(2).upper(), (
+        "page_fetched_at_ms must be nullable (no NOT NULL constraint) for backward compat"
+    )
+
+    # ── 2. MARKETS_COLUMN_ORDER ───────────────────────────────────────────────
+    assert "page_fetched_at_ms" in MARKETS_COLUMN_ORDER, (
+        "page_fetched_at_ms not in MARKETS_COLUMN_ORDER"
+    )
+
+    # ── 3. MARKETS_INSERT_SQL ─────────────────────────────────────────────────
+    assert "page_fetched_at_ms" in MARKETS_INSERT_SQL, (
+        "page_fetched_at_ms not in MARKETS_INSERT_SQL column list"
+    )
+    # Placeholder count must match MARKETS_COLUMN_ORDER length
+    placeholder_count = MARKETS_INSERT_SQL.count("?")
+    assert placeholder_count == len(MARKETS_COLUMN_ORDER), (
+        f"MARKETS_INSERT_SQL placeholder count {placeholder_count} != "
+        f"len(MARKETS_COLUMN_ORDER) {len(MARKETS_COLUMN_ORDER)} after adding page_fetched_at_ms"
+    )
+
+    # ── 4. SNAPSHOT_SCHEMA (pyarrow) ──────────────────────────────────────────
+    import pyarrow as pa
+
+    schema_field_names = {f.name for f in SNAPSHOT_SCHEMA}
+    assert "page_fetched_at_ms" in schema_field_names, (
+        "page_fetched_at_ms not found in SNAPSHOT_SCHEMA"
+    )
+    field = SNAPSHOT_SCHEMA.field("page_fetched_at_ms")
+    assert field.type == pa.int64(), (
+        f"SNAPSHOT_SCHEMA page_fetched_at_ms must be pa.int64(), got {field.type}"
+    )
+    assert field.nullable is True, (
+        "SNAPSHOT_SCHEMA page_fetched_at_ms must be nullable=True (backward compat)"
+    )
+
+    # ── events: 3-point sync (no parquet schema for events) ───────────────────
+    events_ddl_cols = _ddl_table_columns("events")
+    assert "page_fetched_at_ms" in events_ddl_cols, (
+        "page_fetched_at_ms not found in DDL CREATE TABLE events"
+    )
+    assert "page_fetched_at_ms" in EVENTS_COLUMN_ORDER, (
+        "page_fetched_at_ms not in EVENTS_COLUMN_ORDER"
+    )
+    assert "page_fetched_at_ms" in EVENTS_INSERT_SQL, (
+        "page_fetched_at_ms not in EVENTS_INSERT_SQL"
+    )
+    # events placeholder count must also match
+    events_placeholder_count = EVENTS_INSERT_SQL.count("?")
+    assert events_placeholder_count == len(EVENTS_COLUMN_ORDER), (
+        f"EVENTS_INSERT_SQL placeholder count {events_placeholder_count} != "
+        f"len(EVENTS_COLUMN_ORDER) {len(EVENTS_COLUMN_ORDER)}"
+    )
