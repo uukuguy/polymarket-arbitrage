@@ -43,11 +43,35 @@ Goals:
 - [x] T6 类别统计命令 — covered by plan 03 (scan-by-tag, amendment 01 replacement for scan-by-category)
 - [ ] T7 watchlist（YAML 或 SQLite 表）— covered by plan 05
 
-### Phase 2: WebSocket 增量数据流
+### Phase 2: L1 production-grade long-running
 
-**Goal:** /book + /prices 频道实时增量推送替代轮询
-**Status:** ⏸️ Pending Phase 1.1 完成（先用低频观察建立直觉，再上高频管道）
-**Depends on:** Phase 1.1（observation toolkit 用起来后才知道 WS 该订阅什么）
+**Goal:** 把 Phase 01.1 的 L1 观察工具从"研发期单次跑通"升级到"云上 7×24 自主跑 + 健康监控 + 一键部署"。L1 达到生产级判定标准（thread §1）后才能开 L2 工作。
+**Status:** 🟢 Ready for discuss — Phase 01.1 LEARNINGS 已映射 6 条 must-haves
+**Depends on:** Phase 1.1（observation toolkit + acceptance amendments + deployment thread locked）
+**Refs:**
+- `.planning/threads/market-observation-architecture.md` §1 (L1 生产级判定标准) + §1.5 (框架抽象 A/B/C)
+- `.planning/threads/deployment-architecture.md` §0.1 (locked 4 decisions) + §2.6 (云栈调研)
+- `.planning/workstreams/m1-perception/phases/01.1-observation-toolkit/01.1-LEARNINGS.md` (D11/D14/L2/L11/L12/S4)
+
+Scope (从 LEARNINGS carry-over):
+- Makefile CLI 入口 smoke test（修 L11/S5 silent failure 根因）
+- Snapshot 健康判定升级到三态（D14/L12 已在 amendment 落地，phase 02 补 parquet/SQLite 双校验）
+- 框架抽象 A 落地（统一市场状态模型 + 显式分离 stamp 时间 vs 抓取时间，L2/D5/P3）
+- 一键部署链路（Dockerfile + fly.toml + GHA workflow，D11/S4 region eu，PaaS 单 DB）
+- L1 云上 7×24 长跑 + 健康监控（thread §1 生产级判定标准）
+- Dashboard 雏形（Vercel + Supabase 单库，CN 友好非约束）
+
+不在 scope：
+- KMS / 私钥栈（D11 决策延到 M3 实盘前）
+- Tiger Cloud 双库（D11 单库先撞墙）
+- L2/L3 定向跟踪与 WebSocket（thread §1 纪律：L1 未到生产级禁开下一层）
+
+### Phase 3: WebSocket 增量数据流（L3 候选）
+
+**Goal:** /book + /prices 频道实时增量推送，作为 L3 单市场 K 线的数据源
+**Status:** ⏸️ Pending Phase 2 完成 + L2 中间层定义（thread §1 三层金字塔纪律）
+**Depends on:** Phase 2（L1 生产级判定通过）+ thread §2.2 (Polymarket WS 真实能力调研)
+**Note:** 原 Phase 2 (SESSION 12 时代锁)。Phase 01.1 架构纠偏后推迟到 L3 上下文。
 
 ---
 
