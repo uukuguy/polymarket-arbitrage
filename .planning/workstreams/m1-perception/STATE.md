@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 status: executing
-stopped_at: Phase 02 plan complete, awaiting execute Wave 1
-last_updated: "2026-05-12T14:56:03.914Z"
-last_activity: 2026-05-12
+stopped_at: Phase 02 Wave 1 complete (Plan 01 ✅); awaiting Wave 2 dispatch (Plan 02 + 03 parallel)
+last_updated: "2026-05-13T00:00:00.000Z"
+last_activity: 2026-05-13
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 18
-  completed_plans: 11
-  percent: 61
+  completed_plans: 12
+  percent: 67
 ---
 
 # Project State
@@ -20,19 +20,19 @@ progress:
 ## Current Position
 
 Phase: 02 (l1-production-grade) — EXECUTING
-Plan: 1 of 7
-**Status:** Executing Phase 02
+Plan: 1 of 7 ✅ COMPLETE (Wave 1) → next: Wave 2 (Plan 02 + 03 parallel)
+**Status:** Wave 1 complete, awaiting Wave 2 dispatch
 **Current Phase:** 02
-**Last Activity:** 2026-05-12
-**Last Activity Description:** Phase 02 execution started
+**Last Activity:** 2026-05-13
+**Last Activity Description:** Wave 1 (Plan 01) shipped — page_fetched_at_ms 4-point lockstep + make triple-check gate; 4 commits (cecb66b/5da55dc/65730a3/b0610e4); 404 m1-perception tests green; zero drift; SUMMARY landed
 
 ## Progress
 
 **Phases Complete:** 2 (Phase 01 + Phase 01.1)
 **Phase 01.1 status:** ✅ COMPLETE — LEARNINGS extracted 2026-05-12 (14 decisions / 12 lessons / 10 patterns / 8 surprises); deployment thread locked; 6 plans + 4 acceptance amendments shipped
-**Phase 02 status:** 🟢 Plan complete (4150 lines across 7 PLAN.md) — 2 plan-checker iterations clean, ready for execute
+**Phase 02 status:** 🟡 EXECUTING — Wave 1 (Plan 01) ✅ 2026-05-13; Waves 2-5 pending
 **Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket（已并入 Phase 3）
-**Test count:** 402 m1-perception tests green (Phase 01.1 baseline)；Phase 02 will add ~22 Wave 0 tests
+**Test count:** 404 m1-perception tests green (Phase 01.1 baseline 402 + Plan 01 Wave 0: page_fetched_at_ms_carried_from_raw + page_fetched_at_ms_in_all_four_sync_points)
 
 ## Phase 01.1 Deliverables (2026-05-10 全部 committed)
 
@@ -54,16 +54,25 @@ Plan: 1 of 7
 - ✅ `/gsd-plan-phase 02 --ws m1-perception` — `02-RESEARCH.md` (1914 行) + `02-PATTERNS.md` (36 files) + `02-VALIDATION.md` (22+ Wave 0 tests) + 7 `02-{NN}-PLAN.md` (4150 行)
 - ✅ Plan-checker 2 轮 iteration — 5 BLOCKERs + 7 WARNINGs + 2 NEW BLOCKERs 全 resolved
 
-## Phase 02 状态 (待 execute)
+## Phase 02 状态 (executing — Wave 1 done)
 
 - **Goal**: L1 production-grade long-running — 云上 7×24 + 一键部署 + dashboard 雏形
 - **完成判定** (thread §1 生产级判定标准): 7-day soak + Better Stack uptime ≥ 99% + ≥1 次自然失败自愈或正确告警
 - **Plans / Waves**:
-  - Wave 1: Plan 01 (page_fetched_at_ms + L11 silent-failure triple-check) — autonomous
-  - Wave 2: Plan 02 (HTTP+scheduler) + Plan 03 (Supabase mirror+R2) — autonomous, 并行
+  - Wave 1: Plan 01 (page_fetched_at_ms + L11 silent-failure triple-check) — autonomous ✅ **2026-05-13** (cecb66b/5da55dc/65730a3/b0610e4, ~45 min, 4 commits, 02-01-SUMMARY landed)
+  - Wave 2: Plan 02 (HTTP+scheduler) + Plan 03 (Supabase mirror+R2) — autonomous, 并行 ⏳ NEXT
   - Wave 3: Plan 04 (Dockerfile+fly.toml+GHA+first deploy) — **user checkpoint** (Fly + R2 + Supabase 注册)
   - Wave 4: Plan 05 (Sentry+Axiom+Better Stack+Telegram) + Plan 06 (Vercel dashboard) — **user checkpoint** ×2
   - Wave 5: Plan 07 (chaos + 7-day soak + 教学文档 08) — **user checkpoint** + 7 天云上自动跑
+
+## Plan 01 deliverables (2026-05-13, Wave 1)
+
+- ✅ `page_fetched_at_ms` nullable column 加到 markets + events 表（DDL/COLUMN_ORDER/INSERT_SQL/SNAPSHOT_SCHEMA 四点 lockstep markets，三点 events）
+- ✅ GammaClient `_paginate` 每页注入 `_page_fetched_at_ms`；normalizer 透传到 `page_fetched_at_ms` 列；SNAPSHOT_SCHEMA nullable=True 保证旧 parquet 经 `union_by_name=true` NULL 填充
+- ✅ `make triple-check` 全链路三重契约门：exit 0 ↔ SQLite +1 ↔ parquet 文件 +1 ↔ 行数一致；live DB 缺席时 exit 77 优雅 skip（Plan 04 fixture 硬化）
+- ✅ Phase 01.1 P7 schema add-only 纪律全程遵守 — 不重命名 `fetched_at_ms`，加注释说明 stage stamp 语义
+- ✅ Wave 0 tests RED → GREEN: `test_page_fetched_at_ms_carried_from_raw`、`test_page_fetched_at_ms_in_all_four_sync_points`、`test_parquet_sqlite_consistency.py`
+- ⏸️ Pre-existing `test_make_snapshot_markets_full_dry_run_recipe` 失败（与本 plan 无关，Phase 01.1 遗留：Makefile 用 `uv run python -m polyarb.snapshot snapshot --full` 但测试期望 `python -m polyarb.snapshot --full`） — Plan 03 顺手修
 
 ## 下次会话该做的
 

@@ -1130,3 +1130,71 @@
   **如果跳过 Wave 1 直接 Wave 2+**：先读 `project_phase-02-locked-stack` memory + `02-CONTEXT.md` 验证 22 决策仍然有效。
 
 ---
+
+## 2026-05-13 SESSION 17 — Phase 02 Wave 1 落地（Plan 01）
+
+**Duration**: ~50 min（45 min subagent + 5 min orchestrator）
+
+### 完成清单
+
+- [DECISION] **会话恢复**: `/gsd-resume-work --ws m1-perception` → 验证 `make planning-status` 零 drift + git hooks 指向 `.githooks/` + 3 unpushed commits from SESSION 16
+- [DECISION] **`/gsd-execute-phase 02 --wave 1 --ws m1-perception`** dispatch:
+  - Pre-dispatch: `state begin-phase` 写 STATE.md (status: completed → executing) + 清 `_auto_chain_active` flag
+  - Commit `662b92f chore(02): mark Phase 02 EXECUTING + clear stale auto-chain flag` 锚定 worktree base
+  - Spawn `gsd-executor` subagent in worktree isolation
+- [LEARNING] **Wave 1 / Plan 01 (subagent, ~45 min)** — 4 commits on worktree branch, fast-forward merged:
+  1. `cecb66b test(02-01):` — Wave 0 RED tests (page_fetched_at_ms_carried_from_raw + 4-point lockstep + parquet/SQLite consistency + triple-check bash)
+  2. `5da55dc feat(02-01):` — page_fetched_at_ms 加列 + 4-point lockstep（markets DDL/COLUMN_ORDER/INSERT_SQL/SNAPSHOT_SCHEMA）+ 3-point events + GammaClient `_paginate` per-page stamp + normalizer 透传
+  3. `65730a3 feat(02-01):` — `make triple-check` 全链路三重契约门
+  4. `b0610e4 docs(02-01):` — `02-01-SUMMARY.md` (169 行) + self-check PASSED
+- [LEARNING] **Post-wave validation**: 3/3 Wave 0 tests GREEN on main; `make planning-status` zero drift (Plan 01: SUMMARY ✓ 4 commits → OK)；executor 严格遵守 STATE/ROADMAP isolation（diff main..worktree-branch on those two files = empty）
+
+### 关键发现 / Subagent 自动修正
+
+executor 在 Task 2 跑测试时自动捕获 3 个加列引发的连锁测试更新（全部归入 5da55dc 提交）：
+1. `test_lockstep` DDL regex 误命中 `-- Semantic note... for page_fetched_at_ms` 注释行 → 改进 regex 先过滤 `--` 注释
+2. `test_events_composite_primary_key` hardcoded 11-tuple → 12-tuple（events insert 加 page_fetched_at_ms）
+3. `test_normalize_happy_path` EXPECTED_KEYS / `test_markets_column_count_is_22_after_amendment_01` (22 → 23) 同步更新
+
+所有都是 **Rule 1 (Bug)** — schema 加列必然触发的测试断言更新，无 scope creep。
+
+### Outstanding / Carry-over
+
+- ⏸️ `test_make_snapshot_markets_full_dry_run_recipe` 预存在失败（与 Plan 01 无关；Phase 01.1 遗留 Makefile path 串） — Plan 03 顺手修
+- ⏸️ `tests/m1-perception/test_makefile_triple_check.sh` 在工作树内 exit 77 skip（无 live `data/state.db`）—— Plan 04 用 fixture 目录硬化
+- ⏸️ 现有 `data/state.db` 如果继续使用需要 `ALTER TABLE markets ADD COLUMN page_fetched_at_ms INTEGER;` + 同样的 events 迁移；Plan 03 Alembic migration 会覆盖
+- ⏸️ Worktree `.claude/worktrees/agent-a36b5218f1c1b280a` 仍 locked（agent runtime 还持有）— harness 异步清理，不强拆
+
+### Memory 健康化
+
+- ✅ 无需新增记忆 — Plan 01 完全在 `project_phase-02-locked-stack` 已记录的范围内
+- ✅ Phase 01.1 P7 add-only schema evolution 模式在 Plan 01 实测有效 → `architecture_market-observation-pyramid` (VERIFIED) 隐含支持
+
+### Git 状态
+
+- 5 commits 在本 SESSION（662b92f + cecb66b + 5da55dc + 65730a3 + b0610e4，加 STATE 收口 commit 共 6）
+- `main` ff-merged with `worktree-agent-a36b5218f1c1b280a`
+- 累计 origin/main..HEAD: 8 unpushed commits（含 SESSION 16 的 3）
+- Pre-commit hook 全程未 --no-verify 绕过（除 executor 在 worktree 内按设计用 --no-verify，post-wave 手工验证 SUMMARY 全部就位）
+
+- [NEXT] 下次会话从这里开始：
+
+  **第 1 步**（恢复 + 健康）：
+  ```
+  /gsd-resume-work --ws m1-perception
+  make planning-status   # 零 drift，Plan 01 OK / Plans 02-07 NOT-STARTED
+  ```
+
+  **第 2 步**（Wave 2 — 并行落地 daemon shell + cloud mirror）：
+  ```
+  /gsd-execute-phase 02 --wave 2 --ws m1-perception
+  ```
+  - 范围：Plan 02 (HTTP+scheduler，Starlette + Supercronic + loguru JSON) ∥ Plan 03 (Supabase mirror + R2，Alembic + fail-soft 适配器)
+  - 预估：60-90 min subagent serial dispatch（worktrees lock 防止 race）
+  - 两 plan 完成后各自 SUMMARY 必出
+
+  **第 3 步**（如果 Wave 2 成功）：
+  - Wave 3 起需要 SaaS 注册时段 → 用户手工准备 Fly / R2 / Supabase 账户 + secrets
+  - 安排 dedicated 时段做 Wave 3 first deploy（不要赶时间夹缝跑）
+
+---
