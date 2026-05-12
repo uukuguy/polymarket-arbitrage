@@ -217,3 +217,15 @@ test-observation:
 ## test-slippage: Run slippage model tests
 test-slippage:
 	@uv run pytest -v tests/models/test_slippage.py
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 02 Plan 01: triple-check gate (L11/S5 silent failure prevention)
+# ─────────────────────────────────────────────────────────────────────────────
+
+## triple-check: 跑 make snapshot-markets 全链路三重契约 (exit 0 ↔ SQLite row +1 ↔ parquet file landed)
+.PHONY: triple-check
+triple-check:
+	@echo ">> triple-check — verifying make snapshot-markets does what it claims"
+	@echo ">> closes LEARNINGS L11/S5 silent failure root cause"
+	@echo ""
+	bash tests/m1-perception/test_makefile_triple_check.sh

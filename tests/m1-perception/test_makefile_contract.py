@@ -104,6 +104,31 @@ def test_makefile_phony_declaration_present() -> None:
 
 
 # =============================================================================
+# Phase 02 Plan 01: triple-check contract — dry-run only
+# =============================================================================
+
+
+def test_make_triple_check_dry_run_recipe() -> None:
+    """Phase 02 Plan 01: make triple-check must invoke test_makefile_triple_check.sh.
+
+    Dry-run verifies the recipe is wired correctly without actually executing
+    the full snapshot pipeline (L11/S5 silent failure gate — see LEARNINGS).
+    """
+    result = subprocess.run(
+        ["make", "-n", "triple-check"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n triple-check failed: {result.stderr}"
+    assert "tests/m1-perception/test_makefile_triple_check.sh" in result.stdout, (
+        f"triple-check recipe must invoke test_makefile_triple_check.sh, got: {result.stdout!r}"
+    )
+
+
+# =============================================================================
 # CLI smoke — typer.testing.CliRunner with mocked clients
 # =============================================================================
 
