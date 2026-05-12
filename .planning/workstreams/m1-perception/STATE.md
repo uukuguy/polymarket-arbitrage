@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 02 (l1-production-grade)
-status: completed
+current_phase: 02
+status: executing
 stopped_at: Phase 02 plan complete, awaiting execute Wave 1
-last_updated: "2026-05-12T08:27:38.179Z"
+last_updated: "2026-05-12T14:56:03.914Z"
 last_activity: 2026-05-12
 progress:
   total_phases: 4
@@ -19,10 +19,12 @@ progress:
 
 ## Current Position
 
-**Status:** Phase 02 plan complete (7 plans / 5 waves) — 2 plan-checker iterations resolved; ready for `/gsd-execute-phase 02 --wave 1`
-**Current Phase:** 02 (l1-production-grade)
+Phase: 02 (l1-production-grade) — EXECUTING
+Plan: 1 of 7
+**Status:** Executing Phase 02
+**Current Phase:** 02
 **Last Activity:** 2026-05-12
-**Last Activity Description:** SESSION 16 — Phase 01.1 收口 + Phase 02 discuss/plan/checker 全部完成。落 LEARNINGS.md (14D/12L/10P/8S)，deployment thread locked 4 user 锚点决策，Phase 02 重定义 ROADMAP（原 WS 推 Phase 3 = L1 production-grade），22 决策 + 7 the agent discretion + 7 plans / 5 waves shipped。2 轮 plan-checker iteration 解决 5 BLOCKERs + 7 WARNINGs + 2 NEW BLOCKERs（D-22 amendment / Supercronic / SCAN_SHARED_SECRET naming asymmetry / schemas.py lockstep / Top movers real impl）。所有 memory 更新分类清晰（pyramid 升 VERIFIED / phase-naming-trap 加 Phase 02 当前含义 / 新加 Phase 02 locked-stack + plan-revision-tooling）。下次：跑 Wave 1 (Plan 01) 试运行。
+**Last Activity Description:** Phase 02 execution started
 
 ## Progress
 
@@ -70,6 +72,7 @@ progress:
 3. Wave 1 完成 + commit + SUMMARY 落库后再决定 Wave 2
 
 **关键提醒**：
+
 - Wave 3 起需要用户人工 SaaS 账号注册 + secrets 设置（Fly/R2/Supabase/Axiom/Sentry/Better Stack/Telegram/Vercel）
 - 7 天 soak gate 不可跳，是 phase 完成判定
 - 详见 `project_phase-02-locked-stack` memory 完整 22 决策栈
@@ -102,7 +105,8 @@ progress:
 ## Session Continuity
 
 **Stopped At:** Phase 02 plan complete, awaiting execute Wave 1
-**Last Activity:** 2026-05-01 10:04 CST — LIVE-RUN-005 verified (6m12s, 20353 markets, 72% ghost_book), observability all confirmed, 4 commits on origin/main
+**Last Activity:** 2026-05-12 — SESSION 17 resumed; planning-status clean (0 drift), all 7 Phase 02 plans NOT-STARTED as expected
+**Last Resume:** 2026-05-12 — proceeding to `/gsd-execute-phase 02 --wave 1 --ws m1-perception`
 
 **SESSION 08 deliverables (4 unpushed commits)**:
 
