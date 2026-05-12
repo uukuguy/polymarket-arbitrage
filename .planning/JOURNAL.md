@@ -1052,3 +1052,80 @@
     5. dashboard 雏形（Cloudflare Pages + Supabase view）
 
 ---
+
+## 2026-05-12 SESSION 16 — Phase 01.1 收口 + Phase 02 全 plan 阶段
+
+**Duration**: ~6 hours (含 4 subagent serial runs ~115 min + 用户互动 + 手工修)
+
+### 完成清单
+
+- [DECISION] **Deployment thread locked** (`95bc1e1`) — §0.1 写入用户 4 锚点决策（PaaS 混合 / CN 不约束 / DB 合并 / KMS 延 M3）
+- [LEARNING] **`/gsd-extract_learnings 01.1`** (`d3d3daf`) — `01.1-LEARNINGS.md` 落 327 行 / 14 Decisions / 12 Lessons / 10 Patterns / 8 Surprises
+  - 最大产出不在 plan 末复盘，是把 thread §2.1.a 实证 + LEARNINGS D11/L2/L11/L12/S4 映射到 Phase 02 carry-over 6 must-haves
+- [DECISION] **m1-perception ROADMAP 重定义** (`0d9c033`):
+  - Phase 2: WebSocket 增量数据流 → 重命名 **L1 production-grade long-running** (SESSION 16 锁定)
+  - Phase 3 (新): WebSocket 推后（仍是 L3 数据源候选）
+- [DECISION] **`/gsd-discuss-phase 02 --ws m1-perception`** — `02-CONTEXT.md` (488 行) + `02-DISCUSSION-LOG.md`
+  - 22 决策 (D-01..D-22): Fly.io AMS / Supabase Pro Dublin / R2 / Axiom + Sentry + Better Stack / Telegram bot + email / Vercel Next.js + Supabase Auth magic link / Starlette + HMAC X-Signature / IETF 三态 /health
+  - 7 the agent discretion 交给 researcher / planner
+  - 用户两条关键解读：(1) scan trigger 是观察不是策略 → 加 dashboard 交互；(2) "选最佳方案" 授权 → 我按 thread 调研 + LEARNINGS pattern 选
+- [LEARNING] **`/gsd-plan-phase 02 --ws m1-perception`** (`97f9a72`) — 4 subagent serial chain:
+  1. `gsd-phase-researcher` (32 min) → `02-RESEARCH.md` (1914 行) — Context7 验证 D-22 Flycast / Q4 fly cron 2026-05 syntax
+  2. `gsd-pattern-mapper` (28 min) → `02-PATTERNS.md` (36 files mapped to Phase 01.1 analogs)
+  3. `gsd-planner` (37 min) → 7 `02-{NN}-PLAN.md` (4150 行)
+  4. `gsd-plan-checker` (17 min) → 5 BLOCKERs + 7 WARNINGs + 2 INFOs
+- [LEARNING] **Plan-checker iteration 1 + 2** (`2ad335b` + `1578ae1`) — 5 BLOCKERs + 7 WARNINGs + 2 NEW BLOCKERs 全 resolved
+  - **revision subagent killed after 17 min** + 手工接手剩下 plan 06/07 + iteration 2 stale-ref fixups
+  - 关键经验：subagent Edit 工具不可用 → Bash+python fallback 慢 5×；落到 `feedback_plan-revision-tooling.md`
+
+### 关键发现 / Memory 更新
+
+- [LEARNING] **D-22 amendment**：用户原本锁"Fly internal network only via Flycast"，researcher Context7 验证 Flycast 是 org-internal，**Vercel Edge Function 跨 org 不可达**。改为"`/scan` + `/health` 公网 + HMAC X-Signature middleware 作 auth gate"（Stripe/GitHub/Shopify webhook 同款）。需要用户事后追认。
+- [LEARNING] **fly.toml `[[services.processes]] schedule` 不支持** (Fly 2026-05)。改用 **Supercronic** process group + crontab 文件。
+- [LEARNING] **Top movers 不是 top-by-liquidity**：plan-checker 揪出 plan 06 把"Top movers"feature rename 成"top-by-liquidity"。修复为 Alembic 002 创建 `top_movers_view` Supabase view 做真正跨 snapshot diff。
+
+### Memory 健康化（本会话 1 个新分类 + 4 个文件改）
+
+- ✅ `architecture_market-observation-pyramid`: CURRENT-CALL → **VERIFIED** (Phase 01.1 SESSION 15 实证已落)
+- ✅ `project_phase-naming-trap`: 加 Phase 02 = L1 prod (2026-05-12 锁定) + Phase 3 = WS
+- ✅ `project_phase-02-locked-stack` (NEW): 完整 22 决策栈 + D-22 amendment + 7 plans / 5 waves
+- ✅ `feedback_plan-revision-tooling` (NEW): subagent Edit 不可用 → 小修手工
+- ✅ MEMORY.md 索引同步
+
+### Git 状态
+
+- 9 unpushed commits on `main` (origin/main..HEAD)
+- Working tree 干净
+- `make planning-status`: 零 drift
+- pre-commit hook 正常工作
+
+### Outstanding
+
+- ⏸️ **Wave 1 (Plan 01) 未跑** — 用户在 plan 阶段结束后明确选择"会话边界封口"，下次会话再 execute
+- ⏸️ Phase 02 D-22 amendment 用户事后追认（Plan 04 SUMMARY 完成后再问）
+- ⏸️ 7 天 soak gate 在 Wave 5 末，Phase 02 真正完成在 ~7-10 天后
+
+- [NEXT] 下次会话从这里开始：
+
+  **第 1 步**（恢复 + 健康）：
+  ```
+  /gsd-resume-work --ws m1-perception
+  make planning-status   # 应该零 drift
+  ```
+
+  **第 2 步**（试运行 Wave 1）：
+  ```
+  /gsd-execute-phase 02 --wave 1 --ws m1-perception
+  ```
+  - 范围：Plan 01 (page_fetched_at_ms + L11 silent-failure triple-check) — autonomous, 纯本地零部署
+  - 预估：30-60 min subagent
+  - 完成后 commit + `02-01-SUMMARY.md` 必出（pre-commit hook 强制）
+
+  **第 3 步**（决定后续 wave）：
+  - Wave 1 commit 质量好 → `/gsd-execute-phase 02 --wave 2` (Plan 02 + 03 并行, ~60-90 min)
+  - Wave 3 起需要用户 SaaS 注册 (Fly + R2 + Supabase) — 安排专门时段
+  - Wave 5 末 7-day soak gate
+
+  **如果跳过 Wave 1 直接 Wave 2+**：先读 `project_phase-02-locked-stack` memory + `02-CONTEXT.md` 验证 22 决策仍然有效。
+
+---

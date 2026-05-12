@@ -2,34 +2,35 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 01.1 (observation-toolkit)
-status: Phase 01.1 closing (plans 01-06 shipped + 三窗口调研完整 + 两份 thread 实证落地)
-stopped_at: Phase 02 context gathered — ready for /gsd-plan-phase 02
-last_updated: "2026-05-12T03:26:49.890Z"
+current_phase: 02 (l1-production-grade)
+status: completed
+stopped_at: Phase 02 plan complete, awaiting execute Wave 1
+last_updated: "2026-05-12T08:27:38.179Z"
 last_activity: 2026-05-12
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 11
+  total_plans: 18
   completed_plans: 11
-  percent: 100
+  percent: 61
 ---
 
 # Project State
 
 ## Current Position
 
-**Status:** Phase 01.1 closing (plans 01-06 shipped + 三窗口调研完整 + 两份 thread 实证落地)
-**Current Phase:** 01.1 (observation-toolkit)
+**Status:** Phase 02 plan complete (7 plans / 5 waves) — 2 plan-checker iterations resolved; ready for `/gsd-execute-phase 02 --wave 1`
+**Current Phase:** 02 (l1-production-grade)
 **Last Activity:** 2026-05-12
-**Last Activity Description:** SESSION 15 — 三窗口 A+B+C 并行调研完成。A 实证：fetched_at_ms schema-level 拖尾不可见（stage 5 一次性 stamp）+ 8 分钟 elapsed 6 次再验 + L1 9 分钟漂移 99.15% 市场 drift=0 但 1% 长尾 > 0.5¢（修正"模糊影像"假设为"99% 清晰 + 1% 严重失真"）+ 5 维度生产级缺口（含 CLI 入口断裂 silent failure 新发现）。B 调研：deployment-architecture.md 872 行落地，最大方向纠偏 Polymarket 在 AWS eu-west-2 London（非美东）+ 4 档预算推荐组合 + Fly AMS / Supabase Dublin 主推。C 扫描：业内主流模式 A（Vercel + Railway/Nixpacks + SQLite）+ clawfirm Dockerfile + systemd 范本 + 反模式集合。Thread 主文件加 §0.2.1.a/b + §2.1.a + §2.5.a 四节。
+**Last Activity Description:** SESSION 16 — Phase 01.1 收口 + Phase 02 discuss/plan/checker 全部完成。落 LEARNINGS.md (14D/12L/10P/8S)，deployment thread locked 4 user 锚点决策，Phase 02 重定义 ROADMAP（原 WS 推 Phase 3 = L1 production-grade），22 决策 + 7 the agent discretion + 7 plans / 5 waves shipped。2 轮 plan-checker iteration 解决 5 BLOCKERs + 7 WARNINGs + 2 NEW BLOCKERs（D-22 amendment / Supercronic / SCAN_SHARED_SECRET naming asymmetry / schemas.py lockstep / Top movers real impl）。所有 memory 更新分类清晰（pyramid 升 VERIFIED / phase-naming-trap 加 Phase 02 当前含义 / 新加 Phase 02 locked-stack + plan-revision-tooling）。下次：跑 Wave 1 (Plan 01) 试运行。
 
 ## Progress
 
-**Phases Complete:** 1 (Phase 01)
-**Phase 01.1 status:** 🟡 closing — code shipped (plans 01-06) + acceptance amendments + architecture thread drafted; **awaiting** `/gsd-extract_learnings 01.1` and Phase 02 discuss
-**Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket（推迟到三层金字塔架构定型后）
-**Test count:** 402 m1-perception tests green (2026-05-10)
+**Phases Complete:** 2 (Phase 01 + Phase 01.1)
+**Phase 01.1 status:** ✅ COMPLETE — LEARNINGS extracted 2026-05-12 (14 decisions / 12 lessons / 10 patterns / 8 surprises); deployment thread locked; 6 plans + 4 acceptance amendments shipped
+**Phase 02 status:** 🟢 Plan complete (4150 lines across 7 PLAN.md) — 2 plan-checker iterations clean, ready for execute
+**Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket（已并入 Phase 3）
+**Test count:** 402 m1-perception tests green (Phase 01.1 baseline)；Phase 02 will add ~22 Wave 0 tests
 
 ## Phase 01.1 Deliverables (2026-05-10 全部 committed)
 
@@ -42,16 +43,36 @@ progress:
 - ✅ **Acceptance-driven amendments**（5-10）：解耦翻译 sidecar / 三态 OK-DEGRADED-FAILED 状态 / `make overview` 总览 dashboard / `make snapshots-purge` 数据保留 / E2E 验收手册
 - ⏸️ Plan 06 Task 3（human-verify checkpoint，5 对手题）→ 升级为架构方向纠偏（见 thread）
 
-## Phase 01.1 后续
+## Phase 01.1 后续 (✅ 全部完成 2026-05-12)
 
-- **架构 thread**: `.planning/threads/market-observation-architecture.md` — 三层金字塔 + 平台框架抽象层 A/B/C
-  - 5-11 已加四节实证：§0.2.1.a/b 用户硬约束 + §2.1.a stamp/elapsed/漂移实证 + §2.5.a 5 维度生产级缺口
-- **部署 thread**: `.planning/threads/deployment-architecture.md` — 872 行云栈选型调研
-  - drafting 状态 → 用户答 §7 四个开放问题后转 locked
-- **下次会话该做的**:
-  1. 读 deployment thread §7 → 用户决策 4 问 → thread 锁定
-  2. `/gsd-extract_learnings 01.1`（调研已完整，复盘有内容）
-  3. `/gsd-discuss-phase 02 --ws m1-perception`
+- ✅ **架构 thread**: `.planning/threads/market-observation-architecture.md` — Phase 01.1 SESSION 15 实证完整（§0.3 #10 + §2.7 subset/full 决策 + §2.1.a #4 2h 漂移）
+- ✅ **部署 thread**: `.planning/threads/deployment-architecture.md` — drafting → **locked** 2026-05-11，用户 §7 四锚点决策（PaaS 混合 / CN 不约束 / DB 合并 / KMS 延 M3）
+- ✅ `/gsd-extract_learnings 01.1` — `01.1-LEARNINGS.md` 落库（14D / 12L / 10P / 8S，327 行）
+- ✅ `/gsd-discuss-phase 02 --ws m1-perception` — `02-CONTEXT.md` (22 决策 + 7 the agent discretion) + `02-DISCUSSION-LOG.md`
+- ✅ `/gsd-plan-phase 02 --ws m1-perception` — `02-RESEARCH.md` (1914 行) + `02-PATTERNS.md` (36 files) + `02-VALIDATION.md` (22+ Wave 0 tests) + 7 `02-{NN}-PLAN.md` (4150 行)
+- ✅ Plan-checker 2 轮 iteration — 5 BLOCKERs + 7 WARNINGs + 2 NEW BLOCKERs 全 resolved
+
+## Phase 02 状态 (待 execute)
+
+- **Goal**: L1 production-grade long-running — 云上 7×24 + 一键部署 + dashboard 雏形
+- **完成判定** (thread §1 生产级判定标准): 7-day soak + Better Stack uptime ≥ 99% + ≥1 次自然失败自愈或正确告警
+- **Plans / Waves**:
+  - Wave 1: Plan 01 (page_fetched_at_ms + L11 silent-failure triple-check) — autonomous
+  - Wave 2: Plan 02 (HTTP+scheduler) + Plan 03 (Supabase mirror+R2) — autonomous, 并行
+  - Wave 3: Plan 04 (Dockerfile+fly.toml+GHA+first deploy) — **user checkpoint** (Fly + R2 + Supabase 注册)
+  - Wave 4: Plan 05 (Sentry+Axiom+Better Stack+Telegram) + Plan 06 (Vercel dashboard) — **user checkpoint** ×2
+  - Wave 5: Plan 07 (chaos + 7-day soak + 教学文档 08) — **user checkpoint** + 7 天云上自动跑
+
+## 下次会话该做的
+
+1. `make planning-status` 验证零 DRIFT（应该 OK）
+2. `/gsd-execute-phase 02 --wave 1 --ws m1-perception` — 先跑 Wave 1 (~30-60 min) 验证 plan 质量
+3. Wave 1 完成 + commit + SUMMARY 落库后再决定 Wave 2
+
+**关键提醒**：
+- Wave 3 起需要用户人工 SaaS 账号注册 + secrets 设置（Fly/R2/Supabase/Axiom/Sentry/Better Stack/Telegram/Vercel）
+- 7 天 soak gate 不可跳，是 phase 完成判定
+- 详见 `project_phase-02-locked-stack` memory 完整 22 决策栈
 - **基础设施补强（5-10）**: `.githooks/pre-commit` + `scripts/planning_status.py` + `make planning-status` + CLAUDE.md plan-末纪律
 
 ---
@@ -80,7 +101,7 @@ progress:
 
 ## Session Continuity
 
-**Stopped At:** Phase 02 context gathered — ready for /gsd-plan-phase 02
+**Stopped At:** Phase 02 plan complete, awaiting execute Wave 1
 **Last Activity:** 2026-05-01 10:04 CST — LIVE-RUN-005 verified (6m12s, 20353 markets, 72% ghost_book), observability all confirmed, 4 commits on origin/main
 
 **SESSION 08 deliverables (4 unpushed commits)**:
