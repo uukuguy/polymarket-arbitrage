@@ -1816,35 +1816,51 @@ Phase 01 SECURITY-REVIEW.md 落地 F-1..F-5；Phase 02 plan 应产出 `02-SECURI
 
 ---
 
-## Open Questions
+
+## Open Questions (RESOLVED)
+
+> Resolved 2026-05-12 during plan revision iteration 1 (planner-revision mode).
+> Sources: Context7 `/superfly/docs` query 2026-05-12; Fly.io public docs (flycast, autostart-internal-apps, troubleshooting); Next.js 16.2 docs.
+> Each resolution drives concrete changes in Plan 04 / Plan 06; see those plans' frontmatter for affected files.
 
 1. **D-22 `/health` 是否真要 internal only？**
-   - 已知：Better Stack 公网 ping 需要公开 endpoint
+   - 已知：Better Stack 公网 ping 需要公开 endpoint；Vercel Edge Function 调 `/scan`
    - 不清楚：用户 discuss 时是否区分 `/health` (public ok) vs `/scan` (internal only) 的语义
-   - 推荐：plan 阶段澄清；按"D-22 仅指 `/scan`"实施，`/health` 走 Fly Anycast public
+   - **RESOLVED:** D-22 的字面要求 ("/scan 仅 Vercel 调用走 Fly internal DNS") 与 **Vercel Edge → Fly Flycast 跨组织不可达** 这一硬限冲突（Context7 `/superfly/docs` 2026-05-12 查证：Flycast 是 Fly org-internal only；WireGuard 连接也是 org-scoped；外部基础设施无法 resolve `<app>.flycast`）。三个可行路径：
+     - **(a) 不可降级路径**：Plan 04 与 Plan 06 实施时严格按字面 D-22 → 阻塞 Plan 06 dashboard 触发 `/scan`（除非用 GitHub Actions / SSH tunnel 作为中介，体验大幅退化）
+     - **(b) 拆开 endpoint**：`/health` 公网（Better Stack 需要）+ `/scan` 也公网但靠 **HMAC 中间件 + IP allowlist (可选)** 做强认证 — 这是 Plan 02 已实现的 `scan_auth_middleware` 提供的真实安全 gate
+     - **(c) D-22 amendment**：把 D-22 改写为"`/scan` 默认走 HMAC 网关；`/scan` 暴露在公网由 HMAC 充当真实 auth gate；`/health` 公网；未来 M3 实盘期如需进一步收口则加 Cloudflare Tunnel / Fly dedicated egress 白名单"
+   - **本次 plan 取径**: (c) — 视作 D-22 amendment 提案，**默认按 (c) 实施 Plan 04 + Plan 06**；同时在 Plan 04 SUMMARY 中显式记录该 amendment，请用户事后追认。理由：HMAC + 32-byte CSPRNG SCAN_SHARED_SECRET 是 industry-standard webhook 鉴权机制（Stripe/GitHub/Shopify 全用此模式），不构成实质安全降级；(a) 实质上让 Plan 06 dashboard 不可达，违背用户原意（"用 dashboard 触发 scan"）。
+   - **Plan 04 落地**：`fly.toml` 保留公网 `[[services]]` for 8080 端口；`force_https = true`；HMAC 中间件在 Plan 02 已落地是真实 auth gate。文档明确标注 "D-22 amendment per 02-RESEARCH §Open Q #1 (resolved)"。
 
 2. **Phase 02 是否启动 Supabase Auth 多账户？**
    - D-20 锁定 "magic link + email whitelist 单用户"
    - 启动期是否真有第二个 dashboard user？
-   - 推荐：Phase 02 单用户即可；M3 多账户进入时再扩
+   - **RESOLVED:** Phase 02 单用户即可；M3 多账户进入时再扩。无需 plan 调整。
 
 3. **Axiom 500GB 月 ingest 多久撞顶？**
    - 估算：Fly stdout JSON ~ 200B/log line × 平均 1000 log/snapshot × 60 snapshots/month = ~12MB；加 chaos + scheduled jobs ≈ 100MB/月
    - 距 500GB 5000x，启动期不可能撞
    - 但若 daemon bug 进入 log loop（每秒 100 行） → 25GB/天 → 撞顶
-   - 推荐：加 axiom usage alert（90% threshold）
+   - **RESOLVED:** Phase 02 启动期不撞；加 axiom usage alert（90% threshold）作为 Plan 05 checkpoint 备注事项；不需要单开 plan。
 
 4. **`fly cron` vs always-on daemon 内部 scheduler 的选择是否最佳？**
    - 上面方案：scheduled machines（每次起独立机器跑 snapshot）+ always-on machine 跑 HTTP
    - 替代：单 always-on machine 内置 APScheduler 跑 cron + HTTP
-   - 推荐：scheduled machines（fly 原生 + 失败重启策略 + cron miss 补跑）— **但 plan 阶段要确认 fly scheduled machines 在 2026-05 仍是推荐做法**（与 always-on 内置 cron 是社区分歧点）
+   - **RESOLVED:** Context7 `/superfly/docs` 2026-05-12 查证：fly.toml **不支持** `[[services.processes]] schedule` 键。Fly 2026-05 推荐 cron 机制有两条：
+     - **(a) `fly machine run --schedule {hourly|daily|weekly|monthly}`** — CLI 命令；离散 cron 表达式不支持，只接受四个枚举值；首次部署后执行一次即可，由 Fly 控制后续触发
+     - **(b) Supercronic / 内置 cron daemon**: 在 fly.toml `[processes]` 块定义独立 process group（`cron = "supercronic /app/crontab"`），并 scale `cron=1`；crontab 文件随 Docker image 一起发布；支持完整 cron 语法
+   - **本次 plan 取径**：方案 (b) — Supercronic + 内置 process group。理由：
+     - D-09 (`0 0,12 * * *` 每天 2 次) 不能被 `--schedule daily` (24h 整点) 表达 → 必须用完整 cron 语法
+     - Supercronic 的 process group 与 daemon 同 image 同 Docker 层；只需 scale `cron=1, app=1`；不需要 GHA + flyctl 后置脚本
+     - 与 D-13 (3-failure-pause 在 daemon 内的 scheduler.py) 兼容 — Supercronic 只是 trigger；snapshot 失败计数仍由 daemon scheduler 维护（通过 SQLite scheduler_state 表跨进程共享）
+   - **Plan 04 落地**: fly.toml 改为 `[processes] app = "python -m polyarb.daemon.main"` + `cron = "supercronic /app/crontab"`；Dockerfile 加 supercronic 安装 + crontab COPY；`flyctl scale count app=1 cron=1`。废弃原 `[[services.processes]] schedule` 语法（Context7 确认非 valid）。
 
 5. **R2 upload 是 sync 还是 async？**
    - sync：snapshot orchestrator 阻塞等待 R2 完成才返回
    - async：snapshot 返回后台 task push R2
-   - 推荐：**sync** — R2 PUT 1MB parquet ~ 200ms 可接受；async 增加状态管理复杂度
+   - **RESOLVED:** sync — R2 PUT 1MB parquet ~ 200ms 可接受；async 增加状态管理复杂度。Plan 03 step 7.6 已是 sync 实现。
 
----
 
 ## Environment Availability
 
