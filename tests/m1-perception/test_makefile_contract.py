@@ -72,7 +72,7 @@ def test_make_snapshot_markets_dry_run_recipe() -> None:
 
 
 def test_make_snapshot_markets_full_dry_run_recipe() -> None:
-    """The full target must invoke ``python -m polyarb.snapshot --full``."""
+    """The full target must invoke ``uv run python -m polyarb.snapshot snapshot --full``."""
     result = subprocess.run(
         ["make", "-n", "snapshot-markets-full"],
         capture_output=True,
@@ -81,7 +81,8 @@ def test_make_snapshot_markets_full_dry_run_recipe() -> None:
         timeout=5,
     )
     assert result.returncode == 0, f"make -n failed: {result.stderr}"
-    assert "python -m polyarb.snapshot --full" in result.stdout
+    # Makefile uses 'uv run python -m polyarb.snapshot snapshot --full' (CLAUDE.md §7 toolchain)
+    assert "uv run python -m polyarb.snapshot snapshot --full" in result.stdout
 
 
 def test_makefile_phony_declaration_present() -> None:

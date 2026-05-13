@@ -541,6 +541,58 @@ def test_page_fetched_at_ms_in_all_four_sync_points() -> None:
 # =============================================================================
 
 
+# =============================================================================
+# Phase 02 Plan 03: snapshots table 3-point lockstep (supabase_mirror_at_ms + parquet_r2_url)
+# =============================================================================
+
+
+def test_supabase_mirror_at_ms_in_snapshots_three_sync_points() -> None:
+    """supabase_mirror_at_ms must appear in all 3 snapshots sync points.
+
+    3-point lockstep (no parquet schema — snapshots table is SQLite-only):
+      1. SNAPSHOTS_DDL
+      2. SNAPSHOTS_COLUMN_ORDER
+      3. SNAPSHOTS_INSERT_SQL
+    """
+    from polyarb.storage.schemas import SNAPSHOTS_COLUMN_ORDER, SNAPSHOTS_DDL, SNAPSHOTS_INSERT_SQL
+
+    # Sync point 1: DDL string
+    assert "supabase_mirror_at_ms" in SNAPSHOTS_DDL, (
+        "supabase_mirror_at_ms missing from SNAPSHOTS_DDL"
+    )
+    # Sync point 2: column order tuple
+    assert "supabase_mirror_at_ms" in SNAPSHOTS_COLUMN_ORDER, (
+        "supabase_mirror_at_ms missing from SNAPSHOTS_COLUMN_ORDER"
+    )
+    # Sync point 3: INSERT SQL
+    assert "supabase_mirror_at_ms" in SNAPSHOTS_INSERT_SQL, (
+        "supabase_mirror_at_ms missing from SNAPSHOTS_INSERT_SQL"
+    )
+    # Placeholder count matches column count (excluding auto PK 'id')
+    # SNAPSHOTS_INSERT_SQL inserts all columns except id (autoincrement)
+    insert_cols = [c for c in SNAPSHOTS_COLUMN_ORDER if c != "id"]
+    n_cols = len(insert_cols)
+    n_placeholders = SNAPSHOTS_INSERT_SQL.count("?")
+    assert n_cols == n_placeholders, (
+        f"col count {n_cols} != placeholder count {n_placeholders}"
+    )
+
+
+def test_parquet_r2_url_in_snapshots_three_sync_points() -> None:
+    """parquet_r2_url must appear in all 3 snapshots sync points."""
+    from polyarb.storage.schemas import SNAPSHOTS_COLUMN_ORDER, SNAPSHOTS_DDL, SNAPSHOTS_INSERT_SQL
+
+    assert "parquet_r2_url" in SNAPSHOTS_DDL, (
+        "parquet_r2_url missing from SNAPSHOTS_DDL"
+    )
+    assert "parquet_r2_url" in SNAPSHOTS_COLUMN_ORDER, (
+        "parquet_r2_url missing from SNAPSHOTS_COLUMN_ORDER"
+    )
+    assert "parquet_r2_url" in SNAPSHOTS_INSERT_SQL, (
+        "parquet_r2_url missing from SNAPSHOTS_INSERT_SQL"
+    )
+
+
 def test_scheduler_state_table_present_in_schema_and_executable() -> None:
     """SCHEDULER_STATE_DDL declares scheduler_state table with singleton constraint.
 

@@ -46,14 +46,18 @@ PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS snapshots (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  taken_at_ms     INTEGER NOT NULL,
-  finished_at_ms  INTEGER NOT NULL,
-  mode            TEXT NOT NULL CHECK(mode IN ('subset','full')),
-  market_count    INTEGER NOT NULL,
-  is_valid        INTEGER NOT NULL,
-  parquet_path    TEXT NOT NULL,
-  notes           TEXT
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  taken_at_ms           INTEGER NOT NULL,
+  finished_at_ms        INTEGER NOT NULL,
+  mode                  TEXT NOT NULL CHECK(mode IN ('subset','full')),
+  market_count          INTEGER NOT NULL,
+  is_valid              INTEGER NOT NULL,
+  parquet_path          TEXT NOT NULL,
+  notes                 TEXT,
+  -- Phase 02 Plan 03: post-write mirror + r2 tracking; nullable for pre-02 snapshots
+  -- and during transitional deploys (Supabase/R2 disabled).
+  supabase_mirror_at_ms INTEGER,  -- ms timestamp of last successful Supabase mirror push
+  parquet_r2_url        TEXT      -- R2 archive URL once upload_parquet_to_r2 succeeds
 );
 
 -- Phase 1.1 Amendment 01: events table fed from Gamma /events endpoint.
@@ -274,6 +278,51 @@ CREATE TABLE IF NOT EXISTS scheduler_state (
     CHECK (id = 1)
 )
 """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 02 Plan 03: snapshots table lockstep (3-point: DDL / COLUMN_ORDER / INSERT_SQL)
+#
+# The snapshots table is NOT in parquet (only markets is), so there are only
+# 3 sync points vs the 4-point lockstep for markets. The new nullable columns
+# supabase_mirror_at_ms + parquet_r2_url are added here for post-write tracking.
+# NOTE: SNAPSHOTS_DDL is a string constant mirroring the DDL block above for
+# test-assertion purposes only. The actual DDL is applied via the main DDL string.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SNAPSHOTS_DDL = (
+    "CREATE TABLE IF NOT EXISTS snapshots ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "taken_at_ms INTEGER NOT NULL, "
+    "finished_at_ms INTEGER NOT NULL, "
+    "mode TEXT NOT NULL, "
+    "market_count INTEGER NOT NULL, "
+    "is_valid INTEGER NOT NULL, "
+    "parquet_path TEXT NOT NULL, "
+    "notes TEXT, "
+    "supabase_mirror_at_ms INTEGER, "  # Phase 02 Plan 03
+    "parquet_r2_url TEXT"               # Phase 02 Plan 03
+    ")"
+)
+
+SNAPSHOTS_COLUMN_ORDER: tuple[str, ...] = (
+    "id",
+    "taken_at_ms",
+    "finished_at_ms",
+    "mode",
+    "market_count",
+    "is_valid",
+    "parquet_path",
+    "notes",
+    "supabase_mirror_at_ms",  # Phase 02 Plan 03: nullable mirror timestamp
+    "parquet_r2_url",          # Phase 02 Plan 03: nullable R2 URL
+)
+
+SNAPSHOTS_INSERT_SQL = (
+    "INSERT INTO snapshots("
+    "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes,"
+    "supabase_mirror_at_ms,parquet_r2_url) "
+    "VALUES (?,?,?,?,?,?,?,?,?)"
+)
 
 SNAPSHOT_SCHEMA: pa.Schema = pa.schema(
     [

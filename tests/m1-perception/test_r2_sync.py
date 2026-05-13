@@ -223,8 +223,9 @@ def test_r2_key_rejects_user_input() -> None:
         f"compute_r2_key must accept ONLY 'taken_at_ms' parameter (T-02-12 path injection). "
         f"Got: {params}"
     )
-    # Verify it's typed as int in annotations
+    # Verify it's typed as int in annotations (either bare int or string 'int' from __future__.annotations)
     ann = compute_r2_key.__annotations__
-    assert ann.get("taken_at_ms") == int or str(ann.get("taken_at_ms")) == "<class 'int'>", (
-        f"taken_at_ms must be annotated as int, got: {ann.get('taken_at_ms')}"
+    ann_val = ann.get("taken_at_ms")
+    assert ann_val in (int, "int"), (
+        f"taken_at_ms must be annotated as int, got: {ann_val!r}"
     )

@@ -122,6 +122,62 @@ async def health(request: Request) -> JSONResponse:
             }
         ]
 
+    # ── Check 3: Supabase mirror age (only if mirror enabled) ────────────
+    # supabase:mirror_age_seconds — seconds since last successful Supabase push.
+    # Uses supabase_mirror_at_ms column added in Plan 03.
+    # warn if > 25h (cron interval 12h + 13h buffer); fail if > 48h.
+    _MIRROR_WARN_S = 25 * 3600
+    _MIRROR_FAIL_S = 48 * 3600
+    if settings.supabase_mirror_enabled:
+        if last_snapshot is not None and last_snapshot.get("supabase_mirror_at_ms") is not None:
+            mirror_age_s = now_s - last_snapshot["supabase_mirror_at_ms"] / 1000.0
+            if mirror_age_s < _MIRROR_WARN_S:
+                mirror_status = "pass"
+            elif mirror_age_s < _MIRROR_FAIL_S:
+                mirror_status = "warn"
+            else:
+                mirror_status = "fail"
+        else:
+            # No mirror timestamp yet (mirror disabled or first run) → warn (not fail)
+            mirror_age_s = None
+            mirror_status = "warn"
+        overall = _severity(overall, mirror_status)
+        checks["supabase:mirror_age_seconds"] = [
+            {
+                "componentId": "supabase-mirror",
+                "componentType": "datastore",
+                "observedValue": round(mirror_age_s, 1) if mirror_age_s is not None else None,
+                "observedUnit": "s",
+                "status": mirror_status,
+                "time": _utc_now_iso(),
+            }
+        ]
+
+    # ── Check 4: R2 upload recent success (only if R2 enabled) ───────────
+    # r2:upload_recent_success — True if last snapshot has a parquet_r2_url.
+    # Uses parquet_r2_url column added in Plan 03.
+    if settings.r2_enabled:
+        if last_snapshot is not None and last_snapshot.get("parquet_r2_url"):
+            r2_status = "pass"
+            r2_value = True
+        elif last_snapshot is not None:
+            # Snapshot exists but no R2 URL — warn (first run or upload failed)
+            r2_status = "warn"
+            r2_value = False
+        else:
+            r2_status = "warn"
+            r2_value = False
+        overall = _severity(overall, r2_status)
+        checks["r2:upload_recent_success"] = [
+            {
+                "componentId": "r2-archive",
+                "componentType": "system",
+                "observedValue": r2_value,
+                "status": r2_status,
+                "time": _utc_now_iso(),
+            }
+        ]
+
     # ── Build response ─────────────────────────────────────────────────────
     body = {
         "status": overall,

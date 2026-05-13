@@ -156,8 +156,9 @@ class SQLiteStore:
             con.execute("DELETE FROM markets")  # full overwrite (D-C1)
             cur = con.execute(
                 "INSERT INTO snapshots("
-                "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes"
-                ") VALUES (?,?,?,?,?,?,?)",
+                "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes,"
+                "supabase_mirror_at_ms,parquet_r2_url"
+                ") VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     taken_at_ms,
                     finished_at_ms,
@@ -166,6 +167,8 @@ class SQLiteStore:
                     int(is_valid),
                     parquet_path,
                     notes,
+                    None,  # supabase_mirror_at_ms — set after successful mirror push
+                    None,  # parquet_r2_url — set after successful R2 upload
                 ),
             )
             snapshot_id = cur.lastrowid
@@ -224,6 +227,106 @@ class SQLiteStore:
         )
         return snapshot_id
 
+    def update_snapshot_mirror_fields(
+        self,
+        snapshot_id: int,
+        *,
+        supabase_mirror_at_ms: int | None = None,
+        parquet_r2_url: str | None = None,
+    ) -> None:
+        """Update supabase_mirror_at_ms and/or parquet_r2_url for a snapshot.
+
+        Phase 02 Plan 03 — called by orchestrator after successful mirror push / R2 upload.
+        Silently no-ops if snapshot_id doesn't exist (defensive; should never happen).
+        """
+        if supabase_mirror_at_ms is None and parquet_r2_url is None:
+            return
+        sets: list[str] = []
+        params: list = []
+        if supabase_mirror_at_ms is not None:
+            sets.append("supabase_mirror_at_ms = ?")
+            params.append(supabase_mirror_at_ms)
+        if parquet_r2_url is not None:
+            sets.append("parquet_r2_url = ?")
+            params.append(parquet_r2_url)
+        params.append(snapshot_id)
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.execute(
+                f"UPDATE snapshots SET {', '.join(sets)} WHERE id = ?",
+                tuple(params),
+            )
+        finally:
+            con.close()
+
+    def get_snapshot(self, snapshot_id: int) -> dict | None:
+        """Return a single snapshot row by ID, or None if not found.
+
+        Phase 02 Plan 03 — used by reconcile to retrieve snapshot metadata.
+        """
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            return None
+        try:
+            row = con.execute(
+                "SELECT id, taken_at_ms, finished_at_ms, mode, is_valid, market_count, "
+                "parquet_path, notes, supabase_mirror_at_ms, parquet_r2_url "
+                "FROM snapshots WHERE id = ?",
+                (snapshot_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "taken_at_ms": row[1],
+                "finished_at_ms": row[2],
+                "mode": row[3],
+                "is_valid": bool(row[4]),
+                "market_count": row[5],
+                "parquet_path": row[6],
+                "notes": row[7],
+                "supabase_mirror_at_ms": row[8],
+                "parquet_r2_url": row[9],
+            }
+        finally:
+            con.close()
+
+    def get_markets_for_snapshot(self, snapshot_id: int) -> list[dict]:
+        """Return all market rows for a given snapshot_id.
+
+        Phase 02 Plan 03 — used by reconcile to get markets to mirror.
+        Returns list of dicts with selected columns for Supabase narrow mirror.
+        """
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            return []
+        try:
+            rows = con.execute(
+                "SELECT market_id, question, slug, event_id AS event_slug, "
+                "mid_price, liquidity_usd, volume_usd, end_time_ms "
+                "FROM markets WHERE snapshot_id = ?",
+                (snapshot_id,),
+            ).fetchall()
+            return [
+                {
+                    "market_id": r[0],
+                    "question": r[1],
+                    "slug": r[2],
+                    "event_slug": r[3],
+                    "mid_price": r[4],
+                    "liquidity_usd": r[5],
+                    "volume_usd": r[6],
+                    "end_time_ms": r[7],
+                }
+                for r in rows
+            ]
+        finally:
+            con.close()
+
     def get_scheduler_state(self) -> dict | None:
         """Read the scheduler singleton row. Returns None if not yet written."""
         uri = f"file:{self._db_path}?mode=ro"
@@ -276,21 +379,46 @@ class SQLiteStore:
             # DB file doesn't exist yet → no snapshot
             return None
         try:
-            row = con.execute(
-                "SELECT id, taken_at_ms, finished_at_ms, mode, is_valid, market_count, notes "
-                "FROM snapshots ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if not row:
-                return None
-            return {
-                "id": row[0],
-                "taken_at_ms": row[1],
-                "finished_at_ms": row[2],
-                "mode": row[3],
-                "is_valid": bool(row[4]),
-                "market_count": row[5],
-                "notes": row[6],  # notes carries status string (ok/degraded/failed) from orchestrator
-            }
+            # Try to read the new Plan 03 columns; fall back gracefully for old DBs
+            # that haven't been migrated (supabase_mirror_at_ms + parquet_r2_url).
+            try:
+                row = con.execute(
+                    "SELECT id, taken_at_ms, finished_at_ms, mode, is_valid, market_count, notes, "
+                    "supabase_mirror_at_ms, parquet_r2_url "
+                    "FROM snapshots ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "taken_at_ms": row[1],
+                    "finished_at_ms": row[2],
+                    "mode": row[3],
+                    "is_valid": bool(row[4]),
+                    "market_count": row[5],
+                    "notes": row[6],
+                    "supabase_mirror_at_ms": row[7],  # Phase 02 Plan 03: nullable
+                    "parquet_r2_url": row[8],           # Phase 02 Plan 03: nullable
+                }
+            except sqlite3.OperationalError:
+                # Old DB schema without Plan 03 columns — fall back to 7-column query
+                row = con.execute(
+                    "SELECT id, taken_at_ms, finished_at_ms, mode, is_valid, market_count, notes "
+                    "FROM snapshots ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "taken_at_ms": row[1],
+                    "finished_at_ms": row[2],
+                    "mode": row[3],
+                    "is_valid": bool(row[4]),
+                    "market_count": row[5],
+                    "notes": row[6],
+                    "supabase_mirror_at_ms": None,
+                    "parquet_r2_url": None,
+                }
         finally:
             con.close()
 

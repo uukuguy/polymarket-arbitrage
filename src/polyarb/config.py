@@ -70,17 +70,52 @@ class Settings(BaseSettings):
     # recipes yaml path for /scan handler
     recipes_yaml_path: Path = Path("config/scan_recipes.yaml")
 
+    # ── Supabase (D-02) — Plan 03 additions ──────────────────────────────────
+    # TWO distinct env vars: supabase-py SDK uses REST URL; Alembic uses DB DSN.
+    # See W6 fix in 02-03-PLAN.md for explanation.
+    #
+    # POLYARB_SUPABASE_URL  = REST URL (https://<ref>.supabase.co) — supabase-py
+    # POLYARB_SUPABASE_DB_DSN = Postgres DSN (postgresql://postgres:...) — alembic ONLY
+    supabase_url: str = Field(default="", description="Supabase REST URL — supabase-py SDK")
+    supabase_db_dsn: SecretStr = Field(
+        default=SecretStr(""),
+        description="Supabase Postgres DSN — used ONLY by alembic (not supabase-py)",
+    )
+    supabase_service_key: SecretStr = Field(default=SecretStr(""))
+    supabase_mirror_enabled: bool = Field(default=False)  # auto-set by model_validator
+
+    # ── Cloudflare R2 (D-03) — Plan 03 additions ─────────────────────────────
+    r2_endpoint: str = Field(default="")
+    r2_access_key_id: SecretStr = Field(default=SecretStr(""))
+    r2_secret_access_key: SecretStr = Field(default=SecretStr(""))
+    r2_bucket: str = Field(default="polyarb-snapshots")
+    r2_enabled: bool = Field(default=False)  # auto-set by model_validator
+
     model_config = SettingsConfigDict(env_prefix="POLYARB_", env_file=".env", extra="ignore")
 
     @model_validator(mode="after")
     def _require_secret_in_prod(self) -> "Settings":
-        """Raise if scan_shared_secret is empty and not running in test mode."""
+        """Raise if scan_shared_secret is empty and not running in test mode.
+
+        Also auto-sets supabase_mirror_enabled and r2_enabled based on whether
+        the respective credentials are fully populated (Plan 03).
+        """
         secret_val = self.scan_shared_secret.get_secret_value()
         if not secret_val and os.environ.get("POLYARB_ALLOW_EMPTY_SECRET") != "1":
             raise ValueError(
                 "POLYARB_SCAN_SHARED_SECRET must be set in production. "
                 "To run tests or local dev without a secret, set POLYARB_ALLOW_EMPTY_SECRET=1."
             )
+        # Auto-enable Supabase mirror if both URL + service key are set
+        if self.supabase_url and self.supabase_service_key.get_secret_value():
+            object.__setattr__(self, "supabase_mirror_enabled", True)
+        # Auto-enable R2 if endpoint + access key + secret key are all set
+        if (
+            self.r2_endpoint
+            and self.r2_access_key_id.get_secret_value()
+            and self.r2_secret_access_key.get_secret_value()
+        ):
+            object.__setattr__(self, "r2_enabled", True)
         return self
 
     @field_validator("db_path", "parquet_root", "cache_root")

@@ -462,10 +462,104 @@ async def run_snapshot(
             event_tag_rows=event_tag_rows,
         )
 
-        # Cache cleanup happens ONLY after a successful SQLite commit. If step 7
-        # failed mid-way, the cache is left intact so the next run can resume.
-        if cache is not None:
-            cache.cleanup()
+    # ── 7.5. Supabase mirror (D-02 dashboard) — fail-soft post-write ─────────
+    # SQLite + Parquet are the source of truth (D-12 amendment). Mirror failure
+    # → DEGRADED (not FAILED). Does NOT increment scheduler's failure_counter.
+    if settings.supabase_mirror_enabled:
+        from polyarb.storage.supabase_mirror import SupabaseMirror, narrow_market_row
+        try:
+            mirror = SupabaseMirror(
+                settings.supabase_url,
+                settings.supabase_service_key.get_secret_value(),
+            )
+            narrow_rows = [narrow_market_row(m, snapshot_id) for m in target_markets]
+            snapshot_meta = {
+                "id": snapshot_id,
+                "taken_at_ms": taken_at_ms,
+                "finished_at_ms": finished_at_ms,
+                "mode": mode,
+                "status": status.value,
+                "market_count": len(target_markets),
+                "parquet_url": None,  # Updated in step 7.6 if R2 upload succeeds
+            }
+            ok = mirror.push_snapshot(snapshot_id, snapshot_meta, narrow_rows)
+            if ok:
+                # Record successful mirror timestamp in SQLite (non-critical; ignore failure)
+                try:
+                    store.update_snapshot_mirror_fields(
+                        snapshot_id,
+                        supabase_mirror_at_ms=int(time.time() * 1000),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                issues.append(
+                    Issue(
+                        layer=4,
+                        category=Category.UNKNOWN,
+                        market_id=None,
+                        detail=f"Supabase mirror push returned False (fail-soft, snapshot_id={snapshot_id})",
+                    )
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Supabase mirror init failed: {e!r}")
+            issues.append(
+                Issue(
+                    layer=4,
+                    category=Category.UNKNOWN,
+                    market_id=None,
+                    detail=f"Supabase mirror init failed: {str(e)[:200]}",
+                )
+            )
+            mirror = None  # type: ignore[assignment]
+    else:
+        mirror = None  # type: ignore[assignment]
+
+    # ── 7.6. R2 parquet archive (D-03) — fail-soft post-write ────────────────
+    # Upload the already-written parquet to Cloudflare R2. Failure → DEGRADED.
+    if settings.r2_enabled:
+        from polyarb.storage.r2_sync import R2UploadError, compute_r2_key, upload_parquet_to_r2
+        r2_url: str | None = None
+        try:
+            r2_key = compute_r2_key(taken_at_ms)
+            r2_url = upload_parquet_to_r2(
+                parquet_path=parquet_path,
+                bucket=settings.r2_bucket,
+                key=r2_key,
+                endpoint=settings.r2_endpoint,
+                access_key=settings.r2_access_key_id.get_secret_value(),
+                secret_key=settings.r2_secret_access_key.get_secret_value(),
+            )
+            # Record R2 URL in SQLite (non-critical; ignore failure)
+            try:
+                store.update_snapshot_mirror_fields(snapshot_id, parquet_r2_url=r2_url)
+            except Exception:  # noqa: BLE001
+                pass
+        except R2UploadError as e:
+            logger.error(f"R2 upload failed: {e!r}")
+            issues.append(
+                Issue(
+                    layer=4,
+                    category=Category.UNKNOWN,
+                    market_id=None,
+                    detail=f"R2 upload failed: {str(e)[:200]}",
+                )
+            )
+            r2_url = None
+
+        # Update Supabase snapshots.parquet_url if both mirror and R2 succeeded
+        if r2_url is not None and mirror is not None and settings.supabase_mirror_enabled:
+            try:
+                mirror.update_parquet_url(snapshot_id, r2_url)
+            except Exception:  # noqa: BLE001
+                logger.warning("update_parquet_url post-r2 failed; snapshots.parquet_url stays NULL")
+
+    # ── Cache cleanup — MUST run unconditionally (after step 7.5 + 7.6) ──────
+    # Even if mirror/R2 failed, the local write succeeded — clean up cache.
+    # Cache cleanup happens ONLY after a successful SQLite commit. If step 7
+    # failed mid-way, the cache is left intact so the next run can resume.
+    if cache is not None:
+        cache.cleanup()
 
     logger.info(
         f"Snapshot complete in {_format_elapsed(time.monotonic() - overall_t0)} "
