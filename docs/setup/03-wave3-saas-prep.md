@@ -1,0 +1,410 @@
+# Wave 3 SaaS 注册照方抓药指南
+
+> **目的**：把本地能跑的 L1 daemon 搬到 Fly.io 上 7×24 跑前，先把 3 个 SaaS 账号 + 1 个 CSPRNG 密钥准备好（一共 6 个 secrets 要写到 Fly），并在本地把 Supabase 数据库 schema 建好。
+>
+> **预计时间**：30-40 分钟连续操作；建议留 1 小时块时间不被打断。
+>
+> **前置**：本指南假定 Phase 02 Wave 1 + Wave 2 已落地（`make planning-status` 显示 02-01/02/03 全 OK）。
+>
+> **Plan 04 的 Task 4 (Step A-F)** 是本指南对应的"contract 版"；本指南是它的"扩展手册"（多了 cost / pitfalls / 在哪里点 / 失败排查）。
+
+---
+
+## 📋 快速清单（你最后要拿到的 6 个值）
+
+完成本指南后，你手上应该有这 6 个 secret 值（最终通过 `flyctl secrets set` 注入到 Fly app）：
+
+| Secret | 来源 | 形如 |
+|---|---|---|
+| `POLYARB_SUPABASE_URL` | Step C | `https://abc123.supabase.co` |
+| `POLYARB_SUPABASE_DB_DSN` | Step C | `postgresql://postgres:xxx@db.abc123.supabase.co:5432/postgres` |
+| `POLYARB_SUPABASE_SERVICE_KEY` | Step C | `eyJhbGciOi...` (JWT) |
+| `POLYARB_R2_ENDPOINT` | Step B | `https://<account_id>.r2.cloudflarestorage.com` |
+| `POLYARB_R2_ACCESS_KEY_ID` | Step B | `a1b2c3d4...` (32 hex) |
+| `POLYARB_R2_SECRET_ACCESS_KEY` | Step B | `e5f6g7h8...` (64 hex) |
+| `POLYARB_SCAN_SHARED_SECRET` | Step A.7 | `openssl rand -hex 32` (64 hex) |
+
+> `POLYARB_R2_BUCKET=polyarb-snapshots` 已经写死在 `.env.example`，不算 secret。
+
+另外还有 1 个 secret 要单独写到 **GitHub Actions** 的 repo secrets（不在 Fly）：
+
+| Secret | 来源 | 形如 | 放哪 |
+|---|---|---|---|
+| `FLY_API_TOKEN` | Step A.6 | `fm2_xxx...` | GitHub repo → Settings → Secrets and variables → Actions |
+
+---
+
+## 💰 成本预期
+
+| 服务 | 计费 | Phase 02 预期月开销 |
+|---|---|---|
+| Fly.io | 按机器小时 + 流量 | shared-cpu-1x 1G + 5G volume + AMS region ≈ **$5-10/月**（持续运行）|
+| Cloudflare R2 | 10GB 免费存储 + 1M Class A ops / 10M Class B ops | Phase 02 数据量（subset 2/day + full 1/week，~20 MB/snapshot 上限）≈ **$0** |
+| Supabase | Free tier 500MB / 2 cores 半小时挂起；Pro $25/月 | Phase 02 数据 + dashboard read backend → **必须 Pro $25/月**（Free 挂起会让 `/scan` 测试失败）|
+| GitHub Actions | 公开 repo 免费；私有 repo 2000 min/月 free | **$0** |
+
+**合计 Phase 02 月度 ≈ $30-35**。Wave 4 加 Sentry/Axiom/Better Stack 再加 ~$10/月（多数有 free tier 足够 L1 用量）。
+
+> **省钱建议**：Supabase Free tier 也能跑通本指南，但 Better Stack uptime probe 触发 Free 实例 cold start (~3-5s) 会让 /health 偶发 `warn`；要"完整 7-day soak gate"过线建议直接 Pro。
+
+---
+
+## 🛠 准备工作（5 分钟）
+
+```bash
+# 1. 装 flyctl（macOS）
+brew install flyctl
+flyctl version   # 验证装上了
+
+# 2. 装/确认 openssl（macOS 自带 LibreSSL 够用）
+openssl version
+
+# 3. 进项目根
+cd /Users/sujiangwen/sandbox/hacker2026/PolyMarket/polymarket-arbitrage
+
+# 4. 确认 .env 已经从 .env.example 拷贝过（之前 Phase 01.1 翻译用过）
+ls -la .env
+```
+
+> 没装过 flyctl 的话：[https://fly.io/docs/flyctl/install/](https://fly.io/docs/flyctl/install/)。Linux 用 `curl -L https://fly.io/install.sh | sh`。
+
+---
+
+## Step A — Fly.io 账号 + app + Volume + Deploy Token（~10 min）
+
+### A.1 注册 + 加信用卡
+
+打开 [https://fly.io/app/sign-up](https://fly.io/app/sign-up)。
+- 用 GitHub OAuth 注册（最快，省去验证邮箱）。
+- 注册后 **Billing → Add payment method**：必须加信用卡，否则 `apps create` 会成功但 `deploy` 会被 hold。
+- 第一次会预扣 $5 hold（不是扣费，是验证），通常几天内退回。
+
+> **CN 用户提示**：Fly.io 接受国内 Visa/Mastercard。如果信用卡被拒，换 Wise 或 Stripe 友好卡。
+
+### A.2 安装 + 登录 flyctl
+
+```bash
+brew install flyctl   # 已装过跳过
+flyctl auth login     # 浏览器打开 fly.io 登录页 → 授权 → 终端自动接到 token
+flyctl auth whoami    # 应该显示你的 email
+```
+
+### A.3 创建 app（无 region 默认）
+
+```bash
+flyctl apps create polyarb-l1 --org personal
+```
+
+**Expected output**:
+```
+New app created: polyarb-l1
+```
+
+**Pitfall**：如果报 `app name 'polyarb-l1' is already taken` → app name 是全球唯一。换名（如 `polyarb-l1-<yourhandle>`），但要记住改名后 **fly.toml 里的 `app = "polyarb-l1"` 也要同步改**（Plan 04 dispatch 前告诉我新名字）。
+
+### A.4 创建 Volume（5G，AMS）
+
+```bash
+flyctl volumes create polyarb_data --size 5 --region ams -a polyarb-l1
+```
+
+**为什么 AMS**：Polymarket API 主要走 Cloudflare 北美 / 欧洲边缘节点；Dublin (`Supabase`) + Amsterdam (`Fly`) 同 EU 主干网，跨服务延迟 ~5-10ms。换其它 region 会让 Supabase mirror 变慢。
+
+**为什么 5G**：subset snapshot 一个 ~5MB，full 一个 ~20MB；按 2/day subset + 1/week full + 30 天保留 = ~400MB SQLite + ~600MB parquet。预留 5G 留 4-5 倍冗余。
+
+**Expected output**：
+```
+ID                  : vol_xxx
+Name                : polyarb_data
+App                 : polyarb-l1
+Region              : ams
+Zone                : xxx
+Size GB             : 5
+Encrypted           : true
+Created at          : ...
+```
+
+### A.5 验证 app 状态
+
+```bash
+flyctl status -a polyarb-l1
+```
+
+应该看到 app 存在但 "no machines"（还没 deploy）。这是正常的。
+
+### A.6 创建 Deploy Token（给 GHA 用）
+
+```bash
+flyctl tokens create deploy -a polyarb-l1
+```
+
+**Expected output**：一长串 `fm2_xxx...` token（**只显示一次！立即记到密码管理器**）。
+
+把这个值临时记到剪贴板 / 安全笔记 — 后面 Step E 要粘到 GitHub。
+
+### A.7 生成 HMAC 共享密钥
+
+```bash
+openssl rand -hex 32
+```
+
+**Expected output**：64 个十六进制字符（32 字节熵），形如 `7b3a...`。
+
+**这是你的 `POLYARB_SCAN_SHARED_SECRET`** — 记到密码管理器。Plan 06 Vercel dashboard 也会用同一个值（但那边 env-var 名字叫 `SCAN_SHARED_SECRET`，没 `POLYARB_` 前缀，这是因为 Vercel 那边不用 pydantic-settings）。
+
+> **为什么是 32 字节**：HMAC-SHA256 推荐密钥 ≥ block size (64 字节理论)，但 32 字节熵在实践中已远超暴力枚举可行性，且写入 env-var 长度可控。
+
+---
+
+## Step B — Cloudflare R2（~5 min）
+
+### B.1 启用 R2
+
+[https://dash.cloudflare.com/](https://dash.cloudflare.com/) → 左侧 **R2 Object Storage** → "Get Started"。
+
+**好消息**：R2 不要信用卡（D-03 锁定的原因之一）。Free tier 10GB storage + 1M Class A ops + 10M Class B ops — 远超 Phase 02 用量。
+
+### B.2 创建 bucket
+
+R2 主页面 → "Create bucket"：
+- **Name**: `polyarb-snapshots`（**必须这个名字** — `.env.example` 和 `POLYARB_R2_BUCKET` 默认值已经锁定。改名要同步改 `.env.example`，所以别改）
+- **Location**: Automatic（让 Cloudflare 就近放）
+- **Default Storage Class**: Standard（不要选 Infrequent Access — Phase 02 频繁读 parquet）
+- **Public access**: ⛔ NO（保持 private，dashboard 通过 backend 拿 signed URL）
+
+**Expected**：bucket 出现在 R2 列表里，状态 "Active"。
+
+### B.3 创建 API Token
+
+R2 主页面 → 右上角 **"Manage R2 API Tokens"** → "Create API Token"：
+- **Token name**: `polyarb-l1-rw`
+- **Permissions**: ✅ **Object Read & Write**
+- **Specify buckets**: 选 `polyarb-snapshots`（不要选 "Apply to all buckets" — 最小权限原则）
+- **TTL**: Forever（或 1 年 — 看你偏好；Wave 5 之后可以做 rotation）
+- **Client IP Address Filtering**: 留空（Fly.io machine IP 是动态的）
+- 点 **"Create API Token"**
+
+**只显示一次的三个值要立即记下**：
+- **Access Key ID** → 你的 `POLYARB_R2_ACCESS_KEY_ID`
+- **Secret Access Key** → 你的 `POLYARB_R2_SECRET_ACCESS_KEY`
+- **Endpoint for S3 clients** → 形如 `https://<account_id>.r2.cloudflarestorage.com` — 这是你的 `POLYARB_R2_ENDPOINT`
+
+> **Pitfall**：页面会显示三个 endpoint：S3 / jurisdictional EU / jurisdictional FedRAMP。**用第一个 (S3 通用)**。
+
+### B.4 本地烟测（可选但强烈推荐）
+
+```bash
+# 临时设到 shell（不写 .env，避免误提交）
+export AWS_ACCESS_KEY_ID='[B.3 Access Key ID]'
+export AWS_SECRET_ACCESS_KEY='[B.3 Secret]'
+export AWS_ENDPOINT_URL='[B.3 Endpoint]'
+
+# 列 bucket（应该返回空 — 还没东西上传过）
+uv run python -c "
+import boto3, os
+client = boto3.client('s3', endpoint_url=os.environ['AWS_ENDPOINT_URL'])
+resp = client.list_objects_v2(Bucket='polyarb-snapshots')
+print('OK — bucket reachable, contents:', resp.get('Contents', '(empty)'))
+"
+
+# 清掉临时 env
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_ENDPOINT_URL
+```
+
+**Expected**：`OK — bucket reachable, contents: (empty)`。
+**Failure mode**：`InvalidAccessKeyId` → 你 token 复制错了；`NoSuchBucket` → bucket 名拼错（确认是 `polyarb-snapshots` 不是 `polyarb-snapshot`）。
+
+---
+
+## Step C — Supabase Pro Dublin（~5 min）
+
+### C.1 注册 + 创建 project
+
+[https://supabase.com](https://supabase.com) → Sign up（GitHub OAuth）→ **New project**：
+
+- **Project name**: `polyarb`
+- **Organization**: 你的 personal org
+- **Database Password**: ⚠️ 用密码管理器生成 16+ 字符随机 — **现在记下！这是 DSN 的一部分，丢了只能重置整个 project**
+- **Region**: **🇮🇪 West EU (Dublin)** — 必须 Dublin，理由同 Fly AMS（同 EU 主干网）
+- **Pricing Plan**: **Pro $25/月**（D-02 锁定理由 — Free tier 半小时空挂起会让 daemon mirror 失败率飙）
+
+> **CN 用户支付提示**：Supabase 走 Stripe，国内 Visa 一般 OK。如果 Stripe 拒卡 → Wise 卡 / 实体 USD 卡 / Revolut。
+
+> **想先用 Free tier 试水**：可以，但要接受 daemon 跑半小时空闲后第一次 mirror 失败（cold start），并且 7-day soak gate 会有 ~3-5 次 warn。Free → Pro 升级是 in-place 的，不丢数据。
+
+点 **"Create new project"** → 等 30-60 秒 provisioning。
+
+### C.2 收集三个值
+
+Project dashboard 左下 **⚙️ Project Settings** → **API**：
+
+1. **Project URL** → 形如 `https://abc123.supabase.co` → 这是 `POLYARB_SUPABASE_URL`
+2. **`service_role` key**（不是 anon key！）→ 形如 `eyJhbGciOi...`（JWT）→ 这是 `POLYARB_SUPABASE_SERVICE_KEY`
+   - ⚠️ service_role 绕过 RLS，**严禁前端 / Vercel 使用**；Plan 06 dashboard 用 anon key + RLS 策略
+   - 当前 Phase 02 daemon 通过 service_role 直接 upsert mirror，是 server-side 流程
+
+3. **Database DSN**：Project Settings → **Database** → **Connection String** → 切到 "URI"：
+   - 形如 `postgresql://postgres:[YOUR-PASSWORD]@db.abc123.supabase.co:5432/postgres`
+   - 把 `[YOUR-PASSWORD]` 替换成 C.1 的密码
+   - 这是 `POLYARB_SUPABASE_DB_DSN`
+
+   > **重要**：这里 Supabase UI 会显示两种 DSN — "Direct connection" 5432 vs "Connection pooling" 6543。Phase 02 Alembic migration **用 Direct connection (5432)**，理由：Alembic 用 `CREATE TABLE` DDL 不兼容 pgbouncer transaction pooling。Wave 4 dashboard 跑应用查询时再考虑 pool。
+
+### C.3 本地 apply Alembic 001 migration
+
+```bash
+# 把 DSN 写到 .env（永久；Plan 03 supabase_seed.py 也会读）
+echo "POLYARB_SUPABASE_DB_DSN='postgresql://postgres:YOUR-PASSWORD@db.abc123.supabase.co:5432/postgres'" >> .env
+echo "POLYARB_SUPABASE_URL='https://abc123.supabase.co'" >> .env
+echo "POLYARB_SUPABASE_SERVICE_KEY='eyJhbGc...'" >> .env
+
+# 运行 migration
+make supabase-migrate
+```
+
+**Expected output**：
+```
+>> alembic upgrade head — applying initial dashboard schema to Supabase
+...
+INFO  [alembic.runtime.migration] Running upgrade  -> 001, initial dashboard schema
+```
+
+### C.4 验证 schema 落地
+
+Supabase dashboard → **Table Editor** → 应该看到：
+- `snapshots`（id / market_count / status / created_at / supabase_mirror_age_ms / r2_uploaded_at_ms）
+- `markets_latest`（snapshot_id / market_id / ... / page_fetched_at_ms）
+- View: `top_movers_view`
+
+或者命令行验证：
+```bash
+make supabase-reconcile   # 跑 init_check，验证 schema 完整
+```
+
+**Expected**：`init_check PASSED — 2 tables + 1 view created, RLS anon-SELECT policy active`。
+
+> **Pitfall**：如果看到 `relation "alembic_version" already exists` → 你之前手动建过表了。`make supabase-reconcile drop-all` 清场再重跑 `supabase-migrate`（**注意会删数据**，但当前是空库，OK）。
+
+---
+
+## Step D — Fly app secrets（~3 min）
+
+把前 7 个 secret 一次性写入 Fly app（用 HEREDOC 防 shell 拆词）：
+
+```bash
+flyctl secrets set \
+  POLYARB_SUPABASE_URL='https://abc123.supabase.co' \
+  POLYARB_SUPABASE_DB_DSN='postgresql://postgres:YOUR-PASSWORD@db.abc123.supabase.co:5432/postgres' \
+  POLYARB_SUPABASE_SERVICE_KEY='eyJhbGc...' \
+  POLYARB_R2_ENDPOINT='https://YOUR-ACCOUNT-ID.r2.cloudflarestorage.com' \
+  POLYARB_R2_ACCESS_KEY_ID='YOUR-R2-ACCESS-KEY' \
+  POLYARB_R2_SECRET_ACCESS_KEY='YOUR-R2-SECRET' \
+  POLYARB_R2_BUCKET='polyarb-snapshots' \
+  POLYARB_SCAN_SHARED_SECRET='YOUR-OPENSSL-HEX-OUTPUT' \
+  -a polyarb-l1
+```
+
+**Expected output**：
+```
+Secrets are staged for the first deployment
+```
+
+> **没有 app instance 时只是 "staged"** — 等 Step F first deploy 后才真正注入到 machine env。
+
+### D.1 验证 secret 名字（不验证值）
+
+```bash
+flyctl secrets list -a polyarb-l1
+```
+
+**Expected**：8 行，每行一个 secret 名字 + digest（不显示值，正常）。
+```
+NAME                                DIGEST              CREATED AT
+POLYARB_R2_ACCESS_KEY_ID            xxx                 just now
+POLYARB_R2_BUCKET                   xxx                 just now
+POLYARB_R2_ENDPOINT                 xxx                 just now
+POLYARB_R2_SECRET_ACCESS_KEY        xxx                 just now
+POLYARB_SCAN_SHARED_SECRET          xxx                 just now
+POLYARB_SUPABASE_DB_DSN             xxx                 just now
+POLYARB_SUPABASE_SERVICE_KEY        xxx                 just now
+POLYARB_SUPABASE_URL                xxx                 just now
+```
+
+**少了**：检查 D 命令的拼写（特别是 `POLYARB_` 前缀容易漏）。重跑 `flyctl secrets set` 是幂等的，可以补缺。
+
+---
+
+## Step E — GitHub Actions FLY_API_TOKEN（~2 min）
+
+[https://github.com/](https://github.com/) → 你的 `polymarket-arbitrage` repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**：
+
+- **Name**: `FLY_API_TOKEN`（**字面如此**，大小写敏感；Plan 04 的 GHA workflow 引用这个名字）
+- **Value**: Step A.6 那个 `fm2_xxx...` 长 token
+
+点 **"Add secret"**。
+
+**验证**：列表里出现 `FLY_API_TOKEN`，值已加密不可见（正常）。
+
+---
+
+## Step F — First deploy（~5 min，在 Wave 3 dispatch 期间由 agent 跑）
+
+⚠️ **不要现在跑** — 这一步是 **Plan 04 Task 5 (Wave 3 dispatch 内)** 的内容。Dockerfile + fly.toml 还没建。
+
+完成 A-E 后回来跟我说"deployed prep done"，我就 `/gsd-execute-phase 02 --wave 3 --ws m1-perception`：
+- Plan 04 会建 Dockerfile + fly.toml + crontab + GHA workflows（Task 1-3）
+- 到 Task 4 自动暂停 → 我让你 `make deploy`（这一刻才用得上 Step F）
+- `make deploy` 期望输出：
+  - flyctl 上传 Docker context
+  - 远程 build ~3-5 分钟
+  - flyctl 等机器 healthy
+  - `bash scripts/deploy_smoke.sh` 报 `/health = fail`（**这是正常** — 还没首次 snapshot，健康检查找不到数据）
+- 访问 `https://polyarb-l1.fly.dev/health` → 看到 `{"status":"fail",...}` 是 success criterion
+
+---
+
+## ✅ 完工 checklist
+
+完成上述步骤后，你应该有：
+
+- [ ] Fly app `polyarb-l1` 存在，volume `polyarb_data` 5G 在 AMS region
+- [ ] R2 bucket `polyarb-snapshots` 存在，private 访问
+- [ ] Supabase Pro Dublin project 存在，Alembic 001 migration 已 apply（`snapshots` + `markets_latest` 表 + `top_movers_view` view + RLS policy 看得见）
+- [ ] `flyctl secrets list -a polyarb-l1` 列出 8 个 secrets
+- [ ] GitHub repo Settings → Secrets 看到 `FLY_API_TOKEN`
+- [ ] HMAC 共享密钥（Step A.7 的 64 hex）已经记到密码管理器 — Plan 06 还要用
+
+完成后告诉我："deployed prep done" 或者贴出以下 3 个命令的输出：
+
+```bash
+flyctl status -a polyarb-l1
+flyctl secrets list -a polyarb-l1
+make supabase-reconcile
+```
+
+我就 dispatch Wave 3。
+
+---
+
+## 🚨 排错速查
+
+| 症状 | 可能原因 | 处理 |
+|---|---|---|
+| `flyctl apps create` 报 name taken | app name 全球唯一 | 换名（如 `polyarb-l1-<handle>`），同步改 fly.toml 前告诉我 |
+| `flyctl volumes create` 报 "no payment method" | A.1 没加信用卡 | 回去 Billing 加卡 |
+| Supabase `make supabase-migrate` 报 `password authentication failed` | DSN 里 password 没 URL-encode | 密码含 `@/:%` 等特殊字符需 percent-encode；或 C.1 重生成无特殊字符密码 |
+| Supabase 报 `connection to db.xxx timeout` | 用了 6543 pooler 端口 | 改回 5432 (Direct connection) |
+| R2 boto3 烟测报 `InvalidAccessKeyId` | Access Key ID 复制时多了空格 / 换行 | 重新从 dashboard 拷贝；或重建 token |
+| `flyctl secrets set` 报 `Error: missing app name` | 漏了 `-a polyarb-l1` | 加上 |
+| GitHub Settings 找不到 "Secrets and variables" | 没在 repo 的 Settings 而在用户 Settings | URL 应该是 `github.com/<user>/polymarket-arbitrage/settings/secrets/actions` |
+
+---
+
+## 📚 参考
+
+- Plan 04 Task 4 (Step A-F) — `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-04-PLAN.md`
+- Deployment thread §0.1 user 锚点决策 — `.planning/threads/deployment-architecture.md`
+- D-22 amendment（HMAC 不是 Flycast）— `02-CONTEXT.md` + Plan 02 SUMMARY
+- D-02 / D-03 / D-09 / D-10 / D-11 — `02-CONTEXT.md`
+
+> **指南维护原则**：发现指南漏了什么 / 有什么坑 → 直接在这个文件加章节；不另开文件。
