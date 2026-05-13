@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 status: executing
-stopped_at: Phase 02 Wave 1 complete (Plan 01 ✅); awaiting Wave 2 dispatch (Plan 02 + 03 parallel)
-last_updated: "2026-05-13T00:00:00.000Z"
+stopped_at: Phase 02 Wave 2 Plan 02 complete — daemon shell shipped; Wave 2 Plan 03 next
+last_updated: "2026-05-13T12:09:05.797Z"
 last_activity: 2026-05-13
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 18
-  completed_plans: 12
-  percent: 67
+  completed_plans: 13
+  percent: 72
 ---
 
 # Project State
@@ -20,11 +20,11 @@ progress:
 ## Current Position
 
 Phase: 02 (l1-production-grade) — EXECUTING
-Plan: 1 of 7 ✅ COMPLETE (Wave 1) → next: Wave 2 (Plan 02 + 03 parallel)
-**Status:** Wave 1 complete, awaiting Wave 2 dispatch
+Plan: 2 of 7 ✅ COMPLETE (Wave 1) → next: Wave 2 (Plan 02 + 03 parallel)
+**Status:** Ready to execute
 **Current Phase:** 02
 **Last Activity:** 2026-05-13
-**Last Activity Description:** Wave 1 (Plan 01) shipped — page_fetched_at_ms 4-point lockstep + make triple-check gate; 4 commits (cecb66b/5da55dc/65730a3/b0610e4); 404 m1-perception tests green; zero drift; SUMMARY landed
+**Last Activity Description:** Wave 2 Plan 02 shipped — Starlette daemon /health IETF三态 + /scan HMAC + SnapshotScheduler 3-failure-pause + loguru JSON; 23 Wave 0 tests green; 3 commits (593f986/8bd22b6/91a9701); SUMMARY landed
 
 ## Progress
 
@@ -60,7 +60,7 @@ Plan: 1 of 7 ✅ COMPLETE (Wave 1) → next: Wave 2 (Plan 02 + 03 parallel)
 - **完成判定** (thread §1 生产级判定标准): 7-day soak + Better Stack uptime ≥ 99% + ≥1 次自然失败自愈或正确告警
 - **Plans / Waves**:
   - Wave 1: Plan 01 (page_fetched_at_ms + L11 silent-failure triple-check) — autonomous ✅ **2026-05-13** (cecb66b/5da55dc/65730a3/b0610e4, ~45 min, 4 commits, 02-01-SUMMARY landed)
-  - Wave 2: Plan 02 (HTTP+scheduler) + Plan 03 (Supabase mirror+R2) — autonomous, 并行 ⏳ NEXT
+  - Wave 2: Plan 02 (HTTP+scheduler) ✅ **2026-05-13** (593f986/8bd22b6/91a9701, ~2h, 3 commits, 02-02-SUMMARY landed) + Plan 03 (Supabase mirror+R2) ⏳ NEXT
   - Wave 3: Plan 04 (Dockerfile+fly.toml+GHA+first deploy) — **user checkpoint** (Fly + R2 + Supabase 注册)
   - Wave 4: Plan 05 (Sentry+Axiom+Better Stack+Telegram) + Plan 06 (Vercel dashboard) — **user checkpoint** ×2
   - Wave 5: Plan 07 (chaos + 7-day soak + 教学文档 08) — **user checkpoint** + 7 天云上自动跑
