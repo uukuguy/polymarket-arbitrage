@@ -1260,3 +1260,78 @@ planner 原本标 `wave: 2` 给两个 plan（期望并行），但 files 重叠�
   - 预估：60-90 min（Alembic migration + Supabase mirror + R2 sync + fail-soft 适配器）
 
 ---
+
+## 2026-05-13 续 — SESSION 17 Wave 2 Plan 03 落地（Wave 2 COMPLETE）
+
+**Duration**: ~95 min（90 min subagent + 5 min orchestrator）
+
+### 完成清单 — Wave 2 Plan 03
+
+- [DECISION] **手动 sequential dispatch**: orchestrator 重新跑 `/gsd-execute-phase 02 --wave 2`，Plan 03 worktree base = `aaa8d3e`（含 Plan 02）
+- [LEARNING] **Plan 03 (subagent, ~90 min)** — 4 commits on worktree branch, fast-forward merged:
+  1. `12faeea test(02-03):` — Wave 0 RED tests for SupabaseMirror + R2Sync（idempotent / fail-soft / botocore Stubber pattern）
+  2. `9977d57 feat(02-03):` — SupabaseMirror（supabase-py REST SDK service_role upsert） + R2Sync（boto3 S3-compat client）+ orchestrator step 7.5/7.6 fan-out
+  3. `3e378dc feat(02-03):` — Alembic 001 initial schema（snapshots + markets_latest + top_movers_view + RLS anon-SELECT）+ `scripts/supabase_seed.py` typer CLI + `make supabase-migrate` / `supabase-reconcile` / `r2-list` targets
+  4. `d4753f0 docs(02-03):` — 02-03-SUMMARY 212 行
+- [LEARNING] **执行器 contract honored**: Plan 03 executor 严格遵守 STATE.md/ROADMAP.md isolation（diff main..worktree branch on those files = empty）。SESSION 17 上一轮 Plan 02 executor 的违反通过 strengthened prompt（critical_constraints + 明确说"上一个 executor 违反了 contract"）修复
+- [LEARNING] **fail-soft 模式按 D-12 amendment 落地**：SQLite + Parquet 先写（不可逆 source of truth），mirror/upload 失败 → log warning + DEGRADED status + 继续。orchestrator step 7（local atomic write）成功后 fan-out step 7.5（Supabase mirror）+ 7.6（R2 upload）。/health Check 3+4 报告 mirror/R2 status；`fail` 仅在 snapshot pipeline 本身炸了才触发（3-failure-pause 不被 mirror 失败误触发）
+- [LEARNING] **W6 双 URL 约定确立**：`POLYARB_SUPABASE_URL` (REST SDK，mirror 写入用) vs `POLYARB_SUPABASE_DB_DSN` (Alembic Postgres async DSN，migration 用)。避免单一 URL 混淆两种用法
+- [LEARNING] **Pre-existing test 修复**：`test_make_snapshot_markets_full_dry_run_recipe` 现在 green（Plan 01 SUMMARY 已标的 carry-over，Plan 03 顺手清掉）
+
+### Test 状态
+
+- **447 m1-perception tests green，0 failures**（Plan 02 baseline 429 + Plan 03 net +18 + Phase 01.1 makefile pre-existing failure 转 green）
+- Plan 03 新测试：`test_supabase_mirror.py` (botocore Stubber + supabase-py mock，13 tests) + `test_r2_sync.py` (5 tests) + `test_schema_lockstep.py` snapshots 3-point + scheduler_state lockstep 扩展
+
+### Pyright diagnostics 审计（false-positive 全清）
+
+新文件触发 16 个 "import unresolved" — 全部 Pyright resolver miss（loguru/supabase/boto3/respx 都在 uv.lock）。`test_schema_lockstep.py` 的 "SNAPSHOTS_COLUMN_ORDER unknown" 等 7 个 "unknown import symbol" 也是 false-positive（worktree path 不被 Pyright 索引）— 实际 schemas.py 已正确 export `SNAPSHOTS_DDL / SNAPSHOTS_COLUMN_ORDER / SNAPSHOTS_INSERT_SQL` 三常量；`SQLiteStore` 已实现 `get_latest_snapshot` / `get_snapshot` / `get_markets_for_snapshot` 三方法。447 pytest pass 是 ground truth。
+
+### Wave 2 总结
+
+- ✅ Plan 02 ✅ Plan 03 → Wave 2 **COMPLETE**
+- 8 plan commits + 2 orchestrator state commits + 1 pre-Wave-2 phase-EXECUTING marker = **11 commits this session for Wave 2**
+- 累计 origin/main..HEAD: 19 unpushed commits（含 SESSION 16 的 3 个）
+- planning-status 零 drift：02-01 / 02-02 / 02-03 全 OK
+
+### 关键里程碑
+
+**L1 daemon 完整骨架本地可跑了**：
+- 调用 `make daemon-run-local` → uvicorn + scheduler 起来
+- `GET /health` → IETF 三态 JSON（包含 supabase mirror age + r2 upload recency check）
+- `POST /scan` + 正确 HMAC X-Signature → 触发一次完整 snapshot（gamma → clob → SQLite/parquet → supabase mirror → R2 upload）
+- mirror 或 R2 失败 → DEGRADED，snapshot 不被中断；3 次连续 snapshot 失败 → FAIL + pause
+
+**剩下的是 Wave 3+：把这套搬到 Fly.io 上**，需要用户 SaaS 注册。
+
+### Outstanding / Wave 3 准备清单
+
+- 🔧 **用户 SaaS 注册（Wave 3 user checkpoint）**：
+  - Fly.io 账号 + `flyctl auth signup` + payment method
+  - Cloudflare R2 bucket：`POLYARB_R2_BUCKET` (e.g. `polyarb-parquet-prod`) + R2 API token（access_key_id + secret_access_key）
+  - Supabase Pro Dublin project：拿 `POLYARB_SUPABASE_URL` (REST anon)，`POLYARB_SUPABASE_DB_DSN` (Pool URL with prepared_statement_cache_size=0 for pgbouncer compat — RESEARCH §4 pitfall) + `SUPABASE_SERVICE_ROLE_KEY`
+  - `flyctl secrets set` 把以上六个值写入 Fly app 环境
+- ⏸️ **D-22 amendment 用户事后追认** （Plan 04 SUMMARY 完成时再问）
+- ⏸️ **Worktree cleanup**: 3 个 locked worktree（agent-a36b... agent-a10f... agent-a7ad...）等 harness 异步清
+
+- [NEXT] 下次会话从这里开始（Wave 3 — user checkpoint）：
+
+  **第 1 步**（恢复 + 健康）：
+  ```
+  /gsd-resume-work --ws m1-perception
+  make planning-status   # 应该零 drift；Plan 01/02/03 全 OK
+  ```
+
+  **第 2 步**（用户 SaaS 准备 — 不要让 agent 跑）：
+  - 注册 Fly.io + Cloudflare R2 + Supabase Pro Dublin
+  - 收集 6 个 secrets（见上 outstanding list）
+  - 跑 `make supabase-migrate` 在本地 apply Alembic 001 到 Supabase Pro 数据库
+
+  **第 3 步**（Wave 3 dispatch）：
+  ```
+  /gsd-execute-phase 02 --wave 3 --ws m1-perception
+  ```
+  - 范围：Plan 04 (Dockerfile + fly.toml + GHA ci.yml + deploy.yml + first deploy)
+  - autonomous=false（user checkpoint）— agent 会在关键点暂停等用户确认 `flyctl deploy` 输出
+
+---

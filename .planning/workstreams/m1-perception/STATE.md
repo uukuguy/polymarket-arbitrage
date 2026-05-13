@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 status: executing
-stopped_at: Phase 02 Wave 2 Plan 02 ✅; Plan 03 (Supabase mirror + R2) NEXT to finish Wave 2
-last_updated: "2026-05-13T12:30:00.000Z"
+stopped_at: Phase 02 Wave 2 ✅ COMPLETE (Plan 02 + Plan 03); Wave 3 (Plan 04 first deploy) NEXT — needs SaaS registration
+last_updated: "2026-05-13T15:00:00.000Z"
 last_activity: 2026-05-13
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 18
-  completed_plans: 13
-  percent: 72
+  completed_plans: 14
+  percent: 78
 ---
 
 # Project State
@@ -20,19 +20,19 @@ progress:
 ## Current Position
 
 Phase: 02 (l1-production-grade) — EXECUTING
-Plan: 2 of 7 ✅ (Wave 2 Plan 02 done) → next: Wave 2 Plan 03 (Supabase mirror + R2)
-**Status:** Wave 2 in progress — Plan 02 done, Plan 03 pending (forced sequential due to 7-file overlap)
+Plan: 3 of 7 ✅ (Wave 2 complete) → next: Wave 3 Plan 04 (Dockerfile + fly.toml + GHA + first deploy) — **user checkpoint** for SaaS account registration
+**Status:** Wave 2 complete; Wave 3 requires user SaaS prep (Fly.io + R2 + Supabase accounts + secrets)
 **Current Phase:** 02
 **Last Activity:** 2026-05-13
-**Last Activity Description:** Wave 2 Plan 02 shipped — Starlette daemon shell (/health IETF三态, /scan HMAC X-Signature, SnapshotScheduler 3-failure-pause, loguru JSON, correlation_id middleware); 4 commits (593f986/8bd22b6/91a9701/f475512); 19 new direct Plan 02 tests + schema_lockstep/conftest extensions → 429 m1-perception green; D-22 amendment confirmed (public /scan + HMAC, NOT Flycast)
+**Last Activity Description:** Wave 2 Plan 03 shipped — SupabaseMirror + R2Sync (fail-soft post-write adapters), Alembic 001 initial schema, orchestrator step 7.5/7.6 wiring, /health checks 3+4, supabase-migrate/reconcile/r2-list Makefile targets; 4 commits (12faeea/9977d57/3e378dc/d4753f0); 447 m1-perception green (0 failures — pre-existing Phase 01.1 failure now fixed); SQLite remains source of truth (D-12 amendment honored)
 
 ## Progress
 
 **Phases Complete:** 2 (Phase 01 + Phase 01.1)
 **Phase 01.1 status:** ✅ COMPLETE — LEARNINGS extracted 2026-05-12 (14 decisions / 12 lessons / 10 patterns / 8 surprises); deployment thread locked; 6 plans + 4 acceptance amendments shipped
-**Phase 02 status:** 🟡 EXECUTING — Wave 1 ✅ 2026-05-13; Wave 2 Plan 02 ✅ 2026-05-13; Wave 2 Plan 03 + Waves 3-5 pending
+**Phase 02 status:** 🟡 EXECUTING — Wave 1 ✅; Wave 2 ✅; Wave 3+ pending (user SaaS prep gate)
 **Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket（已并入 Phase 3）
-**Test count:** 429 m1-perception tests green (Plan 01 baseline 404 + Plan 02 net +25); 1 pre-existing Phase 01.1 failure (`test_make_snapshot_markets_full_dry_run_recipe` — Plan 03 顺手修)
+**Test count:** 447 m1-perception tests green (Plan 02 baseline 429 + Plan 03 net +18; pre-existing Phase 01.1 makefile path failure FIXED in Plan 03)
 
 ## Phase 01.1 Deliverables (2026-05-10 全部 committed)
 
@@ -60,10 +60,25 @@ Plan: 2 of 7 ✅ (Wave 2 Plan 02 done) → next: Wave 2 Plan 03 (Supabase mirror
 - **完成判定** (thread §1 生产级判定标准): 7-day soak + Better Stack uptime ≥ 99% + ≥1 次自然失败自愈或正确告警
 - **Plans / Waves**:
   - Wave 1: Plan 01 (page_fetched_at_ms + L11 silent-failure triple-check) — autonomous ✅ **2026-05-13** (cecb66b/5da55dc/65730a3/b0610e4, ~45 min, 4 commits, 02-01-SUMMARY landed)
-  - Wave 2: Plan 02 (HTTP+scheduler) ✅ **2026-05-13** (593f986/8bd22b6/91a9701/f475512, ~90 min subagent, 4 commits, 02-02-SUMMARY landed) + Plan 03 (Supabase mirror+R2) ⏳ NEXT — forced sequential (7-file overlap with Plan 02: pyproject.toml, schemas.py, http/health.py, config.py, test_schema_lockstep.py, conftest.py, Makefile)
+  - Wave 2: Plan 02 (HTTP+scheduler) ✅ **2026-05-13** (593f986/8bd22b6/91a9701/f475512, ~90 min, 4 commits) + Plan 03 (Supabase mirror+R2) ✅ **2026-05-13** (12faeea/9977d57/3e378dc/d4753f0, ~90 min, 4 commits) — forced sequential due to 7-file overlap; total Wave 2 = ~3h, 8 commits, 2 SUMMARYs landed
   - Wave 3: Plan 04 (Dockerfile+fly.toml+GHA+first deploy) — **user checkpoint** (Fly + R2 + Supabase 注册)
   - Wave 4: Plan 05 (Sentry+Axiom+Better Stack+Telegram) + Plan 06 (Vercel dashboard) — **user checkpoint** ×2
   - Wave 5: Plan 07 (chaos + 7-day soak + 教学文档 08) — **user checkpoint** + 7 天云上自动跑
+
+## Plan 03 deliverables (2026-05-13, Wave 2)
+
+- ✅ **SupabaseMirror** (`src/polyarb/storage/supabase_mirror.py`) — supabase-py REST SDK service_role 写入；upsert `snapshots` + insert `markets_latest`；**fail-soft**：失败 → log warning + DEGRADED + 继续，不中断 snapshot（D-12 amendment + LEARNINGS P5 严格遵守）
+- ✅ **R2Sync** (`src/polyarb/storage/r2_sync.py`) — boto3 + botocore S3-compat client to `<account-id>.r2.cloudflarestorage.com`；parquet 上传 key `parquet/YYYY/MM/DD/HH-MM-SS.parquet`；**fail-soft** 同款
+- ✅ **Alembic 001** (`alembic/versions/001_initial_dashboard_schema.py`) — Postgres schema: `snapshots` + `markets_latest` + `top_movers_view` + RLS anon-SELECT 策略；`alembic.ini` + `alembic/env.py` async 配置
+- ✅ **W6 双 URL 约定**：`POLYARB_SUPABASE_URL` (REST SDK 用于 mirror 写入) vs `POLYARB_SUPABASE_DB_DSN` (Alembic Postgres DSN 用于 migration)；避免单一 URL 混淆
+- ✅ **3-point lockstep extended**：`snapshots` 表加入 SNAPSHOTS_DDL / SNAPSHOTS_COLUMN_ORDER / SNAPSHOTS_INSERT_SQL（test_schema_lockstep.py 加 assertion 防回归）
+- ✅ **Orchestrator step 7.5/7.6** (`src/polyarb/snapshot/orchestrator.py`) — local atomic write (steps 1-7) 完成后 fan-out mirror + R2 upload；SQLite 仍为 source of truth
+- ✅ **/health checks 3+4** (`src/polyarb/http/health.py`) — Check 3: supabase mirror age (degraded if last mirror > N min)；Check 4: r2 upload recency
+- ✅ **SQLiteStore 新增**：`update_snapshot_mirror_fields` / `get_snapshot` / `get_markets_for_snapshot`
+- ✅ **CLI** (`scripts/supabase_seed.py`) — typer-based `reconcile` + `init_check` commands
+- ✅ **Makefile targets**：`supabase-migrate` / `supabase-reconcile` / `r2-list`
+- ✅ **Pre-existing fix**：`test_make_snapshot_markets_full_dry_run_recipe` 现在 green（Plan 01 carry-over 已清）
+- ✅ **pydantic frozen-model 自动开关**：凭证在场自动开启 mirror/r2_enabled（W6 写入触发条件）
 
 ## Plan 02 deliverables (2026-05-13, Wave 2)
 
