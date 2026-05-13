@@ -254,6 +254,33 @@ smoke-health-local:
 	@echo ""
 	curl -sf http://127.0.0.1:8080/health | python3 -m json.tool
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 02 Plan 03: Supabase mirror + R2 archive
+#
+# supabase-migrate    — run Alembic upgrade head (requires POLYARB_SUPABASE_DB_DSN)
+# supabase-reconcile  — compare SQLite vs Supabase mirror; push missing snapshots
+# r2-list             — list R2 bucket objects (dev convenience)
+# ─────────────────────────────────────────────────────────────────────────────
+
+.PHONY: supabase-migrate supabase-reconcile r2-list
+
+## supabase-migrate: Run Alembic upgrade head against Supabase prod DSN (requires POLYARB_SUPABASE_DB_DSN)
+supabase-migrate:
+	@echo ">> supabase-migrate — alembic upgrade head"
+	@if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN not set (W6: DB DSN distinct from REST URL POLYARB_SUPABASE_URL)"; exit 1; fi
+	uv run alembic upgrade head
+
+## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots
+supabase-reconcile:
+	@echo ">> supabase-reconcile — comparing local SQLite vs Supabase mirror"
+	uv run python scripts/supabase_seed.py reconcile
+
+## r2-list: List objects in R2 bucket (dev convenience; requires POLYARB_R2_ENDPOINT/BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY)
+r2-list:
+	@echo ">> r2-list — listing R2 bucket $${POLYARB_R2_BUCKET:-polyarb-snapshots}"
+	@if [ -z "$$POLYARB_R2_ENDPOINT" ]; then echo "ERROR: POLYARB_R2_ENDPOINT not set"; exit 1; fi
+	uv run python -c "import boto3, os; c = boto3.client('s3', endpoint_url=os.environ['POLYARB_R2_ENDPOINT'], aws_access_key_id=os.environ['POLYARB_R2_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['POLYARB_R2_SECRET_ACCESS_KEY'], region_name='auto'); resp = c.list_objects_v2(Bucket=os.environ.get('POLYARB_R2_BUCKET', 'polyarb-snapshots')); [print(o['Key']) for o in resp.get('Contents', [])]"
+
 ## tail-logs-local: Stream stdout of locally running daemon process. Usage: make tail-logs-local [PID=<pid>]
 tail-logs-local:
 	@echo ">> tail-logs-local — streaming daemon stdout (JSON lines)"

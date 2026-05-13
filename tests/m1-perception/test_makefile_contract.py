@@ -595,6 +595,58 @@ def test_make_help_lists_daemon_targets() -> None:
     assert "smoke-health-local:" in result.stdout, "smoke-health-local missing from make help"
 
 
+# =============================================================================
+# Phase 02 Plan 03 — Supabase migrate + reconcile + r2-list Makefile targets
+# =============================================================================
+
+
+def test_make_supabase_migrate_dry_run() -> None:
+    """`make -n supabase-migrate` resolves to alembic upgrade head."""
+    result = subprocess.run(
+        ["make", "-n", "supabase-migrate"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+        env={**__import__("os").environ, "POLYARB_SUPABASE_DB_DSN": "postgresql://dummy"},
+    )
+    assert result.returncode == 0, f"make -n supabase-migrate failed: {result.stderr}"
+    assert "alembic upgrade head" in result.stdout, (
+        f"supabase-migrate recipe must invoke 'alembic upgrade head', got: {result.stdout!r}"
+    )
+
+
+def test_make_supabase_reconcile_dry_run() -> None:
+    """`make -n supabase-reconcile` resolves to scripts/supabase_seed.py reconcile."""
+    result = subprocess.run(
+        ["make", "-n", "supabase-reconcile"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n supabase-reconcile failed: {result.stderr}"
+    assert "scripts/supabase_seed.py" in result.stdout, (
+        f"supabase-reconcile recipe must invoke scripts/supabase_seed.py, got: {result.stdout!r}"
+    )
+
+
+def test_make_r2_list_dry_run() -> None:
+    """`make -n r2-list` resolves to boto3 R2 list operation."""
+    result = subprocess.run(
+        ["make", "-n", "r2-list"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+        env={**__import__("os").environ, "POLYARB_R2_ENDPOINT": "https://test.r2.cloudflarestorage.com"},
+    )
+    assert result.returncode == 0, f"make -n r2-list failed: {result.stderr}"
+    assert "boto3" in result.stdout, (
+        f"r2-list recipe must invoke boto3, got: {result.stdout!r}"
+    )
+
+
 def test_makefile_daemon_targets_phony() -> None:
     """daemon-run-local, smoke-health-local, tail-logs-local must be declared .PHONY."""
     makefile = (PROJECT_ROOT / "Makefile").read_text()
