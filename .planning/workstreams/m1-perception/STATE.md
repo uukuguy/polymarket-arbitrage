@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 status: executing
-stopped_at: Phase 02 Wave 2 Plan 02 complete — daemon shell shipped; Wave 2 Plan 03 next
-last_updated: "2026-05-13T12:09:05.797Z"
+stopped_at: Phase 02 Wave 2 Plan 02 ✅; Plan 03 (Supabase mirror + R2) NEXT to finish Wave 2
+last_updated: "2026-05-13T12:30:00.000Z"
 last_activity: 2026-05-13
 progress:
   total_phases: 4
@@ -20,19 +20,19 @@ progress:
 ## Current Position
 
 Phase: 02 (l1-production-grade) — EXECUTING
-Plan: 2 of 7 ✅ COMPLETE (Wave 1) → next: Wave 2 (Plan 02 + 03 parallel)
-**Status:** Ready to execute
+Plan: 2 of 7 ✅ (Wave 2 Plan 02 done) → next: Wave 2 Plan 03 (Supabase mirror + R2)
+**Status:** Wave 2 in progress — Plan 02 done, Plan 03 pending (forced sequential due to 7-file overlap)
 **Current Phase:** 02
 **Last Activity:** 2026-05-13
-**Last Activity Description:** Wave 2 Plan 02 shipped — Starlette daemon /health IETF三态 + /scan HMAC + SnapshotScheduler 3-failure-pause + loguru JSON; 23 Wave 0 tests green; 3 commits (593f986/8bd22b6/91a9701); SUMMARY landed
+**Last Activity Description:** Wave 2 Plan 02 shipped — Starlette daemon shell (/health IETF三态, /scan HMAC X-Signature, SnapshotScheduler 3-failure-pause, loguru JSON, correlation_id middleware); 4 commits (593f986/8bd22b6/91a9701/f475512); 19 new direct Plan 02 tests + schema_lockstep/conftest extensions → 429 m1-perception green; D-22 amendment confirmed (public /scan + HMAC, NOT Flycast)
 
 ## Progress
 
 **Phases Complete:** 2 (Phase 01 + Phase 01.1)
 **Phase 01.1 status:** ✅ COMPLETE — LEARNINGS extracted 2026-05-12 (14 decisions / 12 lessons / 10 patterns / 8 surprises); deployment thread locked; 6 plans + 4 acceptance amendments shipped
-**Phase 02 status:** 🟡 EXECUTING — Wave 1 (Plan 01) ✅ 2026-05-13; Waves 2-5 pending
+**Phase 02 status:** 🟡 EXECUTING — Wave 1 ✅ 2026-05-13; Wave 2 Plan 02 ✅ 2026-05-13; Wave 2 Plan 03 + Waves 3-5 pending
 **Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket（已并入 Phase 3）
-**Test count:** 404 m1-perception tests green (Phase 01.1 baseline 402 + Plan 01 Wave 0: page_fetched_at_ms_carried_from_raw + page_fetched_at_ms_in_all_four_sync_points)
+**Test count:** 429 m1-perception tests green (Plan 01 baseline 404 + Plan 02 net +25); 1 pre-existing Phase 01.1 failure (`test_make_snapshot_markets_full_dry_run_recipe` — Plan 03 顺手修)
 
 ## Phase 01.1 Deliverables (2026-05-10 全部 committed)
 
@@ -60,10 +60,21 @@ Plan: 2 of 7 ✅ COMPLETE (Wave 1) → next: Wave 2 (Plan 02 + 03 parallel)
 - **完成判定** (thread §1 生产级判定标准): 7-day soak + Better Stack uptime ≥ 99% + ≥1 次自然失败自愈或正确告警
 - **Plans / Waves**:
   - Wave 1: Plan 01 (page_fetched_at_ms + L11 silent-failure triple-check) — autonomous ✅ **2026-05-13** (cecb66b/5da55dc/65730a3/b0610e4, ~45 min, 4 commits, 02-01-SUMMARY landed)
-  - Wave 2: Plan 02 (HTTP+scheduler) ✅ **2026-05-13** (593f986/8bd22b6/91a9701, ~2h, 3 commits, 02-02-SUMMARY landed) + Plan 03 (Supabase mirror+R2) ⏳ NEXT
+  - Wave 2: Plan 02 (HTTP+scheduler) ✅ **2026-05-13** (593f986/8bd22b6/91a9701/f475512, ~90 min subagent, 4 commits, 02-02-SUMMARY landed) + Plan 03 (Supabase mirror+R2) ⏳ NEXT — forced sequential (7-file overlap with Plan 02: pyproject.toml, schemas.py, http/health.py, config.py, test_schema_lockstep.py, conftest.py, Makefile)
   - Wave 3: Plan 04 (Dockerfile+fly.toml+GHA+first deploy) — **user checkpoint** (Fly + R2 + Supabase 注册)
   - Wave 4: Plan 05 (Sentry+Axiom+Better Stack+Telegram) + Plan 06 (Vercel dashboard) — **user checkpoint** ×2
   - Wave 5: Plan 07 (chaos + 7-day soak + 教学文档 08) — **user checkpoint** + 7 天云上自动跑
+
+## Plan 02 deliverables (2026-05-13, Wave 2)
+
+- ✅ Starlette HTTP app (`src/polyarb/http/{app,health,scan}.py`) — `/health` IETF三态 (pass / warn / fail per draft-inadarei-api-health-check, HTTP 200 for pass+warn, 503 for fail), `/scan` HMAC X-Signature gate (constant-time compare via `hmac.compare_digest`, 401 on missing/invalid)
+- ✅ **D-22 amendment confirmed**: BOTH `/health` AND `/scan` are PUBLIC (researcher verified Flycast is org-internal and Vercel Edge is cross-org → unreachable). Auth = HMAC middleware over request body, keyed by `SCAN_SHARED_SECRET` env. Pattern matches Stripe/GitHub/Shopify webhook auth.
+- ✅ `SnapshotScheduler` (`src/polyarb/daemon/scheduler.py`) — 3-consecutive-failure-pause state machine; pause sets health → fail (503); manual `/scan` resumes + clears counter; persisted via new `scheduler_state` table (sync points: SCHEDULER_STATE_DDL in schemas.py + get/upsert methods in sqlite_store.py)
+- ✅ Daemon entry (`src/polyarb/daemon/main.py`) — Starlette + uvicorn host, embedded scheduler via AsyncIOScheduler-pattern
+- ✅ `loguru` JSON sink (`src/polyarb/observability/logging.py`) — one JSON line per record to stderr (timestamp ISO 8601 UTC / level / message / module / function / line / extra.\*); `correlation_id` middleware binds per-request UUID via `logger.bind`
+- ✅ Settings extended (`src/polyarb/config.py`) — `SCAN_SHARED_SECRET`, scheduler cron, log level/format via pydantic-settings
+- ✅ Makefile: `make daemon-run-local` + `make smoke-health-local` for dev verification
+- ✅ W11 SQL-injection defense test (`scan_recipes_tampered.yaml` fixture) — proves Phase 01.1 4-layer SQL defense engaged via HTTP path
 
 ## Plan 01 deliverables (2026-05-13, Wave 1)
 

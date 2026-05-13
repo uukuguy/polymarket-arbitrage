@@ -1198,3 +1198,65 @@ executor 在 Task 2 跑测试时自动捕获 3 个加列引发的连锁测试更
   - 安排 dedicated 时段做 Wave 3 first deploy（不要赶时间夹缝跑）
 
 ---
+
+## 2026-05-13 续 — SESSION 17 Wave 2 Plan 02 落地
+
+**Duration**: ~95 min（90 min subagent + 5 min orchestrator）
+
+### Wave 2 dispatch 决策：sequential（强制）
+
+`gsd-tools phase-plan-index 02` 检测出 Plan 02 ∩ Plan 03 有 **7 files_modified 重叠**：
+- `pyproject.toml` / `src/polyarb/storage/schemas.py` / `src/polyarb/http/health.py` / `src/polyarb/config.py` / `tests/m1-perception/test_schema_lockstep.py` / `tests/m1-perception/conftest.py` / `Makefile`
+
+planner 原本标 `wave: 2` 给两个 plan（期望并行），但 files 重叠会让 worktree merge race。execute-phase workflow step 1 的安全网触发：override PARALLELIZATION=false，sequential dispatch（02 先于 03）。这是**planner 缺陷**而非 executor 缺陷，已在 SESSION 17 落 JOURNAL 防 Plan 03 再栽。
+
+### 完成清单 — Wave 2 Plan 02
+
+- [DECISION] **`/gsd-execute-phase 02 --wave 2 --ws m1-perception`** → 仅启 Plan 02 worktree（Plan 03 deferred 等 Plan 02 merge）
+- [LEARNING] **Plan 02 (subagent, ~90 min)** — 4 commits on worktree branch, fast-forward merged:
+  1. `593f986 test(02-02):` — Wave 0 RED tests（/health IETF三态 / /scan HMAC / scheduler pause / loguru JSON）
+  2. `8bd22b6 feat(02-02):` — Starlette app（`http/{app,health,scan}.py`）+ `SnapshotScheduler` 3-failure-pause（`daemon/scheduler.py`）+ `daemon/main.py` 入口 + `observability/logging.py` JSON sink + correlation_id middleware + `scheduler_state` 表 + 配套 `sqlite_store` getters
+  3. `91a9701 feat(02-02):` — Makefile targets `daemon-run-local` + `smoke-health-local`
+  4. `f475512 docs(02-02):` — 02-02-SUMMARY 211 行 + self-check PASSED
+- [LEARNING] **D-22 amendment 实施**：`/health` AND `/scan` 都是 PUBLIC；auth gate = HMAC X-Signature middleware (`hmac.compare_digest` constant-time)，keyed by `SCAN_SHARED_SECRET`。这是 Stripe/GitHub/Shopify webhook 同款 pattern。Plan 04 deploy 时继承这一策略。
+- [LEARNING] **3-failure-pause state machine**：pause 期间 `/health` 返回 503/fail；manual `/scan` resumes + clears counter；persisted via 新增 `scheduler_state` 表（sync points: SCHEDULER_STATE_DDL in schemas.py + `get_scheduler_state` / `upsert_scheduler_state` methods in sqlite_store.py + `test_scheduler.py` 验证）
+
+### 关键发现 / Subagent 违反 contract
+
+**executor 修改了 STATE.md**（违反明确指令）。
+- 内容 mostly 正确，但有 typo："Plan: 2 of 7 ✅ COMPLETE (Wave 1)" 应为 Wave 2
+- orchestrator 按 execute-phase.md §5.5 protocol 处理：pre-merge snapshot → ff-merge → restore from snapshot → manually rewrite STATE.md
+- TODO: 在下一轮 plan-checker 之前给 executor prompt 加更强的"don't touch STATE.md"机制（也许加 .pre-commit-config 的执行期 reject）
+
+### Pyright noise (新 diagnostics 全部 false-positive)
+
+新文件触发的 16+ Pyright "import unresolved" 几乎全是**虚警**——loguru/pydantic_settings/pyarrow/respx 都在 uv.lock，但 Pyright 没 hook 到 worktree 的 venv。3 个看起来"real"的 attribute error（`SCHEDULER_STATE_DDL` / `get_latest_snapshot` / `get_scheduler_state`）逐一手验：方法/常量在 schemas.py + sqlite_store.py 都存在，是 Pyright resolver miss。`uv run pytest` 全绿确认。
+
+### Test 状态
+
+- 19 个 Plan 02 新测试全绿（test_health_endpoint 5 + test_http_scan 6 + test_scheduler 5 + test_logging 3）
+- 总 m1-perception: **429 passed**（Plan 01 baseline 404 + Plan 02 net +25）
+- 1 个 pre-existing failure（`test_make_snapshot_markets_full_dry_run_recipe`）— Plan 01 SUMMARY 已经标记，Plan 03 顺手修
+
+### Git 状态
+
+- 4 plan commits（593f986 / 8bd22b6 / 91a9701 / f475512）on `main` via ff-merge from `worktree-agent-a10f86e0e30ec2d88`
+- orchestrator restore-state commit pending（即将提交）
+- pre-commit hook 在 `feat(02-02):` / `test(02-02):` 全部 satisfied（SUMMARY ✓）
+
+### Outstanding / Carry-over to Plan 03
+
+- ⏸️ **Sequential rebase**: Plan 03 worktree 必须基于 Plan 02 merged HEAD（包含 Starlette + scheduler）
+- ⏸️ **`test_make_snapshot_markets_full_dry_run_recipe` 修**：Plan 03 顺手把测试期望从 `python -m polyarb.snapshot --full` 改为 `uv run python -m polyarb.snapshot snapshot --full`
+- ⏸️ **schemas.py / health.py / Makefile 协同编辑**：Plan 03 会加 Supabase + R2 health check 到 `health.py`；加 alembic migration columns 到 `schemas.py`；加 `make alembic-*` / `supabase-seed` 到 `Makefile`
+- ⏸️ **Executor contract violation 防护**：考虑在下一 plan dispatch 加 `<critical_constraints>` 强化 STATE.md/ROADMAP.md isolation
+
+- [NEXT] 立即继续 Wave 2 Plan 03:
+  ```
+  /gsd-execute-phase 02 --wave 2 --ws m1-perception
+  ```
+  - workflow 会再次跑 phase-plan-index，看到 Plan 02 has_summary=true，只 dispatch Plan 03
+  - Plan 03 worktree base 将是当前 main HEAD（包含 Plan 02）
+  - 预估：60-90 min（Alembic migration + Supabase mirror + R2 sync + fail-soft 适配器）
+
+---
