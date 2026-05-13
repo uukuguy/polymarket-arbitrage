@@ -275,6 +275,92 @@ def make_signed_request() -> Callable:
     return _make_signed_request
 
 
+# =============================================================================
+# Plan 02-03: Supabase mirror + R2 sync fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def mocked_supabase() -> Any:
+    """MagicMock supabase client supporting .table(name).upsert/insert/delete/select chain."""
+    client = MagicMock()
+
+    def _table_mock(name: str) -> MagicMock:
+        tbl = MagicMock()
+        tbl.upsert.return_value = tbl
+        tbl.insert.return_value = tbl
+        tbl.delete.return_value = tbl
+        tbl.select.return_value = tbl
+        tbl.neq.return_value = tbl
+        tbl.eq.return_value = tbl
+        tbl.order.return_value = tbl
+        tbl.limit.return_value = tbl
+        tbl.execute.return_value = MagicMock(data=[])
+        return tbl
+
+    client.table.side_effect = _table_mock
+    return client
+
+
+@pytest.fixture
+def mocked_r2_stubber() -> Any:
+    """Yield a botocore Stubber wrapping a boto3 s3 client with dummy creds."""
+    import boto3
+    from botocore.stub import Stubber
+
+    client = boto3.client(
+        "s3",
+        endpoint_url="https://test.r2.cloudflarestorage.com",
+        aws_access_key_id="dummy-access-key",
+        aws_secret_access_key="dummy-secret-key",
+        region_name="auto",
+    )
+    with Stubber(client) as stubber:
+        yield stubber
+
+
+@pytest.fixture
+def settings_for_test_with_supabase_mirror(
+    tmp_db_path: Path, tmp_parquet_root: Path, tmp_cache_root: Path
+) -> Settings:
+    """Settings with Supabase mirror config enabled (mocked — not real endpoint)."""
+    from pydantic import SecretStr
+    return Settings(
+        db_path=tmp_db_path,
+        parquet_root=tmp_parquet_root,
+        cache_root=tmp_cache_root,
+        retry_attempts=1,
+        retry_min_wait_s=0.001,
+        retry_max_wait_s=0.005,
+        http_timeout_s=2.0,
+        liquidity_threshold_usd=100.0,
+        supabase_url="http://localhost:0",
+        supabase_service_key=SecretStr("dummy-service-key"),
+    )
+
+
+@pytest.fixture
+def settings_for_test_with_r2(
+    tmp_db_path: Path, tmp_parquet_root: Path, tmp_cache_root: Path
+) -> Settings:
+    """Settings with R2 config enabled (mocked — not real endpoint)."""
+    from pydantic import SecretStr
+    return Settings(
+        db_path=tmp_db_path,
+        parquet_root=tmp_parquet_root,
+        cache_root=tmp_cache_root,
+        retry_attempts=1,
+        retry_min_wait_s=0.001,
+        retry_max_wait_s=0.005,
+        http_timeout_s=2.0,
+        liquidity_threshold_usd=100.0,
+        r2_endpoint="https://test.r2.cloudflarestorage.com",
+        r2_access_key_id=SecretStr("dummy-access-key"),
+        r2_secret_access_key=SecretStr("dummy-secret-key"),
+        r2_bucket="test-bucket",
+    )
+
+
 @pytest.fixture
 def mocked_gamma_orchestrator(gamma_fixture: list[dict]) -> Any:
     """Patch ``GammaClient`` at the orchestrator's import site (high-level mock).
