@@ -543,3 +543,65 @@ def test_makefile_plan05_targets_phony() -> None:
             phony_targets.update(stripped[len(".PHONY:"):].split())
     missing = set(_PLAN05_TARGETS) - phony_targets
     assert not missing, f"missing .PHONY for plan-05 targets: {missing}"
+
+
+# =============================================================================
+# Phase 02 Plan 02 — daemon targets (daemon-run-local + smoke-health-local)
+# =============================================================================
+
+
+def test_make_daemon_run_local_dry_run_recipe() -> None:
+    """`make -n daemon-run-local` resolves to python -m polyarb.daemon.main."""
+    result = subprocess.run(
+        ["make", "-n", "daemon-run-local"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n daemon-run-local failed: {result.stderr}"
+    assert "polyarb.daemon.main" in result.stdout, (
+        f"daemon-run-local recipe must invoke polyarb.daemon.main, got: {result.stdout!r}"
+    )
+
+
+def test_make_smoke_health_local_dry_run_recipe() -> None:
+    """`make -n smoke-health-local` resolves to a curl /health call."""
+    result = subprocess.run(
+        ["make", "-n", "smoke-health-local"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n smoke-health-local failed: {result.stderr}"
+    assert "127.0.0.1:8080/health" in result.stdout, (
+        f"smoke-health-local recipe must target 127.0.0.1:8080/health, got: {result.stdout!r}"
+    )
+
+
+def test_make_help_lists_daemon_targets() -> None:
+    """make help must surface daemon-run-local and smoke-health-local."""
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+    assert result.returncode == 0, f"make help failed: {result.stderr}"
+    assert "daemon-run-local:" in result.stdout, "daemon-run-local missing from make help"
+    assert "smoke-health-local:" in result.stdout, "smoke-health-local missing from make help"
+
+
+def test_makefile_daemon_targets_phony() -> None:
+    """daemon-run-local, smoke-health-local, tail-logs-local must be declared .PHONY."""
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    phony_targets: set[str] = set()
+    for line in makefile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(".PHONY:"):
+            phony_targets.update(stripped[len(".PHONY:"):].split())
+    required = {"daemon-run-local", "smoke-health-local", "tail-logs-local"}
+    missing = required - phony_targets
+    assert not missing, f"missing .PHONY for daemon targets: {missing}"

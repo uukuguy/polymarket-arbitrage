@@ -229,3 +229,37 @@ triple-check:
 	@echo ">> closes LEARNINGS L11/S5 silent failure root cause"
 	@echo ""
 	bash tests/m1-perception/test_makefile_triple_check.sh
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 02 Plan 02: daemon HTTP server (local dev)
+#
+# daemon-run-local    — start daemon locally (blocks; Ctrl-C to stop)
+# smoke-health-local  — hit /health once and print the JSON response
+# tail-logs-local     — stream daemon stdout (for a separately launched daemon)
+# ─────────────────────────────────────────────────────────────────────────────
+
+.PHONY: daemon-run-local smoke-health-local tail-logs-local
+
+## daemon-run-local: Start the polyarb daemon locally on :8080 (HMAC-authenticated /scan + /health). Ctrl-C to stop.
+daemon-run-local:
+	@echo ">> daemon-run-local — starting on http://127.0.0.1:8080"
+	@echo ">> endpoints: GET /health  POST /scan (requires X-Signature)"
+	@echo ">> Ctrl-C to stop"
+	@echo ""
+	POLYARB_ALLOW_EMPTY_SECRET=1 uv run python -m polyarb.daemon.main
+
+## smoke-health-local: Hit GET /health on running local daemon and print JSON response. Requires daemon-run-local in another terminal.
+smoke-health-local:
+	@echo ">> smoke-health-local — GET http://127.0.0.1:8080/health"
+	@echo ""
+	curl -sf http://127.0.0.1:8080/health | python3 -m json.tool
+
+## tail-logs-local: Stream stdout of locally running daemon process. Usage: make tail-logs-local [PID=<pid>]
+tail-logs-local:
+	@echo ">> tail-logs-local — streaming daemon stdout (JSON lines)"
+	@if [ -n "$(PID)" ]; then \
+		tail -f /proc/$(PID)/fd/1 2>/dev/null || echo ">> note: /proc not available on macOS — use 'make daemon-run-local' directly (logs print to that terminal)"; \
+	else \
+		echo ">> tip: run 'make daemon-run-local' in one terminal; logs appear there in real-time"; \
+		echo ">> alternative: make daemon-run-local 2>&1 | tee /tmp/polyarb-daemon.log"; \
+	fi
