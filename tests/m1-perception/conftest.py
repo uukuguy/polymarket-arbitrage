@@ -17,15 +17,20 @@ F-4 SECURITY (credential-leak regression guard):
     to git. If a future re-recording leaks an Authorization header / Cookie /
     API key, this scanner fails the entire session at collection time so a
     bad fixture cannot reach a CI test report or stay quietly on disk.
+
+Plan 02-02: Added daemon_settings_for_test, http_test_client, make_signed_request
+    fixtures for HTTP server + scheduler tests.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, patch
+from typing import Any, Callable
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import respx
@@ -34,6 +39,8 @@ from httpx import Response
 # F-3 SECURITY ESCAPE HATCH: pytest tmp_path lives outside project root by design.
 # Set BEFORE any Settings import so the field_validator picks it up at class-build time.
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+# Plan 02-02: allow empty HMAC secret in tests (no prod deploy config)
+os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 
 from polyarb.config import Settings  # noqa: E402  (must follow env-var setup)
 
@@ -172,6 +179,100 @@ def mocked_clob(clob_fixture: dict) -> Any:
         clob_inst.get_books = get_books_mock
         clob_inst.get_prices_buy_sell = get_prices_mock
         yield {"books": get_books_mock, "prices": get_prices_mock, "class": ClobMock}
+
+
+# =============================================================================
+# Plan 02-02: HTTP daemon + scheduler fixtures
+# =============================================================================
+
+# A stable 64-char hex test secret (32 random bytes encoded as hex).
+_TEST_SCAN_SECRET = "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+
+
+@pytest.fixture
+def daemon_settings_for_test(
+    tmp_db_path: Path, tmp_parquet_root: Path, tmp_cache_root: Path
+) -> Settings:
+    """Settings for HTTP daemon tests — includes scan_shared_secret and empty-secret bypass."""
+    from pydantic import SecretStr
+    return Settings(
+        db_path=tmp_db_path,
+        parquet_root=tmp_parquet_root,
+        cache_root=tmp_cache_root,
+        retry_attempts=1,
+        retry_min_wait_s=0.001,
+        retry_max_wait_s=0.005,
+        http_timeout_s=2.0,
+        liquidity_threshold_usd=100.0,
+        scan_shared_secret=SecretStr(_TEST_SCAN_SECRET),
+    )
+
+
+@pytest.fixture
+def http_test_client(daemon_settings_for_test: Settings) -> Any:
+    """Starlette TestClient built via create_app factory.
+
+    Uses a mock scheduler so no real snapshot runs occur in tests.
+    """
+    from starlette.testclient import TestClient
+    from polyarb.http.app import create_app
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    # Ensure DB schema is initialized (some tests insert data before calling this)
+    sqlite_store = SQLiteStore(daemon_settings_for_test.db_path)
+    sqlite_store.init_schema()
+
+    mock_scheduler = MagicMock()
+    app = create_app(
+        scheduler=mock_scheduler,
+        sqlite_store=sqlite_store,
+        settings=daemon_settings_for_test,
+    )
+    return TestClient(app, raise_server_exceptions=True)
+
+
+def make_http_test_client(settings: Settings) -> Any:
+    """Non-fixture helper for creating a TestClient directly (used in test helpers)."""
+    from starlette.testclient import TestClient
+    from polyarb.http.app import create_app
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    sqlite_store = SQLiteStore(settings.db_path)
+    sqlite_store.init_schema()
+    mock_scheduler = MagicMock()
+    app = create_app(
+        scheduler=mock_scheduler,
+        sqlite_store=sqlite_store,
+        settings=settings,
+    )
+    return TestClient(app, raise_server_exceptions=True)
+
+
+@pytest.fixture
+def make_signed_request() -> Callable:
+    """Helper fixture: compute HMAC-SHA256 of body JSON bytes + send signed POST request.
+
+    Usage:
+        resp = make_signed_request(client, "/scan", {"recipe_name": "..."})
+    """
+    def _make_signed_request(
+        client: Any,
+        path: str,
+        body_dict: dict,
+        secret: str = _TEST_SCAN_SECRET,
+    ) -> Any:
+        body_bytes = json.dumps(body_dict).encode("utf-8")
+        sig = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
+        return client.post(
+            path,
+            content=body_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "X-Signature": sig,
+            },
+        )
+
+    return _make_signed_request
 
 
 @pytest.fixture
