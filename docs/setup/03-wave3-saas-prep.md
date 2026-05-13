@@ -36,16 +36,33 @@
 
 ## 💰 成本预期
 
-| 服务 | 计费 | Phase 02 预期月开销 |
-|---|---|---|
-| Fly.io | 按机器小时 + 流量 | shared-cpu-1x 1G + 5G volume + AMS region ≈ **$5-10/月**（持续运行）|
-| Cloudflare R2 | 10GB 免费存储 + 1M Class A ops / 10M Class B ops | Phase 02 数据量（subset 2/day + full 1/week，~20 MB/snapshot 上限）≈ **$0** |
-| Supabase | Free tier 500MB / 2 cores 半小时挂起；Pro $25/月 | Phase 02 数据 + dashboard read backend → **必须 Pro $25/月**（Free 挂起会让 `/scan` 测试失败）|
-| GitHub Actions | 公开 repo 免费；私有 repo 2000 min/月 free | **$0** |
+| 服务 | 计费 | 调试期月开销 | 投运期月开销 |
+|---|---|---|---|
+| Fly.io | 按机器小时 + 流量 | shared-cpu-1x 1G + 5G volume + AMS ≈ **$5-10** | 同 |
+| Cloudflare R2 | 10GB 免费 + 1M Class A ops / 10M Class B ops | Phase 02 数据量远低于免费档 ≈ **$0** | 同 |
+| Supabase | Free / Pro $25 | **$0 (Free tier)** | **$25 (Pro)** — Wave 5 末 7-day soak gate 之前升 |
+| GitHub Actions | 公开 repo 免费；私有 2000 min/月 free | **$0** | 同 |
 
-**合计 Phase 02 月度 ≈ $30-35**。Wave 4 加 Sentry/Axiom/Better Stack 再加 ~$10/月（多数有 free tier 足够 L1 用量）。
+**调试期合计 ≈ $5-10/月**（仅 Fly machine 常驻成本）
+**投运期合计 ≈ $30-35/月**（升 Supabase Pro 后）
+Wave 4 加 Sentry/Axiom/Better Stack 再加 ~$10/月（多数 free tier 足够 L1 用量）。
 
-> **省钱建议**：Supabase Free tier 也能跑通本指南，但 Better Stack uptime probe 触发 Free 实例 cold start (~3-5s) 会让 /health 偶发 `warn`；要"完整 7-day soak gate"过线建议直接 Pro。
+### 🎯 Supabase Free → Pro 升级判定标准
+
+**调试期用 Free 即可，以下任一条件满足时升 Pro**：
+
+- [ ] 数据量 > 400MB（接近 Free 500MB 上限）
+- [ ] 准备跑 Wave 5 末 **7-day soak gate**（Free 7 天无活动 auto-pause 会让 soak 中断）
+- [ ] daemon 真投运（持续 24×7 跑超过 1 周）
+- [ ] dashboard 开始有真实用户访问（Free cold start ~3-5s 会让用户体验拉胯）
+
+**Free 升 Pro 是 in-place**：不丢数据、不丢 schema、不改 connection string。**所以现在花的 $0 完全无沉没成本**。
+
+### Free tier 的 3 个真坑（要心里有数，不是 blocker）
+
+1. **7 天无活动自动 pause**：你 daemon 出问题导致 7 天没 mirror 写入 → Supabase 实例暂停 → 下次 mirror 报 `connection refused`。处理：dashboard 点 "Restore" 复活；或加个 keepalive cron。
+2. **500MB 数据上限**：Phase 02 subset 2/day × 4MB ≈ 240MB/月。1.5-2 个月后撞墙 → 升 Pro。
+3. **2 个 project 上限**：调试期肯定够。
 
 ---
 
@@ -226,11 +243,11 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_ENDPOINT_URL
 - **Organization**: 你的 personal org
 - **Database Password**: ⚠️ 用密码管理器生成 16+ 字符随机 — **现在记下！这是 DSN 的一部分，丢了只能重置整个 project**
 - **Region**: **🇮🇪 West EU (Dublin)** — 必须 Dublin，理由同 Fly AMS（同 EU 主干网）
-- **Pricing Plan**: **Pro $25/月**（D-02 锁定理由 — Free tier 半小时空挂起会让 daemon mirror 失败率飙）
+- **Pricing Plan**: **Free**（调试期 — 详见上方 "Supabase Free → Pro 升级判定标准"；Wave 5 末 soak gate 前再升）
 
-> **CN 用户支付提示**：Supabase 走 Stripe，国内 Visa 一般 OK。如果 Stripe 拒卡 → Wise 卡 / 实体 USD 卡 / Revolut。
+> **D-02 历史决定 Pro 是基于"持续投运"假设**；调试期不存在持续投运语义，Free tier 完全够用。Free → Pro 是 in-place 升级（不停服 / 不丢数据 / DSN 不变），所以现在选 Free 没有沉没成本。
 
-> **想先用 Free tier 试水**：可以，但要接受 daemon 跑半小时空闲后第一次 mirror 失败（cold start），并且 7-day soak gate 会有 ~3-5 次 warn。Free → Pro 升级是 in-place 的，不丢数据。
+> **CN 用户支付提示**：未来升 Pro 时 Supabase 走 Stripe，国内 Visa 一般 OK。如果 Stripe 拒卡 → Wise 卡 / 实体 USD 卡 / Revolut。Free tier 不需要绑卡。
 
 点 **"Create new project"** → 等 30-60 秒 provisioning。
 
