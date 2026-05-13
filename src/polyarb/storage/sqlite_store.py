@@ -26,6 +26,7 @@ from polyarb.storage.schemas import (
     EVENTS_INSERT_SQL,
     MARKETS_COLUMN_ORDER,
     MARKETS_INSERT_SQL,
+    SCHEDULER_STATE_DDL,
 )
 from polyarb.validator.category import Issue
 
@@ -102,6 +103,8 @@ class SQLiteStore:
         con = sqlite3.connect(self._db_path, isolation_level=None)
         try:
             con.executescript(DDL)
+            # Phase 02 Plan 02: scheduler_state singleton table
+            con.executescript(SCHEDULER_STATE_DDL)
         finally:
             con.close()
 
@@ -220,6 +223,76 @@ class SQLiteStore:
             f"issues={len(issues)} is_valid={is_valid}"
         )
         return snapshot_id
+
+    def get_scheduler_state(self) -> dict | None:
+        """Read the scheduler singleton row. Returns None if not yet written."""
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            return None
+        try:
+            row = con.execute(
+                "SELECT state, failure_counter, updated_at_ms FROM scheduler_state WHERE id=1"
+            ).fetchone()
+            if not row:
+                return None
+            return {"state": row[0], "failure_counter": row[1], "updated_at_ms": row[2]}
+        finally:
+            con.close()
+
+    def upsert_scheduler_state(self, *, state: str, failure_counter: int) -> None:
+        """Write/update the scheduler singleton row."""
+        import time as _time
+
+        updated_at_ms = int(_time.time() * 1000)
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.execute(
+                "INSERT INTO scheduler_state(id, state, failure_counter, updated_at_ms) "
+                "VALUES (1, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "state=excluded.state, failure_counter=excluded.failure_counter, "
+                "updated_at_ms=excluded.updated_at_ms",
+                (state, failure_counter, updated_at_ms),
+            )
+        finally:
+            con.close()
+
+    def get_latest_snapshot(self) -> dict | None:
+        """Read the most-recent snapshot row for /health endpoint.
+
+        Phase 02 Plan 02 — used by /health handler to determine pass/warn/fail.
+        Uses read-only mode=ro URI (P3.8: HTTP server NEVER writes SQLite).
+        Returns None if no snapshots exist (first deploy edge case).
+
+        Columns returned: id, taken_at_ms, finished_at_ms, mode, status (notes field),
+        market_count, is_valid.
+        """
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            # DB file doesn't exist yet → no snapshot
+            return None
+        try:
+            row = con.execute(
+                "SELECT id, taken_at_ms, finished_at_ms, mode, is_valid, market_count, notes "
+                "FROM snapshots ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "taken_at_ms": row[1],
+                "finished_at_ms": row[2],
+                "mode": row[3],
+                "is_valid": bool(row[4]),
+                "market_count": row[5],
+                "notes": row[6],  # notes carries status string (ok/degraded/failed) from orchestrator
+            }
+        finally:
+            con.close()
 
     def purge_old_snapshots(
         self,

@@ -534,3 +534,32 @@ def test_page_fetched_at_ms_in_all_four_sync_points() -> None:
         f"EVENTS_INSERT_SQL placeholder count {events_placeholder_count} != "
         f"len(EVENTS_COLUMN_ORDER) {len(EVENTS_COLUMN_ORDER)}"
     )
+
+
+# =============================================================================
+# Phase 02 Plan 02: scheduler_state singleton table lockstep
+# =============================================================================
+
+
+def test_scheduler_state_table_present_in_schema_and_executable() -> None:
+    """SCHEDULER_STATE_DDL declares scheduler_state table with singleton constraint.
+
+    Plan 02 (BLOCKER-4 fix): new scheduler_state singleton table must exist in
+    schemas.py DDL + be valid SQLite + enforce CHECK (id = 1).
+    This is a 1-point lockstep (no COLUMN_ORDER / INSERT_SQL / parquet schema
+    because scheduler_state has no parquet mirror and is a singleton).
+    """
+    from polyarb.storage.schemas import SCHEDULER_STATE_DDL
+    import sqlite3
+
+    # DDL string assertions
+    assert "scheduler_state" in SCHEDULER_STATE_DDL, "table name missing from SCHEDULER_STATE_DDL"
+    assert "failure_counter" in SCHEDULER_STATE_DDL, "failure_counter column missing"
+    assert "CHECK (id = 1)" in SCHEDULER_STATE_DDL, "singleton CHECK constraint missing"
+
+    # Verify DDL is valid SQLite by executing it in-memory
+    con = sqlite3.connect(":memory:")
+    con.executescript(SCHEDULER_STATE_DDL)
+    row = con.execute("SELECT name FROM sqlite_master WHERE name='scheduler_state'").fetchone()
+    assert row is not None, "scheduler_state table not created by SCHEDULER_STATE_DDL"
+    con.close()

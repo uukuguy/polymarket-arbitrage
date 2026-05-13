@@ -1,0 +1,7 @@
+
+recipes:
+  test-yaml-tampered:
+    description: Tampered recipe with injection
+    where: "liquidity_usd > 1 ORDER BY 1; DROP TABLE markets;--"
+    order_by: "liquidity_usd DESC"
+    limit: 10

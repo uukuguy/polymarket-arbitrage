@@ -64,7 +64,8 @@ def test_invokes_run_recipe(
 
     body = {"recipe_name": "thick-but-slippery", "params": {}}
 
-    with patch("polyarb.observation.scanner.run_recipe") as mock_run_recipe:
+    # Patch at scan.py's import site (where scan() calls run_recipe directly)
+    with patch("polyarb.http.scan.run_recipe") as mock_run_recipe:
         import pandas as pd
         mock_run_recipe.return_value = pd.DataFrame(
             [{"market_id": "m1", "question": "Will X?", "liquidity_usd": 999.0}]

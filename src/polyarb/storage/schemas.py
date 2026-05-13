@@ -256,6 +256,25 @@ EVENT_TAGS_INSERT_SQL = (
 # to parquet. This is by design — parquet is the historical market snapshot
 # wire format; event metadata is denormalized via the event_id FK on markets,
 # which IS in the parquet (so cross-snapshot tag analysis can rejoin via SQLite).
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 02 Plan 02: scheduler_state singleton table
+#
+# A single-row table that persists the scheduler's state across restarts.
+# CHECK (id = 1) enforces the singleton invariant (only row 0 ever exists).
+# No parquet mirror — this is scheduler metadata, not market data.
+# NOT in SNAPSHOT_SCHEMA (parquet doesn't include scheduler state).
+# ─────────────────────────────────────────────────────────────────────────────
+
+SCHEDULER_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS scheduler_state (
+    id               INTEGER PRIMARY KEY DEFAULT 1,
+    state            TEXT NOT NULL,
+    failure_counter  INTEGER NOT NULL DEFAULT 0,
+    updated_at_ms    INTEGER NOT NULL,
+    CHECK (id = 1)
+)
+"""
+
 SNAPSHOT_SCHEMA: pa.Schema = pa.schema(
     [
         pa.field("market_id", pa.string()),

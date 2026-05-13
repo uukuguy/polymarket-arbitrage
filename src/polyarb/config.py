@@ -8,6 +8,19 @@ Precedence (highest wins):
 The F-3 path validator constrains db_path / parquet_root to live under the project
 root unless POLYARB_ALLOW_EXTERNAL_PATHS=1 is set (test escape hatch only — never
 set in production code).
+
+Phase 02 Plan 02 additions:
+    - scan_shared_secret: HMAC-SHA256 key for /scan endpoint auth (D-22 amendment).
+      Env var: POLYARB_SCAN_SHARED_SECRET (daemon side with POLYARB_ prefix).
+      Vercel side uses SCAN_SHARED_SECRET (no prefix — Next.js doesn't load pydantic Settings).
+      Both sides compute hmac-sha256(body_bytes, secret.encode('utf-8')) → hex.
+    - version: returned in /health JSON (GHA injects via env in Plan 04)
+    - release_id: deployment identifier (GHA commit SHA in Plan 04)
+
+    SECURITY NOTE (BLOCKER-3):
+      If scan_shared_secret is empty AND POLYARB_ALLOW_EMPTY_SECRET != "1",
+      Settings construction raises a ValidationError to prevent silent insecure deploys.
+      Tests must set POLYARB_ALLOW_EMPTY_SECRET=1 in env or pass a secret via fixture.
 """
 
 from __future__ import annotations
@@ -16,7 +29,7 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,7 +53,35 @@ class Settings(BaseSettings):
     parquet_root: Path = Path("data/snapshots")
     cache_root: Path = Path("data/.cache")
 
+    # Phase 02 Plan 02: HTTP daemon fields
+    # HMAC-SHA256 shared secret for /scan endpoint.
+    # Env var: POLYARB_SCAN_SHARED_SECRET (daemon); SCAN_SHARED_SECRET (Vercel, no prefix).
+    scan_shared_secret: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "HMAC-SHA256 shared secret for /scan endpoint auth (Plan 02). "
+            "Required at runtime; empty only for tests (set POLYARB_ALLOW_EMPTY_SECRET=1)."
+        ),
+    )
+    # Version returned in /health JSON response
+    version: str = Field(default="0.2.0")
+    # GHA injects commit SHA in Plan 04 deploy
+    release_id: str = Field(default="dev")
+    # recipes yaml path for /scan handler
+    recipes_yaml_path: Path = Path("config/scan_recipes.yaml")
+
     model_config = SettingsConfigDict(env_prefix="POLYARB_", env_file=".env", extra="ignore")
+
+    @model_validator(mode="after")
+    def _require_secret_in_prod(self) -> "Settings":
+        """Raise if scan_shared_secret is empty and not running in test mode."""
+        secret_val = self.scan_shared_secret.get_secret_value()
+        if not secret_val and os.environ.get("POLYARB_ALLOW_EMPTY_SECRET") != "1":
+            raise ValueError(
+                "POLYARB_SCAN_SHARED_SECRET must be set in production. "
+                "To run tests or local dev without a secret, set POLYARB_ALLOW_EMPTY_SECRET=1."
+            )
+        return self
 
     @field_validator("db_path", "parquet_root", "cache_root")
     @classmethod

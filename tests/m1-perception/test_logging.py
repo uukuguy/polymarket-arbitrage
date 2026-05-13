@@ -60,35 +60,41 @@ def test_json_serialize() -> None:
 
 
 def test_intercept_stdlib_logging() -> None:
-    """stdlib logging.getLogger('uvicorn.error').info() appears in loguru output."""
-    from polyarb.observability.logging import InterceptHandler, init_logging
+    """stdlib logging.getLogger('uvicorn.error').info() appears in loguru output.
+
+    InterceptHandler redirects stdlib records to loguru. We verify this by:
+    1. Adding a loguru StringIO sink
+    2. Registering InterceptHandler on a test stdlib logger
+    3. Emitting a record via stdlib
+    4. Verifying the record appeared in the loguru sink
+    """
+    from polyarb.observability.logging import InterceptHandler
 
     buffer = io.StringIO()
-    # Add our capture sink BEFORE init_logging so we intercept the messages
     sink_id = logger.add(buffer, serialize=True, level="DEBUG", backtrace=False, diagnose=False)
 
     try:
-        # Wire up InterceptHandler for uvicorn.error specifically
-        uvicorn_logger = logging.getLogger("uvicorn.error")
-        original_handlers = uvicorn_logger.handlers[:]
-        original_propagate = uvicorn_logger.propagate
+        # Use a fresh test-specific logger to avoid interfering with existing loggers
+        test_logger_name = "polyarb.test.intercept_handler"
+        test_log = logging.getLogger(test_logger_name)
+        original_handlers = test_log.handlers[:]
+        original_propagate = test_log.propagate
+        original_level = test_log.level
 
-        uvicorn_logger.handlers = [InterceptHandler()]
-        uvicorn_logger.propagate = False
+        test_log.handlers = [InterceptHandler()]
+        test_log.propagate = False
+        test_log.setLevel(logging.DEBUG)
 
-        uvicorn_logger.info("test from stdlib uvicorn")
-
-        # Force flush
-        logger.complete()
+        test_log.info("intercept handler test message xyz")
     finally:
-        # Restore
-        uvicorn_logger.handlers = original_handlers
-        uvicorn_logger.propagate = original_propagate
+        test_log.handlers = original_handlers
+        test_log.propagate = original_propagate
+        test_log.setLevel(original_level)
         logger.remove(sink_id)
 
     output = buffer.getvalue().strip()
     assert output, "InterceptHandler produced no loguru output"
-    assert "test from stdlib uvicorn" in output, (
+    assert "intercept handler test message xyz" in output, (
         f"stdlib log message not found in loguru output: {output[:500]}"
     )
 
