@@ -99,12 +99,42 @@ class SQLiteStore:
         return self._db_path
 
     def init_schema(self) -> None:
-        """Create tables, indexes, set WAL mode. Idempotent — safe to re-run."""
+        """Create tables, indexes, set WAL mode. Idempotent — safe to re-run.
+
+        Phase 02 Plan 02-08 (F-01): after CREATE TABLE IF NOT EXISTS runs, we
+        also perform a PRAGMA-driven idempotent ALTER TABLE ADD COLUMN pass
+        for the snapshots table. `CREATE TABLE IF NOT EXISTS` does NOT modify
+        an existing table, so legacy DBs that were initialized before Plan 03
+        added supabase_mirror_at_ms + parquet_r2_url are still missing those
+        columns and any UPDATE against them raises `no such column`.
+
+        Strategy is add-only (LEARNINGS P7): we never drop, rename, or retype.
+        Each (table, column, ddl) tuple is checked against PRAGMA table_info;
+        the ALTER runs only if absent. Re-running init_schema after migration
+        is a no-op (no duplicate-column error).
+        """
         con = sqlite3.connect(self._db_path, isolation_level=None)
         try:
             con.executescript(DDL)
             # Phase 02 Plan 02: scheduler_state singleton table
             con.executescript(SCHEDULER_STATE_DDL)
+
+            # Phase 02 Plan 02-08 (F-01): idempotent ADD COLUMN for legacy DBs.
+            # Targets: snapshots.supabase_mirror_at_ms, snapshots.parquet_r2_url.
+            # Note: SQLite ALTER TABLE ADD COLUMN cannot add NOT NULL columns
+            # without a default — both targets are nullable, which is correct
+            # (NULL = "never mirrored / not yet uploaded").
+            def _ensure_column(table: str, column: str, ddl: str) -> None:
+                rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+                existing = {r[1] for r in rows}
+                if column not in existing:
+                    con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                    logger.info(
+                        f"sqlite_store: idempotent migration — ALTER {table} ADD COLUMN {column}"
+                    )
+
+            _ensure_column("snapshots", "supabase_mirror_at_ms", "INTEGER")
+            _ensure_column("snapshots", "parquet_r2_url", "TEXT")
         finally:
             con.close()
 
