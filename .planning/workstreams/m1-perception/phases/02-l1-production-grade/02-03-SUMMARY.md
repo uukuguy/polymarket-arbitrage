@@ -98,6 +98,7 @@ completed: 2026-05-13
 - `R2Sync` 模块实现 fail-soft upload_parquet_to_r2（put_object + retry 3次）+ T-02-12 路径注入防御（compute_r2_key 纯 int → UTC 路径）
 - Orchestrator step 7.5/7.6 接入两个适配器，post-write 顺序执行，任意失败升级为 DEGRADED Issue，cache.cleanup() 保持无条件执行
 - Alembic 001 迁移文件创建 snapshots/markets_latest/recipe_runs 三张表 + anon SELECT RLS 策略
+  - **Plan 02-08 amend (2026-05-14)**：top_movers_view 由 Plan 02-08 的 Alembic 002 补建（本 plan 实际只交付了 3 张表，未含 view；SUMMARY 原列 view 是文档偏差，F-03 retro fix-up 已补）
 - scripts/supabase_seed.py typer CLI 提供 `reconcile` 和 `init_check` 两条命令
 - /health 扩展 Check 3（supabase mirror age，componentType: datastore）和 Check 4（r2 upload recency，componentType: system）
 - 修复一个预存失败：`test_make_snapshot_markets_full_dry_run_recipe` 期望值与实际 Makefile 命令不符
@@ -175,6 +176,30 @@ _TDD RED commit: 12 tests fail with ModuleNotFoundError before implementation. G
 
 1. **botocore Stubber 与 upload_file 不兼容** — upload_file 内部通过 s3transfer 的 TransferManager 发出请求，请求链路在 Stubber 之外，导致 Stubber 期望的请求未被触发而超时。解法：改用 put_object 直接调用（无需 s3transfer）。
 2. **worktree 基准 commit 不一致** — 会话启动时 worktree 在旧 commit，需要 `git reset --hard aaa8d3e` 对齐到 Plan 02 结束点，之后 RED/GREEN 均基于正确基线执行。
+
+### Post-deploy issues surfaced by Phase 1 调试期 verification (2026-05-13/14)
+
+5 个 landing-time deviations were caught during real-environment verification
+and addressed by **Plan 02-08 retro fix-up** (commits a055670 / 818e1df /
+daabe30 / c327af6 / 46208b4):
+
+- **F-01 (HIGH)**: `init_schema()` did not add the two new snapshots columns
+  (supabase_mirror_at_ms / parquet_r2_url) to legacy DBs because
+  CREATE TABLE IF NOT EXISTS is a no-op on existing tables. Plan 02-08 added
+  a PRAGMA-driven idempotent ALTER TABLE ADD COLUMN pass.
+- **F-02 (MEDIUM)**: `update_parquet_url` used upsert, which INSERTed a
+  degenerate row when the snapshot didn't exist remotely (NOT NULL violations).
+  Plan 02-08 changed it to a pure UPDATE().eq().
+- **F-03 (LOW)**: `top_movers_view` was claimed as a deliverable but never
+  built — Alembic 001 only created 3 tables. Plan 02-08 added Alembic 002.
+- **F-04 (MEDIUM)**: daemon SIGINT shutdown took up to 10s (scheduler inner
+  sleep granularity). Plan 02-08 dropped to 1s + added explicit
+  scheduler_task.cancel() + bounded final gather timeout.
+- **F-05 (MEDIUM)**: 0-market is_valid=False snapshots still triggered mirror
+  push, polluting Supabase. Plan 02-08 added an is_valid guard at step 7.5.
+
+See `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-08-SUMMARY.md`
+for full retro fix-up details.
 
 ## User Setup Required
 
