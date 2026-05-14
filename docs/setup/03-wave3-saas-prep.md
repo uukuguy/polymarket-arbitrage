@@ -1,12 +1,44 @@
 # Wave 3 SaaS 注册照方抓药指南
 
-> **目的**：把本地能跑的 L1 daemon 搬到 Fly.io 上 7×24 跑前，先把 3 个 SaaS 账号 + 1 个 CSPRNG 密钥准备好（一共 6 个 secrets 要写到 Fly），并在本地把 Supabase 数据库 schema 建好。
+> **目的**：分两段把云栈准备好 —
+> **Phase 1 (调试阶段，零成本)**：建好 3 个 SaaS 账号 + 本地 daemon 写 mirror 到 Supabase Free + R2，验证整条数据链路。
+> **Phase 2 (投运阶段，~$8-35/月)**：当调试通过后，把 daemon 搬到 Fly.io 7×24 跑 + Supabase 升 Pro。
 >
-> **预计时间**：30-40 分钟连续操作；建议留 1 小时块时间不被打断。
+> **预计时间**：Phase 1 ~20 分钟；Phase 2 ~15 分钟（且可以任意时候推迟）。
 >
 > **前置**：本指南假定 Phase 02 Wave 1 + Wave 2 已落地（`make planning-status` 显示 02-01/02/03 全 OK）。
 >
 > **Plan 04 的 Task 4 (Step A-F)** 是本指南对应的"contract 版"；本指南是它的"扩展手册"（多了 cost / pitfalls / 在哪里点 / 失败排查）。
+
+## 🚦 两阶段路线图
+
+```
+┌─ Phase 1：调试期 (今天做，$0) ─────────────────────┐
+│                                                    │
+│  Step A.1-A.5  Fly 账号 + app + volume + token     │
+│  Step A.7      生成 HMAC 密钥 (openssl rand)       │
+│  Step B        Cloudflare R2 + bucket + API token  │
+│  Step C        Supabase Free + Alembic migrate     │
+│                                                    │
+│  → 本地跑 make daemon-run-local                    │
+│  → 验证 mirror 写进 Supabase Free + R2             │
+│  → 月开销 $0.75（仅 Fly volume）                   │
+└────────────────────────────────────────────────────┘
+                       ↓
+              （调试通过、想 7×24 投运）
+                       ↓
+┌─ Phase 2：投运期 (任意时间，$8-35/月) ──────────────┐
+│                                                    │
+│  Step D        flyctl secrets set (8 个一次性)     │
+│  Step E        GitHub FLY_API_TOKEN                │
+│  Step F        make deploy (在 Wave 3 dispatch 时) │
+│  [可选]        Supabase Free → Pro                 │
+└────────────────────────────────────────────────────┘
+```
+
+**Phase 1 的价值**：所有 SaaS 账号 + secrets 都齐了，本地 daemon 已经验证能写 mirror。这时 Wave 3 真要 dispatch，只剩 Plan 04 的 Dockerfile + fly.toml + 5 分钟首次 deploy。**风险与开销都最小化**。
+
+**Phase 2 推迟**：你可以测一周 / 一个月再回来开 Phase 2，已经建好的账号 + secrets 不会失效。
 
 ---
 
@@ -36,16 +68,29 @@
 
 ## 💰 成本预期
 
-| 服务 | 计费 | 调试期月开销 | 投运期月开销 |
-|---|---|---|---|
-| Fly.io | 按机器小时 + 流量 | shared-cpu-1x 1G + 5G volume + AMS ≈ **$5-10** | 同 |
-| Cloudflare R2 | 10GB 免费 + 1M Class A ops / 10M Class B ops | Phase 02 数据量远低于免费档 ≈ **$0** | 同 |
-| Supabase | Free / Pro $25 | **$0 (Free tier)** | **$25 (Pro)** — Wave 5 末 7-day soak gate 之前升 |
-| GitHub Actions | 公开 repo 免费；私有 2000 min/月 free | **$0** | 同 |
+| 服务 | 计费 | Phase 1 调试期 | Phase 2 投运初期 | Phase 2 长测/正式 |
+|---|---|---|---|---|
+| Fly.io machine | shared-cpu-1x 1GB ≈ $0.0000027/s ≈ $7/月 持续运行 | **$0**（machine 不启动）| ~$7/月 | ~$7/月 |
+| Fly.io volume | $0.15/GB/月 × 5G | **$0.75/月** | $0.75/月 | $0.75/月 |
+| Fly.io trial credit | 新账号 $5 一次性 | 部分抵 volume | 部分抵 machine | 已用完 |
+| Cloudflare R2 | 10GB 免费 + 1M A ops / 10M B ops 免费 | **$0** | $0 | $0 |
+| Supabase | Free / Pro $25 | **$0 (Free)** | **$0 (Free)** | $25 (Pro) — 升级判定见下 |
+| GitHub Actions | 公开 repo 免费 | $0 | $0 | $0 |
 
-**调试期合计 ≈ $5-10/月**（仅 Fly machine 常驻成本）
-**投运期合计 ≈ $30-35/月**（升 Supabase Pro 后）
+**Phase 1 调试期合计 ≈ $0**（$5 trial credit 头一两个月足够覆盖 volume）
+**Phase 2 投运初期 ≈ $8/月**（machine + volume，仍用 Supabase Free）
+**Phase 2 长测/正式 ≈ $33/月**（+ Supabase Pro）
+
 Wave 4 加 Sentry/Axiom/Better Stack 再加 ~$10/月（多数 free tier 足够 L1 用量）。
+
+### Fly.io 计费要点
+
+- **不部署 → 不收 machine 费**。`apps create` / `volumes create` 只是元数据。
+- **Volume 一旦创建就计费**（5G × $0.15/月 = $0.75/月），即使 machine 没启动。
+- **新账号 $5 trial credit** 自动抵扣前 ~半个月开销，注册时无需付费。
+- **加信用卡是反滥用要求**，第一次预扣 $5 hold 几天后退回，不是真扣费。
+- ⚠️ **注册后立即去 Dashboard → Billing → Spend Management 设月度 hard cap**（如 $20），防止 bug 死循环刷流量产生意外账单。
+- `flyctl machine stop` 可以随时暂停 machine（停机不收 machine 费，volume 仍 $0.75/月），用于"不调试时省钱"。
 
 ### 🎯 Supabase Free → Pro 升级判定标准
 
@@ -84,6 +129,18 @@ ls -la .env
 ```
 
 > 没装过 flyctl 的话：[https://fly.io/docs/flyctl/install/](https://fly.io/docs/flyctl/install/)。Linux 用 `curl -L https://fly.io/install.sh | sh`。
+
+---
+
+# 📦 PHASE 1 — 调试期账号建设（零成本，今天做）
+
+完成 Step A.1-A.5 + Step A.7 + Step B + Step C 后：
+- 3 个 SaaS 账号建好
+- 6 个 secret 值都在你密码管理器里
+- Supabase Free 数据库 schema 已 apply
+- 月度开销 **$0.75**（仅 Fly volume，被 $5 trial credit 抵掉）
+
+然后用 `make daemon-run-local` 在本地跑 daemon，验证 mirror 真的写进 Supabase + R2。
 
 ---
 
@@ -304,6 +361,91 @@ make supabase-reconcile   # 跑 init_check，验证 schema 完整
 
 ---
 
+## ✅ Phase 1 完工 — 本地验证整条数据链路
+
+到这里 Phase 1 已经做完。现在去验证你 mirror + R2 上传逻辑真的能工作（本地跑 daemon 直接打 Supabase + R2）：
+
+### 1. 把 6 个 secret 写到本地 `.env`
+
+```bash
+# Supabase 三件套（来自 Step C.2）
+echo "POLYARB_SUPABASE_URL='https://abc123.supabase.co'" >> .env
+echo "POLYARB_SUPABASE_DB_DSN='postgresql://postgres:PASSWORD@db.abc123.supabase.co:5432/postgres'" >> .env
+echo "POLYARB_SUPABASE_SERVICE_KEY='eyJhbGc...'" >> .env
+
+# R2 三件套（来自 Step B.3）
+echo "POLYARB_R2_ENDPOINT='https://ACCOUNT_ID.r2.cloudflarestorage.com'" >> .env
+echo "POLYARB_R2_ACCESS_KEY_ID='YOUR-ACCESS-KEY'" >> .env
+echo "POLYARB_R2_SECRET_ACCESS_KEY='YOUR-SECRET'" >> .env
+
+# HMAC 密钥（来自 Step A.7）
+echo "POLYARB_SCAN_SHARED_SECRET='YOUR-OPENSSL-HEX-OUTPUT'" >> .env
+```
+
+### 2. 启动本地 daemon
+
+```bash
+make daemon-run-local
+```
+
+**Expected**：uvicorn 起来，scheduler 加载 cron，loguru JSON 行刷在终端。访问 `http://localhost:8000/health` 应该返回 IETF 三态 JSON（snapshot age 是 `fail` 因为还没跑过；mirror / R2 status 是 `pass` 因为凭证在场）。
+
+### 3. 触发一次完整 snapshot
+
+新开一个终端：
+
+```bash
+# 加载 .env 里的 HMAC 密钥到当前 shell
+export POLYARB_SCAN_SHARED_SECRET=$(grep POLYARB_SCAN_SHARED_SECRET .env | cut -d"'" -f2)
+
+# 计算空 body 的 HMAC 签名
+BODY=''
+SIG=$(printf "%s" "$BODY" | openssl dgst -sha256 -hmac "$POLYARB_SCAN_SHARED_SECRET" | awk '{print $NF}')
+
+# POST /scan
+curl -i -X POST http://localhost:8000/scan \
+  -H "X-Signature: sha256=$SIG" \
+  -H "Content-Type: application/json" \
+  -d "$BODY"
+```
+
+**Expected**：HTTP 200 + JSON 报告 snapshot id + market_count + supabase_mirror_status: ok + r2_upload_status: ok。
+
+### 4. 三处眼见为实
+
+| 目标 | 怎么验证 |
+|---|---|
+| **本地 SQLite 落地** | `sqlite3 data/state.db "SELECT id, market_count, status FROM snapshots ORDER BY id DESC LIMIT 1;"` |
+| **Supabase mirror 落地** | Supabase dashboard → Table Editor → `markets_latest` → 应该看到 N 条记录；`snapshots` 表有一行 status=ok |
+| **R2 parquet 落地** | Cloudflare dashboard → R2 → `polyarb-snapshots` bucket → 应该看到 `parquet/YYYY/MM/DD/HH-MM-SS.parquet` |
+
+**如果三处都有数据**，说明整条 daemon → SQLite/Parquet → Supabase mirror → R2 upload 链路打通。Phase 1 ✅ 全部通过。
+
+### 5. 故意制造失败，验证 fail-soft
+
+```bash
+# 临时把 Supabase URL 改成错的，触发 mirror 失败
+POLYARB_SUPABASE_URL='https://bogus.supabase.co' make daemon-run-local
+# 再触发一次 /scan
+# Expected: snapshot 仍成功 (SQLite + Parquet 落地)，但 /health → status: warn (mirror status: degraded)
+# 这就是 D-12 amendment + LEARNINGS P5 fail-soft 的现场验证
+```
+
+恢复正确 URL，再触发一次确认重新变 `pass`。
+
+---
+
+# 🚀 PHASE 2 — 投运期部署（任意时间，$8/月起）
+
+⚠️ **以下章节是 Wave 3 dispatch 时才跑的内容**。你可以现在跳过 Phase 2，等想"7×24 跑"再回来。
+
+Phase 2 触发条件：
+- ✅ Phase 1 三处眼见为实都通过了（数据真在 SQLite + Supabase + R2）
+- ✅ fail-soft 故障演练通过了（mirror 失败 → DEGRADED 不阻断 snapshot）
+- ✅ 你愿意每月承担 ~$8（machine + volume）让 daemon 7×24 跑
+
+---
+
 ## Step D — Fly app secrets（~3 min）
 
 把前 7 个 secret 一次性写入 Fly app（用 HEREDOC 防 shell 拆词）：
@@ -382,24 +524,34 @@ POLYARB_SUPABASE_URL                xxx                 just now
 
 ## ✅ 完工 checklist
 
-完成上述步骤后，你应该有：
+### Phase 1 (调试期，零成本)
 
-- [ ] Fly app `polyarb-l1` 存在，volume `polyarb_data` 5G 在 AMS region
-- [ ] R2 bucket `polyarb-snapshots` 存在，private 访问
-- [ ] Supabase Pro Dublin project 存在，Alembic 001 migration 已 apply（`snapshots` + `markets_latest` 表 + `top_movers_view` view + RLS policy 看得见）
+- [ ] Fly app `polyarb-l1` 存在，volume `polyarb_data` 5G 在 AMS region（machine 尚未启动 → 不收 machine 费）
+- [ ] Fly Dashboard → Billing → Spend Management 设了月度 hard cap（建议 $20）
+- [ ] R2 bucket `polyarb-snapshots` 存在，private 访问，API token 三件套已记录
+- [ ] Supabase **Free** project (Dublin) 存在，Alembic 001 migration 已 apply（`snapshots` + `markets_latest` 表 + `top_movers_view` view + RLS policy 看得见）
+- [ ] HMAC 共享密钥（Step A.7 的 64 hex）已经记到密码管理器 — Plan 06 也要用
+- [ ] 本地 `.env` 写了 7 个 secret（6 个 SaaS + HMAC 密钥）
+- [ ] `make daemon-run-local` + 一次 HMAC-签名 `/scan` 调用成功
+- [ ] **三处眼见为实**：SQLite / Supabase / R2 都有新数据
+- [ ] fail-soft 故障演练通过：Supabase URL 写错 → snapshot 仍成功 + `/health` 报 warn
+
+Phase 1 完成后告诉我："phase1 done" + 三处眼见为实的截图/输出，我就准备 Phase 2 路径。
+
+### Phase 2 (投运期，~$8/月起，**可任意推迟**)
+
 - [ ] `flyctl secrets list -a polyarb-l1` 列出 8 个 secrets
 - [ ] GitHub repo Settings → Secrets 看到 `FLY_API_TOKEN`
-- [ ] HMAC 共享密钥（Step A.7 的 64 hex）已经记到密码管理器 — Plan 06 还要用
+- [ ] `make deploy` 成功，`https://polyarb-l1.fly.dev/health` 返回 IETF JSON
+- [ ] Fly machine 正常 running（`flyctl status` 看到 1 个 healthy machine）
 
-完成后告诉我："deployed prep done" 或者贴出以下 3 个命令的输出：
+Phase 2 完成后告诉我："deployed prep done"，我 dispatch Wave 3：
 
 ```bash
 flyctl status -a polyarb-l1
 flyctl secrets list -a polyarb-l1
-make supabase-reconcile
+curl -fsS https://polyarb-l1.fly.dev/health
 ```
-
-我就 dispatch Wave 3。
 
 ---
 
