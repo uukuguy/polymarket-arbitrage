@@ -465,7 +465,20 @@ async def run_snapshot(
     # ── 7.5. Supabase mirror (D-02 dashboard) — fail-soft post-write ─────────
     # SQLite + Parquet are the source of truth (D-12 amendment). Mirror failure
     # → DEGRADED (not FAILED). Does NOT increment scheduler's failure_counter.
-    if settings.supabase_mirror_enabled:
+    #
+    # F-05 (Plan 02-08): pre-empt the whole mirror block when the snapshot
+    # is invalid (e.g. 0-market case caused by an API_UNREACHABLE on /markets).
+    # The validator marks is_valid=False there; mirroring such a degenerate
+    # row would land a status="failed" / market_count=0 row in Supabase that
+    # is_valid_overall already says we shouldn't trust. Fail-soft policy says
+    # "skip, don't corrupt".
+    mirror = None  # type: ignore[assignment]
+    if settings.supabase_mirror_enabled and not is_valid:
+        logger.info(
+            f"step 7.5: skip Supabase mirror — snapshot is_valid=False "
+            f"(snapshot_id={snapshot_id}, status={status.value}); F-05 guard"
+        )
+    elif settings.supabase_mirror_enabled:
         from polyarb.storage.supabase_mirror import SupabaseMirror, narrow_market_row
         try:
             mirror = SupabaseMirror(
@@ -512,8 +525,6 @@ async def run_snapshot(
                 )
             )
             mirror = None  # type: ignore[assignment]
-    else:
-        mirror = None  # type: ignore[assignment]
 
     # ── 7.6. R2 parquet archive (D-03) — fail-soft post-write ────────────────
     # Upload the already-written parquet to Cloudflare R2. Failure → DEGRADED.

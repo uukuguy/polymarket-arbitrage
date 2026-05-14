@@ -122,14 +122,41 @@ class SupabaseMirror:
         """Update parquet_url field on an existing snapshot row. Fail-soft.
 
         Called by orchestrator step 7.6 after a successful R2 upload.
-        Returns True on success, False on failure (logs error).
+
+        F-02 fix (Plan 02-08): pure UPDATE — never upsert. The pre-fix code
+        used upsert(id, parquet_url) which, when the snapshot row didn't
+        exist remotely (e.g. step 7.5 push_snapshot had earlier failed),
+        would INSERT a new row containing only id+parquet_url. That insert
+        violates NOT NULL on taken_at_ms / finished_at_ms / mode / status /
+        market_count, blowing up the post-write tail with a misleading
+        constraint error. The correct behaviour for "row missing" is to log
+        and return False — the next snapshot's push_snapshot will create the
+        row properly.
+
+        Returns:
+            True if exactly one row was updated.
+            False if no row matched (snapshot_id missing remotely) OR an
+                  exception was raised (fail-soft per Plan 03 contract).
         """
         try:
-            self._client.table("snapshots").upsert(
-                {"id": snapshot_id, "parquet_url": parquet_url}
-            ).execute()
+            resp = (
+                self._client.table("snapshots")
+                .update({"parquet_url": parquet_url})
+                .eq("id", snapshot_id)
+                .execute()
+            )
+            # supabase-py returns .data as the list of updated rows. Empty
+            # list means no row matched the .eq filter — i.e. the snapshot
+            # row hasn't been mirrored yet. Do NOT fall back to insert.
+            if not getattr(resp, "data", None):
+                logger.warning(
+                    f"update_parquet_url: snapshot_id={snapshot_id} not found in mirror; "
+                    f"skipping (parquet_url={parquet_url!r}). Next push_snapshot will "
+                    f"include this URL via the regular mirror path."
+                )
+                return False
             return True
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 — fail-soft per RESEARCH §3
             logger.warning(
                 f"update_parquet_url snapshot_id={snapshot_id} failed: {str(e)[:200]}"
             )

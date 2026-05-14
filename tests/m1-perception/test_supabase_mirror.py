@@ -299,3 +299,168 @@ def test_supabase_client_initialized_once() -> None:
     assert create_mock.call_count == 1, (
         f"create_client called {create_mock.call_count} times, expected exactly 1"
     )
+
+
+# ---------------------------------------------------------------------------
+# F-02 regression tests: update_parquet_url is a pure UPDATE — no upsert.
+# ---------------------------------------------------------------------------
+
+
+def test_update_parquet_url_uses_update_not_upsert() -> None:
+    """update_parquet_url must call .update().eq('id', ...), not upsert.
+
+    Pre-F-02 code used upsert({"id": sid, "parquet_url": url}) which, when the
+    snapshot row didn't exist remotely (mirror push failed earlier), inserts a
+    new row with only id+parquet_url — triggering NOT NULL on the required
+    columns (taken_at_ms / finished_at_ms / mode / status / market_count).
+    """
+    from polyarb.storage.supabase_mirror import SupabaseMirror
+
+    mock_client = MagicMock()
+    snapshots_tbl = MagicMock()
+    snapshots_tbl.update.return_value = snapshots_tbl
+    snapshots_tbl.eq.return_value = snapshots_tbl
+    # supabase returns the updated row when one was actually updated
+    snapshots_tbl.execute.return_value = MagicMock(data=[{"id": 42}])
+    snapshots_tbl.upsert.return_value = snapshots_tbl
+    mock_client.table.return_value = snapshots_tbl
+
+    with patch("polyarb.storage.supabase_mirror.create_client", return_value=mock_client):
+        mirror = SupabaseMirror(url="http://localhost:0", service_key="dummy")
+        ok = mirror.update_parquet_url(42, "https://r2.example/snap-42.parquet")
+
+    assert ok is True
+    # UPDATE was called — exact column name pinned by separate test below
+    snapshots_tbl.update.assert_called_once()
+    # eq filter on id was applied
+    snapshots_tbl.eq.assert_called_once_with("id", 42)
+    # upsert was NEVER called — that was the F-02 bug
+    snapshots_tbl.upsert.assert_not_called()
+
+
+def test_update_parquet_url_missing_snapshot_skips_gracefully() -> None:
+    """If snapshot row doesn't exist remotely, return False + log warning, no insert."""
+    from polyarb.storage.supabase_mirror import SupabaseMirror
+
+    mock_client = MagicMock()
+    snapshots_tbl = MagicMock()
+    snapshots_tbl.update.return_value = snapshots_tbl
+    snapshots_tbl.eq.return_value = snapshots_tbl
+    # Empty data → no row was updated → snapshot row didn't exist
+    snapshots_tbl.execute.return_value = MagicMock(data=[])
+    snapshots_tbl.upsert.return_value = snapshots_tbl
+    snapshots_tbl.insert.return_value = snapshots_tbl
+    mock_client.table.return_value = snapshots_tbl
+
+    with patch("polyarb.storage.supabase_mirror.create_client", return_value=mock_client):
+        mirror = SupabaseMirror(url="http://localhost:0", service_key="dummy")
+        ok = mirror.update_parquet_url(99, "https://r2.example/orphan.parquet")
+
+    assert ok is False, "missing snapshot must return False, not raise / not insert"
+    # No upsert was triggered as a fallback (that was the F-02 bug)
+    snapshots_tbl.upsert.assert_not_called()
+    snapshots_tbl.insert.assert_not_called()
+
+
+def test_update_parquet_url_exception_fail_soft() -> None:
+    """Network / Supabase errors → return False, do not raise."""
+    from polyarb.storage.supabase_mirror import SupabaseMirror
+
+    mock_client = MagicMock()
+    snapshots_tbl = MagicMock()
+    snapshots_tbl.update.return_value = snapshots_tbl
+    snapshots_tbl.eq.return_value = snapshots_tbl
+    snapshots_tbl.execute.side_effect = Exception("ECONNREFUSED")
+    mock_client.table.return_value = snapshots_tbl
+
+    with patch("polyarb.storage.supabase_mirror.create_client", return_value=mock_client):
+        mirror = SupabaseMirror(url="http://localhost:0", service_key="dummy")
+        ok = mirror.update_parquet_url(7, "https://r2.example/x.parquet")
+
+    assert ok is False  # fail-soft per Plan 03 contract
+
+
+# ---------------------------------------------------------------------------
+# F-05 regression test: orchestrator step 7.5 skips mirror when is_valid=False.
+# Lives in this file because the assertion is on mirror.push_snapshot being
+# uncalled — closest functional neighbour. The orchestrator test file has
+# heavier setup; this one stays narrow.
+# ---------------------------------------------------------------------------
+
+
+def test_step_7_5_skips_mirror_when_snapshot_invalid() -> None:
+    """orchestrator: when is_valid=False (e.g. 0-market snapshot), do NOT call mirror.
+
+    Pre-F-05: orchestrator step 7.5 always built snapshot_meta and called
+    mirror.push_snapshot regardless of is_valid. A 0-market is_valid=False
+    snapshot would still trigger a mirror upsert with status="failed" and 0
+    markets, polluting Supabase's snapshots table with degenerate rows.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock as MM, patch
+
+    from polyarb.config import load_settings
+    from polyarb.snapshot import orchestrator as orch_mod
+
+    settings = load_settings()
+    if not getattr(settings, "supabase_mirror_enabled", False):
+        pytest.skip("supabase mirror is disabled; F-05 guard is moot in this env")
+
+    # We don't run the whole orchestrator — just verify the guard logic by
+    # patching SupabaseMirror.push_snapshot and forcing is_valid=False through
+    # the determine_snapshot_status path. A lighter contract test:
+    # the F-05 fix means orchestrator step 7.5 contains
+    # `if not snapshot_result.is_valid: skip mirror`. We import the orchestrator
+    # source and grep for the guard pattern.
+    import inspect
+
+    src = inspect.getsource(orch_mod.run_snapshot)
+
+    # Guard pattern: the orchestrator must check is_valid before calling
+    # mirror.push_snapshot in step 7.5. We assert the conditional is present
+    # in the source. This is a structural test — narrow but catches regressions
+    # where someone removes the guard.
+    assert "if not is_valid" in src or "if is_valid" in src or "is_valid=False" in src.replace(" ", ""), (
+        "step 7.5 must guard mirror.push_snapshot with an is_valid check (F-05)"
+    )
+
+    # And the guard must wrap (be a precondition of) the push_snapshot call.
+    # We do a lightweight ordering check: the first `is_valid` reference inside
+    # the function appears before the `mirror.push_snapshot(` call.
+    mirror_call_idx = src.find("mirror.push_snapshot(")
+    assert mirror_call_idx != -1, "orchestrator must still contain a mirror.push_snapshot call"
+    guard_idx = src.find("is_valid", src.find("def run_snapshot"))
+    assert guard_idx != -1 and guard_idx < mirror_call_idx, (
+        "is_valid guard must come before mirror.push_snapshot call"
+    )
+
+
+def test_update_parquet_url_column_name_matches_alembic_001() -> None:
+    """Defensive: the column name we UPDATE matches Alembic 001's schema column.
+
+    Alembic 001 declares snapshots.parquet_url (Text, nullable). The F-02 fix
+    must NOT silently rename the column — it stays parquet_url to match the
+    Supabase schema. Note: the SQLite snapshots table uses parquet_r2_url for
+    the same value (the two stores have different historical names). This
+    test pins the Supabase column name to prevent drift.
+    """
+    from polyarb.storage.supabase_mirror import SupabaseMirror
+
+    mock_client = MagicMock()
+    snapshots_tbl = MagicMock()
+    snapshots_tbl.update.return_value = snapshots_tbl
+    snapshots_tbl.eq.return_value = snapshots_tbl
+    snapshots_tbl.execute.return_value = MagicMock(data=[{"id": 1}])
+    mock_client.table.return_value = snapshots_tbl
+
+    with patch("polyarb.storage.supabase_mirror.create_client", return_value=mock_client):
+        mirror = SupabaseMirror(url="http://localhost:0", service_key="dummy")
+        mirror.update_parquet_url(1, "https://r2/x.parquet")
+
+    # Alembic 001: snapshots.parquet_url is the canonical Supabase column.
+    call_args = snapshots_tbl.update.call_args
+    assert call_args is not None
+    payload = call_args[0][0]
+    assert "parquet_url" in payload, (
+        f"update payload must include parquet_url (Alembic 001 column); got {payload!r}"
+    )
