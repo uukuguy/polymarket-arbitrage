@@ -61,9 +61,12 @@ fi
 
 # Expected SUMMARY filename uses the same phase notation as PLAN files.
 # Try a few common patterns (project varies between 01.1-04-SUMMARY.md and 01-04-SUMMARY.md):
+# Note: force base-10 via 10# arithmetic prefix — bash printf %d treats leading-zero
+# numbers like 08/09 as octal and aborts with "invalid number" under set -e. The
+# 10#$PLAN form forces decimal interpretation regardless of leading zeros.
 SUMMARY_CANDIDATES=(
   "${PHASE_DIR}/${PHASE}-${PLAN}-SUMMARY.md"
-  "${PHASE_DIR}/${PHASE}-$(printf '%02d' "$PLAN")-SUMMARY.md"
+  "${PHASE_DIR}/${PHASE}-$(printf '%02d' "$((10#$PLAN))")-SUMMARY.md"
 )
 
 SUMMARY_FOUND=""
