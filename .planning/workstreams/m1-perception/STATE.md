@@ -100,18 +100,48 @@ Plan: 3 of 7 ✅ (Wave 2 complete) + Phase 1 SaaS prep ✅ → next: Plan 03 ret
 - ✅ Wave 0 tests RED → GREEN: `test_page_fetched_at_ms_carried_from_raw`、`test_page_fetched_at_ms_in_all_four_sync_points`、`test_parquet_sqlite_consistency.py`
 - ⏸️ Pre-existing `test_make_snapshot_markets_full_dry_run_recipe` 失败（与本 plan 无关，Phase 01.1 遗留：Makefile 用 `uv run python -m polyarb.snapshot snapshot --full` 但测试期望 `python -m polyarb.snapshot --full`） — Plan 03 顺手修
 
-## 下次会话该做的
+## 下次会话该做的（2026-05-14 EOD 更新）
 
-1. `make planning-status` 验证零 DRIFT（应该 OK）
-2. `/gsd-execute-phase 02 --wave 1 --ws m1-perception` — 先跑 Wave 1 (~30-60 min) 验证 plan 质量
-3. Wave 1 完成 + commit + SUMMARY 落库后再决定 Wave 2
+1. **`make planning-status` 验证零 DRIFT**（应该 OK — Plan 01/02/03 全 SUMMARY ✓）
+2. **`git log --oneline -5`** 看最新两个 commit (`14de7c6` 工具链 fix + `f568041` 文档/state)
+3. **决策路径**（二选一）：
+
+   **路 A**（推荐，符合 thread §1 "L1 未到生产级禁开下一层"纪律）：
+   ```
+   开 Plan 03 retro fix-up PR — 修 F-01..F-05（详见 project_plan-03-retro-issues-2026-05 memory）
+   ↓
+   F-01 (HIGH) + F-04 (MEDIUM) 至少必修；F-02/F-03/F-05 可合修
+   ↓
+   merged 后 Wave 3 dispatch
+   ```
+
+   **路 B**（如果想切换主题）：
+   ```
+   m2-combinatorial 推 T2 Slippage Model（避开 m1 mirror bug）
+   ↓
+   注意：用户原则上禁开 L2，但 m2 是横向能力线不冲突
+   ↓
+   等 Plan 03 retro 时机成熟回 m1
+   ```
+
+4. **Wave 3 dispatch 条件**（不要提前跑）：
+   - ✅ Plan 03 retro PR merged
+   - ⏳ 用户准备 8 个 Fly secrets + GHA `FLY_API_TOKEN`（详见 `docs/setup/03-wave3-saas-prep.md` Phase 2 章节）
+   - 命令：`/gsd-execute-phase 02 --wave 3 --ws m1-perception`
 
 **关键提醒**：
 
-- Wave 3 起需要用户人工 SaaS 账号注册 + secrets 设置（Fly/R2/Supabase/Axiom/Sentry/Better Stack/Telegram/Vercel）
-- 7 天 soak gate 不可跳，是 phase 完成判定
-- 详见 `project_phase-02-locked-stack` memory 完整 22 决策栈
-- **基础设施补强（5-10）**: `.githooks/pre-commit` + `scripts/planning_status.py` + `make planning-status` + CLAUDE.md plan-末纪律
+- Phase 1 调试期端到端 verification ✅ PASSED（详见 `project_phase-1-verification-2026-05` memory）
+- Plan 03 5 个 fix-up issue 落 `.planning/threads/deployment-architecture.md §10.2`
+- Polymarket Gamma offset≤10000 新约束（详见 thread §10.3）— 短期不阻塞 Phase 02，Phase 02.x 修分页
+- 7 天 soak gate 在 Wave 5 末，不可跳；调试期 Supabase Free 够，soak 前升 Pro
+- daemon SIGINT 不响应（F-04），停机用 `pkill -9 -f polyarb.daemon.main`
+- 关键 memory 入口：
+  - [Phase 02 locked stack](memory/project_phase-02-locked-stack.md) — 22 决策栈 + Plan 状态
+  - [Phase 1 verification](memory/project_phase-1-verification-2026-05.md) — 验收结果 + 链路状态
+  - [Plan 03 retro issues](memory/project_plan-03-retro-issues-2026-05.md) — 5 个 fix-up issue 详细
+  - [Secrets hygiene](memory/feedback_secrets-hygiene-2026-05.md) — 4 个泄漏面纪律
+  - [Port numbers](memory/feedback_port-numbers-2026-05.md) — 19080 约定
 
 ---
 
