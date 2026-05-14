@@ -117,6 +117,10 @@ class SnapshotScheduler:
 
         If PAUSED: skip (no-op).
         If RUNNING: run snapshot, update counter, check threshold.
+
+        F-04 (Plan 02-08): cancellation propagates. asyncio.CancelledError
+        is NOT caught by the generic Exception handler — we re-raise so
+        run() can unwind. Wave 5 chaos test gates on this.
         """
         if self.state == SchedulerState.PAUSED:
             logger.info("scheduler is PAUSED, skipping tick")
@@ -141,6 +145,11 @@ class SnapshotScheduler:
                     f"failure_counter={self._failure_counter}/{self.FAILURE_THRESHOLD}"
                 )
 
+        except asyncio.CancelledError:
+            # F-04: cancellation must propagate so run() can stop in <1s.
+            # Do NOT count as a failure — this is a graceful shutdown signal.
+            logger.info("scheduler tick cancelled mid-flight; propagating CancelledError")
+            raise
         except Exception:
             self._failure_counter += 1
             logger.exception(
@@ -172,16 +181,37 @@ class SnapshotScheduler:
 
         Plan 02: sleeps between ticks using settings interval (default 1 hour).
         Plan 04: real prod uses Fly scheduled machines (not this loop).
+
+        F-04 (Plan 02-08): inner sleep granularity dropped from 10s → 1s so
+        a SIGINT-triggered stop_event.set() is observed within 1s, satisfying
+        the Wave 5 chaos test "< 1s graceful shutdown" gate. Also use
+        asyncio.wait_for on stop_event so cancellation interrupts the wait
+        immediately rather than after the next 1s tick.
         """
         interval_s = getattr(self._settings, "scheduler_interval_s", 3600)
         logger.info(f"scheduler loop started, tick interval={interval_s}s")
 
-        while not stop_event.is_set():
-            await self._tick()
-            # Wait for interval, checking stop_event every 10 seconds
-            elapsed = 0
-            while elapsed < interval_s and not stop_event.is_set():
-                await asyncio.sleep(min(10, interval_s - elapsed))
-                elapsed += 10
+        try:
+            while not stop_event.is_set():
+                await self._tick()
+                # Wait for interval, checking stop_event at 1s granularity.
+                # F-04: 10s → 1s. Wave 5 chaos test gates on <1s shutdown.
+                elapsed = 0.0
+                while elapsed < interval_s and not stop_event.is_set():
+                    step = min(1.0, interval_s - elapsed)
+                    try:
+                        # Use wait_for(stop_event.wait, ...) so an external
+                        # task.cancel() lands immediately rather than after
+                        # the 1s sleep completes.
+                        await asyncio.wait_for(stop_event.wait(), timeout=step)
+                        # stop_event fired during the wait — exit inner loop
+                        break
+                    except asyncio.TimeoutError:
+                        elapsed += step
+        except asyncio.CancelledError:
+            # F-04: graceful cancellation path. main.py may cancel this task
+            # explicitly to interrupt an in-flight tick.
+            logger.info("scheduler loop received CancelledError, exiting")
+            raise
 
         logger.info("scheduler loop stopped")

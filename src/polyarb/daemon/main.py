@@ -75,7 +75,22 @@ async def main() -> int:
     logger.info("stop_event set, shutting down server")
     server.should_exit = True
 
-    await asyncio.gather(server_task, scheduler_task, return_exceptions=True)
+    # F-04 (Plan 02-08): explicitly cancel the scheduler task so an in-flight
+    # tick (e.g. ~minutes-long snapshot waiting on Gamma HTTP) is interrupted
+    # within ~1s rather than waiting for the current await to return. The
+    # scheduler re-raises CancelledError out of _tick() per F-04 contract.
+    scheduler_task.cancel()
+
+    # Bounded final wait — even if some task ignores cancellation, the daemon
+    # exits within 5s instead of hanging indefinitely.
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(server_task, scheduler_task, return_exceptions=True),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("graceful shutdown exceeded 5s; daemon exiting anyway")
+
     logger.info("polyarb daemon stopped cleanly")
     return 0
 
