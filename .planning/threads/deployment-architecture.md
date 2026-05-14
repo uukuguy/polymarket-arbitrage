@@ -3,7 +3,7 @@ slug: deployment-architecture
 title: Cloud-Native Deployment Stack for Polymarket Arbitrage (M1-M3 horizon)
 status: locked
 created: 2026-05-11
-updated: 2026-05-11
+updated: 2026-05-14
 locked_at: 2026-05-11
 researcher: subagent (parallel-window-B)
 ---
@@ -951,3 +951,93 @@ researcher: subagent (parallel-window-B)
 ---
 
 *End of draft. 待 Phase 02 决策会议合并入主架构。*
+
+---
+
+## 10. Phase 1 调试期 verification 发现（SESSION 17 续，2026-05-14 晚）
+
+调试期跑通 `daemon → SQLite → Parquet → R2` 完整链路时撞到的工具链 / Plan-spec 偏差。
+**结论**：核心链路 ✅，但 Plan 02/03 落地有多处偏差需修，Polymarket API 也加了新约束。
+
+### 10.1 已修（这次会话内 commit）
+
+| 修复 | 位置 | 原因 |
+|---|---|---|
+| `make supabase-migrate/reconcile/r2-list/snapshot-markets*/daemon-run-local` 自动 source `.env` | Makefile | recipe shell 检查 `$VAR` 在 `uv run` 之前，pydantic-settings 那时还没读 `.env`；fail-fast 误报 missing env |
+| `alembic/env.py` DSN 改写 `postgresql://` → `postgresql+psycopg://` | alembic/env.py | 项目装 psycopg v3，不是 psycopg2；SQLAlchemy 看裸 `postgresql://` 默认 psycopg2 driver |
+| `psycopg[binary]` 添加到 `pyproject.toml` | pyproject.toml + uv.lock | Plan 03 漏装 — 只装 supabase-py (REST SDK)，但 alembic 需 Postgres driver |
+| HTTP 端口 8080 → 19080，可 `POLYARB_HTTP_PORT` 覆盖 | config.py + daemon/main.py + Makefile | 8080 macOS 常被 WeChat/TencentMeeting/Docker 占；用户明确反对常见端口 |
+| HMAC X-Signature 支持 `sha256=<hex>` 前缀 | http/scan.py | docstring 说 "Stripe/GitHub webhook pattern" 但实现只接受裸 hex，跟文档不一致 |
+| R2 smoke script 凭证从 `.env` 读不硬编码 | scripts/smoke-test-cloudflare-r2.sh | 早期版本硬编码触发凭证泄漏事故，已轮换 R2 token + HMAC |
+
+### 10.2 Backlog（Plan 03 fix-up，Phase 1 收口后开 PR 处理）
+
+| ID | 问题 | 严重度 | 备注 |
+|---|---|---|---|
+| **F-01** | `SQLiteStore.init_schema()` 用 `CREATE TABLE IF NOT EXISTS`，对老 DB 不加新列 → Plan 03 的 `supabase_mirror_at_ms` + `parquet_r2_url` 永远 NULL | **HIGH** | 老 dev 机 + Wave 3 backup restore 都会撞；调试期手工 `ALTER TABLE` 已临时救回；正式修法：idempotent ALTER 流程（pragma table_info + ALTER if not present） |
+| **F-02** | `SupabaseMirror.update_parquet_url` 用 upsert (INSERT-on-conflict)，stage 7.5 mirror.upsert_snapshot 失败时 stage 7.6 用同样 PK upsert → 触发 NOT NULL (taken_at_ms null) | MEDIUM | fail-soft 设计下不阻塞 snapshot 完成，但日志噪音；正式修法：`update_parquet_url` 改纯 UPDATE，不走 upsert |
+| **F-03** | Plan 03 SUMMARY 列的 `top_movers_view` 在 Alembic 001 migration 里**不存在**；实际多出一个 `recipe_runs` 表 | LOW | SUMMARY 偏差，不阻塞功能；正式修法：要么补 view 要么改 SUMMARY |
+| **F-04** | daemon SIGINT / SIGTERM 不响应，Ctrl-C 不停机 | MEDIUM | scheduler.run 不响应 stop_event；user workaround `pkill -9 -f polyarb.daemon.main`；Wave 5 chaos test 之前必须修 |
+| **F-05** | `is_valid=False` snapshot 仍触发 mirror upsert，且 mirror.upsert_snapshot 对 0-market snapshot 字段映射有 bug → Supabase NOT NULL 拒绝 | MEDIUM | 跟 F-02 重叠；mirror payload schema 需对齐 SQLite 真实字段名 |
+
+### 10.3 Polymarket API 新约束（外部，非项目 bug）
+
+**Gamma API 加了 `offset ≤ 10000` 上限**（2026-05 起）：
+
+```
+offset=     0  → HTTP 200
+offset=  9900  → HTTP 200
+offset= 10000  → HTTP 200  (boundary)
+offset= 10100  → HTTP 422  ← cap fires here
+offset= 15000  → HTTP 422
+```
+
+Phase 01 LIVE-RUN-005（2026-05-01）时还能拉 20353 markets，**Polymarket 这中间加了 offset cap**。
+
+**影响**：
+- subset 模式（liquidity > $1k）当前能拉到的 markets 顶满 ~10k 行
+- full 模式（所有 markets）会被截在 10k；理论上 Polymarket 有 ~20k 总市场
+- snapshot 全部 422 之后 0 markets normalize → `is_valid=False`
+
+**修法选项**（Phase 02.x 或单独 phase 修）：
+- 改 `limit=500` 让单页带回更多（如果 Polymarket 接受）
+- 换 cursor-based 分页（如果 API 支持）
+- 用 `active=true&closed=false&archived=false` + 多维度 query 切分（按 tag / event / 时间窗）避开单一 offset 上限
+- 换 Polymarket GraphQL endpoint（如果存在）
+
+**短期影响**：调试期跑 subset 拿 ~10k 行已经足够验证 mirror+R2 链路；Phase 1 验收**不被 blocked**。
+
+### 10.4 CN 网络注意事项（落 thread 防再坑）
+
+- Polymarket Gamma/CLOB API 在 CN ISP 直连**被墙**
+- 本地开发要跑代理（Clash / V2Ray 类）让 `httpx` 走 `HTTPS_PROXY`
+- **httpx 默认 `trust_env=True`** → 自动读 `HTTPS_PROXY` 环境变量；项目 `gamma_client.py` 没覆盖，能正常走代理
+- ⚠️ 但 `nc -zv` / `curl --noproxy '*'` 不走代理 → 直连超时是**预期的**，不要据此判断 API 出问题
+- 真生产环境（Fly.io AMS）不需要代理 — AMS 直连 Polymarket eu-west-2 是同区内主干网
+
+### 10.5 调试期发现的 Supavisor 坑
+
+- Supabase Direct connection (`db.<ref>.supabase.co:5432`) **IPv6-only**，CN ISP 普遍不通
+- 必须用 **Session pooler** (`aws-?-<region>.pooler.supabase.com:5432`) 走 IPv4
+- pooler hostname **不能套模板猜** — Supabase region 代号跟 AWS region 不一一映射（London 区不是简单的 `aws-0-eu-west-2`，要去 dashboard "Connect" 按钮看真实字符串）
+- pooler username 格式必须是 `postgres.<project-ref>`（带 `.` + ref），不是裸 `postgres`
+- pooler "Tenant or user not found" 错误通常是 hostname 拼错（不是 username / 不是 region 名）
+
+→ 详见 `docs/setup/03-wave3-saas-prep.md`
+
+### 10.6 Phase 1 验收结果
+
+| 链路 | 状态 | 验证手段 |
+|---|---|---|
+| 工具链 (Makefile / alembic / psycopg / .env / port 19080 / HMAC) | ✅ | 全部跑通 |
+| daemon HTTP /scan with HMAC | ✅ HTTP 200 | `bash scripts/smoke-test-supabase.sh` |
+| SQLite write | ✅ snapshot id=10 | `bash scripts/smoke-test-snapshot.sh` |
+| Parquet 本地写入 | ✅ 4999 bytes | `data/snapshots/2026/05/14/14-59-37.parquet` |
+| **R2 upload** | ✅ **bucket 有文件** | `bash scripts/smoke-test-cloudflare-r2.sh` → `polyarb-snapshots/2026/05/14/14-59-37.parquet` |
+| Supabase Postgres alembic migration | ✅ 3 表 + 1 alembic_version | `make supabase-migrate` 落地 |
+| Supabase mirror | ❌ Plan 03 upsert bug (F-02/F-05) | snapshot 写时 mirror INSERT 触发 NOT NULL |
+| Polymarket Gamma 完整抓取 | ❌ API 加了 offset≤10000 限制 | 见 §10.3 |
+
+**Phase 1 验收口径**：调试期目标是验证**工具链 + 云栈打通**，不是业务功能完整。所有工具链 ✅，云栈 ✅（除 mirror 业务侧 bug，fail-soft 设计下不阻塞 SQLite + R2 source-of-truth）。**Phase 1 通过**。
+
+Plan 03 mirror bug（F-02/F-05）+ Polymarket offset 约束（§10.3）+ daemon SIGINT（F-04）+ init_schema migration（F-01）→ Plan 02/03 retro fix-up 单独 PR 处理，不延 Wave 3 dispatch。

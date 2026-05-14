@@ -56,6 +56,14 @@
 | `POLYARB_R2_SECRET_ACCESS_KEY` | Step B | `e5f6g7h8...` (64 hex) |
 | `POLYARB_SCAN_SHARED_SECRET` | Step A.7 | `openssl rand -hex 32` (64 hex) |
 
+> ⚠️ **真实凭证绝对不要写到本文件**。本指南是 git 仓库的一部分（会推到 GitHub）。所有真实 secret 值只能写到：
+> - `.env`（已在 `.gitignore` 里，不会提交 — 跑 `git check-ignore .env` 验证）
+> - 密码管理器（1Password / Bitwarden / Keychain）
+> - Fly.io secrets (`flyctl secrets set`，加密存在 Fly 后端)
+> - GitHub Actions repo secrets（加密存在 GH 后端）
+>
+> **如果不慎写到本文件**：(1) 立刻把对应服务的 token revoke 重发；(2) 从文件里删掉；(3) 检查是否已 `git add` / `git commit` 过 — 已 commit 的话还要用 `git filter-repo` 重写历史。
+
 > `POLYARB_R2_BUCKET=polyarb-snapshots` 已经写死在 `.env.example`，不算 secret。
 
 另外还有 1 个 secret 要单独写到 **GitHub Actions** 的 repo secrets（不在 Fly）：
@@ -182,7 +190,7 @@ New app created: polyarb-l1
 flyctl volumes create polyarb_data --size 5 --region ams -a polyarb-l1
 ```
 
-**为什么 AMS**：Polymarket API 主要走 Cloudflare 北美 / 欧洲边缘节点；Dublin (`Supabase`) + Amsterdam (`Fly`) 同 EU 主干网，跨服务延迟 ~5-10ms。换其它 region 会让 Supabase mirror 变慢。
+**为什么 AMS**：Polymarket API 主要走 Cloudflare 北美 / 欧洲边缘节点；EU Supabase（London 或 Dublin，看 Supabase 当前提供哪个）+ Amsterdam (`Fly`) 同 EU 主干网，跨服务延迟 ~5-15ms。换 US / SG / SA region 会让 Supabase mirror 慢很多（跨大西洋 80ms+）。
 
 **为什么 5G**：subset snapshot 一个 ~5MB，full 一个 ~20MB；按 2/day subset + 1/week full + 30 天保留 = ~400MB SQLite + ~600MB parquet。预留 5G 留 4-5 倍冗余。
 
@@ -290,7 +298,7 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_ENDPOINT_URL
 
 ---
 
-## Step C — Supabase Pro Dublin（~5 min）
+## Step C — Supabase EU（London / Dublin）（~5 min）
 
 ### C.1 注册 + 创建 project
 
@@ -299,7 +307,7 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_ENDPOINT_URL
 - **Project name**: `polyarb`
 - **Organization**: 你的 personal org
 - **Database Password**: ⚠️ 用密码管理器生成 16+ 字符随机 — **现在记下！这是 DSN 的一部分，丢了只能重置整个 project**
-- **Region**: **🇮🇪 West EU (Dublin)** — 必须 Dublin，理由同 Fly AMS（同 EU 主干网）
+- **Region**: **🇬🇧 West EU (London)** 或 **🇮🇪 West EU (Dublin)** — 选 Supabase 当前提供的任一 EU 选项即可。**必须是 EU**（与 Fly AMS 同主干网）。2026-05 Supabase 把 Dublin 重命名/迁移到 London，两者效果一样。**禁选**：任何 US / SG / SA 选项（跨洋会让 mirror 延迟从 ~10ms 飙到 80-200ms）
 - **Pricing Plan**: **Free**（调试期 — 详见上方 "Supabase Free → Pro 升级判定标准"；Wave 5 末 soak gate 前再升）
 
 > **D-02 历史决定 Pro 是基于"持续投运"假设**；调试期不存在持续投运语义，Free tier 完全够用。Free → Pro 是 in-place 升级（不停服 / 不丢数据 / DSN 不变），所以现在选 Free 没有沉没成本。
@@ -529,7 +537,7 @@ POLYARB_SUPABASE_URL                xxx                 just now
 - [ ] Fly app `polyarb-l1` 存在，volume `polyarb_data` 5G 在 AMS region（machine 尚未启动 → 不收 machine 费）
 - [ ] Fly Dashboard → Billing → Spend Management 设了月度 hard cap（建议 $20）
 - [ ] R2 bucket `polyarb-snapshots` 存在，private 访问，API token 三件套已记录
-- [ ] Supabase **Free** project (Dublin) 存在，Alembic 001 migration 已 apply（`snapshots` + `markets_latest` 表 + `top_movers_view` view + RLS policy 看得见）
+- [ ] Supabase **Free** project (EU — London 或 Dublin) 存在，Alembic 001 migration 已 apply（`snapshots` + `markets_latest` 表 + `top_movers_view` view + RLS policy 看得见）
 - [ ] HMAC 共享密钥（Step A.7 的 64 hex）已经记到密码管理器 — Plan 06 也要用
 - [ ] 本地 `.env` 写了 7 个 secret（6 个 SaaS + HMAC 密钥）
 - [ ] `make daemon-run-local` + 一次 HMAC-签名 `/scan` 调用成功

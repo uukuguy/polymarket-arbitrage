@@ -4,9 +4,9 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 status: executing
-stopped_at: Phase 02 Wave 2 ✅ COMPLETE (Plan 02 + Plan 03); Wave 3 (Plan 04 first deploy) NEXT — needs SaaS registration
-last_updated: "2026-05-13T15:00:00.000Z"
-last_activity: 2026-05-13
+stopped_at: Phase 1 SaaS prep + tool-chain verification ✅ PASSED (SESSION 17 EOD 2026-05-14); Plan 03 retro fix-up + Polymarket offset cap 落 thread backlog；Wave 3 等 Plan 03 fix-up PR 后 dispatch
+last_updated: "2026-05-14T15:30:00.000Z"
+last_activity: 2026-05-14
 progress:
   total_phases: 4
   completed_phases: 2
@@ -20,11 +20,11 @@ progress:
 ## Current Position
 
 Phase: 02 (l1-production-grade) — EXECUTING
-Plan: 3 of 7 ✅ (Wave 2 complete) → next: Wave 3 Plan 04 (Dockerfile + fly.toml + GHA + first deploy) — **user checkpoint** for SaaS account registration
-**Status:** Wave 2 complete; Wave 3 requires user SaaS prep (Fly.io + R2 + Supabase accounts + secrets)
+Plan: 3 of 7 ✅ (Wave 2 complete) + Phase 1 SaaS prep ✅ → next: Plan 03 retro fix-up PR (F-01..F-05) **then** Wave 3 dispatch
+**Status:** Tool-chain ✅; SaaS 账号 ✅; daemon/SQLite/Parquet/R2 端到端验证 ✅；Supabase mirror upsert + Polymarket offset cap 待修
 **Current Phase:** 02
-**Last Activity:** 2026-05-13
-**Last Activity Description:** Wave 2 Plan 03 shipped — SupabaseMirror + R2Sync (fail-soft post-write adapters), Alembic 001 initial schema, orchestrator step 7.5/7.6 wiring, /health checks 3+4, supabase-migrate/reconcile/r2-list Makefile targets; 4 commits (12faeea/9977d57/3e378dc/d4753f0); 447 m1-perception green (0 failures — pre-existing Phase 01.1 failure now fixed); SQLite remains source of truth (D-12 amendment honored)
+**Last Activity:** 2026-05-14
+**Last Activity Description:** SESSION 17 续 — Phase 1 SaaS prep 走通整条工具链 (Fly app/volume/HMAC ✅, R2 bucket+token ✅, Supabase Free+Alembic 001 ✅)；调试时发现并修复 6 处 Plan 02/03 落地偏差（Makefile .env 自动加载 × 7 target / alembic env.py DSN+psycopg / pyproject psycopg[binary] / port 8080→19080 / HMAC sha256= prefix / R2 smoke script .env 化）；2 处凭证泄漏事故零损失拦截（feedback_secrets-hygiene 强化）；Plan 03 5 个 fix-up issue 落 deployment-architecture thread §10.2；Polymarket Gamma offset≤10000 新约束落 §10.3
 
 ## Progress
 

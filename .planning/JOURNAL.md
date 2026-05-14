@@ -1335,3 +1335,79 @@ planner 原本标 `wave: 2` 给两个 plan（期望并行），但 files 重叠�
   - autonomous=false（user checkpoint）— agent 会在关键点暂停等用户确认 `flyctl deploy` 输出
 
 ---
+
+## 2026-05-14 SESSION 17 续 — Phase 1 SaaS prep + 调试期 tool-chain verification
+
+**Duration**: ~4 hours（用户实操 SaaS 注册 + Claude 现场调试工具链）
+
+### 完成清单
+
+- [DECISION] **Phase 1 验收通过**：daemon → SQLite → Parquet → **R2 upload** 端到端打通；Supabase Postgres migration ✅；HMAC /scan 200 ✅；R2 bucket 真有 parquet 文件
+- [DECISION] **用户 SaaS 账号建好**：Fly app `polyarb-l1` AMS region + 5G volume；Cloudflare R2 bucket `polyarb-snapshots` + API token；Supabase Free EU (London) project + Alembic 001 migration applied + 3 张表 + 1 view
+- [LEARNING] **6 处 Plan 02/03 落地偏差现场修复**（这次 commit）：
+  1. Makefile 7 个 target 加自动 `set -a; . ./.env; set +a` — recipe shell 检查 `$VAR` 在 `uv run` pydantic-settings 加载之前 fail-fast 误报
+  2. `alembic/env.py` 强制把 DSN 改写 `postgresql://` → `postgresql+psycopg://` — SQLAlchemy 默认 psycopg2 driver 但项目装 v3
+  3. `pyproject.toml` 加 `psycopg[binary]` — Plan 03 漏装
+  4. HTTP port 默认 8080 → 19080，`POLYARB_HTTP_PORT` 可覆盖 — 用户明确反对常见端口（被 WeChat / TencentMeeting 占用过两次）
+  5. `http/scan.py` HMAC X-Signature 加 `sha256=` 前缀解析 — docstring 说 Stripe pattern 但实现只接受裸 hex
+  6. `scripts/smoke-test-cloudflare-r2.sh` 凭证 `.env` 化 — 早期硬编码触发凭证泄漏事故
+- [LEARNING] **Plan 03 retro fix-up issue 5 个**（落 `deployment-architecture.md §10.2`）：
+  - F-01 **HIGH**: `SQLiteStore.init_schema()` `CREATE TABLE IF NOT EXISTS` 对老 DB 不加新列（调试手工 ALTER 临时救回）
+  - F-02 MEDIUM: `SupabaseMirror.update_parquet_url` 用 upsert，stage 7.5 mirror 失败时 stage 7.6 触发 NOT NULL
+  - F-03 LOW: Plan 03 SUMMARY 列 `top_movers_view` 实际 migration 没建，多出 `recipe_runs`
+  - F-04 MEDIUM: daemon SIGINT/SIGTERM 不响应（scheduler.run 不响应 stop_event），需 `pkill -9` 才能停
+  - F-05 MEDIUM: `is_valid=False` snapshot 仍触发 mirror，0-market payload schema 跟 Supabase NOT NULL 冲突
+- [LEARNING] **Polymarket Gamma API 新约束** (deployment-architecture §10.3)：`offset > 10000` 返回 HTTP 422；Phase 01 LIVE-RUN-005 时还能拉 20353 markets，2026-05 间 Polymarket 加了 offset cap。subset 模式当前拿满 10k 行已经够验证云栈，**Phase 1 不被 blocked**；Phase 02.x 或单独 phase 修分页策略
+- [LEARNING] **CN 网络观察落 thread** §10.4：Polymarket API 在 CN ISP 直连被墙，httpx 默认 `trust_env=True` 自动读 `HTTPS_PROXY`；`nc -zv` 不走代理 → 直连超时是预期的，不要据此判断 API 出问题
+- [LEARNING] **Supavisor pooler 坑落 thread** §10.5：Supabase Direct connection IPv6-only CN 不通；必须 Session pooler；hostname 不能套模板猜（dashboard "Connect" 看真值）；username 必须 `postgres.<ref>` 格式
+
+### 关键事故 — 凭证泄漏 2 次拦截
+
+1. **R2 token + HMAC 写到 `docs/setup/03-wave3-saas-prep.md` 占位符旁**：工作树发现未 commit；R2 token 轮换 + 指南清场 + 加显式警告 block；`feedback_secrets-hygiene-2026-05` 建立
+2. **HMAC 泄漏在 zsh 错误信息里**：shell 命令变量未传到 sub-shell，`command not found: <hex>` 暴露密钥；HMAC 二次轮换；secrets-hygiene memory 补"shell error / chat paste" 泄漏面
+
+零真凭证进入 git history（`git log --all -S` 验证）；本机 `.env` 是真实凭证唯一存放点。
+
+### Memory 更新
+
+- ✅ `feedback_secrets-hygiene-2026-05` (NEW + 增强): 真凭证只进 .env / 云 secret store；shell error / chat paste 泄漏面也算
+- ✅ `feedback_workflow-vs-shortcut-2026-05` (NEW): 调试期撞工具链坑陪用户修工具链，不要提"手工 SQL/UI 绕过"
+- ✅ `feedback_port-numbers-2026-05` (NEW): 默认端口 19080，禁用 8080/8000/3000/5000
+
+### Git 状态
+
+8 个文件修改 + 3 个 smoke script 新增 + 1 个 thread 重大更新：
+- Makefile (7 target .env 加载)
+- alembic/env.py + pyproject.toml + uv.lock (psycopg driver)
+- src/polyarb/config.py + daemon/main.py (port 19080)
+- src/polyarb/http/scan.py (HMAC sha256= prefix)
+- docs/setup/03-wave3-saas-prep.md (两阶段路线图 + 凭证 hygiene block + Free tier + Supavisor 注意)
+- scripts/smoke-test-{cloudflare-r2,supabase,snapshot}.sh (新增，全部 .env 化)
+- .planning/threads/deployment-architecture.md §10 新增（findings + backlog + Polymarket API + CN 网络 + Supavisor）
+
+### Outstanding — Wave 3 dispatch 前 must-do
+
+- ⏸️ **Plan 03 retro fix-up PR** — 5 个 issue (F-01..F-05) 合并修；HIGH 至少修 F-01（老 DB 新列）+ F-04 (daemon stop)
+- ⏸️ **Polymarket offset cap 修法决策** — `limit=500` / cursor pagination / event-tag 切分；走 Phase 02.x 或单独 phase
+- ⏸️ **Phase 2 投运准备**：用户准备 `flyctl secrets set` (8 个 secret) + GHA `FLY_API_TOKEN`（详见 prep guide Phase 2 章节）；可任意时机推迟
+
+- [NEXT] 下次会话从这里开始：
+
+  **第 1 步**（恢复 + 健康）：
+  ```
+  /gsd-resume-work --ws m1-perception
+  make planning-status   # 应该零 drift
+  git log --oneline -10  # 看本次会话 commit
+  ```
+
+  **第 2 步**（Plan 03 retro fix-up — 在 Wave 3 dispatch 之前）：
+  - 走单独 PR 修 F-01..F-05；建议用 `/gsd-quick` 或 `/gsd-fast`
+  - 或者直接手工开 plan：F-01 + F-04 优先（HIGH）
+
+  **第 3 步**（Wave 3 dispatch 时机由用户决定）：
+  ```
+  /gsd-execute-phase 02 --wave 3 --ws m1-perception
+  ```
+  当且仅当：(a) Plan 03 retro PR merged；(b) 用户准备好 8 个 Fly secrets + GHA token
+
+---
