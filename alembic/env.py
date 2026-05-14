@@ -47,6 +47,14 @@ def _get_url() -> str:
             "(NOT POLYARB_SUPABASE_URL which is the REST URL for supabase-py). "
             "Set: postgresql://postgres:[PASSWORD]@db.<ref>.supabase.co:5432/postgres"
         )
+    # Force psycopg v3 driver: project uses psycopg[binary], not legacy psycopg2.
+    # Supabase dashboard gives bare `postgresql://...` URLs; SQLAlchemy defaults
+    # that scheme to psycopg2. Rewrite to `postgresql+psycopg://` so SQLAlchemy
+    # picks v3. Idempotent if scheme already specifies a driver.
+    if dsn.startswith("postgresql://"):
+        dsn = "postgresql+psycopg://" + dsn[len("postgresql://") :]
+    elif dsn.startswith("postgres://"):
+        dsn = "postgresql+psycopg://" + dsn[len("postgres://") :]
     return dsn
 
 

@@ -52,30 +52,34 @@ planning-status:
 
 .PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-fresh snapshots-purge snapshot-cache-purge
 
-## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly.
+## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly. Auto-loads .env for Supabase+R2 mirror.
 snapshot-markets:
-	@echo ">> snapshot-markets (quiet mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
-	@echo ">> tip: open another terminal and run 'make snapshot-status' to check progress"
-	@echo ""
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo ">> snapshot-markets (quiet mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"; \
+	echo ">> tip: open another terminal and run 'make snapshot-status' to check progress"; \
+	echo ""; \
 	uv run python -m polyarb.snapshot snapshot
 
 ## snapshot-markets-v: Same as snapshot-markets but with progress logs (recommended for interactive runs)
 snapshot-markets-v:
-	@echo ">> snapshot-markets-v (verbose mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
-	@echo ""
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo ">> snapshot-markets-v (verbose mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"; \
+	echo ""; \
 	uv run python -m polyarb.snapshot snapshot --verbose
 
 ## snapshot-markets-full: Capture snapshot (FULL mode, all markets, ~1-2 hours). Quiet.
 snapshot-markets-full:
-	@echo ">> snapshot-markets-full (quiet mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
-	@echo ">> tip: this may take 1-2 hours. Use 'make snapshot-status' to check progress."
-	@echo ""
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo ">> snapshot-markets-full (quiet mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"; \
+	echo ">> tip: this may take 1-2 hours. Use 'make snapshot-status' to check progress."; \
+	echo ""; \
 	uv run python -m polyarb.snapshot snapshot --full
 
 ## snapshot-markets-full-v: FULL mode with progress logs
 snapshot-markets-full-v:
-	@echo ">> snapshot-markets-full-v (verbose mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"
-	@echo ""
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo ">> snapshot-markets-full-v (verbose mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"; \
+	echo ""; \
 	uv run python -m polyarb.snapshot snapshot --full --verbose
 
 ## snapshot-status: One-glance status — running process, recent SQLite rows, latest parquet (local time)
@@ -240,19 +244,23 @@ triple-check:
 
 .PHONY: daemon-run-local smoke-health-local tail-logs-local
 
-## daemon-run-local: Start the polyarb daemon locally on :8080 (HMAC-authenticated /scan + /health). Ctrl-C to stop.
+## daemon-run-local: Start the polyarb daemon locally on :19080 (HMAC-authenticated /scan + /health). Ctrl-C to stop. Override port via POLYARB_HTTP_PORT.
 daemon-run-local:
-	@echo ">> daemon-run-local — starting on http://127.0.0.1:8080"
-	@echo ">> endpoints: GET /health  POST /scan (requires X-Signature)"
-	@echo ">> Ctrl-C to stop"
-	@echo ""
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	PORT=$${POLYARB_HTTP_PORT:-19080}; \
+	echo ">> daemon-run-local — starting on http://127.0.0.1:$$PORT"; \
+	echo ">> endpoints: GET /health  POST /scan (requires X-Signature)"; \
+	echo ">> Ctrl-C to stop"; \
+	echo ""; \
 	POLYARB_ALLOW_EMPTY_SECRET=1 uv run python -m polyarb.daemon.main
 
 ## smoke-health-local: Hit GET /health on running local daemon and print JSON response. Requires daemon-run-local in another terminal.
 smoke-health-local:
-	@echo ">> smoke-health-local — GET http://127.0.0.1:8080/health"
-	@echo ""
-	curl -sf http://127.0.0.1:8080/health | python3 -m json.tool
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	PORT=$${POLYARB_HTTP_PORT:-19080}; \
+	echo ">> smoke-health-local — GET http://127.0.0.1:$$PORT/health"; \
+	echo ""; \
+	curl -sf http://127.0.0.1:$$PORT/health | python3 -m json.tool
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 03: Supabase mirror + R2 archive
@@ -264,21 +272,24 @@ smoke-health-local:
 
 .PHONY: supabase-migrate supabase-reconcile r2-list
 
-## supabase-migrate: Run Alembic upgrade head against Supabase prod DSN (requires POLYARB_SUPABASE_DB_DSN)
+## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
 	@echo ">> supabase-migrate — alembic upgrade head"
-	@if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN not set (W6: DB DSN distinct from REST URL POLYARB_SUPABASE_URL)"; exit 1; fi
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN not set in .env or shell (W6: DB DSN distinct from REST URL POLYARB_SUPABASE_URL)"; exit 1; fi; \
 	uv run alembic upgrade head
 
-## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots
+## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:
 	@echo ">> supabase-reconcile — comparing local SQLite vs Supabase mirror"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
 	uv run python scripts/supabase_seed.py reconcile
 
-## r2-list: List objects in R2 bucket (dev convenience; requires POLYARB_R2_ENDPOINT/BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY)
+## r2-list: List objects in R2 bucket (auto-loads .env; requires POLYARB_R2_ENDPOINT/BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY)
 r2-list:
-	@echo ">> r2-list — listing R2 bucket $${POLYARB_R2_BUCKET:-polyarb-snapshots}"
-	@if [ -z "$$POLYARB_R2_ENDPOINT" ]; then echo "ERROR: POLYARB_R2_ENDPOINT not set"; exit 1; fi
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo ">> r2-list — listing R2 bucket $${POLYARB_R2_BUCKET:-polyarb-snapshots}"; \
+	if [ -z "$$POLYARB_R2_ENDPOINT" ]; then echo "ERROR: POLYARB_R2_ENDPOINT not set in .env or shell"; exit 1; fi; \
 	uv run python -c "import boto3, os; c = boto3.client('s3', endpoint_url=os.environ['POLYARB_R2_ENDPOINT'], aws_access_key_id=os.environ['POLYARB_R2_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['POLYARB_R2_SECRET_ACCESS_KEY'], region_name='auto'); resp = c.list_objects_v2(Bucket=os.environ.get('POLYARB_R2_BUCKET', 'polyarb-snapshots')); [print(o['Key']) for o in resp.get('Contents', [])]"
 
 ## tail-logs-local: Stream stdout of locally running daemon process. Usage: make tail-logs-local [PID=<pid>]

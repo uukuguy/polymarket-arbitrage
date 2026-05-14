@@ -4,7 +4,7 @@ Phase 02 Plan 02 — asyncio SIGINT/SIGTERM graceful shutdown.
 
 Run locally:
     POLYARB_ALLOW_EMPTY_SECRET=1 uv run python -m polyarb.daemon.main
-    curl http://127.0.0.1:8080/health
+    curl http://127.0.0.1:19080/health   # default; override via POLYARB_HTTP_PORT
 
 Architecture (Plan 02):
     1. init_logging() — loguru JSON to stdout (must be FIRST before any logger calls)
@@ -50,7 +50,7 @@ async def main() -> int:
     config = uvicorn.Config(
         app,
         host="0.0.0.0",      # Fly internal network only — fly.toml controls exposure
-        port=8080,
+        port=settings.http_port,
         log_config=None,      # use loguru, not uvicorn's logger
         access_log=False,     # Axiom doesn't need access logs at this volume
     )
@@ -69,7 +69,7 @@ async def main() -> int:
     server_task = asyncio.create_task(server.serve())
     scheduler_task = asyncio.create_task(scheduler.run(stop_event))
 
-    logger.info("daemon running: http server on :8080, scheduler started")
+    logger.info(f"daemon running: http server on :{settings.http_port}, scheduler started")
 
     await stop_event.wait()
     logger.info("stop_event set, shutting down server")

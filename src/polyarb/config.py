@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     release_id: str = Field(default="dev")
     # recipes yaml path for /scan handler
     recipes_yaml_path: Path = Path("config/scan_recipes.yaml")
+    # HTTP daemon listen port. Default 19080 (uncommon, avoids 8080/8000 collisions
+    # with IDE / IM / Docker / other dev servers). Override via POLYARB_HTTP_PORT.
+    http_port: int = Field(default=19080)
 
     # ── Supabase (D-02) — Plan 03 additions ──────────────────────────────────
     # TWO distinct env vars: supabase-py SDK uses REST URL; Alembic uses DB DSN.

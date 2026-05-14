@@ -113,6 +113,13 @@ async def scan_auth_middleware(request: Request, call_next: Any, *, secret: str)
     if not received_sig:
         return JSONResponse({"error": "missing X-Signature header"}, status_code=401)
 
+    # Accept both Stripe/GitHub webhook format `sha256=<hex>` AND bare `<hex>`.
+    # The docstring above promises Stripe/GitHub pattern; without this strip,
+    # any client following the documented pattern would 401. Bare-hex form
+    # preserved for backward compat with existing tests + ad-hoc curl clients.
+    if received_sig.startswith("sha256="):
+        received_sig = received_sig[len("sha256=") :]
+
     # Read body for HMAC computation
     body = await request.body()
 
