@@ -67,9 +67,19 @@ async def main() -> int:
         loop.add_signal_handler(sig, _shutdown, sig)
 
     server_task = asyncio.create_task(server.serve())
-    scheduler_task = asyncio.create_task(scheduler.run(stop_event))
 
-    logger.info(f"daemon running: http server on :{settings.http_port}, scheduler started")
+    # Wait for uvicorn to be ready before starting the scheduler.
+    # server.started is set once uvicorn binds its socket and begins
+    # accepting connections. Without this gate, the scheduler's first
+    # tick can monopolize the event loop for minutes and Fly's health
+    # check never sees a live port.
+    for _ in range(100):
+        if server.started:
+            break
+        await asyncio.sleep(0.1)
+    logger.info(f"daemon running: http server on :{settings.http_port}, starting scheduler")
+
+    scheduler_task = asyncio.create_task(scheduler.run(stop_event))
 
     await stop_event.wait()
     logger.info("stop_event set, shutting down server")
