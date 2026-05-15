@@ -209,7 +209,7 @@ async def test_fetch_all_emits_periodic_progress() -> None:
 
     # Contract assertions — order matters but exact phrasing is intentionally
     # loose so future tweaks to wording don't break the test.
-    starting = [m for m in captured if "starting paginated fetch" in m]
+    starting = [m for m in captured if "starting streaming fetch" in m]
     page_1 = [m for m in captured if "page 1 fetched" in m]
     page_50 = [m for m in captured if "page 50 fetched" in m]
     page_100 = [m for m in captured if "page 100 fetched" in m]
@@ -344,3 +344,200 @@ async def test_fetch_events_404_no_retry() -> None:
         finally:
             await client.aclose()
     assert route.call_count == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plan 02-09 (D-23): streaming iterator API tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_iter_active_markets_yields_one_at_a_time() -> None:
+    """3-page mock; iter_active_markets yields each market individually,
+    stamps `_page_fetched_at_ms`, and strips to `_MARKET_KEEP` fields."""
+    settings = _fast_settings()
+    page0 = [
+        {
+            "id": str(540000 + i),
+            "conditionId": f"0x{i:064d}",
+            "question": f"q {i}",
+            "active": True,
+            "closed": False,
+            "extra_garbage_field": "should_be_stripped",
+            "another_unused": [1, 2, 3],
+        }
+        for i in range(100)
+    ]
+    page1 = [
+        {
+            "id": str(540100 + i),
+            "conditionId": f"0x{i:064d}",
+            "question": f"q {i}",
+            "active": True,
+            "closed": False,
+            "extra_garbage_field": "should_be_stripped",
+        }
+        for i in range(100)
+    ]
+    page2 = [
+        {
+            "id": str(540200 + i),
+            "conditionId": f"0x{i:064d}",
+            "question": f"q {i}",
+            "active": True,
+            "closed": False,
+        }
+        for i in range(42)
+    ]
+
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/markets").mock(
+            side_effect=[
+                httpx.Response(200, json=page0),
+                httpx.Response(200, json=page1),
+                httpx.Response(200, json=page2),
+            ]
+        )
+        client = GammaClient(settings)
+        try:
+            collected: list[dict] = []
+            async for m in client.iter_active_markets():
+                collected.append(m)
+        finally:
+            await client.aclose()
+
+    assert len(collected) == 242
+    # Every yielded dict has _page_fetched_at_ms stamped
+    assert all("_page_fetched_at_ms" in m for m in collected)
+    # Stripping: extra_garbage_field MUST be gone after _MARKET_KEEP filter
+    assert all("extra_garbage_field" not in m for m in collected)
+    assert all("another_unused" not in m for m in collected)
+    # Surviving keys ⊆ _MARKET_KEEP
+    keep = GammaClient._MARKET_KEEP
+    for m in collected:
+        assert set(m.keys()) <= keep, f"unexpected keys: {set(m.keys()) - keep}"
+
+
+async def test_iter_active_markets_paginate_is_async_gen() -> None:
+    """Structural check: _paginate is now an async generator function, not coroutine."""
+    import inspect
+
+    assert inspect.isasyncgenfunction(GammaClient._paginate)
+    assert inspect.isasyncgenfunction(GammaClient.iter_active_markets)
+    assert inspect.isasyncgenfunction(GammaClient.iter_active_events)
+
+
+async def test_iter_active_events_trims_nested_markets() -> None:
+    """iter_active_events yields events whose `markets` is trimmed to `[{"id": ...}]`."""
+    settings = _fast_settings()
+    raw_events = [
+        {
+            "id": str(16000 + i),
+            "slug": f"event-{i}",
+            "title": f"Event {i}",
+            "active": True,
+            "closed": False,
+            "markets": [
+                {"id": str(540000 + i * 10 + k), "extra": "junk", "more": [1, 2]}
+                for k in range(3)
+            ],
+        }
+        for i in range(5)
+    ]
+
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/events").mock(return_value=httpx.Response(200, json=raw_events))
+        client = GammaClient(settings)
+        try:
+            collected: list[dict] = []
+            async for e in client.iter_active_events():
+                collected.append(e)
+        finally:
+            await client.aclose()
+
+    assert len(collected) == 5
+    for ev in collected:
+        assert isinstance(ev["markets"], list)
+        for m in ev["markets"]:
+            assert set(m.keys()) == {"id"}, f"nested markets not trimmed: {m}"
+
+
+async def test_fetch_all_active_markets_still_returns_list() -> None:
+    """Backward-compat: fetch_all_active_markets returns a list (not iterator).
+
+    Content equality with iterator-collected version.
+    """
+    settings = _fast_settings()
+    page = [_make_market_dict(i) for i in range(50)]
+
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=False) as router:
+        router.get("/markets").mock(return_value=httpx.Response(200, json=page))
+        client = GammaClient(settings)
+        try:
+            via_list = await client.fetch_all_active_markets()
+        finally:
+            await client.aclose()
+        assert isinstance(via_list, list)
+        assert len(via_list) == 50
+
+        # Reset respx and call iterator path
+        router.get("/markets").mock(return_value=httpx.Response(200, json=page))
+        client2 = GammaClient(settings)
+        try:
+            via_iter: list[dict] = []
+            async for m in client2.iter_active_markets():
+                via_iter.append(m)
+        finally:
+            await client2.aclose()
+
+    # Content matches (both apply the same _MARKET_KEEP filter)
+    assert [m["id"] for m in via_list] == [m["id"] for m in via_iter]
+
+
+async def test_iter_active_markets_422_yields_partial() -> None:
+    """422 mid-pagination → iterator stops cleanly with items yielded so far."""
+    settings = _fast_settings()
+    page0 = [_make_market_dict(i) for i in range(100)]
+    page1 = [_make_market_dict(100 + i) for i in range(100)]
+    # Third call returns 422 (Polymarket offset>10000 cap)
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/markets").mock(
+            side_effect=[
+                httpx.Response(200, json=page0),
+                httpx.Response(200, json=page1),
+                httpx.Response(422, json={"error": "offset cap"}),
+            ]
+        )
+        client = GammaClient(settings)
+        try:
+            collected: list[dict] = []
+            async for m in client.iter_active_markets():
+                collected.append(m)
+        finally:
+            await client.aclose()
+    # 200 items yielded; iterator stops without raising
+    assert len(collected) == 200
+
+
+async def test_iter_active_markets_max_pages_runaway_raises() -> None:
+    """If the API returns MAX_PAGES full pages, the iterator must raise mid-stream."""
+    settings = _fast_settings()
+    # Build PAGE_LIMIT entries per page so the loop keeps requesting.
+    full_page = [_make_market_dict(i) for i in range(100)]
+
+    # Monkey-patch MAX_PAGES to a tiny number to keep the test fast.
+    orig_max = GammaClient.MAX_PAGES
+    try:
+        GammaClient.MAX_PAGES = 3  # type: ignore[assignment]
+
+        with respx.mock(base_url=settings.gamma_url, assert_all_called=False) as router:
+            # Return a full page every time → never terminates organically.
+            router.get("/markets").mock(return_value=httpx.Response(200, json=full_page))
+            client = GammaClient(settings)
+            try:
+                with pytest.raises(RuntimeError, match="exceeded"):
+                    async for _ in client.iter_active_markets():
+                        pass
+            finally:
+                await client.aclose()
+    finally:
+        GammaClient.MAX_PAGES = orig_max  # type: ignore[assignment]
