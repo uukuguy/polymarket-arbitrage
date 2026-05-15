@@ -397,6 +397,25 @@ def mocked_gamma_orchestrator(gamma_fixture: list[dict]) -> Any:
         for m in gamma_fixture
     ]
     fake.fetch_all_active_events.return_value = synthetic_events
+
+    # Plan 02-09 (D-23): orchestrator now uses iter_active_markets (async
+    # iterator). AsyncMock returns a coroutine by default which is NOT an
+    # async iterator. Supply real async-generator stubs that yield the
+    # fixture entries one at a time, matching the streaming contract.
+    def _make_iter_markets(items):
+        async def _iter():
+            for m in items:
+                yield m
+        return _iter
+
+    def _make_iter_events(items):
+        async def _iter():
+            for e in items:
+                yield e
+        return _iter
+
+    fake.iter_active_markets = _make_iter_markets(gamma_fixture)
+    fake.iter_active_events = _make_iter_events(synthetic_events)
     fake.aclose = AsyncMock()
     fake.__aenter__.return_value = fake
     fake.__aexit__.return_value = None

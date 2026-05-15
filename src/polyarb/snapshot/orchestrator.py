@@ -81,7 +81,7 @@ from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
 from polyarb.snapshot.cache import ChunkCache
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
-from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_atomic
+from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_streaming
 from polyarb.storage.sqlite_store import SQLiteStore
 from polyarb.validator.category import Category, Issue
 from polyarb.validator.layers import (
@@ -166,12 +166,16 @@ async def run_snapshot(
 
     taken_at_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     issues: list[Issue] = []
-    gamma_count_reported: int | None = None
-    raw_markets: list[dict] = []
-    raw_events: list[dict] = []
+    target_markets: list[dict] = []
+    seen_ids: set[str] = set()
+    raw_market_count = 0
+    normalized_count = 0
+    dedup_count = 0
     event_rows: list[dict] = []
     event_tag_rows: list[dict] = []
     market_to_event_map: dict[str, str] = {}
+    threshold = settings.liquidity_threshold_usd
+    PROGRESS_EVERY = 5000  # log every N streamed markets so long fetches stay observable
 
     logger.info(
         f"snapshot starting — mode={mode}, cache={'on' if use_cache else 'off'}, "
@@ -180,18 +184,24 @@ async def run_snapshot(
 
     overall_t0 = time.monotonic()
 
-    # ── 1. Gamma fetch (events FIRST for category/tags, then markets) ─────────
-    # Phase 1.1 Amendment 01: /events is the only source of category/tags. We
-    # fetch /events first to build market→event_id reverse map, then /markets,
-    # so the normalizer can stamp event_id on every market row.
-    # If /events fails we still proceed with /markets (event_id will be None for
-    # all markets — graceful degradation, single Issue recorded).
-    with _phase("1/7: Gamma fetch (active events + markets)"):
-        async with GammaClient(settings) as gamma:
-            # Step 1a: events (best-effort — failure → empty map)
+    # ── Phases 1+2 combined: one GammaClient session, events materialized,
+    # then markets STREAMED (D-23). Single `async with` so HTTP/2 keepalive
+    # is shared across /events + /markets and shutdown is clean.
+    async with GammaClient(settings) as gamma:
+        # ── Phase 1: events (fully materialized — Decision A) ─────────────
+        with _phase("1/7: Gamma /events fetch + normalize"):
             try:
                 raw_events = await gamma.fetch_all_active_events()
                 logger.info(f"Gamma: fetched {len(raw_events)} active events")
+                event_rows, event_tag_rows, market_to_event_map = normalize_events(
+                    raw_events
+                )
+                del raw_events  # free 10k+ raw Gamma event dicts immediately
+                logger.info(
+                    f"Events normalized: {len(event_rows)} events, "
+                    f"{len(event_tag_rows)} event_tags, "
+                    f"{len(market_to_event_map)} market→event mappings"
+                )
             except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
                 logger.error(f"Gamma /events fetch failed: {e!r}")
                 issues.append(
@@ -202,15 +212,42 @@ async def run_snapshot(
                         detail=f"Gamma /events unreachable: {str(e)[:200]}",
                     )
                 )
-                raw_events = []
 
-            # Step 1b: markets (mainline — failure → empty markets)
+        # ── Phase 2: stream /markets — normalize + dedupe + mode-filter ──
+        # The 20k raw Gamma /markets list NEVER materializes — each `raw`
+        # dict is normalized, dedup-checked, mode-filtered, and either
+        # appended to `target_markets` or dropped. Non-target markets go
+        # out of scope at the next iteration → GC eligible.
+        with _phase("2/7: Stream /markets — normalize + dedupe + filter"):
             try:
-                raw_markets = await gamma.fetch_all_active_markets()
-                gamma_count_reported = len(raw_markets)
-                logger.info(f"Gamma: fetched {gamma_count_reported} active markets")
+                async for raw in gamma.iter_active_markets():
+                    raw_market_count += 1
+                    normalized = normalize_market(raw, market_to_event_map)
+                    if normalized is None:
+                        continue
+                    mid = normalized.get("market_id")
+                    if mid is None:
+                        continue
+                    if mid in seen_ids:
+                        dedup_count += 1
+                        continue
+                    seen_ids.add(mid)
+                    normalized_count += 1
+
+                    # Mode filter (replaces the old phase-3 block).
+                    if mode == "full" or (
+                        normalized.get("liquidity_usd") or 0
+                    ) > threshold:
+                        target_markets.append(normalized)
+                    # Non-target markets: dropped — no buffer, no reference held.
+
+                    if normalized_count % PROGRESS_EVERY == 0:
+                        logger.info(
+                            f"streaming {normalized_count} markets normalized, "
+                            f"{len(target_markets)} target so far"
+                        )
             except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
-                logger.error(f"Gamma /markets fetch failed: {e!r}")
+                logger.error(f"Gamma /markets stream failed: {e!r}")
                 issues.append(
                     Issue(
                         layer=1,
@@ -219,68 +256,30 @@ async def run_snapshot(
                         detail=f"Gamma unreachable: {str(e)[:200]}",
                     )
                 )
-                raw_markets = []
 
-    # ── 2. Normalize (events first to build map, then markets with map injection)
-    with _phase("2/7: Normalize + dedupe"):
-        # Step 2a: events → events_rows + event_tags + market→event_id map
-        event_rows, event_tag_rows, market_to_event_map = normalize_events(raw_events)
-        del raw_events  # free 10k+ raw Gamma dicts immediately
+    # GammaClient closed (exited async-with). httpx AsyncClient fully cleaned
+    # up before the CLOB phase starts.
+
+    gamma_count_reported = raw_market_count if raw_market_count > 0 else None
+    if dedup_count > 0:
         logger.info(
-            f"Events normalized: {len(event_rows)} events, "
-            f"{len(event_tag_rows)} event_tags, "
-            f"{len(market_to_event_map)} market→event mappings"
+            f"Deduped {dedup_count} markets by market_id (Gamma pagination overlap)"
         )
+    logger.info(
+        f"Streamed {normalized_count}/{raw_market_count} normalized; "
+        f"{len(target_markets)} target after mode-filter (mode={mode})"
+    )
 
-        # Step 2b: markets, injecting event_id from the reverse map
-        raw_market_count = len(raw_markets)
-        markets: list[dict] = [
-            m
-            for m in (
-                normalize_market(r, market_to_event_map) for r in raw_markets
-            )
-            if m is not None
-        ]
-        del raw_markets  # free 10k+ raw Gamma dicts immediately
-
-        # Dedupe by market_id — Gamma /markets returns ~4% duplicates across pagination
-        # boundaries (live empirical: 1,960 dups in 48,985 rows on 2026-04-29). The only
-        # observed differing field is liquidity_usd (drifts between page fetches), so
-        # keeping the FIRST occurrence is safe and stable. Without this, SQLite's UNIQUE
-        # constraint on markets.market_id rolls back the entire snapshot insert.
-        seen_ids: set[str] = set()
-        deduped: list[dict] = []
-        for m in markets:
-            mid = m.get("market_id")
-            if mid is None or mid in seen_ids:
-                continue
-            seen_ids.add(mid)
-            deduped.append(m)
-        dup_count = len(markets) - len(deduped)
-        if dup_count > 0:
-            logger.info(f"Deduped {dup_count} markets by market_id (Gamma pagination overlap)")
-        markets = deduped
-        logger.info(f"Normalized: {len(markets)}/{raw_market_count} unique markets kept")
-
-    # ── 3. Mode filter → token list ───────────────────────────────────────────
-    with _phase("3/7: Mode filter"):
-        if mode == "subset":
-            target_markets = [
-                m for m in markets
-                if (m.get("liquidity_usd") or 0) > settings.liquidity_threshold_usd
-            ]
-        else:
-            target_markets = markets
-
+    # ── Phase 3: token list extraction (was inlined into old phase 3) ────
+    with _phase("3/7: Build token list"):
         token_ids: list[str] = []
         for m in target_markets:
             for k in ("yes_token_id", "no_token_id"):
                 tid = m.get(k)
                 if tid:
                     token_ids.append(tid)
-
         logger.info(
-            f"Mode={mode}: {len(target_markets)}/{len(markets)} markets, "
+            f"Mode={mode}: {len(target_markets)} target markets, "
             f"{len(token_ids)} tokens to fetch from CLOB"
         )
 
@@ -391,7 +390,7 @@ async def run_snapshot(
         if gamma_count_reported is not None:
             # Layer 1 compares Gamma's reported active count vs how many we kept
             # post-normalize. A diff means either a bug in normalize OR API jitter.
-            issues.extend(layer1_count(gamma_count_reported, len(markets)))
+            issues.extend(layer1_count(gamma_count_reported, normalized_count))
 
         # Layer 2/4 validate ONLY persisted markets. Filtered-out markets aren't
         # part of this snapshot's "completeness" claim — they'd flood
@@ -431,29 +430,32 @@ async def run_snapshot(
     finished_at_ms = int(time.time() * 1000)
     parquet_path = compute_snapshot_path(settings.parquet_root, taken_at_ms)
     with _phase("7/7: Persist (Parquet then SQLite)"):
-        # Build parquet rows — must match SNAPSHOT_SCHEMA (22 fields including
-        # snapshot_taken_at_ms + snapshot_id parquet-only fields). Persist ONLY
-        # target_markets (the mode-filtered set). Filtered-out markets aren't part
-        # of this snapshot's claim.
-        parquet_rows: list[dict] = []
-        for m in target_markets:
-            row = dict(m)
-            row["snapshot_taken_at_ms"] = taken_at_ms
-            row["snapshot_id"] = 0  # placeholder — Parquet has no FK; SQLite assigns the real id
-            row.setdefault("fetched_at_ms", clob_done_ms)
-            parquet_rows.append(row)
-        write_parquet_atomic(parquet_rows, parquet_path)
+        # Plan 02-09 (D-23): streaming writes. Parquet via ParquetWriter chunked
+        # write; SQLite via batched executemany in a single BEGIN IMMEDIATE
+        # transaction. Both consume `target_markets` (already post-filter, ≤8k
+        # rows in subset mode at $1k threshold). The architectural win is in
+        # phase 2 above — the 20k raw Gamma list never materializes.
+
+        def _parquet_row_iter():
+            """Generator: stamp snapshot metadata on each target market dict."""
+            for m in target_markets:
+                row = dict(m)
+                row["snapshot_taken_at_ms"] = taken_at_ms
+                row["snapshot_id"] = 0  # SQLite assigns the real id
+                row.setdefault("fetched_at_ms", clob_done_ms)
+                yield row
+
+        write_parquet_streaming(_parquet_row_iter(), parquet_path, batch_size=500)
 
         # Phase 1.1 Amendment 01: stamp events with finished_at_ms (NOT
         # clob_done_ms — events are fetched by Gamma in phase 1, not CLOB).
-        # We use finished_at_ms as the conventional "events landed at" time.
         for ev in event_rows:
             if ev.get("fetched_at_ms") is None:
                 ev["fetched_at_ms"] = finished_at_ms
 
         store = SQLiteStore(settings.db_path)
         store.init_schema()
-        snapshot_id = store.write_snapshot(
+        snapshot_id, market_count = store.write_snapshot_streaming(
             taken_at_ms=taken_at_ms,
             finished_at_ms=finished_at_ms,
             mode=mode,
@@ -463,6 +465,7 @@ async def run_snapshot(
             issues=issues,
             event_rows=event_rows,
             event_tag_rows=event_tag_rows,
+            batch_size=500,
         )
 
     # ── 7.5. Supabase mirror (D-02 dashboard) — fail-soft post-write ─────────
