@@ -191,7 +191,18 @@ class GammaClient:
 
         while True:
             page_params = {**params, "limit": self.PAGE_LIMIT, "offset": offset}
-            page = await self._get(path, page_params)
+            try:
+                page = await self._get(path, page_params)
+            except _NonRetryableHTTPError as exc:
+                # Polymarket 422 at offset>10000 (2026-05 cap). Return what
+                # we already have instead of failing the entire snapshot.
+                if "422" in str(exc) and out:
+                    logger.warning(
+                        f"Gamma {label}: 422 at offset={offset}, "
+                        f"returning {len(out)} items fetched so far"
+                    )
+                    break
+                raise
             if not isinstance(page, list):
                 raise RuntimeError(
                     f"Gamma {path} returned {type(page).__name__}, expected list"

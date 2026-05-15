@@ -192,6 +192,11 @@ class SnapshotScheduler:
         logger.info(f"scheduler loop started, tick interval={interval_s}s")
 
         try:
+            # Yield once before first tick so uvicorn can bind its socket.
+            # Without this, _tick() blocks the event loop for 30s+ on Gamma
+            # fetch and the Fly health check declares the machine dead.
+            await asyncio.sleep(0)
+
             while not stop_event.is_set():
                 await self._tick()
                 # Wait for interval, checking stop_event at 1s granularity.
