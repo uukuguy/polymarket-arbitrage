@@ -1411,3 +1411,69 @@ planner 原本标 `wave: 2` 给两个 plan（期望并行），但 files 重叠�
   当且仅当：(a) Plan 03 retro PR merged；(b) 用户准备好 8 个 Fly secrets + GHA token
 
 ---
+
+## 2026-05-15 SESSION 18 — Plan 02-08 retro fix + Plan 02-04 first prod deploy
+
+**Duration**: ~5 hours
+
+### 完成清单
+
+- [DECISION] **Plan 02-08 landed**: F-01..F-05 五个 Plan 03 retro issue 一次性修完（7 commits: a055670..533e026）
+  - F-01 init_schema idempotent ALTER
+  - F-02+F-05 mirror update_parquet_url pure UPDATE + is_valid guard
+  - F-03 Alembic 002 top_movers_view
+  - F-04 daemon SIGINT ≤ 1s shutdown
+  - pre-commit hook octal trap fix（08/09 plan numbers）
+- [DECISION] **Plan 02-04 landed**: Dockerfile + fly.toml + GHA CI/CD + **first prod deploy**
+  - polyarb-l1.fly.dev /health = pass，256MB VM，全链路跑通
+  - 部署调试期 8 个 fix commits（fly.toml schema / OOM memory fix / scheduler startup gate / Gamma 422 graceful stop / per-page yield / health check grace period）
+- [LEARNING] **修代码不是加内存**: paginator 保留 50+ 字段的完整 Gamma JSON → 20k dicts = 400MB。strip 到 15 字段 + del raw_* 后 256MB 够用。连续 4 次升内存（256→512→1024→2048）全是错误方向。
+- [LEARNING] **合成数据 profiling 不可靠**: 本地 fake 20-field dicts 预估 170MB；真实 50+ field nested JSON 实际 482MB。差 3 倍。
+- [LEARNING] **asyncio 协作调度不免费**: httpx HTTP/2 每页 ~40ms，100 页连续 await 不让出事件循环。需要显式 asyncio.sleep(0)。
+- [LEARNING] **uvicorn startup gate**: scheduler.run() 必须等 server.started 才开始第一个 tick，否则 Fly health check 永远拿不到 200。
+- [LEARNING] **Fly microVM 可用内存 ≠ 分配**: 1024MB 分配 → 578MB 可用（kernel/init 占 ~450MB）。
+
+### Git 状态
+
+20 commits this session:
+- 7 Plan 02-08 commits (a055670..533e026)
+- 1 pre-commit hook fix (46208b4)
+- 3 Plan 02-04 T1-T3 commits (7b558d0..8b3574e)
+- 8 deploy fix commits (af88308..1a97200)
+- 1 lint fix (f712293)
+- 1 SUMMARY (99e6562 — 尚未 push)
+
+### Memory 更新
+
+- ✅ `feedback_fix-code-not-config-2026-05` (NEW): OOM 修代码不加内存
+- ✅ `feedback_profile-with-real-data-2026-05` (NEW): 禁用合成数据 profiling
+- ✅ `project_phase-02-locked-stack` (UPDATED): Wave 1-3 ✅
+- ✅ `archived_plan-03-retro-issues-2026-05` (ARCHIVED): F-01..F-05 全修完
+
+### Outstanding
+
+- ⏸️ **Wave 4**: Plan 05 (Sentry+Axiom+Better Stack+Telegram) + Plan 06 (Vercel dashboard) — 用户需准备 4 个 SaaS 账号
+- ⏸️ **Wave 5**: Plan 07 (chaos test + 7-day soak + 教学文档 08) — 7 天 soak gate
+- ⏸️ **3 pre-existing test failures**: test_pass_when_fresh / make_smoke / r2_retry — 不阻塞但建议清理
+
+- [NEXT] 下次会话从这里开始：
+
+  **第 1 步**（恢复 + 健康）：
+  ```
+  /gsd-resume-work --ws m1-perception
+  make planning-status
+  curl -sS https://polyarb-l1.fly.dev/health  # 确认 prod 还活着
+  ```
+
+  **第 2 步**（Wave 4 前置 — 用户准备 SaaS 账号）：
+  - Sentry: 注册 + 拿 DSN
+  - Axiom: 注册 + 拿 API token
+  - Better Stack: 注册 + 拿 heartbeat URL
+  - Telegram: 创建 bot + 拿 token + chat ID
+
+  **第 3 步**（Wave 4 dispatch）：
+  ```
+  /gsd-execute-phase 02 --wave 4 --ws m1-perception
+  ```
+
+---
