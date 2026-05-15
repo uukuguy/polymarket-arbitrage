@@ -37,3 +37,18 @@ primary_region = "ams"
     method = "GET"
     path = "/health"
     timeout = "5s"
+
+# VM sizing — based on memory profiling (Plan 02-08 session):
+#   Python baseline + all imports: 118 MB
+#   Subset snapshot peak:          170 MB
+#   Full mode peak:                300 MB
+#   512 MB gives 1.7x headroom for full mode.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  processes = ["cron"]
