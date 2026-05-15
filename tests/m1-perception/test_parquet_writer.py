@@ -22,7 +22,11 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
-from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_atomic
+from polyarb.storage.parquet_writer import (
+    compute_snapshot_path,
+    write_parquet_atomic,
+    write_parquet_streaming,
+)
 
 
 def make_market_row(
@@ -150,3 +154,81 @@ def test_write_parquet_uses_snappy_compression(tmp_path: Path) -> None:
     metadata = pq.ParquetFile(out).metadata
     compression = metadata.row_group(0).column(0).compression
     assert compression == "SNAPPY", f"Expected SNAPPY, got {compression}"
+
+
+# ---------- Plan 02-09: streaming writer ------------------------------------
+
+
+def test_write_parquet_streaming_basic(tmp_path: Path) -> None:
+    """100 rows / batch_size=30 — file exists, row count matches, schema matches."""
+    out = tmp_path / "stream.parquet"
+    rows = [make_market_row(f"m{i}") for i in range(100)]
+    total = write_parquet_streaming(iter(rows), out, batch_size=30)
+    assert total == 100
+    assert out.exists()
+    table = pq.read_table(out)
+    assert table.num_rows == 100
+    # Schema must match SNAPSHOT_SCHEMA (field names + order).
+    from polyarb.storage.schemas import SNAPSHOT_SCHEMA
+
+    assert table.schema.names == SNAPSHOT_SCHEMA.names
+    # Row content survives — pick a sentinel field.
+    assert sorted(table.column("market_id").to_pylist()) == sorted(
+        f"m{i}" for i in range(100)
+    )
+
+
+def test_write_parquet_streaming_byte_equivalent_to_atomic(tmp_path: Path) -> None:
+    """Streaming and atomic paths produce identical row content for identical input.
+
+    Row-group layout (and thus file bytes) may differ — we compare via
+    pq.read_table(...).to_pylist() which is the durable contract callers see.
+    """
+    rows = [make_market_row(f"m{i}") for i in range(100)]
+    p_atomic = tmp_path / "atomic.parquet"
+    p_stream = tmp_path / "stream.parquet"
+
+    write_parquet_atomic(rows, p_atomic)
+    # Use a fresh generator so we exercise the streaming-single-pass contract.
+    write_parquet_streaming((r for r in rows), p_stream, batch_size=37)
+
+    rows_atomic = pq.read_table(p_atomic).to_pylist()
+    rows_stream = pq.read_table(p_stream).to_pylist()
+    assert rows_atomic == rows_stream
+
+
+def test_write_parquet_streaming_atomic_on_error(tmp_path: Path) -> None:
+    """Generator yields 250 valid rows then raises — no .parquet, no .tmp leftover."""
+    out = tmp_path / "broken.parquet"
+
+    class BoomError(RuntimeError):
+        pass
+
+    def _explode_after_250():
+        for i in range(250):
+            yield make_market_row(f"m{i}")
+        raise BoomError("synthetic mid-stream failure")
+
+    with pytest.raises(BoomError):
+        write_parquet_streaming(_explode_after_250(), out, batch_size=100)
+
+    # No final file at the destination
+    assert not out.exists(), "Final file must not exist after error"
+    # No .tmp leftover in the parent dir
+    leftovers = [p for p in out.parent.iterdir() if p.suffix == ".tmp"]
+    assert leftovers == [], f"Stale .tmp files: {leftovers}"
+
+
+def test_write_parquet_streaming_empty(tmp_path: Path) -> None:
+    """Empty iterator → valid empty parquet file with SNAPSHOT_SCHEMA."""
+    out = tmp_path / "empty.parquet"
+    total = write_parquet_streaming(iter([]), out, batch_size=500)
+    assert total == 0
+    assert out.exists()
+    table = pq.read_table(out)
+    assert table.num_rows == 0
+    from polyarb.storage.schemas import SNAPSHOT_SCHEMA
+
+    # Schema names must still match — a writer that punted the empty case would
+    # likely produce a schemaless or 0-column file.
+    assert table.schema.names == SNAPSHOT_SCHEMA.names
