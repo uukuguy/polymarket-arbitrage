@@ -130,56 +130,59 @@ class GammaClient:
         # block above. Mypy/pyright happiness only.
         raise RuntimeError("AsyncRetrying exited without yielding — unreachable")
 
+    # Fields the normalizer actually reads — everything else is dead weight
+    # in memory. Polymarket events carry 50+ fields per object including
+    # multi-KB description text and nested arrays we never use.
+    _MARKET_KEEP = frozenset({
+        "id", "conditionId", "slug", "question", "clobTokenIds",
+        "outcomePrices", "active", "closed", "negRisk", "negRiskMarketID",
+        "liquidity", "liquidityNum", "volume", "volumeNum",
+        "endDate", "end_date_iso", "_page_fetched_at_ms",
+    })
+    _EVENT_KEEP = frozenset({
+        "id", "slug", "title", "ticker", "active", "closed",
+        "liquidity", "liquidityNum", "volume", "volumeNum",
+        "endDate", "tags", "markets", "_page_fetched_at_ms",
+    })
+
     async def fetch_all_active_markets(self) -> list[dict]:
-        """Paginate ``/markets`` and return every active+open+non-archived market dict.
-
-        Returns RAW dicts as Polymarket sent them — including the
-        ``clobTokenIds`` JSON-string field (Pitfall 2; Plan 4 normalizes).
-
-        Raises ``RuntimeError`` if pagination exceeds ``MAX_PAGES`` (F-2) or
-        if a page is not a list (defensive — Polymarket should always
-        return ``list[dict]`` here).
-        """
+        """Paginate ``/markets`` — strip to the ~17 fields normalizer needs."""
         return await self._paginate(
             path="/markets",
-            params={
-                "active": "true",
-                "closed": "false",
-                "archived": "false",
-            },
+            params={"active": "true", "closed": "false", "archived": "false"},
             label="markets",
+            keep_fields=self._MARKET_KEEP,
         )
 
     async def fetch_all_active_events(self) -> list[dict]:
-        """Paginate ``/events`` and return every active+open event dict.
-
-        Phase 1.1 Amendment 01: Gamma's /events endpoint is the only source of
-        category/tags information (the /markets endpoint never returns them).
-        Each event row contains:
-            id, slug, title, ticker, liquidity, volume, endDate
-            tags: list[{id, label, slug, ...}]
-            markets: list[{id, ...}]   -- nested: lets us derive market→event_id
-
-        Empirically /events?active=true&closed=false 返回 ~5000 events containing
-        ~48k markets total (more than /markets — events is a richer view).
-
-        Returns RAW dicts verbatim — normalization is owned by
-        polyarb.snapshot.normalizer.normalize_events.
-        """
-        return await self._paginate(
+        """Paginate ``/events`` — strip to ~12 fields. Nested markets
+        trimmed to ``[{"id": ...}]`` (only used for market→event mapping)."""
+        raw = await self._paginate(
             path="/events",
-            params={
-                "active": "true",
-                "closed": "false",
-            },
+            params={"active": "true", "closed": "false"},
             label="events",
+            keep_fields=self._EVENT_KEEP,
         )
+        # Trim nested markets to just id (normalizer only does m.get("id"))
+        for ev in raw:
+            markets = ev.get("markets")
+            if isinstance(markets, list):
+                ev["markets"] = [{"id": m.get("id")} for m in markets if isinstance(m, dict)]
+        return raw
 
-    async def _paginate(self, *, path: str, params: dict, label: str) -> list[dict]:
+    async def _paginate(
+        self,
+        *,
+        path: str,
+        params: dict,
+        label: str,
+        keep_fields: frozenset[str] | None = None,
+    ) -> list[dict]:
         """Shared pagination loop for /markets and /events.
 
         ``params`` is a base dict (filters); we layer ``limit`` + ``offset`` on
-        each call. ``label`` is just for log readability.
+        each call. ``keep_fields``, when set, strips every dict to only those
+        keys — Polymarket objects carry 50+ fields but normalizer uses ~15.
         """
         out: list[dict] = []
         offset = 0
@@ -217,6 +220,13 @@ class GammaClient:
             for raw in page:
                 if isinstance(raw, dict):
                     raw["_page_fetched_at_ms"] = page_fetched_at_ms
+
+            if keep_fields is not None:
+                page = [
+                    {k: v for k, v in raw.items() if k in keep_fields}
+                    for raw in page
+                    if isinstance(raw, dict)
+                ]
 
             out.extend(page)
             pages_fetched += 1

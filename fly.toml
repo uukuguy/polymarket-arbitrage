@@ -38,15 +38,13 @@ primary_region = "ams"
     path = "/health"
     timeout = "10s"
 
-# VM sizing — based on prod OOM data (not synthetic profiling):
-#   OOM at 387MB RSS with only 2400 events (offset=2400) on 512MB VM.
-#   Real Gamma events/markets are ~160KB/obj in Python (50+ nested fields).
-#   Subset mode fetches ~10k events + ~10k markets → peak ~600-700MB.
-#   1GB gives ~1.5x headroom over worst-case subset peak.
-#   Cost: shared-cpu-1x 1GB = $7.12/mo + Volume $0.75 = $7.87/mo.
+# VM sizing — after memory fix (field stripping + del raw_* after normalize):
+#   Python baseline 118MB + stripped dicts ~30MB + normalize ~20MB ≈ 170MB peak.
+#   256MB Fly total → ~150MB usable after kernel → tight but feasible.
+#   If still OOM, step to 512MB ($3.56/mo) — but fix the code first.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "1gb"
+  memory = "256mb"
   processes = ["app"]
 
 [[vm]]

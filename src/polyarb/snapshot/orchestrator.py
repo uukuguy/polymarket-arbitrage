@@ -225,6 +225,7 @@ async def run_snapshot(
     with _phase("2/7: Normalize + dedupe"):
         # Step 2a: events → events_rows + event_tags + market→event_id map
         event_rows, event_tag_rows, market_to_event_map = normalize_events(raw_events)
+        del raw_events  # free 10k+ raw Gamma dicts immediately
         logger.info(
             f"Events normalized: {len(event_rows)} events, "
             f"{len(event_tag_rows)} event_tags, "
@@ -232,6 +233,7 @@ async def run_snapshot(
         )
 
         # Step 2b: markets, injecting event_id from the reverse map
+        raw_market_count = len(raw_markets)
         markets: list[dict] = [
             m
             for m in (
@@ -239,6 +241,7 @@ async def run_snapshot(
             )
             if m is not None
         ]
+        del raw_markets  # free 10k+ raw Gamma dicts immediately
 
         # Dedupe by market_id — Gamma /markets returns ~4% duplicates across pagination
         # boundaries (live empirical: 1,960 dups in 48,985 rows on 2026-04-29). The only
@@ -257,7 +260,7 @@ async def run_snapshot(
         if dup_count > 0:
             logger.info(f"Deduped {dup_count} markets by market_id (Gamma pagination overlap)")
         markets = deduped
-        logger.info(f"Normalized: {len(markets)}/{len(raw_markets)} unique markets kept")
+        logger.info(f"Normalized: {len(markets)}/{raw_market_count} unique markets kept")
 
     # ── 3. Mode filter → token list ───────────────────────────────────────────
     with _phase("3/7: Mode filter"):
