@@ -424,3 +424,30 @@ def mocked_gamma_orchestrator(gamma_fixture: list[dict]) -> Any:
         "polyarb.snapshot.orchestrator.GammaClient", return_value=fake
     ):
         yield fake
+
+
+# =============================================================================
+# Plan 02-09 (D-23): realistic Gamma payload factories for memory regression
+# =============================================================================
+
+
+@pytest.fixture
+def gamma_payload_factory() -> tuple[Any, Any]:
+    """Yield ``(make_realistic_market, make_realistic_event)`` factories.
+
+    W-3 fix from Plan 02-09: ``tests/m1-perception/`` contains a hyphen so
+    direct module imports (``from tests.m1-perception.fixtures import ...``)
+    do NOT work. The fixture module is loaded by path through this fixture.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    payload_path = Path(__file__).parent / "fixtures" / "gamma_streaming_payload.py"
+    spec = importlib.util.spec_from_file_location(
+        "gamma_streaming_payload", payload_path
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.make_realistic_market, mod.make_realistic_event
+
