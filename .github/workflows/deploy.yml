@@ -1,0 +1,39 @@
+name: Deploy to Fly
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: flyctl deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@v1.5
+      - name: Deploy
+        run: flyctl deploy --remote-only --wait-timeout 600
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Smoke test /health
+        env:
+          APP: polyarb-l1
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS "https://${APP}.fly.dev/health" >/dev/null; then
+              echo "deploy healthy"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "/health did not respond after 60s"
+          flyctl logs --app "${APP}" --no-tail | tail -100
+          exit 1
