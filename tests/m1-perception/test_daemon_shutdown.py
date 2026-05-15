@@ -146,7 +146,7 @@ async def test_in_flight_tick_responds_to_cancellation(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_run_loop_inner_sleep_at_most_1s_per_iter(tmp_path: Path) -> None:
+def test_run_loop_inner_sleep_at_most_1s_per_iter() -> None:
     """The inner inter-tick wait must call asyncio.sleep with arg <= 1.
 
     Pre-F-04 code: `await asyncio.sleep(min(10, interval_s - elapsed))`.
