@@ -1,0 +1,5 @@
+# Phase 02 cron — D-09 / D-10 / RESEARCH §4 purge
+# Format: minute hour day-of-month month day-of-week command
+0 0,12 * * *  python -m polyarb.snapshot snapshot
+0 2    * * 0  python -m polyarb.snapshot snapshot --full
+0 4    * * 0  python -m polyarb.snapshot snapshots-purge --older-than-days 30 --keep-last 10

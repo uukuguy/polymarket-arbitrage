@@ -1,0 +1,65 @@
+# Phase 02 production daemon — multi-stage uv build (RESEARCH §6)
+# Source: docs.astral.sh/uv/guides/integration/docker/ (verified 2026-05-12)
+
+# ───── Builder stage ─────────────────────────────────────────────────
+FROM python:3.12-slim-bookworm AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.5.0 /uv /uvx /bin/
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0 \
+    UV_NO_DEV=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --locked --no-install-project --no-editable
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-editable
+
+# ───── Runtime stage ─────────────────────────────────────────────────
+FROM python:3.12-slim-bookworm AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tzdata \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Supercronic — cron with full cron syntax (W8 RESOLVED — see RESEARCH Open Q #4)
+ARG SUPERCRONIC_VERSION=v0.2.30
+RUN curl -fsSL "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-amd64" -o /usr/local/bin/supercronic \
+    && chmod +x /usr/local/bin/supercronic
+
+# Non-root user (UID 10001 follows ASVS V14.1.1 — distroless-style numeric UID)
+RUN groupadd --system --gid 10001 polyarb \
+    && useradd --system --uid 10001 --gid polyarb --no-create-home polyarb
+COPY --from=builder --chown=polyarb:polyarb /app/.venv /app/.venv
+COPY --chown=polyarb:polyarb src/ /app/src/
+RUN mkdir -p /data /app/logs && chown -R polyarb:polyarb /data /app/logs
+
+# Copy crontab for Supercronic process group
+COPY --chown=polyarb:polyarb crontab /app/crontab
+
+# NOTE: POLYARB_ALLOW_EXTERNAL_PATHS=1 is REQUIRED for /data abs path acceptance by
+# config.py Settings._within_project validator (PATTERNS §5.1 gotcha #2).
+# This is a documented prod-only escape hatch; tests gate it via fixture override.
+#
+# POLYARB_HTTP_PORT=8080 overrides the default 19080 so the daemon listens on
+# the standard container port. Fly internal_port and HEALTHCHECK match this.
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH="/app/src" \
+    PYTHONUNBUFFERED=1 \
+    POLYARB_DATA_DIR=/data \
+    POLYARB_LOG_DIR=/app/logs \
+    POLYARB_ALLOW_EXTERNAL_PATHS=1 \
+    POLYARB_HTTP_PORT=8080 \
+    TZ=UTC
+WORKDIR /app
+USER polyarb
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl --fail --silent --show-error http://127.0.0.1:8080/health || exit 1
+EXPOSE 8080
+CMD ["python", "-m", "polyarb.daemon.main"]

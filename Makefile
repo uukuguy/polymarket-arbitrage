@@ -301,3 +301,50 @@ tail-logs-local:
 		echo ">> tip: run 'make daemon-run-local' in one terminal; logs appear there in real-time"; \
 		echo ">> alternative: make daemon-run-local 2>&1 | tee /tmp/polyarb-daemon.log"; \
 	fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 02 Plan 04: Docker + Fly.io deploy
+#
+# docker-build       — build daemon Docker image locally
+# docker-run-local   — run container locally (host:8088 → container:8080)
+# docker-smoke       — build + run + /health probe + tear down (Wave 0 contract)
+# deploy             — deploy to Fly.io prod (requires flyctl + FLY_API_TOKEN)
+# smoke-test         — post-deploy /health probe against prod
+# tail-logs          — tail Fly daemon stdout
+# ─────────────────────────────────────────────────────────────────────────────
+
+.PHONY: docker-build docker-run-local docker-smoke deploy smoke-test tail-logs
+
+## docker-build: Build daemon Docker image locally (no push)
+docker-build:
+	@echo ">> docker-build — multi-stage uv build"
+	docker build -t polyarb-l1:local .
+
+## docker-run-local: Run daemon container locally (host:8088 → container:8080)
+docker-run-local:
+	@echo ">> docker-run-local — daemon at http://localhost:8088/health"
+	docker run --rm -p 8088:8080 -e POLYARB_ALLOW_EMPTY_SECRET=1 -e POLYARB_ALLOW_EXTERNAL_PATHS=1 polyarb-l1:local
+
+## docker-smoke: Build image + run + curl /health + tear down (Plan 04 Wave 0 contract)
+docker-smoke:
+	@echo ">> docker-smoke — full build + run + health probe"
+	bash tests/m1-perception/test_docker_smoke.sh
+
+## deploy: Deploy to Fly.io prod (requires flyctl + FLY_API_TOKEN)
+deploy:
+	@echo ">> deploy — flyctl deploy --remote-only"
+	flyctl deploy --remote-only --wait-timeout 600
+	@echo ">> ensuring process scale: app=1 cron=1 (W8 Supercronic)"
+	flyctl scale count app=1 cron=1 -a polyarb-l1 || true
+	@echo ">> running post-deploy /health smoke probe"
+	bash scripts/deploy_smoke.sh
+
+## smoke-test: Run post-deploy smoke test against prod
+smoke-test:
+	@echo ">> smoke-test — post-deploy /health probe"
+	bash scripts/deploy_smoke.sh
+
+## tail-logs: Tail Fly daemon stdout
+tail-logs:
+	@echo ">> tail-logs — flyctl logs"
+	flyctl logs --app polyarb-l1

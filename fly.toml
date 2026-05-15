@@ -1,0 +1,55 @@
+# Phase 02 Fly.io config — Supercronic cron (W8 RESOLVED, 2026-05-12)
+app = "polyarb-l1"
+primary_region = "ams"
+
+[build]
+
+[mounts]
+  source = "polyarb_data"
+  destination = "/data"
+  initial_size = "5gb"
+
+[env]
+  POLYARB_DATA_DIR = "/data"
+  POLYARB_SNAPSHOT_DIR = "/data/snapshots"
+  POLYARB_DB_PATH = "/data/state.db"
+  POLYARB_ALLOW_EXTERNAL_PATHS = "1"
+
+# Two process groups — daemon (long-running HTTP+scheduler) + cron (Supercronic)
+# Set count via: flyctl scale count app=1 cron=1
+[processes]
+  app = "python -m polyarb.daemon.main"
+  cron = "supercronic /app/crontab"
+
+# Single [[services]] block — bound to "app" process group only (Supercronic does
+# not serve HTTP). D-22 amendment per RESEARCH Open Q #1 RESOLVED: /scan + /health
+# both public on Anycast; HMAC at Plan 02 scan_auth_middleware is the real auth gate
+# (Flycast cross-org-infeasible from Vercel — Context7 verified 2026-05-12).
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  processes = ["app"]
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+    force_https = true
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [[services.http_checks]]
+    grace_period = "30s"
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    timeout = "5s"
+    tls_skip_verify = false
+
+[restart]
+  policy = "on-failure"
+  retries = 3
