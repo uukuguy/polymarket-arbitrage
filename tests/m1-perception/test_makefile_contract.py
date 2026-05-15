@@ -658,3 +658,40 @@ def test_makefile_daemon_targets_phony() -> None:
     required = {"daemon-run-local", "smoke-health-local", "tail-logs-local"}
     missing = required - phony_targets
     assert not missing, f"missing .PHONY for daemon targets: {missing}"
+
+
+# =============================================================================
+# Phase 02 Plan 04 — docker + deploy Makefile targets
+# =============================================================================
+
+
+def test_make_docker_build_dry_run() -> None:
+    """`make -n docker-build` resolves to a docker build command."""
+    result = subprocess.run(
+        ["make", "-n", "docker-build"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n docker-build failed: {result.stderr}"
+    assert "docker build" in result.stdout, (
+        f"docker-build recipe must invoke 'docker build', got: {result.stdout!r}"
+    )
+
+
+def test_make_deploy_dry_run() -> None:
+    """`make -n deploy` resolves to a flyctl deploy command."""
+    result = subprocess.run(
+        ["make", "-n", "deploy"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n deploy failed: {result.stderr}"
+    assert "flyctl deploy" in result.stdout, (
+        f"deploy recipe must invoke 'flyctl deploy', got: {result.stdout!r}"
+    )
