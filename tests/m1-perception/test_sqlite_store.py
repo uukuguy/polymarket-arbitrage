@@ -327,3 +327,212 @@ def test_rollback_on_executemany_failure(store: SQLiteStore) -> None:
         "Rollback must restore prior markets state — got: " + repr(rows)
     )
     assert n_snaps == 1, "Failed snapshot must NOT leave a snapshots row behind"
+
+
+# ---------- Plan 02-09: streaming snapshot writer ---------------------------
+
+
+def test_write_snapshot_streaming_basic_parity(store: SQLiteStore) -> None:
+    """50 rows via streaming → same snapshots/markets/issues row counts as legacy."""
+    rows_a = [make_market(f"m{i}") for i in range(50)]
+    rows_b = [make_market(f"m{i}") for i in range(50)]
+
+    # Legacy path
+    legacy_id = store.write_snapshot(
+        taken_at_ms=1, finished_at_ms=2, mode="subset",
+        parquet_path="x.parquet", is_valid=True,
+        market_rows=rows_a,
+        issues=[Issue(layer=2, category=Category.UNKNOWN, market_id="m0", detail="stale")],
+    )
+
+    # Need a SECOND store / DB for streaming so write_snapshot's
+    # `DELETE FROM markets` doesn't clobber the comparison.
+    store2 = SQLiteStore(Path(str(store.db_path).replace(".db", ".2.db")))
+    store2.init_schema()
+    snap_id, count = store2.write_snapshot_streaming(
+        taken_at_ms=1, finished_at_ms=2, mode="subset",
+        parquet_path="x.parquet", is_valid=True,
+        market_rows=rows_b,
+        issues=[Issue(layer=2, category=Category.UNKNOWN, market_id="m0", detail="stale")],
+        batch_size=20,
+    )
+    assert count == 50
+
+    # Compare both DBs: same market_count, same issue count
+    con_a = sqlite3.connect(store.db_path)
+    con_b = sqlite3.connect(store2.db_path)
+    try:
+        assert con_a.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == 50
+        assert con_b.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == 50
+        assert con_a.execute(
+            "SELECT market_count FROM snapshots WHERE id=?", (legacy_id,)
+        ).fetchone()[0] == 50
+        assert con_b.execute(
+            "SELECT market_count FROM snapshots WHERE id=?", (snap_id,)
+        ).fetchone()[0] == 50
+        assert con_a.execute("SELECT COUNT(*) FROM validation_issues").fetchone()[0] == 1
+        assert con_b.execute("SELECT COUNT(*) FROM validation_issues").fetchone()[0] == 1
+    finally:
+        con_a.close()
+        con_b.close()
+
+
+def test_write_snapshot_streaming_with_generator(store: SQLiteStore) -> None:
+    """1500 rows yielded from a generator, batch_size=500 → all 1500 persisted."""
+    def _gen():
+        for i in range(1500):
+            yield make_market(f"m{i}")
+
+    snap_id, count = store.write_snapshot_streaming(
+        taken_at_ms=10, finished_at_ms=20, mode="full",
+        parquet_path="g.parquet", is_valid=True,
+        market_rows=_gen(),
+        issues=[],
+        batch_size=500,
+    )
+    assert count == 1500
+    con = sqlite3.connect(store.db_path)
+    try:
+        assert con.execute(
+            "SELECT market_count FROM snapshots WHERE id=?", (snap_id,)
+        ).fetchone()[0] == 1500
+        assert con.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == 1500
+    finally:
+        con.close()
+
+
+def test_write_snapshot_streaming_atomicity_on_error(store: SQLiteStore) -> None:
+    """Generator raises mid-stream → no snapshot row, no market rows, exception propagates."""
+    class BoomError(RuntimeError):
+        pass
+
+    def _explode():
+        for i in range(750):
+            yield make_market(f"m{i}")
+        raise BoomError("mid-stream failure")
+
+    # Baseline counts before the failing write
+    con = sqlite3.connect(store.db_path)
+    try:
+        snapshots_before = con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        markets_before = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+    finally:
+        con.close()
+
+    with pytest.raises(BoomError):
+        store.write_snapshot_streaming(
+            taken_at_ms=30, finished_at_ms=40, mode="subset",
+            parquet_path="boom.parquet", is_valid=True,
+            market_rows=_explode(),
+            issues=[],
+            batch_size=200,
+        )
+
+    # ROLLBACK: counts must be unchanged
+    con = sqlite3.connect(store.db_path)
+    try:
+        snapshots_after = con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        markets_after = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+        assert snapshots_after == snapshots_before, "snapshots row leaked"
+        assert markets_after == markets_before, "markets rows leaked"
+    finally:
+        con.close()
+
+
+def test_write_snapshot_streaming_empty_markets(store: SQLiteStore) -> None:
+    """Empty iterator → snapshots row with market_count=0 persisted, valid."""
+    snap_id, count = store.write_snapshot_streaming(
+        taken_at_ms=50, finished_at_ms=60, mode="subset",
+        parquet_path="empty.parquet", is_valid=True,
+        market_rows=iter([]),
+        issues=[],
+        batch_size=500,
+    )
+    assert count == 0
+    con = sqlite3.connect(store.db_path)
+    try:
+        row = con.execute(
+            "SELECT market_count, is_valid FROM snapshots WHERE id=?", (snap_id,)
+        ).fetchone()
+        assert row == (0, 1)
+        assert con.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+def test_write_snapshot_streaming_atomicity_on_commit_failure(
+    store: SQLiteStore, monkeypatch
+) -> None:
+    """W-5: COMMIT itself raises → ROLLBACK invoked, no rows visible.
+
+    This guards against the failure mode where every executemany succeeds
+    but the final commit dies (disk full, lock timeout, etc.).
+
+    Implementation: sqlite3.Connection is an immutable C type so we can't
+    monkey-patch its .execute directly. Instead we wrap sqlite3.connect at
+    the module level the SUT imports from, returning a proxy that intercepts
+    .execute("COMMIT") and raises, but delegates ROLLBACK to the real connection
+    so we can verify the rollback path actually fires.
+    """
+    real_connect = sqlite3.connect
+
+    class _CommitBomb:
+        def __init__(self, real_con):
+            self._real = real_con
+            self.rollback_invoked = False
+        def execute(self, sql, *args, **kwargs):
+            if isinstance(sql, str) and sql.strip().upper() == "COMMIT":
+                raise sqlite3.OperationalError("synthetic commit failure")
+            if isinstance(sql, str) and sql.strip().upper() == "ROLLBACK":
+                self.rollback_invoked = True
+            return self._real.execute(sql, *args, **kwargs)
+        def close(self):
+            return self._real.close()
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    bomb_holder = {}
+
+    def _connect_proxy(*args, **kwargs):
+        # Only intercept writes against our test DB; allow other ad-hoc connects (read-only paths) to pass through.
+        real_con = real_connect(*args, **kwargs)
+        # Only wrap the first WRITE connection for this test (isolation_level=None signals writer in our store)
+        if kwargs.get("isolation_level", "deferred") is None and "bomb" not in bomb_holder:
+            bomb = _CommitBomb(real_con)
+            bomb_holder["bomb"] = bomb
+            return bomb
+        return real_con
+
+    monkeypatch.setattr(
+        "polyarb.storage.sqlite_store.sqlite3.connect", _connect_proxy
+    )
+
+    con = sqlite3.connect(store.db_path)
+    try:
+        snapshots_before = con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        markets_before = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+    finally:
+        con.close()
+
+    rows = [make_market(f"m{i}") for i in range(20)]
+    with pytest.raises(sqlite3.OperationalError, match="commit failure"):
+        store.write_snapshot_streaming(
+            taken_at_ms=70, finished_at_ms=80, mode="subset",
+            parquet_path="cf.parquet", is_valid=True,
+            market_rows=rows,
+            issues=[],
+            batch_size=10,
+        )
+
+    con = sqlite3.connect(store.db_path)
+    try:
+        assert (
+            con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+            == snapshots_before
+        ), "commit-failure leaked a snapshots row"
+        assert (
+            con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+            == markets_before
+        ), "commit-failure leaked markets rows"
+    finally:
+        con.close()

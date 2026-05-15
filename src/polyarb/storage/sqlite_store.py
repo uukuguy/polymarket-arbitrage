@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Iterable
 
 from loguru import logger
 
@@ -256,6 +257,147 @@ class SQLiteStore:
             f"issues={len(issues)} is_valid={is_valid}"
         )
         return snapshot_id
+
+    # Plan 02-09 (D-23): streaming variant — accepts an iterator of market dicts
+    # and inserts them in batches of `batch_size` inside a single BEGIN IMMEDIATE
+    # transaction. Atomicity invariant: a crash mid-batch leaves no partial
+    # snapshot visible (ROLLBACK rewinds the entire write). The legacy
+    # write_snapshot above is retained for callers that pass a fully-materialized
+    # list (tests, one-off scripts). TODO(02-09 follow-up): remove write_snapshot
+    # once orchestrator and Supabase mirror migrate to the streaming variant.
+    def write_snapshot_streaming(
+        self,
+        *,
+        taken_at_ms: int,
+        finished_at_ms: int,
+        mode: str,
+        parquet_path: str,
+        is_valid: bool,
+        market_rows: Iterable[dict],
+        issues: list[Issue],
+        notes: str | None = None,
+        event_rows: list[dict] | None = None,
+        event_tag_rows: list[dict] | None = None,
+        batch_size: int = 500,
+    ) -> tuple[int, int]:
+        """Streaming variant of write_snapshot.
+
+        Identical semantics to write_snapshot, but `market_rows` can be any
+        iterable (list, generator). Inserts run in batches of `batch_size`
+        inside ONE BEGIN IMMEDIATE → COMMIT transaction, so per-snapshot
+        atomicity is preserved exactly as the legacy path.
+
+        Because the iterator length is unknown up front, we insert the
+        snapshots row with market_count=0 as a placeholder and UPDATE it to
+        the real count after the iterator is consumed — still inside the
+        same transaction, so the final visible row always has the correct
+        count.
+
+        Returns:
+            (snapshot_id, market_row_count) — the auto-assigned snapshot id
+            and how many market rows were inserted.
+        """
+        if mode not in _VALID_MODES:
+            raise ValueError(f"mode must be one of {_VALID_MODES}, got {mode!r}")
+
+        event_rows = event_rows or []
+        event_tag_rows = event_tag_rows or []
+
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        con.execute("BEGIN IMMEDIATE")
+        market_count = 0
+        try:
+            con.execute("DELETE FROM markets")  # full overwrite (D-C1)
+            cur = con.execute(
+                "INSERT INTO snapshots("
+                "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes,"
+                "supabase_mirror_at_ms,parquet_r2_url"
+                ") VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    taken_at_ms,
+                    finished_at_ms,
+                    mode,
+                    0,  # placeholder; UPDATEd after stream consumed
+                    int(is_valid),
+                    parquet_path,
+                    notes,
+                    None,
+                    None,
+                ),
+            )
+            snapshot_id = cur.lastrowid
+            assert snapshot_id is not None
+
+            # ── events first (FK target for markets.event_id) ──────────────
+            if event_rows:
+                event_tuples = [
+                    _event_row_to_tuple(r, snapshot_id) for r in event_rows
+                ]
+                con.executemany(EVENTS_INSERT_SQL, event_tuples)
+
+            # ── event_tags (FK references events.id) ───────────────────────
+            if event_tag_rows:
+                event_tag_tuples = [
+                    _event_tag_row_to_tuple(r, snapshot_id) for r in event_tag_rows
+                ]
+                con.executemany(EVENT_TAGS_INSERT_SQL, event_tag_tuples)
+
+            # ── markets streamed in batches ────────────────────────────────
+            batch: list[tuple] = []
+            for row in market_rows:
+                batch.append(_row_to_tuple(row, snapshot_id))
+                if len(batch) >= batch_size:
+                    con.executemany(MARKETS_INSERT_SQL, batch)
+                    market_count += len(batch)
+                    batch.clear()
+            if batch:
+                con.executemany(MARKETS_INSERT_SQL, batch)
+                market_count += len(batch)
+                batch.clear()
+
+            # Patch market_count to the real value (still inside same tx)
+            con.execute(
+                "UPDATE snapshots SET market_count=? WHERE id=?",
+                (market_count, snapshot_id),
+            )
+
+            # ── issues ─────────────────────────────────────────────────────
+            if issues:
+                issue_tuples = [
+                    (
+                        snapshot_id,
+                        issue.layer,
+                        issue.category.value,
+                        issue.market_id,
+                        issue.detail,
+                        issue.raw_payload,
+                    )
+                    for issue in issues
+                ]
+                con.executemany(
+                    "INSERT INTO validation_issues("
+                    "snapshot_id,layer,category,market_id,detail,raw_payload"
+                    ") VALUES (?,?,?,?,?,?)",
+                    issue_tuples,
+                )
+
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            logger.exception("SQLite write_snapshot_streaming rolled back")
+            raise
+        finally:
+            con.close()
+
+        logger.info(
+            f"SQLite snapshot id={snapshot_id} mode={mode} markets={market_count} "
+            f"events={len(event_rows)} event_tags={len(event_tag_rows)} "
+            f"issues={len(issues)} is_valid={is_valid} "
+            f"(streaming, batch_size={batch_size})"
+        )
+        return snapshot_id, market_count
 
     def update_snapshot_mirror_fields(
         self,
