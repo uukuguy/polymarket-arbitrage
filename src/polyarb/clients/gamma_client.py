@@ -31,6 +31,7 @@ Anti-patterns deliberately avoided:
 
 from __future__ import annotations
 
+import asyncio
 import time
 import httpx
 from aiolimiter import AsyncLimiter
@@ -219,6 +220,12 @@ class GammaClient:
 
             out.extend(page)
             pages_fetched += 1
+
+            # Yield to event loop every page so uvicorn and health checks
+            # can run. httpx HTTP/2 responses return in ~40ms — too fast
+            # for asyncio cooperative scheduling to give other coroutines
+            # enough cycles during 100-page paginated fetches.
+            await asyncio.sleep(0)
 
             if pages_fetched == 1 or pages_fetched % PROGRESS_EVERY == 0:
                 logger.info(
