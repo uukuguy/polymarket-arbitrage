@@ -66,6 +66,17 @@ Scope (从 LEARNINGS carry-over):
 - Tiger Cloud 双库（D11 单库先撞墙）
 - L2/L3 定向跟踪与 WebSocket（thread §1 纪律：L1 未到生产级禁开下一层）
 
+Plans:
+- [x] 02-01-PLAN.md — Wave 1: page_fetched_at_ms 列 + L11 silent-failure triple-check（make triple-check 三重契约门）
+- [x] 02-02-PLAN.md — Wave 2: Starlette HTTP daemon (/health + /scan HMAC) + AsyncIOScheduler + loguru JSON sink
+- [x] 02-03-PLAN.md — Wave 2: Supabase mirror + Cloudflare R2 sync + Alembic 001 schema + 双 URL 约定
+- [x] 02-08-PLAN.md — Wave 2.5 retro: Plan 03 F-01..F-05 fix-up（Supabase upsert / Polymarket offset cap / 工具链）
+- [x] 02-04-PLAN.md — Wave 3: Dockerfile multi-stage + fly.toml + GHA deploy workflow + 首次 prod deploy（256MB）
+- [ ] 02-09-PLAN.md — **Wave 3.5 emergent**: 流式分页根因修复（D-23 amendment） — `_paginate` → `AsyncIterator[dict]` + orchestrator streaming consumer + PyArrow ParquetWriter chunked write + 内存回归测试。**触发**: 2026-05-15 Plan 02-04 首次 prod deploy 后 daemon OOM-killed（256MB Fly VM）。**Blocks**: Wave 4-5（daemon 不稳态下装观测/跑 soak 无意义）。
+- [ ] 02-05-PLAN.md — Wave 4: Sentry + Axiom + Better Stack + Telegram alert 集成
+- [ ] 02-06-PLAN.md — Wave 4: Vercel Next.js dashboard 雏形 + scan trigger
+- [ ] 02-07-PLAN.md — Wave 5: chaos test + 7-day soak + 教学文档 08
+
 ### Phase 3: WebSocket 增量数据流（L3 候选）
 
 **Goal:** /book + /prices 频道实时增量推送，作为 L3 单市场 K 线的数据源

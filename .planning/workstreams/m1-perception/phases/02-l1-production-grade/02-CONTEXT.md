@@ -80,6 +80,10 @@ L1 必须达到 thread §1 的「生产级判定标准」：7 天连跑无人值
 - **D-21:** scan trigger 实现 = **Vercel Edge Function POST 到 Fly daemon `/scan` endpoint，同步返回 JSON**（daemon 加 FastAPI endpoint 接收 `{recipe_name, params}` 调 `run_recipe()`；复用 Phase 01.1 的 4 层 SQL 防御 + Trust-split，不在 Supabase 端重新实现 — 违反 P1 trust-split pattern 复用纪律会得不偿失）
 - **D-22:** Fly daemon 暴露端口 = **Fly internal network only（`<app>.internal`）+ HTTPS via Fly Anycast**（不对外暴露 IP，仅 Vercel 调用走 Fly internal DNS）
 
+### Amendment 01 — Memory Discipline (2026-05-15, post-Plan-02-04 prod incident)
+
+- **D-23:** **流式分页是 L1 生产稳定的硬约束** — Gamma `_paginate` 必须改成 `AsyncIterator[dict]`（逐市场 yield，不内部累积 list），orchestrator 必须改成 streaming consumer（每页 normalize → 立刻写 SQLite/parquet → 丢弃 raw）。**触发证据**：2026-05-15 Plan 02-04 首次 prod deploy（256MB Fly VM）观测到 daemon OOM-killed，root cause = paginator 累积 20k stripped dicts ≈ 160MB 常驻 + normalize 中间结构 ≈ 接近上限边际，遇 Gamma 大页即爆。**约束含义**：（1）任何后续 L1/L2 数据源接入都必须 streaming-by-default，不准累积全量 list；（2）L1 在 256MB Fly 上达到 7 天 soak 是 phase 02 完成定义的一部分，不准用"升内存"绕过；（3）此约束适用于所有 m1-perception future phases，不仅本 phase。**纪律来源**：feedback memory `fix-code-not-config-2026-05` + `profile-with-real-data-2026-05`。
+
 ### the agent's Discretion
 
 以下交给 researcher / planner 在 plan 阶段决定（用户未在 discuss 阶段锁定）：
