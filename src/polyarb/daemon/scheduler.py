@@ -192,10 +192,17 @@ class SnapshotScheduler:
         logger.info(f"scheduler loop started, tick interval={interval_s}s")
 
         try:
-            # Yield once before first tick so uvicorn can bind its socket.
-            # Without this, _tick() blocks the event loop for 30s+ on Gamma
-            # fetch and the Fly health check declares the machine dead.
-            await asyncio.sleep(0)
+            # Delay first tick 10s so uvicorn fully starts and Fly's health
+            # check sees a live /health before the first Gamma fetch ties up
+            # the event loop for 30-120s. Use wait_for(stop_event) so SIGINT
+            # during startup delay is still <1s responsive.
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=10)
+                # stop_event was set during delay — exit immediately
+                logger.info("scheduler: stop_event during startup delay, exiting")
+                return
+            except asyncio.TimeoutError:
+                pass  # normal: 10s elapsed, proceed to first tick
 
             while not stop_event.is_set():
                 await self._tick()

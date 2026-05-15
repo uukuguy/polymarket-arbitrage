@@ -32,11 +32,11 @@ primary_region = "ams"
   processes = ["app"]
 
   [[http_service.checks]]
-    grace_period = "30s"
+    grace_period = "120s"
     interval = "30s"
     method = "GET"
     path = "/health"
-    timeout = "5s"
+    timeout = "10s"
 
 # VM sizing — based on prod OOM data (not synthetic profiling):
 #   OOM at 387MB RSS with only 2400 events (offset=2400) on 512MB VM.
