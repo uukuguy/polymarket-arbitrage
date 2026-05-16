@@ -38,13 +38,19 @@ primary_region = "ams"
     path = "/health"
     timeout = "10s"
 
-# VM sizing — after memory fix (field stripping + del raw_* after normalize):
-#   Python baseline 118MB + stripped dicts ~30MB + normalize ~20MB ≈ 170MB peak.
-#   256MB Fly total → ~150MB usable after kernel → tight but feasible.
-#   If still OOM, step to 512MB ($3.56/mo) — but fix the code first.
+# VM sizing — 2026-05-16 SESSION 19: settled on 512MB after Plan 02-09 streaming
+# refactor. The streaming change (Gamma _paginate AsyncIterator + orchestrator
+# per-page consume) is the real architecture fix — 20k raw markets no longer
+# accumulate. But the data itself (target_markets ~25MB at $1k threshold +
+# CLOB books/prices ~10MB + Python/pyarrow/httpx baseline ~120MB) puts peak
+# RSS around 160-170MB, which is the edge of 256MB-with-150MB-usable. 256MB
+# is marginal, 512MB is the right engineering call — $3.56/mo for ~240MB
+# headroom that absorbs 2-3× data growth without revisiting this issue.
+#
+# Cron stays 256MB — supercronic is a small binary, no Python workload.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "256mb"
+  memory = "512mb"
   processes = ["app"]
 
 [[vm]]
