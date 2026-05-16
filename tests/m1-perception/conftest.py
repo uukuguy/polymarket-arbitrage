@@ -397,6 +397,25 @@ def mocked_gamma_orchestrator(gamma_fixture: list[dict]) -> Any:
         for m in gamma_fixture
     ]
     fake.fetch_all_active_events.return_value = synthetic_events
+
+    # Plan 02-09 (D-23): orchestrator now uses iter_active_markets (async
+    # iterator). AsyncMock returns a coroutine by default which is NOT an
+    # async iterator. Supply real async-generator stubs that yield the
+    # fixture entries one at a time, matching the streaming contract.
+    def _make_iter_markets(items):
+        async def _iter():
+            for m in items:
+                yield m
+        return _iter
+
+    def _make_iter_events(items):
+        async def _iter():
+            for e in items:
+                yield e
+        return _iter
+
+    fake.iter_active_markets = _make_iter_markets(gamma_fixture)
+    fake.iter_active_events = _make_iter_events(synthetic_events)
     fake.aclose = AsyncMock()
     fake.__aenter__.return_value = fake
     fake.__aexit__.return_value = None
@@ -405,3 +424,30 @@ def mocked_gamma_orchestrator(gamma_fixture: list[dict]) -> Any:
         "polyarb.snapshot.orchestrator.GammaClient", return_value=fake
     ):
         yield fake
+
+
+# =============================================================================
+# Plan 02-09 (D-23): realistic Gamma payload factories for memory regression
+# =============================================================================
+
+
+@pytest.fixture
+def gamma_payload_factory() -> tuple[Any, Any]:
+    """Yield ``(make_realistic_market, make_realistic_event)`` factories.
+
+    W-3 fix from Plan 02-09: ``tests/m1-perception/`` contains a hyphen so
+    direct module imports (``from tests.m1-perception.fixtures import ...``)
+    do NOT work. The fixture module is loaded by path through this fixture.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    payload_path = Path(__file__).parent / "fixtures" / "gamma_streaming_payload.py"
+    spec = importlib.util.spec_from_file_location(
+        "gamma_streaming_payload", payload_path
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.make_realistic_market, mod.make_realistic_event
+

@@ -348,3 +348,21 @@ smoke-test:
 tail-logs:
 	@echo ">> tail-logs — flyctl logs"
 	flyctl logs --app polyarb-l1
+
+.PHONY: memory-budget-test docker-smoke-256mb
+
+## memory-budget-test: run streaming memory regression test (slow; D-23 acceptance gate)
+memory-budget-test:
+	@echo ">> memory-budget-test — T5.0 calibration + T5.1 budget test"
+	uv run pytest tests/m1-perception/test_streaming_memory_calibration.py tests/m1-perception/test_streaming_memory_budget.py -xvs
+
+## docker-smoke-256mb: build + run snapshot under hard 256MB cap with prod $1k threshold (T6 step 1)
+docker-smoke-256mb: docker-build
+	@echo ">> docker-smoke-256mb — hard 256MB cap, prod threshold \$$1k"
+	docker run --rm --memory=256m --memory-swap=256m \
+	    -e POLYARB_ALLOW_EXTERNAL_PATHS=1 \
+	    -e POLYARB_ALLOW_EMPTY_SECRET=1 \
+	    -e POLYARB_LIQUIDITY_THRESHOLD_USD=1000.0 \
+	    -v $(PWD)/data:/data \
+	    polyarb-l1 \
+	    python -m polyarb.snapshot snapshot

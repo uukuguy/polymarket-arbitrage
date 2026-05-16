@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import AsyncIterator
+
 import httpx
 from aiolimiter import AsyncLimiter
 from loguru import logger
@@ -145,30 +147,57 @@ class GammaClient:
         "endDate", "tags", "markets", "_page_fetched_at_ms",
     })
 
-    async def fetch_all_active_markets(self) -> list[dict]:
-        """Paginate ``/markets`` — strip to the ~17 fields normalizer needs."""
-        return await self._paginate(
+    # Plan 02-09 (D-23): streaming primary API ───────────────────────────
+    # iter_active_markets is the memory-bounded path the orchestrator uses;
+    # fetch_all_active_markets is the backward-compat collector retained for
+    # tests and one-off scripts. _paginate yields per-item (no accumulator).
+    # TODO(02-09 follow-up): once orchestrator confirmed stable on streaming,
+    # remove fetch_all_active_markets (events stays a list — Decision A).
+
+    async def iter_active_markets(self) -> AsyncIterator[dict]:
+        """Stream ``/markets`` one stripped dict at a time. Memory invariant:
+        paginator internal state is bounded by one Gamma page (~100 dicts) plus
+        running counters — no accumulator."""
+        async for raw in self._paginate(
             path="/markets",
             params={"active": "true", "closed": "false", "archived": "false"},
             label="markets",
             keep_fields=self._MARKET_KEEP,
-        )
+        ):
+            yield raw
 
-    async def fetch_all_active_events(self) -> list[dict]:
-        """Paginate ``/events`` — strip to ~12 fields. Nested markets
-        trimmed to ``[{"id": ...}]`` (only used for market→event mapping)."""
-        raw = await self._paginate(
+    async def fetch_all_active_markets(self) -> list[dict]:
+        """Backward-compat: collect ``iter_active_markets`` into a list.
+
+        DEPRECATED for hot paths — prefer ``iter_active_markets`` to avoid the
+        full in-memory list. Retained for tests and one-off scripts.
+        """
+        return [m async for m in self.iter_active_markets()]
+
+    async def iter_active_events(self) -> AsyncIterator[dict]:
+        """Stream ``/events`` one stripped dict at a time. Markets nested-list
+        trimming is done eagerly here (per-event, not at end of stream)."""
+        async for raw in self._paginate(
             path="/events",
             params={"active": "true", "closed": "false"},
             label="events",
             keep_fields=self._EVENT_KEEP,
-        )
-        # Trim nested markets to just id (normalizer only does m.get("id"))
-        for ev in raw:
-            markets = ev.get("markets")
+        ):
+            markets = raw.get("markets")
             if isinstance(markets, list):
-                ev["markets"] = [{"id": m.get("id")} for m in markets if isinstance(m, dict)]
-        return raw
+                raw["markets"] = [
+                    {"id": m.get("id")} for m in markets if isinstance(m, dict)
+                ]
+            yield raw
+
+    async def fetch_all_active_events(self) -> list[dict]:
+        """Backward-compat: collect ``iter_active_events`` into a list.
+
+        Decision A (Plan 02-09): events stays materialized because
+        ``normalize_events`` builds a map the markets pass depends on. This
+        wrapper preserves the existing orchestrator call site.
+        """
+        return [e async for e in self.iter_active_events()]
 
     async def _paginate(
         self,
@@ -177,20 +206,24 @@ class GammaClient:
         params: dict,
         label: str,
         keep_fields: frozenset[str] | None = None,
-    ) -> list[dict]:
-        """Shared pagination loop for /markets and /events.
+    ) -> AsyncIterator[dict]:
+        """Paginate ``path`` and YIELD individual dicts one at a time.
 
-        ``params`` is a base dict (filters); we layer ``limit`` + ``offset`` on
-        each call. ``keep_fields``, when set, strips every dict to only those
-        keys — Polymarket objects carry 50+ fields but normalizer uses ~15.
+        Memory-bounded: internal state is one page of ~100 dicts plus running
+        counters. No accumulator. Caller is responsible for buffering if a list
+        is needed.
+
+        Yields each filtered dict (with ``_page_fetched_at_ms`` stamped). Honors
+        ``MAX_PAGES``, 422-offset-cap graceful stop, and all retry semantics
+        from ``_get``.
         """
-        out: list[dict] = []
         offset = 0
         pages_fetched = 0
+        items_yielded = 0
         PROGRESS_EVERY = 50
 
         logger.info(
-            f"Gamma: starting paginated fetch of {label} (page_limit={self.PAGE_LIMIT})"
+            f"Gamma: starting streaming fetch of {label} (page_limit={self.PAGE_LIMIT})"
         )
 
         while True:
@@ -198,14 +231,14 @@ class GammaClient:
             try:
                 page = await self._get(path, page_params)
             except _NonRetryableHTTPError as exc:
-                # Polymarket 422 at offset>10000 (2026-05 cap). Return what
-                # we already have instead of failing the entire snapshot.
-                if "422" in str(exc) and out:
+                # Polymarket 422 at offset>10000 (2026-05 cap). Stop cleanly
+                # instead of failing the entire snapshot.
+                if "422" in str(exc) and items_yielded > 0:
                     logger.warning(
                         f"Gamma {label}: 422 at offset={offset}, "
-                        f"returning {len(out)} items fetched so far"
+                        f"stopping at {items_yielded} items yielded so far"
                     )
-                    break
+                    return
                 raise
             if not isinstance(page, list):
                 raise RuntimeError(
@@ -213,37 +246,32 @@ class GammaClient:
                 )
 
             # Phase 02 Plan 01: stamp per-page fetch time on each raw dict.
-            # The private key _page_fetched_at_ms carries the real per-page
-            # timestamp through to normalize_market → page_fetched_at_ms column.
-            # Using a private _ prefix to distinguish from Polymarket API fields.
             page_fetched_at_ms = int(time.time() * 1000)
+            page_size = len(page)
             for raw in page:
-                if isinstance(raw, dict):
-                    raw["_page_fetched_at_ms"] = page_fetched_at_ms
+                if not isinstance(raw, dict):
+                    continue
+                raw["_page_fetched_at_ms"] = page_fetched_at_ms
+                if keep_fields is not None:
+                    raw = {k: v for k, v in raw.items() if k in keep_fields}
+                yield raw
+                items_yielded += 1
 
-            if keep_fields is not None:
-                page = [
-                    {k: v for k, v in raw.items() if k in keep_fields}
-                    for raw in page
-                    if isinstance(raw, dict)
-                ]
-
-            out.extend(page)
             pages_fetched += 1
 
-            # Yield to event loop every page so uvicorn and health checks
-            # can run. httpx HTTP/2 responses return in ~40ms — too fast
-            # for asyncio cooperative scheduling to give other coroutines
-            # enough cycles during 100-page paginated fetches.
+            # Yield to event loop every page so uvicorn and health checks can run.
             await asyncio.sleep(0)
 
             if pages_fetched == 1 or pages_fetched % PROGRESS_EVERY == 0:
                 logger.info(
                     f"Gamma: {label} page {pages_fetched} fetched "
-                    f"({len(out)} {label} so far)"
+                    f"({items_yielded} {label} so far)"
                 )
 
-            if len(page) < self.PAGE_LIMIT:
+            # Short-page terminate check uses the raw response length, not
+            # `items_yielded` (page_size includes non-dict entries that get
+            # filtered above; pagination contract is length-based).
+            if page_size < self.PAGE_LIMIT:
                 break
 
             if pages_fetched >= self.MAX_PAGES:
@@ -255,6 +283,5 @@ class GammaClient:
             offset += self.PAGE_LIMIT
 
         logger.info(
-            f"Gamma fetched {len(out)} active {label} in {pages_fetched} pages (final)"
+            f"Gamma streamed {items_yielded} active {label} in {pages_fetched} pages (final)"
         )
-        return out

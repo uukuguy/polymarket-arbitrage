@@ -77,6 +77,19 @@ def _make_fake_gamma(
     fake = AsyncMock()
     fake.fetch_all_active_markets.return_value = markets
     fake.fetch_all_active_events.return_value = events if events is not None else []
+
+    # Plan 02-09 (D-23): orchestrator now consumes iter_active_markets (async
+    # generator). AsyncMock returns a coroutine by default, not iterable —
+    # supply a real async-generator function bound on the mock instance.
+    def _make_iter(items):
+        async def _iter():
+            for item in items:
+                yield item
+        return _iter
+
+    fake.iter_active_markets = _make_iter(markets)
+    fake.iter_active_events = _make_iter(events if events is not None else [])
+
     fake.aclose = AsyncMock()
     fake.__aenter__.return_value = fake
     fake.__aexit__.return_value = None
@@ -812,6 +825,22 @@ async def test_amendment_01_events_failure_does_not_kill_snapshot(tmp_path: Path
     fake_gamma.fetch_all_active_events.side_effect = RuntimeError(
         "simulated /events outage"
     )
+
+    # Plan 02-09: provide iter_active_markets async generator.
+    # iter_active_events is also stubbed but the test patches the wrapped
+    # fetch_all_active_events to raise — for the streaming consumer we need
+    # iter_active_events to raise the same RuntimeError.
+    async def _iter_markets():
+        for m in gamma_data:
+            yield m
+
+    async def _iter_events_raise():
+        raise RuntimeError("simulated /events outage")
+        yield  # unreachable but keeps this as an async generator
+
+    fake_gamma.iter_active_markets = _iter_markets
+    fake_gamma.iter_active_events = _iter_events_raise
+
     fake_gamma.aclose = AsyncMock()
     fake_gamma.__aenter__.return_value = fake_gamma
     fake_gamma.__aexit__.return_value = None

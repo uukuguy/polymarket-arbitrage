@@ -52,6 +52,7 @@ dev = [
   "respx>=0.21,<0.22",
   "freezegun>=1.5,<2",
   "ruff>=0.5,<1",
+  "psutil>=5.9,<7",
 ]
 
 [project.scripts]
@@ -64,6 +65,9 @@ packages = ["src/polyarb"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "slow: opt-in long-running tests (e.g. memory regression — runs via `make memory-budget-test`)",
+]
 
 [tool.ruff]
 line-length = 100

@@ -695,3 +695,30 @@ def test_make_deploy_dry_run() -> None:
     assert "flyctl deploy" in result.stdout, (
         f"deploy recipe must invoke 'flyctl deploy', got: {result.stdout!r}"
     )
+
+
+# Plan 02-09: memory-budget-test + docker-smoke-256mb dry-run contract
+def test_make_memory_budget_test_dry_run() -> None:
+    """`make memory-budget-test` recipe must include both calibration + budget tests."""
+    result = subprocess.run(
+        ["make", "-n", "memory-budget-test"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "test_streaming_memory_budget" in result.stdout
+    assert "test_streaming_memory_calibration" in result.stdout
+
+
+def test_make_docker_smoke_256mb_dry_run() -> None:
+    """`make docker-smoke-256mb` recipe must enforce --memory=256m and prod $1k threshold."""
+    result = subprocess.run(
+        ["make", "-n", "docker-smoke-256mb"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--memory=256m" in result.stdout
+    assert "POLYARB_LIQUIDITY_THRESHOLD_USD=1000.0" in result.stdout

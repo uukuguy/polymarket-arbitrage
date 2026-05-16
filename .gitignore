@@ -44,3 +44,7 @@ watchlist.yaml
 # Phase 1.1 scan outputs (large, regenerable from snapshot data).
 data/scans/
 
+
+# Plan 02-09: host-specific memory-budget calibration baseline (not portable)
+tests/m1-perception/fixtures/baseline_rss.txt
+/tmp/02-09-step1-snapshot.log
