@@ -1541,24 +1541,45 @@ Out of memory: Killed process 647 (python)
   **第 1 步**（恢复 + 健康）：
   ```
   /gsd-resume-work --ws m1-perception
-  make planning-status
-  curl -sS https://polyarb-l1.fly.dev/health  # 应该 status=pass
+  make planning-status                          # 应该 zero drift
+  curl -sS https://polyarb-l1.fly.dev/health    # 应该 overall=pass (3 component checks pass)
   ```
 
-  **第 2 步**（如果 T7 还没跑）：
-  - 看 `02-09-SUMMARY.md` 是否完整（不是 WIP stub）
-  - 看 `docs/learning/08-streaming-snapshot.md` 是否落库
-  - 看 `.planning/threads/market-observation-architecture.md` 是否加了 OOM 实证段
+  **第 2 步**（Wave 4 前置 — 用户准备 4 个 SaaS 账号）：
 
-  **第 3 步**（Wave 4 前置 — 用户准备 SaaS 账号）：
-  - Sentry: 注册 + 拿 DSN
-  - Axiom: 注册 + 拿 API token
-  - Better Stack: 注册 + 拿 heartbeat URL
-  - Telegram: 创建 bot + 拿 token + chat ID
+  打开 `docs/setup/04-wave4-observability-saas-prep.md`（331 行照方抓药指南，30-40 min 全 Free tier）：
+  - §1 Telegram bot         (5 min — @BotFather + getUpdates)
+  - §2 Sentry              (5 min — DSN)
+  - §3 Axiom              (10 min — API token + dataset)
+  - §4 Better Stack       (10 min — heartbeat URL)
+  - §5 flyctl secrets set  (5 min — 一次塞 6 个 secret)
+  - §6 验收清单（8 项）
 
-  **第 4 步**（Wave 4 dispatch）：
+  完成后 `flyctl secrets list -a polyarb-l1` 应有 6 个 secret 名：
+  ```
+  POLYARB_SENTRY_DSN
+  POLYARB_AXIOM_TOKEN
+  POLYARB_AXIOM_DATASET
+  POLYARB_HEARTBEAT_URL
+  POLYARB_TELEGRAM_BOT_TOKEN
+  POLYARB_TELEGRAM_CHAT_ID
+  ```
+
+  **第 3 步**（Wave 4 dispatch — 6 个 secrets 就位后）：
   ```
   /gsd-execute-phase 02 --wave 4
   ```
+
+  Plan 02-05 (Sentry+Axiom+BetterStack+Telegram 集成) + Plan 02-06 (Vercel dashboard) 同时跑。
+
+  **第 4 步**（Wave 5 — Wave 4 完成后）：
+  ```
+  /gsd-execute-phase 02 --wave 5
+  ```
+  7 天 soak gate + chaos test。
+
+  **可选 — 跨线工作**：
+  - m2-combinatorial T2 Slippage Model（不依赖 Wave 4，可并行）
+  - 三个 pre-existing test failures 清理（test_pass_when_fresh / make_smoke / r2_retry — 不阻塞）
 
 ---

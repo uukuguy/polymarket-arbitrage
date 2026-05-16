@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 status: executing
-stopped_at: "SESSION 19 EOD 2026-05-16: Plan 02-09 streaming-paginator landed (5 commits via worktree merge) + 1GB Fly VM scale (commit 1f324f4). prod /health=pass, snapshot id=5 OK 6729 markets. OOM resolved. T7 docs + worktree cleanup pending. Wave 4 still gated on 4 SaaS accounts."
+stopped_at: "SESSION 19 EOD 2026-05-16: Plan 02-09 streaming-paginator landed (5 commits via worktree merge 9901bf9) + 1GB Fly VM scale (1f324f4) + T7 docs/learning/08 + thread §2.8 + 02-09-SUMMARY (f041cc4) + Wave 4 SaaS prep guide (9fd0306). prod /health=pass, snapshot id=6 OK 6753 markets. OOM resolved, worktrees cleaned. Wave 4 gated on user finishing docs/setup/04-wave4-observability-saas-prep.md (Sentry/Axiom/Better Stack/Telegram, all free tier, ~30-40 min)."
 last_updated: "2026-05-16T11:45:00.000Z"
 last_activity: 2026-05-16
 progress:
