@@ -600,6 +600,67 @@ full sid=7 持久化:      54,424 行
 
 ---
 
+### 2.8 OOM 实证与内存预算约束（2026-05-16 SESSION 19）
+
+Phase 02 首次 prod deploy 在 Fly 256MB VM 上 OOM，复测 512MB 仍 OOM。Plan 02-09 streaming 改造 + 升 1GB 双管解决。这一节锁定经验与未来约束。
+
+**实证数字**（Linux Fly daemon, $1k production threshold, ~6700 target_markets）:
+
+```
+[OOM kill log, 512MB VM, 2026-05-16 11:23:32 UTC]
+  process: python (pid 647)
+  total-vm:  871344 kB
+  anon-rss:  402364 kB   ← 数据采集 daemon peak Linux RSS
+```
+
+**Fly VM 边际表**:
+
+| Fly VM | User RSS 上限 (扣 kernel/container overhead) | 结果 |
+|---|---|---|
+| 256MB | ~150MB | OOM (SESSION 18) |
+| 512MB | ~400MB | OOM (SESSION 19，撞 402MB 顶) |
+| **1024MB** | **~900MB** | **稳态** (SESSION 19 验证) |
+| 2048MB | ~1.9GB | 浪费 |
+
+**Working set 拆解（estimate from code inspection）**:
+
+- Python + pyarrow + httpx + sqlite + uvicorn + sentry + loguru baseline: ~120-150MB
+- target_markets (6700-7000 × ~3.5KB stamped+book attached): ~25MB
+- books_by_token + prices buy/sell/combined (~14k tokens): ~10MB
+- market_to_event_map + seen_ids set: ~10MB
+- pyarrow ParquetWriter C-allocator + 500-row batch buffer: ~10-15MB
+- SQLite executemany batch + tx state: ~10-15MB
+- **Linux glibc / C-allocator slack vs macOS**: ~80MB (意外项；macOS pytest 看不到)
+- httpx HTTP/2 connection state + asyncio: ~10MB
+
+**架构教训**:
+
+1. **"HTTP 分页 ≠ 应用流式"** — Plan 02-04 误以为 paginator 已经是流式，实际 `_paginate` 内部 `out: list[dict]` 累积 20k dicts。真正流式要 `AsyncIterator[dict]` + 调用方 `async for` 逐项消费。
+2. **streaming 单独不够** — raw 不累积省 ~160MB，但**数据本身的 working set (~240MB) 是不可压的**。streaming + 1GB VM 是双管必需。
+3. **macOS pytest peak ≠ Linux Fly peak** — 差 ~80-120MB，Linux glibc 长跑 arena 保留是主因。本地 pytest 测过不代表 prod 够。
+4. **"修代码不加内存"纪律有 caveat** — 代码已优化 + 真实数据 profile + 剩下 RSS 是数据本身 → 升一档是合理工程选择，不是逃避。详见 `memory/feedback_fix-code-not-config-2026-05.md` 更新版本。
+
+**未来 phase 的硬约束（D-23 amendment in 02-CONTEXT.md）**:
+
+- L1 daemon 任何新数据源接入 **必须 streaming-by-default**，不准累积全量 list
+- `fly.toml memory = "1024mb"` 是 m1-perception phase 的**稳态决策**，不准回退
+- 如果未来 RSS 超 600MB → 不要再升 2GB，而是**架构层面**改造（多进程拆分 / lazy CLOB fetch / events streaming 等）
+
+**触发未来 plan 02-10 的条件**（写在 R5 风险里）:
+
+- T6 docker smoke 观测到 target_markets > 10000 → CLOB phase 内存攻击成 next priority
+- 1GB VM 仍 OOM → events streaming（Decision A defer 的部分）必做
+- 数据采集成本敏感 → 多进程拆分 snapshot vs HTTP server
+
+**相关 artifact**:
+
+- `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-09-PLAN.md`
+- `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-09-SUMMARY.md`
+- `docs/learning/08-streaming-snapshot.md`
+- `memory/project_phase-02-OOM-resolution-2026-05.md`
+
+---
+
 ## 3. 现有工具栈在三层架构里的位置（重新归类）
 
 > 这是骨架阶段的初步映射，调研后会调整。

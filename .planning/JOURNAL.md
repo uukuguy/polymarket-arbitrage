@@ -1456,24 +1456,109 @@ planner 原本标 `wave: 2` 给两个 plan（期望并行），但 files 重叠�
 - ⏸️ **Wave 5**: Plan 07 (chaos test + 7-day soak + 教学文档 08) — 7 天 soak gate
 - ⏸️ **3 pre-existing test failures**: test_pass_when_fresh / make_smoke / r2_retry — 不阻塞但建议清理
 
+---
+
+## SESSION 19 — 2026-05-16 — Plan 02-09 streaming + 1GB Fly = OOM 终结
+
+### 触发
+
+SESSION 18 EOD 标 `/health=pass on 256MB`，但 SESSION 19 开头 curl `/health` 实测 503 + Fly log 显示 app machine `stopped`。Plan 02-04 retro 的 field stripping 修复在 prod 边际不够 — 单次大 Gamma response 即 OOM。
+
+### Plan 02-09 启动
+
+ROADMAP 加 Wave 3.5（gsd-tools `parseInt('3.5')=3` 把它读为 wave=3，不影响功能）。CONTEXT.md 加 D-23 amendment 锁定 streaming-by-default 为 m1 硬约束。
+
+走 gsd-planner → 1694 行 plan → plan-checker round 1: 2 blockers (memory budget 算错 + test threshold $10k≠prod $1k) → planner revision 1934 行 → plan-checker round 2: PASS-WITH-WARNINGS (5 散文 staleness, 自己 polish) → commit `4e71854`.
+
+### Executor 执行 (gsd-executor in worktree)
+
+5 task commits 在 `worktree-agent-a11aef09b623925de` branch：
+- T1 `590cd72` write_parquet_streaming via pq.ParquetWriter
+- T2 `258c8c4` write_snapshot_streaming + 2 atomicity tests
+- T3 `b09fb55` _paginate → AsyncIterator[dict] (breaking)
+- T4 `74e6476` orchestrator streaming consumer (phases 1+2 fused)
+- T5 `4e86ae5` memory regression test + consistency tests
+
+481 tests pass + 1 xfailed (30MB delta budget 是 plan 设计期低估，实测 ~80-90MB 工作集；executor 正确标 xfail 不让弱化 assertion，反而 lock 住未来 plan 02-10 的 RED gate)。
+
+**Executor 跑 worktree 时碰到 Edit/Write phantom view bug** → fallback heredoc → 但 heredoc 写入主 workspace 不是 worktree → 主 workspace 出现 T1 代码 + 2 marker 文件 unstaged。手动 reset 清理后 merge worktree branch 进 main。
+
+### OOM 实证
+
+merge + commit fly.toml 512MB 后 `make deploy` → machine started 但 health critical → fly log 抓到关键证据：
+
+```
+Out of memory: Killed process 647 (python)
+  total-vm: 871344kB
+  anon-rss: 402364kB   ← 实测 daemon peak Linux RSS
+```
+
+512MB 仍 OOM。**402MB 是数据本身大小**：target_markets ~25MB + CLOB books/prices ~10MB + Python+pyarrow+httpx baseline ~120-150MB + Linux glibc/C-allocator slack ~80MB + 其他 working set。streaming 改造让 raw 20k markets 不驻留（省 ~160MB），但常驻数据本身就这么大。
+
+### 决断升 1GB
+
+用户原话："已经消费好多时间在 OOM 上了，赶快彻底解决清楚" → 我承认 "fix code not config" 纪律不应继续套用：代码已改、profile 用真数据、剩下 RSS 是必要 working set → 升一档是合理工程选择，不是逃避。
+
+`flyctl scale memory 1024` + fly.toml `1024mb` + commit `1f324f4` + `flyctl deploy` → 部署完成 → first snapshot tick：
+
+- SQLite snapshots id 跳 3 → 4 → 5
+- market_count = 6729, is_valid = 1
+- /health overall = `pass`
+- 3 component checks 全 pass (snapshot:last_status OK / supabase:mirror pass / r2:upload pass)
+- machine `started + 1 passing`，**无 OOM**
+
+### Commits this session
+
+- `4e71854` docs(02): Plan 02-09 streaming-paginator 落库
+- `590cd72/258c8c4/b09fb55/74e6476/4e86ae5` Plan 02-09 T1-T5 (via worktree merge)
+- `d1f4228` fix(02-09): fly.toml 512MB + STATE update
+- merge commit (Plan 02-09 worktree → main)
+- `1f324f4` fix(02-09): fly.toml 1024MB after empirical OOM at 402MB
+- 待提交: STATE.md + JOURNAL.md + memory updates + T7 docs/SUMMARY
+
+### Memory 更新
+
+- ✅ `feedback_fix-code-not-config-2026-05` (UPDATED): 加 caveat — 代码改完后实测仍需升一档不违反纪律
+- ✅ `project_phase-02-OOM-resolution-2026-05` (NEW): 实测 RSS 边际表 + decision rationale
+
+### Outstanding
+
+- ⏳ **T7**: docs/learning/08-streaming-snapshot.md + thread amendment + 02-09-SUMMARY.md 重写（带最终数字）
+- ⏳ **Worktree cleanup**: prune worktree-agent-a11aef09b623925de
+- ⏸️ **Wave 4**: Plan 05 (Sentry+Axiom+Better Stack+Telegram) + Plan 06 (Vercel dashboard) — 用户需准备 4 个 SaaS 账号
+- ⏸️ **Wave 5**: Plan 07 (chaos + 7-day soak)
+- ⏸️ **3 pre-existing test failures**: 不阻塞
+
+### 教训
+
+- 不要把 plan budget 当 contract — 它是估算，可被 plan-check 漏掉 target_markets 真实大小
+- macOS pytest peak ≠ Linux Fly peak（差 ~80-120MB）
+- "数据采集小程序"心智 — 承认 RSS 400MB 是数据本身大小，不是代码烂
+- worktree 隔离 + executor heredoc 组合有 phantom-view bug，下次注意
+
 - [NEXT] 下次会话从这里开始：
 
   **第 1 步**（恢复 + 健康）：
   ```
   /gsd-resume-work --ws m1-perception
   make planning-status
-  curl -sS https://polyarb-l1.fly.dev/health  # 确认 prod 还活着
+  curl -sS https://polyarb-l1.fly.dev/health  # 应该 status=pass
   ```
 
-  **第 2 步**（Wave 4 前置 — 用户准备 SaaS 账号）：
+  **第 2 步**（如果 T7 还没跑）：
+  - 看 `02-09-SUMMARY.md` 是否完整（不是 WIP stub）
+  - 看 `docs/learning/08-streaming-snapshot.md` 是否落库
+  - 看 `.planning/threads/market-observation-architecture.md` 是否加了 OOM 实证段
+
+  **第 3 步**（Wave 4 前置 — 用户准备 SaaS 账号）：
   - Sentry: 注册 + 拿 DSN
   - Axiom: 注册 + 拿 API token
   - Better Stack: 注册 + 拿 heartbeat URL
   - Telegram: 创建 bot + 拿 token + chat ID
 
-  **第 3 步**（Wave 4 dispatch）：
+  **第 4 步**（Wave 4 dispatch）：
   ```
-  /gsd-execute-phase 02 --wave 4 --ws m1-perception
+  /gsd-execute-phase 02 --wave 4
   ```
 
 ---

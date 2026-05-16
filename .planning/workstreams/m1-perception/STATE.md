@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 status: executing
-stopped_at: Phase 02 plan complete, awaiting execute Wave 1
-last_updated: "2026-05-15T16:03:24.285Z"
-last_activity: 2026-05-15
+stopped_at: "SESSION 19 EOD 2026-05-16: Plan 02-09 streaming-paginator landed (5 commits via worktree merge) + 1GB Fly VM scale (commit 1f324f4). prod /health=pass, snapshot id=5 OK 6729 markets. OOM resolved. T7 docs + worktree cleanup pending. Wave 4 still gated on 4 SaaS accounts."
+last_updated: "2026-05-16T11:45:00.000Z"
+last_activity: 2026-05-16
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 20
-  completed_plans: 16
-  percent: 80
+  completed_plans: 17
+  percent: 85
 ---
 
 # Project State
@@ -20,11 +20,11 @@ progress:
 ## Current Position
 
 Phase: 02 (l1-production-grade) — EXECUTING
-Plan: 1 of 9
-**Status:** Executing Phase 02
+Plan: 6 of 9 ✅ (Wave 1+2+2.5+3+3.5 complete; Wave 4/5 pending)
+**Status:** Wave 3.5 complete — prod stable on 1GB Fly VM, OOM resolved
 **Current Phase:** 02
-**Last Activity:** 2026-05-15
-**Last Activity Description:** Phase 02 execution started
+**Last Activity:** 2026-05-16
+**Last Activity Description:** SESSION 19 — Plan 02-09 (streaming paginator + 1GB scale) merged. Empirical: Linux daemon peak anon-rss = 402MB; 256MB/512MB OOM, 1GB stable. SQLite snapshots id reached 5 (6729 markets, is_valid=1), /health overall=pass with all 3 component checks pass (snapshot:last_status / supabase:mirror / r2:upload). Plan 02-09 architecture (streaming) + 1GB scaling jointly required — neither alone sufficient.
 
 ## Progress
 
