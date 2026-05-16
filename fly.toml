@@ -38,19 +38,30 @@ primary_region = "ams"
     path = "/health"
     timeout = "10s"
 
-# VM sizing — 2026-05-16 SESSION 19: settled on 512MB after Plan 02-09 streaming
-# refactor. The streaming change (Gamma _paginate AsyncIterator + orchestrator
-# per-page consume) is the real architecture fix — 20k raw markets no longer
-# accumulate. But the data itself (target_markets ~25MB at $1k threshold +
-# CLOB books/prices ~10MB + Python/pyarrow/httpx baseline ~120MB) puts peak
-# RSS around 160-170MB, which is the edge of 256MB-with-150MB-usable. 256MB
-# is marginal, 512MB is the right engineering call — $3.56/mo for ~240MB
-# headroom that absorbs 2-3× data growth without revisiting this issue.
+# VM sizing — 2026-05-16 SESSION 19 final: 1GB after empirical OOM observations.
+#
+# Plan 02-09 streaming refactor IS architecturally correct — the 20k raw Gamma
+# response no longer accumulates. But empirical Linux RSS at production
+# $1k threshold (6700 target_markets, 13400 CLOB tokens) tops out at 402MB
+# anonymous RSS before kernel OOM-kills the daemon process:
+#
+#   [Linux OOM] Killed process 647 (python) total-vm:871344kB,
+#     anon-rss:402364kB, file-rss:60kB ... oom_score_adj:0
+#
+# Fly cgroup limit includes kernel + container overhead, so a 512MB VM gives
+# the user process ~400MB headroom — exactly where Plan 02-09's data-resident
+# working set ends up. 1GB ($7.12/mo) gives ~900MB usable, easily absorbing
+# 2× data growth and the periodic CLOB cache memory bursts.
+#
+# We are not chasing further memory savings on this data-collection daemon.
+# It's a small program; the right tradeoff is paying for headroom rather than
+# adding code complexity. If we ever care about cost per market, plan 02-10
+# can revisit (multi-process snapshot? separate CLOB worker? lazy book fetch?).
 #
 # Cron stays 256MB — supercronic is a small binary, no Python workload.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  memory = "1024mb"
   processes = ["app"]
 
 [[vm]]
