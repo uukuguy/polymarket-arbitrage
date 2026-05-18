@@ -1,20 +1,13 @@
-// Supabase client factories — browser + server SSR variants.
+// Server-side Supabase client — used in Server Components and Route Handlers.
 // Phase 02 Plan 02-06 / D-19 / D-20 — anon key + RLS only; no service_role.
-import {
-  createBrowserClient,
-  createServerClient,
-  type CookieOptions,
-} from "@supabase/ssr";
+//
+// Split from lib/supabase.ts because Next.js 15 App Router forbids a file that
+// imports `next/headers` (server-only) from being imported by any Client
+// Component. This file MUST NOT be imported from "use client" modules.
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
 type CookieEntry = { name: string; value: string; options?: CookieOptions };
-
-export function getBrowserSupabase() {
-  return createBrowserClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-  );
-}
 
 export async function getServerSupabase() {
   const cookieStore = await cookies();

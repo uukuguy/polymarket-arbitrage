@@ -1,7 +1,7 @@
 // /status — L1 timeline (latest 20 snapshots).
 // Server Component; reads Supabase via anon-key + RLS SELECT.
 // Fail-soft (LEARNINGS P5): if Supabase unreachable, show banner + empty table, NOT 500.
-import { getServerSupabase } from "@/lib/supabase";
+import { getServerSupabase } from "@/lib/supabase-server";
 import type { Snapshot } from "@/lib/types";
 
 export const dynamic = "force-dynamic";

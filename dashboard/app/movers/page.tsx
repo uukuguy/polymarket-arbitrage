@@ -9,7 +9,7 @@
 // (requires a markets_history sister table — see Alembic 002 docstring).
 //
 // Fail-soft (LEARNINGS P5): Supabase down -> banner + empty, NOT 500.
-import { getServerSupabase } from "@/lib/supabase";
+import { getServerSupabase } from "@/lib/supabase-server";
 import type { TopMoverRow } from "@/lib/types";
 
 export const dynamic = "force-dynamic";

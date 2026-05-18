@@ -3,7 +3,7 @@
 "use client";
 
 import { useState } from "react";
-import { getBrowserSupabase } from "@/lib/supabase";
+import { getBrowserSupabase } from "@/lib/supabase-browser";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
