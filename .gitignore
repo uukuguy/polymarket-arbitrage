@@ -48,3 +48,10 @@ data/scans/
 # Plan 02-09: host-specific memory-budget calibration baseline (not portable)
 tests/m1-perception/fixtures/baseline_rss.txt
 /tmp/02-09-step1-snapshot.log
+
+# Phase 02 Plan 02-06: Vercel Next.js dashboard build/runtime artifacts
+dashboard/.next/
+dashboard/node_modules/
+dashboard/.vercel/
+dashboard/.env.local
+dashboard/.pnpm-store/
