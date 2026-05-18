@@ -9,7 +9,8 @@
     ".venv",
     "data",
     "3th-party",
-    ".planning"
+    ".planning",
+    ".claude/worktrees"
   ],
   "reportMissingImports": "error",
   "reportUnusedImport": "warning",
