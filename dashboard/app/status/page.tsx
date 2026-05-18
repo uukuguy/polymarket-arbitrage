@@ -29,10 +29,15 @@ export default async function StatusPage() {
 
   try {
     const supabase = await getServerSupabase();
+    // Schema fidelity: Alembic 001 snapshots table has exactly these 8 columns.
+    // Earlier executor draft selected parquet_r2_url / supabase_mirror_at_ms /
+    // is_valid which don't exist; Supabase rejected with "column does not exist"
+    // and the page rendered an empty timeline behind a fail-soft banner.
+    // R2 upload presence is now derived from parquet_url being non-null.
     const { data, error } = await supabase
       .from("snapshots")
       .select(
-        "id, taken_at_ms, finished_at_ms, mode, status, market_count, parquet_url, parquet_r2_url, supabase_mirror_at_ms, is_valid",
+        "id, taken_at_ms, finished_at_ms, mode, status, market_count, parquet_url, issue_count_by_layer",
       )
       .order("taken_at_ms", { ascending: false })
       .limit(20);
@@ -85,9 +90,8 @@ export default async function StatusPage() {
               <th style={{ padding: "8px 6px" }}>mode</th>
               <th style={{ padding: "8px 6px" }}>status</th>
               <th style={{ padding: "8px 6px" }}>markets</th>
-              <th style={{ padding: "8px 6px" }}>valid</th>
-              <th style={{ padding: "8px 6px" }}>mirror?</th>
               <th style={{ padding: "8px 6px" }}>r2?</th>
+              <th style={{ padding: "8px 6px" }}>issues</th>
             </tr>
           </thead>
           <tbody>
@@ -104,13 +108,14 @@ export default async function StatusPage() {
                 <td style={{ padding: "6px 6px" }}>{s.status}</td>
                 <td style={{ padding: "6px 6px" }}>{s.market_count}</td>
                 <td style={{ padding: "6px 6px" }}>
-                  {s.is_valid === false ? "✗" : s.is_valid === true ? "✓" : "-"}
+                  {s.parquet_url ? "✓" : "-"}
                 </td>
-                <td style={{ padding: "6px 6px" }}>
-                  {s.supabase_mirror_at_ms ? "✓" : "-"}
-                </td>
-                <td style={{ padding: "6px 6px" }}>
-                  {s.parquet_r2_url ? "✓" : "-"}
+                <td style={{ padding: "6px 6px", fontSize: 11, color: "#888" }}>
+                  {s.issue_count_by_layer
+                    ? Object.entries(s.issue_count_by_layer)
+                        .map(([layer, count]) => `L${layer}:${count}`)
+                        .join(" ")
+                    : "-"}
                 </td>
               </tr>
             ))}

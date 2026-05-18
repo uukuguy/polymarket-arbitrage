@@ -3,6 +3,9 @@
 
 export type SnapshotStatus = "OK" | "DEGRADED" | "FAILED" | "pass" | "warn" | "fail";
 
+// Snapshot row — Alembic 001 schema exactly (8 columns).
+// Earlier draft included parquet_r2_url / supabase_mirror_at_ms / is_valid which
+// don't exist in the actual table — see /status page comment for context.
 export interface Snapshot {
   id: number;
   taken_at_ms: number;
@@ -11,9 +14,7 @@ export interface Snapshot {
   status: SnapshotStatus;
   market_count: number;
   parquet_url: string | null;
-  parquet_r2_url?: string | null;
-  supabase_mirror_at_ms?: number | null;
-  is_valid?: boolean | null;
+  issue_count_by_layer: Record<string, number> | null;
 }
 
 export interface MarketLatest {
