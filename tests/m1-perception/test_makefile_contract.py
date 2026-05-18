@@ -722,3 +722,69 @@ def test_make_docker_smoke_256mb_dry_run() -> None:
     assert result.returncode == 0, result.stderr
     assert "--memory=256m" in result.stdout
     assert "POLYARB_LIQUIDITY_THRESHOLD_USD=1000.0" in result.stdout
+
+
+# =============================================================================
+# Phase 02 Plan 05 — observability targets (sentry-test + alerts-test + logs-tail-axiom)
+# =============================================================================
+
+
+def test_make_sentry_test_dry_run() -> None:
+    """`make -n sentry-test` resolves to init_sentry + capture_message under uv."""
+    result = subprocess.run(
+        ["make", "-n", "sentry-test"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n sentry-test failed: {result.stderr}"
+    assert "init_sentry" in result.stdout, (
+        f"sentry-test recipe must call init_sentry, got: {result.stdout!r}"
+    )
+    assert "capture_message" in result.stdout, (
+        f"sentry-test recipe must call capture_message, got: {result.stdout!r}"
+    )
+
+
+def test_make_alerts_test_dry_run() -> None:
+    """`make -n alerts-test` resolves to send_paused_alert under uv."""
+    result = subprocess.run(
+        ["make", "-n", "alerts-test"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n alerts-test failed: {result.stderr}"
+    assert "send_paused_alert" in result.stdout, (
+        f"alerts-test recipe must call send_paused_alert, got: {result.stdout!r}"
+    )
+
+
+def test_make_logs_tail_axiom_dry_run() -> None:
+    """`make -n logs-tail-axiom` prints the Axiom dataset URL (no-op convenience)."""
+    result = subprocess.run(
+        ["make", "-n", "logs-tail-axiom"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n logs-tail-axiom failed: {result.stderr}"
+    assert "axiom.co" in result.stdout, (
+        f"logs-tail-axiom recipe should print axiom URL, got: {result.stdout!r}"
+    )
+
+
+def test_makefile_phase02_plan05_targets_phony() -> None:
+    """sentry-test / alerts-test / logs-tail-axiom must be declared .PHONY."""
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    phony_targets: set[str] = set()
+    for line in makefile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(".PHONY:"):
+            phony_targets.update(stripped[len(".PHONY:"):].split())
+    expected = {"sentry-test", "alerts-test", "logs-tail-axiom"}
+    missing = expected - phony_targets
+    assert not missing, f"missing .PHONY for phase-02 plan-05 targets: {missing}"
