@@ -385,3 +385,29 @@ alerts-test:
 logs-tail-axiom:
 	@echo ">> open https://app.axiom.co/datasets/polyarb-prod in browser"
 	@echo ">> APL query: '| where service == \"polyarb-l1\" | sort by _time desc | take 100'"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dashboard (Phase 02 Plan 02-06 — Vercel Next.js)
+# ─────────────────────────────────────────────────────────────────────────────
+
+.PHONY: dashboard-dev dashboard-build dashboard-typecheck dashboard-deploy
+
+## dashboard-dev: 本地起 dashboard (next dev :3000)
+dashboard-dev:
+	@echo ">> dashboard-dev — pnpm run dev"
+	cd dashboard && pnpm run dev
+
+## dashboard-build: Build dashboard production bundle (verify locally before Vercel deploy)
+dashboard-build:
+	@echo ">> dashboard-build — pnpm run build"
+	cd dashboard && pnpm run build
+
+## dashboard-typecheck: TS typecheck dashboard (tsc --noEmit)
+dashboard-typecheck:
+	@echo ">> dashboard-typecheck — pnpm tsc --noEmit"
+	cd dashboard && pnpm tsc --noEmit
+
+## dashboard-deploy: Vercel CLI deploy --prod (requires `vercel login` first time)
+dashboard-deploy:
+	@echo ">> dashboard-deploy — vercel deploy --prod"
+	cd dashboard && pnpm dlx vercel --prod

@@ -788,3 +788,75 @@ def test_makefile_phase02_plan05_targets_phony() -> None:
     expected = {"sentry-test", "alerts-test", "logs-tail-axiom"}
     missing = expected - phony_targets
     assert not missing, f"missing .PHONY for phase-02 plan-05 targets: {missing}"
+
+
+# =============================================================================
+# Phase 02 Plan 02-06 — Dashboard Makefile contract
+# =============================================================================
+
+
+def test_make_dashboard_dev_dry_run() -> None:
+    """`make -n dashboard-dev` resolves to `cd dashboard && pnpm run dev`."""
+    result = subprocess.run(
+        ["make", "-n", "dashboard-dev"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n dashboard-dev failed: {result.stderr}"
+    assert "pnpm run dev" in result.stdout
+    assert "cd dashboard" in result.stdout
+
+
+def test_make_dashboard_build_dry_run() -> None:
+    """`make -n dashboard-build` resolves to `cd dashboard && pnpm run build`."""
+    result = subprocess.run(
+        ["make", "-n", "dashboard-build"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n dashboard-build failed: {result.stderr}"
+    assert "pnpm run build" in result.stdout
+    assert "cd dashboard" in result.stdout
+
+
+def test_make_dashboard_typecheck_dry_run() -> None:
+    """`make -n dashboard-typecheck` resolves to `pnpm tsc --noEmit`."""
+    result = subprocess.run(
+        ["make", "-n", "dashboard-typecheck"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n dashboard-typecheck failed: {result.stderr}"
+    assert "tsc --noEmit" in result.stdout
+
+
+def test_make_dashboard_deploy_dry_run() -> None:
+    """`make -n dashboard-deploy` invokes vercel."""
+    result = subprocess.run(
+        ["make", "-n", "dashboard-deploy"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n dashboard-deploy failed: {result.stderr}"
+    assert "vercel" in result.stdout
+
+
+def test_makefile_phase02_plan06_targets_phony() -> None:
+    """dashboard-{dev,build,typecheck,deploy} must be declared .PHONY."""
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    phony_targets: set[str] = set()
+    for line in makefile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(".PHONY:"):
+            phony_targets.update(stripped[len(".PHONY:"):].split())
+    expected = {"dashboard-dev", "dashboard-build", "dashboard-typecheck", "dashboard-deploy"}
+    missing = expected - phony_targets
+    assert not missing, f"missing .PHONY for phase-02 plan-06 targets: {missing}"

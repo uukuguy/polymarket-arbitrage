@@ -1,0 +1,10 @@
+# dashboard/.vercelignore — Vercel reads this only when Root Directory = dashboard/
+# (W7 fix, Plan 02-06 revision 2026-05-12). Repo-root .vercelignore would be ignored.
+# Python code at repo root is automatically excluded by Vercel's Root Directory setting,
+# so this file only needs to scrub artifacts within the dashboard/ subtree.
+.next/
+node_modules/
+.vercel/
+*.log
+.env.local
+.pnpm-store/
