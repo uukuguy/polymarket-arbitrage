@@ -451,3 +451,154 @@ def gamma_payload_factory() -> tuple[Any, Any]:
     spec.loader.exec_module(mod)
     return mod.make_realistic_market, mod.make_realistic_event
 
+
+# =============================================================================
+# Plan 02-05: Observability fixtures (Sentry + Better Stack + Telegram)
+# =============================================================================
+
+
+@pytest.fixture
+def mocked_sentry(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Monkeypatch sentry_sdk.init / capture_message / capture_exception / add_breadcrumb.
+
+    Returns a SimpleNamespace with the mock objects so tests can assert on calls.
+    """
+    from types import SimpleNamespace
+
+    import sentry_sdk
+
+    init_mock = MagicMock()
+    capture_message_mock = MagicMock()
+    capture_exception_mock = MagicMock()
+    add_breadcrumb_mock = MagicMock()
+
+    monkeypatch.setattr(sentry_sdk, "init", init_mock)
+    monkeypatch.setattr(sentry_sdk, "capture_message", capture_message_mock)
+    monkeypatch.setattr(sentry_sdk, "capture_exception", capture_exception_mock)
+    monkeypatch.setattr(sentry_sdk, "add_breadcrumb", add_breadcrumb_mock)
+
+    # Also patch the references that observability.sentry / daemon.alerts import.
+    # Imports done lazily inside fixture so the test can opt-in without triggering
+    # module load at conftest import time.
+    try:
+        import polyarb.observability.sentry as obs_sentry  # noqa: WPS433
+        monkeypatch.setattr(obs_sentry, "sentry_sdk", sentry_sdk, raising=False)
+    except ImportError:
+        pass  # module not yet implemented in RED phase
+    try:
+        import polyarb.daemon.alerts as alerts_mod  # noqa: WPS433
+        monkeypatch.setattr(alerts_mod, "sentry_sdk", sentry_sdk, raising=False)
+    except ImportError:
+        pass
+
+    return SimpleNamespace(
+        init=init_mock,
+        capture_message=capture_message_mock,
+        capture_exception=capture_exception_mock,
+        add_breadcrumb=add_breadcrumb_mock,
+    )
+
+
+@pytest.fixture
+def mocked_better_stack(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """httpx AsyncClient mock for the Better Stack heartbeat URL + Telegram fallback.
+
+    Returns a SimpleNamespace:
+      - calls: list of (method, url, json_body) tuples observed
+      - set_response(method, url_substring, status_code): override response for a url
+      - reset(): clear calls + responses
+
+    Default behaviour: every request returns 200 OK.
+    """
+    from types import SimpleNamespace
+
+    state: dict = {
+        "calls": [],
+        "overrides": [],  # list of (method, url_substring, status_code)
+        "default_status": 200,
+    }
+
+    def set_response(method: str, url_substring: str, status_code: int) -> None:
+        state["overrides"].append((method.upper(), url_substring, status_code))
+
+    def reset() -> None:
+        state["calls"].clear()
+        state["overrides"].clear()
+        state["default_status"] = 200
+
+    class _FakeResponse:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+        def json(self) -> dict:
+            return {"ok": self.status_code < 400}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(
+            self, url: str, json: dict | None = None, **kwargs: Any
+        ) -> _FakeResponse:
+            state["calls"].append(("POST", url, json))
+            for (m, sub, sc) in state["overrides"]:
+                if m == "POST" and sub in url:
+                    return _FakeResponse(sc)
+            return _FakeResponse(state["default_status"])
+
+        async def get(self, url: str, **kwargs: Any) -> _FakeResponse:
+            state["calls"].append(("GET", url, None))
+            for (m, sub, sc) in state["overrides"]:
+                if m == "GET" and sub in url:
+                    return _FakeResponse(sc)
+            return _FakeResponse(state["default_status"])
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    return SimpleNamespace(
+        calls=state["calls"],
+        set_response=set_response,
+        reset=reset,
+    )
+
+
+@pytest.fixture
+def daemon_settings_with_observability(
+    tmp_db_path: Path, tmp_parquet_root: Path, tmp_cache_root: Path
+) -> Settings:
+    """Settings with all Plan 02-05 observability fields populated.
+
+    Includes plausible-but-fake values for sentry_dsn / axiom / better_stack / telegram.
+    Used by observability tests that need a fully-populated Settings.
+    """
+    from pydantic import SecretStr
+    return Settings(
+        db_path=tmp_db_path,
+        parquet_root=tmp_parquet_root,
+        cache_root=tmp_cache_root,
+        retry_attempts=1,
+        retry_min_wait_s=0.001,
+        retry_max_wait_s=0.005,
+        http_timeout_s=2.0,
+        liquidity_threshold_usd=100.0,
+        scan_shared_secret=SecretStr(_TEST_SCAN_SECRET),
+        sentry_dsn="https://abcdef0123456789@o000000.ingest.sentry.io/123456",
+        axiom_token=SecretStr("axiom-test-token"),
+        axiom_dataset="polyarb-test",
+        better_stack_heartbeat_url=(
+            "https://uptime.betterstack.com/api/v1/heartbeat/test"
+        ),
+        telegram_bot_token=SecretStr("7012345:test-bot-token"),
+        telegram_chat_id="-1001234567890",
+        alert_dedupe_window_seconds=300,
+        release_id="v0.2.0-abc123",
+    )
+

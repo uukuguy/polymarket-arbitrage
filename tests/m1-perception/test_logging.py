@@ -135,3 +135,105 @@ def test_no_diagnose_no_backtrace_in_prod_mode() -> None:
         "diagnose=False should prevent local variable inspection in logs. "
         f"Output contains 'Locals': {output[:500]}"
     )
+
+
+# =============================================================================
+# Plan 02-05: redact_secrets filter — T-02-07 mitigation
+# =============================================================================
+
+
+def _capture_with_redact(level: str, message: str, **bind_kwargs) -> str:
+    """Capture loguru JSON output with the redact_secrets filter active."""
+    from polyarb.observability.logging import redact_secrets
+
+    buffer = io.StringIO()
+    sink_id = logger.add(
+        buffer,
+        serialize=True,
+        level=level,
+        format="{message}",
+        backtrace=False,
+        diagnose=False,
+        filter=redact_secrets,
+    )
+    try:
+        bound = logger.bind(**bind_kwargs) if bind_kwargs else logger
+        bound.log(level, message)
+    finally:
+        logger.remove(sink_id)
+    return buffer.getvalue().strip()
+
+
+def test_redact_bearer_token() -> None:
+    """`Bearer secret123` in log message → `Bearer [REDACTED]` in JSON output."""
+    output = _capture_with_redact(
+        "INFO", "calling api with Bearer secret_token_xyz_12345"
+    )
+
+    assert output, "redact filter swallowed the log line"
+    assert "secret_token_xyz_12345" not in output, (
+        f"raw bearer token leaked through redact filter: {output[:300]}"
+    )
+    assert "[REDACTED]" in output
+
+
+def test_redact_token_param() -> None:
+    """`token=abc123` in URL → `token=[REDACTED]`."""
+    output = _capture_with_redact(
+        "INFO", "url=https://x.example.com?token=my_secret_value_abc123"
+    )
+
+    assert "my_secret_value_abc123" not in output, (
+        f"token= param leaked: {output[:300]}"
+    )
+    assert "[REDACTED]" in output
+
+
+def test_redact_authorization_header() -> None:
+    """Authorization-style values are redacted."""
+    output = _capture_with_redact(
+        "INFO", "request headers: Authorization: Bearer xyz_super_secret_value_456"
+    )
+
+    assert "xyz_super_secret_value_456" not in output, (
+        f"Authorization header value leaked: {output[:300]}"
+    )
+
+
+def test_no_redact_for_non_secret_text() -> None:
+    """A line with no secrets is left intact (no spurious redactions)."""
+    output = _capture_with_redact(
+        "INFO", "snapshot taken with market_count=20000 elapsed=8m12s"
+    )
+
+    assert "[REDACTED]" not in output, (
+        f"redact filter triggered on non-secret message: {output[:300]}"
+    )
+    assert "market_count=20000" in output
+    assert "elapsed=8m12s" in output
+
+
+def test_redact_filter_does_not_break_json_serialize() -> None:
+    """After redaction, the JSON line is still parseable."""
+    import json as _json
+
+    output = _capture_with_redact(
+        "INFO", "calling external Bearer secret_AAA_BBB_CCC service"
+    )
+
+    parsed = _json.loads(output)
+    assert isinstance(parsed, dict), f"redact filter broke JSON: {output[:300]}"
+    # secret value must not appear anywhere in the JSON
+    assert "secret_AAA_BBB_CCC" not in _json.dumps(parsed)
+
+
+def test_redact_extra_field_by_key_name() -> None:
+    """logger.bind(api_key=...) → 'api_key' value redacted in extras."""
+    output = _capture_with_redact(
+        "INFO", "calling api", api_key="sk-abcdef0123456789"
+    )
+
+    assert "sk-abcdef0123456789" not in output, (
+        f"api_key extras leaked: {output[:300]}"
+    )
+
