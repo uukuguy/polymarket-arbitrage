@@ -125,6 +125,70 @@ async def test_degraded_does_not_count_as_failure(
 
 
 @pytest.mark.asyncio
+async def test_successful_tick_calls_heartbeat_ok(
+    daemon_settings_for_test: Any,
+) -> None:
+    """Plan 02-05 fix-up: successful snapshot tick must ping Better Stack heartbeat.
+
+    Wired via `alerts.send_heartbeat_ok(self._settings)` from _tick() success branch.
+    Test patches the module attribute so we can assert the call without HTTP traffic.
+    """
+    from polyarb.storage.sqlite_store import SQLiteStore
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK))
+
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()) as hb_mock:
+        await scheduler._tick()
+        hb_mock.assert_called_once_with(daemon_settings_for_test)
+
+
+@pytest.mark.asyncio
+async def test_degraded_tick_also_calls_heartbeat_ok(
+    daemon_settings_for_test: Any,
+) -> None:
+    """DEGRADED is success-with-warnings (D-12) — heartbeat OK still fires.
+
+    Better Stack monitor should stay green for DEGRADED ticks; the degradation
+    is signalled through Sentry breadcrumbs + supabase mirror age check, not
+    through silencing the heartbeat.
+    """
+    from polyarb.storage.sqlite_store import SQLiteStore
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.DEGRADED))
+
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()) as hb_mock:
+        await scheduler._tick()
+        hb_mock.assert_called_once_with(daemon_settings_for_test)
+
+
+@pytest.mark.asyncio
+async def test_failed_tick_does_not_call_heartbeat_ok(
+    daemon_settings_for_test: Any,
+) -> None:
+    """FAILED tick must NOT ping heartbeat — that's how Better Stack notices the outage.
+
+    If heartbeat OK fires on failure, the monitor stays green and 75-min grace
+    never triggers, defeating the external-watcher safety net.
+    """
+    from polyarb.storage.sqlite_store import SQLiteStore
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
+
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()) as hb_mock:
+        await scheduler._tick()
+        hb_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_counter_persists_across_restart(
     daemon_settings_for_test: Any,
 ) -> None:

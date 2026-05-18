@@ -151,6 +151,15 @@ class SnapshotScheduler:
                     f"snapshot tick success: status={result_status} "
                     f"failure_counter reset to 0"
                 )
+                # Plan 02-05 fix-up: Better Stack heartbeat OK pulse.
+                # Reference via the module attribute (not from-import) so tests
+                # can monkeypatch alerts.send_heartbeat_ok. Fail-soft already
+                # encapsulated inside send_heartbeat_ok itself.
+                try:
+                    from polyarb.daemon import alerts as _alerts
+                    await _alerts.send_heartbeat_ok(self._settings)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"send_heartbeat_ok failed: {e!r}")
             else:
                 # FAILED status
                 self._failure_counter += 1
