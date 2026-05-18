@@ -19,8 +19,50 @@ from __future__ import annotations
 
 import logging
 import sys
+from typing import Any
 
 from loguru import logger
+
+from polyarb.observability.redact import (
+    SENSITIVE_KEY_NAMES,
+    _is_sensitive_key,
+    _redact_string,
+)
+
+
+def redact_secrets(record: dict[str, Any]) -> bool:
+    """Loguru filter — masks known secret patterns in message + extras.
+
+    Plan 02-05 — T-02-07 mitigation. Applied BEFORE ``serialize=True`` so the
+    JSON output going to stdout (and on to Axiom) never contains the raw
+    secret values.
+
+    Loguru passes the record dict by reference and respects in-place mutation.
+    We always return True (keep the line) — the goal is to keep the diagnostic
+    log entry, just without the secret bytes.
+
+    Coverage:
+      - record["message"]: pattern-based redaction (Bearer, token=, JWT, sk-*)
+      - record["extra"]: per-key redaction. If the key matches a sensitive
+        name (api_key, token, secret, telegram_bot_token, ...) the value is
+        replaced wholesale with "[REDACTED]". Otherwise string values are
+        passed through pattern redaction.
+    """
+    if "message" in record:
+        record["message"] = _redact_string(record["message"])
+
+    extra = record.get("extra")
+    if isinstance(extra, dict):
+        record["extra"] = {
+            k: (
+                "[REDACTED]"
+                if _is_sensitive_key(k)
+                else (_redact_string(v) if isinstance(v, str) else v)
+            )
+            for k, v in extra.items()
+        }
+
+    return True
 
 
 class InterceptHandler(logging.Handler):
@@ -69,6 +111,7 @@ def init_logging() -> None:
         enqueue=False,    # in-process; daemon-friendly (no background thread)
         backtrace=False,  # T-02-07: no source path in exception output
         diagnose=False,   # T-02-07: no local variable values in exception output
+        filter=redact_secrets,  # Plan 05 T-02-07: mask Bearer/token=/key=/JWT before serialize
     )
 
     # Intercept stdlib logging (uvicorn, starlette, httpx) → loguru

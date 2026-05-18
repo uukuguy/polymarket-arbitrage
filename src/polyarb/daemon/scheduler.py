@@ -104,13 +104,27 @@ class SnapshotScheduler:
         """Alert hook called when scheduler transitions to PAUSED state.
 
         Plan 02: stub (logs only).
-        Plan 05: wires to Sentry.capture_message + Better Stack heartbeat stop.
+        Plan 05: wires to alerts.send_paused_alert (Sentry + Better Stack +
+            Telegram fallback). We reference via the module attribute
+            ``alerts.send_paused_alert`` (not a from-import) so tests can
+            monkeypatch the function on the module.
         """
         logger.error(
             "SCHEDULER_PAUSED: consecutive failure threshold reached "
             f"(counter={self._failure_counter}). Manual restart required. "
             "Run /scan or SSH to unpause."
         )
+        try:
+            from polyarb.daemon import alerts as _alerts
+            await _alerts.send_paused_alert(
+                self._settings,
+                reason=f"{self._failure_counter} consecutive FAILED snapshots",
+            )
+        except Exception as e:  # noqa: BLE001
+            # Alerts are fail-soft: if every channel is unreachable, the
+            # daemon should still pause cleanly — losing the notification
+            # is bad, losing the pause-state is worse.
+            logger.warning(f"send_paused_alert failed: {e!r}")
 
     async def _tick(self) -> None:
         """Execute one scheduler tick.

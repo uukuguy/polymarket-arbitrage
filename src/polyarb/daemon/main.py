@@ -31,6 +31,7 @@ from polyarb.config import load_settings
 from polyarb.http.app import create_app
 from polyarb.daemon.scheduler import SnapshotScheduler
 from polyarb.observability.logging import init_logging
+from polyarb.observability.sentry import init_sentry
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -38,9 +39,15 @@ async def main() -> int:
     # MUST be first — sets up JSON stdout sink + InterceptHandler
     init_logging()
 
+    settings = load_settings()
+
+    # Plan 05: init_sentry runs AFTER init_logging (LoguruIntegration needs
+    # the loguru sink already installed) and BEFORE any logger.info that
+    # might catch a startup exception we want Sentry to capture.
+    init_sentry(settings)
+
     logger.info("polyarb daemon starting up")
 
-    settings = load_settings()
     sqlite_store = SQLiteStore(settings.db_path)
     sqlite_store.init_schema()
 

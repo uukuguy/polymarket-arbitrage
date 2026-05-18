@@ -45,6 +45,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import sentry_sdk
 from loguru import logger
 
 
@@ -522,6 +523,15 @@ async def run_snapshot(
                 )
         except Exception as e:  # noqa: BLE001
             logger.error(f"Supabase mirror init failed: {e!r}")
+            # Plan 05: Sentry breadcrumb (warning level) — adds context to
+            # the NEXT real Sentry event without opening a new issue. Mirror
+            # failures are fail-soft; we don't want them spamming Sentry.
+            sentry_sdk.add_breadcrumb(
+                category="storage",
+                message=f"supabase_mirror_failed snapshot_id={snapshot_id}",
+                level="warning",
+                data={"error": str(e)[:200]},
+            )
             issues.append(
                 Issue(
                     layer=4,
@@ -554,6 +564,15 @@ async def run_snapshot(
                 pass
         except R2UploadError as e:
             logger.error(f"R2 upload failed: {e!r}")
+            # Plan 05: Sentry breadcrumb (warning level) — captures storage
+            # failure context for the next real Sentry event without
+            # opening a separate issue (fail-soft path, don't pollute Sentry).
+            sentry_sdk.add_breadcrumb(
+                category="storage",
+                message=f"r2_upload_failed snapshot_id={snapshot_id}",
+                level="warning",
+                data={"error": str(e)[:200]},
+            )
             issues.append(
                 Issue(
                     layer=4,

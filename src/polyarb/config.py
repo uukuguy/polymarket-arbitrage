@@ -94,6 +94,39 @@ class Settings(BaseSettings):
     r2_bucket: str = Field(default="polyarb-snapshots")
     r2_enabled: bool = Field(default=False)  # auto-set by model_validator
 
+    # ── Observability (D-14/D-15/D-16/D-17) — Plan 05 additions ─────────────
+    # Sentry DSN — empty string skips init_sentry (dev mode).
+    sentry_dsn: str = Field(
+        default="",
+        description="Sentry DSN (D-15); empty = skip init_sentry for dev",
+    )
+    # Axiom ingest token + dataset — only used by Fly stdout forwarder (no
+    # direct daemon code path); included here so a typo in env var raises
+    # at boot instead of silently dropping logs.
+    axiom_token: SecretStr = Field(
+        default=SecretStr(""),
+        description="Axiom ingest token (D-14)",
+    )
+    axiom_dataset: str = Field(default="polyarb-prod")
+    # Better Stack heartbeat URL — daemon POSTs to <url>/fail on alert,
+    # GETs <url> on heartbeat-OK. Empty = skip Better Stack code paths.
+    better_stack_heartbeat_url: str = Field(
+        default="",
+        description="Better Stack heartbeat URL (D-16)",
+    )
+    # Telegram bot used as direct fallback when Better Stack is unreachable
+    # (e.g. Better Stack returns 5xx, or network partition blocks Better Stack
+    # but not api.telegram.org). Normal alert path goes through Better Stack
+    # native Telegram integration; this is the redundancy.
+    telegram_bot_token: SecretStr = Field(
+        default=SecretStr(""),
+        description="Telegram bot token — direct fallback if Better Stack outage",
+    )
+    telegram_chat_id: str = Field(default="")
+    # Dedup window: a paused-alert fired twice within this many seconds counts
+    # as one alert (suppresses storm during flaky-network episodes).
+    alert_dedupe_window_seconds: int = Field(default=300)
+
     model_config = SettingsConfigDict(env_prefix="POLYARB_", env_file=".env", extra="ignore")
 
     @model_validator(mode="after")
