@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 02
-status: gate-passed-ready-for-extract-learnings
-stopped_at: "SESSION 21 EOD 2026-05-20 04:30 CST: Phase 02 ✅ HARD GATE PASSED — alert chain end-to-end verified live in prod chaos. Inj 2-v2 (21:06:22Z) 在 ~75s 内完整跑出 3× FAILED → PAUSED → send_paused_alert → Sentry email (PYTHON-C/D + PYTHON-B digest) + Telegram '3 consecutive FAILED snapshots' + Sentry dashboard. 全部 5 个 chaos injection 完成。5 个新 P0/P1 bug 4 个在本会话修了 (alerts.py Telegram unconditional / Makefile init_sentry / Sentry alert rule / scheduler_interval_s 可配 / GHA setup-flyctl@1.6)。Phase 02 final 02-07-SUMMARY.md landed. planning-status zero drift. **NEXT 下次会话**：(1) `/gsd-extract_learnings 02 --ws m1-perception` 关 Phase 02。(2) Phase 03 (L2) 启动前必须先消化 Phase 02.1 backlog (2 个 P1 + 1 个 trade-off 待修)。(3) M2 T2 三选一决策。"
-last_updated: "2026-05-19T21:30:00.000Z"
-last_activity: 2026-05-19
+current_phase: 02 (gate passed, awaiting extract_learnings)
+status: verifying
+stopped_at: SESSION 20 EOD (2026-05-19) — Wave 4 完整收尾 + git tree/MEMORY/STATE 全部干净
+last_updated: "2026-05-19T23:09:17.287Z"
+last_activity: 2026-05-20
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 20
   completed_plans: 20
   percent: 100
@@ -32,9 +32,11 @@ Plan: 9 of 9 ✅ (all SUMMARY landed, planning-status zero drift)
 **Phase 01.1 status:** ✅ COMPLETE — LEARNINGS extracted 2026-05-12 (14 decisions / 12 lessons / 10 patterns / 8 surprises); deployment thread locked; 6 plans + 4 acceptance amendments shipped
 **Phase 02 status:** ✅ HARD GATE PASSED — Wave 1+2+2.5+3+3.5+4+5 全 ✅;5 个 prod chaos injection 完成;alert chain end-to-end verified live in prod (Sentry + Telegram + Sentry dashboard 三路). 待 `/gsd-extract_learnings 02 --ws m1-perception`
 **Phase 02.1 backlog (deferred bugs, 启动 Phase 03 前必修)**:
+
   - #6 trade-off: `/health` 503 触发 Fly proxy 切流量 (IETF strict vs Fly proxy 行为冲突)
   - #7 P1: fail-soft 互相抵消 (撤 secret 场景 `mirror_enabled=False` → 静默)
   - #8 P1: daemon PAUSED 无 prod-friendly unpause endpoint (现需 SSH+sqlite3+restart 三步)
+
 **Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket
 **Test count:** 459+ m1-perception tests green (Plan 02-07 +22 chaos tests + 2 scheduler_interval tests; 3 pre-existing failures still deferred)
 
@@ -119,17 +121,21 @@ curl -sS https://polyarb-l1.fly.dev/health                # 应该 overall=pass,
 Phase 02 只剩 Plan 02-07 (Wave 5 = chaos + 7-day soak)，是 Phase 02 完结的最后一个 plan。
 
 **路 A — 启动 Wave 5（推荐时机：你有 7 天观察 budget 时）**：
+
 ```
 /gsd-execute-phase 02 --wave 5
 ```
+
 两段：(a) chaos test 验证 alert paths 在真实失败下都触发 → (b) 7 天 soak gate（daemon 不重启持续运行 7 天，prod uptime ≥ 99%，至少 1 次自然失败被正确告警）。chaos 期间会真实触发 Sentry 邮件 / Better Stack 邮件 / Telegram 推送，是好事。
 
 **路 B — 跨线工作**（不触发 Wave 5，避免 chaos 噪声）：
+
 - m2-combinatorial T2 Slippage Model（不依赖 Phase 02 完成，可并行）
 - 清 3 个 pre-existing test failures（test_pass_when_fresh / make_smoke_health_local / test_r2_retry — 不阻塞但拖测试套件干净度）
 - 173 个旧 commit author 重写（**不建议**，会破坏 SUMMARY cross-ref，详见 [git-identity-anomaly](memory/feedback_git-identity-anomaly-2026-05.md)）
 
 **路 C — 文档 / 教学补遗**：
+
 - `docs/learning/` 加 Wave 4 教学文档（Sentry/Better Stack/Telegram alert path 三轨设计、Edge Runtime HMAC 模式、lib supabase server-client split for Next.js 15 App Router）
 
 ### 第三步（关键事实记忆）
@@ -187,6 +193,7 @@ Phase 02 只剩 Plan 02-07 (Wave 5 = chaos + 7-day soak)，是 Phase 02 完结�
 **Authoritative state:** [Phase 02 Wave 4 完成 memory](memory/project_phase-02-wave-4-2026-05.md)
 
 **Carry-over observational facts**（值得跨 session 保留的市场观察）:
+
 - 220 个市场无 endDate（Layer 2 UNKNOWN）— 需要分类调查（是 perpetual market？）
 - clob_missing 在 4 小时内 +33%（CLOB 可达性漂移）— 需要时序观察
 - Polymarket Gamma API 在 CST 22-24 时段明显慢（page 速度 1.7/s → 0.3/s）— 北美白天高峰；记录为环境事实
