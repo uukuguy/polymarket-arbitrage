@@ -21,6 +21,31 @@ from polyarb.validator.category import SnapshotStatus
 
 
 # ---------------------------------------------------------------------------
+# scheduler_interval_s configurability (Inj 2 P0 fix, 2026-05-20)
+# ---------------------------------------------------------------------------
+
+def test_scheduler_interval_default_3600() -> None:
+    """Default Settings.scheduler_interval_s == 3600 (preserves Plan 02 behavior)."""
+    from polyarb.config import Settings
+    s = Settings(_env_file=None)
+    assert s.scheduler_interval_s == 3600
+
+
+def test_scheduler_interval_reads_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POLYARB_SCHEDULER_INTERVAL_S env var overrides default.
+
+    Inj 2 P0 fix: pre-2026-05-20 the value was read via getattr fallback on a
+    field that Settings did not declare, so the env var was silently ignored
+    and prod was stuck at 3600s (1h) — chaos injection could not verify
+    the 3-failure-pause path within a reasonable window.
+    """
+    from polyarb.config import Settings
+    monkeypatch.setenv("POLYARB_SCHEDULER_INTERVAL_S", "60")
+    s = Settings(_env_file=None)
+    assert s.scheduler_interval_s == 60
+
+
+# ---------------------------------------------------------------------------
 # Helper result types
 # ---------------------------------------------------------------------------
 

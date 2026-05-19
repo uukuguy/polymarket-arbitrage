@@ -211,7 +211,7 @@ class SnapshotScheduler:
         asyncio.wait_for on stop_event so cancellation interrupts the wait
         immediately rather than after the next 1s tick.
         """
-        interval_s = getattr(self._settings, "scheduler_interval_s", 3600)
+        interval_s = self._settings.scheduler_interval_s
         logger.info(f"scheduler loop started, tick interval={interval_s}s")
 
         try:

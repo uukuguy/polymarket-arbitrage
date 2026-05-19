@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     clob_batch_rate_per_10s: int = 450
     clob_batch_size: int = 500
 
+    # 2026-05-20 (Inj 2 P0 fix): scheduler tick interval, was hardcoded 3600
+    # via getattr fallback. Now explicit + env-var configurable so chaos
+    # injection (and operations) can dial it down without redeploy.
+    scheduler_interval_s: int = 3600
+
     liquidity_threshold_usd: float = 1000.0
 
     retry_attempts: int = 3
