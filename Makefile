@@ -411,3 +411,45 @@ dashboard-typecheck:
 dashboard-deploy:
 	@echo ">> dashboard-deploy — vercel deploy --prod"
 	cd dashboard && pnpm dlx vercel --prod
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 02 Plan 07 — 7-day production soak monitoring (Better Stack driven)
+#
+# W9 fix (2026-05-12): 无本地长跑进程。Better Stack cloud probe (Plan 05) 是
+# 真正的 7×24 探针。soak_monitor.py 只做 status check + export audit trail。
+# Requires: BETTERSTACK_API_TOKEN + BETTERSTACK_MONITOR_ID env vars.
+# ─────────────────────────────────────────────────────────────────────────────
+
+.PHONY: soak-status soak-export soak-fault-inject
+
+## soak-status: Pull 7-day uptime % from Better Stack and check Phase 02 gate (uptime >= 99%)
+## Usage: BETTERSTACK_API_TOKEN=... BETTERSTACK_MONITOR_ID=... make soak-status
+soak-status:
+	@echo ">> soak-status — fetching Better Stack 7-day SLA history"
+	uv run python scripts/soak_monitor.py status
+
+## soak-export: Export 7-day Better Stack history to .planning/.../02-SOAK-LOG.md (audit trail)
+## Usage: BETTERSTACK_API_TOKEN=... BETTERSTACK_MONITOR_ID=... make soak-export
+soak-export:
+	@echo ">> soak-export — dumping Better Stack history to 02-SOAK-LOG.md"
+	uv run python scripts/soak_monitor.py export --days 7
+
+## soak-fault-inject: Print instructions for deliberate fault injection (verify alert chain)
+## Run on Day 3-4 of soak window to verify Telegram alert + self-healing path
+soak-fault-inject:
+	@echo ">> soak-fault-inject — deliberate fault injection to verify alert chain"
+	@echo ""
+	@echo "Option A (scale to 0 briefly):"
+	@echo "  flyctl machines stop <machine_id> -a polyarb-l1"
+	@echo "  # Wait 3-5 min → expect Telegram alert + Better Stack incident"
+	@echo "  flyctl machines start <machine_id> -a polyarb-l1"
+	@echo ""
+	@echo "Option B (break R2 credentials):"
+	@echo "  flyctl secrets unset POLYARB_R2_SECRET_ACCESS_KEY -a polyarb-l1"
+	@echo "  # Wait for next snapshot → R2 warn in /health"
+	@echo "  flyctl secrets set POLYARB_R2_SECRET_ACCESS_KEY=<original> -a polyarb-l1"
+	@echo ""
+	@echo "Option C (HMAC flood — 30 bad requests):"
+	@echo "  for i in \$$(seq 1 30); do curl -s -X POST https://polyarb-l1.fly.dev/scan -H 'X-Signature: deadbeef' -d '{}' & done; wait"
+	@echo ""
+	@echo "Document each injection in 02-SOAK-LOG.md with timestamp + outcome."

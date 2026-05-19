@@ -860,3 +860,66 @@ def test_makefile_phase02_plan06_targets_phony() -> None:
     expected = {"dashboard-dev", "dashboard-build", "dashboard-typecheck", "dashboard-deploy"}
     missing = expected - phony_targets
     assert not missing, f"missing .PHONY for phase-02 plan-06 targets: {missing}"
+
+
+# =============================================================================
+# Phase 02 Plan 07 — soak monitoring Makefile targets
+# =============================================================================
+
+
+def test_make_soak_status_dry_run() -> None:
+    """`make -n soak-status` must invoke soak_monitor.py status."""
+    result = subprocess.run(
+        ["make", "-n", "soak-status"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n soak-status failed: {result.stderr}"
+    assert "soak_monitor.py status" in result.stdout, (
+        f"soak-status recipe must call soak_monitor.py status, got: {result.stdout!r}"
+    )
+
+
+def test_make_soak_export_dry_run() -> None:
+    """`make -n soak-export` must invoke soak_monitor.py export --days 7."""
+    result = subprocess.run(
+        ["make", "-n", "soak-export"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n soak-export failed: {result.stderr}"
+    assert "soak_monitor.py export" in result.stdout, (
+        f"soak-export recipe must call soak_monitor.py export, got: {result.stdout!r}"
+    )
+    assert "--days 7" in result.stdout, (
+        f"soak-export recipe must include --days 7, got: {result.stdout!r}"
+    )
+
+
+def test_make_soak_fault_inject_dry_run() -> None:
+    """`make -n soak-fault-inject` must exist and dry-run cleanly."""
+    result = subprocess.run(
+        ["make", "-n", "soak-fault-inject"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n soak-fault-inject failed: {result.stderr}"
+
+
+def test_makefile_phase02_plan07_targets_phony() -> None:
+    """soak-status / soak-export / soak-fault-inject must be declared .PHONY."""
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    phony_targets: set[str] = set()
+    for line in makefile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(".PHONY:"):
+            phony_targets.update(stripped[len(".PHONY:"):].split())
+    expected = {"soak-status", "soak-export", "soak-fault-inject"}
+    missing = expected - phony_targets
+    assert not missing, f"missing .PHONY for phase-02 plan-07 soak targets: {missing}"
