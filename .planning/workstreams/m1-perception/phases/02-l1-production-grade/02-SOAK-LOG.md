@@ -108,6 +108,133 @@ make soak-export
   - Better Stack: heartbeat on-call primary responder 邮箱确认 / 改成正确邮箱
   - 验证: 在 dashboard 点 "Send Test Notification" / "Test alert"，Gmail 1-2 min 内收到
 
+### Inj 2 — Force Gamma URL invalid → scheduler FAILED tick (2026-05-20) — **PARTIAL VERIFIED + 2 个新发现**
+
+**Timeline (UTC)**:
+| 时刻 | 事件 |
+|---|---|
+| 19:21:58Z | `flyctl secrets set POLYARB_GAMMA_URL=https://gamma-invalid.example.com` |
+| 19:22:15Z | daemon 重启完成 |
+| 19:22:44Z | 第 1 次 snapshot tick — `status=FAILED, is_valid=False, 2 L1 issues` |
+| 19:22:45Z | scheduler log: `snapshot tick FAILED: failure_counter=1/3` |
+| 20:01:51Z | `flyctl secrets unset POLYARB_GAMMA_URL` (停损 — 等 3 次累积要 1h45m，不划算) |
+| 20:04:08Z | daemon 恢复 — /health 全 pass，snapshot OK |
+| **Total**: ~42 min，**只完成 1/3 失败累积**，未到 PAUSED 状态 |
+
+**预期 vs 实际**:
+| 通道 | 预期 (PAUSED 后) | 实际 |
+|---|---|---|
+| `send_paused_alert` 真触发 | Telegram + Sentry email | ⏸ 未到 3 次 FAILED 累积，未触发 |
+| daemon 不崩 + status=FAILED | ✓ | ✅ daemon 跑 7.3s snapshot 完成 + 内部 /health=fail (503) + last_status=FAILED |
+| F-05 Supabase mirror skip | ✓ | ✅ `step 7.5: skip Supabase mirror — snapshot is_valid=False` |
+| R2 upload (parquet 0 rows) | ✓ (即使 0 row 也上传) | ✅ R2 upload success |
+
+**第 1 个新发现 (P0 bug)**: **`scheduler_interval_s` 不可配**
+
+`src/polyarb/daemon/scheduler.py:214` 用 `getattr(self._settings, "scheduler_interval_s", 3600)` 读 interval，但 `Settings` class 没声明这个 field — pydantic-settings 不会从 env var 读未声明 field。意思是**生产环境 scheduler interval 写死 1 小时**，无法通过 `flyctl secrets set POLYARB_SCHEDULER_INTERVAL_S=60` 加快。这让 chaos injection 的 "3 次 FAILED 累积 → PAUSED" 验证**需要 1h45m+ 等待**。
+
+修法（建议进 Phase 02.1 不影响本次 ship）：
+1. `config.py` `Settings` 加 `scheduler_interval_s: int = 3600` field
+2. 让 env var `POLYARB_SCHEDULER_INTERVAL_S` 真生效
+3. 加测试验证 settings.scheduler_interval_s 真读 env
+
+**第 2 个新发现 (设计 trade-off, 非 bug 但需 doc)**: **/health 在 FAILED 时返 503 → Fly proxy 切流量 → 外部完全不可达**
+
+IETF Health Check 标准：任何 check fail → overall fail → return 503。Fly `[http_service.checks]` 看到 503 → 标 machine "critical" → **proxy 停止 route 外部流量**。结果：
+
+- ❌ 外部 `curl https://polyarb-l1.fly.dev/health` timeout — 用户/Better Stack 完全看不到 daemon 在跑
+- ❌ Better Stack heartbeat probe 一旦也走 polyarb-l1.fly.dev 必然 timeout (但我们用的是 daemon → Better Stack push 模型，不受此影响)
+- ✅ daemon 内部正常运行 + cron tick 继续
+
+**这是 IETF spec compliance vs Fly proxy behavior 的 trade-off**：
+- 严格 IETF: snapshot FAILED → /health 503 (我们现在的实现)
+- 可观测优先: /health 总返 200，把 FAILED 放 body status 字段里让客户端自己判断 (alternative)
+
+Phase 02 选了 IETF 严格但**结果是 prod down 期间 Better Stack heartbeat 看不到救命信号**。这跟 thread §1 "生产级判定标准" 的"失败自动告警"目标冲突。Phase 03 改 L2 实时 daemon 时必须重定，但 Phase 02 ship 时记入 02.1 backlog。
+
+**Inj 2 verdict**: ⚠️ **partial verified** — 1/3 累积证明 scheduler 状态机正确开始计数 + status reporting 正确，但**未到 3/3 PAUSED 状态触发 send_paused_alert**。`send_paused_alert` 已通过 `make alerts-test` end-to-end verified live (Inj 1 期间 4 封 Sentry email + 3 次 Telegram 接收)，从代码路径推断 PAUSED 触发链路完整，但**未在 prod chaos 真实场景下做端到端 verify**。
+
+Phase 02 关闭决策选项:
+- **路 A** — 接受 partial verified：Inj 2 找到 2 个新 bug 入 02.1 backlog，但 PAUSED-alert 链路凭证不完整。Trade-off: ship with caveat。
+- **路 B** — 修 P0 bug 1 (scheduler_interval_s 可配)，让 Inj 2 能 3 分钟跑完，真验证 PAUSED → alert。Trade-off: 半小时改代码 + 部署 + 跑。
+
+本次会话走路 A 节奏，路 B 留作 Phase 02.1 优先项。
+
+---
+
+### Inj 3 — Supabase secret unset → D-12 fail-soft 验证 (2026-05-20) — **PARTIAL VERIFIED + P1 新发现**
+
+**Timeline (UTC)**:
+| 时刻 | 事件 |
+|---|---|
+| 20:07:18Z | baseline /health 全 pass，snapshot OK，supabase mirror age=207s |
+| 20:07:30Z | `flyctl secrets unset POLYARB_SUPABASE_SERVICE_KEY` |
+| 20:10:15Z | daemon 起来，旧 snapshot OK 显示中 (20:08:35Z snapshot)，**`supabase` check 整段消失** |
+| 20:08:35Z～20:09:55Z | daemon 第一次 tick — snapshot id=87, **status=degraded, is_valid=True**, 14000 books, no mirror log |
+| 20:18:33Z | 从本地 `.env` 备份读 secret 恢复 |
+| 20:22:11Z | daemon 恢复 OK，supabase mirror check 回来 (但还 warn=None) |
+
+**预期 vs 实际**:
+| 通道 | 预期 | 实际 | Verdict |
+|---|---|---|---|
+| snapshot 是 OK/DEGRADED NOT FAILED | ✓ | ✅ **DEGRADED**, is_valid=True | **D-12 ✅** |
+| /health supabase = warn | ✓ | ❌ **整段消失** (不是 warn) | ⚠ |
+| Sentry breadcrumb 出现 | ✓ | ❌ **无 breadcrumb, 无 mirror 任何 log** | ⚠ |
+
+**P1 新发现 — 两层 fail-soft 互相抵消**：
+
+预期路径："撤 secret → mirror.push_snapshot() 失败 → fail-soft except 分支 → Sentry breadcrumb"
+
+实际路径："撤 secret → `supabase_mirror_enabled=False` (model_validator auto-set) → orchestrator step 7.5 `if settings.supabase_mirror_enabled:` 失败 → **整段 mirror block 跳过** → 0 log, 0 breadcrumb"
+
+```python
+# config.py — auto-disable when secret 缺
+@model_validator(mode='after')
+def _enable_flags(self):
+    if self.supabase_url and self.supabase_service_key.get_secret_value():
+        object.__setattr__(self, "supabase_mirror_enabled", True)
+    # implicit: 否则保持 default False
+
+# orchestrator.py step 7.5
+if settings.supabase_mirror_enabled and not is_valid:
+    ...F-05 guard...
+elif settings.supabase_mirror_enabled:
+    try: ... mirror.push_snapshot(...) ... except: log warning + Sentry breadcrumb
+# 第三种 branch (mirror_enabled=False) 隐式什么都不做
+```
+
+**安全场景**："Supabase 短暂网络故障 → secret 还在 → enabled=True → 进 except → 真 breadcrumb"。Inj 3 测的不是这种。
+
+**Inj 3 的 bug 场景**："运维不小心撤了 secret / 输错 → enabled 变 False → mirror 静默停摆 → dashboard 不更新 + 0 alert + /health 没显示 supabase check"。这是真"运维盲区"。
+
+**修法建议 (P1, Phase 02.1)**:
+1. `health.py` 把 supabase check 改为：`enabled=False` 时返 `warn + observedValue="mirror_disabled"`（不是完全省略）
+2. orchestrator step 7.5 在 `mirror_enabled=False` 时 + 历史上曾 enabled (有过 mirror 记录) 时，发一次"mirror disabled detected"breadcrumb + log warning
+
+**Inj 3 verdict**: ✅ **D-12 fail-soft 主契约满足** (snapshot 不 abort, status=degraded) + ⚠ **alerting/visibility 路径 disabled-secret 场景静默** (P1 bug)
+
+---
+
+### Inj 5 — HMAC flood (2026-05-20) — **✅ FULL VERIFIED**
+
+**Timeline (UTC)**: 20:23:30Z 30 个并发 `curl -X POST /scan -H "X-Signature: sha256=deadbeef"`
+
+**Results**:
+- 30/30 returns 401 ✅
+- daemon /health 全程 pass (Fly check 1/1 passing throughout) ✅
+- 0 restart, 0 ERROR log, 0 异常 ✅
+- 401 是 starlette middleware 层 silent rejection（无 log，无 Sentry event）— 这是设计选择避免 noise
+
+**Inj 5 verdict**: ✅ daemon stability boundary 通过。
+
+---
+
+### Inj 4 — SKIPPED (依赖 Inj 2 PAUSED 状态未达成)
+
+Inj 4 设计前提：scheduler 真的进 PAUSED 状态后 `/scan` 触发 unpause。但 Inj 2 因 `scheduler_interval_s` 写死 3600s 没跑到 3/3 累积，scheduler 未 PAUSED。Phase 02.1 修 scheduler_interval_s 配置后补 Inj 2 + Inj 4 全链路。
+
+---
+
 **Inj 1 verdict (REVISED 2026-05-20)**: ❌ 原设计失败 + ✅ 真 bug 全修
 
 原设计 "Fly stop 2 min → Better Stack uptime probe 触发邮件" 完全失败（heartbeat 模型不可能触发 2 min stop）。**但 chaos 暴露的 3 个真 bug 全部追下来修完**：
