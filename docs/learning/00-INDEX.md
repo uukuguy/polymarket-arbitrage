@@ -16,6 +16,7 @@
 | 05 | [Issue #180 ghost_book 实战](05-ghost-book-issue-180.md) | 这个问题的根源、为什么影响 72%、下游策略写代码时的硬约束 |
 | 06 | [代码安全约束（F-1 ~ F-8）](06-security-invariants.md) | 为什么每个 `float()` 都包 try、为什么 `MAX_PAGES=1000`、F 编号代表什么 |
 | 07 | [观察市场（Observation Toolkit + Translation）](07-观察市场.md) | 6 个配方分别看什么、workflow 怎么走、翻译/AST/diff 三个设计取舍、5 道自检题 |
+| 08 | [生产化部署（Phase 02 L1 Production Grade）](08-生产化部署.md) | asyncio daemon 为什么要等 server.started、DEGRADED vs FAILED 的区别、PAUSED 跨重启保持的意义、/scan HMAC trust-split、soak gate 判定标准 |
 
 ## 每篇文档的体例
 
