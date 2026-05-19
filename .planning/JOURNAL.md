@@ -1879,3 +1879,116 @@ git push   # 8 commits 待 push (origin 落后 8)
 这个不急，等 M2 T2 决策完一并做（避免今天反应过激写 hook，明天发现新坑要回头改）。
 
 ---
+
+## SESSION 21 EOD pt 2 — 2026-05-20 04:30 CST (Phase 02 ✅ HARD GATE PASSED)
+
+### 主线突破：alert chain end-to-end verified live in prod chaos
+
+**关键决策点 + 反转**：
+1. 用户决定路 A — 跑 chaos injection 代替 7-day soak
+2. Inj 1 (Fly stop) 设计假设错 (Better Stack = heartbeat 不是 uptime probe)，但**意外发现 3 个真 bug**：alerts.py TG fallback only / Sentry alert rule 配置错 / SESSION 20 "E2E verified" 是验证幻觉
+3. **关键反转**: 修完 3 个 bug 后 Inj 2-v1 又暴露第 4 个 P0 (scheduler_interval_s 不可配) + 第 5 个 P0 (GHA setup-flyctl@v1.5 tag 不存在,所有 deploy 从 5-16 起都没真生效)
+4. 路 B 决策 — 修 P0 然后跑 Inj 2-v2 真验证 (用户同意"强烈推荐")
+5. **Inj 2-v2 21:06:22Z 真触发完整 PAUSED → alert 链路**: 用 fast scheduler_interval_s=30 让 3 次 FAILED 累积在 75s 跑完, send_paused_alert 真触发 → Telegram + Gmail (Sentry PYTHON-C 主 + PYTHON-D capture + PYTHON-B digest) 三路独立确认
+
+**Phase 02 final 02-07-SUMMARY.md landed**, planning-status zero drift.
+
+### 17 个 commits this session (pt 1 + pt 2)
+
+| commit | 内容 |
+|---|---|
+| `8ccd604` | chaos engineering test suite (22 tests) |
+| `2fbfd32` | scripts/soak_monitor.py + soak-* targets |
+| `522ea56` | docs/learning/08-生产化部署.md |
+| `3f70781` | interim SUMMARY (deprecated by final) |
+| `69cb9c1` | pyright cleanup |
+| `63cc8ea` | SESSION 21 pt 1 STATE/JOURNAL |
+| `ce5f5ed` | 7-day soak → 4 chaos 改设计 + thread 偏离 |
+| `4a333ca` | m2 slippage 18-day drift 考古 |
+| `05786e6` | SESSION 21 EOD pt 1 |
+| `b4de60c` | alerts.py Telegram unconditional (Inj 1 bug fix) |
+| `24a8e87` | Inj 1 verdict + 全 bug 修 |
+| `1f118f7` | Inj 2-5 设计 second revision |
+| `7ed3a6a` | Inj 2/3/5 verdict + 4 new bugs |
+| `d271e52` | scheduler_interval_s 可配 P0 fix |
+| `5a5c475` | GHA setup-flyctl@v1.5 → @1.6 (P0!) |
+| `7a39b89` | Inj 2-v2 hard gate PASSED |
+| `(pending)` | Phase 02 final SUMMARY + STATE EOD pt 2 |
+
+origin push 状态: 截至 EOD pt 2 commit 前已 push 12, 还有 5 commits 待 push (含本 EOD)。
+
+### 5 个 chaos injection 完整 verdict
+
+| Inj | Verdict | 凭证类型 |
+|---|---|---|
+| 1 (Fly stop 2-min) | failed-by-design / succeeded-by-discovery | 修 4 个 alert chain bug |
+| 2-v1 (Gamma invalid + 1h interval) | partial | 暴露 P0 scheduler_interval_s |
+| 2-v2 (修后 30s interval) | ✅ **FULL VERIFIED (hard gate)** | PAUSED→alert 全链路 in prod |
+| 3 (Supabase unset) | partial | D-12 主契约 ✅ + P1 fail-soft 抵消 |
+| 4 (SSH+SQL unpause+restart) | partial done | 操作手册凭证 + P1 缺 prod endpoint |
+| 5 (HMAC flood) | ✅ FULL | daemon stability boundary |
+
+### 8 个新发现 bug (5 个 P0 + 2 个 P1 + 1 个 trade-off)
+
+| # | Bug | Status |
+|---|---|---|
+| 1 | alerts.py TG fallback only | ✅ 修 (b4de60c) |
+| 2 | Makefile alerts-test 漏 init_sentry | ✅ 修 (24a8e87) |
+| 3 | Sentry alert rule Suggested Assignees + high priority | ✅ 用户 dashboard 改 |
+| 4 | scheduler_interval_s 写死 3600 | ✅ 修 (d271e52) |
+| 5 | GHA setup-flyctl@v1.5 tag 不存在 | ✅ 修 (5a5c475) |
+| 6 | /health 503 触发 Fly proxy 切流量 | 入 Phase 02.1 (trade-off, Phase 03 重定) |
+| 7 | fail-soft 互相抵消 (撤 secret 静默) | 入 Phase 02.1 P1 |
+| 8 | daemon PAUSED 无 prod unpause endpoint | 入 Phase 02.1 P1 |
+
+### 收尾审计
+
+- ✅ Phase 02 final SUMMARY 落地 (02-07-SUMMARY.md)
+- ✅ STATE.md status='gate-passed-ready-for-extract-learnings', percent=100
+- ✅ planning-status zero drift
+- ✅ prod /health overall=warn (mirror first tick 等下次 cron, 非阻塞)
+- ✅ Sentry/Telegram/Gmail 三路告警 end-to-end verified
+- ⏳ Phase 02 LEARNINGS.md 待生成 (`/gsd-extract_learnings 02`)
+- ⏳ Phase 02.1 backlog (2 P1 + 1 trade-off) 待消化
+- ⏳ M2 T2 三选一决策待做
+
+### Playwright-cli 接管 Edge 完成
+
+本会话还落地了一个**会话长度内可见但跨会话有用的 infra**: playwright-cli 0.1.13 (升级版) + persistent Edge profile (`~/.claude-playwright-profile/`)。Claude 现在能直接读 Sentry / Gmail / Better Stack / Supabase dashboard 不用用户截图，下次会话 profile 仍 valid (cookies 持久化)。
+
+### [NEXT] 下次会话从这里开始：
+
+```
+/gsd-resume-work --ws m1-perception
+make planning-status                                  # 应该 zero drift
+curl -sS https://polyarb-l1.fly.dev/health           # 应该 overall=pass
+git push                                             # 待 push 5 commits
+```
+
+**第 1 步**（关 Phase 02）：
+```
+/gsd-extract_learnings 02 --ws m1-perception
+```
+将 Phase 02 14 个 plans (含 02-07 chaos injection 经验) 的 decisions/lessons/patterns/surprises 提取入 02-LEARNINGS.md。
+
+**第 2 步**（决策 — 你选其一）：
+
+**路 A — 进 Phase 03 (L2 orderbook)** :
+- 启动前必须先消化 Phase 02.1 backlog (2 P1 + 1 trade-off)
+- thread §1 要求 L1 真生产级才能进 L2,这次没收集 7-day uptime 凭证,Phase 03 必须先回补 (启动 7-day soak,可能要升 Supabase Pro)
+- `/gsd-discuss-phase 03 --ws m1-perception`
+
+**路 B — 决定 M2 T2 走向**:
+- threads/learnings-meta.md 记的"plan-code 沉默分叉 18 天"考古结论:
+  (a) 冻 M2 等 m1 L2 出来再启 T2
+  (b) 重定义 T2 为现有 fee-differential 设计 + 补 IMDEA Type-2 验证 (推荐)
+  (c) 跳 T2 推 T3 (Routing Engine) 或 T6 (Settings)
+- M2 02-1-PLAN.md 必须加 Revision History 段写明分叉历史
+
+**路 C — Phase 02.1 fix-up pass**:
+- 把剩余 2 个 P1 修了 (fail-soft 抵消 + unpause endpoint)
+- 1 trade-off (/health 503) 决定 Phase 03 重定 vs 02.1 修
+
+我倾向 **路 A 优先 (有 thread §1 要求驱动)**, 然后 **路 B**, 再 **路 C** 视情况插入。
+
+---

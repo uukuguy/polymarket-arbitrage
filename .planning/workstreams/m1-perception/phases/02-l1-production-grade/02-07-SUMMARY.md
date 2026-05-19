@@ -1,202 +1,184 @@
 ---
-phase: "02"
-plan: "07"
-subsystem: m1-perception
-status: "TASKS 1-3 COMPLETE — TASK 4 (SOAK) PENDING USER START"
-tags: [chaos-engineering, soak-monitor, testing, teaching-doc, production]
-dependency_graph:
-  requires: [02-04, 02-05, 02-06]
-  provides: [chaos-test-suite, soak-monitor, production-teaching-doc]
-  affects: [tests/m1-perception/, scripts/, docs/learning/]
-tech_stack:
-  added: [respx>=0.21]
-  patterns: [chaos-engineering, fail-soft, state-machine-testing, concurrent-sqlite]
-key_files:
+phase: 02-l1-production-grade
+plan: 07
+workstream: m1-perception
+subsystem: chaos-engineering + production-verification
+tags: [chaos-engineering, alert-chain, sentry, telegram, fail-soft, scheduler, state-machine, production-gate]
+
+requires:
+  - phase: 02-04
+    provides: Fly deploy + /scan HMAC + /health endpoint live in prod
+  - phase: 02-05
+    provides: send_paused_alert + send_heartbeat_ok + Sentry + Better Stack + Telegram channels wired
+  - phase: 02-06
+    provides: Vercel dashboard (read-only, not in Inj scope)
+
+provides:
+  - "Chaos test suite (mocked CI) — 22 tests covering Gamma 5xx / CLOB malformed / Supabase 500 / R2 503 / 3× FAILED → PAUSED / /scan flood / SQLite WAL concurrency"
+  - "scripts/soak_monitor.py — Better Stack API status/export, Phase 02 soak gate audit tool"
+  - "docs/learning/08-生产化部署.md — 251 行 Phase 02 教学文档"
+  - "5 个 prod chaos injection 完成,Phase 02 alert chain hard gate ✅ verified live"
+  - "scheduler_interval_s 修复 (P0 bug,从 1h 写死改可配)"
+  - "alerts.py Telegram direct unconditional (P0 bug,Inj 1 暴露 BS 200 ≠ user notified)"
+  - "Makefile alerts-test 加 init_sentry (P0 bug,SDK 静默 no-op)"
+  - "GHA deploy.yml setup-flyctl 版本修复 (P0 bug,自 5-16 起所有 deploy 都没真生效)"
+
+affects:
+  - phase: 03 (L2 orderbook) — 必须先消化剩余 4 个 Phase 02.1 backlog
+  - all m1-perception phases — chaos injection 方法论 + SOAK-LOG 体例确立
+  - all observability work — "HTTP 200 ≠ user notified" + "chaos injection 是对抗 SUMMARY 自我欺骗" 教训入 thread learnings-meta
+
+tech-stack:
+  added:
+    - "respx>=0.21 (dev only, chaos test HTTP mocking)"
+    - "botocore stubber (dev only, R2 chaos test)"
+  patterns:
+    - "Chaos injection 体例: 真触发 ≠ 测试按钮触发,Send Test Notification 走简化路径绕过 alert rule"
+    - "Pre-injection backup: ORIG_<SECRET>=$(flyctl ssh ... -C 'printenv ...') 必备份"
+    - "Hard gate / soft gate 分层: PAUSED→alert 是硬门,其它是 caveats"
+    - "Tri-layer monitoring: 监控/告警/通知是三层,HTTP 200 只能证前两层,必须 end-to-end chaos 验证最后一层"
+
+key-files:
   created:
-    - tests/m1-perception/test_chaos_gamma_5xx.py
-    - tests/m1-perception/test_chaos_clob.py
-    - tests/m1-perception/test_chaos_supabase.py
-    - tests/m1-perception/test_chaos_r2.py
-    - tests/m1-perception/test_chaos_3failures_pause.py
-    - tests/m1-perception/test_chaos_scan_flood.py
-    - tests/m1-perception/test_sqlite_concurrency.py
-    - scripts/soak_monitor.py
-    - .planning/workstreams/m1-perception/phases/02-l1-production-grade/02-SOAK-LOG.md
-    - docs/learning/08-生産化部署.md
+    - "tests/m1-perception/test_chaos_*.py (7 files, 22 tests)"
+    - "tests/m1-perception/test_sqlite_concurrency.py"
+    - "scripts/soak_monitor.py (168 lines)"
+    - "docs/learning/08-生产化部署.md"
+    - ".planning/workstreams/m1-perception/phases/02-l1-production-grade/02-SOAK-LOG.md (chaos audit trail)"
+    - ".planning/threads/soak-gate-deviation-2026-05.md (thread §1 偏离决策 trace)"
   modified:
-    - src/polyarb/validator/layers.py
-    - src/polyarb/snapshot/orchestrator.py
-    - Makefile
-    - tests/m1-perception/test_makefile_contract.py
-    - docs/learning/00-INDEX.md
-    - pyproject.toml
-decisions:
-  - "D-12 confirmed: DEGRADED does NOT increment failure_counter — mirror/R2 failure ≠ data loss"
-  - "Chaos test patch targets: module-level imports vs function-scope imports require different patch paths"
-  - "respx>=0.21,<0.22 pinned for httpx mock compatibility"
-metrics:
-  duration: "~3 hours (Tasks 1-3)"
-  completed_date: "2026-05-19"
-  tasks_completed: 3
-  tasks_pending: 2
-  files_created: 10
-  files_modified: 6
+    - "src/polyarb/config.py (+5 lines, scheduler_interval_s field)"
+    - "src/polyarb/daemon/scheduler.py (1 line, getattr → 直接属性访问)"
+    - "src/polyarb/daemon/alerts.py (-3 +5 lines, Telegram unconditional)"
+    - "src/polyarb/validator/layers.py + orchestrator.py (KeyError escape fix, Rule 1 trigger)"
+    - "tests/m1-perception/test_alerts.py (新加 BS 200 case + 重命名 503 case)"
+    - "tests/m1-perception/test_scheduler.py (+2 tests for scheduler_interval_s)"
+    - "Makefile (alerts-test target 加 init_sentry; 3 个 soak-* target)"
+    - ".github/workflows/deploy.yml (setup-flyctl@v1.5 → @1.6)"
+    - ".planning/threads/learnings-meta.md (3 个新 sub-lesson 沉淀)"
+
+key-decisions:
+  - "Phase 02 关闭凭证改为 'chaos injection 真验证 alert chain' 而非 thread §1 原定的 '7-day soak'. 详见 threads/soak-gate-deviation-2026-05.md. Phase 03 必须回补真 soak."
+  - "Inj 2-v2 走 fast scheduler_interval_s=30 方式让 3 次累积在 90s 跑完. 这是 P0 修复后才有的能力."
+  - "alerts.py Telegram direct 升为无条件主路径. BS /fail 仍 best-effort 但不再决定 TG 是否发. 兜底保证 alert 链可达."
+  - "Sentry alert rule 配置最终用 'Notify Suggested Assignees + Recently Active Members fallback', 因 'Recently Active' 兜底真 work, 不强制 'Notify Member' 显式化."
+  - "/health 在 FAILED 时返 503 (IETF strict) → Fly proxy 切外部流量. 设计 trade-off, Phase 03 可考虑改'overall 200 + status in body'模式让外部探针仍能拿到状态."
+
+patterns-established:
+  - "Pattern A — Chaos injection 设计反推: 不是'测哪些 chaos',而是'反推哪些代码路径触发 alert,逆向构造场景让那个路径真触发'"
+  - "Pattern B — Verdict 三态: full verified / partial verified / failed-by-design-succeeded-by-discovery. SESSION 20 的 'E2E verified' 自我欺骗反模式禁止重演."
+  - "Pattern C — SUMMARY 'verified' 必须附验证手段: 不可写 'X verified', 必须写 'X verified via [具体动作] [具体证据]'."
+  - "Pattern D — Pre-injection secret backup: 任何撤 secret 操作前 ORIG_X=$(flyctl ssh ... -C 'printenv X'). 本地 .env 同步备份."
+  - "Pattern E — SDK init contract for ad-hoc scripts: 任何 ad-hoc Makefile target / scripts/ 走 SDK 的命令必须显式 init SDK (alerts-test 漏了 init_sentry 教训)."
+
+requirements-completed:
+  - "Plan 02-07 Task 1 — chaos test suite 8 scenarios (RESEARCH §11)"
+  - "Plan 02-07 Task 2 — scripts/soak_monitor.py + Makefile soak targets"
+  - "Plan 02-07 Task 3 — docs/learning/08-生产化部署.md"
+  - "Plan 02-07 Task 4 (REVISED) — 5 chaos injections in prod (变体替代原 7-day soak)"
+  - "Phase 02 thread §1 生产级判定标准 (变体): alert chain end-to-end verified ✅"
+
+requirements-deferred:
+  - "Original thread §1 '7-day soak + uptime ≥99%' — 因 Supabase Free tier 不能扛 7 天 auto-pause, 用户不升 Pro $25/mo. Phase 03 必须回补."
+  - "Phase 02.1 backlog (5 个新发现 bug):"
+  - "  1. P0 ✅ 本会话修了 — scheduler_interval_s 不可配"
+  - "  2. trade-off — /health 503 触发 Fly proxy 切流量 (IETF strict vs Fly proxy 行为冲突)"
+  - "  3. P1 — fail-soft 互相抵消 (撤 secret 场景 mirror_enabled=False, 0 log/0 breadcrumb)"
+  - "  4. P1 — daemon PAUSED 没 prod-friendly unpause endpoint (现在需 SSH + SQL + restart 三步)"
+  - "  5. P0 ✅ 本会话修了 — alerts.py Telegram fallback only → 无条件主路径"
+  - "  6. P0 ✅ 本会话修了 — Makefile alerts-test 漏 init_sentry"
+  - "  7. P0 ✅ 本会话修了 — GHA setup-flyctl@v1.5 tag 不存在 (5-16 起所有 deploy fail)"
+
+duration: ~12h (SESSION 20 Task 1-3 ~3h + SESSION 21 chaos injection + bug fix + verification ~9h)
+completed: 2026-05-20
+
 ---
 
-# Phase 02 Plan 07: Wave 5 Chaos + Soak Summary
+# Plan 02-07: Phase 02 Chaos Injection Verification + Alert Chain Verified Live
 
-**Status: TASKS 1-3 COMPLETE — TASK 4 (SOAK) PENDING USER START**
+**Phase 02 hard gate ✅ verified live in prod: `send_paused_alert` 真触发 → Sentry email + Telegram + Sentry dashboard 三路独立确认 — 用 fast scheduler interval (30s) 让 3 次 FAILED 累积在 ~75s 触发完整 PAUSED 状态机链路。**
 
-> Task 4 (7-day Better Stack soak) cannot be executed by this agent — it requires
-> 7 calendar days of real cloud monitoring. User must start the soak by running
-> `make soak-status` after Day 7. Task 5 (final SUMMARY update) will be written
-> at that time.
+## TL;DR
 
-One-liner: Chaos test suite (20 passing tests, 8 fault scenarios) + Better Stack soak monitor CLI + Phase 02 production teaching doc.
+Plan 02-07 由两半组成 + 一个 second revision:
 
-## Tasks Completed
+**Half 1 (SESSION 20 完成)** — Mocked chaos test suite + soak infra + teaching doc 落地:
+- 22 个 chaos test (respx + botocore stubber, CI-friendly)
+- scripts/soak_monitor.py + Makefile soak targets
+- docs/learning/08-生产化部署.md (251 行)
 
-| Task | Description | Commit | Status |
-|------|-------------|--------|--------|
-| 1 | Chaos engineering test suite (8 scenarios, 7 files) | `8ccd604` | DONE |
-| 2 | `scripts/soak_monitor.py` + `make soak-*` targets + `02-SOAK-LOG.md` | `2fbfd32` | DONE |
-| 3 | `docs/learning/08-生産化部署.md` + 00-INDEX update | `522ea56` | DONE |
-| 4 | 7-day Better Stack soak (cloud, user checkpoint) | — | PENDING |
-| 5 | Final SUMMARY update (after soak passes) | — | PENDING |
+**Half 2 (SESSION 21 完成)** — Prod chaos injection 5 个 (REVISED — 原 7-day soak 改为 4+1 chaos):
+- Inj 1: Fly machine stop → failed-by-design / succeeded-by-discovery (修 4 个 alert chain bug)
+- Inj 2-v1: Gamma URL invalid + 默认 1h interval → 暴露 P0 scheduler_interval_s 不可配
+- Inj 2-v2: 修后 fast 30s interval → **Phase 02 关闭硬门 ✅** (PAUSED → alert end-to-end verified live)
+- Inj 3: Supabase secret unset → D-12 fail-soft 主契约 ✅ + 暴露 P1 fail-soft 抵消
+- Inj 4: SSH + SQL unpause + restart → 操作手册凭证 + 暴露 P1 缺 prod unpause endpoint
+- Inj 5: HMAC flood → daemon stability boundary ✅
 
-## Task 1: Chaos Engineering Test Suite
+**Verdict**: Phase 02 production-grade L1 daemon 真 LIVE,alert chain end-to-end verified in prod chaos. Phase 03 (L2 orderbook) 现在 unblocked,但启动前必须先消化 4 个 Phase 02.1 backlog item (其中 4 个本会话已修)。
 
-### Files Created
+## Hard Gate Evidence (Inj 2-v2)
 
-| File | Scenarios Covered |
-|------|-------------------|
-| `test_chaos_gamma_5xx.py` | Gamma 503 exhaustion → FAILED; mid-pagination timeout → DEGRADED or FAILED |
-| `test_chaos_clob.py` | Malformed CLOB book (dict instead of list) → F-1 capture, no crash |
-| `test_chaos_supabase.py` | Supabase `push_snapshot` raises 500 → DEGRADED, not FAILED |
-| `test_chaos_r2.py` | R2UploadError → DEGRADED + Issue; R2 retry config 3 attempts |
-| `test_chaos_3failures_pause.py` | 3 FAILED → PAUSED; alert called once; PAUSED skips tick; unpause resumes; counter persists restart |
-| `test_chaos_scan_flood.py` | 100 concurrent /scan requests → no 500; HMAC validation holds |
-| `test_sqlite_concurrency.py` | WAL mode concurrent reader + writer → no crash, monotonic counts; `SQLiteStore.init_schema()` enables WAL |
+**Timeline (UTC 2026-05-20)**:
+- 21:04:25 `flyctl secrets set POLYARB_SCHEDULER_INTERVAL_S=30 POLYARB_GAMMA_URL=https://gamma-invalid.example.com`
+- 21:05:08 第 1 次 tick FAILED, `failure_counter=1/3`
+- 21:05:45 第 2 次 tick FAILED, `failure_counter=2/3`
+- 21:06:22 第 3 次 tick FAILED, `failure_counter=3/3` → **PAUSED**
+- 21:06:22 `ALERT: scheduler paused: 3 consecutive FAILED snapshots` (send_paused_alert 真触发)
+- 21:06:22 Sentry PYTHON-C + PYTHON-D issue 创建 (capture_message + Loguru auto-capture)
+- 5:06 AM CST Gmail 收到 PYTHON-C subject email
+- 5:12 AM CST Gmail 收到 PYTHON-B digest "2 new alerts since 5:06 a.m."
+- 21:06:22 用户 Telegram 真收到 "polyarb-l1 scheduler PAUSED: 3 consecutive FAILED snapshots"
+- 21:11:19 `flyctl secrets unset POLYARB_GAMMA_URL POLYARB_SCHEDULER_INTERVAL_S` 恢复
 
-**Result: 20 tests passing, all GREEN.** (1 slow test marked `@pytest.mark.slow`; 7 standard tests run in ~1.70s)
+**三路独立 alert path verified**:
+- Sentry capture_message (alerts.py) → DSN → alert rule → Gmail ✅
+- Loguru auto-capture (scheduler.py:_on_paused logger.error) → DSN → alert rule → Gmail ✅
+- Telegram direct (alerts.py _telegram_direct unconditional) → bot API → 用户手机 ✅
 
-### Auto-Fixed Bugs (Rule 1)
+## 关键 Bug 发现 + 修复表
 
-**[Rule 1 - Bug] F-1 defense incomplete in `layers.py` and `orchestrator.py`**
+| # | Bug | Severity | 修法 | Verified |
+|---|---|---|---|---|
+| 1 | alerts.py Telegram fallback only (BS 200 → TG 不发) | P0 | unconditional 主路径 + 测试守门 | ✅ Inj 2-v2 |
+| 2 | Makefile alerts-test 漏 init_sentry → SDK silent no-op | P0 | target 加 init_sentry(s) | ✅ Inj 2-v2 |
+| 3 | Sentry alert rule "Notify Suggested Assignees" + "high priority" filter | P0 | 用户 dashboard 改 When + 用 Recently Active fallback | ✅ Inj 2-v2 |
+| 4 | scheduler_interval_s 不可配 (getattr 读未声明 field) | P0 | Settings 显式声明 + env var override + 2 测试 | ✅ Inj 2-v2 |
+| 5 | GHA setup-flyctl@v1.5 tag 不存在 → 5-16 起所有 deploy fail | P0 | @v1.5 → @1.6 | ✅ deploy success 2m13s |
+| 6 | /health 503 触发 Fly proxy 切流量 | trade-off | (Phase 03 重定) | 入 Phase 02.1 |
+| 7 | fail-soft 互相抵消 (撤 secret 场景静默) | P1 | (Phase 02.1) | 入 backlog |
+| 8 | daemon PAUSED 没 prod unpause endpoint | P1 | (Phase 02.1) | 入 backlog,实测 SSH+SQL+restart |
 
-The chaos test for malformed CLOB books exposed a real production bug:
+## 测试
 
-- **Found during**: Task 1 (test_chaos_clob.py development)
-- **Issue**: `book.get("asks")` returning a `dict` (not a list) was truthy, so `asks = book.get("asks") or []` kept the dict. Then `asks[0]` raised `KeyError`, which was NOT in the except clause `(AttributeError, IndexError, TypeError)`. The F-1 invariant claimed to protect against malformed book data, but `KeyError` escaped.
-- **Fix**: Normalize to list type before indexing:
-  ```python
-  _raw_asks = book.get("asks")
-  asks = _raw_asks if isinstance(_raw_asks, (list, tuple)) else []
-  ```
-  Also added `KeyError` to the except clause. Applied to both `layers.py:208` and `orchestrator.py` Phase 5 stamp section.
-- **Files modified**: `src/polyarb/validator/layers.py`, `src/polyarb/snapshot/orchestrator.py`
-- **Commits**: part of `8ccd604`
+- `uv run pytest tests/m1-perception/ -k chaos --tb=short` — 22 passed
+- `uv run pytest tests/m1-perception/test_scheduler.py -xvs` — 10 passed (含 2 新加 scheduler_interval test)
+- `uv run pytest tests/m1-perception/test_alerts.py -xvs` — 7 passed (含新 BS 200 case)
 
-### Key Implementation Decisions
+## Commits (SESSION 21, 5-19 ~ 5-20)
 
-**Mock patch paths**: Supabase and R2 are imported locally inside `run_snapshot()`, not at module level. Must patch at source module:
-- `polyarb.storage.supabase_mirror.SupabaseMirror` (not `polyarb.snapshot.orchestrator.SupabaseMirror`)
-- `polyarb.storage.r2_sync.upload_parquet_to_r2` (not `polyarb.snapshot.orchestrator.upload_parquet_to_r2`)
+- `8ccd604 test(02-07)`: chaos engineering test suite (8 scenarios, 22 tests)
+- `2fbfd32 feat(02-07)`: scripts/soak_monitor.py + Makefile soak targets
+- `522ea56 docs(02-07)`: Phase 02 teaching doc — 生产化部署 (08)
+- `3f70781 docs(02-07)`: interim SUMMARY (deprecated by this file)
+- `69cb9c1 chore(02-07)`: pyright unused-import cleanup
+- `63cc8ea docs(state)`: SESSION 21 Wave 5 chaos+soak infra landed
+- `ce5f5ed docs(02-07)`: 7-day soak → 4 chaos injections + thread 偏离
+- `4a333ca docs(threads)`: m2 slippage.py 18-day plan-code drift 考古
+- `05786e6 docs(state)`: SESSION 21 EOD pt 1
+- `b4de60c fix(alerts)`: Telegram direct unconditional + chaos Inj 1 bug 发现
+- `24a8e87 fix(02-07)`: chaos Inj 1 全 bug 修复 + verdict 改写
+- `1f118f7 docs(02-07)`: Inj 2-5 设计 second revision (核心 alert chain 反推)
+- `7ed3a6a docs(02-07)`: Inj 2/3/5 verdict + 4 个新 bug 发现
+- `d271e52 fix(02-07)`: scheduler_interval_s 可配 (Inj 2 P0)
+- `5a5c475 fix(ci)`: setup-flyctl@v1.5 → @1.6 (P0,自 5-16 起所有 deploy fail)
+- `7a39b89 docs(02-07)`: Inj 2-v2 hard gate PASSED — alert chain 真验证
+- (this commit): Phase 02 final SUMMARY + close
 
-**Post-SQLite issues**: Mirror/R2 issues (steps 7.5/7.6) run AFTER `store.write_snapshot_streaming()`. They only flow into `SnapshotResult.issue_categories`, not into SQLite `validation_issues`. Tests must assert on `result.issue_categories`, not DB rows.
+## Next
 
-**D-12 confirmation**: Tests verify DEGRADED does NOT increment `_failure_counter`. Supabase or R2 failure → DEGRADED → counter stays 0 → never reaches PAUSED threshold.
-
-## Task 2: Soak Monitor
-
-### Files Created
-
-**`scripts/soak_monitor.py`**: typer CLI with two commands:
-- `status`: fetches Better Stack 7-day SLA, exits 0 if uptime ≥ 99%, else 1
-- `export`: appends timestamped audit section to `02-SOAK-LOG.md`
-
-Both require `BETTERSTACK_API_TOKEN` + `BETTERSTACK_MONITOR_ID` env vars.
-
-**`.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-SOAK-LOG.md`**: Initial scaffold with:
-- Pass criteria checklist (8 items)
-- Fault injection plan (3 scenarios: scale-to-0, break R2 creds, HMAC flood)
-- `<!-- BEGIN SOAK EVENTS -->` marker for `soak_monitor.py export` append target
-
-**Makefile targets added**:
-```makefile
-make soak-status       # check current uptime % (exit 0 = gate PASS)
-make soak-export       # dump 7-day history to 02-SOAK-LOG.md
-make soak-fault-inject # print fault injection instructions
-```
-
-## Task 3: Teaching Doc
-
-**`docs/learning/08-生産化部署.md`**: Phase 02 production deployment teaching doc (Chinese, 251 lines).
-
-Sections:
-1. **30 秒心智模型**: 3-layer diagram (Fly daemon, state machine, alert paths)
-2. **用户工作流**: 7-step morning check + emergency commands
-3. **关键代码片段**: 7 snippets with exact file:line references
-4. **设计取舍**: 5 documented trade-offs
-5. **自检题**: 5 questions with detailed answers
-6. **FAQ 增量区**: empty, ready for user Q&A
-
-`docs/learning/00-INDEX.md` updated with doc 08 entry.
-
-## Task 4: 7-Day Soak (PENDING)
-
-**How to start**: The soak is already running — Better Stack monitor was configured in Plan 05 and pings `/health` every 30s from the cloud. No action needed to "start" it.
-
-**Day 7 completion steps**:
-```bash
-# Check 7-day uptime (exit 0 = PASS)
-make soak-status
-
-# Export audit trail to 02-SOAK-LOG.md
-make soak-export
-
-# Verify fault injection (optional, Day 3-4)
-make soak-fault-inject
-```
-
-**Pass criteria** (from `02-SOAK-LOG.md`):
-- Uptime ≥ 99% (Better Stack 7-day SLA)
-- Cron 14/14 subset fires (7 days × 2/day)
-- Cron 1/1 full fires (Sunday 04:00 UTC)
-- OK + DEGRADED ≥ 95% of snapshot attempts
-- ≥ 1 natural failure → Telegram alert received
-- Self-healing after failure OR correct PAUSED (3x consecutive)
-- SQLite volume ≤ 4GB at day 7
-- Sentry errors < 5/day
-
-## Deviations from Plan
-
-### Auto-fixed Issues
-
-**1. [Rule 1 - Bug] F-1 defense incomplete — KeyError not caught in layers.py and orchestrator.py**
-- **Found during**: Task 1 (writing test_chaos_clob.py)
-- **Issue**: Non-list book data (e.g., a dict for `asks`) bypassed the `or []` guard and reached `asks[0]`, raising `KeyError` outside the except clause
-- **Fix**: `isinstance` check before indexing; added `KeyError` to except tuple
-- **Files modified**: `src/polyarb/validator/layers.py`, `src/polyarb/snapshot/orchestrator.py`
-- **Commit**: `8ccd604`
-
-No other deviations — plan executed as written for Tasks 1-3.
-
-## Self-Check: PASSED
-
-Files verified:
-- `tests/m1-perception/test_chaos_gamma_5xx.py` — FOUND
-- `tests/m1-perception/test_chaos_clob.py` — FOUND
-- `tests/m1-perception/test_chaos_supabase.py` — FOUND
-- `tests/m1-perception/test_chaos_r2.py` — FOUND
-- `tests/m1-perception/test_chaos_3failures_pause.py` — FOUND
-- `tests/m1-perception/test_chaos_scan_flood.py` — FOUND
-- `tests/m1-perception/test_sqlite_concurrency.py` — FOUND
-- `scripts/soak_monitor.py` — FOUND
-- `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-SOAK-LOG.md` — FOUND
-- `docs/learning/08-生産化部署.md` — FOUND
-
-Commits verified:
-- `8ccd604` — chaos test suite (Task 1)
-- `2fbfd32` — soak monitor (Task 2)
-- `522ea56` — teaching doc (Task 3)
+1. `/gsd-extract_learnings 02 --ws m1-perception` — 关 Phase 02,extract learnings
+2. **跨 workstream 决策点**:
+   - M1 Phase 03 (L2 orderbook) — 启动前必须先消化剩余 backlog (2 个 P1 + 1 个 trade-off)
+   - M2 T2 (Slippage Model) — plan-code 沉默分叉 18 天考古结论 (threads/learnings-meta.md): 三选一决策待做
+3. Phase 02.1 backlog 内容由 LEARNINGS.md 落地后再决定优先级

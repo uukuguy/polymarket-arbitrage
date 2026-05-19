@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 02
-status: executing
-stopped_at: "SESSION 21 EOD 2026-05-19: Wave 5 Tasks 1-3 ✅ (8 commits on main, origin 落后 8 待 push). Phase 02 关闭定义已改：7-day soak → 4 chaos injections (用户不升 Supabase Pro $25/mo, ce5f5ed)。新 thread soak-gate-deviation-2026-05.md 记偏离决策 + Phase 03 必须回补 7-day 凭证。m2 slippage.py 考古入 thread learnings-meta.md (4a333ca) — plan-code 沉默分叉 18 天 (5-01~5-19) 案例 + 工程教训。**NEXT 下次会话**：(1) 关 Phase 02 — 按 02-07-PLAN Task 4 跑 4 次 prod chaos injection (Fly stop / R2 unset / Supabase unset / HMAC flood)，每次记 SOAK-LOG Events 段。(2) Phase 02 关掉后做 M2 T2 走向决策 (三选一在 JOURNAL [NEXT] 块)。"
-last_updated: "2026-05-19T20:30:00.000Z"
+status: gate-passed-ready-for-extract-learnings
+stopped_at: "SESSION 21 EOD 2026-05-20 04:30 CST: Phase 02 ✅ HARD GATE PASSED — alert chain end-to-end verified live in prod chaos. Inj 2-v2 (21:06:22Z) 在 ~75s 内完整跑出 3× FAILED → PAUSED → send_paused_alert → Sentry email (PYTHON-C/D + PYTHON-B digest) + Telegram '3 consecutive FAILED snapshots' + Sentry dashboard. 全部 5 个 chaos injection 完成。5 个新 P0/P1 bug 4 个在本会话修了 (alerts.py Telegram unconditional / Makefile init_sentry / Sentry alert rule / scheduler_interval_s 可配 / GHA setup-flyctl@1.6)。Phase 02 final 02-07-SUMMARY.md landed. planning-status zero drift. **NEXT 下次会话**：(1) `/gsd-extract_learnings 02 --ws m1-perception` 关 Phase 02。(2) Phase 03 (L2) 启动前必须先消化 Phase 02.1 backlog (2 个 P1 + 1 个 trade-off 待修)。(3) M2 T2 三选一决策。"
+last_updated: "2026-05-19T21:30:00.000Z"
 last_activity: 2026-05-19
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 20
-  completed_plans: 19
-  percent: 95
+  completed_plans: 20
+  percent: 100
 ---
 
 # Project State
