@@ -1992,3 +1992,61 @@ git push                                             # 待 push 5 commits
 我倾向 **路 A 优先 (有 thread §1 要求驱动)**, 然后 **路 B**, 再 **路 C** 视情况插入。
 
 ---
+
+## SESSION 22 — 2026-05-20 (Phase 02 close + M2 T2 锁定)
+
+### 完成项
+
+1. **Phase 02 LEARNINGS extracted** (commit `5267297`)
+   - 18 decisions / 15 lessons / 14 patterns / 9 surprises (493 行)
+   - 9 plan SUMMARYs + 02-CONTEXT + 02-SOAK-LOG 完整 extract
+   - missing artifacts: 02-VERIFICATION.md / 02-UAT.md (Phase 02 用 chaos injection trail 代替, 已说明)
+
+2. **m2-combinatorial 02-1-PLAN.md Revision History + DRIFT NOTICE** (commit `a5c4e0d`)
+   - 写明 Revision 0/1/2/3 历史 + 18 天 silent drift 考古
+   - 顶部 DRIFT NOTICE + Pending Decision 段 (T2 三选一)
+   - 履行 `feedback_plan-code-drift-2026-05` 纪律 (plan body 改动留 trace)
+
+3. **用户决策 (AskUserQuestion 2026-05-20)**:
+   - T2 走向 → **Option B (fee-differential + IMDEA Type-2 验证)**
+   - Phase 02.1 backlog → **进 Phase 03 启动前必修 (deferred 但优先)**
+
+4. **02-1-PLAN.md Revision 4 落地** (本 commit)
+   - Pending Decision 标记 CLOSED
+   - T2 body 改写对齐 fee-differential 代码 (320 行 already landed)
+   - 列明 IMDEA Type-2 validation 测试要求 (≥3 测试)
+   - 废弃 depth-curve 设计 (原 Revision 0/1)
+
+5. **threads/market-microstructure.md** 加 IMDEA Type-2 经济学段
+   - 论文经济学量级 ($40M / $4.2M / 86M 笔) 与代码模型量级 ($1k size × 40bps = $4/笔) 对照
+   - T2 validation 测试 3 个 case 设计草稿
+   - 3 个 open question (size 分布 / PM rebate 现状 / CLOB maker avail rate)
+
+6. **m2 STATE.md** sync (T2 status 改 🟡, plan-vs-code 偏离审计加 2026-05-20 update 段)
+
+### [NEXT] 下次会话从这里开始
+
+```
+/gsd-resume-work --ws m1-perception    # 或 --ws m2-combinatorial 看走哪条线
+make planning-status                    # 应该 zero drift
+```
+
+**决策点 — 两条线选一**:
+
+**路 A — Phase 02.1 fix-up** (m1-perception):
+- 修 2 P1 (fail-soft 互相抵消 + daemon PAUSED 无 prod unpause endpoint)
+- 决定 trade-off (/health 503 是否 Phase 03 重定)
+- 预计 1-2 session
+- 完成后才能进 Phase 03 (L2 orderbook) discuss
+
+**路 B — M2 T2 IMDEA validation** (m2-combinatorial):
+- 补 ≥3 IMDEA Type-2 测试到 `tests/models/test_slippage.py`
+- 验证 fee_diff_bps 40bps/20bps + cross_execution_savings 经济学量级
+- 然后可推 T3 Routing Engine (用 estimate_cross_execution_savings)
+- 预计 1 session
+
+**两条线解耦不冲突**,任选其一推进。当前 STATE 倾向 (我的判断):
+- 若想保持 m1 主线纪律 (生产级 L1 真闭环) → 路 A 先
+- 若想分散试错风险 / 多条线并行 → 路 B 先,因 Phase 02.1 backlog 不阻塞 m2
+
+---

@@ -48,15 +48,23 @@
   - ✅ Revision History 段落落地 (本段)
   - ⏳ T2 走向决策待做 (见 Pending Decision 段)
 
-### 2026-05-20 Revision 3 — Revision History 段落补齐 (本次 edit)
+### 2026-05-20 Revision 3 — Revision History 段落补齐
 - Trigger: Phase 02 close 后用户授权 "按计划往下走,自己判断" → 优先项是为 T2 走向决策铺路
 - 本 revision **不修改** T1-T8 body 内容 (保留 Revision 1 描述作为历史档案)
 - 本 revision **加入** 顶部 DRIFT NOTICE + Revision History + Pending Decision 段
 - 下一步 (须用户决策): 见 Pending Decision
 
+### 2026-05-20 Revision 4 — T2 走向锁定 = Option B (fee-differential + IMDEA Type-2)
+- Decision source: 用户 AskUserQuestion 拍板 2026-05-20,选 Option B (推荐)
+- T2 body **重写** (见下方 "T2: Slippage Model — Fee-Differential Cross-Venue (REWRITTEN)" 段) 对齐 `src/polyarb/models/slippage.py` 实际代码 (320 行 fee-differential 模型)
+- 原 Revision 1 depth-curve 设计**正式废弃** — 推迟到 future plan,若 m1 Phase 03 (L2 orderbook) 落地后 depth-based 信号需要再启则单开 plan
+- 增加 T2 IMDEA Type-2 验证测试要求 (Polymarket 86M 笔交易论文 cross-venue fee differential 实证)
+- T1/T3/T4/T5 body **暂未改写** — STATE.md "Plan-vs-Code 偏离审计" 显示这几个也有膨胀,但本 revision 焦点是 T2 (T2 是核心信号层,T3/T4 用它),T1 body 与代码的差异是命名/枚举级别非语义级别,推到执行时按需校正
+- Pending Decision 段标记为 **CLOSED 2026-05-20**,保留作历史
+
 ---
 
-## Pending Decision (post-2026-05-20)
+## Pending Decision (post-2026-05-20) — **CLOSED 2026-05-20: Option B selected**
 
 T2 走向三选一,**必须用户拍板**才能继续 m2 任何执行工作:
 
@@ -116,15 +124,39 @@ Build the core arbitrage execution engine: routing (Polymarket-first → Gamma),
 4. Pydantic v2 validators: profit ≥ 0, price in [0, 1], size > 0
 5. Tests: model construction, validation edge cases, serialization round-trip
 
-### T2: Slippage Model — Polymarket Depth Estimation
+### T2: Slippage Model — Fee-Differential Cross-Venue (REWRITTEN 2026-05-20 Revision 4)
 **Owner**: general-purpose agent
-**Files**: `src/polyarb/models/slippage.py`, `tests/test_slippage.py`
-**Steps**:
-1. `SlippageModel` class with `estimate_slippage(token_id, side, size, depth_curve)` → (slippage_pct, max_acceptable_size)
-2. `PolymarketDepthCurve`: estimate AMM depth from order book (Phase 1 `OrderBookSummary` data)
-3. `DepthCurve` protocol for pluggable curves
-4. Unit tests: slippage at 0.5x/1x/2x depth, edge cases (tiny markets, deep markets)
-5. Integration note: Phase 1 `GhostBookAnalyzer` output feeds this model
+**Files**: `src/polyarb/models/slippage.py` (320 lines, already landed 2026-05-01 commit `08a13d3`), `tests/models/test_slippage.py` (already 4 tests green) + NEW IMDEA validation tests
+**Status**: code 已存在, 这一 task 现在是 **巩固 + 验证 + 补 IMDEA Type-2 证据** 而非"新建"
+
+**Design (locked, matches landed code):**
+1. `SlippageParams` dataclass — 9 个 tunable bps 参数 (maker_fee_bps / taker_fee_bps / impact_coef / vol_pct / pm_rebate_bps / clob_taker_cost_bps / clob_maker_rebate_bps / pm_taker_cost_bps / small_notional+mid_notional breakpoints)
+2. `SlippageResult` dataclass — 单 leg 成本分解 (market_impact_bps / fee_bps / mid_price_delta_bps / total_cost_bps / net_cost_after_rebate_bps + to_dict + net_cost_dollars)
+3. `SlippageCalculator` — 主 estimator,3 个方法:
+   - `estimate(side, venue, size_usd, mid_price, clob_bid/ask, pm_bid/ask, clob_maker_avail, daily_volume_usd) → SlippageResult` — Kyle's lambda market impact (impact_dollar = impact_coef × notional / √daily_volume) + fee 分支 (PM rebate vs taker, CLOB maker vs taker) + mid-price delta vs signal time
+   - `estimate_cross_execution_savings(...)` → dict {pm_net_cost_bps, clob_net_cost_bps, savings_bps, pm_result, clob_result} — **核心 cross-venue fee differential 接口**
+   - `estimate_leg(side, venue, mid_price, quantity_shares, ...)` — shares-based convenience wrapper
+   - `compare_venues(side, mid_price, quantity_shares, ...)` → dict {pm_result, clob_result, savings_bps}
+4. `SlippageEstimate` + `VenueSlippageProfile` + `SlippageModel` — signal-layer 抽象,DEFAULT_PROFILES (PM / CLOB / POL 三个 venue),`estimate(venue, size_usd, mid_price)` 返回 SlippageEstimate
+5. `SlippageParams.fee_diff_bps(side, clob_maker_avail)` — IMDEA Type-2 核心: BUY 场景 CLOB maker (-10bps) vs PM taker (-50bps) = 40bps 更便宜; SELL 同理。**这是 fee differential 模型的经济学定理**
+
+**Validation tasks (本 plan 范围):**
+1. 现有 4 个测试 (`tests/models/test_slippage.py`) 保持 green
+2. **新增 IMDEA Type-2 validation 测试** (来源: Polymarket 86M 笔交易论文 — `docs/research/polymarket-oss-landscape-2026-04.md` 引用):
+   - Type-2 套利 = same outcome, different venue, fee differential profit
+   - 测试用例: 给定 mid_price=0.5, size_usd=$1k, 调 `estimate_cross_execution_savings` → 验证 savings_bps 与论文中 Top 3 钱包 $4.2M 净利的 bps 量级一致 ($1k size × 40bps fee_diff = $4/笔, $4M/Top 钱包 ≈ 1M 笔/钱包级订单流, IMDEA 论文 Top 3 合计 $4.2M 在 86M 笔总量中占比 ~5% 验证合理)
+   - 至少 3 个测试: (a) fee_diff_bps BUY clob_maker_avail / (b) fee_diff_bps SELL no_clob_maker / (c) estimate_cross_execution_savings 主路径 + IMDEA 量级断言
+3. Edge cases: tiny markets (size < small_notional), deep markets (size > mid_notional), zero daily_volume (sqrt(1.0) fallback), mid_price=0 / negative size (zero return guard)
+4. Integration note: T3 Routing Engine 用 `estimate_cross_execution_savings` 做 PM-vs-CLOB venue selection;T4 Pipeline 用 `estimate` 做 per-leg pre-trade 成本预估
+
+**NOT in T2 scope (废弃自 Revision 1):**
+- ~~`PolymarketDepthCurve` Protocol~~ — Revision 0/1 设计,已废弃;若 m1 Phase 03 L2 orderbook 出来后需要 depth-based 信号,单开 future plan
+- ~~依赖 Phase 1 `OrderBookSummary` / `GhostBookAnalyzer`~~ — 当前 fee-differential 模型不依赖 L2,与 m1 并行推进
+
+**Acceptance:**
+- `tests/models/test_slippage.py` 全 green (4 现有 + ≥3 新增 IMDEA Type-2 = ≥7 测试)
+- `src/polyarb/models/slippage.py` 不需重写 (代码已正确,只补测试)
+- IMDEA Type-2 测试数据来源在 plan body 或 thread 中可追溯 (cite 论文 §章节 / 数字)
 
 ### T3: Routing Engine — Polymarket-First Logic
 **Owner**: general-purpose agent

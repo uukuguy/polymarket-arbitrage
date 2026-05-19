@@ -198,6 +198,52 @@ $5000 投入到期变 ~$4170，亏 17%
 
 ---
 
+## IMDEA Type-2 套利经济学（m2 T2 fee-differential 模型的论文根据，2026-05-20）
+
+> Trigger: m2-combinatorial Phase 2 T2 走向锁定为 Option B (fee-differential 模型) 后,需要把论文经济学量级与代码模型量级对照。
+
+### Type-2 定义（论文术语）
+
+- **Type-1** = AMM ↔ AMM 跨池价差（早期 Polymarket 主要套利形式,2024 前）
+- **Type-2** = **cross-venue 同结果不同场所的 fee/spread 差**（Polymarket Public CLOB 推出后出现，2024 至今主流）
+- **Type-3** = negrisk group `sum(best_ask) < 1` 多合约组合（见 §6.4，这是另一种 combinatorial 套利，与 Type-2 fee differential 互补）
+
+### Type-2 的经济学量级（论文数据 + 代码模型对照）
+
+| 维度 | 数值 |
+|---|---|
+| 总交易笔数 | 86M |
+| 套利总利润 | $40M |
+| Top 3 钱包合计 | $4.2M (≈10.5% of total) |
+| 单笔平均利润 (粗估) | $40M / 86M ≈ $0.47/笔 (低,因大部分是小单) |
+| Top 3 钱包平均单笔 (估) | ~$1-4/笔 (依单均规模) |
+
+**模型量级对照** (用 `SlippageParams` 默认值):
+- BUY 场景: CLOB maker (-10bps) vs PM taker (-50bps) → `fee_diff_bps = 40bps`
+- 单笔 $1k size × 40bps = **$4 fee differential / 笔**
+- 这与论文 Top 3 钱包平均单笔 ~$1-4 实证量级一致 → 模型在 $1k-$10k size 区间是合理的
+
+### m2 T2 validation 测试设计
+
+T2 IMDEA validation 测试至少要 cover:
+1. **fee_diff_bps BUY clob_maker_avail** — 断言 40bps (CLOB maker rebate -10 vs PM taker -50 实际拿到 maker side 时的差)
+2. **fee_diff_bps SELL no_clob_maker** — 断言 20bps (PM rebate +30 vs PM taker +50 退而求次的差)
+3. **estimate_cross_execution_savings @ $1k size** — 断言 savings_bps × notional 在 $1-10 量级,对齐论文 Top 3 钱包平均单笔利润
+
+### 引用
+
+- 论文出处: `docs/research/polymarket-oss-landscape-2026-04.md` 引用 (IMDEA 86M / $40M / $4.2M 三组数字)
+- 代码出处: `src/polyarb/models/slippage.py` SlippageParams.fee_diff_bps 方法 + estimate_cross_execution_savings 方法
+- Plan 锁定: `.planning/workstreams/m2-combinatorial/phases/02-arbitrage-engine/02-1-PLAN.md` Revision 4 (2026-05-20)
+
+### Open Questions (未来 m2 推进时考虑)
+
+- **Top 3 钱包 $4.2M 的 size 分布**: 论文是否给单笔 size 中位数 / 90 分位?这会决定 SlippageParams.small/mid_notional 阈值的真实校准
+- **PM rebate 现状**: pm_rebate_bps 默认 30bps 是设计假设,实际 Polymarket 当前 maker rebate 是否还是这个数?需要 2026-Q2 重新 verify (Polymarket 2026-02 移除 taker delay 时可能调过 fee)
+- **CLOB maker availability rate**: clob_maker_avail 取决于实时 BBO 是否有 maker 挂单,这是 m1 Phase 03 (L2 orderbook) 才能给数据。在 L2 出来前 m2 T3 只能用占位/概率分布
+
+---
+
 ## SESSION 06 — Polymarket Issue #180 实测：72% liquid 市场 `/book` 给假价（2026-04-29）
 
 第一次 live API run（17,259 markets, liquidity > $1k）真实数字：

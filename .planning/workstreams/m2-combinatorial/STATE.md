@@ -1,23 +1,24 @@
 ---
 workstream: m2-combinatorial
 created: 2026-04-28
+last_updated: 2026-05-20
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
-**Status:** Phase 2 partial — T1 实施完毕，剩 7 task
+**Status:** Phase 2 T2 走向锁定 (Option B, Revision 4 落地) → 待执行 T2 IMDEA Type-2 测试补充
 **Current Phase:** Phase 2 — 套利执行引擎（02-arbitrage-engine）
-**Last Activity:** 2026-05-01
-**Last Activity Description:** 清理跨 session 散件 — config namespace 修复、补 T1 漏依赖、目录改名
+**Last Activity:** 2026-05-20
+**Last Activity Description:** 02-1-PLAN.md Revision 3+4 — 加 Revision History + DRIFT NOTICE + Pending Decision (CLOSED Option B) + T2 body 改写对齐 fee-differential 代码 + IMDEA Type-2 validation requirement
 
-## Phase 2 Plan Progress (`02-1-PLAN.md`)
-- ✅ **T1** signal & execution models — `models/signal.py` + `models/slippage.py`（运行时 commit `08a13d3`）
-- ⏸ **T2** Slippage Model — `tests/models/test_slippage.py` 已有 4 tests，模型代码 `models/slippage.py` 已落地，但和 T2 的 `PolymarketDepthCurve` / `DepthCurve` Protocol 还没对接
-- ⏸ **T3** Routing Engine — `routing/engine.py` 雏形 + 17 routing tests 已 commit，但完整路由分支仍待补
-- ⏸ **T4** Execution Pipeline — `execution/engine.py` 雏形已 commit，sequential flow 未完
+## Phase 2 Plan Progress (`02-1-PLAN.md` — Revision 4 locked 2026-05-20)
+- ✅ **T1** signal & execution models — `models/signal.py` + `models/slippage.py` (commit `08a13d3`)。Body 仍未对齐 (signal.py 概念膨胀), 推到 T2 完成后回头校正
+- 🟡 **T2** Slippage Model = fee-differential cross-venue (Revision 4 locked) — code 已落地 320 行,4 测试 green。**剩**: 补 ≥3 个 IMDEA Type-2 validation 测试 (cross-venue fee differential 经济学量级断言)
+- ⏸ **T3** Routing Engine — `routing/engine.py` 雏形 + 17 routing tests 已 commit。T2 IMDEA 验证完后 T3 接 `estimate_cross_execution_savings` 做 venue selection
+- ⏸ **T4** Execution Pipeline — `execution/engine.py` 雏形已 commit,sequential flow 未完
 - ⏸ **T5** Position Tracker — `routing/position_tracker.py` 已 commit
-- ⏸ **T6** Settings — `routing/config.py` 落地（含 RoutingConfig/ExecutionConfig/PositionConfig/AppConfig）
+- ⏸ **T6** Settings — `routing/config.py` 落地 (含 RoutingConfig/ExecutionConfig/PositionConfig/AppConfig)
 - ⏸ **T7** CLI Integration — `arbitrage evaluate/run/status` subcommand 未做
 - ⏸ **T8** E2E test — 未做
 
@@ -28,28 +29,28 @@ created: 2026-04-28
 **Stopped At:** SESSION 11 cleanup 完成；Phase 2 T2-T8 待续
 **Resume File:** None
 
-## ⚠️ Plan-vs-Code 偏离审计（SESSION 11 EOD 发现）
+## ⚠️ Plan-vs-Code 偏离审计 — 历史快照 (SESSION 11 EOD 发现 + SESSION 21 考古)
 
-SESSION 10 落地的 m2 代码方向**与 02-1-PLAN.md 不完全一致**，未来推进前需要先 reconcile：
+> **2026-05-20 update**: T2 偏离已通过 02-1-PLAN.md Revision 4 解决 (Option B, plan body 改写对齐代码)。T1/T3/T4 偏离**仍未对齐**, 但优先级低于 T2 (T2 是核心信号层)。下面段落保留作历史。
 
-| PLAN 期望 | SESSION 10 实际产出 | 差距 |
-|---|---|---|
-| T1 `ArbitrageLeg/ArbitrageSignal/ExecutionResult` 三个核心 dataclass | `models/signal.py` 350+ 行，多个 enum/class（包含 SignalStatus/SignalSide/LegSide/PipelineOutcome/MarketOutcome/MarketSignal 等）| 概念膨胀，需对齐到 PLAN 的最小集 |
-| T2 `SlippageModel` 基于 Phase 1 `OrderBookSummary` 估算 AMM 深度 | `models/slippage.py` 实现的是抽象费用模型（taker/maker bps + impact_coef）| **方向错了** — 没接 Phase 1 数据，没有 `DepthCurve` Protocol 也没有 `PolymarketDepthCurve` |
-| T3 `RoutingDecision` enum (EXECUTE/SKIP/NEEDS_HEDGE/UNCERTAIN) | 实现成了 dataclass | 类型选择不一致 |
-| T4 ArbitragePipeline sequential flow + 4 paths | `execution/engine.py` 4K 雏形 | 实现深度未知，需读代码 |
+SESSION 10 落地的 m2 代码方向**与 02-1-PLAN.md Revision 1 不完全一致**:
 
-**判断**：SESSION 10 的实施方向**部分自洽但偏离 PLAN**。继续盲目推 T3-T8 会让偏离继续放大。
+| PLAN Revision 1 期望 | SESSION 10 实际产出 (Revision 2 代码) | 差距 | 2026-05-20 状态 |
+|---|---|---|---|
+| T1 `ArbitrageLeg/ArbitrageSignal/ExecutionResult` 三个核心 dataclass | `models/signal.py` 350+ 行,多个 enum/class | 概念膨胀 | 仍未对齐, 推到 T2 完成后校正 |
+| T2 `SlippageModel` 基于 Phase 1 `OrderBookSummary` 估算 AMM 深度 | `models/slippage.py` 是 CLOB↔PM 双场所 fee differential 模型 | **方向不同** | ✅ Revision 4 锁定 fee-differential 为正,depth-curve 废弃 |
+| T3 `RoutingDecision` enum (EXECUTE/SKIP/NEEDS_HEDGE/UNCERTAIN) | 实现成了 dataclass | 类型选择不一致 | 仍未对齐, 推到 T3 执行时校正 |
+| T4 ArbitragePipeline sequential flow + 4 paths | `execution/engine.py` 4K 雏形 | 实现深度未知 | 仍未对齐, 推到 T4 执行时校正 |
 
-## Recommended Next Action
+**判断 (2026-05-20 update)**: T2 已解决 (Revision 4),T1/T3/T4 推到对应 task 执行时按需校正。"按 plan 盲推" 反模式已通过 02-1-PLAN.md 顶部 DRIFT NOTICE + Revision History 制度防范。
 
-**A. 先做"对齐审计"**：逐文件对比 `models/signal.py` / `models/slippage.py` / `routing/engine.py` / `execution/engine.py` 与 02-1-PLAN.md 的 T1-T4，写一份 RECONCILIATION.md，决定每处偏离是 (a) 接受（PLAN 要修订）还是 (b) 重做（对齐 PLAN）
+## Next Action (2026-05-20)
 
-**B. 直接重做 T2**：如果决定 T2 必须接 Phase 1 OrderBookSummary（套利第一红线 mid vs ask 的工程实现），那 `models/slippage.py` 当前的费用模型代码可能要重写或移到别的地方
+**T2 执行准备就绪** — code 已有,只缺 IMDEA Type-2 validation 测试。下次会话可:
+1. 启动一个新 plan (e.g., `02-2-PLAN.md`) 专做 T2 IMDEA validation + 写完 T3 routing engine,**或**
+2. 在现有 02-1-PLAN.md 框架下走 T2 IMDEA 测试补全,然后 sequential 推 T3-T8
 
-**C. 先看 m1 Phase 2 (WebSocket) 决定 m2 是否需要等数据**：m2 套利触发依赖实时 BBO，m1 polling-only 时 m2 信号识别滞后秒级。WebSocket 可能改变 m2 设计
-
-**推荐 A**：m2 现在最不该做的事是"继续按 PLAN 推 T2-T8" — 偏离已经存在，要先承认或纠正。审计成本低（读 ~600 行代码），收益高（避免连锁错位）
+执行前 prereq: **m1 Phase 02.1 backlog 必须先消化** (用户 2026-05-20 决策,见 m1-perception STATE)。M2 T2 与 m1 Phase 02.1 解耦不冲突, 优先级看你想先看哪条线进展。
 
 ---
 
