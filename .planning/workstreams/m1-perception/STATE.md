@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 status: executing
-stopped_at: "SESSION 20 EOD 2026-05-19: Wave 4 完整落地 — Plan 02-05 (observability stack, 7 commits + SUMMARY efa2014) + Plan 02-06 (Vercel dashboard, 7 commits + SUMMARY 69824c6). 3 alert paths E2E verified live (Sentry email PYTHON-1 + Better Stack incident email + Telegram direct). Dashboard live at polymarket-arbitrage-ppf6exo78-jiangwen-su-s-projects.vercel.app, magic-link → recipe → JSON 验证通。.git/config [user] section 已清，解 Vercel author block。git tree 干净，planning-status zero drift。下一动作：Plan 02-07 (Wave 5 chaos + 7-day soak gate)。"
-last_updated: "2026-05-19T15:30:00.000Z"
+stopped_at: "SESSION 21 2026-05-19: Wave 5 Plan 02-07 Tasks 1-3 dispatched ✅ (8ccd604 chaos suite + 2fbfd32 soak_monitor + 522ea56 teaching doc + 3f70781 interim SUMMARY + 69cb9c1 unused-import cleanup, 5 commits fast-forward merged worktree → main). 22/22 chaos tests green (Gamma 5xx, CLOB malformed, Supabase 500, R2 503, 3-fail PAUSED, /scan flood, SQLite WAL concurrency). docs/learning/08-生产化部署.md landed. planning-status zero drift. **NEXT (user gate)**: Task 4 = launch 7-day soak (Better Stack uptime probe + Fly cron auto), monitor via scripts/soak_monitor.py + 02-SOAK-LOG.md. Pre-flight before starting: decide whether to upgrade Supabase Free→Pro $25/mo (Free auto-pauses after 7 days idle → would break soak)."
+last_updated: "2026-05-19T18:30:00.000Z"
 last_activity: 2026-05-19
 progress:
   total_phases: 4
@@ -19,12 +19,12 @@ progress:
 
 ## Current Position
 
-Phase: 02 (l1-production-grade) — EXECUTING (Wave 5 of 5 pending)
-Plan: 8 of 9 ✅ (Wave 1+2+2.5+3+3.5+4 complete; Wave 5 = Plan 02-07 pending)
-**Status:** Wave 4 complete — 3 alert paths E2E + Vercel dashboard live
+Phase: 02 (l1-production-grade) — EXECUTING (Wave 5 Tasks 1-3 ✅ / Task 4 = 7-day soak pending user)
+Plan: 9 of 9 partial (Wave 1+2+2.5+3+3.5+4 ✅; Wave 5 Plan 02-07 Tasks 1-3 ✅, Task 4 soak + Task 5 final SUMMARY pending)
+**Status:** Wave 5 autonomous tasks complete — chaos suite + soak infra + teaching doc landed; 7-day soak gate is the remaining user action
 **Current Phase:** 02
 **Last Activity:** 2026-05-19
-**Last Activity Description:** SESSION 20 — Wave 4 dispatch + 完整收尾。Plan 02-05 (Sentry init + redact + alerts.py Telegram fallback + heartbeat ping wired in scheduler success branch). Plan 02-06 (Next.js 15 App Router + Supabase magic-link + Edge HMAC forwarder; Vercel deploy Ready 8d89eb3 at polymarket-arbitrage-ppf6exo78-jiangwen-su-s-projects.vercel.app). Live verified via Gmail (Sentry / Better Stack incident emails) + Telegram (bot direct msg) + browser (dashboard E2E magic-link + recipe trigger → daemon JSON 回传)。Wave 4 期间修了 3 个真 bug (heartbeat_ok wiring / lib supabase server-client boundary / /status schema mismatch) + 解决 Vercel author verification block (清 .git/config [user])。
+**Last Activity Description:** SESSION 21 — Wave 5 dispatch + worktree merge. gsd-executor (sonnet) shipped 4 commits in worktree-agent-abd466f816a357cb1 (chaos suite 8ccd604, soak_monitor 2fbfd32, teaching doc 522ea56, interim SUMMARY 3f70781), then I added 69cb9c1 unused-import cleanup after pyright surfaced cosmetic warnings. Fast-forward merged worktree → main (5 commits, 18 files, +2177/-8). All 22 chaos tests green: respx-mocked Gamma 5xx exhaustion, CLOB malformed book F-1 defense (also auto-fixed a real `KeyError` escape in layers.py/orchestrator.py), Supabase 500 → DEGRADED, R2 503 → DEGRADED, 3 consecutive FAILED → PAUSED state machine, `/scan` flood resilience, SQLite WAL concurrency. scripts/soak_monitor.py (typer + Better Stack API status/export), 02-SOAK-LOG.md scaffold, 3 `make soak-*` targets, docs/learning/08-生产化部署.md (251 lines, CN, 7 code refs + 5 trade-offs + 5 self-check Q&A). planning-status zero drift, all 9 Phase 02 plans show OK.
 
 ## Progress
 

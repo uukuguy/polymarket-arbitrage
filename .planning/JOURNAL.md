@@ -1661,3 +1661,97 @@ Out of memory: Killed process 647 (python)
   - 写 Wave 4 教学文档 `docs/learning/09-observability-and-dashboard.md`
 
 ---
+
+## SESSION 21 — 2026-05-19 (Wave 5 dispatch — chaos suite + soak infra landed; 7-day soak gate pending user)
+
+### 主轴：/gsd-execute-phase 02 --wave 5 → Plan 02-07 Tasks 1-3
+
+按 SESSION 20 EOD [NEXT] 路 A 走。Plan 02-07 设计成两段：autonomous (Tasks 1-3) + 用户检查点 (Task 4 = 7 天 soak) + 最终 (Task 5)。本次只跑 autonomous 段，soak 留给用户决定何时启动。
+
+**5 个 commits 合并入 main**（fast-forward worktree → main）：
+
+| commit | 内容 |
+|---|---|
+| `8ccd604` | test(02-07): chaos engineering test suite — 8 scenarios (7 test files, 22 tests) |
+| `2fbfd32` | feat(02-07): scripts/soak_monitor.py + make soak-status/export + SOAK-LOG scaffold |
+| `522ea56` | docs(02-07): Phase 02 teaching doc — 生产化部署 (08) |
+| `3f70781` | docs(02-07): interim SUMMARY — Tasks 1-3 complete, Task 4 (soak) pending user start |
+| `69cb9c1` | chore(02-07): drop unused imports surfaced by pyright after Wave 5 dispatch |
+
+**Chaos test scenarios (22 tests, 100% green)**：
+- `test_chaos_gamma_5xx.py` — Gamma 503×5 exhaustion → FAILED; mid-pagination timeout → DEGRADED/FAILED
+- `test_chaos_clob.py` — malformed CLOB book (asks/bids as dict not list) → DEGRADED + F-1 `_safe_float` captures。**Bonus**: 执行 agent 触发 Rule 1 修了一个真生产 bug — `KeyError` 当时从 F-1 except 子句逃逸出来 (`layers.py` + `orchestrator.py` 一处疏漏)
+- `test_chaos_supabase.py` — Supabase 500 → snapshot OK/DEGRADED (mirror fail-soft, NOT abort) — D-12 amendment + LEARNINGS P5 守住
+- `test_chaos_r2.py` — R2UploadError → DEGRADED + Issue logged; parquet 仍本地写成功
+- `test_chaos_3failures_pause.py` — 3× FAILED → scheduler PAUSED state + `send_paused_alert` 调用 exactly once; 第 4 次 tick 跳过；unpause 后恢复 RUNNING
+- `test_chaos_scan_flood.py` — `/scan` flood (10 req/s × 30s) → no daemon crash, HMAC still validates
+- `test_sqlite_concurrency.py` — WAL mode reader + writer 并发 → no crash, eventual consistency
+
+**Soak infrastructure**：
+- `scripts/soak_monitor.py` (168 行, typer CLI) — `status` 拉 Better Stack 当前 incident 状态，`export` 拉 7 天 history JSON 写入 02-SOAK-LOG.md
+- `02-SOAK-LOG.md` scaffold — 8 项 pass criteria checklist + fault injection plan + uptime/incident table 占位
+- 3 个 Makefile targets: `soak-status` / `soak-export` / `soak-checklist`
+
+**Teaching doc (08-生产化部署.md, 251 行)** — Phase 02 心智模型 + 7 段代码切片 + 5 个设计取舍 + 5 道自检题 + FAQ 增量区。INDEX 更新。
+
+### Pyright 误报噪音 + 实清理
+
+worktree 合并前 pyright 报了一批 diagnostics：
+- ✘ false positives (NOT real)：`respx`/`starlette/py.typed` ENOENT — pyright 在 worktree 的 `.venv` 里找包（worktree 没有自己的 .venv，共享 main 的）；`Config.retries` 类属性未识别 — botocore stub 不完整，runtime 正常；`from polyarb.daemon import alerts` 属性未识别 — `__init__.py` 没 re-export，但 Python 模块加载机制 runtime 正常
+- ⚠ real (cosmetic)：5 个 unused imports (re, SimpleNamespace, sqlite3, MagicMock, pytest) — 一刀清掉，22/22 测试仍 green
+
+修后 commit `69cb9c1` 落入 worktree → 合并入 main。
+
+### 合并细节
+
+`git merge worktree-agent-abd466f816a357cb1 --no-edit` → fast-forward (5 commits)，18 文件改动 (+2177/-8)。orchestrator 文件 (STATE/ROADMAP) 不变化，无需走 main-wins backup。`planning-status` zero drift。worktree 因 agent process 仍存活被 git 标记 locked，不影响 main 正常工作 — 留给 harness 异步清理。
+
+### 数字
+
+- **commits this session**: 6 (5 from agent + 1 STATE/JOURNAL update at session end)
+- **lines added (code)**: +2177 / -8 (worktree merge)
+- **chaos tests**: 22 (new) — Phase 02 测试 469+ 全 green (除 3 个 pre-existing deferred)
+- **production code change**: 1 bug fix (layers.py + orchestrator.py F-1 KeyError escape — Rule 1 triggered)
+- **agent duration**: ~3 hours (executor reported)
+
+### Task 4 = 7-day soak 的前置 check（用户决定何时开）
+
+⚠️ **Supabase Free tier 不能直接进 soak** — 7 天无活动会 auto-pause project，会让 supabase-mirror 健康检查变 fail，直接断 soak gate。三种走法：
+1. **升 Pro $25/月**（最稳，推荐）— 7 天 soak 期间 dashboard 健康，无干预
+2. **保 Free + 每日手动 ping** — 风险高，漏一次就废
+3. **保 Free + 让 chaos 期间的活动续命** — chaos 测试主要打 mock，不动 Supabase real；不可靠
+
+未决定前 soak 不要启动。chaos suite 已经在本地证伪了 alert path 触发，**云端真 alert 验证**等 soak 阶段做。
+
+### [NEXT] 下次会话从这里开始：
+
+**第 1 步**（恢复 + 健康）：
+```
+/gsd-resume-work --ws m1-perception
+make planning-status                          # 应该 zero drift
+curl -sS https://polyarb-l1.fly.dev/health    # 应该 overall=pass
+```
+
+**第 2 步**（决定 Supabase tier）：
+- 升 Pro → 继续路 A
+- 不升 → 走路 B / C
+
+**路 A**（推荐 — 关掉 Phase 02）：
+1. Supabase 升 Pro
+2. 启动 7-day soak: 让 prod 自己跑 + Better Stack uptime 探针自动监控 + Fly cron 14×subset + 1×full 自然触发
+3. 每日 `make soak-status` 看 Better Stack incident 计数
+4. T+7 跑 `make soak-export` 把 7 天数据写入 02-SOAK-LOG.md
+5. 检查 8 项 pass criteria → 全过则把 `02-07-SUMMARY.md` 改写为 Phase 02 final SUMMARY
+6. 跑 `/gsd-extract_learnings 02 --ws m1-perception` 关闭 Phase 02
+7. 进 Phase 03 (L2 orderbook) discuss
+
+**路 B**（跨线并行 — 不阻塞）：
+- m2-combinatorial T2 Slippage Model（独立，不依赖 Phase 02 完成）
+- 清 3 个 pre-existing test failures (`test_pass_when_fresh` / `make_smoke_health_local` / `test_r2_retry`)
+- 写 `docs/learning/09-observability-and-dashboard.md`（Wave 4 教学文档补漏）
+
+**路 C**（chaos in prod 提前预热 — 风险可控）：
+- 在 prod 主动注入 1 次故障（如临时撤掉 Supabase secret 让 mirror 失败）→ 验证 Sentry + Telegram alert 真发出来
+- 验证完恢复 → 这次"真火"算 soak gate 的 ≥1 自然故障正确告警凭证
+
+---
