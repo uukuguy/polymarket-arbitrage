@@ -14,10 +14,9 @@ low-level config; this test verifies the orchestrator-level behavior).
 from __future__ import annotations
 
 import os
-import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 

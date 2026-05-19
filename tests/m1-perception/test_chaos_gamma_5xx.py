@@ -14,9 +14,7 @@ Scenario 1b: Gamma timeout mid-pagination (first page OK, second page 503 ×
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
