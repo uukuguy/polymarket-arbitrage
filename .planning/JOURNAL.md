@@ -1755,3 +1755,127 @@ curl -sS https://polyarb-l1.fly.dev/health    # 应该 overall=pass
 - 验证完恢复 → 这次"真火"算 soak gate 的 ≥1 自然故障正确告警凭证
 
 ---
+
+## SESSION 21 续 — 2026-05-19 (Phase 02 关闭预调 + m2 plan-code 沉默分叉考古)
+
+### 主轴一：Phase 02 关闭定义对上现实
+
+用户决策不升 Supabase Free→Pro $25/mo → 7-day soak gate 走不通。变体改为 **4 次 prod chaos injection** 作为 thread §1 生产级判定的替代凭证（chaos test suite 已在 mocked CI 证伪代码层，injection 证伪部署的 alert chain end-to-end real）。
+
+**改动 (commit `ce5f5ed`)**：
+- `02-07-PLAN.md` Task 4 重写：4 个 injection plan (Fly stop / R2 unset / Supabase unset / HMAC flood)，每个带完整 flyctl 命令 + 预期 evidence + secret 备份步骤
+- `02-07-PLAN.md` Task 5 SUMMARY 模板改为 chaos-injection 变体
+- `02-SOAK-LOG.md` 重写 pass criteria 从 8 项 uptime checklist 改为 4 个 injection 的 alert-chain checklist
+- 新 thread `soak-gate-deviation-2026-05.md`：完整决策 trace + 风险面 + Phase 03 (L2) 必须把 7-day 凭证补回的要求
+- `market-observation-architecture.md` §1 加 backlink — L1 原定义不动，但显式标注 Phase 02 走的是变体
+
+### 主轴二：m2 slippage.py 考古（用户问"那段代码什么来历"）
+
+用户准备切 M2 T2 时让我先摸状态，发现 `src/polyarb/models/slippage.py` 320 行 + 4 测试全 green，但代码跟 `02-1-PLAN.md` 现行 T2 设计**不一致**且**分叉 18 天没人察觉**（2026-05-01 落地 → 2026-05-19 才被注意）。
+
+**用 git log + JOURNAL 还原的真相**：
+| 时间 | 事件 |
+|---|---|
+| 5-01 SESSION 10 上午 | T2 设计是 "depth-based 线性衰减 + 1% cap" (JOURNAL line 418) |
+| 5-01 15:31 (T1 commit `688363a`) | Claude 写代码漏 `git add` slippage.py/signal.py → `git checkout 688363a` 跑不起来 |
+| 5-01 SESSION 11 (commit `08a13d3`) | 补提交 slippage.py + signal.py + 测试。**只验证 "import 不爆 + 测试通过"，没验证 plan compliance** |
+| 5-01 ~ 5-19 | m1 主线 (Phase 01.1 → Phase 02 Wave 1-5) 吞掉所有注意力，m2 没人回头 |
+| 某次中间 session | **plan 文件 02-1-PLAN.md 的 T2 被默默改成依赖 L2 的版本**，代码没改，JOURNAL 没留 trace |
+
+**根因**：5 层失守
+1. SESSION 10 commit 漏文件（Claude `git add` 不严谨）
+2. SESSION 11 散件清理只验证表面（"import 不爆" 不等于 "代码符合 plan"）
+3. plan-code 漂移无检测机制
+4. plan 被默默改写（改 plan 跟改代码一样严重，但没规矩约束）
+5. workstream 切换让沉默时间放大
+
+**工程教训** (commit `4a333ca` 入 `threads/learnings-meta.md`)：
+- **测试套件不是 plan compliance 的 gate** — 测试只能证"代码自洽"，不能证"代码符合 plan"
+- **plan 改写必须留 Revision: 头** — 改 plan = 改契约
+- `/gsd-resume-work` 切 workstream 时必须扫 plan-code drift（不止看 STATE/JOURNAL，要 grep plan 点名的 class/function 是否存在 + signature 大致对得上）
+- commit 完成度自检：`git stash && git checkout <sha> -- <paths> && python -c "<import smoke>"`
+- pre-commit hook 待加：plan 文件改动无 `Revision:` 头则阻断（TODO）
+
+**沉默成本估算**：如果今天没考古直接基于现有 slippage.py 推 T3-T8，等于把分叉设计焊死到下游 routing/execution；撕一次成本 X，焊死后撕成本 5X+。30 分钟考古换 2-3 个会话不踩坑 — 便宜的 audit 是最划算的工程动作。
+
+### Commits this session (8 new on main)
+
+| commit | 内容 |
+|---|---|
+| `8ccd604` | test(02-07): chaos engineering test suite — 8 scenarios (22 tests) |
+| `2fbfd32` | feat(02-07): scripts/soak_monitor.py + make soak-status/export |
+| `522ea56` | docs(02-07): Phase 02 teaching doc — 生产化部署 (08) |
+| `3f70781` | docs(02-07): interim SUMMARY — Tasks 1-3 complete |
+| `69cb9c1` | chore(02-07): drop unused imports (pyright cleanup) |
+| `63cc8ea` | docs(state): SESSION 21 — Wave 5 chaos+soak infra landed |
+| `ce5f5ed` | docs(02-07): revise Task 4 — 7-day soak → 4 prod chaos injections |
+| `4a333ca` | docs(threads): record plan-code 沉默分叉 18 天 (m2 slippage.py 考古) |
+
+origin/main 落后 main 8 个 commit；本会话未推送（用户自决推送时机）。
+
+### Task state
+
+- ✅ Phase 02 Wave 5 Tasks 1-3 落地 + 关闭定义对上现实
+- ⏸ Phase 02 Task 4 (4 chaos injections in prod) — 待下次会话执行
+- ⏸ M2 T2 走向 — 三选一决策阻塞，等 Phase 02 关闭后再做：
+  - (a) 冻 M2 等 m1 L2 (Phase 03) 出来再启 T2
+  - (b) 重定义 T2 为现有 fee-differential 设计 + 补 IMDEA Type-2 验证（推荐 — 接受现实，加难点验证）
+  - (c) 跳 T2 推 T3 (Routing Engine) / T6 (Settings)，T2 等 L2 再补
+- ⏸ M2 02-1-PLAN.md 必须加 Revision History 头部段（明文写出 plan 跟代码的不一致，不是悄悄改 plan 让它对上代码）— 决策 T2 走向时一并做
+
+### [NEXT] 下次会话从这里开始：
+
+```
+/gsd-resume-work --ws m1-perception
+make planning-status
+curl -sS https://polyarb-l1.fly.dev/health
+git push   # 8 commits 待 push (origin 落后 8)
+```
+
+**第 1 步**（关闭 Phase 02 — 主轴）：
+
+按 `02-07-PLAN.md` Task 4 Step B 顺序跑 4 次 chaos injection，每次中间在 `02-SOAK-LOG.md` "Events" 段记 timestamp + 观察到的 alert + 恢复 time：
+
+1. **Inj 1 (Fly stop)** ~10 min — 验证 Better Stack uptime probe + Telegram path
+   ```bash
+   MID=$(flyctl machines list -a polyarb-l1 --json | jq -r '.[0].id')
+   flyctl machines stop $MID -a polyarb-l1
+   # 等 3-5 min 收 email + Telegram → 检查 Gmail / Telegram
+   flyctl machines start $MID -a polyarb-l1
+   curl -sS https://polyarb-l1.fly.dev/health | jq .status   # 应该 pass
+   ```
+
+2. **Inj 2 (R2 unset)** ~15 min — 验证 R2 fail-soft + Sentry path
+   - **关键：先备份原 secret** (`ORIG_R2=$(flyctl ssh console ... -C 'printenv POLYARB_R2_SECRET_ACCESS_KEY')`)
+   - 撤 secret → 等下次 snapshot tick (或 trigger `/scan` 加速) → 看 /health r2 warn + Sentry breadcrumb
+   - 恢复 secret，确认 /health 全 pass
+
+3. **Inj 3 (Supabase unset)** ~15 min — 验证 Supabase fail-soft + 关键 D-12 (mirror 失败不 abort snapshot)
+   - 同样先备份 `ORIG_SB=...`
+   - 撤 secret → 看 snapshot 状态仍 OK/DEGRADED 而不是 FAILED + Sentry breadcrumb
+   - 恢复 secret
+
+4. **Inj 4 (HMAC flood)** ~5 min — 验证 scan endpoint 抗 flood
+   - 30 × curl with `X-Signature: deadbeef` → 全 401 + daemon /health 全程 pass
+
+4 个都跑完 + 4 + 5 = 9 项 pass criteria 全过 → 用户回到会话说 "chaos verified" + 贴 SOAK-LOG 内容 → 我写 final Phase 02 SUMMARY → `/gsd-extract_learnings 02 --ws m1-perception` 关 Phase 02。
+
+**第 2 步**（Phase 02 关掉后 — M2 T2 决策）：
+
+切 M2 之前先决策 T2 走向（三选一上面）。我的判断倾向 (b)：
+- 接受 fee-differential 设计是现实
+- 把 plan 改成 "T2: cross-venue fee differential model with IMDEA Type-2 validation"
+- 补难点：用真实 IMDEA paper 的 86M 笔交易数据子集 vs 我们 model 输出对比，证 model 不是 toy
+- 把 02-1-PLAN.md 加 Revision History 段写明 2026-05-01~05-19 的分叉历史
+
+但**用户决定** — 我把三个选项端到他面前 + 各自代价/收益，他选。
+
+**第 3 步**（可选 — 加 hook 防再分叉）：
+
+如果今天的 plan-code drift 教训值得永久投资，可以：
+- pre-commit hook 加 plan-revision-trace 检查
+- `/gsd-resume-work` skill 加 workstream drift scan 步骤
+
+这个不急，等 M2 T2 决策完一并做（避免今天反应过激写 hook，明天发现新坑要回头改）。
+
+---

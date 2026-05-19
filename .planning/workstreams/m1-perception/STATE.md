@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 status: executing
-stopped_at: "SESSION 21 2026-05-19: Wave 5 Plan 02-07 Tasks 1-3 dispatched ✅ (8ccd604 chaos suite + 2fbfd32 soak_monitor + 522ea56 teaching doc + 3f70781 interim SUMMARY + 69cb9c1 unused-import cleanup, 5 commits fast-forward merged worktree → main). 22/22 chaos tests green (Gamma 5xx, CLOB malformed, Supabase 500, R2 503, 3-fail PAUSED, /scan flood, SQLite WAL concurrency). docs/learning/08-生产化部署.md landed. planning-status zero drift. **NEXT (user gate)**: Task 4 = launch 7-day soak (Better Stack uptime probe + Fly cron auto), monitor via scripts/soak_monitor.py + 02-SOAK-LOG.md. Pre-flight before starting: decide whether to upgrade Supabase Free→Pro $25/mo (Free auto-pauses after 7 days idle → would break soak)."
-last_updated: "2026-05-19T18:30:00.000Z"
+stopped_at: "SESSION 21 EOD 2026-05-19: Wave 5 Tasks 1-3 ✅ (8 commits on main, origin 落后 8 待 push). Phase 02 关闭定义已改：7-day soak → 4 chaos injections (用户不升 Supabase Pro $25/mo, ce5f5ed)。新 thread soak-gate-deviation-2026-05.md 记偏离决策 + Phase 03 必须回补 7-day 凭证。m2 slippage.py 考古入 thread learnings-meta.md (4a333ca) — plan-code 沉默分叉 18 天 (5-01~5-19) 案例 + 工程教训。**NEXT 下次会话**：(1) 关 Phase 02 — 按 02-07-PLAN Task 4 跑 4 次 prod chaos injection (Fly stop / R2 unset / Supabase unset / HMAC flood)，每次记 SOAK-LOG Events 段。(2) Phase 02 关掉后做 M2 T2 走向决策 (三选一在 JOURNAL [NEXT] 块)。"
+last_updated: "2026-05-19T20:30:00.000Z"
 last_activity: 2026-05-19
 progress:
   total_phases: 4
