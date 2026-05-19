@@ -19,20 +19,24 @@ progress:
 
 ## Current Position
 
-Phase: 02 (l1-production-grade) — EXECUTING (Wave 5 Tasks 1-3 ✅ / Task 4 = 7-day soak pending user)
-Plan: 9 of 9 partial (Wave 1+2+2.5+3+3.5+4 ✅; Wave 5 Plan 02-07 Tasks 1-3 ✅, Task 4 soak + Task 5 final SUMMARY pending)
-**Status:** Wave 5 autonomous tasks complete — chaos suite + soak infra + teaching doc landed; 7-day soak gate is the remaining user action
-**Current Phase:** 02
-**Last Activity:** 2026-05-19
-**Last Activity Description:** SESSION 21 — Wave 5 dispatch + worktree merge. gsd-executor (sonnet) shipped 4 commits in worktree-agent-abd466f816a357cb1 (chaos suite 8ccd604, soak_monitor 2fbfd32, teaching doc 522ea56, interim SUMMARY 3f70781), then I added 69cb9c1 unused-import cleanup after pyright surfaced cosmetic warnings. Fast-forward merged worktree → main (5 commits, 18 files, +2177/-8). All 22 chaos tests green: respx-mocked Gamma 5xx exhaustion, CLOB malformed book F-1 defense (also auto-fixed a real `KeyError` escape in layers.py/orchestrator.py), Supabase 500 → DEGRADED, R2 503 → DEGRADED, 3 consecutive FAILED → PAUSED state machine, `/scan` flood resilience, SQLite WAL concurrency. scripts/soak_monitor.py (typer + Better Stack API status/export), 02-SOAK-LOG.md scaffold, 3 `make soak-*` targets, docs/learning/08-生产化部署.md (251 lines, CN, 7 code refs + 5 trade-offs + 5 self-check Q&A). planning-status zero drift, all 9 Phase 02 plans show OK.
+Phase: 02 (l1-production-grade) — ✅ **HARD GATE PASSED**, ready for /gsd-extract_learnings
+Plan: 9 of 9 ✅ (all SUMMARY landed, planning-status zero drift)
+**Status:** Phase 02 alert chain end-to-end verified live in prod chaos (Inj 2-v2 2026-05-20 21:06Z). Phase 03 unblocked, 但启动前必须先消化 Phase 02.1 backlog (2 P1 + 1 trade-off) + 回补 7-day uptime soak (thread §1 要求).
+**Current Phase:** 02 (gate passed, awaiting extract_learnings)
+**Last Activity:** 2026-05-20
+**Last Activity Description:** SESSION 21 EOD pt 2 — Phase 02 final close. 5 个 prod chaos injection 完成 (Inj 1/2-v1/2-v2/3/5; Inj 4 SSH+SQL 实操). Inj 2-v2 真触发 send_paused_alert → 三路独立 alert verified (Sentry email PYTHON-C/D + PYTHON-B digest, Telegram, Sentry dashboard). 暴露 8 个新 bug,本会话修了 5 个 P0 (alerts.py TG unconditional / Makefile init_sentry / Sentry alert rule / scheduler_interval_s 可配 / GHA setup-flyctl@1.6). Phase 02.1 backlog deferred 3 (P1×2 + trade-off×1). 17 commits 全 push. Phase 02 final 02-07-SUMMARY.md + 配套 thread (soak-gate-deviation / learnings-meta updates) 落地.
 
 ## Progress
 
-**Phases Complete:** 2 (Phase 01 + Phase 01.1)
+**Phases Complete:** 2 (Phase 01 + Phase 01.1) + Phase 02 hard gate passed (awaiting LEARNINGS)
 **Phase 01.1 status:** ✅ COMPLETE — LEARNINGS extracted 2026-05-12 (14 decisions / 12 lessons / 10 patterns / 8 surprises); deployment thread locked; 6 plans + 4 acceptance amendments shipped
-**Phase 02 status:** 🟡 EXECUTING — Wave 1+2+2.5+3+3.5+4 ✅; Wave 5 (Plan 02-07 chaos + 7-day soak gate) NOT-STARTED
-**Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket（已并入 Phase 3）
-**Test count:** 447+ m1-perception tests green (Plan 02-05 +24 / Plan 02-06 +5 Makefile contract tests; 3 pre-existing failures still deferred — test_pass_when_fresh / make_smoke_health_local / r2_retry)
+**Phase 02 status:** ✅ HARD GATE PASSED — Wave 1+2+2.5+3+3.5+4+5 全 ✅;5 个 prod chaos injection 完成;alert chain end-to-end verified live in prod (Sentry + Telegram + Sentry dashboard 三路). 待 `/gsd-extract_learnings 02 --ws m1-perception`
+**Phase 02.1 backlog (deferred bugs, 启动 Phase 03 前必修)**:
+  - #6 trade-off: `/health` 503 触发 Fly proxy 切流量 (IETF strict vs Fly proxy 行为冲突)
+  - #7 P1: fail-soft 互相抵消 (撤 secret 场景 `mirror_enabled=False` → 静默)
+  - #8 P1: daemon PAUSED 无 prod-friendly unpause endpoint (现需 SSH+sqlite3+restart 三步)
+**Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket
+**Test count:** 459+ m1-perception tests green (Plan 02-07 +22 chaos tests + 2 scheduler_interval tests; 3 pre-existing failures still deferred)
 
 ## Phase 01.1 Deliverables (2026-05-10 全部 committed)
 
