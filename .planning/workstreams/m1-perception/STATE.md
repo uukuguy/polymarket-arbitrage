@@ -4,35 +4,35 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 status: executing
-stopped_at: "SESSION 19 EOD 2026-05-16: Plan 02-09 streaming-paginator landed (5 commits via worktree merge 9901bf9) + 1GB Fly VM scale (1f324f4) + T7 docs/learning/08 + thread §2.8 + 02-09-SUMMARY (f041cc4) + Wave 4 SaaS prep guide (9fd0306). prod /health=pass, snapshot id=6 OK 6753 markets. OOM resolved, worktrees cleaned. Wave 4 gated on user finishing docs/setup/04-wave4-observability-saas-prep.md (Sentry/Axiom/Better Stack/Telegram, all free tier, ~30-40 min)."
-last_updated: "2026-05-16T11:45:00.000Z"
-last_activity: 2026-05-16
+stopped_at: "SESSION 20 EOD 2026-05-19: Wave 4 完整落地 — Plan 02-05 (observability stack, 7 commits + SUMMARY efa2014) + Plan 02-06 (Vercel dashboard, 7 commits + SUMMARY 69824c6). 3 alert paths E2E verified live (Sentry email PYTHON-1 + Better Stack incident email + Telegram direct). Dashboard live at polymarket-arbitrage-ppf6exo78-jiangwen-su-s-projects.vercel.app, magic-link → recipe → JSON 验证通。.git/config [user] section 已清，解 Vercel author block。git tree 干净，planning-status zero drift。下一动作：Plan 02-07 (Wave 5 chaos + 7-day soak gate)。"
+last_updated: "2026-05-19T15:30:00.000Z"
+last_activity: 2026-05-19
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 20
-  completed_plans: 17
-  percent: 85
+  completed_plans: 19
+  percent: 95
 ---
 
 # Project State
 
 ## Current Position
 
-Phase: 02 (l1-production-grade) — EXECUTING
-Plan: 6 of 9 ✅ (Wave 1+2+2.5+3+3.5 complete; Wave 4/5 pending)
-**Status:** Wave 3.5 complete — prod stable on 1GB Fly VM, OOM resolved
+Phase: 02 (l1-production-grade) — EXECUTING (Wave 5 of 5 pending)
+Plan: 8 of 9 ✅ (Wave 1+2+2.5+3+3.5+4 complete; Wave 5 = Plan 02-07 pending)
+**Status:** Wave 4 complete — 3 alert paths E2E + Vercel dashboard live
 **Current Phase:** 02
-**Last Activity:** 2026-05-16
-**Last Activity Description:** SESSION 19 — Plan 02-09 (streaming paginator + 1GB scale) merged. Empirical: Linux daemon peak anon-rss = 402MB; 256MB/512MB OOM, 1GB stable. SQLite snapshots id reached 5 (6729 markets, is_valid=1), /health overall=pass with all 3 component checks pass (snapshot:last_status / supabase:mirror / r2:upload). Plan 02-09 architecture (streaming) + 1GB scaling jointly required — neither alone sufficient.
+**Last Activity:** 2026-05-19
+**Last Activity Description:** SESSION 20 — Wave 4 dispatch + 完整收尾。Plan 02-05 (Sentry init + redact + alerts.py Telegram fallback + heartbeat ping wired in scheduler success branch). Plan 02-06 (Next.js 15 App Router + Supabase magic-link + Edge HMAC forwarder; Vercel deploy Ready 8d89eb3 at polymarket-arbitrage-ppf6exo78-jiangwen-su-s-projects.vercel.app). Live verified via Gmail (Sentry / Better Stack incident emails) + Telegram (bot direct msg) + browser (dashboard E2E magic-link + recipe trigger → daemon JSON 回传)。Wave 4 期间修了 3 个真 bug (heartbeat_ok wiring / lib supabase server-client boundary / /status schema mismatch) + 解决 Vercel author verification block (清 .git/config [user])。
 
 ## Progress
 
 **Phases Complete:** 2 (Phase 01 + Phase 01.1)
 **Phase 01.1 status:** ✅ COMPLETE — LEARNINGS extracted 2026-05-12 (14 decisions / 12 lessons / 10 patterns / 8 surprises); deployment thread locked; 6 plans + 4 acceptance amendments shipped
-**Phase 02 status:** 🟡 EXECUTING — Wave 1 ✅; Wave 2 ✅; Wave 3+ pending (user SaaS prep gate)
+**Phase 02 status:** 🟡 EXECUTING — Wave 1+2+2.5+3+3.5+4 ✅; Wave 5 (Plan 02-07 chaos + 7-day soak gate) NOT-STARTED
 **Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket（已并入 Phase 3）
-**Test count:** 447 m1-perception tests green (Plan 02 baseline 429 + Plan 03 net +18; pre-existing Phase 01.1 makefile path failure FIXED in Plan 03)
+**Test count:** 447+ m1-perception tests green (Plan 02-05 +24 / Plan 02-06 +5 Makefile contract tests; 3 pre-existing failures still deferred — test_pass_when_fresh / make_smoke_health_local / r2_retry)
 
 ## Phase 01.1 Deliverables (2026-05-10 全部 committed)
 
@@ -100,48 +100,57 @@ Plan: 6 of 9 ✅ (Wave 1+2+2.5+3+3.5 complete; Wave 4/5 pending)
 - ✅ Wave 0 tests RED → GREEN: `test_page_fetched_at_ms_carried_from_raw`、`test_page_fetched_at_ms_in_all_four_sync_points`、`test_parquet_sqlite_consistency.py`
 - ⏸️ Pre-existing `test_make_snapshot_markets_full_dry_run_recipe` 失败（与本 plan 无关，Phase 01.1 遗留：Makefile 用 `uv run python -m polyarb.snapshot snapshot --full` 但测试期望 `python -m polyarb.snapshot --full`） — Plan 03 顺手修
 
-## 下次会话该做的（2026-05-14 EOD 更新）
+## 下次会话该做的（2026-05-19 SESSION 20 EOD 更新）
 
-1. **`make planning-status` 验证零 DRIFT**（应该 OK — Plan 01/02/03 全 SUMMARY ✓）
-2. **`git log --oneline -5`** 看最新两个 commit (`14de7c6` 工具链 fix + `f568041` 文档/state)
-3. **决策路径**（二选一）：
+### 第一步（恢复 + 健康）
 
-   **路 A**（推荐，符合 thread §1 "L1 未到生产级禁开下一层"纪律）：
-   ```
-   开 Plan 03 retro fix-up PR — 修 F-01..F-05（详见 project_plan-03-retro-issues-2026-05 memory）
-   ↓
-   F-01 (HIGH) + F-04 (MEDIUM) 至少必修；F-02/F-03/F-05 可合修
-   ↓
-   merged 后 Wave 3 dispatch
-   ```
+```
+/gsd-resume-work --ws m1-perception
+make planning-status                                      # 应该 zero drift
+curl -sS https://polyarb-l1.fly.dev/health                # 应该 overall=pass, 4 checks all pass
+```
 
-   **路 B**（如果想切换主题）：
-   ```
-   m2-combinatorial 推 T2 Slippage Model（避开 m1 mirror bug）
-   ↓
-   注意：用户原则上禁开 L2，但 m2 是横向能力线不冲突
-   ↓
-   等 Plan 03 retro 时机成熟回 m1
-   ```
+### 第二步（决策：Plan 02-07 起 vs 其它工作）
 
-4. **Wave 3 dispatch 条件**（不要提前跑）：
-   - ✅ Plan 03 retro PR merged
-   - ⏳ 用户准备 8 个 Fly secrets + GHA `FLY_API_TOKEN`（详见 `docs/setup/03-wave3-saas-prep.md` Phase 2 章节）
-   - 命令：`/gsd-execute-phase 02 --wave 3 --ws m1-perception`
+Phase 02 只剩 Plan 02-07 (Wave 5 = chaos + 7-day soak)，是 Phase 02 完结的最后一个 plan。
 
-**关键提醒**：
+**路 A — 启动 Wave 5（推荐时机：你有 7 天观察 budget 时）**：
+```
+/gsd-execute-phase 02 --wave 5
+```
+两段：(a) chaos test 验证 alert paths 在真实失败下都触发 → (b) 7 天 soak gate（daemon 不重启持续运行 7 天，prod uptime ≥ 99%，至少 1 次自然失败被正确告警）。chaos 期间会真实触发 Sentry 邮件 / Better Stack 邮件 / Telegram 推送，是好事。
 
-- Phase 1 调试期端到端 verification ✅ PASSED（详见 `project_phase-1-verification-2026-05` memory）
-- Plan 03 5 个 fix-up issue 落 `.planning/threads/deployment-architecture.md §10.2`
-- Polymarket Gamma offset≤10000 新约束（详见 thread §10.3）— 短期不阻塞 Phase 02，Phase 02.x 修分页
-- 7 天 soak gate 在 Wave 5 末，不可跳；调试期 Supabase Free 够，soak 前升 Pro
-- daemon SIGINT 不响应（F-04），停机用 `pkill -9 -f polyarb.daemon.main`
-- 关键 memory 入口：
-  - [Phase 02 locked stack](memory/project_phase-02-locked-stack.md) — 22 决策栈 + Plan 状态
-  - [Phase 1 verification](memory/project_phase-1-verification-2026-05.md) — 验收结果 + 链路状态
-  - [Plan 03 retro issues](memory/project_plan-03-retro-issues-2026-05.md) — 5 个 fix-up issue 详细
-  - [Secrets hygiene](memory/feedback_secrets-hygiene-2026-05.md) — 4 个泄漏面纪律
-  - [Port numbers](memory/feedback_port-numbers-2026-05.md) — 19080 约定
+**路 B — 跨线工作**（不触发 Wave 5，避免 chaos 噪声）：
+- m2-combinatorial T2 Slippage Model（不依赖 Phase 02 完成，可并行）
+- 清 3 个 pre-existing test failures（test_pass_when_fresh / make_smoke_health_local / test_r2_retry — 不阻塞但拖测试套件干净度）
+- 173 个旧 commit author 重写（**不建议**，会破坏 SUMMARY cross-ref，详见 [git-identity-anomaly](memory/feedback_git-identity-anomaly-2026-05.md)）
+
+**路 C — 文档 / 教学补遗**：
+- `docs/learning/` 加 Wave 4 教学文档（Sentry/Better Stack/Telegram alert path 三轨设计、Edge Runtime HMAC 模式、lib supabase server-client split for Next.js 15 App Router）
+
+### 第三步（关键事实记忆）
+
+- prod daemon **持续运行中**，不需要手动重启
+- Vercel dashboard URL: `polymarket-arbitrage-ppf6exo78-jiangwen-su-s-projects.vercel.app`（产品 production deployment alias）
+- 14 个 Fly secrets 全 deployed（8 base + 6 Wave 4 observability）
+- 5 个 Vercel env vars 全 set（Supabase URL + anon key + EMAIL_WHITELIST + SCAN_SHARED_SECRET + SCAN_ENDPOINT_URL）
+- Supabase Auth URL Configuration done (Site URL + /auth/callback Redirect URL)
+- 本地 `.env` 含 14 个 secrets（Wave 4 backfilled，gitignored），`.env.bak-pre-wave4` 是 backup
+- **`.git/config [user]` section 已删** — 新 commit 用 global `Jiangwen Su <uukuguy@gmail.com>` → Vercel auto-deploys
+
+### 关键 memory 入口
+
+- [Phase 02 Wave 4 完成 2026-05](memory/project_phase-02-wave-4-2026-05.md) — Wave 4 全栈状态 + 3 alert path + dashboard + 2 process 事故
+- [Phase 02 locked stack](memory/project_phase-02-locked-stack.md) — 22+1 决策 + Wave 1-4 ✅ 状态
+- [Git identity anomaly 2026-05](memory/feedback_git-identity-anomaly-2026-05.md) — 不要再凭空构造 author identity，禁止 set git config user.*
+
+### 关键提醒
+
+- Wave 5 7-day soak gate 不可跳 — 这是 Phase 02 "生产级" 判定标准（uptime ≥ 99% + ≥1 次自然失败正确告警）
+- chaos test 期间会真实触发告警邮件 + Telegram 推送，**用户邮箱会收一波**（计划好心理预期）
+- Supabase Free tier 7 天无活动 auto-pause 会让 soak 中断 → soak 启动前升 Pro $25/月（thread §5）
+- daemon SIGINT 不响应（F-04 deferred），停机用 `pkill -9 -f polyarb.daemon.main`
+- Polymarket Gamma offset≤10000 新约束（thread §10.3）— 短期不阻塞 Phase 02，Phase 02.x 修分页
 
 ---
 
@@ -169,47 +178,17 @@ Plan: 6 of 9 ✅ (Wave 1+2+2.5+3+3.5 complete; Wave 4/5 pending)
 
 ## Session Continuity
 
-**Stopped At:** Phase 02 plan complete, awaiting execute Wave 1
-**Last Activity:** 2026-05-12 — SESSION 17 resumed; planning-status clean (0 drift), all 7 Phase 02 plans NOT-STARTED as expected
-**Last Resume:** 2026-05-12 — proceeding to `/gsd-execute-phase 02 --wave 1 --ws m1-perception`
+**Stopped At:** SESSION 20 EOD (2026-05-19) — Wave 4 完整收尾 + git tree/MEMORY/STATE 全部干净
+**Next Resume:** 见上方 "下次会话该做的（2026-05-19 SESSION 20 EOD 更新）" 段
+**Authoritative state:** [Phase 02 Wave 4 完成 memory](memory/project_phase-02-wave-4-2026-05.md)
 
-**SESSION 08 deliverables (4 unpushed commits)**:
-
-1. `8bbdc47 docs(learning):` — Phase 1 教学文档 6 章 (`docs/learning/`) + CLAUDE.md "教学文档持续产出" 纪律
-2. `ccedb5a feat(01):` — `ChunkCache` class + `make snapshot-status` + 5 个新 make target
-3. `50c4299 fix(01):` — Gamma 翻页进度 + Phase N/7 banner + macOS `ps -o etime` 兼容
-4. `63797ad feat(01):` — 时间戳 prefix + 每 phase elapsed timing (`► Phase X — done in Ys`)
-- Tests: 119/119 green (97 → 119, +22 new tests across cache / progress / phase timing)
-
-**SESSION 09 results** (2026-05-01):
-
-- LIVE-RUN-005: 20353 markets, 32916 issues, 72% ghost_book stable
-- 6m12s total (vs 26m25s RUN-001) — API idle period effect
-- All observability features confirmed: timestamp/phase-elapsed/progress/cache cleanup
-- 4 commits already on origin/main (previous push succeeded)
-- Snapshot ID 3 in SQLite
-
-**Recommended Next Action** (下次会话首选项)：
-
-**A. 启动 Phase 1.1 plan（observation-toolkit + 中文化）**（推荐 — discuss 已完成）
-
-   - `/gsd-plan-phase 1.1 --ws m1-perception`
-   - 如果 SDK 兼容问题再次出现，降级为 Claude 手工 plan
-   - CONTEXT.md 已锁定 T1-T7 全部决策，plan 阶段只需排执行顺序
-   - 第一目标：T1 (schema+category) + T2 (翻译) + T3 第一个配方 走通
-
-**B. 切到 m2-combinatorial 推 T2 Slippage Model**（避开 m1 完成 m2）
-
-   - T1 已 commit 落地，T2 缺 PolymarketDepthCurve
-
-**推荐 A**：方向已重定 — 用户明确反对 demo 路线，要"为进入市场做准备"的成熟观察体系。Phase 1.1 是真正的下一步，Phase 2 WebSocket 推迟到 1.1 完成
-
-**Carry-over open items**:
-
+**Carry-over observational facts**（值得跨 session 保留的市场观察）:
 - 220 个市场无 endDate（Layer 2 UNKNOWN）— 需要分类调查（是 perpetual market？）
 - clob_missing 在 4 小时内 +33%（CLOB 可达性漂移）— 需要时序观察
-- Polymarket Gamma API 在 CST 22-24 时段明显慢（page 速度从 1.7/s 降到 0.3/s）— 暂未触发任何代码改动，但记录为环境事实
-- **新观察**: Gamma 翻页速度在北京时间 10 点（美东 22 点）极快（6m12s 总耗时），但在 22-24 点（美东 10-12 点）慢（26m25s）— 推测 API 有北美白天高峰
+- Polymarket Gamma API 在 CST 22-24 时段明显慢（page 速度 1.7/s → 0.3/s）— 北美白天高峰；记录为环境事实
+- Gamma offset≤10000 是 2026-05 新约束（详见 deployment-architecture.md §10.3）— Phase 02.x 修分页
+
+**历史 session 详细 carry-over** — 见 git log + 各 plan SUMMARY，不在 STATE.md 重复维护。
 
 ## Phase 1 Artifacts
 
