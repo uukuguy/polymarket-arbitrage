@@ -227,3 +227,64 @@ updated: YYYY-MM-DD
 - 用户读不懂自己代码 = 教学失败 = CLAUDE.md 第 1 条原则"研发即学习"被违反
 - 这次用户主动指出"那些字段从未教过"才暴露
 - 已写入项目 CLAUDE.md "教学文档持续产出（教练角色的具象化）"小节作为长期约束
+
+---
+
+## 2026-05-19 SESSION 21 — Plan-Code 沉默分叉 18 天（m2 slippage.py 考古案例）
+
+### 现象
+
+用户在 SESSION 21 准备启动 m2 T2 (Slippage Model) 时让 Claude 摸状态，发现：
+
+- `src/polyarb/models/slippage.py` 320 行已落地，4 个测试全 green
+- 但代码内部是 `SlippageParams` + dataclass + **CLOB↔PM 双场所 fee differential** 模型
+- 现行 `02-1-PLAN.md` Task T2 写的是 **`SlippageModel.estimate_slippage(token_id, side, size, depth_curve)` + `PolymarketDepthCurve` Protocol + 依赖 m1 `OrderBookSummary`/`GhostBookAnalyzer`** 的另一套设计
+
+**plan 描述的 T2 ≠ 代码实现的 T2 ≠ JOURNAL 记录的 T2**。三份描述里至少两份是不同形态。代码挂在 git 里 **18 天没人看过**（2026-05-01 落地 → 2026-05-19 才被注意到）。
+
+### 考古结论（用 git + JOURNAL 还原）
+
+| 时间 | 事件 |
+|---|---|
+| 2026-05-01 SESSION 10 上午 | Phase 2 discuss → CONTEXT.md + 02-1-PLAN.md 落地。**当时**的 T2 设计是 "depth-based 线性衰减 + 1% cap"（见 JOURNAL 第 418 行） |
+| 2026-05-01 15:31 (T1 commit `688363a`) | Claude 写了 `routing/engine.py` / `execution/engine.py`，但**漏 `git add` 了它们依赖的 `models/signal.py` + `models/slippage.py`**。`git checkout 688363a` 拉一份干净仓库 → ImportError |
+| 2026-05-01 SESSION 11 (清理) | Claude 发现 import 链坏，commit `08a13d3` 一次性补齐 slippage.py + signal.py + 测试。**没有重新对照 plan 验证设计语义** |
+| 2026-05-01 ~ 2026-05-19 | m1 主线（Phase 01.1 → Phase 02 Wave 1-5）吞掉所有注意力。m2 没人回头 |
+| 后期某次 session（git 上没找到对应 plan-rewrite commit） | **plan 文件 02-1-PLAN.md 的 T2 描述被改成依赖 L2 的版本**，代码没跟着改 |
+| 2026-05-19 SESSION 21 | 用户问 "M2 是啥" → Claude 摸状态 → 三份描述对不上 → 触发本次考古 |
+
+### 根因
+
+**多层失守，没单点责任**：
+
+1. **commit 漏文件** — Claude 在 SESSION 10 写代码时 `git add` 不严谨，T1 commit 缺依赖；可怕的是 `git checkout 688363a` 跑不起来这件事**直到 SESSION 11 才被发现**
+2. **散件清理只验证表面** — SESSION 11 教训写了"🔴 import 链坏：必须立刻发现 / 🔴 commit history 不完整：`git checkout <commit>` 必须能跑"（见 `learnings-meta.md` SESSION 11 段），但**没把"代码跟 plan 对得上"列入清理项**
+3. **plan-code 漂移无检测** — 测试套件只验证 "import 不爆 + 当前代码逻辑自洽"，**测试通过 ≠ plan compliance**。Claude 写测试时是测的"当前代码做什么"，不是测"plan 要求什么"
+4. **plan 被默默改写** — 某次 session 把 T2 plan 改成依赖 L2 的版本但没改代码也没记 JOURNAL，等于在没人审计的情况下变更契约
+5. **沉默时间放大** — workstream 切换（m1 主线吞注意力 18 天）让分歧从"代码 ≠ plan"变成"无人记得 plan 是什么时候改的"
+
+### 工程教训
+
+- **测试套件不是 plan compliance 的 gate**。测试只能证"代码自洽"，不能证"代码符合 plan"
+- **`/gsd-resume-work` 切到一个 workstream 时，必须扫这条线"plan vs code 漂移"**，不是只看 STATE 和 JOURNAL。具体动作：每条 active task 的 plan body 描述里点名的核心 class/function，grep 一下代码里有没有同名实体；找不到 = 漂移嫌疑
+- **plan 文件被改写要留 trace**。改 plan 跟改代码一样严重；plan 是契约，悄改契约 = 后患。规则：plan body 改动必须在文件头加 `Revision: YYYY-MM-DD - <one-line reason>`，并在 JOURNAL 留 `[PLAN-REVISION]` tag
+- **commit 完成度自检**：每个 commit 之后跑 `git stash && git checkout <just-committed-sha> -- <changed-paths> && uv run python -c "<import smoke test>"`。SESSION 11 已经写过这条教训但没落到 hook，现在加一条 [TODO] 给未来 hook 化（参见下方"待补的 hook"）
+- **workstream 切换前必查 plan-code 一致性**。这次是 m1 把 m2 晾了 18 天才暴露；如果 18 天扩到 6 个月，slippage.py 可能直接被新人当成"祖传代码"接受了
+
+### 修法（这次本身的 immediate action）
+
+1. ✅ 这次先**搞清楚现状**（本节）
+2. ⏳ 决定 T2 走向（见 02-07 收尾后的 followup 决策点 — 三选一：冻 M2、重定义 T2 接受现实、跳 T2 推 T3/T6）
+3. ⏳ 在 02-1-PLAN.md 加 "Revision History" 头部段，把现状跟 plan 的不一致明文写出（不是悄悄改 plan 让它对上代码）
+4. ⏳ 把 "plan-code drift detection" 列为 gsd-resume-work 的辅助检查（开 ticket，不在本会话做）
+
+### 待补的 hook（项目层面）
+
+- pre-commit 已经检查 SUMMARY-per-plan，可以再加一条 **plan-revision-trace**：plan 文件改动且没在 file head 加 `Revision:` 行 → 阻断
+- gsd-resume-work skill 加一步 **workstream drift scan**：扫 active phase 所有 plan 的 `<tasks>` 块里点名的 file path，验证存在；点名的 class/function symbol，用 codegraph_search 验证存在 + signature 大致对得上
+
+### 沉默成本估算
+
+slippage.py 320 行 + 测试 49 行 = ~370 行未对齐代码挂了 18 天。如果今天没人考古，下次 m2 真启动时直接基于这份代码搭 T3-T8，等于把"分叉的设计"焊死到下游 routing/execution 里 — 撕一次成本 X，焊死后撕成本 5X+。这次成本是 30 min 考古；不查的成本是 2-3 个会话拆错代码。
+
+便宜的 audit 是最划算的工程动作。
