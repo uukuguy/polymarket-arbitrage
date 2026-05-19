@@ -195,8 +195,12 @@ def layer4_cross_source(
                 continue
 
             book = books_by_token[tid] or {}
-            asks = book.get("asks") or []
-            bids = book.get("bids") or []
+            # F-1: normalize asks/bids to list — guards against non-list types
+            # (dict, str, None) that would raise TypeError/KeyError on indexing.
+            _raw_asks = book.get("asks")
+            _raw_bids = book.get("bids")
+            asks = _raw_asks if isinstance(_raw_asks, (list, tuple)) else []
+            bids = _raw_bids if isinstance(_raw_bids, (list, tuple)) else []
 
             # F-1: defend against attacker-controlled non-numeric / missing fields.
             top_ask_price: float | None = None
@@ -205,8 +209,11 @@ def layer4_cross_source(
 
             if asks:
                 try:
-                    raw = asks[0].get("price") if isinstance(asks[0], dict) else None
-                except (AttributeError, IndexError, TypeError):
+                    # F-1: asks may be a non-list (dict, str, None) — guard with
+                    # isinstance first; also catch KeyError for dict subscript.
+                    first_ask = asks[0] if isinstance(asks, (list, tuple)) else None
+                    raw = first_ask.get("price") if isinstance(first_ask, dict) else None
+                except (AttributeError, IndexError, KeyError, TypeError):
                     raw = None
                 top_ask_price = _safe_float(raw)
                 if top_ask_price is None:
@@ -214,8 +221,9 @@ def layer4_cross_source(
 
             if bids and not unparseable:
                 try:
-                    raw = bids[0].get("price") if isinstance(bids[0], dict) else None
-                except (AttributeError, IndexError, TypeError):
+                    first_bid = bids[0] if isinstance(bids, (list, tuple)) else None
+                    raw = first_bid.get("price") if isinstance(first_bid, dict) else None
+                except (AttributeError, IndexError, KeyError, TypeError):
                     raw = None
                 top_bid_price = _safe_float(raw)
                 if top_bid_price is None and bids:

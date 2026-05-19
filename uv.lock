@@ -1449,6 +1449,11 @@ dev = [
     { name = "ruff" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "respx" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aiolimiter", specifier = ">=1.2,<2" },
@@ -1482,6 +1487,9 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32,<0.33" },
 ]
 provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "respx", specifier = ">=0.21.1" }]
 
 [[package]]
 name = "postgrest"

@@ -350,8 +350,13 @@ async def run_snapshot(
             if not tid or tid not in books_by_token:
                 continue
             book = books_by_token[tid]
-            asks = book.get("asks") or []
-            bids = book.get("bids") or []
+            # F-1 SECURITY: book fields may be attacker-controlled non-list types.
+            # Normalize asks/bids to list before any indexing — guards against
+            # dict/str/None values that would raise TypeError/KeyError on [0].
+            _raw_asks = book.get("asks")
+            _raw_bids = book.get("bids")
+            asks = _raw_asks if isinstance(_raw_asks, (list, tuple)) else []
+            bids = _raw_bids if isinstance(_raw_bids, (list, tuple)) else []
 
             # F-1 SECURITY: CLOB book is attacker-controlled external input.
             # Malformed price/size strings (NaN, missing key, null) must NOT crash
