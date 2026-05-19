@@ -1,5 +1,91 @@
 # Phase 2 Plan 1: Foundation — Data Models, Routing Engine, Execution Pipeline
 
+> ⚠ **PLAN-CODE DRIFT NOTICE — READ FIRST** (2026-05-20)
+>
+> This plan body **does NOT** describe what is currently in `src/`. Code shipped on `main` since 2026-05-01 implements a different design (fee-differential model) than what the body below describes (depth-curve model). **18 days silent drift** between 2026-05-01 and 2026-05-19 — see `Revision History` section directly below + `.planning/threads/learnings-meta.md` 2026-05-19 § "Plan-Code 沉默分叉 18 天" for the full forensics.
+>
+> **Do NOT execute T2 from this body until a Revision lands.** Pending decision (post-Phase-02 close): three options listed in `Revision History` § "Pending Decision (post-2026-05-20)".
+
+---
+
+## Revision History
+
+> Per `feedback_plan-code-drift-2026-05` + `threads/learnings-meta.md` 2026-05-19 § "Plan-Code 沉默分叉 18 天",任何 plan body 改动必须留 trace。这段是历史 ledger,新 revision 追加在末尾,**不修订**已有条目。
+
+### 2026-04-28 Revision 0 — Initial drop (SESSION 10 discuss)
+- Source: `/gsd-discuss-phase 02 --ws m2-combinatorial` SESSION 10 (2026-04-28)
+- T2 design: `SlippageModel.estimate_slippage(token_id, side, size, depth_curve)` + `PolymarketDepthCurve` Protocol + 依赖 m1 `OrderBookSummary` / `GhostBookAnalyzer` 的 **depth-based linear decay + 1% cap** 模型
+- Rationale (当时): m1 Phase 1 已出 OrderBookSummary,Phase 2 套利触发依赖深度估算,设计自然走 depth-curve 接口
+- Commit trace: 与 ROADMAP/CONTEXT 同 batch 落地;具体 commit SHA 未单独记录 (历史限制)
+
+### 2026-05-01 Revision 1 (UNTRACED) — Plan body 被改写成依赖 L2 的版本
+- **No commit found** — `git log -- 02-1-PLAN.md` 只显示 1 个 commit (`ed49d55` rename,2026-05-01),plan body 内容变更未单独 commit,JOURNAL 无 `[PLAN-REVISION]` tag
+- 当前 body 中的 T2 (depth-curve + `OrderBookSummary` 依赖) 实际是 Revision 1 的产物,不是 Revision 0
+- 变更性质: 把 T2 从 "minimal depth curve" 改成依赖 m1 L2 orderbook 的版本 — 但 m1 当时还在 Phase 1 (L1 only,L2 推到 Phase 03)
+- **这是契约级变更但无人签字**,直接导致 Revision 1 plan body 跟 Revision 2 代码 (见下) 永久分叉
+- Discovered: 2026-05-19 SESSION 21 考古 (用户问 "M2 是啥")
+
+### 2026-05-01 Revision 2 (CODE-ONLY) — slippage.py 落地 fee-differential 模型 (不对齐 Revision 1)
+- Commit: `08a13d3 fix(02): complete T1 dependencies + relocate config to routing/` (2026-05-01)
+- 背景: T1 commit `688363a` (2026-05-01 15:31) 漏 `git add` `models/signal.py` + `models/slippage.py` → `git checkout 688363a` ImportError
+- SESSION 11 清理: `08a13d3` 一次性补齐 slippage.py (320 行) + signal.py + 4 测试。**没有对照 Revision 1 plan body 验证设计语义**
+- 代码实际实现: `SlippageParams` (dataclass, maker_fee_bps / taker_fee_bps / impact_coef / vol_pct / pm_rebate_bps / clob_taker_cost_bps / clob_maker_rebate_bps / pm_taker_cost_bps / small/mid_notional 9 个参数) + `SlippageResult` 分解 (market_impact_bps / fee_bps / mid_price_delta_bps / total_cost_bps / net_cost_after_rebate_bps) + `fee_diff_bps(side, clob_maker_avail)` cross-execution 模型
+- 设计语义: **CLOB ↔ PM 双场所 fee differential + market impact** 而非 Revision 1 的 depth-curve
+- 测试: `tests/models/test_slippage.py` 4 测试全 green — 但测的是"当前代码自洽",不是"代码符合 Revision 1 plan"
+
+### 2026-05-01 → 2026-05-19 — Silent Drift (18 天)
+- m1 主线 (Phase 01.1 → Phase 02 Wave 1-5) 吞掉所有注意力,m2 无人回头
+- `make planning-status` 不验证 plan-code 一致性 (只验证 SUMMARY 存在)
+- 测试套件全 green 强化 "一切正常" 错觉
+- 沉默成本估算: ~370 行未对齐代码 (slippage.py 320 + 测试 49) 若直接被 T3-T8 焊死,撕除成本 5×+ vs 此刻 30 min 考古
+
+### 2026-05-19 SESSION 21 — Drift discovered (用户触发)
+- 用户准备启动 m2 T2 时让 Claude 摸状态 → 三份描述对不上 (plan body / 代码 / JOURNAL)
+- 完整考古见 `threads/learnings-meta.md` 2026-05-19 § "Plan-Code 沉默分叉 18 天 (m2 slippage.py 考古案例)"
+- 修法落实:
+  - ✅ thread learnings-meta.md 落地 5 层根因 + 4 工程教训 (commit `4a333ca`)
+  - ✅ memory `feedback_plan-code-drift-2026-05.md` 落地 5 条防范纪律
+  - ✅ Revision History 段落落地 (本段)
+  - ⏳ T2 走向决策待做 (见 Pending Decision 段)
+
+### 2026-05-20 Revision 3 — Revision History 段落补齐 (本次 edit)
+- Trigger: Phase 02 close 后用户授权 "按计划往下走,自己判断" → 优先项是为 T2 走向决策铺路
+- 本 revision **不修改** T1-T8 body 内容 (保留 Revision 1 描述作为历史档案)
+- 本 revision **加入** 顶部 DRIFT NOTICE + Revision History + Pending Decision 段
+- 下一步 (须用户决策): 见 Pending Decision
+
+---
+
+## Pending Decision (post-2026-05-20)
+
+T2 走向三选一,**必须用户拍板**才能继续 m2 任何执行工作:
+
+### Option A — 冻 M2 等 m1 L2 (Phase 03) 出来再启 T2
+- 含义: 把 m2 整条线挂起,等 m1 Phase 03 (L2 orderbook) 落地 → 再启 T2 走 Revision 1 depth-curve 设计 → 现有 slippage.py 320 行 + 测试 49 行**删掉** (撕)
+- 优势: plan-code 重新对齐,设计纯净
+- 代价: 370 行代码废,SESSION 10/11 投入沉没;m2 整条线推迟到 m1 Phase 03 完成 (Phase 02.1 + Phase 03 ≈ 几周)
+- 适用: 若 depth-curve 是套利核心信号唯一正确建模方式
+
+### Option B (推荐) — 重定义 T2 = 现有 fee-differential 设计 + 补 IMDEA Type-2 验证
+- 含义: 承认 Revision 2 代码 = T2 当前 source of truth → 把 plan body T2 段**改写**对齐代码 → 补 IMDEA 论文 Type-2 (cross-venue fee differential) 套利验证测试 → T3-T8 在此基础上继续
+- 优势: 370 行代码不浪费;fee-differential 是 IMDEA 86M 笔交易实证的真实套利类型 (Type-2 占 ~$4M);不依赖 m1 L2 (m2 与 m1 并行推进)
+- 代价: 承认 SESSION 11 漏验证的事实写入历史;原 Revision 0/1 depth-curve 设计正式废弃 (推到 future plan if needed)
+- 适用: 若 fee-differential 是当前能稳定建模的套利类型,且 IMDEA 论文支持其经济价值
+
+### Option C — 跳 T2 推 T3 (Routing Engine) 或 T6 (Settings)
+- 含义: T2 走向暂不决策,先做不依赖 slippage 模型的 task — T6 Settings (配置层独立) 或 T3 Routing (用占位 slippage cost)
+- 优势: 不卡住,代码进度继续
+- 代价: T2 仍 broken 状态,T3 用占位会埋后续坑;违反"plan-code 必须一致"纪律 (本次考古的目的)
+- 适用: 若 T2 决策需要更多调研时间 (例如先读 IMDEA 论文细节再选)
+
+---
+
+## ⚠ 本次 edit 后所有下游 task 描述 (T1-T8) 仍是 Revision 1 内容,跟代码不一致
+
+继续阅读下面 T1-T8 body 前请先做完 Pending Decision。若选 Option B,T2 body 在执行前需 Revision 4 改写;T1 body 也可能要更新 (signal.py 实际产出比 plan 描述膨胀,见 STATE.md "Plan-vs-Code 偏离审计")。
+
+---
+
 ## Goal
 Build the core arbitrage execution engine: routing (Polymarket-first → Gamma), slippage model, sequential execution pipeline, and position management.
 
