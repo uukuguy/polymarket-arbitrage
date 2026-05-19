@@ -26,7 +26,7 @@ make soak-export
 ## Pass Criteria (REVISED 2026-05-20 — second revision after Inj 1 真实发现)
 
 **Hard gate (Inj 2 必过)**:
-- [ ] **Inj 2 (scheduler PAUSED 全链路)**: Telegram 收到 PAUSED msg + Gmail 收到 Sentry email — 这是 Phase 02 关闭的核心凭证
+- [x] **Inj 2-v2 (scheduler PAUSED 全链路)**: ✅ **PASSED 2026-05-20** — Telegram 收到 + Gmail 收到 Sentry email (PYTHON-C + PYTHON-D + PYTHON-B digest) + Sentry dashboard 真 issue. Hard gate ✅
 
 **Soft criteria (Inj 3/4/5 可记 "shipped with caveats")**:
 - [ ] **Inj 3 (D-12 fail-soft)**: 撤 Supabase secret 后 snapshot 是 OK/DEGRADED **NOT FAILED** + /health supabase=warn + Sentry breadcrumb 出现
@@ -161,6 +161,40 @@ Phase 02 关闭决策选项:
 本次会话走路 A 节奏，路 B 留作 Phase 02.1 优先项。
 
 ---
+
+### Inj 2-v2 — Force 3× FAILED → PAUSED → send_paused_alert 全链路 (2026-05-20) — **✅ FULL VERIFIED (hard gate ✅)**
+
+**前置 fix (commit `d271e52` + `5a5c475`)**:
+- P0 fix: `Settings.scheduler_interval_s` 显式声明 + scheduler 读改为属性访问
+- GHA fix: `superfly/flyctl-actions/setup-flyctl@v1.5` → `@1.6` (tag 不存在导致 5-16 起所有 deploy fail)
+
+**Timeline (UTC)**:
+| 时刻 | 事件 |
+|---|---|
+| 21:04:25Z | `flyctl secrets set POLYARB_SCHEDULER_INTERVAL_S=30 POLYARB_GAMMA_URL=https://gamma-invalid.example.com` |
+| 21:04:39Z | daemon 起来, scheduler 进入 30s tick 模式 (10s 启动延迟后第一次 tick) |
+| 21:05:08Z | 第 1 次 tick FAILED, `failure_counter=1/3` |
+| 21:05:45Z | 第 2 次 tick FAILED, `failure_counter=2/3` (37s 后) |
+| 21:06:22Z | 第 3 次 tick FAILED, `failure_counter=3/3` |
+| **21:06:22Z** | **`SCHEDULER_PAUSED: consecutive failure threshold reached (counter=3)`** |
+| **21:06:22Z** | **`ALERT: scheduler paused: 3 consecutive FAILED snapshots`** — `send_paused_alert` 真触发 |
+| 21:06:52Z 起 | `scheduler is PAUSED, skipping tick` (PAUSED 状态下后续 tick 全跳过 ✅) |
+| 21:11:19Z | `flyctl secrets unset POLYARB_GAMMA_URL POLYARB_SCHEDULER_INTERVAL_S` 恢复 |
+
+**预期 vs 实际 (alert chain end-to-end)**:
+| 通道 | 预期 | 实际 |
+|---|---|---|
+| 3 次 FAILED → 自动 PAUSED | ✓ | ✅ counter=1/3 → 2/3 → 3/3 完美累积 |
+| `send_paused_alert` 真触发 | ✓ | ✅ scheduler log `ALERT:`, alerts.py log `send_paused_alert:87` |
+| Sentry capture_message → DSN | ✓ | ✅ PYTHON-D issue 创建 (capture_message), PYTHON-C issue (loguru auto-capture from scheduler:_on_paused) |
+| Sentry alert rule → email | ✓ | ✅ Gmail 收到 5:06 AM CST email (PYTHON-C subject), 5:12 AM digest (PYTHON-B "2 new alerts since...") |
+| Telegram direct (unconditional, Inj 1 修法) | ✓ | ✅ 用户 TG 真收到 "polyarb-l1 scheduler PAUSED: 3 consecutive FAILED snapshots" |
+| PAUSED 后跳过 tick (state machine) | ✓ | ✅ 多次 "scheduler is PAUSED, skipping tick" log |
+| /scan unpause 路径 (Inj 4) | 跳过 — 因为本次会话结束后 secret 恢复后会自动重启 daemon, 重置 state | (deferred 进 phase 03 mocked test) |
+
+**Inj 2-v2 verdict**: ✅ **Phase 02 关闭硬门凭证拿到**。alert chain 在 prod 真实 chaos 下端到端 verified live (Sentry email + Telegram + Sentry dashboard 全确认)。
+
+**配套发现**: Gmail 还有 PYTHON-9 (Inj 2-v1 期间 Gamma stream failed) 和 PYTHON-A (Inj 3 secret 恢复瞬间 supabase mirror push 失败) 邮件 — 说明 Inj 2-v1 + Inj 3 也都触发了 Sentry 邮件，**只是我们当时查 Gmail newer_than:1h 错过了**。这意味着 **Sentry alert chain 在所有 Inj 期间都 work**，之前的 partial verdict 偏保守。
 
 ### Inj 3 — Supabase secret unset → D-12 fail-soft 验证 (2026-05-20) — **PARTIAL VERIFIED + P1 新发现**
 
