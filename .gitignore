@@ -59,3 +59,7 @@ dashboard/node_modules/
 dashboard/.vercel/
 dashboard/.env.local
 dashboard/.pnpm-store/
+
+# Playwright CLI/MCP browser session artifacts (snapshots, console logs)
+.playwright-cli/
+.playwright-mcp/

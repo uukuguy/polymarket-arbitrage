@@ -375,11 +375,16 @@ sentry-test:
 	@echo ">> sentry-test — calling init_sentry then capture_message"
 	uv run python -c "from polyarb.config import load_settings; from polyarb.observability.sentry import init_sentry; import sentry_sdk; s = load_settings(); init_sentry(s); sentry_sdk.capture_message('polyarb-l1 sentry-test from $$USER@$$(hostname) at $$(date -u +%FT%TZ)', level='info'); print('captured — check Sentry dashboard')"
 
-## alerts-test: Trigger a deliberate paused-alert (Sentry + Better Stack /fail + Telegram fallback)
+## alerts-test: Trigger a deliberate paused-alert (Sentry + Better Stack /fail + Telegram direct)
 ## Usage: POLYARB_BETTER_STACK_HEARTBEAT_URL='...' POLYARB_TELEGRAM_BOT_TOKEN='...' POLYARB_TELEGRAM_CHAT_ID='...' make alerts-test
+##
+## NOTE 2026-05-20: init_sentry() MUST be called before send_paused_alert.
+## Without init_sentry, sentry_sdk.capture_message silently no-ops (SDK is
+## uninitialized in the script's process). Chaos Inj 1 root cause #4 —
+## see threads/learnings-meta.md.
 alerts-test:
-	@echo ">> alerts-test — calling send_paused_alert"
-	uv run python -c "import asyncio; from polyarb.config import load_settings; from polyarb.daemon.alerts import send_paused_alert; asyncio.run(send_paused_alert(load_settings(), reason='alerts-test from $$USER@$$(hostname)'))"
+	@echo ">> alerts-test — calling send_paused_alert (with init_sentry first)"
+	uv run python -c "import asyncio; from polyarb.config import load_settings; from polyarb.observability.sentry import init_sentry; from polyarb.daemon.alerts import send_paused_alert; s = load_settings(); init_sentry(s); asyncio.run(send_paused_alert(s, reason='alerts-test from $$USER@$$(hostname)'))"
 
 ## logs-tail-axiom: Print the Axiom dataset URL + sample APL query (convenience; opens nothing local)
 logs-tail-axiom:

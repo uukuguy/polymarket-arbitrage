@@ -103,7 +103,28 @@ make soak-export
   - Better Stack: heartbeat on-call primary responder 邮箱确认 / 改成正确邮箱
   - 验证: 在 dashboard 点 "Send Test Notification" / "Test alert"，Gmail 1-2 min 内收到
 
-**Inj 1 verdict**: ❌ alert chain 不通过原设计的 "Better Stack uptime probe" 路径触发 — **但发现了 3 个真 bug + 修复其中代码层的 1 个**。这比 7 天 soak 无事跑发现的多得多 — 印证 thread `soak-gate-deviation-2026-05.md` "chaos injection 凭证比 7 天无事更强"的判断。
+**Inj 1 verdict (REVISED 2026-05-20)**: ❌ 原设计失败 + ✅ 真 bug 全修
+
+原设计 "Fly stop 2 min → Better Stack uptime probe 触发邮件" 完全失败（heartbeat 模型不可能触发 2 min stop）。**但 chaos 暴露的 3 个真 bug 全部追下来修完**：
+
+| Bug | 修法 | Verified Live |
+|---|---|---|
+| 1. `send_paused_alert` TG 是 fallback only (BS 200 时不发) | `alerts.py` 把 TG 升无条件主路径 + 测试守门 | ✅ TG 3 次连续触发都收到 |
+| 2. `make alerts-test` 漏 `init_sentry()` → Sentry SDK 静默丢弃 events | Makefile target 加 `init_sentry(s)` 在 send_paused_alert 前 | ✅ Sentry 邮件 4 封连续收到 (Gmail) |
+| 3. Sentry alert rule "Then=Notify Suggested Assignees" + "When=high priority" → unassigned info 级别 issue 被 silent drop | User 在 dashboard 改成 "Notify Jiangwen Su (Member)" + "When=A new issue is created" | ✅ 通过 Send Test Notification + 真 capture_message 双重 verified |
+| 4. (剩余) Better Stack heartbeat on-call routing primary responder 邮箱未确认 | 暂不修 — 已有两条独立 alert 路径 (Sentry 邮件 + TG)，BS 邮件冗余可选 | ⏳ 留待 |
+
+**结论**：Inj 1 设计预期 100% 失败，但 chaos injection 这个**手段本身**100% 成功 — 把 alert chain 从"3 路全死 (SESSION 20 验证幻觉)"修成 "2 路 live + 第 3 路冗余可选"。
+
+**比 7 天 soak 通过更有价值的凭证**：用 ~2 小时 chaos diagnostic 把 alert chain 从"运维盲区"变成"两路可达 + 测试守门"。如果走 7-day soak 路径，**这个 bug 99% 不会暴露**（7 天里多半没有真故障，即使有也未必走到 scheduler PAUSED）。SESSION 20 的"E2E verified" SUMMARY 在那种路径下会被 ship 出去，未来某次真 oracle 操纵告警石沉大海。
+
+### Inj 1 后 alert chain 真实状态
+
+| 通道 | 触发条件 | 状态 |
+|---|---|---|
+| Sentry email | scheduler PAUSED (3× FAILED) → capture_message | ✅ live verified |
+| Telegram direct | scheduler PAUSED (3× FAILED) → unconditional send | ✅ live verified |
+| Better Stack incident email | heartbeat missed > tolerant window (12h+) OR /fail POST + on-call routes to email | ⚠ /fail POST 发了但 BS dashboard 未配 on-call → 不发邮件 |
 
 **新契约下 Telegram = primary alert channel**，下面 Inj 2-4 重新设计触发条件以让 `send_paused_alert` 真触发（不再依赖 Better Stack uptime probe）：
 

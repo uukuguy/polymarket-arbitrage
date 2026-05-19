@@ -380,3 +380,29 @@ SESSION 20 的"E2E verified"是欺骗性陈述。从今往后任何 SUMMARY 里�
 **意思是 Phase 02 本来要"shipped with confidence"基于一个完全坏的 alert chain**。修这个 bug 的真实救助价值：未来某次真 oracle 操纵/系统挂掉时**不会错过 alert**，对一个套利系统来说这是几千刀 vs 一无所知的差别。
 
 chaos injection 不是"演习"，是"对抗 SUMMARY 自我欺骗"的唯一手段。
+
+---
+
+### Sub-lesson 5 (2026-05-20): SDK 静默 no-op 是隐形成本最高的 bug
+
+修完 Telegram 无条件路径后，Sentry email 仍然不发。诊断从"alert rule 配错"猜了一阵子，最后发现真根因：
+
+**`make alerts-test` Makefile target 直接调 `send_paused_alert`，但漏调 `init_sentry()`**。`sentry_sdk.capture_message` 在未 init 的进程里**静默返回 None**，不报错、不 raise、不打 warning log。Daemon 进程没这个问题 (`main.py` 里 init 了)，但 ad-hoc 测试脚本会漏。
+
+**关键模式 — SDK 静默 no-op 的危险等级排序**：
+
+| Bug 类型 | 怎么发现 | 隐形成本 |
+|---|---|---|
+| 🔴 SDK 没 init → capture 静默丢 | 只能通过 dashboard 反查 event 数 | 极高，看不到 |
+| 🔴 网络层 200 但 server 未通知 user (BS /fail) | 验证用户感知 (打开邮箱/手机) | 高 |
+| 🟡 SDK init 了但 DSN 错 | SDK 本身会 log "invalid DSN" | 中 |
+| 🟡 alert rule 没匹配 | dashboard activity log 能看 | 低 |
+| 🟢 SMTP 投递失败 | dashboard 显示 "send failed" | 低 |
+
+**工程教训**：
+
+1. **任何走 SDK 的 ad-hoc 测试 target / 一次性脚本，必须显式 init SDK** — Makefile / scripts/ / docs 里的 "quick test" 命令是高危区，因为它们 **不走主 daemon entrypoint**
+2. **SDK 应该有 "lazy fail" 而不是 "silent no-op" 默认行为** — `sentry_sdk.capture_message` 在未 init 时应该 raise (或至少 logger.warning)，而不是 return None。这是 sentry-sdk 库的设计 anti-pattern，但我们不能改库，只能改使用方
+3. **未来加 hook**：考虑给 `polyarb.observability.sentry` 加一个 `assert_initialized()` helper，在 `capture_message` 调用前先 assert，没 init 就 raise。这样 Makefile target 漏 init 时会**红字 error**而不是**静默成功**
+
+**修法（本会话）**：Makefile `alerts-test` target 改为先调 `init_sentry(s)`，并加注释说明这个 contract。详见 commit (2026-05-20)。
