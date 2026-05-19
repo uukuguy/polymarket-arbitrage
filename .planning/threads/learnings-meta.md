@@ -288,3 +288,95 @@ updated: YYYY-MM-DD
 slippage.py 320 行 + 测试 49 行 = ~370 行未对齐代码挂了 18 天。如果今天没人考古，下次 m2 真启动时直接基于这份代码搭 T3-T8，等于把"分叉的设计"焊死到下游 routing/execution 里 — 撕一次成本 X，焊死后撕成本 5X+。这次成本是 30 min 考古；不查的成本是 2-3 个会话拆错代码。
 
 便宜的 audit 是最划算的工程动作。
+
+---
+
+## 2026-05-19 SESSION 21 — Alert chain "HTTP 200 = user notified" 幻觉
+
+### 现象
+
+SESSION 20 (5-18) Plan 02-05 SUMMARY 自信地写："**Four redundant alert paths verified live in prod: a daemon failure now produces (1) Sentry email, (2) Better Stack incident email, (3) Telegram direct message — independently delivered**"。
+
+SESSION 21 (5-19) 跑 Chaos Inj 1 (Fly machine stop 2 min)，**4 条 alert path 全部静默** — Gmail 没 Better Stack 邮件，Gmail 没 Sentry 邮件，Telegram 没消息。诊断脚本确认：
+
+- Better Stack `/fail` POST → **200 OK**（signal accepted）
+- Telegram `sendMessage` 直连 → **200 OK**（real send，用户手机真收到）
+- `make alerts-test`（走 `send_paused_alert` 完整链路）→ **用户什么都没收到**
+
+### 根因（5 层）
+
+详见 `02-SOAK-LOG.md` Inj 1 段落。核心是 3 层"HTTP 200 = user notified"假设错：
+
+1. **Better Stack `/fail` 返回 200 ≠ 用户被通知** — 200 只表示 signal accepted；是否 fanout 到邮箱/Telegram 取决于 BS 的 on-call/escalation 配置。我们的配置是默认 "primary responder + email"，但 primary responder 邮箱可能没确认。
+2. **Sentry `capture_message` 成功 ≠ 用户收到邮件** — Sentry alert rule 配的是 "Notify Suggested Assignees"，issue unassigned 时无人通知。
+3. **`send_paused_alert` 的 Telegram 是 fallback only** — `if not bs_ok: telegram_direct(...)`。BS 200 → TG 不发。两个"200 不代表用户被通知"叠加，等于全静默。
+
+### SESSION 20 的验证幻觉是怎么形成的
+
+那次"E2E verified" 是这么做的：
+
+| 通道 | 验证手段 | 等价于什么 |
+|---|---|---|
+| Sentry | **Sentry dashboard 上手动点 "Send Test Issue"** | 验证 Sentry 自家 test 按钮邮件，不验证 alert rule routing |
+| Better Stack | **手动 POST `/fail`** + 在 dashboard 看 incident 出现 | 验证 BS UI 显示 incident，不验证 on-call routing 真发邮件 |
+| Telegram | daemon 的 alerts-test 路径 | **运气好** — 当时可能因为 BS 返回了 5xx（首次 incident？quota？）触发了 fallback，所以 TG 真收到；但 SESSION 20 没记录 BS 那次实际返回什么 |
+
+每一条都验证了"消息通道存在"，**没一条验证"用户在真实故障路径下会被通知"**。
+
+### 工程教训（核心）
+
+#### Lesson 1: 监控 / 告警 / 通知是三个不同的层，分别验证
+
+```
+监控层  : 系统有没有事件发生  → /health / heartbeat / probe
+告警层  : 事件有没有被记录到告警系统  → Sentry event 存在 / BS incident 存在
+通知层  : 用户有没有真的收到通知  → 邮箱/手机/Telegram 真的有消息
+```
+
+**HTTP 200 只能证监控+告警层通了**，证不了通知层。
+
+#### Lesson 2: 告警系统 alert path 的验证不能用"测试按钮"，必须 end-to-end chaos
+
+测试按钮（Sentry "Send Test Notification" / BS "Test alert"）走的是简化路径，跟"真故障 → 告警系统 → 通知用户"的真实流程**经常不一样**。例如：
+- Sentry 测试按钮直接发邮件给当前登录账号
+- 真 issue 触发要先匹配 alert rule + 匹配 issue owner / member → 任何一步不对就跳过
+
+**唯一可靠的验证 = 故意制造真故障 + 等真告警送达**。这就是 chaos injection 的本质价值。
+
+#### Lesson 3: alert 链路必须有**至少 1 条无条件、不需要远端配置**的兜底路径
+
+把 Telegram direct 改成无条件主路径（绕过 Sentry/BS 的远端配置）就是这个原则：
+- Sentry/BS 任一是"远端配置可能漂移"的——dashboard 可能被人改、邮箱可能被人 unverify、alert rule 可能被人改、quota 可能耗尽
+- Telegram bot token + chat_id 是"本地 secret 控制"的——只要 Fly secret 不动，bot 永远能发到固定 chat
+- 设计原则：**至少有一条 user-facing channel，它的可达性只依赖本地 secret + Telegram API 自身，不依赖任何第三方监控系统的远端配置**
+
+我们的修正：`send_paused_alert` 改为 Sentry + BS + **无条件 Telegram**。前两者是"试一下"，TG 是"必须送达"。
+
+#### Lesson 4: SUMMARY 里说 "verified" 必须附验证手段
+
+SESSION 20 的"E2E verified"是欺骗性陈述。从今往后任何 SUMMARY 里出现 "verified"/"E2E"/"tested" 时必须**附验证手段**：
+
+| 不可接受（含义模糊） | 可接受（验证手段明文） |
+|---|---|
+| "alert path E2E verified" | "alert path verified: triggered real daemon FAILED via fly machine stop, observed Telegram msg 22:35 UTC, observed Gmail incident email 22:36 UTC" |
+| "Sentry email delivered" | "Sentry email delivered via 'Send Test Notification' button (NOT via real issue)" — 注意这里要老老实实 |
+| "Telegram works" | "Telegram works: chat_id=6319452645 received message_id=6 timestamped 23:06:22 UTC" |
+
+### 修法
+
+- ✅ 代码层 (`alerts.py`): Telegram direct 升无条件主路径
+- ✅ 测试守住新契约 (`test_alerts.py` 加 BS 200 时 TG 必须发的 case)
+- ✅ SOAK-LOG 写下 Inj 1 完整诊断 + 重新设计 Inj 2-4 触发条件
+- ⏳ 配置层（用户自助）: Sentry alert rule + Better Stack on-call routing 修
+- ⏳ Plan 02-07 Task 4 待回头改：Inj 2-4 的设计要让 `send_paused_alert` 真触发（连续 3 次 FAILED → PAUSED → alert），不能假设单次 DEGRADED 也触发
+
+### 沉默成本估算（这次）
+
+如果 Phase 02 走 7-day soak gate 而不是 chaos injection 关闭，**这个 bug 几乎 100% 不会暴露**：
+- 7 天里很可能不会有真故障
+- 即使有故障，daemon 失败 3 次自愈即可，scheduler 可能根本没 PAUSED
+- 即使 PAUSED 触发 send_paused_alert，BS 返回 200 → fallback TG 不发 → SESSION 20 同款幻觉重演
+
+**意思是 Phase 02 本来要"shipped with confidence"基于一个完全坏的 alert chain**。修这个 bug 的真实救助价值：未来某次真 oracle 操纵/系统挂掉时**不会错过 alert**，对一个套利系统来说这是几千刀 vs 一无所知的差别。
+
+chaos injection 不是"演习"，是"对抗 SUMMARY 自我欺骗"的唯一手段。

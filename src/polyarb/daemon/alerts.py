@@ -62,12 +62,18 @@ def _is_deduped(key: str, window_seconds: int) -> bool:
 async def send_paused_alert(settings: Settings, *, reason: str) -> None:
     """Fire a scheduler-paused alert across all configured channels.
 
-    Channels (in order):
-      1. Sentry capture_message(level="error") — long-lived audit trail.
-      2. Better Stack /fail endpoint — primary user-facing alert
-         (routes to Telegram + email via Better Stack native integration).
-      3. Direct Telegram fallback — invoked ONLY if (2) failed (5xx /
-         network error). Skipped if telegram_bot_token unset.
+    Channels (all fire unconditionally — 2026-05-19 fix after chaos Inj 1
+    revealed that Better Stack `/fail` returning 200 does NOT guarantee the
+    user receives a notification — it only acknowledges the signal):
+
+      1. Sentry capture_message(level="error") — long-lived audit trail
+         (whether Sentry delivers email depends on Sentry alert rule, not us).
+      2. Better Stack /fail endpoint — signals heartbeat downtime to Better
+         Stack (whether Better Stack routes to email/Telegram depends on its
+         on-call config, not on the POST status code).
+      3. Direct Telegram — unconditional primary user-facing channel. Proven
+         working in chaos Inj 1; this is the path that 100% reaches the
+         operator's phone regardless of Sentry/BS configuration drift.
 
     Deduplication: a second call within ``settings.alert_dedupe_window_seconds``
     is a no-op.
@@ -86,11 +92,11 @@ async def send_paused_alert(settings: Settings, *, reason: str) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"sentry capture_message failed: {e!r}")
 
-    # (2) Better Stack /fail
-    bs_ok = await _better_stack_fail(settings, reason=reason)
+    # (2) Better Stack /fail — best-effort signal; 200 ≠ user notified
+    await _better_stack_fail(settings, reason=reason)
 
-    # (3) Fallback: direct Telegram if Better Stack unreachable
-    if not bs_ok and settings.telegram_bot_token.get_secret_value():
+    # (3) Telegram direct — unconditional primary path
+    if settings.telegram_bot_token.get_secret_value():
         await _telegram_direct(
             settings, text=f"polyarb-l1 scheduler PAUSED: {reason}"
         )

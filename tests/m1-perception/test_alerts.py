@@ -73,12 +73,12 @@ async def test_send_paused_alert_also_captures_to_sentry(
 
 
 @pytest.mark.asyncio
-async def test_send_paused_alert_falls_back_to_telegram_direct_when_better_stack_503(
+async def test_send_paused_alert_calls_telegram_direct_when_better_stack_503(
     daemon_settings_with_observability: Any,
     mocked_better_stack: Any,
     mocked_sentry: Any,
 ) -> None:
-    """Better Stack returns 503 → alerts use telegram_bot_token + chat_id direct."""
+    """Better Stack returns 503 → Telegram direct still fires (now unconditional)."""
     from polyarb.daemon import alerts
 
     alerts._LAST_ALERT_TIME_MS.clear()
@@ -88,17 +88,50 @@ async def test_send_paused_alert_falls_back_to_telegram_direct_when_better_stack
 
     await alerts.send_paused_alert(
         daemon_settings_with_observability,
-        reason="testing fallback path",
+        reason="testing with BS 503",
     )
 
-    # Find a POST to api.telegram.org/bot.../sendMessage
     telegram_calls = [
         c for c in mocked_better_stack.calls
         if c[0] == "POST" and "api.telegram.org" in c[1]
     ]
     assert telegram_calls, (
-        f"Better Stack 503 should trigger direct Telegram fallback. "
-        f"observed calls={mocked_better_stack.calls}"
+        f"Telegram direct must fire on BS 503. observed={mocked_better_stack.calls}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_paused_alert_calls_telegram_direct_when_better_stack_200(
+    daemon_settings_with_observability: Any,
+    mocked_better_stack: Any,
+    mocked_sentry: Any,
+) -> None:
+    """2026-05-19 contract change: Telegram direct fires unconditionally.
+
+    Pre-fix: BS /fail returning 200 was treated as "user notified" → Telegram
+    direct was suppressed. Chaos Inj 1 (2026-05-19) revealed BS 200 only
+    means "signal accepted", not "user reached". Telegram direct is now the
+    unconditional primary user-facing path.
+    """
+    from polyarb.daemon import alerts
+
+    alerts._LAST_ALERT_TIME_MS.clear()
+
+    # Better Stack /fail returns 200 (the SAD path before this fix: TG was skipped)
+    mocked_better_stack.set_response("POST", "betterstack.com", 200)
+
+    await alerts.send_paused_alert(
+        daemon_settings_with_observability,
+        reason="testing with BS 200",
+    )
+
+    telegram_calls = [
+        c for c in mocked_better_stack.calls
+        if c[0] == "POST" and "api.telegram.org" in c[1]
+    ]
+    assert telegram_calls, (
+        f"Telegram direct MUST fire even when BS returns 200 (2026-05-19 contract). "
+        f"observed={mocked_better_stack.calls}"
     )
 
 
