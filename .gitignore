@@ -21,6 +21,7 @@ venv/
 data/state.db
 data/state.db-wal
 data/state.db-shm
+data/state.db.bak-*
 data/snapshots/
 data/.cache/
 
@@ -43,6 +44,9 @@ watchlist.yaml
 
 # Phase 1.1 scan outputs (large, regenerable from snapshot data).
 data/scans/
+
+# CodeGraph local index (per-machine, regenerable; tool has its own .gitignore inside).
+.codegraph/
 
 
 # Plan 02-09: host-specific memory-budget calibration baseline (not portable)
