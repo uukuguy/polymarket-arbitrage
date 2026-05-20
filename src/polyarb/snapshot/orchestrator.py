@@ -546,6 +546,25 @@ async def run_snapshot(
                 )
             )
             mirror = None  # type: ignore[assignment]
+    else:
+        # D-01 (Phase 02.1, BUG-7): audit log + breadcrumb for config-disabled skip.
+        # Previously this branch was completely silent — daemon log had nothing,
+        # Sentry events had no breadcrumb context. The 2026-05 chaos Inj 3
+        # (撤 POLYARB_SUPABASE_SERVICE_KEY → pydantic flips mirror_enabled=False)
+        # surfaced this as Bug #7: fail-soft path collapsed to a black hole.
+        #
+        # D-12 invariant: fail-soft contract unchanged — snapshot still completes.
+        logger.info(
+            f"step 7.5: mirror disabled — reason=config-disabled "
+            f"(snapshot_id={snapshot_id}). "
+            "Supabase dashboard will not update until mirror is re-enabled."
+        )
+        sentry_sdk.add_breadcrumb(
+            category="mirror",
+            level="info",
+            message="mirror skipped: reason=config-disabled",
+            data={"supabase_mirror_enabled": False, "snapshot_id": snapshot_id},
+        )
 
     # ── 7.6. R2 parquet archive (D-03) — fail-soft post-write ────────────────
     # Upload the already-written parquet to Cloudflare R2. Failure → DEGRADED.

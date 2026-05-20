@@ -130,34 +130,39 @@ def _run(settings: Settings) -> Any:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_mirror_disabled_logs_audit_entry(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_mirror_disabled_logs_audit_entry(tmp_path: Path) -> None:
     """When supabase_mirror_enabled=False, step 7.5 emits an audit-log line
     containing 'mirror disabled' / 'config-disabled' (D-01, BUG-7).
 
     Previously this branch was silent — no log, no breadcrumb. The new ``else``
     must produce a loguru INFO line so Fly log shipping can audit the skip.
-    """
-    settings = _make_settings(tmp_path)
-    assert settings.supabase_mirror_enabled is False, (
-        "test precondition: mirror must be disabled (no service key)"
-    )
 
-    with caplog.at_level(logging.INFO):
+    Note: project logs via loguru (not stdlib), so pytest ``caplog`` cannot
+    see the message. Add a loguru sink that writes to a StringIO buffer and
+    grep that.
+    """
+    import io
+    from loguru import logger as _loguru_logger
+
+    buf = io.StringIO()
+    sink_id = _loguru_logger.add(buf, level="INFO", format="{message}")
+    try:
+        settings = _make_settings(tmp_path)
+        assert settings.supabase_mirror_enabled is False, (
+            "test precondition: mirror must be disabled (no service key)"
+        )
+
         result = _run(settings)
 
-    # D-12 invariant: snapshot still completes (fail-soft contract unchanged).
-    assert result is not None
+        # D-12 invariant: snapshot still completes (fail-soft contract unchanged).
+        assert result is not None
+    finally:
+        _loguru_logger.remove(sink_id)
 
-    matching = [
-        r
-        for r in caplog.records
-        if "mirror disabled" in r.message or "config-disabled" in r.message
-    ]
-    assert matching, (
+    output = buf.getvalue()
+    assert "mirror disabled" in output or "config-disabled" in output, (
         f"expected an audit log line containing 'mirror disabled' / "
-        f"'config-disabled' — got {[r.message for r in caplog.records[-10:]]}"
+        f"'config-disabled' — got tail:\n{output[-1500:]}"
     )
 
 
