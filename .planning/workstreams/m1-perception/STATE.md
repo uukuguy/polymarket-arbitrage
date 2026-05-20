@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 02 (gate passed, awaiting extract_learnings)
-status: verifying
-stopped_at: SESSION 20 EOD (2026-05-19) — Wave 4 完整收尾 + git tree/MEMORY/STATE 全部干净
+current_phase: 02.1 (context gathered, ready for plan)
+status: context-gathered
+stopped_at: "SESSION 22 (2026-05-20) — Phase 02 closed (LEARNINGS 18D/15L/14P/9S landed) + Phase 02.1 inserted into ROADMAP + CONTEXT.md gathered via /gsd-discuss-phase. 7 decisions locked: 严格 fix-up scope / #7 Option (b) audit log + breadcrumb / #7 chaos Inj 3 verification / #8 Option (b) /control/unpause endpoint / #8 counter 清零 / #6 Option (c) 拆 /health + /healthz. Codegraph 验证 scheduler.unpause() 0 callers = bug 本质. Next: /gsd-plan-phase 02.1 --ws m1-perception"
 last_updated: "2026-05-19T23:09:17.287Z"
 last_activity: 2026-05-20
 progress:

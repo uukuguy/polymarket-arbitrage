@@ -77,6 +77,16 @@ Plans:
 - [ ] 02-06-PLAN.md — Wave 4: Vercel Next.js dashboard 雏形 + scan trigger
 - [ ] 02-07-PLAN.md — Wave 5: chaos test + 7-day soak + 教学文档 08
 
+### Phase 02.1: Phase 02 fix-up: 2 P1 backlog + /health 503 trade-off (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 02
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 02.1 to break down)
+
 ### Phase 3: WebSocket 增量数据流（L3 候选）
 
 **Goal:** /book + /prices 频道实时增量推送，作为 L3 单市场 K 线的数据源
