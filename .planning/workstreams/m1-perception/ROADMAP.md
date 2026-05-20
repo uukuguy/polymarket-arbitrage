@@ -77,15 +77,34 @@ Plans:
 - [ ] 02-06-PLAN.md — Wave 4: Vercel Next.js dashboard 雏形 + scan trigger
 - [ ] 02-07-PLAN.md — Wave 5: chaos test + 7-day soak + 教学文档 08
 
-### Phase 02.1: Phase 02 fix-up: 2 P1 backlog + /health 503 trade-off (INSERTED)
+### Phase 02.1: L1 Production-Grade Fix-up (INSERTED 2026-05-20)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
-**Depends on:** Phase 02
-**Plans:** 0 plans
+**Goal:** 消化 Phase 02 chaos injection 暴露的 3 个 deferred bug, 让 L1 daemon 从"生产级带 caveats"升级到"真生产级", 解锁 Phase 03 (L2 orderbook) discuss。严格 fix-up scope — 不蔓延。
+**Requirements**: 3 bug 全修 + chaos-grade verification (per Phase 02 L6/L7 alert chain discipline)
+**Depends on:** Phase 02 (LEARNINGS extracted, hard gate passed)
+**Refs:**
+- `.planning/workstreams/m1-perception/phases/02.1-phase-02-fix-up-2-p1-backlog-health-503-trade-off/02.1-CONTEXT.md` (7 decisions locked)
+- `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-LEARNINGS.md` §§ L6/L7/P14 (verification 设计依据)
+- `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-07-SUMMARY.md` § "8 个新发现 bug" 表 (#6/#7/#8 命名定义)
+**Plans:** 4 plans (3 waves)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 02.1 to break down)
+- [ ] 02.1-01-PLAN.md — Wave 1: Bug #7 fail-soft visibility (orchestrator step 7.5 audit log + Sentry breadcrumb + chaos Inj 3-v2 verification, D-01/D-02)
+- [ ] 02.1-02-PLAN.md — Wave 1: Bug #8 prod unpause endpoint (src/polyarb/http/control.py + ControlAuthMiddleware + make unpause-prod + chaos Inj 4 verification, D-03/D-04/D-22)
+- [ ] 02.1-03-PLAN.md — Wave 2: Bug #6 /healthz endpoint + fly.toml probe path 切换 (health.py refactor + _build_health_checks helper + Fly checks smoke, D-05/D-06)
+- [ ] 02.1-04-PLAN.md — Wave 3: docs/learning/09-生产化运维.md + 00-INDEX 更新 + Phase 02.1 closure verification (per CLAUDE.md 教学纪律, D-07)
+
+Scope (3 bug):
+- #7 P1: fail-soft visibility — 撤 Supabase secret → mirror_enabled=False 路径静默跳过, 加 orchestrator audit log + Sentry breadcrumb (D-01/D-02)
+- #8 P1: daemon unpause endpoint — PAUSED 后只能 SSH+sqlite3+restart 三步, 新起 /control/unpause endpoint (HMAC), counter 清零 (D-03/D-04)
+- #6 trade-off: /health 503 vs Fly proxy — 拆两 endpoint /health (IETF strict) + /healthz (Fly-friendly 200), fly.toml probe 切到 /healthz (D-05/D-06)
+
+不在 scope (D-07 严格 fix-up):
+- 3 pre-existing test failure (独立 chore commit)
+- Axiom log-shipping (P2 backlog)
+- 7-day uptime soak (Phase 03 启动期)
+- Vercel dashboard "Unpause Daemon" 按钮 UI (推独立 plan)
+- /control/pause + /control/status (本 phase 只建 unpause, planner 可选择是否搭 router 框架)
 
 ### Phase 3: WebSocket 增量数据流（L3 候选）
 

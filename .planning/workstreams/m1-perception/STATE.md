@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 02.1 (context gathered, ready for plan)
-status: context-gathered
-stopped_at: "SESSION 22 (2026-05-20) — Phase 02 closed (LEARNINGS 18D/15L/14P/9S landed) + Phase 02.1 inserted into ROADMAP + CONTEXT.md gathered via /gsd-discuss-phase. 7 decisions locked: 严格 fix-up scope / #7 Option (b) audit log + breadcrumb / #7 chaos Inj 3 verification / #8 Option (b) /control/unpause endpoint / #8 counter 清零 / #6 Option (c) 拆 /health + /healthz. Codegraph 验证 scheduler.unpause() 0 callers = bug 本质. Next: /gsd-plan-phase 02.1 --ws m1-perception"
-last_updated: "2026-05-19T23:09:17.287Z"
+current_phase: 02.1 (planning complete, ready to execute)
+status: planned
+stopped_at: "SESSION 22 (2026-05-20) — Phase 02 closed (LEARNINGS 18D/15L/14P/9S landed) + Phase 02.1 inserted + CONTEXT.md (7 decisions) + RESEARCH.md + PATTERNS.md + VALIDATION.md + 4 plans (02.1-01/02/03/04) all pass gsd-plan-checker iteration 2. Wave structure: W1=Plan 01+02 parallel (no file overlap), W2=Plan 03 (app.py merge), W3=Plan 04 (docs closure). Next: /gsd-execute-phase 02.1 --ws m1-perception"
+last_updated: "2026-05-20T14:11:20.387Z"
 last_activity: 2026-05-20
 progress:
-  total_phases: 4
+  total_phases: 5
   completed_phases: 3
-  total_plans: 20
+  total_plans: 24
   completed_plans: 20
-  percent: 100
+  percent: 83
 ---
 
 # Project State
@@ -21,10 +21,10 @@ progress:
 
 Phase: 02 (l1-production-grade) — ✅ **HARD GATE PASSED**, ready for /gsd-extract_learnings
 Plan: 9 of 9 ✅ (all SUMMARY landed, planning-status zero drift)
-**Status:** Phase 02 alert chain end-to-end verified live in prod chaos (Inj 2-v2 2026-05-20 21:06Z). Phase 03 unblocked, 但启动前必须先消化 Phase 02.1 backlog (2 P1 + 1 trade-off) + 回补 7-day uptime soak (thread §1 要求).
+**Status:** Ready to execute
 **Current Phase:** 02 (gate passed, awaiting extract_learnings)
 **Last Activity:** 2026-05-20
-**Last Activity Description:** SESSION 21 EOD pt 2 — Phase 02 final close. 5 个 prod chaos injection 完成 (Inj 1/2-v1/2-v2/3/5; Inj 4 SSH+SQL 实操). Inj 2-v2 真触发 send_paused_alert → 三路独立 alert verified (Sentry email PYTHON-C/D + PYTHON-B digest, Telegram, Sentry dashboard). 暴露 8 个新 bug,本会话修了 5 个 P0 (alerts.py TG unconditional / Makefile init_sentry / Sentry alert rule / scheduler_interval_s 可配 / GHA setup-flyctl@1.6). Phase 02.1 backlog deferred 3 (P1×2 + trade-off×1). 17 commits 全 push. Phase 02 final 02-07-SUMMARY.md + 配套 thread (soak-gate-deviation / learnings-meta updates) 落地.
+**Last Activity Description:** Phase 02.1 planning complete — 4 plans ready
 
 ## Progress
 
