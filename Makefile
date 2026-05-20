@@ -367,7 +367,7 @@ docker-smoke-256mb: docker-build
 	    polyarb-l1 \
 	    python -m polyarb.snapshot snapshot
 
-.PHONY: sentry-test alerts-test logs-tail-axiom
+.PHONY: sentry-test alerts-test logs-tail-axiom unpause-prod
 
 ## sentry-test: Trigger a deliberate Sentry capture_message to verify Sentry dashboard receives it
 ## Usage: POLYARB_SENTRY_DSN='https://...@sentry.io/...' make sentry-test
@@ -385,6 +385,18 @@ sentry-test:
 alerts-test:
 	@echo ">> alerts-test — calling send_paused_alert (with init_sentry first)"
 	uv run python -c "import asyncio; from polyarb.config import load_settings; from polyarb.observability.sentry import init_sentry; from polyarb.daemon.alerts import send_paused_alert; s = load_settings(); init_sentry(s); asyncio.run(send_paused_alert(s, reason='alerts-test from $$USER@$$(hostname)'))"
+
+## unpause-prod: POST /control/unpause to prod daemon (HMAC-signed, empty body)
+## Usage: POLYARB_SCAN_SHARED_SECRET='<secret>' make unpause-prod
+## Reads POLYARB_SCAN_SHARED_SECRET from env (same secret as /scan per D-22).
+## Phase 02.1 Plan 02 (BUG-8): replaces SSH + sqlite3 UPDATE + restart with one command.
+unpause-prod:
+	@[ -n "$$POLYARB_SCAN_SHARED_SECRET" ] || (echo "ERROR: POLYARB_SCAN_SHARED_SECRET not set"; exit 1)
+	@SIG=$$(printf '' | openssl dgst -sha256 -hmac "$$POLYARB_SCAN_SHARED_SECRET" | awk '{print $$2}'); \
+	echo ">> unpause-prod — POST https://polyarb-l1.fly.dev/control/unpause"; \
+	curl -s -X POST https://polyarb-l1.fly.dev/control/unpause \
+	  -H "X-Signature: sha256=$$SIG" \
+	  -H "Content-Length: 0" | python -m json.tool
 
 ## logs-tail-axiom: Print the Axiom dataset URL + sample APL query (convenience; opens nothing local)
 logs-tail-axiom:
