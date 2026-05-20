@@ -2050,3 +2050,86 @@ make planning-status                    # 应该 zero drift
 - 若想分散试错风险 / 多条线并行 → 路 B 先,因 Phase 02.1 backlog 不阻塞 m2
 
 ---
+
+## SESSION 22 EOD pt 2 — 2026-05-20 (Phase 02.1 planning 闭环)
+
+### 完成项
+
+1. **Phase 02.1 inserted into ROADMAP** (commit `c16cda1`)
+   - 用 `gsd-tools phase insert 02 ...` decimal insert
+   - ROADMAP.md Phase 02.1 entry 完整化 (Goal + Refs + Scope + 不在 scope)
+
+2. **02.1-CONTEXT.md 落地** (commit `c16cda1`)
+   - 4 个 AskUserQuestion rounds (scope meta + #7/#8/#6 各一轮)
+   - 7 decisions 锁: D-01..D-07
+   - 4 the agent's discretion 推给 planner
+
+3. **02.1-RESEARCH.md** (researcher sonnet, HIGH confidence)
+   - 7 focus areas: Fly probe / IETF strict / Starlette middleware / scheduler.unpause / Sentry breadcrumb / chaos automation / future /control/* router
+   - Validation Architecture 段 (workflow §5.5 nyquist 要求)
+   - Plan Task Recommendations + Open Questions for Planner
+
+4. **02.1-PATTERNS.md** (pattern-mapper sonnet)
+   - 9 文件 analog 全 cover, 0 missing
+   - control.py → scan.py 直接 copy + path guard 改
+   - test_control_unpause.py → test_http_scan.py
+   - 关键 pattern: ControlAuthMiddleware 独立 not 共享 scan.py (关注点分离)
+
+5. **02.1-VALIDATION.md** — 10 task verification map + Wave 0 requirements
+
+6. **4 PLAN.md 落地** (planner opus, 3 waves)
+   - 02.1-01 (#7 fail-soft, D-01/D-02): 3 tasks (Wave 1)
+   - 02.1-02 (#8 unpause endpoint, D-03/D-04/D-22): 5 tasks (Wave 1)
+   - 02.1-03 (#6 /healthz, D-05/D-06): 5 tasks (Wave 2)
+   - 02.1-04 (docs closure + VALIDATION frontmatter flip, D-07): 3 tasks (Wave 3)
+
+7. **plan-checker iteration loop** (commit `8949845`)
+   - Iteration 1: 1 BLOCKER + 3 WARNINGs (VALIDATION/PATTERNS/PLAN 文档对齐 issues)
+   - Revision: targeted 修法 4 处
+   - Iteration 2: ✅ VERIFICATION PASSED, 4/4 prior issues resolved, 0 regressions
+
+8. **8 commits this session total 全 push origin/main**:
+   - `5267297` docs(02): Phase 02 LEARNINGS.md
+   - `a5c4e0d` docs(m2-02): 02-1-PLAN.md add Revision History
+   - `ed28f4d` docs(m2): T2 Option B locked + IMDEA Type-2
+   - `c16cda1` docs(02.1): insert Phase 02.1 + CONTEXT
+   - `8949845` docs(02.1): RESEARCH + PATTERNS + VALIDATION + 4 plans
+
+### Session boundary cleanup (本会话末)
+
+- ✅ Git tree clean + sync with origin/main (8 commits 全 push)
+- ✅ `make planning-status` zero drift (含 Phase 02.1 4 plans NOT-STARTED)
+- ✅ MEMORY.md 修正分类:
+  - 新增 [project_phase-02-1-planned-2026-05.md](memory/project_phase-02-1-planned-2026-05.md) (VERIFIED)
+  - 新增 [project_m2-t2-locked-2026-05.md](memory/project_m2-t2-locked-2026-05.md) (VERIFIED — Option B locked)
+  - 修正 NEXT 段从 "/gsd-discuss-phase 02.1" → "/gsd-execute-phase 02.1"
+  - 修正 commit count 3 → 5 → 8 (累计本 session 总数)
+  - CURRENT-CALL 段从 3 项 (Phase 02.1 backlog + M2 T2 + BS) 精简到 2 项 (BS on-call + 路 A/B 倾向)
+- ✅ STATE.md current_phase 02 → 02.1 (planning complete, ready to execute), status planned
+
+### [NEXT] 下次会话从这里开始
+
+```bash
+/gsd-resume-work --ws m1-perception      # 推荐路 A
+make planning-status                       # 应该 zero drift
+curl -sS https://polyarb-l1.fly.dev/health # overall=pass/warn 正常
+```
+
+**第 1 步 (推荐路 A)**:
+```
+/gsd-execute-phase 02.1 --ws m1-perception
+```
+
+Wave 1 (Plan 01 + Plan 02 parallel) 含 2 个 `checkpoint:human-verify`:
+- **Plan 01 Task 3**: chaos Inj 3 复跑 (`flyctl secrets unset POLYARB_SUPABASE_SERVICE_KEY -a polyarb-l1` 等)
+- **Plan 02 Task 5**: chaos Inj 4 复跑 (复用 Inj 2-v2 模式 + `make unpause-prod`)
+
+**或第 1 步 (备选路 B)**:
+```
+/gsd-resume-work --ws m2-combinatorial
+```
+然后写一个新 plan `02-2-PLAN.md` 补 ≥3 IMDEA Type-2 测试。
+
+详见: [Phase 02.1 planned 2026-05](memory/project_phase-02-1-planned-2026-05.md) + [M2 T2 locked 2026-05](memory/project_m2-t2-locked-2026-05.md)
+
+---
