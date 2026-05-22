@@ -3,39 +3,43 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 02.1
-status: executing
-stopped_at: SESSION 20 EOD (2026-05-19) — Wave 4 完整收尾 + git tree/MEMORY/STATE 全部干净
-last_updated: "2026-05-20T16:36:19.546Z"
-last_activity: 2026-05-20
+status: complete (awaiting /gsd-extract_learnings)
+stopped_at: SESSION 23 (2026-05-22) — Phase 02.1 全 4 plans 闭环 (BUG-6 + BUG-7 + BUG-8 修完, Inj 3-v2 + Inj 4 + Inj #6-verification 3 段 SOAK-LOG, 6/6 truths verified live in prod for Plan 03; Plan 01 partial PASS truth-2 deferred to Phase 02.2 backlog)
+last_updated: "2026-05-22T02:10:00.000Z"
+last_activity: 2026-05-22
 progress:
   total_phases: 5
-  completed_phases: 3
-  total_plans: 24
-  completed_plans: 20
-  percent: 83
+  completed_phases: 4
+  total_plans: 28
+  completed_plans: 24
+  percent: 86
 ---
 
 # Project State
 
 ## Current Position
 
-Phase: 02.1 (phase-02-fix-up-2-p1-backlog-health-503-trade-off) — EXECUTING
-Plan: 1 of 4
-**Status:** Executing Phase 02.1
-**Current Phase:** 02.1
-**Last Activity:** 2026-05-20
-**Last Activity Description:** Phase 02.1 execution started
+Phase: 02.1 (phase-02-fix-up-2-p1-backlog-health-503-trade-off) — ✅ **COMPLETE** (awaiting /gsd-extract_learnings)
+Plan: 4 of 4 ✅ (all SUMMARY landed, planning-status zero drift)
+**Status:** Phase 02.1 hard gate passed
+**Current Phase:** 02.1 (awaiting LEARNINGS)
+**Last Activity:** 2026-05-22
+**Last Activity Description:** Phase 02.1 全闭环 — 3 bug 修 + 3 chaos PASS + docs/learning/09 + VALIDATION nyquist_compliant=true
 
 ## Progress
 
 **Phases Complete:** 2 (Phase 01 + Phase 01.1) + Phase 02 hard gate passed (awaiting LEARNINGS)
 **Phase 01.1 status:** ✅ COMPLETE — LEARNINGS extracted 2026-05-12 (14 decisions / 12 lessons / 10 patterns / 8 surprises); deployment thread locked; 6 plans + 4 acceptance amendments shipped
 **Phase 02 status:** ✅ HARD GATE PASSED — Wave 1+2+2.5+3+3.5+4+5 全 ✅;5 个 prod chaos injection 完成;alert chain end-to-end verified live in prod (Sentry + Telegram + Sentry dashboard 三路). 待 `/gsd-extract_learnings 02 --ws m1-perception`
-**Phase 02.1 backlog (deferred bugs, 启动 Phase 03 前必修)**:
+**Phase 02.1 status:** ✅ **COMPLETE** (2026-05-22) — 3 bug 修完, prod ops 闭环
 
-  - #6 trade-off: `/health` 503 触发 Fly proxy 切流量 (IETF strict vs Fly proxy 行为冲突)
-  - #7 P1: fail-soft 互相抵消 (撤 secret 场景 `mirror_enabled=False` → 静默)
-  - #8 P1: daemon PAUSED 无 prod-friendly unpause endpoint (现需 SSH+sqlite3+restart 三步)
+  - ✅ #7 BUG: fail-soft 撤 secret → audit log + Sentry breadcrumb (Plan 02.1-01, 5 commits, Inj 3-v2 partial PASS 3/4 truths; truth 2 breadcrumb UI 验证 design-unreachable, 修法 A 推 Phase 02.2)
+  - ✅ #8 BUG: daemon PAUSED → `make unpause-prod` 一条命令 (Plan 02.1-02, 7 commits, Inj 4 PASS 5/6 truths via container localhost + BUG-6 cross-injection 实证)
+  - ✅ #6 BUG: /healthz always-200 + fly.toml probe switch (Plan 02.1-03, 7 commits, Inj #6-verification PASS 6/6 truths in prod — BUG-6 + BUG-8 联合修复 prod ops 路径恢复)
+  - ✅ Phase 02.1 closure: docs/learning/09-生产化运维.md + 00-INDEX 更新 + VALIDATION nyquist_compliant=true (Plan 02.1-04, 4 commits)
+
+**Phase 02.2 backlog (carried forward)**:
+  - Truth 2 修法 A: mirror **成功路径**也 emit `category=mirror` breadcrumb (~3 行 code at supabase_mirror.push_snapshot), 让 mirror failed event 上一定带 mirror crumb. 详见 02-SOAK-LOG.md Inj 3-v2 段
 
 **Phase 1.5 status:** ❌ REVERTED (历史) — `filterDate` API 参数不存在；方向重定为 WebSocket
 **Test count:** 459+ m1-perception tests green (Plan 02-07 +22 chaos tests + 2 scheduler_interval tests; 3 pre-existing failures still deferred)

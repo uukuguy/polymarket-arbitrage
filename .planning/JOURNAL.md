@@ -2133,3 +2133,83 @@ Wave 1 (Plan 01 + Plan 02 parallel) 含 2 个 `checkpoint:human-verify`:
 详见: [Phase 02.1 planned 2026-05](memory/project_phase-02-1-planned-2026-05.md) + [M2 T2 locked 2026-05](memory/project_m2-t2-locked-2026-05.md)
 
 ---
+
+## SESSION 23 — 2026-05-22 (Phase 02.1 execute 全闭环)
+
+### 完成项 (all in one session, Claude 自动驱动)
+
+1. **Wave 1 Plan 02.1-01 ✅** (BUG-7 fail-soft visibility, 5 commits)
+   - orchestrator.step-7.5 else 分支 audit log + Sentry breadcrumb
+   - 2 unit tests + RED→GREEN
+   - **Inj 3-v2 chaos verification**: log truth ✅, fail-soft truth ✅, L7 truth ✅. Breadcrumb UI truth = **design-unreachable** (fail-soft 路径不抛 exception → Sentry buffer 永不上传). 用 Sentry API 自己拉 PYTHON-A 200 breadcrumbs 全扫确认 (`event:read + project:read` scope, EU region). Phase 02.2 修法 A 入 backlog.
+
+2. **Wave 1 Plan 02.1-02 ✅** (BUG-8 /control/unpause endpoint, 7 commits)
+   - src/polyarb/http/control.py: ControlAuthMiddleware + 3 routes (unpause + pause/status stubs)
+   - app.py register + Makefile `make unpause-prod`
+   - 5 unit tests, path guard 不拦 /health 和 /scan ✓
+   - **Inj 4 chaos verification**: 完整 PAUSED → unpause → idempotent → 401 sentinel **5/6 truths PASS**. 触发 Telegram + Sentry 双告警邮件 ✓ (alert chain L4 unconditional fallback 实证)
+   - **Cross-bug discovery**: BUG-8 chaos 撞上 BUG-6 - Fly proxy 看 /health=503 切流量, make unpause-prod 经 prod proxy 不可达. 从 container localhost:8080 调通 → BUG-8 endpoint code 完全 work, 只是 prod 路径暂阻待 Plan 03 修
+
+3. **Wave 2 Plan 02.1-03 ✅** (BUG-6 /healthz, 7 commits)
+   - _build_health_checks() shared helper 抽出
+   - /healthz always-200 + body schema mirror /health
+   - fly.toml [http_service.checks] path → /healthz + Makefile smoke-healthz
+   - 4 unit tests, /health IETF strict 不变
+   - **Inj #6-verification chaos**: cross-injection (gamma-invalid) → /health=503 同时 /healthz=200 + Fly proxy 仍正常路由 (vs Inj 4 critical → /control/unpause 经 proxy 路径恢复). **6/6 truths PASS in prod**. BUG-6 + BUG-8 联合修复 prod ops 闭环实证.
+
+4. **Wave 3 Plan 02.1-04 ✅** (docs closure + VALIDATION flip, 4 commits)
+   - docs/learning/09-生产化运维.md (324 行, 21 file:line refs, 18 D-* decision refs, 5 self-check)
+   - docs/learning/00-INDEX.md 加 09 章节
+   - 02.1-VALIDATION.md frontmatter triplet: status=complete + nyquist_compliant=true + wave_0_complete=true
+   - Phase 02.1 关闭凭证 3 段 SOAK-LOG 整合
+
+### 验证手法升级 (重要 process 学习)
+
+会话中段用户反馈: **"我觉得最好你自己能验证清楚应该验证的, 不是把这么复杂的验证交给用户人工来做."**
+
+→ 写入 [feedback_verification-ownership-2026-05](memory/feedback_verification-ownership-2026-05.md) memory.
+→ 改用 Sentry API token (`event:read + project:read` EU region) 自己拉 event JSON 解析 breadcrumbs, 取代用户手翻 UI.
+→ Inj 4 + Inj #6-verification 全程 Claude 跑 + Claude judge verdict + 写 SOAK-LOG. 用户没翻一张 Sentry 截图.
+→ plan-checker 阶段就要审视 "truth 在 prod 是否可观测" — 本次 Plan 01 truth 2 design-unreachable 应该 plan-checker 抓到.
+
+### 关键 commits (本 session)
+
+- `d0ed6aa` docs(02.1-01): Inj 3-v2 verdict — partial PASS truth 2 deferred (+ probe script)
+- `ea2d456` docs(02.1-01): backfill Inj 3-v2 closure SHA
+- `0e4300f` docs(02.1-02): Inj 4 verdict — 5/6 PASS + BUG-6 cross-injection evidence
+- `f0f25f4` docs(02.1-02): backfill Inj 4 SHA
+- `be9d05f` docs(02.1-03): Inj #6-verification PASS — BUG-6 closure live in prod
+- `119d4d8` docs(02.1-03): backfill Inj #6-verification SHA
+- `ddfd037` docs(02.1-04): docs/learning/09-生产化运维.md (324 lines)
+- `029b5e7` docs(02.1-04): INDEX 加入 09
+- `932f1cb` chore(02.1-04): VALIDATION → complete + nyquist_compliant=true
+- `e1d5aee` docs(02.1-04): SUMMARY landing
+- (+ executor agent 落的 Plan 03/04 各 task commits: `bd3e65e`/`6df27c6`/`6a101bc`/`7ceb591`/`d9c7369` for Plan 03)
+
+### 重要 process 凭证
+
+- Plan 02.1-01 / 02 / 03 / 04 全部 SUMMARY ✓ + ROADMAP marked complete + planning-status zero drift
+- 2 个 feedback memory 落库 (verification-ownership + alert-chain interaction observation)
+- prod daemon 持续运行中 (cleanup 后 /health 恢复 pass)
+- 0 commits 用 --no-verify (所有 commits 经 pre-commit hook 验)
+
+### [NEXT] 下次会话从这里开始
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                       # 应该 zero drift
+curl -sS https://polyarb-l1.fly.dev/health # overall pass/warn (mirror tick 后)
+curl -sS https://polyarb-l1.fly.dev/healthz # 永远 200
+```
+
+**第 1 步 (推荐)**:
+```
+/gsd-extract_learnings 02.1 --ws m1-perception
+```
+Phase 02.1 LEARNINGS 落库, 然后开 Phase 03 discuss / 或者切 m2-combinatorial workstream 跑 T2 IMDEA validation.
+
+**Phase 02.2 backlog (truth 2 修法 A)**:
+- src/polyarb/storage/supabase_mirror.py push_snapshot 成功路径加 `sentry_sdk.add_breadcrumb(category="mirror", level="info", message="mirror ok")` ~3 行
+- 让 mirror failed event (PYTHON-A) 上一定带最近一次 mirror crumb
+- 优先级低 (truth 1/3/4 已 PASS, BUG-7 核心目标已闭环)
+
