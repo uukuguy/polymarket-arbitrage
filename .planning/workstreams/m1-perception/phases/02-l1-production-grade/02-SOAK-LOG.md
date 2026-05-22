@@ -418,6 +418,6 @@ proxy lax error.message="could not find a good candidate within 40 attempts at l
 request.url="https://polyarb-l1.fly.dev/control/unpause"
 ```
 
-**Closure SHA**: <填本次 commit SHA>
+**Closure SHA**: 0e4300f
 
 **Status: PASS (5/6 truths) + BUG-6 cross-injection evidence; Plan 02.1-03 上线后 truth 1 prod 路径自动闭环**
