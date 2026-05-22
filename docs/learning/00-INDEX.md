@@ -17,6 +17,14 @@
 | 06 | [代码安全约束（F-1 ~ F-8）](06-security-invariants.md) | 为什么每个 `float()` 都包 try、为什么 `MAX_PAGES=1000`、F 编号代表什么 |
 | 07 | [观察市场（Observation Toolkit + Translation）](07-观察市场.md) | 6 个配方分别看什么、workflow 怎么走、翻译/AST/diff 三个设计取舍、5 道自检题 |
 | 08 | [生产化部署（Phase 02 L1 Production Grade）](08-生产化部署.md) | asyncio daemon 为什么要等 server.started、DEGRADED vs FAILED 的区别、PAUSED 跨重启保持的意义、/scan HMAC trust-split、soak gate 判定标准 |
+| 09 | [生产化运维（Phase 02.1 fix-up）](09-生产化运维.md) | fail-soft 不等于 silent / `/control/unpause` HMAC 设计 / `/health` IETF strict vs `/healthz` Fly-friendly 的语义分离 / BUG-8 与 BUG-6 的互锁验证（Inj 4 实证） |
+
+## Phase 02.1 教学增量（2026-05）
+
+Phase 02.1 (fix-up) 在 [09-生产化运维](09-生产化运维.md) 加入了三个生产化运维核心概念：
+- **fail-soft 可见性**（D-01）— 不抛 exception ≠ 不留 audit trail，撤 secret 路径必须 emit log + Sentry breadcrumb
+- **prod control endpoints**（D-03）— HMAC-protected `/control/unpause`，独立 ControlAuthMiddleware 与 scan.py 解耦
+- **IETF strict 监控与 platform probe 在路由层面的语义分离**（D-05/D-06）— `/health` 503 是告警信号正确，`/healthz` 永远 200 让 Fly proxy 不切流量
 
 ## 每篇文档的体例
 
