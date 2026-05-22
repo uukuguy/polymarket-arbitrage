@@ -35,7 +35,7 @@ primary_region = "ams"
     grace_period = "120s"
     interval = "30s"
     method = "GET"
-    path = "/health"
+    path = "/healthz"
     timeout = "10s"
 
 # VM sizing — 2026-05-16 SESSION 19 final: 1GB after empirical OOM observations.

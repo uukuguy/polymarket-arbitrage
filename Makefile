@@ -242,7 +242,7 @@ triple-check:
 # tail-logs-local     — stream daemon stdout (for a separately launched daemon)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: daemon-run-local smoke-health-local tail-logs-local
+.PHONY: daemon-run-local smoke-health-local smoke-healthz tail-logs-local
 
 ## daemon-run-local: Start the polyarb daemon locally on :19080 (HMAC-authenticated /scan + /health). Ctrl-C to stop. Override port via POLYARB_HTTP_PORT.
 daemon-run-local:
@@ -261,6 +261,14 @@ smoke-health-local:
 	echo ">> smoke-health-local — GET http://127.0.0.1:$$PORT/health"; \
 	echo ""; \
 	curl -sf http://127.0.0.1:$$PORT/health | python3 -m json.tool
+
+## smoke-healthz: Verify prod /healthz always returns 200 (Fly probe target — D-05). No auth required.
+smoke-healthz:
+	@echo ">> smoke-healthz — GET https://polyarb-l1.fly.dev/healthz"
+	@STATUS=$$(curl -s -o /tmp/healthz_body.json -w "%{http_code}" https://polyarb-l1.fly.dev/healthz); \
+	echo "HTTP $$STATUS"; \
+	cat /tmp/healthz_body.json | python3 -m json.tool; \
+	if [ "$$STATUS" = "200" ]; then echo "PASS: /healthz returned 200"; else echo "FAIL: expected 200 got $$STATUS"; exit 1; fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 03: Supabase mirror + R2 archive
