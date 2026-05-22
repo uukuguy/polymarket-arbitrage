@@ -421,3 +421,52 @@ request.url="https://polyarb-l1.fly.dev/control/unpause"
 **Closure SHA**: 0e4300f
 
 **Status: PASS (5/6 truths) + BUG-6 cross-injection evidence; Plan 02.1-03 上线后 truth 1 prod 路径自动闭环**
+
+---
+
+## Inj #6-verification — /healthz + fly.toml probe switch (BUG-6 closure, 2026-05-22)
+
+**Plan:** [02.1-03](../02.1-phase-02-fix-up-2-p1-backlog-health-503-trade-off/02.1-03-PLAN.md) (D-05 / D-06)
+
+**Procedure:**
+
+```bash
+# Baseline (post-deploy, before injection):
+curl --noproxy '*' https://polyarb-l1.fly.dev/healthz  # → 200 status=warn
+curl --noproxy '*' https://polyarb-l1.fly.dev/health   # → 200 status=warn (IETF: warn=200)
+flyctl checks list -a polyarb-l1                       # → passing (Fly probe now sees /healthz)
+
+# Cross-injection: force /health=fail
+flyctl secrets set POLYARB_GAMMA_URL=https://gamma-invalid.example.com \
+                   POLYARB_SCHEDULER_INTERVAL_S=30 -a polyarb-l1
+
+# Wait ~3min for 3 consecutive snapshot failures, then verify:
+curl --noproxy '*' https://polyarb-l1.fly.dev/health    # → 503 status=fail  (IETF strict)
+curl --noproxy '*' https://polyarb-l1.fly.dev/healthz   # → 200 status=fail  (D-05/D-06)
+flyctl checks list                                       # → passing  (Fly probe still happy)
+curl --noproxy '*' -X POST https://polyarb-l1.fly.dev/control/unpause -H "Content-Length: 0"
+# → 401 "missing X-Signature header"  (endpoint reachable, BUG-6 + BUG-8 联合修复实证)
+
+# Cleanup
+flyctl secrets set POLYARB_GAMMA_URL=https://gamma-api.polymarket.com -a polyarb-l1
+flyctl secrets unset POLYARB_SCHEDULER_INTERVAL_S -a polyarb-l1
+```
+
+**Truth-by-truth verdict** (must_haves.truths from 02.1-03-PLAN.md):
+
+| # | Truth | 状态 | Evidence |
+|---|---|---|---|
+| 1 | GET /healthz 永远返 HTTP 200 (即便 underlying checks 显示 fail) | ✅ PASS | Cross-injection 期间 /healthz [HTTP 200] body status=fail |
+| 2 | GET /health 仍遵守 IETF strict — fail → 503 | ✅ PASS | Cross-injection 期间 /health [HTTP 503] body status=fail |
+| 3 | fly.toml [http_service.checks] path 指向 /healthz | ✅ PASS | Deploy 后 servicecheck-00-http-8080 OUTPUT 显示 body 来自 /healthz; daemon PAUSED-pre-recovery 期间 check 仍 passing (vs Inj 4 时 critical) |
+| 4 | /healthz body 与 /health 共享 schema (4 checks + status + serviceId + version + releaseId) per D-06 | ✅ PASS | curl 两 endpoint 比对, body 同 shape; 4 checks 全到位 |
+| 5 | /healthz 和 /health 都是 public (no HMAC) — D-22 保持 | ✅ PASS | curl 不带 X-Signature 直接 200 OK; ControlAuthMiddleware path guard only matches /control/* |
+| 6 | _build_health_checks() shared helper 抽出 — check 逻辑不分叉 | ✅ PASS | health.py refactor; /health 和 /healthz 都调 helper; 4 unit tests + 现有 regression 全 GREEN |
+
+**Bonus — cross-bug interaction repair**:
+
+Inj 4 (2026-05-22 00:30Z) 期间观察到 Fly proxy 切流量: `error.message="could not find a good candidate within 40 attempts"`. **Inj #6-verification (now) 期间相同 /health=503 状态下, Fly proxy 仍正常路由** — `curl /control/unpause` 经 Fly proxy 返 endpoint 自己的 401, 不再被 proxy 拦截. **BUG-6 + BUG-8 联合修复 prod ops 闭环已实证**.
+
+**Closure SHA**: <填本次 commit SHA>
+
+**Status: PASS (6/6 truths verified live in prod, cross-injection 验证 BUG-6 与 BUG-8 互锁修复)**

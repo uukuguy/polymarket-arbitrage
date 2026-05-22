@@ -86,12 +86,12 @@ Plans:
 - `.planning/workstreams/m1-perception/phases/02.1-phase-02-fix-up-2-p1-backlog-health-503-trade-off/02.1-CONTEXT.md` (7 decisions locked)
 - `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-LEARNINGS.md` §§ L6/L7/P14 (verification 设计依据)
 - `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-07-SUMMARY.md` § "8 个新发现 bug" 表 (#6/#7/#8 命名定义)
-**Plans:** 4 plans (3 waves)
+**Plans:** 3/4 plans executed
 
 Plans:
-- [ ] 02.1-01-PLAN.md — Wave 1: Bug #7 fail-soft visibility (orchestrator step 7.5 audit log + Sentry breadcrumb + chaos Inj 3-v2 verification, D-01/D-02)
-- [ ] 02.1-02-PLAN.md — Wave 1: Bug #8 prod unpause endpoint (src/polyarb/http/control.py + ControlAuthMiddleware + make unpause-prod + chaos Inj 4 verification, D-03/D-04/D-22)
-- [ ] 02.1-03-PLAN.md — Wave 2: Bug #6 /healthz endpoint + fly.toml probe path 切换 (health.py refactor + _build_health_checks helper + Fly checks smoke, D-05/D-06)
+- [x] 02.1-01-PLAN.md — Wave 1: Bug #7 fail-soft visibility (orchestrator step 7.5 audit log + Sentry breadcrumb + chaos Inj 3-v2 verification, D-01/D-02)
+- [x] 02.1-02-PLAN.md — Wave 1: Bug #8 prod unpause endpoint (src/polyarb/http/control.py + ControlAuthMiddleware + make unpause-prod + chaos Inj 4 verification, D-03/D-04/D-22)
+- [x] 02.1-03-PLAN.md — Wave 2: Bug #6 /healthz endpoint + fly.toml probe path 切换 (health.py refactor + _build_health_checks helper + Fly checks smoke, D-05/D-06)
 - [ ] 02.1-04-PLAN.md — Wave 3: docs/learning/09-生产化运维.md + 00-INDEX 更新 + Phase 02.1 closure verification (per CLAUDE.md 教学纪律, D-07)
 
 Scope (3 bug):
