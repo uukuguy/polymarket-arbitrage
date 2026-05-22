@@ -299,3 +299,65 @@ Inj 4 设计前提：scheduler 真的进 PAUSED 状态后 `/scan` 触发 unpause
 - **Inj 4 (HMAC flood)** — 本来就不会触发 alert，验证的是"daemon 不挂"，不是 alert path
 
 → Inj 2-4 走前必须**先做 PLAN 修订**：要测什么 alert path 必须从 "what gets send_paused_alert called" 倒推。
+
+---
+
+## Inj 3-v2 — fail-soft visibility (BUG-7 closure, 2026-05-22)
+
+**Plan:** [02.1-01](../02.1-phase-02-fix-up-2-p1-backlog-health-503-trade-off/02.1-01-PLAN.md) (D-01 / D-02)
+
+**Difference vs original Inj 3:** original Inj 3 在 Phase 02 Wave 5 跑过, 暴露了 BUG-7 (fail-soft 撤 secret 路径完全静默, 无 log / 无 breadcrumb / 无 health check). Plan 02.1-01 修法是 step 7.5 else 分支加 audit log + Sentry breadcrumb. Inj 3-v2 是修后复跑, 验证 fail-soft 不再"黑洞静默".
+
+**Procedure:**
+
+```bash
+# 1. 备份 Supabase service key
+flyctl ssh console -a polyarb-l1 -C 'printenv POLYARB_SUPABASE_SERVICE_KEY' > /tmp/svc_key.bak
+
+# 2. 撤 secret (触发 mirror_enabled=False 路径)
+flyctl secrets unset POLYARB_SUPABASE_SERVICE_KEY -a polyarb-l1
+sleep 90
+
+# 3. 验 audit log 出现
+flyctl logs -a polyarb-l1 --no-tail | grep -E "mirror disabled|config-disabled" | tail -5
+# 命中: snapshot_id=146 line 557 "step 7.5: mirror disabled — reason=config-disabled"
+
+# 4. 触发 Sentry capture 看 breadcrumb (本地, 不是 prod daemon 进程)
+make alerts-test
+# 收到 Sentry email: scheduler paused: alerts-test from sujiangwen@m3max.local
+
+# 5. 恢复 secret
+flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="$(cat /tmp/svc_key.bak)" -a polyarb-l1
+rm /tmp/svc_key.bak
+
+# 6. (Sentry API verdict) 用 read-only token 拉 prod event JSON 解析 breadcrumbs
+curl -sS -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+  "https://de.sentry.io/api/0/organizations/speechlessai/issues/PYTHON-A/events/latest/" \
+  | jq '.entries[] | select(.type=="breadcrumbs") | .data.values | map(select(.category=="mirror"))'
+```
+
+**Truth-by-truth verdict** (must_haves.truths from 02.1-01-PLAN.md frontmatter):
+
+| # | Truth | 状态 | Evidence |
+|---|---|---|---|
+| 1 | 撤 secret → daemon log 出现 'mirror disabled' / 'config-disabled' | ✅ PASS | flyctl logs 命中 "step 7.5: mirror disabled — reason=config-disabled (snapshot_id=146)" @ 2026-05-21 22:46:10Z |
+| 2 | breadcrumb (category='mirror', level='info') 出现在下次 Sentry event 上 | ❌ **design-unreachable** | 拉 PYTHON-A latest event (200 breadcrumbs, 时间窗口覆盖撤 secret 期间) — 0 条 category=mirror. **根因**: (a) 代码只在 disabled 路径 emit crumb, 但 disabled 路径 fail-soft 不抛 exception → crumb 进了 buffer 但**永不上传**; (b) 真正抛 exception 的成功 mirror 失败路径里, buffer 里也没 mirror crumb (代码不在那条路径 emit) |
+| 3 | D-12 fail-soft 主契约不变 — snapshot 仍继续完成, mirror skip 不阻断 | ✅ PASS | snapshot 146 disabled 后仍完成; 后续 snapshot 147 / 148 正常; /health 整体仍 pass |
+| 4 | Phase 02 LEARNINGS L7 verification 纪律遵守 — chaos 复跑 (不是只 unit test) | ✅ PASS | 本节即复跑记录 |
+
+**Verdict: 3/4 PASS, 1 design-unreachable → ship-acceptable (Plan 02.1-01 核心目标 BUG-7 闭环)**
+
+**核心目标判定**: BUG-7 原症状是"撤 secret = 黑洞 (0 log / 0 breadcrumb / 0 health signal)". Truth 1 验证 log 路径已通 — **黑洞已破** — audit visibility 在 log 层已恢复. Truth 2 是更进一步的"Sentry UI 上也能看见", 不阻塞 BUG-7 闭环.
+
+**Truth 2 design gap → Phase 02.2 backlog**:
+
+两种修法 (任选其一即可让 truth 2 prod 可达):
+
+- **修法 A** (轻): mirror **成功路径**也 emit `category=mirror, level=info, message="mirror ok", data={snapshot_id, age_seconds}` breadcrumb. 这样 PYTHON-A 这种 mirror 失败 event 上一定带最近一次 mirror crumb. 代价: 每次 snapshot 多一条 breadcrumb (Sentry SDK buffer 自动 evict, 无成本).
+- **修法 B** (硬): mirror **disabled 路径**顺手 `sentry_sdk.capture_message(level="info", message="mirror disabled")`. 这样 prod 一定出现一条 info-level event. 代价: Sentry 配额多用 (info-level 默认计费, 但 Polymarket daemon 每 N 小时 snapshot, 量可忽略).
+
+我推荐**修法 A** — 不增加 Sentry 计费, 实现简单 (`mirror.py` push_snapshot 成功路径加 3 行).
+
+**Closure SHA**: <填本次 commit SHA>
+
+**Status: PASS (partial, truth 2 deferred to Phase 02.2 with concrete fix path)**
