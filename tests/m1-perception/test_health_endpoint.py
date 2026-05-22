@@ -141,3 +141,76 @@ def test_no_snapshot_returns_fail(
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "fail"
+
+
+# ---------------------------------------------------------------------------
+# Plan 02.1-03 — /healthz Fly-friendly probe (D-05 / D-06)
+#
+# /healthz mirrors /health body schema but ALWAYS returns HTTP 200 regardless
+# of underlying check status. Fly platform probe reads only HTTP code, so this
+# keeps Fly proxy routing traffic even when daemon is PAUSED or
+# Supabase/R2 are stale. /health (IETF strict 503) remains for Better Stack.
+# ---------------------------------------------------------------------------
+
+
+def test_healthz_returns_200_when_fresh(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """Snapshot 1h ago (underlying pass) → /healthz HTTP 200."""
+    now_ms = int(time.time() * 1000)
+    one_hour_ago_ms = now_ms - int(1 * 3600 * 1000)
+    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=one_hour_ago_ms)
+
+    resp = http_test_client.get("/healthz")
+    assert resp.status_code == 200
+
+
+def test_healthz_returns_200_when_stale(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """Snapshot 15h ago (underlying warn) → /healthz HTTP 200."""
+    now_ms = int(time.time() * 1000)
+    fifteen_hours_ago_ms = now_ms - int(15 * 3600 * 1000)
+    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=fifteen_hours_ago_ms)
+
+    resp = http_test_client.get("/healthz")
+    assert resp.status_code == 200
+
+
+def test_healthz_returns_200_when_failed(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """Snapshot 26h ago (underlying fail) → /healthz STILL HTTP 200 (key D-05 differentiator)."""
+    now_ms = int(time.time() * 1000)
+    twenty_six_hours_ago_ms = now_ms - int(26 * 3600 * 1000)
+    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=twenty_six_hours_ago_ms)
+
+    resp = http_test_client.get("/healthz")
+    # KEY: NOT 503 — Fly probe sees 200, proxy keeps routing traffic.
+    assert resp.status_code == 200
+
+
+def test_healthz_body_has_status_field_and_content_type(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """GET /healthz body has status field + application/health+json content-type (D-06)."""
+    now_ms = int(time.time() * 1000)
+    twenty_six_hours_ago_ms = now_ms - int(26 * 3600 * 1000)
+    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=twenty_six_hours_ago_ms)
+
+    resp = http_test_client.get("/healthz")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "status" in body
+    assert body["status"] in ("pass", "warn", "fail")
+    # underlying state is fail; only HTTP wrapping differs from /health
+    assert body["status"] == "fail"
+    # D-06: same schema as /health
+    assert "checks" in body
+    # RESEARCH Pitfall 5: must use application/health+json content type
+    ct = resp.headers.get("content-type", "")
+    assert "health+json" in ct
