@@ -358,6 +358,6 @@ curl -sS -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
 
 我推荐**修法 A** — 不增加 Sentry 计费, 实现简单 (`mirror.py` push_snapshot 成功路径加 3 行).
 
-**Closure SHA**: <填本次 commit SHA>
+**Closure SHA**: d0ed6aa
 
 **Status: PASS (partial, truth 2 deferred to Phase 02.2 with concrete fix path)**
