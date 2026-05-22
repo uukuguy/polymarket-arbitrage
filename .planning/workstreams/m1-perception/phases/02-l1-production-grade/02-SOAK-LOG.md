@@ -467,6 +467,6 @@ flyctl secrets unset POLYARB_SCHEDULER_INTERVAL_S -a polyarb-l1
 
 Inj 4 (2026-05-22 00:30Z) 期间观察到 Fly proxy 切流量: `error.message="could not find a good candidate within 40 attempts"`. **Inj #6-verification (now) 期间相同 /health=503 状态下, Fly proxy 仍正常路由** — `curl /control/unpause` 经 Fly proxy 返 endpoint 自己的 401, 不再被 proxy 拦截. **BUG-6 + BUG-8 联合修复 prod ops 闭环已实证**.
 
-**Closure SHA**: <填本次 commit SHA>
+**Closure SHA**: be9d05f
 
 **Status: PASS (6/6 truths verified live in prod, cross-injection 验证 BUG-6 与 BUG-8 互锁修复)**
