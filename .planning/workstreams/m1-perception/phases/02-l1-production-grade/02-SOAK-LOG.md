@@ -361,3 +361,63 @@ curl -sS -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
 **Closure SHA**: d0ed6aa
 
 **Status: PASS (partial, truth 2 deferred to Phase 02.2 with concrete fix path)**
+
+---
+
+## Inj 4 — prod unpause endpoint (BUG-8 closure, 2026-05-22)
+
+**Plan:** [02.1-02](../02.1-phase-02-fix-up-2-p1-backlog-health-503-trade-off/02.1-02-PLAN.md) (D-03 / D-04 / D-22)
+
+**Procedure:**
+
+```bash
+# 1. 加速 scheduler + 注入 invalid Gamma URL → 3 consecutive failures → PAUSED
+flyctl secrets set POLYARB_SCHEDULER_INTERVAL_S=30 POLYARB_GAMMA_URL=https://gamma-invalid.example.com -a polyarb-l1
+# 等 ~3 min, 看到 SCHEDULER_PAUSED log + send_paused_alert ERROR log @ 00:16:58
+# (Telegram + Sentry email 双路告警实际收到 ✓)
+
+# 2. 恢复 Gamma URL (counter sticky, daemon 仍 PAUSED 即便 restart)
+flyctl secrets set POLYARB_GAMMA_URL=https://gamma-api.polymarket.com -a polyarb-l1
+# 验证: daemon 重启后日志仍持续 "scheduler is PAUSED, skipping tick"  ✓ (sticky 行为正确)
+
+# 3. 核心验证 — 从容器内部 localhost 调 endpoint (BUG-6 阻断 prod proxy 路径)
+flyctl ssh sftp shell -a polyarb-l1 --machine <app-id> << 'EOS'
+put /tmp/inj4_internal.sh /tmp/inj4_internal.sh
+EOS
+flyctl ssh console -a polyarb-l1 --machine <app-id> -C \
+  'sh -c "chmod +x /tmp/inj4_internal.sh && /tmp/inj4_internal.sh"'
+
+# 4. cleanup
+flyctl secrets unset POLYARB_SCHEDULER_INTERVAL_S -a polyarb-l1
+```
+
+**Truth-by-truth verdict** (must_haves.truths from 02.1-02-PLAN.md frontmatter):
+
+| # | Truth | 状态 | Evidence |
+|---|---|---|---|
+| 1 | PAUSED → 单条 `make unpause-prod` 切 RUNNING (无需 SSH+sqlite3+restart 三步) | ⚠️ **PASS via fallback** | endpoint code + 协议本身完整 work — 从容器内 localhost:8080/control/unpause 单 POST 即切. **prod proxy 路径暂阻** (BUG-6: /health=fail → Fly proxy 切流量 → "could not find a good candidate within 40 attempts at load balancing"). Plan 02.1-03 修 /healthz 上线后此 truth 自动 prod 可达. |
+| 2 | POST /control/unpause (HMAC valid, PAUSED) → 200 + RUNNING + counter=0 | ✅ PASS | `{"status":"ok","state":"RUNNING","failure_counter":0}` HTTP 200 |
+| 3 | POST /control/unpause (no/invalid HMAC) → 401 constant-time | ✅ PASS | `{"error":"missing X-Signature header"}` HTTP 401 |
+| 4 | POST /control/unpause (already RUNNING) → 200 + already_running (幂等) | ✅ PASS | `{"status":"already_running","state":"RUNNING"}` HTTP 200 |
+| 5 | /healthz + /health 不被 ControlAuthMiddleware 拦截 (path guard 只匹配 /control/*) | ✅ PASS | /health localhost 直接返 JSON (status=fail 是 IETF 内容, 不是 middleware 401) |
+| 6 | Telegram + Sentry 告警在 PAUSED 触发时真发出 | ✅ PASS bonus | send_paused_alert ERROR log @ 00:16:58.732; alert chain L4 (unconditional fallback) 生效 |
+
+**Verdict: 5/6 PASS + 1 partial-PASS (prod proxy 路径阻塞是 BUG-6 实证,不是 BUG-8 失败)**
+
+**Cross-bug interaction discovery (新发现, 进 thread learnings-meta)**:
+
+Inj 4 把 BUG-8 (no prod unpause) + BUG-6 (IETF strict vs Fly probe) **完全展开**: 
+- BUG-8 代码闭环, endpoint 完全 work
+- 但 prod 验证路径要走 Fly proxy → proxy 看 /health=fail (因 daemon PAUSED, snapshot stale) → 切流量 → make unpause-prod 在 prod 不可达
+- **两个 bug 是耦合的**: BUG-8 让 daemon PAUSED 进生产, BUG-6 让 PAUSED 期间 ops 失去 prod proxy 路径恢复能力 (只能 ssh)
+- Plan 02.1-03 修 /healthz 上线后, BUG-8 的"一条 make unpause-prod"UX 才在 prod 真闭环
+
+**实际 Fly proxy 报错** (proof of BUG-6 manifestation):
+```
+proxy lax error.message="could not find a good candidate within 40 attempts at load balancing"
+request.url="https://polyarb-l1.fly.dev/control/unpause"
+```
+
+**Closure SHA**: <填本次 commit SHA>
+
+**Status: PASS (5/6 truths) + BUG-6 cross-injection evidence; Plan 02.1-03 上线后 truth 1 prod 路径自动闭环**
