@@ -1,13 +1,28 @@
-"""IETF draft-inadarei-api-health-check-06 compliant /health endpoint.
+"""IETF draft-inadarei-api-health-check-06 compliant /health endpoint + Fly-friendly /healthz.
 
 Phase 02 Plan 02 — D-12 / D-13 / D-16.
+Phase 02.1 Plan 03 — D-05 / D-06: separate /healthz (always 200) from /health (IETF strict).
+
+Two endpoints, ONE underlying check logic (see _build_health_checks()):
+
+- GET /health (IETF strict) — Better Stack external probe target.
+    * 200 for pass/warn, 503 for fail.
+    * 503 is the alarm signal — Better Stack uptime probe interprets it as down.
+
+- GET /healthz (Fly-friendly) — Fly platform machine probe target (per fly.toml).
+    * ALWAYS 200 regardless of underlying check status.
+    * Status is reported in the JSON body, but Fly proxy reads only the HTTP code.
+    * This prevents Fly from withdrawing the machine from the routing pool when
+      daemon is PAUSED / Supabase mirror is stale / R2 upload failed —
+      observed during Phase 02 Inj 2 and confirmed in Plan 02.1-02 Inj 4
+      ("could not find a good candidate within 40 attempts at load balancing").
 
 Three-state health: pass | warn | fail
-- pass  → all checks green (HTTP 200)
-- warn  → at least one check degraded, none failed (HTTP 200)
-- fail  → at least one check failed (HTTP 503)
+- pass  → all checks green
+- warn  → at least one check degraded, none failed
+- fail  → at least one check failed
 
-Plan 02 checks (minimal set — Plan 03 adds supabase/r2):
+Plan 02 checks (Plan 03 adds supabase/r2):
 1. snapshot:last_success_age_seconds
    - pass  < 14h  (subset cron interval 12h + 2h buffer)
    - warn  14-25h
@@ -15,16 +30,18 @@ Plan 02 checks (minimal set — Plan 03 adds supabase/r2):
 2. snapshot:last_status
    - maps SnapshotStatus.OK → pass, DEGRADED → warn, FAILED → fail
    - if no snapshot → omitted from checks (age check already reports fail)
+3. supabase:mirror_age_seconds (when settings.supabase_mirror_enabled)
+4. r2:upload_recent_success (when settings.r2_enabled)
 
 Overall = worst-of all sub-checks (fail > warn > pass).
-HTTP 200 for pass/warn; 503 for fail (Better Stack convention).
 
-Security note (T-02-09): /health is intentionally PUBLIC (no HMAC).
-Better Stack uptime probe needs unauthenticated access. Response exposes only
-snapshot age + status enum — no DB schema, no IPs, no secrets.
+Security note (T-02-09 / T-02.1-6-01): both /health and /healthz are intentionally
+PUBLIC (no HMAC). Better Stack uptime probe + Fly platform probe both need
+unauthenticated access. Response exposes only snapshot age + status enum —
+no DB schema, no IPs, no secrets. (D-22 amendment + D-06.)
 
 Source: datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06
-        RESEARCH.md §8
+        RESEARCH.md §8 / 02.1-RESEARCH.md Area 1-2
 """
 from __future__ import annotations
 
@@ -41,6 +58,10 @@ HEALTH_CONTENT_TYPE = "application/health+json"
 _PASS_AGE_S = 14 * 3600     # < 14h → pass
 _WARN_AGE_S = 25 * 3600     # 14-25h → warn; > 25h → fail
 
+# Supabase mirror thresholds
+_MIRROR_WARN_S = 25 * 3600
+_MIRROR_FAIL_S = 48 * 3600
+
 
 def _utc_now_iso() -> str:
     """Current UTC timestamp in ISO 8601 format with Z suffix."""
@@ -53,26 +74,34 @@ def _severity(a: str, b: str) -> str:
     return a if order.get(a, 0) >= order.get(b, 0) else b
 
 
-async def health(request: Request) -> JSONResponse:
-    """GET /health — IETF三态 health response.
+def _build_health_checks(
+    store: Any,
+    settings: Any,
+    now_s: float,
+) -> tuple[dict[str, list[dict[str, Any]]], str]:
+    """Compute all health sub-checks and the overall status.
 
-    Reads from app.state.sqlite_store and app.state.settings.
-    All SQLite reads use mode=ro URI (P3.8: HTTP server never writes).
+    Shared by /health (IETF strict — fail → 503) and /healthz (always 200).
+    Both endpoints render the same JSON body shape; only the HTTP status code
+    differs (per D-06 — full-mirror body schema, do NOT diverge check logic).
+
+    Args:
+        store: SQLiteStore instance (read-only).
+        settings: Settings instance — drives optional mirror/r2 checks.
+        now_s: current epoch seconds (passed in so /health and /healthz agree
+               on age values within a single request handler invocation).
+
+    Returns:
+        (checks_dict, overall_status) where overall_status in {"pass","warn","fail"}.
     """
-    from polyarb.storage.sqlite_store import SQLiteStore
-
-    store: SQLiteStore = request.app.state.sqlite_store
-    settings = request.app.state.settings
-
     checks: dict[str, list[dict[str, Any]]] = {}
     overall = "pass"
-    now_s = time.time()
 
     # ── Check 1: snapshot age ─────────────────────────────────────────────
     last_snapshot = store.get_latest_snapshot()
 
     if last_snapshot is None:
-        age_s = None
+        age_s: float | None = None
         age_status = "fail"
         overall = _severity(overall, "fail")
     else:
@@ -126,11 +155,9 @@ async def health(request: Request) -> JSONResponse:
     # supabase:mirror_age_seconds — seconds since last successful Supabase push.
     # Uses supabase_mirror_at_ms column added in Plan 03.
     # warn if > 25h (cron interval 12h + 13h buffer); fail if > 48h.
-    _MIRROR_WARN_S = 25 * 3600
-    _MIRROR_FAIL_S = 48 * 3600
     if settings.supabase_mirror_enabled:
         if last_snapshot is not None and last_snapshot.get("supabase_mirror_at_ms") is not None:
-            mirror_age_s = now_s - last_snapshot["supabase_mirror_at_ms"] / 1000.0
+            mirror_age_s: float | None = now_s - last_snapshot["supabase_mirror_at_ms"] / 1000.0
             if mirror_age_s < _MIRROR_WARN_S:
                 mirror_status = "pass"
             elif mirror_age_s < _MIRROR_FAIL_S:
@@ -159,7 +186,7 @@ async def health(request: Request) -> JSONResponse:
     if settings.r2_enabled:
         if last_snapshot is not None and last_snapshot.get("parquet_r2_url"):
             r2_status = "pass"
-            r2_value = True
+            r2_value: bool = True
         elif last_snapshot is not None:
             # Snapshot exists but no R2 URL — warn (first run or upload failed)
             r2_status = "warn"
@@ -178,8 +205,12 @@ async def health(request: Request) -> JSONResponse:
             }
         ]
 
-    # ── Build response ─────────────────────────────────────────────────────
-    body = {
+    return checks, overall
+
+
+def _build_health_body(overall: str, checks: dict[str, list[dict[str, Any]]], settings: Any) -> dict[str, Any]:
+    """Shared IETF body shape — same for /health and /healthz (D-06 full mirror)."""
+    return {
         "status": overall,
         "version": settings.version,
         "releaseId": settings.release_id,
@@ -188,5 +219,52 @@ async def health(request: Request) -> JSONResponse:
         "checks": checks,
     }
 
+
+async def health(request: Request) -> JSONResponse:
+    """GET /health — IETF strict三态 health response.
+
+    Returns 200 for pass/warn, 503 for fail. Better Stack外探针 reads this
+    endpoint — 503 is the告警 signal. Fly platform probe reads /healthz
+    instead (per Phase 02.1 D-05).
+
+    Reads from app.state.sqlite_store and app.state.settings.
+    All SQLite reads use mode=ro URI (P3.8: HTTP server never writes).
+    """
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store: SQLiteStore = request.app.state.sqlite_store
+    settings = request.app.state.settings
+
+    checks, overall = _build_health_checks(store, settings, time.time())
+    body = _build_health_body(overall, checks, settings)
     http_status = 503 if overall == "fail" else 200
     return JSONResponse(body, status_code=http_status, media_type=HEALTH_CONTENT_TYPE)
+
+
+async def healthz(request: Request) -> JSONResponse:
+    """GET /healthz — Fly-friendly probe. ALWAYS HTTP 200.
+
+    Same JSON body schema as /health (D-06 full mirror). The underlying check
+    status is exposed in body["status"], but the HTTP code is always 200 so
+    Fly platform's [http_service.checks] never marks the machine unhealthy.
+
+    Why this matters (BUG-6, Phase 02 Inj 2 + Plan 02.1-02 Inj 4):
+    Fly proxy stops routing traffic to a machine whose service check fails.
+    If we point Fly at /health (IETF strict) then a PAUSED daemon /
+    stale Supabase mirror / failed R2 upload pulls the entire machine out of
+    the routing pool — including /control/unpause, blocking recovery.
+    /healthz keeps the proxy happy so external administrative endpoints
+    stay reachable, while /health continues to deliver true alarm semantics
+    to Better Stack.
+
+    D-22 + D-06: public endpoint, no HMAC, same body schema as /health.
+    """
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store: SQLiteStore = request.app.state.sqlite_store
+    settings = request.app.state.settings
+
+    checks, overall = _build_health_checks(store, settings, time.time())
+    body = _build_health_body(overall, checks, settings)
+    # KEY: ignore overall when deciding HTTP code — always 200.
+    return JSONResponse(body, status_code=200, media_type=HEALTH_CONTENT_TYPE)
