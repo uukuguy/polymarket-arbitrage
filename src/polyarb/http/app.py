@@ -1,12 +1,19 @@
 """Starlette app factory for the L1 daemon HTTP server.
 
 Phase 02 Plan 02 — D-21 / D-22.
+Phase 02.1 Plan 02 — D-03: /control/* HMAC-protected routes.
+Phase 02.1 Plan 03 — D-05: /healthz Fly-friendly always-200 probe.
 
-create_app() wires /health (public, IETF三态) + /scan (HMAC-protected, P1 trust-split).
+create_app() wires:
+- /health  (public, IETF strict 三态 — Better Stack alarm target)
+- /healthz (public, ALWAYS HTTP 200 — Fly platform probe target)
+- /scan    (HMAC-protected, P1 trust-split)
+- /control/* (HMAC-protected, same secret per D-22)
 
 Middleware:
-- ScanAuthMiddleware wraps scan_auth_middleware in BaseHTTPMiddleware so it applies
-  globally. The middleware itself bypasses /health (path check inside).
+- ScanAuthMiddleware / ControlAuthMiddleware both bypass /health and /healthz
+  via path guards inside their respective middlewares. /healthz must stay
+  public-no-HMAC because Fly platform probe is unauthenticated.
 
 app.state stashes scheduler + sqlite_store + settings for route handlers.
 
@@ -27,7 +34,7 @@ from polyarb.http.control import (
     pause,
     unpause,
 )
-from polyarb.http.health import health
+from polyarb.http.health import health, healthz
 from polyarb.http.scan import scan, scan_auth_middleware
 
 
@@ -67,6 +74,7 @@ def create_app(*, scheduler: Any, sqlite_store: Any, settings: Any) -> Starlette
     ]
     routes = [
         Route("/health", health, methods=["GET"]),
+        Route("/healthz", healthz, methods=["GET"]),                # D-05 Phase 02.1: Fly probe target (always 200)
         Route("/scan", scan, methods=["POST"]),
         Route("/control/unpause", unpause, methods=["POST"]),       # D-03 Phase 02.1
         Route("/control/pause", pause, methods=["POST"]),           # stub 501, Phase 03+ 填实现
