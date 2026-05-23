@@ -759,3 +759,172 @@ L3（WebSocket / OHLC）和事件总线（抽象 C）暂不预测，等 L1+L2 �
 - `.planning/threads/market-structure.md` — 数据宇宙 4 层结构（API 层级）
 - `.planning/threads/data-quality.md` — 已知数据质量问题
 - `docs/research/polymarket-oss-landscape-2026-04.md` — OSS 项目调研报告
+
+---
+
+## RESEARCH UPDATE 2026-05-23 (Phase 03 pre-discuss research)
+
+> 触发：Phase 03 (L2 Orderbook Tracking) discuss-phase 启动前，要求把 §2.2（WebSocket 能力）+ §2.6（DB 量级）两块从"待调研"变为"决策可拍"。来源以官方 docs.polymarket.com + 厂商 pricing 页 + 3th-party OSS 为准；研发期不臆测、不无源。
+
+### §2.2 Polymarket WebSocket capability research
+
+**调研路径备注**：
+- `3th-party/polymarket-kalshi-weather-bot/` 调研后**不含**实际 Polymarket WS client 代码 — 该项目对 Polymarket 仅通过 Gamma REST 拉 markets（见 `backend/data/markets.py L37`，平台标 `polymarket`，但实际 fetch 是 `https://gamma-api.polymarket.com/events`），WS 仅出现在 RESEARCH.md L65/L79 的目录性提及。**不是可参考的 WS 实现样本。**
+- `3th-party/clawfirm/` 套利模块为空壳（早已记录），其中的 `useWebSocket.ts` 是产品内部 dashboard 用 WS，与 Polymarket 无关。
+- 因此本节 5 个问题全部以 **docs.polymarket.com (Mintlify 文档站，2026-05-23 取)** + Polymarket org GitHub issues 实证为权威源。
+
+#### Q1: `/book` 通道是 per-token 订阅还是支持批量？一个连接最多订几个？
+
+**Answer**: **支持批量**，且**一个连接订阅数量无硬上限（2025-05-28 起取消 100 token 限制）**。
+- 订阅 payload 是 `assets_ids: string[]`（数组），单个 connection 一次性可订多个 token；channel type 是 `"market"`。
+- 字段名注意：是 `assets_ids`（带 `s`），不是 `asset_ids`。
+- Subscribe 后还能用 `{operation: "subscribe", assets_ids: [...]}` 动态加订，无需重连；`operation: "unsubscribe"` 同理可减。
+- 2025-05-28 changelog 明确："The 100 token subscription limit has been removed for the Markets channel. You can now subscribe to as many token IDs as needed for your use case."
+- 同期新增 optional 字段 `initial_dump`（default `true`）：subscribe 时是否要求服务器先 push 一个 full orderbook snapshot。
+
+**Source**:
+- https://docs.polymarket.com/market-data/websocket/overview（fetched 2026-05-23）— Subscribing 章节 + 字段表
+- https://docs.polymarket.com/changelog（fetched 2026-05-23）— 2025-05-28 条目 "Websocket Changes"
+- https://docs.polymarket.com/api-reference/wss/market（fetched 2026-05-23）— Subscription Request 示例
+
+**含义**：L2 实现**不需要**做"多连接分片"。一条 WS 连接订满整个 watchlist（candidate-set ≤ 几百 token）是预期的官方使用模式。这把整个 §2.2"动态切换跟踪集"问题从"架构问题"降级为"应用层 subscribe/unsubscribe 一行代码"。
+
+#### Q2: `/prices` 通道粒度是什么？事件级还是 token 级？
+
+**Answer**: Polymarket WS **没有独立的 `/prices` 通道** — 这是 §2.2 问题里的概念误导。所有"price 变化"事件都走 `market` 通道的 event 流，**粒度按 asset_id（token）**：
+- `price_change`（orderbook level delta，含 `asset_id` + `price` + `size` + `side`）— 粒度 = token level
+- `last_trade_price`（trade execution，含 `asset_id` + `price` + `size`）— 粒度 = token level
+- `best_bid_ask`（custom feature，含 `asset_id` + `best_bid` + `best_ask` + `spread`）— 粒度 = token level
+- `book`（full snapshot）— 粒度 = token level
+
+REST 侧的 `/prices` / `/prices-history` 是分开的 HTTP endpoint，不在 WS 范围。
+
+**Source**: https://docs.polymarket.com/api-reference/wss/market — Messages 表（event_type 列）+ 各 event schema 都带 `asset_id` 字段。
+
+**含义**：L2 价格事件全部 keyed by `asset_id` (= token_id = clob_token_id)；策略层做映射 `asset_id → (market, outcome=Yes/No)` 是必做工作（市场状态表必须缓存这层映射）。
+
+#### Q3: 是否存在"某个 event 下所有 markets 一次订完"的快捷方式？
+
+**Answer**: **没有** event-level 快捷订阅。WS 订阅参数只接受 `assets_ids: string[]`（market 通道）或 `markets: string[]`（user 通道，per condition_id）。
+- 没有 `event_id` / `event_slug` / `tag` 作为订阅维度的 endpoint。
+- 但**可一次订很多 token**（Q1 — 无上限），所以实际操作是：先用 Gamma REST `GET /events/{id}` 拿到该 event 下所有 markets 的 `clob_token_ids`（每个 binary market 2 个：Yes/No），然后把 token id list 一次性 push 进 `assets_ids` 订阅。
+- 应用层封装一个 `subscribe_event(event_id)` helper 即可，3-5 行 code。
+
+**Source**:
+- https://docs.polymarket.com/market-data/websocket/overview — Subscribing payload schema（仅 `assets_ids` 一个维度）
+- https://docs.polymarket.com/api-reference/wss/market — Subscription Request 示例只支持 `assets_ids`
+
+**含义**：没有原生 "event subscribe"，但**完全不阻塞**架构。watchlist 数据模型仍以 token 为单位（与 L1 已有的 token-centric 设计一致）。
+
+#### Q4: 速率限制 / 连接数限制 / 重连策略？
+
+**A. WS 连接侧**（与 REST rate limit 独立）：
+- Heartbeat 强制：market/user 通道 client 必须每 10 秒发 `PING`（plaintext "PING"），server 回 `PONG`。**不发心跳 ≈10s 后服务器断连**（docs 显式列为 troubleshooting 项 "Connection drops after about 10 seconds"）。
+- 连接 timeout：subscribe 必须在连接建立后立即发送，否则服务器关掉连接（"Connection closes immediately after opening"）。
+- 已知问题（生产侧 bug，2026-03 仍 open）：偶发 "WSS server accepts connection + subscription but sends no messages" 状态——TCP 没断、PONG 还在回，但 event 流冻结。需要 client 侧做"业务层 staleness 检测"（>N 秒无业务消息则强制重连），不能依赖 TCP-level keepalive 单一信号。
+- **没有公开的"单 IP 最大并发 WS 连接数"上限文档**，但 OSS 实现（如 `Polymarket/real-time-data-client`、`GoPolymarket/polymarket-go-sdk`）的常规做法是单进程一条 WS 连接复用所有订阅，符合 Q1 取消 100-token 限制后的官方推荐路径。
+
+**B. REST 侧（用于 fallback / discovery / history）**：Cloudflare throttle，按 endpoint 分（全部 sliding window，限速时 delay 不 reject）：
+| Endpoint | Limit |
+|---|---|
+| 全局 general | 15,000 req / 10s |
+| Gamma `/events` | 500 req / 10s |
+| Gamma `/markets` | 300 req / 10s |
+| CLOB `/book` | 1,500 req / 10s |
+| CLOB `/books`（批量） | 500 req / 10s |
+| CLOB `/prices-history` | 1,000 req / 10s |
+| CLOB `/trades`（ledger） | 900 req / 10s（合订 `/orders` `/notifications` `/order` 共享） |
+| Data API `/trades` | 200 req / 10s |
+
+**C. 重连策略**（基于 docs + GH issues + OSS 客户端模式）：
+- 推荐：业务层 staleness watchdog（举例 30s 无任何 event → close + reconnect）+ 指数退避（1s, 2s, 4s, capped 30s）+ 重连成功后**重新 subscribe**（服务器不持久化订阅状态）。
+- `initial_dump: true` 在重连后非常关键 — 否则只能等下一笔 `price_change`，期间 orderbook 是错的。
+
+**Source**:
+- https://docs.polymarket.com/market-data/websocket/overview — Heartbeats / Troubleshooting
+- https://docs.polymarket.com/api-reference/rate-limits（fetched 2026-05-23）— 完整 rate limit 表
+- https://github.com/Polymarket/py-clob-client/issues/292（2026-03-05 open）— "Server accepts connection + subscription but sends no messages" 实证：业务层心跳必须独立于 TCP keepalive
+- https://docs.polymarket.com/changelog — 2025-05-28 `initial_dump` 字段添加
+
+#### Q5: 历史 trades 有 REST 接口吗（深度多深）？还是只能从 WS 流自累积？
+
+**Answer**: **有，三条独立 REST 路径，各有侧重**：
+
+| 来源 | Endpoint | 深度 / 限制 | 用途 |
+|---|---|---|---|
+| Data API（公开，无 auth） | `GET https://data-api.polymarket.com/trades` | 全市场聚合 trades；`limit` max **500**，`offset` max **1,000**（2025-08-26 收紧）；rate 200 req/10s；支持 `takerOnly=true` 等过滤；按 market/user 都能查 | 全市场历史 trades 回溯（offset 上限是硬伤，深历史要靠时间窗 + 多次请求拼） |
+| CLOB Ledger（auth） | `GET https://clob.polymarket.com/trades` | 用户自己的成交；900 req/10s | 自己交易后的 reconciliation |
+| CLOB Market Data | `GET /prices-history` | 单 market `interval` ∈ {`1h`, `6h`, `1d`, `1w`, `max`, `all`, `1m`}, `fidelity` 默认 1 分钟；返回 `{t, p}` 时序点 | OHLC-like 历史价格（**不是 trades**，是 price ticks 聚合） |
+
+**已知陷阱**（项目侧风险点，要写进 Phase 03 CONTEXT）：
+- `prices-history` 对**已结算 (resolved/closed) 市场只返回 12+ 小时颗粒度**的数据，即使该市场曾是高交易量（py-clob-client issue #216，2025-12-22 仍 open）— 意味着事后回测 closed 市场的细粒度价格历史**不可靠**，必须 Phase 03 一开始就开 WS 实盘累积自己的 trades 流。
+- Data API `/trades` offset 1000 上限意味着深回溯（>1000 笔以前的 trade）必须按时间窗倒序滑动，不能纯 offset paginate。
+
+**WS 自累积建议**：Phase 03 L2 应**两条腿走**：
+1. REST 一次性 backfill（启动 / 重连）— 用 `/prices-history` 拉过去 7-30 天分钟级 price points 作 baseline
+2. WS 实时累积 `last_trade_price` 事件持久化到 L2 时序表 — 这是事后回测和策略 backtest 的真数据源
+
+**Source**:
+- https://docs.polymarket.com/api-reference/rate-limits — Data API + CLOB 分表
+- https://docs.polymarket.com/changelog — 2025-08-26 "Updated /trades and /activity endpoints" 条目（limit 500 / offset 1000）
+- https://docs.polymarket.com/api-reference/markets/get-prices-history — query params
+- https://github.com/Polymarket/py-clob-client/issues/216（2025-12-22） — closed markets 12h 颗粒度退化
+
+---
+
+### §2.6 DB tier selection research (L2 量级)
+
+**项目侧基线事实**：
+- 当前用 Supabase Free（`.env.example L21-25` 已含 `POLYARB_SUPABASE_URL` / `_DB_DSN` / `_SERVICE_KEY`，Phase 02 实际用的就是 Free 项目）
+- Phase 02 已踩坑：7 天无活动 auto-pause 是 soak-gate-deviation 的根本原因（详见 `threads/soak-gate-deviation-2026-05.md`）
+- L2 工作负载：~72k 行/天 × 365 天 = **~26M 行/年**，单表存量到年底约 **2-4 GB**（含索引），属于"小型时序数据"区间
+
+#### A. 各 DB option 对照表（all prices USD，fetched 2026-05-23）
+
+| 维度 | Supabase Pro | Supabase Free（现状） | Neon Launch | Fly MPG Basic | Fly Volume 自管 PG |
+|---|---|---|---|---|---|
+| **月费起步** | **$25** + $10 compute credit 内含 | $0 | ~**$5-15**（usage-based: 100-300 CU-hr × $0.106 + storage $0.35/GB-mo） | **$38** | **~$10**（VM $5 + 10GB volume $1.50 + 自管 PG image） |
+| **Idle 自动暂停** | **❌ 不暂停**（Pro 显式取消 pause 行为） | ✅ **7 天无活动暂停**（root cause of soak-gate-deviation） | ⚠️ Auto-suspend 到 zero compute（可配置；Launch 默认 idle 后 scale-to-zero，再访问 350ms 冷启动） | ❌ 不暂停（一直常驻 VM） | ❌ 不暂停 |
+| **DB 存储（L2 量级足够）** | 内含 8 GB；overage $0.125/GB-mo | 500 MB（年底 2-4GB 撑不到） | 内含 10 GB；overage $0.35/GB-mo | 自购 storage $0.28/GB-mo（10GB = $2.80） | Fly Volume $0.15/GB-mo（10GB = $1.50，便宜很多） |
+| **Compute** | 2-core ARM Micro (1 GB RAM)；含 $10 compute credit | Shared CPU / 500 MB RAM | 0.25-2 CU autoscale (1-8 GB RAM per CU)，按 CU-hr 计 | Shared-2x / 1 GB RAM（HA cluster 内含） | 1× shared CPU / 256 MB-1 GB RAM | 
+| **HA / backup** | PITR add-on $100/mo（不含）；自动每日 backup 内含 | 每日 backup 7 天保留 | PITR via instant-restore 内含（1-day history default） | HA cluster + 自动 backup + failover 内含 | 自己写 cron `pg_dump` |
+| **Auth/SDK 集成成本（项目当前已用 Supabase Auth）** | 零（in-place 升级） | — | 中（要重接 auth；Neon Auth ≤60k MAU 免费但不是 Supabase Auth 兼容） | 高（无 hosted auth；要么继续用 Supabase Auth 跨厂商 + 数据在 Fly PG，要么自建） | 高（同上） |
+| **同 region 部署（polyarb-l1 在 fra）延迟** | Supabase region 可选；当前 Dublin/eu-west-1，跨 region 几十 ms | 同 | Neon 全球 region，可选近 polyarb-l1.fly.dev 的 region | ✅ Fly 同 organization 私网；几 ms | ✅ 同 |
+| **迁移成本**（从 Supabase Free） | ✅ **零停机 in-place upgrade**（Pro 升级在 dashboard 一键，DB 不动） | — | 中（pg_dump + restore；改 DSN + 改 supabase-py → asyncpg/psycopg；auth 体系迁移） | 高（DB + auth 都改） | 高 |
+| **TimescaleDB 扩展** | ❌ 不在 Supabase 默认扩展列表（要 self-hosted；可 fallback 用 BRIN/partial index + 分区表） | ❌ 同 | ❌ 不在 Neon 扩展列表 | ❌ Fly MPG 仅 default PG16 trusted ext + `pgvector` + `PostGIS`（明文列；no Timescale） | ✅ 可装 |
+| **L2 量级 fit-for-purpose** | ✅ 充分（8 GB 存量足够 2 年；compute 微负载） | ❌ 7 天暂停硬伤 + 500 MB 存量不够 | ✅ 充分；scale-to-zero 反成本（小负载 ~$5-10/mo） | ⚠️ 充分但**贵**（$38 起 + storage 单价 2× Fly Volume） | ✅ 充分**且最便宜**，但运维成本付现 |
+
+**Source**:
+- Supabase Pro: https://supabase.com/pricing（fetched 2026-05-23）; https://aiagencyplus.com/keep-your-supabase-free-tier-project-live-past-the-limit（"The Pro plan currently $25/month removes the project pause behaviour entirely"）
+- Supabase Free pause 政策: https://supabase.com/pricing "Free projects are paused after 1 week of inactivity"; https://supabase.com/docs/guides/deployment/going-into-prod "Upgrade to Pro to guarantee that we won't pause your project for inactivity"
+- Neon pricing: https://neon.com/pricing（fetched 2026-05-23）— Launch plan $0.106/CU-hr, scale-to-zero default, 10 GB storage included on Launch; storage $0.35/GB-mo paid plans
+- Fly MPG pricing: https://fly.io/docs/mpg/（fetched 2026-05-23）— Basic plan $38/mo (Shared-2x/1GB), Starter $72; storage $0.28/GB-mo; only `pgvector` + `PostGIS` 3rd-party ext
+- Fly Volume pricing: https://kuberns.com/blogs/flyio-pricing（cited Fly docs）— Volume $0.15/GB-mo
+
+#### B. TimescaleDB 必要性评估
+
+**结论**：26M 行/年（72k 行/天）**不需要 TimescaleDB**。
+- 单表 26M 行在原生 PG 16 上配合 BRIN 索引（时间列）+ 普通 btree（asset_id）就是 sub-100ms 查询的工作负载（参考 `medium.com/@vbahadircan/what-10-million-rows-taught-me-about-tuning-postgresql` — 10M 行在调优 PG 上 sub-second）。
+- 真要 partitioning：原生 PG declarative partitioning（按月分区，12 个 child table/年）覆盖 99% 时序需求，不引入 Timescale 依赖。
+- 触发 Timescale 升级的真实阈值通常在 **>1B 行 或 >100GB** 时序数据 — L2 单 watchlist 模型至少 30+ 年才到，远超本项目时间尺度。
+
+**Source**: Neon/Supabase/Fly MPG 全部不在默认扩展集合中包含 Timescale（厂商文档已 cite），意味着选 managed 时 Timescale 不是免费选项；这同时也确认了"对小型时序工作负载，Timescale 不是必需"是业内共识（厂商不在 default 集合 = 不是主流小项目刚需）。
+
+#### C. 推荐排序（按 Phase 03 实际诉求权重：稳定性 > 迁移成本 > 价格）
+
+1. **Supabase Pro $25/mo** — **首选**。理由：(a) 一键 in-place 升级零迁移成本，(b) 立即根除 7-day pause 这个 Phase 02 已证的坑，(c) 8 GB 存量 + Micro compute 覆盖 L2 2 年以上量级，(d) Supabase Auth 投资保留（dashboard、RLS、service_role key 流程全继承）。$25/mo 的"价格不便宜"在这个项目阶段不是 blocker（用户 §0.2.1.a 明确接受 ~$25/月 单服务预算）。
+2. **Neon Launch ~$5-15/mo** — **次优**。理由：实际 L2 工作负载（每分钟一次 query + 写）在 Neon scale-to-zero 模式下账单极低；但迁移要重接 auth，且 L1 dashboard 已是 Supabase 生态，**迁移成本不抵省下的钱**。除非未来要做"按需冷启动 + 偶发查询"型负载（不是 L2 形态），否则不推荐切换。
+3. **Fly Postgres + 自管 Volume ~$10/mo** — **不推荐**。理由：和 polyarb-l1 同区私网延迟优势对 1 分钟一次的 L2 写入零意义；自管 PG 的运维成本（backup / 版本升级 / 故障处理）只有时段套利者愿意付，研发期付这个税亏本。
+4. **Fly MPG Basic $38/mo** — **不推荐**。比 Supabase Pro 贵 50%，又失去 Supabase Auth 集成，无任何对应优势。
+
+---
+
+### Summary recommendation for Phase 03 discuss
+
+> **Recommendation: WS vs REST — hybrid (WS 主 + REST backfill)** because Polymarket 官方 docs 已明示 WS market 通道支持单连接订阅无上限 token、`initial_dump` 字段、动态 subscribe/unsubscribe，但同时存在"silent freeze"已知 bug（py-clob-client issue #292）— 业务层 staleness watchdog 必须做，REST `/prices-history` + Data API `/trades` 兼任"启动 backfill"和"WS 冻结时 fallback"双角色。**DB — Supabase Pro $25/mo** because in-place upgrade 零迁移成本 + 直接根除 Phase 02 已证的 7-day idle-pause 风险 + 保留现有 Supabase Auth 投资，是唯一"工程纪律"侧零风险的路径；Neon 便宜但迁移税不划算，Fly Postgres 贵且无对应优势。**These two together make candidate-set max ~200 markets × 1-min interval feasible** within $25/mo total（compute 余量大），且**有清晰的扩容路径**（订阅数翻倍仍是单 WS connection；DB 存量到 8GB 上限触发再加 compute add-on 或迁 Neon Scale）。
+
+**残留不确定**（写进 Phase 03 CONTEXT 的"未决/已知风险"）：
+1. WS "silent freeze" 已知 bug 的发生频率 — docs 没量化，社区 issue 个案性；Phase 03 必须把 watchdog 阈值（建议 30s 无业务消息触发重连）和 reconnect 后的 idempotent re-subscribe 写为 plan 一级 acceptance criterion。
+2. `prices-history` 对 closed markets 12h 颗粒度退化 — 意味着事后回测能力不能依赖 REST history，必须 Phase 03 起就 **WS-accumulate own trades** 到 L2 表。这反过来强化"WS 主 + REST 补"的混合架构。
+3. Supabase Pro Micro compute (1 GB RAM) 在 L2 负载下绰绰有余，但 Phase 05+ 若加 L3 OHLC 聚合 + dashboard 复杂查询，可能需要 compute add-on（$10-30/mo 升 Small）。不是 Phase 03 立即决策点。
+
