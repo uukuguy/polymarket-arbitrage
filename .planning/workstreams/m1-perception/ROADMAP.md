@@ -106,12 +106,40 @@ Scope (3 bug):
 - Vercel dashboard "Unpause Daemon" 按钮 UI (推独立 plan)
 - /control/pause + /control/status (本 phase 只建 unpause, planner 可选择是否搭 router 框架)
 
-### Phase 3: WebSocket 增量数据流（L3 候选）
+### Phase 03: L2 Orderbook Tracking (分钟级 daemon)
+
+**Goal:** L2 中间层 — 候选子集 (10-100 个) 分钟级 (1-5 min) tracking, top-of-book + 成交流, 信号识别 / 进场触发. thread §1 三层金字塔的中段，桥接 L1 全市场观察与 L3 策略执行。
+**Status:** 🟡 Ready to discuss (Phase 02.1 closed, Phase 02 hard gate passed, soak deviation 待回补)
+**Depends on:** Phase 02.1 (3 bug 修完 + chaos 闭环) + soak-gate-deviation thread 回补 (must-haves 包含 real 7-day soak 或新 deviation)
+**Refs:**
+- `.planning/threads/market-observation-architecture.md` § 1 三层金字塔 + § 2.2 Polymarket WS 真实能力调研
+- `.planning/threads/soak-gate-deviation-2026-05.md` (Phase 03 must-haves 回补点)
+- `.planning/workstreams/m1-perception/phases/02.1-phase-02-fix-up-2-p1-backlog-health-503-trade-off/02.1-LEARNINGS.md` (Phase 02.1 9D/8L/7P/5S)
+- `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-LEARNINGS.md` § L6/L7/P14
+
+**Plans:** TBD (待 discuss-phase 完成后 plan-phase 决定)
+
+Scope (核心问题, discuss-phase 决):
+- 候选集选择: L1 snapshot 哪些字段 → L2 跟踪集 (流动性 / volume / tag / 用户 watchlist?)
+- WS vs REST polling: top-of-book 用 Polymarket /book channel 还是 REST? thread §2.2 未答
+- 时序后端: 继续 SQLite + Parquet 还是 TimescaleDB / DuckDB? L2 频率高于 L1
+- 成交流采集: trades 历史用 Subgraph 还是 WS 流自己累积?
+- 信号识别: surface "候选→tracker→signal" 流程? 是否进 dashboard?
+- L1 7-day soak deviation 回补: paid Supabase Pro $25/mo? 切 Neon? 新 deviation?
+- DB 选型重审: thread §0.2.1 deployment 决策 + L2 写入频率 → 是否升 Supabase Pro / 切 Neon / 自管 Postgres
+
+不在 scope (delegated to L3 / Phase 04+):
+- 完整 orderbook 深度 (top-of-book only)
+- 策略执行层 (信号识别 only, 不下单)
+- WebSocket 全市场流 (L3 候选)
+- M4 LLM 价值判断 (m4-smart-strategies 独立 workstream)
+
+### Phase 04 (former Phase 3): WebSocket 增量数据流（L3 候选）
 
 **Goal:** /book + /prices 频道实时增量推送，作为 L3 单市场 K 线的数据源
-**Status:** ⏸️ Pending Phase 2 完成 + L2 中间层定义（thread §1 三层金字塔纪律）
-**Depends on:** Phase 2（L1 生产级判定通过）+ thread §2.2 (Polymarket WS 真实能力调研)
-**Note:** 原 Phase 2 (SESSION 12 时代锁)。Phase 01.1 架构纠偏后推迟到 L3 上下文。
+**Status:** ⏸️ Pending Phase 03 (L2) 完成
+**Depends on:** Phase 03 (L2 中间层 ready) + thread §2.2 (Polymarket WS 真实能力调研)
+**Note:** 原 Phase 2 (SESSION 12 时代锁)。Phase 01.1 架构纠偏后推迟到 L3 上下文。Phase 03 L2 锁定后此 phase 重命名为 Phase 04。
 
 ---
 
