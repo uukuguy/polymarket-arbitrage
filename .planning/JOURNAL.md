@@ -2213,3 +2213,51 @@ Phase 02.1 LEARNINGS 落库, 然后开 Phase 03 discuss / 或者切 m2-combinato
 - 让 mirror failed event (PYTHON-A) 上一定带最近一次 mirror crumb
 - 优先级低 (truth 1/3/4 已 PASS, BUG-7 核心目标已闭环)
 
+
+## SESSION 24 — 2026-05-23 (Phase 02.1 close + Phase 03 setup, autonomous-drive)
+
+### 用户授权 "自主推进" — 接力 SESSION 23 EOD
+
+1. **Phase 02.1 LEARNINGS extracted** (`193cf81`) — 9D / 8L / 7P / 5S, 231 行
+   - 9 decisions: D-01..D-07 + D-22 reuse + verification-ownership process upgrade
+   - 8 lessons: fail-soft + breadcrumb upload 交互 / cross-bug 必须前置识别 / .env 渗透 / loguru StringIO sink / Sentry API region 路由 / chaos cleanup 滞后 / Pyright false positive / 容器内验证 fallback
+   - 7 patterns: 双锚点 audit / breadcrumb category 区分 / 独立 middleware / ISSUE-04 sentinel / helper-first refactor / VALIDATION ledger / file:line 落地后 grep
+   - 5 surprises: breadcrumb design-unreachable / BUG-8+BUG-6 互锁 / 单日完成 Phase / GHA no-op deploy / macOS HTTPS_PROXY TLS
+
+2. **Phase 03 (L2 Orderbook Tracking) setup** (`dfd3546`)
+   - ROADMAP entry inserted (Phase 03 dependents 含 Phase 02.1 + soak-gate-deviation 回补)
+   - 原 "Phase 3 WebSocket" 重命名 "Phase 04 (L3 候选)"
+   - 03-CONTEXT.md pre-research draft (research-blocked)
+   - 用户决策: 三个 gray area 都讨论 (DB → WS/REST → 候选集), 按依赖顺序; 先 thread 调研再 discuss
+
+3. **Thread §2.2 + §2.6 research** (`6258be7`)
+   - general-purpose subagent 169 行 RESEARCH UPDATE block
+   - §2.2 WS: 5 个 Q 全部 docs.polymarket.com 答; 单 WS connection 订阅无上限 (2025-05-28 取消 100 token); 有 silent freeze bug (issue #292) → 业务层 staleness watchdog 必做; closed markets `/prices-history` 退化到 12h 颗粒度 (issue #216) → WS 自累积 trades 是必需
+   - §2.6 DB: 11-维对照表; **Supabase Pro $25/mo 推荐** (in-place 零迁移 + 根除 7-day pause + 保留 Auth 投资); TimescaleDB 不必要 (26M 行/年 在原生 PG 16 sub-100ms)
+   - 推荐: **WS 主 + REST backfill 混合 + Supabase Pro** — candidate-set max ~200 markets × 1-min interval feasible within $25/mo
+
+### Phase 03 当前 status
+
+- **Pre-research COMPLETE**: thread 调研完成, 3 个 gray area 全部 evidence-ready
+- **Decision lock pending**: D-01..D-08 (DB / WS / 候选集 / fail-soft / 候选集触发机制 / 告警链 / 7-day soak gate 回补 / migration plan)
+- **Next**: 续作 discuss-phase, 用户拍板 8 个 decision
+
+### [NEXT] 下次会话从这里开始
+
+```bash
+/gsd-resume-work --ws m1-perception
+# Phase 03 discuss-phase 续作 — 8 个 decision 等用户拍板
+```
+
+或者直接读 03-CONTEXT.md (pre-research) + thread RESEARCH UPDATE 2026-05-23 block, 给 Claude "/gsd-discuss-phase 03 --ws m1-perception" 续作.
+
+**推荐方向 (基于 research)**:
+- D-01 DB: Supabase Pro $25/mo (in-place upgrade)
+- D-02 7-day soak gate 回补: 升级后 7 天 calendar soak + uptime ≥99% (Phase 03 启动 5 天内做)
+- D-03 采集方式: WS market channel 主 + REST `/prices-history` + Data API `/trades` backfill (混合)
+- D-04 候选集 mechanism: 复用 Phase 01.1 scanner recipe 体系 (用户在 yaml 写 ranking 规则) + L1 snapshot.complete event-driven refresh
+- D-05 WS staleness watchdog: 30s 无业务消息触发重连 + idempotent re-subscribe (issue #292 抗 silent freeze)
+- D-06 trades 自累积: WS `last_trade_price` 持久化到 L2 表 (规避 issue #216 closed markets 12h 颗粒度退化)
+- D-07 dashboard surface: L2 候选 + 信号事件 mirror 到 Supabase (复用 Phase 02 dashboard 模式)
+- D-08 daemon 边界: L2 是新 daemon 还是 polyarb-l1 进程内 thread? (建议新 daemon `polyarb-l2`, 隔离 L1 写入压力)
+

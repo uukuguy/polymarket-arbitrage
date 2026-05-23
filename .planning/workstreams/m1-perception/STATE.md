@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 02.1
-status: complete (awaiting /gsd-extract_learnings)
-stopped_at: SESSION 23 (2026-05-22) — Phase 02.1 全 4 plans 闭环 (BUG-6 + BUG-7 + BUG-8 修完, Inj 3-v2 + Inj 4 + Inj #6-verification 3 段 SOAK-LOG, 6/6 truths verified live in prod for Plan 03; Plan 01 partial PASS truth-2 deferred to Phase 02.2 backlog)
-last_updated: "2026-05-22T02:10:00.000Z"
-last_activity: 2026-05-22
+current_phase: 03 (pre-discuss research complete, awaiting decisions on D-01..D-08)
+status: discuss-pre-research-done
+stopped_at: SESSION 23/24 (2026-05-22 → 2026-05-23) — Phase 02.1 全闭环 + LEARNINGS 9D/8L/7P/5S + Phase 03 ROADMAP entry + 03-CONTEXT.md pre-research draft + thread §2.2/§2.6 RESEARCH UPDATE block. 三个 gray area (DB tier / WS vs REST / 候选集机制) 全部 research-blocked → research done → ready to lock D-01..D-08.
+last_updated: "2026-05-23T03:00:00.000Z"
+last_activity: 2026-05-23
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 4
   total_plans: 28
   completed_plans: 24
-  percent: 86
+  percent: 75
 ---
 
 # Project State
