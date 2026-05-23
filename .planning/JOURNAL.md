@@ -2261,3 +2261,78 @@ Phase 02.1 LEARNINGS 落库, 然后开 Phase 03 discuss / 或者切 m2-combinato
 - D-07 dashboard surface: L2 候选 + 信号事件 mirror 到 Supabase (复用 Phase 02 dashboard 模式)
 - D-08 daemon 边界: L2 是新 daemon 还是 polyarb-l1 进程内 thread? (建议新 daemon `polyarb-l2`, 隔离 L1 写入压力)
 
+
+## SESSION 25 — 2026-05-24 (Phase 03 plan-phase 闭环)
+
+### 用户授权 "继续" — 接力 SESSION 24 EOD (discuss-phase)
+
+1. **Phase 03 discuss-phase complete** (e0c45a4) — 8 decisions locked + D-09 cross-cutting:
+   - D-01 DB tier: **Supabase Free + GHA cron keepalive** (反 research 推荐, cost-saving, 风险面已 codify)
+   - D-02 采集: WS market channel 主 + REST backfill 混合
+   - D-03 WS staleness watchdog: 30s 无 event → 重连 + initial_dump=true
+   - D-04 候选集: Phase 01.1 scanner recipe + 手选 watchlist 混合
+   - D-05 candidate refresh: L1 snapshot.complete event 驱动
+   - D-06 daemon 边界: 新独立 daemon polyarb-l2
+   - D-07 dashboard: Supabase mirror + Vercel dashboard 4 pages
+   - D-08 trades 自累积: WS last_trade_price 全量存
+   - D-09 Phase 02.1 LEARNINGS 应用映射
+
+2. **Phase 03 plan-phase complete** (a2d7401):
+   - 03-RESEARCH.md (1513 lines, HIGH confidence) — 7 focus areas
+   - 03-PATTERNS.md (33 files mapped, 8 shared patterns SP1-SP8)
+   - 03-VALIDATION.md (Wave 0 RED tests + 5 chaos Inj L2-* + programmatic verification surfaces)
+   - 8 PLAN.md (6813 lines total, wave 1→7 monotonic, fully serialized post-iter 2)
+
+3. **Plan-checker iteration loop**:
+   - Iter 1: 3 BLOCKERs (B1 POLYARB_EVENT_BUS_ENABLED default / B2 Plans 04+05 file overlap / B3 VALIDATION sign-off count) + 6 WARNINGs (wave 数 / PATTERNS filename / uv quoting / Plan 07 D-09 missing / Inj L2-3 semantics)
+   - Iter 2 (planner targeted fix): 2/3 BLOCKERs clean + 6/6 WARNINGs clean; B1 partial (4 leftover lines in 03-05-PLAN.md)
+   - Iter 3 (orchestrator direct Edit): B1 final 4 lines flipped — truth #11 + Output spec + citation + code comment 全翻 default=False
+   - **Final: ✅ VERIFICATION PASSED**
+
+### 关键架构 lock (Phase 03)
+
+- **polyarb-l2 daemon = L1 sibling, NOT from-scratch** — Dockerfile 复用, fly-l2.toml = fly.toml + 4 diffs, Settings 复用
+- **Event bus = asyncpg Postgres LISTEN/NOTIFY** (NOT Supabase realtime, NOT Redis)
+- **POLYARB_EVENT_BUS_ENABLED 默认 FALSE** — 显式 opt-in via Fly secret ONLY after Plan 07 chaos PASS for Inj L2-3 (B1 spawn constraint overrides RESEARCH Open Q 6)
+- **Alembic migration 003 (NOT 002)** — Plan 02-08 已 ship 002_add_top_movers_view.py
+- **dashboard 严格 4 pages** (candidates / top_of_book / trades / signals), 无 v2 features
+- **WS staleness watchdog 锁定 30s threshold** + initial_dump=true on reconnect
+
+### Wave 结构 (8 plans, 7 waves, post-iter 2 serialization)
+
+| Wave | Plans | Trigger |
+|------|-------|---------|
+| 1 | 03-01 (GHA keepalive) + 03-02 (Fly bootstrap) | parallel — 零 file 重叠 |
+| 2 | 03-03 (L2 daemon entry) | depends on Plan 02 |
+| 3 | 03-04 (WS client + watchdog) | depends on Plan 03 |
+| 4 | 03-05 (event bus + candidate refresh) | depends on Plan 04 (serialized per B2) |
+| 5 | 03-06 (Alembic 003 + L2 mirror + Data API) | depends on Plan 04+05 |
+| 6 | 03-07 (5 chaos Inj L2-*) | depends on Plan 06, checkpoint |
+| 7 | 03-08 (docs/learning/10 + 4 dashboard pages + VALIDATION flip) | depends on Plan 07, closure |
+
+### [NEXT] 下次会话从这里开始
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                       # 应该 zero drift, 8 plans NOT-STARTED
+```
+
+**第 1 步**:
+```
+/gsd-execute-phase 03 --ws m1-perception
+```
+
+或分波执行 (单 plan):
+```
+/gsd-execute-phase 03 --wave 1 --ws m1-perception   # Plan 01+02 parallel
+```
+
+预计 7 sessions 走完 8 plans (每 wave 一 session)。Plan 07 chaos 是最长的 session (5 个 Inj 真在 prod 跑)。
+
+### 关键 memory 入口
+
+- [Phase 02.1 complete 2026-05](memory/project_phase-02-1-complete-2026-05.md)
+- [Verification ownership](memory/feedback_verification-ownership-2026-05.md)
+- Phase 03 artifacts in `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/`
+- thread `market-observation-architecture.md` RESEARCH UPDATE 2026-05-23 (line 762+)
+
