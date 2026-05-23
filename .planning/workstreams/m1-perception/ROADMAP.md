@@ -109,15 +109,28 @@ Scope (3 bug):
 ### Phase 03: L2 Orderbook Tracking (分钟级 daemon)
 
 **Goal:** L2 中间层 — 候选子集 (10-100 个) 分钟级 (1-5 min) tracking, top-of-book + 成交流, 信号识别 / 进场触发. thread §1 三层金字塔的中段，桥接 L1 全市场观察与 L3 策略执行。
-**Status:** 🟡 Ready to discuss (Phase 02.1 closed, Phase 02 hard gate passed, soak deviation 待回补)
-**Depends on:** Phase 02.1 (3 bug 修完 + chaos 闭环) + soak-gate-deviation thread 回补 (must-haves 包含 real 7-day soak 或新 deviation)
+**Status:** 🟢 Plans complete (2026-05-23) — ready to execute
+**Depends on:** Phase 02.1 (3 bug 修完 + chaos 闭环) ✅
 **Refs:**
 - `.planning/threads/market-observation-architecture.md` § 1 三层金字塔 + § 2.2 Polymarket WS 真实能力调研
-- `.planning/threads/soak-gate-deviation-2026-05.md` (Phase 03 must-haves 回补点)
+- `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-CONTEXT.md` (9 D-XX decisions locked)
+- `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-RESEARCH.md` (1513 lines, 7 focus areas)
+- `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-PATTERNS.md` (33 files mapped, 8 SP)
+- `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-VALIDATION.md` (5 chaos Inj + Wave 0 RED tests)
 - `.planning/workstreams/m1-perception/phases/02.1-phase-02-fix-up-2-p1-backlog-health-503-trade-off/02.1-LEARNINGS.md` (Phase 02.1 9D/8L/7P/5S)
 - `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-LEARNINGS.md` § L6/L7/P14
 
-**Plans:** TBD (待 discuss-phase 完成后 plan-phase 决定)
+**Plans:** 8 plans across 7 stages (Wave 1 // Wave 2 // Wave 3 // Wave 4 // Wave 5 // Wave 6 (checkpoint) // Wave 7 (checkpoint)) — Plans 04/05 serialized per B2 fix to avoid pyproject.toml + l2_main.py + config.py overlap
+
+Plans:
+- [ ] 03-01-PLAN.md — Wave 1 (autonomous, parallel w/ 02): GHA Supabase keepalive + Better Stack heartbeat (D-01)
+- [ ] 03-02-PLAN.md — Wave 1 (autonomous, parallel w/ 01): polyarb-l2 Fly bootstrap (D-06)
+- [ ] 03-03-PLAN.md — Wave 2 (checkpoint, depends on 01+02): L2 daemon entry + /health + /healthz + P9 server-started gate (D-06)
+- [ ] 03-04-PLAN.md — Wave 3 (autonomous, depends on 03): WS client + WsWatchdog 30s + storm cap + WsConsumer (D-02/D-03)
+- [ ] 03-05-PLAN.md — Wave 4 (autonomous, depends on 03+04 — B2 serialization to avoid pyproject/l2_main/config overlap): asyncpg LISTEN/NOTIFY event bus + candidate refresh, `POLYARB_EVENT_BUS_ENABLED` defaults FALSE (B1) (D-04/D-05)
+- [ ] 03-06-PLAN.md — Wave 5 (autonomous, depends on 04+05): Alembic 003 + L2SupabaseMirror + Data API trades backfill (D-07/D-08)
+- [ ] 03-07-PLAN.md — Wave 6 (checkpoint, depends on 06): chaos verification (5 Inj L2-1..5 including L2-3a default-FALSE + L2-3b opt-in) + 03-SOAK-LOG.md
+- [ ] 03-08-PLAN.md — Wave 7 (checkpoint, autonomous-final, depends on 07): docs/learning/10-L2-跟踪.md + 4 Vercel dashboard pages + VALIDATION flip; prerequisite: L1 secret `POLYARB_EVENT_BUS_ENABLED=1` set + L2-3 PASS (D-07/D-09)
 
 Scope (核心问题, discuss-phase 决):
 - 候选集选择: L1 snapshot 哪些字段 → L2 跟踪集 (流动性 / volume / tag / 用户 watchlist?)
