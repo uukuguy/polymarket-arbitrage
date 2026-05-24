@@ -934,3 +934,134 @@ async def test_amendment_01_event_tags_writeable_with_multiple_tags(tmp_path: Pa
     assert distinct_labels == 3
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plan 03-05 — Step 7.7: event bus NOTIFY fan-out (feature-flagged)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_step_7_7_emits_snapshot_complete_when_enabled(tmp_path: Path) -> None:
+    """When event_bus_enabled=True, step 7.7 calls publish_snapshot_complete once."""
+    settings = _make_settings(tmp_path)
+    # Plan 05: enable event bus on this settings instance only (B1 default is False)
+    settings.event_bus_enabled = True
+
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock, patch(
+        "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as publish_mock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    assert result.is_valid is True
+    assert publish_mock.await_count == 1
+    args, kwargs = publish_mock.await_args
+    assert kwargs.get("snapshot_id") == result.snapshot_id
+    assert kwargs.get("taken_at_ms") == result.taken_at_ms
+
+
+@pytest.mark.asyncio
+async def test_step_7_7_failsoft_when_publish_raises(tmp_path: Path) -> None:
+    """publish_snapshot_complete raising must NOT block snapshot completion."""
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock, patch(
+        "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("simulated NOTIFY failure"),
+    ), patch(
+        "polyarb.snapshot.orchestrator.sentry_sdk.add_breadcrumb"
+    ) as breadcrumb_mock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        # Must NOT raise — snapshot completes
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    assert result.snapshot_id >= 1
+    # At least one breadcrumb with category="event-bus" level="warning"
+    bus_breadcrumbs = [
+        c for c in breadcrumb_mock.call_args_list
+        if c.kwargs.get("category") == "event-bus"
+    ]
+    assert bus_breadcrumbs, "fail-soft step 7.7 must emit event-bus breadcrumb"
+
+
+@pytest.mark.asyncio
+async def test_step_7_7_skipped_when_event_bus_disabled(tmp_path: Path) -> None:
+    """event_bus_enabled=False → publish_snapshot_complete NOT called."""
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = False
+
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock, patch(
+        "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+        new_callable=AsyncMock,
+    ) as publish_mock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    assert publish_mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_step_7_7_skipped_by_default(tmp_path: Path, monkeypatch) -> None:
+    """B1 invariant: with POLYARB_EVENT_BUS_ENABLED unset, default is False — no publish."""
+    monkeypatch.delenv("POLYARB_EVENT_BUS_ENABLED", raising=False)
+    settings = _make_settings(tmp_path)
+    # Must be False by default
+    assert settings.event_bus_enabled is False
+
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
+
+    with patch(
+        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
+    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock, patch(
+        "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+        new_callable=AsyncMock,
+    ) as publish_mock:
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    assert publish_mock.await_count == 0
