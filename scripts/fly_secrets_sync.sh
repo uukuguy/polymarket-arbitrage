@@ -30,7 +30,9 @@ fi
 # Filter comments (^#) + blank lines + lines missing = (malformed) from .env.
 # This is the 03-PATTERNS.md File 5 Gotcha — flyctl secrets set would otherwise
 # treat "# comment" as a literal KEY and fail with a confusing parse error.
-SECRETS_RAW="$(grep -v '^#' "${ENV_FILE}" | grep -v '^$' | grep '=' || true)"
+# Also skip FLY_API_TOKEN (host-side only, container does not need it; its value
+# can contain commas/spaces that confuse downstream tr-based splitters).
+SECRETS_RAW="$(grep -v '^#' "${ENV_FILE}" | grep -v '^$' | grep '=' | grep -v '^FLY_API_TOKEN=' || true)"
 
 if [ -z "${SECRETS_RAW}" ]; then
   echo "ERROR: no secrets found in ${ENV_FILE} after comment/blank filter" >&2
@@ -63,8 +65,10 @@ for APP in "${APPS[@]}"; do
   echo "=== Syncing → ${APP} ==="
   # --stage = no machine restart per secret; final `secrets deploy` triggers
   # a single atomic restart at the end (vs N restarts mid-sync).
-  # shellcheck disable=SC2046  # intentional word-split of KEY=VALUE pairs
-  flyctl secrets set -a "${APP}" --stage $(echo "${SECRETS_RAW}" | tr '\n' ' ')
+  # Pipe KEY=VALUE pairs via stdin (one per line) — flyctl reads them safely
+  # even when values contain whitespace, commas, or quoted multiline content.
+  # (Prior tr '\n' ' ' word-split broke on values like FLY_API_TOKEN='FlyV1 fm2_...,fm2_...'.)
+  printf '%s\n' "${SECRETS_RAW}" | flyctl secrets import -a "${APP}" --stage
   echo "Staged ${SECRET_COUNT} secrets. Applying…"
   flyctl secrets deploy -a "${APP}"
   echo "${APP}: ${SECRET_COUNT} secrets applied."
