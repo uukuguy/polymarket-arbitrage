@@ -19,12 +19,40 @@ progress:
 
 ## Current Position
 
-Phase: 02.1 (phase-02-fix-up-2-p1-backlog-health-503-trade-off) — ✅ **COMPLETE** (awaiting /gsd-extract_learnings)
-Plan: 4 of 4 ✅ (all SUMMARY landed, planning-status zero drift)
-**Status:** Phase 02.1 hard gate passed
-**Current Phase:** 02.1 (awaiting LEARNINGS)
-**Last Activity:** 2026-05-22
-**Last Activity Description:** Phase 02.1 全闭环 — 3 bug 修 + 3 chaos PASS + docs/learning/09 + VALIDATION nyquist_compliant=true
+Phase: **03 (l2-orderbook-tracking-daemon)** — 🟢 **plan-phase COMPLETE** (ready to execute)
+Plan: 0 of 8 (all 8 PLAN.md landed + plan-checker 3 iter PASSED, planning-status zero drift)
+**Status:** ready to execute Phase 03
+**Current Phase:** 03 (8 plans across 7 waves)
+**Last Activity:** 2026-05-24
+**Last Activity Description:** Phase 03 plan-phase 全闭环 — 9 D-XX decisions locked + 1513 行 RESEARCH + 33 files PATTERNS + 8 PLAN.md (6813 行) + plan-checker 3 iter (3 BLOCKERs + 6 WARNINGs 全 resolved)
+
+### Phase 02.1 — ✅ COMPLETE (2026-05-22, LEARNINGS extracted 2026-05-23)
+
+- 4 of 4 plans ✅ (all SUMMARY landed)
+- 3 bug 修完 (BUG-6/7/8) + 3 chaos PASS (Inj 3-v2 / Inj 4 / Inj #6-verification)
+- docs/learning/09-生产化运维.md (324 行) + VALIDATION nyquist_compliant=true
+- 02.1-LEARNINGS.md 9D / 8L / 7P / 5S 落库
+
+### Phase 03 — 🟢 plan-phase COMPLETE (2026-05-24)
+
+**Next step**: `/gsd-execute-phase 03 --ws m1-perception` (or `--wave 1` 分波)
+
+**8 plans** (wave 1→7 monotonic, serialized post plan-checker iter 2):
+- Wave 1 (parallel): Plan 01 (GHA Supabase keepalive) + Plan 02 (polyarb-l2 Fly bootstrap)
+- Wave 2: Plan 03 (L2 daemon entry + /health + /healthz)
+- Wave 3: Plan 04 (WS market client + staleness watchdog)
+- Wave 4: Plan 05 (Event bus asyncpg + candidate refresh)
+- Wave 5: Plan 06 (Alembic 003 + L2 mirror + Data API backfill)
+- Wave 6 (checkpoint): Plan 07 (5 chaos Inj L2-1..L2-5)
+- Wave 7 (closure): Plan 08 (docs/learning/10 + 4 dashboard pages + VALIDATION flip)
+
+**关键 architecture lock** (不可乱改):
+- POLYARB_EVENT_BUS_ENABLED **默认 FALSE** (opt-in via Fly secret ONLY after Plan 07 chaos PASS for Inj L2-3)
+- Alembic 003 (NOT 002, Plan 02-08 已 ship 002_add_top_movers_view)
+- WS staleness watchdog 30s + initial_dump=true
+- Dashboard 严格 4 pages: candidates / top_of_book / trades / signals
+- Event bus = asyncpg Postgres LISTEN/NOTIFY (NOT Supabase realtime / Redis)
+- polyarb-l2 = 新独立 Fly app (L1 sibling)
 
 ## Progress
 

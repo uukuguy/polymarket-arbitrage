@@ -38,6 +38,9 @@ pytestdebug.log
 # Claude Code harness state
 .claude/
 
+# gsd-tools ephemeral runtime state (e.g., _auto_chain_active flag set on every workflow start)
+.planning/config.json
+
 # Phase 1.1 user-local config (template watchlist.yaml.example committed; actual
 # watchlist.yaml is per-user, sync via git only if user opts in).
 watchlist.yaml
