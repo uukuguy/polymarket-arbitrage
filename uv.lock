@@ -1437,6 +1437,7 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -1485,6 +1486,7 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.66,<5" },
     { name = "typer", specifier = ">=0.12,<0.13" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32,<0.33" },
+    { name = "websockets", specifier = ">=15,<16" },
 ]
 provides-extras = ["dev"]
 
