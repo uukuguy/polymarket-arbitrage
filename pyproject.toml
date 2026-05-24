@@ -44,6 +44,7 @@ dependencies = [
   "alembic>=1.16,<2",
   "psycopg[binary]>=3.3.4",
   "websockets>=15,<16",
+  "asyncpg>=0.31,<0.32",
 ]
 
 [project.optional-dependencies]

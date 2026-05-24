@@ -141,6 +141,30 @@ class Settings(BaseSettings):
     # as one alert (suppresses storm during flaky-network episodes).
     alert_dedupe_window_seconds: int = Field(default=300)
 
+    # ── Event bus (D-05) — Plan 03-05 additions ──────────────────────────────
+    # Feature-flag for L1 orchestrator step 7.7 (pg_notify fan-out to L2).
+    # B1 spawn constraint: DEFAULT FALSE — explicit opt-in via Fly secret
+    # `POLYARB_EVENT_BUS_ENABLED=1` ONLY after Plan 07 chaos PASS for Inj L2-3.
+    event_bus_enabled: bool = Field(
+        default=False,
+        description=(
+            "Plan 05 D-05 — when True, L1 orchestrator step 7.7 emits "
+            "pg_notify('snapshot_complete') after R2 upload. Default FALSE; "
+            "opt-in via flyctl secrets set POLYARB_EVENT_BUS_ENABLED=1 only "
+            "after Plan 07 chaos PASS for Inj L2-3."
+        ),
+    )
+    # Plan 05 D-04 — scanner-recipes YAML path (REUSE Phase 01.1 scanner verbatim)
+    candidate_scanner_yaml: Path | None = Field(
+        default=None,
+        description="YAML path for scanner recipes consumed by candidate refresh (D-04)",
+    )
+    # Plan 05 D-04 — watchlist YAML path (REUSE Phase 01.1 watchlist verbatim)
+    candidate_watchlist_yaml: Path | None = Field(
+        default=None,
+        description="YAML path for watchlist entries unioned into candidate set (D-04)",
+    )
+
     model_config = SettingsConfigDict(env_prefix="POLYARB_", env_file=".env", extra="ignore")
 
     @model_validator(mode="after")
