@@ -478,3 +478,38 @@ soak-fault-inject:
 	@echo "  for i in \$$(seq 1 30); do curl -s -X POST https://polyarb-l1.fly.dev/scan -H 'X-Signature: deadbeef' -d '{}' & done; wait"
 	@echo ""
 	@echo "Document each injection in 02-SOAK-LOG.md with timestamp + outcome."
+
+# ─── Phase 03 Plan 02 — polyarb-l2 lifecycle (D-06) ─────────────────────────
+
+## deploy-l2-prod: Manually trigger polyarb-l2 deploy via GHA workflow_dispatch (D-06)
+deploy-l2-prod:
+	@echo ">> deploy-l2-prod — gh workflow run deploy-l2.yml"
+	gh workflow run deploy-l2.yml
+	@echo "L2 deploy triggered. Watch:  gh run watch  (then 'make fly-l2-status')"
+.PHONY: deploy-l2-prod
+
+## fly-l2-status: List polyarb-l2 machines + checks (post-deploy verification)
+fly-l2-status:
+	@echo ">> fly-l2-status — flyctl status -a polyarb-l2"
+	flyctl status -a polyarb-l2
+	@echo "--- checks ---"
+	flyctl checks list -a polyarb-l2
+.PHONY: fly-l2-status
+
+## fly-l2-logs: Tail polyarb-l2 daemon logs
+fly-l2-logs:
+	@echo ">> fly-l2-logs — flyctl logs -a polyarb-l2"
+	flyctl logs --app polyarb-l2
+.PHONY: fly-l2-logs
+
+## fly-secrets-sync: Push .env to BOTH polyarb-l1 + polyarb-l2 (Phase 02.1 D-22 invariant)
+fly-secrets-sync:
+	@echo ">> fly-secrets-sync — pushing .env to both Fly apps"
+	bash scripts/fly_secrets_sync.sh
+.PHONY: fly-secrets-sync
+
+## fly-secrets-sync-dry: DRY_RUN preview of fly-secrets-sync (no flyctl side effect)
+fly-secrets-sync-dry:
+	@echo ">> fly-secrets-sync-dry — DRY_RUN=1 preview"
+	DRY_RUN=1 bash scripts/fly_secrets_sync.sh
+.PHONY: fly-secrets-sync-dry
