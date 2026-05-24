@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -77,6 +78,14 @@ class Settings(BaseSettings):
     # HTTP daemon listen port. Default 19080 (uncommon, avoids 8080/8000 collisions
     # with IDE / IM / Docker / other dev servers). Override via POLYARB_HTTP_PORT.
     http_port: int = Field(default=19080)
+
+    # Phase 03 Plan 03: which daemon variant this process is — "l1" (default) or "l2".
+    # Drives Sentry service tag, log line differentiation, and (later) wave 2 health
+    # check selection. Env var: POLYARB_DAEMON_VARIANT.
+    daemon_variant: Literal["l1", "l2"] = Field(
+        default="l1",
+        description="Daemon variant identifier — 'l1' for snapshot daemon, 'l2' for orderbook daemon",
+    )
 
     # ── Supabase (D-02) — Plan 03 additions ──────────────────────────────────
     # TWO distinct env vars: supabase-py SDK uses REST URL; Alembic uses DB DSN.
