@@ -582,3 +582,35 @@ verify-keepalive:
 	@bash scripts/check_keepalive.sh 7
 .PHONY: verify-keepalive
 
+# ─────────────────────────────────────────────────────────────────────────────
+# M1-perception Phase 03 Plan 06: L2 mirror + Data API backfill ops (D-07/D-08)
+# ─────────────────────────────────────────────────────────────────────────────
+
+## migrate-l2: Apply Alembic 003 (5 L2 tables + RLS + BRIN) to Supabase Postgres
+## (D-07) — alias of supabase-migrate (alembic auto-detects pending revisions).
+migrate-l2:
+	@echo ">> migrate-l2 — alembic upgrade head (003_l2_tables.py)"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN not set"; exit 1; fi; \
+	uv run alembic upgrade head && uv run alembic current
+.PHONY: migrate-l2
+
+## backfill-trades: 7-day /trades backfill for one asset (D-08).
+## Usage: make backfill-trades MARKET=<asset_id> [DAYS=7]
+## Output: JSONL on stdout (one trade per line); pipe to jq or supabase upsert.
+backfill-trades:
+	@if [ -z "$(MARKET)" ]; then \
+		echo "Usage: make backfill-trades MARKET=<asset_id> [DAYS=7]" >&2; exit 1; \
+	fi
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	uv run python -m polyarb.clients.data_api_client --market $(MARKET) --days $${DAYS:-7}
+.PHONY: backfill-trades
+
+## smoke-l2-mirror: Sanity-instantiate L2SupabaseMirror against .env creds.
+## Does NOT write data — only confirms the supabase-py client constructs cleanly.
+## Useful as a credential-presence gate before deploying the L2 daemon.
+smoke-l2-mirror:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	uv run python -c "from polyarb.config import load_settings; from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror; s = load_settings(); m = L2SupabaseMirror(s.supabase_url, s.supabase_service_key.get_secret_value()); print('OK l2-mirror instantiated url=', s.supabase_url)"
+.PHONY: smoke-l2-mirror
+

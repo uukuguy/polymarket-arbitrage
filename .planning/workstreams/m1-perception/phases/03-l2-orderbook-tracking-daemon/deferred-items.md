@@ -22,7 +22,14 @@ Discovered during Plan 03-04 regression sweep (2026-05-24).
 - Pre-existing; cause not investigated.
 - **Action**: Defer to a maintenance plan.
 
+### 4. `tests/m1-perception/test_chaos_r2.py::test_r2_retry_config_is_applied`
+- Pre-existing; sibling of test_r2_sync.py failure (likely same root cause).
+- Confirmed pre-existing during Plan 03-06 regression sweep (2026-05-25).
+- **Action**: Defer to same maintenance plan as #3.
+
 ## Notes
-None of the above failures involve modules touched by Plan 03-04
-(ws_market_client.py, ws_watchdog.py, ws_consumer.py, l2_main.py).
-The Plan 03-04 + Plan 03-03 test suites (18 tests) pass cleanly.
+None of the above failures involve modules touched by Plans 03-03 through 03-06
+(ws_market_client.py, ws_watchdog.py, ws_consumer.py, l2_main.py,
+events/, observation/l2_candidate_refresh.py, storage/l2_supabase_mirror.py,
+clients/data_api_client.py, alembic/versions/003_l2_tables.py).
+The Plan 03-06 module-scope test suites pass cleanly (46 tests green).
