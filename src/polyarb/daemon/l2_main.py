@@ -1,9 +1,9 @@
 """Polyarb L2 daemon entry — WS market channel + event listener + Starlette health.
 
-Phase 03 Plan 03 — D-06: separate process from L1 snapshot daemon. This file
-ships the runnable skeleton; Plan 04 (WS client + watchdog) and Plan 05
-(event bus + candidate refresh) extend `ws_consumer` / `event_listener`
-without re-engineering the init order or shutdown semantics.
+Phase 03 Plan 03 — D-06: separate process from L1 snapshot daemon.
+Phase 03 Plan 04 wired the real `WsWatchdog` + `WsConsumer` (replacing the
+Mock-shaped placeholders). Plan 05 will wire `event_listener` to the
+asyncpg-based event bus + candidate refresh.
 
 Init order mirrors `polyarb.daemon.main` (Phase 02 P9 server-started gate is
 MANDATORY — otherwise Fly's 120s grace period times out before uvicorn binds
@@ -30,9 +30,8 @@ Architecture:
     10. server.should_exit = True
     11. await asyncio.wait_for(server_task, timeout=5.0)  — F-04 bounded shutdown
 
-Plan 04/05 placeholders: `ws_consumer` / `event_listener` start as None;
-health checks render "warn" with output="not_configured" until those plans wire
-the real components.
+Plan 05 placeholder: `event_listener` still starts as None; health check
+renders "warn" with output="not_configured" until Plan 05 wires it.
 
 Cross-pollination guard (T-03-03-03): this module MUST NOT import from
 `polyarb.daemon.main`. Both files share the L1/L2 init contract via
@@ -53,6 +52,8 @@ from loguru import logger
 # All imports below are patched at IMPORT SITE (polyarb.daemon.l2_main.*)
 # by tests — Phase 02 L9. Never patch at definition site.
 from polyarb.config import load_settings
+from polyarb.daemon.ws_consumer import WsConsumer
+from polyarb.daemon.ws_watchdog import WsWatchdog
 from polyarb.http.l2_app import create_l2_app
 from polyarb.observability.logging import init_logging
 from polyarb.observability.sentry import init_sentry
@@ -83,12 +84,26 @@ async def main() -> int:
     sqlite_store = SQLiteStore(settings.db_path)
     sqlite_store.init_schema()
 
-    # ── Plan 04/05 placeholders ──────────────────────────────────────────────
-    # Plan 04 will replace with: WsConsumer + WsWatchdog wired together
-    # Plan 05 will replace with: EventListener wired to candidate_refresh
-    # Until then, l2_health.py renders "warn" with output="not_configured".
-    ws_consumer: Any = None
-    event_listener: Any = None
+    # ── Plan 04 wiring (real WsWatchdog + WsConsumer) ────────────────────────
+    # Plan 05 will replace event_listener=None with EventListener wired to
+    # candidate_refresh; Plan 06 will replace _placeholder_on_event with the
+    # Supabase mirror dispatch.
+    watchdog = WsWatchdog(stale_s=30.0)
+
+    def _placeholder_on_event(frame: dict) -> None:
+        """Plan 04 placeholder — Plan 06 replaces with l2_supabase_mirror dispatch.
+
+        T-03-04-01 mitigation: log only event_type, never the body.
+        """
+        logger.debug(f"ws frame type={frame.get('event_type', 'unknown')}")
+
+    ws_consumer: Any = WsConsumer(
+        settings=settings,
+        watchdog=watchdog,
+        on_event=_placeholder_on_event,
+        initial_assets=[],  # Plan 05 will populate via candidate_refresh
+    )
+    event_listener: Any = None  # Plan 05 will wire EventListener
     # ─────────────────────────────────────────────────────────────────────────
 
     app = create_l2_app(
@@ -137,9 +152,11 @@ async def main() -> int:
         f"variant={getattr(settings, 'daemon_variant', 'unknown')}"
     )
 
-    # Plan 04 will create ws_consumer task here.
+    # Plan 04 wiring — watchdog + consumer tasks alongside server_task.
     # Plan 05 will create event_listener task here.
-    # Plan 03 boundary: just wait on stop_event.
+    watchdog_task = asyncio.create_task(watchdog.watch(stop_event))
+    consumer_task = asyncio.create_task(ws_consumer.run(stop_event))
+
     try:
         await stop_event.wait()
     except asyncio.CancelledError:
@@ -149,14 +166,25 @@ async def main() -> int:
     finally:
         logger.info("polyarb-l2 daemon stopping")
         server.should_exit = True
-        # F-04 bounded shutdown — even if uvicorn ignores should_exit, exit within 5s
-        try:
-            await asyncio.wait_for(server_task, timeout=5.0)
-        except asyncio.TimeoutError:
-            logger.warning("uvicorn server did not stop within 5s — forcing")
-        except asyncio.CancelledError:
-            # Re-raise so the run() caller exits cleanly
-            raise
+        # Signal watchdog + consumer to exit by cancelling explicitly (stop_event is
+        # already set, but cancel is the belt-and-suspenders for any blocking await).
+        watchdog_task.cancel()
+        consumer_task.cancel()
+        # F-04 bounded shutdown — even if any task ignores cancel, exit within 5s each
+        for task, name in (
+            (server_task, "server"),
+            (watchdog_task, "watchdog"),
+            (consumer_task, "consumer"),
+        ):
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"{name} task did not stop within 5s — forcing")
+            except asyncio.CancelledError:
+                # Expected for watchdog_task / consumer_task because we cancelled them.
+                # Re-raise only if it's the server (graceful exit signal).
+                if name == "server":
+                    raise
 
     logger.info("polyarb-l2 daemon stopped cleanly")
     return 0
