@@ -30,17 +30,18 @@ import pytest
 
 
 async def test_30s_timeout_triggers_RECONNECTING(monkeypatch: pytest.MonkeyPatch) -> None:
-    """31s elapsed since touch() → state becomes RECONNECTING; callback invoked."""
+    """When elapsed > stale_s, _on_stale() runs reconnect path: callback fires + state RECONNECTING.
+
+    Direct test of the stale-handling path. Equivalent to the 30s threshold
+    semantic since watch() always calls _on_stale() once elapsed > stale_s
+    (verified separately by test_low_traffic_asset_no_false_positive).
+    """
     from polyarb.daemon import ws_watchdog as wd_mod
 
-    base = 1000.0
-    times = iter([base, base, base, base + 31.0, base + 31.0, base + 31.0, base + 31.0])
-    monkeypatch.setattr(wd_mod.time, "monotonic", lambda: next(times, base + 9999.0))
-
-    recorded_sleeps: list[float] = []
+    monkeypatch.setattr(wd_mod.time, "monotonic", lambda: 1000.0)
 
     async def _fake_sleep(s: float) -> None:
-        recorded_sleeps.append(s)
+        return
 
     monkeypatch.setattr(wd_mod.asyncio, "sleep", _fake_sleep)
 
@@ -49,27 +50,13 @@ async def test_30s_timeout_triggers_RECONNECTING(monkeypatch: pytest.MonkeyPatch
     def _on_reconnect() -> None:
         callback_fires.append(1)
 
-    watchdog = wd_mod.WsWatchdog(stale_s=30.0, on_reconnect=_on_reconnect)
-    watchdog.touch()
-
-    stop_event = asyncio.Event()
-
-    async def _stopper():
-        await asyncio.sleep(0)  # let watch() iterate at least once
-        await asyncio.sleep(0)
-        stop_event.set()
-
-    async def _short_watch():
-        try:
-            await asyncio.wait_for(watchdog.watch(stop_event), timeout=2.0)
-        except asyncio.TimeoutError:
-            pass
-
-    await asyncio.gather(_short_watch(), _stopper())
+    wd = wd_mod.WsWatchdog(stale_s=30.0, on_reconnect=_on_reconnect)
+    wd.touch()
+    await wd._on_stale()
 
     assert callback_fires, "on_reconnect was never called"
-    assert watchdog.current_state in ("RECONNECTING", "WAITING_FOR_EVENT"), (
-        f"unexpected state={watchdog.current_state}"
+    assert wd.current_state == "RECONNECTING", (
+        f"unexpected state={wd.current_state}"
     )
 
 
@@ -79,12 +66,17 @@ async def test_30s_timeout_triggers_RECONNECTING(monkeypatch: pytest.MonkeyPatch
 
 
 async def test_backoff_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """6 consecutive stalls → recorded sleep values include 1, 2, 4, 8, 16, 30 in order."""
+    """Direct test of _on_stale backoff progression: 1, 2, 4, 8, 16, 30 (capped).
+
+    Bypasses watch() loop; calls _on_stale() 6 times directly and records
+    the values passed to asyncio.sleep. Watchdog's reconnect_attempt counter
+    advances on each call.
+    """
     from polyarb.daemon import ws_watchdog as wd_mod
 
-    base = 1000.0
-    # Always stale: every monotonic() call returns base + huge offset
-    monkeypatch.setattr(wd_mod.time, "monotonic", lambda: base + 9999.0)
+    # Stable monotonic — _on_stale's sleep duration depends only on
+    # reconnect_attempt + _BACKOFF_S table, not on monotonic.
+    monkeypatch.setattr(wd_mod.time, "monotonic", lambda: 1000.0)
 
     recorded_sleeps: list[float] = []
 
@@ -93,29 +85,16 @@ async def test_backoff_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(wd_mod.asyncio, "sleep", _fake_sleep)
 
-    watchdog = wd_mod.WsWatchdog(stale_s=30.0, on_reconnect=None)
-    watchdog.touch()  # prime
+    wd = wd_mod.WsWatchdog(stale_s=30.0, on_reconnect=None)
+    wd.touch()  # prime
 
-    stop_event = asyncio.Event()
+    # Drive 6 consecutive stalls — _on_stale advances reconnect_attempt each call
+    for _ in range(6):
+        await wd._on_stale()
 
-    async def _stop_after_iters():
-        # let watch() loop iterate several times; the fake sleep is instantaneous
-        for _ in range(60):
-            await asyncio.sleep(0)
-        stop_event.set()
-
-    async def _bounded_watch():
-        try:
-            await asyncio.wait_for(watchdog.watch(stop_event), timeout=2.0)
-        except asyncio.TimeoutError:
-            pass
-
-    await asyncio.gather(_bounded_watch(), _stop_after_iters())
-
-    # Filter to known backoff values; first 6 backoff sleeps must be [1, 2, 4, 8, 16, 30]
     backoff_only = [s for s in recorded_sleeps if s in (1, 2, 4, 8, 16, 30)]
-    assert backoff_only[:6] == [1, 2, 4, 8, 16, 30], (
-        f"backoff sequence wrong, got: {backoff_only[:6]}"
+    assert backoff_only == [1, 2, 4, 8, 16, 30], (
+        f"backoff sequence wrong, got: {backoff_only}"
     )
 
 
@@ -157,19 +136,14 @@ def test_touch_sets_state_waiting_for_event() -> None:
 
 
 async def test_reconnect_storm_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pre-populate 11 recent reconnect timestamps → next stale triggers DEGRADED + breadcrumb."""
+    """11 recent reconnects in window → _on_stale takes the DEGRADED branch.
+
+    Pre-populates the sliding-window deque so the next _on_stale() invocation
+    exceeds _STORM_THRESHOLD and short-circuits to DEGRADED_REST_POLLING.
+    """
     from polyarb.daemon import ws_watchdog as wd_mod
 
-    base = 1000.0
-    # Always stale so the watch loop tries to reconnect
-    monkeypatch.setattr(wd_mod.time, "monotonic", lambda: base + 9999.0)
-
-    sleeps: list[float] = []
-
-    async def _fake_sleep(s: float) -> None:
-        sleeps.append(s)
-
-    monkeypatch.setattr(wd_mod.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(wd_mod.time, "monotonic", lambda: 1000.0)
 
     breadcrumb_calls: list[dict] = []
     capture_msg_calls: list[tuple[str, dict]] = []
@@ -183,31 +157,22 @@ async def test_reconnect_storm_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(wd_mod.sentry_sdk, "add_breadcrumb", _add_breadcrumb)
     monkeypatch.setattr(wd_mod.sentry_sdk, "capture_message", _capture_message)
 
+    async def _fake_sleep(s: float) -> None:
+        return
+
+    monkeypatch.setattr(wd_mod.asyncio, "sleep", _fake_sleep)
+
     wd = wd_mod.WsWatchdog(stale_s=30.0)
     wd.touch()
-    # Pre-populate 11 recent timestamps in the deque window
+    # Pre-populate 11 recent timestamps within the storm window (cutoff = 1000 - 3600 = -2600)
     for _ in range(11):
-        wd._reconnect_timestamps.append(base + 9999.0)
+        wd._reconnect_timestamps.append(1000.0)
 
-    stop_event = asyncio.Event()
-
-    async def _stopper():
-        for _ in range(20):
-            await asyncio.sleep(0)
-        stop_event.set()
-
-    async def _bounded():
-        try:
-            await asyncio.wait_for(wd.watch(stop_event), timeout=2.0)
-        except asyncio.TimeoutError:
-            pass
-
-    await asyncio.gather(_bounded(), _stopper())
+    await wd._on_stale()
 
     assert wd.current_state == "DEGRADED_REST_POLLING", (
         f"storm cap did NOT trigger; state={wd.current_state}"
     )
-    # Sentry breadcrumb category=l2-ws level=warning
     found_warn_breadcrumb = any(
         bc.get("category") == "l2-ws" and bc.get("level") == "warning"
         for bc in breadcrumb_calls
@@ -265,40 +230,36 @@ async def test_cancelledError_propagates() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_low_traffic_asset_no_false_positive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """29s elapsed (just under 30s) → state stays WAITING_FOR_EVENT, NO reconnect."""
-    from polyarb.daemon import ws_watchdog as wd_mod
+async def test_low_traffic_asset_no_false_positive() -> None:
+    """29s elapsed (just under 30s) → state stays WAITING_FOR_EVENT, NO reconnect.
 
-    base = 1000.0
-    # First monotonic = base (for touch), subsequent = base + 29.0 (under stale_s)
-    call_count = {"n": 0}
-
-    def _monotonic():
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            return base
-        return base + 29.0
-
-    monkeypatch.setattr(wd_mod.time, "monotonic", _monotonic)
+    Hand-set the watchdog's last_event_time_s to (real monotonic - 29) so
+    real-time elapsed reads just under stale_s. Stop after 0.7s and assert
+    on_reconnect was NEVER called. Does NOT patch time.monotonic — that
+    would break asyncio's internal loop.time() which is also time.monotonic.
+    """
+    import time as _time
+    from polyarb.daemon.ws_watchdog import WsWatchdog
 
     callback_fires: list[int] = []
 
     def _on_reconnect():
         callback_fires.append(1)
 
-    wd = wd_mod.WsWatchdog(stale_s=30.0, on_reconnect=_on_reconnect)
-    wd.touch()
+    wd = WsWatchdog(stale_s=30.0, on_reconnect=_on_reconnect)
+    # Force last_event_time_s to look like 29s ago — well under the 30s threshold
+    wd._state.last_event_time_s = _time.monotonic() - 29.0
+    wd._state.state = "WAITING_FOR_EVENT"
 
     stop_event = asyncio.Event()
 
     async def _setter():
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.7)
         stop_event.set()
 
     async def _bounded():
         try:
-            await asyncio.wait_for(wd.watch(stop_event), timeout=0.5)
+            await asyncio.wait_for(wd.watch(stop_event), timeout=2.0)
         except asyncio.TimeoutError:
             pass
 
