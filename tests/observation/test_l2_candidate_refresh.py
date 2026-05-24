@@ -312,8 +312,18 @@ async def test_refresh_debounce_60s(settings_with_db, monkeypatch, tmp_path):
     fake_ws.subscribed_assets = []
     fake_ws._subscribed_assets = []
 
-    times = iter([100.0, 130.0, 200.0])
-    monkeypatch.setattr(mod.time, "monotonic", lambda: next(times))
+    # Each on_snapshot_complete call invokes time.monotonic() once (line:
+    # now = time.monotonic()). Three calls → three values.
+    times = [100.0, 130.0, 200.0]
+    idx = {"i": 0}
+
+    def _mono():
+        v = times[idx["i"]]
+        if idx["i"] < len(times) - 1:
+            idx["i"] += 1
+        return v
+
+    monkeypatch.setattr(mod.time, "monotonic", _mono)
 
     compute_calls = {"n": 0}
     real_compute = mod.compute_candidates
