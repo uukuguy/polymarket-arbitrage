@@ -271,6 +271,47 @@ smoke-healthz:
 	if [ "$$STATUS" = "200" ]; then echo "PASS: /healthz returned 200"; else echo "FAIL: expected 200 got $$STATUS"; exit 1; fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Phase 03 Plan 03: L2 daemon (orderbook tracking) — D-06 separate process
+#
+# daemon-l2-run-local  — run L2 daemon locally on :19081 (dev env)
+# smoke-l2-health      — curl local L2 /health + /healthz (verify Plan 03 skeleton)
+# smoke-l2-health-prod — curl prod L2 /healthz on polyarb-l2.fly.dev
+# ─────────────────────────────────────────────────────────────────────────────
+
+.PHONY: daemon-l2-run-local smoke-l2-health smoke-l2-health-prod
+
+## daemon-l2-run-local: Start polyarb-l2 daemon locally on :19081 (separate from L1's :19080). Ctrl-C to stop.
+daemon-l2-run-local:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	PORT=$${POLYARB_HTTP_PORT:-19081}; \
+	echo ">> daemon-l2-run-local — starting on http://127.0.0.1:$$PORT"; \
+	echo ">> endpoints: GET /health (IETF strict)  GET /healthz (always 200)"; \
+	echo ">> Ctrl-C to stop"; \
+	echo ""; \
+	POLYARB_DAEMON_VARIANT=l2 \
+	POLYARB_DB_PATH=./data/l2-state.db \
+	POLYARB_HTTP_PORT=$$PORT \
+	POLYARB_ALLOW_EMPTY_SECRET=1 \
+	uv run python -m polyarb.daemon.l2_main
+
+## smoke-l2-health: Hit GET /health + /healthz on running local L2 daemon (port 19081 default)
+smoke-l2-health:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	PORT=$${POLYARB_HTTP_PORT:-19081}; \
+	echo ">> smoke-l2-health — GET http://127.0.0.1:$$PORT/health"; \
+	curl -fsS http://127.0.0.1:$$PORT/health | python3 -m json.tool || echo "L2 daemon not running locally"; \
+	echo ""; echo ">> smoke-l2-health — GET http://127.0.0.1:$$PORT/healthz"; \
+	curl -fsS http://127.0.0.1:$$PORT/healthz | python3 -m json.tool
+
+## smoke-l2-health-prod: Verify prod polyarb-l2.fly.dev /healthz returns 200 (post-deploy)
+smoke-l2-health-prod:
+	@echo ">> smoke-l2-health-prod — GET https://polyarb-l2.fly.dev/healthz"
+	@STATUS=$$(curl -s -o /tmp/l2_healthz_body.json -w "%{http_code}" https://polyarb-l2.fly.dev/healthz); \
+	echo "HTTP $$STATUS"; \
+	cat /tmp/l2_healthz_body.json | python3 -m json.tool; \
+	if [ "$$STATUS" = "200" ]; then echo "PASS: L2 /healthz returned 200"; else echo "FAIL: expected 200 got $$STATUS"; exit 1; fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 03: Supabase mirror + R2 archive
 #
 # supabase-migrate    — run Alembic upgrade head (requires POLYARB_SUPABASE_DB_DSN)
