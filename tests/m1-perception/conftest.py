@@ -28,6 +28,7 @@ import hmac
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -568,6 +569,57 @@ def mocked_better_stack(monkeypatch: pytest.MonkeyPatch) -> Any:
         set_response=set_response,
         reset=reset,
     )
+
+
+# =============================================================================
+# Phase 03 Plan 03: L2 daemon fixtures (mock-shaped WsConsumer + EventListener)
+# =============================================================================
+
+
+@pytest.fixture
+def mock_ws_consumer() -> Any:
+    """MagicMock WS consumer shaped like Plan 04 WsConsumer interface.
+
+    Plan 04 will replace this mock with a real `polyarb.daemon.ws.WsConsumer`.
+    For Plan 03, attributes match what `_build_l2_health_checks` reads.
+    """
+    consumer = MagicMock()
+    consumer.current_state = "CONNECTED"
+    consumer.last_event_at_s = time.time()
+    consumer.subscribed_assets = ["0xabc", "0xdef"]
+    return consumer
+
+
+@pytest.fixture
+def mock_event_listener() -> Any:
+    """MagicMock event listener for Plan 05 wiring."""
+    listener = MagicMock()
+    listener.is_listening = True
+    listener.last_event_received_s = time.time()
+    return listener
+
+
+@pytest.fixture
+def l2_http_test_client(
+    daemon_settings_for_test: Any,
+    mock_ws_consumer: Any,
+    mock_event_listener: Any,
+) -> Any:
+    """Starlette TestClient using create_l2_app factory + injected mocks."""
+    from starlette.testclient import TestClient
+    from polyarb.http.l2_app import create_l2_app
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    app = create_l2_app(
+        sqlite_store=store,
+        settings=daemon_settings_for_test,
+        ws_consumer=mock_ws_consumer,
+        event_listener=mock_event_listener,
+    )
+    with TestClient(app) as client:
+        yield client
 
 
 @pytest.fixture
