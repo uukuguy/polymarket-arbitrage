@@ -513,3 +513,15 @@ fly-secrets-sync-dry:
 	@echo ">> fly-secrets-sync-dry — DRY_RUN=1 preview"
 	DRY_RUN=1 bash scripts/fly_secrets_sync.sh
 .PHONY: fly-secrets-sync-dry
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M1-perception Phase 03: ops surface for daily keepalive (D-01)
+# ─────────────────────────────────────────────────────────────────────────────
+
+## verify-keepalive: Show last 7 runs of supabase-keepalive workflow (D-01 ops surface)
+## Surfaces silent GHA failures (Phase 02 L8 precedent: 4d silent fail observed).
+## Exit 1 if ≥2 failures in window — triggers D-01 risk-surface review (upgrade to Pro?).
+verify-keepalive:
+	@bash scripts/check_keepalive.sh 7
+.PHONY: verify-keepalive
+
