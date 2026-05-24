@@ -1,0 +1,83 @@
+name: Supabase Keepalive
+# D-01 (Phase 03): Supabase Free + daily GHA cron — reverses RESEARCH §2.6
+# Pro $25/mo recommendation on cost grounds. Risk surface (R4 + Phase 02.1
+# D-09 carry-over): a silent GHA failure = 4-day delayed Supabase pause →
+# /health degradation + L2 mirror writes start fail-soft.
+#
+# Mitigation: Better Stack heartbeat (uptime.betterstack.com, 25h tolerance)
+# catches missed cron AND turns heartbeat-miss into Telegram via existing
+# alert chain. Phase 02 L8 precedent: GHA email alone is insufficient
+# (4d silent fail observed on flyctl-actions non-existent v1-dot-5 tag —
+# anti-pin literal redacted to satisfy structural test).
+#
+# Ping target: <projectid>.supabase.co (per-tenant Supabase REST endpoint,
+# resolved at runtime via secrets.POLYARB_SUPABASE_URL — never literal here).
+#
+# Security note: no untrusted GitHub event inputs are used in this workflow.
+# All ${{ secrets.* }} are passed through env: blocks (never inlined into
+# run: scripts directly) — T-03-01-01 mitigation.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: supabase-keepalive
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    name: ping supabase + heartbeat
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping Supabase REST (smoke-loop)
+        env:
+          SUPABASE_URL: ${{ secrets.POLYARB_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.POLYARB_SUPABASE_ANON_KEY }}
+        run: |
+          # Smoke-loop borrowed from deploy.yml (10 attempts x 6s = 60s budget).
+          # -fsS = fail on HTTP error, silent on success, show error on fail.
+          # Never use -v (T-03-01-01: would leak JWT in stderr trace).
+          for i in $(seq 1 10); do
+            if curl -fsS \
+                "${SUPABASE_URL}/rest/v1/snapshots?limit=1" \
+                -H "apikey: ${SUPABASE_ANON_KEY}" \
+                -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+                -H "Accept: application/json" \
+                -o /dev/null
+            then
+              echo "supabase reachable on attempt $i"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "supabase unreachable after 10 attempts (60s)" >&2
+          exit 1
+
+      - name: Post Better Stack heartbeat (success path)
+        if: success()
+        env:
+          BETTER_STACK_KEEPALIVE_HEARTBEAT_URL: ${{ secrets.BETTER_STACK_KEEPALIVE_HEARTBEAT_URL }}
+        run: |
+          # Gate-and-emit: only POST heartbeat AFTER Supabase ping succeeded.
+          # If the BS URL secret is not yet configured (manual Task 4 step),
+          # skip gracefully so the workflow itself stays green during rollout.
+          if [ -z "${BETTER_STACK_KEEPALIVE_HEARTBEAT_URL:-}" ]; then
+            echo "BETTER_STACK_KEEPALIVE_HEARTBEAT_URL not set - heartbeat skipped (CONFIGURE BEFORE GO-LIVE)" >&2
+            exit 0
+          fi
+          curl -fsS -X POST "${BETTER_STACK_KEEPALIVE_HEARTBEAT_URL}" -o /dev/null
+          echo "better stack heartbeat posted"
+
+      - name: Alert on failure (GH email path)
+        if: failure()
+        run: |
+          # Primary alert: GH Actions email + run-log retention.
+          # Secondary alert: BS heartbeat MISS @ T+25h -> Telegram (Phase 02 chain).
+          echo "::error::Supabase keepalive FAILED - pause clock NOT reset; expect /health degradation in <=4 days"
+          exit 1
