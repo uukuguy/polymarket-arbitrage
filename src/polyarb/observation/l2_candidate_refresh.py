@@ -215,6 +215,7 @@ async def on_snapshot_complete(
     *,
     ws_consumer: Any,
     settings: Any,
+    mirror: Any | None = None,
 ) -> bool:
     """NOTIFY handler — recompute candidates + mutate ws_consumer subscription.
 
@@ -226,6 +227,13 @@ async def on_snapshot_complete(
     Mutation contract (Plan 04 ↔ Plan 05): writes to
     ``ws_consumer._subscribed_assets`` directly (private attribute). The
     public ``subscribed_assets`` property returns a defensive copy.
+
+    Plan 06 extension (D-07): if `mirror` is provided (L2SupabaseMirror
+    instance), persist the diff to l2_candidates:
+      - `added` rows → mirror.upsert_candidates(...)
+      - `removed` asset_ids → mirror.mark_candidates_removed(...)
+    Mirror calls are fail-soft (mirror's own envelope) — any failure surfaces
+    in the mirror's loguru + Sentry breadcrumb but does NOT block the refresh.
     """
     global _last_refresh_at_s
     now = time.monotonic()
@@ -259,4 +267,25 @@ async def on_snapshot_complete(
 
     # Mutate _subscribed_assets directly — Plan 04 design contract.
     ws_consumer._subscribed_assets = list(new_asset_ids)
+
+    # Plan 06 D-07: persist diff to dashboard mirror (fail-soft via mirror itself).
+    if mirror is not None:
+        if removed:
+            mirror.mark_candidates_removed(list(removed))
+        if added:
+            snapshot_id = payload.get("snapshot_id")
+            added_rows_dicts = [
+                {
+                    "snapshot_id": snapshot_id,
+                    "recipe_name": r.recipe_name,
+                    "asset_id": r.asset_id,
+                    "market_id": r.market_id,
+                    "event_id": r.event_id,
+                    "source": r.source,
+                    "ranking_score": r.ranking_score,
+                }
+                for r in added
+            ]
+            mirror.upsert_candidates(added_rows_dicts)
+
     return True

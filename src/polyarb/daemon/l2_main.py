@@ -60,7 +60,124 @@ from polyarb.http.l2_app import create_l2_app
 from polyarb.observability.logging import init_logging
 from polyarb.observability.sentry import init_sentry
 from polyarb.observation.l2_candidate_refresh import on_snapshot_complete
+from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 from polyarb.storage.sqlite_store import SQLiteStore
+
+
+# ── Plan 06 D-07: WS frame → l2_* row builders ───────────────────────────
+# Polymarket WS market-channel event shapes (empirical):
+#   price_change:    {event_type, asset_id, price, side, size, timestamp, ...}
+#   best_bid_ask:    {event_type, asset_id, best_bid, best_ask, timestamp, ...}
+#   book:            {event_type, asset_id, bids:[...], asks:[...], timestamp, ...}
+#   last_trade_price:{event_type, asset_id, market, price, side, size, ts,
+#                     fee_rate_bps, transactionHash?, taker?, ...}
+#
+# These builders project each frame into the narrow l2_top_of_book /
+# l2_trades schema. Missing fields → None (Postgres NULL). We never raise on
+# malformed frames — return None and the dispatcher skips the write.
+
+
+def _isoformat_ts(ts: int | float | str | None) -> str | None:
+    """Normalize WS timestamp (unix seconds or ms) to ISO 8601 string."""
+    if ts is None:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        ts_num = float(ts)
+        # Heuristic: > 1e12 → milliseconds; else seconds
+        if ts_num > 1e12:
+            ts_num /= 1000.0
+        return datetime.fromtimestamp(ts_num, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def _tob_row_from_frame(frame: dict) -> dict | None:
+    """Project a price_change / best_bid_ask / book frame to a l2_top_of_book row.
+
+    Returns None if the frame lacks an asset_id (cannot index).
+    """
+    asset_id = frame.get("asset_id")
+    if not asset_id:
+        return None
+    et = frame.get("event_type", "unknown")
+    # best_bid_ask carries explicit best_bid/best_ask fields
+    best_bid = frame.get("best_bid")
+    best_ask = frame.get("best_ask")
+    if best_bid is None and best_ask is None and et == "price_change":
+        # price_change is per-side delta; carry side+price only as best_<side>
+        side = (frame.get("side") or "").upper()
+        price = frame.get("price")
+        if side == "BUY":
+            best_bid = price
+        elif side == "SELL":
+            best_ask = price
+    # `book` frames carry bids/asks arrays — take top entry of each
+    if et == "book":
+        bids = frame.get("bids") or []
+        asks = frame.get("asks") or []
+        if bids and isinstance(bids[0], dict):
+            best_bid = bids[0].get("price", best_bid)
+        if asks and isinstance(asks[0], dict):
+            best_ask = asks[0].get("price", best_ask)
+
+    try:
+        bb_f = float(best_bid) if best_bid is not None else None
+        ba_f = float(best_ask) if best_ask is not None else None
+    except (TypeError, ValueError):
+        return None
+
+    spread = (ba_f - bb_f) if (bb_f is not None and ba_f is not None) else None
+    mid = ((bb_f + ba_f) / 2) if (bb_f is not None and ba_f is not None) else None
+
+    return {
+        "asset_id": asset_id,
+        "ts": _isoformat_ts(frame.get("timestamp") or frame.get("ts")),
+        "best_bid": bb_f,
+        "best_ask": ba_f,
+        "spread": spread,
+        "mid_price": mid,
+        "depth_yes_usd": None,  # populated only when book frame carries size
+        "depth_no_usd": None,
+        "source_event": et,
+    }
+
+
+def _trade_row_from_frame(frame: dict) -> dict | None:
+    """Project a last_trade_price frame to a l2_trades row.
+
+    Returns None if asset_id or trade_hash is missing (cannot dedup).
+    """
+    asset_id = frame.get("asset_id")
+    if not asset_id:
+        return None
+    # Polymarket WS may key the tx hash under different names depending on
+    # source; accept the common variants.
+    trade_hash = (
+        frame.get("trade_hash")
+        or frame.get("transactionHash")
+        or frame.get("txHash")
+    )
+    if not trade_hash:
+        return None
+    try:
+        size = float(frame.get("size", 0))
+    except (TypeError, ValueError):
+        return None
+    if size <= 0:
+        return None
+    return {
+        "asset_id": asset_id,
+        "market_id": frame.get("market") or frame.get("market_id"),
+        "ts": _isoformat_ts(frame.get("timestamp") or frame.get("ts")),
+        "price": frame.get("price"),
+        "size": size,
+        "side": (frame.get("side") or "").upper() or None,
+        "taker_address": frame.get("taker") or frame.get("taker_address"),
+        "trade_hash": trade_hash,
+        "source": "ws",
+    }
 
 
 class _EventListenerWrapper:
@@ -101,22 +218,54 @@ async def main() -> int:
     sqlite_store.init_schema()
 
     # ── Plan 04 wiring (real WsWatchdog + WsConsumer) ────────────────────────
-    # Plan 05 will replace event_listener=None with EventListener wired to
-    # candidate_refresh; Plan 06 will replace _placeholder_on_event with the
-    # Supabase mirror dispatch.
+    # Plan 05 wired event_listener; Plan 06 replaces placeholder on_event with
+    # real L2SupabaseMirror dispatch by event_type.
     watchdog = WsWatchdog(stale_s=30.0)
 
-    def _placeholder_on_event(frame: dict) -> None:
-        """Plan 04 placeholder — Plan 06 replaces with l2_supabase_mirror dispatch.
+    # ── Plan 06: L2SupabaseMirror init (D-07) — fail-soft if creds missing ──
+    l2_mirror: L2SupabaseMirror | None
+    if settings.supabase_url and settings.supabase_service_key.get_secret_value():
+        l2_mirror = L2SupabaseMirror(
+            url=settings.supabase_url,
+            service_key=settings.supabase_service_key.get_secret_value(),
+        )
+        logger.info("l2-mirror enabled (Supabase REST URL + service_key present)")
+    else:
+        l2_mirror = None
+        logger.info("l2-mirror disabled (POLYARB_SUPABASE_URL or _SERVICE_KEY missing)")
+        # Phase 02.1 P1 — double-anchor for disabled path so dashboards know
+        # at-a-glance whether the silence is by design or by failure.
+        sentry_sdk.add_breadcrumb(
+            category="l2-mirror",
+            level="info",
+            message="l2-mirror disabled (config); no l2_* writes will occur",
+        )
 
-        T-03-04-01 mitigation: log only event_type, never the body.
+    def _on_event(frame: dict) -> None:
+        """Plan 06 D-07: dispatch WS frame to L2SupabaseMirror by event_type.
+
+        T-03-04-01 mitigation: log only event_type + asset prefix, never body.
+        Mirror is fail-soft — call returns False on failure but never raises.
         """
-        logger.debug(f"ws frame type={frame.get('event_type', 'unknown')}")
+        event_type = frame.get("event_type", "unknown")
+        asset_id_raw = frame.get("asset_id") or ""
+        logger.debug(f"ws frame type={event_type} asset={asset_id_raw[:16]}")
+        if l2_mirror is None:
+            return  # disabled — startup breadcrumb already explains why
+
+        if event_type in ("price_change", "best_bid_ask", "book"):
+            row = _tob_row_from_frame(frame)
+            if row is not None:
+                l2_mirror.push_top_of_book([row])
+        elif event_type == "last_trade_price":
+            row = _trade_row_from_frame(frame)
+            if row is not None:
+                l2_mirror.push_trades([row])
 
     ws_consumer: Any = WsConsumer(
         settings=settings,
         watchdog=watchdog,
-        on_event=_placeholder_on_event,
+        on_event=_on_event,
         initial_assets=[],  # candidate_refresh populates on first NOTIFY (or catch-up)
     )
 
@@ -124,12 +273,19 @@ async def main() -> int:
     event_listener: Any = _EventListenerWrapper()
 
     def _dispatch_on_snapshot(payload: dict) -> None:
-        """Sync-callback bridge from asyncpg loop to async refresh handler."""
+        """Sync-callback bridge from asyncpg loop to async refresh handler.
+
+        Plan 06: pass `mirror=l2_mirror` so candidate refresh persists
+        diff to l2_candidates (D-07 dashboard write path).
+        """
         event_listener.last_event_received_s = time.time()
         try:
             asyncio.create_task(
                 on_snapshot_complete(
-                    payload, ws_consumer=ws_consumer, settings=settings
+                    payload,
+                    ws_consumer=ws_consumer,
+                    settings=settings,
+                    mirror=l2_mirror,
                 )
             )
         except Exception as e:  # noqa: BLE001

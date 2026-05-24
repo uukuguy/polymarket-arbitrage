@@ -418,3 +418,84 @@ def test_compute_candidates_recipe_failure_continues(settings_with_db, tmp_path,
     asset_ids = {r.asset_id for r in rows}
     # ok-one populated all 3 markets
     assert len(asset_ids) == 3
+
+
+# ── Plan 06: mirror upsert wired into on_snapshot_complete tail ─────────
+
+
+@pytest.mark.asyncio
+async def test_on_snapshot_complete_calls_mirror_upsert_when_provided(
+    settings_with_db, tmp_path
+):
+    """When `mirror=<L2SupabaseMirror-like>` is passed, the tail calls
+    mirror.upsert_candidates(added) AND mirror.mark_candidates_removed(removed).
+    """
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings, db_path = settings_with_db
+    _create_minimal_sqlite(db_path, _seed_markets(3, "R"))
+    scanner_yaml = tmp_path / "recipes.yaml"
+    scanner_yaml.write_text(
+        "recipes:\n"
+        "  r-only:\n"
+        "    description: x\n"
+        "    where: market_id LIKE 'R%'\n"
+        "    order_by: liquidity_usd DESC\n"
+        "    limit: 10\n"
+    )
+    settings.candidate_scanner_yaml = scanner_yaml
+    settings.candidate_watchlist_yaml = None
+
+    fake_ws = MagicMock()
+    # Pre-populate ws with 2 'old' assets so 2 should be removed
+    fake_ws.subscribed_assets = ["OLD-A", "OLD-B"]
+    fake_ws._subscribed_assets = ["OLD-A", "OLD-B"]
+
+    fake_mirror = MagicMock()
+    fake_mirror.upsert_candidates.return_value = True
+    fake_mirror.mark_candidates_removed.return_value = True
+
+    ok = await mod.on_snapshot_complete(
+        {"snapshot_id": 42, "taken_at_ms": 1},
+        ws_consumer=fake_ws,
+        settings=settings,
+        mirror=fake_mirror,
+    )
+    assert ok is True
+
+    # 3 new R-markets added
+    fake_mirror.upsert_candidates.assert_called_once()
+    added_arg = fake_mirror.upsert_candidates.call_args[0][0]
+    assert len(added_arg) == 3, f"expected 3 added rows, got {len(added_arg)}"
+    # Each upsert row must carry snapshot_id from payload
+    assert all(r["snapshot_id"] == 42 for r in added_arg)
+
+    # 2 old assets removed
+    fake_mirror.mark_candidates_removed.assert_called_once()
+    removed_arg = fake_mirror.mark_candidates_removed.call_args[0][0]
+    assert set(removed_arg) == {"OLD-A", "OLD-B"}
+
+
+@pytest.mark.asyncio
+async def test_on_snapshot_complete_no_mirror_call_when_none(
+    settings_with_db, tmp_path
+):
+    """mirror=None (config-disabled) → no mirror method calls; refresh still runs."""
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings, db_path = settings_with_db
+    _create_minimal_sqlite(db_path, _seed_markets(2, "R"))
+    settings.candidate_scanner_yaml = None
+    settings.candidate_watchlist_yaml = None
+
+    fake_ws = MagicMock()
+    fake_ws.subscribed_assets = []
+    fake_ws._subscribed_assets = []
+
+    ok = await mod.on_snapshot_complete(
+        {"snapshot_id": 1, "taken_at_ms": 1},
+        ws_consumer=fake_ws,
+        settings=settings,
+        mirror=None,
+    )
+    assert ok is True  # refresh ran (debounce not blocking)
