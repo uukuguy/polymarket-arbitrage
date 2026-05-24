@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 from typing import Any
 
 import sentry_sdk
@@ -54,10 +55,25 @@ from loguru import logger
 from polyarb.config import load_settings
 from polyarb.daemon.ws_consumer import WsConsumer
 from polyarb.daemon.ws_watchdog import WsWatchdog
+from polyarb.events.listener import catchup_from_cursor, listen_snapshot_complete
 from polyarb.http.l2_app import create_l2_app
 from polyarb.observability.logging import init_logging
 from polyarb.observability.sentry import init_sentry
+from polyarb.observation.l2_candidate_refresh import on_snapshot_complete
 from polyarb.storage.sqlite_store import SQLiteStore
+
+
+class _EventListenerWrapper:
+    """Health-surface shim — health endpoint reads is_listening + last event ts.
+
+    Plan 05 D-05: the listener task itself flips is_listening=True after a
+    successful LISTEN snapshot_complete; the dispatch wrapper bumps
+    last_event_received_s on each NOTIFY received.
+    """
+
+    def __init__(self) -> None:
+        self.is_listening: bool = False
+        self.last_event_received_s: float = time.time()
 
 
 async def main() -> int:
@@ -101,9 +117,23 @@ async def main() -> int:
         settings=settings,
         watchdog=watchdog,
         on_event=_placeholder_on_event,
-        initial_assets=[],  # Plan 05 will populate via candidate_refresh
+        initial_assets=[],  # candidate_refresh populates on first NOTIFY (or catch-up)
     )
-    event_listener: Any = None  # Plan 05 will wire EventListener
+
+    # ── Plan 05 wires: EventListener + on_snapshot_complete dispatch ─────
+    event_listener: Any = _EventListenerWrapper()
+
+    def _dispatch_on_snapshot(payload: dict) -> None:
+        """Sync-callback bridge from asyncpg loop to async refresh handler."""
+        event_listener.last_event_received_s = time.time()
+        try:
+            asyncio.create_task(
+                on_snapshot_complete(
+                    payload, ws_consumer=ws_consumer, settings=settings
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"on_snapshot_complete dispatch failed: {e!r}")
     # ─────────────────────────────────────────────────────────────────────────
 
     app = create_l2_app(
@@ -153,9 +183,47 @@ async def main() -> int:
     )
 
     # Plan 04 wiring — watchdog + consumer tasks alongside server_task.
-    # Plan 05 will create event_listener task here.
+    # Plan 05 wiring — event listener task (asyncpg LISTEN) + startup catchup.
     watchdog_task = asyncio.create_task(watchdog.watch(stop_event))
     consumer_task = asyncio.create_task(ws_consumer.run(stop_event))
+
+    # ── Plan 05: startup catch-up (Plan 06 cursor table absence tolerated) ──
+    try:
+        dsn = settings.supabase_db_dsn.get_secret_value()
+        if dsn:
+            missed = await catchup_from_cursor(dsn=dsn, consumer="l2-candidate-refresh")
+            if missed:
+                logger.info(
+                    f"event-bus catchup: {len(missed)} missed snapshots to replay"
+                )
+            else:
+                logger.info("event-bus catchup: no missed snapshots")
+        else:
+            logger.info("event-bus catchup skipped: supabase_db_dsn not set")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"catchup_from_cursor failed (fail-soft, Plan 06 may not have shipped yet): {e!r}"
+        )
+
+    # ── Plan 05: long-running listener task ─────────────────────────────────
+    async def _listener_runner() -> None:
+        """Wrap listen_snapshot_complete so health wrapper flips is_listening."""
+        try:
+            event_listener.is_listening = True
+            dsn = settings.supabase_db_dsn.get_secret_value()
+            if not dsn:
+                logger.warning(
+                    "event listener: supabase_db_dsn not set; idling until shutdown"
+                )
+                await stop_event.wait()
+                return
+            await listen_snapshot_complete(
+                dsn=dsn, on_event=_dispatch_on_snapshot, stop_event=stop_event
+            )
+        finally:
+            event_listener.is_listening = False
+
+    listener_task = asyncio.create_task(_listener_runner())
 
     try:
         await stop_event.wait()
@@ -166,15 +234,18 @@ async def main() -> int:
     finally:
         logger.info("polyarb-l2 daemon stopping")
         server.should_exit = True
-        # Signal watchdog + consumer to exit by cancelling explicitly (stop_event is
-        # already set, but cancel is the belt-and-suspenders for any blocking await).
+        # Signal watchdog + consumer + listener to exit by cancelling explicitly
+        # (stop_event is already set, but cancel is the belt-and-suspenders for
+        # any blocking await).
         watchdog_task.cancel()
         consumer_task.cancel()
+        listener_task.cancel()
         # F-04 bounded shutdown — even if any task ignores cancel, exit within 5s each
         for task, name in (
             (server_task, "server"),
             (watchdog_task, "watchdog"),
             (consumer_task, "consumer"),
+            (listener_task, "listener"),
         ):
             try:
                 await asyncio.wait_for(task, timeout=5.0)

@@ -80,6 +80,7 @@ def _phase(label: str):
 from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
+from polyarb.events.bus import publish_snapshot_complete
 from polyarb.snapshot.cache import ChunkCache
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_streaming
@@ -613,6 +614,30 @@ async def run_snapshot(
                 mirror.update_parquet_url(snapshot_id, r2_url)
             except Exception:  # noqa: BLE001
                 logger.warning("update_parquet_url post-r2 failed; snapshots.parquet_url stays NULL")
+
+    # ── 7.7. Event bus fan-out (Plan 03-05, D-05) — fail-soft post-write ─────
+    # L1 → L2 cross-process NOTIFY so the L2 daemon can refresh its
+    # candidate WS subscription set. Feature-flag `event_bus_enabled`
+    # default FALSE per B1 spawn constraint — opt-in via Fly secret
+    # `POLYARB_EVENT_BUS_ENABLED=1` ONLY after Plan 07 chaos PASS for
+    # Inj L2-3. Wrapped in try/except so a NOTIFY failure NEVER blocks
+    # snapshot completion (D-12 invariant). publish_snapshot_complete
+    # itself is fail-soft, but we belt-and-suspender the import call too.
+    if getattr(settings, "event_bus_enabled", False):
+        try:
+            await publish_snapshot_complete(
+                settings,
+                snapshot_id=snapshot_id,
+                taken_at_ms=taken_at_ms,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"event bus publish failed (fail-soft): {e!r}")
+            sentry_sdk.add_breadcrumb(
+                category="event-bus",
+                level="warning",
+                message=f"orchestrator step 7.7 publish failed: {snapshot_id}",
+                data={"error": str(e)[:200]},
+            )
 
     # ── Cache cleanup — MUST run unconditionally (after step 7.5 + 7.6) ──────
     # Even if mirror/R2 failed, the local write succeeded — clean up cache.
