@@ -87,6 +87,16 @@ class Settings(BaseSettings):
         description="Daemon variant identifier — 'l1' for snapshot daemon, 'l2' for orderbook daemon",
     )
 
+    # ── Plan 03 Wave 5 deploy-bootstrap (2026-05-25) ─────────────────────
+    # Comma-separated list of Polymarket asset_ids to subscribe at L2 startup
+    # BEFORE any L1 NOTIFY arrives. Lets L2 connect to WS immediately on
+    # cold start (otherwise WsConsumer idles with empty subscribed_assets).
+    # Phase 03.1 will replace this with Supabase markets_latest query.
+    bootstrap_asset_ids: str = Field(
+        default="",
+        description="Comma-separated asset_ids for L2 WS bootstrap (POLYARB_BOOTSTRAP_ASSET_IDS)",
+    )
+
     # ── Supabase (D-02) — Plan 03 additions ──────────────────────────────────
     # TWO distinct env vars: supabase-py SDK uses REST URL; Alembic uses DB DSN.
     # See W6 fix in 02-03-PLAN.md for explanation.

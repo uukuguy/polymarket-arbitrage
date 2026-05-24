@@ -262,11 +262,25 @@ async def main() -> int:
             if row is not None:
                 l2_mirror.push_trades([row])
 
+    # Bootstrap asset_ids from env (Phase 03 Wave 5 deploy aid 2026-05-25):
+    # without this, L2 cold-starts with empty subscribed_assets and idles
+    # until L1 emits NOTIFY (which requires event_bus_enabled=True per B1).
+    # In debug/dev mode, set POLYARB_BOOTSTRAP_ASSET_IDS=<id1>,<id2>,... to
+    # have WS connect immediately. candidate_refresh diffs against this set.
+    _bootstrap_ids = [
+        s.strip() for s in (settings.bootstrap_asset_ids or "").split(",") if s.strip()
+    ]
+    if _bootstrap_ids:
+        logger.info(
+            f"ws_consumer: bootstrapping with {len(_bootstrap_ids)} asset_ids "
+            f"from POLYARB_BOOTSTRAP_ASSET_IDS"
+        )
+
     ws_consumer: Any = WsConsumer(
         settings=settings,
         watchdog=watchdog,
         on_event=_on_event,
-        initial_assets=[],  # candidate_refresh populates on first NOTIFY (or catch-up)
+        initial_assets=_bootstrap_ids,
     )
 
     # ── Plan 05 wires: EventListener + on_snapshot_complete dispatch ─────
@@ -344,14 +358,45 @@ async def main() -> int:
     consumer_task = asyncio.create_task(ws_consumer.run(stop_event))
 
     # ── Plan 05: startup catch-up (Plan 06 cursor table absence tolerated) ──
+    # P0 fix (2026-05-25): catchup must REPLAY each missed snapshot through the
+    # dispatch chain, then advance l2_event_cursor.last_snapshot_id so the next
+    # restart is monotonic. Prior code only logged the count; missed snapshots
+    # silently never reached candidate_refresh, leaving WS subscribed_assets
+    # empty on every cold start.
     try:
         dsn = settings.supabase_db_dsn.get_secret_value()
         if dsn:
             missed = await catchup_from_cursor(dsn=dsn, consumer="l2-candidate-refresh")
             if missed:
                 logger.info(
-                    f"event-bus catchup: {len(missed)} missed snapshots to replay"
+                    f"event-bus catchup: replaying {len(missed)} missed snapshots"
                 )
+                for row in missed:
+                    _dispatch_on_snapshot(
+                        {"snapshot_id": row["id"], "ts_s": row["taken_at_ms"] / 1000.0}
+                    )
+                # Advance cursor — best-effort; cursor table is in Supabase, so
+                # use the same dsn. fail-soft on connection error.
+                try:
+                    import asyncpg as _asyncpg
+                    _conn = await _asyncpg.connect(dsn=dsn)
+                    try:
+                        await _conn.execute(
+                            "INSERT INTO l2_event_cursor (consumer, last_snapshot_id) "
+                            "VALUES ($1, $2) ON CONFLICT (consumer) DO UPDATE "
+                            "SET last_snapshot_id = EXCLUDED.last_snapshot_id",
+                            "l2-candidate-refresh",
+                            int(missed[-1]["id"]),
+                        )
+                        logger.info(
+                            f"event-bus catchup: cursor advanced to snapshot_id={missed[-1]['id']}"
+                        )
+                    finally:
+                        await _conn.close()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"event-bus catchup: cursor advance failed (fail-soft): {e!r}"
+                    )
             else:
                 logger.info("event-bus catchup: no missed snapshots")
         else:
