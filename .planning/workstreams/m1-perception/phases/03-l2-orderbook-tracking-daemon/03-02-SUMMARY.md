@@ -156,6 +156,28 @@ completed: 2026-05-24
 - Wave 1 (Plans 01 + 02) complete enables Wave 2 (Plan 03 — L2 daemon entry).
 - No blockers. polyarb-l2 Fly app config infrastructure ready; first deploy gated on Plan 03 code landing.
 
+## Self-Check: PASSED
+
+Verified post-completion (2026-05-24):
+
+| Artifact | Check | Result |
+|---|---|---|
+| fly-l2.toml | `test -f` | FOUND |
+| .github/workflows/deploy-l2.yml | `test -f` | FOUND |
+| scripts/fly_secrets_sync.sh | `test -x` | FOUND + executable |
+| tests/test_fly_l2_config.py | `uv run pytest` | 11/11 PASS |
+| Makefile targets | `grep -cE "^(deploy-l2-prod\|fly-l2-status\|fly-l2-logs\|fly-secrets-sync\|fly-secrets-sync-dry):"` | 5 |
+| dbd8e38 (Task 1) | `git log --oneline --all \| grep` | FOUND |
+| 5d5c26e (Task 2) | `git log --oneline --all \| grep` | FOUND |
+| 28ec7a4 (Task 3) | `git log --oneline --all \| grep` | FOUND |
+| 098d6e9 (Task 4) | `git log --oneline --all \| grep` | FOUND |
+| 637077b (Task 5) | `git log --oneline --all \| grep` | FOUND |
+| Plan 03-02 in make planning-status | grep `plan 03-02` | `SUMMARY ✓ 5 commits → OK` |
+
+**Out-of-scope deferred items** (NOT caused by Plan 02 work; logged for future cleanup):
+- m1-perception test pollution flakes (4 tests fail in full-suite run but pass in isolation: `test_chaos_r2::test_r2_retry_config_is_applied`, `test_r2_sync::test_r2_retry_config_applied`, `test_health_endpoint::test_pass_when_fresh`, `test_makefile_contract::test_make_smoke_health_local_dry_run_recipe`) — verified pre-existing by stash-and-rerun. Belongs in a Phase 02.2-style hygiene plan, not here.
+- Plan 03-01 (parallel Wave 1 sibling) shows DRIFT in `make planning-status` — separate executor agent; not this plan's responsibility.
+
 ---
 *Phase: 03-l2-orderbook-tracking-daemon*
 *Completed: 2026-05-24*
