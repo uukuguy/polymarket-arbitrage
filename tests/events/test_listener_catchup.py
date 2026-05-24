@@ -52,37 +52,38 @@ async def test_listener_calls_on_event_with_parsed_payload():
 
 
 @pytest.mark.asyncio
-async def test_listener_reconnects_after_connection_loss(loguru_sink, monkeypatch):
+async def test_listener_reconnects_after_connection_loss(loguru_sink):
     """First connect raises, second succeeds; sleep called between attempts."""
     from polyarb.events import listener
 
     sleep_calls: list[float] = []
+    real_sleep = asyncio.sleep
 
     async def _fake_sleep(s):
         sleep_calls.append(s)
+        # yield to scheduler so loop doesn't hot-spin
+        await real_sleep(0)
 
     fake_conn = _make_fake_conn()
     connect_mock = AsyncMock(side_effect=[RuntimeError("conn lost"), fake_conn])
-
     stop_event = asyncio.Event()
-
-    async def _stop_soon():
-        await asyncio.sleep(0)  # let listener run a tick
-        stop_event.set()
 
     with patch.object(listener.asyncpg, "connect", connect_mock), \
          patch.object(listener.asyncio, "sleep", _fake_sleep):
-        # schedule stop after first reconnect cycle
-        async def _runner():
-            task = asyncio.create_task(listener.listen_snapshot_complete(
-                dsn="postgresql://test", on_event=lambda d: None, stop_event=stop_event
-            ))
-            # give it time to fail once + reconnect once
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-            stop_event.set()
-            await asyncio.wait_for(task, timeout=2.0)
-        await _runner()
+        task = asyncio.create_task(
+            listener.listen_snapshot_complete(
+                dsn="postgresql://test",
+                on_event=lambda d: None,
+                stop_event=stop_event,
+            )
+        )
+        # let listener fail once + reconnect (poll up to 1s)
+        for _ in range(50):
+            await real_sleep(0.01)
+            if connect_mock.await_count >= 2:
+                break
+        stop_event.set()
+        await asyncio.wait_for(task, timeout=2.0)
 
     assert connect_mock.await_count >= 2, "must have reconnected after failure"
     assert sleep_calls, "must sleep before reconnecting"
