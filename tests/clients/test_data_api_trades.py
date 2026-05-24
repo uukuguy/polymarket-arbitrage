@@ -153,7 +153,11 @@ async def test_cutoff_at_7_days() -> None:
 
 
 async def test_trade_hash_dedup() -> None:
-    """Duplicate transactionHash in subsequent pages must NOT be yielded twice."""
+    """Duplicate transactionHash in subsequent pages must NOT be yielded twice.
+
+    Use full-page chunks (page_size=2 with 2-row pages) so the iterator
+    advances to a second page instead of short-page-terminating after page1.
+    """
     from polyarb.clients.data_api_client import (
         DATA_API_BASE,
         backfill_trades_for_asset,
@@ -161,25 +165,28 @@ async def test_trade_hash_dedup() -> None:
 
     asset = "asset-A"
     now = int(time.time())
-    # page1 and page2 share two trade hashes
-    page1 = [_trade(i, asset=asset, ts=now - i) for i in range(3)]
-    page2 = [_trade(i, asset=asset, ts=now - i) for i in [1, 2, 3, 4]]  # 1,2 are dupes
+    # Both pages have exactly page_size=2 rows so pagination advances.
+    page1 = [_trade(i, asset=asset, ts=now - i) for i in range(2)]   # hashes 0,1
+    page2 = [_trade(i, asset=asset, ts=now - i) for i in [1, 2]]      # hash 1 dupe, 2 new
+    page3: list[dict] = []  # short page → terminate
 
     with respx.mock(base_url=DATA_API_BASE) as router:
         router.get("/trades").mock(
             side_effect=[
                 httpx.Response(200, json=page1),
                 httpx.Response(200, json=page2),
-                httpx.Response(200, json=[]),
+                httpx.Response(200, json=page3),
             ]
         )
         out = []
-        async for t in backfill_trades_for_asset(asset_id=asset, days=7):
+        async for t in backfill_trades_for_asset(asset_id=asset, days=7, page_size=2):
             out.append(t)
 
     hashes = [t["transactionHash"] for t in out]
     assert len(hashes) == len(set(hashes)), f"dedup failed: {hashes}"
-    assert set(hashes) == {f"0xhash-{i:08x}" for i in range(5)}, f"got {hashes}"
+    assert set(hashes) == {"0xhash-00000000", "0xhash-00000001", "0xhash-00000002"}, (
+        f"expected {{0,1,2}}; got {hashes}"
+    )
 
 
 async def test_429_retry() -> None:
