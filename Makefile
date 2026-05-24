@@ -278,7 +278,7 @@ smoke-healthz:
 # smoke-l2-health-prod — curl prod L2 /healthz on polyarb-l2.fly.dev
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: daemon-l2-run-local smoke-l2-health smoke-l2-health-prod
+.PHONY: daemon-l2-run-local smoke-l2-health smoke-l2-health-prod smoke-l2-ws
 
 ## daemon-l2-run-local: Start polyarb-l2 daemon locally on :19081 (separate from L1's :19080). Ctrl-C to stop.
 daemon-l2-run-local:
@@ -310,6 +310,13 @@ smoke-l2-health-prod:
 	echo "HTTP $$STATUS"; \
 	cat /tmp/l2_healthz_body.json | python3 -m json.tool; \
 	if [ "$$STATUS" = "200" ]; then echo "PASS: L2 /healthz returned 200"; else echo "FAIL: expected 200 got $$STATUS"; exit 1; fi
+
+## smoke-l2-ws: 30s WS sanity against a known liquid Polymarket asset (Phase 03 Plan 04, D-02 manual smoke)
+##   Connects to wss://ws-subscriptions-clob.polymarket.com/ws/market, subscribes,
+##   prints event-type counts. Override asset: make smoke-l2-ws ASSET=0x...
+smoke-l2-ws:
+	@echo ">> smoke-l2-ws — 30s sanity against Polymarket WS market channel"
+	@uv run python scripts/smoke_l2_ws.py $(ASSET)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 03: Supabase mirror + R2 archive

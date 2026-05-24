@@ -91,9 +91,31 @@ async def stream_market_events(
                 except json.JSONDecodeError as e:
                     logger.warning(f"ws non-JSON frame ignored: {e!r}")
                     continue
-                # T-03-04-01: log frame type only, NEVER the body
-                logger.debug(f"ws event type={data.get('event_type', 'unknown')}")
-                yield data
+                # Polymarket WS frames come in two shapes (empirical, 2026-05-24):
+                #   1. dict — single event ({"event_type": "...", ...})
+                #   2. list — batched events on initial_dump or burst
+                # Normalize: yield each event dict individually so downstream
+                # consumers (Plan 06 mirror) don't have to know about batching.
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            # T-03-04-01: log frame type only, NEVER body
+                            logger.debug(
+                                f"ws event type={item.get('event_type', 'unknown')}"
+                            )
+                            yield item
+                        else:
+                            logger.warning(
+                                f"ws unexpected list-item type {type(item).__name__}; skipping"
+                            )
+                elif isinstance(data, dict):
+                    # T-03-04-01: log frame type only, NEVER the body
+                    logger.debug(f"ws event type={data.get('event_type', 'unknown')}")
+                    yield data
+                else:
+                    logger.warning(
+                        f"ws unexpected frame top-level type {type(data).__name__}; skipping"
+                    )
         except websockets.ConnectionClosed as e:
             # Outer reconnect-iterator will pick up; just log + continue.
             # Use modern .rcvd.code / .rcvd.reason (websockets 13.1+; .code/.reason deprecated).
