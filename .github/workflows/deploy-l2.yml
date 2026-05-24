@@ -1,0 +1,75 @@
+name: Deploy L2 to Fly
+# Phase 03 Plan 02 — polyarb-l2 deployment pipeline (D-06).
+#
+# Paths filter: only deploy L2 when L2-relevant files change. L1-only commits
+# (e.g., src/polyarb/snapshot/orchestrator.py — even when Plan 05 modifies it
+# to emit NOTIFY, that is an L1-side event publish; L2 does not need redeploy
+# for L1-only changes) DO NOT trigger this workflow.
+#
+# Security note: this workflow only consumes `secrets.FLY_API_TOKEN` (repo
+# secret) and a literal `APP=polyarb-l2` env var. No user-controlled input
+# (issue title, PR body, commit message, head_ref) flows into `run:` blocks,
+# so no shell-injection surface exists here. If future iterations need to
+# echo user-controlled fields, route them through env: with quoted "$VAR".
+#
+# Pin discipline: superfly/flyctl-actions/setup-flyctl@1.6 — the older
+# "v1.5"-prefixed tag is non-existent (Phase 02 L8) and would silently no-op
+# the install. Always use the no-v form documented at superfly/flyctl-actions.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/polyarb/daemon/l2_main.py'
+      - 'src/polyarb/clients/ws_market_client.py'
+      - 'src/polyarb/daemon/ws_watchdog.py'
+      - 'src/polyarb/observation/l2_candidate_refresh.py'
+      - 'src/polyarb/events/**'
+      - 'src/polyarb/http/l2_health.py'
+      - 'src/polyarb/storage/l2_supabase_mirror.py'
+      - 'src/polyarb/clients/data_api_client.py'
+      - 'fly-l2.toml'
+      - 'Dockerfile'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'alembic/versions/003_*.py'
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-l2-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: flyctl deploy --config fly-l2.toml
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@1.6
+      - name: Deploy L2
+        run: flyctl deploy --config fly-l2.toml --remote-only --wait-timeout 600
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Smoke test /healthz
+        env:
+          APP: polyarb-l2
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS "https://${APP}.fly.dev/healthz" >/dev/null; then
+              echo "L2 deploy healthy"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "L2 /healthz unreachable after 10 attempts (60s)" >&2
+          flyctl logs --app "${APP}" --no-tail | tail -100 || true
+          exit 1
+      - name: Verify Fly checks list
+        if: success()
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl checks list -a polyarb-l2 || true
