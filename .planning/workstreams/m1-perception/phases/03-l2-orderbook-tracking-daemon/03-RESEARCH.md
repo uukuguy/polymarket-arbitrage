@@ -880,6 +880,30 @@ async def backfill_trades_for_asset(
 
 [ASSUMED] The exact filter param name for "older than timestamp" (`beforeTimestamp`, `endDate`, etc.) — docs.polymarket.com/api-reference/data-api/trades schema must be re-fetched at plan time. Phase 1.5 历史踩过 `filterDate` 不存在的坑 (STATE.md L46 references this revert). **Plan-phase MUST verify** before implementation.
 
+> **RESOLVED — Open Q 2 (Plan 06 Task 0 probe, 2026-05-24):**
+> Polymarket Data API `/trades` does NOT support server-side time-range filtering.
+> Tested `beforeTimestamp`, `before`, `maxTimestamp`, `endTimestamp` — ALL silently
+> ignored (returned the same latest-trades page regardless of value).
+> Tested `asset=<token_id>`, `eventSlug=<slug>` — both silently ignored too.
+> Only `user=<wallet>` and `takerOnly=true` appear to filter server-side.
+> Offset cap: 3000 OK, 4000+ → HTTP 400 (Plan keeps conservative MAX_OFFSET=1000).
+> Trade timestamp field: `timestamp` (unix seconds).
+> Trade hash field: `transactionHash`.
+> Asset/token field: `asset`.
+>
+> **Strategy adjustment (Plan 06 GREEN — Task 6):** Since server-side time
+> filtering and per-asset filtering are unavailable, `backfill_trades_for_asset`
+> degrades to:
+>   (a) paginate offset 0 → 1000 (PAGE_SIZE=500) of the GLOBAL feed,
+>   (b) client-side filter by `trade["asset"] == asset_id` to pick out the
+>       target asset's trades,
+>   (c) stop iteration when a trade with `timestamp < cutoff_ts` is observed.
+> Practical implication: the global /trades feed is ordered by recency, so
+> per-asset coverage during a 7-day backfill is best-effort — heavily-traded
+> assets get plenty of rows; thinly-traded assets may need M3+ to add a
+> proper subgraph-backed historical source. The time-window-slide loop is
+> retained in code shape but uses `offset` only (no `beforeTimestamp` param).
+
 ### Per-asset backfill orchestration
 
 ```python
