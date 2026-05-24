@@ -81,4 +81,5 @@ select = ["E", "F", "I", "UP"]
 [dependency-groups]
 dev = [
     "respx>=0.21.1",
+    "testcontainers[postgres]>=4.0",
 ]
