@@ -278,7 +278,7 @@ smoke-healthz:
 # smoke-l2-health-prod — curl prod L2 /healthz on polyarb-l2.fly.dev
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: daemon-l2-run-local smoke-l2-health smoke-l2-health-prod smoke-l2-ws
+.PHONY: daemon-l2-run-local smoke-l2-health smoke-l2-health-prod smoke-l2-ws smoke-event-bus
 
 ## daemon-l2-run-local: Start polyarb-l2 daemon locally on :19081 (separate from L1's :19080). Ctrl-C to stop.
 daemon-l2-run-local:
@@ -317,6 +317,15 @@ smoke-l2-health-prod:
 smoke-l2-ws:
 	@echo ">> smoke-l2-ws — 30s sanity against Polymarket WS market channel"
 	@uv run python scripts/smoke_l2_ws.py $(ASSET)
+
+## smoke-event-bus: sanity-publish one pg_notify('snapshot_complete', ...) (Phase 03 Plan 05, D-05)
+##   Requires POLYARB_SUPABASE_DB_DSN. Prints 'OK' if NOTIFY succeeded, 'FAIL' otherwise.
+##   Auto-loads .env if present.
+smoke-event-bus:
+	@echo ">> smoke-event-bus — publish one snapshot_complete NOTIFY"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN not set"; exit 1; fi; \
+	uv run python -c "import asyncio; from polyarb.config import load_settings; from polyarb.events.bus import publish_snapshot_complete; ok = asyncio.run(publish_snapshot_complete(load_settings(), snapshot_id=0, taken_at_ms=0)); print('OK' if ok else 'FAIL')"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 03: Supabase mirror + R2 archive
