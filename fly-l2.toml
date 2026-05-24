@@ -1,0 +1,62 @@
+# Phase 03 Fly.io config — polyarb-l2 (L2 orderbook tracking daemon)
+#
+# Single binary, two deployments architecture (per Phase 03 RESEARCH Focus 7).
+# The Dockerfile is reused VERBATIM from fly.toml; deployment differs in the
+# 8 line-level diffs documented in 03-PATTERNS.md File 3 (lines 165-179):
+#
+#   1. app = "polyarb-l2"
+#   2. [mounts] initial_size = "1gb"          (no parquet archive)
+#   3. REMOVE [processes] cron = "..."        (L2 is pure WS — no cron)
+#   4. REMOVE second [[vm]] processes = ["cron"]
+#   5. [env] POLYARB_DAEMON_VARIANT = "l2"    (selects l2_main.py entrypoint)
+#   6. [env] POLYARB_DB_PATH = "/data/l2-state.db"  (separate from L1 state.db)
+#   7. [[vm]] memory = "1024mb"               (start parity with L1; profile post-Inj L2-1)
+#   8. [[http_service.checks]] path = "/healthz"  (Phase 02.1 BUG-6 invariant)
+#
+# Volume "polyarb_l2_data" is NOT created by this plan — first deploy at Plan 03
+# closure runs:  flyctl volumes create polyarb_l2_data -r ams -s 1
+
+app = "polyarb-l2"
+primary_region = "ams"   # same region as the L1 app — private network latency to event bus
+
+[build]
+
+[mounts]
+  source = "polyarb_l2_data"
+  destination = "/data"
+  initial_size = "1gb"   # no parquet archive — just SQLite state + WS checkpoint
+
+[env]
+  POLYARB_DATA_DIR = "/data"
+  POLYARB_DB_PATH = "/data/l2-state.db"     # separate from L1's /data/state.db
+  POLYARB_ALLOW_EXTERNAL_PATHS = "1"
+  POLYARB_DAEMON_VARIANT = "l2"             # consumed by daemon entry switch (Plan 03)
+  POLYARB_LOG_LEVEL = "INFO"
+
+# Single process group — WS-driven async loop, no cron.
+# D-06: cron tasks (if any) stay on the L1 app to isolate WS reconnect storm.
+[processes]
+  app = "python -m polyarb.daemon.l2_main"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "120s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"       # Phase 02.1 D-05/BUG-6 invariant — always-200 Fly-friendly
+    timeout = "10s"
+
+# VM sizing — start at L1 parity (1024mb) per Phase 02 OOM precedent (S19 final).
+# Profile post-Inj L2-1 (Plan 07 chaos) — if WS message backlog stays modest
+# (<200MB anon-rss), Plan 08 can revisit 512mb to cut $/mo.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1024mb"
+  processes = ["app"]
