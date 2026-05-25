@@ -614,3 +614,106 @@ smoke-l2-mirror:
 	uv run python -c "from polyarb.config import load_settings; from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror; s = load_settings(); m = L2SupabaseMirror(s.supabase_url, s.supabase_service_key.get_secret_value()); print('OK l2-mirror instantiated url=', s.supabase_url)"
 .PHONY: smoke-l2-mirror
 
+# ─────────────────────────────────────────────────────────────────────────────
+# M1-perception Phase 03 Wave 6 — chaos injection targets (Plan 03-07)
+# ─────────────────────────────────────────────────────────────────────────────
+# Each target invokes the per-Inj action commands from L2_CHAOS_PLAN
+# (tests/chaos/test_l2_chaos_plan.py). Run them in sequence (L2-1 → L2-5),
+# recording evidence in 03-SOAK-LOG.md. NEVER run during peak trading —
+# Sentry + Telegram will alert for real.
+
+## chaos-l2-baseline: Capture pre-chaos baseline (machine + /health + row count)
+chaos-l2-baseline:
+	@echo "=== Phase 03 chaos baseline ($$(date -u +%FT%TZ)) ==="
+	@flyctl status -a polyarb-l2 | tail -6
+	@echo ""
+	@echo "/healthz HTTP: $$(curl -sS -o /dev/null -w '%{http_code}' https://polyarb-l2.fly.dev/healthz)"
+	@echo "/health  HTTP: $$(curl -sS -o /dev/null -w '%{http_code}' https://polyarb-l2.fly.dev/health)"
+	@echo ""
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'l2_top_of_book rows='||count(*) FROM l2_top_of_book"
+.PHONY: chaos-l2-baseline
+
+## chaos-l2-inj1: Inj L2-1 — restart machine (TCP RST forces WS close), observe reconnect
+##
+## Original chaos design called for `pkill` inside container, but python-slim
+## base has no procps. Alternative: `flyctl machine restart` triggers SIGTERM
+## to PID 1 (the daemon) → graceful shutdown → cold restart in ~10-30s.
+## This is the closest in-prod analog to "kill WS connection" — actually
+## stronger because it tests cold-start init order (Phase 02 P9 gate) AND
+## reconnect simultaneously.
+chaos-l2-inj1:
+	@echo "=== Inj L2-1: machine restart ($$(date -u +%FT%TZ)) ==="
+	@MID=$$(flyctl machines list -a polyarb-l2 --json | jq -r '.[0].id'); \
+	echo "machine_id=$$MID"; \
+	flyctl machine restart $$MID -a polyarb-l2
+	@echo "→ restart issued. Polling /health for 90s…"
+	@for i in 1 2 3 4 5 6 7 8 9; do \
+		sleep 10; \
+		echo -n "  t+$$(($$i*10))s: "; \
+		curl -sS https://polyarb-l2.fly.dev/health 2>/dev/null | jq -r '.checks["ws:connection_state"][0].observedValue + " age=" + (.checks["ws:last_event_age_seconds"][0].observedValue|tostring) + "s"' 2>/dev/null || echo "(no response — daemon cold-starting)"; \
+	done
+	@echo ""
+	@echo "=== Post-recovery: machine state + l2_top_of_book delta ==="
+	@flyctl status -a polyarb-l2 | grep -E "started|stopped" | head -2
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'rows_in_last_120s='||count(*) FROM l2_top_of_book WHERE ts > now() - interval '120 seconds'"
+.PHONY: chaos-l2-inj1
+
+## chaos-l2-inj2: Inj L2-2 — revoke SUPABASE_SERVICE_KEY on L2, observe fail-soft
+chaos-l2-inj2:
+	@echo "=== Inj L2-2: revoke L2 SUPABASE_SERVICE_KEY ($$(date -u +%FT%TZ)) ==="
+	flyctl secrets unset POLYARB_SUPABASE_SERVICE_KEY -a polyarb-l2
+	@echo "→ revoked. Waiting 60s for fail-soft to manifest…"
+	@sleep 60
+	@echo ""
+	@echo "/healthz: $$(curl -sS -o /dev/null -w '%{http_code}' https://polyarb-l2.fly.dev/healthz)  (expect 200)"
+	@echo "/health:  $$(curl -sS -o /dev/null -w '%{http_code}' https://polyarb-l2.fly.dev/health)  (expect 503)"
+	@flyctl status -a polyarb-l2 | grep -E "started|running" | head -2
+	@echo ""
+	@echo "=== restoring key from .env (cleanup) ==="
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="$$POLYARB_SUPABASE_SERVICE_KEY" -a polyarb-l2
+.PHONY: chaos-l2-inj2
+
+## chaos-l2-inj3a: Inj L2-3a — confirm L1 publishes 0 NOTIFY when EVENT_BUS disabled
+chaos-l2-inj3a:
+	@echo "=== Inj L2-3a: default-state probe ($$(date -u +%FT%TZ)) ==="
+	@flyctl secrets list -a polyarb-l1 | grep -i event_bus || echo "OK POLYARB_EVENT_BUS_ENABLED unset on L1 (B1 default OFF)"
+	@echo ""
+	@echo "L2 listener still in 'listening' state (no NOTIFY needed):"
+	@curl -sS https://polyarb-l2.fly.dev/health 2>/dev/null | jq -r '.checks["event_bus:listener_state"][0].observedValue'
+.PHONY: chaos-l2-inj3a
+
+## chaos-l2-inj3b: Inj L2-3b — opt-in L1 NOTIFY, trigger scan, confirm L2 receives
+chaos-l2-inj3b:
+	@echo "=== Inj L2-3b: opt-in path ($$(date -u +%FT%TZ)) ==="
+	flyctl secrets set POLYARB_EVENT_BUS_ENABLED=1 -a polyarb-l1
+	@echo "→ L1 NOTIFY enabled. Triggering a snapshot via /scan…"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	BODY='{}'; SIG=$$(printf "%s" "$$BODY" | openssl dgst -sha256 -hmac "$$POLYARB_SCAN_SHARED_SECRET" | awk '{print $$2}'); \
+	curl -sS -X POST -H "X-Signature: $$SIG" -d "$$BODY" https://polyarb-l1.fly.dev/scan || true
+	@echo ""
+	@echo "→ waiting 120s for L1 snapshot to complete + L2 to dispatch…"
+	@sleep 120
+	@echo ""
+	@echo "L2 candidate refresh log (last 3):"
+	@flyctl logs -a polyarb-l2 --no-tail | grep -oE 'candidate refresh.*snapshot_id=[0-9]+' | tail -3 || echo "(none yet)"
+	@echo ""
+	@echo "l2_event_cursor advance:"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'last_snapshot_id='||last_snapshot_id FROM l2_event_cursor WHERE consumer='l2-candidate-refresh'"
+	@echo ""
+	@echo "=== reverting to default OFF (B1 invariant) ==="
+	flyctl secrets unset POLYARB_EVENT_BUS_ENABLED -a polyarb-l1
+.PHONY: chaos-l2-inj3b
+
+## chaos-l2-cleanup: Force restore L2 secrets from .env (use if Inj aborts mid-way)
+chaos-l2-cleanup:
+	@echo "=== Phase 03 chaos cleanup — restoring L2 secrets from .env ==="
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="$$POLYARB_SUPABASE_SERVICE_KEY" POLYARB_SUPABASE_DB_DSN="$$POLYARB_SUPABASE_DB_DSN" -a polyarb-l2
+	flyctl secrets unset POLYARB_EVENT_BUS_ENABLED -a polyarb-l1 || true
+	@echo "→ done. Verify with: make chaos-l2-baseline"
+.PHONY: chaos-l2-cleanup
+
