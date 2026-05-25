@@ -2336,3 +2336,92 @@ make planning-status                       # 应该 zero drift, 8 plans NOT-STAR
 - Phase 03 artifacts in `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/`
 - thread `market-observation-architecture.md` RESEARCH UPDATE 2026-05-23 (line 762+)
 
+
+
+## SESSION 26 — 2026-05-25 (Phase 03 大跃进 — plan-phase → CLOSED in 1 session)
+
+### 用户授权 "推进到可实际部署工作的程度" 单次会话跑完 Phase 03
+
+**46 commits, 8/8 plans, 1 chaos cycle, 1 prod deploy**:
+
+1. **Wave 1-5 全部 autonomous executor 跑完** (~5h plan + ~30min orchestration):
+   - 03-01 GHA Supabase keepalive (8 commits, 7 truth gates GREEN)
+   - 03-02 polyarb-l2 Fly bootstrap (6 commits, 11 truth gates GREEN)
+   - 03-03 L2 daemon skeleton + /health + /healthz (6 commits, 14 tests GREEN, P9 server-started gate)
+   - 03-04 WS client + 30s watchdog (9 commits, 21 tests + 真 Polymarket WS prod smoke 通过, `websockets>=15,<16` deviation due to supabase 2.x transitive cap)
+   - 03-05 event bus + candidate refresh (10 commits, 27 tests GREEN, B1 default FALSE 守住, asyncpg LISTEN/NOTIFY)
+   - 03-06 Alembic 003 + L2 mirror + Data API (11 commits, 5 L2 tables 落库 prod Supabase + dual-anchor breadcrumb category='l2-mirror' Phase 02.2 preemptive)
+
+2. **Deploy Phase (orchestrator 直接做, 不走 executor)**:
+   - Hybrid DSN port 决策: 全 :5432 (mirror REST 不碰 DSN, alembic 一次性 DDL OK, listener 需 session — pgbouncer transactional 不兼容 LISTEN)
+   - Alembic 003 → prod Supabase (5 tables + 5 anon_read RLS + 2 BRIN indexes) ✅
+   - `flyctl apps create polyarb-l2` + `flyctl volumes create polyarb_l2_data 1GB ams` ✅
+   - `make fly-secrets-sync` 修了 stdin import bug (multi-value FLY_API_TOKEN 拆裂) → 20 secrets staged + applied to L1 + L2
+   - `flyctl deploy --config fly-l2.toml --remote-only` (GHA token unauthorized for L2, 用本地 flyctl) → machine 85e647c4eed598 started
+   - **DEPLOY-DISCOVERY 1**: catchup_from_cursor 返回 84 missed snapshots 但 l2_main.py 只 log 没 dispatch → 修 (commit 060b98e)
+   - **DEPLOY-DISCOVERY 2**: WS subscribed_assets 启动空, 加 POLYARB_BOOTSTRAP_ASSET_IDS env (3 个 WC2026 高流动性 asset_id seed)
+   - 第二次 deploy → **真有 WS 数据落 l2_top_of_book** ✅✅✅ (3 行真实数据 from Polymarket WS prod)
+
+3. **Wave 6 (Plan 03-07) chaos cycle 真在 prod 跑** (~1h):
+   - L2-1 PASS — flyctl machine restart proxy (python-slim 没 pkill, 用 machine restart substitute) + 2 行 l2_top_of_book post-recovery
+   - L2-2 partial PASS + **5 GAPs**: fail-soft envelope works ✅ 但 `/health` 没 503 (l2_mirror_enabled config field 从未添加, mirror sub-check 在 dead-code)
+   - L2-3a PASS — B1 invariant clean (L1 POLYARB_EVENT_BUS_ENABLED unset + L2 listener 仍 listening)
+   - L2-3b/L2-4/L2-5 DEFERRED 到 Phase 03.1 (with substitute evidence for L2-3b/L2-4)
+
+4. **Wave 7 (Plan 03-08) closure** (executor 跑 ~42min):
+   - docs/learning/10-L2-跟踪.md (542 lines + 31 file:line refs)
+   - 4 dashboard pages (candidates / asset/[id]/tob / asset/[id]/trades / signals) + dashboard/lib/supabase/l2-queries.ts (anon key, RLS)
+   - 03-VALIDATION.md frontmatter flipped (status: complete + nyquist_compliant: true + wave_0_complete: true)
+   - Vercel auto-deploy triggered (b8deb26); production URL `polymarket-arbitrage-ed1icqtti-jiangwen-su-s-projects.vercel.app` 返 401 = deployment protection 工作 (Phase 02 EMAIL_WHITELIST 续行为, 不是 Phase 03 问题)
+
+5. **Phase 03 LEARNINGS extracted**: 11 D / 10 L / 8 P / 7 S (300 lines)
+   - 最重要决策: B1 (event_bus_enabled=FALSE 默认), Hybrid catchup + bootstrap (Wave 5 deploy 发现的, 不在任何 PLAN.md)
+   - 最深刻 lesson: 代码过 unit tests ≠ alert chain prod 通 (Inj L2-2 meta-discovery — Plan 03.1 必修)
+
+### 关键 architecture lock (Phase 03 完成态)
+
+- polyarb-l2.fly.dev machine started, Fly volume 1GB ams
+- Alembic 003 applied to prod Supabase (5 L2 tables + anon_read RLS + BRIN ts indexes)
+- asyncpg LISTEN connected to `snapshot_complete` channel; listener `listening` state ✅
+- POLYARB_EVENT_BUS_ENABLED unset on L1 (B1 default OFF 守住)
+- WsConsumer: bootstrap 3 WC2026 asset_ids → ws subscribed → l2_top_of_book 3 行 (initial_dump)
+- 21 secrets on L2 (20 base + 1 bootstrap)
+- catchup replay loop FIXED (84 missed → dispatch → cursor advance to 86)
+
+### Phase 03.1 carry-over (~10 items)
+
+**5 GAPs from Inj L2-2** (P0 unless noted):
+1. add `Settings.l2_mirror_enabled` + model_validator auto-set
+2. add `SqliteStore.get_l2_tob_last_mirror_at_s()` getter
+3. `L2SupabaseMirror.push_*` success path persists `last_mirror_at_s` to SQLite
+4. (P1) chaos Makefile + secrets sync — drop FLY_API_TOKEN before flyctl
+5. (P1) re-run Inj L2-2 with Sentry API breadcrumb query
+
+**3 deferred Inj**:
+6. L2-3b: opt-in L1 NOTIFY path (低流量窗口跑)
+7. L2-4: cross-bug storm — 需 POLYARB_WS_TEST_KILL flag (~10 LoC)
+8. L2-5: Data API 429 backfill (ad-hoc path, 实际用时再验)
+
+**Process upgrades for Phase 03.1+**:
+9. plan-checker 新规则: "fail-soft envelope MUST surface to /health" (encode chain-truth not just code-truth)
+10. CLAUDE.md context for "container-image-aware chaos design" (pkill 不存在的事故记忆)
+
+### [NEXT] 下次会话从这里开始
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                       # 应该 zero drift
+curl -fsS https://polyarb-l2.fly.dev/healthz | jq .  # L2 还活着
+```
+
+**第 1 步选项**:
+- 路 A: `/gsd-new-phase 03.1` — 创 Phase 03.1 plan 修 5 GAPs + 跑 3 deferred Inj (推荐)
+- 路 B: 转 m2-combinatorial T2 (Slippage Model — 与 L2 并行无依赖)
+- 路 C: 让 polyarb-l2 跑几天观察 (无 candidate refresh → WS subscribed_assets 只 3 个 bootstrap, 数据量小)
+
+### 关键 memory 入口
+
+- [Phase 03 deploy + chaos 2026-05](memory/project_phase-03-deploy-chaos-2026-05.md) (待写)
+- Phase 03 LEARNINGS: `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-LEARNINGS.md`
+- thread `market-observation-architecture.md` RESEARCH UPDATE 2026-05-23
+
