@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03 (plan-phase complete, ready to execute)
-status: plan-phase-complete
-stopped_at: SESSION 24/25 (2026-05-23 → 2026-05-24) — Phase 03 (L2 Orderbook Tracking) plan-phase 完整闭环 — 03-CONTEXT.md (9 decisions locked) + 03-RESEARCH.md (1513 lines) + 03-PATTERNS.md (33 files) + 03-VALIDATION.md + 8 PLAN.md (6813 lines, wave 1→7). plan-checker 3 iter (3 BLOCKERs + 6 WARNINGs 全 resolved). 准备 /gsd-execute-phase 03 --ws m1-perception.
-last_updated: "2026-05-24T00:00:00.000Z"
-last_activity: 2026-05-24
+current_phase: 03 (COMPLETE — closed 2026-05-25, awaiting /gsd-extract_learnings)
+status: phase-03-closed-awaiting-extract-learnings
+stopped_at: SESSION 25 EOD (2026-05-25) — Phase 03 (L2 Orderbook Tracking) hard-gate CLOSED. 8/8 plans shipped (8 SUMMARYs landed); 03-VALIDATION.md flipped (status=complete + nyquist_compliant=true + wave_0_complete=true); ROADMAP Phase 03 marked ✅ COMPLETE; chapter 10 教学文档 (10-L2-跟踪.md, 542 lines + 31 file:line refs); 4 Vercel dashboard pages (anon key + RLS); 5 GAPs + 3 deferred Inj carried over to Phase 03.1. 下次会话: /gsd-extract_learnings 03 --ws m1-perception.
+last_updated: "2026-05-25T00:00:00.000Z"
+last_activity: 2026-05-25
 progress:
   total_phases: 6
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 32
-  completed_plans: 24
-  percent: 75
+  completed_plans: 32
+  percent: 100
 ---
 
 # Project State
@@ -33,18 +33,23 @@ Plan: 0 of 8 (all 8 PLAN.md landed + plan-checker 3 iter PASSED, planning-status
 - docs/learning/09-生产化运维.md (324 行) + VALIDATION nyquist_compliant=true
 - 02.1-LEARNINGS.md 9D / 8L / 7P / 5S 落库
 
-### Phase 03 — 🟢 plan-phase COMPLETE (2026-05-24)
+### Phase 03 — ✅ COMPLETE (closed 2026-05-25)
 
-**Next step**: `/gsd-execute-phase 03 --ws m1-perception` (or `--wave 1` 分波)
+**Next step**: `/gsd-extract_learnings 03 --ws m1-perception`
 
-**8 plans** (wave 1→7 monotonic, serialized post plan-checker iter 2):
-- Wave 1 (parallel): Plan 01 (GHA Supabase keepalive) + Plan 02 (polyarb-l2 Fly bootstrap)
-- Wave 2: Plan 03 (L2 daemon entry + /health + /healthz)
-- Wave 3: Plan 04 (WS market client + staleness watchdog)
-- Wave 4: Plan 05 (Event bus asyncpg + candidate refresh)
-- Wave 5: Plan 06 (Alembic 003 + L2 mirror + Data API backfill)
-- Wave 6 (checkpoint): Plan 07 (5 chaos Inj L2-1..L2-5)
-- Wave 7 (closure): Plan 08 (docs/learning/10 + 4 dashboard pages + VALIDATION flip)
+**8/8 plans** complete (waves 1→7 all shipped):
+- ✅ Wave 1: Plan 01 (GHA Supabase keepalive) + Plan 02 (polyarb-l2 Fly bootstrap)
+- ✅ Wave 2: Plan 03 (L2 daemon entry + /health + /healthz)
+- ✅ Wave 3: Plan 04 (WS market client + staleness watchdog)
+- ✅ Wave 4: Plan 05 (Event bus asyncpg + candidate refresh, B1 default-FALSE)
+- ✅ Wave 5: Plan 06 (Alembic 003 + L2 mirror + Data API backfill)
+- ✅ Wave 6: Plan 07 (3 chaos Inj live PASS + 2 deferred to Phase 03.1)
+- ✅ Wave 7: Plan 08 (docs/learning/10 + 4 dashboard pages + VALIDATION flip)
+
+**Phase 03.1 backlog** (carried over from Plan 03-07 + 03-08):
+- 5 GAPs from Inj L2-2 (mirror_enabled flag wiring + last_mirror_at_s persistence + chaos Makefile FLY_API_TOKEN fix)
+- 3 deferred Inj: L2-3b (opt-in NOTIFY happy-path) / L2-4 (cross-bug WS storm + Supabase paused) / L2-5 (Data API 429 backfill)
+- Plan 03-08 Vercel live smoke (`make smoke-l2-dashboard` after push propagation)
 
 **关键 architecture lock** (不可乱改):
 - POLYARB_EVENT_BUS_ENABLED **默认 FALSE** (opt-in via Fly secret ONLY after Plan 07 chaos PASS for Inj L2-3)
