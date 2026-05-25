@@ -472,7 +472,7 @@ logs-tail-axiom:
 # Dashboard (Phase 02 Plan 02-06 — Vercel Next.js)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: dashboard-dev dashboard-build dashboard-typecheck dashboard-deploy
+.PHONY: dashboard-dev dashboard-build dashboard-typecheck dashboard-deploy smoke-l2-dashboard
 
 ## dashboard-dev: 本地起 dashboard (next dev :3000)
 dashboard-dev:
@@ -493,6 +493,35 @@ dashboard-typecheck:
 dashboard-deploy:
 	@echo ">> dashboard-deploy — vercel deploy --prod"
 	cd dashboard && pnpm dlx vercel --prod
+
+## smoke-l2-dashboard: curl all 4 L2 Vercel pages, expect HTTP 200 each (D-07 reachability)
+## Usage: make smoke-l2-dashboard                     # uses default URL
+##        VERCEL_URL=https://your-url make smoke-l2-dashboard
+##
+## Note: the prod URL is gated behind Vercel Auth (Email whitelist from Phase 02
+## Wave 4). A 200 response indicates the auth page (or the actual content if you
+## pass a session cookie). Either result means the route is alive — 404/500
+## means the page did not deploy.
+##
+## After committing dashboard changes to main, Vercel auto-deploys via webhook
+## (~60-90s). Run this smoke AFTER the push has propagated. 404 across all 4 =
+## deploy has not yet reached prod (or the project URL has drifted — override
+## with VERCEL_URL=...).
+smoke-l2-dashboard:
+	@VERCEL_URL="$${VERCEL_URL:-https://polymarket-arbitrage.vercel.app}"; \
+	echo ">> smoke-l2-dashboard — VERCEL_URL=$$VERCEL_URL"; \
+	rc=0; \
+	for path in candidates "asset/test-asset-id-12345/tob" "asset/test-asset-id-12345/trades" signals; do \
+	  code=$$(curl -sS -L -o /dev/null -w "%{http_code}" "$$VERCEL_URL/$$path" 2>/dev/null); \
+	  if [ -z "$$code" ]; then code="000"; fi; \
+	  if [ "$$code" = "200" ]; then \
+	    printf "  /%s: %s OK\n" "$$path" "$$code"; \
+	  else \
+	    printf "  /%s: %s FAIL\n" "$$path" "$$code"; \
+	    rc=1; \
+	  fi; \
+	done; \
+	exit $$rc
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 07 — 7-day production soak monitoring (Better Stack driven)
