@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03 (8 plans across 7 waves)
-status: executing
-stopped_at: SESSION 20 EOD (2026-05-19) — Wave 4 完整收尾 + git tree/MEMORY/STATE 全部干净
-last_updated: "2026-05-25T11:26:51.840Z"
+current_phase: 03 (CLOSED — 8/8 plans + LEARNINGS extracted)
+status: complete-with-carryover
+stopped_at: SESSION 26 EOD (2026-05-25) — Phase 03 CLOSED + LEARNINGS 11D/10L/8P/7S + Phase 03.1 carry-over (5 GAPs + 3 deferred Inj) ready for next session
+last_updated: "2026-05-25T12:00:00.000Z"
 last_activity: 2026-05-25
 progress:
   total_phases: 5
@@ -13,18 +13,27 @@ progress:
   total_plans: 32
   completed_plans: 32
   percent: 100
+next_action: "/gsd-new-phase 03.1 to address 5 GAPs from Inj L2-2 + 3 deferred chaos Inj (path A, recommended); OR /gsd-progress to assess M1/M2 parallel routes"
 ---
 
 # Project State
 
 ## Current Position
 
-Phase: **03 (l2-orderbook-tracking-daemon)** — 🟢 **plan-phase COMPLETE** (ready to execute)
-Plan: 0 of 8 (all 8 PLAN.md landed + plan-checker 3 iter PASSED, planning-status zero drift)
-**Status:** ready to execute Phase 03
-**Current Phase:** 03 (8 plans across 7 waves)
+Phase: **03 (l2-orderbook-tracking-daemon)** — ✅ **CLOSED 2026-05-25** (Phase 03.1 carry-over filed)
+Plan: 8 of 8 (all SUMMARY ✓ + LEARNINGS extracted + zero drift)
+**Status:** complete-with-carryover — Phase 03.1 ready to start
+**Current Phase:** 03 CLOSED → 03.1 (recommended next phase to address 5 GAPs + 3 deferred Inj)
 **Last Activity:** 2026-05-25
-**Last Activity Description:** Phase 03 plan-phase 全闭环 — 9 D-XX decisions locked + 1513 行 RESEARCH + 33 files PATTERNS + 8 PLAN.md (6813 行) + plan-checker 3 iter (3 BLOCKERs + 6 WARNINGs 全 resolved)
+**Last Activity Description:** Phase 03 CLOSED — 8 waves shipped in 1 session (50 commits) + polyarb-l2 deployed to Fly + 3 chaos Inj live PASS + 03-LEARNINGS.md 11D/10L/8P/7S + JOURNAL SESSION 26 entry + STATE bump
+
+### Phase 03 — ✅ COMPLETE (closed 2026-05-25)
+
+**Reference**: `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-LEARNINGS.md` is the canonical knowledge source.
+
+**Production state**: `polyarb-l2.fly.dev` machine started (AMS, 1GB volume), 21 secrets applied, real WS frames flowing into prod Supabase `l2_top_of_book`, asyncpg listener connected to `snapshot_complete` channel, B1 (`POLYARB_EVENT_BUS_ENABLED=False` default) invariant preserved on L1.
+
+**Next step** (recommended path A): `/gsd-new-phase 03.1 fix-l2-observability-gaps --ws m1-perception` to address the 5 GAPs from Inj L2-2 + 3 deferred chaos Inj.
 
 ### Phase 02.1 — ✅ COMPLETE (2026-05-22, LEARNINGS extracted 2026-05-23)
 
