@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 03 CLOSED → 03.1 (recommended next phase to address 5 GAPs + 3 deferred Inj)
 status: completed
-stopped_at: Phase 03.1 context gathered (4 D-decisions + 9 mechanical fixes scoped)
-last_updated: "2026-05-26T03:36:29.297Z"
+stopped_at: Phase 01 polywatch-mvp context gathered (4 D-Polywatch decisions + 4 trial sub-decisions)
+last_updated: "2026-05-26T05:10:38.388Z"
 last_activity: 2026-05-25
 progress:
   total_phases: 6
@@ -237,7 +237,7 @@ Phase 02 只剩 Plan 02-07 (Wave 5 = chaos + 7-day soak)，是 Phase 02 完结�
 
 ## Session Continuity
 
-**Stopped At:** Phase 03.1 context gathered (4 D-decisions + 9 mechanical fixes scoped)
+**Stopped At:** Phase 01 polywatch-mvp context gathered (4 D-Polywatch decisions + 4 trial sub-decisions)
 **Next Resume:** 见上方 "下次会话该做的（2026-05-19 SESSION 20 EOD 更新）" 段
 **Authoritative state:** [Phase 02 Wave 4 完成 memory](memory/project_phase-02-wave-4-2026-05.md)
 
