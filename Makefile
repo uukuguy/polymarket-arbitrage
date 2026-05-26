@@ -819,4 +819,82 @@ dns-baseline-probe:
 	@uv run python scripts/dns_baseline_probe.py
 .PHONY: dns-baseline-probe
 
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 03.1 — chaos kill flags (Plan 06)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Two new chaos targets land here:
+#   - chaos-l2-inj4: Inj L2-4 — WS storm (POLYARB_WS_TEST_KILL=1) + Supabase
+#     mirror failure double-fault. Replaces Phase 03's pkill-based primitive
+#     (python:3.12-slim has no procps — feedback_container-image-aware-chaos).
+#   - chaos-l2-inj5-dryrun: Inj L2-5 — replay recorded 429 fixture against
+#     the backfill code locally (no Polymarket calls). Live 429 chaos is
+#     deferred to "实际触发时再验" per 03.1-CONTEXT.md.
+#
+# FLY_API_TOKEN discipline (Phase 03.1-03 GAP-4): every flyctl invocation
+# below carries an explicit `FLY_API_TOKEN= ` prefix to force fallback to
+# the keychain credential. The .env may contain an L1-only token that
+# silently shadows the keychain entry (memory feedback_fly-api-token-
+# shadowing-2026-05.md). Do NOT remove the prefix even on a refactor pass.
+
+## chaos-l2-inj4: Inj L2-4 — WS storm (POLYARB_WS_TEST_KILL=1) + Supabase mirror failure (double-fault)
+##
+## Sequence:
+##   1. precondition baseline (machine healthy, /healthz 200)
+##   2. set POLYARB_WS_TEST_KILL=1 (forces WS connection to drop on next message — Plan 06 Task 1)
+##   3. concurrently unset POLYARB_SUPABASE_SERVICE_KEY (mirror writes fail)
+##   4. wait 60s — observe daemon survival, reconnect attempts, mirror surface to /health
+##   5. curl /health → expect overall=fail (mirror:l2_tob_age_seconds trips when Plan 02 wired)
+##       /health should also list chaos:ws_test_kill_flag with status=warn (chain-truth surface)
+##   6. cleanup: unset WS_TEST_KILL + restore SUPABASE_SERVICE_KEY from .env
+##   7. wait 30s → /health back to pass, l2_top_of_book new rows resume
+##
+## This is the cross-bug chaos deferred from Phase 03 (D-04). 3-asset bootstrap candidate set
+## means we verify LOGIC CORRECTNESS (watchdog kicks in, mirror surface), NOT throughput.
+## Phase 04+ revisits throughput when candidate set grows past bootstrap.
+chaos-l2-inj4:
+	@echo "=== Inj L2-4: WS storm + Supabase pause double-fault ($$(date -u +%FT%TZ)) ==="
+	@echo "→ Precondition: /healthz must be 200"
+	@HZ=$$(curl -sS -o /dev/null -w '%{http_code}' https://polyarb-l2.fly.dev/healthz); \
+	if [ "$$HZ" != "200" ]; then echo "ABORT: /healthz=$$HZ (expected 200)"; exit 1; fi
+	@echo "→ Step 1: enable POLYARB_WS_TEST_KILL=1 on polyarb-l2"
+	FLY_API_TOKEN= flyctl secrets set POLYARB_WS_TEST_KILL=1 -a polyarb-l2
+	@echo "→ Step 2: revoke POLYARB_SUPABASE_SERVICE_KEY on polyarb-l2 (concurrent fault)"
+	FLY_API_TOKEN= flyctl secrets unset POLYARB_SUPABASE_SERVICE_KEY -a polyarb-l2
+	@echo "→ Waiting 60s for faults to manifest…"
+	@sleep 60
+	@echo ""
+	@echo "→ /health overall (expect fail / HTTP 503 when Plan 02 mirror sub-check wired):"
+	@curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://polyarb-l2.fly.dev/health
+	@curl -sS https://polyarb-l2.fly.dev/health | jq '.status, .checks["chaos:ws_test_kill_flag"][0], .checks["mirror:l2_tob_age_seconds"][0]'
+	@echo ""
+	@echo "→ l2_top_of_book new rows in last 60s (expect 0 — mirror dead):"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'l2_tob rows last 60s='||count(*) FROM l2_top_of_book WHERE ts > now() - interval '60 seconds'"
+	@echo ""
+	@echo "→ CLEANUP — restoring secrets…"
+	FLY_API_TOKEN= flyctl secrets unset POLYARB_WS_TEST_KILL -a polyarb-l2
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	FLY_API_TOKEN= flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="$$POLYARB_SUPABASE_SERVICE_KEY" -a polyarb-l2
+	@echo "→ Waiting 30s for recovery…"
+	@sleep 30
+	@echo "→ /health overall (expect pass / 200):"
+	@curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://polyarb-l2.fly.dev/health
+	@curl -sS https://polyarb-l2.fly.dev/health | jq '.status, (.checks | has("chaos:ws_test_kill_flag"))'
+	@echo ""
+	@echo "→ l2_top_of_book new rows in last 60s (expect >0 — mirror restored):"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'l2_tob rows last 60s='||count(*) FROM l2_top_of_book WHERE ts > now() - interval '60 seconds'"
+.PHONY: chaos-l2-inj4
+
+## chaos-l2-inj5-dryrun: Replay recorded 429 fixture against backfill code locally (no Polymarket calls)
+##
+## Live Inj L2-5 (real Polymarket /trades 429) is deferred per 03.1-CONTEXT.md
+## "实际触发时再验". This target validates the code path handles 429 correctly
+## using a recorded fixture, so the code can be confidently shipped without
+## waiting for nature to trigger the real condition.
+chaos-l2-inj5-dryrun:
+	@echo "=== Inj L2-5 dry-run: 429 fixture replay (no network) ==="
+	@uv run pytest tests/chaos/test_data_api_429_fixture.py -xvs
+.PHONY: chaos-l2-inj5-dryrun
 
