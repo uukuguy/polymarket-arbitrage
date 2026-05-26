@@ -2425,3 +2425,70 @@ curl -fsS https://polyarb-l2.fly.dev/healthz | jq .  # L2 还活着
 - Phase 03 LEARNINGS: `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-LEARNINGS.md`
 - thread `market-observation-architecture.md` RESEARCH UPDATE 2026-05-23
 
+
+## SESSION 27 — 2026-05-26 (Resume → L1 PAUSE RCA → Polywatch 立项 + MVP SHIPPED)
+
+### 起点
+
+`/gsd-resume-work --ws m1-perception` resume 后看 healthz: L1 status=fail, snapshot_age=299451s (~3.5 天 没 snapshot). L2 status=warn 但 WS 在收数据 (last_event_age=0s).
+
+### Triage (Step 1-2)
+
+1. **Step 1 — L1 unpause + 验证 chain 恢复**
+   - 初次走了过期 ops 路径: SSH 进 polyarb-l1 + 改 SQLite scheduler_state RUNNING + restart machine. 后来发现 Phase 02.1 BUG-8 早就把 `make unpause-prod` (HMAC-signed POST /control/unpause) 做好了, 我没读 Makefile
+   - chain 恢复确认: snapshot id=159 markets=6913 is_valid=True, supabase_mirror_age=68s, L2 WS event in流
+2. **Step 2a — market_count=0 真根因 (Sentry 硬证据)**
+   - 用 playwright-cli + Edge profile (用户授权 SESSION 27 — 见 `feedback_dashboard-access-autonomous-2026-05`) 翻 Sentry, 找 SCHEDULER_PAUSED issue 121111789
+   - **真根因**: `Gamma /markets stream failed: ConnectError('[Errno -5] No address associated with hostname')` (EAI_NODATA, Fly 容器 DNS 短时失败)
+   - **慢性病发现**: Issue 121111789 共 3 次 occurrence (05-19 21:06 / 05-22 00:16 / 05-22 01:45), environment=dev release=dev
+3. **Step 2b — Alert chain 验证**
+   - Telegram + Sentry 双触达确认 (用户口头 + Sentry 列表硬证据). 3.5 天 ignore 是 alerting policy 缺失而非 transport 缺陷
+4. **Step 2c+2d** — fail-reason 持久化 + alert SLA 设计留 Phase 03.1 plan, 不 ad-hoc 改
+
+### Polywatch 立项
+
+用户问"karpathy/autoresearch 能不能套到本项目市场感知?". 深度研究后得出: 不能直接套 (mismatch: 不是单 file/不是 5min trial/没单数值 verdict). 但可以抽象成自动化基建总称.
+
+**架构**: Ralph Loop (收敛单 goal) / AutoResearch (搜索对比) / Cron (周期触发) 三件套 + 决策树.
+
+**命名**: Polywatch (Polymarket+watcher 双关 + watch market/watch self 双义).
+
+**落库**:
+- memory `architecture_polywatch-decision-framework.md` — 4 条件 + 8 应用点 + 3 红线 + 决策树
+- thread `.planning/threads/polywatch-architecture.md` — 跨 phase 累积 + D-Polywatch-1..4 待定
+
+### Polywatch MVP shipped (commit 6a77e06)
+
+按用户选择 D (极简先 ship), 1h 内完成:
+- `scripts/polywatch/healthz_watcher.py` (253 行, 纯 stdlib, 无 deps)
+- `.github/workflows/polywatch-healthz.yml` (cron `*/15 * * * *`)
+- Makefile targets: `polywatch-healthz` + `polywatch-healthz-dry`
+- Manual run 26427062571 success, wet test Telegram 真到达用户手机
+
+### 顺带的 P0 fix
+
+发现 supabase-keepalive 1+ 天静默 fail (GHA secrets POLYARB_SUPABASE_URL/ANON_KEY 全空). 设齐 6 个 GHA secrets, manual trigger run 26426938564 success 9s.
+
+### Phase 03.1 carry-over (待启动)
+
+12 项 observability gap 已整理就绪 (5 原 GAPs + 3 deferred Inj + 2 process upgrades + 4 今日 Sentry RCA 新增 = Fly DNS chronic 调研 / failure_threshold 调优 / Sentry env=dev tag audit / snapshots.notes 写 fail reason). 等用户下次会话起 phase.
+
+### [NEXT] 下次会话从这里开始
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                                # zero drift
+gh run list --workflow=polywatch-healthz.yml --limit 5  # polywatch 自从过去 N 个 tick 都 success
+curl -fsS https://polyarb-l1.fly.dev/healthz | jq '.checks."snapshot:last_success_age_seconds"[0].status'
+```
+
+**两条 phase 并行开** (按 SESSION 27 整理的 scope):
+- `/gsd-new-phase 03.1 fix-observability-gaps --ws m1-perception` (12 项 gap)
+- `/gsd-new-phase 01 polywatch-mvp --ws m5-industrialize` (4 trial: healthz-watcher MVP 已上线作为基线 + chaos-replay + memory-sanity-check + autoresearch-validation-tuning)
+
+### 关键 memory 入口
+
+- ⭐⭐ [Polywatch MVP shipped](memory/project_polywatch-mvp-shipped-2026-05.md)
+- ⭐ [Polywatch decision framework](memory/architecture_polywatch-decision-framework.md)
+- ⭐ [Dashboard access autonomous](memory/feedback_dashboard-access-autonomous-2026-05.md)
+- thread `.planning/threads/polywatch-architecture.md`
