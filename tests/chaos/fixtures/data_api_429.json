@@ -1,0 +1,19 @@
+{
+  "_meta": {
+    "captured_at": "2026-05-26T00:00:00Z",
+    "source": "synthetic — Polymarket Data API 429 shape (Phase 03.1-06 Plan, Inj L2-5 fixture-only)",
+    "note": "Real Polymarket /trades 429 shape inferred from public rate-limit docs (200 req / 10s). Body shape is plausible — Polymarket has not published a documented 429 schema. Test only asserts on status code + Retry-After + safe sleep behavior; tolerant of any body shape.",
+    "status_code": 429,
+    "headers": {
+      "Retry-After": "30",
+      "Content-Type": "application/json",
+      "X-RateLimit-Limit": "200",
+      "X-RateLimit-Remaining": "0",
+      "X-RateLimit-Reset": "1748217630"
+    }
+  },
+  "body": {
+    "error": "rate_limited",
+    "message": "Too many requests — try again in 30 seconds"
+  }
+}
