@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03 (CLOSED — 8/8 plans + LEARNINGS extracted)
-status: complete-with-carryover
-stopped_at: SESSION 26 EOD (2026-05-25) — Phase 03 CLOSED + LEARNINGS 11D/10L/8P/7S + Phase 03.1 carry-over (5 GAPs + 3 deferred Inj) ready for next session
-last_updated: "2026-05-25T12:00:00.000Z"
-last_activity: 2026-05-25
+current_phase: 03 (CLOSED 2026-05-25) → 03.1 ready
+status: complete-with-carryover + Polywatch MVP shipped
+stopped_at: SESSION 27 EOD (2026-05-26) — Polywatch healthz-watcher live (commit 6a77e06) + supabase-keepalive 修好 + L1 PAUSE 3.5天 RCA 完成 + Phase 03.1 scope expanded to 12 items (含今日 Sentry RCA 4 项新发现)
+last_updated: "2026-05-26T02:00:00.000Z"
+last_activity: 2026-05-26
 progress:
   total_phases: 5
   completed_phases: 5
   total_plans: 32
   completed_plans: 32
   percent: 100
-next_action: "/gsd-new-phase 03.1 to address 5 GAPs from Inj L2-2 + 3 deferred chaos Inj (path A, recommended); OR /gsd-progress to assess M1/M2 parallel routes"
+next_action: "双轨并行: /gsd-new-phase 03.1 fix-observability-gaps --ws m1-perception (修 12 项 gap) + /gsd-new-phase 01 polywatch-mvp --ws m5-industrialize (扩展 4 trial,healthz MVP 已做 baseline)"
 ---
 
 # Project State
