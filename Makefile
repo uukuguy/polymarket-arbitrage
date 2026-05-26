@@ -807,3 +807,16 @@ chaos-l2-fly-image-check:
 	exit $$rc
 .PHONY: chaos-l2-fly-image-check
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 03.1 — DNS observability (Plan 04)
+# ─────────────────────────────────────────────────────────────────────────────
+
+## dns-baseline-probe: Probe Polymarket hostnames N times — Fly DNS chronic failure baseline data
+## (Sentry issue 121111789). Pure stdlib script, runnable inside the polyarb-l1
+## container image. Tune via POLYARB_DNS_PROBE_N / POLYARB_DNS_PROBE_INTERVAL_S.
+dns-baseline-probe:
+	@echo "=== DNS baseline probe ($$(date -u +%FT%TZ)) ==="
+	@uv run python scripts/dns_baseline_probe.py
+.PHONY: dns-baseline-probe
+
+
