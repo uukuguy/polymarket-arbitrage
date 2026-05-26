@@ -37,11 +37,18 @@ Threat model carry-over (T-03-06-04/-05):
 """
 from __future__ import annotations
 
-from typing import Iterator
+import time as _time
+from typing import TYPE_CHECKING, Iterator
 
 import sentry_sdk
 from loguru import logger
 from supabase import Client, create_client
+
+if TYPE_CHECKING:
+    # Forward-reference only — avoid runtime circular import in the
+    # storage layer (sqlite_store and l2_supabase_mirror both live in
+    # polyarb.storage and are sibling modules).
+    from polyarb.storage.sqlite_store import SQLiteStore
 
 # ── Narrow column projections ────────────────────────────────────────────────
 
@@ -110,16 +117,52 @@ class L2SupabaseMirror:
     iteration budget).
     """
 
-    def __init__(self, url: str, service_key: str) -> None:
+    def __init__(
+        self,
+        url: str,
+        service_key: str,
+        store: "SQLiteStore | None" = None,
+    ) -> None:
         """Create supabase client. Exactly ONE client per instance.
 
         Args:
             url: Supabase REST URL (https://<ref>.supabase.co) — POLYARB_SUPABASE_URL
             service_key: Supabase service_role JWT — POLYARB_SUPABASE_SERVICE_KEY
+            store: Optional SQLiteStore for the freshness-cache write-through
+                (Phase 03.1 Plan 01 GAP-3). When provided, push_top_of_book and
+                push_trades success branches call
+                `store.upsert_l2_tob_mirror_state(int(time.time()))` so /health
+                has a freshness anchor. When None (legacy callers), success
+                paths skip the cache write — backwards-compatible.
 
         DO NOT pass the Postgres DSN — that's reserved for alembic + asyncpg.
         """
         self._client: Client = create_client(url, service_key)
+        # Phase 03.1 Plan 01: optional freshness-cache writer. Daemon wires this
+        # in Plan 02; legacy / direct callers may pass None.
+        self._store: "SQLiteStore | None" = store
+
+    # ── _refresh_freshness_cache (Phase 03.1 Plan 01) ────────────────────────
+
+    def _refresh_freshness_cache(self) -> None:
+        """Best-effort write of the wall-clock freshness anchor to local SQLite.
+
+        Called from push_top_of_book / push_trades success branches ONLY.
+        Failure of the cache write must NEVER break the mirror's actual write
+        path — wrapped in try/except, emits a breadcrumb on failure.
+        """
+        if self._store is None:
+            return
+        try:
+            self._store.upsert_l2_tob_mirror_state(int(_time.time()))
+        except Exception as e:  # noqa: BLE001 — freshness cache is non-critical
+            logger.warning(f"l2-mirror: freshness-cache write failed: {e!r}")
+            sentry_sdk.add_breadcrumb(
+                category="l2-mirror",
+                level="warning",
+                message="freshness-cache write failed",
+                data={"error": str(e)[:200]},
+            )
 
     # ── push_top_of_book ─────────────────────────────────────────────────────
 
@@ -142,6 +185,9 @@ class L2SupabaseMirror:
                 data={"rows": len(rows), "table": "l2_top_of_book"},
             )
             logger.info(f"l2-mirror: pushed {len(rows)} top_of_book rows")
+            # Phase 03.1 Plan 01 (GAP-3): refresh local freshness anchor so
+            # /health l2_tob_age_seconds has a sub-second readable value.
+            self._refresh_freshness_cache()
             return True
         except Exception as e:  # noqa: BLE001 — fail-soft per D-12
             logger.error(
@@ -178,6 +224,9 @@ class L2SupabaseMirror:
                 data={"rows": len(rows), "table": "l2_trades"},
             )
             logger.info(f"l2-mirror: upserted {len(rows)} trade rows")
+            # Phase 03.1 Plan 01 (GAP-3): refresh local freshness anchor (any
+            # successful write to the L2 mirror surface counts).
+            self._refresh_freshness_cache()
             return True
         except Exception as e:  # noqa: BLE001 — fail-soft per D-12
             logger.error(
