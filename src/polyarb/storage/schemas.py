@@ -280,6 +280,33 @@ CREATE TABLE IF NOT EXISTS scheduler_state (
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Phase 03.1 Plan 01: l2_mirror_state singleton table (GAP-2 + GAP-3)
+#
+# Local freshness cache: the L2 Supabase mirror writes here on every successful
+# push (push_top_of_book / push_trades). /health l2_tob_age_seconds sub-check
+# reads from this cache via SQLiteStore.get_l2_tob_last_mirror_at_s().
+#
+# Why a local cache instead of querying Supabase?
+#   Sub-second /health probes MUST NOT round-trip to Supabase (latency + Free-tier
+#   request budget). The cache is the freshness anchor referenced by Inj L2-2
+#   RCA — Phase 03 mirror failure stayed silent because nothing surfaced
+#   "last successful mirror at" to /health.
+#
+# Schema:
+#   l2_mirror_state (
+#       id               INTEGER PRIMARY KEY CHECK(id=1),
+#       last_mirror_at_s INTEGER NOT NULL   -- wall-clock seconds since epoch
+#   )
+# ─────────────────────────────────────────────────────────────────────────────
+
+L2_MIRROR_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS l2_mirror_state (
+    id               INTEGER PRIMARY KEY CHECK(id=1),
+    last_mirror_at_s INTEGER NOT NULL
+)
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 03: snapshots table lockstep (3-point: DDL / COLUMN_ORDER / INSERT_SQL)
 #
 # The snapshots table is NOT in parquet (only markets is), so there are only

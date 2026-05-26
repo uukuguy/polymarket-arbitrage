@@ -25,6 +25,7 @@ from polyarb.storage.schemas import (
     EVENT_TAGS_INSERT_SQL,
     EVENTS_COLUMN_ORDER,
     EVENTS_INSERT_SQL,
+    L2_MIRROR_STATE_DDL,
     MARKETS_COLUMN_ORDER,
     MARKETS_INSERT_SQL,
     SCHEDULER_STATE_DDL,
@@ -119,6 +120,8 @@ class SQLiteStore:
             con.executescript(DDL)
             # Phase 02 Plan 02: scheduler_state singleton table
             con.executescript(SCHEDULER_STATE_DDL)
+            # Phase 03.1 Plan 01: l2_mirror_state singleton (GAP-2 + GAP-3)
+            con.executescript(L2_MIRROR_STATE_DDL)
 
             # Phase 02 Plan 02-08 (F-01): idempotent ADD COLUMN for legacy DBs.
             # Targets: snapshots.supabase_mirror_at_ms, snapshots.parquet_r2_url.
@@ -530,6 +533,57 @@ class SQLiteStore:
                 "state=excluded.state, failure_counter=excluded.failure_counter, "
                 "updated_at_ms=excluded.updated_at_ms",
                 (state, failure_counter, updated_at_ms),
+            )
+        finally:
+            con.close()
+
+    # ── Phase 03.1 Plan 01: l2_mirror_state singleton (GAP-2 + GAP-3) ──────
+    #
+    # Freshness anchor for /health l2_tob_age_seconds sub-check. Mirror's
+    # success path writes here; /health (Plan 02 wires it) reads via the
+    # getter. None = cold start ("never mirrored") → /health caller maps to
+    # WARN. Sub-second /health probes MUST NOT round-trip to Supabase, so
+    # this lives in the local SQLite file alongside scheduler_state.
+
+    def get_l2_tob_last_mirror_at_s(self) -> int | None:
+        """Read last successful L2 mirror push wall-clock (seconds since epoch).
+
+        Returns None when the l2_mirror_state row is absent (cold start) —
+        caller treats None as "never mirrored", typically maps to /health WARN.
+        Never raises on missing file or missing table; the DDL is created in
+        init_schema() but read-only callers may hit a not-yet-initialized DB.
+        """
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            return None
+        try:
+            try:
+                row = con.execute(
+                    "SELECT last_mirror_at_s FROM l2_mirror_state WHERE id=1"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                # Legacy DB without the l2_mirror_state table (pre-03.1).
+                return None
+            return int(row[0]) if row else None
+        finally:
+            con.close()
+
+    def upsert_l2_tob_mirror_state(self, last_mirror_at_s: int) -> None:
+        """Write singleton row with the latest successful mirror wall-clock.
+
+        Idempotent — uses ON CONFLICT(id) DO UPDATE so repeated calls overwrite
+        the single row enforced by CHECK(id=1).
+        """
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.execute(
+                "INSERT INTO l2_mirror_state(id, last_mirror_at_s) "
+                "VALUES (1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "last_mirror_at_s=excluded.last_mirror_at_s",
+                (int(last_mirror_at_s),),
             )
         finally:
             con.close()
