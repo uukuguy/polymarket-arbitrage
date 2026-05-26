@@ -217,6 +217,33 @@ CLAUDE.md 是**契约**，状态在别处：
 - `make help` 始终列出所有可用命令
 - 当 phase plan 包含新命令时，plan 必须显式列出"Makefile target 名称"作为产出之一
 
+## chaos 工具 image-aware 设计（强制）
+
+Phase 03 Inj L2-1 教训：`python:3.12-slim` 不含 `pkill` / `ps` / `dig` / `ping` / `which`。任何 chaos primitive 在 plan 落地前必须验证：
+
+```bash
+make chaos-l2-fly-image-check     # 自动找当前 fly image, docker run + command -v
+```
+
+规则：
+- 新 chaos plan 的 `<verify>` 必须有 image-check 证据（`make chaos-l2-fly-image-check` 输出或 `docker run --rm IMAGE /bin/sh -c "command -v TOOL"` 手验）
+- 缺工具优先用替代（Python / shell builtin / flyctl machine 命令），不轻易 `apt-get install`（image bloat + 攻击面）
+- 实在不可替代 → 改 Dockerfile 进独立 plan，不在 chaos phase 临时加
+- 完整工具矩阵 + substitute pattern: `docs/dev/chaos-toolkit.md`
+
+## chain-truth 纪律（强制）
+
+Phase 03 Inj L2-2 教训：fail-soft envelope 代码层完美（`try/except + log + breadcrumb`）但 `/health` 子检查 gate 在不存在的 config 字段 → mirror 失败 5 天静默才被 chaos 发现。
+
+任何 fail-soft 路径在 plan 落地前必须打通 chain：
+1. 哪个 `/health` 子检查观察这条路径？(file:line)
+2. 子检查读什么数据源？(file:line — 必须是写入侧真在 mutate)
+3. 什么 config flag 门控？flag 是否在 `config.py` 已声明？
+4. 写入侧成功/失败如何更新数据源？(file:line)
+5. 哪个 chaos test end-to-end 触发（不是 unit-level）？
+
+完整 discipline + plan-template checklist: `.planning/threads/market-observation-architecture.md` §1.6 chain-truth discipline。plan-checker review 时逐项核查。
+
 ## 技术栈（已锁定）
 
 - Python 3.12+ 主线（pin 在 `.python-version`）

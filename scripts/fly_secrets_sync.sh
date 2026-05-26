@@ -17,6 +17,16 @@
 
 set -euo pipefail
 
+# Phase 03.1 Plan 03 (GAP-4): prevent .env-shadowing of keychain Fly token.
+# Lesson from Phase 03 Inj L2-2 cleanup: when .env contains an L1-only
+# FLY_API_TOKEN (or stale token), flyctl picks it up via process env and
+# silently shadows the correct keychain credential, producing misleading
+# "App not found" errors against sibling apps (polyarb-l2 in the precedent).
+# Force flyctl to fall back to the keychain by unsetting any inherited
+# token at the very top of this script. See feedback memory
+# `feedback_fly-api-token-shadowing-2026-05.md` for the lived precedent.
+unset FLY_API_TOKEN
+
 ENV_FILE="${ENV_FILE:-.env}"
 APPS=("polyarb-l1" "polyarb-l2")
 DRY_RUN="${DRY_RUN:-0}"

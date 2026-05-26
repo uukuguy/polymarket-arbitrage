@@ -123,6 +123,11 @@ L1/L2/L3 一开始就按云原生形态设计（数据库选型、长跑调度�
 **重要纪律**：**当前层不达到生产级判定标准，禁止开下一层的工作**。
 否则会出现"L1 还在断断续续，L2 daemon 已经在跑残缺数据"这种灾难。
 
+> 判定"生产级"不能只看 code-level OK —— 必须按 §1.6 chain-truth discipline 把
+> `failure → /health → human signal` 这条链端到端走通。Phase 03 Inj L2-2 是
+> 这条纪律的诞生原因（mirror fail-soft envelope 完美但 /health 子检查 gate 在
+> 不存在的 config flag 上，5 天没人发现）。
+
 > **L1 Phase 02 偏离备注 (2026-05-19)**：Phase 02 关闭时**没有**收集 "7 天连跑" 这个凭证 — 用 4 次 prod chaos injection 替代了 7 天日历门。完整决策 + 风险面 + 未来回补点见 [`soak-gate-deviation-2026-05.md`](./soak-gate-deviation-2026-05.md)。**Phase 03 (L2) discuss-phase 时必须把这个凭证补上才能视为 L1 真生产级。** 本表上 L1 行的原定义不变。
 
 ---
@@ -660,6 +665,49 @@ Phase 02 首次 prod deploy 在 Fly 256MB VM 上 OOM，复测 512MB 仍 OOM。Pl
 - `.planning/workstreams/m1-perception/phases/02-l1-production-grade/02-09-SUMMARY.md`
 - `docs/learning/08-streaming-snapshot.md`
 - `memory/project_phase-02-OOM-resolution-2026-05.md`
+
+---
+
+## 1.6 chain-truth discipline (added 2026-05-26 from Phase 03 Inj L2-2 lesson)
+
+> 与 §1（三层生产级判定标准）配套的纪律。判定标准告诉你"什么算生产级"，
+> chain-truth 告诉你"怎么验证它真的是生产级，而不是 code-level OK 的幻觉"。
+> 这条纪律在 plan-checker 会被引用。
+
+**Rule:** Every fail-soft envelope MUST surface to `/health`（或同等可观测端点）。
+代码层的 unit test 通过是**必要不充分**的 —— 必须把 `failure → telemetry surface → human-visible signal` 这条链在 plan 时端到端走通，不能等 chaos 时才发现链断了。
+
+### 1.6.1 "chain-truth" 具体什么意思
+
+1. **fail-soft 必有 /health 子检查对应**。任何形如 `try: ... except: log + breadcrumb + return False` 的代码路径，**必须**存在一个 `/health` 子检查（`mirror:l2_tob_age_seconds`、`ws:last_event_age_seconds` 等），它能把**持续的** False 状态转化为 HTTP 级别的 503/warn。
+2. **子检查必须读真实数据源**。子检查读的字段（age timestamp / counter / flag）必须是 fail-soft 路径**真在 mutate** 的东西，不能 gate 在一个永远不会被翻转的 config flag（dead-code gate）上。
+3. **plan-checker 必须在 plan 时走链**：问 "which check reads this?" 和 "which secret/flag gates the check?" —— 任一环节缺失 = plan incomplete，不许 lock。
+
+### 1.6.2 Lived example — Phase 03, Inj L2-2
+
+`L2SupabaseMirror.push_top_of_book` 有完美的 fail-soft envelope（try/except + Sentry breadcrumb + `return False`）。`/health` 也有 `mirror:l2_tob_age_seconds` 子检查。**但是**子检查 gate 在 `settings.l2_mirror_enabled` 上 —— 而这个字段从来没有在 `config.py` 里声明过。
+
+结果：revoke 掉 prod 的 Supabase service key → daemon 继续报 healthy → operator 永远收不到告警 → 这条 5-layer dead code 直到 chaos 故意 inject 才暴露。
+
+完整 5-layer RCA 与命中链：`.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-SOAK-LOG.md` Inj L2-2 段。
+
+### 1.6.3 plan-template checklist（fail-soft 路径锁 plan 前必勾）
+
+写新 plan、planner 在 `<must_haves>` 或 `<verify>` 里**必须**显式回答下面 5 项；plan-checker 在 review 时会逐项核查：
+
+- [ ] 哪个 `/health` 子检查观察这条 fail-soft 路径？（file:line）
+- [ ] 子检查读什么数据源？（file:line —— 必须是写入侧真在 mutate 的字段）
+- [ ] 什么 config flag 门控子检查？该 flag 是否已在 `config.py` 声明？
+- [ ] 写入侧成功 / 失败路径如何更新数据源？（file:line）
+- [ ] 哪个 chaos test 端到端触发（不是 unit-level）？
+
+### 1.6.4 与 §1 判定标准的关系
+
+§1 表中"7×24 daemon，断网自愈，时序数据查询响应 < 1s"是**外部观察者视角**的判定。
+§1.6 是**让这种外部判定真的成立**的代码侧纪律 —— 没有 chain-truth，§1 的判定只是 wishful thinking。
+
+> Cross-ref: `feedback_code-vs-chain-truth-2026-05.md`（用户偏好原文）；
+> Phase 03 LEARNINGS L1（meta-discovery 的 narrative 版）。
 
 ---
 
