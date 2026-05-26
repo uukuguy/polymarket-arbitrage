@@ -2,18 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03 (CLOSED 2026-05-25) → 03.1 ready
-status: complete-with-carryover + Polywatch MVP shipped
-stopped_at: SESSION 27 EOD (2026-05-26) — Polywatch healthz-watcher live (commit 6a77e06) + supabase-keepalive 修好 + L1 PAUSE 3.5天 RCA 完成 + Phase 03.1 scope expanded to 12 items (含今日 Sentry RCA 4 项新发现)
-last_updated: "2026-05-26T02:00:00.000Z"
-last_activity: 2026-05-26
+current_phase: 03 CLOSED → 03.1 (recommended next phase to address 5 GAPs + 3 deferred Inj)
+status: completed
+stopped_at: Phase 03.1 context gathered (4 D-decisions + 9 mechanical fixes scoped)
+last_updated: "2026-05-26T03:36:29.297Z"
+last_activity: 2026-05-25
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 5
   total_plans: 32
   completed_plans: 32
   percent: 100
-next_action: "双轨并行: /gsd-new-phase 03.1 fix-observability-gaps --ws m1-perception (修 12 项 gap) + /gsd-new-phase 01 polywatch-mvp --ws m5-industrialize (扩展 4 trial,healthz MVP 已做 baseline)"
 ---
 
 # Project State
@@ -238,7 +237,7 @@ Phase 02 只剩 Plan 02-07 (Wave 5 = chaos + 7-day soak)，是 Phase 02 完结�
 
 ## Session Continuity
 
-**Stopped At:** SESSION 20 EOD (2026-05-19) — Wave 4 完整收尾 + git tree/MEMORY/STATE 全部干净
+**Stopped At:** Phase 03.1 context gathered (4 D-decisions + 9 mechanical fixes scoped)
 **Next Resume:** 见上方 "下次会话该做的（2026-05-19 SESSION 20 EOD 更新）" 段
 **Authoritative state:** [Phase 02 Wave 4 完成 memory](memory/project_phase-02-wave-4-2026-05.md)
 
