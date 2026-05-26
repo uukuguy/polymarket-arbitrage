@@ -14,7 +14,7 @@ Fallback path (Better Stack itself unreachable):
     → POST api.telegram.org/bot<token>/sendMessage directly
 
 Dedup: a paused-alert fired twice within ``alert_dedupe_window_seconds`` counts
-as one. Prevents alert storm when a flaky network keeps tripping the 3-failure
+as one. Prevents alert storm when a flaky network keeps tripping the 5-failure
 threshold every few minutes.
 
 Module-level state ``_LAST_ALERT_TIME_MS`` is intentional — alerts are

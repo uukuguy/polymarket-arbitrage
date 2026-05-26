@@ -1,11 +1,14 @@
-"""Tests for SnapshotScheduler 3-failure-pause state machine.
+"""Tests for SnapshotScheduler N-failure-pause state machine.
 
-Covers D-13 / T-02-04:
-- scheduler.state == PAUSED after 3 consecutive FAILED results
-- DEGRADED is NOT failure (D-12 amendment); 3x DEGRADED must NOT pause
+Covers D-13 / T-02-04 (Phase 02 baseline) + D-02 (Phase 03.1-04 raises
+FAILURE_THRESHOLD 3 → 5 to absorb DNS jitter via tenacity retry):
+
+- scheduler.state == PAUSED after FAILURE_THRESHOLD consecutive FAILED results
+- DEGRADED is NOT failure (D-12 amendment); N×DEGRADED must NOT pause
 - Paused scheduler skips tick (no run_snapshot called)
 - Failure counter resets on OK/DEGRADED success
 - Counter persists across restart (restored from DB)
+- 4 failures keep RUNNING; the 5th transitions to PAUSED (explicit guard)
 """
 from __future__ import annotations
 
@@ -65,7 +68,11 @@ async def test_pause_after_3_failures(
     daemon_settings_for_test: Any,
     tmp_path: Path,
 ) -> None:
-    """3 consecutive FAILED results → scheduler.state == PAUSED."""
+    """FAILURE_THRESHOLD consecutive FAILED results → scheduler.state == PAUSED.
+
+    Phase 03.1-04 D-02: threshold is 5. Loop drives the class attribute so the
+    invariant ("after N failures we pause") survives future tuning.
+    """
     from polyarb.storage.sqlite_store import SQLiteStore
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
@@ -75,11 +82,45 @@ async def test_pause_after_3_failures(
     # Always raise → counts as FAILED
     scheduler._run_snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
 
-    for _ in range(3):
+    for _ in range(SnapshotScheduler.FAILURE_THRESHOLD):
         await scheduler._tick()
 
     assert scheduler.state == SchedulerState.PAUSED
-    assert scheduler._failure_counter >= 3
+    assert scheduler._failure_counter >= SnapshotScheduler.FAILURE_THRESHOLD
+
+
+@pytest.mark.asyncio
+async def test_pause_after_5_failures_not_3(
+    daemon_settings_for_test: Any,
+) -> None:
+    """Phase 03.1-04 D-02 explicit guard: 4 failures keep RUNNING; the 5th pauses.
+
+    Pinned to literal 5 (not the class attribute) because this test's purpose
+    is to catch silent threshold regressions back to 3. If someone bumps
+    FAILURE_THRESHOLD to 3 (or 7), this test should fail loudly.
+    """
+    from polyarb.storage.sqlite_store import SQLiteStore
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
+
+    # 4 failures: counter goes 1, 2, 3, 4 — state must remain RUNNING
+    for tick in range(4):
+        await scheduler._tick()
+        assert scheduler.state == SchedulerState.RUNNING, (
+            f"After {tick + 1} failures, expected RUNNING; got {scheduler.state}. "
+            "Threshold may have regressed below 5."
+        )
+
+    # 5th failure: counter = 5 → PAUSED
+    await scheduler._tick()
+    assert scheduler.state == SchedulerState.PAUSED, (
+        f"After 5 failures, expected PAUSED; got {scheduler.state}. "
+        "Threshold may have increased above 5."
+    )
+    assert scheduler._failure_counter == 5
 
 
 @pytest.mark.asyncio
@@ -217,27 +258,34 @@ async def test_failed_tick_does_not_call_heartbeat_ok(
 async def test_counter_persists_across_restart(
     daemon_settings_for_test: Any,
 ) -> None:
-    """Counter=2 from prior shutdown → one more failure on restart → PAUSED at counter=3."""
+    """Counter=N-1 from prior shutdown → one more failure on restart → PAUSED at N.
+
+    Phase 03.1-04 D-02: threshold is 5. We drive both halves from the class
+    attribute so the persistence invariant survives future tuning.
+    """
     from polyarb.storage.sqlite_store import SQLiteStore
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
-    # First instance: run 2 failures, then "shut down"
+    threshold = SnapshotScheduler.FAILURE_THRESHOLD
+    pre_shutdown_counter = threshold - 1  # one short of trigger
+
+    # First instance: run threshold-1 failures, then "shut down"
     scheduler1 = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
     scheduler1._run_snapshot = AsyncMock(side_effect=RuntimeError("failed"))
 
-    await scheduler1._tick()
-    await scheduler1._tick()
+    for _ in range(pre_shutdown_counter):
+        await scheduler1._tick()
 
-    assert scheduler1._failure_counter == 2
+    assert scheduler1._failure_counter == pre_shutdown_counter
     assert scheduler1.state == SchedulerState.RUNNING
 
-    # Second instance reads from DB → restores counter=2
+    # Second instance reads from DB → restores counter
     scheduler2 = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
 
-    assert scheduler2._failure_counter == 2, (
-        f"Expected restored counter=2, got {scheduler2._failure_counter}. "
-        "Scheduler must persist counter to SQLite."
+    assert scheduler2._failure_counter == pre_shutdown_counter, (
+        f"Expected restored counter={pre_shutdown_counter}, "
+        f"got {scheduler2._failure_counter}. Scheduler must persist counter to SQLite."
     )
 
     # One more failure → PAUSED

@@ -1,13 +1,15 @@
-"""Chaos: 3 consecutive FAILED snapshots → scheduler PAUSED + send_paused_alert called.
+"""Chaos: N consecutive FAILED snapshots → scheduler PAUSED + send_paused_alert called.
+
+Phase 03.1-04 D-02: threshold raised 3 → 5 (FAILURE_THRESHOLD = 5).
 
 Scenario: run_snapshot always raises → scheduler._failure_counter increments each tick
-→ after 3 ticks: scheduler.state == PAUSED, send_paused_alert called exactly once.
+→ after FAILURE_THRESHOLD ticks: scheduler.state == PAUSED, send_paused_alert called exactly once.
 
 Also verifies:
-  - Tick 4+ (still PAUSED): run_snapshot NOT called (scheduler skips ticks when PAUSED)
+  - Tick N+1+ (still PAUSED): run_snapshot NOT called (scheduler skips ticks when PAUSED)
   - Unpause: scheduler.state → RUNNING, next tick calls run_snapshot again
 
-This mirrors RESEARCH §11 row "3× consecutive FAILED → PAUSED + alert".
+This mirrors RESEARCH §11 row "consecutive FAILED → PAUSED + alert".
 """
 from __future__ import annotations
 
@@ -61,27 +63,33 @@ def _make_settings(tmp_path: Path) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: 3 consecutive failures → PAUSED
+# Test 1: FAILURE_THRESHOLD consecutive failures → PAUSED
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_3_failures_cause_pause(tmp_path: Path) -> None:
-    """3 ticks all raising → scheduler.state == PAUSED after 3rd tick."""
+    """FAILURE_THRESHOLD ticks all raising → PAUSED after the Nth tick.
+
+    Phase 03.1-04 D-02: threshold is 5 (was 3). Loop reads from the class
+    attribute so future threshold changes don't drift this test.
+    """
     settings = _make_settings(tmp_path)
     store = _make_store(tmp_path)
     scheduler = SnapshotScheduler(settings=settings, sqlite_store=store)
 
     scheduler._run_snapshot = AsyncMock(side_effect=RuntimeError("chaos: always fail"))
 
-    for i in range(3):
+    for i in range(SnapshotScheduler.FAILURE_THRESHOLD):
         await scheduler._tick()
 
     assert scheduler.state == SchedulerState.PAUSED, (
-        f"Expected PAUSED after 3 failures, got {scheduler.state!r}"
+        f"Expected PAUSED after {SnapshotScheduler.FAILURE_THRESHOLD} failures, "
+        f"got {scheduler.state!r}"
     )
-    assert scheduler._failure_counter >= 3, (
-        f"failure_counter must be >= 3, got {scheduler._failure_counter}"
+    assert scheduler._failure_counter >= SnapshotScheduler.FAILURE_THRESHOLD, (
+        f"failure_counter must be >= {SnapshotScheduler.FAILURE_THRESHOLD}, "
+        f"got {scheduler._failure_counter}"
     )
 
 
@@ -108,15 +116,15 @@ async def test_paused_alert_called_once_on_pause(tmp_path: Path) -> None:
     with patch.object(
         _alerts_mod, "send_paused_alert", new=AsyncMock(return_value=None)
     ) as mock_alert:
-        # 3 ticks → transitions to PAUSED, calls send_paused_alert once
-        for _ in range(3):
+        # N ticks → transitions to PAUSED, calls send_paused_alert once
+        for _ in range(SnapshotScheduler.FAILURE_THRESHOLD):
             await scheduler._tick()
 
         assert mock_alert.call_count == 1, (
             f"Expected send_paused_alert to be called once, got {mock_alert.call_count}"
         )
 
-        # 4th tick: scheduler is already PAUSED → skips → no additional call
+        # Next tick: scheduler is already PAUSED → skips → no additional call
         await scheduler._tick()
 
         assert mock_alert.call_count == 1, (
@@ -159,7 +167,7 @@ async def test_unpause_resumes_ticks(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     scheduler = SnapshotScheduler(settings=settings, sqlite_store=store)
     scheduler.state = SchedulerState.PAUSED
-    scheduler._failure_counter = 3
+    scheduler._failure_counter = SnapshotScheduler.FAILURE_THRESHOLD
 
     ok_mock = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK))
     scheduler._run_snapshot = ok_mock
@@ -187,21 +195,29 @@ async def test_unpause_resumes_ticks(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_failure_counter_persists_restart(tmp_path: Path) -> None:
-    """Counter=2 from prior run → one more failure on fresh instance → PAUSED at 3."""
+    """Counter=N-1 from prior run → one more failure on fresh instance → PAUSED at N.
+
+    Phase 03.1-04 D-02: threshold is 5. Pre-shutdown counter set to 4, restart
+    restores 4, one more failure transitions to PAUSED.
+    """
     settings = _make_settings(tmp_path)
     store = _make_store(tmp_path)
 
-    # First instance: 2 failures
+    threshold = SnapshotScheduler.FAILURE_THRESHOLD
+    pre_shutdown_counter = threshold - 1  # one short of trigger
+
+    # First instance: threshold-1 failures
     s1 = SnapshotScheduler(settings=settings, sqlite_store=store)
     s1._run_snapshot = AsyncMock(side_effect=RuntimeError("fail"))
-    await s1._tick()
-    await s1._tick()
-    assert s1._failure_counter == 2
+    for _ in range(pre_shutdown_counter):
+        await s1._tick()
+    assert s1._failure_counter == pre_shutdown_counter
 
     # Second instance (simulating restart): reads counter from DB
     s2 = SnapshotScheduler(settings=settings, sqlite_store=store)
-    assert s2._failure_counter == 2, (
-        f"Restarted scheduler must restore counter=2, got {s2._failure_counter}"
+    assert s2._failure_counter == pre_shutdown_counter, (
+        f"Restarted scheduler must restore counter={pre_shutdown_counter}, "
+        f"got {s2._failure_counter}"
     )
 
     from polyarb.daemon import alerts as _alerts_mod
@@ -212,5 +228,6 @@ async def test_failure_counter_persists_restart(tmp_path: Path) -> None:
         await s2._tick()
 
     assert s2.state == SchedulerState.PAUSED, (
-        f"After 3rd failure (counter restored=2 + 1), must be PAUSED, got {s2.state!r}"
+        f"After {threshold}-th failure (counter restored={pre_shutdown_counter} + 1), "
+        f"must be PAUSED, got {s2.state!r}"
     )

@@ -1,6 +1,11 @@
-"""SnapshotScheduler — 3-failure-pause state machine.
+"""SnapshotScheduler — 5-failure-pause state machine.
 
 Phase 02 Plan 02 — D-13 / T-02-04.
+Phase 03.1-04 — D-02: threshold raised 3 → 5 to give tenacity DNS retry (D-01 A)
+room to absorb transient EAI_NODATA without prematurely flipping to PAUSED.
+At ~37s snapshot cadence, 5 consecutive failures = ~3min observation window;
+healthz-watcher (15-min cron) will auto-unpause before manual intervention
+is required.
 
 State machine:
   RUNNING → tick OK/DEGRADED → reset counter, stay RUNNING
@@ -33,14 +38,14 @@ from polyarb.validator.category import SnapshotStatus
 
 
 class SchedulerState(str, Enum):
-    """Scheduler state: RUNNING (normal) or PAUSED (3x consecutive failures)."""
+    """Scheduler state: RUNNING (normal) or PAUSED (5x consecutive failures)."""
 
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
 
 
 class SnapshotScheduler:
-    """Manages snapshot scheduling with 3-failure pause protection.
+    """Manages snapshot scheduling with 5-failure pause protection.
 
     Usage:
         scheduler = SnapshotScheduler(settings=settings, sqlite_store=store)
@@ -48,7 +53,10 @@ class SnapshotScheduler:
         await scheduler.run(stop_ev)  # long-running loop (Plan 02 placeholder)
     """
 
-    FAILURE_THRESHOLD = 3
+    # Phase 03.1-04 D-02: 3 → 5. Combined with DNS retry (D-01 A) the threshold
+    # tolerates ~3min of bursty failure before pausing; healthz-watcher cron
+    # (15-min) auto-unpauses well within human-response cadence.
+    FAILURE_THRESHOLD = 5
 
     def __init__(self, settings: object, sqlite_store: object) -> None:
         self._settings = settings
