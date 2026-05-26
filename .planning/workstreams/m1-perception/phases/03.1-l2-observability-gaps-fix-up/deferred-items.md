@@ -31,3 +31,7 @@ all run synchronously and pass 31/31:
 `tests/m1-perception/test_streaming_memory_calibration.py` fail at collection
 with `ModuleNotFoundError: No module named 'psutil'`. Same fix vector as
 D-DEFER-1 (uv sync dev extras gap). Out of scope here.
+
+## D-DEFER-3 (Plan 06, 2026-05-26) — Makefile contract test port mismatch
+
+- **test_makefile_contract::test_make_smoke_health_local_dry_run_recipe** (FAIL, pre-existing): asserts `127.0.0.1:8080/health` but recipe uses `$POLYARB_HTTP_PORT:-19080`. Discovered during Plan 06 execution 2026-05-26. Out of Plan 06 scope — fix in a separate Makefile-contract sync plan.
