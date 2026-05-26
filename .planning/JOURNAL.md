@@ -2492,3 +2492,111 @@ curl -fsS https://polyarb-l1.fly.dev/healthz | jq '.checks."snapshot:last_succes
 - ⭐ [Polywatch decision framework](memory/architecture_polywatch-decision-framework.md)
 - ⭐ [Dashboard access autonomous](memory/feedback_dashboard-access-autonomous-2026-05.md)
 - thread `.planning/threads/polywatch-architecture.md`
+
+
+## SESSION 28 — 2026-05-26 (双轨 phase context + Phase 03.1 plan-checker 闭环)
+
+### 起点
+
+`/gsd-resume-work --ws m1-perception` resume SESSION 27 状态. 用户指令 "并行开" 两条 phase. 用户进一步明确 "这种问题不要问我,你自己决定" → 按 SESSION 27 记忆最热的顺序走: 先 m1 03.1, 再 m5 01 polywatch-mvp.
+
+### 工作流
+
+**Phase 03.1 (m1-perception)**:
+1. ROADMAP 插入 `### Phase 03.1: L2 Observability Gaps Fix-up` (12 项 scope)
+2. `/gsd-discuss-phase` 4 个 gray area, 决出 D-01..D-04:
+   - D-01 Fly DNS: A (tenacity retry, EAI_NODATA/EAI_AGAIN errno filter) + D (GAP-101 threshold↑) + C (Fly support ticket 并行诊断, 不盲改 transport)
+   - D-02 failure_threshold: 3 → 5
+   - D-03 Sentry: audit + `environment="production"` + PagerDuty 推 m5 backlog
+   - D-04 Inj L2-4: sustained 100msg/s × 30s + POLYARB_WS_TEST_KILL env var + 双故障叠加 + 03.1 内跑(低负载验逻辑)
+3. CONTEXT.md + DISCUSSION-LOG.md 落库, commit 1018f1f
+4. STATE.md record session, commit 846f82b
+
+**m5 Phase 01 polywatch-mvp**:
+1. ROADMAP 插入 `### Phase 01: Polywatch MVP` (4 trial scope)
+2. `/gsd-discuss-phase` 4 个 gray area, 决出 D-Polywatch-1..4:
+   - D-1 trials.tsv 位置: `.planning/polywatch/trials/{name}.jsonl` append-only
+   - D-2 cron 混合: healthz=GHA / chaos=Fly machine / ralph=会话 / autoresearch=本地
+   - D-3 ⚠️ **本 phase 同步抽 `~/.claude/skills/polywatch/`** (user override Claude 推荐 — scope 扩了)
+   - D-4 escalation 4 级: streak=3 + L3 自动 GH issue + L0/L1/L2/L3 silent→breadcrumb→Telegram→issue
+3. Trial 2/3/4 子决策:
+   - Trial 2 (chaos-inj-replay): Inj=L2-1/2/3a 起步, UTC 18:00 nightly, prod+dry-run flag
+   - Trial 3 (ralph memory-sanity): max iter=10, propose review 不自动 commit, 手动触发
+   - Trial 4 (autoresearch validation-tuning): 1 天数据 + grid 10 + signal:noise + max=10
+4. CONTEXT.md + DISCUSSION-LOG.md + 手工 STATE.md 落库, commit be58efc + 9bf4a4b
+
+**Phase 03.1 plan-phase**:
+1. Skip research (well-understood fix-up scope), skip Nyquist/UI gate
+2. Spawn `gsd-planner` → 7 plans 6 waves
+3. Spawn `gsd-plan-checker` → 3 BLOCKER + 6 WARNING:
+   - B-1 wave numbering wrong (Plan 03 wave=2 应 wave=1 等)
+   - B-2 Plan 06 缺 depends_on "03.1-03" (FLY_API_TOKEN 纪律)
+   - B-3 Plan 07 Task 2 留了 option(c) sub-check 存在即算 chain-truth (违 phase goal)
+   - W-1..W-6 + 2 INFO
+4. Revision iter 1: planner 10/10 全修
+5. Plan-checker iter 2: VERIFICATION PASSED (no new BLOCKER, Wave 3 Makefile append-conflict 是 WARNING 级,建议串行)
+6. 7 plans + ROADMAP + STATE commit e5e8056, zero drift
+
+### 输出概要
+
+| Phase | Status | Decisions locked | Plans | Commit |
+|---|---|---|---|---|
+| m1 03.1 fix-observability-gaps | Ready to execute | D-01..D-04 | 7 plans, 5 waves | 1018f1f, 846f82b, e5e8056 |
+| m5 01 polywatch-mvp | Context locked, awaiting plan | D-Polywatch-1..4 + 4 trial sub-decisions | 0 (待 plan) | be58efc, 9bf4a4b |
+
+### Phase 03.1 plan 结构 (revised, 5 waves)
+
+| Wave | Plans | What |
+|---|---|---|
+| 1 (parallel) | 01, 03 | GAP-2/3 SqliteStore mirror state + GAP-4/PROCESS-1/2 FLY_API_TOKEN-safe Makefile + chain-truth thread + CLAUDE.md chaos |
+| 2 | 02 | GAP-1/103 /health live wiring + snapshots.notes + l2_tob_age_*_s Settings |
+| 3 (parallel, 建议串行) | 04, 06 | GAP-100/101 tenacity DNS retry + threshold 5 + dns_baseline_probe + POLYARB_WS_TEST_KILL + chaos:test_kill_flag /health sub-check |
+| 4 (checkpoint) | 05 | GAP-102 Sentry audit + env=production + typo guard |
+| 5 (checkpoint) | 07 | GAP-5 Inj L2-2 re-run (env-var threshold override hard gate) + Inj L2-3b + Inj L2-4 + phase closure |
+
+### 关键设计决策(本会话发现/确认)
+
+- **Phase 02 l2_tob_age 阈值改可 env-var override**: B-3 修法引入 `POLYARB_L2_TOB_AGE_FAIL_S`/`POLYARB_L2_TOB_AGE_WARN_S`, 让 Inj L2-2 不必等 600s,临时 set 30/15 就能验真 chain-truth。同时为 Plan 07 验证提供 hard gate (`status=fail` + HTTP 503 timestamp)
+- **POLYARB_WS_TEST_KILL 必须 /health 自报家门** (W-5): chain-truth own-dog-food, chaos mode 不能只 log stdout, 必须 sub-check status=warn 显式标注 "should never appear in production"
+- **D-3 反 Claude 推荐**: user 选 "现在就抽 global skill", Claude 推荐 "本 phase 跑通后再抽"。已 acknowledge user override, 写入 CONTEXT 的 risk + 缓解段。
+
+### Polywatch MVP 跑动现状
+
+- GHA cron `*/15` schedule 触发延迟可达 30+ min (Free tier 常见)。SESSION 28 检测到 02:09Z 还没自然 fire (上次是 01:27Z workflow_dispatch),非异常
+- supabase-keepalive run 26426938564 已 success, 7-day pause clock 真在重置
+
+### [NEXT] 下次会话从这里开始
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                                # zero drift, 7 NOT-STARTED 是预期
+git log --oneline -8                                # 验最近 commit (5 个本会话)
+gh run list --workflow=polywatch-healthz.yml --limit 5  # 应看到 cron 自然 fire 的 run
+curl -fsS https://polyarb-l1.fly.dev/healthz | jq '.checks."snapshot:last_success_age_seconds"[0].status'
+```
+
+**主路径 — execute Phase 03.1**:
+```bash
+/clear                                              # 推荐:清 context, execute 7 plans 耗 token
+/gsd-execute-phase 03.1 --ws m1-perception
+```
+
+注意事项:
+- Wave 3 Plan 04 + Plan 06 都 append Makefile, target 名不冲突但建议串行(04 → 06)避免 git conflict
+- Plan 05 是 user-checkpoint (需手工应用 Sentry secret + 看 audit 报告确认), 自动执行会停
+- Plan 07 跑前需先 `fly secrets set POLYARB_L2_TOB_AGE_FAIL_S=30 POLYARB_L2_TOB_AGE_WARN_S=15 -a polyarb-l2` (临时下调阈值), 跑完 unset
+
+**并行路径 — plan m5 polywatch-mvp**:
+```bash
+/gsd-plan-phase 01 --ws m5-industrialize   # CONTEXT.md 已就位
+```
+
+m5 phase 01 可以跟 03.1 execute 并行(不同 workstream, 不同代码区域)。
+
+### 关键 memory 入口
+
+- ⭐⭐ [Phase 03.1 planned](memory/project_phase-03-1-planned-2026-05.md) (本 session 写)
+- ⭐⭐ [m5 Phase 01 polywatch-mvp planned](memory/project_m5-phase-01-polywatch-mvp-planned-2026-05.md) (本 session 写)
+- ⭐ [Polywatch decision framework](memory/architecture_polywatch-decision-framework.md)
+- ⭐ [Polywatch MVP shipped](memory/project_polywatch-mvp-shipped-2026-05.md)
+- thread `.planning/threads/polywatch-architecture.md` — D-Polywatch-1..4 现已锁定, thread 需对应更新(下次会话顺手做)
