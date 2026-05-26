@@ -154,8 +154,9 @@ Scope (核心问题, discuss-phase 决):
 
 
 **Goal:** 修 Phase 03 chaos Inj L2-2 暴露的 5 个 observability GAP + 跑 3 个 deferred chaos Inj + 整合 SESSION 27 L1 PAUSE 3.5 天 RCA 的 4 项新发现 (Fly DNS chronic / failure_threshold 调优 / Sentry env=dev tag audit / snapshots.notes 写 fail reason)。让 L1+L2 alert chain 真正能在分钟级被发现并修复。
-**Status:** 🟢 Ready for discuss
+**Status:** 🟢 Plans ready (7 plans across 5 waves; planned 2026-05-26 SESSION 28; revised post-checker — Wave 1 [01,03] parallel, Wave 3 [04,06] parallel)
 **Depends on:** Phase 03 (closed 2026-05-25, carry-over filed in 03-LEARNINGS)
+**Plans:** 7 plans
 **Refs:**
 - `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-LEARNINGS.md` (carry-over: 5 GAPs + 3 deferred Inj)
 - `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-SOAK-LOG.md` (Inj L2-2 fail-soft chain-truth gap)
@@ -194,8 +195,14 @@ Scope (12 项, discuss-phase 决):
 - 7-day uptime soak (单独触发, 等 P0 修完)
 - M2/M3/M4 workstream 推进 (workstream 独立)
 
-Plans:
-- (待 discuss-phase 决出 wave 分组)
+Plans (revised 2026-05-26 SESSION 28 post-checker — 5 waves, Wave 1 & Wave 3 parallel):
+- [ ] 03.1-01-PLAN.md — Wave 1 (autonomous): SqliteStore l2_mirror_state singleton + L2SupabaseMirror success-path freshness persist (GAP-2 + GAP-3)
+- [ ] 03.1-02-PLAN.md — Wave 2 (autonomous, depends 01): Settings.l2_mirror_enabled + l2_tob_age_warn/fail_s thresholds + /health mirror sub-check live wiring + orchestrator snapshots.notes derive from issues (GAP-1 + GAP-103)
+- [ ] 03.1-03-PLAN.md — Wave 1 (autonomous, parallel w/ 01): Makefile chaos FLY_API_TOKEN= prefix + thread chain-truth discipline + CLAUDE.md container-image-aware chaos + docs/dev/chaos-toolkit.md (GAP-4 + PROCESS-1 + PROCESS-2)
+- [ ] 03.1-04-PLAN.md — Wave 3 (autonomous, depends 02): tenacity DNS-class retry on Gamma fetch + FAILURE_THRESHOLD 3→5 + dns_baseline_probe.py script + Polywatch trial backlog registration (GAP-100 + GAP-101)
+- [ ] 03.1-05-PLAN.md — Wave 4 (checkpoint, depends 06): Sentry alert routing audit (playwright-cli) + sentry_environment Settings field + W-6 typo guard + user-applied prod env rollout (GAP-102)
+- [ ] 03.1-06-PLAN.md — Wave 3 (autonomous, depends 01+02+03; parallel w/ 04): POLYARB_WS_TEST_KILL primitive + /health chaos:test_kill_flag sub-check (W-5 chain-truth) + chaos-l2-inj4 Makefile orchestrator + Inj L2-5 429 fixture+dry-run (Inj L2-4 + Inj L2-5 fixture)
+- [ ] 03.1-07-PLAN.md — Wave 5 (checkpoint, depends 02+03+04+05+06): chaos run batch — Inj L2-2 re-run with lowered-threshold chain-truth proof (GAP-5, B-3) + Inj L2-3b + Inj L2-4 + SOAK-LOG + VALIDATION + phase closure
 
 
 
