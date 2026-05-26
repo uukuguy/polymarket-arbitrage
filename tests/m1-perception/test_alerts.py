@@ -203,7 +203,11 @@ async def test_scheduler_paused_invokes_alerts(
     daemon_settings_with_observability: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When scheduler hits 3 consecutive failures, _on_paused → alerts.send_paused_alert."""
+    """When scheduler hits FAILURE_THRESHOLD consecutive failures, _on_paused → alerts.send_paused_alert.
+
+    Phase 03.1-04 D-02: threshold is 5 (was 3). Drive the loop off the class
+    attribute so future tuning doesn't drift this assertion.
+    """
     from polyarb.daemon import alerts
     from polyarb.daemon.scheduler import SchedulerState, SnapshotScheduler
     from polyarb.storage.sqlite_store import SQLiteStore
@@ -223,7 +227,7 @@ async def test_scheduler_paused_invokes_alerts(
 
     scheduler._run_snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
 
-    for _ in range(3):
+    for _ in range(SnapshotScheduler.FAILURE_THRESHOLD):
         await scheduler._tick()
 
     assert scheduler.state == SchedulerState.PAUSED
