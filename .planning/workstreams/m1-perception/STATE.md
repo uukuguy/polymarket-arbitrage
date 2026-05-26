@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03 CLOSED → 03.1 (recommended next phase to address 5 GAPs + 3 deferred Inj)
+current_phase: 03.1
 status: executing
 stopped_at: Phase 01 polywatch-mvp context gathered (4 D-Polywatch decisions + 4 trial sub-decisions)
-last_updated: "2026-05-26T08:10:00.000Z"
+last_updated: "2026-05-26T08:59:56.710Z"
 last_activity: 2026-05-26
 progress:
   total_phases: 6
@@ -19,12 +19,12 @@ progress:
 
 ## Current Position
 
-Phase: **03 (l2-orderbook-tracking-daemon)** — ✅ **CLOSED 2026-05-25** (Phase 03.1 carry-over filed)
-Plan: 8 of 8 (all SUMMARY ✓ + LEARNINGS extracted + zero drift)
-**Status:** Ready to execute
-**Current Phase:** 03 CLOSED → 03.1 (recommended next phase to address 5 GAPs + 3 deferred Inj)
+Phase: 03.1 (l2-observability-gaps-fix-up) — EXECUTING
+Plan: 4 of 7 (Plans 01-04 complete; Wave 3 Plan 04 just landed: tenacity DNS retry + FAILURE_THRESHOLD 3→5 + dns_baseline_probe)
+**Status:** Executing Phase 03.1
+**Current Phase:** 03.1
 **Last Activity:** 2026-05-26
-**Last Activity Description:** Phase 03.1 planning complete — 7 plans ready
+**Last Activity Description:** Plan 03.1-04 complete — GAP-100 D-01 A+C + GAP-101 D-02 mitigations live (5 task commits + SUMMARY)
 
 ### Phase 03 — ✅ COMPLETE (closed 2026-05-25)
 
