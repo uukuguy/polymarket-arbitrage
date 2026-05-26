@@ -95,6 +95,32 @@ from polyarb.validator.layers import (
 )
 
 
+def _derive_notes_from_issues(issues: list[Issue]) -> str | None:
+    """Phase 03.1 Plan 02 GAP-103 — pull a one-line fail-reason for snapshots.notes.
+
+    Operators need to know WHY a snapshot failed without joining the
+    validation_issues table. Strategy: collect API_UNREACHABLE details (truncated
+    to 80 chars each), semicolon-join, cap total at 200 chars.
+
+    Returns None when no API_UNREACHABLE issues are present — clean / validator-
+    only-noise snapshots keep notes=NULL (operators want fail reasons, not L2
+    validation findings like zombie_market or ghost_book).
+
+    Format chosen so dashboards can `SELECT substr(notes, 1, 40), count(*) FROM
+    snapshots GROUP BY 1` to tally failure modes.
+    """
+    reasons: list[str] = []
+    for issue in issues:
+        if issue.category != Category.API_UNREACHABLE:
+            continue
+        detail = issue.detail or f"L{issue.layer}: unknown"
+        reasons.append(detail[:80])
+    if not reasons:
+        return None
+    joined = "; ".join(reasons)
+    return joined[:200]
+
+
 @dataclass
 class SnapshotResult:
     """Return value of ``run_snapshot`` — what the CLI prints + what tests assert on.
@@ -470,6 +496,7 @@ async def run_snapshot(
             is_valid=is_valid,
             market_rows=target_markets,
             issues=issues,
+            notes=_derive_notes_from_issues(issues),  # Plan 03.1-02 GAP-103
             event_rows=event_rows,
             event_tag_rows=event_tag_rows,
             batch_size=500,
