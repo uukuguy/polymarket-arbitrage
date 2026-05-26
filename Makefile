@@ -395,12 +395,19 @@ docker-smoke:
 	@echo ">> docker-smoke — full build + run + health probe"
 	bash tests/m1-perception/test_docker_smoke.sh
 
-## deploy: Deploy to Fly.io prod (requires flyctl + FLY_API_TOKEN)
+# Phase 03.1 Plan 03 (GAP-4): every flyctl invocation in this Makefile is
+# prefixed with `FLY_API_TOKEN= ` to force flyctl to fall back to the
+# keychain credential. Reason: .env may carry an L1-only FLY_API_TOKEN that
+# silently shadows the keychain → "App not found" errors against sibling
+# apps (Phase 03 Inj L2-2 cleanup precedent; memory
+# `feedback_fly-api-token-shadowing-2026-05.md`). Do not remove the prefix.
+
+## deploy: Deploy to Fly.io prod (requires flyctl + keychain auth — see GAP-4 banner above)
 deploy:
 	@echo ">> deploy — flyctl deploy --remote-only"
-	flyctl deploy --remote-only --wait-timeout 600
+	FLY_API_TOKEN= flyctl deploy --remote-only --wait-timeout 600
 	@echo ">> ensuring process scale: app=1 cron=1 (W8 Supercronic)"
-	flyctl scale count app=1 cron=1 -a polyarb-l1 || true
+	FLY_API_TOKEN= flyctl scale count app=1 cron=1 -a polyarb-l1 || true
 	@echo ">> running post-deploy /health smoke probe"
 	bash scripts/deploy_smoke.sh
 
@@ -412,7 +419,7 @@ smoke-test:
 ## tail-logs: Tail Fly daemon stdout
 tail-logs:
 	@echo ">> tail-logs — flyctl logs"
-	flyctl logs --app polyarb-l1
+	FLY_API_TOKEN= flyctl logs --app polyarb-l1
 
 .PHONY: memory-budget-test docker-smoke-256mb
 
@@ -588,15 +595,15 @@ deploy-l2-prod:
 ## fly-l2-status: List polyarb-l2 machines + checks (post-deploy verification)
 fly-l2-status:
 	@echo ">> fly-l2-status — flyctl status -a polyarb-l2"
-	flyctl status -a polyarb-l2
+	FLY_API_TOKEN= flyctl status -a polyarb-l2
 	@echo "--- checks ---"
-	flyctl checks list -a polyarb-l2
+	FLY_API_TOKEN= flyctl checks list -a polyarb-l2
 .PHONY: fly-l2-status
 
 ## fly-l2-logs: Tail polyarb-l2 daemon logs
 fly-l2-logs:
 	@echo ">> fly-l2-logs — flyctl logs -a polyarb-l2"
-	flyctl logs --app polyarb-l2
+	FLY_API_TOKEN= flyctl logs --app polyarb-l2
 .PHONY: fly-l2-logs
 
 ## fly-secrets-sync: Push .env to BOTH polyarb-l1 + polyarb-l2 (Phase 02.1 D-22 invariant)
@@ -661,16 +668,25 @@ smoke-l2-mirror:
 # (tests/chaos/test_l2_chaos_plan.py). Run them in sequence (L2-1 → L2-5),
 # recording evidence in 03-SOAK-LOG.md. NEVER run during peak trading —
 # Sentry + Telegram will alert for real.
+#
+# Phase 03.1 Plan 03 (GAP-4) — FLY_API_TOKEN-safe invariant:
+# All chaos-l2-* targets prefix flyctl calls with `FLY_API_TOKEN= ` to force
+# flyctl to fall back to the keychain credential, preventing the .env
+# shadowing silent-error pattern documented in Phase 03 Inj L2-2 cleanup
+# (memory `feedback_fly-api-token-shadowing-2026-05.md`). Where the recipe
+# also sources `.env` (for POLYARB_SUPABASE_*), it MUST explicitly
+# `unset FLY_API_TOKEN` AFTER `set +a` so the .env-resident token does not
+# leak back into the shell. Do not remove the prefix or the unset.
 
 ## chaos-l2-baseline: Capture pre-chaos baseline (machine + /health + row count)
 chaos-l2-baseline:
 	@echo "=== Phase 03 chaos baseline ($$(date -u +%FT%TZ)) ==="
-	@flyctl status -a polyarb-l2 | tail -6
+	@FLY_API_TOKEN= flyctl status -a polyarb-l2 | tail -6
 	@echo ""
 	@echo "/healthz HTTP: $$(curl -sS -o /dev/null -w '%{http_code}' https://polyarb-l2.fly.dev/healthz)"
 	@echo "/health  HTTP: $$(curl -sS -o /dev/null -w '%{http_code}' https://polyarb-l2.fly.dev/health)"
 	@echo ""
-	@set -a; [ -f .env ] && . ./.env; set +a; \
+	@set -a; [ -f .env ] && . ./.env; set +a; unset FLY_API_TOKEN; \
 	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'l2_top_of_book rows='||count(*) FROM l2_top_of_book"
 .PHONY: chaos-l2-baseline
 
@@ -684,9 +700,9 @@ chaos-l2-baseline:
 ## reconnect simultaneously.
 chaos-l2-inj1:
 	@echo "=== Inj L2-1: machine restart ($$(date -u +%FT%TZ)) ==="
-	@MID=$$(flyctl machines list -a polyarb-l2 --json | jq -r '.[0].id'); \
+	@MID=$$(FLY_API_TOKEN= flyctl machines list -a polyarb-l2 --json | jq -r '.[0].id'); \
 	echo "machine_id=$$MID"; \
-	flyctl machine restart $$MID -a polyarb-l2
+	FLY_API_TOKEN= flyctl machine restart $$MID -a polyarb-l2
 	@echo "→ restart issued. Polling /health for 90s…"
 	@for i in 1 2 3 4 5 6 7 8 9; do \
 		sleep 10; \
@@ -695,31 +711,31 @@ chaos-l2-inj1:
 	done
 	@echo ""
 	@echo "=== Post-recovery: machine state + l2_top_of_book delta ==="
-	@flyctl status -a polyarb-l2 | grep -E "started|stopped" | head -2
-	@set -a; [ -f .env ] && . ./.env; set +a; \
+	@FLY_API_TOKEN= flyctl status -a polyarb-l2 | grep -E "started|stopped" | head -2
+	@set -a; [ -f .env ] && . ./.env; set +a; unset FLY_API_TOKEN; \
 	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'rows_in_last_120s='||count(*) FROM l2_top_of_book WHERE ts > now() - interval '120 seconds'"
 .PHONY: chaos-l2-inj1
 
 ## chaos-l2-inj2: Inj L2-2 — revoke SUPABASE_SERVICE_KEY on L2, observe fail-soft
 chaos-l2-inj2:
 	@echo "=== Inj L2-2: revoke L2 SUPABASE_SERVICE_KEY ($$(date -u +%FT%TZ)) ==="
-	flyctl secrets unset POLYARB_SUPABASE_SERVICE_KEY -a polyarb-l2
+	FLY_API_TOKEN= flyctl secrets unset POLYARB_SUPABASE_SERVICE_KEY -a polyarb-l2
 	@echo "→ revoked. Waiting 60s for fail-soft to manifest…"
 	@sleep 60
 	@echo ""
 	@echo "/healthz: $$(curl -sS -o /dev/null -w '%{http_code}' https://polyarb-l2.fly.dev/healthz)  (expect 200)"
 	@echo "/health:  $$(curl -sS -o /dev/null -w '%{http_code}' https://polyarb-l2.fly.dev/health)  (expect 503)"
-	@flyctl status -a polyarb-l2 | grep -E "started|running" | head -2
+	@FLY_API_TOKEN= flyctl status -a polyarb-l2 | grep -E "started|running" | head -2
 	@echo ""
 	@echo "=== restoring key from .env (cleanup) ==="
-	@set -a; [ -f .env ] && . ./.env; set +a; \
-	flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="$$POLYARB_SUPABASE_SERVICE_KEY" -a polyarb-l2
+	@set -a; [ -f .env ] && . ./.env; set +a; unset FLY_API_TOKEN; \
+	FLY_API_TOKEN= flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="$$POLYARB_SUPABASE_SERVICE_KEY" -a polyarb-l2
 .PHONY: chaos-l2-inj2
 
 ## chaos-l2-inj3a: Inj L2-3a — confirm L1 publishes 0 NOTIFY when EVENT_BUS disabled
 chaos-l2-inj3a:
 	@echo "=== Inj L2-3a: default-state probe ($$(date -u +%FT%TZ)) ==="
-	@flyctl secrets list -a polyarb-l1 | grep -i event_bus || echo "OK POLYARB_EVENT_BUS_ENABLED unset on L1 (B1 default OFF)"
+	@FLY_API_TOKEN= flyctl secrets list -a polyarb-l1 | grep -i event_bus || echo "OK POLYARB_EVENT_BUS_ENABLED unset on L1 (B1 default OFF)"
 	@echo ""
 	@echo "L2 listener still in 'listening' state (no NOTIFY needed):"
 	@curl -sS https://polyarb-l2.fly.dev/health 2>/dev/null | jq -r '.checks["event_bus:listener_state"][0].observedValue'
@@ -728,9 +744,9 @@ chaos-l2-inj3a:
 ## chaos-l2-inj3b: Inj L2-3b — opt-in L1 NOTIFY, trigger scan, confirm L2 receives
 chaos-l2-inj3b:
 	@echo "=== Inj L2-3b: opt-in path ($$(date -u +%FT%TZ)) ==="
-	flyctl secrets set POLYARB_EVENT_BUS_ENABLED=1 -a polyarb-l1
+	FLY_API_TOKEN= flyctl secrets set POLYARB_EVENT_BUS_ENABLED=1 -a polyarb-l1
 	@echo "→ L1 NOTIFY enabled. Triggering a snapshot via /scan…"
-	@set -a; [ -f .env ] && . ./.env; set +a; \
+	@set -a; [ -f .env ] && . ./.env; set +a; unset FLY_API_TOKEN; \
 	BODY='{}'; SIG=$$(printf "%s" "$$BODY" | openssl dgst -sha256 -hmac "$$POLYARB_SCAN_SHARED_SECRET" | awk '{print $$2}'); \
 	curl -sS -X POST -H "X-Signature: $$SIG" -d "$$BODY" https://polyarb-l1.fly.dev/scan || true
 	@echo ""
@@ -738,22 +754,56 @@ chaos-l2-inj3b:
 	@sleep 120
 	@echo ""
 	@echo "L2 candidate refresh log (last 3):"
-	@flyctl logs -a polyarb-l2 --no-tail | grep -oE 'candidate refresh.*snapshot_id=[0-9]+' | tail -3 || echo "(none yet)"
+	@FLY_API_TOKEN= flyctl logs -a polyarb-l2 --no-tail | grep -oE 'candidate refresh.*snapshot_id=[0-9]+' | tail -3 || echo "(none yet)"
 	@echo ""
 	@echo "l2_event_cursor advance:"
-	@set -a; [ -f .env ] && . ./.env; set +a; \
+	@set -a; [ -f .env ] && . ./.env; set +a; unset FLY_API_TOKEN; \
 	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'last_snapshot_id='||last_snapshot_id FROM l2_event_cursor WHERE consumer='l2-candidate-refresh'"
 	@echo ""
 	@echo "=== reverting to default OFF (B1 invariant) ==="
-	flyctl secrets unset POLYARB_EVENT_BUS_ENABLED -a polyarb-l1
+	FLY_API_TOKEN= flyctl secrets unset POLYARB_EVENT_BUS_ENABLED -a polyarb-l1
 .PHONY: chaos-l2-inj3b
 
 ## chaos-l2-cleanup: Force restore L2 secrets from .env (use if Inj aborts mid-way)
 chaos-l2-cleanup:
 	@echo "=== Phase 03 chaos cleanup — restoring L2 secrets from .env ==="
-	@set -a; [ -f .env ] && . ./.env; set +a; \
-	flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="$$POLYARB_SUPABASE_SERVICE_KEY" POLYARB_SUPABASE_DB_DSN="$$POLYARB_SUPABASE_DB_DSN" -a polyarb-l2
-	flyctl secrets unset POLYARB_EVENT_BUS_ENABLED -a polyarb-l1 || true
+	@set -a; [ -f .env ] && . ./.env; set +a; unset FLY_API_TOKEN; \
+	FLY_API_TOKEN= flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="$$POLYARB_SUPABASE_SERVICE_KEY" POLYARB_SUPABASE_DB_DSN="$$POLYARB_SUPABASE_DB_DSN" -a polyarb-l2
+	FLY_API_TOKEN= flyctl secrets unset POLYARB_EVENT_BUS_ENABLED -a polyarb-l1 || true
 	@echo "→ done. Verify with: make chaos-l2-baseline"
 .PHONY: chaos-l2-cleanup
+
+## chaos-l2-fly-image-check: Verify chaos primitives available in current polyarb-l2 fly image
+##
+## Phase 03.1 Plan 03 / PROCESS-2 (image-aware chaos design). Auto-resolves
+## the currently deployed image and runs `docker run --rm IMAGE which TOOL`
+## for each chaos primitive we may want to use. Output is best-effort:
+## requires local `docker` daemon + flyctl auth. If docker is unavailable
+## the target still surfaces "ERROR: docker missing" without breaking CI.
+chaos-l2-fly-image-check:
+	@if ! command -v docker >/dev/null 2>&1; then \
+		echo "ERROR: docker not on PATH — this is a developer-local target."; \
+		echo "Install docker desktop or run from a host with the daemon."; \
+		exit 2; \
+	fi
+	@IMAGE=$$(FLY_API_TOKEN= flyctl status -a polyarb-l2 --json 2>/dev/null | jq -r '.ImageRef.Registry + "/" + .ImageRef.Repository + ":" + .ImageRef.Tag' 2>/dev/null); \
+	if [ -z "$$IMAGE" ] || [ "$$IMAGE" = "null/:null" ] || [ "$$IMAGE" = "/:" ]; then \
+		echo "ERROR: cannot resolve current polyarb-l2 image (flyctl auth?)"; exit 1; \
+	fi; \
+	echo "Checking primitives in $$IMAGE…"; \
+	rc=0; \
+	for tool in pkill ps kill which dig ping curl python; do \
+		if docker run --rm --entrypoint /bin/sh "$$IMAGE" -c "command -v $$tool >/dev/null 2>&1"; then \
+			echo "  OK    $$tool"; \
+		else \
+			echo "  MISS  $$tool"; \
+			rc=1; \
+		fi; \
+	done; \
+	if [ $$rc -ne 0 ]; then \
+		echo ""; \
+		echo "→ Missing tools detected. See docs/dev/chaos-toolkit.md for substitute patterns."; \
+	fi; \
+	exit $$rc
+.PHONY: chaos-l2-fly-image-check
 
