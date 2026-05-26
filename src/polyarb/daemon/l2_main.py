@@ -223,11 +223,16 @@ async def main() -> int:
     watchdog = WsWatchdog(stale_s=30.0)
 
     # ── Plan 06: L2SupabaseMirror init (D-07) — fail-soft if creds missing ──
+    # Phase 03.1 Plan 02 (B-2 chain-truth): pass store=sqlite_store so the
+    # mirror writes a freshness anchor to l2_mirror_state on every successful
+    # push. /health mirror:l2_tob_age_seconds sub-check reads that anchor →
+    # chain-truth alive: code → DB → /health → operator alert.
     l2_mirror: L2SupabaseMirror | None
     if settings.supabase_url and settings.supabase_service_key.get_secret_value():
         l2_mirror = L2SupabaseMirror(
             url=settings.supabase_url,
             service_key=settings.supabase_service_key.get_secret_value(),
+            store=sqlite_store,
         )
         logger.info("l2-mirror enabled (Supabase REST URL + service_key present)")
     else:
