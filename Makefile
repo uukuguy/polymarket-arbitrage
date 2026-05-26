@@ -463,6 +463,17 @@ unpause-prod:
 	  -H "X-Signature: sha256=$$SIG" \
 	  -H "Content-Length: 0" | python -m json.tool
 
+## polywatch-healthz-dry: Run polywatch healthz-watcher in dry-run mode (no Telegram/unpause)
+## Usage: make polywatch-healthz-dry
+## Reads POLYARB_SCAN_SHARED_SECRET / POLYARB_TELEGRAM_* from env (optional).
+polywatch-healthz-dry:
+	POLYWATCH_DRY_RUN=1 uv run python scripts/polywatch/healthz_watcher.py
+
+## polywatch-healthz: Run polywatch healthz-watcher live (will push Telegram + try unpause on fail)
+## Usage: POLYARB_SCAN_SHARED_SECRET=... POLYARB_TELEGRAM_BOT_TOKEN=... POLYARB_TELEGRAM_CHAT_ID=... make polywatch-healthz
+polywatch-healthz:
+	uv run python scripts/polywatch/healthz_watcher.py
+
 ## logs-tail-axiom: Print the Axiom dataset URL + sample APL query (convenience; opens nothing local)
 logs-tail-axiom:
 	@echo ">> open https://app.axiom.co/datasets/polyarb-prod in browser"

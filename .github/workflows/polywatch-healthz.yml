@@ -1,0 +1,61 @@
+name: Polywatch — Healthz Watcher
+# Polywatch MVP, first trial. Every 15 minutes:
+#   - poll polyarb-l1 + polyarb-l2 /healthz
+#   - if L1 snapshot stale (>30 min), POST /control/unpause (HMAC) + Telegram
+#   - if L2 fail or WS silent >10 min, Telegram
+# See .planning/threads/polywatch-architecture.md for design context.
+#
+# Failure modes:
+#   - script exit 1 -> Polywatch escalation itself failed (Telegram down etc).
+#     GHA email fallback (no auto-recovery; manual investigate).
+#   - script exit 0 -> either all green OR escalation succeeded; no GHA email.
+#
+# Cost: 15 min * 4 = 96 runs/day, ~30s each = 48 min GHA / day, well within
+# the free-tier 2000 min/mo budget.
+#
+# Security note: secrets passed through env: blocks (T-03-01-01 same as
+# supabase-keepalive.yml). No untrusted GitHub event inputs are used; the only
+# workflow input (dry_run) is a typed bool, not interpolated into run: scripts.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry-run (no Telegram push, no unpause)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: polywatch-healthz
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    name: poll /healthz + escalate
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      # Typed bool input rendered into env (never inlined into run: scripts).
+      # Safe because inputs.dry_run is type:boolean, not user-controlled text.
+      POLYWATCH_DRY_RUN: ${{ inputs.dry_run == true && '1' || '0' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run healthz watcher
+        env:
+          POLYARB_SCAN_SHARED_SECRET: ${{ secrets.POLYARB_SCAN_SHARED_SECRET }}
+          POLYARB_TELEGRAM_BOT_TOKEN: ${{ secrets.POLYARB_TELEGRAM_BOT_TOKEN }}
+          POLYARB_TELEGRAM_CHAT_ID: ${{ secrets.POLYARB_TELEGRAM_CHAT_ID }}
+        run: python3 scripts/polywatch/healthz_watcher.py
+
+      - name: Alert on escalation failure (GH email path)
+        if: failure()
+        run: |
+          echo "::error::Polywatch escalation FAILED - Telegram or unpause path broken; investigate immediately"
+          exit 1
