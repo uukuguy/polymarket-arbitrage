@@ -148,7 +148,56 @@ Scope (核心问题, discuss-phase 决):
 - WebSocket 全市场流 (L3 候选)
 - M4 LLM 价值判断 (m4-smart-strategies 独立 workstream)
 
-### Phase 04 (former Phase 3): WebSocket 增量数据流（L3 候选）
+### Phase 03.1: L2 Observability Gaps Fix-up
+
+> INSERTED 2026-05-26 — addresses Phase 03 chaos Inj L2-2 carry-over + SESSION 27 Sentry RCA new findings.
+
+
+**Goal:** 修 Phase 03 chaos Inj L2-2 暴露的 5 个 observability GAP + 跑 3 个 deferred chaos Inj + 整合 SESSION 27 L1 PAUSE 3.5 天 RCA 的 4 项新发现 (Fly DNS chronic / failure_threshold 调优 / Sentry env=dev tag audit / snapshots.notes 写 fail reason)。让 L1+L2 alert chain 真正能在分钟级被发现并修复。
+**Status:** 🟢 Ready for discuss
+**Depends on:** Phase 03 (closed 2026-05-25, carry-over filed in 03-LEARNINGS)
+**Refs:**
+- `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-LEARNINGS.md` (carry-over: 5 GAPs + 3 deferred Inj)
+- `.planning/workstreams/m1-perception/phases/03-l2-orderbook-tracking-daemon/03-SOAK-LOG.md` (Inj L2-2 fail-soft chain-truth gap)
+- `.planning/JOURNAL.md` SESSION 27 (2026-05-26 L1 PAUSE RCA + Polywatch 立项)
+- memory `project_fly-dns-chronic-failure-2026-05.md` (Sentry issue 121111789, 6 天 3 次 occurrence)
+- memory `feedback_code-vs-chain-truth-2026-05.md` (fail-soft 必须 surface /health)
+- memory `feedback_container-image-aware-chaos-2026-05.md` (pkill/ps 必先验目标 image)
+- memory `feedback_fly-api-token-shadowing-2026-05.md` (.env FLY_API_TOKEN 覆盖 keychain)
+
+Scope (12 项, discuss-phase 决):
+
+**5 carry-over GAPs from Inj L2-2 (P0):**
+- GAP-1: `l2_mirror_enabled` flag 接入 `/health` + Sentry breadcrumb (fail-soft surface to chain truth)
+- GAP-2: `SqliteStore.get_l2_tob_last_mirror_at_s()` getter 实现
+- GAP-3: L2SupabaseMirror.push_* success path 持久化 `last_mirror_at_s` 到 SQLite
+- GAP-4: chaos Makefile + secrets sync — flyctl 前 drop FLY_API_TOKEN env (修 token shadowing)
+- GAP-5: re-run Inj L2-2 with Sentry API breadcrumb query (验证 GAP-1..3 真闭环)
+
+**3 deferred chaos Inj (P1):**
+- Inj L2-3b: opt-in L1 NOTIFY happy-path (POLYARB_EVENT_BUS_ENABLED=true 真启 + 低流量窗口跑)
+- Inj L2-4: cross-bug WS storm + Supabase paused (需 POLYARB_WS_TEST_KILL flag ~10 LoC)
+- Inj L2-5: Data API 429 backfill (ad-hoc 路径, 实际用时再验)
+
+**4 SESSION 27 Sentry RCA 新发现 (P0/P1):**
+- GAP-100: Fly machine 容器 DNS chronic 故障 — 6 天 3 次 EAI_NODATA 触发 SCHEDULER_PAUSED (Sentry issue 121111789). 调研 IPv6 fallback / 缓存 TTL / 是否 Fly 平台问题, 给修复方案 (P0)
+- GAP-101: `failure_threshold` 调优 — 当前 1 次 fail 就 PAUSE, DNS jitter 不该 trip; 考虑 N-of-M 阈值或 transient error 分类 (P0)
+- GAP-102: Sentry alert routing audit — `environment=dev` tag 是否让 alert routing 静音/降级? 6 天 3 次 alert 用户都没主动响应需查 alert rule (P0)
+- GAP-103: `snapshots.notes` 列写 fail reason — 让 dashboard / SQL 能直接看到 "DNS fail" 等具体原因, 不止 is_valid=false (P1)
+
+**2 process upgrades (P1):**
+- PROCESS-1: plan-checker 新规则 — "fail-soft envelope MUST surface to /health" (encode chain-truth not just code-truth) 进 .planning/threads/
+- PROCESS-2: CLAUDE.md context — "container-image-aware chaos design" (pkill 不存在的 image 教训)
+
+不在 scope:
+- Polywatch healthz-watcher MVP 进一步扩展 (走 m5-industrialize phase 01 polywatch-mvp)
+- 7-day uptime soak (单独触发, 等 P0 修完)
+- M2/M3/M4 workstream 推进 (workstream 独立)
+
+Plans:
+- (待 discuss-phase 决出 wave 分组)
+
+
 
 **Goal:** /book + /prices 频道实时增量推送，作为 L3 单市场 K 线的数据源
 **Status:** ⏸️ Pending Phase 03 (L2) 完成
