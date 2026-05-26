@@ -111,6 +111,30 @@ class Settings(BaseSettings):
     supabase_service_key: SecretStr = Field(default=SecretStr(""))
     supabase_mirror_enabled: bool = Field(default=False)  # auto-set by model_validator
 
+    # Phase 03.1 Plan 02 — l2_mirror_enabled gates /health mirror:l2_tob_age_seconds
+    # sub-check. SAME secrets as supabase_mirror_enabled (L1 + L2 share Supabase
+    # project), so the auto-detect block sets BOTH flags. Distinct field so an
+    # operator can opt out of the L2 mirror code path independently (e.g. paused
+    # L2 daemon during chaos) without disabling L1 dashboard mirroring.
+    l2_mirror_enabled: bool = Field(default=False)  # auto-set by model_validator
+
+    # Phase 03.1 Plan 02 (Plan 07 chaos hook): /health l2_tob_age sub-check
+    # thresholds are explicit Settings fields so chaos can temporarily lower
+    # them via env var to flip status within 60s instead of waiting 10 minutes
+    # for the default 600s threshold.
+    #   Pre-step before Inj L2-2 re-run (Plan 07 Task 2 option b):
+    #     fly secrets set POLYARB_L2_TOB_AGE_FAIL_S=30 POLYARB_L2_TOB_AGE_WARN_S=15 -a polyarb-l2
+    #   Post-cleanup:
+    #     fly secrets unset POLYARB_L2_TOB_AGE_FAIL_S POLYARB_L2_TOB_AGE_WARN_S -a polyarb-l2
+    l2_tob_age_warn_s: int = Field(
+        default=300,
+        description="WARN threshold for /health mirror:l2_tob_age_seconds (env POLYARB_L2_TOB_AGE_WARN_S)",
+    )
+    l2_tob_age_fail_s: int = Field(
+        default=600,
+        description="FAIL threshold for /health mirror:l2_tob_age_seconds (env POLYARB_L2_TOB_AGE_FAIL_S)",
+    )
+
     # ── Cloudflare R2 (D-03) — Plan 03 additions ─────────────────────────────
     r2_endpoint: str = Field(default="")
     r2_access_key_id: SecretStr = Field(default=SecretStr(""))
@@ -191,8 +215,11 @@ class Settings(BaseSettings):
                 "To run tests or local dev without a secret, set POLYARB_ALLOW_EMPTY_SECRET=1."
             )
         # Auto-enable Supabase mirror if both URL + service key are set
+        # Phase 03.1-02: same secrets gate l2_mirror_enabled (L2 daemon uses the
+        # same Supabase project for the L2 dashboard mirror).
         if self.supabase_url and self.supabase_service_key.get_secret_value():
             object.__setattr__(self, "supabase_mirror_enabled", True)
+            object.__setattr__(self, "l2_mirror_enabled", True)
         # Auto-enable R2 if endpoint + access key + secret key are all set
         if (
             self.r2_endpoint

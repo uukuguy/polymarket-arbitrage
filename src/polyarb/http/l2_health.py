@@ -35,9 +35,13 @@ _WS_AGE_WARN_S = 120     # 30-120s → warn; > 120s → fail
 # RECONNECTING age threshold for "too long" (Phase 02.1 D-05)
 _RECONNECTING_FAIL_S = 60
 
-# L2 mirror age thresholds (seconds) — placeholder; Plan 06 will populate real
-_MIRROR_PASS_S = 300     # < 5min → pass
-_MIRROR_WARN_S = 1800    # 5-30min → warn; > 30min → fail
+# L2 mirror age thresholds — Phase 03.1 Plan 02 (B-3 fix): thresholds NOW
+# read from Settings (settings.l2_tob_age_warn_s / l2_tob_age_fail_s) so the
+# Plan 07 chaos knob can lower them via env override to flip /health within
+# 60s instead of waiting 10 minutes. The constants below remain as compatibility
+# fallbacks ONLY if Settings somehow lacks the fields (defensive).
+_MIRROR_PASS_S_DEFAULT = 300   # default warn threshold (override via settings.l2_tob_age_warn_s)
+_MIRROR_FAIL_S_DEFAULT = 600   # default fail threshold (override via settings.l2_tob_age_fail_s)
 
 
 def _utc_now_iso() -> str:
@@ -167,31 +171,45 @@ def _build_l2_health_checks(
         overall = _severity(overall, listener_status)
 
     # ── Check 4: mirror:l2_tob_age_seconds (only when l2_mirror_enabled) ───
+    # Phase 03.1 Plan 02 (B-3): chain-truth wiring. settings.l2_mirror_enabled
+    # auto-detects from supabase secrets; thresholds come from Settings (env-
+    # overridable via POLYARB_L2_TOB_AGE_WARN_S / POLYARB_L2_TOB_AGE_FAIL_S).
+    # Mapping: age < warn → pass; warn <= age < fail → warn; age >= fail → fail;
+    # cold-start (getter returns None) → warn (do NOT fail on first boot).
     if getattr(settings, "l2_mirror_enabled", False):
+        warn_s = int(getattr(settings, "l2_tob_age_warn_s", _MIRROR_PASS_S_DEFAULT))
+        fail_s = int(getattr(settings, "l2_tob_age_fail_s", _MIRROR_FAIL_S_DEFAULT))
         try:
             getter = getattr(store, "get_l2_tob_last_mirror_at_s", None)
             last_mirror_at = getter() if callable(getter) else None
             if last_mirror_at is None:
                 mirror_status = "warn"
                 mirror_age: float | None = None
+                mirror_output: str | None = "cold-start: never mirrored"
             else:
                 mirror_age = now_s - float(last_mirror_at)
-                if mirror_age < _MIRROR_PASS_S:
-                    mirror_status = "pass"
-                elif mirror_age < _MIRROR_WARN_S:
+                if mirror_age >= fail_s:
+                    mirror_status = "fail"
+                elif mirror_age >= warn_s:
                     mirror_status = "warn"
                 else:
-                    mirror_status = "fail"
+                    mirror_status = "pass"
+                mirror_output = (
+                    f"last mirror push {mirror_age:.0f}s ago "
+                    f"(warn>={warn_s}s, fail>={fail_s}s)"
+                )
         except Exception as e:
             logger.warning(f"L2 mirror age check failed (fail-soft): {e!r}")
             mirror_status = "warn"
             mirror_age = None
+            mirror_output = f"check error: {e!r}"
         checks["mirror:l2_tob_age_seconds"] = [{
             "componentId": "supabase-l2-mirror",
             "componentType": "datastore",
             "observedValue": round(mirror_age, 1) if mirror_age is not None else None,
             "observedUnit": "s",
             "status": mirror_status,
+            "output": mirror_output,
             "time": _utc_now_iso(),
         }]
         overall = _severity(overall, mirror_status)
