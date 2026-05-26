@@ -45,8 +45,40 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 import sentry_sdk
 from loguru import logger
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+
+def _is_dns_jitter(exc: BaseException) -> bool:
+    """Match the specific DNS-failure exception shapes seen in Fly machine production.
+
+    Phase 03.1 D-01 modify A — Sentry issue 121111789 evidence (6 days, 3 occurrences):
+      - "[Errno -5] No address associated with hostname"   (EAI_NODATA)
+      - "[Errno -3] Temporary failure in name resolution"  (EAI_AGAIN)
+
+    Strictly DNS-class: refuses to retry other ConnectErrors (connection
+    refused, host unreachable) — those signal real upstream outages and the
+    existing fail-soft Issue(API_UNREACHABLE) path must remain intact
+    (chain-truth discipline; ref feedback_code-vs-chain-truth-2026-05).
+    """
+    if not isinstance(exc, httpx.ConnectError):
+        return False
+    s = str(exc)
+    return (
+        "[Errno -5]" in s
+        or "[Errno -3]" in s
+        or "EAI_AGAIN" in s
+        or "EAI_NODATA" in s
+        or "Name or service not known" in s
+        or "Temporary failure in name resolution" in s
+    )
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -246,34 +278,54 @@ async def run_snapshot(
         # dict is normalized, dedup-checked, mode-filtered, and either
         # appended to `target_markets` or dropped. Non-target markets go
         # out of scope at the next iteration → GC eligible.
+        #
+        # Phase 03.1-04 D-01 modify A: wrap the stream-START in tenacity
+        # AsyncRetrying that fires ONLY for DNS-class ConnectError (EAI_NODATA
+        # / EAI_AGAIN). first_frame_seen sentinel ensures middle-of-stream
+        # exceptions are NOT retried (a partial stream consumed N markets ≠
+        # idempotent retry boundary). Stops at 3 attempts, exponential wait
+        # 1..5s. Re-raises last exception → existing fail-soft except clause
+        # below appends API_UNREACHABLE (chain-truth preserved).
         with _phase("2/7: Stream /markets — normalize + dedupe + filter"):
+            first_frame_seen = False
             try:
-                async for raw in gamma.iter_active_markets():
-                    raw_market_count += 1
-                    normalized = normalize_market(raw, market_to_event_map)
-                    if normalized is None:
-                        continue
-                    mid = normalized.get("market_id")
-                    if mid is None:
-                        continue
-                    if mid in seen_ids:
-                        dedup_count += 1
-                        continue
-                    seen_ids.add(mid)
-                    normalized_count += 1
+                async for retry_state in AsyncRetrying(
+                    retry=retry_if_exception(
+                        lambda e: _is_dns_jitter(e) and not first_frame_seen
+                    ),
+                    stop=stop_after_attempt(3),
+                    wait=wait_exponential(multiplier=1, min=1, max=5),
+                    reraise=True,
+                ):
+                    with retry_state:
+                        async for raw in gamma.iter_active_markets():
+                            if not first_frame_seen:
+                                first_frame_seen = True
+                            raw_market_count += 1
+                            normalized = normalize_market(raw, market_to_event_map)
+                            if normalized is None:
+                                continue
+                            mid = normalized.get("market_id")
+                            if mid is None:
+                                continue
+                            if mid in seen_ids:
+                                dedup_count += 1
+                                continue
+                            seen_ids.add(mid)
+                            normalized_count += 1
 
-                    # Mode filter (replaces the old phase-3 block).
-                    if mode == "full" or (
-                        normalized.get("liquidity_usd") or 0
-                    ) > threshold:
-                        target_markets.append(normalized)
-                    # Non-target markets: dropped — no buffer, no reference held.
+                            # Mode filter (replaces the old phase-3 block).
+                            if mode == "full" or (
+                                normalized.get("liquidity_usd") or 0
+                            ) > threshold:
+                                target_markets.append(normalized)
+                            # Non-target markets: dropped — no buffer, no reference held.
 
-                    if normalized_count % PROGRESS_EVERY == 0:
-                        logger.info(
-                            f"streaming {normalized_count} markets normalized, "
-                            f"{len(target_markets)} target so far"
-                        )
+                            if normalized_count % PROGRESS_EVERY == 0:
+                                logger.info(
+                                    f"streaming {normalized_count} markets normalized, "
+                                    f"{len(target_markets)} target so far"
+                                )
             except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
                 logger.error(f"Gamma /markets stream failed: {e!r}")
                 issues.append(
