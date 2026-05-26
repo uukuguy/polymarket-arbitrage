@@ -18,6 +18,7 @@ T-03-03-06 mitigation: response body whitelists fields; never dict(settings) dum
 """
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -213,6 +214,31 @@ def _build_l2_health_checks(
             "time": _utc_now_iso(),
         }]
         overall = _severity(overall, mirror_status)
+
+    # ── Check 5: chaos:ws_test_kill_flag (Phase 03.1-06 W-5 chain-truth) ────
+    # Plan 03 codified the rule: every fail-soft / chaos primitive MUST surface
+    # to /health (feedback_code-vs-chain-truth-2026-05). POLYARB_WS_TEST_KILL=1
+    # forces the WS consumer to drop the connection on next message — it's the
+    # quintessential chaos primitive, and operators MUST be able to see it via
+    # curl /health, not just by grep'ing flyctl logs.
+    #
+    # Status is 'warn' (not 'fail'): the flag itself doesn't trip overall=fail;
+    # let downstream sub-checks (ws:connection_state going RECONNECTING,
+    # mirror:l2_tob_age_seconds going stale) drive overall fail. The chaos
+    # sub-check is purely a visibility surface — "yes, the flag is set".
+    if os.getenv("POLYARB_WS_TEST_KILL") == "1":
+        checks["chaos:ws_test_kill_flag"] = [{
+            "componentId": "ws-consumer",
+            "componentType": "system",
+            "observedValue": "1",
+            "status": "warn",
+            "output": (
+                "POLYARB_WS_TEST_KILL=1 — CHAOS MODE active; "
+                "should never appear in production"
+            ),
+            "time": _utc_now_iso(),
+        }]
+        overall = _severity(overall, "warn")
 
     return checks, overall
 

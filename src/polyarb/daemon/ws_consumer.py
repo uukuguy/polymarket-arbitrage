@@ -17,6 +17,7 @@ crash the consume loop (only the placeholder dispatches downstream).
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Any, Callable
 
@@ -24,6 +25,47 @@ from loguru import logger
 
 from polyarb.clients.ws_market_client import stream_market_events
 from polyarb.daemon.ws_watchdog import WsWatchdog
+
+
+# ── Phase 03.1-06 D-04: POLYARB_WS_TEST_KILL chaos primitive ─────────────────
+#
+# Used by `make chaos-l2-inj4` to drop the WS connection mid-stream WITHOUT
+# OS-level pkill (which doesn't exist in python:3.12-slim base — Phase 03 L2-1
+# lesson, see feedback_container-image-aware-chaos-2026-05).
+#
+# Opt-in is the literal string "1" only. Any other value (including "0",
+# "true", "yes", empty) is ignored — guards against accidental prod toggle
+# from boolean-like misconfigured secret values.
+#
+# PROD SAFETY CONTRACT (CI-enforced by
+# tests/m1-perception/test_ws_test_kill_flag.py::test_prod_fly_toml_never_sets_test_kill_flag):
+#   - fly.toml MUST NOT contain POLYARB_WS_TEST_KILL
+#   - fly-l2.toml MUST NOT contain POLYARB_WS_TEST_KILL
+#
+# The flag also surfaces to /health as chaos:ws_test_kill_flag sub-check
+# (l2_health.py) per chain-truth own-dog-food (feedback_code-vs-chain-truth-2026-05).
+
+
+class WsTestKillRequested(Exception):
+    """Raised when POLYARB_WS_TEST_KILL=1 forces a synthetic WS close.
+
+    Chaos-only. Caught by the consumer loop and re-raised so the watchdog's
+    reconnect path runs as if the WS had naturally dropped. NEVER set this
+    flag in production — Phase 03.1-03 chaos-toolkit + CLAUDE.md document
+    the prod safety contract.
+    """
+
+
+def _check_ws_test_kill() -> None:
+    """Check the chaos-only kill flag — raise WsTestKillRequested when '1'.
+
+    Strictly opt-in: only the literal string "1" triggers. Any other value
+    is ignored. Returns None when not set (the no-op fast path).
+    """
+    if os.getenv("POLYARB_WS_TEST_KILL") == "1":
+        raise WsTestKillRequested(
+            "POLYARB_WS_TEST_KILL=1 — synthetic WS close (Phase 03.1-06 D-04)"
+        )
 
 
 class WsConsumer:
@@ -101,6 +143,12 @@ class WsConsumer:
             ):
                 if stop_event.is_set():
                     break
+                # Phase 03.1-06 D-04: chaos kill check BEFORE business logic.
+                # When POLYARB_WS_TEST_KILL=1, raise to trigger watchdog reconnect.
+                # Lets it propagate out of the async for — stream_market_events'
+                # context manager will close the WS, then run() returns and the
+                # outer task supervisor (l2_main) restarts the consumer.
+                _check_ws_test_kill()
                 self._frame_count += 1
                 self._last_event_at_s = time.time()
                 self._watchdog.touch()
@@ -109,6 +157,17 @@ class WsConsumer:
                     self._on_event(event)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"ws_consumer: on_event raised: {e!r}")
+        except WsTestKillRequested as e:
+            # Phase 03.1-06 D-04: synthetic close via chaos flag. Log loudly
+            # so chaos runs are visible in flyctl logs grep.
+            logger.warning(
+                f"ws_consumer: {e} — closing WS for chaos test (this MUST NOT appear in production)"
+            )
+            self._state = "DISCONNECTED"
+            # Do NOT re-raise: returning lets the supervisor (l2_main) decide
+            # whether to relaunch the consumer. Watchdog will mark RECONNECTING
+            # via its stale_s timeout if no fresh touch arrives.
+            return
         except asyncio.CancelledError:
             # F-04: must propagate.
             logger.info("ws_consumer: cancelled, propagating CancelledError")

@@ -41,6 +41,7 @@ process boundary.
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 import time
@@ -212,6 +213,16 @@ async def main() -> int:
     sentry_sdk.set_tag("service", "polyarb-l2")
 
     logger.info("polyarb-l2 daemon starting up")
+
+    # Phase 03.1-06 D-04: loud warning if chaos kill flag is set at startup.
+    # Makes accidental prod-set immediately visible in flyctl logs. Paired with
+    # the chaos:ws_test_kill_flag sub-check in /health (l2_health.py) for
+    # chain-truth own-dog-food per feedback_code-vs-chain-truth-2026-05.
+    if os.getenv("POLYARB_WS_TEST_KILL") == "1":
+        logger.warning(
+            "⚠ POLYARB_WS_TEST_KILL=1 detected — CHAOS MODE; WS will drop on "
+            "next message. This MUST NOT appear in production."
+        )
 
     # 4. SQLite (separate DB path from L1 — settings.db_path = /data/l2-state.db on Fly)
     sqlite_store = SQLiteStore(settings.db_path)
