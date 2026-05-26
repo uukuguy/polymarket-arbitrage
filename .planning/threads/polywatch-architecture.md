@@ -52,43 +52,54 @@
 | memory-sanity-check | Ralph Loop (单次会话执行) | grep MEMORY.md 所有 VERIFIED 条目里的 file:line 引用,验证对应代码仍存在;失效条目 propose patch (不自动 commit) | 只读, propose 不 commit |
 | autoresearch-validation-tuning | AutoResearch (本地脚本) | L4 validation rule 阈值校准: 跑 N 天历史 snapshot,搜索 L4 tolerance 最佳值。verdict=signal:noise ratio | 只读历史 snapshot, results.tsv append-only |
 
-## 关键架构决策 (待 phase discuss 阶段确认)
+## 关键架构决策 — ✅ LOCKED @ SESSION 28 (2026-05-26, m5 phase 01 discuss)
 
-### D-Polywatch-1: trial 状态承载位置
+> 4 决策全部锁定。canonical 出处: `.planning/workstreams/m5-industrialize/phases/01-polywatch-mvp/01-CONTEXT.md`。
+> 本 thread 仅保留**结论 + why short**, 完整 rationale 看 CONTEXT.md。
 
-候选:
-- A) `.planning/polywatch/trials.tsv` (随项目 git 走)
-- B) `~/.polywatch/trials/` (跨项目共享)
-- C) Supabase 表 (有 dashboard 加成)
+### D-Polywatch-1: trial 状态承载位置 — ✅ LOCKED = A++
 
-**当前倾向**: A,先随项目走,跨项目化等基建经过本项目实战再说。
+**决策**: `.planning/polywatch/trials/{trial_name}.jsonl` append-only (每行一个 trial result)。
 
-### D-Polywatch-2: cron 触发位置
+- Schema: `{trial_name, iteration, timestamp, verdict, metrics, notes, ref_commit}`
+- **Why A over B/C**: B (`~/.polywatch/`) 在 GHA runner 完全丢失; C (Supabase) 工程量大且 GHA 网络依赖。 A 起步快、可 diff、跨机器一致
+- **Why jsonl over tsv**: schema 演化、嵌套 metrics 友好
 
-候选:
-- A) GitHub Actions (现有 keepalive 已用,免费 cron)
-- B) Fly machine cron (现有 polyarb-l1 已有 cron machine)
-- C) 本地 macOS launchd (开发机不开就不跑)
+### D-Polywatch-2: cron 触发位置 — ✅ LOCKED = 混合策略
 
-**当前倾向**: 混合 — healthz-watcher 用 A (云端持续),chaos-inj-replay 用 B (Fly 内部更省网络),memory-sanity 用 ralph 走会话内,不需 cron。
+各 trial 独立选 cron 位置:
 
-### D-Polywatch-3: 是否封装成 global skill
+| Trial | Cron 位置 | 备注 |
+|---|---|---|
+| healthz-watcher | GHA (`*/15` schedule) | 已 ship `.github/workflows/polywatch-healthz.yml`, 不动 |
+| chaos-inj-replay | Fly machine cron (polyarb-l1 内部) | UTC 18:00 nightly, 零网络 overhead |
+| memory-sanity-check | 无 cron (ralph 会话内手动) | memory 改动后 / 月度审查 |
+| autoresearch-validation-tuning | 无 cron (本地脚本) | 需 SQLite/Parquet 本地访问 |
 
-候选:
-- A) 先做项目内 phase,跑通后再抽 `~/.claude/skills/polywatch/`
-- B) 直接 global skill 起步
+**Why**: 单一 cron 在某些 trial 上是 anti-pattern (chaos 跑 GHA 要拉 Fly state 多绕; autoresearch 跑 Fly 要传历史数据)。
 
-**当前倾向**: A — 基建先经实战再封装。CLAUDE.md "不要预先抽象" 原则。
+### D-Polywatch-3: global skill 抽取时机 — ✅ LOCKED = B (本 phase 同步抽) ⚠️ user override
 
-### D-Polywatch-4: trial 失败的 escalation 级别
+**决策**: 本 phase 同步抽 `~/.claude/skills/polywatch/` (改 B,反 thread 原默认 + 反 Claude 推荐)。
 
-candidate trial 失败时:
-- 静默 retry → log only → trial.tsv 标 fail
-- Sentry breadcrumb → 已有 alert chain
-- Telegram 推送 → 仅"红线触发"时 (max iter 用尽 / 副作用越界)
-- GitHub issue → 仅"基建本身坏了"时 (cron 没启动 / harness 崩溃)
+- **Why user override**: 边做边定 skill 接口能让 trial 实现自始至终保持 skill 友好结构, 反正都要抽,避免日后重构
+- **Risk acknowledged** (写入 CONTEXT): 违反 CLAUDE.md "不要预先抽象" 一次
+- **缓解**: skill 起步是**薄壳** (SKILL.md + `trial_runner.py` + `escalation.py` + 3 个 trial template), 不强求完美;经 4 trial 实战后, m5 phase 04 再"实战回炉"
+- **Skill 范围**: SKILL.md 描述 4 trial 模式 + 决策树 + 红线 + 通用 jsonl ledger 写入器 + 4 级 escalation 实现
 
-**当前倾向**: 分级,默认 trial 失败只落 trials.tsv,不污染 Sentry。
+### D-Polywatch-4: trial 失败 escalation — ✅ LOCKED = 4 级 (streak=3 + L3 auto GH issue)
+
+| Level | 触发 | 落到哪 |
+|---|---|---|
+| L0 silent | 单次 fail | `.planning/polywatch/trials/{trial}.jsonl` 标 `verdict=fail`, 不告警 |
+| L1 breadcrumb | streak 3 连续 fail | Sentry breadcrumb (复用现有 SDK) |
+| L2 Telegram | 红线触发 (max iter 用尽 / 副作用越界 / prod alert chain 自身坏) | Telegram push |
+| L3 GH issue | 基建本身坏 (cron 没启动 ≥2 周期 / harness 启动崩) | `gh issue create` 自动 |
+
+- **Why streak=3 (非 5)**: 配合 healthz-watcher 15min × 3 = ~45min, 人响应窗口合理
+- **Why L3 自动**: issue 可关, 自动开比"无人察觉基建坏掉"危险小很多
+
+### 4 trial 子决策 (Trial 1-4) 全部在 CONTEXT.md, 不复述
 
 ## 红线 (与 [[architecture_polywatch-decision-framework]] 一致,本 thread 复述强化)
 
@@ -117,4 +128,5 @@ candidate trial 失败时:
 
 ## 更新日志
 
-- 2026-05-26 thread 起,SESSION 27 命名 + 框架 + 第一批 trial 设计
+- 2026-05-26 SESSION 27 thread 起 — 命名 + 三件套框架 + 第一批 trial 设计 + D-1..D-4 候选
+- 2026-05-26 SESSION 28 — D-Polywatch-1..4 全 LOCKED (m5 phase 01 discuss-phase 输出), D-3 user override 反 Claude 推荐 + 反 thread 默认 (本 phase 同步抽 global skill). Canonical 决策出处转移到 `.planning/workstreams/m5-industrialize/phases/01-polywatch-mvp/01-CONTEXT.md`
