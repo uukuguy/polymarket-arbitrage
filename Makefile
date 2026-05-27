@@ -898,3 +898,23 @@ chaos-l2-inj5-dryrun:
 	@uv run pytest tests/chaos/test_data_api_429_fixture.py -xvs
 .PHONY: chaos-l2-inj5-dryrun
 
+# ============================================================================
+# Phase 03.1-05 (GAP-102) — Sentry alert routing audit
+# ============================================================================
+
+## sentry-alert-audit: Re-emit Sentry alert rule baseline as JSON-lines
+##
+## Hard artifact: `.planning/workstreams/m1-perception/phases/03.1-l2-observability-gaps-fix-up/sentry-audit-report.md`
+## This target re-prints the audit baseline (rule IDs / actions / env filters)
+## as JSON-lines so a future operator can re-run the playwright-cli navigation
+## sequence and diff against baseline to detect rule drift.
+##
+## Typical workflow:
+##   1. `make sentry-alert-audit > /tmp/sentry-audit.jsonl`
+##   2. Re-run playwright-cli on the URLs listed under `"type": "steps"`
+##   3. Compare live data to BASELINE_RULES in scripts/sentry_alert_audit.py
+##   4. Update sentry-audit-report.md + BASELINE_RULES on confirmed drift.
+sentry-alert-audit:
+	@uv run python scripts/sentry_alert_audit.py
+.PHONY: sentry-alert-audit
+
