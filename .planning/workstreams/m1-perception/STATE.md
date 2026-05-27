@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03.1
-status: complete
-stopped_at: Phase 03.1 closed — Plan 07 SOAK + VALIDATION landed, goal MET (chain-truth alive end-to-end in prod, Inj L2-2/3b/4 all PASS)
-last_updated: "2026-05-27T04:35:00Z"
+current_phase: 03.1 → next 04 (TBD)
+status: Phase 03.1 closed
+stopped_at: Phase 01 polywatch-mvp context gathered (4 D-Polywatch decisions + 4 trial sub-decisions)
+last_updated: "2026-05-27T08:41:35.081Z"
 last_activity: 2026-05-27
 progress:
   total_phases: 6
