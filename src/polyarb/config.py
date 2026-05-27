@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -147,6 +147,24 @@ class Settings(BaseSettings):
     sentry_dsn: str = Field(
         default="",
         description="Sentry DSN (D-15); empty = skip init_sentry for dev",
+    )
+    # Phase 03.1-05 GAP-102 — explicit Sentry environment tag (was derived from
+    # `release_id != "dev"` which silently failed to flip prod deploys to
+    # `environment=production`. See sentry-audit-report.md.) Override via
+    # POLYARB_SENTRY_ENV. Canonical values: dev / staging / production.
+    #
+    # `validation_alias="POLYARB_SENTRY_ENV"` is required because the env_prefix
+    # convention would otherwise expect `POLYARB_SENTRY_ENVIRONMENT` (field
+    # name `sentry_environment` minus `POLYARB_` prefix). We deliberately use
+    # the shorter `POLYARB_SENTRY_ENV` to match Sentry's own ergonomics.
+    sentry_environment: str = Field(
+        default="dev",
+        validation_alias=AliasChoices("sentry_environment", "POLYARB_SENTRY_ENV"),
+        description=(
+            "Sentry environment tag (dev/staging/production). Override via "
+            "POLYARB_SENTRY_ENV. Replaces the buggy `release_id != 'dev'` "
+            "derivation (Phase 03.1-05 GAP-102)."
+        ),
     )
     # Axiom ingest token + dataset — only used by Fly stdout forwarder (no
     # direct daemon code path); included here so a typo in env var raises

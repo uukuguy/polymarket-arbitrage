@@ -89,19 +89,36 @@ def init_sentry(settings: Settings) -> None:
     No-op (with a warning log) when settings.sentry_dsn is empty. Production
     deploys must set POLYARB_SENTRY_DSN; local dev can leave it blank.
 
-    Environment is auto-detected from app hostname: ``fly.dev`` → ``prod``,
-    anything else → ``dev``. This keeps Sentry's environment filter useful
-    without an extra env var to manage.
+    Environment is taken verbatim from ``settings.sentry_environment`` (env
+    var POLYARB_SENTRY_ENV). Canonical values are dev / staging / production
+    — anything else logs a typo-guard warning but is still passed through so
+    custom environments (e.g. ``perf-test``) remain valid.
+
+    Phase 03.1-05 GAP-102 — see sentry-audit-report.md. Historical derivation
+    ``"prod" if settings.release_id != "dev" else "dev"`` silently failed to
+    flip production deploys to ``environment=production`` (issue 121111789
+    tagged ``environment=dev`` 100%), and used the non-canonical 3-char
+    ``"prod"`` instead of Sentry's conventional ``"production"`` filter value.
     """
     if not settings.sentry_dsn:
         logger.warning("sentry skipped — POLYARB_SENTRY_DSN not set")
         return
 
-    # Auto-detect environment from any hostname-ish setting; default to dev
-    # so a misconfigured prod doesn't pollute Sentry "dev" issues. We do NOT
-    # currently track app_hostname in Settings — release_id is the closest
-    # proxy ("v0.2.0-abc123" implies a real deploy).
-    environment = "prod" if settings.release_id != "dev" else "dev"
+    # Phase 03.1-05 GAP-102: explicit env field (per D-03). Previous derivation
+    # `release_id != "dev"` silently failed to flip production deploys to
+    # environment=production — Sentry alert routing rules that filter by env
+    # then could not match production issues. See sentry-audit-report.md.
+    environment = settings.sentry_environment
+
+    # W-6 typo guard — prevents silent "produciton" / "prouction" misconfigs from
+    # routing alerts into a never-matched bucket. 1 LoC, no behavior change for
+    # the canonical set, loud warning for anything else.
+    if environment not in ("dev", "staging", "production"):
+        logger.warning(
+            f"sentry_environment={environment!r} not in canonical set "
+            f"(dev/staging/production) — alert routing rules with environment "
+            f"filters may not match this value. Check Sentry dashboard."
+        )
 
     sentry_sdk.init(
         dsn=settings.sentry_dsn,
@@ -119,4 +136,7 @@ def init_sentry(settings: Settings) -> None:
         ],
         before_send=_before_send,
     )
-    logger.info(f"sentry initialized — release={settings.release_id} env={environment}")
+    logger.info(
+        f"sentry initialized — release={settings.release_id} env={environment} "
+        f"[explicit POLYARB_SENTRY_ENV]"
+    )
