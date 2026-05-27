@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03.1 → next 04 (TBD)
+current_phase: 03.1 closed → **Phase 04 ready to discuss** (Candidate Set 扩容 + L2 Throughput + 投影 Gap 收尾)
 status: Phase 03.1 closed
-stopped_at: Phase 01 polywatch-mvp context gathered (4 D-Polywatch decisions + 4 trial sub-decisions)
-last_updated: "2026-05-27T08:41:35.081Z"
-last_activity: 2026-05-27
+stopped_at: Phase 04 context gathered (8 decisions D-01..D-08)
+last_updated: "2026-05-27T23:57:47.483Z"
+last_activity: 2026-05-28
 progress:
-  total_phases: 6
+  total_phases: 8
   completed_phases: 6
   total_plans: 39
   completed_plans: 39
@@ -242,7 +242,7 @@ Phase 02 只剩 Plan 02-07 (Wave 5 = chaos + 7-day soak)，是 Phase 02 完结�
 
 ## Session Continuity
 
-**Stopped At:** Phase 01 polywatch-mvp context gathered (4 D-Polywatch decisions + 4 trial sub-decisions)
+**Stopped At:** Phase 04 context gathered (8 decisions D-01..D-08)
 **Next Resume:** 见上方 "下次会话该做的（2026-05-19 SESSION 20 EOD 更新）" 段
 **Authoritative state:** [Phase 02 Wave 4 完成 memory](memory/project_phase-02-wave-4-2026-05.md)
 
