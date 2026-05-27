@@ -206,10 +206,34 @@ Plans (revised 2026-05-26 SESSION 28 post-checker — 5 waves, Wave 1 & Wave 3 p
 
 
 
+### Phase 04: Candidate Set 扩容 + L2 Throughput 验证 + 投影 Gap 收尾
+
+> ADDED 2026-05-28 (SESSION 30) — Phase 03.1 chaos 多处"低负载只验逻辑不验 throughput"的明确欠账 + Phase 02/03 投影 gap + GAP-200。
+
+**Goal:** 把 polyarb-l2 candidate set 从 3 个 bootstrap asset_ids 扩到真实规模（compute_candidates 改读 Supabase `markets_latest` 而非本地 SQLite，解决跨容器读不到的限制），在真实负载下验证 WS storm / watchdog throughput（补 Phase 03.1 Inj L2-4 只验逻辑的欠账），并收尾两个投影 gap（`markets_latest.yes_token_id` 补列 + GAP-200 config-disable 也 surface 成 chain-truth）。
+**Status:** 🔵 Ready to discuss
+**Depends on:** Phase 03.1 (closed 2026-05-27) + Supabase `markets_latest` schema（Phase 02 mirror 投影）
+**Plans:** 0 plans (run /gsd-discuss-phase 04 then /gsd-plan-phase 04)
+
+Scope (候选, discuss-phase 决):
+- **candidate set 扩容**: compute_candidates 改 Supabase `markets_latest` 查询（当前需 L1 SQLite 本地访问，跨容器读不到 — memory CURRENT-CALL）
+- **markets_latest.yes_token_id 补列**: Phase 02 mirror 投影 gap（markets_latest 缺 yes_token_id 列）
+- **L2 throughput 验证**: 真实 candidate scale 下重跑 WS storm / watchdog（Phase 03.1 Inj L2-4 只在 3-asset 低负载验了逻辑，没验 throughput）
+- **GAP-200**: config-disable mirror 也 surface 成 chain-truth（service_key empty 时 /health 仍注册 mirror sub-check status=fail）
+
+Plans:
+- [ ] TBD (run /gsd-discuss-phase 04 → /gsd-plan-phase 04 to break down)
+
+### Phase 05: WS /book + /prices 增量推送
+
 **Goal:** /book + /prices 频道实时增量推送，作为 L3 单市场 K 线的数据源
-**Status:** ⏸️ Pending Phase 03 (L2) 完成
+**Status:** ⏸️ Pending Phase 04 + thread §2.2 调研
 **Depends on:** Phase 03 (L2 中间层 ready) + thread §2.2 (Polymarket WS 真实能力调研)
-**Note:** 原 Phase 2 (SESSION 12 时代锁)。Phase 01.1 架构纠偏后推迟到 L3 上下文。Phase 03 L2 锁定后此 phase 重命名为 Phase 04。
+**Note:** 原 Phase 2 (SESSION 12 时代锁)。Phase 01.1 架构纠偏后推迟到 L3 上下文。2026-05-28 SESSION 30 正式补回标题并编号 Phase 05（此前为丢失标题的悬空 metadata），排在 candidate 扩容 Phase 04 之后。
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (待 Phase 04 完成 + thread §2.2 WS 能力调研)
 
 ---
 

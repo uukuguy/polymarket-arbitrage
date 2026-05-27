@@ -22,9 +22,14 @@ progress:
 Phase: 03.1 (l2-observability-gaps-fix-up) — ✅ **COMPLETE** (closed 2026-05-27 autopilot)
 Plan: 7 of 7 (all SUMMARYs + 03.1-VALIDATION.md nyquist_compliant=true)
 **Status:** Phase 03.1 closed
-**Current Phase:** 03.1 → next 04 (TBD)
-**Last Activity:** 2026-05-27
-**Last Activity Description:** Plan 03.1-07 complete — 3 chaos Inj all PASS in prod (L2-2 chain-truth CONFIRMED, L2-3b NOTIFY chain proven, L2-4 daemon survived double-fault); Phase goal MET; recommend `/gsd-extract-learnings 03.1 --ws m1-perception` next session
+**Current Phase:** 03.1 closed → **Phase 04 ready to discuss** (Candidate Set 扩容 + L2 Throughput + 投影 Gap 收尾)
+**Last Activity:** 2026-05-28
+**Last Activity Description:** Phase 03.1 LEARNINGS extracted (13D/12L/10P/8S) + 对手测试 3/3 PASS → Phase 03.1 fully closed. Phase 04 added to ROADMAP (candidate set 扩容 + L2 throughput 验证 + 投影 gap 收尾); orphaned WS metadata 收编为 Phase 05. Next: `/gsd-discuss-phase 04 --ws m1-perception`.
+
+### Roadmap Evolution
+
+- **2026-05-28 (SESSION 30)**: Phase 04 added — "Candidate Set 扩容 + L2 Throughput 验证 + 投影 Gap 收尾" (compute_candidates 改 Supabase markets_latest 查询 + markets_latest.yes_token_id 补列 + L2 throughput 真实负载验证 + GAP-200 config-disable chain-truth surface). 来源: Phase 03.1 chaos "只验逻辑不验 throughput" 欠账 + Phase 02/03 投影 gap。
+- **2026-05-28 (SESSION 30)**: Phase 05 收编 — 丢失标题的悬空 WS /book+/prices 增量推送 metadata 正式补回标题并编号 Phase 05，排在 candidate 扩容 Phase 04 之后。
 
 ### Phase 03 — ✅ COMPLETE (closed 2026-05-25)
 
