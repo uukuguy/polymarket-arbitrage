@@ -2603,7 +2603,83 @@ m5 phase 01 可以跟 03.1 execute 并行(不同 workstream, 不同代码区域)
 
 ---
 
-## SESSION 30 — 2026-05-27 autopilot — Phase 03.1 CLOSED (Plan 07 chaos triple-PASS)
+## SESSION 29 — 2026-05-26→27 — Phase 03.1 全 7 plan execute autopilot + Gmail-Sentry routing 翻案
+
+**Goal**: 一次 session 跑完 Phase 03.1 全 7 plans (m1-perception observability gaps fix-up)。SESSION 28 已 plan 完 (7 plans / 5 waves, plan-checker iter 2 PASSED); 本会话直接 execute autopilot。
+
+### Outcome — Phase 03.1 ✅ CLOSED, goal MET, zero drift
+
+22 commits ship 到 main 本会话 (5/26 warm-up 1 commit + 5/27 execute 21 commits)。
+
+### Warm-up (5/26 ~09:00Z)
+- Thread `polywatch-architecture.md` D-Polywatch-1..4 标 LOCKED, canonical 指向 m5 phase 01 CONTEXT (commit 42578d5)
+- 健康检查全绿 (L1 healthz pass, Polywatch cron 5/5 success, Supabase keepalive 7-day clock 在重置)
+
+### 7-plan execute by wave (5/27)
+
+| Wave | Plans | 模式 | 实际结果 |
+|---|---|---|---|
+| 1 | 01 + 03 | 并行 worktree | ✅ 9 commits 合并 (Plan 03 cherry-pick) |
+| 2 | 02 | 单 worktree | ⚠️ **第一次跑 dueling-impl 灾难**: worktree 从 42578d5 起,没看到 Plan 01 merge,自创 `l2_tob_mirror_anchor` 表 + 删了 Plan 01 `_refresh_freshness_cache` 方法。**抛弃**重跑 → 第二次清洁完成 6 commits |
+| 3 | 04 + 06 | 串行 (Makefile 冲突防) | ⚠️ Plan 04 出现**双 agent 重复**: 我以为第一次被 interrupt 实际它跑完了, 第二次 launch (`ad1bbb`) 重做。第一个版本 `a371e5` 用 tenacity AsyncRetrying 已 ship 到 main,第二个版本胜被弃。Plan 06 cherry-pick 解 Makefile 冲突, +deferred-items 冲突解, 5 commits |
+| 4 | 05 user-checkpoint | autopilot (user 授权) | ✅ Sentry audit via playwright-cli + env=production migration + Fly secrets applied + 6/6 tests GREEN |
+| 5 | 07 user-checkpoint | autopilot (user 授权) | ✅ 3 chaos Inj triple-PASS, VALIDATION ledger 落地 |
+
+### ⭐ 中央成果 — Phase 03 chain-truth 教训被实证 discharge
+
+Inj L2-2 re-run 04:33Z 完整证据链:
+```
+code 401 (Supabase service_key revoked)
+  → L2SupabaseMirror.push_top_of_book ERROR
+  → last_mirror_at_s 不前进
+  → /health _check_l2_tob_age 算出 age=1729s > FAIL 阈值
+  → mirror:l2_tob_age_seconds status="fail"
+  → /health overall=fail → HTTP 503
+  → Sentry capture PYTHON-H
+  → Gmail email 11:33 AM 北京 (uukuguy@gmail.com)
+```
+
+每一环都有时间戳证据,**3.5 天没人发现 PAUSE 的事故再也不会发生**。
+
+### ⭐⭐ SESSION 27 Sentry 静音真相被翻案两次
+
+1. SESSION 27 初判: `environment=dev` tag 静音 alert routing → 写进 thread
+2. Plan 05 audit 改判: REFUTED rule-level filter (rule env=All), 真因是 **0/2 alert rules wire 任何 external integration** (Telegram 没装,只发 Sentry 内部 email)
+3. **Gmail playwright 验证最终翻案**: Sentry email **真的发了** (PYTHON-H @ 11:33 AM 实证)。**真凶是 Sentry issue grouping** — 3 个 SCHEDULER_PAUSED 事件 (5/19, 5/22×2) 折叠成同一 issue 121111789, **只首次 trigger "new issue" email**, 第 2/3 次完全沉默。叠加 0 Telegram → "1 email + 0 follow-ups + 0 Telegram = 3.5 days unnoticed"
+
+→ 这是 audit-driven 调试 vs 假设-driven 调试的活教材, 进 LEARNINGS
+
+### 工程纪律新教训 (本会话付出 ~2h 代价)
+
+**并行 worktree 必须 rebase main 才能跑**:
+- Plan 02 worktree 从 42578d5 branch, Plan 01 已 ship 到 main, agent 没看到 → 自创竞争实现
+- Plan 04 双 agent 重复 (a371e5 跑完没等到 notify, 我又 launch ad1bbb)
+- Plan 06 worktree 同样 stale, cherry-pick 解 Makefile + deferred-items 冲突
+- Plan 07 worktree 同样 stale, agent 自己 rebase 了
+
+→ 凡是 `--isolation worktree` launch agent, prompt 必须显式写 `git rebase main FIRST, verify with git log main..HEAD --oneline IS EMPTY`
+
+### Plan 07 deferred (3 个新 GAP 进 backlog)
+
+- **GAP-200**: mirror-disabled-by-config silent (config-disable 应也 surface 为 chain-truth signal) — Phase 04+
+- **GAP-201**: Fly secret cleanup quoting trap (chaos-l2-* cleanup 用 `set -a; . ./.env; set +a` 替代 grep+sed) — m1 backlog
+- **GAP-202**: L1 /scan endpoint 500 on NaN — m1 backlog
+
+### Next session
+
+```bash
+/gsd-resume-work --ws m1-perception
+/gsd-extract_learnings 03.1 --ws m1-perception     # ⭐ 主推: capture 13 D-decisions + chain-truth empirical lessons + Sentry/Gmail routing 翻案
+make planning-status                                # 应继续 zero drift
+```
+
+之后可选: m2-combinatorial T2 validation tests / m5 phase 01 polywatch-mvp plan / m1 Phase 04 (拓 candidate set 超 3 个 bootstrap)。
+
+[NEXT] Extract Phase 03.1 LEARNINGS (含 SESSION 29 三个翻案 + 并行 worktree 教训), 然后用户选下一步方向。
+
+---
+
+## SESSION 29 Plan 07 子段 — autopilot chaos triple-PASS (agent 视角原始记录)
 
 **Goal**: execute Plan 03.1-07 autopilot to close Phase 03.1 — Inj L2-2 (GAP-5 chain-truth) + Inj L2-3b (opt-in NOTIFY) + Inj L2-4 (WS storm + Supabase double-fault), then VALIDATION.
 
