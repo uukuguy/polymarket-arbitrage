@@ -64,3 +64,16 @@ D-DEFER-1 (uv sync dev extras gap). Out of scope here.
 - **Fix (small, m1-perception backlog)**: chaos cleanup targets should ALWAYS use
   `set -a; . ./.env; set +a; ... -a polyarb-l2` form (shell-native parsing) instead of grep+sed
   extraction. Audit all chaos-l2-* cleanup blocks in Makefile.
+
+## GAP-202 (Plan 07, 2026-05-27) — /scan endpoint 500 on NaN values
+
+- **Discovered during**: Inj L2-3b (Plan 07 Task 3) attempt to manually fire snapshot via /scan
+- **Issue**: `curl -X POST -d '{"recipe_name":"near-end"}' /scan` returns 500 with traceback:
+  `ValueError: Out of range float values are not JSON compliant: nan` in `JSONResponse` render.
+- **Root cause (probable)**: scan response includes per-market computed values (e.g. spread, mid_price)
+  that can be NaN when bid/ask are equal-but-NaN. Starlette's default JSON encoder doesn't handle
+  NaN per RFC 8259 strict mode.
+- **Fix (small, m1-perception backlog)**: in src/polyarb/http/scan.py:83, replace `JSONResponse(...)`
+  with a custom encoder that maps NaN/Inf → null OR sanitizes input dict before render.
+- **Workaround**: natural scheduler tick still fires snapshots correctly; only manual /scan trigger
+  affected. This blocked nothing in Plan 07.
