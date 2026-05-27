@@ -24,7 +24,7 @@ Plan: 7 of 7 (all SUMMARYs + 03.1-VALIDATION.md nyquist_compliant=true)
 **Status:** Phase 03.1 closed
 **Current Phase:** 03.1 → next 04 (TBD)
 **Last Activity:** 2026-05-27
-**Last Activity Description:** Plan 03.1-07 complete — 3 chaos Inj all PASS in prod (L2-2 chain-truth CONFIRMED, L2-3b NOTIFY chain proven, L2-4 daemon survived double-fault); Phase goal MET; recommend `/gsd-extract_learnings 03.1 --ws m1-perception` next session
+**Last Activity Description:** Plan 03.1-07 complete — 3 chaos Inj all PASS in prod (L2-2 chain-truth CONFIRMED, L2-3b NOTIFY chain proven, L2-4 daemon survived double-fault); Phase goal MET; recommend `/gsd-extract-learnings 03.1 --ws m1-perception` next session
 
 ### Phase 03 — ✅ COMPLETE (closed 2026-05-25)
 
@@ -43,7 +43,7 @@ Plan: 7 of 7 (all SUMMARYs + 03.1-VALIDATION.md nyquist_compliant=true)
 
 ### Phase 03 — ✅ COMPLETE (closed 2026-05-25)
 
-**Next step**: `/gsd-extract_learnings 03 --ws m1-perception`
+**Next step**: `/gsd-extract-learnings 03 --ws m1-perception`
 
 **8/8 plans** complete (waves 1→7 all shipped):
 
@@ -74,7 +74,7 @@ Plan: 7 of 7 (all SUMMARYs + 03.1-VALIDATION.md nyquist_compliant=true)
 
 **Phases Complete:** 2 (Phase 01 + Phase 01.1) + Phase 02 hard gate passed (awaiting LEARNINGS)
 **Phase 01.1 status:** ✅ COMPLETE — LEARNINGS extracted 2026-05-12 (14 decisions / 12 lessons / 10 patterns / 8 surprises); deployment thread locked; 6 plans + 4 acceptance amendments shipped
-**Phase 02 status:** ✅ HARD GATE PASSED — Wave 1+2+2.5+3+3.5+4+5 全 ✅;5 个 prod chaos injection 完成;alert chain end-to-end verified live in prod (Sentry + Telegram + Sentry dashboard 三路). 待 `/gsd-extract_learnings 02 --ws m1-perception`
+**Phase 02 status:** ✅ HARD GATE PASSED — Wave 1+2+2.5+3+3.5+4+5 全 ✅;5 个 prod chaos injection 完成;alert chain end-to-end verified live in prod (Sentry + Telegram + Sentry dashboard 三路). 待 `/gsd-extract-learnings 02 --ws m1-perception`
 **Phase 02.1 status:** ✅ **COMPLETE** (2026-05-22) — 3 bug 修完, prod ops 闭环
 
   - ✅ #7 BUG: fail-soft 撤 secret → audit log + Sentry breadcrumb (Plan 02.1-01, 5 commits, Inj 3-v2 partial PASS 3/4 truths; truth 2 breadcrumb UI 验证 design-unreachable, 修法 A 推 Phase 02.2)
@@ -104,7 +104,7 @@ Plan: 7 of 7 (all SUMMARYs + 03.1-VALIDATION.md nyquist_compliant=true)
 
 - ✅ **架构 thread**: `.planning/threads/market-observation-architecture.md` — Phase 01.1 SESSION 15 实证完整（§0.3 #10 + §2.7 subset/full 决策 + §2.1.a #4 2h 漂移）
 - ✅ **部署 thread**: `.planning/threads/deployment-architecture.md` — drafting → **locked** 2026-05-11，用户 §7 四锚点决策（PaaS 混合 / CN 不约束 / DB 合并 / KMS 延 M3）
-- ✅ `/gsd-extract_learnings 01.1` — `01.1-LEARNINGS.md` 落库（14D / 12L / 10P / 8S，327 行）
+- ✅ `/gsd-extract-learnings 01.1` — `01.1-LEARNINGS.md` 落库（14D / 12L / 10P / 8S，327 行）
 - ✅ `/gsd-discuss-phase 02 --ws m1-perception` — `02-CONTEXT.md` (22 决策 + 7 the agent discretion) + `02-DISCUSSION-LOG.md`
 - ✅ `/gsd-plan-phase 02 --ws m1-perception` — `02-RESEARCH.md` (1914 行) + `02-PATTERNS.md` (36 files) + `02-VALIDATION.md` (22+ Wave 0 tests) + 7 `02-{NN}-PLAN.md` (4150 行)
 - ✅ Plan-checker 2 轮 iteration — 5 BLOCKERs + 7 WARNINGs + 2 NEW BLOCKERs 全 resolved

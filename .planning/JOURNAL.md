@@ -2669,7 +2669,7 @@ code 401 (Supabase service_key revoked)
 
 ```bash
 /gsd-resume-work --ws m1-perception
-/gsd-extract_learnings 03.1 --ws m1-perception     # ⭐ 主推: capture 13 D-decisions + chain-truth empirical lessons + Sentry/Gmail routing 翻案
+/gsd-extract-learnings 03.1 --ws m1-perception     # ⭐ 主推: capture 13 D-decisions + chain-truth empirical lessons + Sentry/Gmail routing 翻案
 make planning-status                                # 应继续 zero drift
 ```
 
@@ -2731,7 +2731,7 @@ Worktree had Plan 06 commits but local `main` was at Plan 05 SUMMARY (4de1f62) w
 
 ```bash
 /gsd-resume-work --ws m1-perception
-/gsd-extract_learnings 03.1 --ws m1-perception     # capture 13 D-decisions + chain-truth empirical lessons
+/gsd-extract-learnings 03.1 --ws m1-perception     # capture 13 D-decisions + chain-truth empirical lessons
 make planning-status                                # should remain zero drift
 ```
 

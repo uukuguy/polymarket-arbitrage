@@ -53,7 +53,7 @@ agent 并行执行会让用户的"理解曲线"被代码进度甩开。**每次 
 - 体例：30 秒心智模型 + 关键代码片段（带 `file:line`）+ 设计取舍 + 自检题 + FAQ 增量区
 - 迭代机制：用户读 → 提问 → 我把答疑追加进对应文档的"FAQ 增量"区（不动正文）→ 某 FAQ 反复出现（≥3 次）→ 提升进正文
 - 触发时机：
-  - phase 执行完成后 / `/gsd-extract_learnings` 之前 → 该 phase 引入的核心代码概念要有教学
+  - phase 执行完成后 / `/gsd-extract-learnings` 之前 → 该 phase 引入的核心代码概念要有教学
   - 引入新依赖、新设计模式、新数据契约时
   - 用户提问暴露某个 gap → 立刻加一节
 - 命名约定：`docs/learning/NN-<topic>.md`，序号递增；`docs/learning/00-INDEX.md` 维护阅读顺序
@@ -120,7 +120,7 @@ agent 并行执行会让用户的"理解曲线"被代码进度甩开。**每次 
 | 检查进度 | `/gsd-progress` 或 `make status` |
 | 中断保存 | `/gsd-pause-work` |
 | 简单任务 | `/gsd-quick` 或 `/gsd-fast` |
-| Phase 末复盘 | `/gsd-extract_learnings` |
+| Phase 末复盘 | `/gsd-extract-learnings` |
 | 自动找下一步 | `/gsd-next` |
 
 ### 每个 Plan 末（强制 — 与 phase 末同等纪律）
@@ -136,7 +136,7 @@ agent 并行执行会让用户的"理解曲线"被代码进度甩开。**每次 
 ### 每个 Phase 末（强制）
 
 1. 确认所有 plan 的 SUMMARY 都已就位（`make planning-status` 全 OK）
-2. 跑 `/gsd-extract_learnings`
+2. 跑 `/gsd-extract-learnings`
 3. 提 **3-5 个对手测试问题**（实战决策题，不是知识题）
 4. 答得上 → 进入下一 phase；答不上 → 就这个问题展开教学
 5. 评估完成度，更新 ROADMAP

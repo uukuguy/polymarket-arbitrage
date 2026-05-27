@@ -68,7 +68,7 @@
 - **结尾**：更新 JOURNAL，给出"下次会话第一条命令"
 
 每个 Phase 末：
-- 强制 `/gsd-extract_learnings`
+- 强制 `/gsd-extract-learnings`
 - 提 3-5 个对手测试问题，发现知识盲点立即补
 - 评估完成度，决定是否进入下一 phase
 
