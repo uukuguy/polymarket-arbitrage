@@ -3,28 +3,28 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 03.1
-status: executing
-stopped_at: Phase 01 polywatch-mvp context gathered (4 D-Polywatch decisions + 4 trial sub-decisions)
-last_updated: "2026-05-26T08:59:56.710Z"
-last_activity: 2026-05-26
+status: complete
+stopped_at: Phase 03.1 closed — Plan 07 SOAK + VALIDATION landed, goal MET (chain-truth alive end-to-end in prod, Inj L2-2/3b/4 all PASS)
+last_updated: "2026-05-27T04:35:00Z"
+last_activity: 2026-05-27
 progress:
   total_phases: 6
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 39
-  completed_plans: 32
-  percent: 82
+  completed_plans: 39
+  percent: 100
 ---
 
 # Project State
 
 ## Current Position
 
-Phase: 03.1 (l2-observability-gaps-fix-up) — EXECUTING
-Plan: 4 of 7 (Plans 01-04 complete; Wave 3 Plan 04 just landed: tenacity DNS retry + FAILURE_THRESHOLD 3→5 + dns_baseline_probe)
-**Status:** Executing Phase 03.1
-**Current Phase:** 03.1
-**Last Activity:** 2026-05-26
-**Last Activity Description:** Plan 03.1-04 complete — GAP-100 D-01 A+C + GAP-101 D-02 mitigations live (5 task commits + SUMMARY)
+Phase: 03.1 (l2-observability-gaps-fix-up) — ✅ **COMPLETE** (closed 2026-05-27 autopilot)
+Plan: 7 of 7 (all SUMMARYs + 03.1-VALIDATION.md nyquist_compliant=true)
+**Status:** Phase 03.1 closed
+**Current Phase:** 03.1 → next 04 (TBD)
+**Last Activity:** 2026-05-27
+**Last Activity Description:** Plan 03.1-07 complete — 3 chaos Inj all PASS in prod (L2-2 chain-truth CONFIRMED, L2-3b NOTIFY chain proven, L2-4 daemon survived double-fault); Phase goal MET; recommend `/gsd-extract_learnings 03.1 --ws m1-perception` next session
 
 ### Phase 03 — ✅ COMPLETE (closed 2026-05-25)
 

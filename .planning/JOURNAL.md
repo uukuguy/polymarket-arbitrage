@@ -2600,3 +2600,63 @@ m5 phase 01 可以跟 03.1 execute 并行(不同 workstream, 不同代码区域)
 - ⭐ [Polywatch decision framework](memory/architecture_polywatch-decision-framework.md)
 - ⭐ [Polywatch MVP shipped](memory/project_polywatch-mvp-shipped-2026-05.md)
 - thread `.planning/threads/polywatch-architecture.md` — D-Polywatch-1..4 现已锁定, thread 需对应更新(下次会话顺手做)
+
+---
+
+## SESSION 30 — 2026-05-27 autopilot — Phase 03.1 CLOSED (Plan 07 chaos triple-PASS)
+
+**Goal**: execute Plan 03.1-07 autopilot to close Phase 03.1 — Inj L2-2 (GAP-5 chain-truth) + Inj L2-3b (opt-in NOTIFY) + Inj L2-4 (WS storm + Supabase double-fault), then VALIDATION.
+
+### Outcome — Phase 03.1 ✅ CLOSED
+
+7 commits this session (worktree-agent-a38226828831ae958):
+
+1. `chore(03.1-07): Inj L2-2 re-run — GAP-5 chain-truth CONFIRMED in prod` (2874113)
+   - B-3 hard gate passed: `mirror:l2_tob_age_seconds status="fail"` at 2026-05-27T03:33:19Z, age=1729s, HTTP 503 confirmed
+   - Pre-flight Rule-3 blocker fix: re-deployed Plans 01-06 to polyarb-l2/l1 (v5 image was missing Plan 02 mirror sub-check — dueling-implementation pattern caught)
+   - Discovered GAP-200 (mirror-disabled-by-config silent) + GAP-201 (Fly secret quote trap) — both logged to deferred-items.md
+2. `chore(03.1-07): Inj L2-3b opt-in NOTIFY path — happy-path CONFIRMED in prod` (2814d6b)
+   - Full L1→L2 chain proven: snapshot_id=199 published at 04:02:21Z, L2 candidate refresh fired same second (private ams network)
+   - B1 invariant restored: POLYARB_EVENT_BUS_ENABLED unset, listener idle ✓
+   - Side: GAP-202 (/scan endpoint 500 on NaN) logged
+3. `chore(03.1-07): Inj L2-4 WS storm + Supabase double-fault — daemon survived` (968034a)
+   - 4 verdicts all PASS: daemon survived, watchdog logic correct (2 reconnect attempts @ 1s/2s backoff), chain-truth surface (chaos:ws_test_kill_flag warn), recovery clean
+   - GAP-200 silently reproduced (mirror sub-check absent during chaos) — re-confirmed deferral
+4. `docs(03.1-07): VALIDATION + STATE close — Phase 03.1 goal MET` (pending — this commit)
+
+### Three chaos run summary
+
+| Inj | UTC window | Verdict | Cleanup |
+|---|---|---|---|
+| L2-2 re-run | 03:05–03:52Z | chain-truth CONFIRMED | thresholds restored, service_key real value |
+| L2-3b opt-in NOTIFY | 03:59–04:09Z | NOTIFY→LISTEN→refresh chain proven | EVENT_BUS unset, B1 restored |
+| L2-4 WS storm + Supabase | 04:13–04:17Z | daemon survived, all 4 verdict gates pass | WS_TEST_KILL unset, service_key restored, mirror back to pass |
+
+### Phase goal verification
+
+"L1+L2 alert chain 分钟级被发现并修复, SESSION 27 那种 '3.5 天没人发现 PAUSE' 永久不再发生" → **MET**
+
+- Chain-truth alive end-to-end on patched mirror path (code 401 → /health 503 in ≤60s with lowered thresholds, ~10 min with defaults)
+- Sentry env=production correctly tagged (verified via container startup log on this deploy)
+- DNS retry + 5-fail threshold logic deployed (prod evidence accumulates with natural occurrences)
+- healthz-watcher cron 16-min auto-unpause fallback live since 2026-05-26
+
+### Deferred (NEW GAPs from Plan 07 execution)
+
+- **GAP-200**: mirror-disabled-by-config is silent (config-disable should also surface as chain-truth signal) — Phase 04+ candidate
+- **GAP-201**: Fly secret cleanup quoting trap (audit all chaos-l2-* cleanup blocks) — m1-perception backlog
+- **GAP-202**: L1 /scan endpoint 500 on NaN — small fix, m1-perception backlog
+
+### Pre-flight discovery (worth flagging for future executors)
+
+Worktree had Plan 06 commits but local `main` was at Plan 05 SUMMARY (4de1f62) while `origin/main` was older (76fedb6). Rebase showed Plan 06 commits collapsed cleanly (already in main ancestry). The deployed polyarb-l2 v5 image (Plan 05 deploy) was missing Plan 02's mirror sub-check — Plan 05's worktree-built deploy had branched before Plan 02 merge. Re-deployed current main to fix. This is exactly the dueling-implementation risk the user prompt flagged for this executor — autopilot caught it before chaos started.
+
+### Next session
+
+```bash
+/gsd-resume-work --ws m1-perception
+/gsd-extract_learnings 03.1 --ws m1-perception     # capture 13 D-decisions + chain-truth empirical lessons
+make planning-status                                # should remain zero drift
+```
+
+[NEXT] Extract Phase 03.1 LEARNINGS, then consider Phase 04 scoping or pivot to m2-combinatorial T2 validation tests (per memory current-call).
