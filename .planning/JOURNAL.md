@@ -2736,3 +2736,52 @@ make planning-status                                # should remain zero drift
 ```
 
 [NEXT] Extract Phase 03.1 LEARNINGS, then consider Phase 04 scoping or pivot to m2-combinatorial T2 validation tests (per memory current-call).
+
+---
+
+## SESSION 30 — 2026-05-28 — Phase 03.1 收口 + Phase 04 full planning chain
+
+**Theme**: Phase 03.1 完全收口 (LEARNINGS + 对手测试) + ROADMAP 重构 (Phase 04 新增 + Phase 05 收编悬空 WS metadata) + Phase 04 全 planning 链 ship (context → research → patterns → plan → checker)。
+
+### Actions (7 commits ship to main, 7 ahead of origin EOD)
+
+1. `be906eb` docs: fix /gsd-extract-learnings command name typo across active docs (历史 typo 全活跃文档清, 历史 doc 保留)
+2. `762f1e7` docs(03.1): extract Phase 03.1 LEARNINGS — 13D/12L/10P/8S (300 行, 含 Sentry routing 翻案 + parallel worktree dueling-implementation + chain-truth 实证 lessons)
+3. `190b8fe` docs(roadmap): add Phase 04 candidate-set 扩容 + 收编悬空 WS phase 为 05 (ROADMAP 顺序: 01→01.1→02→02.1→03→03.1→04→05)
+4. `0889a08` docs(04): capture phase context (8D decisions, scout 发现 L2 compute_candidates 读空库)
+5. `9bc57a0` docs(state): record phase 04 context session
+6. `47f5e3f` docs(04): research phase — Supabase fetch, recipe column deps, temp DB adapter, D-07/D-08 (HIGH confidence, 5 critical findings)
+7. `8e0bbec` docs(phase-04): add research + validation strategy (VALIDATION.md nyquist_compliant=true)
+8. `56f0820` docs(04): create phase plan — 4 plans / 3 waves
+9. `8415a30` docs(04): plan-checker revision — resolve 1 blocker + 2 warnings (11/12 PASS)
+
+### 对手测试 (Phase 03.1 收口最后一步) — 3/3 PASS
+
+- Q1 chain-truth inverse: /health checks 数组无 mirror sub-check = mirror 被 config 禁用 (GAP-200 心智模型) ✅
+- Q2 SESSION 27 沉默链: Sentry issue grouping + 0 Telegram action target (非 env=dev tag) ✅
+- Q3 parallel worktree: 必须验证 deployed image == 最新 plan-merged main (非本地测试全绿) ✅
+
+### Phase 04 关键发现 (research + plan 阶段 5 个改设计的发现)
+
+1. **L2 compute_candidates 当前读 L2 本地空 SQLite** (scout) — recipe 路径 prod 返回零行, 「扩容」前提是让通路跑起来
+2. **Pagination 强制** (research) — markets_latest ~6729 行, PostgREST 1000 行 cap 静默截断
+3. **`:memory:` SQLite 不可用** (research, 推翻 CONTEXT D-02) — scanner.run_recipe 自开 connection, 两个 :memory: 是独立 DB; 必须 named temp file
+4. **NOT-NULL 列要 sentinel-fill, 不是 NULL-fill** (planner DDL 校验) — condition_id/fetched_at_ms/snapshot_id/incomplete 都 NOT NULL
+5. **D-08 不动 config.py** (research + pattern) — 只改 l2_health.py:180 三分支门控
+
+### Phase 04 plan 结构
+
+- Wave 1: 04-01 (D-07 yes_token_id Alembic 004 + [BLOCKING] supabase-migrate) + 04-03 (D-08 GAP-200 三分支) — 并行
+- Wave 2: 04-02 (D-01/02/03/04 数据源切换 + 分页 + fail-loud 适配层 + chain-truth fetch_age 子检查)
+- Wave 3: 04-04 (D-05/06 prod throughput chaos, human-verify)
+
+### Next session
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                          # 应 zero drift
+/clear                                        # 建议: planning 链路吃了不少 context
+/gsd-execute-phase 04 --ws m1-perception      # 执行 Phase 04
+```
+
+[NEXT] 执行 Phase 04 — Wave 1 04-01 会在 [BLOCKING] alembic push 暂停等用户确认 live POLYARB_SUPABASE_DB_DSN。可选 push 本会话 7 commits 到 origin。

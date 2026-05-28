@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03.1 closed → **Phase 04 ready to discuss** (Candidate Set 扩容 + L2 Throughput + 投影 Gap 收尾)
+current_phase: "Phase 04 planned → ready to execute (Wave 1: 04-01 + 04-03 parallel)"
 status: executing
-stopped_at: Phase 04 context gathered (8 decisions D-01..D-08)
-last_updated: "2026-05-28T01:58:29.478Z"
+stopped_at: Phase 04 planning complete — 4 plans / 3 waves, checker 11/12 PASS + 3 doc fixes; ready to execute
+last_updated: "2026-05-28T02:51:39.534Z"
 last_activity: 2026-05-28
 progress:
   total_phases: 8
@@ -21,10 +21,10 @@ progress:
 
 Phase: 03.1 (l2-observability-gaps-fix-up) — ✅ **COMPLETE** (closed 2026-05-27 autopilot)
 Plan: 7 of 7 (all SUMMARYs + 03.1-VALIDATION.md nyquist_compliant=true)
-**Status:** Ready to execute
-**Current Phase:** 03.1 closed → **Phase 04 ready to discuss** (Candidate Set 扩容 + L2 Throughput + 投影 Gap 收尾)
+**Status:** planned (Phase 04 ready to execute)
+**Current Phase:** Phase 04 planned → ready to execute (Wave 1: 04-01 + 04-03 parallel)
 **Last Activity:** 2026-05-28
-**Last Activity Description:** Phase 04 planning complete — 4 plans ready
+**Last Activity Description:** Phase 04 planning complete — 4 plans / 3 waves, checker 11/12 PASS + 3 doc fixes applied. Next: /gsd-execute-phase 04 --ws m1-perception (Wave 1 04-01 [BLOCKING] alembic push pause for live POLYARB_SUPABASE_DB_DSN).
 
 ### Roadmap Evolution
 
