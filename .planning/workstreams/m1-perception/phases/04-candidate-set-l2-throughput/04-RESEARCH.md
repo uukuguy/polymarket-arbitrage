@@ -721,21 +721,19 @@ def validate_recipe_columns(recipe: Recipe) -> None:
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should Supabase fetch happen inside compute_candidates or in on_snapshot_complete?**
    - What we know: on_snapshot_complete is async; compute_candidates is sync. Supabase-py is sync.
-   - What's unclear: Whether to add async supabase-py calls or keep sync fetch inside on_snapshot_complete's task.
-   - Recommendation: Keep supabase-py sync inside `on_snapshot_complete` (which runs in asyncio via `create_task`). The blocking duration is bounded (~100-500ms for 6000 rows paginated). If this becomes a bottleneck, revisit in Phase 05.
+   - RESOLVED: Keep supabase-py sync inside `on_snapshot_complete` (runs in asyncio via `create_task`). Bounded blocking (~100-500ms for 6000 rows paginated). Adopted by Plan 02 Task 2. Revisit only if bottleneck in Phase 05.
 
 2. **Named temp file cleanup on process crash?**
-   - What we know: `os.unlink` in `finally` covers normal + exception paths. Process crash (SIGKILL) skips finally.
-   - What's unclear: Whether temp files accumulate in `/tmp` over time.
-   - Recommendation: Use `tempfile.TemporaryDirectory()` context manager or system tmpfs cleanup. On Fly.io (ephemeral containers), /tmp is cleaned on restart — acceptable risk.
+   - What we know: `os.unlink` in `finally` covers normal + exception paths. SIGKILL skips finally.
+   - RESOLVED: `os.unlink` in `finally` for normal/exception paths; Fly.io ephemeral containers clean /tmp on restart, so SIGKILL leftover is acceptable risk. Adopted by Plan 02 Task 1.
 
 3. **New /health sub-check for Supabase fetch status (D-01 fail-soft surface)?**
    - CONTEXT.md specifies fail-soft for the fetch but does not specify /health surface.
-   - Recommendation: Add `candidates:supabase_fetch_age_seconds` sub-check (similar to `mirror:l2_tob_age_seconds`). Records last successful fetch time via local SQLite singleton. This is chain-truth discipline (§1.6) applied to the new fetch path. Planner should decide whether this is Phase 04 scope or deferred.
+   - RESOLVED: YES — Plan 02 Task 3 implements `candidates:supabase_fetch_age_seconds` sub-check (mirrors `mirror:l2_tob_age_seconds`), recording last successful fetch via local SQLite singleton. This is chain-truth §1.6 applied to the new fetch path — IN Phase 04 scope.
 
 ---
 

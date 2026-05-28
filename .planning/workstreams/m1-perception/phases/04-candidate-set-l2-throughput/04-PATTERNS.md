@@ -121,14 +121,26 @@ _NARROW_TO_MARKETS: dict[str, str] = {
     "yes_token_id": "yes_token_id", # D-07 adds this to narrow projection
 }
 
-# Columns PRESENT in markets DDL but ABSENT from narrow projection → NULL-filled.
-# These must exist in the CREATE TABLE (they do, per schemas.DDL) but values = NULL.
+# Columns PRESENT in markets DDL but ABSENT from narrow projection.
+# Split by DDL nullability — NOT-NULL columns CANNOT be NULL-filled (INSERT
+# constraint violation); they MUST get a sentinel value. See Plan 02 Task 1
+# action (authoritative). This corrects an earlier over-broad _NULL_FILLED_COLS.
+
+# Nullable columns → safe to NULL-fill:
 _NULL_FILLED_COLS = frozenset([
-    "condition_id", "no_token_id",
+    "no_token_id",
     "best_bid_price", "best_bid_size", "best_ask_price", "best_ask_size",
     "active", "closed", "neg_risk", "neg_risk_market_id",
-    "fetched_at_ms", "page_fetched_at_ms", "incomplete",
+    "page_fetched_at_ms",
 ])
+
+# NOT-NULL columns in schemas.DDL → MUST sentinel-fill, never NULL:
+_SENTINEL_FILL = {
+    "condition_id": "",      # NOT NULL TEXT
+    "fetched_at_ms": 0,      # NOT NULL INTEGER
+    "snapshot_id": 0,        # NOT NULL INTEGER (FK — temp DB uses PRAGMA foreign_keys=OFF)
+    "incomplete": 0,         # NOT NULL INTEGER (default 0)
+}
 ```
 
 **Fail-loud warning pattern** (from RESEARCH Q2):

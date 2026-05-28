@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 03.1 closed → **Phase 04 ready to discuss** (Candidate Set 扩容 + L2 Throughput + 投影 Gap 收尾)
-status: Phase 03.1 closed
+status: executing
 stopped_at: Phase 04 context gathered (8 decisions D-01..D-08)
-last_updated: "2026-05-27T23:57:47.483Z"
+last_updated: "2026-05-28T01:58:29.478Z"
 last_activity: 2026-05-28
 progress:
   total_phases: 8
   completed_phases: 6
-  total_plans: 39
+  total_plans: 43
   completed_plans: 39
-  percent: 100
+  percent: 91
 ---
 
 # Project State
@@ -21,10 +21,10 @@ progress:
 
 Phase: 03.1 (l2-observability-gaps-fix-up) — ✅ **COMPLETE** (closed 2026-05-27 autopilot)
 Plan: 7 of 7 (all SUMMARYs + 03.1-VALIDATION.md nyquist_compliant=true)
-**Status:** Phase 03.1 closed
+**Status:** Ready to execute
 **Current Phase:** 03.1 closed → **Phase 04 ready to discuss** (Candidate Set 扩容 + L2 Throughput + 投影 Gap 收尾)
 **Last Activity:** 2026-05-28
-**Last Activity Description:** Phase 03.1 LEARNINGS extracted (13D/12L/10P/8S) + 对手测试 3/3 PASS → Phase 03.1 fully closed. Phase 04 added to ROADMAP (candidate set 扩容 + L2 throughput 验证 + 投影 gap 收尾); orphaned WS metadata 收编为 Phase 05. Next: `/gsd-discuss-phase 04 --ws m1-perception`.
+**Last Activity Description:** Phase 04 planning complete — 4 plans ready
 
 ### Roadmap Evolution
 
