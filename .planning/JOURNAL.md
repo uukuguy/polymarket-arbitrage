@@ -2785,3 +2785,49 @@ make planning-status                          # 应 zero drift
 ```
 
 [NEXT] 执行 Phase 04 — Wave 1 04-01 会在 [BLOCKING] alembic push 暂停等用户确认 live POLYARB_SUPABASE_DB_DSN。可选 push 本会话 7 commits 到 origin。
+
+---
+
+## SESSION 31 — 2026-05-28 — m1-perception backlog clean-up (GAP-201 + GAP-202)
+
+**Theme**: 在执行 Phase 04 前先清掉 Phase 03.1 Plan 07 遗留的两个小 backlog GAP，避免技术债跨 phase 累积。
+
+### Actions (2 commits)
+
+1. `4e2eee2` fix(http): GAP-202 sanitize NaN/Inf in /scan response
+   - `src/polyarb/http/scan.py` 加 `_sanitize_for_json` helper (递归 walk dict/list, NaN/+Inf/-Inf → None)
+   - 应用到 `df.head(100).to_dict(orient="records")` 后, JSONResponse 前
+   - `tests/m1-perception/test_http_scan.py` 加 `test_nan_in_rows_renders_as_null` 回归测试 (mock run_recipe 返回 NaN/±Inf, 断言 200 + null)
+   - 7/7 test pass; bug 复现 → fix 确认
+
+2. `acd7892` fix(chaos): GAP-201 unset FLY_API_TOKEN in chaos-l2-inj4 env-sourcing blocks
+   - audit 全部 9 处 chaos-l2-* `set -a; . ./.env; set +a` 模式
+   - 6 处已 compliant (Plan 03 GAP-4 invariant)
+   - chaos-l2-inj4 (Plan 06 加的) 3 处漏 `unset FLY_API_TOKEN`: lines 872, 877, 886
+   - 修后全部 9 处一致遵守 invariant; `make -n chaos-l2-inj4` 干跑 OK
+   - deferred-items.md 同时关闭 GAP-201 + GAP-202 两个 RESOLVED marker
+
+### Verification
+
+- `pytest tests/m1-perception/test_http_scan.py -xvs` → 7/7 pass
+- `make -n chaos-l2-inj4` → 语法 OK
+- `make planning-status` → zero drift maintained
+- `git status -sb` → working tree clean, main 2 commits ahead of origin
+
+### Why these matter
+
+GAP-201 不是符号性 audit — invariant 漏一处, 后人加新 line 容易再踩 `.env` token shadowing 坑 (SESSION 26 真实代价: 一整天 401 debugging)。补齐让 6/9 → 9/9, 一致性是防线。
+
+GAP-202 影响面虽小 (只 manual /scan 触发, scheduler tick 不走这路径), 但 chaos 期需要手动验证 /scan 时 500 会掩盖真实 chain-truth signal。修了 = 减一个 false-positive noise source。
+
+### Next session
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                          # 应 zero drift
+git log --oneline -5                          # 应见 acd7892 + 4e2eee2 在 tip
+/clear                                        # 建议: backlog + planning context 累积
+/gsd-execute-phase 04 --ws m1-perception      # 执行 Phase 04
+```
+
+[NEXT] 执行 Phase 04 — Wave 1 04-01 会在 [BLOCKING] alembic push 暂停等用户确认 live POLYARB_SUPABASE_DB_DSN。本会话 2 commits 待 push 决策。
