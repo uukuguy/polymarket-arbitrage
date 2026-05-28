@@ -28,6 +28,14 @@ if TYPE_CHECKING:
 
 # Narrow market row columns mirrored to Supabase (dashboard-relevant only).
 # Does NOT include all ~23 SQLite markets columns — Supabase is read-only dashboard.
+#
+# Phase 04 D-07: widened from 10 to 11 columns. yes_token_id is needed by the
+# L2 candidate-refresh watchlist path (Plan 02) — temp DB does
+# `SELECT yes_token_id FROM markets WHERE slug=?` and treats the value as the
+# Polymarket WS subscription asset_id. The narrow_market_row() default branch
+# (`out[col] = full_row.get(col)`) handles nullable passthrough correctly
+# without a special-case branch — yes_token_id is None when source row lacks it
+# (normalizer.py:107: `else None` for empty clobTokenIds list).
 _NARROW_MARKET_COLUMNS = (
     "market_id",
     "question",
@@ -39,6 +47,7 @@ _NARROW_MARKET_COLUMNS = (
     "end_time_ms",
     "snapshot_id",
     "question_zh",
+    "yes_token_id",  # D-07: nullable; source = normalizer.py:107 clobTokenIds[0]
 )
 
 
