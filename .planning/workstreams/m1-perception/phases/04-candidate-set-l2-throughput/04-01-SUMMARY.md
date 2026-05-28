@@ -74,12 +74,11 @@ Each task was committed atomically:
 1. **Task 1: Alembic 004 migration + static-check tests** — `083cf5f` (feat)
    - `alembic/versions/004_add_yes_token_id.py` (new): revision="004", down_revision="003", `op.add_column("markets_latest", sa.Column("yes_token_id", sa.Text, nullable=True))`
    - `tests/alembic/test_004.py` (new): 3 static tests (chain, no-drop, revision id) + 2 `@pytest.mark.slow` Docker-gated live-DB tests (column exists nullable TEXT, idempotent downgrade→upgrade replay)
-2. **Task 2: Mirror narrow projection + [BLOCKING] live push** — `{TASK2_SHA}` (feat) — see below for full body
+2. **Task 2: Mirror narrow projection + [BLOCKING] live push** — `507be65` (feat) — see below for full body
    - Step A: `src/polyarb/storage/supabase_mirror.py`: added `"yes_token_id"` to `_NARROW_MARKET_COLUMNS` (10 → 11 cols)
    - Step B: `tests/storage/test_supabase_mirror.py` (new): 6 unit tests covering narrow projection contract
-   - Step C: [BLOCKING] `make supabase-migrate` — see "Live Push Evidence (D-07)" below
-
-**Plan metadata:** `{PLAN_META_SHA}` (docs: SUMMARY + push evidence)
+   - Step C: [BLOCKING] live `uv run alembic upgrade head` against Supabase Postgres — see "Live Push Evidence (D-07)" below; pushed at 2026-05-28T06:55:33Z (UTC) after operator approval
+3. **Plan metadata: SUMMARY amendment with live D-07 evidence** — see latest `docs(04-01): record live D-07 alembic push evidence` commit (hash recorded in completion message)
 
 ## Files Created/Modified
 
@@ -112,40 +111,65 @@ Chain: 001 → 002 → 003 → **004** (head).
 
 ## Live Push Evidence (D-07) — [BLOCKING] Step
 
-**Status:** AWAITING OPERATOR APPROVAL (autonomous: false).
+**Status:** ✅ PUSHED + VERIFIED on Supabase Postgres at **2026-05-28T06:55:33Z** (UTC).
 
-The migration file is written and ready. The static-check tests are green. The live-DB Docker testcontainer slow-test (`test_004_up`) was NOT run in agent context — Docker availability is environment-dependent and the slow test is a CI safety net, not a substitute for the real production push.
+Operator approved the live ALTER TABLE; continuation agent sourced the main-repo `.env`, ran sanity checks (role: `postgres`, db: `postgres`), confirmed pre-state at revision `003` with column absent, then executed the migration.
 
-**The REAL D-07 evidence is the production push against `POLYARB_SUPABASE_DB_DSN`:**
-
-```
-# To be executed AFTER operator confirms .env contains POLYARB_SUPABASE_DB_DSN
-# and they're ready for a prod schema ALTER TABLE:
-
-$ uv run alembic current   # confirm at 003 before push
-$ make supabase-migrate    # executes: uv run alembic upgrade head
-$ uv run alembic current   # confirm at 004 after push
-```
-
-Verification (also to be executed by continuation agent):
+### Alembic revision: before → after
 
 ```
-# Live column existence proof (psql against POLYARB_SUPABASE_DB_DSN):
+$ uv run alembic current   # BEFORE
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+003
+
+$ uv run alembic upgrade head
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 003 -> 004, Add yes_token_id nullable column to markets_latest (Phase 04 D-07)
+
+$ uv run alembic current   # AFTER
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+004 (head)
+```
+
+### Live column proof (information_schema query)
+
+```
 $ psql "$POLYARB_SUPABASE_DB_DSN" -c "\
     SELECT column_name, is_nullable, data_type \
     FROM information_schema.columns \
     WHERE table_name='markets_latest' AND column_name='yes_token_id'"
 
-# Expected output:
-#   column_name  | is_nullable | data_type
-#   -------------+-------------+-----------
-#   yes_token_id | YES         | text
-#   (1 row)
+ column_name  | is_nullable | data_type
+--------------+-------------+-----------
+ yes_token_id | YES         | text
+(1 row)
 ```
 
-**SECURITY NOTE:** The DSN itself is NEVER echoed to logs or this SUMMARY. Only the `information_schema` query RESULT is recorded. The yes_token_id values are public market metadata (Polymarket asset IDs); no PII.
+### `\d+ markets_latest` confirmation (column row)
 
-After successful push + verification, this section will be replaced (via a follow-up `docs(04-01): record live D-07 push evidence` commit) with the actual psql output, run timestamp, and `alembic current` confirmations.
+```
+$ psql "$POLYARB_SUPABASE_DB_DSN" -c "\d+ markets_latest" | grep -i yes_token_id
+ yes_token_id  | text             |           |          |         | extended |             |              |
+```
+
+The column is present, nullable (`is_nullable = YES`), of type `text`, with no DEFAULT (existing rows receive NULL per PostgreSQL semantics) and `extended` storage. This matches the migration's `op.add_column("markets_latest", sa.Column("yes_token_id", sa.Text, nullable=True))` exactly.
+
+### Pre-push role / database sanity
+
+```
+$ psql "$POLYARB_SUPABASE_DB_DSN" -c "SELECT current_user, current_database()"
+ current_user | current_database
+--------------+------------------
+ postgres     | postgres
+(1 row)
+```
+
+**SECURITY NOTE:** The DSN was sourced via `set -a; . /Users/sujiangwen/sandbox/hacker2026/PolyMarket/polymarket-arbitrage/.env; set +a` (main-repo `.env`, not copied into worktree). `$POLYARB_SUPABASE_DB_DSN` was never echoed. Only `information_schema` query results, role/db identifiers, and alembic revision strings are recorded above. The yes_token_id values are public market metadata (Polymarket asset IDs); no PII.
+
+**D-07 must_have #1 ("markets_latest table has a nullable yes_token_id column live in Supabase Postgres") is now backed by live production evidence.**
 
 ## Decisions Made
 
@@ -179,4 +203,4 @@ No new threat surface introduced beyond plan's threat_model coverage (T-04-01 / 
 
 *Phase: 04-candidate-set-l2-throughput*
 *Plan: 01*
-*Completed: 2026-05-28 (code + tests); live push evidence pending operator approval*
+*Completed: 2026-05-28 — code + tests + live D-07 push to Supabase Postgres (revision 004, evidence above)*
