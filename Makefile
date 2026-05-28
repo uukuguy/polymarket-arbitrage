@@ -869,12 +869,12 @@ chaos-l2-inj4:
 	@curl -sS https://polyarb-l2.fly.dev/health | jq '.status, .checks["chaos:ws_test_kill_flag"][0], .checks["mirror:l2_tob_age_seconds"][0]'
 	@echo ""
 	@echo "→ l2_top_of_book new rows in last 60s (expect 0 — mirror dead):"
-	@set -a; [ -f .env ] && . ./.env; set +a; \
+	@set -a; [ -f .env ] && . ./.env; set +a; unset FLY_API_TOKEN; \
 	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'l2_tob rows last 60s='||count(*) FROM l2_top_of_book WHERE ts > now() - interval '60 seconds'"
 	@echo ""
 	@echo "→ CLEANUP — restoring secrets…"
 	FLY_API_TOKEN= flyctl secrets unset POLYARB_WS_TEST_KILL -a polyarb-l2
-	@set -a; [ -f .env ] && . ./.env; set +a; \
+	@set -a; [ -f .env ] && . ./.env; set +a; unset FLY_API_TOKEN; \
 	FLY_API_TOKEN= flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="$$POLYARB_SUPABASE_SERVICE_KEY" -a polyarb-l2
 	@echo "→ Waiting 30s for recovery…"
 	@sleep 30
@@ -883,7 +883,7 @@ chaos-l2-inj4:
 	@curl -sS https://polyarb-l2.fly.dev/health | jq '.status, (.checks | has("chaos:ws_test_kill_flag"))'
 	@echo ""
 	@echo "→ l2_top_of_book new rows in last 60s (expect >0 — mirror restored):"
-	@set -a; [ -f .env ] && . ./.env; set +a; \
+	@set -a; [ -f .env ] && . ./.env; set +a; unset FLY_API_TOKEN; \
 	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'l2_tob rows last 60s='||count(*) FROM l2_top_of_book WHERE ts > now() - interval '60 seconds'"
 .PHONY: chaos-l2-inj4
 

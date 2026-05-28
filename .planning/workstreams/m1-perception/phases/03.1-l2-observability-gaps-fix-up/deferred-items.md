@@ -55,25 +55,35 @@ D-DEFER-1 (uv sync dev extras gap). Out of scope here.
 
 ## GAP-201 (Plan 07, 2026-05-27) — Fly secret quoting trap in cleanup commands
 
+**STATUS: ✅ RESOLVED 2026-05-28** (SESSION 31, m1-perception backlog clean-up)
+
 - **Discovered during**: Inj L2-2 re-run (Plan 07 Task 2 recovery)
 - **Issue**: `.env` values wrapped in single quotes (`KEY='value'`); naïve `grep + sed` extraction
   can leave quote chars in the value, leading to off-by-2-byte values that authenticate as a
   different key (or fail 401). Subtle because `flyctl secrets set` happily accepts the bad value.
 - **Symptom**: 401 Unauthorized errors despite "key restored" cleanup; long debug to identify
   219 vs 221 byte mismatch.
-- **Fix (small, m1-perception backlog)**: chaos cleanup targets should ALWAYS use
-  `set -a; . ./.env; set +a; ... -a polyarb-l2` form (shell-native parsing) instead of grep+sed
-  extraction. Audit all chaos-l2-* cleanup blocks in Makefile.
+- **Fix shipped**: audited all chaos-l2-* targets in Makefile (lines 681-888). All shell-native
+  `set -a; . ./.env; set +a` blocks confirmed to use shell-native parsing (no grep+sed survives).
+  Found three lines in chaos-l2-inj4 (872, 877, 886) that were missing the
+  `unset FLY_API_TOKEN` invariant per Makefile:670-679 — added. Now all 9 chaos-l2-* env-sourcing
+  blocks (689, 715, 731, 749, 760, 770, 872, 877, 886) consistently include the unset.
+- **Resolution commit**: (see git log — fix(chaos): GAP-201)
 
 ## GAP-202 (Plan 07, 2026-05-27) — /scan endpoint 500 on NaN values
+
+**STATUS: ✅ RESOLVED 2026-05-28** (SESSION 31, m1-perception backlog clean-up)
 
 - **Discovered during**: Inj L2-3b (Plan 07 Task 3) attempt to manually fire snapshot via /scan
 - **Issue**: `curl -X POST -d '{"recipe_name":"near-end"}' /scan` returns 500 with traceback:
   `ValueError: Out of range float values are not JSON compliant: nan` in `JSONResponse` render.
-- **Root cause (probable)**: scan response includes per-market computed values (e.g. spread, mid_price)
-  that can be NaN when bid/ask are equal-but-NaN. Starlette's default JSON encoder doesn't handle
-  NaN per RFC 8259 strict mode.
-- **Fix (small, m1-perception backlog)**: in src/polyarb/http/scan.py:83, replace `JSONResponse(...)`
-  with a custom encoder that maps NaN/Inf → null OR sanitizes input dict before render.
-- **Workaround**: natural scheduler tick still fires snapshots correctly; only manual /scan trigger
-  affected. This blocked nothing in Plan 07.
+- **Root cause (confirmed)**: Starlette's `JSONResponse` renders with `json.dumps(allow_nan=False)`
+  per RFC 8259 strict mode. Recipe outputs (e.g. spread, mid_price) can be NaN/Inf when bid/ask
+  are missing or equal.
+- **Fix shipped**: added `_sanitize_for_json` helper in `src/polyarb/http/scan.py` that walks the
+  response dict and replaces NaN/+Inf/-Inf leaf floats with None. JSON null is the canonical
+  representation and matches what jq / pandas consumers already expect. Applied before JSONResponse
+  render; only floats in leaf positions are inspected (cheap on row counts capped at 100).
+- **Regression test**: `tests/m1-perception/test_http_scan.py::test_nan_in_rows_renders_as_null`
+  mocks run_recipe to return NaN/+Inf/-Inf rows, asserts 200 + null serialization.
+- **Resolution commit**: (see git log — fix(http): GAP-202)
