@@ -50,7 +50,15 @@ REFRESH_DEBOUNCE_S: float = 60.0  # SP8 cross-bug check #1
 # Module-level debounce state. Acceptable for Phase 03 (single-process L2
 # daemon). If a future phase introduces multi-instance L2, move this into
 # SQLite (l2_candidates) or Redis so all instances share the floor.
-_last_refresh_at_s: float = 0.0
+#
+# G-01 (Phase 04 Plan 04 prod evidence, 2026-05-28): cold-start initial value
+# MUST be < -REFRESH_DEBOUNCE_S so the first call after process start passes
+# the debounce check. With time.monotonic() returning ~0..N seconds since
+# process start, an init of 0.0 makes `elapsed = monotonic - 0` always <
+# REFRESH_DEBOUNCE_S → first NOTIFY is silently dropped. Confirmed via
+# polyarb-l2 v17 prod logs: 31 catchup snapshots all debounced in 9ms.
+# Memory: feedback_cold-start-debounce-trap-2026-05.
+_last_refresh_at_s: float = -REFRESH_DEBOUNCE_S - 1.0
 
 # ── Phase 04 Plan 02 — D-01 fail-soft state ──────────────────────────────
 # Last successfully-fetched markets_latest rows. on_snapshot_complete falls
