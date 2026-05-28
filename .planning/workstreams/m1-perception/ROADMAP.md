@@ -224,7 +224,7 @@ Scope (候选, discuss-phase 决):
 Plans (4 plans, 3 waves — D-01/02/03 是数据源切换前提, D-07/D-08 独立可并行):
 - [ ] 04-01-PLAN.md — Wave 1 (autonomous: false — [BLOCKING] alembic push needs live DSN): D-07 markets_latest.yes_token_id nullable column (Alembic 004 add-only + push) + supabase_mirror narrow projection 补列
 - [ ] 04-03-PLAN.md — Wave 1 (autonomous, parallel w/ 01): D-08 GAP-200 /health three-branch mirror gate (config-disable surface as chain-truth)
-- [ ] 04-02-PLAN.md — Wave 2 (autonomous, depends 01): D-01/D-02/D-03/D-04 数据源切换核心 — Supabase markets_latest 分页拉取 + 命名临时 SQLite 适配层(fail-loud) + compute_candidates fail-soft + candidates fetch-age /health 链 (RESEARCH 覆盖: 命名临时文件非 :memory:; 必须分页)
+- [x] 04-02-PLAN.md — Wave 2 ✅ EXECUTED 2026-05-28 (autonomous, deps 01+03 ✅): D-01/D-02/D-03/D-04 数据源切换核心 — Supabase markets_latest 分页拉取 + 命名临时 SQLite 适配层(fail-loud) + compute_candidates fail-soft + candidates fetch-age /health 链. Commits 52858c1 + de54785 + SUMMARY commit; 18 new tests pass; +1 Rule 1 bug fix (BUILTINS dropped when scanner_yaml=None — pre-existing latent)
 - [ ] 04-04-PLAN.md — Wave 3 (checkpoint: human-verify, depends 02): D-05/D-06 真实 candidate scale prod throughput chaos — WsConsumer dropped-frame counter + chaos-l2-inj4-throughput Makefile target + baseline/storm/recovery verdict (补 Inj L2-4 throughput 欠账)
 
 Makefile targets delivered: `chaos-l2-inj4-throughput` (Plan 04). `supabase-migrate` (existing, reused by Plan 01 D-07 push).

@@ -94,11 +94,20 @@ def settings_with_db(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _reset_debounce_state():
-    """Reset module-level debounce state between tests."""
+    """Reset module-level debounce + Phase-04 D-01 fail-soft state between tests."""
     import polyarb.observation.l2_candidate_refresh as mod
     mod._last_refresh_at_s = 0.0
+    # Phase 04 Plan 02 — D-01 fail-soft state.
+    if hasattr(mod, "_last_known_markets_rows"):
+        mod._last_known_markets_rows = None
+    if hasattr(mod, "_last_fetch_success_at_s"):
+        mod._last_fetch_success_at_s = None
     yield
     mod._last_refresh_at_s = 0.0
+    if hasattr(mod, "_last_known_markets_rows"):
+        mod._last_known_markets_rows = None
+    if hasattr(mod, "_last_fetch_success_at_s"):
+        mod._last_fetch_success_at_s = None
 
 
 def _seed_markets(n: int, prefix: str = "M", *, liquidity_base: float = 200_000.0) -> list[dict]:
@@ -499,3 +508,202 @@ async def test_on_snapshot_complete_no_mirror_call_when_none(
         mirror=None,
     )
     assert ok is True  # refresh ran (debounce not blocking)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 04 Plan 02 — D-01 Supabase fetch + D-03 cap + D-04 fallback tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_supabase_mock_with_pages(pages: list[list[dict]]) -> MagicMock:
+    """Build a mock supabase client whose .range(...).execute() pops pages."""
+    mock_client = MagicMock()
+    page_iter = iter(pages)
+
+    def _execute() -> MagicMock:
+        m = MagicMock()
+        try:
+            m.data = next(page_iter)
+        except StopIteration:
+            m.data = []
+        return m
+
+    mock_client.table.return_value.select.return_value.range.return_value.execute = _execute
+    return mock_client
+
+
+def test_fetch_pagination():
+    """_fetch_all_markets_latest paginates past 1000-row PostgREST cap."""
+    from polyarb.observation.l2_candidate_refresh import _fetch_all_markets_latest
+
+    page1 = [{"market_id": f"m{i}"} for i in range(1000)]
+    page2 = [{"market_id": f"m{i}"} for i in range(1000, 1500)]
+    mock_client = _make_supabase_mock_with_pages([page1, page2])
+
+    rows = _fetch_all_markets_latest(mock_client)
+    assert len(rows) == 1500, "must paginate past 1000-row cap (RESEARCH Pitfall 2)"
+    assert rows[0]["market_id"] == "m0"
+    assert rows[1000]["market_id"] == "m1000"
+
+
+def test_fetch_single_page_under_1000():
+    """Loop exits when a batch is shorter than page_size."""
+    from polyarb.observation.l2_candidate_refresh import _fetch_all_markets_latest
+
+    page = [{"market_id": f"m{i}"} for i in range(300)]
+    mock_client = _make_supabase_mock_with_pages([page])
+
+    rows = _fetch_all_markets_latest(mock_client)
+    assert len(rows) == 300
+
+
+def _supabase_settings(db_path: Path):
+    """Settings with Supabase URL + key + a real (but minimal) db_path fallback."""
+    from polyarb.config import Settings
+
+    return Settings(
+        db_path=db_path,
+        parquet_root=db_path.parent / "snapshots",
+        supabase_url="https://x.supabase.co",
+        supabase_service_key="test-key",
+    )
+
+
+def _narrow_for_near_end(market_id: str = "m1") -> dict:
+    """A narrow row that satisfies the near-end builtin recipe.
+
+    Builtin near-end WHERE:
+      end_time_ms BETWEEN strftime('%s','now')*1000 AND strftime('%s','now','+72 hours')*1000
+      AND liquidity_usd > 1000
+
+    Use end_time ~24h from now + liquidity 100k to comfortably satisfy.
+    """
+    import time
+
+    return {
+        "market_id": market_id,
+        "question": "Q?",
+        "slug": f"slug-{market_id}",
+        "event_slug": "ev",
+        "mid_price": 0.5,
+        "liquidity_usd": 100_000.0,
+        "volume_usd": 10_000.0,
+        # 24h from now — well within the 72h near-end window.
+        "end_time_ms": int((time.time() + 24 * 3600) * 1000),
+        "snapshot_id": 1,
+        "yes_token_id": f"YES-{market_id}",
+        "question_zh": None,
+    }
+
+
+def test_compute_candidates_uses_temp_db_when_markets_rows(tmp_path):
+    """When markets_rows provided, build temp DB; temp file unlinked after."""
+    from polyarb.observation.l2_candidate_refresh import compute_candidates
+
+    settings = _supabase_settings(tmp_path / "state.db")
+    # Track build_temp_db return so we can verify cleanup.
+    built_paths: list[Path] = []
+    import polyarb.observation.l2_candidate_refresh as mod
+    real_build = mod.build_temp_db
+
+    def _spy(rows):
+        p = real_build(rows)
+        built_paths.append(p)
+        return p
+
+    import unittest.mock as um
+
+    with um.patch.object(mod, "build_temp_db", side_effect=_spy):
+        rows = compute_candidates(settings, markets_rows=[_narrow_for_near_end("m1")])
+
+    # near-end default recipe should produce at least our row.
+    assert any(r.asset_id == "YES-m1" for r in rows), (
+        f"expected YES-m1 in candidates, got {[r.asset_id for r in rows]}"
+    )
+    # Cleanup verified: built temp path unlinked.
+    assert built_paths, "build_temp_db spy should have been invoked"
+    for p in built_paths:
+        assert not p.exists(), f"temp file {p} not cleaned up (/tmp leak)"
+
+
+def test_compute_candidates_fallback_to_db_path_when_no_rows(settings_with_db, tmp_path):
+    """markets_rows=None → falls back to Path(settings.db_path) (D-04)."""
+    from polyarb.observation.l2_candidate_refresh import compute_candidates
+
+    settings, db_path = settings_with_db
+    _create_minimal_sqlite(db_path, _seed_markets(3, "R"))
+    scanner_yaml = tmp_path / "recipes.yaml"
+    scanner_yaml.write_text(
+        "recipes:\n"
+        "  r-only:\n"
+        "    description: x\n"
+        "    where: market_id LIKE 'R%'\n"
+        "    order_by: liquidity_usd DESC\n"
+        "    limit: 10\n"
+    )
+    # markets_rows omitted — should fall back to settings.db_path.
+    rows = compute_candidates(settings, scanner_yaml, None)
+    assert len(rows) == 3, f"D-04 fallback failed; got {len(rows)} rows"
+
+
+@pytest.mark.asyncio
+async def test_supabase_fetch_fail_uses_last_known(tmp_path):
+    """on_snapshot_complete with create_client raising → no exception, fail-soft."""
+    import polyarb.observation.l2_candidate_refresh as mod
+    from polyarb.observation.l2_candidate_refresh import on_snapshot_complete
+
+    # Seed last-known rows so fail-soft has something to fall back on.
+    mod._last_known_markets_rows = [_narrow_for_near_end("m1")]
+
+    settings = _supabase_settings(tmp_path / "state.db")
+    settings.candidate_scanner_yaml = None
+    settings.candidate_watchlist_yaml = None
+
+    with patch("polyarb.observation.l2_candidate_refresh.create_client") as mock_create:
+        mock_create.side_effect = RuntimeError("network down")
+        fake_ws = MagicMock()
+        fake_ws.subscribed_assets = []
+        fake_ws._subscribed_assets = []
+        # MUST NOT raise.
+        ok = await on_snapshot_complete(
+            {"snapshot_id": 99, "taken_at_ms": 1},
+            ws_consumer=fake_ws,
+            settings=settings,
+        )
+    assert ok is True, "refresh should still run (fail-soft) on fetch failure"
+
+
+def test_cap_500_with_supabase_rows(tmp_path):
+    """600 narrow rows from Supabase → candidate set capped at 500 (D-03)."""
+    from polyarb.observation.l2_candidate_refresh import MAX_CANDIDATES, compute_candidates
+
+    settings = _supabase_settings(tmp_path / "state.db")
+    rows = [_narrow_for_near_end(f"m{i}") for i in range(600)]
+    out = compute_candidates(settings, markets_rows=rows)
+    assert len(out) <= MAX_CANDIDATES == 500, f"cap violated: {len(out)} > 500"
+
+
+@pytest.mark.asyncio
+async def test_on_snapshot_complete_records_fetch_success_on_supabase_call(tmp_path):
+    """Successful supabase fetch updates _last_fetch_success_at_s (chain-truth)."""
+    import polyarb.observation.l2_candidate_refresh as mod
+    from polyarb.observation.l2_candidate_refresh import on_snapshot_complete
+
+    settings = _supabase_settings(tmp_path / "state.db")
+    settings.candidate_scanner_yaml = None
+    settings.candidate_watchlist_yaml = None
+
+    mock_client = _make_supabase_mock_with_pages([[_narrow_for_near_end("m1")]])
+    with patch("polyarb.observation.l2_candidate_refresh.create_client", return_value=mock_client):
+        fake_ws = MagicMock()
+        fake_ws.subscribed_assets = []
+        fake_ws._subscribed_assets = []
+        ok = await on_snapshot_complete(
+            {"snapshot_id": 1, "taken_at_ms": 1},
+            ws_consumer=fake_ws,
+            settings=settings,
+        )
+    assert ok is True
+    assert mod._last_fetch_success_at_s is not None, "fetch success timestamp not recorded"
+    assert len(mod._last_known_markets_rows or []) == 1
+    assert (mod._last_known_markets_rows or [{}])[0]["market_id"] == "m1"
