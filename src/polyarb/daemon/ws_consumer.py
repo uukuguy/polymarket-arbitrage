@@ -86,6 +86,12 @@ class WsConsumer:
         self._state: str = "DISCONNECTED"
         self._last_event_at_s: float = time.time()
         self._frame_count: int = 0
+        # Phase 04 Plan 04 D-06 indicator 1 — frames RECEIVED but downstream
+        # on_event dispatch raised. Distinct from frame_count: a frame may be
+        # received successfully (frame_count += 1) yet fail to process
+        # (dropped_frame_count += 1). Surfaces operational throughput health
+        # during the prod chaos run (`make chaos-l2-inj4-throughput`).
+        self._dropped_frame_count: int = 0
 
     # ── Properties (read by health endpoint) ───────────────────────────────
 
@@ -108,6 +114,16 @@ class WsConsumer:
     @property
     def frame_count(self) -> int:
         return self._frame_count
+
+    @property
+    def dropped_frame_count(self) -> int:
+        """Frames RECEIVED but whose on_event callback raised.
+
+        Phase 04 Plan 04 D-06 indicator 1. A non-zero value during prod
+        throughput chaos means downstream dispatch is failing while WS
+        delivery is healthy — read alongside frame_count for context.
+        """
+        return self._dropped_frame_count
 
     # ── Main loop ──────────────────────────────────────────────────────────
 
@@ -156,6 +172,9 @@ class WsConsumer:
                 try:
                     self._on_event(event)
                 except Exception as e:  # noqa: BLE001
+                    # Phase 04 Plan 04 D-06 indicator 1: count the drop so the
+                    # throughput chaos run has a numeric signal beyond log-grep.
+                    self._dropped_frame_count += 1
                     logger.warning(f"ws_consumer: on_event raised: {e!r}")
         except WsTestKillRequested as e:
             # Phase 03.1-06 D-04: synthetic close via chaos flag. Log loudly
