@@ -171,13 +171,49 @@ def _build_l2_health_checks(
         }]
         overall = _severity(overall, listener_status)
 
-    # ── Check 4: mirror:l2_tob_age_seconds (only when l2_mirror_enabled) ───
-    # Phase 03.1 Plan 02 (B-3): chain-truth wiring. settings.l2_mirror_enabled
-    # auto-detects from supabase secrets; thresholds come from Settings (env-
-    # overridable via POLYARB_L2_TOB_AGE_WARN_S / POLYARB_L2_TOB_AGE_FAIL_S).
-    # Mapping: age < warn → pass; warn <= age < fail → warn; age >= fail → fail;
-    # cold-start (getter returns None) → warn (do NOT fail on first boot).
-    if getattr(settings, "l2_mirror_enabled", False):
+    # ── Check 4: mirror:l2_tob_age_seconds — D-08 three-branch (GAP-200) ──
+    # Phase 04 Plan 03: three-branch chain-truth gate. Inverse of Phase 03.1
+    # L4 lesson (feedback_code-vs-chain-truth-2026-05): the previous binary
+    # `if l2_mirror_enabled:` gate made a config mistake (URL set but key
+    # forgotten) silently absent from /health. Now:
+    #   (a) supabase_url empty (key irrelevant) → no sub-check
+    #       (Supabase not configured at all — backwards-compat, correct).
+    #   (b) supabase_url SET but service_key EMPTY → status=fail, surface
+    #       the operator config mistake on /health (chain-truth).
+    #   (c) both set → existing age-based pass/warn/fail logic (unchanged).
+    #
+    # Note: config.py model_validator still sets l2_mirror_enabled iff BOTH
+    # url AND key non-empty (the AND-gate at line 238). In case (b),
+    # l2_mirror_enabled remains False — only /health PRESENTATION changes.
+    _supabase_url = getattr(settings, "supabase_url", "")
+    _service_key_val = ""
+    try:
+        _service_key_val = settings.supabase_service_key.get_secret_value()
+    except AttributeError:
+        # service_key is not a SecretStr (defensive — possible under test mocks)
+        pass
+
+    if _supabase_url and not _service_key_val:
+        # Case (b): URL configured but service_key missing — operator mistake.
+        # GAP-200: surface as a /health fail so the misconfiguration is
+        # observable, not silent. Output names the missing field (no secret
+        # material leaked — T-04-04 in plan threat model).
+        checks["mirror:l2_tob_age_seconds"] = [{
+            "componentId": "supabase-l2-mirror",
+            "componentType": "datastore",
+            "observedValue": None,
+            "observedUnit": "s",
+            "status": "fail",
+            "output": "mirror disabled by config (service_key empty)",
+            "time": _utc_now_iso(),
+        }]
+        overall = _severity(overall, "fail")
+    elif getattr(settings, "l2_mirror_enabled", False):
+        # Case (c): both url + key set — existing age sub-check (unchanged
+        # body from Phase 03.1 Plan 02). Settings drive thresholds so the
+        # Plan 07 chaos knob can lower them via env override.
+        # Mapping: age < warn → pass; warn <= age < fail → warn;
+        # age >= fail → fail; cold-start (getter returns None) → warn.
         warn_s = int(getattr(settings, "l2_tob_age_warn_s", _MIRROR_PASS_S_DEFAULT))
         fail_s = int(getattr(settings, "l2_tob_age_fail_s", _MIRROR_FAIL_S_DEFAULT))
         try:
@@ -214,6 +250,9 @@ def _build_l2_health_checks(
             "time": _utc_now_iso(),
         }]
         overall = _severity(overall, mirror_status)
+    # else: case (a) — supabase_url also empty → no sub-check (correct,
+    # operator opted out of Supabase entirely; reporting fail would be a
+    # false alarm).
 
     # ── Check 5: chaos:ws_test_kill_flag (Phase 03.1-06 W-5 chain-truth) ────
     # Plan 03 codified the rule: every fail-soft / chaos primitive MUST surface
