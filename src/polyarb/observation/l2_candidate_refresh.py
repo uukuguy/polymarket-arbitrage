@@ -28,6 +28,7 @@ MUST write to the private `_subscribed_assets` attribute.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -35,8 +36,10 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from supabase import create_client
 
 # REUSE Phase 01.1 scanner verbatim (D-04)
+from polyarb.observation.l2_temp_db import build_temp_db, warn_null_filled_recipe_columns
 from polyarb.observation.scanner import list_all_recipes, run_recipe
 from polyarb.observation.watchlist import load_watchlist
 
@@ -48,6 +51,64 @@ REFRESH_DEBOUNCE_S: float = 60.0  # SP8 cross-bug check #1
 # daemon). If a future phase introduces multi-instance L2, move this into
 # SQLite (l2_candidates) or Redis so all instances share the floor.
 _last_refresh_at_s: float = 0.0
+
+# ── Phase 04 Plan 02 — D-01 fail-soft state ──────────────────────────────
+# Last successfully-fetched markets_latest rows. on_snapshot_complete falls
+# back to this snapshot if a fresh Supabase fetch raises (fail-soft envelope,
+# same pattern as the per-recipe failure isolation at line 116-118).
+_last_known_markets_rows: list[dict] | None = None
+
+# Wall-clock seconds since epoch of the last SUCCESSFUL Supabase fetch.
+# Read by the /health candidates:supabase_fetch_age_seconds sub-check
+# (Task 3 — chain-truth surface). None == cold-start (never fetched).
+_last_fetch_success_at_s: float | None = None
+
+
+def _record_fetch_success() -> None:
+    """Mark a successful Supabase fetch — drives /health sub-check freshness."""
+    global _last_fetch_success_at_s
+    _last_fetch_success_at_s = time.time()
+
+
+def get_last_fetch_success_at_s() -> float | None:
+    """Public getter for /health candidates:supabase_fetch_age_seconds.
+
+    Returned value is the wall-clock timestamp of the last successful Supabase
+    fetch, or None if no fetch has ever succeeded (cold-start). The /health
+    sub-check (l2_health.py) maps this to status pass/warn/fail by age.
+
+    Chain-truth note (§1.6): this getter reads a field that the fetch path
+    REALLY mutates (every successful fetch calls _record_fetch_success). It is
+    NOT a dead-code config flag — Inj L2-2 RCA prevention.
+    """
+    return _last_fetch_success_at_s
+
+
+# ── Phase 04 Plan 02 — D-01 Supabase pagination ──────────────────────────
+def _fetch_all_markets_latest(client: Any) -> list[dict]:
+    """Fetch all markets_latest rows with pagination.
+
+    PostgREST default cap = 1000 rows. ``markets_latest`` has ~6729 rows.
+    A plain ``.select("*").execute()`` silently truncates to 1000 (RESEARCH
+    Pitfall 2). We MUST page via ``.range(offset, offset+page_size-1)`` and
+    terminate when ``len(batch) < page_size``.
+    """
+    rows: list[dict] = []
+    offset = 0
+    page_size = 1000
+    while True:
+        resp = (
+            client.table("markets_latest")
+            .select("*")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        batch: list[dict] = resp.data or []
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return rows
 
 
 @dataclass(frozen=True)
@@ -84,6 +145,7 @@ def compute_candidates(
     settings: Any,
     scanner_yaml: Path | None = None,
     watchlist_yaml: Path | None = None,
+    markets_rows: list[dict] | None = None,
 ) -> list[CandidateRow]:
     """Build the current candidate set as union(scanner-recipes, watchlist).
 
@@ -92,6 +154,10 @@ def compute_candidates(
         scanner_yaml: optional path to user recipes YAML (BUILTIN_RECIPES are
                       always merged regardless).
         watchlist_yaml: optional path to watchlist YAML.
+        markets_rows: Phase 04 D-01 — when provided, build a named-temp-file
+            SQLite from these Supabase ``markets_latest`` rows and use that
+            for the scanner; when None, fall back to ``Path(settings.db_path)``
+            (D-04 cold-start path, preserved for backwards-compat / tests).
 
     Returns:
         list[CandidateRow] capped at MAX_CANDIDATES; watchlist always retained.
@@ -100,17 +166,56 @@ def compute_candidates(
 
     Failure isolation: if a single recipe raises, log warning + continue
     with the other recipes (Rule 1 — never block refresh on one bad recipe).
+
+    Temp-file cleanup (D-02): when ``markets_rows`` is provided, the built
+    temp DB is ``os.unlink``ed in the finally block so /tmp does not leak.
     """
-    db_path = Path(settings.db_path)
+    # Phase 04 D-01: prefer the freshly-fetched Supabase rows when present.
+    if markets_rows is not None:
+        db_path = build_temp_db(markets_rows)
+        cleanup_tmp = True
+    else:
+        db_path = Path(settings.db_path)
+        cleanup_tmp = False
+
+    try:
+        return _compute_candidates_against(db_path, scanner_yaml, watchlist_yaml)
+    finally:
+        if cleanup_tmp:
+            try:
+                os.unlink(db_path)
+            except OSError:
+                # Best-effort cleanup — log but never block refresh on this.
+                logger.warning(f"temp DB cleanup failed: {db_path}")
+
+
+def _compute_candidates_against(
+    db_path: Path,
+    scanner_yaml: Path | None,
+    watchlist_yaml: Path | None,
+) -> list[CandidateRow]:
+    """Internal: run recipes + watchlist against ``db_path`` (extracted to
+    isolate temp-file cleanup in the wrapper). Body verbatim from the
+    pre-D-01 ``compute_candidates`` — only the db_path argument changes."""
     out: dict[str, CandidateRow] = {}
 
     # ── 1) Scanner recipes (D-04 verbatim REUSE) ─────────────────────────
     if scanner_yaml is not None or _builtin_recipes_present():
-        recipes = list_all_recipes(scanner_yaml) if scanner_yaml else {}
+        # Bugfix (Phase 04 Plan 02 — Rule 1 deviation): the previous
+        # `list_all_recipes(scanner_yaml) if scanner_yaml else {}` dropped the
+        # BUILTINS when scanner_yaml was None. list_all_recipes(None) returns
+        # just the BUILTIN_RECIPES dict — exactly what the outer `or
+        # _builtin_recipes_present()` invited. Phase 04 D-01 path is
+        # scanner_yaml=None most of the time, so this latent bug had to be
+        # fixed for builtins (near-end / coin-flip / etc) to drive candidates.
+        recipes = list_all_recipes(scanner_yaml)
         for name, recipe in recipes.items():
             # Skip GROUP BY recipes — they produce aggregations, not asset rows.
             if recipe.group_by is not None:
                 continue
+            # Phase 04 D-02 fail-loud: warn when a recipe references columns
+            # NULL-filled in the Supabase narrow projection.
+            warn_null_filled_recipe_columns(recipe)
             try:
                 df = run_recipe(db_path, recipe)
             except Exception as e:  # noqa: BLE001
@@ -235,7 +340,7 @@ async def on_snapshot_complete(
     Mirror calls are fail-soft (mirror's own envelope) — any failure surfaces
     in the mirror's loguru + Sentry breadcrumb but does NOT block the refresh.
     """
-    global _last_refresh_at_s
+    global _last_refresh_at_s, _last_known_markets_rows
     now = time.monotonic()
     elapsed = now - _last_refresh_at_s
     if elapsed < REFRESH_DEBOUNCE_S:
@@ -247,10 +352,42 @@ async def on_snapshot_complete(
         return False
     _last_refresh_at_s = now
 
+    # ── Phase 04 D-01: fetch markets_latest from Supabase (fail-soft) ────
+    # NOTIFY payload only carries snapshot_id (RESEARCH Q5); the candidate
+    # compute path needs the FULL markets_latest snapshot, so we round-trip
+    # through Supabase REST. On failure we fall back to the last known good
+    # rows so the candidate set freezes rather than collapses to empty.
+    markets_rows: list[dict] | None = None
+    supabase_url = getattr(settings, "supabase_url", "")
+    service_key = ""
+    try:
+        service_key = settings.supabase_service_key.get_secret_value()
+    except AttributeError:
+        # service_key is not a SecretStr (defensive — possible under test mocks).
+        service_key = ""
+    if supabase_url and service_key:
+        try:
+            client = create_client(supabase_url, service_key)
+            markets_rows = _fetch_all_markets_latest(client)
+            _last_known_markets_rows = markets_rows
+            _record_fetch_success()
+            logger.info(
+                f"candidate refresh: fetched {len(markets_rows)} rows from markets_latest"
+            )
+        except Exception as e:  # noqa: BLE001 — fail-soft envelope (same as recipe loop)
+            logger.error(
+                f"candidate refresh: supabase fetch failed: {e!r} — "
+                f"using last known rows (count={len(_last_known_markets_rows or [])})"
+            )
+            markets_rows = _last_known_markets_rows
+    # else: Supabase not configured (D-04 cold-start) — fall through with
+    #       markets_rows=None so compute_candidates uses settings.db_path.
+
     new_rows = compute_candidates(
         settings,
         getattr(settings, "candidate_scanner_yaml", None),
         getattr(settings, "candidate_watchlist_yaml", None),
+        markets_rows=markets_rows,
     )
     new_asset_ids = [r.asset_id for r in new_rows]
 
