@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,30 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from polyarb.observation.scanner import list_all_recipes, run_recipe, run_recipe_grouped
+
+
+def _sanitize_for_json(value: Any) -> Any:
+    """Recursively replace NaN / +Inf / -Inf with None for strict JSON encoding.
+
+    GAP-202 (Phase 03.1 Plan 07): Starlette's JSONResponse renders with
+    `json.dumps(..., allow_nan=False)` per RFC 8259 strict mode. Per-row recipe
+    outputs (spread, mid_price) can contain NaN when bid/ask are missing, which
+    crashes the response render with HTTP 500.
+
+    JSON null is the canonical fix (matches pandas → JSON via orient='records'
+    when handled explicitly; matches what consumers like Pandas/jq already do).
+    Applied only to leaf floats; container types are walked. Cheap O(n) on row
+    counts we cap at 100, so no perf concern.
+    """
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, dict):
+        return {k: _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_for_json(v) for v in value]
+    return value
 
 
 async def scan(request: Request) -> JSONResponse:
@@ -80,11 +105,13 @@ async def scan(request: Request) -> JSONResponse:
     except sqlite3.OperationalError as e:
         return JSONResponse({"error": f"database error: {str(e)[:200]}"}, status_code=500)
 
+    # GAP-202: sanitize NaN/Inf → None before JSONResponse render (strict-JSON mode).
+    rows = _sanitize_for_json(df.head(100).to_dict(orient="records"))
     return JSONResponse(
         {
             "recipe": recipe_name,
             "row_count": len(df),
-            "rows": df.head(100).to_dict(orient="records"),
+            "rows": rows,
         }
     )
 

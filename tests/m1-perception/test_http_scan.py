@@ -189,3 +189,46 @@ recipes:
         assert any(kw in error_msg for kw in ["forbidden", "layer 2", "validation"]), (
             f"Expected Layer 2 / forbidden / validation error, got: {e}"
         )
+
+
+def test_nan_in_rows_renders_as_null(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+    make_signed_request: Any,
+) -> None:
+    """GAP-202 regression: recipes producing NaN floats (e.g. spread when bid/ask missing)
+    must not crash the JSON renderer. NaN/+Inf/-Inf → JSON null.
+
+    Before fix: starlette.JSONResponse uses json.dumps(allow_nan=False) → ValueError → 500.
+    After fix: scan._sanitize_for_json walks the dict and replaces NaN/Inf with None.
+    """
+    from polyarb.storage.sqlite_store import SQLiteStore
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    body = {"recipe_name": "near-end", "params": {}}
+
+    with patch("polyarb.http.scan.run_recipe") as mock_run_recipe:
+        import pandas as pd
+        mock_run_recipe.return_value = pd.DataFrame(
+            [
+                {"market_id": "m1", "question": "Q?", "spread": float("nan"), "mid_price": 0.5},
+                {"market_id": "m2", "question": "Q2?", "spread": float("inf"), "mid_price": float("-inf")},
+                {"market_id": "m3", "question": "Q3?", "spread": 0.02, "mid_price": 0.55},
+            ]
+        )
+        resp = make_signed_request(http_test_client, "/scan", body)
+
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    payload = resp.json()
+    assert payload["recipe"] == "near-end"
+    assert payload["row_count"] == 3
+    rows = payload["rows"]
+    # NaN → null, +Inf → null, -Inf → null
+    assert rows[0]["spread"] is None
+    assert rows[1]["spread"] is None
+    assert rows[1]["mid_price"] is None
+    # Finite floats untouched
+    assert rows[0]["mid_price"] == 0.5
+    assert rows[2]["spread"] == 0.02
+    assert rows[2]["mid_price"] == 0.55
