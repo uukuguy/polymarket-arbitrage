@@ -887,6 +887,103 @@ chaos-l2-inj4:
 	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'l2_tob rows last 60s='||count(*) FROM l2_top_of_book WHERE ts > now() - interval '60 seconds'"
 .PHONY: chaos-l2-inj4
 
+## chaos-l2-inj4-throughput: Phase 04 D-05/D-06 — real candidate-scale WS storm + throughput verdict
+##
+## Extends chaos-l2-inj4 with baseline-then-threshold throughput measurement.
+## Repays the Phase 03.1 Inj L2-4 instrumentation debt ("3-asset bootstrap is
+## small enough that WS storm is really WS close + reconnect — no genuine
+## storm rate"). Runs LOCALLY on the dev host (curl/jq on macOS), targeting
+## the public polyarb-l2.fly.dev endpoints — no python:3.12-slim image-tool
+## gap applies. Requires `jq` locally (Homebrew default); RSS is read via
+## `flyctl ssh console -C 'cat /proc/1/status'` (procfs exists in any Linux
+## image — no Dockerfile change needed, image-aware safe per docs/dev/chaos-toolkit.md).
+##
+## Sequence (8 steps, ~7 min wall clock):
+##   1. precondition: /healthz 200
+##   2. precondition: ws:subscribed_count > 3 (confirms D-01 Supabase swap is
+##      effective in prod; aborts if still <= 3 bootstrap assets — would
+##      degrade to Phase 03.1 logic-only test)
+##   3. baseline T1: frame_count + ws state + RSS @ T=0
+##   4. wait 5min for baseline frame rate accumulation
+##   5. baseline T2: frame_count + RSS @ T=5min — yields baseline rate +
+##      baseline RSS (the operator computes deltas from the JSON snapshots
+##      saved to /tmp under known names)
+##   6. storm: FLY_API_TOKEN= flyctl secrets set POLYARB_WS_TEST_KILL=1
+##   7. wait 60s, then recovery: frame_count + ws state + RSS @ T=storm+60s
+##   8. cleanup: FLY_API_TOKEN= flyctl secrets unset POLYARB_WS_TEST_KILL
+##
+## D-06 PASS criteria (RESEARCH Q4 baseline-then-threshold):
+##   (1) frame_rate_recovery >= frame_rate_baseline * 0.90  → "zero dropped frames"
+##   (2) watchdog state == WAITING_FOR_EVENT within 60s of cleanup
+##   (3) rss_recovery <= rss_baseline * 1.30                → memory within 30%
+##
+## Verdict is HUMAN-VERIFY (Task 3 checkpoint): the recipe emits the raw
+## numbers and the operator records the pass/fail line in 04-SOAK-LOG.md.
+## Snapshots are written to /tmp/inj4t-{t1,t2,t3}.json so the operator can
+## diff after the run without re-curling.
+##
+## ALL flyctl invocations carry the `FLY_API_TOKEN= ` prefix (Pitfall 5 /
+## fly-api-token-shadowing memory) — do NOT remove on a refactor pass.
+chaos-l2-inj4-throughput:
+	@echo "=== Inj L2-4-throughput: real candidate set WS storm ($$(date -u +%FT%TZ)) ==="
+	@command -v jq >/dev/null 2>&1 || { echo "ABORT: jq not found on dev host (brew install jq)"; exit 1; }
+	@echo "→ Step 1: Precondition /healthz must be 200"
+	@HZ=$$(curl -sS -o /dev/null -w '%{http_code}' https://polyarb-l2.fly.dev/healthz); \
+	if [ "$$HZ" != "200" ]; then echo "ABORT: /healthz=$$HZ (expected 200)"; exit 1; fi; \
+	echo "→ /healthz=200 OK"
+	@echo "→ Step 2: Precondition ws:subscribed_count > 3 (confirms D-01 swap deployed)"
+	@N=$$(curl -sS https://polyarb-l2.fly.dev/health | jq -r '.checks["ws:subscribed_count"][0].observedValue // 0'); \
+	if [ "$${N:-0}" -le 3 ]; then \
+		echo "ABORT: ws:subscribed_count=$$N (<=3) — D-01 Supabase swap not effective in prod;"; \
+		echo "  investigate Plan 02 deployment + candidates:supabase_fetch_age_seconds /health row before chaos."; \
+		exit 1; \
+	fi; \
+	echo "→ ws:subscribed_count=$$N (> 3 confirmed)"
+	@echo "→ Step 3: Baseline T1 snapshot @ $$(date -u +%H:%M:%SZ) → /tmp/inj4t-t1.json"
+	@curl -sS https://polyarb-l2.fly.dev/health > /tmp/inj4t-t1.json
+	@jq '{ts: now, ws_state: .checks["ws:connection_state"][0].observedValue, ws_age_s: .checks["ws:last_event_age_seconds"][0].observedValue, subscribed: .checks["ws:subscribed_count"][0].observedValue}' /tmp/inj4t-t1.json
+	@echo "→ Baseline T1 RSS (procfs via flyctl ssh):"
+	@FLY_API_TOKEN= flyctl ssh console -a polyarb-l2 -C "sh -c 'grep VmRSS /proc/1/status'" 2>/dev/null | tee /tmp/inj4t-t1-rss.txt || echo "RSS-read skipped (ssh unavailable — operator can run flyctl ssh console manually)"
+	@echo ""
+	@echo "→ Step 4: Waiting 5min for baseline frame rate accumulation…"
+	@sleep 300
+	@echo "→ Step 5: Baseline T2 snapshot @ $$(date -u +%H:%M:%SZ) → /tmp/inj4t-t2.json"
+	@curl -sS https://polyarb-l2.fly.dev/health > /tmp/inj4t-t2.json
+	@jq '{ts: now, ws_state: .checks["ws:connection_state"][0].observedValue, ws_age_s: .checks["ws:last_event_age_seconds"][0].observedValue}' /tmp/inj4t-t2.json
+	@echo "→ Baseline T2 RSS (procfs via flyctl ssh):"
+	@FLY_API_TOKEN= flyctl ssh console -a polyarb-l2 -C "sh -c 'grep VmRSS /proc/1/status'" 2>/dev/null | tee /tmp/inj4t-t2-rss.txt || echo "RSS-read skipped"
+	@echo ""
+	@echo "→ Step 6: STORM — set POLYARB_WS_TEST_KILL=1 on polyarb-l2"
+	FLY_API_TOKEN= flyctl secrets set POLYARB_WS_TEST_KILL=1 -a polyarb-l2
+	@echo "→ Waiting 60s for reconnect + recovery…"
+	@sleep 60
+	@echo "→ Step 7: Recovery T3 snapshot @ $$(date -u +%H:%M:%SZ) → /tmp/inj4t-t3.json"
+	@curl -sS https://polyarb-l2.fly.dev/health > /tmp/inj4t-t3.json
+	@jq '{ts: now, ws_state: .checks["ws:connection_state"][0].observedValue, ws_age_s: .checks["ws:last_event_age_seconds"][0].observedValue, chaos_flag: (.checks["chaos:ws_test_kill_flag"][0].status // "absent")}' /tmp/inj4t-t3.json
+	@echo "→ Recovery T3 RSS (procfs via flyctl ssh):"
+	@FLY_API_TOKEN= flyctl ssh console -a polyarb-l2 -C "sh -c 'grep VmRSS /proc/1/status'" 2>/dev/null | tee /tmp/inj4t-t3-rss.txt || echo "RSS-read skipped"
+	@echo ""
+	@echo "→ Step 8: CLEANUP — unset POLYARB_WS_TEST_KILL"
+	FLY_API_TOKEN= flyctl secrets unset POLYARB_WS_TEST_KILL -a polyarb-l2
+	@sleep 30
+	@echo "→ Final /health (expect overall=pass / HTTP 200):"
+	@curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://polyarb-l2.fly.dev/health
+	@curl -sS https://polyarb-l2.fly.dev/health | jq '.status, (.checks | has("chaos:ws_test_kill_flag"))'
+	@echo ""
+	@echo "=== Throughput verdict (operator records in 04-SOAK-LOG.md) ==="
+	@echo "  Snapshots: /tmp/inj4t-t1.json /tmp/inj4t-t2.json /tmp/inj4t-t3.json"
+	@echo "  RSS files: /tmp/inj4t-t{1,2,3}-rss.txt"
+	@echo "  Compute:"
+	@echo "    baseline_frame_rate = (?frame_count source — see below)"
+	@echo "    recovery vs baseline ratio against D-06 criteria:"
+	@echo "      (1) frame_rate_recovery >= baseline*0.90"
+	@echo "      (2) ws_state == WAITING_FOR_EVENT within 60s ?"
+	@echo "      (3) rss_recovery <= rss_baseline*1.30 ?"
+	@echo "  Note: frame_count is exposed via consumer.frame_count; if /health"
+	@echo "  does not surface it yet, read directly: flyctl ssh console -a polyarb-l2 -C"
+	@echo "  'python -c \"import requests;print(requests.get(\\\"http://localhost:8080/health\\\").json())\"'"
+.PHONY: chaos-l2-inj4-throughput
+
 ## chaos-l2-inj5-dryrun: Replay recorded 429 fixture against backfill code locally (no Polymarket calls)
 ##
 ## Live Inj L2-5 (real Polymarket /trades 429) is deferred per 03.1-CONTEXT.md

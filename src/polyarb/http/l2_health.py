@@ -157,6 +157,34 @@ def _build_l2_health_checks(
         }]
         overall = _severity(overall, age_status)
 
+    # ── Check 2b: ws:subscribed_count ──────────────────────────────────────
+    # Phase 04 Plan 04 Task 2 — operator-visibility surface for the
+    # candidate set size driving WS subscriptions. Needed by
+    # `make chaos-l2-inj4-throughput` as the precondition gate: a candidate
+    # count of <= 3 means Plan 02's Supabase data-source swap is not
+    # effective in prod (only bootstrap asset_ids), so the throughput chaos
+    # would degrade to the Phase 03.1 Inj L2-4 logic-only test all over
+    # again. The Makefile aborts when this number is <= 3.
+    #
+    # Status is purely informational (pass) — health pass/fail for the WS
+    # connection itself is driven by ws:connection_state above. This
+    # sub-check is read by chaos/operator tooling, not the alerting path.
+    if ws_consumer is not None:
+        try:
+            subscribed = getattr(ws_consumer, "subscribed_assets", []) or []
+            sub_count = len(subscribed)
+        except Exception:  # noqa: BLE001 — fail-soft on /health read
+            sub_count = 0
+        checks["ws:subscribed_count"] = [{
+            "componentId": "ws-consumer",
+            "componentType": "websocket",
+            "observedValue": sub_count,
+            "observedUnit": "assets",
+            "status": "pass",
+            "output": f"{sub_count} assets currently subscribed",
+            "time": _utc_now_iso(),
+        }]
+
     # ── Check 3: event_bus:listener_state ──────────────────────────────────
     if event_listener is None:
         checks["event_bus:listener_state"] = [{

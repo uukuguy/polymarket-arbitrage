@@ -18,3 +18,4 @@ confirmed via `git stash` regression check.
 literal `127.0.0.1:$PORT/health` plus require `POLYARB_HTTP_PORT:-19080` default,
 or (b) make the Makefile recipe emit a literal port for the dry-run check.
 **Suggested owner:** `/gsd-quick` after Phase 04 closure.
+- 2026-05-28 (04-04 executor): pre-existing failure `tests/m1-perception/test_makefile_contract.py::test_make_smoke_health_local_dry_run_recipe` — asserts hardcoded `127.0.0.1:8080` but Makefile uses `$PORT` default 19080. Out of scope for Plan 04-04 (test is stale, not blocking 04-04 work).
