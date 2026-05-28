@@ -44,6 +44,15 @@ _RECONNECTING_FAIL_S = 60
 _MIRROR_PASS_S_DEFAULT = 300   # default warn threshold (override via settings.l2_tob_age_warn_s)
 _MIRROR_FAIL_S_DEFAULT = 600   # default fail threshold (override via settings.l2_tob_age_fail_s)
 
+# Phase 04 Plan 02 Task 3 — candidates:supabase_fetch_age_seconds thresholds.
+# The default refresh debounce is 60s (REFRESH_DEBOUNCE_S), so:
+#   warn at 2× debounce (120s)  → "fetch slipping a window"
+#   fail at 10× debounce (600s) → "sustained Supabase outage; freeze candidate set"
+# These are reasonable defaults; expose via settings only if a future chaos
+# knob needs them (no env override today, keep API surface narrow).
+_CANDIDATES_FETCH_WARN_S = 120
+_CANDIDATES_FETCH_FAIL_S = 600
+
 
 def _utc_now_iso() -> str:
     """Current UTC timestamp in ISO 8601 format with Z suffix."""
@@ -253,6 +262,76 @@ def _build_l2_health_checks(
     # else: case (a) — supabase_url also empty → no sub-check (correct,
     # operator opted out of Supabase entirely; reporting fail would be a
     # false alarm).
+
+    # ── Check 4b: candidates:supabase_fetch_age_seconds — D-01 chain-truth ─
+    # Phase 04 Plan 02 Task 3. The Supabase markets_latest fetch driving
+    # `compute_candidates` is fail-soft (last-known rows on failure). Without
+    # a /health surface, a sustained outage would silently freeze the
+    # candidate set — the exact Inj L2-2 dead-code-gate failure pattern
+    # (feedback_code-vs-chain-truth-2026-05). This sub-check reads a field
+    # the fetch path REALLY mutates: `_last_fetch_success_at_s` updated on
+    # every successful fetch via `_record_fetch_success()`. Cold-start
+    # (None) is `warn`, NOT `fail` — boot must not be a health alarm.
+    #
+    # Gated identically to the mirror sub-check above:
+    #   case (a) supabase_url empty                  → skip (no signal needed)
+    #   case (b) supabase_url set, service_key empty → registered as warn
+    #            (candidates path will not run at all; mirror gate already
+    #             surfaces the config mistake as fail — we add a soft warn
+    #             here too so the candidates row exists in /health output)
+    #   case (c) both set → real age-based pass/warn/fail logic
+    if _supabase_url:
+        # Read the write-side state via the public getter (chain-truth §1.6 —
+        # this is not a dead-code config flag; it is the same field
+        # _record_fetch_success() writes after every successful fetch).
+        try:
+            from polyarb.observation.l2_candidate_refresh import (
+                get_last_fetch_success_at_s,
+            )
+
+            last_fetch_at = get_last_fetch_success_at_s()
+        except Exception as e:  # noqa: BLE001 — fail-soft on /health read
+            logger.warning(f"candidates fetch age check failed (fail-soft): {e!r}")
+            last_fetch_at = None
+            fetch_status = "warn"
+            fetch_age: float | None = None
+            fetch_output: str | None = f"check error: {e!r}"
+        else:
+            if not _service_key_val:
+                # Case (b): URL configured but no key → candidates path never runs.
+                # mirror sub-check already FAILs above; we warn here so the
+                # candidates row is present in /health output (operator visibility).
+                fetch_status = "warn"
+                fetch_age = None
+                fetch_output = "supabase service_key empty — candidates fetch disabled"
+            elif last_fetch_at is None:
+                # Cold-start: never fetched. Warn (NOT fail) on boot.
+                fetch_status = "warn"
+                fetch_age = None
+                fetch_output = "cold-start: never fetched"
+            else:
+                fetch_age = now_s - float(last_fetch_at)
+                if fetch_age >= _CANDIDATES_FETCH_FAIL_S:
+                    fetch_status = "fail"
+                elif fetch_age >= _CANDIDATES_FETCH_WARN_S:
+                    fetch_status = "warn"
+                else:
+                    fetch_status = "pass"
+                fetch_output = (
+                    f"last fetch {fetch_age:.0f}s ago "
+                    f"(warn>={_CANDIDATES_FETCH_WARN_S}s, "
+                    f"fail>={_CANDIDATES_FETCH_FAIL_S}s)"
+                )
+        checks["candidates:supabase_fetch_age_seconds"] = [{
+            "componentId": "l2-candidate-refresh",
+            "componentType": "candidate-set",
+            "observedValue": round(fetch_age, 1) if fetch_age is not None else None,
+            "observedUnit": "s",
+            "status": fetch_status,
+            "output": fetch_output,
+            "time": _utc_now_iso(),
+        }]
+        overall = _severity(overall, fetch_status)
 
     # ── Check 5: chaos:ws_test_kill_flag (Phase 03.1-06 W-5 chain-truth) ────
     # Plan 03 codified the rule: every fail-soft / chaos primitive MUST surface
