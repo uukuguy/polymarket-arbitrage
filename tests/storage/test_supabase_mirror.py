@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import os
 
-import pytest
-
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 

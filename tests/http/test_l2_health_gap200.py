@@ -75,11 +75,13 @@ def test_both_empty_no_subcheck() -> None:
     configure Supabase at all, so reporting fail would be a false alarm)."""
     from polyarb.config import Settings
 
-    settings = Settings(supabase_url="", supabase_service_key="")
+    from pydantic import SecretStr
+
+    settings = Settings(supabase_url="", supabase_service_key=SecretStr(""))
     # Sanity: model_validator did NOT auto-enable the mirror flag.
     assert settings.l2_mirror_enabled is False
 
-    checks, _overall = _call_health_checks(settings)
+    checks, _ = _call_health_checks(settings)
 
     assert "mirror:l2_tob_age_seconds" not in checks, (
         "case (a): both empty must NOT register mirror sub-check "
@@ -101,11 +103,13 @@ def test_url_set_key_empty_registers_fail() -> None:
     Inverse of the Phase 03.1 L4 lesson — fail-soft surfaces have to reach
     /health, not just logs / breadcrumbs.
     """
+    from pydantic import SecretStr
+
     from polyarb.config import Settings
 
     settings = Settings(
         supabase_url="https://x.supabase.co",
-        supabase_service_key="",
+        supabase_service_key=SecretStr(""),
     )
     # Sanity: model_validator did NOT auto-enable l2_mirror_enabled because
     # the AND condition requires BOTH url AND key non-empty (config.py:238).
@@ -144,7 +148,7 @@ def test_url_set_key_empty_registers_fail() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_both_set_existing_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_both_set_existing_behavior() -> None:
     """Case (c) parity: both url+key SET → existing age sub-check runs.
 
     With cold-start (get_l2_tob_last_mirror_at_s returns None), the existing
@@ -152,18 +156,20 @@ def test_both_set_existing_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
     three-branch refactor preserves the case-(c) body unchanged. Full
     pass/warn/fail/borderline coverage lives in the m1-perception suite.
     """
+    from pydantic import SecretStr
+
     from polyarb.config import Settings
     from polyarb.http.l2_health import _build_l2_health_checks
 
     settings = Settings(
         supabase_url="https://x.supabase.co",
-        supabase_service_key="some-key",
+        supabase_service_key=SecretStr("some-key"),
     )
     assert settings.l2_mirror_enabled is True
 
     store = MagicMock()
     store.get_l2_tob_last_mirror_at_s.return_value = None  # cold start
-    checks, _overall = _build_l2_health_checks(
+    checks, _ = _build_l2_health_checks(
         store, settings, ws_consumer=None, event_listener=None, now_s=time.time()
     )
 
