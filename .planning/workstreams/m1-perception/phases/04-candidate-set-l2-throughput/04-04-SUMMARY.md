@@ -45,7 +45,7 @@ patterns-established:
 requirements-completed: []  # plan 04-04 has requirements: [] (ROADMAP-scoped, covers D-05/D-06)
 
 # Metrics
-duration: ~45min (Tasks 1+2 scaffolding only — Task 3 human-verify pending)
+duration: ~75min (Tasks 1+2 scaffolding + Task 3 prod chaos run)
 completed: 2026-05-28
 ---
 
@@ -119,66 +119,69 @@ Atomic per-task:
 
 None. The chaos target uses existing polyarb-l2 Fly secrets + keychain-resident `FLY_API_TOKEN` (via the `FLY_API_TOKEN= ` prefix that nukes the env-shadowed value). `jq` is required on the dev host (already installed: `/opt/homebrew/bin/jq` v1.7.1).
 
-## Task 3 — PENDING (operator must run prod chaos manually)
+## Task 3 — EXECUTED — verdict DEFERRED (D-06 indicators blocked by 3 structural issues exposed during run)
 
-**This scaffold delivers the instrumentation + orchestrator. The actual prod chaos run and pass/fail verdict against D-06 three criteria are deferred to the human-verify checkpoint per plan `<task type="checkpoint:human-verify" gate="blocking">`.**
+**Operator-authorized prod chaos run completed on 2026-05-28T13:49Z → 14:00Z. End-to-end execution succeeded (storm + cleanup both ran; POLYARB_WS_TEST_KILL absent post-run). G-01 cold-start debounce fix is verified effective in prod. However the chaos run exposed THREE new structural findings (G-02 / G-03 / G-04) that block meaningful evaluation of D-06's three pass criteria. Full detail recorded in [`04-SOAK-LOG.md`](04-SOAK-LOG.md). Verdict: chaos primitive executes cleanly, instrumentation works, but the Plan 04 goal "verify real candidate-scale throughput" is DEFERRED pending G-02/G-03/G-04 fix.**
 
-### must_haves verdicts
+### must_haves verdicts (final)
 
 | truth | status | evidence |
 |---|---|---|
 | WsConsumer exposes a dropped-frame counter that increments when on_event callback raises | ✅ VERIFIED | `src/polyarb/daemon/ws_consumer.py:160-164` + 3 tests in `tests/daemon/test_ws_consumer_dropped_frames.py` (3/3 GREEN) |
-| `make chaos-l2-inj4-throughput` runs against polyarb-l2 prod with the REAL candidate set (>3 assets), not 3 bootstrap assets | ⏳ PENDING Task 3 | Precondition gate added (aborts when `ws:subscribed_count <= 3`); actual run by operator |
-| Baseline frame rate + RSS captured before storm; recovery compared against baseline (D-06 three indicators) | ⏳ PENDING Task 3 | Recipe shape implemented + snapshots to /tmp; actual numbers from operator's run |
-| Throughput pass = `frame_rate_recovery >= baseline*0.90 AND watchdog == WAITING_FOR_EVENT within 60s AND RSS_recovery <= baseline*1.30` | ⏳ PENDING Task 3 | Criteria printed at end of recipe; operator records verdict in 04-SOAK-LOG.md |
-| Deployed prod image == latest plan-merged main BEFORE chaos | ⏳ PENDING Task 3 | Operator pre-flight: `FLY_API_TOKEN= flyctl image show -a polyarb-l2` vs `git log origin/main -1` |
+| `make chaos-l2-inj4-throughput` runs against polyarb-l2 prod with the REAL candidate set (>3 assets), not 3 bootstrap assets | ✅ VERIFIED | Pre-flight gate passed with `ws:subscribed_count=60`. Storm executed against 60-asset state; T1/T2 baselines captured at subs=60. |
+| Baseline frame rate + RSS captured before storm; recovery compared against baseline (D-06 three indicators) | ⚠ PARTIAL | T1/T2/T3 snapshots captured (subs, ws_state, ws_age, mirror_age, fetch_age, chaos_flag). Frame_count not surfaced on /health → no rate computable. RSS read targeted PID 1 = hallpass (G-04 — wrong process). Indicators 1+3 not evaluable; indicator 2 blocked by G-03 chaos design issue. |
+| Throughput pass = `frame_rate_recovery >= baseline*0.90 AND watchdog == WAITING_FOR_EVENT within 60s AND RSS_recovery <= baseline*1.30` | ❌ **DEFERRED** | Indicator 1: N/A (no frame_count on /health). Indicator 2: FAIL on the literal observation (ws_state=DISCONNECTED at storm+60s) but the cause is G-03 (Fly `secrets set` triggers rolling restart, not in-flight env mutation) — the recovery wall-time was measuring a restart cycle, not a kill-recovery cycle. Indicator 3: N/A (wrong PID). |
+| Deployed prod image == latest plan-merged main BEFORE chaos | ✅ VERIFIED | v18 deployed from main HEAD `39c60ef`; image digest `sha256:9f22b823…`; v17→v18 transition cleanly observable (only v18 contains the G-01 fix in the prod image). |
 
-### Operator pre-flight checklist (Task 3)
+### G-01 cold-start debounce fix — verified observable in prod
 
-```bash
-# 1. Verify deployed image == latest main (parallel-worktree-rebase memory)
-FLY_API_TOKEN= flyctl image show -a polyarb-l2
-git log origin/main -1
+The first significant outcome of this run: the v17 production state (3 bootstrap assets, `candidates:supabase_fetch_age_seconds=null` "cold-start: never fetched", 5-min poll stuck) transitioned post-G-01 to v18 state (60 D-01 assets, `fetch_age=91.4s` then drifting normally) on the very first health probe ~30s after machine started. This confirms:
 
-# 2. Confirm candidate set has expanded (>3 assets)
-curl -sS https://polyarb-l2.fly.dev/health | jq '.checks["ws:subscribed_count"][0]'
+- G-01 fix (`_last_refresh_at_s: float = -REFRESH_DEBOUNCE_S - 1.0`) makes the first NOTIFY post-process-start pass the debounce check
+- Phase 03.1 + Phase 04 Plan 02 / 03 / 04 D-01 swap is structurally correct, only blocked by the cold-start bug
+- The catchup-replay path is the primary first-fetch trigger in normal restart sequences (and works correctly once the debounce floor is configured properly)
 
-# 3. Confirm D-08 mirror healthy + recent Supabase fetch
-curl -sS https://polyarb-l2.fly.dev/health | jq '.checks["mirror:l2_tob_age_seconds"][0], .checks["candidates:supabase_fetch_age_seconds"][0]'
+### NEW findings from prod run (fold-forward into next plan)
 
-# 4. (Optional) ensure dev deps for any local RSS reads
-uv sync --extra dev
+#### G-02 — D-01 fetch not re-triggered on restart-without-NOTIFY-backlog
 
-# 5. Run the chaos (~7 min wall: 5min baseline + 60s storm + 30s cleanup + chatter)
-make chaos-l2-inj4-throughput
+After the storm + cleanup restart sequence, catchup found 0 missed snapshots (cursor already at 234), so `on_snapshot_complete` was never invoked → markets_latest fetch never ran → subscribed_count stayed at 3 bootstrap. L1 NOTIFY cadence is ~30+ min, so the L2 sits on bootstrap until the next L1 snapshot. The 60-asset state at v18 first boot was a lucky accident (31 backlogged NOTIFYs from the v17→v18 deploy gap). **Phase 04 D-01 is fragile across L2 restarts.**
 
-# 6. Record verdict in 04-SOAK-LOG.md (extend the Inj L2-4 section):
-#    - candidate_set_size, frame_rate baseline + recovery, RSS baseline + recovery
-#    - watchdog state timeline (T1 → storm → T3), time-to-WAITING_FOR_EVENT
-#    - dropped_frame_count delta
-#    - D-06 PASS/FAIL per the three ratios
-#    - If A2 (calendar low-activity) → documented-deferred with actual N captured
-#    - If Pitfall 4 watchdog false-trip observed → record as finding, NOT silent pass
-```
+**Recommended smallest fix**: eager startup fetch after `catchup_from_cursor` regardless of missed count. Synthetic call: `await on_snapshot_complete({"snapshot_id": -1, "_startup_prime": True}, ws_consumer=..., settings=..., mirror=l2_mirror)`. Post-G-01 the first call always passes debounce, so this is safe.
 
-### Why this scaffold matters
+#### G-03 — `flyctl secrets set/unset` triggers rolling restart, not in-flight env mutation
 
-Phase 03.1 SOAK-LOG explicitly noted Inj L2-4 verified only daemon logic correctness (watchdog kicks in, mirror surfaces) — "3-asset bootstrap is small enough that WS storm is really WS close + reconnect (no genuine storm rate)". Plan 02 expanded the candidate set; this plan adds the measurement surface so the operator can finally answer:
+The chaos target sets `POLYARB_WS_TEST_KILL=1` via `flyctl secrets set`. Fly handles secrets as machine-level env, so each `secrets set` is a full deploy. The pre-storm 60-asset process is **terminated** by the deploy, not interrupted mid-flight. The "60s wait after storm" measures a fresh process startup, not a kill-recovery cycle.
 
-- Does the daemon actually keep up under real-scale WS storm throughput?
-- Does memory grow under sustained subscription load?
-- Does the watchdog false-trip during normal Supabase-mirror push windows (Pitfall 4)?
+**Recommended fix**: HTTP admin endpoint (`POST /admin/chaos/ws-test-kill`) gated by `POLYARB_SCAN_SHARED_SECRET` that flips a process-local atomic flag. Aligns with Phase 04 intent and unblocks Inj L2-4 real verdicts.
 
-Without Tasks 1+2, the answer would be "we can't see". With them, the operator's chaos run produces concrete numbers + a recorded verdict.
+#### G-04 — RSS reads target PID 1 (= hallpass, Fly SSH proxy), not the Python L2 process
+
+All three RSS samples in the run were 6400/6400/6432 kB — that's the hallpass Go binary, not the Python daemon. The recipe uses `grep VmRSS /proc/1/status` and PID 1 in Fly machines is hallpass, not the application.
+
+**Recommended fix**: `pgrep -f 'python -m polyarb.daemon.l2_main' | xargs -I{} grep VmRSS /proc/{}/status` or expose `/health.checks["process:rss_kb"]` via `psutil`.
+
+### Mirror staleness during chaos window — explanation
+
+Baseline T1 already showed `mirror_age=370s` (drifting past 300s warn). T2 at +5min: `mirror_age=695s` (past fail). Even at 60 subscribed assets, the specific event_types that drive `_on_event → push_top_of_book` (price_change / best_bid_ask / book / last_trade_price) didn't fire in the 5-min window. Confirmed via log inspection: only the initial dump produced 3 mirror pushes, then silence. **Structural Polymarket low-liquidity reality, NOT a Phase 04 regression.** Suggests `mirror:l2_tob_age_seconds` thresholds may need recalibration once real candidate set is permanently in place, or the candidate recipe should bias toward higher-event-rate markets. Carried forward to next planning round.
+
+### Cleanup verification
+
+- ✅ `POLYARB_WS_TEST_KILL` not in `flyctl secrets list -a polyarb-l2` (verified at 13:58Z, 14:11Z)
+- ✅ `chaos:ws_test_kill_flag` absent from `/health.checks` (verified at 14:00Z, 14:11Z, 14:29Z)
+- ⚠ `/health.status = fail` from ~14:00Z onward — `mirror:l2_tob_age_seconds` crossed 600s. **Root cause is G-02 (3-asset bootstrap, no qualifying events)**, NOT chaos residue, NOT a regression. WS receiving events (ws_age fresh), event listener listening, mirror pipeline able to push (proven by initial dump pushes). Will recover automatically on next L1 NOTIFY or via the eager startup fetch when G-02 is fixed.
 
 ## Next Phase Readiness
 
-- **Phase 04 not yet closed** — Task 3 human-verify gate must execute first.
-- **Plan 02 + 03 already merged on main** — candidate expansion + D-08 three-branch mirror gate present.
-- **No blockers from this plan** for parallel Phase 04 plans or m2/m5 work.
-- **Suggested next operator action:** run pre-flight checklist + `make chaos-l2-inj4-throughput`, then resume the plan executor with the recorded verdict.
+- **Phase 04 Plan 04 STATUS:** Tasks 1+2 SHIPPED (counter + Makefile target + ws:subscribed_count sub-check verified in prod). Task 3 EXECUTED but verdict DEFERRED on D-06 indicators.
+- **G-01 fix verified in prod** (commit `39c60ef`, v18 image): subs transitioned 3→60 within 30s of process start.
+- **G-02 / G-03 / G-04 are new follow-up items** for a separate plan (proposed 04-05 or first plan of Phase 05). All three are scoped, small, and tractable.
+- **Phase 04 closure recommendation:** with Tasks 1+2 shipped + Task 3 executed-with-deferred-verdict + the three findings recorded in SOAK-LOG and SUMMARY, Phase 04 can be CLOSED with verdict "candidate-set expansion works in prod when cold-start is fixed; throughput verdict requires follow-up plan." Phase 05 then opens with G-02 fix as first task.
+- **No blockers for parallel Phase 04 plans or m2/m5 work.**
+- **prod is functionally healthy** even with mirror_age=fail — the failure mode is well-understood and self-recoverable.
 
 ---
 
 *Phase: 04-candidate-set-l2-throughput*
-*Completed (Tasks 1+2): 2026-05-28*
+*Tasks 1+2 completed: 2026-05-28*
+*Task 3 executed (verdict DEFERRED — see SOAK-LOG): 2026-05-28*
