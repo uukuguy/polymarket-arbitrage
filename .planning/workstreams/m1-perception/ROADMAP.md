@@ -211,9 +211,9 @@ Plans (revised 2026-05-26 SESSION 28 post-checker — 5 waves, Wave 1 & Wave 3 p
 > ADDED 2026-05-28 (SESSION 30) — Phase 03.1 chaos 多处"低负载只验逻辑不验 throughput"的明确欠账 + Phase 02/03 投影 gap + GAP-200。
 
 **Goal:** 把 polyarb-l2 candidate set 从 3 个 bootstrap asset_ids 扩到真实规模（compute_candidates 改读 Supabase `markets_latest` 而非本地 SQLite，解决跨容器读不到的限制），在真实负载下验证 WS storm / watchdog throughput（补 Phase 03.1 Inj L2-4 只验逻辑的欠账），并收尾两个投影 gap（`markets_latest.yes_token_id` 补列 + GAP-200 config-disable 也 surface 成 chain-truth）。
-**Status:** 🔵 Ready to discuss
+**Status:** 🟢 Plans ready (4 plans across 3 waves; planned 2026-05-28 SESSION 30)
 **Depends on:** Phase 03.1 (closed 2026-05-27) + Supabase `markets_latest` schema（Phase 02 mirror 投影）
-**Plans:** 0 plans (run /gsd-discuss-phase 04 then /gsd-plan-phase 04)
+**Plans:** 4 plans
 
 Scope (候选, discuss-phase 决):
 - **candidate set 扩容**: compute_candidates 改 Supabase `markets_latest` 查询（当前需 L1 SQLite 本地访问，跨容器读不到 — memory CURRENT-CALL）
@@ -221,8 +221,13 @@ Scope (候选, discuss-phase 决):
 - **L2 throughput 验证**: 真实 candidate scale 下重跑 WS storm / watchdog（Phase 03.1 Inj L2-4 只在 3-asset 低负载验了逻辑，没验 throughput）
 - **GAP-200**: config-disable mirror 也 surface 成 chain-truth（service_key empty 时 /health 仍注册 mirror sub-check status=fail）
 
-Plans:
-- [ ] TBD (run /gsd-discuss-phase 04 → /gsd-plan-phase 04 to break down)
+Plans (4 plans, 3 waves — D-01/02/03 是数据源切换前提, D-07/D-08 独立可并行):
+- [ ] 04-01-PLAN.md — Wave 1 (autonomous: false — [BLOCKING] alembic push needs live DSN): D-07 markets_latest.yes_token_id nullable column (Alembic 004 add-only + push) + supabase_mirror narrow projection 补列
+- [ ] 04-03-PLAN.md — Wave 1 (autonomous, parallel w/ 01): D-08 GAP-200 /health three-branch mirror gate (config-disable surface as chain-truth)
+- [ ] 04-02-PLAN.md — Wave 2 (autonomous, depends 01): D-01/D-02/D-03/D-04 数据源切换核心 — Supabase markets_latest 分页拉取 + 命名临时 SQLite 适配层(fail-loud) + compute_candidates fail-soft + candidates fetch-age /health 链 (RESEARCH 覆盖: 命名临时文件非 :memory:; 必须分页)
+- [ ] 04-04-PLAN.md — Wave 3 (checkpoint: human-verify, depends 02): D-05/D-06 真实 candidate scale prod throughput chaos — WsConsumer dropped-frame counter + chaos-l2-inj4-throughput Makefile target + baseline/storm/recovery verdict (补 Inj L2-4 throughput 欠账)
+
+Makefile targets delivered: `chaos-l2-inj4-throughput` (Plan 04). `supabase-migrate` (existing, reused by Plan 01 D-07 push).
 
 ### Phase 05: WS /book + /prices 增量推送
 
