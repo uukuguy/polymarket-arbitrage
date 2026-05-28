@@ -20,8 +20,6 @@ import os
 import sqlite3
 from pathlib import Path
 
-import pytest
-
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 

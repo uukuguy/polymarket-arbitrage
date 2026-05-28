@@ -82,13 +82,47 @@ def _create_minimal_sqlite(db_path: Path, markets: list[dict]) -> None:
     con.close()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_supabase_env(monkeypatch):
+    """Phase 04 Plan 02 — D-01 isolation: ensure tests don't pick up live Supabase
+    credentials from .env. Without this, the Phase 04 fetch path in
+    `on_snapshot_complete` would make real network calls during unit tests and
+    consume monotonic ticks via httpx internals (breaking time-patched tests
+    like test_refresh_debounce_60s).
+
+    Individual tests that need to exercise the fetch path mock create_client +
+    _fetch_all_markets_latest explicitly; they should NOT rely on real env.
+    """
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+    for var in (
+        "POLYARB_SUPABASE_URL",
+        "POLYARB_SUPABASE_SERVICE_KEY",
+        "POLYARB_SUPABASE_DB_DSN",
+        "POLYARB_L2_MIRROR_ENABLED",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
 @pytest.fixture
 def settings_with_db(tmp_path):
-    """Settings with db_path pointing at the tmp_path SQLite."""
+    """Settings with db_path pointing at the tmp_path SQLite.
+
+    Phase 04 Plan 02 — D-01 isolation: explicitly empty supabase_url + service_key
+    so unit tests never hit the live fetch path (which would consume httpx
+    internals' monotonic ticks and break time-patched tests).
+    """
+    from pydantic import SecretStr
+
     db_path = tmp_path / "state.db"
     from polyarb.config import Settings
 
-    s = Settings(db_path=db_path, parquet_root=tmp_path / "snapshots")
+    s = Settings(
+        db_path=db_path,
+        parquet_root=tmp_path / "snapshots",
+        supabase_url="",
+        supabase_service_key=SecretStr(""),
+    )
     return s, db_path
 
 
@@ -559,13 +593,15 @@ def test_fetch_single_page_under_1000():
 
 def _supabase_settings(db_path: Path):
     """Settings with Supabase URL + key + a real (but minimal) db_path fallback."""
+    from pydantic import SecretStr
+
     from polyarb.config import Settings
 
     return Settings(
         db_path=db_path,
         parquet_root=db_path.parent / "snapshots",
         supabase_url="https://x.supabase.co",
-        supabase_service_key="test-key",
+        supabase_service_key=SecretStr("test-key"),
     )
 
 

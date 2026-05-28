@@ -41,11 +41,13 @@ def _reset_fetch_state():
 
 def _settings_with_supabase():
     """Settings instance with Supabase URL + key set (case-c posture)."""
+    from pydantic import SecretStr
+
     from polyarb.config import Settings
 
     return Settings(
         supabase_url="https://x.supabase.co",
-        supabase_service_key="test-key",
+        supabase_service_key=SecretStr("test-key"),
     )
 
 
@@ -133,10 +135,12 @@ def test_fetch_health_stale_fails():
 
 def test_fetch_health_not_registered_when_supabase_unconfigured():
     """When supabase_url is empty, the sub-check is absent (case-a parity)."""
+    from pydantic import SecretStr
+
     from polyarb.config import Settings
     from polyarb.http.l2_health import _build_l2_health_checks
 
-    settings = Settings(supabase_url="", supabase_service_key="")
+    settings = Settings(supabase_url="", supabase_service_key=SecretStr(""))
     store = MagicMock()
     store.get_l2_tob_last_mirror_at_s.return_value = None
 

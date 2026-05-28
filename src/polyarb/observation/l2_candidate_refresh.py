@@ -285,11 +285,14 @@ def _compute_candidates_against(
     watchlist_rows = [r for r in out.values() if r.source == "watchlist"]
     recipe_rows = [r for r in out.values() if r.source == "recipe"]
     # Sort recipe rows by liquidity desc, None-safe (None goes last).
-    recipe_rows.sort(
-        key=lambda r: (
-            -(r.ranking_score.get("liquidity") if r.ranking_score and r.ranking_score.get("liquidity") is not None else -1e18),
-        )
-    )
+    def _liquidity_key(r: CandidateRow) -> tuple[float]:
+        if r.ranking_score:
+            liq = r.ranking_score.get("liquidity")
+            if liq is not None:
+                return (-float(liq),)
+        return (1e18,)  # None / missing → goes last (most-positive key)
+
+    recipe_rows.sort(key=_liquidity_key)
     headroom = max(0, MAX_CANDIDATES - len(watchlist_rows))
     capped_recipes = recipe_rows[:headroom]
     return watchlist_rows + capped_recipes
