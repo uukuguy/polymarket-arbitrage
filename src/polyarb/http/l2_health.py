@@ -386,6 +386,33 @@ def _build_l2_health_checks(
         }]
         overall = _severity(overall, "warn")
 
+    # ── Check 6: process:rss_kb — G-04 (04.1) current-process RSS ───────────
+    # Phase 04 chaos read /proc/1/status (PID-1-hallpass bug — 04-SOAK-LOG
+    # §G-04): PID 1 is the Fly init/shim, not the Python daemon. psutil.Process()
+    # (no arg) = os.getpid() = THIS daemon. Informational (pass) — observability
+    # only, never trips overall (D-04.4). Lazy-import so a missing dep degrades
+    # to warn, not a /health import crash.
+    try:
+        import psutil  # lazy — runtime dep (pyproject), degrade-soft if absent
+        rss_kb = psutil.Process().memory_info().rss / 1024
+        rss_status = "pass"
+        rss_output = f"current-process RSS {rss_kb:.0f} kB (psutil.Process, not PID 1)"
+    except Exception as e:  # noqa: BLE001 — fail-soft on /health read
+        rss_kb = None
+        rss_status = "warn"
+        rss_output = f"rss read unavailable (fail-soft): {e!r}"
+    checks["process:rss_kb"] = [{
+        "componentId": "l2-daemon",
+        "componentType": "system",
+        "observedValue": round(rss_kb, 1) if rss_kb is not None else None,
+        "observedUnit": "kB",
+        "status": rss_status,
+        "output": rss_output,
+        "time": _utc_now_iso(),
+    }]
+    # NOTE: intentionally NO `overall = _severity(overall, rss_status)` —
+    # informational (D-04.4); even the fail-soft warn must not alarm /health.
+
     return checks, overall
 
 
