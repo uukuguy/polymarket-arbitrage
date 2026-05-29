@@ -236,7 +236,7 @@ Makefile targets delivered: `chaos-l2-inj4-throughput` (Plan 04). `supabase-migr
 **Goal:** 修掉 Phase 04 prod chaos 暴露的三个结构性问题，让 D-06 throughput verdict 能在真实 candidate scale 下真正算出来：(1) D-01 fetch 跨 L2 restart 健壮 — restart 落在 NOTIFY 静默窗口也能拿到真实 candidate set（G-02）；(2) chaos primitive 从 "flyctl secrets set = rolling restart" 重设计成 in-flight 注入，让 storm 真测 in-flight kill-recovery 而非 startup（G-03）；(3) RSS 测对 Python L2 进程而非 Fly hallpass（G-04）。修完后 re-run chaos 拿真 D-06 verdict + 补 Pitfall 4 watchdog false-trip 观察（被 G-03 阻塞未观察到）。
 **Status:** 📋 PLANNED (2026-05-29 SESSION 31) — 4 plans, 3 waves
 **Depends on:** Phase 04 (closed 2026-05-29) — G-02/G-03/G-04 findings in 04-SOAK-LOG.md
-**Plans:** 4 plans (3 waves)
+**Plans:** 2/4 plans executed
 
 Scope (locked in 04.1-CONTEXT.md):
 - **G-02 D-01 跨 restart 健壮**: eager startup-prime (catchup 完无条件 dispatch 一次 synthetic prime → markets_latest fetch) — D-01.1 locked
@@ -245,8 +245,8 @@ Scope (locked in 04.1-CONTEXT.md):
 - **D-06 verdict re-run**: 修完三个后重跑 chaos-l2-inj4-throughput 拿真 verdict + 观察 Pitfall 4 watchdog false-trip — D-06 locked
 
 Plans:
-- [ ] 04.1-01-PLAN.md — Wave 1 — G-02 eager startup-prime in l2_main.py (cross-restart candidate-set robustness)
-- [ ] 04.1-02-PLAN.md — Wave 1 — G-04 /health process:rss_kb sub-check + psutil dev→runtime + chaos Makefile RSS via /health
+- [x] 04.1-01-PLAN.md — Wave 1 — G-02 eager startup-prime in l2_main.py (cross-restart candidate-set robustness)
+- [x] 04.1-02-PLAN.md — Wave 1 — G-04 /health process:rss_kb sub-check + psutil dev→runtime + chaos Makefile RSS via /health
 - [ ] 04.1-03-PLAN.md — Wave 2 — G-03 in-band HMAC /control/chaos/ws-test-kill + process-local flag + make chaos-ws-kill (THREAT MODEL)
 - [ ] 04.1-04-PLAN.md — Wave 3 — deploy + prod chaos re-run for real D-06 verdict + Pitfall 4 observation (checkpoint:human-verify)
 

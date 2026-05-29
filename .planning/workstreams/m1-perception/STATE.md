@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 04
+current_phase: 04.1
 status: executing
 stopped_at: Phase 04 context gathered (8 decisions D-01..D-08)
-last_updated: "2026-05-29T14:35:07.345Z"
+last_updated: "2026-05-29T17:06:09.588Z"
 last_activity: 2026-05-29
 progress:
   total_phases: 10
@@ -19,12 +19,12 @@ progress:
 
 ## Current Position
 
-Phase: 04 (candidate-set-l2-throughput) — EXECUTING
+Phase: 04.1 (d01-restart-robustness-chaos-redesign) — EXECUTING
 Plan: 1 of 4
-**Status:** Executing Phase 04
-**Current Phase:** 04
+**Status:** Executing Phase 04.1
+**Current Phase:** 04.1
 **Last Activity:** 2026-05-29
-**Last Activity Description:** Phase 04 execution started
+**Last Activity Description:** Phase 04.1 execution started
 
 ### Roadmap Evolution
 
