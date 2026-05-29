@@ -887,6 +887,30 @@ chaos-l2-inj4:
 	psql "$$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT 'l2_tob rows last 60s='||count(*) FROM l2_top_of_book WHERE ts > now() - interval '60 seconds'"
 .PHONY: chaos-l2-inj4
 
+## chaos-ws-kill: flip the in-flight WS-kill chaos flag on prod L2 (HMAC-gated, no restart).
+##
+## Phase 04.1 G-03: in-band chaos primitive. Sends a signed POST to
+## /control/chaos/ws-test-kill on polyarb-l2.fly.dev, flipping the process-local
+## flag without restarting the Fly machine (the pre-storm 60-asset process survives).
+##
+## Usage:
+##   make chaos-ws-kill ON=1   # enable WS kill (next WS frame triggers disconnect)
+##   make chaos-ws-kill ON=0   # clear flag (normal reconnect continues)
+##
+## Requires POLYARB_SCAN_SHARED_SECRET in .env. Uses openssl + curl (dev host tools
+## — no Fly image tooling needed; image-aware safe per CLAUDE.md).
+##
+## HMAC is computed over the exact body bytes (sha256=<hex>) — any body tamper
+## would invalidate the signature (T-04.1-02 mitigation). Missing/wrong sig → 401.
+chaos-ws-kill:
+	@test -n "$(ON)" || { echo "usage: make chaos-ws-kill ON=1|0"; exit 1; }
+	@set -a; . ./.env; set +a; \
+	  BODY=$$([ "$(ON)" = "1" ] && echo '{"enabled":true}' || echo '{"enabled":false}'); \
+	  SIG=$$(printf '%s' "$$BODY" | openssl dgst -sha256 -hmac "$$POLYARB_SCAN_SHARED_SECRET" | sed 's/^.* //'); \
+	  curl -sS -X POST https://polyarb-l2.fly.dev/control/chaos/ws-test-kill \
+	    -H "X-Signature: sha256=$$SIG" -H 'Content-Type: application/json' -d "$$BODY" | jq .
+.PHONY: chaos-ws-kill
+
 ## chaos-l2-inj4-throughput: Phase 04 D-05/D-06 — real candidate-scale WS storm + throughput verdict
 ##
 ## Extends chaos-l2-inj4 with baseline-then-threshold throughput measurement.
@@ -894,9 +918,12 @@ chaos-l2-inj4:
 ## small enough that WS storm is really WS close + reconnect — no genuine
 ## storm rate"). Runs LOCALLY on the dev host (curl/jq on macOS), targeting
 ## the public polyarb-l2.fly.dev endpoints — no python:3.12-slim image-tool
-## gap applies. Requires `jq` locally (Homebrew default); RSS is read via
-## `flyctl ssh console -C 'cat /proc/1/status'` (procfs exists in any Linux
-## image — no Dockerfile change needed, image-aware safe per docs/dev/chaos-toolkit.md).
+## gap applies. Requires `jq` locally (Homebrew default).
+##
+## Phase 04.1 G-03 update: storm/cleanup now use the in-band HTTP endpoint
+## (make chaos-ws-kill ON=1/0) instead of `flyctl secrets set/unset
+## POLYARB_WS_TEST_KILL`. This means the pre-storm 60-asset process SURVIVES
+## into the storm window — enabling Pitfall 4 watchdog observation.
 ##
 ## Sequence (8 steps, ~7 min wall clock):
 ##   1. precondition: /healthz 200
@@ -908,9 +935,9 @@ chaos-l2-inj4:
 ##   5. baseline T2: frame_count + RSS @ T=5min — yields baseline rate +
 ##      baseline RSS (the operator computes deltas from the JSON snapshots
 ##      saved to /tmp under known names)
-##   6. storm: FLY_API_TOKEN= flyctl secrets set POLYARB_WS_TEST_KILL=1
+##   6. storm: make chaos-ws-kill ON=1 (HMAC endpoint — no restart, same process)
 ##   7. wait 60s, then recovery: frame_count + ws state + RSS @ T=storm+60s
-##   8. cleanup: FLY_API_TOKEN= flyctl secrets unset POLYARB_WS_TEST_KILL
+##   8. cleanup: make chaos-ws-kill ON=0 (clears flag in-band — no restart)
 ##
 ## D-06 PASS criteria (RESEARCH Q4 baseline-then-threshold):
 ##   (1) frame_rate_recovery >= frame_rate_baseline * 0.90  → "zero dropped frames"
@@ -918,12 +945,9 @@ chaos-l2-inj4:
 ##   (3) rss_recovery <= rss_baseline * 1.30                → memory within 30%
 ##
 ## Verdict is HUMAN-VERIFY (Task 3 checkpoint): the recipe emits the raw
-## numbers and the operator records the pass/fail line in 04-SOAK-LOG.md.
+## numbers and the operator records the pass/fail line in 04.1-SOAK-LOG.md.
 ## Snapshots are written to /tmp/inj4t-{t1,t2,t3}.json so the operator can
 ## diff after the run without re-curling.
-##
-## ALL flyctl invocations carry the `FLY_API_TOKEN= ` prefix (Pitfall 5 /
-## fly-api-token-shadowing memory) — do NOT remove on a refactor pass.
 chaos-l2-inj4-throughput:
 	@echo "=== Inj L2-4-throughput: real candidate set WS storm ($$(date -u +%FT%TZ)) ==="
 	@command -v jq >/dev/null 2>&1 || { echo "ABORT: jq not found on dev host (brew install jq)"; exit 1; }
@@ -953,8 +977,8 @@ chaos-l2-inj4-throughput:
 	@echo "→ Baseline T2 RSS (from /health process:rss_kb — G-04 04.1 fix):"
 	@jq '.checks["process:rss_kb"][0].observedValue' /tmp/inj4t-t2.json | tee /tmp/inj4t-t2-rss.txt
 	@echo ""
-	@echo "→ Step 6: STORM — set POLYARB_WS_TEST_KILL=1 on polyarb-l2"
-	FLY_API_TOKEN= flyctl secrets set POLYARB_WS_TEST_KILL=1 -a polyarb-l2
+	@echo "→ Step 6: STORM — flip ws-test-kill flag via in-band endpoint (no restart, same process)"
+	$(MAKE) chaos-ws-kill ON=1
 	@echo "→ Waiting 60s for reconnect + recovery…"
 	@sleep 60
 	@echo "→ Step 7: Recovery T3 snapshot @ $$(date -u +%H:%M:%SZ) → /tmp/inj4t-t3.json"
@@ -963,8 +987,8 @@ chaos-l2-inj4-throughput:
 	@echo "→ Recovery T3 RSS (from /health process:rss_kb — G-04 04.1 fix):"
 	@jq '.checks["process:rss_kb"][0].observedValue' /tmp/inj4t-t3.json | tee /tmp/inj4t-t3-rss.txt
 	@echo ""
-	@echo "→ Step 8: CLEANUP — unset POLYARB_WS_TEST_KILL"
-	FLY_API_TOKEN= flyctl secrets unset POLYARB_WS_TEST_KILL -a polyarb-l2
+	@echo "→ Step 8: CLEANUP — clear ws-test-kill flag in-band (no restart)"
+	$(MAKE) chaos-ws-kill ON=0
 	@sleep 30
 	@echo "→ Final /health (expect overall=pass / HTTP 200):"
 	@curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://polyarb-l2.fly.dev/health
