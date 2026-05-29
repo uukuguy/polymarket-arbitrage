@@ -2831,3 +2831,61 @@ git log --oneline -5                          # 应见 acd7892 + 4e2eee2 在 tip
 ```
 
 [NEXT] 执行 Phase 04 — Wave 1 04-01 会在 [BLOCKING] alembic push 暂停等用户确认 live POLYARB_SUPABASE_DB_DSN。本会话 2 commits 待 push 决策。
+
+---
+
+## SESSION 31 (续) — 2026-05-29 — Phase 04 execute + CLOSE + Phase 04.1 全 planning 链
+
+**Theme**: 接着 SESSION 31 开头的 backlog fix (GAP-201/202), 一路推到 Phase 04 execute (含 prod chaos)、close + LEARNINGS, 然后 Phase 04.1 fix-up 全 planning 链。
+
+### Phase 04 execute (Wave 1-3)
+
+- **Wave 1 (parallel)**: 04-01 (D-07 Alembic 004 yes_token_id + live push 003→004, commits cd482d0+2a8bf00+b33be42) + 04-03 (D-08 GAP-200 三分支 mirror gate, commit 094b478)。pyright cleanup 1ae1938。
+- **Wave 2**: 04-02 (D-01/02/03/04 Supabase markets_latest 数据源切换, worktree merge 7411a09 + 3 commits)。merge 后暴露 3 个 test isolation failure (settings 读 .env 真凭证 → fetch path 跑 → httpx 吃 monotonic tick) + pyright issues → fix 2976f47 (autouse _isolate_supabase_env fixture + settings_with_db 显式空 supabase + 真 pyright bug `float(object)` 提取 helper)。
+- **Wave 3**: 04-04 Tasks 1+2 (WsConsumer dropped_frame_count counter + chaos-l2-inj4-throughput Makefile target + ws:subscribed_count /health 子检查, commits c1ce2c3+41c71fd+3cc4444+2dab009)。Task 3 (prod chaos human-verify) → spawn agent。
+
+### G-01 cold-start trap (prod 实证, 本会话最大发现)
+
+- Task 3 agent pre-flight Step 1 abort: prod 跑 v16 (May 27, pre-Phase-04 image)。授权 deploy。
+- v17 deploy 后 post-deploy 验证: `ws:subscribed_count=3` + `candidates:supabase_fetch_age_seconds=null "cold-start: never fetched"`。5-min poll 不变。
+- **Root cause**: `l2_candidate_refresh.py:53 _last_refresh_at_s: float = 0.0` + `time.monotonic()` → first NOTIFY elapsed 总 <60s → debounce 永久吞掉首次 fetch。prod 现场 31 个 catchup snapshot 9ms 内全 debounce。
+- **chain-truth paid off**: Plan 02 Task 3 加的 `candidates:supabase_fetch_age_seconds=null` 子检查正确暴露了这个静默故障。
+- **Fix F1** (commit 39c60ef): `_last_refresh_at_s = -REFRESH_DEBOUNCE_S - 1.0` + 新 cold-start 契约测试 (importlib.reload)。
+- **v18 deploy 实证**: 30s 内 subs 3→60, fetch_age null→91.4s。fix 立竿见影。
+- 落 memory: [[cold-start-debounce-trap-2026-05]] (适用所有 cooldown/rate-limit 模式)。
+
+### Phase 04 chaos verdict DEFERRED + 3 新 gap
+
+v18 chaos run 跑通 (storm + cleanup) 但 D-06 verdict DEFERRED — 暴露 3 个结构 gap:
+- **G-02**: D-01 fetch 在 restart-without-NOTIFY-backlog 时不触发 (catchup "no missed" → on_snapshot_complete 不被调 → subs 留 3 bootstrap)。
+- **G-03**: `flyctl secrets set/unset` = rolling restart 不是 in-flight 注入 → storm 测的是 startup 不是 kill-recovery。
+- **G-04**: `grep VmRSS /proc/1/status` 读到 Fly hallpass (PID 1) 不是 Python L2。
+
+### Phase 04 CLOSE
+
+- LEARNINGS extract (commit 7bb4fa1): 11D/9L/8P/5S。
+- ROADMAP: Phase 04 标 CLOSED + 插入 Phase 04.1 (commit cfc8535)。
+
+### Phase 04.1 全 planning 链 (fix-up, G-02/03/04)
+
+- discuss → CONTEXT 4 decisions locked (commit f3d3000): G-02 eager startup-prime / G-03 in-band HMAC `/control/chaos/ws-test-kill` / G-04 /health process:rss_kb (+ psutil dev→runtime) / D-06 本 phase 内 re-run。
+- pattern-map → PATTERNS 7 files (commit 5c566b2): G-03 复用 control.py HMAC pattern (path-guard 硬编码 /control 的关键发现)。
+- plan → 4 plans/3 waves (commit c1ce44a): Wave 1 (01 G-02 + 02 G-04 parallel) → Wave 2 (03 G-03) → Wave 3 (04 D-06 human-verify)。
+- plan-checker → **VERIFICATION PASSED 12/12, 0 blocker** (commit 48a0cb4)。POLYARB_SCAN_SHARED_SECRET 确认 deploy 在 polyarb-l2 (HMAC endpoint prod 可达, 关键 de-risk)。
+
+### 会话末状态
+
+- origin/main = `48a0cb4`, working tree clean, zero drift。
+- 13 stale worktrees (本会话并行 execute 累积, 都 clean, 待清理)。
+- memory 更新: [[phase-04-1-planned-2026-05]] 新建 + [[phase-04-planned-2026-05]] 标 CLOSED + [[cold-start-debounce-trap-2026-05]] (SESSION 31 落库) + MEMORY.md 索引刷新。
+
+### Next session
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                          # 应 zero drift
+/clear                                        # 已建议 (planning 链吃 context)
+/gsd-execute-phase 04.1 --ws m1-perception    # 执行 Phase 04.1
+```
+
+[NEXT] 执行 Phase 04.1 — Wave 1 (04.1-01 G-02 + 04.1-02 G-04 parallel) → Wave 2 (04.1-03 G-03) → Wave 3 (04.1-04 D-06 human-verify, deploy + prod chaos re-run 拿真 verdict + Pitfall 4 观察)。chaos re-run 前置: deployed image == latest main。
