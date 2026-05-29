@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 
 import pytest
 
@@ -307,7 +306,6 @@ def test_existing_test_still_passes_after_module_flag_refactor(monkeypatch):
     constraint is preserved in the seed logic.
     """
     import importlib
-    from polyarb.daemon.ws_consumer import set_ws_test_kill
 
     # Set env to '1' before reload → seeds flag True
     monkeypatch.setenv("POLYARB_WS_TEST_KILL", "1")

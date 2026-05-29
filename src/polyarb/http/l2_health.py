@@ -18,7 +18,6 @@ T-03-03-06 mitigation: response body whitelists fields; never dict(settings) dum
 """
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime, timezone
 from typing import Any
