@@ -422,6 +422,19 @@ async def main() -> int:
             f"catchup_from_cursor failed (fail-soft, Plan 06 may not have shipped yet): {e!r}"
         )
 
+    # ── Phase 04.1 G-02: eager startup-prime (D-01.1/D-01.2) ────────────────
+    # Catchup-with-no-missed leaves candidate set at bootstrap ids only
+    # (04-SOAK-LOG §G-02). Force ONE markets_latest fetch so the WS subscribes
+    # to the real candidate set on every cold start, independent of missed
+    # count. Additive — does NOT replace D-04 bootstrap fallback (bootstrap_ids
+    # already drive WS before this fires). Sentinel snapshot_id=-1 is safe:
+    # on_snapshot_complete uses snapshot_id only for log lines, never a row read.
+    # G-01 fix (39c60ef) guarantees this first call passes the refresh debounce.
+    _dispatch_on_snapshot(
+        {"snapshot_id": -1, "_startup_prime": True, "ts_s": time.time()}
+    )
+    logger.info("event-bus startup-prime dispatched (G-02 cross-restart robustness)")
+
     # ── Plan 05: long-running listener task ─────────────────────────────────
     async def _listener_runner() -> None:
         """Wrap listen_snapshot_complete so health wrapper flips is_listening."""
