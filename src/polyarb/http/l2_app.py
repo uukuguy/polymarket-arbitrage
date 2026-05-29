@@ -6,10 +6,10 @@ Routes registered at Plan 03 boundary:
 - GET /health   (public, IETF strict 三态 — Better Stack alarm target)
 - GET /healthz  (public, ALWAYS HTTP 200 — Fly platform probe target — BUG-6)
 
-No /control/* or /scan endpoints at Plan 03 — those are L1-only.
-Plan 04 will pass a real WsConsumer via the ws_consumer kwarg.
-Plan 05 will pass a real EventListener via the event_listener kwarg.
-Plan 03 ships placeholders (default None) — health checks handle gracefully.
+Phase 04.1 Plan 03 — G-03 (D-03.4): L2's FIRST HMAC-gated admin endpoint.
+    POST /control/chaos/ws-test-kill — in-band chaos primitive (no restart).
+    Reuses ControlAuthMiddleware from polyarb.http.control (path-guard /control/*).
+    /health + /healthz automatically bypass the guard (not under /control/).
 
 app.state stashes sqlite_store + settings + ws_consumer + event_listener
 for route handlers.
@@ -19,8 +19,11 @@ from __future__ import annotations
 from typing import Any
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.routing import Route
 
+from polyarb.http.control import ControlAuthMiddleware
+from polyarb.http.l2_control import ws_test_kill_handler
 from polyarb.http.l2_health import health, healthz
 
 
@@ -31,10 +34,11 @@ def create_l2_app(
     ws_consumer: Any | None = None,
     event_listener: Any | None = None,
 ) -> Starlette:
-    """Build L2 Starlette app — /health (IETF strict) + /healthz (always 200).
+    """Build L2 Starlette app — /health + /healthz + /control/chaos/ws-test-kill.
 
     Plan 03 boundary: ws_consumer / event_listener default None.
     Plan 04 wires real WsConsumer; Plan 05 wires real EventListener.
+    Plan 04.1-03 adds the first HMAC admin route on L2.
 
     Args:
         sqlite_store: SQLiteStore instance (stashed on app.state).
@@ -44,12 +48,32 @@ def create_l2_app(
 
     Returns:
         Configured Starlette application ready for uvicorn.
+
+    Security note (T-04.1-08):
+        ControlAuthMiddleware path-guard is hard-coded to /control — only routes
+        under /control/* are HMAC-checked. /health + /healthz are exempt (they do
+        not start with /control). Missing/wrong X-Signature → 401 before handler.
     """
+    secret = settings.scan_shared_secret.get_secret_value()
+
     routes = [
         Route("/health", health, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
+        # Phase 04.1 G-03: in-band chaos endpoint — HMAC-gated by middleware below.
+        # Route lives under /control/ so ControlAuthMiddleware's path-guard covers it.
+        Route(
+            "/control/chaos/ws-test-kill",
+            ws_test_kill_handler,
+            methods=["POST"],
+        ),
     ]
-    app = Starlette(routes=routes)
+    middleware = [
+        # Reuse L1 ControlAuthMiddleware (control.py) unchanged.
+        # Path-guard: only /control/* requests are HMAC-verified.
+        # /health + /healthz pass through without a signature check.
+        Middleware(ControlAuthMiddleware, secret=secret),
+    ]
+    app = Starlette(routes=routes, middleware=middleware)
     # Stash dependencies on app.state for handlers to access
     app.state.sqlite_store = sqlite_store
     app.state.settings = settings

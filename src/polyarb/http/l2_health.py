@@ -361,25 +361,33 @@ def _build_l2_health_checks(
         }]
         overall = _severity(overall, fetch_status)
 
-    # ── Check 5: chaos:ws_test_kill_flag (Phase 03.1-06 W-5 chain-truth) ────
-    # Plan 03 codified the rule: every fail-soft / chaos primitive MUST surface
-    # to /health (feedback_code-vs-chain-truth-2026-05). POLYARB_WS_TEST_KILL=1
-    # forces the WS consumer to drop the connection on next message — it's the
-    # quintessential chaos primitive, and operators MUST be able to see it via
-    # curl /health, not just by grep'ing flyctl logs.
+    # ── Check 5: chaos:ws_test_kill_flag (Phase 03.1-06 W-5 / Phase 04.1 G-03) ─
+    # Phase 04.1 G-03 chain-truth update: read the PROCESS-LOCAL flag via
+    # get_ws_test_kill() (NOT os.getenv) so /health reflects an in-flight toggle
+    # from the HMAC endpoint (l2_control.py) — not just the cold-start env value.
     #
-    # Status is 'warn' (not 'fail'): the flag itself doesn't trip overall=fail;
-    # let downstream sub-checks (ws:connection_state going RECONNECTING,
-    # mirror:l2_tob_age_seconds going stale) drive overall fail. The chaos
-    # sub-check is purely a visibility surface — "yes, the flag is set".
-    if os.getenv("POLYARB_WS_TEST_KILL") == "1":
+    # Before G-03: the flag was flipped by `flyctl secrets set POLYARB_WS_TEST_KILL=1`
+    # (machine restart). /health read os.getenv, which worked only at cold-start.
+    # After G-03: the flag is flipped at runtime via POST /control/chaos/ws-test-kill
+    # without restart. /health reads get_ws_test_kill() so the toggle is immediately
+    # visible — same write-side that ws_consumer._check_ws_test_kill reads.
+    #
+    # Status is 'warn' (not 'fail'): flag itself doesn't trip overall=fail.
+    # Lazy import of get_ws_test_kill inside try (fail-soft — if ws_consumer import
+    # somehow fails, /health degrades gracefully to omitting the sub-check).
+    try:
+        from polyarb.daemon.ws_consumer import get_ws_test_kill  # lazy, fail-soft
+        _ws_kill_active = get_ws_test_kill()
+    except Exception:  # noqa: BLE001 — fail-soft: missing import must not crash /health
+        _ws_kill_active = False
+    if _ws_kill_active:
         checks["chaos:ws_test_kill_flag"] = [{
             "componentId": "ws-consumer",
             "componentType": "system",
             "observedValue": "1",
             "status": "warn",
             "output": (
-                "POLYARB_WS_TEST_KILL=1 — CHAOS MODE active; "
+                "WS test-kill flag active (process-local) — CHAOS MODE; "
                 "should never appear in production"
             ),
             "time": _utc_now_iso(),

@@ -27,27 +27,63 @@ from polyarb.clients.ws_market_client import stream_market_events
 from polyarb.daemon.ws_watchdog import WsWatchdog
 
 
-# ── Phase 03.1-06 D-04: POLYARB_WS_TEST_KILL chaos primitive ─────────────────
+# ── Phase 03.1-06 D-04 / Phase 04.1 G-03: POLYARB_WS_TEST_KILL chaos primitive ─
 #
 # Used by `make chaos-l2-inj4` to drop the WS connection mid-stream WITHOUT
 # OS-level pkill (which doesn't exist in python:3.12-slim base — Phase 03 L2-1
 # lesson, see feedback_container-image-aware-chaos-2026-05).
 #
-# Opt-in is the literal string "1" only. Any other value (including "0",
-# "true", "yes", empty) is ignored — guards against accidental prod toggle
-# from boolean-like misconfigured secret values.
+# Phase 04.1 G-03 REDESIGN — process-local flag (in-band endpoint):
+#   The old approach used `flyctl secrets set POLYARB_WS_TEST_KILL=1` to flip the
+#   flag, which RESTARTS the Fly machine — killing the 60-asset pre-storm process
+#   and making Pitfall 4 (watchdog false-trip on healthy long-lived process)
+#   unobservable (04-SOAK-LOG §G-03).
+#
+#   Fix: a PROCESS-LOCAL boolean flag (_ws_test_kill_flag) replaces the direct
+#   os.getenv read. The flag is seeded from env at import (cold-start compat for
+#   backward compat with the old flyctl secrets approach), but can be FLIPPED AT
+#   RUNTIME without a restart via the HMAC-gated POST /control/chaos/ws-test-kill
+#   endpoint (l2_control.py). This way, the 60-asset process SURVIVES the storm.
 #
 # PROD SAFETY CONTRACT (CI-enforced by
 # tests/m1-perception/test_ws_test_kill_flag.py::test_prod_fly_toml_never_sets_test_kill_flag):
 #   - fly.toml MUST NOT contain POLYARB_WS_TEST_KILL
 #   - fly-l2.toml MUST NOT contain POLYARB_WS_TEST_KILL
 #
-# The flag also surfaces to /health as chaos:ws_test_kill_flag sub-check
-# (l2_health.py) per chain-truth own-dog-food (feedback_code-vs-chain-truth-2026-05).
+# The flag surfaces to /health as chaos:ws_test_kill_flag sub-check (l2_health.py)
+# reading get_ws_test_kill() — NOT os.getenv — so an in-flight toggle is visible
+# without a restart (chain-truth, feedback_code-vs-chain-truth-2026-05).
+
+# Module-level mutable flag. Seeded from env at import (cold-start compat:
+# `flyctl secrets set POLYARB_WS_TEST_KILL=1` before deploy still works).
+# Runtime value is controlled by set_ws_test_kill() via the HTTP endpoint.
+# Opt-in seed: only the literal string "1" triggers (same semantics as before).
+_ws_test_kill_flag: bool = (os.getenv("POLYARB_WS_TEST_KILL") == "1")
+
+
+def set_ws_test_kill(enabled: bool) -> None:
+    """Flip the process-local WS-kill chaos flag (no restart needed).
+
+    Called by the HMAC-gated POST /control/chaos/ws-test-kill endpoint
+    (l2_control.py) to enable or disable the chaos primitive on a RUNNING
+    process. Also used by tests for isolation.
+    """
+    global _ws_test_kill_flag
+    _ws_test_kill_flag = bool(enabled)
+
+
+def get_ws_test_kill() -> bool:
+    """Return the current process-local WS-kill flag.
+
+    Used by /health chaos:ws_test_kill_flag sub-check (l2_health.py) to
+    surface the in-flight flag value — not os.getenv — so a runtime toggle
+    via the endpoint is immediately visible in /health (chain-truth).
+    """
+    return _ws_test_kill_flag
 
 
 class WsTestKillRequested(Exception):
-    """Raised when POLYARB_WS_TEST_KILL=1 forces a synthetic WS close.
+    """Raised when the chaos kill flag forces a synthetic WS close.
 
     Chaos-only. Caught by the consumer loop and re-raised so the watchdog's
     reconnect path runs as if the WS had naturally dropped. NEVER set this
@@ -57,14 +93,16 @@ class WsTestKillRequested(Exception):
 
 
 def _check_ws_test_kill() -> None:
-    """Check the chaos-only kill flag — raise WsTestKillRequested when '1'.
+    """Check the process-local chaos kill flag — raise WsTestKillRequested when True.
 
-    Strictly opt-in: only the literal string "1" triggers. Any other value
-    is ignored. Returns None when not set (the no-op fast path).
+    Phase 04.1 G-03: reads the MODULE-LEVEL _ws_test_kill_flag (NOT os.getenv).
+    The flag is seeded from env at import (cold-start compat) but is flipped at
+    runtime via set_ws_test_kill() — the endpoint sets it without restarting the
+    process. Returns None when False (the no-op fast path, normal prod).
     """
-    if os.getenv("POLYARB_WS_TEST_KILL") == "1":
+    if _ws_test_kill_flag:
         raise WsTestKillRequested(
-            "POLYARB_WS_TEST_KILL=1 — synthetic WS close (Phase 03.1-06 D-04)"
+            "WS test-kill flag set — synthetic WS close (Phase 04.1 G-03 in-band endpoint)"
         )
 
 
