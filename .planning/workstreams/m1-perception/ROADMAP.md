@@ -211,7 +211,7 @@ Plans (revised 2026-05-26 SESSION 28 post-checker — 5 waves, Wave 1 & Wave 3 p
 > ADDED 2026-05-28 (SESSION 30) — Phase 03.1 chaos 多处"低负载只验逻辑不验 throughput"的明确欠账 + Phase 02/03 投影 gap + GAP-200。
 
 **Goal:** 把 polyarb-l2 candidate set 从 3 个 bootstrap asset_ids 扩到真实规模（compute_candidates 改读 Supabase `markets_latest` 而非本地 SQLite，解决跨容器读不到的限制），在真实负载下验证 WS storm / watchdog throughput（补 Phase 03.1 Inj L2-4 只验逻辑的欠账），并收尾两个投影 gap（`markets_latest.yes_token_id` 补列 + GAP-200 config-disable 也 surface 成 chain-truth）。
-**Status:** 🟢 Plans ready (4 plans across 3 waves; planned 2026-05-28 SESSION 30)
+**Status:** ✅ CLOSED 2026-05-29 (SESSION 31) — 4 plans shipped + LEARNINGS (11D/9L/8P/5S) + G-01 cold-start fix prod-verified (subs 3→60). D-06 throughput verdict **DEFERRED** (G-02/G-03/G-04 阻塞) → carried to Phase 04.1. origin/main `7bb4fa1`.
 **Depends on:** Phase 03.1 (closed 2026-05-27) + Supabase `markets_latest` schema（Phase 02 mirror 投影）
 **Plans:** 4 plans
 
@@ -229,6 +229,24 @@ Plans (4 plans, 3 waves — D-01/02/03 是数据源切换前提, D-07/D-08 独�
 
 Makefile targets delivered: `chaos-l2-inj4-throughput` (Plan 04). `supabase-migrate` (existing, reused by Plan 01 D-07 push).
 
+### Phase 04.1: D-01 跨 restart 健壮性 + chaos primitive 重设计 + throughput verdict 收口
+
+> ADDED 2026-05-29 (SESSION 31) — Phase 04 Plan 04 Task 3 prod chaos run 暴露的 3 个结构性 gap (G-02/G-03/G-04)，阻塞 D-06 throughput verdict。fix-up phase（同 02.1 / 03.1 体例）。
+
+**Goal:** 修掉 Phase 04 prod chaos 暴露的三个结构性问题，让 D-06 throughput verdict 能在真实 candidate scale 下真正算出来：(1) D-01 fetch 跨 L2 restart 健壮 — restart 落在 NOTIFY 静默窗口也能拿到真实 candidate set（G-02）；(2) chaos primitive 从 "flyctl secrets set = rolling restart" 重设计成 in-flight 注入，让 storm 真测 in-flight kill-recovery 而非 startup（G-03）；(3) RSS 测对 Python L2 进程而非 Fly hallpass（G-04）。修完后 re-run chaos 拿真 D-06 verdict + 补 Pitfall 4 watchdog false-trip 观察（被 G-03 阻塞未观察到）。
+**Status:** ⏳ Pending discuss-phase (2026-05-29 SESSION 31)
+**Depends on:** Phase 04 (closed 2026-05-29) — G-02/G-03/G-04 findings in 04-SOAK-LOG.md
+**Plans:** TBD (discuss-phase 决)
+
+Scope (候选, discuss-phase 决):
+- **G-02 D-01 跨 restart 健壮**: eager startup fetch (catchup 完无条件调一次 on_snapshot_complete) / scheduled fallback timer / boot-align L1 cadence — 三选一或组合
+- **G-03 chaos primitive 重设计**: in-band `POST /admin/chaos/ws-test-kill` (HMAC-gated, 翻进程内 atomic flag, 不重启) 或 signal-based — 让 storm 真测 in-flight
+- **G-04 RSS 测对进程**: `pgrep -f python L2 main` + procfs 或 /health `process:rss_kb` 子检查 (psutil)
+- **D-06 verdict re-run**: 修完三个后重跑 chaos-l2-inj4-throughput 拿真 verdict + 观察 Pitfall 4 watchdog false-trip
+
+Plans:
+- [ ] TBD (discuss-phase 决 plan 拆分)
+
 ### Phase 05: WS /book + /prices 增量推送
 
 **Goal:** /book + /prices 频道实时增量推送，作为 L3 单市场 K 线的数据源
@@ -239,6 +257,16 @@ Makefile targets delivered: `chaos-l2-inj4-throughput` (Plan 04). `supabase-migr
 
 Plans:
 - [ ] TBD (待 Phase 04 完成 + thread §2.2 WS 能力调研)
+
+### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 5
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 6 to break down)
 
 ---
 
