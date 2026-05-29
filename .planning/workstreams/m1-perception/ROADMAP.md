@@ -234,18 +234,21 @@ Makefile targets delivered: `chaos-l2-inj4-throughput` (Plan 04). `supabase-migr
 > ADDED 2026-05-29 (SESSION 31) — Phase 04 Plan 04 Task 3 prod chaos run 暴露的 3 个结构性 gap (G-02/G-03/G-04)，阻塞 D-06 throughput verdict。fix-up phase（同 02.1 / 03.1 体例）。
 
 **Goal:** 修掉 Phase 04 prod chaos 暴露的三个结构性问题，让 D-06 throughput verdict 能在真实 candidate scale 下真正算出来：(1) D-01 fetch 跨 L2 restart 健壮 — restart 落在 NOTIFY 静默窗口也能拿到真实 candidate set（G-02）；(2) chaos primitive 从 "flyctl secrets set = rolling restart" 重设计成 in-flight 注入，让 storm 真测 in-flight kill-recovery 而非 startup（G-03）；(3) RSS 测对 Python L2 进程而非 Fly hallpass（G-04）。修完后 re-run chaos 拿真 D-06 verdict + 补 Pitfall 4 watchdog false-trip 观察（被 G-03 阻塞未观察到）。
-**Status:** ⏳ Pending discuss-phase (2026-05-29 SESSION 31)
+**Status:** 📋 PLANNED (2026-05-29 SESSION 31) — 4 plans, 3 waves
 **Depends on:** Phase 04 (closed 2026-05-29) — G-02/G-03/G-04 findings in 04-SOAK-LOG.md
-**Plans:** TBD (discuss-phase 决)
+**Plans:** 4 plans (3 waves)
 
-Scope (候选, discuss-phase 决):
-- **G-02 D-01 跨 restart 健壮**: eager startup fetch (catchup 完无条件调一次 on_snapshot_complete) / scheduled fallback timer / boot-align L1 cadence — 三选一或组合
-- **G-03 chaos primitive 重设计**: in-band `POST /admin/chaos/ws-test-kill` (HMAC-gated, 翻进程内 atomic flag, 不重启) 或 signal-based — 让 storm 真测 in-flight
-- **G-04 RSS 测对进程**: `pgrep -f python L2 main` + procfs 或 /health `process:rss_kb` 子检查 (psutil)
-- **D-06 verdict re-run**: 修完三个后重跑 chaos-l2-inj4-throughput 拿真 verdict + 观察 Pitfall 4 watchdog false-trip
+Scope (locked in 04.1-CONTEXT.md):
+- **G-02 D-01 跨 restart 健壮**: eager startup-prime (catchup 完无条件 dispatch 一次 synthetic prime → markets_latest fetch) — D-01.1 locked
+- **G-03 chaos primitive 重设计**: in-band `POST /control/chaos/ws-test-kill` (HMAC-gated 复用 ControlAuthMiddleware, 翻进程内 atomic flag, 不重启) — D-03 locked
+- **G-04 RSS 测对进程**: /health `process:rss_kb` 子检查 (psutil 当前进程) + psutil dev→runtime + Makefile RSS 改读 /health — D-04 locked
+- **D-06 verdict re-run**: 修完三个后重跑 chaos-l2-inj4-throughput 拿真 verdict + 观察 Pitfall 4 watchdog false-trip — D-06 locked
 
 Plans:
-- [ ] TBD (discuss-phase 决 plan 拆分)
+- [ ] 04.1-01-PLAN.md — Wave 1 — G-02 eager startup-prime in l2_main.py (cross-restart candidate-set robustness)
+- [ ] 04.1-02-PLAN.md — Wave 1 — G-04 /health process:rss_kb sub-check + psutil dev→runtime + chaos Makefile RSS via /health
+- [ ] 04.1-03-PLAN.md — Wave 2 — G-03 in-band HMAC /control/chaos/ws-test-kill + process-local flag + make chaos-ws-kill (THREAT MODEL)
+- [ ] 04.1-04-PLAN.md — Wave 3 — deploy + prod chaos re-run for real D-06 verdict + Pitfall 4 observation (checkpoint:human-verify)
 
 ### Phase 05: WS /book + /prices 增量推送
 
