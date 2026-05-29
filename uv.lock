@@ -1478,6 +1478,7 @@ dependencies = [
     { name = "loguru" },
     { name = "openai" },
     { name = "pandas" },
+    { name = "psutil" },
     { name = "psycopg", extra = ["binary"] },
     { name = "py-clob-client" },
     { name = "pyarrow" },
@@ -1498,7 +1499,6 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "freezegun" },
-    { name = "psutil" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "respx" },
@@ -1524,7 +1524,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7,<0.8" },
     { name = "openai", specifier = ">=2.0,<3" },
     { name = "pandas", specifier = ">=2.0,<3" },
-    { name = "psutil", marker = "extra == 'dev'", specifier = ">=5.9,<7" },
+    { name = "psutil", specifier = ">=5.9,<7" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "py-clob-client", specifier = ">=0.34.6,<0.35" },
     { name = "pyarrow", specifier = ">=17.0,<18" },

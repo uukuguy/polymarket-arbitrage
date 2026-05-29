@@ -45,6 +45,9 @@ dependencies = [
   "psycopg[binary]>=3.3.4",
   "websockets>=15,<16",
   "asyncpg>=0.31,<0.32",
+  # Runtime dep: prod /health imports psutil for process:rss_kb sub-check (G-04, Phase 04.1).
+  # Previously dev-only; promoted so the deployed daemon can expose RSS without dev extras.
+  "psutil>=5.9,<7",
 ]
 
 [project.optional-dependencies]
@@ -54,7 +57,6 @@ dev = [
   "respx>=0.21,<0.22",
   "freezegun>=1.5,<2",
   "ruff>=0.5,<1",
-  "psutil>=5.9,<7",
 ]
 
 [project.scripts]

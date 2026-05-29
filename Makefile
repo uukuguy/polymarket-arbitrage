@@ -942,16 +942,16 @@ chaos-l2-inj4-throughput:
 	@echo "→ Step 3: Baseline T1 snapshot @ $$(date -u +%H:%M:%SZ) → /tmp/inj4t-t1.json"
 	@curl -sS https://polyarb-l2.fly.dev/health > /tmp/inj4t-t1.json
 	@jq '{ts: now, ws_state: .checks["ws:connection_state"][0].observedValue, ws_age_s: .checks["ws:last_event_age_seconds"][0].observedValue, subscribed: .checks["ws:subscribed_count"][0].observedValue}' /tmp/inj4t-t1.json
-	@echo "→ Baseline T1 RSS (procfs via flyctl ssh):"
-	@FLY_API_TOKEN= flyctl ssh console -a polyarb-l2 -C "sh -c 'grep VmRSS /proc/1/status'" 2>/dev/null | tee /tmp/inj4t-t1-rss.txt || echo "RSS-read skipped (ssh unavailable — operator can run flyctl ssh console manually)"
+	@echo "→ Baseline T1 RSS (from /health process:rss_kb — G-04 04.1 fix):"
+	@jq '.checks["process:rss_kb"][0].observedValue' /tmp/inj4t-t1.json | tee /tmp/inj4t-t1-rss.txt
 	@echo ""
 	@echo "→ Step 4: Waiting 5min for baseline frame rate accumulation…"
 	@sleep 300
 	@echo "→ Step 5: Baseline T2 snapshot @ $$(date -u +%H:%M:%SZ) → /tmp/inj4t-t2.json"
 	@curl -sS https://polyarb-l2.fly.dev/health > /tmp/inj4t-t2.json
 	@jq '{ts: now, ws_state: .checks["ws:connection_state"][0].observedValue, ws_age_s: .checks["ws:last_event_age_seconds"][0].observedValue}' /tmp/inj4t-t2.json
-	@echo "→ Baseline T2 RSS (procfs via flyctl ssh):"
-	@FLY_API_TOKEN= flyctl ssh console -a polyarb-l2 -C "sh -c 'grep VmRSS /proc/1/status'" 2>/dev/null | tee /tmp/inj4t-t2-rss.txt || echo "RSS-read skipped"
+	@echo "→ Baseline T2 RSS (from /health process:rss_kb — G-04 04.1 fix):"
+	@jq '.checks["process:rss_kb"][0].observedValue' /tmp/inj4t-t2.json | tee /tmp/inj4t-t2-rss.txt
 	@echo ""
 	@echo "→ Step 6: STORM — set POLYARB_WS_TEST_KILL=1 on polyarb-l2"
 	FLY_API_TOKEN= flyctl secrets set POLYARB_WS_TEST_KILL=1 -a polyarb-l2
@@ -960,8 +960,8 @@ chaos-l2-inj4-throughput:
 	@echo "→ Step 7: Recovery T3 snapshot @ $$(date -u +%H:%M:%SZ) → /tmp/inj4t-t3.json"
 	@curl -sS https://polyarb-l2.fly.dev/health > /tmp/inj4t-t3.json
 	@jq '{ts: now, ws_state: .checks["ws:connection_state"][0].observedValue, ws_age_s: .checks["ws:last_event_age_seconds"][0].observedValue, chaos_flag: (.checks["chaos:ws_test_kill_flag"][0].status // "absent")}' /tmp/inj4t-t3.json
-	@echo "→ Recovery T3 RSS (procfs via flyctl ssh):"
-	@FLY_API_TOKEN= flyctl ssh console -a polyarb-l2 -C "sh -c 'grep VmRSS /proc/1/status'" 2>/dev/null | tee /tmp/inj4t-t3-rss.txt || echo "RSS-read skipped"
+	@echo "→ Recovery T3 RSS (from /health process:rss_kb — G-04 04.1 fix):"
+	@jq '.checks["process:rss_kb"][0].observedValue' /tmp/inj4t-t3.json | tee /tmp/inj4t-t3-rss.txt
 	@echo ""
 	@echo "→ Step 8: CLEANUP — unset POLYARB_WS_TEST_KILL"
 	FLY_API_TOKEN= flyctl secrets unset POLYARB_WS_TEST_KILL -a polyarb-l2
