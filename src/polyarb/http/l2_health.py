@@ -255,7 +255,7 @@ def _build_l2_health_checks(
         fail_s = int(getattr(settings, "l2_tob_age_fail_s", _MIRROR_FAIL_S_DEFAULT))
         try:
             getter = getattr(store, "get_l2_tob_last_mirror_at_s", None)
-            last_mirror_at = getter() if callable(getter) else None
+            last_mirror_at: Any = getter() if callable(getter) else None
             if last_mirror_at is None:
                 mirror_status = "warn"
                 mirror_age: float | None = None

@@ -12,18 +12,16 @@ Invariants:
 """
 from __future__ import annotations
 
-import sys
-from types import ModuleType
+import time
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 
-def _call_build_checks(**kwargs):
+def _call_build_checks(**kwargs: Any):
     """Helper: call _build_l2_health_checks with safe defaults for irrelevant args."""
     from polyarb.http.l2_health import _build_l2_health_checks
 
-    import time
-
-    defaults = dict(
+    defaults: dict[str, Any] = dict(
         store=MagicMock(),
         settings=MagicMock(
             supabase_url="",
@@ -100,7 +98,6 @@ def test_rss_reads_current_process_not_pid1():
 
 def test_rss_fail_soft_when_psutil_raises():
     """If psutil read raises, sub-check degrades to status='warn', observedValue=None."""
-    import psutil
 
     class _BrokenProcess:
         def __init__(self, pid=None):
@@ -127,7 +124,6 @@ def test_rss_fail_soft_when_psutil_raises():
 
 def test_rss_warn_does_not_escalate_overall_to_fail():
     """Even when rss sub-check returns warn (fail-soft path), overall must not become 'fail'."""
-    import psutil
 
     class _BrokenProcess:
         def __init__(self, pid=None):

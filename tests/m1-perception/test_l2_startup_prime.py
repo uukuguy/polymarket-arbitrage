@@ -15,7 +15,6 @@ Design refs:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import os
 from pathlib import Path
 from typing import Any
@@ -55,8 +54,6 @@ async def _idle_until_stop(
 
 def _make_minimal_settings() -> MagicMock:
     """Minimal Settings stub that satisfies l2_main._run_l2_daemon's attribute access."""
-    from pydantic import SecretStr
-
     s = MagicMock()
     s.supabase_db_dsn.get_secret_value.return_value = (
         "postgresql://test:test@localhost/test"
