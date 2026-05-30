@@ -383,7 +383,7 @@ def _build_l2_health_checks(
         checks["chaos:ws_test_kill_flag"] = [{
             "componentId": "ws-consumer",
             "componentType": "system",
-            "observedValue": "1",
+            "observedValue": True,  # IN-01 (04.1 review): bool, not string "1"
             "status": "warn",
             "output": (
                 "WS test-kill flag active (process-local) — CHAOS MODE; "

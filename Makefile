@@ -905,6 +905,7 @@ chaos-l2-inj4:
 chaos-ws-kill:
 	@test -n "$(ON)" || { echo "usage: make chaos-ws-kill ON=1|0"; exit 1; }
 	@set -a; . ./.env; set +a; \
+	  [ -n "$$POLYARB_SCAN_SHARED_SECRET" ] || { echo "ERROR: POLYARB_SCAN_SHARED_SECRET not set (check .env) — request would 401"; exit 1; }; \
 	  BODY=$$([ "$(ON)" = "1" ] && echo '{"enabled":true}' || echo '{"enabled":false}'); \
 	  SIG=$$(printf '%s' "$$BODY" | openssl dgst -sha256 -hmac "$$POLYARB_SCAN_SHARED_SECRET" | sed 's/^.* //'); \
 	  curl -sS -X POST https://polyarb-l2.fly.dev/control/chaos/ws-test-kill \

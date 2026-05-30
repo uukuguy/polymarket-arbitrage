@@ -288,9 +288,15 @@ async def _run_catchup_and_prime_block(
             pass  # mirrors outer fail-soft
 
         # ── Phase 04.1 G-02: eager startup-prime ──────────────────────────────
-        # This call MUST appear verbatim in l2_main.py after the catchup envelope.
-        # We simulate it here to verify the logic fires on all three catchup paths.
-        # The structural tests above verify it also lives in the actual source.
+        # NOTE (WR-01/IN-02, 04.1 code review): this helper RECONSTRUCTS the prime
+        # dispatch — it does NOT execute l2_main._run_l2_daemon. So the asserts that
+        # consume this only verify the prime ENVELOPE CONTRACT (sentinel snapshot_id=-1
+        # + _startup_prime flag + idempotency across all three catchup paths), not that
+        # the source actually fires it. Regression protection that the prime LIVES in
+        # l2_main.py comes from the four structural (source-text-search) tests above,
+        # and it was confirmed firing in prod (subs 3→62, 04.1-SOAK-LOG.md). A true
+        # behavioral test would need to drive _run_l2_daemon end-to-end (deferred —
+        # heavy asyncpg/WS mocking for marginal gain over structural + prod proof).
         _fake_dispatch(
             {"snapshot_id": -1, "_startup_prime": True, "ts_s": _time.time()}
         )

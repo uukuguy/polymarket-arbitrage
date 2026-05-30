@@ -67,10 +67,24 @@ async def ws_test_kill_handler(request: Request) -> JSONResponse:
     """
     try:
         body = await request.json()
-        enabled: bool = bool(body.get("enabled", False))
+        raw_enabled = body.get("enabled", False)
     except Exception as e:
         logger.warning(f"ws_test_kill_handler: bad JSON body: {e!r}")
         return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    # WR-02 (04.1 code review): require a genuine JSON boolean. A chaos kill-switch
+    # must never silently invert — `bool("false")` is True, so reject any non-bool
+    # (string/int/null) rather than coerce. The Makefile sends real booleans.
+    if not isinstance(raw_enabled, bool):
+        logger.warning(
+            f"ws_test_kill_handler: 'enabled' must be a JSON boolean, got "
+            f"{type(raw_enabled).__name__}={raw_enabled!r}"
+        )
+        return JSONResponse(
+            {"error": "'enabled' must be a JSON boolean (true/false)"},
+            status_code=400,
+        )
+    enabled: bool = raw_enabled
 
     set_ws_test_kill(enabled)
     flag = get_ws_test_kill()
