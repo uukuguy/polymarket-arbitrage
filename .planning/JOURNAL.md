@@ -2889,3 +2889,55 @@ make planning-status                          # 应 zero drift
 ```
 
 [NEXT] 执行 Phase 04.1 — Wave 1 (04.1-01 G-02 + 04.1-02 G-04 parallel) → Wave 2 (04.1-03 G-03) → Wave 3 (04.1-04 D-06 human-verify, deploy + prod chaos re-run 拿真 verdict + Pitfall 4 观察)。chaos re-run 前置: deployed image == latest main。
+
+---
+
+## SESSION 32 — 2026-05-30 — Phase 04.1 EXECUTE + CLOSE (D-06 verdict + GAP-401 watchdog 发现)
+
+**Theme**: 从干净状态执行 Phase 04.1 全 3 waves，含 prod deploy + chaos re-run，拿到真 D-06 verdict，意外暴露并 root-cause 了 watchdog false-trip 真 bug (GAP-401)。
+
+### Wave 1 (parallel worktree) — G-02 + G-04
+
+- **04.1-01 (G-02)**: `l2_main.py` eager startup-prime — catchup envelope 后无条件 dispatch 一次 `{snapshot_id:-1, _startup_prime:True}` synthetic prime。TDD RED→GREEN (commits 9a01c5d/7109689/28de6f4)。
+- **04.1-02 (G-04)**: `/health process:rss_kb` via psutil 当前进程 (非 PID-1 hallpass) + psutil dev→runtime + 3x chaos Makefile RSS 改读 /health jq (commits 659a484/8d35d89/e48f138/a2c3971)。
+- merge 后 **2 pyright error** (1 新 `float|None`, 1 pre-existing Phase 03.1 latent `float(object)` @l2_health:264) → cleanup commit 83aae78 (0 errors)。
+
+### Wave 2 — G-03 in-band chaos endpoint
+
+- **04.1-03 (G-03)**: `/control/chaos/ws-test-kill` (HMAC under /control, path-guard 覆盖) + process-local `_ws_test_kill_flag` (set/get) + `/health chaos:ws_test_kill_flag` 子检查。chain-truth walked: 写侧 endpoint→flag, 读侧 flag→/health+ws_consumer 同一 process-local var (commits 44422ac/d102c8b/f8d16d4/3451c06)。23 tests green。
+- merge 后大量 `set/get_ws_test_kill unknown import symbol` 诊断 = **worktree-vs-main resolution noise** (符号在 ws_consumer.py:64/75, merge 后解析正常)。cleanup commit 1aa8a74 (drop dead imports, 0 errors)。
+
+### Wave 3 (human-verify, 用户授权) — deploy + chaos re-run
+
+- **Task 1 deploy**: `FLY_API_TOKEN= flyctl deploy --config fly-l2.toml --remote-only` → image `deployment-01KSWFMYBBAZYW7B7Q67HWJXK0` v21。pre-flight 确认三 fix LIVE: G-02 `subs=62` (was 3!), G-03 `chaos-ws-kill ON=0`→200, G-04 `process:rss_kb=241MB`。**部署前 prod 现场正是 G-02 bug 实证** (`candidates: never fetched` + mirror 7999s stale)。
+- **Task 2 chaos**: `make chaos-l2-inj4-throughput` 跑通 8 步。**D-06 verdict = PARTIAL**: (1) frame-rate DEFERRED (低活跃窗口, /health 无 frame_count) / (2) ws-recovery **FAIL** / (3) RSS **PASS** (T3/T1=1.0000)。
+
+### GAP-401 — watchdog false-trip 真 bug (本会话最大发现)
+
+- chain-first 诊断 flyctl logs: **baseline 窗口 (storm 前) watchdog 就在 false-trip** — `ws_watchdog: stale (30.0s silence) → RECONNECTING`,把 30s 合法静默 (安静市场无 event) 误判为 stale。
+- pre-storm false-trips 烧光 11-reconnect/hr storm-cap → `13:22:10Z reconnect storm cap hit; degrading to REST polling` → 卡 DISCONNECTED 一整小时。这就是 T3 没在 60s 内恢复的真因。
+- **只有 G-03 (no-restart kill) 才观察得到** — Phase 04 每次 restart 重置 reconnect counter, false-trip 累积不起来。Pitfall 4 (D-06.3) 终于被观察到。
+- root cause: watchdog 不区分 "healthy-but-quiet" vs "genuinely-stale"。修法候选 (carry-forward, 不进 04.1): WS ping/pong liveness / activity-aware threshold / 只把真 close 计入 storm-cap。
+- prod 已 `flyctl machine restart` 恢复健康 (WAITING_FOR_EVENT, subs=62)。
+
+### Post-execution gates
+
+- **code-review** (gsd-code-reviewer, standard): 0 critical / 3 warn / 2 info。全部 fix (commit 2e2d9ad): WR-02 (chaos kill-switch 拒绝非 bool `enabled`, 防 `bool("false")`=True 反转) / WR-03 (Makefile secret pre-flight guard) / IN-01 (observedValue bool 非 "1") / WR-01+IN-02 (startup-prime test 是 contract-shape 非 behavioral, 改诚实注释)。
+- **verify** (gsd-verifier): **passed 4/4 must-haves**。
+- phase complete (844d2a1), zero drift。
+
+### 会话末状态
+
+- origin/main 待 push (20 commits)。
+- ⚠ **17 worktrees** (本会话 3 个 + 历史 14, 都 merged, harness-locked pid 57877, 待 session 结束后 `git worktree prune`)。
+- ⚠ **code-review fixes (WR-02/WR-03/IN-01) 在 main 未 deploy** — happy-path 行为等价 (Makefile 发真 bool), 随下次 deploy ship, 不急。
+- memory 待更新: Phase 04.1 CLOSED + GAP-401 新建。
+
+### Next session
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                          # 应 zero drift
+```
+
+[NEXT] Phase 04.1 CLOSED (passed 4/4)。下一步选项: (a) Phase 05 (WS /book+/prices 增量推送, 无 CONTEXT, 从 /gsd-discuss-phase 05 起) / (b) **GAP-401 watchdog false-trip 修复** (新 phase 或 fold 进 05, 推荐优先 — 是真 prod bug, 让 L2 在安静窗口稳定) / (c) m2-combinatorial T2 validation tests (不依赖 m1) / (d) 清 17 worktrees。code-review fixes (WR-02/03/IN-01) 随下次 L2 deploy ship。
