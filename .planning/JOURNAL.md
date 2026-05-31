@@ -2941,3 +2941,41 @@ make planning-status                          # 应 zero drift
 ```
 
 [NEXT] Phase 04.1 CLOSED (passed 4/4)。下一步选项: (a) Phase 05 (WS /book+/prices 增量推送, 无 CONTEXT, 从 /gsd-discuss-phase 05 起) / (b) **GAP-401 watchdog false-trip 修复** (新 phase 或 fold 进 05, 推荐优先 — 是真 prod bug, 让 L2 在安静窗口稳定) / (c) m2-combinatorial T2 validation tests (不依赖 m1) / (d) 清 17 worktrees。code-review fixes (WR-02/03/IN-01) 随下次 L2 deploy ship。
+
+---
+
+## SESSION 33 — 2026-05-31 — GAP-401 watchdog false-trip 修复 (quick task)
+
+**Theme**: 接 SESSION 32 推荐, 修掉 Phase 04.1 prod chaos 暴露的 GAP-401 watchdog false-trip 真 bug。
+
+### 修法决策 (user-approved liveness-touch)
+
+调研定位: `WsWatchdog.touch()` 只在数据 frame 上调 (`ws_consumer.py:208`), 安静市场无 frame → `elapsed>stale_s(30)` → `_on_stale()` 误 reconnect → 烧 storm-cap → REST polling 卡 DISCONNECTED。`stale_s=30` 是 D-03 LOCKED 不能动。
+
+context7 (`/python-websockets/websockets`) 确认: 库自带 ping/pong keepalive (`ping_interval=10, ping_timeout=10`), 真冻结 (#292) 库自己 `ping_timeout` 关连接→`async for ws` iterator 重连; `ws.latency` 暴露活性 (0.0 直到首个 pong, 之后正 RTT)。→ 3 修法候选给用户, 选 **liveness-touch (推荐)**: pong 活着就不当 stale。
+
+### 实现 (quick task 260531, TDD)
+
+- `WsWatchdog.__init__` 加 `liveness_check: Callable[[],bool]|None`; `_on_stale()` 顶部 gate: 活着就 reset silence baseline + 留 WAITING_FOR_EVENT + return (不 reconnect 不烧 storm-cap)。
+- `stream_market_events` 加 `on_connect` 侧信道吐 live ws (iterator 仍只 yield event dict)。
+- `WsConsumer._stash_ws` 存当前 ws + `_liveness_check()` 闭包 (`ws.state is OPEN and ws.latency>0`) 注入 watchdog。
+- commits: a41ef23 (RED) / fb5e271 (GREEN) / 23a85e4 (SUMMARY+STATE) / 0f85a0e (cleanup unused imports)。10 liveness tests green, 52 L2 WS/health 全 green, 0 pyright。`stale_s=30` lock + storm-cap thresholds 不动。
+- origin/main `0f85a0e`, zero drift, working tree clean。
+
+### 关键约束守护
+
+- `stale_s=30.0` D-03 LOCKED 注释保留, 值不动。#292 silent-freeze 仍由库 ping_timeout 兜底 (belt+suspenders: 若库 keepalive 自己冻了, latency stale → liveness False → fall through 到 _on_stale)。
+
+### 会话末状态
+
+- ⚠ **2 块未 deploy 代码在 main**: (1) 04.1 code-review fixes WR-02/03/IN-01; (2) GAP-401 watchdog liveness。随下次 L2 deploy 一起上, 之后开安静窗口复验 GAP-401 false-trip 消失。
+- ⚠ 18 worktrees 待清。
+
+### Next session
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                          # 应 zero drift
+```
+
+[NEXT] GAP-401 code-fixed (待 prod 复验)。下一步选项: (a 推荐) **Phase 05** WS /book+/prices 增量推送 (无 CONTEXT, 从 /gsd-discuss-phase 05 起, m1 主线) / (b) 下次 L2 deploy + GAP-401 prod 复验 (顺带 ship 04.1 code-review fixes) / (c) m2 T2 validation tests / (d) 清 18 worktrees。
