@@ -73,11 +73,18 @@ class WsWatchdog:
         self,
         stale_s: float = 30.0,  # D-03 LOCKED — DO NOT make user-configurable
         on_reconnect: Optional[Callable[[], None]] = None,
+        liveness_check: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.stale_s = stale_s
         self._state = WatchdogState()
         self._last_touch_event = asyncio.Event()
         self._on_reconnect = on_reconnect
+        # GAP-401: optional liveness probe supplied by WsConsumer.
+        # When set and returning True (socket OPEN + pong seen), a data-silence
+        # window is treated as benign (market quiet) rather than a true stale.
+        # The silence baseline resets and NO reconnect is attempted.
+        # When None or returning False the existing _on_stale() reconnect path runs.
+        self._liveness_check = liveness_check
         # Sliding-window deque of recent reconnect monotonic timestamps.
         # maxlen 2x threshold so window pruning has room to operate.
         self._reconnect_timestamps: deque[float] = deque(maxlen=_STORM_THRESHOLD * 2)
@@ -153,7 +160,21 @@ class WsWatchdog:
     # ── Internal: stale-handling path ──────────────────────────────────────
 
     async def _on_stale(self) -> None:
-        """Called when elapsed since last touch exceeds stale_s."""
+        """Called when elapsed since last touch exceeds stale_s.
+
+        GAP-401 liveness gate: if liveness_check is set and returns True,
+        the silence is benign (socket alive, market quiet) — reset the baseline
+        and return without reconnecting. This prevents false-trips from burning
+        the reconnect storm-cap during healthy-but-quiet windows.
+        """
+        # GAP-401: check socket liveness before treating silence as stale.
+        if self._liveness_check is not None and self._liveness_check():
+            # Socket is provably alive (OPEN + keepalive pong seen).
+            # Reset the silence clock and stay in WAITING_FOR_EVENT.
+            self._state.last_event_time_s = time.monotonic()
+            self._state.state = "WAITING_FOR_EVENT"
+            return
+
         now = time.monotonic()
 
         # Prune timestamps older than the storm window

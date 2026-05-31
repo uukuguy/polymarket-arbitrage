@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import websockets
 from loguru import logger
@@ -47,6 +47,7 @@ async def stream_market_events(
     *,
     initial_dump: bool = True,
     ping_interval_s: int = PING_INTERVAL_S,
+    on_connect: Callable[[Any], None] | None = None,
 ) -> AsyncIterator[dict]:
     """Long-lived async iterator yielding market-channel events.
 
@@ -57,6 +58,11 @@ async def stream_market_events(
             baseline after a reconnect (no held-state drift).
         ping_interval_s: ping cadence (default 10s). DO NOT raise above 10
             — Polymarket drops the socket at ~10s silence.
+        on_connect: optional callback called once per (re)connect with the
+            live websockets.ClientConnection object as the sole argument.
+            Used by WsConsumer (GAP-401) to stash the current ws for liveness
+            reads. The iterator still yields ONLY event dicts — this hook is
+            a side-channel that does NOT affect yielded values.
 
     Yields:
         Parsed JSON event dicts. Malformed frames (JSONDecodeError) are
@@ -85,6 +91,12 @@ async def stream_market_events(
             logger.info(
                 f"ws subscribed: {len(assets_ids)} assets, initial_dump={initial_dump}"
             )
+            # GAP-401: notify consumer of the live ws object (side-channel).
+            if on_connect is not None:
+                try:
+                    on_connect(ws)
+                except Exception as _e:  # noqa: BLE001
+                    logger.warning(f"ws_market_client: on_connect hook raised: {_e!r}")
             async for raw in ws:
                 try:
                     data = json.loads(raw)

@@ -26,6 +26,11 @@ from loguru import logger
 from polyarb.clients.ws_market_client import stream_market_events
 from polyarb.daemon.ws_watchdog import WsWatchdog
 
+# GAP-401: websockets State enum for the liveness closure.
+# Import from websockets.protocol (canonical in websockets 15+;
+# websockets.connection is deprecated and emits a DeprecationWarning).
+from websockets.protocol import State as WsState
+
 
 # ── Phase 03.1-06 D-04 / Phase 04.1 G-03: POLYARB_WS_TEST_KILL chaos primitive ─
 #
@@ -130,6 +135,45 @@ class WsConsumer:
         # (dropped_frame_count += 1). Surfaces operational throughput health
         # during the prod chaos run (`make chaos-l2-inj4-throughput`).
         self._dropped_frame_count: int = 0
+        # GAP-401: stash of the current live ws object (None until first connect).
+        # Updated by _stash_ws() on each (re)connect via the on_connect hook in
+        # stream_market_events. Read by _liveness_check() to tell the watchdog
+        # whether the socket is provably alive (OPEN + keepalive pong received).
+        self._current_ws: Any = None
+        # Wire the liveness closure into the watchdog so it uses it for the gate.
+        self._watchdog._liveness_check = self._liveness_check
+
+    # ── GAP-401: liveness probe ────────────────────────────────────────────
+
+    def _stash_ws(self, ws: Any) -> None:
+        """Store the current live ws object (called by on_connect hook each connect).
+
+        Called by stream_market_events' on_connect side-channel once per (re)connect
+        so the liveness closure always reads the CURRENT connection's state/latency.
+        """
+        self._current_ws = ws
+
+    def _liveness_check(self) -> bool:
+        """Return True when the current WS connection is provably alive.
+
+        Liveness = socket OPEN AND keepalive pong seen (latency > 0).
+        - ws.state == WsState.OPEN: the websockets lib's protocol state machine
+          is in OPEN (not CONNECTING/CLOSING/CLOSED).
+        - ws.latency > 0: at least one ping/pong round-trip completed; a frozen
+          socket stops exchanging pings → latency sticks at last value (which
+          stays > 0) but the lib's ping_timeout fires → closes the conn itself.
+          If the lib's keepalive never started (ping_interval=None), latency stays
+          0 forever and we conservatively return False (rely on _on_stale path).
+        When False, the watchdog falls through to its normal _on_stale reconnect.
+        """
+        ws = self._current_ws
+        if ws is None:
+            return False
+        try:
+            return ws.state is WsState.OPEN and ws.latency > 0
+        except Exception:  # noqa: BLE001
+            # Defensive: unexpected attribute error on ws object → not alive
+            return False
 
     # ── Properties (read by health endpoint) ───────────────────────────────
 
@@ -193,7 +237,9 @@ class WsConsumer:
             )
 
             async for event in stream_market_events(
-                self._subscribed_assets, initial_dump=True
+                self._subscribed_assets,
+                initial_dump=True,
+                on_connect=self._stash_ws,  # GAP-401: stash ws for liveness gate
             ):
                 if stop_event.is_set():
                     break
@@ -221,6 +267,7 @@ class WsConsumer:
                 f"ws_consumer: {e} — closing WS for chaos test (this MUST NOT appear in production)"
             )
             self._state = "DISCONNECTED"
+            self._current_ws = None  # GAP-401: clear stash on disconnect
             # Do NOT re-raise: returning lets the supervisor (l2_main) decide
             # whether to relaunch the consumer. Watchdog will mark RECONNECTING
             # via its stale_s timeout if no fresh touch arrives.
@@ -229,4 +276,5 @@ class WsConsumer:
             # F-04: must propagate.
             logger.info("ws_consumer: cancelled, propagating CancelledError")
             self._state = "DISCONNECTED"
+            self._current_ws = None  # GAP-401: clear stash on disconnect
             raise
