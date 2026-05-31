@@ -255,6 +255,14 @@ Phase 02 只剩 Plan 02-07 (Wave 5 = chaos + 7-day soak)，是 Phase 02 完结�
 
 **历史 session 详细 carry-over** — 见 git log + 各 plan SUMMARY，不在 STATE.md 重复维护。
 
+## Quick Tasks Completed
+
+| ID | Title | Date | Commits | Summary |
+|----|-------|------|---------|---------|
+| 260531-gap-401-watchdog-false-trip | GAP-401 watchdog false-trip fix (liveness gate) | 2026-05-31 | a41ef23 (RED), fb5e271 (GREEN) | `.planning/quick/260531-gap-401-watchdog-false-trip/SUMMARY.md` |
+
+---
+
 ## Phase 1 Artifacts
 
 - `.planning/workstreams/m1-perception/phases/01-market-snapshot/01-CONTEXT.md` — locked decisions
