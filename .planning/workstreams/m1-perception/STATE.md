@@ -242,12 +242,16 @@ Phase 02 只剩 Plan 02-07 (Wave 5 = chaos + 7-day soak)，是 Phase 02 完结�
 
 ## Session Continuity
 
-**Last session:** 2026-06-01T01:28:22.446Z
-**Stopped At:** Phase 05 context gathered (16 decisions D-01..D-16, L2→L3 升级 scope locked)
-**Next action:** `/gsd-discuss-phase 05 --ws m1-perception` (WS /book+/prices 增量推送 — 无 CONTEXT, gather context first)
-**Carry-over (未变):** 2 块未 deploy 代码在 main (04.1 code-review fixes + GAP-401 watchdog liveness), 随下次 L2 deploy 一起上 + 安静窗口复验 GAP-401 false-trip 消失; 17 worktrees 待 prune
-**Prior resume notes (历史):** 见下方 "下次会话该做的（2026-05-19 SESSION 20 EOD 更新）" 段
-**Authoritative state:** [Phase 02 Wave 4 完成 memory](memory/project_phase-02-wave-4-2026-05.md)
+**Last session:** 2026-06-01 (SESSION 34 — Phase 05 Wave 1-4 executed)
+**Stopped At:** Phase 05 Wave 1-4 done (5/6 plans, 24/30 tasks); Wave 5 (deploy + 24h soak) left for next session — needs user to run `flyctl deploy` + watch prod window
+**Next action:** `/gsd-execute-phase 05 --wave 5 --ws m1-perception` (2 human checkpoints: Task 1 flyctl deploy + Task 2 24h soak verdict). Prepare for chicken-and-egg: `depth_yes_usd > 500` threshold may not fire because column only populates for already-promoted markets (book events only flow for promoted assets). May surface NOT-CLOSED → quick-task v1 threshold fix → re-soak.
+**Carry-over (Wave 5 deploy ships 3 un-deployed blocks together):**
+1. Phase 04.1 code-review fixes WR-02/03/IN-01 (SESSION 32, happy-path equivalent)
+2. GAP-401 watchdog liveness gate (SESSION 33, quick-task `260531`)
+3. Phase 05 full code (l3_promote module + book_levels write path + /health l3:* sub-checks + dashboard + Makefile)
+**Alembic 005 already live on prod Supabase** (orchestrator pushed SESSION 34 EOD per user auth) — 4 tables + 3 OHLC views + `l3_promoted_at_ts` column; `l2_ohlc_1m` returns 155 rows from existing L2 data.
+**Worktrees:** 18 harness-locked (PID 62636); `git worktree prune` after session ends.
+**Authoritative state:** SESSION 34 entry in JOURNAL.md + plan SUMMARYs `05-01..05-05`.
 
 **Carry-over observational facts**（值得跨 session 保留的市场观察）:
 
