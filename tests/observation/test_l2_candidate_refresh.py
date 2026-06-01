@@ -395,7 +395,13 @@ async def test_refresh_debounce_60s(settings_with_db, monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_on_snapshot_complete_mutates_ws_consumer(settings_with_db, tmp_path):
-    """Handler writes the new asset_id list into ws_consumer._subscribed_assets."""
+    """Handler calls ws_consumer.update_candidate_set(new_asset_ids).
+
+    Phase 05 Plan 02 contract: migrate from the legacy
+    ``ws_consumer._subscribed_assets = list(...)`` overwrite to the new
+    ``update_candidate_set`` helper, which leaves _l3_active_set untouched
+    (Pitfall 5 race fix).
+    """
     import polyarb.observation.l2_candidate_refresh as mod
 
     settings, db_path = settings_with_db
@@ -413,15 +419,20 @@ async def test_on_snapshot_complete_mutates_ws_consumer(settings_with_db, tmp_pa
     settings.candidate_watchlist_yaml = None
 
     fake_ws = MagicMock()
-    fake_ws.subscribed_assets = []
-    fake_ws._subscribed_assets = []
+    # Phase 05 Plan 02: ws_consumer now exposes _candidate_set + _l3_active_set;
+    # the diff source for "old" is _candidate_set (not subscribed_assets).
+    fake_ws._candidate_set = set()
+    fake_ws._l3_active_set = set()
 
     ok = await mod.on_snapshot_complete(
         {"snapshot_id": 1, "taken_at_ms": 1}, ws_consumer=fake_ws, settings=settings
     )
     assert ok is True
-    assert len(fake_ws._subscribed_assets) == 5
-    assert all(a.startswith("YES-R") for a in fake_ws._subscribed_assets)
+    # New API: handler MUST call update_candidate_set with the new asset_ids.
+    fake_ws.update_candidate_set.assert_called_once()
+    new_ids = list(fake_ws.update_candidate_set.call_args[0][0])
+    assert len(new_ids) == 5
+    assert all(a.startswith("YES-R") for a in new_ids)
 
 
 def test_compute_candidates_recipe_failure_continues(settings_with_db, tmp_path, monkeypatch):
@@ -490,9 +501,12 @@ async def test_on_snapshot_complete_calls_mirror_upsert_when_provided(
     settings.candidate_watchlist_yaml = None
 
     fake_ws = MagicMock()
-    # Pre-populate ws with 2 'old' assets so 2 should be removed
-    fake_ws.subscribed_assets = ["OLD-A", "OLD-B"]
-    fake_ws._subscribed_assets = ["OLD-A", "OLD-B"]
+    # Phase 05 Plan 02: pre-populate _candidate_set with 2 'old' assets so the
+    # diff_candidate_sets logic computes 2 removals. _l3_active_set must stay
+    # empty so the log's "L3 set untouched: 0 tokens" reflects an unrelated
+    # L3 dimension (Pitfall 5 fix).
+    fake_ws._candidate_set = {"OLD-A", "OLD-B"}
+    fake_ws._l3_active_set = set()
 
     fake_mirror = MagicMock()
     fake_mirror.upsert_candidates.return_value = True
@@ -532,8 +546,10 @@ async def test_on_snapshot_complete_no_mirror_call_when_none(
     settings.candidate_watchlist_yaml = None
 
     fake_ws = MagicMock()
-    fake_ws.subscribed_assets = []
-    fake_ws._subscribed_assets = []
+    # Phase 05 Plan 02: new contract — handler reads _candidate_set (not
+    # subscribed_assets) for diff and calls update_candidate_set for mutation.
+    fake_ws._candidate_set = set()
+    fake_ws._l3_active_set = set()
 
     ok = await mod.on_snapshot_complete(
         {"snapshot_id": 1, "taken_at_ms": 1},
