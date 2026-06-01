@@ -21,10 +21,12 @@ Debounce (SP8 cross-bug pre-check #1 + R1): a refresh is rate-limited to
 once per REFRESH_DEBOUNCE_S=60.0s window. Multiple NOTIFYs inside the
 window collapse to a single refresh.
 
-Cross-plan contract (Plan 04 ↔ Plan 05): `on_snapshot_complete` mutates
-`ws_consumer._subscribed_assets` directly. The WsConsumer public
-`subscribed_assets` property returns a defensive copy, so the handler
-MUST write to the private `_subscribed_assets` attribute.
+Cross-plan contract (Phase 05 Plan 02 — Pitfall 5 fix): `on_snapshot_complete`
+mutates the candidate set via `ws_consumer.update_candidate_set(asset_ids)`,
+which leaves `ws_consumer._l3_active_set` UNTOUCHED. The legacy full-list
+overwrite of the private subscriptions attribute is no longer used — that
+path would clobber L3 tokens (race condition documented in 05-PATTERNS.md /
+05-RESEARCH.md §Pitfall 5).
 """
 from __future__ import annotations
 
@@ -340,9 +342,11 @@ async def on_snapshot_complete(
     Debounce: only one refresh runs per REFRESH_DEBOUNCE_S window. Multiple
     NOTIFYs collapse to a single refresh.
 
-    Mutation contract (Plan 04 ↔ Plan 05): writes to
-    ``ws_consumer._subscribed_assets`` directly (private attribute). The
-    public ``subscribed_assets`` property returns a defensive copy.
+    Mutation contract (Phase 05 Plan 02 — Pitfall 5 fix): mutates the
+    candidate set via ``ws_consumer.update_candidate_set(asset_ids)``, which
+    replaces the L2-candidate portion of the subscription set while leaving
+    ``ws_consumer._l3_active_set`` untouched. The public ``subscribed_assets``
+    property returns the union (candidate ∪ L3) as a defensive list copy.
 
     Plan 06 extension (D-07): if `mirror` is provided (L2SupabaseMirror
     instance), persist the diff to l2_candidates:
@@ -402,19 +406,24 @@ async def on_snapshot_complete(
     )
     new_asset_ids = [r.asset_id for r in new_rows]
 
-    # Diff for log surface — mutation is unconditional (we hand the new list
-    # to ws_consumer; the consumer applies internal subscribe/unsubscribe on
-    # next reconnect — Plan 04 contract).
-    old_asset_ids = set(ws_consumer.subscribed_assets)
+    # Diff for log surface — mutation goes through update_candidate_set so
+    # the L3 set (Phase 05 Plan 02 D-11) is NEVER clobbered (Pitfall 5 fix).
+    # `old_asset_ids` reads from `_candidate_set` (not `subscribed_assets`)
+    # so the +N/-M log surface reflects ONLY candidate churn, not L3 churn.
+    old_asset_ids = set(getattr(ws_consumer, "_candidate_set", set()))
     removed, added = diff_candidate_sets(old_asset_ids, new_rows)
+    l3_count = len(getattr(ws_consumer, "_l3_active_set", set()))
     logger.info(
         f"candidate refresh: +{len(added)} -{len(removed)} "
-        f"total={len(new_asset_ids)} (cap={MAX_CANDIDATES}) "
+        f"l2-candidates (L3 set untouched: {l3_count} tokens) "
+        f"total_candidate={len(new_asset_ids)} (cap={MAX_CANDIDATES}) "
         f"snapshot_id={payload.get('snapshot_id')}"
     )
 
-    # Mutate _subscribed_assets directly — Plan 04 design contract.
-    ws_consumer._subscribed_assets = list(new_asset_ids)
+    # Phase 05 Plan 02 Task 3: migrate to the dedicated helper. This replaces
+    # the legacy full-list overwrite of the private subscriptions attribute
+    # which would clobber the L3 set (Pitfall 5).
+    ws_consumer.update_candidate_set(new_asset_ids)
 
     # Plan 06 D-07: persist diff to dashboard mirror (fail-soft via mirror itself).
     if mirror is not None:
