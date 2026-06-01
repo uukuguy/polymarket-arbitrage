@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 05
 status: planning
-stopped_at: Phase 04 context gathered (8 decisions D-01..D-08)
-last_updated: "2026-05-30T14:43:02.458Z"
+stopped_at: Phase 05 context gathered (16 decisions D-01..D-16, L2→L3 升级 scope locked)
+last_updated: "2026-06-01T01:28:22.450Z"
 last_activity: 2026-05-30
 progress:
   total_phases: 10
@@ -242,8 +242,11 @@ Phase 02 只剩 Plan 02-07 (Wave 5 = chaos + 7-day soak)，是 Phase 02 完结�
 
 ## Session Continuity
 
-**Stopped At:** Phase 04 context gathered (8 decisions D-01..D-08)
-**Next Resume:** 见上方 "下次会话该做的（2026-05-19 SESSION 20 EOD 更新）" 段
+**Last session:** 2026-06-01T01:28:22.446Z
+**Stopped At:** Phase 05 context gathered (16 decisions D-01..D-16, L2→L3 升级 scope locked)
+**Next action:** `/gsd-discuss-phase 05 --ws m1-perception` (WS /book+/prices 增量推送 — 无 CONTEXT, gather context first)
+**Carry-over (未变):** 2 块未 deploy 代码在 main (04.1 code-review fixes + GAP-401 watchdog liveness), 随下次 L2 deploy 一起上 + 安静窗口复验 GAP-401 false-trip 消失; 17 worktrees 待 prune
+**Prior resume notes (历史):** 见下方 "下次会话该做的（2026-05-19 SESSION 20 EOD 更新）" 段
 **Authoritative state:** [Phase 02 Wave 4 完成 memory](memory/project_phase-02-wave-4-2026-05.md)
 
 **Carry-over observational facts**（值得跨 session 保留的市场观察）:
