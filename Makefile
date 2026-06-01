@@ -1053,3 +1053,56 @@ sentry-alert-audit:
 	@uv run python scripts/sentry_alert_audit.py
 .PHONY: sentry-alert-audit
 
+# ============================================================================
+# Phase 05 Plan 05-05 — L3 promoter + OHLC + dashboard smoke ops
+# ============================================================================
+
+## l3-promote-dry-run: Run l3_promote.promote_run once locally without WS mutation (prints candidate set)
+##
+## Loads .env (if present) so POLYARB_SUPABASE_URL + service-role key reach
+## the helper. Swaps WsConsumer for a no-op shim — `WOULD add` / `WOULD remove`
+## lines show what real subscribe calls WOULD have been issued. Use this to
+## sanity-check the L3 candidate selection logic against prod Supabase
+## without touching real WS state.
+l3-promote-dry-run:
+	@echo ">> l3-promote-dry-run — single tick, no real WS mutation"
+	@if [ -f .env ]; then set -a && . ./.env && set +a; fi; \
+	uv run python scripts/l3_promote_dry_run.py
+.PHONY: l3-promote-dry-run
+
+## ohlc-spot-check: Query /health for L3 active set + book_levels freshness anchors
+##
+## Reads the local L2 daemon /health (or pass URL=https://polyarb-l2.fly.dev
+## to hit prod). Prints l3:active_count + last_promote_at_s + last
+## book_levels_write_at_s — the 3 anchors that prove the L3 promoter is alive
+## and OHLC views have fresh source data. Use after deploy or as a daily
+## sanity check; doesn't fail the build if /health unreachable.
+ohlc-spot-check:
+	@echo ">> ohlc-spot-check — l3:* anchors from /health"
+	@URL="$${URL:-http://localhost:8080}"; \
+	echo "→ hitting $$URL/health"; \
+	curl -sS "$$URL/health" 2>/dev/null | uv run python scripts/ohlc_spot_check.py \
+		|| echo "(daemon at $$URL/health not reachable — try URL=https://polyarb-l2.fly.dev)"
+.PHONY: ohlc-spot-check
+
+## smoke-l3-dashboard: HTTP smoke an /l3/<asset_id> page (local dev OR prod via URL=)
+##
+## Usage:
+##   make smoke-l3-dashboard asset_id=<asset_id>
+##   make smoke-l3-dashboard asset_id=<asset_id> URL=https://polyarb-dashboard.vercel.app
+##
+## Default URL is http://localhost:3000 (run `cd dashboard && pnpm dev` first).
+## Returns HTTP status + payload size + grep for "asset_id" marker. Fail-soft:
+## echoes a hint and exit 77 if URL isn't reachable, so CI consumers can
+## detect "skip" vs "fail" cleanly.
+smoke-l3-dashboard:
+	@echo ">> smoke-l3-dashboard — usage: make smoke-l3-dashboard asset_id=<id> [URL=...]"
+	@if [ -z "$(asset_id)" ]; then echo "ABORT: missing asset_id (try: make smoke-l3-dashboard asset_id=<asset_id>)"; exit 2; fi
+	@URL="$${URL:-http://localhost:3000}"; \
+	echo "→ hitting $$URL/l3/$(asset_id)"; \
+	curl -sS -o /tmp/l3-smoke.html -w "HTTP %{http_code} (size: %{size_download} bytes)\n" \
+		"$$URL/l3/$(asset_id)" \
+		|| { echo "(dashboard at $$URL not reachable — run 'cd dashboard && pnpm dev' first, or pass URL=https://...)"; exit 77; }
+	@MARKERS=$$(grep -c "asset_id\|Depth ladder\|KlineChart\|l3_promoted" /tmp/l3-smoke.html 2>/dev/null || echo 0); \
+	echo "→ markers found: $$MARKERS (asset_id / Depth ladder / KlineChart / l3_promoted)"
+.PHONY: smoke-l3-dashboard
