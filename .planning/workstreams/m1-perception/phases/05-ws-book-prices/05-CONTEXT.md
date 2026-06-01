@@ -48,11 +48,12 @@
 - **D-14 (Recompute frequency)**: **5 min** — 与 L2 粒度一致, last_trade<60min 门槛下 churn 慢, 5min 足够; 减少 promoter task 复杂度。复用 Phase 02 AsyncIOScheduler cron 模式。
 
 ### OHLC (K 线生产)
-- **D-03 (Strategy)**: **SQL window view on `l2_top_of_book`** 起步。复用 Postgres `time_bucket` (含在 Supabase Pro 默认 ext), 不引 TimescaleDB。零新进程, 精度 = L2 写入频率 (~分钟级)。
+- **D-03 (Strategy)**: **SQL window view on `l2_top_of_book`** 起步。**用 Postgres core `date_trunc('minute'/'hour', ts)` + window functions + `array_agg(... ORDER BY ts)` 取 first/last**, 不依赖 TimescaleDB 的 `time_bucket()` — Supabase Postgres 17 已废弃 TimescaleDB extension (2024 EoL, official deprecation)。语义不变 (regular view on l2_top_of_book), 仅底层 SQL 函数换。零新 ext 依赖, 精度 = L2 写入频率 (~分钟级)。**修订自 SESSION 34 research, D-03 round 1 用了 `time_bucket` 是 CONTEXT 笔误。**
 - **D-06 (Bars/granularity)**: **1m + 5m + 1h regular (non-materialized) view**。三个 view 是 SQL 写一次, 查询时 run, 查询响应 sub-100ms (thread §2.6 实测 PG 10M 行调优负载)。
   - 不用 materialized view 避免 pg_cron extension 依赖 + 1-min lag
   - View 命名: `l2_ohlc_1m` / `l2_ohlc_5m` / `l2_ohlc_1h`
   - 数据源 = `l2_top_of_book.mid_price` (有 best_bid + best_ask 算出的 mid)
+  - SQL 体例见 `05-RESEARCH.md` Example 1 (Alembic 005 完整迁移)
 
 ### Full Book Depth 持久化
 - **D-04 (Strategy)**: 新表 `l2_book_levels` 存 top-10 levels/边。
@@ -64,6 +65,7 @@
   - 复用 thread §2.2 Q1 已记的 `{"operation": "subscribe", "assets_ids": [...]}` 动态加订 (无需重连)
   - L3 promoter task 每 5min 计算 new set, diff 出 add/remove tokens, send subscribe/unsubscribe payload
   - 不开新 WS 连接, 不重连, **不动 Phase 04.1 已修的 watchdog liveness gate** (那是另一个独立约束)
+  - **D-11 实现细节修订 (SESSION 34 research)**: 现有 `stream_market_events` 只在 (re)connect 时 subscribe 一次, **没有 send-after-connect API**。Phase 05 需新增 `WsConsumer.add_subscriptions(asset_ids: list[str])` / `remove_subscriptions(asset_ids: list[str])` 方法, 在 `_current_ws` (GAP-401 fix 已 stash via `on_connect` 钩子) 上 send 新 subscribe payload。详 `05-RESEARCH.md` Example 4。这是 D-11 范围内 the agent's Discretion 落地, 不是 scope 扩张。
 
 ### Dashboard
 - **D-08 (UI scope)**: `/l3/[asset_id]` 动态页 (Next.js App Router dynamic segment)
