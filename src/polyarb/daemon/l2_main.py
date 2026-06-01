@@ -128,6 +128,38 @@ def _isoformat_ts(ts: int | float | str | None) -> str | None:
     return None
 
 
+def _sum_depth_usd(levels: list, top_n: int = 10) -> float | None:
+    """Sum (price * size) over top-N orderbook levels; return None if no valid levels.
+
+    Quick task 260601: each level in the WS `book` event is `{"price": str, "size": str}`.
+    Skip non-dict entries, non-numeric price/size, or size <= 0.
+
+    Used by `_tob_row_from_frame` to populate `depth_yes_usd` (bids) and
+    `depth_no_usd` (asks). Phase 05 L3 promoter D-13 threshold needs this.
+    """
+    if not levels:
+        return None
+    total = 0.0
+    n_valid = 0
+    for entry in levels[:top_n]:
+        if not isinstance(entry, dict):
+            continue
+        raw_price = entry.get("price")
+        raw_size = entry.get("size")
+        if raw_price is None or raw_size is None:
+            continue
+        try:
+            price = float(raw_price)
+            size = float(raw_size)
+        except (TypeError, ValueError):
+            continue
+        if size <= 0:
+            continue
+        total += price * size
+        n_valid += 1
+    return total if n_valid > 0 else None
+
+
 def _tob_row_from_frame(frame: dict) -> dict | None:
     """Project a price_change / best_bid_ask / book frame to a l2_top_of_book row.
 
@@ -149,6 +181,9 @@ def _tob_row_from_frame(frame: dict) -> dict | None:
         elif side == "SELL":
             best_ask = price
     # `book` frames carry bids/asks arrays — take top entry of each
+    # Quick 260601: also compute depth_yes_usd / depth_no_usd from top-10 levels.
+    depth_yes_usd_v: float | None = None
+    depth_no_usd_v: float | None = None
     if et == "book":
         bids = frame.get("bids") or []
         asks = frame.get("asks") or []
@@ -156,6 +191,8 @@ def _tob_row_from_frame(frame: dict) -> dict | None:
             best_bid = bids[0].get("price", best_bid)
         if asks and isinstance(asks[0], dict):
             best_ask = asks[0].get("price", best_ask)
+        depth_yes_usd_v = _sum_depth_usd(bids, top_n=10)
+        depth_no_usd_v = _sum_depth_usd(asks, top_n=10)
 
     try:
         bb_f = float(best_bid) if best_bid is not None else None
@@ -173,8 +210,8 @@ def _tob_row_from_frame(frame: dict) -> dict | None:
         "best_ask": ba_f,
         "spread": spread,
         "mid_price": mid,
-        "depth_yes_usd": None,  # populated only when book frame carries size
-        "depth_no_usd": None,
+        "depth_yes_usd": depth_yes_usd_v,
+        "depth_no_usd": depth_no_usd_v,
         "source_event": et,
     }
 
