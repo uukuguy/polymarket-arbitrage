@@ -15,6 +15,32 @@ All validators take a ``trusted: bool`` keyword:
 Layer 1 (read-only URI) and Layer 4 (limit cap) apply to BOTH paths
 — these are ENGINE-level / RESOURCE-level guards, not text validators.
 
+═══ Trusted-recipe tiers (3) ════════════════════════════════════════════
+Phase 05 Plan 04 (Warning #10) makes the third tier explicit:
+
+  1. BUILTIN_RECIPES (recipes.py) — Python literals via
+     ``Recipe.from_builtin()``; ``_is_trusted=True``; bypasses Layer 2/3.
+     These are authored in source and reviewed via commit.
+
+  2. User-supplied yaml (e.g. ``config/scan_recipes.yaml``) — loaded via
+     ``Recipe.from_yaml()``; ``_is_trusted=False``; FULL strict validation
+     (Layers 2/3 enforced). Yaml from forums / AI / external sources gets
+     the strict treatment.
+
+  3. **Source-controlled yaml** (``src/polyarb/scan_recipes/*.yaml`` — e.g.
+     ``l3-promote.yaml``, Phase 05 Plan 04) — yaml on disk that lives in
+     the repository and is modified via PR + code review. Loaded via
+     **direct ``Recipe(..., _is_trusted=True)`` construction** (NOT via
+     ``Recipe.from_yaml`` which hard-codes ``_is_trusted=False``). This is
+     the "trusted-yaml" tier: trust equivalent to BUILTIN_RECIPES because
+     the file is git-controlled, with yaml-only audit trail for threshold
+     tuning (per CLAUDE.md "experiment values never touch baseline
+     defaults"). Layer 1 (read-only URI) + Layer 4 (limit) still apply
+     regardless of tier.
+
+The Phase 05 L3 promoter (``l3_promote._load_recipe``) is the canonical
+example of tier 3 usage.
+
 ═══ GROUPED-PATH NO-BYPASS INVARIANT ═════════════════════════════════════
 ``run_recipe_grouped`` MUST call ``_validate_where`` + ``_validate_order_by``
 with the recipe's ``_is_trusted`` flag, exactly like ``run_recipe``. Yaml

@@ -1,0 +1,24 @@
+# Phase 05 D-09 + D-13. v1 阈值 baseline — yaml-only audit trail
+# (CLAUDE.md "experiment values never touch baseline defaults"). DO NOT
+# promote thresholds to env var; tune by editing this file + commit.
+#
+# Trust tier: source-controlled yaml — loaded via direct Recipe(..., _is_trusted=True)
+# construction in l3_promote._load_recipe (scanner.py docstring documents this
+# as the 3rd recipe trust tier). Layer 1 (read-only URI) + Layer 4 (limit)
+# defenses still apply.
+#
+# ts predicate (Blocker #2): INTEGER epoch ms — matches _build_tob_temp_db
+# schema. Pure numeric comparison via `strftime('%s','now','-1 hour') * 1000`.
+# Avoids ISO TEXT lex comparison failure when timezone/`T` format varies.
+recipes:
+  l3-promote:
+    description: |
+      Top-5 L3 锁定集 — 优先 depth_yes_usd 高 + spread 紧 + 最近活跃。
+      Phase 05 D-02 trigger + D-05 N=5 + D-13 阈值。
+      Recompute: 5-min cron. Source: l2_top_of_book latest-per-asset snapshot.
+    where: |
+      spread < 0.02
+      AND depth_yes_usd > 500
+      AND ts > (strftime('%s', 'now', '-1 hour') * 1000)
+    order_by: depth_yes_usd DESC
+    limit: 5
