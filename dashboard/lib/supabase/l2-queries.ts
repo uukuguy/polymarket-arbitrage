@@ -28,6 +28,9 @@ export interface L2Candidate {
   removed_at_ts: string | null;
   ranking_score: Record<string, unknown> | null;
   source: string;
+  // Phase 05 Plan 05-04 (D-08): non-null when L3 promoter has subscribed
+  // this candidate's asset to the WS /book + /price-change firehose.
+  l3_promoted_at_ts: string | null;
 }
 
 export interface L2TopOfBook {
@@ -81,7 +84,7 @@ export async function getActiveCandidates(
   const { data, error } = await client
     .from("l2_candidates")
     .select(
-      "id, snapshot_id, recipe_name, asset_id, market_id, event_id, included_at_ts, removed_at_ts, ranking_score, source",
+      "id, snapshot_id, recipe_name, asset_id, market_id, event_id, included_at_ts, removed_at_ts, ranking_score, source, l3_promoted_at_ts",
     )
     .is("removed_at_ts", null)
     .order("included_at_ts", { ascending: false })
@@ -162,4 +165,74 @@ export async function getSignals(
     .limit(limit);
   if (error) throw error;
   return (data ?? []) as L2Signal[];
+}
+
+// ─── Phase 05 — L3 query helpers (Alembic 005) ────────────────────────────────
+// Reads l2_book_levels table + l2_ohlc_{1m,5m,1h} views via anon RLS
+// (Plan 05-01 GRANT SELECT TO anon). Fail-soft contract identical to above:
+// errors bubble; callers wrap in try/catch and render fail-soft banner
+// (Phase 02 LEARNINGS P5 dashboard pattern).
+
+export interface L2OhlcRow {
+  asset_id: string;
+  bucket_ts: string;  // ISO timestamptz
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  sample_count: number;
+}
+
+export interface L2BookLevel {
+  asset_id: string;
+  ts: string;
+  side: "BUY" | "SELL";
+  level: number;
+  price: number;
+  size: number;
+}
+
+/**
+ * OHLC bars for a single asset over the last `hours` from the requested
+ * granularity view (l2_ohlc_1m / 5m / 1h — Alembic 005).
+ * Ascending bucket_ts (lightweight-charts setData expects monotonic time).
+ */
+export async function getOhlcForAsset(
+  assetId: string,
+  granularity: "1m" | "5m" | "1h" = "1m",
+  hours: number = 24,
+  supabase?: SupabaseClient,
+): Promise<L2OhlcRow[]> {
+  const client = supabase ?? (await getServerSupabase());
+  const cutoff = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+  const view = `l2_ohlc_${granularity}`;
+  const { data, error } = await client
+    .from(view)
+    .select("asset_id, bucket_ts, open, high, low, close, sample_count")
+    .eq("asset_id", assetId)
+    .gte("bucket_ts", cutoff)
+    .order("bucket_ts", { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as L2OhlcRow[];
+}
+
+/**
+ * Latest L3 book-levels snapshot (top-20 rows, descending ts) for a single
+ * asset. Caller's DepthLadder picks the most recent ts batch and groups by
+ * side → top-10 bids + top-10 asks. Returns up to 20 rows to ensure both
+ * sides have headroom even when one side reports fewer levels.
+ */
+export async function getBookLevelsLatest(
+  assetId: string,
+  supabase?: SupabaseClient,
+): Promise<L2BookLevel[]> {
+  const client = supabase ?? (await getServerSupabase());
+  const { data, error } = await client
+    .from("l2_book_levels")
+    .select("asset_id, ts, side, level, price, size")
+    .eq("asset_id", assetId)
+    .order("ts", { ascending: false })
+    .limit(20);
+  if (error) throw error;
+  return (data ?? []) as L2BookLevel[];
 }
