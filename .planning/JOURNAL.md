@@ -3054,3 +3054,41 @@ git push origin main                          # 同步 31 commits
 ```
 
 [NEXT] Phase 05 Wave 5 (deploy + 24h soak)。下一步选项：(a 推荐) **`/gsd-execute-phase 05 --wave 5 --ws m1-perception`** — 用户亲跑 deploy + 24h soak verdict (准备好 chicken-and-egg 可能 NOT-CLOSED → re-soak quick task) / (b) 先快速修 chicken-and-egg (新 quick task: 把 D-13 改为不依赖 depth_yes_usd 的 v1 threshold, e.g. spread + recent_trade + volume) 然后 Wave 5 / (c) m2 T2 validation tests 不依赖 m1 / (d) 清 18 worktrees。
+
+
+### SESSION 34 EOD addendum — Wave 5 partial: deploy 成功 + 2 个 prod data plane bugs 浮出
+
+接 Wave 1-4 后续：用户授权 push + deploy。完成项 + 暴露的新 bug：
+
+**Wave 5 Task 1 完成 (orchestrator 代跑 per user auth)**:
+- 38 commits pushed → origin/main synced
+- `flyctl deploy --remote-only` 两次 (v22 = Phase 05 全 code; v23 = + quick task depth fix)
+- **Phase 05 control plane 100% live on prod**: l3_promote module 在跑 (`run_periodic started interval=300s`), `/health` 暴露 3 个 l3:* sub-checks (chain-truth surface 工作), Pitfall 5 race fix 实证 (prod 日志 `candidate refresh: +59 -3 ... L3 set untouched: 0 tokens`), GAP-401 watchdog liveness gate 在 prod 跑
+
+**Quick task `260601-depth-yes-usd`** (3 commits: facbffd / 9122b39 / de7f92a):
+- 修 Phase 03 latent TODO: `_tob_row_from_frame` `depth_yes_usd: None` 硬编码
+- 添加 `_sum_depth_usd(levels, top_n=10)` helper, 4 RED → GREEN tests, 96/96 regression green
+- prod 验证: `depth_no_usd` 已 populate ($1M-$28M USD samples)
+
+**2 个 data plane bugs 暴露 (Wave 5 Task 2 24h soak blocker)**:
+
+1. **`depth_yes_usd` 仍 NULL** — 不是 bug, 是数据偏斜。当前 candidate set 都是 "yes ≈ 0.999" 极端价格 markets (NO 侧有 ask, YES 侧无 bids)。需要 candidate 多样化 (中区市场, mid_price 接近 0.5) 才会看到 yes_depth 填上。**修法: 等 bug #2 修了之后 candidate set 重新 populate, 大概率会看到**
+2. **`upsert_candidates` 新 bug (Phase 04 schema mismatch)** — prod 日志: `null value in column "included_at_ts" of relation "l2_candidates" violates not-null constraint`. Writer (`l2_supabase_mirror.upsert_candidates`) row dict 没填 `included_at_ts` 但 DB 列 NOT NULL。**直接后果**: candidate set 写不进, promoter 没有 markets 可查 → `l3:active_count=0/10` 卡死
+
+**D-12 24h soak 没启动** — 等 bug #2 修了再开 soak window。
+
+**会话末状态**:
+- `de7f92a` tip, origin/main 同步, working tree clean
+- 0 drift (`make planning-status` ✓)
+- 18+ worktrees harness-locked PID 62636, session 末自动 prune
+
+### Next session
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                          # 应 zero drift
+git log --oneline -5                          # 应见 de7f92a tip
+curl -sS https://polyarb-l2.fly.dev/health | jq '.status, .checks."l3:active_count"'  # 应 warn, 0/10
+```
+
+[NEXT] Phase 05 Wave 5 chicken-and-egg 收口。**推荐下一步: quick task `260601-included-at-ts`** — 修 `l2_supabase_mirror.upsert_candidates` row dict 加 `included_at_ts=now_iso`, ~1 行 code + 1 RED test, 修完 candidate set 通路恢复 → L3 promoter 才有 markets 可选 → 24h soak (D-12) 才能跑。修完后选项: (a) 再 redeploy + 等 5-15min 看 `l3:active_count > 0` → 开 24h soak / (b) 也可以同步看 `depth_yes_usd` 自然填上 (candidate 多样化后) / (c) cross-line 工作 (m2 T2) 在 soak 跑期间做。
