@@ -267,6 +267,7 @@ Phase 02 只剩 Plan 02-07 (Wave 5 = chaos + 7-day soak)，是 Phase 02 完结�
 | ID | Title | Date | Commits | Summary |
 |----|-------|------|---------|---------|
 | 260531-gap-401-watchdog-false-trip | GAP-401 watchdog false-trip fix (liveness gate) | 2026-05-31 | a41ef23 (RED), fb5e271 (GREEN) | `.planning/quick/260531-gap-401-watchdog-false-trip/SUMMARY.md` |
+| 260601-depth-yes-usd | _tob_row_from_frame depth_yes_usd / depth_no_usd fill (Phase 03 latent TODO; unblocks D-13 promoter threshold) | 2026-06-01 | facbffd (RED), 9122b39 (GREEN) | `.planning/quick/260601-depth-yes-usd/SUMMARY.md` |
 
 ---
 
