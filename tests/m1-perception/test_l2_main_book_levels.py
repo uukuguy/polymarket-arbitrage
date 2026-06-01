@@ -275,3 +275,88 @@ def test_on_event_book_with_non_l3_asset_does_not_call_push_book_levels() -> Non
         assert l2_mirror.push_book_levels.call_count == 0
     finally:
         l3_promote._l3_active_set = prior
+
+
+# ── Quick task 260601-depth-yes-usd: _tob_row_from_frame depth fill ────────
+
+
+def test_tob_row_book_event_fills_depth_yes_usd_from_top_10_bids():
+    """Quick 260601: book event with bids/asks arrays → depth = sum(price*size top-10).
+
+    Phase 03 latent TODO — depth_yes_usd was hardcoded None. Promoter D-13
+    threshold `depth_yes_usd > 500` could never fire in prod (631 lifetime
+    rows: 0 with depth populated). This RED test asserts the fill works.
+    """
+    import pytest
+    from polyarb.daemon.l2_main import _tob_row_from_frame
+    frame = _make_book_frame(
+        asset_id="AID-1",
+        bids=[{"price": "0.45", "size": "1000"}, {"price": "0.44", "size": "500"}],
+        asks=[{"price": "0.46", "size": "800"}, {"price": "0.47", "size": "200"}],
+    )
+    row = _tob_row_from_frame(frame)
+    assert row is not None
+    # depth_yes_usd = sum of (price * size) for top-10 bids = 0.45*1000 + 0.44*500 = 670.0
+    assert row["depth_yes_usd"] == pytest.approx(0.45 * 1000 + 0.44 * 500)
+    # depth_no_usd = sum for asks = 0.46*800 + 0.47*200 = 462.0
+    assert row["depth_no_usd"] == pytest.approx(0.46 * 800 + 0.47 * 200)
+
+
+def test_tob_row_book_event_caps_at_top_10_levels():
+    """Quick 260601: if bids has 15 levels, only top-10 contribute to depth_yes_usd."""
+    import pytest
+    from polyarb.daemon.l2_main import _tob_row_from_frame
+    frame = _make_book_frame(
+        asset_id="AID-1",
+        bids=[{"price": "0.5", "size": "100"} for _ in range(15)],
+        asks=[],
+    )
+    row = _tob_row_from_frame(frame)
+    assert row is not None
+    # Only top-10 = 0.5 * 100 * 10 = 500.0; the extra 5 levels are ignored.
+    assert row["depth_yes_usd"] == pytest.approx(500.0)
+    # asks empty → depth_no_usd None
+    assert row["depth_no_usd"] is None
+
+
+def test_tob_row_book_event_skips_zero_size_levels():
+    """Quick 260601: levels with size<=0 are excluded from depth sum."""
+    import pytest
+    from polyarb.daemon.l2_main import _tob_row_from_frame
+    frame = _make_book_frame(
+        asset_id="AID-1",
+        bids=[
+            {"price": "0.5", "size": "100"},
+            {"price": "0.4", "size": "0"},   # skip — zero size
+            {"price": "0.3", "size": "200"},
+            {"price": "0.2", "size": "-50"}, # skip — negative size
+        ],
+        asks=[],
+    )
+    row = _tob_row_from_frame(frame)
+    assert row is not None
+    # 0.5*100 + 0.3*200 = 50 + 60 = 110
+    assert row["depth_yes_usd"] == pytest.approx(110.0)
+
+
+def test_tob_row_price_change_event_leaves_depth_none():
+    """Quick 260601: non-book events (price_change/best_bid_ask/last_trade) → depth = None.
+
+    Polymarket WS docs: only `book` event carries bids[]/asks[] arrays with size.
+    Other event types (price_change is per-side delta, best_bid_ask is best-only)
+    do NOT carry depth info; the projector must leave depth_yes_usd/depth_no_usd
+    as None for those, to preserve chain-truth (depth populated <=> source was a book frame).
+    """
+    from polyarb.daemon.l2_main import _tob_row_from_frame
+    frame = {
+        "event_type": "price_change",
+        "asset_id": "AID-1",
+        "timestamp": _VALID_TS,
+        "side": "BUY",
+        "price": "0.55",
+        "size": "100",
+    }
+    row = _tob_row_from_frame(frame)
+    assert row is not None
+    assert row["depth_yes_usd"] is None
+    assert row["depth_no_usd"] is None
