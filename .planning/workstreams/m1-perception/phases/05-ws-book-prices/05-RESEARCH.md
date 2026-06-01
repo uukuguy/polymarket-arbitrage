@@ -1286,7 +1286,7 @@ export default function KlineChart({ ohlc }: { ohlc: L2OhlcRow[] }) {
 | PHASE05-R03 | OHLC view 在 sparse 数据下不报错（≥1 行即 GREEN） | integration | `pytest tests/m1-perception/test_alembic_005_ohlc_views.py::test_sparse_data -x` | ❌ Wave 0 |
 | PHASE05-R04 | `ws_consumer.add_subscriptions` 发送正确 payload | unit | `pytest tests/m1-perception/test_ws_consumer_dynamic_subscribe.py::test_add_sends_subscribe -x` | ❌ Wave 0 |
 | PHASE05-R04 | `ws_consumer.remove_subscriptions` 同款 | unit | `pytest tests/m1-perception/test_ws_consumer_dynamic_subscribe.py::test_remove_sends_unsubscribe -x` | ❌ Wave 0 |
-| PHASE05-R04 | GAP-401 watchdog liveness gate 仍 intact (regression) | unit | `pytest tests/m1-perception/test_ws_watchdog_liveness_gate.py -x` (existing) | ✅ (Phase 04.1 quick task 260531) |
+| PHASE05-R04 | GAP-401 watchdog liveness gate 仍 intact (regression) | unit | `pytest tests/m1-perception/test_ws_watchdog_liveness.py -x` (existing) | ✅ (Phase 04.1 quick task 260531) |
 | PHASE05-R05 | dashboard `/l3/[asset_id]` 渲染 K 线 + ladder | smoke (manual or playwright) | `make smoke-l3-dashboard` (新 target) | ❌ Wave 0 |
 | PHASE05-R06 | promoter task 不阻塞 ws_consumer / health endpoint | integration | `pytest tests/m1-perception/test_l2_daemon_integration.py::test_promoter_concurrent_with_ws -x` | ❌ Wave 0 |
 | PHASE05-R07 | `/health` 含 3 个新 L3 sub-checks | unit | `pytest tests/m1-perception/test_l2_health_l3_subchecks.py -x` | ❌ Wave 0 |

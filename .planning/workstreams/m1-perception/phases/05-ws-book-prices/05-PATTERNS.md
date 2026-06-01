@@ -660,7 +660,7 @@ except Exception as e:  # noqa: BLE001 — fail-soft per D-12
 - `self._watchdog._liveness_check = self._liveness_check` wiring (line 144)
 - `ws_market_client.stream_market_events` on_connect hook (lines 94-99)
 
-**Verification:** Plan must include "regression: GAP-401 liveness test green" item — run the 10-test suite in `tests/m1-perception/test_ws_watchdog_liveness_gate.py`.
+**Verification:** Plan must include "regression: GAP-401 liveness test green" item — run the 10-test suite in `tests/m1-perception/test_ws_watchdog_liveness.py`.
 
 ---
 

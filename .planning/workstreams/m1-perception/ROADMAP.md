@@ -250,16 +250,52 @@ Plans:
 - [x] 04.1-03-PLAN.md — Wave 2 — G-03 in-band HMAC /control/chaos/ws-test-kill + process-local flag + make chaos-ws-kill (THREAT MODEL)
 - [x] 04.1-04-PLAN.md — Wave 3 — deploy + prod chaos re-run for real D-06 verdict + Pitfall 4 observation (checkpoint:human-verify)
 
-### Phase 05: WS /book + /prices 增量推送
+### Phase 05: WS /book + /prices 增量推送 (L2 → L3 升级)
 
-**Goal:** /book + /prices 频道实时增量推送，作为 L3 单市场 K 线的数据源
-**Status:** ⏸️ Pending Phase 04 + thread §2.2 调研
-**Depends on:** Phase 03 (L2 中间层 ready) + thread §2.2 (Polymarket WS 真实能力调研)
-**Note:** 原 Phase 2 (SESSION 12 时代锁)。Phase 01.1 架构纠偏后推迟到 L3 上下文。2026-05-28 SESSION 30 正式补回标题并编号 Phase 05（此前为丢失标题的悬空 metadata），排在 candidate 扩容 Phase 04 之后。
-**Plans:** 0 plans
+> PLANNED 2026-06-01 (SESSION 34) — 16 D-XX decisions locked in CONTEXT, 1402-line RESEARCH, 13-file pattern map. Scope re-defined per D-01: 字面 "WS /book+/prices" 已在 Phase 03 落地; 本 phase 是 L2→L3 跨层升级 — full depth 持久化 + OHLC K 线 + 自动 promote + dashboard `/l3/[asset_id]`。
 
-Plans:
-- [ ] TBD (待 Phase 04 完成 + thread §2.2 WS 能力调研)
+**Goal:** 把 Phase 03 已落地的 L2 通路升级到 L3 单市场层：自动 promote (5-min cron, top-5 markets) + full book depth (`l2_book_levels` top-10 levels/边) + OHLC views (`l2_ohlc_1m/5m/1h` via Postgres `date_trunc`, NOT `time_bucket` — TimescaleDB deprecated on Supabase PG17) + WS 动态 subscribe/unsubscribe API + 3 /health L3 sub-checks (chain-truth) + dashboard /l3/[asset_id] K-line via lightweight-charts v5.
+**Status:** 📋 PLANNED (2026-06-01 SESSION 34) — 6 plans, 5 waves
+**Depends on:** Phase 03 (L2 daemon ready) + Phase 04 (Supabase markets_latest read path) + Phase 04.1 (GAP-401 watchdog liveness gate — must NOT regress)
+**Plans:** 6 plans
+**Refs:**
+- `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-CONTEXT.md` (16 D-XX decisions locked)
+- `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-RESEARCH.md` (1402 lines — Pitfall 1 date_trunc; Pitfall 2 ws send-after-connect API gap; Pitfall 5 candidate-refresh race)
+- `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-PATTERNS.md` (13 files mapped + 5 cross-pattern decisions)
+- `.planning/quick/260531-gap-401-watchdog-false-trip/SUMMARY.md` (GAP-401 liveness gate — DO NOT REGRESS)
+- memory `feedback_cold-start-debounce-trap-2026-05.md` (sentinel-None pattern for new `_last_X_at_s` anchors)
+
+Scope (16 locked D-XX):
+- **D-01 Scope**: L2 → L3 升级 (NOT WS plumbing rewrite — Phase 03 已 ship)
+- **D-02/05/09/13/14 L3 Promote**: SQL rule via scanner recipe `l3-promote.yaml` (D-13 thresholds yaml-only, NOT env per CLAUDE.md "experiment values never touch baseline defaults"); N=5; 5-min cron
+- **D-03/06 OHLC**: Postgres `date_trunc` (TimescaleDB deprecated on Supabase PG17); regular view (not MV); 1m/5m/1h granularity
+- **D-04/07/10 Full Book Depth**: `l2_book_levels` top-10/side; unified `l2_*` namespace
+- **D-08 Dashboard**: `/l3/[asset_id]` + L3 badge on candidates page
+- **D-11 WS Sub**: dynamic add/remove subscribe (NEW API on WsConsumer — current client only subscribes on (re)connect)
+- **D-12 Done**: 5 L3 markets 24h soak + OHLC view returns data + book depth in DB + dashboard K-line renders
+- **D-15 Deploy**: same process as polyarb-l2 fly app (asyncio task, no new Fly app)
+- **D-16 Carry**: ship 04.1 code-review fixes + GAP-401 liveness gate with this deploy (happy-path equivalent)
+
+不在 scope (deferred to Phase 06+):
+- Multi-granularity OHLC (15m/4h/1d) — start with 1m/5m/1h
+- REST `/prices-history` cold-start backfill
+- Materialized view + pg_cron (regular view first)
+- L3 signal strategies (M4 workstream)
+- Yes/No 双 token L3 单边 promote (v2 optimization)
+
+Plans (6 plans across 5 waves; Wave 1 parallel; Wave 5 has 2 checkpoints — deploy + 24h soak):
+- [ ] 05-01-PLAN.md — Wave 1 (autonomous, parallel w/ 02): Alembic 005 — `l2_book_levels` table + 3 OHLC views (date_trunc) + `l2_candidates.l3_promoted_at_ts` column + Wave 0 schema-contract tests + `make supabase-migrate-test` target
+- [ ] 05-02-PLAN.md — Wave 1 (autonomous, parallel w/ 01): WsConsumer `add_subscriptions`/`remove_subscriptions` API + split `_candidate_set`/`_l3_active_set` (Pitfall 5 race fix) + l2_candidate_refresh `update_candidate_set` helper (no more raw `_subscribed_assets` clobber) + GAP-401 liveness gate preserved
+- [ ] 05-03-PLAN.md — Wave 2 (autonomous, depends 01+02): `_book_levels_rows_from_frame` projector + `L2SupabaseMirror.push_book_levels` (fail-soft envelope + chain-truth anchor mutation) + `l2_main._on_event` dispatcher gate on `_l3_active_set` + `l3_promote.py` module scaffold (state + getters + stub `promote_run`)
+- [ ] 05-04-PLAN.md — Wave 3 (autonomous, depends 03): `l3-promote.yaml` (D-13 thresholds) + full `promote_run` (Supabase tob fetch + scanner temp-DB + diff + ws_consumer add/remove + last-known-good freeze on outage) + raw asyncio `run_periodic` (5-min cron, NO apscheduler dep) + 3 /health L3 sub-checks (chain-truth getters)
+- [ ] 05-05-PLAN.md — Wave 4 (autonomous: false — [BLOCKING] alembic push to prod; depends 01+02+03+04): Task 1 [BLOCKING] `make supabase-migrate` push 005 to prod Supabase + dashboard `/l3/[asset_id]` page + `KlineChart.tsx` (lightweight-charts v5 dynamic import) + `DepthLadder.tsx` + candidates page L3 badge column + 3 new Makefile targets (`l3-promote-dry-run` / `ohlc-spot-check` / `smoke-l3-dashboard`)
+- [ ] 05-06-PLAN.md — Wave 5 (autonomous: false — 2 checkpoints; depends 01-05): flyctl deploy polyarb-l2 + 24h prod soak + 3-sub-indicator STRICT N=5 verdict (Blocker #5 — all 3 must == 5 for GREEN; no YELLOW fallback) + GAP-401 prod re-verification (carry-over) + docs/learning/11-L3-K线.md teaching doc (Chinese, 5 自检题) + VALIDATION nyquist_compliant flip + STATE/ROADMAP phase closure
+
+Makefile targets to deliver (per Plan 05-01 + 05-05):
+- `make supabase-migrate-test` — Alembic 005 forward+reverse roundtrip validation (Plan 05-01)
+- `make l3-promote-dry-run` — single promote tick locally, prints candidate set (Plan 05-05)
+- `make ohlc-spot-check` — query /health for current L3 active set + freshness anchors (Plan 05-05)
+- `make smoke-l3-dashboard asset_id=<id>` — HTTP smoke against `/l3/[asset_id]` route (Plan 05-05)
 
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 
