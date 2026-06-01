@@ -79,19 +79,53 @@ from polyarb.storage.sqlite_store import SQLiteStore
 
 
 def _isoformat_ts(ts: int | float | str | None) -> str | None:
-    """Normalize WS timestamp (unix seconds or ms) to ISO 8601 string."""
+    """Normalize WS timestamp (unix seconds, ms, or ISO 8601 string) to ISO 8601 UTC.
+
+    Phase 05 D-04: accepts ISO 8601 strings in addition to unix epoch numbers.
+    The Polymarket ``book`` frame carries ``"timestamp": "2026-06-01T..."``
+    per 05-CONTEXT.md <interfaces> block, while ``last_trade_price`` /
+    ``price_change`` typically carry numeric ms. Both shapes route to the
+    same normalized ISO 8601 UTC string for DB writes.
+
+    Returns ``None`` on any parse failure (caller treats None as drop).
+    """
     if ts is None:
         return None
-    try:
-        from datetime import datetime, timezone
+    from datetime import datetime, timezone
 
-        ts_num = float(ts)
-        # Heuristic: > 1e12 → milliseconds; else seconds
-        if ts_num > 1e12:
-            ts_num /= 1000.0
-        return datetime.fromtimestamp(ts_num, tz=timezone.utc).isoformat()
-    except Exception:
-        return None
+    # Numeric path: unix seconds (or ms via the 1e12 heuristic).
+    if isinstance(ts, (int, float)):
+        try:
+            ts_num = float(ts)
+            if ts_num > 1e12:
+                ts_num /= 1000.0
+            return datetime.fromtimestamp(ts_num, tz=timezone.utc).isoformat()
+        except Exception:
+            return None
+
+    # String path: try numeric-via-string first (some sources send "1717243200"),
+    # then fall back to ISO 8601 parsing. Accept the trailing 'Z' alias for +00:00.
+    if isinstance(ts, str):
+        s = ts.strip()
+        if not s:
+            return None
+        try:
+            ts_num = float(s)
+            if ts_num > 1e12:
+                ts_num /= 1000.0
+            return datetime.fromtimestamp(ts_num, tz=timezone.utc).isoformat()
+        except (TypeError, ValueError):
+            pass
+        try:
+            iso_s = s.replace("Z", "+00:00") if s.endswith("Z") else s
+            dt = datetime.fromisoformat(iso_s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).isoformat()
+        except (TypeError, ValueError):
+            return None
+
+    return None
 
 
 def _tob_row_from_frame(frame: dict) -> dict | None:
@@ -179,6 +213,72 @@ def _trade_row_from_frame(frame: dict) -> dict | None:
         "trade_hash": trade_hash,
         "source": "ws",
     }
+
+
+def _book_levels_rows_from_frame(
+    frame: dict, max_levels: int = 10
+) -> list[dict]:
+    """Project a WS ``book`` frame to up to ``2 * max_levels`` l2_book_levels rows.
+
+    Phase 05 D-04 + D-07. Returns ``[]`` (never None, never raises) for:
+    - frames without ``asset_id``
+    - frames without ``timestamp`` (and no ``ts``)
+    - books whose only entries are malformed (non-dict, non-numeric price)
+    - books with all sizes ≤ 0
+
+    Side normalization: bids → ``"BUY"``, asks → ``"SELL"`` (uppercase,
+    consistent with ``l2_trades.side`` from :func:`_trade_row_from_frame`).
+
+    Level numbering: 1-indexed AFTER filtering invalid entries. The first
+    valid bid is level=1 even if earlier dict entries had size=0 — this
+    keeps the (asset_id, ts, side, level) UNIQUE constraint stable across
+    snapshots where the worst level happens to be temporarily zeroed.
+
+    ``max_levels=10`` (D-07) caps each side at top-10 → up to 20 rows per
+    book event per asset. Bounded by design — bigger payloads from the
+    Polymarket WS are silently truncated.
+
+    Returned dict shape matches ``_NARROW_BOOK_LEVELS_COLUMNS`` exactly:
+    ``{asset_id, ts, side, level, price, size}``.
+    """
+    asset_id = frame.get("asset_id")
+    if not asset_id:
+        return []
+    ts_iso = _isoformat_ts(frame.get("timestamp") or frame.get("ts"))
+    if ts_iso is None:
+        return []
+    rows: list[dict] = []
+    for side_key, side_norm in (("bids", "BUY"), ("asks", "SELL")):
+        levels = frame.get(side_key) or []
+        valid_idx = 0
+        for entry in levels:
+            if valid_idx >= max_levels:
+                break
+            if not isinstance(entry, dict):
+                continue
+            raw_price = entry.get("price")
+            raw_size = entry.get("size", 0)
+            if raw_price is None:
+                continue
+            try:
+                price = float(raw_price)
+                size = float(raw_size) if raw_size is not None else 0.0
+            except (TypeError, ValueError):
+                continue
+            if size <= 0:
+                continue
+            valid_idx += 1
+            rows.append(
+                {
+                    "asset_id": asset_id,
+                    "ts": ts_iso,
+                    "side": side_norm,
+                    "level": valid_idx,
+                    "price": price,
+                    "size": size,
+                }
+            )
+    return rows
 
 
 class _EventListenerWrapper:

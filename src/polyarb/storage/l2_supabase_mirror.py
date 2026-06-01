@@ -88,6 +88,16 @@ _NARROW_CANDIDATE_COLUMNS: tuple[str, ...] = (
     "source",
 )
 
+# Phase 05 D-04 + D-07: l2_book_levels writes — top-10 per side per book event.
+_NARROW_BOOK_LEVELS_COLUMNS: tuple[str, ...] = (
+    "asset_id",
+    "ts",
+    "side",
+    "level",
+    "price",
+    "size",
+)
+
 # Chunk size — postgrest body-size headroom; matches Phase 02 supabase_mirror.
 _CHUNK_SIZE: int = 1000
 
@@ -198,6 +208,61 @@ class L2SupabaseMirror:
                 level="warning",
                 message=f"push_top_of_book failed rows={len(rows)}",
                 data={"rows": len(rows), "table": "l2_top_of_book", "error": str(e)[:200]},
+            )
+            return False
+
+    # ── push_book_levels (Phase 05 D-04 + D-07) ──────────────────────────────
+
+    def push_book_levels(self, rows: list[dict]) -> bool:
+        """Bulk insert ``l2_book_levels`` rows. Fail-soft per D-12 envelope.
+
+        Phase 05 D-04 / D-07. Mirrors :meth:`push_top_of_book` envelope verbatim:
+        narrow projection + 1000-row chunks + dual-anchor Sentry breadcrumb
+        + loguru. On SUCCESS, mutates ``l3_promote._last_book_levels_write_at_s``
+        — the chain-truth anchor read by /health ``l3:last_book_levels_write_at_s``
+        (Plan 05-04). On FAILURE the anchor is intentionally left untouched
+        (chain-truth: only the real success path advances freshness).
+
+        Args:
+            rows: List of dicts with keys ``asset_id, ts, side, level, price,
+                size`` (see ``_NARROW_BOOK_LEVELS_COLUMNS``). Extra keys are
+                silently dropped by ``_project``.
+
+        Returns:
+            True on success; False on any exception (never raises).
+        """
+        try:
+            narrow = _project(rows, _NARROW_BOOK_LEVELS_COLUMNS)
+            for chunk in _chunk(narrow, _CHUNK_SIZE):
+                self._client.table("l2_book_levels").insert(chunk).execute()
+            sentry_sdk.add_breadcrumb(
+                category="l2-mirror",
+                level="info",
+                message=f"push_book_levels ok rows={len(rows)}",
+                data={"rows": len(rows), "table": "l2_book_levels"},
+            )
+            logger.info(f"l2-mirror: pushed {len(rows)} book_levels rows")
+            # Chain-truth anchor — /health reads via
+            # l3_promote.get_last_book_levels_write_at_s. Local import avoids
+            # a module-init cycle (l3_promote may itself import storage in a
+            # future plan; deferring to call-time keeps this resilient).
+            from polyarb.observation import l3_promote
+            l3_promote._last_book_levels_write_at_s = _time.time()
+            return True
+        except Exception as e:  # noqa: BLE001 — fail-soft per D-12
+            logger.error(
+                f"l2-mirror push_book_levels failed rows={len(rows)}: "
+                f"{str(e)[:200]}"
+            )
+            sentry_sdk.add_breadcrumb(
+                category="l2-mirror",
+                level="warning",
+                message=f"push_book_levels failed rows={len(rows)}",
+                data={
+                    "rows": len(rows),
+                    "table": "l2_book_levels",
+                    "error": str(e)[:200],
+                },
             )
             return False
 
