@@ -373,6 +373,17 @@ async def main() -> int:
             row = _tob_row_from_frame(frame)
             if row is not None:
                 l2_mirror.push_top_of_book([row])
+            # Phase 05 D-04: book events for L3-promoted assets ALSO write
+            # full depth. TOB path above remains the unconditional baseline;
+            # this depth write is gated on the L3 active set populated by the
+            # promoter (Plan 04). Local import avoids picking up a stale
+            # binding if l3_promote._l3_active_set is reassigned at runtime.
+            if event_type == "book":
+                from polyarb.observation import l3_promote
+                if asset_id_raw and asset_id_raw in l3_promote.get_l3_active_set():
+                    book_rows = _book_levels_rows_from_frame(frame, max_levels=10)
+                    if book_rows:
+                        l2_mirror.push_book_levels(book_rows)
         elif event_type == "last_trade_price":
             row = _trade_row_from_frame(frame)
             if row is not None:
