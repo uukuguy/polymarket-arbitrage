@@ -76,6 +76,7 @@ export default async function CandidatesPage() {
           <thead>
             <tr style={{ borderBottom: "1px solid #333", textAlign: "left" }}>
               <th style={{ padding: "8px 6px" }}>asset_id</th>
+              <th style={{ padding: "8px 6px" }}>L3</th>
               <th style={{ padding: "8px 6px" }}>recipe</th>
               <th style={{ padding: "8px 6px" }}>liquidity</th>
               <th style={{ padding: "8px 6px" }}>included_at (UTC)</th>
@@ -94,6 +95,19 @@ export default async function CandidatesPage() {
                   title={row.asset_id}
                 >
                   {truncateAssetId(row.asset_id)}
+                </td>
+                <td style={{ padding: "6px 6px", fontSize: 12 }}>
+                  {row.l3_promoted_at_ts ? (
+                    <a
+                      href={`/l3/${encodeURIComponent(row.asset_id)}`}
+                      style={{ color: "#7fc6ff", textDecoration: "none" }}
+                      title={`L3 since ${row.l3_promoted_at_ts}`}
+                    >
+                      ★ L3
+                    </a>
+                  ) : (
+                    <span style={{ color: "#444" }}>—</span>
+                  )}
                 </td>
                 <td style={{ padding: "6px 6px" }}>{row.recipe_name}</td>
                 <td style={{ padding: "6px 6px" }}>
