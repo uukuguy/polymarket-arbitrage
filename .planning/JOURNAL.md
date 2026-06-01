@@ -2979,3 +2979,78 @@ make planning-status                          # 应 zero drift
 ```
 
 [NEXT] GAP-401 code-fixed (待 prod 复验)。下一步选项: (a 推荐) **Phase 05** WS /book+/prices 增量推送 (无 CONTEXT, 从 /gsd-discuss-phase 05 起, m1 主线) / (b) 下次 L2 deploy + GAP-401 prod 复验 (顺带 ship 04.1 code-review fixes) / (c) m2 T2 validation tests / (d) 清 18 worktrees。
+
+
+---
+
+## SESSION 34 — 2026-06-01 — Phase 05 全流程：discuss + plan + 5/6 plans executed (L2 → L3 升级 — 数据通路 + 控制平面 + UI 就绪, Wave 5 prod deploy + 24h soak 推下次)
+
+**Theme**: m1-perception Phase 05 (WS /book+/prices 增量推送 — 实质 = L2 → L3 跨层升级)。完整跑通 discuss-phase → plan-phase (含 research/pattern-map/check/revise 二轮) → execute-phase Wave 1-4 (4/5 waves，5/6 plans)。Wave 5 deploy + 24h soak 因需用户亲跑 `flyctl deploy` + 守 prod 窗口，留下次。
+
+### Phase 05 Domain redefinition (discuss-phase 关键发现)
+
+**Phase 03 已经在跑 WS market 通道** (price_change/best_bid_ask/last_trade_price/book → l2_top_of_book + l2_trades)，ROADMAP "WS /book+/prices 增量推送" 字面已被覆盖。但 ROADMAP 描述 "作为 L3 单市场 K 线的数据源" 才是真目标 → Phase 05 = **L2 → L3 升级**：
+- 自动 promote (top-5 markets, 5min cron, spread<2c + depth>$500 + recent<60min)
+- Full book depth top-10 levels/边 → 新表 `l2_book_levels`
+- OHLC K 线 1m/5m/1h regular view on `l2_top_of_book`
+- Dashboard `/l3/[asset_id]` 动态页 (K 线 + depth ladder)
+- 同进程 polyarb-l2 asyncio task (D-15)
+
+16 D-XX 决策锁定，5 轮 AskUserQuestion (含 2 个 research-发现的 CONTEXT 笔误现场修复 — D-03 time_bucket→date_trunc 因 Supabase PG17 废弃 Timescale；D-11 ws_market_client 需新 add_subscriptions/remove_subscriptions API)。
+
+### plan-phase 关键过程
+
+- **Research**: 1402 行 RESEARCH.md，发现 2 个 CONTEXT 错误 + 6 个 pitfalls (time_bucket、scanner SQLite-only、candidate-refresh race line 417、l2_promoter 与 candidate-refresh 互踩等)
+- **Pattern-map**: 13 文件映射到现存 file:line 类比，surface 5 跨 pattern 决策 (`push_book_levels` Sentry category=l2-mirror、L3 freshness anchor 模块位置、race fix 选 split-sets 而非 union+protected-delta、cron 用 raw asyncio 而非 apscheduler、recipe 目录用 `src/polyarb/scan_recipes/`)
+- **Plan-check iter 1**: 5 blockers + 9 warnings — 最关键的 #1 是 chain-truth 断 (l2_candidates.l3_promoted_at_ts 列加了但没人写)、#2 lex-comparison ts bug (ISO 8601 'T' separator vs SQLite datetime() 空格 → 漏选/错选)、#5 D-12 软化 (5 markets → ≥3)
+- **Plan revise**: 全部 5 blockers + 6 flagged warnings 收口；D-12 strict N=5 + Yes/No 双 token = 10 subscriptions + VALIDATION.md 主体填充 + 3 个剩余 G/Y/R prose stale 清理
+- **Plan-check iter 2**: VERIFICATION PASSED (1 cosmetic G/Y/R warning, 已 surgical clean)
+
+### execute-phase Wave 1-4 (5/6 plans done, 24/30 tasks done)
+
+| Wave | Plan | Commits | Tests | Auto-fixed deviations |
+|---|---|---|---|---|
+| 1 (parallel) | 05-01 Alembic 005 | 4 | 6/6 green | 1 (anti-regression test guard 触发，重写 docstring 不提及 forbidden identifier) |
+| 1 (parallel) | 05-02 WsConsumer dyn-subscribe + race fix | 4 | 21/21 (11 new + 10 GAP-401 regression) | 4 (1 Rule 3 install pytest-asyncio, 3 Rule 1 narrow corrections) |
+| 2 | 05-03 book_levels projector + mirror + l3_promote scaffold | 4 | 21/21 (16 new + 5 mirror regression) | 2 (`_isoformat_ts` 加 ISO string support — latent bug；type guard `float(entry.get("price"))`) |
+| 3 | 05-04 full L3 promoter (densest plan, scope_density:HIGH) | 4 | 25/25 (12 promoter + 13 health) + 104 regression | 3 (Rule 1 plan-pseudocode bugs: `prior_market_token_map` snapshot before overwrite；temp DB schema 必须有 `markets` + `question_translations` 表；docstring 提及 APScheduler 触发 case-insensitive lint) |
+| 4 | 05-05 prod migrate + dashboard + Makefile | 5 (4 executor + 1 orchestrator dry-run fix) | 68/68 backend regression + `pnpm typecheck/build` exit 0 | 2 dashboard polish + 1 orchestrator fix (scripts/l3_promote_dry_run.py: `from polyarb.config import settings` → `load_settings()`) |
+
+**Plan 01-04 全在 main，4 个 SUMMARY 落库，zero drift 全程。**
+
+### Alembic 005 prod push (Wave 4 Task 1 = human-action checkpoint, orchestrator 代跑 per user authorization)
+
+Evidence captured:
+1. `alembic current` → `005 (head)` (从 `004` 推进)
+2. View smoke: `l2_book_levels` (7 列 id/asset_id/ts/side/level/price/size) + 3 OHLC views (`l2_ohlc_1m/5m/1h`) + `l2_candidates.l3_promoted_at_ts` (TIMESTAMPTZ nullable) **全部 live in prod Supabase**
+3. **`l2_ohlc_1m` 已经返回 155 rows** from existing prod L2 top_of_book data — 视图 SQL 在真实 prod 数据上工作正常 (重要 sanity check)
+4. Post-migrate Wave 0: 6/6 green
+
+### chicken-and-egg 浮出 (Wave 5 prod soak 需正面对决)
+
+`make l3-promote-dry-run` 跑通了 (修了 `load_settings()` import bug)，但返回 `{added:[], removed:[]}` —— **promoter 的 D-13 threshold `depth_yes_usd > 500` 选不到 markets，因为 `depth_yes_usd` 只在 book 事件流到 promoted markets 时才被填**。CONTEXT Deferred §"cold-start backfill" 警告过这点。Wave 5 prod soak 会暴露：要么 (a) 加 seed 机制，要么 (b) 用 spread + last_trade 不依赖 depth 的 v1 threshold。
+
+### Wave 5 carry-over (留下次会话)
+
+- **Task 1 deploy**: 用户需 `env -u FLY_API_TOKEN flyctl deploy --config fly-l2.toml --remote-only` (keychain auth, .env token 屏蔽)。会一起 ship: (a) Phase 05 全部新代码 (l3_promote + book_levels write path + /health l3:* sub-checks + Makefile targets); (b) 04.1 code-review fixes WR-02/03/IN-01 (carry from SESSION 32); (c) GAP-401 watchdog liveness gate (carry from SESSION 33)
+- **Task 2 24h soak**: D-12 STRICT — 5 markets all 24h + 5/5 OHLC + GAP-401 watchdog stale = 0。**预期 chicken-and-egg 会让 N=5 不满足** — 准备好 NOT-CLOSED → quick-task fix v1 threshold → re-soak
+- **Task 3 docs/learning/11-L3-K线.md**: 教学文档 (autonomous after Task 2)
+- **Task 4 VALIDATION nyquist_compliant=true + STATE/ROADMAP closure**: phase 关闭 (autonomous after Task 3)
+
+### 会话末状态
+
+- main 领先 origin/main **31 commits** (Phase 05 全部 + STATE 跟踪)，待 push
+- 0 drift (`make planning-status` 全 OK)
+- working tree clean (1c8412f dry-run fix + 9678782 tracking 之后)
+- ⚠ **未 deploy 代码堆积**：04.1 code-review fixes WR-02/03/IN-01 + GAP-401 watchdog + Phase 05 全部新代码 — Wave 5 deploy 一起上
+- ⚠ **18 worktrees** harness-locked PID 62636，session 末 `git worktree prune`
+
+### Next session
+
+```bash
+/gsd-resume-work --ws m1-perception
+make planning-status                          # 应 zero drift
+git push origin main                          # 同步 31 commits
+```
+
+[NEXT] Phase 05 Wave 5 (deploy + 24h soak)。下一步选项：(a 推荐) **`/gsd-execute-phase 05 --wave 5 --ws m1-perception`** — 用户亲跑 deploy + 24h soak verdict (准备好 chicken-and-egg 可能 NOT-CLOSED → re-soak quick task) / (b) 先快速修 chicken-and-egg (新 quick task: 把 D-13 改为不依赖 depth_yes_usd 的 v1 threshold, e.g. spread + recent_trade + volume) 然后 Wave 5 / (c) m2 T2 validation tests 不依赖 m1 / (d) 清 18 worktrees。
