@@ -39,8 +39,10 @@ class _NoopConsumer:
 
 
 async def _main() -> int:
-    from polyarb.config import settings  # noqa: WPS433 — runtime import
+    from polyarb.config import load_settings  # noqa: WPS433 — runtime import
     from polyarb.observation import l3_promote
+
+    settings = load_settings()
 
     recipe = Path("src/polyarb/scan_recipes/l3-promote.yaml")
     if not recipe.exists():
