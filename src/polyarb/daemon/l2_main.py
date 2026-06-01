@@ -566,6 +566,36 @@ async def main() -> int:
 
     listener_task = asyncio.create_task(_listener_runner())
 
+    # ── Phase 05 Plan 04: L3 promoter task (5-min cron, D-14) ──────────────
+    # Real Recipe over the latest tob snapshot from Supabase. Selects top-5
+    # markets (D-13 thresholds) then expands to 10 token ids via
+    # markets_latest yes/no columns (D-05 N=5 × 2). Diffs vs
+    # _l3_active_set and calls ws_consumer.add_subscriptions /
+    # remove_subscriptions; write-through l2_candidates.l3_promoted_at_ts
+    # for the /candidates dashboard surface (Blocker #1).
+    #
+    # Raw asyncio.wait_for(stop_event.wait()) loop — no scheduler dep added
+    # (cross-pattern decision #4; matches ws_consumer.run idle-wait pattern).
+    from pathlib import Path as _Path
+
+    from polyarb.observation import l3_promote as l3_promote_module
+
+    # Recipe path: src/polyarb/scan_recipes/l3-promote.yaml (source-controlled
+    # yaml, 3rd recipe trust tier — see scanner.py docstring).
+    _l3_recipe_path = (
+        _Path(__file__).resolve().parents[1] / "scan_recipes" / "l3-promote.yaml"
+    )
+    l3_promoter_task = asyncio.create_task(
+        l3_promote_module.run_periodic(
+            stop_event=stop_event,
+            settings=settings,
+            ws_consumer=ws_consumer,
+            recipe_yaml_path=_l3_recipe_path,
+            interval_s=300.0,
+        ),
+        name="l3-promoter",
+    )
+
     try:
         await stop_event.wait()
     except asyncio.CancelledError:
@@ -581,12 +611,14 @@ async def main() -> int:
         watchdog_task.cancel()
         consumer_task.cancel()
         listener_task.cancel()
+        l3_promoter_task.cancel()
         # F-04 bounded shutdown — even if any task ignores cancel, exit within 5s each
         for task, name in (
             (server_task, "server"),
             (watchdog_task, "watchdog"),
             (consumer_task, "consumer"),
             (listener_task, "listener"),
+            (l3_promoter_task, "l3-promoter"),
         ):
             try:
                 await asyncio.wait_for(task, timeout=5.0)

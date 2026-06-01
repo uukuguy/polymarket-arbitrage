@@ -420,6 +420,108 @@ def _build_l2_health_checks(
     # NOTE: intentionally NO `overall = _severity(overall, rss_status)` —
     # informational (D-04.4); even the fail-soft warn must not alarm /health.
 
+    # ── Phase 05 Plan 04 D-08: L3 sub-checks (chain-truth) ─────────────────
+    # Three sub-checks read getters that the WRITE side really mutates.
+    # NO config-flag gating between getter and sub-check — chain truth IS
+    # the field (CLAUDE.md §chain-truth + Phase 04 D-08, Inj L2-2 RCA).
+    #
+    # L3_EXPECTED_TOKEN_COUNT = 10 — D-05 N=5 markets × 2 (Yes+No tokens).
+    # active_count threshold reflects the strict revision-1 promoter
+    # contract; <10 = under-filled (warn, not fail).
+    try:
+        from polyarb.observation import l3_promote
+        l3_active_count = l3_promote.get_l3_active_count()
+        l3_last_promote_at = l3_promote.get_last_promote_at_s()
+        l3_last_book_levels_at = l3_promote.get_last_book_levels_write_at_s()
+    except Exception as e:  # noqa: BLE001 — fail-soft on /health read
+        logger.warning(f"/health: l3 getter import failed: {e!r}")
+        l3_active_count = 0
+        l3_last_promote_at = None
+        l3_last_book_levels_at = None
+
+    # Sub-check 1: l3:active_count — informational pass/warn (no overall bump).
+    L3_EXPECTED_TOKEN_COUNT = 10  # D-05 N=5 markets × 2 (Yes+No)
+    if l3_active_count < L3_EXPECTED_TOKEN_COUNT:
+        l3_count_status = "warn"
+        l3_count_output = (
+            f"{l3_active_count}/{L3_EXPECTED_TOKEN_COUNT} (under-filled)"
+        )
+    else:
+        l3_count_status = "pass"
+        l3_count_output = f"{l3_active_count}/{L3_EXPECTED_TOKEN_COUNT}"
+    checks["l3:active_count"] = [{
+        "componentId": "l3-promoter",
+        "componentType": "datastore",
+        "observedValue": l3_active_count,
+        "observedUnit": "tokens",
+        "status": l3_count_status,
+        "output": l3_count_output,
+        "time": _utc_now_iso(),
+    }]
+    # NOTE: intentionally NO `overall = _severity(...)` — informational
+    # only (matches ws:subscribed_count pattern); under-fill on cold-start
+    # must not alarm.
+
+    # Sub-check 2: l3:last_promote_at_s — chain-truth age gate.
+    # Thresholds: warn ≥ 600s (2× the 5-min cron), fail ≥ 1800s (6×).
+    L3_PROMOTE_WARN_S = 600
+    L3_PROMOTE_FAIL_S = 1800
+    if l3_last_promote_at is None:
+        l3_promote_status = "warn"
+        l3_promote_output: str | None = "cold-start: never promoted"
+        l3_promote_age: float | None = None
+    else:
+        l3_promote_age = now_s - float(l3_last_promote_at)
+        if l3_promote_age >= L3_PROMOTE_FAIL_S:
+            l3_promote_status = "fail"
+        elif l3_promote_age >= L3_PROMOTE_WARN_S:
+            l3_promote_status = "warn"
+        else:
+            l3_promote_status = "pass"
+        l3_promote_output = f"{l3_promote_age:.0f}s since last promote"
+    checks["l3:last_promote_at_s"] = [{
+        "componentId": "l3-promoter",
+        "componentType": "system",
+        "observedValue": (
+            round(l3_promote_age, 1) if l3_promote_age is not None else None
+        ),
+        "observedUnit": "s",
+        "status": l3_promote_status,
+        "output": l3_promote_output,
+        "time": _utc_now_iso(),
+    }]
+    overall = _severity(overall, l3_promote_status)
+
+    # Sub-check 3: l3:last_book_levels_write_at_s — chain-truth age gate.
+    # Thresholds: warn ≥ 120s (sparse book events), fail ≥ 600s.
+    L3_BOOK_WARN_S = 120
+    L3_BOOK_FAIL_S = 600
+    if l3_last_book_levels_at is None:
+        l3_book_status = "warn"
+        l3_book_output: str | None = "cold-start: never written"
+        l3_book_age: float | None = None
+    else:
+        l3_book_age = now_s - float(l3_last_book_levels_at)
+        if l3_book_age >= L3_BOOK_FAIL_S:
+            l3_book_status = "fail"
+        elif l3_book_age >= L3_BOOK_WARN_S:
+            l3_book_status = "warn"
+        else:
+            l3_book_status = "pass"
+        l3_book_output = f"{l3_book_age:.0f}s since last l2_book_levels write"
+    checks["l3:last_book_levels_write_at_s"] = [{
+        "componentId": "l3-book-levels",
+        "componentType": "datastore",
+        "observedValue": (
+            round(l3_book_age, 1) if l3_book_age is not None else None
+        ),
+        "observedUnit": "s",
+        "status": l3_book_status,
+        "output": l3_book_output,
+        "time": _utc_now_iso(),
+    }]
+    overall = _severity(overall, l3_book_status)
+
     return checks, overall
 
 
