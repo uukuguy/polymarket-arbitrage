@@ -330,12 +330,13 @@ smoke-event-bus:
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 03: Supabase mirror + R2 archive
 #
-# supabase-migrate    — run Alembic upgrade head (requires POLYARB_SUPABASE_DB_DSN)
-# supabase-reconcile  — compare SQLite vs Supabase mirror; push missing snapshots
-# r2-list             — list R2 bucket objects (dev convenience)
+# supabase-migrate       — run Alembic upgrade head (requires POLYARB_SUPABASE_DB_DSN)
+# supabase-migrate-test  — forward+reverse+forward roundtrip (Phase 05 Plan 01 reversibility)
+# supabase-reconcile     — compare SQLite vs Supabase mirror; push missing snapshots
+# r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -343,6 +344,18 @@ supabase-migrate:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN not set in .env or shell (W6: DB DSN distinct from REST URL POLYARB_SUPABASE_URL)"; exit 1; fi; \
 	uv run alembic upgrade head
+
+## supabase-migrate-test: Forward+reverse+forward roundtrip on Alembic head (validates 005 reversibility)
+## Phase 05 Plan 01: requires POLYARB_SUPABASE_DB_DSN pointing at a TEST database (never prod).
+## Exits 77 (make-skip convention) if DSN unset; matches make triple-check pattern.
+supabase-migrate-test:
+	@echo ">> supabase-migrate-test — alembic upgrade head → downgrade -1 → upgrade head (validates reversibility)"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "POLYARB_SUPABASE_DB_DSN unset — skip"; exit 77; fi; \
+	uv run alembic upgrade head && \
+	uv run alembic downgrade -1 && \
+	uv run alembic upgrade head && \
+	uv run alembic current
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:
