@@ -1,6 +1,6 @@
 # Phase 2 Plan 1: Foundation — Data Models, Routing Engine, Execution Pipeline
 
-> ✅ **T2 CLOSED 2026-06-02** (SESSION 36) — IMDEA Type-2 validation 3 tests landed, test_slippage.py 4→7 green. fee-differential model now has economic-magnitude assertions locked. T3 Routing Engine 是下一步。
+> ✅ **T2 + T3 CLOSED 2026-06-02** (SESSION 36) — IMDEA validation locked (test_slippage 4→7) + RoutingEngine slippage-aware (test_engine 6→12). Engine no longer hardcodes "polymarket-first"; selection comes from `estimate_cross_execution_savings`. T4 Execution Pipeline 是下一步。
 >
 > ⚠ **HISTORICAL PLAN-CODE DRIFT NOTICE** (2026-05-20)
 >
@@ -61,6 +61,23 @@
 - 增加 T2 IMDEA Type-2 验证测试要求 (Polymarket 86M 笔交易论文 cross-venue fee differential 实证)
 - T1/T3/T4/T5 body **暂未改写** — STATE.md "Plan-vs-Code 偏离审计" 显示这几个也有膨胀,但本 revision 焦点是 T2 (T2 是核心信号层,T3/T4 用它),T1 body 与代码的差异是命名/枚举级别非语义级别,推到执行时按需校正
 - Pending Decision 段标记为 **CLOSED 2026-05-20**,保留作历史
+
+### 2026-06-02 Revision 6 — T3 ✅ CLOSED (SESSION 36 same-day continuation)
+- Decision source: 用户授权 "扎实把系统做到能用" + T3 是 T2→T4 之间的必经层 (无 T3 → 无 venue selection → 无意义的 cost estimation)
+- `src/polyarb/routing/engine.py` extended (+136 lines): `__init__` accepts optional `SlippageCalculator` (default-constructs to preserve backward-compat with 6 pre-T3 tests), `_build_execution_legs` now calls `_select_venue` for each market, which consults `estimate_cross_execution_savings`
+- `_select_venue` logic: PM-vs-CLOB by lower `net_cost_after_rebate_bps`, tie → PM (single-venue baseline). Caller can override by setting `market.venue` to non-PM alias (e.g. "gamma") — slippage still computed for cost accounting but venue is forced
+- `ExecutionLeg.estimated_cost` now reflects `SlippageResult.net_cost_dollars()` not naive `market.price × stake`. Locked by `test_estimated_cost_reflects_slippage_model` so future drift is loud
+- 6 new tests in `tests/routing/test_engine.py` lock the behaviour:
+  - `test_default_params_buy_picks_polymarket` — BUY under default params → PM
+  - `test_default_params_sell_picks_polymarket_on_tie` — SELL tie → PM
+  - `test_estimated_cost_reflects_slippage_model` — cost from slippage, not naive
+  - `test_param_flip_makes_clob_cheaper_for_buy` — taker_fee_bps=−200 → BUY routes CLOB (mechanism check)
+  - `test_caller_venue_override_respected` — venue="gamma" honored
+  - `test_backward_compatible_no_slippage_arg` — `RoutingEngine()` works without args
+- m2 test total: 24 → 30 green (`test_engine` 6 → 12)
+- Empirical fact recorded: under default `SlippageParams`, **PM always wins** every (side × size × mid) combination (PM rebate −30bps beats CLOB taker +50bps for BUY; PM/CLOB tie at +50bps for SELL). This means the slippage-aware path produces the same observable selection as the pre-T3 hardcoded "polymarket-first" — **but the mechanism is now real**. Param tuning or new venue (CLOB-maker availability) will flip selection automatically
+- No regression in models/routing/execution/m1-observation suites; 3 pre-existing m1 failures unrelated (`test_pass_when_fresh` / `test_make_smoke_health_local_dry_run_recipe` port=8080 vs 19080 anomaly / `test_r2_retry_config_applied`)
+- 下一步: T4 Execution Pipeline — `src/polyarb/execution/engine.py` 雏形已存在, 需要接 RoutingDecision 跑 sequential 成交 flow + 4 paths (atomic / best-effort / abort / retry)
 
 ### 2026-06-02 Revision 5 — T2 ✅ CLOSED (SESSION 36)
 - Decision source: 用户授权 "扎实把系统做到能用" + "自主推进,不要把时间浪费在停下等我回答完全没必要问的问题"
