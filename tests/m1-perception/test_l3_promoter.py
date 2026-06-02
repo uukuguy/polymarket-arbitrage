@@ -181,6 +181,59 @@ def test_recipe_ts_predicate_filters_synthetic_rows_correctly() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Test 3b — Quick task 260602-diag-depth: env override for depth threshold
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_load_recipe_default_threshold_is_yaml_baseline(monkeypatch) -> None:
+    """Without POLYARB_L3_DEPTH_MIN_USD env, recipe WHERE keeps yaml default 500.
+
+    Baseline invariant (CLAUDE.md "experiment values never touch baseline defaults"):
+    the yaml file is the source of truth; absence of env must not change anything.
+    """
+    from polyarb.observation import l3_promote
+
+    monkeypatch.delenv("POLYARB_L3_DEPTH_MIN_USD", raising=False)
+    recipe = l3_promote._load_recipe(RECIPE_PATH)
+    assert "depth_yes_usd > 500" in recipe.where, (
+        f"baseline must remain depth_yes_usd > 500 when env unset; got: {recipe.where!r}"
+    )
+
+
+def test_load_recipe_env_override_substitutes_threshold(monkeypatch) -> None:
+    """With POLYARB_L3_DEPTH_MIN_USD=0, recipe WHERE swaps to depth_yes_usd > 0.
+
+    Diagnostic surface for prod bug 2 (Phase 05 Wave 5 carry): we cannot start
+    24h soak with N=0 active and the only way to learn what's actually in the
+    tob table is to drop the depth filter and observe. Override path keeps the
+    yaml default clean.
+    """
+    from polyarb.observation import l3_promote
+
+    monkeypatch.setenv("POLYARB_L3_DEPTH_MIN_USD", "0")
+    recipe = l3_promote._load_recipe(RECIPE_PATH)
+    assert "depth_yes_usd > 0" in recipe.where, (
+        f"override should rewrite threshold to 0; got: {recipe.where!r}"
+    )
+    assert "depth_yes_usd > 500" not in recipe.where, (
+        f"baseline 500 must be replaced, not kept alongside; got: {recipe.where!r}"
+    )
+
+
+def test_load_recipe_env_override_invalid_falls_back_to_yaml(monkeypatch) -> None:
+    """An unparseable env value must NOT silently break the recipe — fall back
+    to yaml baseline + log a warning. Defensive: a typo in fly secret shouldn't
+    turn off the L3 promoter."""
+    from polyarb.observation import l3_promote
+
+    monkeypatch.setenv("POLYARB_L3_DEPTH_MIN_USD", "not-a-number")
+    recipe = l3_promote._load_recipe(RECIPE_PATH)
+    assert "depth_yes_usd > 500" in recipe.where, (
+        f"invalid env must fall back to yaml baseline; got: {recipe.where!r}"
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Test 4 — Supabase creds missing → _l3_active_set frozen (Open Q #5)
 # ────────────────────────────────────────────────────────────────────────
 
