@@ -644,8 +644,8 @@ async def test_on_snapshot_complete_calls_ws_add_subscriptions_for_added(
     fake_ws = MagicMock()
     fake_ws._candidate_set = set()  # cold start
     fake_ws._l3_active_set = set()
-    fake_ws.add_subscriptions = AsyncMock(return_value=True)
-    fake_ws.remove_subscriptions = AsyncMock(return_value=True)
+    fake_ws.subscribe_candidates_payload = AsyncMock(return_value=True)
+    fake_ws.unsubscribe_candidates_payload = AsyncMock(return_value=True)
 
     ok = await mod.on_snapshot_complete(
         {"snapshot_id": 100, "taken_at_ms": 1},
@@ -655,10 +655,11 @@ async def test_on_snapshot_complete_calls_ws_add_subscriptions_for_added(
     )
     assert ok is True
 
-    fake_ws.add_subscriptions.assert_awaited_once()
-    added_arg = fake_ws.add_subscriptions.await_args[0][0]
-    assert sorted(added_arg) == sorted(["YES-R1", "YES-R2", "YES-R3"]), (
-        f"expected all 3 R-markets passed to add_subscriptions, got {added_arg}"
+    fake_ws.subscribe_candidates_payload.assert_awaited_once()
+    added_arg = fake_ws.subscribe_candidates_payload.await_args[0][0]
+    assert sorted(added_arg) == sorted(["YES-R0", "YES-R1", "YES-R2"]), (
+        f"expected all 3 R-markets passed to subscribe_candidates_payload, "
+        f"got {added_arg}"
     )
 
 
@@ -693,8 +694,8 @@ async def test_on_snapshot_complete_calls_ws_remove_subscriptions_for_removed(
     fake_ws = MagicMock()
     fake_ws._candidate_set = {"OLD-X", "OLD-Y"}  # pre-populated; will be dropped
     fake_ws._l3_active_set = set()
-    fake_ws.add_subscriptions = AsyncMock(return_value=True)
-    fake_ws.remove_subscriptions = AsyncMock(return_value=True)
+    fake_ws.subscribe_candidates_payload = AsyncMock(return_value=True)
+    fake_ws.unsubscribe_candidates_payload = AsyncMock(return_value=True)
 
     ok = await mod.on_snapshot_complete(
         {"snapshot_id": 101, "taken_at_ms": 1},
@@ -704,10 +705,11 @@ async def test_on_snapshot_complete_calls_ws_remove_subscriptions_for_removed(
     )
     assert ok is True
 
-    fake_ws.remove_subscriptions.assert_awaited_once()
-    removed_arg = fake_ws.remove_subscriptions.await_args[0][0]
+    fake_ws.unsubscribe_candidates_payload.assert_awaited_once()
+    removed_arg = fake_ws.unsubscribe_candidates_payload.await_args[0][0]
     assert sorted(removed_arg) == sorted(["OLD-X", "OLD-Y"]), (
-        f"expected old assets passed to remove_subscriptions, got {removed_arg}"
+        f"expected old assets passed to unsubscribe_candidates_payload, "
+        f"got {removed_arg}"
     )
 
 
@@ -736,10 +738,10 @@ async def test_on_snapshot_complete_no_ws_subscribe_calls_when_no_diff(
     fake_ws = MagicMock()
     # Pre-populate _candidate_set to match exactly what the recipe will return,
     # so the diff produces no added/no removed.
-    fake_ws._candidate_set = {"YES-R1", "YES-R2"}
+    fake_ws._candidate_set = {"YES-R0", "YES-R1"}
     fake_ws._l3_active_set = set()
-    fake_ws.add_subscriptions = AsyncMock(return_value=True)
-    fake_ws.remove_subscriptions = AsyncMock(return_value=True)
+    fake_ws.subscribe_candidates_payload = AsyncMock(return_value=True)
+    fake_ws.unsubscribe_candidates_payload = AsyncMock(return_value=True)
 
     ok = await mod.on_snapshot_complete(
         {"snapshot_id": 102, "taken_at_ms": 1},
@@ -749,8 +751,8 @@ async def test_on_snapshot_complete_no_ws_subscribe_calls_when_no_diff(
     )
     assert ok is True
 
-    fake_ws.add_subscriptions.assert_not_awaited()
-    fake_ws.remove_subscriptions.assert_not_awaited()
+    fake_ws.subscribe_candidates_payload.assert_not_awaited()
+    fake_ws.unsubscribe_candidates_payload.assert_not_awaited()
 
 
 @pytest.mark.asyncio

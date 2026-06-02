@@ -426,6 +426,35 @@ async def on_snapshot_complete(
     # which would clobber the L3 set (Pitfall 5).
     ws_consumer.update_candidate_set(new_asset_ids)
 
+    # Quick task 260602-ws-dynamic-subscribe: actually push the diff to the
+    # live WS connection. update_candidate_set only mutates the in-memory
+    # `_candidate_set` — without these calls the WS keeps streaming frames
+    # for the prior subscription set (typically just the bootstrap 3 asset
+    # ids), and new candidates never receive `book` events → depth_yes_usd
+    # stays NULL forever → L3 promoter recipe matches 0 rows.
+    #
+    # Fail-soft: add_subscriptions / remove_subscriptions return False on
+    # send failure but log + breadcrumb internally. We do not block the
+    # refresh on a WS send error — the next reconnect will pick up the
+    # updated _candidate_set via _compute_active_assets().
+    added_asset_ids = sorted(r.asset_id for r in added)
+    sub_payload = getattr(ws_consumer, "subscribe_candidates_payload", None)
+    if added_asset_ids and sub_payload is not None:
+        try:
+            await sub_payload(added_asset_ids)
+        except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
+            logger.warning(
+                f"candidate refresh: ws subscribe_candidates_payload raised: {e!r}"
+            )
+    unsub_payload = getattr(ws_consumer, "unsubscribe_candidates_payload", None)
+    if removed and unsub_payload is not None:
+        try:
+            await unsub_payload(sorted(removed))
+        except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
+            logger.warning(
+                f"candidate refresh: ws unsubscribe_candidates_payload raised: {e!r}"
+            )
+
     # Plan 06 D-07: persist diff to dashboard mirror (fail-soft via mirror itself).
     if mirror is not None:
         if removed:

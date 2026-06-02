@@ -335,6 +335,66 @@ class WsConsumer:
         self._l3_active_set.difference_update(asset_ids)
         return True
 
+    # ── Quick task 260602-ws-dynamic-subscribe ──────────────────────────────
+    #
+    # Payload-only subscribe/unsubscribe — dual of add_subscriptions /
+    # remove_subscriptions for the L2 candidate-refresh flow. State mutation
+    # (`_candidate_set`) is already handled by `update_candidate_set`; these
+    # helpers ONLY push the mid-connection WS payload so the live socket
+    # actually starts/stops receiving frames for the new asset_ids.
+    #
+    # Why a separate method: `add_subscriptions` mutates `_l3_active_set` —
+    # using it for L2 candidates would clobber the L3 set (Pitfall 5
+    # regression — verified by test_candidate_refresh_l3_protection).
+    #
+    # Returns True if (a) asset_ids empty (noop) or (b) WS send succeeded.
+    # Returns False on no-live-ws or send error — caller logs, no state
+    # mutation. The next reconnect picks up the new candidate set via
+    # _compute_active_assets() in either case.
+
+    async def subscribe_candidates_payload(self, asset_ids: list[str]) -> bool:
+        """Send mid-conn `subscribe` payload for L2 candidate add diff."""
+        if not asset_ids:
+            return True
+        ws = self._current_ws
+        if ws is None:
+            return False
+        payload = {
+            "operation": "subscribe",
+            "assets_ids": list(asset_ids),
+            "initial_dump": True,
+        }
+        try:
+            await ws.send(json.dumps(payload))
+        except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
+            logger.warning(
+                f"ws_consumer.subscribe_candidates_payload: send failed ({e!r}) — "
+                f"asset_ids={list(asset_ids)[:5]}{'...' if len(asset_ids) > 5 else ''}"
+            )
+            return False
+        return True
+
+    async def unsubscribe_candidates_payload(self, asset_ids: list[str]) -> bool:
+        """Send mid-conn `unsubscribe` payload for L2 candidate remove diff."""
+        if not asset_ids:
+            return True
+        ws = self._current_ws
+        if ws is None:
+            return False
+        payload = {
+            "operation": "unsubscribe",
+            "assets_ids": list(asset_ids),
+        }
+        try:
+            await ws.send(json.dumps(payload))
+        except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
+            logger.warning(
+                f"ws_consumer.unsubscribe_candidates_payload: send failed ({e!r}) — "
+                f"asset_ids={list(asset_ids)[:5]}{'...' if len(asset_ids) > 5 else ''}"
+            )
+            return False
+        return True
+
     @property
     def frame_count(self) -> int:
         return self._frame_count
