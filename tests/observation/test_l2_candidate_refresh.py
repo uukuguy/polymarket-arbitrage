@@ -534,6 +534,78 @@ async def test_on_snapshot_complete_calls_mirror_upsert_when_provided(
 
 
 @pytest.mark.asyncio
+async def test_on_snapshot_complete_upsert_rows_include_included_at_ts(
+    settings_with_db, tmp_path
+):
+    """Quick task 260601-included-at-ts (RED).
+
+    Prod incident 2026-06-01: `l2_candidates.included_at_ts` is NOT NULL but the
+    caller's row dict in `on_snapshot_complete` omitted it → every upsert failed
+    with code 23502 (Postgres NOT NULL violation), candidate set never
+    populated, promoter `l3:active_count` stayed at 0/10, Wave 5 24h soak
+    blocked.
+
+    Contract: caller MUST stamp `included_at_ts` at the moment of inclusion,
+    mirroring `mark_candidates_removed`'s `now_iso` pattern. The stamp is an
+    ISO-8601 UTC string (e.g. '2026-06-02T00:00:00+00:00').
+    """
+    from datetime import datetime, timezone
+
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings, db_path = settings_with_db
+    _create_minimal_sqlite(db_path, _seed_markets(2, "R"))
+    scanner_yaml = tmp_path / "recipes.yaml"
+    scanner_yaml.write_text(
+        "recipes:\n"
+        "  r-only:\n"
+        "    description: x\n"
+        "    where: market_id LIKE 'R%'\n"
+        "    order_by: liquidity_usd DESC\n"
+        "    limit: 10\n"
+    )
+    settings.candidate_scanner_yaml = scanner_yaml
+    settings.candidate_watchlist_yaml = None
+
+    fake_ws = MagicMock()
+    fake_ws._candidate_set = set()
+    fake_ws._l3_active_set = set()
+
+    fake_mirror = MagicMock()
+    fake_mirror.upsert_candidates.return_value = True
+    fake_mirror.mark_candidates_removed.return_value = True
+
+    before = datetime.now(timezone.utc)
+    ok = await mod.on_snapshot_complete(
+        {"snapshot_id": 99, "taken_at_ms": 1},
+        ws_consumer=fake_ws,
+        settings=settings,
+        mirror=fake_mirror,
+    )
+    after = datetime.now(timezone.utc)
+    assert ok is True
+
+    fake_mirror.upsert_candidates.assert_called_once()
+    added_arg = fake_mirror.upsert_candidates.call_args[0][0]
+    assert len(added_arg) == 2
+
+    for row in added_arg:
+        assert "included_at_ts" in row, (
+            f"row missing included_at_ts key — Postgres NOT NULL will reject. row={row!r}"
+        )
+        val = row["included_at_ts"]
+        assert val is not None, "included_at_ts must not be None"
+        assert isinstance(val, str), f"included_at_ts must be str, got {type(val)}"
+        # Must parse as ISO-8601 with a UTC offset.
+        parsed = datetime.fromisoformat(val)
+        assert parsed.tzinfo is not None, "included_at_ts must be tz-aware"
+        # Stamped at-or-near 'now' (within the test wall-clock window).
+        assert before <= parsed <= after, (
+            f"included_at_ts {parsed} not within [{before}, {after}]"
+        )
+
+
+@pytest.mark.asyncio
 async def test_on_snapshot_complete_no_mirror_call_when_none(
     settings_with_db, tmp_path
 ):
