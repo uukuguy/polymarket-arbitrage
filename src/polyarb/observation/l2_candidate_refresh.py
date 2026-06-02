@@ -34,6 +34,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -431,6 +432,10 @@ async def on_snapshot_complete(
             mirror.mark_candidates_removed(list(removed))
         if added:
             snapshot_id = payload.get("snapshot_id")
+            # Quick task 260601-included-at-ts: stamp included_at_ts at the
+            # moment of inclusion. Column is NOT NULL in `l2_candidates`;
+            # omitting it caused Postgres 23502 in prod (Phase 05 v23 deploy).
+            included_at_ts = datetime.now(timezone.utc).isoformat()
             added_rows_dicts = [
                 {
                     "snapshot_id": snapshot_id,
@@ -440,6 +445,7 @@ async def on_snapshot_complete(
                     "event_id": r.event_id,
                     "source": r.source,
                     "ranking_score": r.ranking_score,
+                    "included_at_ts": included_at_ts,
                 }
                 for r in added
             ]
