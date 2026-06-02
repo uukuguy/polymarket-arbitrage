@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -603,6 +603,154 @@ async def test_on_snapshot_complete_upsert_rows_include_included_at_ts(
         assert before <= parsed <= after, (
             f"included_at_ts {parsed} not within [{before}, {after}]"
         )
+
+
+@pytest.mark.asyncio
+async def test_on_snapshot_complete_calls_ws_add_subscriptions_for_added(
+    settings_with_db, tmp_path
+):
+    """Quick task 260602-ws-dynamic-subscribe (RED).
+
+    Prod incident SESSION 35: bug 1 fix shipped, candidates upsert succeeds,
+    but L3 promoter still finds 0 markets. Chain-walked to: on_snapshot_complete
+    mutates `_candidate_set` via update_candidate_set(...), but never sends a
+    mid-connection `subscribe` payload to the live WS. The active WS connection
+    therefore only ever sees frames for the bootstrap 3 asset_ids; all 56+
+    dynamically-added candidates receive zero `book` events → depth_yes_usd
+    stays NULL forever → recipe filter `depth_yes_usd > 500` (or even `> 0`)
+    rejects every row → markets=0, tokens=0 promoter output.
+
+    Contract: when on_snapshot_complete's diff yields `added` asset_ids and
+    the ws_consumer exposes `add_subscriptions`, we MUST call
+    `await ws_consumer.add_subscriptions(list(added))` so the live WS picks
+    up the new tokens with initial_dump=True and book frames start flowing.
+    """
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings, db_path = settings_with_db
+    _create_minimal_sqlite(db_path, _seed_markets(3, "R"))
+    scanner_yaml = tmp_path / "recipes.yaml"
+    scanner_yaml.write_text(
+        "recipes:\n"
+        "  r-only:\n"
+        "    description: x\n"
+        "    where: market_id LIKE 'R%'\n"
+        "    order_by: liquidity_usd DESC\n"
+        "    limit: 10\n"
+    )
+    settings.candidate_scanner_yaml = scanner_yaml
+    settings.candidate_watchlist_yaml = None
+
+    fake_ws = MagicMock()
+    fake_ws._candidate_set = set()  # cold start
+    fake_ws._l3_active_set = set()
+    fake_ws.add_subscriptions = AsyncMock(return_value=True)
+    fake_ws.remove_subscriptions = AsyncMock(return_value=True)
+
+    ok = await mod.on_snapshot_complete(
+        {"snapshot_id": 100, "taken_at_ms": 1},
+        ws_consumer=fake_ws,
+        settings=settings,
+        mirror=None,
+    )
+    assert ok is True
+
+    fake_ws.add_subscriptions.assert_awaited_once()
+    added_arg = fake_ws.add_subscriptions.await_args[0][0]
+    assert sorted(added_arg) == sorted(["YES-R1", "YES-R2", "YES-R3"]), (
+        f"expected all 3 R-markets passed to add_subscriptions, got {added_arg}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_snapshot_complete_calls_ws_remove_subscriptions_for_removed(
+    settings_with_db, tmp_path
+):
+    """Quick task 260602-ws-dynamic-subscribe (RED, companion).
+
+    Symmetric to the add path: when on_snapshot_complete's diff yields
+    `removed` asset_ids, we MUST call ws_consumer.remove_subscriptions(...)
+    to stop the live WS from churning frames for tokens we no longer track.
+    Without this, dropped candidates keep streaming events that we silently
+    discard — wasted bandwidth + noise in the per-frame on_event path.
+    """
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings, db_path = settings_with_db
+    _create_minimal_sqlite(db_path, _seed_markets(2, "R"))
+    scanner_yaml = tmp_path / "recipes.yaml"
+    scanner_yaml.write_text(
+        "recipes:\n"
+        "  r-only:\n"
+        "    description: x\n"
+        "    where: market_id LIKE 'R%'\n"
+        "    order_by: liquidity_usd DESC\n"
+        "    limit: 10\n"
+    )
+    settings.candidate_scanner_yaml = scanner_yaml
+    settings.candidate_watchlist_yaml = None
+
+    fake_ws = MagicMock()
+    fake_ws._candidate_set = {"OLD-X", "OLD-Y"}  # pre-populated; will be dropped
+    fake_ws._l3_active_set = set()
+    fake_ws.add_subscriptions = AsyncMock(return_value=True)
+    fake_ws.remove_subscriptions = AsyncMock(return_value=True)
+
+    ok = await mod.on_snapshot_complete(
+        {"snapshot_id": 101, "taken_at_ms": 1},
+        ws_consumer=fake_ws,
+        settings=settings,
+        mirror=None,
+    )
+    assert ok is True
+
+    fake_ws.remove_subscriptions.assert_awaited_once()
+    removed_arg = fake_ws.remove_subscriptions.await_args[0][0]
+    assert sorted(removed_arg) == sorted(["OLD-X", "OLD-Y"]), (
+        f"expected old assets passed to remove_subscriptions, got {removed_arg}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_snapshot_complete_no_ws_subscribe_calls_when_no_diff(
+    settings_with_db, tmp_path
+):
+    """Edge case: when diff yields neither added nor removed (candidate set
+    unchanged across refresh), we MUST NOT send no-op WS payloads."""
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings, db_path = settings_with_db
+    _create_minimal_sqlite(db_path, _seed_markets(2, "R"))
+    scanner_yaml = tmp_path / "recipes.yaml"
+    scanner_yaml.write_text(
+        "recipes:\n"
+        "  r-only:\n"
+        "    description: x\n"
+        "    where: market_id LIKE 'R%'\n"
+        "    order_by: liquidity_usd DESC\n"
+        "    limit: 10\n"
+    )
+    settings.candidate_scanner_yaml = scanner_yaml
+    settings.candidate_watchlist_yaml = None
+
+    fake_ws = MagicMock()
+    # Pre-populate _candidate_set to match exactly what the recipe will return,
+    # so the diff produces no added/no removed.
+    fake_ws._candidate_set = {"YES-R1", "YES-R2"}
+    fake_ws._l3_active_set = set()
+    fake_ws.add_subscriptions = AsyncMock(return_value=True)
+    fake_ws.remove_subscriptions = AsyncMock(return_value=True)
+
+    ok = await mod.on_snapshot_complete(
+        {"snapshot_id": 102, "taken_at_ms": 1},
+        ws_consumer=fake_ws,
+        settings=settings,
+        mirror=None,
+    )
+    assert ok is True
+
+    fake_ws.add_subscriptions.assert_not_awaited()
+    fake_ws.remove_subscriptions.assert_not_awaited()
 
 
 @pytest.mark.asyncio
