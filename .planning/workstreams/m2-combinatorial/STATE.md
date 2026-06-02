@@ -1,21 +1,21 @@
 ---
 workstream: m2-combinatorial
 created: 2026-04-28
-last_updated: 2026-05-20
+last_updated: 2026-06-02
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
-**Status:** Phase 2 T2 走向锁定 (Option B, Revision 4 落地) → 待执行 T2 IMDEA Type-2 测试补充
+**Status:** Phase 2 T2 ✅ closed (SESSION 36) → T3 Routing Engine 起跑准备 (engine.py 雏形已在, 接 slippage)
 **Current Phase:** Phase 2 — 套利执行引擎（02-arbitrage-engine）
-**Last Activity:** 2026-05-20
-**Last Activity Description:** 02-1-PLAN.md Revision 3+4 — 加 Revision History + DRIFT NOTICE + Pending Decision (CLOSED Option B) + T2 body 改写对齐 fee-differential 代码 + IMDEA Type-2 validation requirement
+**Last Activity:** 2026-06-02
+**Last Activity Description:** SESSION 36 — T2 IMDEA Type-2 validation 3 tests landed (test_slippage.py 4→7). fee_diff_bps BUY+clob_maker locked at 60bps, SELL matrix locked, estimate_cross_execution_savings unit-economics asserted in [$0.10, $20] IMDEA band. T2 ✅ DONE。
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — Revision 4 locked 2026-05-20)
 - ✅ **T1** signal & execution models — `models/signal.py` + `models/slippage.py` (commit `08a13d3`)。Body 仍未对齐 (signal.py 概念膨胀), 推到 T2 完成后回头校正
-- 🟡 **T2** Slippage Model = fee-differential cross-venue (Revision 4 locked) — code 已落地 320 行,4 测试 green。**剩**: 补 ≥3 个 IMDEA Type-2 validation 测试 (cross-venue fee differential 经济学量级断言)
-- ⏸ **T3** Routing Engine — `routing/engine.py` 雏形 + 17 routing tests 已 commit。T2 IMDEA 验证完后 T3 接 `estimate_cross_execution_savings` 做 venue selection
+- ✅ **T2** Slippage Model = fee-differential cross-venue (Revision 4 locked, SESSION 36 closed) — code 320 行 + 7 测试 green (4 existing + 3 IMDEA Type-2)。fee_diff_bps BUY+clob_maker = 60bps locked; SELL matrix locked; estimate_cross_execution_savings unit-economics 在 [$0.10, $20] IMDEA band 内
+- 🟡 **T3** Routing Engine — `routing/engine.py` 雏形 + 6 routing engine tests 已 commit。下一步: 接 `estimate_cross_execution_savings` 做 PM-vs-CLOB venue selection
 - ⏸ **T4** Execution Pipeline — `execution/engine.py` 雏形已 commit,sequential flow 未完
 - ⏸ **T5** Position Tracker — `routing/position_tracker.py` 已 commit
 - ⏸ **T6** Settings — `routing/config.py` 落地 (含 RoutingConfig/ExecutionConfig/PositionConfig/AppConfig)
@@ -23,10 +23,10 @@ last_updated: 2026-05-20
 - ⏸ **T8** E2E test — 未做
 
 ## Test Count (m2)
-- 21 tests green: `test_engine` 6 + `test_signal` 11 + `test_slippage` 4
+- 24 tests green (SESSION 36): `test_engine` 6 + `test_signal` 11 + `test_slippage` 7 (4 existing + 3 IMDEA Type-2)
 
 ## Session Continuity
-**Stopped At:** SESSION 11 cleanup 完成；Phase 2 T2-T8 待续
+**Stopped At:** SESSION 36 — T2 IMDEA validation done, T3 routing 是下一步 (接 `estimate_cross_execution_savings`)
 **Resume File:** None
 
 ## ⚠️ Plan-vs-Code 偏离审计 — 历史快照 (SESSION 11 EOD 发现 + SESSION 21 考古)
@@ -44,13 +44,13 @@ SESSION 10 落地的 m2 代码方向**与 02-1-PLAN.md Revision 1 不完全一�
 
 **判断 (2026-05-20 update)**: T2 已解决 (Revision 4),T1/T3/T4 推到对应 task 执行时按需校正。"按 plan 盲推" 反模式已通过 02-1-PLAN.md 顶部 DRIFT NOTICE + Revision History 制度防范。
 
-## Next Action (2026-05-20)
+## Next Action (2026-06-02)
 
-**T2 执行准备就绪** — code 已有,只缺 IMDEA Type-2 validation 测试。下次会话可:
-1. 启动一个新 plan (e.g., `02-2-PLAN.md`) 专做 T2 IMDEA validation + 写完 T3 routing engine,**或**
-2. 在现有 02-1-PLAN.md 框架下走 T2 IMDEA 测试补全,然后 sequential 推 T3-T8
-
-执行前 prereq: **m1 Phase 02.1 backlog 必须先消化** (用户 2026-05-20 决策,见 m1-perception STATE)。M2 T2 与 m1 Phase 02.1 解耦不冲突, 优先级看你想先看哪条线进展。
+**T3 Routing Engine** — 现状: `src/polyarb/routing/engine.py` 雏形 + 6 tests 已 commit, 但 engine 还没接 slippage 模型。下一步:
+1. 读 `routing/engine.py` 现状, 看 PM-vs-CLOB selection 逻辑是 stub 还是部分实现
+2. 接 `SlippageCalculator.estimate_cross_execution_savings` 做 venue selection 决策
+3. 写 RED → GREEN tests 锁定 routing 在 BUY (PM cheaper) / SELL (CLOB-maker worst) / no-clob-quote (fallback PM) 三种场景的选择
+4. T4 Execution Pipeline (sequential flow) 在 T3 GREEN 后启动
 
 ---
 

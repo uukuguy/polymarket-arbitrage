@@ -1,10 +1,10 @@
 # Phase 2 Plan 1: Foundation — Data Models, Routing Engine, Execution Pipeline
 
-> ⚠ **PLAN-CODE DRIFT NOTICE — READ FIRST** (2026-05-20)
+> ✅ **T2 CLOSED 2026-06-02** (SESSION 36) — IMDEA Type-2 validation 3 tests landed, test_slippage.py 4→7 green. fee-differential model now has economic-magnitude assertions locked. T3 Routing Engine 是下一步。
 >
-> This plan body **does NOT** describe what is currently in `src/`. Code shipped on `main` since 2026-05-01 implements a different design (fee-differential model) than what the body below describes (depth-curve model). **18 days silent drift** between 2026-05-01 and 2026-05-19 — see `Revision History` section directly below + `.planning/threads/learnings-meta.md` 2026-05-19 § "Plan-Code 沉默分叉 18 天" for the full forensics.
+> ⚠ **HISTORICAL PLAN-CODE DRIFT NOTICE** (2026-05-20)
 >
-> **Do NOT execute T2 from this body until a Revision lands.** Pending decision (post-Phase-02 close): three options listed in `Revision History` § "Pending Decision (post-2026-05-20)".
+> This plan body T2 段 (depth-curve design) historically diverged from `src/` (fee-differential code) for 18 days (2026-05-01 → 2026-05-19). Resolved by Revision 4 (T2 body 改写对齐代码) + Revision 5 (T2 validation 完成). T1/T3/T4 body 仍可能与代码有命名/枚举级别差异,推到对应 task 执行时按需校正。Forensics: `.planning/threads/learnings-meta.md` 2026-05-19 § "Plan-Code 沉默分叉 18 天"。
 
 ---
 
@@ -61,6 +61,17 @@
 - 增加 T2 IMDEA Type-2 验证测试要求 (Polymarket 86M 笔交易论文 cross-venue fee differential 实证)
 - T1/T3/T4/T5 body **暂未改写** — STATE.md "Plan-vs-Code 偏离审计" 显示这几个也有膨胀,但本 revision 焦点是 T2 (T2 是核心信号层,T3/T4 用它),T1 body 与代码的差异是命名/枚举级别非语义级别,推到执行时按需校正
 - Pending Decision 段标记为 **CLOSED 2026-05-20**,保留作历史
+
+### 2026-06-02 Revision 5 — T2 ✅ CLOSED (SESSION 36)
+- Decision source: 用户授权 "扎实把系统做到能用" + "自主推进,不要把时间浪费在停下等我回答完全没必要问的问题"
+- T2 IMDEA Type-2 validation **3 tests landed** in `tests/models/test_slippage.py`:
+  - `test_fee_diff_bps_buy_with_clob_maker_locks_at_60bps` — BUY+clob_maker = 60bps 锁定 (clob_maker_rebate 10 + pm_taker_cost 50)
+  - `test_fee_diff_bps_sell_matrix_locks` — SELL+clob_maker = −40bps,SELL+no_maker = −20bps,clob_maker 比 no_maker 更差 (反直觉但 lock 防 T3 routing 反向)
+  - `test_estimate_cross_execution_savings_imdea_unit_economics` — $1k size × mid=0.5 → savings_dollars ∈ [$0.10, $20] IMDEA band。$4M/86M trades 量级数学一致性。
+- `tests/models/test_slippage.py` 现在 7/7 green (4 原 + 3 IMDEA)
+- 注意 plan body T2 §141 注释 "BUY 场景 CLOB maker (-10bps) vs PM taker (-50bps) = 40bps 更便宜" **数值有误**, 实际代码计算 = 60bps (10 - (-50) = 60), 测试 lock 的是 60。Plan body 注释保留作历史 (验证测试是 source of truth)。
+- 下一步: T3 Routing Engine — engine.py 雏形 + 6 tests 已 commit, 需要接 `estimate_cross_execution_savings`
+- 整个 m2 test count: 24 green (`test_engine` 6 + `test_signal` 11 + `test_slippage` 7)
 
 ---
 
@@ -124,10 +135,10 @@ Build the core arbitrage execution engine: routing (Polymarket-first → Gamma),
 4. Pydantic v2 validators: profit ≥ 0, price in [0, 1], size > 0
 5. Tests: model construction, validation edge cases, serialization round-trip
 
-### T2: Slippage Model — Fee-Differential Cross-Venue (REWRITTEN 2026-05-20 Revision 4)
+### T2: Slippage Model — Fee-Differential Cross-Venue ✅ CLOSED 2026-06-02 (Revision 5)
 **Owner**: general-purpose agent
-**Files**: `src/polyarb/models/slippage.py` (320 lines, already landed 2026-05-01 commit `08a13d3`), `tests/models/test_slippage.py` (already 4 tests green) + NEW IMDEA validation tests
-**Status**: code 已存在, 这一 task 现在是 **巩固 + 验证 + 补 IMDEA Type-2 证据** 而非"新建"
+**Files**: `src/polyarb/models/slippage.py` (320 lines, landed 2026-05-01 commit `08a13d3`), `tests/models/test_slippage.py` (7 tests green: 4 existing + 3 IMDEA Type-2 landed SESSION 36)
+**Status**: ✅ DONE — IMDEA Type-2 validation 3 tests landed, economic claims locked.
 
 **Design (locked, matches landed code):**
 1. `SlippageParams` dataclass — 9 个 tunable bps 参数 (maker_fee_bps / taker_fee_bps / impact_coef / vol_pct / pm_rebate_bps / clob_taker_cost_bps / clob_maker_rebate_bps / pm_taker_cost_bps / small_notional+mid_notional breakpoints)
