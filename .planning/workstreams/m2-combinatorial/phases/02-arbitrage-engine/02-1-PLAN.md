@@ -1,6 +1,6 @@
 # Phase 2 Plan 1: Foundation — Data Models, Routing Engine, Execution Pipeline
 
-> ✅ **T2 + T3 CLOSED 2026-06-02** (SESSION 36) — IMDEA validation locked (test_slippage 4→7) + RoutingEngine slippage-aware (test_engine 6→12). Engine no longer hardcodes "polymarket-first"; selection comes from `estimate_cross_execution_savings`. T4 Execution Pipeline 是下一步。
+> ✅ **T2 + T3 + T4 CLOSED 2026-06-02** (SESSION 36) — IMDEA validation locked (test_slippage 4→7) + RoutingEngine slippage-aware (routing/test_engine 6→12) + Execution orchestration shell (execution/test_engine 0→8: atomic abort + pluggable executor + retry + position-tracker fix). m2 test total 21 → 38. T5 Position Tracker / T7 CLI 是下一步。
 >
 > ⚠ **HISTORICAL PLAN-CODE DRIFT NOTICE** (2026-05-20)
 >
@@ -61,6 +61,28 @@
 - 增加 T2 IMDEA Type-2 验证测试要求 (Polymarket 86M 笔交易论文 cross-venue fee differential 实证)
 - T1/T3/T4/T5 body **暂未改写** — STATE.md "Plan-vs-Code 偏离审计" 显示这几个也有膨胀,但本 revision 焦点是 T2 (T2 是核心信号层,T3/T4 用它),T1 body 与代码的差异是命名/枚举级别非语义级别,推到执行时按需校正
 - Pending Decision 段标记为 **CLOSED 2026-05-20**,保留作历史
+
+### 2026-06-02 Revision 7 — T4 ✅ CLOSED (SESSION 36 same-day continuation after T3)
+- Decision source: 用户授权 "扎实把系统做到能用" — T4 是 sequential-execution 的最薄一层 orchestration shell, 无 T4 → 无端到端 E2E
+- `src/polyarb/execution/engine.py` 重写 130→230 lines:
+  - Pluggable `leg_executor: Callable[[ExecutionLeg, int], Awaitable[tuple[bool, str | None]]]` — caller injects; default = `_default_leg_executor` (no-op simulator preserving backward-compat with pre-T4 stub behaviour). Production will inject py-clob-client adapter (T5+ scope).
+  - **Atomic abort invariant**: first-leg fail → mark ABORTED, skip remaining legs. Subsequent-leg fail → PARTIAL (signal-time we already committed leg 0; T5 will handle unwind / hedge). Distinction recorded in `ExecutionStatus.ABORTED` (new enum value).
+  - **Per-leg retry**: uses `ExecutionConfig.retry_attempts` (default 3) + `retry_delay_seconds` (default 2.0). Retries are NOT counted as separate leg executions — `legs_executed` is the count of legs that ultimately succeeded.
+  - **Structured `ExecutionLegResult`** per leg (leg / success / attempts / error / skipped) accessible via `result.leg_results`. Aggregate `ExecutionResult.error_message` summarises failure pattern.
+  - **Position tracker only updates on successful legs** — pre-T4 bug fix. Old engine called `open_position` for every leg regardless of success, corrupting PnL accounting.
+  - **Executor exceptions caught**: `RuntimeError` / network errors in the executor are treated as `(False, "executor raised: ...")` rather than crashing the engine. Respects retry semantics.
+- `tests/execution/test_engine.py` 新增 8 tests (was 0 — only `__init__.py` existed):
+  - `test_all_legs_succeed_completed_status` — happy path
+  - `test_executor_receives_leg_and_attempt` — protocol shape
+  - `test_first_leg_fail_aborts_subsequent_legs` — atomic invariant locked
+  - `test_second_leg_fail_marks_partial_not_aborted` — PARTIAL vs ABORTED distinction locked
+  - `test_retry_succeeds_on_second_attempt` — retry happy
+  - `test_retry_exhausts_marks_failed` — retry exhaustion → ABORTED
+  - `test_executor_exception_treated_as_failure` — exception caught + retried
+  - `test_position_tracker_called_only_for_successful_legs` — pre-T4 bug fix lock
+- m2 test total: 30 → 38 green (`test_engine` routing 12 + `test_signal` 11 + `test_slippage` 7 + `test_engine` execution 8)
+- Pre-T4 bug acknowledged: old `_update_tracker` opened a position for EVERY leg regardless of success. The signal-time stub never actually failed so this was latent — but as soon as a real venue client is wired, it would have created phantom positions for failed legs. Test locks the fix.
+- 下一步: T5 Position Tracker (close_position + PnL realization + stop-loss check chain) **OR** T7 CLI (`arbitrage evaluate/run/status` subcommand). T5 / T7 mutually independent — pick by which value lands first for the user.
 
 ### 2026-06-02 Revision 6 — T3 ✅ CLOSED (SESSION 36 same-day continuation)
 - Decision source: 用户授权 "扎实把系统做到能用" + T3 是 T2→T4 之间的必经层 (无 T3 → 无 venue selection → 无意义的 cost estimation)

@@ -7,27 +7,26 @@ last_updated: 2026-06-02
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
-**Status:** Phase 2 T2 + T3 ✅ closed (SESSION 36) → T4 Execution Pipeline 是下一步
+**Status:** Phase 2 T2 + T3 + T4 ✅ closed (SESSION 36) → T5 Position Tracker / T7 CLI 是下一步
 **Current Phase:** Phase 2 — 套利执行引擎（02-arbitrage-engine）
 **Last Activity:** 2026-06-02
-**Last Activity Description:** SESSION 36 — T2 IMDEA validation (4→7 tests) + T3 RoutingEngine slippage-aware venue selection (6→12 tests, +SlippageCalculator wiring + estimate_cross_execution_savings consultation + caller override path)。Engine no longer hardcodes "polymarket-first"; PM still wins under default params but mechanism flips on param change (test_param_flip_makes_clob_cheaper_for_buy locks it)。
+**Last Activity Description:** SESSION 36 — T2 IMDEA validation (4→7 tests) + T3 RoutingEngine slippage-aware (6→12) + T4 ExecutionEngine orchestration shell (0→8 tests, atomic abort + pluggable executor + retry policy + position-tracker fix)。execution/engine.py rewrote 130→230 lines: pluggable leg_executor (production injects py-clob-client adapter later), abort-on-first-leg-fail (atomic invariant), per-leg retry with backoff, structured ExecutionLegResult, tracker only updates on success (Pre-T4 bug fix)。
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — Revision 4 locked 2026-05-20)
 - ✅ **T1** signal & execution models — `models/signal.py` + `models/slippage.py` (commit `08a13d3`)。Body 仍未对齐 (signal.py 概念膨胀), 推到 T2 完成后回头校正
 - ✅ **T2** Slippage Model = fee-differential cross-venue (Revision 4 locked, SESSION 36 closed) — code 320 行 + 7 测试 green (4 existing + 3 IMDEA Type-2)。fee_diff_bps BUY+clob_maker = 60bps locked; SELL matrix locked; estimate_cross_execution_savings unit-economics 在 [$0.10, $20] IMDEA band 内
 - ✅ **T3** Routing Engine slippage-aware (Revision 6 locked, SESSION 36 closed) — `routing/engine.py` extended to inject `SlippageCalculator`, `_select_venue` consults `estimate_cross_execution_savings` for PM-vs-CLOB selection, `ExecutionLeg.estimated_cost` now reflects `SlippageResult.net_cost_dollars()` not naive `price × size`。6 → 12 routing tests green (added: default-params BUY→PM lock, SELL→PM-tie-break, estimated_cost reflects slippage, param flip→CLOB, caller override respected, backward-compat)
-- 🟡 **T4** Execution Pipeline — `execution/engine.py` 雏形已 commit,sequential flow 未完。下一步: 接 RoutingDecision 跑顺序成交
-- ⏸ **T4** Execution Pipeline — `execution/engine.py` 雏形已 commit,sequential flow 未完
-- ⏸ **T5** Position Tracker — `routing/position_tracker.py` 已 commit
+- ✅ **T4** Execution Pipeline orchestration shell (Revision 7 locked, SESSION 36 closed) — `execution/engine.py` rewrote 130→230 lines: pluggable `leg_executor` callable (production injects py-clob-client adapter; tests inject simulators), atomic abort-on-first-leg-fail invariant, per-leg retry with `retry_attempts` + `retry_delay_seconds` config, structured `ExecutionLegResult` per leg, `ExecutionStatus.ABORTED` distinct from PARTIAL/FAILED, position tracker only mutates on success (pre-T4 bug fix)。0 → 8 execution tests green
+- 🟡 **T5** Position Tracker — `routing/position_tracker.py` 已 commit, T4 only wires `open_position` on success path。下一步: T5 owns close_position via fill data + PnL realization on exit + stop-loss checks
 - ⏸ **T6** Settings — `routing/config.py` 落地 (含 RoutingConfig/ExecutionConfig/PositionConfig/AppConfig)
 - ⏸ **T7** CLI Integration — `arbitrage evaluate/run/status` subcommand 未做
 - ⏸ **T8** E2E test — 未做
 
 ## Test Count (m2)
-- 30 tests green (SESSION 36): `test_engine` 12 (6 existing + 6 T3 venue selection) + `test_signal` 11 + `test_slippage` 7 (4 existing + 3 IMDEA Type-2)
+- 38 tests green (SESSION 36): `routing/test_engine` 12 + `models/test_signal` 11 + `models/test_slippage` 7 + `execution/test_engine` 8 (new — atomic abort / retry / tracker contract)
 
 ## Session Continuity
-**Stopped At:** SESSION 36 — T2 + T3 done, T4 Execution Pipeline 是下一步 (接 RoutingDecision sequential flow)
+**Stopped At:** SESSION 36 — T2 + T3 + T4 done, T5 Position Tracker (close_position + PnL realization + stop-loss) or T7 CLI 是下一步
 **Resume File:** None
 
 ## ⚠️ Plan-vs-Code 偏离审计 — 历史快照 (SESSION 11 EOD 发现 + SESSION 21 考古)
@@ -47,11 +46,12 @@ SESSION 10 落地的 m2 代码方向**与 02-1-PLAN.md Revision 1 不完全一�
 
 ## Next Action (2026-06-02)
 
-**T4 Execution Pipeline** — 现状: `src/polyarb/execution/engine.py` 雏形已 commit, sequential 成交 flow 未完。下一步:
-1. 读 `execution/engine.py` 现状, 看 sequential flow 和 4 paths (atomic/best-effort/abort/retry) 实现到哪
-2. 接 RoutingEngine 输出的 RoutingDecision → 按 plan.legs 顺序成交
-3. 写 RED → GREEN tests: happy path / partial fill / first-leg-fail abort / network retry
-4. T5 Position Tracker 在 T4 GREEN 后接 — 跟踪 open positions, hedge ratios, P&L
+**T5 Position Tracker** — 现状: `src/polyarb/routing/position_tracker.py` 已 commit (Position + PortfolioMetrics + open_position + close_position + update_prices + check_stop_loss)。T4 接的是 `open_position`; T5 需要补 close_position 实际调用 + PnL 实现 + stop-loss 触发链路。下一步:
+1. 读 position_tracker.py 看现状 (它的 open/close 已经写好, 缺的可能是测试 / 调用方)
+2. T5 owns: fills 进来调 close_position + 算 realized PnL + check_stop_loss 自动 close 触发器
+3. 写 RED → GREEN tests: 单 position lifecycle / stop loss 触发 / portfolio metrics 聚合 / fill data 映射
+
+**或并行 T7 CLI** — `arbitrage evaluate/run/status` subcommand。让用户能从 CLI 跑 m2 pipeline 看到结果。T5 / T7 互独立, 任选一条先做。
 
 ---
 
