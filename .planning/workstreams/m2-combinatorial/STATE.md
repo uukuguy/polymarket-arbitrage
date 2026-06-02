@@ -7,7 +7,7 @@ last_updated: 2026-06-02
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
-**Status:** Phase 2 T2 + T3 + T4 ✅ closed (SESSION 36) → T5 Position Tracker / T7 CLI 是下一步
+**Status:** Phase 2 T2 + T3 + T4 + T7 ✅ closed (SESSION 36) → T5 Position Tracker / T8 E2E 是下一步
 **Current Phase:** Phase 2 — 套利执行引擎（02-arbitrage-engine）
 **Last Activity:** 2026-06-02
 **Last Activity Description:** SESSION 36 — T2 IMDEA validation (4→7 tests) + T3 RoutingEngine slippage-aware (6→12) + T4 ExecutionEngine orchestration shell (0→8 tests, atomic abort + pluggable executor + retry policy + position-tracker fix)。execution/engine.py rewrote 130→230 lines: pluggable leg_executor (production injects py-clob-client adapter later), abort-on-first-leg-fail (atomic invariant), per-leg retry with backoff, structured ExecutionLegResult, tracker only updates on success (Pre-T4 bug fix)。
@@ -19,14 +19,14 @@ last_updated: 2026-06-02
 - ✅ **T4** Execution Pipeline orchestration shell (Revision 7 locked, SESSION 36 closed) — `execution/engine.py` rewrote 130→230 lines: pluggable `leg_executor` callable (production injects py-clob-client adapter; tests inject simulators), atomic abort-on-first-leg-fail invariant, per-leg retry with `retry_attempts` + `retry_delay_seconds` config, structured `ExecutionLegResult` per leg, `ExecutionStatus.ABORTED` distinct from PARTIAL/FAILED, position tracker only mutates on success (pre-T4 bug fix)。0 → 8 execution tests green
 - 🟡 **T5** Position Tracker — `routing/position_tracker.py` 已 commit, T4 only wires `open_position` on success path。下一步: T5 owns close_position via fill data + PnL realization on exit + stop-loss checks
 - ⏸ **T6** Settings — `routing/config.py` 落地 (含 RoutingConfig/ExecutionConfig/PositionConfig/AppConfig)
-- ⏸ **T7** CLI Integration — `arbitrage evaluate/run/status` subcommand 未做
+- ✅ **T7** CLI Integration (Revision 8 locked, SESSION 36 closed) — `src/polyarb/cli_arbitrage.py` 230 lines: `evaluate`/`run`/`status` typer commands. `evaluate` 走 RoutingEngine 输出 routed plan, `run` 走 ExecutionEngine paper-mode (default no-op leg_executor) 输出 execution result, `status` dump PositionTracker。Makefile: `make eval-arb`/`run-arb`/`status-arb` (+mid/stake/legs/venue 可调)。4 smoke tests green。第一次端到端可见 m2 价值面: `make eval-arb mid=0.45 stake=500` 就能看到 routed decision + slippage-aware costs
 - ⏸ **T8** E2E test — 未做
 
 ## Test Count (m2)
-- 38 tests green (SESSION 36): `routing/test_engine` 12 + `models/test_signal` 11 + `models/test_slippage` 7 + `execution/test_engine` 8 (new — atomic abort / retry / tracker contract)
+- 42 tests green (SESSION 36): `routing/test_engine` 12 + `models/test_signal` 11 + `models/test_slippage` 7 + `execution/test_engine` 8 + `cli/test_arbitrage_cli` 4 (new — CLI smoke)
 
 ## Session Continuity
-**Stopped At:** SESSION 36 — T2 + T3 + T4 done, T5 Position Tracker (close_position + PnL realization + stop-loss) or T7 CLI 是下一步
+**Stopped At:** SESSION 36 — T2/T3/T4/T7 done, T5 (close_position + PnL realization) or T8 (E2E test) 是下一步。用户已可跑 `make eval-arb` 看 routed decisions
 **Resume File:** None
 
 ## ⚠️ Plan-vs-Code 偏离审计 — 历史快照 (SESSION 11 EOD 发现 + SESSION 21 考古)
@@ -46,12 +46,14 @@ SESSION 10 落地的 m2 代码方向**与 02-1-PLAN.md Revision 1 不完全一�
 
 ## Next Action (2026-06-02)
 
-**T5 Position Tracker** — 现状: `src/polyarb/routing/position_tracker.py` 已 commit (Position + PortfolioMetrics + open_position + close_position + update_prices + check_stop_loss)。T4 接的是 `open_position`; T5 需要补 close_position 实际调用 + PnL 实现 + stop-loss 触发链路。下一步:
-1. 读 position_tracker.py 看现状 (它的 open/close 已经写好, 缺的可能是测试 / 调用方)
-2. T5 owns: fills 进来调 close_position + 算 realized PnL + check_stop_loss 自动 close 触发器
+**T5 Position Tracker** — 现状: position_tracker.py 已 commit (Position + PortfolioMetrics + open/close/update_prices/check_stop_loss)。T4 走的是 open_position 路径; T5 需要补 close_position 实际调用 + realized PnL 实现 + stop-loss 触发链路。下一步:
+1. 读 position_tracker.py 看现状 (open/close 已经写好, 缺的可能是测试 / 调用方)
+2. T5 owns: fills → close_position + realized PnL + check_stop_loss 自动 close 触发器
 3. 写 RED → GREEN tests: 单 position lifecycle / stop loss 触发 / portfolio metrics 聚合 / fill data 映射
 
-**或并行 T7 CLI** — `arbitrage evaluate/run/status` subcommand。让用户能从 CLI 跑 m2 pipeline 看到结果。T5 / T7 互独立, 任选一条先做。
+**或 T8 E2E** — 整个 m2 pipeline 走通 (synth signal → route → execute → tracker update → status dump)。已经有 cli_arbitrage 做了类似的事, T8 是把它系统化加 chaos 测试 (partial fail / retry exhaust / network blowup 整链验证)。
+
+**已交付给用户**: `make eval-arb mid=0.45 stake=1000` 现在可以从命令行跑 m2 pipeline, 看 routed decision + slippage cost。`make run-arb` paper-mode 端到端。`make status-arb` 看 tracker 状态。这是 m2 第一次有 "the user can run it" 价值面。
 
 ---
 

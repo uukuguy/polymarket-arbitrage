@@ -1,6 +1,6 @@
 # Phase 2 Plan 1: Foundation — Data Models, Routing Engine, Execution Pipeline
 
-> ✅ **T2 + T3 + T4 CLOSED 2026-06-02** (SESSION 36) — IMDEA validation locked (test_slippage 4→7) + RoutingEngine slippage-aware (routing/test_engine 6→12) + Execution orchestration shell (execution/test_engine 0→8: atomic abort + pluggable executor + retry + position-tracker fix). m2 test total 21 → 38. T5 Position Tracker / T7 CLI 是下一步。
+> ✅ **T2 + T3 + T4 + T7 CLOSED 2026-06-02** (SESSION 36) — IMDEA validation locked (test_slippage 4→7) + RoutingEngine slippage-aware (routing/test_engine 6→12) + Execution orchestration shell (execution/test_engine 0→8) + CLI surface live (cli/test_arbitrage_cli 4, `make eval-arb` / `make run-arb` / `make status-arb`). m2 test total 21 → 42. **First user-visible value face**: 命令行直接跑 m2 pipeline。T5 (Position Tracker realization) / T8 (E2E chaos) 是下一步。
 >
 > ⚠ **HISTORICAL PLAN-CODE DRIFT NOTICE** (2026-05-20)
 >
@@ -61,6 +61,23 @@
 - 增加 T2 IMDEA Type-2 验证测试要求 (Polymarket 86M 笔交易论文 cross-venue fee differential 实证)
 - T1/T3/T4/T5 body **暂未改写** — STATE.md "Plan-vs-Code 偏离审计" 显示这几个也有膨胀,但本 revision 焦点是 T2 (T2 是核心信号层,T3/T4 用它),T1 body 与代码的差异是命名/枚举级别非语义级别,推到执行时按需校正
 - Pending Decision 段标记为 **CLOSED 2026-05-20**,保留作历史
+
+### 2026-06-02 Revision 8 — T7 ✅ CLOSED (SESSION 36 same-day continuation after T4)
+- Decision source: 用户授权 "扎实把系统做到能用" — T7 把 T2+T3+T4 从库代码变成 "用户能在命令行跑" 的产品面。这是 m2 第一次有可视化价值。
+- `src/polyarb/cli_arbitrage.py` 新建 (230 lines, typer 风格对齐 cli_observation.py / cli_translation.py):
+  - `evaluate` — synth ArbitrageSignal → RoutingEngine → JSON dump routed decision (legs + venue + slippage-aware cost)
+  - `run` — synth → route → ExecutionEngine paper-mode (default no-op leg_executor) → JSON dump execution result (status + leg_results)
+  - `status` — dump PositionTracker open positions + metrics
+- Makefile targets: `make eval-arb` / `make run-arb` / `make status-arb`, 支持 mid / stake / legs / venue / min_threshold_pct / retries 覆盖 (per CLAUDE.md "Makefile contract" 强制纪律)
+- `tests/cli/test_arbitrage_cli.py` 新建 4 smoke tests (typer.testing.CliRunner):
+  - evaluate happy → JSON parseable + estimated_cost != naive price×stake
+  - evaluate below-threshold → exit 1 + gate message
+  - run happy → execution.status="completed" + 2/2 legs executed
+  - status → expected envelope shape
+- m2 test total: 38 → 42
+- Bug fix landed: `cli_arbitrage.status` 之前调 `pos.pnl()` 当方法用, 实际是 `@property`。Smoke test 抓到, 改成 `pos.pnl`。
+- 副产出: 第一次 m2 pipeline 端到端可跑。`make eval-arb mid=0.45 stake=500` 输出 routed decision + per-leg slippage cost。`make run-arb` 输出 paper execution result。`make status-arb` 输出 tracker dump (per-process state, 不跨 invocation 持久化 — T5 owns 持久化)
+- 下一步: T5 Position Tracker (fill→close→realized PnL→stop-loss 链路) **OR** T8 E2E (chaos test partial-fail/retry-exhaust 整链)。两条独立, 按用户价值优先级选
 
 ### 2026-06-02 Revision 7 — T4 ✅ CLOSED (SESSION 36 same-day continuation after T3)
 - Decision source: 用户授权 "扎实把系统做到能用" — T4 是 sequential-execution 的最薄一层 orchestration shell, 无 T4 → 无端到端 E2E

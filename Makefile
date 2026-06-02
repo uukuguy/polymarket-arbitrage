@@ -1106,3 +1106,45 @@ smoke-l3-dashboard:
 	@MARKERS=$$(grep -c "asset_id\|Depth ladder\|KlineChart\|l3_promoted" /tmp/l3-smoke.html 2>/dev/null || echo 0); \
 	echo "→ markers found: $$MARKERS (asset_id / Depth ladder / KlineChart / l3_promoted)"
 .PHONY: smoke-l3-dashboard
+
+# ═══════════════════════════════════════════════════════════════════════════
+# m2 arbitrage CLI (T7 Revision 8, SESSION 36)
+# Wraps `python -m polyarb.cli_arbitrage` with sensible defaults.
+# Paper-mode by default — no real venue connections (T5+ scope).
+# ═══════════════════════════════════════════════════════════════════════════
+
+## eval-arb: synth signal → RoutingEngine → print routed decision (no exec).
+##
+## Usage:
+##   make eval-arb                                  # all defaults: mid=0.5, stake=1000, legs=2
+##   make eval-arb mid=0.45 stake=500 legs=3        # override
+##   make eval-arb venue=clob min_threshold_pct=0.5 # explore CLOB routing + lower gate
+eval-arb:
+	@MID="$${mid:-0.5}"; STAKE="$${stake:-1000}"; LEGS="$${legs:-2}"; VENUE="$${venue:-polymarket}"; THR="$${min_threshold_pct:-1.0}"; \
+	echo ">> eval-arb mid=$$MID stake=$$STAKE legs=$$LEGS venue=$$VENUE threshold=$$THR%"; \
+	uv run python -m polyarb.cli_arbitrage evaluate --mid $$MID --stake $$STAKE --legs $$LEGS --venue $$VENUE --min-threshold-pct $$THR
+.PHONY: eval-arb
+
+## run-arb: synth signal → route → execute via paper executor → print result.
+##
+## Paper-mode default; no orders go to any exchange. Use `make eval-arb` first
+## if you just want the routed plan without the execution result.
+##
+## Usage:
+##   make run-arb                                   # paper-mode happy path
+##   make run-arb mid=0.45 stake=500 retries=1     # tighten retry budget
+run-arb:
+	@MID="$${mid:-0.5}"; STAKE="$${stake:-1000}"; LEGS="$${legs:-2}"; VENUE="$${venue:-polymarket}"; THR="$${min_threshold_pct:-1.0}"; RETRIES="$${retries:-3}"; \
+	echo ">> run-arb (paper) mid=$$MID stake=$$STAKE legs=$$LEGS venue=$$VENUE retries=$$RETRIES"; \
+	uv run python -m polyarb.cli_arbitrage run --mid $$MID --stake $$STAKE --legs $$LEGS --venue $$VENUE --min-threshold-pct $$THR --retries $$RETRIES --retry-delay 0
+.PHONY: run-arb
+
+## status-arb: dump current PositionTracker state.
+##
+## Note: tracker is per-process. Across separate make invocations state
+## resets — persistent state lives at T5+. For now, run `make run-arb &&
+## make status-arb` in the same Python session to see opened positions.
+status-arb:
+	@echo ">> status-arb"
+	@uv run python -m polyarb.cli_arbitrage status
+.PHONY: status-arb
