@@ -3092,3 +3092,41 @@ curl -sS https://polyarb-l2.fly.dev/health | jq '.status, .checks."l3:active_cou
 ```
 
 [NEXT] Phase 05 Wave 5 chicken-and-egg 收口。**推荐下一步: quick task `260601-included-at-ts`** — 修 `l2_supabase_mirror.upsert_candidates` row dict 加 `included_at_ts=now_iso`, ~1 行 code + 1 RED test, 修完 candidate set 通路恢复 → L3 promoter 才有 markets 可选 → 24h soak (D-12) 才能跑。修完后选项: (a) 再 redeploy + 等 5-15min 看 `l3:active_count > 0` → 开 24h soak / (b) 也可以同步看 `depth_yes_usd` 自然填上 (candidate 多样化后) / (c) cross-line 工作 (m2 T2) 在 soak 跑期间做。
+
+---
+
+## SESSION 36 — 2026-06-02 (大会话: Phase 05 3 bugs resolved + m2 T2/T3/T4/T7 closed + CLI live)
+
+### 主线产出
+
+**Phase 05 三个串联 prod bugs 全部 RESOLVED**:
+- bug 1 `upsert_candidates` NOT NULL violation 修 + deploy v24 — quick task `260601-included-at-ts` (commits 0e8b0fe / b248a78 / 83a2e7e)
+- diagnostic env override `POLYARB_L3_DEPTH_MIN_USD` 加 + deploy v25 + 跑诊断 → 暴露 bug 3 — quick task `260602-diag-depth` (commits 7989ca8 / a888fce / e0d0ec1)
+- bug 3 真因发现 + 修 + deploy v26: `update_candidate_set` 只 mutate 内存, 缺 WS subscribe payload → 56 个新候选永远不收 `book` 事件 → depth 永远 NULL — quick task `260602-ws-dynamic-subscribe` (commits cf2a63c / 3495d2e / ce7496a)
+- "bug 2" 退役: depth NULL 不是数据偏斜独立 bug, 而是 bug 3 的可见症状
+- 残留: D-13 阈值校准 (不是 bug), prod 数据 baseline 重新 unset 干净
+
+**m2 第一次有用户可见面 (4 个 task 闭环)**:
+- T2 IMDEA validation 3 tests (commit e4ae53e) — test_slippage 4→7
+- T3 RoutingEngine slippage-aware (commit 8b6e022) — routing/test_engine 6→12, 加 SlippageCalculator injection, `_select_venue` 走 `estimate_cross_execution_savings`, `ExecutionLeg.estimated_cost` 反映真实 slippage
+- T4 ExecutionEngine orchestration shell (commit 77fbaf6) — execution/test_engine 0→8, pluggable leg_executor + atomic abort + retry + pre-T4 tracker bug fix
+- T7 CLI Integration (commit eb106c7) — cli_arbitrage.py 230行 + 3 Makefile targets + 4 smoke tests
+- **m2 test total 21 → 42 green**
+
+### 总 17 commits / +2493 lines
+
+### 会话级 outcome 修正
+
+- "bug 2 likely auto-heals" (SESSION 34 EOD 假设) — 实证证伪。bug 3 才是真因
+- "m1 Phase 05 是当前主战场" — 转向 "m2 Phase 02 是用户价值面" (m1 还有阈值校准但不阻塞)
+
+### [NEXT] 下次会话推荐路径
+
+`/gsd-resume-work --ws m2-combinatorial`. T5 Position Tracker realization (fill→close→PnL→stop-loss) 或真实 venue adapter (py-clob-client 接入, 写非-no-op leg_executor) 是最直接的下一步价值。详 [[m2-arbitrage-pipeline-runnable-2026-06]] / [[phase-05-bugs-resolved-2026-06]]。
+
+```bash
+/gsd-resume-work --ws m2-combinatorial
+make planning-status                            # 应 zero drift
+git log --oneline -5                            # tip: eb106c7
+make eval-arb mid=0.45 stake=1000              # 实测当前 m2 pipeline (paper-mode)
+```
