@@ -311,6 +311,14 @@ def _load_recipe(recipe_yaml_path: Path) -> Any:
     tiers): yaml on disk loaded with ``_is_trusted=True`` because the file
     lives in the repo and is modified via PR review. Layer 1 (read-only
     URI) + Layer 4 (limit) still apply via ``scanner.run_recipe``.
+
+    Diagnostic env override (quick task 260602-diag-depth):
+    ``POLYARB_L3_DEPTH_MIN_USD`` — when set to a float, rewrites the WHERE
+    clause's ``depth_yes_usd > 500`` filter to ``depth_yes_usd > <env>``.
+    Baseline yaml (=500) is untouched on disk. Invalid env values fall back
+    to the yaml baseline + log warning (defensive: a typo in fly secret
+    must not silently disable the L3 promoter). Per CLAUDE.md "experiment
+    values never touch baseline defaults".
     """
     import yaml
 
@@ -319,10 +327,35 @@ def _load_recipe(recipe_yaml_path: Path) -> Any:
     with open(recipe_yaml_path) as f:
         data = yaml.safe_load(f)
     body = data["recipes"]["l3-promote"]
+
+    where = body["where"]
+    env_val = os.environ.get("POLYARB_L3_DEPTH_MIN_USD")
+    if env_val is not None:
+        try:
+            override_min = float(env_val)
+            if "depth_yes_usd > 500" not in where:
+                logger.warning(
+                    "l3-promote: POLYARB_L3_DEPTH_MIN_USD set but baseline "
+                    "'depth_yes_usd > 500' not found in yaml — leaving WHERE unchanged"
+                )
+            else:
+                where = where.replace(
+                    "depth_yes_usd > 500", f"depth_yes_usd > {override_min:g}"
+                )
+                logger.info(
+                    f"l3-promote: depth threshold overridden via "
+                    f"POLYARB_L3_DEPTH_MIN_USD={override_min:g} (yaml baseline=500)"
+                )
+        except (ValueError, TypeError):
+            logger.warning(
+                f"l3-promote: invalid POLYARB_L3_DEPTH_MIN_USD={env_val!r} — "
+                f"falling back to yaml baseline"
+            )
+
     return Recipe(
         name="l3-promote",
         description=body.get("description", ""),
-        where=body["where"],
+        where=where,
         order_by=body["order_by"],
         limit=int(body["limit"]),
         _is_trusted=True,
