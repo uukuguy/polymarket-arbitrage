@@ -1,30 +1,34 @@
 """Execution engine: orchestrates sequential execution of routed arbitrage legs.
 
-T4 Revision 7 (2026-06-02 SESSION 36) — orchestration shell:
+T4 Revision 7 (2026-06-02 SESSION 36) — orchestration shell.
+T5 Revision 9 (2026-06-06 SESSION 37) — close-path integration:
 
 - **Pluggable leg executor**: caller injects `leg_executor` (async callable
   `(ExecutionLeg, attempt: int) -> tuple[bool, str | None]`) so tests can
   simulate any failure pattern. Production will inject a py-clob-client
-  adapter (T5+ scope). The default executor is a no-op simulator that
-  always returns success — preserves backward compat for any caller that
-  was relying on the old stub behaviour.
+  adapter. The default executor is a no-op simulator that always returns
+  success — preserves backward compat for callers relying on stub behaviour.
 
 - **Real abort-on-fail invariant**: when any leg's final attempt fails, no
-  subsequent leg is fired. This is the atomic-execution guarantee — never
-  leave a half-executed arb hanging (which would create directional
-  exposure no one asked for). Status maps to ABORTED on this path.
+  subsequent leg is fired (T4).
 
-- **Per-leg retry policy**: configured via ExecutionConfig.retry_attempts
-  (default 3) and retry_delay_seconds (default 2.0). Each retry is logged
-  with attempt number. Retries are NOT counted as separate leg executions
-  — `legs_executed` is the count of legs that ultimately succeeded.
+- **Per-leg retry policy**: ExecutionConfig.retry_attempts + retry_delay_seconds.
 
-- **Structured result per leg**: ExecutionLegResult captures attempt count,
-  final success/fail, and error message. Aggregate ExecutionResult exposes
-  this for downstream P&L / monitoring / forensic.
+- **Structured result per leg**: ExecutionLegResult.
 
-- **Position tracker is only updated on successful legs**, not failed ones.
-  Failed-leg positions would corrupt PnL accounting downstream.
+- **Position tracker updates only on successful legs** (T4 bug fix).
+
+- **Close path** (T5): on successful leg, the engine either (a) calls the
+  injected `fill_provider(leg)` to get a real Fill (production with real
+  venue), (b) synthesizes a paper-mode Fill at `leg.estimated_price` if
+  `paper_close=True` (paper mode lifecycle exercise), or (c) leaves the
+  position open if neither is configured (legacy behaviour). The Fill is
+  forwarded to `tracker.close_position_with_fill`.
+
+- **Stop-loss surface** (T5): post-execution, the engine queries
+  `tracker.check_stop_loss_event()` and surfaces any event on
+  `ExecutionResult.stop_loss` so callers (CLI, monitor) can halt new
+  signals without re-querying the tracker.
 """
 from __future__ import annotations
 
@@ -35,7 +39,11 @@ from enum import Enum
 from typing import Awaitable, Callable
 
 from polyarb.models.signal import RoutingDecision, ExecutionLeg
-from polyarb.routing.position_tracker import PositionTracker
+from polyarb.routing.position_tracker import (
+    Fill,
+    PositionTracker,
+    StopLossEvent,
+)
 from polyarb.routing.config import ExecutionConfig
 
 logger = logging.getLogger(__name__)
@@ -70,10 +78,15 @@ class ExecutionResult:
     realized_pnl: float
     leg_results: list[ExecutionLegResult] = field(default_factory=list)
     error_message: str | None = None
+    # T5: stop-loss event from the tracker post-execution. Non-None means
+    # the caller should halt new signals.
+    stop_loss: StopLossEvent | None = None
 
 
 # Type alias for the pluggable leg executor.
 LegExecutor = Callable[[ExecutionLeg, int], Awaitable[tuple[bool, str | None]]]
+# Type alias for the fill provider (T5): returns a Fill for a successful leg.
+FillProvider = Callable[[ExecutionLeg], Awaitable[Fill]]
 
 
 async def _default_leg_executor(
@@ -101,10 +114,21 @@ class ExecutionEngine:
         config: ExecutionConfig | None = None,
         tracker: PositionTracker | None = None,
         leg_executor: LegExecutor | None = None,
+        fill_provider: FillProvider | None = None,
+        paper_close: bool = False,
     ) -> None:
         self.config = config or ExecutionConfig()
         self.tracker = tracker or PositionTracker()
         self.leg_executor: LegExecutor = leg_executor or _default_leg_executor
+        # T5: close-path configuration.
+        # - `fill_provider`: production hook — given a successful leg, returns
+        #   a Fill (real venue fill). Engine forwards it to
+        #   tracker.close_position_with_fill.
+        # - `paper_close`: when True (and no fill_provider), synthesize a Fill
+        #   at the leg's estimated_price → zero-PnL lifecycle exercise.
+        # - Neither set: position stays open (legacy / explicit-close mode).
+        self.fill_provider: FillProvider | None = fill_provider
+        self.paper_close: bool = paper_close
 
     async def execute(self, decision: RoutingDecision) -> ExecutionResult:
         """Execute a routing decision across all legs sequentially.
@@ -147,6 +171,7 @@ class ExecutionEngine:
 
             if leg_result.success:
                 self._update_tracker_for_leg(leg)
+                await self._maybe_close_for_leg(leg)
             else:
                 if i == 0:
                     # Atomic invariant: never proceed past a failed first leg.
@@ -175,6 +200,8 @@ class ExecutionEngine:
 
         realized_pnl = self._calc_realized_pnl(decision, executed, total)
         error_msg = self._summarize_errors(leg_results) if failed > 0 or aborted else None
+        # T5: surface stop-loss state so callers can halt new signals.
+        stop_loss_event = self.tracker.check_stop_loss_event()
 
         return ExecutionResult(
             decision=decision,
@@ -184,6 +211,7 @@ class ExecutionEngine:
             realized_pnl=realized_pnl,
             leg_results=leg_results,
             error_message=error_msg,
+            stop_loss=stop_loss_event,
         )
 
     async def _execute_leg_with_retry(
@@ -231,17 +259,53 @@ class ExecutionEngine:
         """Open a position in the tracker for a successfully-executed leg only.
 
         Failed legs MUST NOT update the tracker — they'd corrupt downstream
-        PnL accounting. The pre-T4 implementation updated for all legs;
-        Revision 7 fixes that.
+        PnL accounting.
         """
+        # ExecutionLeg.action is lowercase ("buy"/"sell"); tracker contract
+        # is uppercase ("BUY"/"SELL"). Normalize here to keep the tracker's
+        # PnL math sign-consistent.
         self.tracker.open_position(
             market_id=leg.asset,
             condition_id=leg.asset,
-            side=leg.action,
-            outcome="yes",  # T5 scope: derive from leg metadata
+            side=leg.action.upper(),
+            outcome="yes",  # T5+: derive from leg metadata when available
             stake=leg.size,
             price=leg.estimated_price,
         )
+
+    async def _maybe_close_for_leg(self, leg: ExecutionLeg) -> None:
+        """T5 close-path hook — only fires for successfully-executed legs.
+
+        Priority:
+          1. `fill_provider` set → call it, forward returned Fill to tracker.
+          2. `paper_close=True` → synthesize Fill at leg.estimated_price.
+          3. Neither → leave position open (legacy / explicit-close mode).
+        """
+        if self.fill_provider is not None:
+            try:
+                fill = await self.fill_provider(leg)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "fill_provider raised for leg %s: %r — leaving position open",
+                    leg.leg_id, exc,
+                )
+                return
+            try:
+                self.tracker.close_position_with_fill(fill)
+            except ValueError as exc:
+                # Partial fill or other tracker rejection — log and skip close.
+                logger.warning(
+                    "tracker rejected fill for leg %s: %s", leg.leg_id, exc,
+                )
+            return
+
+        if self.paper_close:
+            fill = Fill(
+                market_id=leg.asset,
+                exit_price=leg.estimated_price,
+                filled_size=leg.size,
+            )
+            self.tracker.close_position_with_fill(fill)
 
     def _calc_realized_pnl(
         self, decision: RoutingDecision, executed: int, total: int

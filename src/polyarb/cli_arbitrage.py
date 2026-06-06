@@ -36,7 +36,7 @@ from polyarb.models.signal import (
 from polyarb.models.slippage import SlippageCalculator
 from polyarb.routing.config import ExecutionConfig, RoutingConfig
 from polyarb.routing.engine import RoutingEngine
-from polyarb.routing.position_tracker import PositionTracker
+from polyarb.routing.position_tracker import Fill, PositionTracker
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
@@ -153,6 +153,11 @@ def run(
     min_threshold_pct: float = typer.Option(1.0, "--min-threshold-pct"),
     retry_attempts: int = typer.Option(3, "--retries"),
     retry_delay_seconds: float = typer.Option(0.0, "--retry-delay"),
+    paper_close: bool = typer.Option(
+        False,
+        "--paper-close",
+        help="T5: synth Fill at estimated_price → exercise full open→close lifecycle (zero PnL)",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Synth signal → route → execute via paper-mode executor → print result.
@@ -161,6 +166,12 @@ def run(
     T5+ wires a real venue client, swap by passing `leg_executor=...` to
     ExecutionEngine. The CLI defaults preserve a safe "see-what-it-would-do"
     contract — no orders go to any exchange.
+
+    T5 addition: `--paper-close` synthesizes a Fill at each leg's
+    estimated_price after successful execution, exercising the close path.
+    With `--paper-close`, `make status-arb` after `make run-arb` shows
+    closed lifecycle (open_count=0, realized_pnl=0). Without it, positions
+    accumulate across runs and stay open (legacy T4 behaviour).
     """
     import asyncio
 
@@ -186,6 +197,7 @@ def run(
             retry_delay_seconds=retry_delay_seconds,
         ),
         tracker=_TRACKER,
+        paper_close=paper_close,
     )
     result = asyncio.run(exec_engine.execute(decision))
 
@@ -197,6 +209,16 @@ def run(
             "legs_total": result.legs_total,
             "realized_pnl": round(result.realized_pnl, 4),
             "error_message": result.error_message,
+            "stop_loss": (
+                {
+                    "loss_pct": round(result.stop_loss.loss_pct, 4),
+                    "realized_pnl": round(result.stop_loss.realized_pnl, 4),
+                    "threshold_pct": result.stop_loss.threshold_pct,
+                    "recommendation": result.stop_loss.recommendation,
+                }
+                if result.stop_loss is not None
+                else None
+            ),
             "leg_results": [
                 {
                     "leg_id": r.leg.leg_id,
@@ -218,8 +240,9 @@ def status(
 ) -> None:
     """Print current PositionTracker state (open positions + portfolio metrics).
 
+    T5: now uses tracker.snapshot() to surface realized PnL, balance, and ROI.
     Note: tracker state is per-process. Across separate CLI invocations
-    state resets. Persistent state is T5+ scope.
+    state resets. Persistent state is T5+1 scope (SQLite/Supabase).
     """
     _setup_logger(verbose)
     open_positions = [
@@ -234,15 +257,94 @@ def status(
             "pnl": round(pos.pnl, 4),
             "pnl_pct": round(pos.pnl_pct, 4),
         }
-        for pos in _TRACKER._open_positions.values()
+        for pos in _TRACKER.open_positions()
     ]
+    snap = _TRACKER.snapshot()
     metrics = {
-        "open_positions": len(open_positions),
-        # Best-effort: only call methods that exist on PositionTracker.
-        "balance": getattr(_TRACKER, "balance", None),
+        "open_positions": snap.open_positions,
+        "balance": round(snap.balance, 4),
+        "total_unrealized_pnl": round(snap.total_unrealized_pnl, 4),
+        "total_realized_pnl": round(snap.total_realized_pnl, 4),
+        "total_pnl": round(snap.total_pnl, 4),
+        "roi_pct": round(snap.roi_pct, 4),
+        "max_exposure": round(snap.max_exposure, 4),
     }
-    out = {"open_positions": open_positions, "metrics": metrics}
+    stop_loss_event = _TRACKER.check_stop_loss_event()
+    stop_loss = (
+        {
+            "loss_pct": round(stop_loss_event.loss_pct, 4),
+            "realized_pnl": round(stop_loss_event.realized_pnl, 4),
+            "threshold_pct": stop_loss_event.threshold_pct,
+            "recommendation": stop_loss_event.recommendation,
+        }
+        if stop_loss_event is not None
+        else None
+    )
+    out = {
+        "open_positions": open_positions,
+        "metrics": metrics,
+        "stop_loss": stop_loss,
+    }
     typer.echo(json.dumps(out, indent=2))
+
+
+@app.command()
+def close(
+    market_id: str = typer.Option(..., "--market-id", help="Open position market_id to close"),
+    exit_price: float = typer.Option(..., "--exit-price", help="Fill exit price (0..1)"),
+    size: float | None = typer.Option(
+        None,
+        "--size",
+        help="Filled size (defaults to position stake — must equal it; T5 has no partial fills)",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Close an open position via a synthesized Fill (operator-driven).
+
+    Production close path goes through `ExecutionEngine` + `fill_provider`.
+    This subcommand exists so operators can exercise the close path
+    manually — e.g., after a `run --paper-close=false`, observe an open
+    position via `status`, then `close --market-id=... --exit-price=...`
+    to see realized PnL flow.
+
+    Note: per-process tracker state. To see the close, run `run` then
+    `close` in the SAME process (e.g., via a Python REPL importing the
+    module). The CLI is mainly diagnostic; cross-process persistence is
+    T5+1.
+    """
+    _setup_logger(verbose)
+    pos = next(
+        (p for p in _TRACKER.open_positions() if p.market_id == market_id),
+        None,
+    )
+    if pos is None:
+        typer.secho(
+            f"no open position for market_id={market_id}",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    fill = Fill(
+        market_id=market_id,
+        exit_price=exit_price,
+        filled_size=size if size is not None else pos.stake,
+    )
+    try:
+        pnl = _TRACKER.close_position_with_fill(fill)
+    except ValueError as exc:
+        typer.secho(f"close rejected: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    typer.echo(
+        json.dumps(
+            {
+                "closed": market_id,
+                "exit_price": exit_price,
+                "realized_pnl": round(pnl, 4),
+                "total_realized_pnl": round(_TRACKER.total_realized_pnl, 4),
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

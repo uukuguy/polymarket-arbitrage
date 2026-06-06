@@ -256,3 +256,144 @@ async def test_position_tracker_called_only_for_successful_legs():
     assert len(tracker._open_positions) == 1
     assert "asset-0" in tracker._open_positions
     assert "asset-1" not in tracker._open_positions
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# T5 — ExecutionEngine wires close path on fill events
+# ──────────────────────────────────────────────────────────────────────────
+#
+# T4 only wired open_position. T5 wires the close side: when an executor
+# returns a Fill (instead of bare success), the engine forwards it to
+# tracker.close_position_with_fill on a configurable close callback. Default
+# (paper-mode) behaviour: every successful leg synthesizes a Fill at the
+# leg's estimated_price, immediately closing the position (zero PnL, but
+# the lifecycle is exercised). Production: real executor returns a real
+# Fill with the actual fill price; close happens on that.
+
+
+@pytest.mark.asyncio
+async def test_paper_mode_close_path_zero_pnl_lifecycle():
+    """Default no-op executor + paper-mode close → open then close at
+    estimated_price → zero realized PnL, but position is closed.
+
+    This is what `make run-arb` should produce out of the box: every leg
+    goes through the full open→close lifecycle, so `make status-arb` shows
+    a sane (empty) open set with realized PnL = 0, not phantom open
+    positions that never close.
+    """
+    from polyarb.execution.engine import ExecutionEngine
+
+    tracker = PositionTracker()
+    engine = ExecutionEngine(tracker=tracker, paper_close=True)
+    decision = _make_decision(n_legs=2)
+
+    result = await engine.execute(decision)
+
+    assert result.status == ExecutionStatus.COMPLETED
+    # Paper-mode close should have closed every successful leg.
+    assert len(tracker._open_positions) == 0
+    # Closed at estimated_price = entry → zero realized PnL.
+    assert tracker.total_realized_pnl == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_real_fill_close_books_realized_pnl():
+    """Executor that returns a real Fill (exit_price differs from entry)
+    → tracker books realized PnL on close."""
+    from polyarb.execution.engine import ExecutionEngine
+    from polyarb.routing.position_tracker import Fill
+
+    tracker = PositionTracker()
+
+    async def executor_with_fill(leg: ExecutionLeg, attempt: int):
+        # Simulate venue filling at a price 5% above entry → BUY profit.
+        return True, None
+
+    async def fill_provider(leg: ExecutionLeg):
+        return Fill(market_id=leg.asset, exit_price=0.525, filled_size=leg.size)
+
+    engine = ExecutionEngine(
+        tracker=tracker,
+        leg_executor=executor_with_fill,
+        fill_provider=fill_provider,
+    )
+    decision = _make_decision(n_legs=1)
+    result = await engine.execute(decision)
+
+    assert result.status == ExecutionStatus.COMPLETED
+    assert len(tracker._open_positions) == 0
+    # BUY 100 @ 0.50, close @ 0.525 → 100 × 0.025 = 2.5
+    assert tracker.total_realized_pnl == pytest.approx(2.5)
+
+
+@pytest.mark.asyncio
+async def test_close_path_only_fires_for_successful_legs():
+    """If a leg fails, no Fill is requested + no close happens for it."""
+    from polyarb.execution.engine import ExecutionEngine
+    from polyarb.routing.position_tracker import Fill
+
+    tracker = PositionTracker()
+    fill_calls: list[str] = []
+
+    async def fail_second(leg: ExecutionLeg, attempt: int):
+        return leg.leg_id != "leg-1", None if leg.leg_id != "leg-1" else "fail"
+
+    async def fill_provider(leg: ExecutionLeg):
+        fill_calls.append(leg.leg_id)
+        return Fill(market_id=leg.asset, exit_price=0.50, filled_size=leg.size)
+
+    config = ExecutionConfig(retry_attempts=1, retry_delay_seconds=0.0)
+    engine = ExecutionEngine(
+        config=config,
+        tracker=tracker,
+        leg_executor=fail_second,
+        fill_provider=fill_provider,
+    )
+    decision = _make_decision(n_legs=2)
+    await engine.execute(decision)
+
+    # Only leg-0 succeeded → fill_provider only called for leg-0.
+    assert fill_calls == ["leg-0"]
+    # leg-0 opened then closed → tracker has 0 open positions.
+    assert len(tracker._open_positions) == 0
+
+
+@pytest.mark.asyncio
+async def test_stop_loss_event_surfaced_in_result():
+    """After execution, ExecutionResult.stop_loss carries the event from
+    tracker.check_stop_loss_event so callers can halt new signals."""
+    from polyarb.execution.engine import ExecutionEngine
+    from polyarb.routing.config import PositionConfig
+    from polyarb.routing.position_tracker import Fill
+
+    cfg = PositionConfig(initial_balance=1000.0, enable_pnl_stop=True, stop_loss_pct=5.0)
+    tracker = PositionTracker(cfg)
+
+    async def fill_provider(leg: ExecutionLeg):
+        # 20% loss on BUY: open at 0.5, close at 0.4 → -$10 per leg × 5 legs = -$50 = 5%
+        return Fill(market_id=leg.asset, exit_price=0.40, filled_size=leg.size)
+
+    engine = ExecutionEngine(tracker=tracker, fill_provider=fill_provider)
+
+    # Use a decision with 5 legs × stake 100, each closing for -$10 PnL → -$50 realized.
+    legs = [_make_leg(i) for i in range(5)]
+    plan = ExecutionPlan(
+        signal_id="sig-stop",
+        legs=legs,
+        total_estimated_cost=sum(l.estimated_cost for l in legs),
+        profit_threshold_pct=1.0,
+    )
+    decision = RoutingDecision(
+        signal_id="sig-stop",
+        plan=plan,
+        is_profitable=True,
+        expected_profit_pct=5.0,
+        expected_profit_abs=5.0,
+        reason="stop-loss-test",
+    )
+
+    result = await engine.execute(decision)
+
+    assert result.stop_loss is not None
+    assert result.stop_loss.recommendation == "halt_new_signals"
+    assert result.stop_loss.loss_pct == pytest.approx(5.0)

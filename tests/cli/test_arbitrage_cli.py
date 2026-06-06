@@ -76,5 +76,105 @@ def test_status_returns_expected_envelope():
     payload = json.loads(result.stdout)
     assert "open_positions" in payload
     assert "metrics" in payload
+    assert "stop_loss" in payload  # T5: top-level stop-loss field
     assert isinstance(payload["open_positions"], list)
-    assert "open_positions" in payload["metrics"]
+    # T5: metrics now sourced from tracker.snapshot()
+    metrics = payload["metrics"]
+    for field in (
+        "open_positions",
+        "balance",
+        "total_unrealized_pnl",
+        "total_realized_pnl",
+        "total_pnl",
+        "roi_pct",
+        "max_exposure",
+    ):
+        assert field in metrics, f"missing snapshot field: {field}"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# T5 — paper_close lifecycle + close subcommand
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_run_paper_close_closes_lifecycle_zero_pnl():
+    """`run --paper-close` synths Fill at estimated_price → open then close
+    same-process → tracker has 0 open positions, realized_pnl ≈ 0."""
+    # Reset module-level tracker so prior tests don't bleed in.
+    from polyarb import cli_arbitrage as cli_mod
+    from polyarb.routing.position_tracker import PositionTracker
+    cli_mod._TRACKER = PositionTracker()
+
+    result = runner.invoke(
+        app,
+        [
+            "run", "--mid", "0.45", "--stake", "500", "--profit-pct", "3.0",
+            "--legs", "2", "--retry-delay", "0", "--paper-close",
+        ],
+    )
+    assert result.exit_code == 0, f"non-zero exit: {result.exit_code}\n{result.output}"
+    payload = json.loads(result.stdout)
+    assert payload["execution"]["status"] == "completed"
+    assert payload["execution"]["stop_loss"] is None  # no losses booked
+
+    # status should now show open_count=0 (all closed via paper Fill).
+    status_result = runner.invoke(app, ["status"])
+    assert status_result.exit_code == 0
+    status_payload = json.loads(status_result.stdout)
+    assert status_payload["metrics"]["open_positions"] == 0
+    assert status_payload["metrics"]["total_realized_pnl"] == 0.0
+
+
+def test_close_subcommand_books_realized_pnl():
+    """run (without paper-close) leaves position open → `close` books PnL.
+
+    Same-process flow (CliRunner shares module state across invokes)."""
+    from polyarb import cli_arbitrage as cli_mod
+    from polyarb.routing.position_tracker import PositionTracker
+    cli_mod._TRACKER = PositionTracker()
+
+    # mid<0.5 → BUY leg (RoutingEngine sets action by price-vs-0.5).
+    # We want a BUY position so close at higher price → profit.
+    run_result = runner.invoke(
+        app,
+        [
+            "run", "--mid", "0.40", "--stake", "100", "--profit-pct", "3.0",
+            "--legs", "1", "--retry-delay", "0",
+        ],
+    )
+    assert run_result.exit_code == 0
+    # Without --paper-close, position stays open in the tracker. The tracker
+    # uses market.condition_id as the position market_id (RoutingEngine
+    # sets `leg.asset = market.condition_id` in _build_execution_legs).
+    open_positions = list(cli_mod._TRACKER.open_positions())
+    assert len(open_positions) == 1, f"expected 1 open position; got {len(open_positions)}"
+    open_pos = open_positions[0]
+    open_market_id = open_pos.market_id
+    open_stake = open_pos.stake
+
+    close_result = runner.invoke(
+        app,
+        [
+            "close",
+            "--market-id", open_market_id,
+            "--exit-price", str(open_pos.entry_price + 0.05),  # 5¢ profit
+        ],
+    )
+    assert close_result.exit_code == 0, f"close exit={close_result.exit_code}\n{close_result.output}"
+    close_payload = json.loads(close_result.stdout)
+    # BUY profit: stake × (exit - entry) = stake × 0.05
+    expected_pnl = open_stake * 0.05
+    assert close_payload["realized_pnl"] > 0
+    # Approximate compare to tolerate float arithmetic.
+    assert abs(close_payload["realized_pnl"] - expected_pnl) < 1e-3, (
+        f"realized_pnl={close_payload['realized_pnl']}, expected≈{expected_pnl}"
+    )
+
+
+def test_close_unknown_market_exits_nonzero():
+    result = runner.invoke(
+        app,
+        ["close", "--market-id", "nonexistent", "--exit-price", "0.5"],
+    )
+    assert result.exit_code == 1, f"expected exit=1 for unknown market; got {result.exit_code}"
+    assert "no open position" in result.output.lower()
