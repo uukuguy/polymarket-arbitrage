@@ -3130,3 +3130,71 @@ make planning-status                            # 应 zero drift
 git log --oneline -5                            # tip: eb106c7
 make eval-arb mid=0.45 stake=1000              # 实测当前 m2 pipeline (paper-mode)
 ```
+
+---
+
+## SESSION 37 — 2026-06-06 (m2 T5 Position Tracker realization closed)
+
+### 主线产出
+
+**m2 Phase 02 T5 闭环** — Position Tracker realization:
+
+1. **`Fill` 事件模型** (`position_tracker.py`) — venue-agnostic 关仓信号 (market_id, exit_price, filled_size, filled_at)。生产 `leg_executor` 返回 Fill, paper mode 合成 Fill at estimated_price
+2. **`close_position_with_fill(fill)` 生产关仓路径** — 强制 `fill.filled_size == position.stake` (partial fill 拒绝 ValueError → T5+1 scope), 实账 PnL + balance + open set 全更新
+3. **`StopLossEvent` 富返回** — `check_stop_loss_event()` 返回 (loss_pct, realized_pnl, threshold_pct, recommendation) 而非裸 bool。FP-tolerant 阈值比较 (+1e-9)。Legacy bool form 保留
+4. **`ExecutionEngine` 关仓 hook** — `fill_provider` (production) + `paper_close` (lifecycle exercise) + `_maybe_close_for_leg` 仅成功 leg fires + `ExecutionResult.stop_loss` post-execution surface
+5. **CLI 关仓面** — `run --paper-close` (全 lifecycle) + `status` snapshot-driven (balance/realized_pnl/roi_pct/stop_loss 都加入 envelope) + `close` 子命令 (operator-driven)
+6. **Makefile** — `make run-arb paper_close=1` + 新 `make close-arb market_id=… exit_price=… [size=…]`
+
+### Pre-T5 两个 latent bug 关仓路径强制暴露 + 修
+
+- **`PositionSnapshot.roi_pct` AttributeError** — 引用不存在 `self.snapshot_balance` 字段, 任何 snapshot reader 都会 crash。T5.1 RED test 锁定 + 修 → `self.balance`。Pre-T5 没人调用 roi_pct (CLI status 用 dict-only 投影绕过), T5.6 status snapshot 直接读 → 修是必经之路
+- **大小写 BUY/SELL 不一致致 PnL 符号反向** — `ExecutionLeg.action` 是小写 ("buy"/"sell"), `Position.pnl` 检查大写 ("BUY"/"SELL")。Engine `open_position(side=leg.action)` 没规范化 → SELL 路径错走 BUY 计算, 符号反向。T4 没关仓所以 latent, T5 关仓后立刻暴露。修 = engine `leg.action.upper()` 规范化
+
+### 测试
+
+- `tests/routing/test_position_tracker.py` **new**: 14 tests (roi_pct bug 3 + close-with-fill lifecycle 6 + stop-loss event chain 5)
+- `tests/execution/test_engine.py` +4: paper-mode close zero-PnL / real-fill PnL booking / close skipped for failed legs / stop_loss surfaced in result
+- `tests/cli/test_arbitrage_cli.py` +3 + 1 expanded: status envelope T5 snapshot fields / run --paper-close lifecycle / close subcommand books PnL / close unknown market exits non-zero
+- **m2 test total: 42 → 63 green**
+- alembic 005 failures 是 pre-existing (Phase 03-06/04-01, m1 DB infra), 非 T5 引入
+
+### 设计取舍 (per CLAUDE.md "don't add features beyond what task requires")
+
+明确**没做**:
+- SQLite/Supabase 跨进程 position 持久化 → T5+1 (`make close-arb` 在独立进程跑 tracker 是空的, doc 注明)
+- 多次 fill 累积成单 position close → T5+1
+- 多腿 atomic 全关或全不关 → T8 territory
+- 真实 wallet/py-clob-client 集成 → 另一个独立 task (T5 已把 `fill_provider` 做成可插拔, 是接入点)
+
+### 命令演示
+
+```bash
+# 全 lifecycle (open → close at estimated_price, zero PnL)
+make run-arb mid=0.45 stake=500 paper_close=1
+# → execution.status=completed, stop_loss=null, both legs closed
+make status-arb
+# → open_positions=[], balance=1000.0, total_realized_pnl=0.0
+
+# 半 lifecycle + operator close (CLI tests 覆盖, make 跨进程不能演示)
+# 在单 Python 进程: run --no-paper-close → status 见 open → close → status 见 closed + realized PnL
+```
+
+### 会话末状态
+
+- main 领先 origin/main, 待 commit + push
+- 0 drift (`make planning-status` 全 OK 在 commit 前 — 但 T5 commit 标签是 `feat(m2-t5)` 不触发 SUMMARY hook, 沿用 T2/T3/T4/T7 惯例)
+- 18+ worktrees harness-locked PID, session 末 auto-cleanup
+- 03 alembic 5 test failures pre-existing, 非 T5 引入
+
+### Next session
+
+```bash
+/gsd-resume-work --ws m2-combinatorial
+make planning-status                            # 应 zero drift
+git log --oneline -5
+# 最直接的下一步用户价值:
+make run-arb paper_close=1                      # 看 T5 全 lifecycle
+```
+
+[NEXT] m2 Phase 02 T5 closed。下一步选项: (a) 真实 venue adapter — 写非-no-op `leg_executor`+`fill_provider` 调 py-clob-client; **阻塞: Polymarket 账户可用性** / (b 推荐若无账户) T8 E2E chaos test — partial-fail/retry-exhaust/stop-loss 触发等 failure mode 闭环, 不依赖外部资源 / (c) T6 Settings — 整合 m2 dataclass 进 pydantic-settings + env var / (d) 跨线 m1 Phase 05 D-13 阈值校准 / m5 phase 01 polywatch-mvp。详 [[m2-t5-position-tracker-closed-2026-06]]。

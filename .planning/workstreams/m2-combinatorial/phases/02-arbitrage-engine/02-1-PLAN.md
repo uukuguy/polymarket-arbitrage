@@ -1,6 +1,8 @@
 # Phase 2 Plan 1: Foundation — Data Models, Routing Engine, Execution Pipeline
 
-> ✅ **T2 + T3 + T4 + T7 CLOSED 2026-06-02** (SESSION 36) — IMDEA validation locked (test_slippage 4→7) + RoutingEngine slippage-aware (routing/test_engine 6→12) + Execution orchestration shell (execution/test_engine 0→8) + CLI surface live (cli/test_arbitrage_cli 4, `make eval-arb` / `make run-arb` / `make status-arb`). m2 test total 21 → 42. **First user-visible value face**: 命令行直接跑 m2 pipeline。T5 (Position Tracker realization) / T8 (E2E chaos) 是下一步。
+> ✅ **T5 CLOSED 2026-06-06** (SESSION 37) — Position Tracker realization: `Fill` event model + `close_position_with_fill` production close path + `StopLossEvent` rich return + ExecutionEngine close hook (`paper_close` / `fill_provider`) + CLI `close` subcommand + `make close-arb` + status snapshot fields (balance / realized_pnl / roi_pct / stop_loss). Pre-T5 latent bugs fixed: `PositionSnapshot.roi_pct` AttributeError (referenced non-existent field) + engine BUY/SELL case-mismatch silently inverted PnL sign (latent because T4 never closed). m2 test total **42 → 63** (+14 tracker + 4 execution close-path + 3 CLI close lifecycle + 2 stop-loss surfacing). **First user-visible value face for the close side**: `make run-arb paper_close=1` exercises full open→close lifecycle; `make close-arb market_id=… exit_price=…` operator-driven close. T6 (Settings) / T8 (E2E chaos) 是下一步。
+
+> ✅ **T2 + T3 + T4 + T7 CLOSED 2026-06-02** (SESSION 36) — IMDEA validation locked (test_slippage 4→7) + RoutingEngine slippage-aware (routing/test_engine 6→12) + Execution orchestration shell (execution/test_engine 0→8) + CLI surface live (cli/test_arbitrage_cli 4, `make eval-arb` / `make run-arb` / `make status-arb`). m2 test total 21 → 42.
 >
 > ⚠ **HISTORICAL PLAN-CODE DRIFT NOTICE** (2026-05-20)
 >
@@ -61,6 +63,38 @@
 - 增加 T2 IMDEA Type-2 验证测试要求 (Polymarket 86M 笔交易论文 cross-venue fee differential 实证)
 - T1/T3/T4/T5 body **暂未改写** — STATE.md "Plan-vs-Code 偏离审计" 显示这几个也有膨胀,但本 revision 焦点是 T2 (T2 是核心信号层,T3/T4 用它),T1 body 与代码的差异是命名/枚举级别非语义级别,推到执行时按需校正
 - Pending Decision 段标记为 **CLOSED 2026-05-20**,保留作历史
+
+### 2026-06-06 Revision 9 — T5 ✅ CLOSED (SESSION 37)
+- Decision source: 用户授权 "同意" 走 T5 path (vs real venue adapter / m1 D-13 校准 / T8 / m5-01) — T5 是用户价值面 second wave (T7 only opened positions; T5 closes the loop)
+- `src/polyarb/routing/position_tracker.py` 179→320 lines:
+  - **New `Fill` dataclass** — venue-agnostic fill event (market_id, exit_price, filled_size, filled_at). Production: real `leg_executor` returns one; paper mode: ExecutionEngine synthesizes at leg.estimated_price.
+  - **New `StopLossEvent` dataclass** — richer return from `check_stop_loss_event()` than bare bool: carries `loss_pct`, `realized_pnl`, `threshold_pct`, `recommendation="halt_new_signals"`. CLI / monitor can act on it without re-querying tracker.
+  - **New `close_position_with_fill(fill)`** — production close path. Enforces `fill.filled_size == position.stake` (T5 scope: no partial-fill aggregation; raises ValueError otherwise). Books realized PnL + restores balance + removes from open set.
+  - **New `open_positions()` iterator** — read-only public view (replaces direct `_open_positions.values()` access in CLI / tests).
+  - **Bug fix (T5.1)**: `PositionSnapshot.roi_pct` referenced non-existent `self.snapshot_balance` field — any snapshot reader would AttributeError. Fixed to use `self.balance`. Pre-existing latent bug; T5 unearthed it because T5.1 was the first code path to actually read roi_pct.
+  - **FP-tolerant stop-loss threshold compare** — `abs(loss_pct) + 1e-9 < stop_loss_pct` ensures "exactly at threshold" triggers even when float arithmetic produces 4.999999% for a 5.0% threshold.
+  - **Legacy `check_stop_loss() → bool`** preserved (computed from `check_stop_loss_event()`).
+  - **Legacy `close_position(market_id, exit_price)`** preserved as low-level primitive (size-unchecked close); production goes through `close_position_with_fill`.
+- `src/polyarb/execution/engine.py` (T4 230 lines → 290 lines):
+  - **New `fill_provider: Callable[[ExecutionLeg], Awaitable[Fill]]`** param — production hook: caller injects, engine calls per successful leg, forwards Fill to tracker.close_position_with_fill.
+  - **New `paper_close: bool` param** — paper-mode lifecycle exercise: synthesizes `Fill(exit_price=leg.estimated_price, filled_size=leg.size)` per successful leg → zero realized PnL but full open→close cycle exercised.
+  - **New `_maybe_close_for_leg(leg)` async hook** — fires ONLY on successful legs (failed legs never get a fill). Priority: fill_provider → paper_close → leave open (legacy / explicit-close mode).
+  - **Side normalization bug fix** — engine now `leg.action.upper()` before opening position. `ExecutionLeg.action` convention is lowercase ("buy"/"sell"); tracker contract is uppercase ("BUY"/"SELL"). Mismatch silently inverted `Position.pnl` sign — latent because T4 never closed positions. T5 surfaces this immediately via close path.
+  - **`ExecutionResult.stop_loss: StopLossEvent | None`** — post-execution the engine calls `tracker.check_stop_loss_event()` and stamps the result, so callers (CLI, monitor) can halt new signals in one read.
+  - **`fill_provider` exceptions caught + logged + position left open** (matches T4 fail-soft envelope philosophy).
+  - **Partial-fill ValueError caught + logged** (tracker enforces stake match; engine doesn't crash on it).
+- `src/polyarb/cli_arbitrage.py` (T7 230 lines → 320 lines):
+  - `run --paper-close` flag → CLI users can exercise full lifecycle from terminal
+  - `status` now uses `tracker.snapshot()` to surface `balance / total_unrealized_pnl / total_realized_pnl / total_pnl / roi_pct / max_exposure`, plus top-level `stop_loss` field (event details if triggered)
+  - **New `close` subcommand** — operator-driven close via synthesized Fill. Operator workflow: `run` (without --paper-close) → `status` to see open position → `close --market-id=… --exit-price=…` to book PnL. Per-process tracker state caveat documented (cross-call persistence is T5+1).
+- `Makefile` — `make run-arb paper_close=1` (env-driven flag conversion) + new `make close-arb market_id=… exit_price=… [size=…]` target.
+- `tests/routing/test_position_tracker.py` **new, 14 tests** covering: roi_pct bug fix (3) + close-with-fill lifecycle (6, BUY/SELL × profit/loss/unknown/partial-fill-rejected) + stop-loss event chain (5, disabled/within/at-threshold/profit/legacy-bool).
+- `tests/execution/test_engine.py` **+4 tests**: paper-mode close zero-PnL lifecycle / real-fill PnL booking / close path skipped for failed legs / stop_loss surfaced in ExecutionResult.
+- `tests/cli/test_arbitrage_cli.py` **+3 tests + 1 expanded**: status envelope (T5 snapshot fields + stop_loss) / run --paper-close lifecycle / close subcommand books PnL / close unknown market exits non-zero.
+- m2 test total: 42 → 63 green.
+- **Pre-T5 latent bugs caught + locked**: (a) `PositionSnapshot.roi_pct` AttributeError, (b) BUY/SELL case-mismatch sign inversion. Both invisible pre-T5 because the close path never executed; T5 forced the lifecycle and they surfaced immediately. Lock by test ensures any future revert is loud.
+- **Conscious omissions (per CLAUDE.md "don't add features beyond what task requires")**: no SQLite persistence for positions (T5+1), no partial-fill aggregation (T5+1), no multi-leg atomic close-all-or-none (T8 territory), no real wallet integration (separate task — real `leg_executor` adapter). The pluggable `fill_provider` is the integration point for real venues.
+- 下一步: T8 E2E chaos test (orchestration partial-fail / retry-exhaust integration with close path) **OR** real venue adapter (write non-no-op `leg_executor` + `fill_provider` calling py-clob-client) **OR** T6 Settings consolidation **OR** cross-line work (m1 D-13 校准 / m5 phase 01)
 
 ### 2026-06-02 Revision 8 — T7 ✅ CLOSED (SESSION 36 same-day continuation after T4)
 - Decision source: 用户授权 "扎实把系统做到能用" — T7 把 T2+T3+T4 从库代码变成 "用户能在命令行跑" 的产品面。这是 m2 第一次有可视化价值。
@@ -251,15 +285,50 @@ Build the core arbitrage execution engine: routing (Polymarket-first → Gamma),
 6. Error handling: per-leg timeout (5s Polymarket, 10s Gamma), retry logic (1x), circuit breaker (3 failures → pause)
 7. Integration tests: full pipeline with mocked clients, all 4 execution paths
 
-### T5: Position Management — In-Memory Tracker
+### T5: Position Management — In-Memory Tracker ✅ CLOSED 2026-06-06 (Revision 9)
 **Owner**: general-purpose agent
-**Files**: `src/polyarb/execution/positions.py`, `tests/test_positions.py`
-**Steps**:
-1. `PositionTracker` class: `positions: dict[str, Position]`, `open_pnl: float`, `total_trades: int`
-2. `Position` dataclass: `token_id`, `venue`, `side`, `size`, `entry_price`, `current_price`, `unrealized_pnl`
-3. Methods: `open_position()`, `update_market()`, `close_position()`, `get_exposure(token_id)`
-4. Max exposure guard: configurable `max_position_size` per token, reject signal if exceeded
-5. Tests: open/close/update flows, exposure guard, PnL calculation
+**Files**: `src/polyarb/routing/position_tracker.py` (179→320 lines), `src/polyarb/execution/engine.py` (+60 lines for close hook), `src/polyarb/cli_arbitrage.py` (+90 lines for status snapshot + close subcommand), `tests/routing/test_position_tracker.py` (new, 14 tests), `tests/execution/test_engine.py` (+4 tests), `tests/cli/test_arbitrage_cli.py` (+3 tests).
+**Status**: ✅ DONE — fill→close→PnL→stop-loss chain locked end to end. CLI close path exposed (`make run-arb paper_close=1` + `make close-arb`).
+
+**Note on file paths**: Revision 0 said `src/polyarb/execution/positions.py` + `tests/test_positions.py`. Actual location is `src/polyarb/routing/position_tracker.py` (already in place pre-T5 from SESSION 10 cleanup; T5 extends it) + `tests/routing/test_position_tracker.py`. Plan-vs-code naming drift recorded here, not retconned.
+
+**Design (locked, matches landed code):**
+1. **`Fill` dataclass** — venue-agnostic fill event (market_id, exit_price, filled_size, filled_at).
+2. **`StopLossEvent` dataclass** — rich return from `check_stop_loss_event()` (loss_pct, realized_pnl, threshold_pct, recommendation).
+3. **`PositionTracker.close_position_with_fill(fill: Fill) → float`** — production close path. Enforces `fill.filled_size == position.stake`; raises ValueError on partial fill. Books realized PnL, restores balance, removes from open set.
+4. **`PositionTracker.check_stop_loss_event() → StopLossEvent | None`** — uses realized PnL only (unrealized swings shouldn't force halt). FP-tolerant threshold (`+1e-9` slack). Disabled config returns None always.
+5. **`PositionTracker.open_positions() → Iterable[Position]`** — read-only public view (replaces `_open_positions.values()` access).
+6. **ExecutionEngine integration**:
+   - `fill_provider: Callable[[ExecutionLeg], Awaitable[Fill]]` — production hook
+   - `paper_close: bool` — paper-mode lifecycle exercise
+   - `_maybe_close_for_leg(leg)` — fires only on successful legs
+   - `ExecutionResult.stop_loss` — post-execution event surface
+7. **CLI integration**: `run --paper-close`, `close --market-id --exit-price [--size]`, `status` now snapshot-driven with realized_pnl + roi_pct + stop_loss fields.
+
+**Pre-T5 latent bugs caught and locked:**
+- `PositionSnapshot.roi_pct` referenced non-existent `self.snapshot_balance` → AttributeError on any reader. Locked by `test_roi_pct_does_not_raise_attribute_error`.
+- `ExecutionEngine` opened tracker positions with lowercase side ("buy"/"sell"); tracker `Position.pnl` matched uppercase "BUY"/"SELL" → mismatch silently inverted PnL sign. Locked by `test_real_fill_close_books_realized_pnl` (BUY profit must be positive).
+
+**NOT in T5 scope (deferred):**
+- SQLite/Supabase persistence — T5+1
+- Partial-fill aggregation (multiple fills per position) — T5+1
+- Multi-leg atomic close-all-or-none — T8 territory
+- Real `leg_executor` adapter (py-clob-client + wallet) — separate task; the `fill_provider` hook is the integration point
+
+**Acceptance:**
+- `tests/routing/test_position_tracker.py` 14/14 green
+- `tests/execution/test_engine.py` 12/12 green (8 pre-T5 + 4 T5)
+- `tests/cli/test_arbitrage_cli.py` 7/7 green (4 pre-T5 + 3 T5)
+- m2 test total: 42 → 63 green
+- `make run-arb paper_close=1` → execution.status="completed" + stop_loss=null
+- `make status-arb` → metrics envelope includes balance/total_realized_pnl/roi_pct/stop_loss
+
+**Original Revision 0 steps (for historical reference):**
+1. ~~`PositionTracker` class: `positions: dict[str, Position]`, `open_pnl: float`, `total_trades: int`~~ — open_positions dict + balance + _realized_pnl; total_trades not added (not used downstream)
+2. ~~`Position` dataclass: `token_id`, `venue`, `side`, `size`, `entry_price`, `current_price`, `unrealized_pnl`~~ — market_id, condition_id, side, outcome, stake, entry/current_price, leg_id, opened_at
+3. ~~Methods: `open_position()`, `update_market()`, `close_position()`, `get_exposure(token_id)`~~ — open_position, update_prices, close_position, close_position_with_fill, check_stop_loss_event; no get_exposure (PositionConfig.max_total_exposure checked at open time)
+4. ~~Max exposure guard: configurable `max_position_size` per token, reject signal if exceeded~~ — PositionConfig.max_total_exposure aggregate (per-asset cap deferred to T5+1)
+5. ~~Tests: open/close/update flows, exposure guard, PnL calculation~~ — 14 lifecycle tests + 4 execution close-path + 3 CLI close lifecycle
 
 ### T6: Settings — Phase 2 Configuration
 **Owner**: general-purpose agent
