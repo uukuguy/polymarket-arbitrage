@@ -15,8 +15,9 @@
 > INSERTED 2026-05-26 — Polywatch 自动化基建第一批落地, healthz-watcher MVP 已 ship 作 baseline (commit 6a77e06)。
 
 **Goal:** Polywatch 自动化基建第一批 4 trial 跑通 + harness 形态验证。让本项目从"alert 到达但被忽略"升级到"alert 到达 + 自动响应/缓解 + ledger 留底"。healthz-watcher 已是 baseline,本 phase 把它正式纳入 phase 治理 + 扩展另外 3 个 trial + 决出 4 个待定架构决策 (D-Polywatch-1..4)。
-**Status:** 🟢 Ready for discuss
-**Depends on:** Phase 02.1 BUG-8 (`/control/unpause` HMAC endpoint, 已 ship); Phase 03 carry-over Inj L2-3b/L2-4/L2-5 (chaos-inj-replay trial 复用)
+**Status:** 🟡 Planning — Plan 01-1 written, ready for execute
+**Depends on:** Phase 02.1 BUG-8 (`/control/unpause` HMAC endpoint, 已 ship); Phase 03.1 Plan 07 (GAP-103 notes field + chaos Inj finalization)
+**Plan:** 01-1-PLAN.md — 4 trials + global skill, single phase plan (trials independent, no wave-splitting needed)
 **Refs:**
 - memory `architecture_polywatch-decision-framework.md` — 4 条件 + 8 应用点 + 3 红线 + 决策树
 - memory `project_polywatch-mvp-shipped-2026-05.md` — healthz-watcher MVP baseline + 6 GHA secrets + 上线状态
@@ -57,7 +58,7 @@ Scope (4 trial, discuss-phase 决具体边界):
 - 真实下单 / 资金 / push prod main / ADR 锁决 (永远红线)
 
 Plans:
-- (待 discuss-phase 决出 wave 分组)
+- 01-1-PLAN.md — Phase-wide plan: 4 trials + global skill (2026-06-07, SESSION 29)
 
 ---
 
