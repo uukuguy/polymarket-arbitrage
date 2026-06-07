@@ -3198,3 +3198,57 @@ make run-arb paper_close=1                      # 看 T5 全 lifecycle
 ```
 
 [NEXT] m2 Phase 02 T5 closed。下一步选项: (a) 真实 venue adapter — 写非-no-op `leg_executor`+`fill_provider` 调 py-clob-client; **阻塞: Polymarket 账户可用性** / (b 推荐若无账户) T8 E2E chaos test — partial-fail/retry-exhaust/stop-loss 触发等 failure mode 闭环, 不依赖外部资源 / (c) T6 Settings — 整合 m2 dataclass 进 pydantic-settings + env var / (d) 跨线 m1 Phase 05 D-13 阈值校准 / m5 phase 01 polywatch-mvp。详 [[m2-t5-position-tracker-closed-2026-06]]。
+
+---
+
+## SESSION ~38 — 2026-06-07 (m2 Phase 2 T6 + T8 close — Phase 2 COMPLETE)
+
+### 主线产出
+
+**m2 Phase 02 全 8 task 闭环** — 从 SESSION 36 启动的 T2/T3/T4/T7 到 SESSION 37 的 T5 到本 session 的 T6/T8:
+
+**T6: Settings env-var (commit `4e1d1af`)**:
+- `routing/config.py`: RoutingConfig/ExecutionConfig/PositionConfig 从 plain `@dataclass` → pydantic-settings `BaseSettings` with `POLYARB_` prefix
+- Env var mapping: `POLYARB_RETRY_ATTEMPTS` / `POLYARB_STOP_LOSS_PCT` / `POLYARB_MIN_PROFIT_THRESHOLD_PCT` 等
+- Precedence: explicit kwarg > env var > default
+- `AppConfig` stays dataclass (aggregator); `load_m2_settings()` factory added
+- `extra="ignore"` prevents unrelated POLYARB_ env var noise
+- 16 tests: defaults / env override / kwarg-over-env precedence / bool parsing / AppConfig cascading / factory
+
+**T8: E2E chaos tests (commit `4e1d1af`)**:
+- 25 tests in `tests/execution/test_arbitrage_e2e.py`
+- Happy path (2): full pipeline COMPLETED + single-leg signal
+- Abort-on-fail (2): first-leg fail → ABORTED + no phantom positions
+- Partial execution (2): second-leg fail → PARTIAL + only successful legs tracked
+- Retry (2): exhaust → ABORTED + succeed on retry N
+- Stop-loss (6): not-triggered / disabled / exact-match / below-threshold / profit / surfaced in ExecutionResult
+- Paper close (3): lifecycle zero-PnL / no positions left / failed legs never paper-closed
+- Fill provider (2): close at entry → zero PnL / only called for successful legs
+- Below-threshold gate (3): rejected / accepted / at-exact-threshold
+- All-fail + multi-venue (3): ABORTED / N legs / decision surface metrics
+
+**Phase 2 closeout**:
+- SUMMARY `02-1-SUMMARY.md` 落库 (commit `ee2ff81`)
+- STATE.md 更新: Phase 2 CLOSED, test count 63 → 104
+- `make planning-status` zero drift
+- 2 commits session total (`4e1d1af` + `ee2ff81`)
+
+### 会话末状态
+
+- main 领先 origin/main 2 commits
+- working tree clean
+- m2 Phase 2 全 task 完成: T1-T8 all ✅
+- m2 test: **104 green**
+
+### [NEXT] 下次会话从这里开始
+
+```bash
+/gsd-resume-work --ws m2-combinatorial
+make planning-status                          # 应 zero drift
+make eval-arb mid=0.45 stake=1000            # m2 pipeline 可跑
+```
+
+**下一步选项** (Phase 2 闭环后):
+- (a) 真实 venue adapter — `leg_executor` + `fill_provider` 接入 py-clob-client (阻塞: Polymarket 账户)
+- (b) T5+1 持久化 — SQLite/Supabase 跨进程 position state
+- (c) 跨线 — m1 Phase 05 D-13 / m5 polywatch / m1 deploy + soak
