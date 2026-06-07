@@ -1,12 +1,31 @@
-"""Routing and execution configuration."""
+"""Routing and execution configuration.
+
+T6 (2026-06-07) — env-var support via pydantic-settings BaseSettings.
+Each config class reads from POLYARB_ prefixed env vars (and .env file).
+Precedence: explicit kwarg > env var > default.
+
+Usage:
+    # Explicit (env vars ignored for overridden fields):
+    config = RoutingConfig(min_profit_threshold_pct=2.0)
+
+    # From env: POLYARB_MIN_PROFIT_THRESHOLD_PCT=2.0
+    config = RoutingConfig()
+
+    # Convenience factory:
+    from polyarb.routing.config import load_m2_settings
+    app = load_m2_settings()
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-@dataclass
-class RoutingConfig:
-    """Routing engine configuration."""
+
+class RoutingConfig(BaseSettings):
+    """Routing engine configuration — env overridable via POLYARB_*."""
+
+    model_config = SettingsConfigDict(env_prefix="POLYARB_", env_file=".env", extra="ignore")
 
     min_profit_threshold_pct: float = 1.0
     min_leg_size: float = 0.01
@@ -14,9 +33,10 @@ class RoutingConfig:
     enable_conditional_routing: bool = True
 
 
-@dataclass
-class ExecutionConfig:
-    """Execution pipeline configuration."""
+class ExecutionConfig(BaseSettings):
+    """Execution pipeline configuration — env overridable via POLYARB_*."""
+
+    model_config = SettingsConfigDict(env_prefix="POLYARB_", env_file=".env", extra="ignore")
 
     max_slippage_bps: float = 50.0
     leg_timeout_seconds: float = 30.0
@@ -25,9 +45,10 @@ class ExecutionConfig:
     retry_delay_seconds: float = 2.0
 
 
-@dataclass
-class PositionConfig:
-    """Position tracking configuration."""
+class PositionConfig(BaseSettings):
+    """Position tracking configuration — env overridable via POLYARB_*."""
+
+    model_config = SettingsConfigDict(env_prefix="POLYARB_", env_file=".env", extra="ignore")
 
     initial_balance: float = 1000.0
     max_position_per_asset: float = 500.0
@@ -38,8 +59,22 @@ class PositionConfig:
 
 @dataclass
 class AppConfig:
-    """Root configuration aggregating all sub-configs."""
+    """Root configuration aggregating all sub-configs.
+
+    Each sub-config is a BaseSettings so env vars are read independently.
+    Explicit construction overrides env: `AppConfig(routing=RoutingConfig(min_profit_threshold_pct=2.0))`.
+    """
 
     routing: RoutingConfig = field(default_factory=RoutingConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     position: PositionConfig = field(default_factory=PositionConfig)
+
+
+def load_m2_settings() -> AppConfig:
+    """Read m2 config from env vars (POLYARB_*) + defaults.
+
+    Equivalent to `AppConfig()`. Provided as a named entry point so
+    production daemons and scripts have a single call site for m2 config,
+    matching the pattern of m1 `polyarb.config.load_settings()`.
+    """
+    return AppConfig()
