@@ -206,6 +206,13 @@ def daemon_settings_for_test(
         http_timeout_s=2.0,
         liquidity_threshold_usd=100.0,
         scan_shared_secret=SecretStr(_TEST_SCAN_SECRET),
+        # Explicitly empty so model_validator does NOT auto-enable mirror/R2
+        # when .env has POLYARB_SUPABASE_URL / POLYARB_R2_ENDPOINT set.
+        supabase_url="",
+        supabase_service_key=SecretStr(""),
+        r2_endpoint="",
+        r2_access_key_id=SecretStr(""),
+        r2_secret_access_key=SecretStr(""),
     )
 
 

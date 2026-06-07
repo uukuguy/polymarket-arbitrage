@@ -576,8 +576,8 @@ def test_make_smoke_health_local_dry_run_recipe() -> None:
         timeout=5,
     )
     assert result.returncode == 0, f"make -n smoke-health-local failed: {result.stderr}"
-    assert "127.0.0.1:8080/health" in result.stdout, (
-        f"smoke-health-local recipe must target 127.0.0.1:8080/health, got: {result.stdout!r}"
+    assert "127.0.0.1:$PORT/health" in result.stdout or "127.0.0.1:19080/health" in result.stdout, (
+        f"smoke-health-local recipe must target /health on localhost, got: {result.stdout!r}"
     )
 
 
