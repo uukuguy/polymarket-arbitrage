@@ -3672,3 +3672,5 @@ make scan-arb-live min_edge_bps=0
 ```
 
 恢复后先跑 `make planning-status` 和 strict L2 `/health`，从 candidate refresh 写入/错误链开始定位。
+
+- [VERIFIED] handoff commit `c0abdfa` Fly deploy passed；repo-wide CI 仍在历史 Ruff baseline 失败，不能宣称全仓 CI green。

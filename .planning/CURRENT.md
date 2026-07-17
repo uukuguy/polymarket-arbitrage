@@ -54,6 +54,7 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 - `evaluate/run` 仍是 synthetic executor；真实市场发现请用 `scan-arb-live`。
 - `VenueSettlement` 是已验证的对账合同；当前没有 live adapter 自动提供这些事实。
 - L1 业务健康已恢复；R2 archive 仍为 warn，不影响本地 SQLite→M2 feed。
+- 全仓 CI 仍被历史 repo-wide Ruff 基线阻断；本次相关 tests/targeted Ruff 与 Fly deploy 通过，不等于全仓 CI 绿色。
 - Phase 2–8 complete 表示 foundation plans 完成，不表示 M2 产品使命完成。
 
 ## 距离可实际 paper/live 使用还缺什么

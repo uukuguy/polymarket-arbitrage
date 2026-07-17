@@ -22,6 +22,11 @@
       "description": "Production L2 candidate, WS-event, and mirror freshness checks are stale; strict /health returns 503.",
       "type": "technical",
       "workaround": "Trace candidate refresh mutation, restore WS events, then mirror writes before starting soak."
+    },
+    {
+      "description": "Repository-wide CI is red at the legacy Ruff baseline; pytest/planning jobs are skipped after lint fails.",
+      "type": "technical",
+      "workaround": "Do not confuse targeted green checks with global CI; repair lint baseline as a separate bounded work package."
     }
   ],
   "human_actions_pending": [],
