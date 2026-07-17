@@ -25,7 +25,7 @@ Plans:
 **Goal:** [To be planned]
 **Requirements**: TBD
 **Depends on:** Phase 2
-**Plans:** 0 plans
+**Plans:** 0/1 plans executed
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 3 to break down)
