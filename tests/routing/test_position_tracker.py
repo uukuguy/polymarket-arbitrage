@@ -345,3 +345,62 @@ class TestRepositoryBackedTracker:
         assert tracker.balance == pytest.approx(900.0)
         assert [position.market_id for position in tracker.open_positions()] == ["m1"]
         assert tracker.total_realized_pnl == 0.0
+
+
+class TestExactCashDomain:
+    def test_repeated_decimal_closes_accumulate_exact_money(self) -> None:
+        tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
+
+        for index in range(2):
+            market_id = f"m{index}"
+            assert tracker.open_position(
+                market_id,
+                f"c{index}",
+                "BUY",
+                "YES",
+                100.0,
+                0.4,
+                operation_id=f"open:{index}",
+            )
+            assert tracker.close_position_with_fill(
+                Fill(market_id, 0.5, 100.0),
+                operation_id=f"close:{index}",
+            ) == pytest.approx(10.0)
+
+        state = tracker.repository.load()
+        assert state.balance_money.micros == 1_020_000_000
+        assert state.snapshot_balance_money.micros == 1_000_000_000
+        assert state.realized_pnl_money.micros == 20_000_000
+        assert tracker.balance == 1020.0
+        assert tracker.total_realized_pnl == 20.0
+
+    def test_open_quantizes_stake_once_before_balance_check(self) -> None:
+        tracker = PositionTracker(PositionConfig(initial_balance=0.3))
+
+        assert tracker.open_position("m1", "c1", "BUY", "YES", 0.3000004, 0.4)
+
+        position = tracker.open_positions()[0]
+        assert position.stake_money.micros == 300_000
+        assert position.stake == 0.3
+        assert tracker.repository.load().balance_money.micros == 0
+
+    def test_exposure_limit_compares_quantized_stakes(self) -> None:
+        tracker = PositionTracker(
+            PositionConfig(initial_balance=1.0, max_total_exposure=0.3)
+        )
+
+        assert tracker.open_position("m1", "c1", "BUY", "YES", 0.1, 0.4)
+        assert tracker.open_position("m2", "c2", "BUY", "YES", 0.2, 0.4)
+        assert tracker.snapshot().max_exposure == 0.3
+
+    def test_full_fill_equality_uses_quantized_money(self) -> None:
+        tracker = PositionTracker(PositionConfig(initial_balance=1.0))
+        assert tracker.open_position("m1", "c1", "BUY", "YES", 0.3, 0.4)
+
+        pnl = tracker.close_position_with_fill(
+            Fill("m1", 0.5, 0.1 + 0.2), operation_id="close:m1"
+        )
+
+        assert pnl == pytest.approx(0.03)
+        assert tracker.open_count == 0
+        assert tracker.repository.load().realized_pnl_money.micros == 30_000
