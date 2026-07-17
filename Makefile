@@ -1188,13 +1188,18 @@ status-arb:
 ##
 ## Usage:
 ##   make close-arb db=data/m2-positions.db market_id=cond-0 exit_price=0.55
+##   make close-arb db=data/m2-positions.db market_id=cond-0 exit_price=0.55 operation_id=close-001
 close-arb:
 	@if [ -z "$${market_id}" ] || [ -z "$${exit_price}" ]; then \
-		echo "usage: make close-arb db=<path> market_id=<id> exit_price=<0..1> [size=<float>]"; \
+		echo "usage: make close-arb db=<path> market_id=<id> exit_price=<0..1> [size=<float>] [operation_id=<immutable-id>]"; \
 		exit 1; \
 	fi; \
 	echo ">> close-arb db=$(if $(strip $(db)),$(db),data/m2-positions.db) market_id=$${market_id} exit_price=$${exit_price}"; \
 	SIZE_FLAG=""; \
 	if [ -n "$${size}" ]; then SIZE_FLAG="--size $${size}"; fi; \
-	uv run python -m polyarb.cli_arbitrage close --market-id "$${market_id}" --exit-price $${exit_price} --db-path "$(if $(strip $(db)),$(db),data/m2-positions.db)" $$SIZE_FLAG
+	if [ -n "$(strip $(operation_id))" ]; then \
+		uv run python -m polyarb.cli_arbitrage close --market-id "$${market_id}" --exit-price $${exit_price} --db-path "$(if $(strip $(db)),$(db),data/m2-positions.db)" --operation-id "$(operation_id)" $$SIZE_FLAG; \
+	else \
+		uv run python -m polyarb.cli_arbitrage close --market-id "$${market_id}" --exit-price $${exit_price} --db-path "$(if $(strip $(db)),$(db),data/m2-positions.db)" $$SIZE_FLAG; \
+	fi
 .PHONY: close-arb

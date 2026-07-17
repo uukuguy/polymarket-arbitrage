@@ -26,6 +26,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import typer
 from loguru import logger
@@ -343,6 +344,11 @@ def close(
         "--db-path",
         help="SQLite paper-account path (overrides POLYARB_POSITION_DB_PATH)",
     ),
+    operation_id: str | None = typer.Option(
+        None,
+        "--operation-id",
+        help="Caller-owned immutable close identity for cross-process retry",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Close an open position via a synthesized Fill (operator-driven).
@@ -358,31 +364,68 @@ def close(
     """
     _setup_logger(verbose)
     tracker = _build_tracker(db_path)
-    pos = next(
-        (p for p in tracker.open_positions() if p.market_id == market_id),
-        None,
+    caller_supplied = operation_id is not None
+    effective_operation_id = (
+        operation_id or f"local:operator-close:{market_id}:{uuid4()}"
     )
-    if pos is None:
-        typer.secho(
-            f"no open position for market_id={market_id}",
-            fg=typer.colors.YELLOW,
-            err=True,
+    replayed = False
+    receipt = (
+        tracker.operation_receipt(effective_operation_id)
+        if caller_supplied
+        else None
+    )
+    if receipt is not None:
+        if receipt.operation_type != "close" or receipt.target_id != market_id:
+            typer.secho(
+                "operation identity conflict: "
+                f"{effective_operation_id!r} was already used for "
+                f"{receipt.operation_type!r}/{receipt.target_id!r}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if type(receipt.result) is not float:
+            typer.secho(
+                f"corrupt close receipt: {effective_operation_id!r} "
+                "does not contain a float result",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        pnl = receipt.result
+        replayed = True
+    else:
+        pos = next(
+            (p for p in tracker.open_positions() if p.market_id == market_id),
+            None,
         )
-        raise typer.Exit(code=1)
-    fill = Fill(
-        market_id=market_id,
-        exit_price=exit_price,
-        filled_size=size if size is not None else pos.stake,
-    )
-    try:
-        pnl = tracker.close_position_with_fill(fill)
-    except ValueError as exc:
-        typer.secho(f"close rejected: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2)
+        if pos is None:
+            typer.secho(
+                f"no open position for market_id={market_id}",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        fill = Fill(
+            market_id=market_id,
+            exit_price=exit_price,
+            filled_size=size if size is not None else pos.stake,
+        )
+        try:
+            pnl = tracker.close_position_with_fill(
+                fill,
+                operation_id=effective_operation_id,
+            )
+        except ValueError as exc:
+            typer.secho(f"close rejected: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
     typer.echo(
         json.dumps(
             {
                 "closed": market_id,
+                "operation_id": effective_operation_id,
+                "replayed": replayed,
+                "retry_safe": caller_supplied,
                 "exit_price": exit_price,
                 "realized_pnl": round(pnl, 4),
                 "total_realized_pnl": round(tracker.total_realized_pnl, 4),
