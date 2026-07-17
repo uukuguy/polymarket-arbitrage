@@ -15,7 +15,6 @@ from polyarb.routing.position_repository import (
 )
 from polyarb.routing.position_tracker import Position
 
-
 _PHASE4_SCHEMA = """
 CREATE TABLE m2_account_state (
     account_id TEXT PRIMARY KEY,

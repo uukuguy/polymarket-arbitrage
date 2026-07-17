@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS m2_account_state (
     snapshot_balance REAL NOT NULL,
     balance REAL NOT NULL,
     realized_pnl REAL NOT NULL,
+    snapshot_balance_micros INTEGER NOT NULL,
+    balance_micros INTEGER NOT NULL,
+    realized_pnl_micros INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS m2_open_positions (
@@ -30,6 +33,7 @@ CREATE TABLE IF NOT EXISTS m2_open_positions (
     side TEXT NOT NULL,
     outcome TEXT NOT NULL,
     stake REAL NOT NULL,
+    stake_micros INTEGER NOT NULL,
     entry_price REAL NOT NULL,
     current_price REAL NOT NULL,
     leg_id TEXT NOT NULL,
@@ -49,6 +53,9 @@ _REQUIRED_COLUMNS = {
         "snapshot_balance",
         "balance",
         "realized_pnl",
+        "snapshot_balance_micros",
+        "balance_micros",
+        "realized_pnl_micros",
         "updated_at",
     },
     "m2_open_positions": {
@@ -57,6 +64,7 @@ _REQUIRED_COLUMNS = {
         "side",
         "outcome",
         "stake",
+        "stake_micros",
         "entry_price",
         "current_price",
         "leg_id",
@@ -69,6 +77,18 @@ _REQUIRED_COLUMNS = {
         "result_json",
         "applied_at",
     },
+}
+_MONEY_COLUMNS = {
+    "m2_account_state": {
+        "snapshot_balance_micros": "snapshot_balance",
+        "balance_micros": "balance",
+        "realized_pnl_micros": "realized_pnl",
+    },
+    "m2_open_positions": {"stake_micros": "stake"},
+}
+_BASE_REQUIRED_COLUMNS = {
+    table: required - set(_MONEY_COLUMNS.get(table, {}))
+    for table, required in _REQUIRED_COLUMNS.items()
 }
 
 
@@ -212,6 +232,7 @@ class SQLitePositionRepository:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initial_balance = initial_balance
+        self._initial_balance_money = Money.from_value(initial_balance)
         self._busy_timeout_ms = busy_timeout_ms
         self._initialize()
 
@@ -309,22 +330,29 @@ class SQLitePositionRepository:
             con.execute("PRAGMA journal_mode=WAL")
             con.execute("PRAGMA synchronous=NORMAL")
             con.executescript(_SCHEMA)
-            self._verify_schema(con)
+            self._verify_schema(con, _BASE_REQUIRED_COLUMNS)
             con.execute("BEGIN IMMEDIATE")
+            self._migrate_money_schema(con)
+            self._verify_schema(con, _REQUIRED_COLUMNS)
             rows = con.execute(
-                "SELECT snapshot_balance FROM m2_account_state"
+                "SELECT snapshot_balance_micros FROM m2_account_state"
             ).fetchall()
             if not rows:
                 now = datetime.now(UTC).isoformat()
                 con.execute(
                     "INSERT INTO m2_account_state "
-                    "(account_id, snapshot_balance, balance, realized_pnl, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "(account_id, snapshot_balance, balance, realized_pnl, "
+                    "snapshot_balance_micros, balance_micros, "
+                    "realized_pnl_micros, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         _ACCOUNT_ID,
-                        self._initial_balance,
-                        self._initial_balance,
+                        self._initial_balance_money.to_float(),
+                        self._initial_balance_money.to_float(),
                         0.0,
+                        self._initial_balance_money.micros,
+                        self._initial_balance_money.micros,
+                        0,
                         now,
                     ),
                 )
@@ -332,12 +360,12 @@ class SQLitePositionRepository:
                 raise RepositoryStateError(
                     "m2_account_state must contain exactly one account row"
                 )
-            elif float(rows[0][0]) != self._initial_balance:
+            elif int(rows[0][0]) != self._initial_balance_money.micros:
                 logger.warning(
                     "Configured initial balance %.2f differs from durable %.2f; "
                     "durable state wins",
-                    self._initial_balance,
-                    float(rows[0][0]),
+                    self._initial_balance_money.to_float(),
+                    Money(int(rows[0][0])).to_float(),
                 )
             con.commit()
         except Exception:
@@ -348,8 +376,10 @@ class SQLitePositionRepository:
             con.close()
 
     @staticmethod
-    def _verify_schema(con: sqlite3.Connection) -> None:
-        for table, required in _REQUIRED_COLUMNS.items():
+    def _verify_schema(
+        con: sqlite3.Connection, required_columns: dict[str, set[str]]
+    ) -> None:
+        for table, required in required_columns.items():
             actual = {
                 row[1] for row in con.execute(f"PRAGMA table_info({table})").fetchall()
             }
@@ -359,10 +389,76 @@ class SQLitePositionRepository:
                     f"incompatible {table} schema; missing columns: {missing}"
                 )
 
+    @classmethod
+    def _migrate_money_schema(cls, con: sqlite3.Connection) -> None:
+        existing = {
+            table: {
+                row[1]
+                for row in con.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for table in _MONEY_COLUMNS
+        }
+        all_money_columns_existed = all(
+            set(columns).issubset(existing[table])
+            for table, columns in _MONEY_COLUMNS.items()
+        )
+
+        for table, columns in _MONEY_COLUMNS.items():
+            for money_column in columns:
+                if money_column not in existing[table]:
+                    con.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {money_column} INTEGER"
+                    )
+
+        if not all_money_columns_existed:
+            account_rows = con.execute(
+                "SELECT account_id, snapshot_balance, balance, realized_pnl "
+                "FROM m2_account_state"
+            ).fetchall()
+            for account_id, snapshot, balance, realized in account_rows:
+                con.execute(
+                    "UPDATE m2_account_state SET snapshot_balance_micros = ?, "
+                    "balance_micros = ?, realized_pnl_micros = ? "
+                    "WHERE account_id = ?",
+                    (
+                        Money.from_value(snapshot).micros,
+                        Money.from_value(balance).micros,
+                        Money.from_value(realized).micros,
+                        account_id,
+                    ),
+                )
+            position_rows = con.execute(
+                "SELECT market_id, stake FROM m2_open_positions"
+            ).fetchall()
+            for market_id, stake in position_rows:
+                con.execute(
+                    "UPDATE m2_open_positions SET stake_micros = ? "
+                    "WHERE market_id = ?",
+                    (Money.from_value(stake).micros, market_id),
+                )
+
+        cls._validate_money_authority(con)
+
+    @staticmethod
+    def _validate_money_authority(con: sqlite3.Connection) -> None:
+        for table, columns in _MONEY_COLUMNS.items():
+            invalid_predicate = " OR ".join(
+                f"typeof({column}) != 'integer'" for column in columns
+            )
+            invalid_count = con.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {invalid_predicate}"
+            ).fetchone()[0]
+            if invalid_count:
+                raise RepositoryStateError(
+                    f"{table} contains invalid authoritative money values"
+                )
+
     @staticmethod
     def _load_state(con: sqlite3.Connection) -> PositionState:
+        SQLitePositionRepository._validate_money_authority(con)
         accounts = con.execute(
-            "SELECT snapshot_balance, balance, realized_pnl FROM m2_account_state"
+            "SELECT snapshot_balance_micros, balance_micros, "
+            "realized_pnl_micros FROM m2_account_state"
         ).fetchall()
         if len(accounts) != 1:
             raise RepositoryStateError(
@@ -373,7 +469,7 @@ class SQLitePositionRepository:
 
         positions: dict[str, Position] = {}
         rows = con.execute(
-            "SELECT market_id, condition_id, side, outcome, stake, entry_price, "
+            "SELECT market_id, condition_id, side, outcome, stake_micros, entry_price, "
             "current_price, leg_id, opened_at FROM m2_open_positions"
         ).fetchall()
         for row in rows:
@@ -382,7 +478,7 @@ class SQLitePositionRepository:
                 condition_id=row[1],
                 side=row[2],
                 outcome=row[3],
-                stake=float(row[4]),
+                stake=Money(int(row[4])),
                 entry_price=float(row[5]),
                 current_price=float(row[6]),
                 leg_id=row[7],
@@ -392,9 +488,9 @@ class SQLitePositionRepository:
 
         account = accounts[0]
         return PositionState(
-            snapshot_balance=float(account[0]),
-            balance=float(account[1]),
-            realized_pnl=float(account[2]),
+            snapshot_balance=Money(int(account[0])),
+            balance=Money(int(account[1])),
+            realized_pnl=Money(int(account[2])),
             open_positions=positions,
         )
 
@@ -404,11 +500,15 @@ class SQLitePositionRepository:
     ) -> None:
         updated = con.execute(
             "UPDATE m2_account_state SET snapshot_balance = ?, balance = ?, "
-            "realized_pnl = ?, updated_at = ?",
+            "realized_pnl = ?, snapshot_balance_micros = ?, balance_micros = ?, "
+            "realized_pnl_micros = ?, updated_at = ?",
             (
-                state.snapshot_balance,
-                state.balance,
-                state.realized_pnl,
+                state.snapshot_balance_money.to_float(),
+                state.balance_money.to_float(),
+                state.realized_pnl_money.to_float(),
+                state.snapshot_balance_money.micros,
+                state.balance_money.micros,
+                state.realized_pnl_money.micros,
                 updated_at,
             ),
         )
@@ -425,14 +525,16 @@ class SQLitePositionRepository:
                 )
             con.execute(
                 "INSERT INTO m2_open_positions "
-                "(market_id, condition_id, side, outcome, stake, entry_price, "
-                "current_price, leg_id, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(market_id, condition_id, side, outcome, stake, stake_micros, "
+                "entry_price, current_price, leg_id, opened_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     position.market_id,
                     position.condition_id,
                     position.side,
                     position.outcome,
-                    position.stake,
+                    position.stake_money.to_float(),
+                    position.stake_money.micros,
                     position.entry_price,
                     position.current_price,
                     position.leg_id,
