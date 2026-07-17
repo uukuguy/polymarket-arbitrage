@@ -2,29 +2,29 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 4
-status: completed
-stopped_at: Phase 4 closed; H-002 confirmed at 100 local score
-last_updated: "2026-07-17T03:02:13.940Z"
+current_phase: 5
+status: executing
+stopped_at: Phase 5 planned; H-003 ready for TDD execution
+last_updated: "2026-07-17T04:33:10.644Z"
 last_activity: 2026-07-17
 progress:
-  total_phases: 3
+  total_phases: 4
   completed_phases: 3
-  total_plans: 3
+  total_plans: 4
   completed_plans: 3
-  percent: 100
+  percent: 75
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
 
-Phase: 4 (Durable Close Receipts) — ✅ CLOSED 2026-07-17
-Plan: 1 of 1 complete
-**Status:** Milestone complete
-**Current Phase:** 4
+Phase: 5 (Exact Cash Ledger) — PLANNED 2026-07-17
+Plan: 0 of 1 complete
+**Status:** Ready to execute
+**Current Phase:** 5
 **Last Activity:** 2026-07-17
-**Last Activity Description:** Phase 4 complete
+**Last Activity Description:** Phase 05 planning complete — 1 plans ready
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 
@@ -54,6 +54,13 @@ Plan: 1 of 1 complete
 - ✅ True subprocess response-loss recovery proof
 - ✅ Teaching, SUMMARY, learnings, JOURNAL, and H-002 climb closure
 
+## Phase 5 Plan Progress (`05-01-PLAN.md` — READY)
+
+- ⬜ Frozen Money value and exact tracker domain
+- ⬜ Transactional SQLite v2 migration and INTEGER authority
+- ⬜ Tagged money receipts and CLI restart recovery
+- ⬜ Teaching, SUMMARY, learnings, JOURNAL, and H-003 climb closure
+
 ## Test Count (m2)
 
 - **104 tests green**: `routing/test_engine` 12 + `routing/test_position_tracker` 14 + `routing/test_config` 16 (T6) + `models/test_signal` 11 + `models/test_slippage` 7 + `execution/test_engine` 12 + `execution/test_arbitrage_e2e` 25 (T8) + `cli/test_arbitrage_cli` 7
@@ -64,18 +71,16 @@ Plan: 1 of 1 complete
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 4 closed; H-002 confirmed at 100 local score
-**Resume File:** .planning/workstreams/m2-combinatorial/phases/04-durable-close-receipts/04-01-SUMMARY.md
+**Stopped At:** Phase 5 planned; H-003 ready for TDD execution
+**Resume File:** .planning/workstreams/m2-combinatorial/phases/05-exact-cash-ledger/05-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-H-001/H-002 已 confirmed，当前无 pending hypothesis。下一条无账户依赖、由实测暴露的候选是“现金/PnL 精确表示”：两次 +10 在 SQLite REAL 中为 `19.999999999999996`。
-
-先用探索模式界定是否采用 integer minor units 或 Decimal，以及价格 float 与现金精度的边界；不在未定义迁移/兼容语义前直接改账本。
+H-003 已登记并完成探索、设计和单计划。采用 integer micro-pUSD 作为现金 authority，价格保持 float；先实现 Money/domain RED→GREEN，再迁移 SQLite 和 receipt。
 
 第一条命令：
 
-`$gsd-explore --ws m2-combinatorial cash-ledger exactness and migration boundary`
+`$gsd-execute-phase 5 --ws m2-combinatorial`
 
 **已交付给用户 (累积)**:
 
