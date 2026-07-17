@@ -5,11 +5,11 @@
 ## Session
 
 - Last cycle: 4
-- Next action: execute H-005 durable partial-fill accounting
+- Next action: add H-005 engine and CLI subprocess response-loss proof
 
 ## In flight
 
-- None
+- H-005
 
 ## Hypothesis pool
 

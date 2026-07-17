@@ -1,6 +1,11 @@
 {
-  "in_flight": null,
+  "in_flight": {
+    "hypothesis_id": "H-005",
+    "phase": "implementation",
+    "completed_slice": "exact residual allocation and canonical fill identity",
+    "next_slice": "engine and CLI subprocess response-loss proof"
+  },
   "last_cycle": 4,
-  "next_action": "execute H-005 durable partial-fill accounting",
+  "next_action": "add H-005 engine and CLI subprocess response-loss proof",
   "session": "2026-07-17-m2-position-persistence"
 }

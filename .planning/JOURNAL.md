@@ -3495,3 +3495,17 @@ H-004 五门 100 后不暂停，直接执行已 pending 的 H-005 durable partia
 ```bash
 $gsd-plan-phase 7 --ws m2-combinatorial
 ```
+
+### SESSION 43 continuation — H-005 implementation slice 1
+
+- Phase 7 design/context/research/plan 已落库，planning-status zero drift。
+- RED `ccf8778`：partial sequence、canonical fill identity、anonymous/zero/overfill、micro residual 共暴露 4 个预期失败。
+- GREEN `eda5cf9`：Position authority 变为 remaining quantity/cost basis；partial fill 比例释放 collateral，final fill 吃掉全部 residual；canonical operation ID=`venue-fill:{fill_id}`。
+- SQLite restart 下同一 fill 通过不同 caller operation ID 重放仍只记一次；full corrected M2 当前 **225 passed**。
+- H-005 尚未裁决；剩余 slice 是 execution fill-provider 多 fill 流程、CLI/Makefile fill ID、true subprocess lost-response proof、教学/SUMMARY/closure。
+
+下一动作：
+
+```bash
+uv run pytest tests/execution/test_engine.py tests/cli/test_arbitrage_cli_process.py -q
+```
