@@ -3436,3 +3436,17 @@ H-003 五门全 100 后自动选择下一条 bounded hypothesis；live venue ada
 - 当前 H-001/H-002/H-003 全 confirmed、pool 无 pending；climb 按 Knowledge Layer 继续产生下一假设，不等待用户指令。
 
 下一步探索当前明确 deferred、且不依赖账户的 partial-fill accounting：先锁定 `filled_size` 的 cash-vs-shares 语义、剩余 stake/receipt identity、重复/乱序 fill 的幂等边界，再决定是否登记 H-004。
+
+### SESSION 42 continuation — Knowledge Layer generated H-004..H-006
+
+- 代码链确认 `size/stake/filled_size` 存在三重单位碰撞：路由按 shares 乘价格，position 按 cash 扣余额，PnL 又把同一值当 shares。
+- 官方 V2 contract 确认 market BUY `amount` 是 pUSD、SELL `amount` 是 shares；FAK、`size_matched` 与 trade `size` 要求 partial-fill 先按 token quantity 建模。
+- Knowledge Layer 新增三条有序假设：H-004 unit-safe quantity/cost basis、H-005 durable partial fills、H-006 venue-truth reconciliation。
+- H-004 排名 0.99，先引入 exact micro-share `Quantity`，拆分 position quantity 与 cash cost basis，并完成 Phase 5 DB 的 additive migration；不接 live credentials，不提前实现 partial aggregation。
+- 探索证据与 acceptance boundary 已落 `.planning/notes/m2-fill-quantity-accounting-boundary.md`，跨 phase 结论追加到 `threads/execution-accounting.md`；climb research tree 已确定性重建。
+
+下一步直接规划并执行 H-004；第一条命令：
+
+```bash
+$gsd-plan-phase 6 --ws m2-combinatorial
+```

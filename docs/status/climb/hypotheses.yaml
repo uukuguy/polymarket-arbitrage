@@ -67,3 +67,33 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-004
+  description: Explicit exact share quantity and pUSD cost basis eliminate the size/stake
+    unit collision across routing, positions, and full-fill close accounting
+  parent_paradigm: dimension-safe-execution-ledger
+  expected_lift: +100 unit-safety gate points
+  cost_h: 3.0
+  ranking: 0.99
+  status: pending
+  created_at: '2026-07-17T13:20:00+08:00'
+  results: []
+- id: H-005
+  description: Immutable fill identities plus exact cumulative quantity and proceeds make
+    partial closes idempotent across retries and restarts
+  parent_paradigm: durable-partial-fill-ledger
+  expected_lift: +100 partial-fill recovery points
+  cost_h: 3.5
+  ranking: 0.92
+  status: pending
+  created_at: '2026-07-17T13:20:01+08:00'
+  results: []
+- id: H-006
+  description: Venue-confirmed share, cash, and fee amounts supersede paper formulas through
+    an exact reconciliation boundary
+  parent_paradigm: venue-truth-reconciliation
+  expected_lift: +100 reconciliation gate points
+  cost_h: 4.0
+  ranking: 0.80
+  status: pending
+  created_at: '2026-07-17T13:20:02+08:00'
+  results: []

@@ -29,3 +29,21 @@
 3. receipt/outbox 的 canonical unit 是什么？
 4. legacy float 输入在何处只量化一次？
 5. 哪个 raw storage/query 证明 authority 没降级？
+
+## 2026-07-17 — H-004 Knowledge Layer: quantity is not cash
+
+### 新发现
+
+- 当前 M2 的 `size/stake/filled_size` 同时承担 shares 和 pUSD，导致余额与 PnL 不可能同时正确。
+- `ArbitrageLeg.pm_size` 由 `price * size` 计算成本，证明它是 shares；`ExecutionLeg.size`
+  文档却写 dollars，而路由仍把它乘价格。
+- 官方 V2 market order 的 `amount` 是 side-dependent：BUY 表示花费的 pUSD，SELL 表示卖出的
+  shares。不能把 SDK 字段名当作领域单位。
+- FAK、`size_matched` 和 trade `size` 证明 partial-fill 真相首先是 token quantity；现金 proceeds
+  与 fee 是另一条维度。
+
+### 决策
+
+先做 H-004，把 exact `Quantity`、position quantity、cash cost basis、fill quantity 分开；之后
+H-005 才允许实现 partial aggregation。H-006 再引入 venue-confirmed cash/fee truth。价格仍保留
+decimal-facing estimate，不扩张 H-003 的 Money 范围。

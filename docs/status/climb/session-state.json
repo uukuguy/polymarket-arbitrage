@@ -1,6 +1,6 @@
 {
   "in_flight": null,
   "last_cycle": 3,
-  "next_action": "rank next pending hypothesis",
+  "next_action": "execute H-004 unit-safe execution accounting",
   "session": "2026-07-17-m2-position-persistence"
 }

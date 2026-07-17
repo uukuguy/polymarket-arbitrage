@@ -5,7 +5,7 @@
 ## Session
 
 - Last cycle: 3
-- Next action: rank next pending hypothesis
+- Next action: execute H-004 unit-safe execution accounting
 
 ## In flight
 
@@ -14,8 +14,11 @@
 ## Hypothesis pool
 
 - **H-001** [confirmed]: Transactional SQLite repository prevents cross-process state loss
+- **H-004** [pending]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
+- **H-005** [pending]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
 - **H-002** [confirmed]: Caller-supplied immutable close identities make committed-but-unacknowledged retries observable and idempotent
+- **H-006** [pending]: Venue-confirmed share, cash, and fee amounts supersede paper formulas through an exact reconciliation boundary
 
 ## Runs
 
