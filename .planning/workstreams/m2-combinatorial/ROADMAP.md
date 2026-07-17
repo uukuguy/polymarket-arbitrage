@@ -20,6 +20,16 @@
 Plans:
 - [x] `02-1-PLAN.md` — T1-T8 signal, slippage, routing, execution, position tracking, settings, CLI, and E2E chaos coverage
 
+### Phase 3: Position Persistence
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 3 to break down)
+
 ---
 
 *Workstream: m2-combinatorial*
