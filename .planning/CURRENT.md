@@ -1,6 +1,6 @@
 # 当前项目状态
 
-> 唯一当前状态入口。最后核验：2026-07-17 17:56 CST。
+> 唯一当前状态入口。最后核验：2026-07-17 18:21 CST。
 > `JOURNAL.md` 是追加式历史；其中旧 `[NEXT]` 均不代表当前任务。
 
 ## 一句话结论
@@ -12,9 +12,9 @@ paper 精确账本的研发系统；**可用于真实数据监控/paper 决策�
 
 | 范围 | 当前结论 | 现在能否使用 |
 |---|---|---|
-| 主分支 `main` | M2 Phase 3–9 已集成并部署 | 当前交付主线 |
+| 主分支 `main` | M2 Phase 2–9 已集成并部署 | 当前交付主线 |
 | M1 L1 Fly 服务 | 39 天 stale 根因已修复；snapshot 恢复到分钟级，Supabase pass | 可作为 M2 机会发现输入 |
-| M1 L2 Fly 服务 | 进程可达，但实测 `/health` 返回 503，WS event 严重过期 | 当前不可作为可信实时 orderbook 数据源 |
+| M1 L2 Fly 服务 | `/health` 503；60 assets 已订阅但 WS/candidate/mirror 分别约 20/40/21 天 stale | 当前不可作为可信实时 orderbook 数据源 |
 | M2 paper execution/accounting | Phase 2–8、H-001～H-006 已通过本地质量门 | 可用于本地模拟、账本和恢复测试 |
 | M2 真实组合套利 | Phase 9 提供 fresh executable-ask neg-risk buy-all feed | 线上真实数据监控可用；当前无正 gross edge |
 | M3 | 未开始 | 不可用 |
@@ -74,4 +74,8 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 ## 当前下一步
 
-Phase 9 已现场验证。下一主线是恢复 M1 L2 新鲜度并积累真实 paper evidence。
+恢复 M1 L2 新鲜度；Phase 05 Plan 06 的 24h soak 在此之前不得启动。
+
+```bash
+/gsd-resume-work --ws m1-perception
+```

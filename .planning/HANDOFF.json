@@ -1,83 +1,43 @@
 {
   "version": "1.0",
-  "timestamp": "2026-07-17T01:06:47.263Z",
-  "phase": "2",
-  "phase_name": "arbitrage-engine (complete)",
-  "phase_dir": ".planning/workstreams/m2-combinatorial/phases/02-arbitrage-engine",
-  "plan": 1,
-  "task": 6,
-  "total_tasks": 6,
-  "status": "paused",
+  "timestamp": "2026-07-17T10:23:13.868Z",
+  "workstream": "m1-perception",
+  "phase": "05",
+  "phase_name": "ws-book-prices",
+  "phase_dir": ".planning/workstreams/m1-perception/phases/05-ws-book-prices",
+  "plan": 6,
+  "task": 2,
+  "total_tasks": 4,
+  "status": "blocked_before_soak",
   "completed_tasks": [
+    {"id": 1, "name": "Deploy Phase 05 surface", "status": "done", "evidence": "production /health exposes all L3 checks"},
+    {"id": 3, "name": "Write L3 teaching document", "status": "done", "evidence": "docs/learning/11-L3-K线.md exists"}
+  ],
+  "remaining_tasks": [
+    {"id": 2, "name": "Restore L2 prerequisites, then execute 24h strict soak", "status": "blocked"},
+    {"id": 4, "name": "Flip validation and close Phase 05", "status": "not_started"}
+  ],
+  "blockers": [
     {
-      "id": 1,
-      "name": "Approve design and implementation plan",
-      "status": "done",
-      "commit": "ab86d09"
-    },
-    {
-      "id": 2,
-      "name": "Restore M2 Phase 2 ROADMAP metadata",
-      "status": "done",
-      "commit": "37c1da5"
-    },
-    {
-      "id": 3,
-      "name": "Build safe stale-worktree reaper with TDD",
-      "status": "done",
-      "commit": "6118171"
-    },
-    {
-      "id": 4,
-      "name": "Harden installed GSD worktree lifecycle",
-      "status": "done",
-      "commit": "c1dcbac"
-    },
-    {
-      "id": 5,
-      "name": "Audit and reclaim 21 stale worktrees",
-      "status": "done",
-      "commit": "c1dcbac"
-    },
-    {
-      "id": 6,
-      "name": "Verify and close planning artifacts",
-      "status": "done",
-      "commit": "5fb84bd"
+      "description": "Production L2 candidate, WS-event, and mirror freshness checks are stale; strict /health returns 503.",
+      "type": "technical",
+      "workaround": "Trace candidate refresh mutation, restore WS events, then mirror writes before starting soak."
     }
   ],
-  "remaining_tasks": [],
-  "blockers": [],
   "human_actions_pending": [],
   "decisions": [
     {
-      "decision": "Keep parallel worktree isolation but make cleanup execution-scoped, loud, and dry-run-first across sessions.",
-      "rationale": "Disabling worktrees would avoid leaks but lose useful isolation; the root cause was lifecycle handling, not worktrees themselves.",
-      "phase": "quick-260717"
+      "decision": "Preserve Phase 05 strict N=5 soak gate.",
+      "rationale": "Relaxing L3 thresholds would hide the broken upstream L2 chain.",
+      "phase": "05"
     },
     {
-      "decision": "Non-ancestor branches must block automatic cleanup until mapped to a plan and explicitly recovered or discarded.",
-      "rationale": "Indefinite preservation merely converts disk leaks into knowledge islands.",
-      "phase": "quick-260717"
-    },
-    {
-      "decision": "Do not create M2 Phase 3 during repair work.",
-      "rationale": "Position persistence has a clear candidate outcome but still needs a dedicated discuss/plan decision.",
-      "phase": "m2-combinatorial"
+      "decision": "Resume on m1-perception rather than M2.",
+      "rationale": "M2 read-only real-data path is deployed; L2 freshness is the next product blocker.",
+      "phase": "05"
     }
   ],
-  "uncommitted_files": [
-    {
-      "path": "CLAUDE.md",
-      "status": "type-changed",
-      "ownership": "pre-existing user change; do not modify or stage"
-    },
-    {
-      "path": "AGENTS.md",
-      "status": "untracked",
-      "ownership": "pre-existing user file; do not modify or stage"
-    }
-  ],
-  "next_action": "Run /gsd-resume-work --ws m2-combinatorial, verify make planning-status and make patch-gsd-worktree-cleanup check=1, then run $gsd-discuss-phase 3 --ws m2-combinatorial for position persistence.",
-  "context_notes": "Quick 260717 is complete. M2 Phase 2 is consistently recorded in ROADMAP/STATE/SUMMARY. Worktree registry contains only main, .claude/worktrees is 0B, and no worktree-agent branches remain. The installed GSD patch is machine-local and may be overwritten by a future GSD update; the repository-owned idempotent patcher is the recovery mechanism. No project daemon, pytest, cleanup, or flyctl process was left running."
+  "uncommitted_files": [],
+  "next_action": "Run /gsd-resume-work --ws m1-perception, make planning-status, capture strict L2 /health, then diagnose candidate refresh before WS and mirror.",
+  "context_notes": "M2 Phase 2-9 is deployed and L1 is fresh. Do not equate /healthz 200 with L2 business health. No local background workflow remains. Real-money execution is not authorized."
 }

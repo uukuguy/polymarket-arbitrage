@@ -3655,3 +3655,20 @@ make scan-arb-live min_edge_bps=0
 - [VERIFIED] 用户定义 `handoff` 为快速完整跨会话收口：边界、状态、git、MEMORY、索引和 resume 可恢复性。
 - [VERIFIED] 技术事实继续以 `.planning/` 为真相源；MEMORY 只记录用户偏好/协作元信息，避免双重状态。
 - [CURRENT-CALL] 默认只做增量更新；仅在检测到漂移、错误记忆或未提交工作时扩大收口范围。
+
+## SESSION 47 — 2026-07-17 (handoff complete)
+
+- [VERIFIED] L2 `/healthz` HTTP 200 仅代表进程可达；strict `/health` 返回 503。
+- [VERIFIED] L2 有 60 subscriptions/listening event bus，但 WS event≈1,764,233s、mirror≈1,784,287s、candidate fetch≈3,446,382s stale。
+- [VERIFIED] L3 promoter timer 在运行但 active=0/10、book-level 从未写；Phase 05 Plan 06 soak 不可启动。
+- [VERIFIED] M1 STATE、ROADMAP、CURRENT、HANDOFF.json 和 phase `.continue-here.md` 已统一到 L2 freshness repair。
+- [VERIFIED] MEMORY 加载层从 17KB 过时状态索引收缩为协作偏好；历史独立文件保留可检索。
+- [CURRENT-CALL] 下次按 candidate refresh → WS event → mirror → L3/soak 顺序诊断；不降低 strict N=5 gate。
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+恢复后先跑 `make planning-status` 和 strict L2 `/health`，从 candidate refresh 写入/错误链开始定位。
