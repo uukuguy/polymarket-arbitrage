@@ -5,8 +5,8 @@ from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
-import polyarb.routing.position_repository as repository_module
 
+import polyarb.routing.position_repository as repository_module
 from polyarb.routing.position_repository import (
     InMemoryPositionRepository,
     PositionState,

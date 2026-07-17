@@ -82,8 +82,18 @@ type TransitionResult = bool | float | None
 type Transition = Callable[[PositionState], TransitionResult]
 
 
+@dataclass(frozen=True)
+class OperationReceipt:
+    operation_id: str
+    operation_type: str
+    target_id: str
+    result: TransitionResult
+
+
 class PositionRepository(Protocol):
     def load(self) -> PositionState: ...
+
+    def get_receipt(self, operation_id: str) -> OperationReceipt | None: ...
 
     def apply(
         self,
@@ -98,23 +108,20 @@ class RepositoryStateError(RuntimeError):
     """Durable state violates repository invariants."""
 
 
-@dataclass(frozen=True)
-class AppliedOperation:
-    operation_type: str
-    target_id: str
-    result: TransitionResult
-
-
 class InMemoryPositionRepository:
     def __init__(self, initial_balance: float) -> None:
         self._state = PositionState(
             balance=initial_balance,
             snapshot_balance=initial_balance,
         )
-        self._operations: dict[str, AppliedOperation] = {}
+        self._operations: dict[str, OperationReceipt] = {}
 
     def load(self) -> PositionState:
         return deepcopy(self._state)
+
+    def get_receipt(self, operation_id: str) -> OperationReceipt | None:
+        receipt = self._operations.get(operation_id)
+        return deepcopy(receipt)
 
     def apply(
         self,
@@ -142,7 +149,8 @@ class InMemoryPositionRepository:
             raise TypeError("transition result must be bool, float, or None")
 
         self._state = candidate
-        self._operations[operation_id] = AppliedOperation(
+        self._operations[operation_id] = OperationReceipt(
+            operation_id=operation_id,
             operation_type=operation_type,
             target_id=target_id,
             result=deepcopy(result),
@@ -172,6 +180,22 @@ class SQLitePositionRepository:
     def load(self) -> PositionState:
         with self._connect() as con:
             return self._load_state(con)
+
+    def get_receipt(self, operation_id: str) -> OperationReceipt | None:
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT operation_type, target_id, result_json "
+                "FROM m2_applied_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return OperationReceipt(
+            operation_id=operation_id,
+            operation_type=row[0],
+            target_id=row[1],
+            result=json.loads(row[2]),
+        )
 
     def apply(
         self,
