@@ -95,15 +95,17 @@ def _git_log_for(
     plan: str,
     plan_md: Path,
 ) -> list[tuple[str, str]]:
-    """Return scoped commits made after this exact plan entered the branch.
+    """Return scoped commits inside this exact plan's documented lifetime.
 
     Plan numbers are only unique inside a workstream. Searching ``--all`` for
     ``feat(03-01)`` lets an older M1 plan make a new M2 plan look shipped. The
-    plan's creation commit is the earliest safe boundary. An uncommitted plan
-    has no code commits by definition and therefore returns an empty list.
+    plan creation is the lower boundary; once its SUMMARY is committed, SUMMARY
+    creation is the upper boundary. A later workstream may safely reuse the
+    numeric scope. An uncommitted plan has no code commits by definition.
     """
     pattern = rf"^[a-z]+\({re.escape(phase)}-{re.escape(plan)}\):"
-    try:
+
+    def creation_sha(path: Path) -> str | None:
         creation_out = subprocess.check_output(
             [
                 "git",
@@ -112,20 +114,28 @@ def _git_log_for(
                 "--diff-filter=A",
                 "--format=%H",
                 "--",
-                str(plan_md),
+                str(path),
             ],
             text=True,
             stderr=subprocess.DEVNULL,
         )
-        creation_commits = [line for line in creation_out.splitlines() if line]
-        if not creation_commits:
+        commits = [line for line in creation_out.splitlines() if line]
+        return commits[-1] if commits else None
+
+    try:
+        plan_creation_sha = creation_sha(plan_md)
+        if plan_creation_sha is None:
             return []
-        creation_sha = creation_commits[-1]
+        summary_md = plan_md.with_name(
+            SUMMARY_TPL.format(phase=phase, plan=plan)
+        )
+        summary_creation_sha = creation_sha(summary_md)
+        upper_bound = summary_creation_sha or "HEAD"
         out = subprocess.check_output(
             [
                 "git",
                 "log",
-                f"{creation_sha}..HEAD",
+                f"{plan_creation_sha}..{upper_bound}",
                 "-E",
                 f"--grep={pattern}",
                 "--pretty=%h %s",
