@@ -3377,3 +3377,17 @@ make climb-status
 ```
 
 然后执行 `$gsd-explore --ws m2-combinatorial cash-ledger exactness and migration boundary`。当前没有 pending hypothesis；先探索 integer minor units vs Decimal、价格 float 与现金精度分界、现有 SQLite REAL 迁移/兼容，再决定是否登记 H-003。真实 venue adapter/reconciliation 仍受账户与 venue truth 可用性约束。
+
+### SESSION 41 continuation — H-003 exploration crystallized
+
+- Phase 4 smoke 的 `19.999999999999996` 被确认为账户账本表示缺陷，而非 CLI 展示问题。
+- 官方 pUSD 约束确认 collateral 使用 6 decimals；选择 integer micro-pUSD 作为 balance/stake/fees/realized PnL 的唯一 authoritative representation。
+- 市场价格继续用 float 服务 perception/ranking；paper PnL 在 accounting boundary 通过 `Decimal(str(...))` 集中量化，避免全模型重写。
+- 现有 SQLite `REAL` 数据采用 additive、transactional、fail-closed migration；新 money receipt 使用 tagged micros，旧 float receipt 保持可读。
+- 探索已收敛为可验证的 H-003，并登记为 pending；live venue wire precision / SDK 选择明确不进入本假设。
+
+下一步自主创建并执行 M2 Phase 5 Exact Cash Ledger；第一条命令：
+
+```bash
+$gsd-plan-phase 5 --ws m2-combinatorial
+```
