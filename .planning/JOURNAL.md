@@ -3293,3 +3293,44 @@ make eval-arb mid=0.45 stake=1000            # m2 pipeline 可跑
 **commits**: `56dabdd` / `ab86d09` / `37c1da5` / `6118171` / `c1dcbac`，最终 planning closure commit 随后补。
 
 [NEXT] 先 `/gsd-resume-work --ws m2-combinatorial`，然后 `$gsd-discuss-phase 3 --ws m2-combinatorial`，推荐 Phase 3 = position persistence，使 `run/status/close` 跨进程可用。
+
+---
+
+## SESSION 40 — 2026-07-17 (M2 Phase 3 Position Persistence CLOSED)
+
+### 主线产出
+
+- 新增 `PositionRepository` transaction boundary：in-memory deep-copy commit/rollback + SQLite 三表投影。
+- SQLite mutation 在读取状态前 `BEGIN IMMEDIATE`，账户 / open positions / applied operation 同事务提交。
+- `PositionTracker` 领域计算改为 transition closure；默认内存兼容，注入 SQLite 后跨进程共享。
+- ExecutionEngine 用 `open:{signal_id}:{leg_id}` 与稳定 paper-close ID 做严格重放。
+- `run/status/close --db-path`、`POLYARB_POSITION_DB_PATH`、`make ... db=` 全部打通；`--signal-id` 支持 synthetic retry identity。
+- 新增 `docs/learning/13-仓位持久化.md`，并修正 chapter 12 的 per-process 旧说明。
+
+### 验证
+
+- corrected full M2 gate：**130 passed**；原计划的重叠 pytest path 只收集 69 条，已写入 SUMMARY/learnings-meta。
+- Makefile contract：2 passed；修改的五个生产模块 Ruff 全通过；`git diff --check` clean。
+- 四进程 operator smoke：1000 → open 后 900/1 position → close +10 → 1010/0 position；专用 `/tmp` DB 已清理。
+- corrupt DB / invalid singleton / busy timeout 均 fail closed；跨进程 signal replay ledger cardinality 不增长。
+
+### 关键决策与剩余风险
+
+- 领域公式只在 Tracker；Repository 只做事务、序列化和 operation ledger。
+- Durable state 胜过启动配置，绝不因读取异常隐式重置 paper balance。
+- 真实 venue close 仍需 immutable fill/trade ID；operator close retry identity 与启动 reconciliation 是下一条无账户依赖的恢复能力候选。
+
+### Phase closure
+
+- `03-01-SUMMARY.md`、`03-LEARNINGS.md`、教学 chapter 13 在位。
+- GSD `phase complete 03` 将 STATE 标为 completed；其 ROADMAP updater 未替换旧 TBD 内容，随后经 plan-progress 工具与精确元数据修复闭环。
+
+### [NEXT] 下次会话从这里开始
+
+```bash
+/gsd-resume-work --ws m2-combinatorial
+make planning-status
+make climb-status
+```
+
+随后由 climb 对 Phase 3 本地证据评分，并选择下一条 bounded M2 hypothesis；当前推荐“执行恢复语义”（immutable fill identity + operator retry + reconciliation），真实 venue adapter 继续受账户可用性约束。

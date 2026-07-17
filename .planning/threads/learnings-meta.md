@@ -425,3 +425,13 @@ chaos injection 不是"演习"，是"对抗 SUMMARY 自我欺骗"的唯一手段
 - non-ancestor branch 不能只“保留以后看”，必须映射 plan 后显式 recovery 或 discard，否则仍是知识孤岛。
 
 本次 4 条 non-ancestor branch 均为已完成 plan 的重复 executor lineage；审计后显式 discard。最终 registry only-main、临时 branch 0、占用 0B。
+
+---
+
+## 2026-07-17 — pytest 验证路径不能同时列子文件与父目录
+
+Phase 3 计划的完整 M2 命令同时传了 `tests/routing/test_signal.py` 和 `tests/routing`。pytest 对重叠 collection path 去重后，只跑 69 条，父目录其余 routing tests 没进门；改成互不重叠的 `tests/models/test_slippage.py tests/routing tests/execution tests/cli` 后才是 130 条。
+
+**纪律**：SUMMARY 的“full suite”必须同时记录 collected/passed 数量；目录 gate 只列最小不重叠路径，不能仅凭退出码判断覆盖完整。
+
+同一 phase 还暴露了另一个验证层次：业务最终 state 相同不等于 operation 幂等。重放测试必须检查 transition 调用次数或 durable ledger cardinality，否则“第二次被重复持仓检查挡住”会伪装成幂等成功。

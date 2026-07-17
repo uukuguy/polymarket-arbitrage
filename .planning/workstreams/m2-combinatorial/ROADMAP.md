@@ -20,15 +20,16 @@
 Plans:
 - [x] `02-1-PLAN.md` — T1-T8 signal, slippage, routing, execution, position tracking, settings, CLI, and E2E chaos coverage
 
-### Phase 3: Position Persistence
+### Phase 3: Position Persistence ✅
 
-**Goal:** [To be planned]
-**Requirements**: TBD
+**Goal:** Persist the paper account and open-position lifecycle so independent `run`, `status`, and `close` processes share crash-consistent, idempotent state.
+**Status:** Complete — 2026-07-17
+**Requirements**: Internal durability contract (no external credentials)
 **Depends on:** Phase 2
-**Plans:** 0/1 plans executed
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 3 to break down)
+- [x] `03-01-PLAN.md` — repository boundary, transactional SQLite projection, stable operation identity, durable CLI/Makefile lifecycle, and teaching artifact
 
 ---
 
