@@ -454,14 +454,8 @@ def test_sqlite_fresh_schema_stores_authoritative_money_as_integer(tmp_path) -> 
 def test_sqlite_fresh_schema_stores_quantity_and_cost_basis_authority(tmp_path) -> None:
     path = tmp_path / "positions.db"
     tracker = SQLitePositionRepository(path, initial_balance=1000.0)
-    state = tracker.load()
     position = _position()
-    state.balance_money = Money.from_value("960")
-    state.open_positions["m1"] = position
-    tracker.apply("open:m1", "open", "m1", lambda _: True)
 
-    # Apply above intentionally does not install the detached state. Use a real
-    # transition so the repository serializes the v3 domain object.
     def install(candidate: PositionState) -> bool:
         candidate.balance_money = Money.from_value("960")
         candidate.open_positions["m1"] = position
@@ -577,7 +571,7 @@ def test_sqlite_migrates_phase4_real_state_and_preserves_identity(tmp_path) -> N
     state = repository.load()
 
     assert state.snapshot_balance_money.micros == 1_000_000_000
-    assert state.balance_money.micros == 920_000_000
+    assert state.balance_money.micros == 980_000_000
     assert state.realized_pnl_money.micros == 20_000_000
     assert state.open_positions["m1"].quantity_value.micros == 100_000_000
     assert state.open_positions["m1"].cost_basis_money.micros == 40_000_000
@@ -592,7 +586,7 @@ def test_sqlite_migrates_phase4_real_state_and_preserves_identity(tmp_path) -> N
             row[1]
             for row in con.execute("PRAGMA table_info(m2_open_positions)").fetchall()
         }
-    assert raw == (1_000_000_000, 920_000_000, 20_000_000)
+    assert raw == (1_000_000_000, 980_000_000, 20_000_000)
     assert "stake_micros" in columns
 
 

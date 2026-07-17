@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from polyarb.routing.money import Money
+from polyarb.routing.quantity import Quantity
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,8 @@ CREATE TABLE IF NOT EXISTS m2_open_positions (
     outcome TEXT NOT NULL,
     stake REAL NOT NULL,
     stake_micros INTEGER NOT NULL,
+    quantity_micros INTEGER NOT NULL,
+    cost_basis_micros INTEGER NOT NULL,
     entry_price REAL NOT NULL,
     current_price REAL NOT NULL,
     leg_id TEXT NOT NULL,
@@ -66,6 +69,8 @@ _REQUIRED_COLUMNS = {
         "outcome",
         "stake",
         "stake_micros",
+        "quantity_micros",
+        "cost_basis_micros",
         "entry_price",
         "current_price",
         "leg_id",
@@ -87,8 +92,13 @@ _MONEY_COLUMNS = {
     },
     "m2_open_positions": {"stake_micros": "stake"},
 }
+_POSITION_UNIT_COLUMNS = {"quantity_micros", "cost_basis_micros"}
 _BASE_REQUIRED_COLUMNS = {
-    table: required - set(_MONEY_COLUMNS.get(table, {}))
+    table: (
+        required
+        - set(_MONEY_COLUMNS.get(table, {}))
+        - (_POSITION_UNIT_COLUMNS if table == "m2_open_positions" else set())
+    )
     for table, required in _REQUIRED_COLUMNS.items()
 }
 
@@ -371,6 +381,7 @@ class SQLitePositionRepository:
             self._verify_schema(con, _BASE_REQUIRED_COLUMNS)
             con.execute("BEGIN IMMEDIATE")
             self._migrate_money_schema(con)
+            self._migrate_position_units(con)
             self._verify_schema(con, _REQUIRED_COLUMNS)
             rows = con.execute(
                 "SELECT snapshot_balance_micros FROM m2_account_state"
@@ -491,9 +502,72 @@ class SQLitePositionRepository:
                     f"{table} contains invalid authoritative money values"
                 )
 
+    @classmethod
+    def _migrate_position_units(cls, con: sqlite3.Connection) -> None:
+        existing = {
+            row[1]
+            for row in con.execute("PRAGMA table_info(m2_open_positions)")
+        }
+        present = _POSITION_UNIT_COLUMNS & existing
+        if present and present != _POSITION_UNIT_COLUMNS:
+            raise RepositoryStateError(
+                "m2_open_positions contains partial v3 position authority"
+            )
+
+        if not present:
+            for column in sorted(_POSITION_UNIT_COLUMNS):
+                con.execute(
+                    f"ALTER TABLE m2_open_positions ADD COLUMN {column} INTEGER"
+                )
+
+            refund = Money(0)
+            rows = con.execute(
+                "SELECT market_id, side, stake_micros, entry_price "
+                "FROM m2_open_positions"
+            ).fetchall()
+            for market_id, side, legacy_quantity_micros, entry_price in rows:
+                quantity = Quantity(int(legacy_quantity_micros))
+                cost_basis = Money.collateral_for(quantity, entry_price, side)
+                con.execute(
+                    "UPDATE m2_open_positions SET quantity_micros = ?, "
+                    "cost_basis_micros = ? WHERE market_id = ?",
+                    (quantity.micros, cost_basis.micros, market_id),
+                )
+                legacy_reserve = Money(quantity.micros)
+                refund = refund + legacy_reserve - cost_basis
+
+            if refund.micros:
+                account = con.execute(
+                    "SELECT balance_micros FROM m2_account_state"
+                ).fetchall()
+                if len(account) != 1:
+                    raise RepositoryStateError(
+                        "m2_account_state must contain exactly one account row"
+                    )
+                repaired_balance = Money(int(account[0][0])) + refund
+                con.execute(
+                    "UPDATE m2_account_state SET balance_micros = ?, balance = ?",
+                    (repaired_balance.micros, repaired_balance.to_float()),
+                )
+
+        cls._validate_position_authority(con)
+
+    @staticmethod
+    def _validate_position_authority(con: sqlite3.Connection) -> None:
+        invalid_count = con.execute(
+            "SELECT COUNT(*) FROM m2_open_positions "
+            "WHERE typeof(quantity_micros) != 'integer' "
+            "OR typeof(cost_basis_micros) != 'integer'"
+        ).fetchone()[0]
+        if invalid_count:
+            raise RepositoryStateError(
+                "m2_open_positions contains invalid v3 position authority"
+            )
+
     @staticmethod
     def _load_state(con: sqlite3.Connection) -> PositionState:
         SQLitePositionRepository._validate_money_authority(con)
+        SQLitePositionRepository._validate_position_authority(con)
         accounts = con.execute(
             "SELECT snapshot_balance_micros, balance_micros, "
             "realized_pnl_micros FROM m2_account_state"
@@ -507,8 +581,9 @@ class SQLitePositionRepository:
 
         positions: dict[str, Position] = {}
         rows = con.execute(
-            "SELECT market_id, condition_id, side, outcome, stake_micros, entry_price, "
-            "current_price, leg_id, opened_at FROM m2_open_positions"
+            "SELECT market_id, condition_id, side, outcome, quantity_micros, "
+            "cost_basis_micros, entry_price, current_price, leg_id, opened_at "
+            "FROM m2_open_positions"
         ).fetchall()
         for row in rows:
             position = Position(
@@ -516,12 +591,22 @@ class SQLitePositionRepository:
                 condition_id=row[1],
                 side=row[2],
                 outcome=row[3],
-                stake=Money(int(row[4])),
-                entry_price=float(row[5]),
-                current_price=float(row[6]),
-                leg_id=row[7],
-                opened_at=datetime.fromisoformat(row[8]),
+                quantity=Quantity(int(row[4])),
+                cost_basis=Money(int(row[5])),
+                entry_price=float(row[6]),
+                current_price=float(row[7]),
+                leg_id=row[8],
+                opened_at=datetime.fromisoformat(row[9]),
             )
+            expected_cost = Money.collateral_for(
+                position.quantity_value,
+                position.entry_price,
+                position.side,
+            )
+            if position.cost_basis_money != expected_cost:
+                raise RepositoryStateError(
+                    f"position {position.market_id!r} cost basis is inconsistent"
+                )
             positions[position.market_id] = position
 
         account = accounts[0]
@@ -564,8 +649,8 @@ class SQLitePositionRepository:
             con.execute(
                 "INSERT INTO m2_open_positions "
                 "(market_id, condition_id, side, outcome, stake, stake_micros, "
-                "entry_price, current_price, leg_id, opened_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "quantity_micros, cost_basis_micros, entry_price, current_price, "
+                "leg_id, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     position.market_id,
                     position.condition_id,
@@ -573,6 +658,8 @@ class SQLitePositionRepository:
                     position.outcome,
                     position.quantity_value.to_float(),
                     position.quantity_value.micros,
+                    position.quantity_value.micros,
+                    position.cost_basis_money.micros,
                     position.entry_price,
                     position.current_price,
                     position.leg_id,
