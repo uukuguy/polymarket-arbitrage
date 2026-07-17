@@ -21,11 +21,17 @@ T4 wired `open_position`. T5 wires the rest of the lifecycle:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Iterable
+from datetime import UTC, datetime
+from uuid import uuid4
 
 from polyarb.routing.config import PositionConfig
+from polyarb.routing.position_repository import (
+    InMemoryPositionRepository,
+    PositionRepository,
+    PositionState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +48,7 @@ class Position:
     entry_price: float
     current_price: float
     leg_id: str = ""
-    opened_at: datetime = field(default_factory=datetime.utcnow)
+    opened_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     @property
     def pnl(self) -> float:
@@ -120,21 +126,30 @@ class PositionSnapshot:
 class PositionTracker:
     """Tracks open positions, balance, realized PnL, stop-loss state."""
 
-    def __init__(self, config: PositionConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: PositionConfig | None = None,
+        repository: PositionRepository | None = None,
+    ) -> None:
         self.config = config or PositionConfig()
-        self._balance: float = self.config.initial_balance
-        self._snapshot_balance: float = self.config.initial_balance
-        self._open_positions: dict[str, Position] = {}
-        self._realized_pnl: float = 0.0
+        self.repository = repository or InMemoryPositionRepository(
+            self.config.initial_balance
+        )
+
+    @staticmethod
+    def _operation_id(provided: str | None, kind: str, target: str) -> str:
+        return provided or f"local:{kind}:{target}:{uuid4()}"
 
     def can_open_position(self, size: float) -> tuple[bool, str]:
         """Return (True, "") if a position of `size` can be opened, else (False, reason)."""
-        if size > self._balance:
-            return False, f"Insufficient balance: need {size:.2f}, have {self._balance:.2f}"
-        if self._total_exposure + size > self.config.max_total_exposure:
+        state = self.repository.load()
+        if size > state.balance:
+            return False, f"Insufficient balance: need {size:.2f}, have {state.balance:.2f}"
+        total_exposure = sum(p.stake for p in state.open_positions.values())
+        if total_exposure + size > self.config.max_total_exposure:
             return (
                 False,
-                f"Max exposure exceeded: {self._total_exposure + size:.2f} > "
+                f"Max exposure exceeded: {total_exposure + size:.2f} > "
                 f"{self.config.max_total_exposure:.2f}",
             )
         return True, ""
@@ -148,82 +163,137 @@ class PositionTracker:
         stake: float,
         price: float,
         leg_id: str = "",
+        operation_id: str | None = None,
     ) -> bool:
-        if stake > self._balance:
-            logger.warning(
-                "Insufficient balance for position: need %.2f, have %.2f",
-                stake,
-                self._balance,
+        def transition(state: PositionState) -> bool:
+            if stake > state.balance:
+                logger.warning(
+                    "Insufficient balance for position: need %.2f, have %.2f",
+                    stake,
+                    state.balance,
+                )
+                return False
+            total_exposure = sum(p.stake for p in state.open_positions.values())
+            if total_exposure + stake > self.config.max_total_exposure:
+                logger.warning(
+                    "Max exposure reached: %.2f + %.2f > %.2f",
+                    total_exposure,
+                    stake,
+                    self.config.max_total_exposure,
+                )
+                return False
+            if market_id in state.open_positions:
+                logger.warning("Position already open for market %s", market_id)
+                return False
+            state.open_positions[market_id] = Position(
+                market_id=market_id,
+                condition_id=condition_id,
+                side=side,
+                outcome=outcome,
+                stake=stake,
+                entry_price=price,
+                current_price=price,
+                leg_id=leg_id,
             )
-            return False
-        if self._total_exposure + stake > self.config.max_total_exposure:
-            logger.warning(
-                "Max exposure reached: %.2f + %.2f > %.2f",
-                self._total_exposure,
+            state.balance -= stake
+            logger.info(
+                "Opened position: %s %s @ %.4f, stake=%.2f",
+                side,
+                market_id,
+                price,
                 stake,
-                self.config.max_total_exposure,
             )
-            return False
-        if market_id in self._open_positions:
-            logger.warning("Position already open for market %s", market_id)
-            return False
-        pos = Position(
-            market_id=market_id,
-            condition_id=condition_id,
-            side=side,
-            outcome=outcome,
-            stake=stake,
-            entry_price=price,
-            current_price=price,
-            leg_id=leg_id,
-        )
-        self._open_positions[market_id] = pos
-        self._balance -= stake
-        logger.info(
-            "Opened position: %s %s @ %.4f, stake=%.2f", side, market_id, price, stake
-        )
-        return True
+            return True
 
-    def update(self, legs: int, pnl: float) -> None:
+        result = self.repository.apply(
+            self._operation_id(operation_id, "open", market_id),
+            "open",
+            market_id,
+            transition,
+        )
+        assert isinstance(result, bool)
+        return result
+
+    def update(
+        self, legs: int, pnl: float, operation_id: str | None = None
+    ) -> None:
         """Legacy compatibility shim — `orchestrator.py` still calls it.
 
         Production T5+ should use `close_position_with_fill` instead. Kept
         here so the orchestrator's tests don't fail; flagged for removal
         in a follow-up task once the orchestrator is migrated.
         """
-        self._realized_pnl += pnl
-        logger.debug("Updated tracker (legacy path): +%d legs, PnL=%.2f", legs, pnl)
+        def transition(state: PositionState) -> None:
+            state.realized_pnl += pnl
+            logger.debug(
+                "Updated tracker (legacy path): +%d legs, PnL=%.2f", legs, pnl
+            )
 
-    def update_prices(self, prices: dict[str, float]) -> None:
-        for market_id, price in prices.items():
-            if market_id in self._open_positions:
-                self._open_positions[market_id].current_price = price
+        self.repository.apply(
+            self._operation_id(operation_id, "legacy-update", "account"),
+            "legacy-update",
+            "account",
+            transition,
+        )
 
-    def close_position(self, market_id: str, exit_price: float | None = None) -> float:
+    def update_prices(
+        self, prices: dict[str, float], operation_id: str | None = None
+    ) -> None:
+        def transition(state: PositionState) -> None:
+            for market_id, price in prices.items():
+                if market_id in state.open_positions:
+                    state.open_positions[market_id].current_price = price
+
+        target = ",".join(sorted(prices)) or "none"
+        self.repository.apply(
+            self._operation_id(operation_id, "prices", target),
+            "prices",
+            target,
+            transition,
+        )
+
+    def close_position(
+        self,
+        market_id: str,
+        exit_price: float | None = None,
+        operation_id: str | None = None,
+    ) -> float:
         """Low-level close primitive — closes regardless of fill size.
 
         Production code path uses `close_position_with_fill` (which enforces
         size match). This primitive stays for explicit operator close (e.g.,
         `make close-arb market_id=... exit_price=...`).
         """
-        pos = self._open_positions.pop(market_id, None)
-        if pos is None:
-            logger.warning("No open position for market %s", market_id)
-            return 0.0
-        if exit_price is not None:
-            pos.current_price = exit_price
-        pnl = pos.pnl
-        self._balance += pos.stake + pnl
-        self._realized_pnl += pnl
-        logger.info(
-            "Closed position: %s @ %.4f, PnL=%.2f",
-            market_id,
-            exit_price if exit_price is not None else pos.current_price,
-            pnl,
-        )
-        return pnl
+        def transition(state: PositionState) -> float:
+            pos = state.open_positions.pop(market_id, None)
+            if pos is None:
+                logger.warning("No open position for market %s", market_id)
+                return 0.0
+            if exit_price is not None:
+                pos.current_price = exit_price
+            pnl = pos.pnl
+            state.balance += pos.stake + pnl
+            state.realized_pnl += pnl
+            logger.info(
+                "Closed position: %s @ %.4f, PnL=%.2f",
+                market_id,
+                exit_price if exit_price is not None else pos.current_price,
+                pnl,
+            )
+            return pnl
 
-    def close_position_with_fill(self, fill: Fill) -> float:
+        result = self.repository.apply(
+            self._operation_id(operation_id, "close", market_id),
+            "close",
+            market_id,
+            transition,
+        )
+        assert isinstance(result, float)
+        return result
+
+    def close_position_with_fill(
+        self, fill: Fill, operation_id: str | None = None
+    ) -> float:
         """Production close path: a venue fill closes an open position.
 
         Requires `fill.filled_size == position.stake` (no partial fills in
@@ -231,32 +301,41 @@ class PositionTracker:
         position is open for `fill.market_id`, returns 0.0 and warns
         (callers can audit log this).
         """
-        pos = self._open_positions.get(fill.market_id)
-        if pos is None:
-            logger.warning(
-                "close_position_with_fill: no open position for market %s",
+        def transition(state: PositionState) -> float:
+            pos = state.open_positions.get(fill.market_id)
+            if pos is None:
+                logger.warning(
+                    "close_position_with_fill: no open position for market %s",
+                    fill.market_id,
+                )
+                return 0.0
+            if fill.filled_size != pos.stake:
+                raise ValueError(
+                    f"partial fill not supported (T5 scope): position stake "
+                    f"{pos.stake} but fill size {fill.filled_size}"
+                )
+            del state.open_positions[fill.market_id]
+            pos.current_price = fill.exit_price
+            pnl = pos.pnl
+            state.balance += pos.stake + pnl
+            state.realized_pnl += pnl
+            logger.info(
+                "Closed via fill: %s @ %.4f, size=%.2f, PnL=%.2f",
                 fill.market_id,
+                fill.exit_price,
+                fill.filled_size,
+                pnl,
             )
-            return 0.0
-        if fill.filled_size != pos.stake:
-            raise ValueError(
-                f"partial fill not supported (T5 scope): position stake "
-                f"{pos.stake} but fill size {fill.filled_size}"
-            )
-        # Safe to close — same arithmetic as close_position.
-        del self._open_positions[fill.market_id]
-        pos.current_price = fill.exit_price
-        pnl = pos.pnl
-        self._balance += pos.stake + pnl
-        self._realized_pnl += pnl
-        logger.info(
-            "Closed via fill: %s @ %.4f, size=%.2f, PnL=%.2f",
+            return pnl
+
+        result = self.repository.apply(
+            self._operation_id(operation_id, "close-fill", fill.market_id),
+            "close",
             fill.market_id,
-            fill.exit_price,
-            fill.filled_size,
-            pnl,
+            transition,
         )
-        return pnl
+        assert isinstance(result, float)
+        return result
 
     def check_stop_loss(self) -> bool:
         """Legacy bool form — True if loss crossed threshold."""
@@ -270,11 +349,12 @@ class PositionTracker:
         """
         if not self.config.enable_pnl_stop:
             return None
-        if self._snapshot_balance == 0:
+        state = self.repository.load()
+        if state.snapshot_balance == 0:
             return None
-        loss_pct = (self._realized_pnl / self._snapshot_balance) * 100.0
+        loss_pct = (state.realized_pnl / state.snapshot_balance) * 100.0
         # Loss = negative pnl → abs(loss_pct) compared to threshold.
-        if self._realized_pnl >= 0:
+        if state.realized_pnl >= 0:
             return None
         # FP-tolerant threshold compare: "at threshold" must trigger even
         # when float arithmetic produces e.g. 4.999999999 ≈ 5.0.
@@ -282,45 +362,65 @@ class PositionTracker:
             return None
         logger.warning(
             "Stop loss triggered: realized_pnl=%.2f, loss=%.2f%% >= %.2f%%",
-            self._realized_pnl,
+            state.realized_pnl,
             abs(loss_pct),
             self.config.stop_loss_pct,
         )
         return StopLossEvent(
             loss_pct=abs(loss_pct),
-            realized_pnl=self._realized_pnl,
+            realized_pnl=state.realized_pnl,
             threshold_pct=self.config.stop_loss_pct,
         )
 
     @property
     def _total_exposure(self) -> float:
-        return sum(p.stake for p in self._open_positions.values())
+        return sum(p.stake for p in self.repository.load().open_positions.values())
 
     @property
     def _total_unrealized_pnl(self) -> float:
-        return sum(p.pnl for p in self._open_positions.values())
+        return sum(p.pnl for p in self.repository.load().open_positions.values())
+
+    @property
+    def _balance(self) -> float:
+        """Compatibility view for legacy tests and diagnostic callers."""
+        return self.repository.load().balance
+
+    @property
+    def _snapshot_balance(self) -> float:
+        return self.repository.load().snapshot_balance
+
+    @property
+    def _open_positions(self) -> dict[str, Position]:
+        return self.repository.load().open_positions
+
+    @property
+    def _realized_pnl(self) -> float:
+        return self.repository.load().realized_pnl
 
     @property
     def balance(self) -> float:
-        return self._balance
+        return self.repository.load().balance
 
     @property
     def total_realized_pnl(self) -> float:
-        return self._realized_pnl
+        return self.repository.load().realized_pnl
 
     @property
     def open_count(self) -> int:
-        return len(self._open_positions)
+        return len(self.repository.load().open_positions)
 
     def open_positions(self) -> Iterable[Position]:
         """Read-only view of currently open positions."""
-        return list(self._open_positions.values())
+        return list(self.repository.load().open_positions.values())
 
     def snapshot(self) -> PositionSnapshot:
+        state = self.repository.load()
+        total_exposure = sum(p.stake for p in state.open_positions.values())
+        total_unrealized_pnl = sum(p.pnl for p in state.open_positions.values())
         return PositionSnapshot(
-            balance=self._balance,
-            total_unrealized_pnl=self._total_unrealized_pnl,
-            total_realized_pnl=self._realized_pnl,
-            open_positions=len(self._open_positions),
-            max_exposure=self._total_exposure,
+            balance=state.balance,
+            total_unrealized_pnl=total_unrealized_pnl,
+            total_realized_pnl=state.realized_pnl,
+            open_positions=len(state.open_positions),
+            max_exposure=total_exposure,
         )

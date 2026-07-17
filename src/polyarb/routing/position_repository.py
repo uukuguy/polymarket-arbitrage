@@ -1,15 +1,15 @@
 """Persistence boundary for M2 paper-account position state."""
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import json
 import logging
-from pathlib import Path
 import sqlite3
-from typing import Any, Callable, Protocol, TypeAlias
-
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +78,8 @@ class PositionState:
     open_positions: dict[str, Any] = field(default_factory=dict)
 
 
-TransitionResult: TypeAlias = bool | float | None
-Transition: TypeAlias = Callable[[PositionState], TransitionResult]
+type TransitionResult = bool | float | None
+type Transition = Callable[[PositionState], TransitionResult]
 
 
 class PositionRepository(Protocol):
@@ -204,7 +204,7 @@ class SQLitePositionRepository:
             if result is not None and not isinstance(result, (bool, float)):
                 raise TypeError("transition result must be bool, float, or None")
 
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             self._write_state(con, state, now)
             con.execute(
                 "INSERT INTO m2_applied_operations "
@@ -249,7 +249,7 @@ class SQLitePositionRepository:
                 "SELECT snapshot_balance FROM m2_account_state"
             ).fetchall()
             if not rows:
-                now = datetime.now(timezone.utc).isoformat()
+                now = datetime.now(UTC).isoformat()
                 con.execute(
                     "INSERT INTO m2_account_state "
                     "(account_id, snapshot_balance, balance, realized_pnl, updated_at) "

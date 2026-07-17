@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -24,7 +24,7 @@ def _position(market_id: str = "m1") -> Position:
         entry_price=0.4,
         current_price=0.4,
         leg_id=f"leg-{market_id}",
-        opened_at=datetime(2026, 7, 17, 8, 0, tzinfo=timezone.utc),
+        opened_at=datetime(2026, 7, 17, 8, 0, tzinfo=UTC),
     )
 
 

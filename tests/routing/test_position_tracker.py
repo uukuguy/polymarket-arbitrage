@@ -18,9 +18,9 @@ from __future__ import annotations
 import pytest
 
 from polyarb.routing.config import PositionConfig
+from polyarb.routing.position_repository import SQLitePositionRepository
 from polyarb.routing.position_tracker import (
     Fill,
-    Position,
     PositionSnapshot,
     PositionTracker,
     StopLossEvent,
@@ -223,3 +223,103 @@ class TestStopLossTriggerChain:
 # engine tests; declared here as a placeholder reference. See:
 #   tests/execution/test_engine.py::TestExecutionEngineClosePath
 # ---------------------------------------------------------------------------
+
+
+class TestRepositoryBackedTracker:
+    def test_two_trackers_observe_the_same_open_and_close(self, tmp_path):
+        path = tmp_path / "positions.db"
+        first = PositionTracker(
+            repository=SQLitePositionRepository(path, initial_balance=1000.0)
+        )
+        second = PositionTracker(
+            repository=SQLitePositionRepository(path, initial_balance=1000.0)
+        )
+
+        assert first.open_position(
+            "m1",
+            "c1",
+            "BUY",
+            "YES",
+            100.0,
+            0.4,
+            leg_id="l1",
+            operation_id="open:s1:l1",
+        )
+        assert second.open_count == 1
+
+        pnl = second.close_position_with_fill(
+            Fill("m1", 0.5, 100.0), operation_id="close:f1"
+        )
+
+        assert pnl == pytest.approx(10.0)
+        assert first.open_count == 0
+        assert first.balance == pytest.approx(1010.0)
+        assert first.total_realized_pnl == pytest.approx(10.0)
+
+    def test_persisted_position_timestamp_is_timezone_aware(self, tmp_path):
+        tracker = PositionTracker(
+            repository=SQLitePositionRepository(
+                tmp_path / "positions.db", initial_balance=1000.0
+            )
+        )
+        tracker.open_position(
+            "m1", "c1", "BUY", "YES", 100.0, 0.4, operation_id="open:m1"
+        )
+
+        assert tracker.open_positions()[0].opened_at.utcoffset() is not None
+
+    def test_duplicate_operation_ids_do_not_double_book(self, tmp_path):
+        tracker = PositionTracker(
+            repository=SQLitePositionRepository(
+                tmp_path / "positions.db", initial_balance=1000.0
+            )
+        )
+
+        for _ in range(2):
+            assert tracker.open_position(
+                "m1",
+                "c1",
+                "BUY",
+                "YES",
+                100.0,
+                0.4,
+                operation_id="open:s1:l1",
+            )
+        assert tracker.balance == pytest.approx(900.0)
+        assert tracker.open_count == 1
+
+        fill = Fill("m1", 0.5, 100.0)
+        assert tracker.close_position_with_fill(
+            fill, operation_id="close:f1"
+        ) == pytest.approx(10.0)
+        assert tracker.close_position_with_fill(
+            fill, operation_id="close:f1"
+        ) == pytest.approx(10.0)
+        assert tracker.balance == pytest.approx(1010.0)
+        assert tracker.total_realized_pnl == pytest.approx(10.0)
+
+    def test_rejected_open_and_partial_fill_leave_durable_state_unchanged(
+        self, tmp_path
+    ):
+        config = PositionConfig(initial_balance=1000.0, max_total_exposure=100.0)
+        tracker = PositionTracker(
+            config,
+            repository=SQLitePositionRepository(
+                tmp_path / "positions.db", initial_balance=1000.0
+            ),
+        )
+        assert tracker.open_position(
+            "m1", "c1", "BUY", "YES", 100.0, 0.4, operation_id="open:m1"
+        )
+
+        assert not tracker.open_position(
+            "m2", "c2", "BUY", "YES", 1.0, 0.4, operation_id="open:m2"
+        )
+        with pytest.raises(ValueError, match="partial fill"):
+            tracker.close_position_with_fill(
+                Fill("m1", 0.5, 50.0), operation_id="close:partial"
+            )
+
+        assert tracker.balance == pytest.approx(900.0)
+        assert [position.market_id for position in tracker.open_positions()] == ["m1"]
+        assert tracker.total_realized_pnl == 0.0
