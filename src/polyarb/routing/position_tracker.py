@@ -20,6 +20,7 @@ T4 wired `open_position`. T5 wires the rest of the lifecycle:
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ from polyarb.routing.position_repository import (
     OperationReceipt,
     PositionRepository,
     PositionState,
+    SettlementReceipt,
 )
 from polyarb.routing.quantity import Quantity
 
@@ -137,6 +139,32 @@ class Position:
         return (self.pnl / self.cost_basis) * 100.0
 
 
+@dataclass(frozen=True, slots=True)
+class VenueSettlement:
+    """Terminal venue cash truth attached to an immutable fill identity."""
+
+    gross_cash: Money
+    fee: Money
+    status: str
+    source_ref: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.gross_cash, Money) or not isinstance(self.fee, Money):
+            raise TypeError("venue settlement gross_cash and fee must be Money")
+        if self.status != "CONFIRMED":
+            raise ValueError("venue settlement status must be CONFIRMED")
+        if not isinstance(self.source_ref, str) or not self.source_ref:
+            raise ValueError("venue settlement source_ref must be non-empty")
+        if self.gross_cash.micros < 0 or self.fee.micros < 0:
+            raise ValueError("venue settlement cash values must be non-negative")
+        if self.fee.micros > self.gross_cash.micros:
+            raise ValueError("venue settlement fee cannot exceed gross cash")
+
+    @property
+    def net_cash(self) -> Money:
+        return self.gross_cash - self.fee
+
+
 @dataclass(init=False)
 class Fill:
     """A venue fill event — the bridge between executor and tracker close path.
@@ -154,6 +182,7 @@ class Fill:
     filled_quantity_value: Quantity
     filled_at: datetime
     fill_id: str = ""
+    settlement: VenueSettlement | None = None
 
     def __init__(
         self,
@@ -162,6 +191,7 @@ class Fill:
         filled_quantity: int | float | str | Quantity | None = None,
         filled_at: datetime | None = None,
         fill_id: str = "",
+        settlement: VenueSettlement | None = None,
         *,
         filled_size: int | float | str | Quantity | None = None,
     ) -> None:
@@ -183,6 +213,9 @@ class Fill:
         )
         self.filled_at = filled_at or datetime.now(UTC)
         self.fill_id = fill_id
+        if settlement is not None and not isinstance(settlement, VenueSettlement):
+            raise TypeError("fill settlement must be VenueSettlement")
+        self.settlement = settlement
 
     @property
     def filled_quantity(self) -> float:
@@ -440,7 +473,7 @@ class PositionTracker:
 
     def close_position_with_fill(
         self, fill: Fill, operation_id: str | None = None
-    ) -> float:
+    ) -> float | SettlementReceipt:
         """Production close path: a venue fill closes an open position.
 
         Applies a positive fill no larger than the remaining quantity. Partial
@@ -449,13 +482,31 @@ class PositionTracker:
         the same repository transaction. If no position is open, returns 0.0
         and warns so callers can audit a late venue event.
         """
+        if fill.settlement is not None and not fill.fill_id:
+            raise ValueError("venue settlement requires immutable fill_id")
         effective_operation_id = (
             f"venue-fill:{fill.fill_id}"
             if fill.fill_id
             else self._operation_id(operation_id, "close-fill", fill.market_id)
         )
 
-        def transition(state: PositionState) -> Money:
+        request_fingerprint = ""
+        if fill.settlement is not None:
+            settlement = fill.settlement
+            request_fingerprint = "venue-settlement:v1:" + json.dumps(
+                {
+                    "fee_micros": settlement.fee.micros,
+                    "gross_micros": settlement.gross_cash.micros,
+                    "market_id": fill.market_id,
+                    "quantity_micros": fill.filled_quantity_value.micros,
+                    "source_ref": settlement.source_ref,
+                    "status": settlement.status,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        def transition(state: PositionState) -> Money | SettlementReceipt:
             pos = state.open_positions.get(fill.market_id)
             if pos is None:
                 logger.warning(
@@ -482,15 +533,25 @@ class PositionTracker:
                 pos.quantity_value,
             )
             pos.current_price = fill.exit_price
-            pnl_money = Money.pnl_for(
-                fill.filled_quantity_value,
-                pos.entry_price,
-                fill.exit_price,
-                pos.side,
-            )
-            state.balance_money = (
-                state.balance_money + allocated_cost + pnl_money
-            )
+            if fill.settlement is None:
+                pnl_money = Money.pnl_for(
+                    fill.filled_quantity_value,
+                    pos.entry_price,
+                    fill.exit_price,
+                    pos.side,
+                )
+                cash_returned = allocated_cost + pnl_money
+                transition_result: Money | SettlementReceipt = pnl_money
+            else:
+                cash_returned = fill.settlement.net_cash
+                pnl_money = cash_returned - allocated_cost
+                transition_result = SettlementReceipt(
+                    gross_cash=fill.settlement.gross_cash,
+                    fee=fill.settlement.fee,
+                    net_cash=cash_returned,
+                    realized_pnl=pnl_money,
+                )
+            state.balance_money = state.balance_money + cash_returned
             state.realized_pnl_money = state.realized_pnl_money + pnl_money
             if is_partial:
                 pos.quantity_value = (
@@ -508,14 +569,17 @@ class PositionTracker:
                 pos.quantity if is_partial else 0.0,
                 pnl_money.to_float(),
             )
-            return pnl_money
+            return transition_result
 
         result = self.repository.apply(
             effective_operation_id,
             "close",
             fill.market_id,
             transition,
+            request_fingerprint=request_fingerprint,
         )
+        if isinstance(result, SettlementReceipt):
+            return result
         if isinstance(result, Money):
             return result.to_float()
         assert type(result) is float
