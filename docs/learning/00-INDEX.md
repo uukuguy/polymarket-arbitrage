@@ -23,6 +23,7 @@
 | 12 | [套利引擎（M2 Combinatorial Arbitrage）](12-套利引擎.md) | ArbitrageSignal / ExecutionLeg / RoutingDecision 数据契约 / SlippageCalculator 三笔成本 / _select_venue 滑点感知选场 / abort-vs-partial 原子不变式 / paper-mode vs real venue 安全面 / 五个 Makefile target 对照 |
 | 13 | [仓位持久化：让每个进程看见同一本账](13-仓位持久化.md) | PositionState / repository transition / BEGIN IMMEDIATE / 三表原子投影 / operation ID 幂等 / fail-closed DB / 跨进程 run→status→close |
 | 14 | [精确现金账本：价格可以近似，钱必须有唯一答案](14-精确现金账本.md) | price float 与 cash authority 的边界 / micro-pUSD / HALF_EVEN / additive SQLite migration / tagged Money receipt / 五道对手测试 |
+| 15 | [成交数量与现金不是一回事：别让一个 size 同时戴两顶帽子](15-成交数量与现金不是一回事.md) | Quantity shares vs Money pUSD / BUY 与 SELL collateral / full-fill quantity equality / Phase 5 余额修复 / SDK side-dependent amount |
 
 ## Phase 02.1 教学增量（2026-05）
 
