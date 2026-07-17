@@ -372,6 +372,13 @@ def test_venue_cash_recovers_lost_response_and_rejects_changed_fee(tmp_path) -> 
     assert "operation identity conflict" in conflict.stderr
     assert path.read_bytes() == before
 
+    changed_exit = list(venue_args)
+    changed_exit[changed_exit.index("0.99")] = "0.98"
+    exit_conflict = _cli(*changed_exit)
+    assert exit_conflict.returncode == 2
+    assert "operation identity conflict" in exit_conflict.stderr
+    assert path.read_bytes() == before
+
     status = _cli("status", "--db-path", str(path))
     state = json.loads(status.stdout)
     assert state["metrics"]["balance"] == 973.5

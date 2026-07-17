@@ -103,6 +103,9 @@ exact structured receipt, and rejects every changed retry atomically across proc
   research-tree regeneration in the command that owns the state mutation.
 - Regression evidence: 192 focused execution/accounting/CLI/Makefile tests passed;
   targeted Ruff, `git diff --check`, and `make planning-status` passed.
+- Final review correction binds canonical exit price into venue-settlement fingerprints
+  because partial fills persist it as remaining-position mark price. Tracker and true
+  subprocess retries now reject changed exit price; the final M2 gate is **272 passed**.
 
 ## User Setup Required
 

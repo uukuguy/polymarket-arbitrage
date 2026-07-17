@@ -651,16 +651,17 @@ class TestVenueTruthReconciliation:
         assert restarted.open_positions()[0].quantity == 70.0
 
     @pytest.mark.parametrize(
-        "quantity,gross,fee,source_ref",
+        "exit_price,quantity,gross,fee,source_ref",
         [
-            (31, "13.80", "0.30", "trade-001"),
-            (30, "13.81", "0.30", "trade-001"),
-            (30, "13.80", "0.31", "trade-001"),
-            (30, "13.80", "0.30", "trade-other"),
+            (0.99, 30, "13.80", "0.30", "trade-001"),
+            (0.90, 31, "13.80", "0.30", "trade-001"),
+            (0.90, 30, "13.81", "0.30", "trade-001"),
+            (0.90, 30, "13.80", "0.31", "trade-001"),
+            (0.90, 30, "13.80", "0.30", "trade-other"),
         ],
     )
     def test_changed_confirmed_settlement_conflicts_with_same_fill_id(
-        self, tmp_path, quantity, gross, fee, source_ref
+        self, tmp_path, exit_price, quantity, gross, fee, source_ref
     ) -> None:
         path = tmp_path / "positions.db"
         tracker = PositionTracker(
@@ -681,7 +682,7 @@ class TestVenueTruthReconciliation:
             tracker.close_position_with_fill(
                 Fill(
                     "m1",
-                    0.90,
+                    exit_price,
                     filled_quantity=quantity,
                     fill_id="venue-001",
                     settlement=self._settlement(

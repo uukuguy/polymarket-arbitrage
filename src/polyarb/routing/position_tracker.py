@@ -508,6 +508,9 @@ class PositionTracker:
             settlement = fill.settlement
             request_fingerprint = "venue-settlement:v1:" + json.dumps(
                 {
+                    "exit_price": format(
+                        Decimal(str(fill.exit_price)).normalize(), "f"
+                    ),
                     "fee_micros": settlement.fee.micros,
                     "gross_micros": settlement.gross_cash.micros,
                     "market_id": fill.market_id,
