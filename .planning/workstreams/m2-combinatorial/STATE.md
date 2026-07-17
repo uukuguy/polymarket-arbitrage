@@ -2,29 +2,29 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03
-status: completed
-stopped_at: Phase 3 closed; autonomous climb selecting next bounded M2 hypothesis
-last_updated: "2026-07-17T02:24:11.033Z"
+current_phase: 04
+status: ready_to_execute
+stopped_at: Phase 4 planned; begin 04-01 RED receipt repository tests
+last_updated: "2026-07-17T02:50:15.059Z"
 last_activity: 2026-07-17
 progress:
-  total_phases: 2
+  total_phases: 3
   completed_phases: 2
-  total_plans: 2
+  total_plans: 3
   completed_plans: 2
-  percent: 100
+  percent: 67
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
 
-Phase: 3 (Position Persistence) — ✅ CLOSED 2026-07-17
-Plan: 1 of 1 complete
-**Status:** Milestone complete
-**Current Phase:** 03
+Phase: 4 (Durable Close Receipts)
+Plan: 0 of 1 complete
+**Status:** Ready to execute
+**Current Phase:** 04
 **Last Activity:** 2026-07-17
-**Last Activity Description:** Phase 3 position persistence closed with 130-test M2 gate
+**Last Activity Description:** Phase 4 planning complete — 1 plans ready
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 
@@ -46,6 +46,14 @@ Plan: 1 of 1 complete
 - ✅ Cross-process CLI lifecycle with `db=` Makefile entry points
 - ✅ Teaching chapter 13, phase summary, learnings, and operator smoke
 
+## Phase 4 Plan Progress (`04-01-PLAN.md` — READY)
+
+- ⬜ Public immutable `OperationReceipt` lookup in memory and SQLite
+- ⬜ Tracker receipt delegation and stable venue `Fill.fill_id`
+- ⬜ Retry-safe operator close identity in CLI and Makefile
+- ⬜ True subprocess response-loss recovery proof
+- ⬜ Teaching, SUMMARY, learnings, JOURNAL, and H-002 climb closure
+
 ## Test Count (m2)
 
 - **104 tests green**: `routing/test_engine` 12 + `routing/test_position_tracker` 14 + `routing/test_config` 16 (T6) + `models/test_signal` 11 + `models/test_slippage` 7 + `execution/test_engine` 12 + `execution/test_arbitrage_e2e` 25 (T8) + `cli/test_arbitrage_cli` 7
@@ -55,18 +63,17 @@ Plan: 1 of 1 complete
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 3 closed; autonomous climb selecting next bounded M2 hypothesis
-**Resume File:** .planning/workstreams/m2-combinatorial/phases/03-position-persistence/03-01-SUMMARY.md
+**Stopped At:** Phase 4 planned; begin 04-01 RED receipt repository tests
+**Resume File:** .planning/workstreams/m2-combinatorial/phases/04-durable-close-receipts/04-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-Phase 3 已闭环。下一步优先级:
+执行 Phase 4 H-002：先在 `tests/routing/test_position_repository.py`
+写 receipt contract 的 RED tests，再实现公开 `OperationReceipt` 和两种 repository lookup。
 
-**A. 真实 venue adapter** (最直接的下一步用户价值) — 写非-no-op `leg_executor` + `fill_provider` 调 py-clob-client + 钱包。T4 `leg_executor` 可插拔，T5 `fill_provider` 可插拔。阻塞: Polymarket 账户可用性。
+第一条命令：
 
-**B. 执行恢复语义** — venue fill immutable identity、operator close retry、启动 reconciliation；不依赖账户，可作为下一条 bounded hypothesis。
-
-**C. 跨线** — m1 Phase 05 D-13 阈值校准 / m5 phase 01 polywatch-mvp / m1 Phase 05 Wave 5 24h soak。
+`uv run pytest tests/routing/test_position_repository.py -q`
 
 **已交付给用户 (累积)**:
 

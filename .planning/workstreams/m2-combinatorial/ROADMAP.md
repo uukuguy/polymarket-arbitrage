@@ -31,6 +31,16 @@ Plans:
 Plans:
 - [x] `03-01-PLAN.md` — repository boundary, transactional SQLite projection, stable operation identity, durable CLI/Makefile lifecycle, and teaching artifact
 
+### Phase 4: Durable Close Receipts
+
+**Goal:** Recover already-committed operator and venue close results across process or response loss by replaying caller-owned immutable operation identities.
+**Requirements**: Internal recovery contract (no live venue credentials)
+**Depends on:** Phase 3
+**Plans:** 1 plan
+
+Plans:
+- [ ] `04-01-PLAN.md` — public receipt lookup, immutable venue fill identity, retry-safe CLI/Makefile close, subprocess recovery proof, and teaching update
+
 ---
 
 *Workstream: m2-combinatorial*
