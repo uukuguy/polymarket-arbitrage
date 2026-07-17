@@ -340,6 +340,68 @@ async def test_replaying_venue_fill_uses_immutable_fill_identity(
 
 
 @pytest.mark.asyncio
+async def test_engine_forwards_complete_venue_settlement_without_fee_math(tmp_path):
+    from polyarb.routing.money import Money
+    from polyarb.routing.position_repository import SettlementReceipt
+    from polyarb.routing.position_tracker import Fill, VenueSettlement
+
+    path = tmp_path / "positions.db"
+    tracker = PositionTracker(
+        repository=SQLitePositionRepository(path, initial_balance=1000.0)
+    )
+
+    async def fill_provider(leg: ExecutionLeg) -> Fill:
+        return Fill(
+            leg.asset,
+            exit_price=0.99,
+            filled_quantity=30,
+            fill_id="venue-cash-001",
+            settlement=VenueSettlement(
+                gross_cash=Money.from_value("13.80"),
+                fee=Money.from_value("0.30"),
+                status="CONFIRMED",
+                source_ref="trade-001",
+            ),
+        )
+
+    decision = _make_decision(n_legs=1)
+    decision.plan.legs[0].estimated_price = 0.40
+    await ExecutionEngine(tracker=tracker, fill_provider=fill_provider).execute(decision)
+
+    receipt = tracker.operation_receipt("venue-fill:venue-cash-001")
+    assert receipt is not None
+    assert receipt.result == SettlementReceipt(
+        gross_cash=Money.from_value("13.80"),
+        fee=Money.from_value("0.30"),
+        net_cash=Money.from_value("13.50"),
+        realized_pnl=Money.from_value("1.50"),
+    )
+    assert tracker.balance == 973.5
+
+
+@pytest.mark.asyncio
+async def test_engine_nonterminal_settlement_leaves_position_open(caplog):
+    from polyarb.routing.money import Money
+    from polyarb.routing.position_tracker import VenueSettlement
+
+    async def fill_provider(_leg: ExecutionLeg):
+        return VenueSettlement(
+            gross_cash=Money.from_value("13.80"),
+            fee=Money.from_value("0.30"),
+            status="MATCHED",
+            source_ref="trade-001",
+        )
+
+    tracker = PositionTracker()
+    await ExecutionEngine(tracker=tracker, fill_provider=fill_provider).execute(
+        _make_decision(n_legs=1)
+    )
+
+    assert tracker.open_count == 1
+    assert "fill_provider raised" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_partial_fill_sequence_survives_engine_retry_and_restart(tmp_path):
     from polyarb.routing.position_tracker import Fill
 

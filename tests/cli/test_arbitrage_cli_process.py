@@ -327,6 +327,52 @@ def test_partial_fill_recovers_lost_response_across_processes(tmp_path) -> None:
     ]
 
 
+def test_venue_cash_recovers_lost_response_and_rejects_changed_fee(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    opened = _cli(
+        "run", "--mid", "0.40", "--stake", "100", "--legs", "1",
+        "--retry-delay", "0", "--signal-id", "venue-open-001",
+        "--db-path", str(path),
+    )
+    assert opened.returncode == 0, opened.stderr
+    venue_args = (
+        "close", "--market-id", "cond-0", "--exit-price", "0.99",
+        "--size", "30", "--fill-id", "venue-cash-001",
+        "--venue-cash", "13.80", "--venue-fee", "0.30",
+        "--venue-status", "CONFIRMED", "--venue-ref", "trade-001",
+        "--db-path", str(path),
+    )
+    committed = _cli(*venue_args)
+    assert committed.returncode == 0, committed.stderr
+    # Response is deliberately discarded after the durable commit.
+
+    replayed = _cli(*venue_args)
+    assert replayed.returncode == 0, replayed.stderr
+    payload = json.loads(replayed.stdout)
+    assert payload["replayed"] is True
+    assert payload["settlement"] == {
+        "source": "venue-confirmed",
+        "gross_cash": 13.8,
+        "fee": 0.3,
+        "net_cash": 13.5,
+        "realized_pnl": 1.5,
+    }
+
+    before = path.read_bytes()
+    changed = list(venue_args)
+    changed[changed.index("0.30")] = "0.31"
+    conflict = _cli(*changed)
+    assert conflict.returncode == 2
+    assert "operation identity conflict" in conflict.stderr
+    assert path.read_bytes() == before
+
+    status = _cli("status", "--db-path", str(path))
+    state = json.loads(status.stdout)
+    assert state["metrics"]["balance"] == 973.5
+    assert state["open_positions"][0]["quantity"] == 70.0
+    assert state["open_positions"][0]["cost_basis"] == 28.0
+
+
 def test_close_without_caller_identity_reports_not_retry_safe(tmp_path) -> None:
     path = tmp_path / "positions.db"
     opened = _cli(

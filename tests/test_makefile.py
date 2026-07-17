@@ -68,3 +68,18 @@ def test_close_arbitrage_target_forwards_partial_fill_identity() -> None:
     assert result.returncode == 0, result.stderr
     assert 'SIZE_FLAG="--size ${size}"' in result.stdout
     assert '--fill-id "venue-fill-001"' in result.stdout
+
+
+def test_close_arbitrage_target_forwards_complete_venue_truth() -> None:
+    result = _make(
+        "-n", "close-arb", "market_id=cond-0", "exit_price=0.99", "size=30",
+        "fill_id=fill-001", "venue_cash=13.80", "venue_fee=0.30",
+        "venue_status=CONFIRMED", "venue_ref=trade-001",
+    )
+
+    assert result.returncode == 0, result.stderr
+    for expected in (
+        '--venue-cash "13.80"', '--venue-fee "0.30"',
+        '--venue-status "CONFIRMED"', '--venue-ref "trade-001"',
+    ):
+        assert expected in result.stdout

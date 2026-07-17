@@ -80,6 +80,28 @@ def test_run_happy_path_paper_executor_marks_completed():
     assert all(r["success"] for r in payload["execution"]["leg_results"])
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--venue-cash", "13.80"],
+        ["--venue-cash", "13.80", "--venue-fee", "0.30"],
+        [
+            "--venue-cash", "13.80", "--venue-fee", "0.30",
+            "--venue-status", "CONFIRMED", "--venue-ref", "trade-001",
+            "--fill-id", "fill-001",
+        ],
+    ],
+)
+def test_close_rejects_incomplete_or_nonreconstructible_venue_truth(args):
+    result = runner.invoke(
+        app,
+        ["close", "--market-id", "m1", "--exit-price", "0.9", *args],
+    )
+
+    assert result.exit_code == 2
+    assert "venue" in result.output.lower()
+
+
 def test_status_returns_expected_envelope():
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, f"non-zero exit: {result.exit_code}\n{result.output}"
