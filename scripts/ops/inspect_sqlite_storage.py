@@ -24,13 +24,17 @@ def main() -> int:
                 "free_bytes": freelist_count * page_size,
             },
         )
-        tables = connection.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
-            "ORDER BY CASE name WHEN 'snapshots' THEN 0 "
-            "WHEN 'scheduler_state' THEN 1 ELSE 2 END, name"
-        ).fetchall()
-        for (table,) in tables:
+        # Keep this production diagnostic bounded. Counting every table scanned the
+        # multi-gigabyte event_tags table and routinely exceeded Fly SSH timeouts.
+        existing_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        for table in ("snapshots", "markets", "scheduler_state"):
+            if table not in existing_tables:
+                continue
             quoted = table.replace('"', '""')
             rows = connection.execute(
                 f'SELECT count(*) FROM "{quoted}"'  # noqa: S608 - schema-owned name

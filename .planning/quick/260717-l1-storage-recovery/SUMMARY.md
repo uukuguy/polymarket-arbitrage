@@ -12,6 +12,8 @@
   keep-last-5 purge on the app-owned mounted store via `asyncio.to_thread`.
 - Diagnostic correction: a failed SQLite rollback no longer masks the original disk
   error with `cannot rollback - no transaction is active`.
+- Storage inspection is bounded to snapshots/markets/scheduler_state; it no longer
+  scans the multi-gigabyte event-tags table and times out over Fly SSH.
 
 ## Evidence
 
