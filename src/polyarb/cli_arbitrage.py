@@ -42,9 +42,10 @@ from polyarb.routing.engine import RoutingEngine
 from polyarb.routing.money import Money
 from polyarb.routing.position_repository import (
     RepositoryStateError,
+    SettlementReceipt,
     SQLitePositionRepository,
 )
-from polyarb.routing.position_tracker import Fill, PositionTracker
+from polyarb.routing.position_tracker import Fill, PositionTracker, VenueSettlement
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
@@ -359,6 +360,18 @@ def close(
         "--fill-id",
         help="Venue-owned immutable fill identity; required for partial fills",
     ),
+    venue_cash: str | None = typer.Option(
+        None, "--venue-cash", help="Venue-confirmed gross cash"
+    ),
+    venue_fee: str | None = typer.Option(
+        None, "--venue-fee", help="Venue-confirmed fee"
+    ),
+    venue_status: str | None = typer.Option(
+        None, "--venue-status", help="Venue terminal status (CONFIRMED)"
+    ),
+    venue_ref: str | None = typer.Option(
+        None, "--venue-ref", help="Immutable venue trade/source reference"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Close an open position via a synthesized Fill (operator-driven).
@@ -373,6 +386,37 @@ def close(
     position opened by an earlier independent `run` process.
     """
     _setup_logger(verbose)
+    venue_values = (venue_cash, venue_fee, venue_status, venue_ref)
+    venue_requested = any(value is not None for value in venue_values)
+    if venue_requested and (
+        not all(value is not None for value in venue_values)
+        or fill_id is None
+        or size is None
+    ):
+        typer.secho(
+            "venue truth requires --venue-cash, --venue-fee, --venue-status, "
+            "--venue-ref, --fill-id, and explicit --size",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    settlement = None
+    if venue_requested:
+        assert venue_cash is not None
+        assert venue_fee is not None
+        assert venue_status is not None
+        assert venue_ref is not None
+        try:
+            settlement = VenueSettlement(
+                gross_cash=Money.from_value(venue_cash),
+                fee=Money.from_value(venue_fee),
+                status=venue_status,
+                source_ref=venue_ref,
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            typer.secho(f"venue truth rejected: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2) from exc
+
     tracker = _build_tracker(db_path)
     caller_supplied = fill_id is not None or operation_id is not None
     effective_operation_id = (
@@ -386,12 +430,19 @@ def close(
         if caller_supplied
         else None
     )
-    if receipt is not None:
+    if receipt is not None and not venue_requested:
         if receipt.operation_type != "close" or receipt.target_id != market_id:
             typer.secho(
                 "operation identity conflict: "
                 f"{effective_operation_id!r} was already used for "
                 f"{receipt.operation_type!r}/{receipt.target_id!r}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if isinstance(receipt.result, SettlementReceipt):
+            typer.secho(
+                "venue settlement replay requires the complete original venue inputs",
                 fg=typer.colors.RED,
                 err=True,
             )
@@ -410,11 +461,12 @@ def close(
             raise typer.Exit(code=2)
         replayed = True
     else:
+        replayed = receipt is not None
         pos = next(
             (p for p in tracker.open_positions() if p.market_id == market_id),
             None,
         )
-        if pos is None:
+        if pos is None and not replayed:
             typer.secho(
                 f"no open position for market_id={market_id}",
                 fg=typer.colors.YELLOW,
@@ -424,8 +476,15 @@ def close(
         fill = Fill(
             market_id=market_id,
             exit_price=exit_price,
-            filled_quantity=size if size is not None else pos.quantity,
+            filled_quantity=(
+                size
+                if size is not None
+                else pos.quantity
+                if pos is not None
+                else 0
+            ),
             fill_id=fill_id or "",
+            settlement=settlement,
         )
         try:
             pnl = tracker.close_position_with_fill(
@@ -435,6 +494,18 @@ def close(
         except ValueError as exc:
             typer.secho(f"close rejected: {exc}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=2)
+    settlement_output = None
+    if isinstance(pnl, SettlementReceipt):
+        settlement_output = {
+            "source": pnl.source,
+            "gross_cash": pnl.gross_cash.to_float(),
+            "fee": pnl.fee.to_float(),
+            "net_cash": pnl.net_cash.to_float(),
+            "realized_pnl": pnl.realized_pnl.to_float(),
+        }
+        realized_pnl = pnl.realized_pnl.to_float()
+    else:
+        realized_pnl = pnl
     typer.echo(
         json.dumps(
             {
@@ -444,7 +515,8 @@ def close(
                 "replayed": replayed,
                 "retry_safe": caller_supplied,
                 "exit_price": exit_price,
-                "realized_pnl": round(pnl, 4),
+                "realized_pnl": round(realized_pnl, 4),
+                "settlement": settlement_output,
                 "total_realized_pnl": round(tracker.total_realized_pnl, 4),
             },
             indent=2,
