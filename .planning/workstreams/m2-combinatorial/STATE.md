@@ -3,25 +3,25 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 5
-status: executing
-stopped_at: Phase 5 planned; H-003 ready for TDD execution
+status: completed
+stopped_at: Phase 5 closed; H-003 ready for climb evaluation
 last_updated: "2026-07-17T04:33:10.644Z"
 last_activity: 2026-07-17
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 4
-  completed_plans: 3
-  percent: 75
+  completed_plans: 4
+  percent: 100
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
 
-Phase: 5 (Exact Cash Ledger) — PLANNED 2026-07-17
-Plan: 0 of 1 complete
-**Status:** Ready to execute
+Phase: 5 (Exact Cash Ledger) — ✅ CLOSED 2026-07-17
+Plan: 1 of 1 complete
+**Status:** Milestone complete
 **Current Phase:** 5
 **Last Activity:** 2026-07-17
 **Last Activity Description:** Phase 05 planning complete — 1 plans ready
@@ -56,10 +56,11 @@ Plan: 0 of 1 complete
 
 ## Phase 5 Plan Progress (`05-01-PLAN.md` — READY)
 
-- ⬜ Frozen Money value and exact tracker domain
-- ⬜ Transactional SQLite v2 migration and INTEGER authority
-- ⬜ Tagged money receipts and CLI restart recovery
-- ⬜ Teaching, SUMMARY, learnings, JOURNAL, and H-003 climb closure
+- ✅ Frozen Money value and exact tracker domain
+- ✅ Transactional SQLite v2 migration and INTEGER authority
+- ✅ Tagged money receipts and CLI restart recovery
+- ✅ Teaching chapter 14, SUMMARY, learnings, and zero planning drift
+- ⏳ H-003 climb evaluation runs immediately after metadata closure
 
 ## Test Count (m2)
 
@@ -67,20 +68,21 @@ Plan: 0 of 1 complete
 - m2 test progression: 21 → 30 → 38 → 42 → 63 → **104**
 - **Phase 3 corrected full gate: 130 tests green** (repository 14 + tracker 18 + expanded engine/CLI/config/process coverage)
 - **Phase 4 corrected full gate: 145 tests green**; climb H-002 planning/unit/integration/CLI/restart = 100/100 each
+- **Phase 5 corrected full gate: 187 tests green**; exact migration/restart smoke proves INTEGER micros and tagged receipt
 
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 5 planned; H-003 ready for TDD execution
-**Resume File:** .planning/workstreams/m2-combinatorial/phases/05-exact-cash-ledger/05-01-PLAN.md
+**Stopped At:** Phase 5 closed; H-003 ready for climb evaluation
+**Resume File:** .planning/workstreams/m2-combinatorial/phases/05-exact-cash-ledger/05-01-SUMMARY.md
 
 ## Next Action (2026-07-17)
 
-H-003 已登记并完成探索、设计和单计划。采用 integer micro-pUSD 作为现金 authority，价格保持 float；先实现 Money/domain RED→GREEN，再迁移 SQLite 和 receipt。
+Phase 5 已实现 integer micro-pUSD cash authority、Phase 4 additive migration、tagged receipt 和 response-loss replay。下一步由 climb adapter 对 planning/unit/integration/CLI/restart 五门裁决 H-003。
 
 第一条命令：
 
-`$gsd-execute-phase 5 --ws m2-combinatorial`
+`make climb-cycle hypothesis=H-003`
 
 **已交付给用户 (累积)**:
 

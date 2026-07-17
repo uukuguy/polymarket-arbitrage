@@ -42,16 +42,16 @@ Plans:
 Plans:
 - [x] `04-01-PLAN.md` — public receipt lookup, immutable venue fill identity, retry-safe CLI/Makefile close, subprocess recovery proof, and teaching update
 
-### Phase 5: Exact Cash Ledger
+### Phase 5: Exact Cash Ledger ✅
 
 **Goal:** Make paper-account cash state and close receipts exact across memory, SQLite migration, restart, and replay using integer micro-pUSD without rewriting market-price models.
 **Requirements**: H-003 internal accounting contract (no live venue credentials)
 **Depends on:** Phase 4
-**Status:** Planning
-**Plans:** 0/1 plans complete
+**Status:** Complete — 2026-07-17
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] `05-01-PLAN.md` — Money value object, exact tracker state, additive SQLite migration, tagged receipts, compatibility surfaces, teaching, and climb proof
+- [x] `05-01-PLAN.md` — Money value object, exact tracker state, additive SQLite migration, tagged receipts, compatibility surfaces, teaching, and climb proof
 
 ---
 

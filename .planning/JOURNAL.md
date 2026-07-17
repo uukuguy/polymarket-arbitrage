@@ -3391,3 +3391,39 @@ make climb-status
 ```bash
 $gsd-plan-phase 5 --ws m2-combinatorial
 ```
+
+---
+
+## SESSION 42 — 2026-07-17 (M2 Phase 5 Exact Cash Ledger CLOSED)
+
+### 主线产出
+
+- H-003 exploration/design/Phase 5 单计划落库；明确 price 保留 float、cash 使用 integer micro-pUSD、live venue wire precision 独立延后。
+- 新增 frozen `Money(micros)`：六位 scale、`Decimal(str(value))`、HALF_EVEN、bool/non-finite/signed-64-bit fail closed。
+- `PositionState` balance/snapshot/realized PnL 与 `Position.stake` 改为 Money authority；余额、exposure、fill-size equality、stop-loss 全部按 exact money 决策，外部 API 仍 float-compatible。
+- Phase 4 SQLite REAL schema 在 `BEGIN IMMEDIATE` 内 additive migration 到 `*_micros INTEGER`；每次 load 验证 dynamic type，旧 REAL 只作为派生 projection 双写。
+- 新 close receipt 使用 tagged JSON micros；合法旧 bool/float/None receipt 原类型兼容，未知 tag/bool micros/overflow/NaN/corrupt JSON fail closed。
+- 新增 `docs/learning/14-精确现金账本.md` 和 `.planning/threads/execution-accounting.md`。
+
+### TDD 与验证
+
+- Money、tracker、migration/runtime corruption、tagged receipt 四组 RED→GREEN，相关 commits 已写入 `05-01-SUMMARY.md`。
+- corrected full M2 gate：**187 passed**；Makefile **3 passed**；climb adapter **16 passed**；修改模块 Ruff 全绿；`git diff --check` clean。
+- true migrated response-loss smoke：literal Phase 4 DB → migration → close stdout 丢弃 → retry；raw SQLite 为 balance `1010000000` micros、PnL `10000000` micros、INTEGER type、0 positions、1 close receipt、tagged result。
+- `05-01-SUMMARY.md` 已在 code commits 后立即落库，`make planning-status` zero drift。
+
+### 关键学习
+
+- “列声明 INTEGER”不等于运行时存储一定是 integer；不验证 `typeof` 会让 `int(1.5)` 制造假精确。
+- 兼容层只能是 authority 的单向 projection；如果 REAL/float 可以反向驱动账本，就仍然有双重真相。
+- TDD 数值向量必须标单位：半个 micro 与 500 micros 的数量级误判会错误指责正确 rounding。
+- 任务顺序也是正确性：Money receipt 与 codec 必须原子切换，否则中间 GREEN commit 会破坏 SQLite JSON。
+
+### [NEXT]
+
+```bash
+make climb-cycle hypothesis=H-003
+make climb-status
+```
+
+H-003 五门全 100 后自动选择下一条 bounded hypothesis；live venue adapter/order-wire precision 仍受真实账户/venue truth 触发条件约束。
