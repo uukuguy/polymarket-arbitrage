@@ -22,11 +22,14 @@
 - Fly after extension: `/dev/vdc 15G`, 4.6G used, 9.5G available (33%).
 - Production `/healthz`: top status `warn`, snapshot age 164s, last status `OK`,
   Supabase `pass`; only R2 archival remains `warn`.
+- First bounded production retention committed successfully: snapshots 501→491,
+  WAL 263MB→0, 62MB entered SQLite freelist, current markets remained 1,922,
+  and volume utilization fell to 32%.
 - Focused regression: 38 scheduler/store/control/chaos tests passed.
 - Targeted Ruff and `git diff --check`: passed.
 
 ## Follow-up
 
-- Observe the first bounded app-owned retention run and confirm expired snapshot
-  count drops while fresh snapshots continue.
+- Let subsequent successful ticks drain the remaining historical backlog in bounded
+  batches while retaining the current market projection.
 - Repair R2 archival separately; it no longer blocks the usable M1→M2 paper path.

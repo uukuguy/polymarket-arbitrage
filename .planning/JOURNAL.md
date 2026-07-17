@@ -3639,6 +3639,8 @@ make status
   这代表当时无正 gross edge，不是系统失败。
 - retention 现场计数仍为 499，根因是旧实现单事务删除约 494 个 snapshot/数 GB 子表，
   WAL 涨到约 727MB 且事务被部署反复中断；已改成每次最多 10 个 snapshot 的有界事务。
+- 有界修复部署后首轮生产事务完成：snapshots 501→491、WAL 263MB→0、SQLite
+  freelist 约 62MB、current markets 保持 1,922、volume 使用率降到 32%。长期清理路径已验证。
 
 ### [NEXT — CURRENT]
 
