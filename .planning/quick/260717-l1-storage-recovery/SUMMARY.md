@@ -14,6 +14,8 @@
   error with `cannot rollback - no transaction is active`.
 - Storage inspection is bounded to snapshots/markets/scheduler_state; it no longer
   scans the multi-gigabyte event-tags table and times out over Fly SSH.
+- Retention deletes at most 10 snapshots per transaction. The previous unbounded
+  494-snapshot delete grew WAL and was repeatedly interrupted before commit.
 
 ## Evidence
 
@@ -25,6 +27,6 @@
 
 ## Follow-up
 
-- Observe the first deployed app-owned retention run and confirm expired snapshot
+- Observe the first bounded app-owned retention run and confirm expired snapshot
   count drops while fresh snapshots continue.
 - Repair R2 archival separately; it no longer blocks the usable M1→M2 paper path.

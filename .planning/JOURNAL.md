@@ -3631,11 +3631,14 @@ make status
 - 新增教学 chapter 18 和 `.planning/CURRENT.md` 真实能力口径：真实数据监控/paper 可用，
   真实资金下单不可用；Phase complete 不再等同于产品闭环。
 
-### 发布门
+### 发布结果
 
-Phase 9 相关测试、Ruff、planning-status 已通过；仍需完成生产部署后等待一个新 snapshot，
-再现场验证 `make scan-arb-live min_edge_bps=0`。返回 count=0 代表当前无正 gross edge，
-不是系统失败。
+- Phase 9 相关测试、Ruff、planning-status 与 Fly deploy 均通过。
+- 生产 `healthz`：snapshot age 31.8s、last status OK、Supabase pass；R2 仍 warn。
+- `make scan-arb-live min_edge_bps=0` 返回显式 gross-before-fees feed，当前 count=0；
+  这代表当时无正 gross edge，不是系统失败。
+- retention 现场计数仍为 499，根因是旧实现单事务删除约 494 个 snapshot/数 GB 子表，
+  WAL 涨到约 727MB 且事务被部署反复中断；已改成每次最多 10 个 snapshot 的有界事务。
 
 ### [NEXT — CURRENT]
 
@@ -3643,5 +3646,4 @@ Phase 9 相关测试、Ruff、planning-status 已通过；仍需完成生产部�
 make scan-arb-live min_edge_bps=0
 ```
 
-验证 fresh production feed 后，下一主线是修复 L2 WS 新鲜度并积累费用后 paper evidence；
-未经单独授权，不接真实资金。
+下一主线是修复 L2 WS 新鲜度并积累费用后 paper evidence；未经单独授权，不接真实资金。

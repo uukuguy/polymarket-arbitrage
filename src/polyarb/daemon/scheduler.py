@@ -176,6 +176,7 @@ class SnapshotScheduler:
                         self._sqlite_store.purge_old_snapshots,
                         older_than_days=7,
                         keep_last=5,
+                        max_snapshots_per_run=10,
                         parquet_root=self._settings.parquet_root,
                     )
                     if deleted:

@@ -664,18 +664,23 @@ class SQLiteStore:
         *,
         older_than_days: int = 7,
         keep_last: int = 5,
+        max_snapshots_per_run: int = 10,
         parquet_root: Path | None = None,
         dry_run: bool = False,
     ) -> tuple[int, list[int]]:
-        """Delete snapshots older than N days, keeping at least M most recent.
+        """Delete one bounded batch older than N days, keeping M most recent.
 
         Deletes in FK-safe order: validation_issues → markets → event_tags →
         events → snapshots. Also deletes parquet files.
 
+        Bounding each transaction prevents a large historical backlog from growing
+        WAL for minutes and losing all progress when a deployment interrupts it.
         Returns (deleted_count, deleted_ids).
         """
         import time as _time
 
+        if max_snapshots_per_run < 1:
+            raise ValueError("max_snapshots_per_run must be positive")
         cutoff_ms = int((_time.time() - older_than_days * 86_400) * 1000)
 
         con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
@@ -694,8 +699,8 @@ class SQLiteStore:
                 for r in con.execute(
                     f"SELECT id FROM snapshots "
                     f"WHERE taken_at_ms < ? AND id NOT IN ({placeholders}) "
-                    f"ORDER BY id",
-                    [cutoff_ms, *keep_ids],
+                    f"ORDER BY id LIMIT ?",
+                    [cutoff_ms, *keep_ids, max_snapshots_per_run],
                 ).fetchall()
             ]
             # Also fetch parquet paths for cleanup

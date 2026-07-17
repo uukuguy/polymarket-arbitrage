@@ -18,7 +18,8 @@ turns fresh executable asks into a fail-closed buy-all opportunity feed.
 - Scanner/HTTP/orchestrator/health/control/CLI/Makefile relevant suite passed.
 - Non-finite thresholds are rejected instead of reaching Decimal comparison.
 - New/changed M2 and HTTP Python files pass Ruff; `git diff --check` passes.
-- Production deployment and fresh response remain the final unchecked release gate.
+- Production `healthz` proved a 31.8-second fresh OK snapshot and Supabase pass;
+  `make scan-arb-live min_edge_bps=0` returned the explicit gross feed with count 0.
 
 ## Safety Boundary
 

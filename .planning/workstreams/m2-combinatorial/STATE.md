@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 9
 status: paper_discovery_usable
-stopped_at: Fresh M1 neg-risk buy-all opportunity feed implemented; live adapter remains out of scope
+stopped_at: Production neg-risk buy-all feed verified; live order adapter remains out of scope
 last_updated: "2026-07-17T08:38:03Z"
 last_activity: 2026-07-17
 progress:
@@ -100,14 +100,13 @@ Plan: 1 of 1 complete
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 9 implemented; production deployment and fresh live-feed proof are the remaining release gate
+**Stopped At:** Phase 9 production feed verified; sustained fee-adjusted paper evidence is next
 **Resume File:** .planning/workstreams/m2-combinatorial/phases/09-neg-risk-opportunity-discovery/09-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-M2 execution/accounting foundation 与 Phase 9 neg-risk opportunity discovery 均已实现。
-当前发布门是把 Phase 9 部署到生产，并用新的 M1 snapshot 验证真实 feed；这一步完成前
-不宣称线上可用。
+M2 execution/accounting foundation 与 Phase 9 neg-risk opportunity discovery 均已实现并
+部署。fresh production response 已验证；当前可做真实数据监控/paper，仍不可下真实订单。
 
 第一条命令：
 

@@ -231,6 +231,7 @@ async def test_successful_tick_purges_expired_snapshots_on_attached_store(
     purge.assert_called_once_with(
         older_than_days=7,
         keep_last=5,
+        max_snapshots_per_run=10,
         parquet_root=daemon_settings_for_test.parquet_root,
     )
 

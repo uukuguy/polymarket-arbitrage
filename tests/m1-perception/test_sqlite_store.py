@@ -21,6 +21,7 @@ import os
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,31 @@ def test_init_schema_creates_three_tables(store: SQLiteStore) -> None:
         assert mode.lower() == "wal"
     finally:
         con.close()
+
+
+def test_purge_old_snapshots_bounds_each_transaction(store: SQLiteStore) -> None:
+    old_ms = int((time.time() - 8 * 86_400) * 1000)
+    for offset in range(35):
+        store.write_snapshot(
+            taken_at_ms=old_ms + offset,
+            finished_at_ms=old_ms + offset,
+            mode="subset",
+            parquet_path="",
+            is_valid=True,
+            market_rows=[],
+            issues=[],
+        )
+
+    deleted, deleted_ids = store.purge_old_snapshots(
+        older_than_days=7,
+        keep_last=5,
+        max_snapshots_per_run=10,
+    )
+
+    assert deleted == 10
+    assert len(deleted_ids) == 10
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT count(*) FROM snapshots").fetchone()[0] == 25
 
 
 def test_streaming_disk_full_preserves_original_error_when_sqlite_auto_rolls_back(
