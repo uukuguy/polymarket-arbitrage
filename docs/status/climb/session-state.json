@@ -1,6 +1,6 @@
 {
-  "session": "2026-07-17-m2-position-persistence",
-  "last_cycle": 0,
   "in_flight": null,
-  "next_action": "run H-001"
+  "last_cycle": 1,
+  "next_action": "rank next pending hypothesis",
+  "session": "2026-07-17-m2-position-persistence"
 }

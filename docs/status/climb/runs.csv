@@ -1,1 +1,2 @@
 run_id,cycle,session,hypothesis_id,paradigm,parent_run,pushed_at,local_score,planning,unit,integration,cli,restart,push_decision,decision_reason,verdict,cost_h,manifest_path
+20260717-022644-h-001,1,2026-07-17-m2-position-persistence,H-001,repository-backed-domain-model,,,100.0,100.0,100.0,100.0,100.0,100.0,PUSH,all local gates passed,confirmed,0.0,/Users/sujiangwen/sandbox/hacker2026/PolyMarket/polymarket-arbitrage/.worktrees/m2-position-persistence/runs/climb/20260717-022644-h-001/manifest.json

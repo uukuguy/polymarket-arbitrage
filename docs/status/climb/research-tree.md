@@ -4,8 +4,8 @@
 
 ## Session
 
-- Last cycle: 0
-- Next action: run H-001
+- Last cycle: 1
+- Next action: rank next pending hypothesis
 
 ## In flight
 
@@ -13,8 +13,8 @@
 
 ## Hypothesis pool
 
-- **H-001** [pending]: Transactional SQLite repository prevents cross-process state loss
+- **H-001** [confirmed]: Transactional SQLite repository prevents cross-process state loss
 
 ## Runs
 
-- None
+- 20260717-022644-h-001: 100.0 (confirmed)

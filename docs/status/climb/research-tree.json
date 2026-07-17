@@ -2,6 +2,8 @@
   "hypotheses": [
     "H-001"
   ],
-  "last_cycle": 0,
-  "runs": []
+  "last_cycle": 1,
+  "runs": [
+    "20260717-022644-h-001"
+  ]
 }
