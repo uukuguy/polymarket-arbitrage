@@ -3533,3 +3533,18 @@ H-005 五门确认后不暂停，直接设计并执行 H-006 venue-truth reconci
 - H005 的 durable partial-fill ledger 已闭环；下一 ranked hypothesis 为 H-006 venue-truth reconciliation。
 
 下一步不等待用户，直接建立 Phase 8；第一动作是锁定 venue-confirmed cash/fee 的 exact domain contract。
+
+### SESSION 43 continuation — H-006 Phase 8 planned and verified
+
+- 官方 contract 核对：普通 authenticated trade 只有 `fee_rate_bps`，不能冒充 actual fee；builder trade 才提供 `sizeUsdc/feeUsdc`；只有 `CONFIRMED` 是成功终态。
+- Phase 8 锁定 complete terminal `VenueSettlement`、structured exact receipt、operation request fingerprint 与 CLI/Makefile acceptance harness；不接 live signing/network。
+- plan-checker 首轮发现 6 BLOCKER/3 WARNING：修正显式 retry size、fingerprint 四象限、真实 overlapping writer、nonterminal 语义、depends_on、done/Ruff/write-set，并拆分 integration TDD 与 closure。
+- 第二轮 `VERIFICATION PASSED`，08-01 单 plan 可自主执行。
+
+### [NEXT]
+
+```bash
+uv run pytest tests/routing/test_position_repository.py -q
+```
+
+先写 SettlementReceipt codec/fingerprint concurrency RED，再做最小 GREEN。

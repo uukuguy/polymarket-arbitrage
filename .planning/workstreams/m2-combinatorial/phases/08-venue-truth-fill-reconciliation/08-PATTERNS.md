@@ -72,8 +72,9 @@ Follow `_migrate_money_schema` / `_migrate_position_units`:
 2. Let the pre-migration schema check accept a database without it.
 3. Under the initialization `BEGIN IMMEDIATE`, `ALTER TABLE` once, then validate the
    column's dynamic storage type and complete schema.
-4. Preserve legacy rows with the research-defined empty fingerprint; do not attempt to
-   reconstruct historical quantity/cash/fee facts from a Money receipt.
+4. Preserve legacy rows with empty fingerprint; do not reconstruct historical facts.
+   Equal non-empty and empty+empty replay; exactly one empty or unequal non-empty conflict.
+   Never upgrade or overwrite stored empty.
 
 Fingerprint input must be canonical authority, not presentation values: market ID,
 filled quantity micros, gross micros, fee micros, exact status, and source reference.
@@ -126,8 +127,9 @@ never reach repository fingerprint comparison.
 
 For venue settlement calls:
 
-1. Detect whether any venue option is present; require all four plus `fill_id` before
-   loading/mutating the position.
+1. Detect whether any venue option is present; require explicit original `size`, all
+   four venue fields, and `fill_id` before repository access. Never derive retry
+   quantity from the remaining or already-deleted position.
 2. Construct the same `Fill(VenueSettlement(...))` on first delivery and replay.
 3. A pre-read may set the display-only `replayed` flag, but always invoke
    `close_position_with_fill`; repository `apply` decides replay versus conflict.
@@ -166,4 +168,3 @@ The strongest end-to-end analog is the Phase 7 subprocess test:
 - Do not backfill a fabricated fingerprint for legacy receipts.
 - Do not change paper Fill behavior or the H-005 residual allocation branch.
 - Do not add live credentials, SDK calls, polling, or a second ledger in this phase.
-

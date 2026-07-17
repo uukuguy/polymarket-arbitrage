@@ -70,7 +70,7 @@ old receipt merely because the ID matches.
 - `ExecutionEngine.fill_provider` forwards the complete Fill unchanged; tracker owns
   the exact reconciliation decision.
 - CLI `close` adds an all-or-none venue truth surface for local proof:
-  `--fill-id`, `--venue-cash`, `--venue-fee`, `--venue-status CONFIRMED`,
+  `--fill-id`, explicit original fill `--size`, `--venue-cash`, `--venue-fee`, `--venue-status CONFIRMED`,
   `--venue-ref`.
 - `make close-arb` forwards the same parameters. This is a deterministic acceptance
   harness, not live order submission.
@@ -84,6 +84,8 @@ old receipt merely because the ID matches.
 - venue truth without fill ID/source reference: reject;
 - duplicate identical settlement: replay exact structured receipt;
 - duplicate fill ID with different quantity/cash/fee/source: identity conflict;
+- stored empty legacy fingerprint plus supplied venue fingerprint (or the reverse):
+  identity conflict; only empty+empty retains legacy replay;
 - zero/overfill/market conflict: retain H-005 fail-closed behavior.
 
 ## Acceptance vectors

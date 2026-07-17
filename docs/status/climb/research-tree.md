@@ -5,11 +5,11 @@
 ## Session
 
 - Last cycle: 5
-- Next action: rank next pending hypothesis
+- Next action: add H-006 repository codec and fingerprint RED tests
 
 ## In flight
 
-- None
+- H-006
 
 ## Hypothesis pool
 

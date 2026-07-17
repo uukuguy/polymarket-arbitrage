@@ -2,29 +2,29 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 7
-status: complete
-stopped_at: Phase 7 complete; H-005 ready for climb adjudication
+current_phase: 8
+status: ready
+stopped_at: Phase 8 planned and verified; H-006 ready for TDD execution
 last_updated: "2026-07-17T04:33:10.644Z"
 last_activity: 2026-07-17
 progress:
-  total_phases: 6
+  total_phases: 7
   completed_phases: 6
-  total_plans: 6
+  total_plans: 7
   completed_plans: 6
-  percent: 100
+  percent: 86
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
 
-Phase: 7 (Durable Partial-Fill Accounting)
-Plan: 1 of 1 complete
-**Status:** Complete
-**Current Phase:** 7
+Phase: 8 (Venue-Truth Fill Reconciliation)
+Plan: 0 of 1 complete
+**Status:** Ready for execution
+**Current Phase:** 8
 **Last Activity:** 2026-07-17
-**Last Activity Description:** Phase 7 durable partial-fill accounting complete
+**Last Activity Description:** Phase 8 H-006 plan researched and checker-verified
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 
@@ -78,6 +78,14 @@ Plan: 1 of 1 complete
 - ✅ CLI/Makefile partial fill ID and true subprocess response-loss recovery
 - ✅ Teaching chapter 16, SUMMARY, learnings, and zero planning drift
 
+## Phase 8 Plan Progress (`08-01-PLAN.md` — PLANNED)
+
+- ⬜ Structured SettlementReceipt codec and additive request fingerprint migration
+- ⬜ Overlapping-writer fingerprint replay/conflict proof
+- ⬜ Complete CONFIRMED venue truth tracker transition
+- ⬜ Engine/CLI/Makefile subprocess response-loss reconciliation proof
+- ⬜ Teaching, SUMMARY, learnings, full gates, and H-006 climb closure
+
 ## Test Count (m2)
 
 - **104 tests green**: `routing/test_engine` 12 + `routing/test_position_tracker` 14 + `routing/test_config` 16 (T6) + `models/test_signal` 11 + `models/test_slippage` 7 + `execution/test_engine` 12 + `execution/test_arbitrage_e2e` 25 (T8) + `cli/test_arbitrage_cli` 7
@@ -91,16 +99,16 @@ Plan: 1 of 1 complete
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 7 complete; H-005 ready for climb adjudication
-**Resume File:** .planning/workstreams/m2-combinatorial/phases/07-durable-partial-fill-accounting/07-01-PLAN.md
+**Stopped At:** Phase 8 planned and verified; H-006 ready for TDD execution
+**Resume File:** .planning/workstreams/m2-combinatorial/phases/08-venue-truth-fill-reconciliation/08-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-Phase 7 已完成；运行 H-005 climb 五门裁决，然后直接进入 H-006 venue-truth reconciliation。
+H-005 已 confirmed；执行 H-006 venue-truth reconciliation Task 1 RED。
 
 第一条命令：
 
-`make climb-cycle hypothesis=H-005`
+`uv run pytest tests/routing/test_position_repository.py -q`
 
 **已交付给用户 (累积)**:
 

@@ -26,8 +26,11 @@ persistence, Engine, CLI, and Makefile proof; it does not place network orders.
   integer micros; legacy Money/float receipts remain readable.
 - The applied-operation ledger gains an atomic request fingerprint so a reused fill ID
   with different quantity/cash/fee/status/source fails even under concurrent processes.
-- Engine forwards complete Fill facts unchanged. CLI/Makefile expose an all-or-none
-  venue settlement acceptance harness, not live trading.
+- Engine forwards complete Fill facts unchanged. CLI/Makefile require explicit original
+  fill `size` plus the complete venue bundle so retries reconstruct the same fingerprint;
+  they expose an acceptance harness, not live trading.
+- Fingerprint replay matrix is strict: equal replays, empty+empty preserves legacy,
+  exactly one empty conflicts, and unequal non-empty conflicts. Stored values are never upgraded.
 - Non-terminal/incomplete/negative/fee-over-gross settlement, anonymous venue truth,
   zero/overfill, or identity conflict fails without mutation.
 

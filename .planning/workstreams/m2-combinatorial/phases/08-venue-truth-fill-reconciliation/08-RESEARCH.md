@@ -60,7 +60,9 @@ receipts remain readable.
 ### Operation request fingerprint
 
 Add `request_fingerprint TEXT NOT NULL DEFAULT ''` to `m2_applied_operations`. Existing
-rows backfill to empty. Venue settlement fingerprint must deterministically include
+rows backfill to empty. Replay matrix: equal non-empty replays; empty+empty replays;
+exactly one empty conflicts; unequal non-empty conflicts. Never upgrade stored empty.
+Venue settlement fingerprint must deterministically include
 market, fill quantity micros, gross/fee micros, status, and source reference. On replay,
 `apply` compares stored and supplied fingerprints inside the same `BEGIN IMMEDIATE`.
 Different non-empty fingerprints raise `operation identity conflict`; identical values
@@ -87,8 +89,9 @@ set a deliberately wrong price and still obtain venue cash PnL.
 
 - Engine already forwards Fill; it needs tests proving structured venue receipt survives
   duplicate delivery/restart and nonterminal settlement leaves the position open.
-- CLI adds all-or-none `--venue-cash`, `--venue-fee`, `--venue-status`, `--venue-ref`.
-  These require `--fill-id`; any subset exits 2 before mutation.
+- CLI adds all-or-none `--size`, `--venue-cash`, `--venue-fee`, `--venue-status`,
+  `--venue-ref`. These require `--fill-id`; venue retry never derives original fill
+  quantity from a changed/removed position. Any subset exits 2 before repository access.
 - Replay output must expose source, gross, fee, net, and PnL from the stored receipt, not
   reconstruct from current CLI flags.
 - Makefile forwards these arguments through existing `close-arb`; no new command.
@@ -127,7 +130,8 @@ git diff --check
 ### Required RED vectors
 
 1. structured settlement receipt codec/restart and corrupt JSON rejection;
-2. conflicting same-fill fingerprint across two repository instances;
+2. conflicting same-fill fingerprint across overlapping writers: writer A pauses inside
+   its transition after BEGIN IMMEDIATE, writer B begins conflicting apply, then A commits;
 3. wrong paper price but exact venue gross/fee drives balance/PnL;
 4. nonterminal/incomplete/fee-over-gross settlement rolls back;
 5. true subprocess lost-response replay returns stored structured fields;

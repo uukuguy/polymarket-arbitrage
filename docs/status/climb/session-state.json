@@ -1,6 +1,11 @@
 {
-  "in_flight": null,
+  "in_flight": {
+    "hypothesis_id": "H-006",
+    "phase": "implementation",
+    "completed_slice": "phase design, protocol research, validation, and checker-approved plan",
+    "next_slice": "structured settlement receipt and overlapping-writer fingerprint RED"
+  },
   "last_cycle": 5,
-  "next_action": "rank next pending hypothesis",
+  "next_action": "add H-006 repository codec and fingerprint RED tests",
   "session": "2026-07-17-m2-position-persistence"
 }

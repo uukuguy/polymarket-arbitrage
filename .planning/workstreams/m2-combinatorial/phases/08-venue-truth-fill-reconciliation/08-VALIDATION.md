@@ -33,6 +33,7 @@ created: 2026-07-17
 | 08-01-01 | 01 | 1 | H-006 | T-08-01/02/03 | exact codec + atomic fingerprint conflict | unit/restart | `uv run pytest tests/routing/test_position_repository.py -q` | ✅ | ⬜ pending |
 | 08-01-02 | 01 | 1 | H-006 | T-08-01/02/04 | terminal complete venue truth overrides model | unit | `uv run pytest tests/routing/test_position_tracker.py -q` | ✅ | ⬜ pending |
 | 08-01-03 | 01 | 1 | H-006 | T-08-02/03/05 | Engine/CLI subprocess replay and conflict | integration/CLI | `uv run pytest tests/execution/test_engine.py tests/cli/test_arbitrage_cli_process.py tests/test_makefile.py -q` | ✅ | ⬜ pending |
+| 08-01-04 | 01 | 1 | H-006 | all | full regression, docs, and climb closure | full | `uv run pytest tests/models/test_slippage.py tests/routing tests/execution tests/cli -q` plus targeted Ruff | ✅ | ⬜ pending |
 
 ## Wave 0 Requirements
 
@@ -51,5 +52,11 @@ All Phase 8 behavior is locally automated; live venue access is explicitly out o
 - [x] No watch-mode flags.
 - [x] Feedback latency < 30 seconds.
 - [x] `nyquist_compliant: true`.
+
+Targeted Ruff closure command:
+
+```bash
+uv run ruff check src/polyarb/routing/position_repository.py src/polyarb/routing/position_tracker.py src/polyarb/execution/engine.py src/polyarb/cli_arbitrage.py tests/routing/test_position_repository.py tests/routing/test_position_tracker.py tests/execution/test_engine.py tests/cli/test_arbitrage_cli.py tests/cli/test_arbitrage_cli_process.py tests/test_makefile.py
+```
 
 **Approval:** approved 2026-07-17
