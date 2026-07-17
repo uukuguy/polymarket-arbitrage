@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 8
-status: ready
-stopped_at: Phase 8 planned and verified; H-006 ready for TDD execution
+status: complete
+stopped_at: Phase 8 complete; H-006 ready for climb adjudication
 last_updated: "2026-07-17T04:33:10.644Z"
 last_activity: 2026-07-17
 progress:
   total_phases: 7
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 7
-  completed_plans: 6
-  percent: 86
+  completed_plans: 7
+  percent: 100
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
@@ -20,11 +20,11 @@ progress:
 ## Current Position
 
 Phase: 8 (Venue-Truth Fill Reconciliation)
-Plan: 0 of 1 complete
-**Status:** Ready for execution
+Plan: 1 of 1 complete
+**Status:** Complete
 **Current Phase:** 8
 **Last Activity:** 2026-07-17
-**Last Activity Description:** Phase 8 H-006 plan researched and checker-verified
+**Last Activity Description:** Phase 8 venue-truth reconciliation implemented and verified
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 
@@ -78,13 +78,13 @@ Plan: 0 of 1 complete
 - ✅ CLI/Makefile partial fill ID and true subprocess response-loss recovery
 - ✅ Teaching chapter 16, SUMMARY, learnings, and zero planning drift
 
-## Phase 8 Plan Progress (`08-01-PLAN.md` — PLANNED)
+## Phase 8 Plan Progress (`08-01-PLAN.md` — ✅ CLOSED 2026-07-17)
 
-- ⬜ Structured SettlementReceipt codec and additive request fingerprint migration
-- ⬜ Overlapping-writer fingerprint replay/conflict proof
-- ⬜ Complete CONFIRMED venue truth tracker transition
-- ⬜ Engine/CLI/Makefile subprocess response-loss reconciliation proof
-- ⬜ Teaching, SUMMARY, learnings, full gates, and H-006 climb closure
+- ✅ Structured SettlementReceipt codec and additive request fingerprint migration
+- ✅ Overlapping-writer fingerprint replay/conflict proof
+- ✅ Complete CONFIRMED venue truth tracker transition
+- ✅ Engine/CLI/Makefile subprocess response-loss reconciliation proof
+- ✅ Teaching, SUMMARY, learnings, and full gates
 
 ## Test Count (m2)
 
@@ -95,20 +95,21 @@ Plan: 0 of 1 complete
 - **Phase 5 corrected full gate: 187 tests green**; exact migration/restart smoke proves INTEGER micros and tagged receipt
 - **Phase 6 corrected full gate: 219 tests green**; raw v3 quantity/cost-basis INTEGER authority and four-process lifecycle verified
 - **Phase 7 corrected full gate: 227 tests green**; duplicate partial fill response-loss replay leaves exact remaining authority and final residual closes cleanly
+- **Phase 8 corrected full gate: 260 tests green**; exact venue cash supersedes modeled price and changed retries conflict atomically
 
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 8 planned and verified; H-006 ready for TDD execution
+**Stopped At:** Phase 8 complete; H-006 ready for climb adjudication
 **Resume File:** .planning/workstreams/m2-combinatorial/phases/08-venue-truth-fill-reconciliation/08-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-H-005 已 confirmed；执行 H-006 venue-truth reconciliation Task 1 RED。
+Phase 8 已闭环；执行 H-006 deterministic climb adjudication。
 
 第一条命令：
 
-`uv run pytest tests/routing/test_position_repository.py -q`
+`make climb-cycle hypothesis=H-006`
 
 **已交付给用户 (累积)**:
 
@@ -119,6 +120,7 @@ H-005 已 confirmed；执行 H-006 venue-truth reconciliation Task 1 RED。
 - `make close-arb market_id=… exit_price=…` — operator-driven close
 - `make close-arb market_id=… exit_price=… operation_id=…` — 响应丢失后跨进程恢复原 close receipt
 - `make close-arb market_id=… exit_price=… size=… fill_id=…` — partial fill 跨进程幂等重放
+- `make close-arb ... size=… fill_id=… venue_cash=… venue_fee=… venue_status=CONFIRMED venue_ref=…` — exact venue truth 对账与冲突检测
 - `make run-arb/status-arb/close-arb db=…` — 跨进程共享 SQLite paper account
 - Env var config: `POLYARB_MIN_PROFIT_THRESHOLD_PCT=2.0 make eval-arb` etc.
 

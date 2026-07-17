@@ -5,11 +5,11 @@
 ## Session
 
 - Last cycle: 5
-- Next action: add H-006 repository codec and fingerprint RED tests
+- Next action: run H-006 deterministic climb adjudication
 
 ## In flight
 
-- H-006
+- None
 
 ## Hypothesis pool
 

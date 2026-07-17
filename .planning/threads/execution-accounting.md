@@ -83,3 +83,25 @@ decimal-facing estimate，不扩张 H-003 的 Money 范围。
 - venue cash/fee 必须进入 exact Money 边界并与同一 fill receipt 原子提交。
 - adapter 必须显式翻译 BUY cash request、SELL share request、matched shares 与 settlement cash，
   不能复用一个 side-dependent `amount` 字段做领域 authority。
+
+## 2026-07-17 — H-006 verified venue-truth reconciliation
+
+### 已验证事实
+
+- `VenueSettlement` 只接受完整 `CONFIRMED` gross/fee/source facts；MATCHED/MINED、空
+  source、负值与 fee>gross 在 repository mutation 前失败。
+- venue path 的 cash authority 是 `net=gross-fee`，realized PnL 是
+  `net-allocated_cost`；故意错误的 exit price 不影响账本。
+- exact `SettlementReceipt` 用 integer micros 保存 gross/fee/net/PnL；legacy Money/float
+  receipts 与 paper modeled path 保持兼容。
+- request fingerprint 包含 market/quantity/gross/fee/status/source/version，并在
+  `BEGIN IMMEDIATE` 内严格比较；同 ID 的任何 payload 变化都原子冲突。
+- true subprocess response-loss 后，完整原请求可恢复 structured receipt；changed fee
+  返回 exit 2，SQLite 文件与 remaining authority 均不变。
+
+### 给 live adapter 的约束
+
+- 只有 fee rate 而没有 actual fee 的普通 trade 不能进入 venue-truth path。
+- adapter 必须提供可审计 terminal status、gross cash、actual fee、matched Quantity 与
+  immutable source reference；不能在 tracker 内补公式或猜测。
+- live signing/network/allowance 不属于 H-006，本阶段没有扩大执行权限。

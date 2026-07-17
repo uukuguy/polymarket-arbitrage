@@ -3548,3 +3548,26 @@ uv run pytest tests/routing/test_position_repository.py -q
 ```
 
 先写 SettlementReceipt codec/fingerprint concurrency RED，再做最小 GREEN。
+
+### SESSION 43 continuation — M2 Phase 8 Venue-Truth Reconciliation CLOSED
+
+- 新增 exact `SettlementReceipt` tagged codec 与 additive request fingerprint migration；
+  overlapping SQLite writer 证明比较发生在 `BEGIN IMMEDIATE` 内，一次 mutation/receipt。
+- `VenueSettlement` 只接受完整 `CONFIRMED` gross/fee/source facts；venue cash 按
+  `net=gross-fee`、`PnL=net-allocated_cost` 入账，故意错误 exit price 无权改变现金。
+- Engine 保持纯 fact-forwarding；CLI/Makefile 要求完整 venue 参数、显式 size 与 fill ID，
+  每次 retry 都重新进入 repository fingerprint 裁决。
+- true subprocess response-loss 可恢复 structured receipt；changed fee 返回 exit 2 且
+  SQLite 原始文件不变。
+- corrected full M2 **260 passed**；focused repository/tracker **102 passed**；
+  Engine/CLI/process/Makefile **43 passed**；Ruff、diff、planning-status 全绿。
+- 教学 chapter 17、08-01-SUMMARY、08-LEARNINGS 与 execution-accounting thread 已同步。
+
+### [NEXT]
+
+```bash
+make climb-cycle hypothesis=H-006
+```
+
+H-006 五门确认后审计 M2 workstream 是否还有未闭合 phase/requirement；若无则完成 M2
+能力线闭环，不自动引入 live signing 或真实资金权限。

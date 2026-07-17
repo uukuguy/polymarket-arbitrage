@@ -1,11 +1,6 @@
 {
-  "in_flight": {
-    "hypothesis_id": "H-006",
-    "phase": "implementation",
-    "completed_slice": "phase design, protocol research, validation, and checker-approved plan",
-    "next_slice": "structured settlement receipt and overlapping-writer fingerprint RED"
-  },
+  "in_flight": null,
   "last_cycle": 5,
-  "next_action": "add H-006 repository codec and fingerprint RED tests",
+  "next_action": "run H-006 deterministic climb adjudication",
   "session": "2026-07-17-m2-position-persistence"
 }

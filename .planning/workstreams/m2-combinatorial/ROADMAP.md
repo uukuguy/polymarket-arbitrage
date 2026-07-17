@@ -77,17 +77,17 @@ cost basis, cash, and replay state across restart.
 Plans:
 - [x] `07-01-PLAN.md` — residual allocation, canonical fill identity, restart/replay, engine/process proof, teaching, and climb closure
 
-### Phase 8: Venue-Truth Fill Reconciliation
+### Phase 8: Venue-Truth Fill Reconciliation ✅
 
 **Goal:** Replace modeled fill cash with complete, terminal, exact venue-confirmed
 quantity/cash/fee facts while preserving canonical fill identity and atomic restart replay.
 **Requirements:** H-006 exact reconciliation contract (no live signing credentials)
 **Depends on:** Phase 7
-**Status:** Discussed — ready for research and planning
-**Plans:** 0/1 planned
+**Status:** Complete — 2026-07-17
+**Plans:** 1/1 complete
 
 Plans:
-- [ ] `08-01-PLAN.md` — terminal settlement domain, fingerprinted durable receipts, tracker/engine/operator reconciliation, restart proof, teaching, and climb closure
+- [x] `08-01-PLAN.md` — terminal settlement domain, fingerprinted durable receipts, tracker/engine/operator reconciliation, restart proof, teaching, and climb closure
 
 ---
 

@@ -26,16 +26,15 @@ key-files:
 key-decisions:
   - "Fingerprint equality is strict: equal replays; any mismatch, including empty/non-empty, conflicts."
   - "Venue settlement receipts store gross, fee, net, and PnL as tagged integer micros."
-requirements-completed: []
-status: in-progress
-completed: null
+requirements-completed: [H-006]
+status: complete
+completed: 2026-07-17
 ---
 
 # Phase 8 Plan 01: Venue-Truth Fill Reconciliation Summary
 
-> In-progress SUMMARY anchor created immediately after the first Phase 8 production
-> commit. It will be completed only after tracker, Engine/CLI, full gates, teaching,
-> and H-006 climb adjudication finish.
+**M2 now replaces modeled fill cash with complete terminal venue truth, persists an
+exact structured receipt, and rejects every changed retry atomically across processes.**
 
 ## Completed Slice: Repository Receipt and Fingerprint
 
@@ -60,10 +59,6 @@ completed: null
 - Focused evidence: **14 venue reconciliation tests passed**, then **102 tracker +
   repository tests passed**; targeted Ruff passed.
 
-## Remaining
-
-- Teaching chapter 17, full regression, learnings/state closure, and H-006 climb cycle.
-
 ## Completed Slice: Engine and Operator Delivery
 
 - RED `84509de`: delivery-boundary tests specified Engine fact forwarding,
@@ -76,5 +71,32 @@ completed: null
   Ruff and `git diff --check` passed. The changed-fee subprocess returned 2
   while the SQLite file remained byte-identical.
 
+## Verification Evidence
+
+- Full M2 regression: **260 passed**.
+- Makefile + climb adapter gate: **21 passed** after clearing the completed in-flight
+  baton.
+- Repository/tracker focused: **102 passed**; Engine/CLI/process/Makefile: **43 passed**.
+- Targeted Ruff over every changed Python file: clean; `git diff --check`: clean.
+- `make planning-status`: zero drift.
+
+## Deviations from Plan
+
+- Engine required no production edit: it already forwarded the complete `Fill` object
+  without doing fee math. New tests lock that fact-forwarding boundary.
+- The SUMMARY anchor was created after Task 1 rather than Task 3, strengthening the
+  project invariant without changing the delivered contract.
+
+## User Setup Required
+
+None. This phase performs no live venue authentication, signing, allowance mutation,
+or network write.
+
+## Next Phase Readiness
+
+H-006 is ready for deterministic climb adjudication. The next live-facing phase may
+implement an adapter that supplies auditable terminal gross/fee facts, but must not
+weaken finality, fingerprint, or remaining-authority contracts.
+
 ---
-*Phase: 08-venue-truth-fill-reconciliation — in progress*
+*Phase: 08-venue-truth-fill-reconciliation — completed 2026-07-17*
