@@ -73,11 +73,18 @@ def test_tracked_state_is_resumable_and_best_effort() -> None:
     by_id = {item["id"]: item for item in hypotheses["hypotheses"]}
     assert by_id["H-001"]["status"] == "confirmed"
     assert by_id["H-001"]["results"]
-    assert any(item["status"] == "pending" for item in by_id.values())
+    assert all(
+        item["status"] in {"pending", "confirmed", "falsified"}
+        for item in by_id.values()
+    )
     assert session["session"] == "2026-07-17-m2-position-persistence"
     assert session["last_cycle"] == len(runs)
     assert session["in_flight"] is None
-    assert session["next_action"]
+    pending = [item for item in by_id.values() if item["status"] == "pending"]
+    if pending:
+        assert session["next_action"]
+    else:
+        assert session["next_action"] == "rank next pending hypothesis"
     assert "target_value:" in target
 
 

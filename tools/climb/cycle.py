@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 from pathlib import Path
 
 import yaml
 
 from tools.climb.regen_tree import regenerate
-
 
 RUN_FIELDS = [
     "run_id",
@@ -79,8 +79,16 @@ def sync_cycle(state_dir: Path, completed_run: dict) -> None:
         "cost_h": completed_run["cost_h"],
         "manifest_path": completed_run["manifest_path"],
     }
-    with runs_path.open("a", newline="") as handle:
-        csv.DictWriter(handle, fieldnames=RUN_FIELDS).writerow(row)
+    existing.append(row)
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=RUN_FIELDS,
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    writer.writerows(existing)
+    _atomic_write(runs_path, output.getvalue())
 
     hypothesis = next(
         item

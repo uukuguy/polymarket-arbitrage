@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import csv
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import yaml
-
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from tools.climb.cycle import sync_cycle  # noqa: E402
 from tools.climb.regen_tree import regenerate  # noqa: E402
-
 
 RUN_HEADER = (
     "run_id,cycle,session,hypothesis_id,paradigm,parent_run,pushed_at,"
