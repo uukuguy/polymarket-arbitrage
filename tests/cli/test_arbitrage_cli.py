@@ -152,6 +152,11 @@ def test_close_subcommand_books_realized_pnl(isolated_tracker):
     open_pos = open_positions[0]
     open_market_id = open_pos.market_id
     open_stake = open_pos.stake
+    status_result = runner.invoke(app, ["status"])
+    status_position = json.loads(status_result.stdout)["open_positions"][0]
+    assert status_position["quantity"] == open_pos.quantity
+    assert status_position["cost_basis"] == open_pos.cost_basis
+    assert status_position["stake"] == open_pos.quantity
 
     close_result = runner.invoke(
         app,

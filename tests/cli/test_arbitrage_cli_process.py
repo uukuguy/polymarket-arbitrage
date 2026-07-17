@@ -86,7 +86,25 @@ def test_run_status_close_status_across_four_processes(tmp_path) -> None:
     assert status.returncode == 0, status.stderr
     before = json.loads(status.stdout)
     assert before["metrics"]["open_positions"] == 1
-    assert before["open_positions"][0]["market_id"] == "cond-0"
+    assert before["metrics"]["balance"] == 960.0
+    assert before["metrics"]["max_exposure"] == 40.0
+    open_position = before["open_positions"][0]
+    assert open_position["market_id"] == "cond-0"
+    assert open_position["quantity"] == 100.0
+    assert open_position["cost_basis"] == 40.0
+    assert open_position["stake"] == 100.0
+    with sqlite3.connect(path) as con:
+        raw_position = con.execute(
+            "SELECT quantity_micros, cost_basis_micros, "
+            "typeof(quantity_micros), typeof(cost_basis_micros) "
+            "FROM m2_open_positions"
+        ).fetchone()
+    assert raw_position == (
+        100_000_000,
+        40_000_000,
+        "integer",
+        "integer",
+    )
 
     close = _cli(
         "close",
