@@ -3334,3 +3334,46 @@ make climb-status
 ```
 
 随后由 climb 对 Phase 3 本地证据评分，并选择下一条 bounded M2 hypothesis；当前推荐“执行恢复语义”（immutable fill identity + operator retry + reconciliation），真实 venue adapter 继续受账户可用性约束。
+
+---
+
+## SESSION 41 — 2026-07-17 (M2 Phase 4 Durable Close Receipts CLOSED)
+
+### 主线产出
+
+- H-002 设计和 GSD Phase 4 单计划落库；15 条 decisions 覆盖 receipt、operator retry、venue fill identity、失败语义和完整验收。
+- `OperationReceipt` 成为 frozen public contract；in-memory / SQLite `get_receipt()` 对 unknown、bool/float/None、restart、storage error 语义一致。
+- `PositionTracker.operation_receipt()` 提供窄边界；`Fill.fill_id` 生成 `close:{signal}:{leg}:fill:{fill_id}`，旧 timestamp fallback 明确 warning。
+- CLI/Makefile 增加 caller-owned `operation_id`：已 commit 但 response 丢失时，新进程先读 receipt，返回原 PnL 与 `replayed=true`。
+- 自动生成 ID 的兼容路径明确 `retry_safe=false`；跨 type/target identity conflict、corrupt result、unknown ID + missing position 均 fail closed。
+- 教学 chapter 13 增补 projection-vs-receipt 心智模型、race authority、identity 取舍、5 道对手测试和 FAQ。
+
+### TDD 与验证
+
+- 三组 RED→GREEN commits：repository receipt、tracker/fill identity、CLI/Make response recovery。
+- corrected full M2 gate：**145 passed**（Phase 3 为 130）；Makefile **3 passed**；修改的 4 个生产模块 Ruff 全绿；`git diff --check` clean。
+- true subprocess lost-response smoke：第一次 close stdout 丢弃；retry 恢复 +10，balance 1010、0 position、1 close receipt；reopen/new ID 后 balance 1020、2 receipts、CLI cumulative PnL 20。
+- `04-01-SUMMARY.md` 在 closure 前落库，`make planning-status` 从预期 DRIFT 恢复 zero drift。
+
+### Climb 裁决
+
+- `make climb-cycle hypothesis=H-002` → cycle 2，planning/unit/integration/CLI/restart 五项均 **100**，total **100**，H-002 `pending → confirmed`。
+- adapter 没配置 external target evaluation；仓库契约以 local GSD gates 为 authoritative decision surface，未调用外部 AI/leaderboard。
+- cycle closure 暴露 `csv.DictWriter` 默认 CRLF 导致 `git diff --check` trailing whitespace；独立 quick TDD 修复为 LF atomic rewrite，16 个 climb tests 全绿，并让“所有 hypotheses 已裁决、当前无 pending”成为合法状态机终态。
+
+### 关键学习
+
+- projection absence 不能证明操作是否发生；receipt ledger 才能恢复已提交响应。
+- lookup 不是并发正确性边界；两个 caller 都 miss 时仍由 `BEGIN IMMEDIATE` + ledger PK + transaction replay 保证只记一次。
+- 两次 +10 的 SQLite REAL 为 `19.999999999999996`，暴露下一条候选研究：现金/PnL 精确表示及迁移边界；不影响当前 CLI round-to-20 contract。
+- GSD planned/complete 工具仍需 read-after-write：本次两次留下 stale Current Position/checkbox，均在 closure 前精确修复。
+
+### [NEXT] 下次会话从这里开始
+
+```bash
+/gsd-resume-work --ws m2-combinatorial
+make planning-status
+make climb-status
+```
+
+然后执行 `$gsd-explore --ws m2-combinatorial cash-ledger exactness and migration boundary`。当前没有 pending hypothesis；先探索 integer minor units vs Decimal、价格 float 与现金精度分界、现有 SQLite REAL 迁移/兼容，再决定是否登记 H-003。真实 venue adapter/reconciliation 仍受账户与 venue truth 可用性约束。

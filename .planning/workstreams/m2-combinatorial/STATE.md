@@ -2,29 +2,29 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 04
-status: ready_to_execute
-stopped_at: Phase 4 planned; begin 04-01 RED receipt repository tests
-last_updated: "2026-07-17T02:50:15.059Z"
+current_phase: 4
+status: completed
+stopped_at: Phase 4 closed; H-002 confirmed at 100 local score
+last_updated: "2026-07-17T03:02:13.940Z"
 last_activity: 2026-07-17
 progress:
   total_phases: 3
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 3
-  completed_plans: 2
-  percent: 67
+  completed_plans: 3
+  percent: 100
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
 
-Phase: 4 (Durable Close Receipts)
-Plan: 0 of 1 complete
-**Status:** Ready to execute
-**Current Phase:** 04
+Phase: 4 (Durable Close Receipts) — ✅ CLOSED 2026-07-17
+Plan: 1 of 1 complete
+**Status:** Milestone complete
+**Current Phase:** 4
 **Last Activity:** 2026-07-17
-**Last Activity Description:** Phase 4 planning complete — 1 plans ready
+**Last Activity Description:** Phase 4 complete
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 
@@ -46,34 +46,36 @@ Plan: 0 of 1 complete
 - ✅ Cross-process CLI lifecycle with `db=` Makefile entry points
 - ✅ Teaching chapter 13, phase summary, learnings, and operator smoke
 
-## Phase 4 Plan Progress (`04-01-PLAN.md` — READY)
+## Phase 4 Plan Progress (`04-01-PLAN.md` — ✅ CLOSED 2026-07-17)
 
-- ⬜ Public immutable `OperationReceipt` lookup in memory and SQLite
-- ⬜ Tracker receipt delegation and stable venue `Fill.fill_id`
-- ⬜ Retry-safe operator close identity in CLI and Makefile
-- ⬜ True subprocess response-loss recovery proof
-- ⬜ Teaching, SUMMARY, learnings, JOURNAL, and H-002 climb closure
+- ✅ Public immutable `OperationReceipt` lookup in memory and SQLite
+- ✅ Tracker receipt delegation and stable venue `Fill.fill_id`
+- ✅ Retry-safe operator close identity in CLI and Makefile
+- ✅ True subprocess response-loss recovery proof
+- ✅ Teaching, SUMMARY, learnings, JOURNAL, and H-002 climb closure
 
 ## Test Count (m2)
 
 - **104 tests green**: `routing/test_engine` 12 + `routing/test_position_tracker` 14 + `routing/test_config` 16 (T6) + `models/test_signal` 11 + `models/test_slippage` 7 + `execution/test_engine` 12 + `execution/test_arbitrage_e2e` 25 (T8) + `cli/test_arbitrage_cli` 7
 - m2 test progression: 21 → 30 → 38 → 42 → 63 → **104**
 - **Phase 3 corrected full gate: 130 tests green** (repository 14 + tracker 18 + expanded engine/CLI/config/process coverage)
+- **Phase 4 corrected full gate: 145 tests green**; climb H-002 planning/unit/integration/CLI/restart = 100/100 each
 
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 4 planned; begin 04-01 RED receipt repository tests
-**Resume File:** .planning/workstreams/m2-combinatorial/phases/04-durable-close-receipts/04-01-PLAN.md
+**Stopped At:** Phase 4 closed; H-002 confirmed at 100 local score
+**Resume File:** .planning/workstreams/m2-combinatorial/phases/04-durable-close-receipts/04-01-SUMMARY.md
 
 ## Next Action (2026-07-17)
 
-执行 Phase 4 H-002：先在 `tests/routing/test_position_repository.py`
-写 receipt contract 的 RED tests，再实现公开 `OperationReceipt` 和两种 repository lookup。
+H-001/H-002 已 confirmed，当前无 pending hypothesis。下一条无账户依赖、由实测暴露的候选是“现金/PnL 精确表示”：两次 +10 在 SQLite REAL 中为 `19.999999999999996`。
+
+先用探索模式界定是否采用 integer minor units 或 Decimal，以及价格 float 与现金精度的边界；不在未定义迁移/兼容语义前直接改账本。
 
 第一条命令：
 
-`uv run pytest tests/routing/test_position_repository.py -q`
+`$gsd-explore --ws m2-combinatorial cash-ledger exactness and migration boundary`
 
 **已交付给用户 (累积)**:
 
@@ -82,6 +84,7 @@ Plan: 0 of 1 complete
 - `make run-arb paper_close=1` — paper-mode 全 lifecycle (open then close)
 - `make status-arb` — tracker state with balance/realized_pnl/roi_pct/stop_loss
 - `make close-arb market_id=… exit_price=…` — operator-driven close
+- `make close-arb market_id=… exit_price=… operation_id=…` — 响应丢失后跨进程恢复原 close receipt
 - `make run-arb/status-arb/close-arb db=…` — 跨进程共享 SQLite paper account
 - Env var config: `POLYARB_MIN_PROFIT_THRESHOLD_PCT=2.0 make eval-arb` etc.
 

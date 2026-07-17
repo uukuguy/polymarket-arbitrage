@@ -22,11 +22,25 @@ hypotheses:
     verdict: confirmed
     decision_reason: all local gates passed
 - id: H-002
-  description: Caller-supplied immutable close identities make committed-but-unacknowledged retries observable and idempotent
+  description: Caller-supplied immutable close identities make committed-but-unacknowledged
+    retries observable and idempotent
   parent_paradigm: durable-operation-receipts
   expected_lift: +100 close-retry recovery points
   cost_h: 1.5
   ranking: 0.9
-  status: pending
+  status: confirmed
   created_at: '2026-07-17T10:30:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-17-m2-position-persistence
+    cycle: 2
+    run: 20260717-030140-h-002
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
