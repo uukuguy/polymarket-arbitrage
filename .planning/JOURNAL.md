@@ -3427,3 +3427,12 @@ make climb-status
 ```
 
 H-003 五门全 100 后自动选择下一条 bounded hypothesis；live venue adapter/order-wire precision 仍受真实账户/venue truth 触发条件约束。
+
+### SESSION 42 continuation — H-003 climb CONFIRMED
+
+- `make climb-cycle hypothesis=H-003` → cycle 3；planning/unit/integration/CLI/restart 五项均 **100**，total **100**。
+- H-003 自动从 `pending` 变为 `confirmed`；research-tree/runs/session-state 已由 adapter 同步，无手工改写实验结论。
+- adapter target 显示 “evaluation not configured”，符合本仓库 local GSD gates authoritative、无 external leaderboard 的既定语义，不影响 confirmed verdict。
+- 当前 H-001/H-002/H-003 全 confirmed、pool 无 pending；climb 按 Knowledge Layer 继续产生下一假设，不等待用户指令。
+
+下一步探索当前明确 deferred、且不依赖账户的 partial-fill accounting：先锁定 `filled_size` 的 cash-vs-shares 语义、剩余 stake/receipt identity、重复/乱序 fill 的幂等边界，再决定是否登记 H-004。

@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 5
 status: completed
-stopped_at: Phase 5 closed; H-003 ready for climb evaluation
+stopped_at: Phase 5 closed; H-003 confirmed at 100 local score
 last_updated: "2026-07-17T04:33:10.644Z"
 last_activity: 2026-07-17
 progress:
@@ -60,7 +60,7 @@ Plan: 1 of 1 complete
 - ✅ Transactional SQLite v2 migration and INTEGER authority
 - ✅ Tagged money receipts and CLI restart recovery
 - ✅ Teaching chapter 14, SUMMARY, learnings, and zero planning drift
-- ⏳ H-003 climb evaluation runs immediately after metadata closure
+- ✅ H-003 climb planning/unit/integration/CLI/restart = 100/100 each
 
 ## Test Count (m2)
 
@@ -73,16 +73,16 @@ Plan: 1 of 1 complete
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 5 closed; H-003 ready for climb evaluation
+**Stopped At:** Phase 5 closed; H-003 confirmed at 100 local score
 **Resume File:** .planning/workstreams/m2-combinatorial/phases/05-exact-cash-ledger/05-01-SUMMARY.md
 
 ## Next Action (2026-07-17)
 
-Phase 5 已实现 integer micro-pUSD cash authority、Phase 4 additive migration、tagged receipt 和 response-loss replay。下一步由 climb adapter 对 planning/unit/integration/CLI/restart 五门裁决 H-003。
+Phase 5 已实现 integer micro-pUSD cash authority、Phase 4 additive migration、tagged receipt 和 response-loss replay；H-003 climb 五门均 100 并 confirmed。当前 pool 无 pending，下一步触发 Knowledge Layer 排序新的 bounded hypothesis。
 
 第一条命令：
 
-`make climb-cycle hypothesis=H-003`
+`$gsd-explore --ws m2-combinatorial durable partial-fill accounting boundary`
 
 **已交付给用户 (累积)**:
 

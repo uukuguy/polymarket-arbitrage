@@ -51,6 +51,19 @@ hypotheses:
   expected_lift: +100 exact-accounting gate points
   cost_h: 2.5
   ranking: 0.95
-  status: pending
+  status: confirmed
   created_at: '2026-07-17T12:18:57+08:00'
-  results: []
+  results:
+  - session: 2026-07-17-m2-position-persistence
+    cycle: 3
+    run: 20260717-045843-h-003
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
