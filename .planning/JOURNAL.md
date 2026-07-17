@@ -3525,3 +3525,11 @@ make climb-cycle hypothesis=H-005
 ```
 
 H-005 五门确认后不暂停，直接设计并执行 H-006 venue-truth reconciliation。
+
+### SESSION 43 continuation — H-005 climb CONFIRMED
+
+- `make climb-cycle hypothesis=H-005` → cycle 5；planning/unit/integration/CLI/restart 五门均 **100**，total **100**。
+- H-005 从 pending 变为 confirmed；run `20260717-064120-h-005`、runs ledger、session state 与 research tree 已由 adapter 确定性同步。
+- H005 的 durable partial-fill ledger 已闭环；下一 ranked hypothesis 为 H-006 venue-truth reconciliation。
+
+下一步不等待用户，直接建立 Phase 8；第一动作是锁定 venue-confirmed cash/fee 的 exact domain contract。

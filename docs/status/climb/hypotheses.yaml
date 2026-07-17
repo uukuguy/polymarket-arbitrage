@@ -97,9 +97,22 @@ hypotheses:
   expected_lift: +100 partial-fill recovery points
   cost_h: 3.5
   ranking: 0.92
-  status: pending
+  status: confirmed
   created_at: '2026-07-17T13:20:01+08:00'
-  results: []
+  results:
+  - session: 2026-07-17-m2-position-persistence
+    cycle: 5
+    run: 20260717-064120-h-005
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-006
   description: Venue-confirmed share, cash, and fee amounts supersede paper formulas
     through an exact reconciliation boundary
