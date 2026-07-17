@@ -17,9 +17,13 @@ from __future__ import annotations
 
 import pytest
 
+import polyarb.routing.position_tracker as tracker_module
 from polyarb.routing.config import PositionConfig
 from polyarb.routing.money import Money
-from polyarb.routing.position_repository import SQLitePositionRepository
+from polyarb.routing.position_repository import (
+    SettlementReceipt,
+    SQLitePositionRepository,
+)
 from polyarb.routing.position_tracker import (
     Fill,
     PositionSnapshot,
@@ -539,3 +543,182 @@ class TestDurablePartialFillAccounting:
 
         assert tracker.open_count == 0
         assert tracker.balance == 1.0
+
+
+class TestVenueTruthReconciliation:
+    @staticmethod
+    def _open(tracker: PositionTracker) -> None:
+        assert tracker.open_position(
+            "m1",
+            "c1",
+            "BUY",
+            "YES",
+            price=0.4,
+            quantity=100,
+            operation_id="open:m1",
+        )
+
+    @staticmethod
+    def _settlement(
+        *, gross: str = "13.80", fee: str = "0.30", source_ref: str = "trade-001"
+    ):
+        return tracker_module.VenueSettlement(
+            gross_cash=Money.from_value(gross),
+            fee=Money.from_value(fee),
+            status="CONFIRMED",
+            source_ref=source_ref,
+        )
+
+    def test_confirmed_venue_cash_supersedes_wrong_modeled_price(self) -> None:
+        tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
+        self._open(tracker)
+
+        result = tracker.close_position_with_fill(
+            Fill(
+                "m1",
+                exit_price=0.90,
+                filled_quantity=30,
+                fill_id="venue-001",
+                settlement=self._settlement(),
+            )
+        )
+
+        assert result == SettlementReceipt(
+            gross_cash=Money.from_value("13.80"),
+            fee=Money.from_value("0.30"),
+            net_cash=Money.from_value("13.50"),
+            realized_pnl=Money.from_value("1.50"),
+        )
+        remaining = tracker.open_positions()[0]
+        assert remaining.quantity == 70.0
+        assert remaining.cost_basis == 28.0
+        assert tracker.balance == 973.5
+        assert tracker.total_realized_pnl == 1.5
+
+    def test_identical_settlement_replays_after_restart(self, tmp_path) -> None:
+        path = tmp_path / "positions.db"
+        first = PositionTracker(
+            repository=SQLitePositionRepository(path, initial_balance=1000.0)
+        )
+        self._open(first)
+        fill = Fill(
+            "m1",
+            exit_price=0.90,
+            filled_quantity=30,
+            fill_id="venue-001",
+            settlement=self._settlement(),
+        )
+        committed = first.close_position_with_fill(fill)
+
+        restarted = PositionTracker(
+            repository=SQLitePositionRepository(path, initial_balance=1000.0)
+        )
+        replayed = restarted.close_position_with_fill(fill)
+
+        assert replayed == committed
+        assert restarted.balance == 973.5
+        assert restarted.total_realized_pnl == 1.5
+        assert restarted.open_positions()[0].quantity == 70.0
+
+    @pytest.mark.parametrize(
+        "quantity,gross,fee,source_ref",
+        [
+            (31, "13.80", "0.30", "trade-001"),
+            (30, "13.81", "0.30", "trade-001"),
+            (30, "13.80", "0.31", "trade-001"),
+            (30, "13.80", "0.30", "trade-other"),
+        ],
+    )
+    def test_changed_confirmed_settlement_conflicts_with_same_fill_id(
+        self, tmp_path, quantity, gross, fee, source_ref
+    ) -> None:
+        path = tmp_path / "positions.db"
+        tracker = PositionTracker(
+            repository=SQLitePositionRepository(path, initial_balance=1000.0)
+        )
+        self._open(tracker)
+        tracker.close_position_with_fill(
+            Fill(
+                "m1",
+                0.90,
+                filled_quantity=30,
+                fill_id="venue-001",
+                settlement=self._settlement(),
+            )
+        )
+
+        with pytest.raises(ValueError, match="operation identity conflict"):
+            tracker.close_position_with_fill(
+                Fill(
+                    "m1",
+                    0.90,
+                    filled_quantity=quantity,
+                    fill_id="venue-001",
+                    settlement=self._settlement(
+                        gross=gross, fee=fee, source_ref=source_ref
+                    ),
+                )
+            )
+
+        assert tracker.balance == 973.5
+        assert tracker.open_positions()[0].quantity == 70.0
+
+    @pytest.mark.parametrize(
+        "kwargs,match",
+        [
+            ({"status": "MATCHED"}, "CONFIRMED"),
+            ({"status": "MINED"}, "CONFIRMED"),
+            ({"source_ref": ""}, "source_ref"),
+            ({"gross_cash": Money.from_value("-1")}, "non-negative"),
+            ({"fee": Money.from_value("-0.01")}, "non-negative"),
+            (
+                {
+                    "gross_cash": Money.from_value("0.10"),
+                    "fee": Money.from_value("0.11"),
+                },
+                "exceed",
+            ),
+        ],
+    )
+    def test_invalid_or_nonterminal_settlement_fails_at_boundary(
+        self, kwargs, match
+    ) -> None:
+        values = {
+            "gross_cash": Money.from_value("13.80"),
+            "fee": Money.from_value("0.30"),
+            "status": "CONFIRMED",
+            "source_ref": "trade-001",
+            **kwargs,
+        }
+
+        with pytest.raises(ValueError, match=match):
+            tracker_module.VenueSettlement(**values)
+
+    def test_venue_settlement_requires_fill_id_without_mutation(self) -> None:
+        tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
+        self._open(tracker)
+
+        with pytest.raises(ValueError, match="fill_id"):
+            tracker.close_position_with_fill(
+                Fill(
+                    "m1",
+                    0.90,
+                    filled_quantity=30,
+                    settlement=self._settlement(),
+                ),
+                operation_id="caller-cannot-authorize-venue-truth",
+            )
+
+        assert tracker.balance == 960.0
+        assert tracker.open_positions()[0].quantity == 100.0
+
+    def test_modeled_fill_still_returns_float(self) -> None:
+        tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
+        self._open(tracker)
+
+        result = tracker.close_position_with_fill(
+            Fill("m1", 0.45, filled_quantity=30, fill_id="modeled-fill")
+        )
+
+        assert type(result) is float
+        assert result == pytest.approx(1.5)
