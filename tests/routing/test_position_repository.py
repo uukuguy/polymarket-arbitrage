@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
+import polyarb.routing.position_repository as repository_module
 
 from polyarb.routing.position_repository import (
     InMemoryPositionRepository,
@@ -107,6 +109,25 @@ def test_operation_id_cannot_be_reused_for_different_target() -> None:
         repository.apply("op-1", "close", "m2", lambda state: 0.0)
 
 
+@pytest.mark.parametrize("result", [True, False, 3.25, None])
+def test_in_memory_receipt_round_trips_identity_and_result(result) -> None:
+    repository = InMemoryPositionRepository(initial_balance=1000.0)
+
+    assert repository.get_receipt("unknown") is None
+    repository.apply("op-1", "close", "m1", lambda state: result)
+
+    receipt = repository.get_receipt("op-1")
+    assert receipt == repository_module.OperationReceipt(
+        operation_id="op-1",
+        operation_type="close",
+        target_id="m1",
+        result=result,
+    )
+    with pytest.raises(FrozenInstanceError):
+        receipt.target_id = "m2"
+    assert repository.get_receipt("op-1").target_id == "m1"
+
+
 def test_sqlite_instances_share_committed_account_and_positions(tmp_path) -> None:
     path = tmp_path / "positions.db"
     left = SQLitePositionRepository(path, initial_balance=1000.0)
@@ -136,6 +157,53 @@ def test_sqlite_duplicate_operation_returns_original_result(tmp_path) -> None:
     assert repository.apply("close:f1", "close", "m1", transition) == 5.0
     assert calls == 1
     assert repository.load().realized_pnl == 5.0
+
+
+@pytest.mark.parametrize("result", [True, False, 3.25, None])
+def test_sqlite_receipt_survives_restart_with_original_result_type(
+    tmp_path, result
+) -> None:
+    path = tmp_path / "positions.db"
+    repository = SQLitePositionRepository(path, initial_balance=1000.0)
+    repository.apply("op-1", "close", "m1", lambda state: result)
+
+    restarted = SQLitePositionRepository(path, initial_balance=1000.0)
+    receipt = restarted.get_receipt("op-1")
+
+    assert receipt == repository_module.OperationReceipt(
+        operation_id="op-1",
+        operation_type="close",
+        target_id="m1",
+        result=result,
+    )
+    assert type(receipt.result) is type(result)
+
+
+def test_sqlite_unknown_receipt_is_observational(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    repository = SQLitePositionRepository(path, initial_balance=1000.0)
+
+    assert repository.get_receipt("unknown") is None
+
+    with sqlite3.connect(path) as con:
+        operation_count = con.execute(
+            "SELECT COUNT(*) FROM m2_applied_operations"
+        ).fetchone()[0]
+    assert operation_count == 0
+
+
+def test_sqlite_receipt_lookup_propagates_storage_errors(tmp_path, monkeypatch) -> None:
+    repository = SQLitePositionRepository(
+        tmp_path / "positions.db", initial_balance=1000.0
+    )
+
+    def unavailable() -> sqlite3.Connection:
+        raise sqlite3.DatabaseError("storage unavailable")
+
+    monkeypatch.setattr(repository, "_connect", unavailable)
+
+    with pytest.raises(sqlite3.DatabaseError, match="storage unavailable"):
+        repository.get_receipt("op-1")
 
 
 def test_sqlite_apply_rolls_back_account_and_positions_on_exception(tmp_path) -> None:
