@@ -17,8 +17,6 @@ import pytest
 
 from polyarb.execution.engine import (
     ExecutionEngine,
-    ExecutionLegResult,
-    ExecutionResult,
     ExecutionStatus,
 )
 from polyarb.models.signal import (
@@ -50,7 +48,7 @@ def _make_decision(n_legs: int = 2, profit_abs: float = 5.0) -> RoutingDecision:
     plan = ExecutionPlan(
         signal_id="sig-1",
         legs=legs,
-        total_estimated_cost=sum(l.estimated_cost for l in legs),
+        total_estimated_cost=sum(leg.estimated_cost for leg in legs),
         profit_threshold_pct=1.0,
     )
     return RoutingDecision(
@@ -335,8 +333,8 @@ async def test_replaying_venue_fill_uses_immutable_fill_identity(
             ).fetchall()
         ]
     assert operation_ids == [
-        "close:sig-1:leg-0:fill:venue-fill-001",
         "open:sig-1:leg-0",
+        "venue-fill:venue-fill-001",
     ]
     assert "durable retry guarantees unavailable" not in caplog.text
 
@@ -491,7 +489,7 @@ async def test_stop_loss_event_surfaced_in_result():
     plan = ExecutionPlan(
         signal_id="sig-stop",
         legs=legs,
-        total_estimated_cost=sum(l.estimated_cost for l in legs),
+        total_estimated_cost=sum(leg.estimated_cost for leg in legs),
         profit_threshold_pct=1.0,
     )
     decision = RoutingDecision(

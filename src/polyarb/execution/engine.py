@@ -296,9 +296,7 @@ class ExecutionEngine:
                 return
             try:
                 if fill.fill_id:
-                    operation_id = (
-                        f"close:{signal_id}:{leg.leg_id}:fill:{fill.fill_id}"
-                    )
+                    operation_id = f"venue-fill:{fill.fill_id}"
                 else:
                     logger.warning(
                         "venue fill for leg %s has no fill_id; "

@@ -133,3 +133,30 @@ class Money:
         else:
             raise ValueError("side must be BUY or SELL")
         return cls.from_value(quantity.to_decimal() * delta)
+
+    @classmethod
+    def allocate(
+        cls,
+        total: Money,
+        part: Quantity,
+        whole: Quantity,
+    ) -> Money:
+        """Allocate exact cash by quantity; a final fill consumes the residual."""
+        if not isinstance(total, Money):
+            raise TypeError("allocation total must be Money")
+        if not isinstance(part, Quantity) or not isinstance(whole, Quantity):
+            raise TypeError("allocation quantities must be Quantity")
+        if whole.micros <= 0 or part.micros <= 0:
+            raise ValueError("allocation quantities must be positive")
+        if part.micros > whole.micros:
+            raise ValueError("allocation part cannot exceed whole")
+        if part == whole:
+            return total
+        allocated_micros = int(
+            (
+                Decimal(total.micros)
+                * Decimal(part.micros)
+                / Decimal(whole.micros)
+            ).to_integral_value(rounding=ROUND_HALF_EVEN)
+        )
+        return cls(allocated_micros)

@@ -448,6 +448,12 @@ class PositionTracker:
         position is open for `fill.market_id`, returns 0.0 and warns
         (callers can audit log this).
         """
+        effective_operation_id = (
+            f"venue-fill:{fill.fill_id}"
+            if fill.fill_id
+            else self._operation_id(operation_id, "close-fill", fill.market_id)
+        )
+
         def transition(state: PositionState) -> Money:
             pos = state.open_positions.get(fill.market_id)
             if pos is None:
@@ -456,29 +462,55 @@ class PositionTracker:
                     fill.market_id,
                 )
                 return Money(0)
-            if fill.filled_quantity_value != pos.quantity_value:
+            if fill.filled_quantity_value.micros <= 0:
                 raise ValueError(
-                    f"partial fill not supported (T5 scope): position stake "
-                    f"{pos.quantity} but fill quantity {fill.filled_quantity}"
+                    "fill quantity must be positive"
                 )
-            del state.open_positions[fill.market_id]
+            if fill.filled_quantity_value.micros > pos.quantity_value.micros:
+                raise ValueError(
+                    f"fill quantity {fill.filled_quantity} exceeds remaining "
+                    f"quantity {pos.quantity}"
+                )
+            is_partial = fill.filled_quantity_value != pos.quantity_value
+            if is_partial and not fill.fill_id:
+                raise ValueError("partial fill requires immutable fill_id")
+
+            allocated_cost = Money.allocate(
+                pos.cost_basis_money,
+                fill.filled_quantity_value,
+                pos.quantity_value,
+            )
             pos.current_price = fill.exit_price
-            pnl_money = pos.pnl_money
+            pnl_money = Money.pnl_for(
+                fill.filled_quantity_value,
+                pos.entry_price,
+                fill.exit_price,
+                pos.side,
+            )
             state.balance_money = (
-                state.balance_money + pos.cost_basis_money + pnl_money
+                state.balance_money + allocated_cost + pnl_money
             )
             state.realized_pnl_money = state.realized_pnl_money + pnl_money
+            if is_partial:
+                pos.quantity_value = (
+                    pos.quantity_value - fill.filled_quantity_value
+                )
+                pos.cost_basis_money = pos.cost_basis_money - allocated_cost
+            else:
+                del state.open_positions[fill.market_id]
             logger.info(
-                "Closed via fill: %s @ %.4f, size=%.2f, PnL=%.2f",
+                "Applied fill: %s @ %.4f, quantity=%.6f, remaining=%.6f, "
+                "PnL=%.2f",
                 fill.market_id,
                 fill.exit_price,
                 fill.filled_quantity,
+                pos.quantity if is_partial else 0.0,
                 pnl_money.to_float(),
             )
             return pnl_money
 
         result = self.repository.apply(
-            self._operation_id(operation_id, "close-fill", fill.market_id),
+            effective_operation_id,
             "close",
             fill.market_id,
             transition,
