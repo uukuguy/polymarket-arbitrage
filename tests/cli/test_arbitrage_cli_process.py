@@ -8,6 +8,45 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[2]
 
+_PHASE4_SCHEMA = """
+CREATE TABLE m2_account_state (
+    account_id TEXT PRIMARY KEY,
+    snapshot_balance REAL NOT NULL,
+    balance REAL NOT NULL,
+    realized_pnl REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE m2_open_positions (
+    market_id TEXT PRIMARY KEY,
+    condition_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    stake REAL NOT NULL,
+    entry_price REAL NOT NULL,
+    current_price REAL NOT NULL,
+    leg_id TEXT NOT NULL,
+    opened_at TEXT NOT NULL
+);
+CREATE TABLE m2_applied_operations (
+    operation_id TEXT PRIMARY KEY,
+    operation_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+"""
+
+
+def _create_phase4_account(path: Path) -> None:
+    with sqlite3.connect(path) as con:
+        con.executescript(_PHASE4_SCHEMA)
+        con.execute(
+            "INSERT INTO m2_account_state "
+            "(account_id, snapshot_balance, balance, realized_pnl, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("paper", 1000.0, 1000.0, 0.0, "2026-07-17T08:00:00Z"),
+        )
+
 
 def _cli(
     *args: str,
@@ -71,6 +110,7 @@ def test_run_status_close_status_across_four_processes(tmp_path) -> None:
 
 def test_close_receipt_recovers_lost_response_across_processes(tmp_path) -> None:
     path = tmp_path / "positions.db"
+    _create_phase4_account(path)
     run_args = (
         "run",
         "--mid",
@@ -134,6 +174,15 @@ def test_close_receipt_recovers_lost_response_across_processes(tmp_path) -> None
             "SELECT COUNT(*) FROM m2_applied_operations WHERE operation_id = ?",
             ("close-001",),
         ).fetchone()[0] == 1
+        account = con.execute(
+            "SELECT balance_micros, realized_pnl_micros FROM m2_account_state"
+        ).fetchone()
+        receipt_json = con.execute(
+            "SELECT result_json FROM m2_applied_operations WHERE operation_id = ?",
+            ("close-001",),
+        ).fetchone()[0]
+    assert account == (1_010_000_000, 10_000_000)
+    assert json.loads(receipt_json) == {"kind": "money", "micros": 10_000_000}
 
     conflict = _cli(
         "close",

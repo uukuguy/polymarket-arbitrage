@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
@@ -7,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 
 import polyarb.routing.position_repository as repository_module
+from polyarb.routing.money import Money
 from polyarb.routing.position_repository import (
     InMemoryPositionRepository,
     PositionState,
@@ -490,3 +492,85 @@ def test_sqlite_state_write_dual_writes_legacy_projection_from_micros(
             "FROM m2_account_state"
         ).fetchone()
     assert row == (666_666, -333_334, 0.666666, -0.333334)
+
+
+@pytest.mark.parametrize(
+    "repository_factory",
+    [
+        lambda path: InMemoryPositionRepository(initial_balance=1000.0),
+        lambda path: SQLitePositionRepository(path, initial_balance=1000.0),
+    ],
+)
+def test_money_receipt_round_trips_exact_value(repository_factory, tmp_path) -> None:
+    repository = repository_factory(tmp_path / "positions.db")
+    expected = Money.from_value("-0.000001")
+
+    assert repository.apply("close:exact", "close", "m1", lambda state: expected) == expected
+    assert repository.apply(
+        "close:exact",
+        "close",
+        "m1",
+        lambda state: pytest.fail("replay invoked transition"),
+    ) == expected
+    assert repository.get_receipt("close:exact").result == expected
+
+
+def test_sqlite_money_receipt_uses_tagged_micro_json(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    repository = SQLitePositionRepository(path, initial_balance=1000.0)
+    repository.apply(
+        "close:exact",
+        "close",
+        "m1",
+        lambda state: Money.from_value("10"),
+    )
+
+    with sqlite3.connect(path) as con:
+        raw = con.execute(
+            "SELECT result_json FROM m2_applied_operations WHERE operation_id = ?",
+            ("close:exact",),
+        ).fetchone()[0]
+    assert json.loads(raw) == {"kind": "money", "micros": 10_000_000}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"kind": "unknown", "micros": 1},
+        {"kind": "money", "micros": True},
+        {"kind": "money", "micros": 2**63},
+        {"kind": "money", "micros": 1, "extra": "forged"},
+        1,
+        float("nan"),
+    ],
+)
+def test_sqlite_malformed_or_ambiguous_receipt_fails_closed(
+    tmp_path, payload
+) -> None:
+    path = tmp_path / "positions.db"
+    repository = SQLitePositionRepository(path, initial_balance=1000.0)
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "INSERT INTO m2_applied_operations "
+            "(operation_id, operation_type, target_id, result_json, applied_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("corrupt", "close", "m1", json.dumps(payload), "2026-07-17T08:00:00Z"),
+        )
+
+    with pytest.raises(RepositoryStateError, match="receipt"):
+        repository.get_receipt("corrupt")
+
+
+def test_sqlite_invalid_receipt_json_fails_as_repository_state_error(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    repository = SQLitePositionRepository(path, initial_balance=1000.0)
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "INSERT INTO m2_applied_operations "
+            "(operation_id, operation_type, target_id, result_json, applied_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("corrupt", "close", "m1", "{", "2026-07-17T08:00:00Z"),
+        )
+
+    with pytest.raises(RepositoryStateError, match="receipt"):
+        repository.get_receipt("corrupt")

@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 
 from polyarb.routing.config import PositionConfig
+from polyarb.routing.money import Money
 from polyarb.routing.position_repository import SQLitePositionRepository
 from polyarb.routing.position_tracker import (
     Fill,
@@ -326,7 +327,7 @@ class TestRepositoryBackedTracker:
         assert receipt.operation_id == "close:f1"
         assert receipt.operation_type == "close"
         assert receipt.target_id == "m1"
-        assert receipt.result == pytest.approx(10.0)
+        assert receipt.result == Money.from_value("10")
         assert tracker.operation_receipt("unknown") is None
 
     def test_rejected_open_and_partial_fill_leave_durable_state_unchanged(
