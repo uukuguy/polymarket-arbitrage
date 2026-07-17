@@ -21,3 +21,12 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-002
+  description: Caller-supplied immutable close identities make committed-but-unacknowledged retries observable and idempotent
+  parent_paradigm: durable-operation-receipts
+  expected_lift: +100 close-retry recovery points
+  cost_h: 1.5
+  ranking: 0.9
+  status: pending
+  created_at: '2026-07-17T10:30:00+08:00'
+  results: []

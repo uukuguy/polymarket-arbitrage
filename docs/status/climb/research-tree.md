@@ -5,7 +5,7 @@
 ## Session
 
 - Last cycle: 1
-- Next action: rank next pending hypothesis
+- Next action: design H-002 durable close receipt contract
 
 ## In flight
 
@@ -14,6 +14,7 @@
 ## Hypothesis pool
 
 - **H-001** [confirmed]: Transactional SQLite repository prevents cross-process state loss
+- **H-002** [pending]: Caller-supplied immutable close identities make committed-but-unacknowledged retries observable and idempotent
 
 ## Runs
 

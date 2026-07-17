@@ -3,11 +3,10 @@ from __future__ import annotations
 import csv
 import json
 import os
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import yaml
-
 
 ROOT = Path(__file__).resolve().parents[2]
 STATE_DIR = ROOT / "docs/status/climb"
@@ -64,19 +63,21 @@ def test_state_files_exist_and_runs_header_matches_contract() -> None:
         ]
 
 
-def test_initial_state_is_resumable_and_best_effort() -> None:
+def test_tracked_state_is_resumable_and_best_effort() -> None:
     hypotheses = yaml.safe_load((STATE_DIR / "hypotheses.yaml").read_text())
     session = json.loads((STATE_DIR / "session-state.json").read_text())
     target = (STATE_DIR / "session-target.md").read_text()
+    with (STATE_DIR / "runs.csv").open(newline="") as handle:
+        runs = list(csv.DictReader(handle))
 
-    assert hypotheses["hypotheses"][0]["id"] == "H-001"
-    assert hypotheses["hypotheses"][0]["status"] == "pending"
-    assert session == {
-        "session": "2026-07-17-m2-position-persistence",
-        "last_cycle": 0,
-        "in_flight": None,
-        "next_action": "run H-001",
-    }
+    by_id = {item["id"]: item for item in hypotheses["hypotheses"]}
+    assert by_id["H-001"]["status"] == "confirmed"
+    assert by_id["H-001"]["results"]
+    assert any(item["status"] == "pending" for item in by_id.values())
+    assert session["session"] == "2026-07-17-m2-position-persistence"
+    assert session["last_cycle"] == len(runs)
+    assert session["in_flight"] is None
+    assert session["next_action"]
     assert "target_value:" in target
 
 
