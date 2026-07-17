@@ -1,7 +1,7 @@
 ---
 workstream: m2-combinatorial
 created: 2026-04-28
-last_updated: 2026-06-07
+last_updated: 2026-07-17
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
@@ -9,8 +9,8 @@ last_updated: 2026-06-07
 ## Current Position
 **Status:** Phase 2 ✅ CLOSED — 全 8 task (T1-T8) 完成
 **Current Phase:** Phase 2 — 套利执行引擎（02-arbitrage-engine）
-**Last Activity:** 2026-06-07
-**Last Activity Description:** T6 + T8 落地，Phase 2 收口。T6: `routing/config.py` plain dataclass → pydantic-settings BaseSettings with POLYARB_ prefix (16 tests)。T8: 25 E2E chaos tests — full lifecycle (COMPLETED/PARTIAL/ABORTED/FAILED) + retry exhaust/succeed + stop-loss trigger chain + paper-close lifecycle + fill-provider close-path + below-threshold gate + multi-venue routing。m2 test 63 → 104 green (+41)。
+**Last Activity:** 2026-07-17
+**Last Activity Description:** 修复 M2 ROADMAP 缺失 Phase 2 的元数据漂移；同时闭环 Claude/GSD worktree 生命周期泄漏，安全回收 21 个 stale worktree（7.4GB → 0B），未改变 Phase 2 套利引擎行为。
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 - ✅ **T1** signal & execution models — `models/signal.py` + `models/slippage.py` (commit `08a13d3`)
@@ -28,10 +28,10 @@ last_updated: 2026-06-07
 
 ## Session Continuity
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 2 closure is now recorded consistently in STATE, SUMMARY, and ROADMAP. Worktree lifecycle repair is in progress; Phase 3 has not been created.
+**Stopped At:** Phase 2 closure is recorded consistently in STATE, SUMMARY, and ROADMAP. Worktree lifecycle repair complete; Phase 3 has not been created.
 **Resume File:** None
 
-## Next Action (2026-06-07)
+## Next Action (2026-07-17)
 
 Phase 2 闭环后的选项:
 

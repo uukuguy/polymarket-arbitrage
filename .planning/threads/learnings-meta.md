@@ -406,3 +406,22 @@ chaos injection 不是"演习"，是"对抗 SUMMARY 自我欺骗"的唯一手段
 3. **未来加 hook**：考虑给 `polyarb.observability.sentry` 加一个 `assert_initialized()` helper，在 `capture_message` 调用前先 assert，没 init 就 raise。这样 Makefile target 漏 init 时会**红字 error**而不是**静默成功**
 
 **修法（本会话）**：Makefile `alerts-test` target 改为先调 `init_sentry(s)`，并加注释说明这个 contract。详见 commit (2026-05-20)。
+
+---
+
+## 2026-07-17 — Agent worktree 清理必须是 scoped + loud + disposition-closed
+
+21 个 Claude agent worktree 累积到 7.4GB。不是 Git prune 失效，而是生命周期协议同时违反三条纪律：
+
+1. **Scope 错**：post-wave 清理枚举所有 linked worktree，而不是 current execution 创建的集合。
+2. **Git 语义错**：locked worktree 需要 `git worktree remove --force --force`，单 `--force` 必然失败。
+3. **失败静默**：`2>/dev/null || true` 把资源泄漏伪装成 cleanup success。
+
+闭环模式：
+
+- spawn 前 snapshot worktree registry，结束后只处理集合差；
+- removal 失败必须 non-zero；branch 只能在 worktree removal 成功且 ancestry 已证后自动删；
+- 跨会话 reaper 默认 dry-run，PID live / malformed lock / dirty / path 越界一律 BLOCK；
+- non-ancestor branch 不能只“保留以后看”，必须映射 plan 后显式 recovery 或 discard，否则仍是知识孤岛。
+
+本次 4 条 non-ancestor branch 均为已完成 plan 的重复 executor lineage；审计后显式 discard。最终 registry only-main、临时 branch 0、占用 0B。

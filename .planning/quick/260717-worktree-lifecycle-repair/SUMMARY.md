@@ -1,7 +1,8 @@
 # Quick Task 260717 — Worktree Lifecycle Repair Summary
 
-> **Status:** IN PROGRESS
+> **Status:** ✅ COMPLETE
 > **Started:** 2026-07-17
+> **Completed:** 2026-07-17
 
 ## Root cause
 
@@ -30,5 +31,38 @@ These are duplicate executor lineages for completed plans, not unplanned work. F
 - [x] Safe reaper RED/GREEN — 12 tests pass; dry-run default, PID/dirty/path/ancestry gates, explicit audited discard
 - [x] Makefile operational surface — contract RED observed, target/help contract now GREEN (commit deferred with patcher so no dangling target)
 - [x] GSD workflow patcher RED/GREEN and installed patch — 5 tests pass; actual-format regression added after shape gate caught execute-phase indentation; installed execute/quick both CURRENT
-- [ ] 21-worktree cleanup
-- [ ] Final verification and JOURNAL closure
+- [x] 21-worktree cleanup — 17 ancestry-proven branches + 4 explicitly audited duplicate lineages removed
+- [x] Final verification and JOURNAL closure
+
+## Delivered
+
+- `scripts/cleanup_agent_worktrees.py` — Git-registry-driven, dry-run-first cleanup with strict path, PID, dirty-state, ancestry, and explicit-disposition gates.
+- `make cleanup-worktrees [apply=1] [discard_unmerged="..."]` — unified operational entry point.
+- `scripts/patch_gsd_worktree_cleanup.py` — idempotent, shape-checked installed-workflow patcher.
+- `make patch-gsd-worktree-cleanup [check=1]` — apply/check entry point.
+- Installed GSD `execute-phase.md` and `quick.md` now snapshot pre-execution worktrees, process only newly-created paths, use double-force locked removal, report failures, and gate branch deletion on ancestry.
+- M2 ROADMAP now records completed Phase 2 consistently with STATE and SUMMARY.
+
+## Verification evidence
+
+- `make planning-status` — exit 0, zero shipped-plan drift.
+- Reaper tests — 12 passed, including real temporary Git repositories/worktrees.
+- GSD patcher tests — 5 passed, including idempotence and unknown-upstream refusal.
+- Full Makefile contract suite — passed.
+- M2 routing/execution/arbitrage CLI regression suite — passed.
+- `make patch-gsd-worktree-cleanup check=1` — both installed workflows `CURRENT`.
+- `git worktree list --porcelain` — main worktree only.
+- `git for-each-ref ... refs/heads/worktree-agent-*` — no remaining temporary branches.
+- `.claude/worktrees` — 7.4 GB before, 0 B after.
+
+## Commits
+
+- `56dabdd` — approved repair design
+- `ab86d09` — implementation plan
+- `37c1da5` — M2 ROADMAP restoration + quick task anchors
+- `6118171` — safe stale-worktree reaper
+- `c1dcbac` — GSD lifecycle patcher + Makefile surfaces
+
+## Deviation caught by the safety gate
+
+The first installed-workflow patch attempt was refused because the audited test fixture omitted the three-space Markdown indentation used by the real `execute-phase.md` code fence. No installed file changed. A RED regression fixture was added, the patcher learned the execute/quick formatting distinction, all tests passed, and only then were both installed workflows patched.

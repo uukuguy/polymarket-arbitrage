@@ -3252,3 +3252,44 @@ make eval-arb mid=0.45 stake=1000            # m2 pipeline 可跑
 - (a) 真实 venue adapter — `leg_executor` + `fill_provider` 接入 py-clob-client (阻塞: Polymarket 账户)
 - (b) T5+1 持久化 — SQLite/Supabase 跨进程 position state
 - (c) 跨线 — m1 Phase 05 D-13 / m5 polywatch / m1 deploy + soak
+
+---
+
+## SESSION 39 — 2026-07-17 (resume only: m2 Phase 2 closure restored)
+
+### 恢复结论
+
+- Active workstream 按最新 `[NEXT]` 恢复为 `m2-combinatorial`。
+- Phase 2 已 CLOSED：T1-T8 全部完成，`02-1-SUMMARY.md` 在位，m2 基线为 104 tests green。
+- `make planning-status`：zero drift；M1 `05-06` 是 NOT-STARTED，不是已发货无 SUMMARY。
+- `core.hooksPath` 从 `.git/hooks` 修正为 `.githooks`。
+- 手工恢复检查发现 M2 元数据漂移：`STATE.md`/SUMMARY 记录 Phase 2 完成，但 `ROADMAP.md` 仍是“等待启动”，尚未登记 Phase 2。推进新工作前先修 ROADMAP。
+- 工作树原有 `CLAUDE.md` type change 与 untracked `AGENTS.md` 保留，未改动。
+
+### [NEXT]
+
+先用 `$gsd-quick` 修复 M2 ROADMAP：补登记已完成的 Phase 2，并把下一条有明确验收口径的能力定义为 Phase 3（推荐：position persistence，使 `run/status/close` 跨进程可用）。ROADMAP 修复后再 `$gsd-discuss-phase 3 --ws m2-combinatorial`。
+
+### SESSION 39 continuation — M2 ROADMAP + worktree lifecycle repair COMPLETE
+
+**M2 元数据修复**:
+- `m2-combinatorial/ROADMAP.md` 已补登记 Phase 2 `02-arbitrage-engine` COMPLETE；STATE / ROADMAP / `02-1-SUMMARY.md` 三者一致。
+- 未擅自创建 Phase 3；position persistence 仍需独立 discuss/plan。
+
+**worktree leak 根因与修复**:
+- 发现 21 个 `.claude/worktrees/agent-*`，共 7.4GB；lock 记录的 PID 全死亡且无 open-file holder。
+- GSD `execute-phase` / `quick` 原逻辑扫全部 worktree，并用单 `--force` 删除 locked worktree（Git 要求双 `--force`），错误被 `2>/dev/null || true` 吞掉。
+- 新增 `make cleanup-worktrees`：默认 dry-run；严格校验 repo path / lock PID / dirty / branch ancestry；non-ancestor 必须显式 `discard_unmerged=`。
+- 新增 `make patch-gsd-worktree-cleanup`：idempotent + upstream shape gate；已 patch 本机 GSD execute/quick，只处理本 execution 新建 worktree，删除失败显式 non-zero。
+- 17 条 branch 由 ancestor 证明已合 main；4 条 non-ancestor 分别映射到已完成 plan `03.1-02` / `03.1-04` / `03.1-06` / `03-01`，经 SUMMARY + main commits + 功能面审计后显式 discard，不留分支孤岛。
+
+**验证**:
+- reaper 12 tests + patcher 5 tests + full Makefile contract suite：green。
+- M2 routing/execution/arbitrage CLI regression suite：green。
+- `make planning-status`：zero drift。
+- `git worktree list`：only main；`worktree-agent-*` branches：0；`.claude/worktrees`：**7.4GB → 0B**。
+- installed GSD workflow check：execute-phase / quick 均 `CURRENT`。
+
+**commits**: `56dabdd` / `ab86d09` / `37c1da5` / `6118171` / `c1dcbac`，最终 planning closure commit 随后补。
+
+[NEXT] 先 `/gsd-resume-work --ws m2-combinatorial`，然后 `$gsd-discuss-phase 3 --ws m2-combinatorial`，推荐 Phase 3 = position persistence，使 `run/status/close` 跨进程可用。
