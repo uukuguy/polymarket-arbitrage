@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from threading import Event, Thread
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
@@ -766,3 +767,241 @@ def test_sqlite_invalid_receipt_json_fails_as_repository_state_error(tmp_path) -
 
     with pytest.raises(RepositoryStateError, match="receipt"):
         repository.get_receipt("corrupt")
+
+
+class TestVenueSettlementReceiptAndFingerprint:
+    @staticmethod
+    def _settlement_receipt():
+        return repository_module.SettlementReceipt(
+            gross_cash=Money.from_value("13.80"),
+            fee=Money.from_value("0.30"),
+            net_cash=Money.from_value("13.50"),
+            realized_pnl=Money.from_value("1.50"),
+        )
+
+    @pytest.mark.parametrize(
+        "repository_factory",
+        [
+            lambda path: InMemoryPositionRepository(initial_balance=1000.0),
+            lambda path: SQLitePositionRepository(path, initial_balance=1000.0),
+        ],
+    )
+    def test_structured_settlement_receipt_replays_exactly(
+        self, repository_factory, tmp_path
+    ) -> None:
+        repository = repository_factory(tmp_path / "positions.db")
+        expected = self._settlement_receipt()
+
+        result = repository.apply(
+            "venue-fill:trade-1",
+            "close",
+            "m1",
+            lambda state: expected,
+            request_fingerprint="settlement:v1:one",
+        )
+        replay = repository.apply(
+            "venue-fill:trade-1",
+            "close",
+            "m1",
+            lambda state: pytest.fail("replay invoked transition"),
+            request_fingerprint="settlement:v1:one",
+        )
+
+        assert result == replay == expected
+        receipt = repository.get_receipt("venue-fill:trade-1")
+        assert receipt.result == expected
+        assert receipt.request_fingerprint == "settlement:v1:one"
+
+    def test_sqlite_settlement_receipt_uses_exact_tagged_micros(self, tmp_path) -> None:
+        path = tmp_path / "positions.db"
+        repository = SQLitePositionRepository(path, initial_balance=1000.0)
+        repository.apply(
+            "venue-fill:trade-1",
+            "close",
+            "m1",
+            lambda state: self._settlement_receipt(),
+            request_fingerprint="settlement:v1:one",
+        )
+
+        with sqlite3.connect(path) as con:
+            result_json, fingerprint = con.execute(
+                "SELECT result_json, request_fingerprint "
+                "FROM m2_applied_operations WHERE operation_id = ?",
+                ("venue-fill:trade-1",),
+            ).fetchone()
+        assert json.loads(result_json) == {
+            "kind": "settlement",
+            "source": "venue-confirmed",
+            "gross_micros": 13_800_000,
+            "fee_micros": 300_000,
+            "net_micros": 13_500_000,
+            "pnl_micros": 1_500_000,
+        }
+        assert fingerprint == "settlement:v1:one"
+
+    @pytest.mark.parametrize(
+        "stored,supplied,should_replay",
+        [
+            ("settlement:v1:same", "settlement:v1:same", True),
+            ("", "", True),
+            ("", "settlement:v1:new", False),
+            ("settlement:v1:old", "", False),
+            ("settlement:v1:old", "settlement:v1:new", False),
+        ],
+    )
+    def test_fingerprint_replay_matrix(
+        self, tmp_path, stored: str, supplied: str, should_replay: bool
+    ) -> None:
+        repository = SQLitePositionRepository(
+            tmp_path / f"{len(stored)}-{len(supplied)}.db",
+            initial_balance=1000.0,
+        )
+        repository.apply(
+            "venue-fill:matrix",
+            "close",
+            "m1",
+            lambda state: Money.from_value("1"),
+            request_fingerprint=stored,
+        )
+
+        if should_replay:
+            assert repository.apply(
+                "venue-fill:matrix",
+                "close",
+                "m1",
+                lambda state: pytest.fail("replay invoked transition"),
+                request_fingerprint=supplied,
+            ) == Money.from_value("1")
+        else:
+            with pytest.raises(ValueError, match="operation identity conflict"):
+                repository.apply(
+                    "venue-fill:matrix",
+                    "close",
+                    "m1",
+                    lambda state: pytest.fail("conflict invoked transition"),
+                    request_fingerprint=supplied,
+                )
+
+    def test_conflicting_overlapping_writer_serializes_before_replay(
+        self, tmp_path
+    ) -> None:
+        path = tmp_path / "positions.db"
+        writer_a = SQLitePositionRepository(path, initial_balance=1000.0)
+        writer_b = SQLitePositionRepository(path, initial_balance=1000.0)
+        entered_transition = Event()
+        release_writer = Event()
+        failures: list[BaseException] = []
+
+        def transition_a(state: PositionState) -> Money:
+            state.balance_money = state.balance_money - Money.from_value("1")
+            entered_transition.set()
+            assert release_writer.wait(timeout=5)
+            return Money.from_value("1")
+
+        def apply_a() -> None:
+            writer_a.apply(
+                "venue-fill:race",
+                "close",
+                "m1",
+                transition_a,
+                request_fingerprint="settlement:v1:a",
+            )
+
+        def apply_b() -> None:
+            try:
+                writer_b.apply(
+                    "venue-fill:race",
+                    "close",
+                    "m1",
+                    lambda state: pytest.fail("conflict invoked transition"),
+                    request_fingerprint="settlement:v1:b",
+                )
+            except BaseException as exc:  # captured for main-thread assertions
+                failures.append(exc)
+
+        first = Thread(target=apply_a)
+        second = Thread(target=apply_b)
+        first.start()
+        assert entered_transition.wait(timeout=5)
+        second.start()
+        release_writer.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+        assert not first.is_alive() and not second.is_alive()
+        assert len(failures) == 1
+        assert isinstance(failures[0], ValueError)
+        assert "operation identity conflict" in str(failures[0])
+        assert writer_a.load().balance == 999.0
+        with sqlite3.connect(path) as con:
+            row = con.execute(
+                "SELECT COUNT(*), request_fingerprint "
+                "FROM m2_applied_operations WHERE operation_id = ?",
+                ("venue-fill:race",),
+            ).fetchone()
+        assert row == (1, "settlement:v1:a")
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {
+                "kind": "settlement",
+                "source": "venue-confirmed",
+                "gross_micros": 10,
+                "fee_micros": 2,
+                "net_micros": 9,
+                "pnl_micros": 1,
+            },
+            {
+                "kind": "settlement",
+                "source": "venue-confirmed",
+                "gross_micros": True,
+                "fee_micros": 0,
+                "net_micros": 1,
+                "pnl_micros": 1,
+            },
+            {
+                "kind": "settlement",
+                "source": "venue-confirmed",
+                "gross_micros": 1,
+                "fee_micros": 0,
+                "net_micros": 1,
+                "pnl_micros": 1,
+                "extra": "forged",
+            },
+        ],
+    )
+    def test_corrupt_settlement_receipt_fails_closed(self, tmp_path, payload) -> None:
+        path = tmp_path / "positions.db"
+        repository = SQLitePositionRepository(path, initial_balance=1000.0)
+        with sqlite3.connect(path) as con:
+            con.execute(
+                "INSERT INTO m2_applied_operations "
+                "(operation_id, operation_type, target_id, result_json, applied_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("corrupt-settlement", "close", "m1", json.dumps(payload), "now"),
+            )
+
+        with pytest.raises(RepositoryStateError, match="settlement receipt"):
+            repository.get_receipt("corrupt-settlement")
+
+    def test_phase7_database_adds_empty_fingerprint_without_changing_receipt(
+        self, tmp_path
+    ) -> None:
+        path = tmp_path / "positions.db"
+        _create_phase5_database(path)
+
+        repository = SQLitePositionRepository(path, initial_balance=1000.0)
+
+        receipt = repository.get_receipt("open:m1")
+        assert receipt is not None
+        assert receipt.result is True
+        assert receipt.request_fingerprint == ""
+        with sqlite3.connect(path) as con:
+            column = next(
+                row for row in con.execute("PRAGMA table_info(m2_applied_operations)")
+                if row[1] == "request_fingerprint"
+            )
+        assert column[2].upper() == "TEXT"
+        assert column[3] == 1
+        assert column[4] == "''"
