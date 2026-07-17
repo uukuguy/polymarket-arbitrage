@@ -29,15 +29,14 @@ Source: RESEARCH.md §Architecture Patterns §2.5, CONTEXT.md D-13
 from __future__ import annotations
 
 import asyncio
-import time
-from enum import Enum
+from enum import StrEnum
 
 from loguru import logger
 
 from polyarb.validator.category import SnapshotStatus
 
 
-class SchedulerState(str, Enum):
+class SchedulerState(StrEnum):
     """Scheduler state: RUNNING (normal) or PAUSED (5x consecutive failures)."""
 
     RUNNING = "RUNNING"
@@ -74,9 +73,14 @@ class SnapshotScheduler:
             if row:
                 self._failure_counter = int(row.get("failure_counter", 0))
                 state_str = row.get("state", "RUNNING").upper()
-                self.state = SchedulerState(state_str) if state_str in SchedulerState.__members__ else SchedulerState.RUNNING
+                self.state = (
+                    SchedulerState(state_str)
+                    if state_str in SchedulerState.__members__
+                    else SchedulerState.RUNNING
+                )
                 logger.debug(
-                    f"scheduler state restored: state={self.state} failure_counter={self._failure_counter}"
+                    f"scheduler state restored: state={self.state} "
+                    f"failure_counter={self._failure_counter}"
                 )
         except Exception:
             logger.warning("could not restore scheduler state from DB, starting fresh")
@@ -97,7 +101,6 @@ class SnapshotScheduler:
         This method is injectable — tests replace it with AsyncMock.
         Real prod wires it to the orchestrator in Plan 04.
         """
-        from polyarb.config import load_settings
         from polyarb.snapshot.orchestrator import run_snapshot
 
         # Result object with status attribute (matches SnapshotResult interface)
@@ -168,6 +171,21 @@ class SnapshotScheduler:
                     await _alerts.send_heartbeat_ok(self._settings)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"send_heartbeat_ok failed: {e!r}")
+                try:
+                    deleted, _ = await asyncio.to_thread(
+                        self._sqlite_store.purge_old_snapshots,
+                        older_than_days=7,
+                        keep_last=5,
+                        parquet_root=self._settings.parquet_root,
+                    )
+                    if deleted:
+                        logger.info(
+                            f"snapshot retention deleted {deleted} expired snapshots"
+                        )
+                except Exception as e:  # noqa: BLE001
+                    # Retention is fail-soft relative to a valid fresh snapshot,
+                    # but its failure remains visible in production logs.
+                    logger.warning(f"snapshot retention failed: {e!r}")
             else:
                 # FAILED status
                 self._failure_counter += 1
@@ -232,7 +250,7 @@ class SnapshotScheduler:
                 # stop_event was set during delay — exit immediately
                 logger.info("scheduler: stop_event during startup delay, exiting")
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass  # normal: 10s elapsed, proceed to first tick
 
             while not stop_event.is_set():
@@ -249,7 +267,7 @@ class SnapshotScheduler:
                         await asyncio.wait_for(stop_event.wait(), timeout=step)
                         # stop_event fired during the wait — exit inner loop
                         break
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         elapsed += step
         except asyncio.CancelledError:
             # F-04: graceful cancellation path. main.py may cancel this task

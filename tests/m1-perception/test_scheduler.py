@@ -12,7 +12,6 @@ FAILURE_THRESHOLD 3 → 5 to absorb DNS jitter via tenacity retry):
 """
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,7 +20,6 @@ import pytest
 
 from polyarb.daemon.scheduler import SchedulerState, SnapshotScheduler
 from polyarb.validator.category import SnapshotStatus
-
 
 # ---------------------------------------------------------------------------
 # scheduler_interval_s configurability (Inj 2 P0 fix, 2026-05-20)
@@ -209,6 +207,32 @@ async def test_successful_tick_calls_heartbeat_ok(
     with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()) as hb_mock:
         await scheduler._tick()
         hb_mock.assert_called_once_with(daemon_settings_for_test)
+
+
+@pytest.mark.asyncio
+async def test_successful_tick_purges_expired_snapshots_on_attached_store(
+    daemon_settings_for_test: Any,
+) -> None:
+    """Retention must run in the app process that owns the mounted volume."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    purge = MagicMock(return_value=(0, []))
+    store.purge_old_snapshots = purge  # type: ignore[method-assign]
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test, sqlite_store=store
+    )
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK))
+
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()):
+        await scheduler._tick()
+
+    purge.assert_called_once_with(
+        older_than_days=7,
+        keep_last=5,
+        parquet_root=daemon_settings_for_test.parquet_root,
+    )
 
 
 @pytest.mark.asyncio

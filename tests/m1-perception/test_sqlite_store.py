@@ -85,6 +85,55 @@ def test_init_schema_creates_three_tables(store: SQLiteStore) -> None:
         con.close()
 
 
+def test_streaming_disk_full_preserves_original_error_when_sqlite_auto_rolls_back(
+    store: SQLiteStore, monkeypatch
+) -> None:
+    """A failed ROLLBACK must never mask the actionable disk-full cause."""
+    real_connect = sqlite3.connect
+
+    class _DiskFullProxy:
+        def __init__(self, real_con):
+            self._real = real_con
+
+        def execute(self, sql, *args, **kwargs):
+            normalized = sql.strip().upper() if isinstance(sql, str) else ""
+            if normalized == "DELETE FROM MARKETS":
+                self._real.execute("ROLLBACK")
+                raise sqlite3.OperationalError("database or disk is full")
+            return self._real.execute(sql, *args, **kwargs)
+
+        def close(self):
+            return self._real.close()
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    wrapped = False
+
+    def _connect_proxy(*args, **kwargs):
+        nonlocal wrapped
+        connection = real_connect(*args, **kwargs)
+        if kwargs.get("isolation_level", "deferred") is None and not wrapped:
+            wrapped = True
+            return _DiskFullProxy(connection)
+        return connection
+
+    monkeypatch.setattr(
+        "polyarb.storage.sqlite_store.sqlite3.connect", _connect_proxy
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="database or disk is full"):
+        store.write_snapshot_streaming(
+            taken_at_ms=90,
+            finished_at_ms=100,
+            mode="subset",
+            parquet_path="disk-full.parquet",
+            is_valid=True,
+            market_rows=[],
+            issues=[],
+        )
+
+
 def test_init_schema_idempotent(tmp_path: Path) -> None:
     s = SQLiteStore(tmp_path / "t.db")
     s.init_schema()
@@ -494,9 +543,9 @@ def test_write_snapshot_streaming_atomicity_on_commit_failure(
     bomb_holder = {}
 
     def _connect_proxy(*args, **kwargs):
-        # Only intercept writes against our test DB; allow other ad-hoc connects (read-only paths) to pass through.
+        # Intercept writes against our test DB; allow ad-hoc readers through.
         real_con = real_connect(*args, **kwargs)
-        # Only wrap the first WRITE connection for this test (isolation_level=None signals writer in our store)
+        # isolation_level=None identifies the store's explicit writer.
         if kwargs.get("isolation_level", "deferred") is None and "bomb" not in bomb_holder:
             bomb = _CommitBomb(real_con)
             bomb_holder["bomb"] = bomb

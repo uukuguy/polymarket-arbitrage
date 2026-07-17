@@ -14,8 +14,8 @@ Design notes (anti-patterns avoided):
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from loguru import logger
 
@@ -38,6 +38,17 @@ _VALID_MODES = ("subset", "full")
 _BOOL_COLUMNS = ("active", "closed", "neg_risk", "incomplete")
 # events table also has bool fields stored as INTEGER 0/1.
 _EVENT_BOOL_COLUMNS = ("active", "closed")
+
+
+def _rollback_without_masking(con: object) -> None:
+    """Best-effort rollback while preserving the exception that caused it."""
+    try:
+        con.execute("ROLLBACK")  # type: ignore[attr-defined]
+    except sqlite3.Error as rollback_error:
+        logger.warning(
+            "SQLite rollback was already unavailable after the original failure: "
+            f"{rollback_error}"
+        )
 
 
 def _row_to_tuple(row: dict, snapshot_id: int) -> tuple:
@@ -248,7 +259,7 @@ class SQLiteStore:
 
             con.execute("COMMIT")
         except Exception:
-            con.execute("ROLLBACK")
+            _rollback_without_masking(con)
             logger.exception("SQLite write_snapshot rolled back")
             raise
         finally:
@@ -388,7 +399,7 @@ class SQLiteStore:
 
             con.execute("COMMIT")
         except Exception:
-            con.execute("ROLLBACK")
+            _rollback_without_masking(con)
             logger.exception("SQLite write_snapshot_streaming rolled back")
             raise
         finally:
@@ -739,7 +750,7 @@ class SQLiteStore:
                 )
                 con.execute("COMMIT")
             except Exception:
-                con.execute("ROLLBACK")
+                _rollback_without_masking(con)
                 logger.exception("purge_old_snapshots rolled back")
                 raise
         finally:
