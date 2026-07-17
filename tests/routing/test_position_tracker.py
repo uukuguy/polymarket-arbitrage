@@ -298,6 +298,28 @@ class TestRepositoryBackedTracker:
         assert tracker.balance == pytest.approx(1010.0)
         assert tracker.total_realized_pnl == pytest.approx(10.0)
 
+    def test_tracker_exposes_committed_close_receipt(self, tmp_path):
+        tracker = PositionTracker(
+            repository=SQLitePositionRepository(
+                tmp_path / "positions.db", initial_balance=1000.0
+            )
+        )
+        tracker.open_position(
+            "m1", "c1", "BUY", "YES", 100.0, 0.4, operation_id="open:m1"
+        )
+        tracker.close_position_with_fill(
+            Fill("m1", 0.5, 100.0), operation_id="close:f1"
+        )
+
+        receipt = tracker.operation_receipt("close:f1")
+
+        assert receipt is not None
+        assert receipt.operation_id == "close:f1"
+        assert receipt.operation_type == "close"
+        assert receipt.target_id == "m1"
+        assert receipt.result == pytest.approx(10.0)
+        assert tracker.operation_receipt("unknown") is None
+
     def test_rejected_open_and_partial_fill_leave_durable_state_unchanged(
         self, tmp_path
     ):

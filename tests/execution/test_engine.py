@@ -300,6 +300,75 @@ async def test_replaying_paper_close_reuses_open_and_close_operations(tmp_path):
     assert count == 2
 
 
+@pytest.mark.asyncio
+async def test_replaying_venue_fill_uses_immutable_fill_identity(
+    tmp_path, caplog
+):
+    from polyarb.routing.position_tracker import Fill
+
+    path = tmp_path / "positions.db"
+    tracker = PositionTracker(
+        repository=SQLitePositionRepository(path, initial_balance=1000.0)
+    )
+
+    async def fill_provider(leg: ExecutionLeg) -> Fill:
+        return Fill(
+            market_id=leg.asset,
+            exit_price=0.525,
+            filled_size=leg.size,
+            fill_id="venue-fill-001",
+        )
+
+    engine = ExecutionEngine(tracker=tracker, fill_provider=fill_provider)
+    decision = _make_decision(n_legs=1)
+
+    await engine.execute(decision)
+    await engine.execute(decision)
+
+    assert tracker.balance == pytest.approx(1002.5)
+    assert tracker.total_realized_pnl == pytest.approx(2.5)
+    with sqlite3.connect(path) as con:
+        operation_ids = [
+            row[0]
+            for row in con.execute(
+                "SELECT operation_id FROM m2_applied_operations ORDER BY operation_id"
+            ).fetchall()
+        ]
+    assert operation_ids == [
+        "close:sig-1:leg-0:fill:venue-fill-001",
+        "open:sig-1:leg-0",
+    ]
+    assert "durable retry guarantees unavailable" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_venue_fill_without_fill_id_warns_and_uses_legacy_identity(
+    tmp_path, caplog
+):
+    from polyarb.routing.position_tracker import Fill
+
+    path = tmp_path / "positions.db"
+    tracker = PositionTracker(
+        repository=SQLitePositionRepository(path, initial_balance=1000.0)
+    )
+
+    async def fill_provider(leg: ExecutionLeg) -> Fill:
+        return Fill(market_id=leg.asset, exit_price=0.525, filled_size=leg.size)
+
+    engine = ExecutionEngine(tracker=tracker, fill_provider=fill_provider)
+
+    await engine.execute(_make_decision(n_legs=1))
+
+    with sqlite3.connect(path) as con:
+        close_id = con.execute(
+            "SELECT operation_id FROM m2_applied_operations "
+            "WHERE operation_type = 'close'"
+        ).fetchone()[0]
+    assert close_id.startswith("close:sig-1:leg-0:")
+    assert ":fill:" not in close_id
+    assert "durable retry guarantees unavailable" in caplog.text
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # T5 — ExecutionEngine wires close path on fill events
 # ──────────────────────────────────────────────────────────────────────────
