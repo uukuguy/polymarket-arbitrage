@@ -192,6 +192,15 @@ def _index_books_by_token(books: list) -> dict[str, dict]:
     return out
 
 
+def _include_in_snapshot(mode: str, market: dict, threshold: float) -> bool:
+    """Keep liquid markets plus every neg-risk sibling needed by M2."""
+    return (
+        mode == "full"
+        or bool(market.get("neg_risk_market_id"))
+        or (market.get("liquidity_usd") or 0) > threshold
+    )
+
+
 async def run_snapshot(
     settings: Settings,
     *,
@@ -315,9 +324,7 @@ async def run_snapshot(
                             normalized_count += 1
 
                             # Mode filter (replaces the old phase-3 block).
-                            if mode == "full" or (
-                                normalized.get("liquidity_usd") or 0
-                            ) > threshold:
+                            if _include_in_snapshot(mode, normalized, threshold):
                                 target_markets.append(normalized)
                             # Non-target markets: dropped — no buffer, no reference held.
 

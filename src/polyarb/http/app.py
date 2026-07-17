@@ -28,6 +28,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 
+from polyarb.http.arbitrage import opportunities
 from polyarb.http.control import (
     ControlAuthMiddleware,
     control_status,
@@ -70,11 +71,14 @@ def create_app(*, scheduler: Any, sqlite_store: Any, settings: Any) -> Starlette
 
     middleware = [
         Middleware(ScanAuthMiddleware, secret=secret),
-        Middleware(ControlAuthMiddleware, secret=secret),  # D-03: /control/* HMAC, same secret per D-22
+        # D-03: /control/* HMAC, same secret per D-22.
+        Middleware(ControlAuthMiddleware, secret=secret),
     ]
     routes = [
         Route("/health", health, methods=["GET"]),
-        Route("/healthz", healthz, methods=["GET"]),                # D-05 Phase 02.1: Fly probe target (always 200)
+        # D-05 Phase 02.1: Fly probe target (always 200).
+        Route("/healthz", healthz, methods=["GET"]),
+        Route("/arbitrage/opportunities", opportunities, methods=["GET"]),
         Route("/scan", scan, methods=["POST"]),
         Route("/control/unpause", unpause, methods=["POST"]),       # D-03 Phase 02.1
         Route("/control/pause", pause, methods=["POST"]),           # stub 501, Phase 03+ 填实现

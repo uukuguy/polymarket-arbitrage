@@ -40,6 +40,10 @@ from polyarb.models.slippage import SlippageCalculator
 from polyarb.routing.config import ExecutionConfig, PositionConfig, RoutingConfig
 from polyarb.routing.engine import RoutingEngine
 from polyarb.routing.money import Money
+from polyarb.routing.opportunity_scanner import (
+    StaleSnapshotError,
+    scan_neg_risk_buy_all,
+)
 from polyarb.routing.position_repository import (
     RepositoryStateError,
     SettlementReceipt,
@@ -272,6 +276,39 @@ def run(
         },
     }
     typer.echo(json.dumps(out, indent=2))
+
+
+@app.command()
+def scan(
+    db_path: Path = typer.Option(Path("data/state.db"), "--db-path"),
+    min_edge_bps: float = typer.Option(0.0, "--min-edge-bps"),
+    max_snapshot_age_s: float | None = typer.Option(
+        None, "--max-snapshot-age-s"
+    ),
+    limit: int = typer.Option(20, "--limit"),
+) -> None:
+    """Discover executable neg-risk buy-all bundles from an M1 database."""
+    try:
+        found = scan_neg_risk_buy_all(
+            db_path,
+            min_edge_bps=min_edge_bps,
+            max_snapshot_age_s=max_snapshot_age_s,
+            limit=limit,
+        )
+    except (sqlite3.Error, StaleSnapshotError, ValueError) as error:
+        typer.secho(f"opportunity scan failed: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    typer.echo(
+        json.dumps(
+            {
+                "strategy": "neg-risk-buy-all",
+                "profit_basis": "gross-before-fees",
+                "count": len(found),
+                "opportunities": [item.to_dict() for item in found],
+            },
+            indent=2,
+        )
+    )
 
 
 @app.command()

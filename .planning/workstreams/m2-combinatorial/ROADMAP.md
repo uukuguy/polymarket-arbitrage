@@ -14,9 +14,10 @@
 Phase 2–8 完成的是 execution/accounting foundation：路由壳、paper executor、持久仓位、
 精确 cash/quantity、partial fill 与 venue-truth reconciliation contract。
 
-**M2 产品能力尚未闭环。** 当前仍缺真实 combinatorial opportunity discovery、M1→M2
-market-state contract、真实数据持续 paper evidence，以及经过明确授权的 live venue adapter。
-下方所有现有 Phase complete 不应解读为整体产品可实盘。当前没有已规划的后续 Phase。
+Phase 9 已补上第一条真实 M1→M2 产品路径：从 fresh executable asks 发现 buy-all
+neg-risk 机会。当前可做真实数据发现与 paper execution；仍缺持续 paper evidence、
+fee-adjusted performance gate，以及经过明确授权的 live venue adapter。因此下方所有
+Phase complete 仍不等于可用真实资金实盘。
 
 ## Phases
 
@@ -97,6 +98,17 @@ quantity/cash/fee facts while preserving canonical fill identity and atomic rest
 
 Plans:
 - [x] `08-01-PLAN.md` — terminal settlement domain, fingerprinted durable receipts, tracker/engine/operator reconciliation, restart proof, teaching, and climb closure
+
+### Phase 9: Neg-Risk Opportunity Discovery ✅
+
+**Goal:** Convert a complete fresh M1 neg-risk sibling set and executable asks into a
+fail-closed M2 buy-all opportunity feed.
+**Depends on:** M1 fresh snapshot production + Phase 8
+**Status:** Complete — 2026-07-17
+**Plans:** 1/1 complete
+
+Plans:
+- [x] `09-01-PLAN.md` — M1 subset completeness, executable ask scanner, HTTP/CLI/Makefile delivery, teaching, and live verification
 
 ---
 

@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 8
-status: foundation_complete
-stopped_at: Execution/accounting foundation complete; M2 product capability remains open
+current_phase: 9
+status: paper_discovery_usable
+stopped_at: Fresh M1 neg-risk buy-all opportunity feed implemented; live adapter remains out of scope
 last_updated: "2026-07-17T08:38:03Z"
 last_activity: 2026-07-17
 progress:
-  total_phases: 7
-  completed_phases: 7
-  total_plans: 7
-  completed_plans: 7
+  total_phases: 9
+  completed_phases: 9
+  total_plans: 9
+  completed_plans: 9
   percent: 100
 ---
 
@@ -19,12 +19,12 @@ progress:
 
 ## Current Position
 
-Phase: 8 (Venue-Truth Fill Reconciliation)
+Phase: 9 (Neg-Risk Opportunity Discovery)
 Plan: 1 of 1 complete
-**Status:** Foundation complete; product capability open
-**Current Phase:** 8
+**Status:** Real-data discovery/paper usable; live trading not authorized
+**Current Phase:** 9
 **Last Activity:** 2026-07-17
-**Last Activity Description:** Phase 2-8 foundation confirmed; closure wording corrected after product-gap audit
+**Last Activity Description:** Fresh M1 executable-ask neg-risk opportunity feed delivered
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 
@@ -100,25 +100,24 @@ Plan: 1 of 1 complete
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** No incomplete planned phase; discovery, M1 integration, real paper feed, and live adapter remain unplanned product gaps
-**Resume File:** .planning/workstreams/m2-combinatorial/phases/08-venue-truth-fill-reconciliation/08-01-PLAN.md
+**Stopped At:** Phase 9 implemented; production deployment and fresh live-feed proof are the remaining release gate
+**Resume File:** .planning/workstreams/m2-combinatorial/phases/09-neg-risk-opportunity-discovery/09-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-M2 execution/accounting foundation 已闭环；Phase 2-8 全部 complete，H-001 至 H-006
-全部 confirmed。M2 产品能力未闭环，且当前没有已规划的后续 Phase。
+M2 execution/accounting foundation 与 Phase 9 neg-risk opportunity discovery 均已实现。
+当前发布门是把 Phase 9 部署到生产，并用新的 M1 snapshot 验证真实 feed；这一步完成前
+不宣称线上可用。
 
 第一条命令：
 
-`make status`
+`make scan-arb-live min_edge_bps=0`
 
-## Product Gaps (not yet planned as phases)
+## Remaining Product Gaps
 
-- Real combinatorial opportunity discovery from live market state
-- Explicit M1→M2 market-state input contract
-- Sustained real-data paper evidence and strategy-level performance metrics
+- Sustained real-data paper evidence and fee-adjusted strategy performance metrics
+- Sell-all and general cross-market combinatorial discovery beyond buy-all neg-risk
 - Authorized Polymarket order/fill adapter with operational risk controls
-- Feature-branch review and integration into `main`
 
 **已交付给用户 (累积)**:
 
@@ -131,6 +130,8 @@ M2 execution/accounting foundation 已闭环；Phase 2-8 全部 complete，H-001
 - `make close-arb market_id=… exit_price=… size=… fill_id=…` — partial fill 跨进程幂等重放
 - `make close-arb ... size=… fill_id=… venue_cash=… venue_fee=… venue_status=CONFIRMED venue_ref=…` — exact venue truth 对账与冲突检测
 - `make run-arb/status-arb/close-arb db=…` — 跨进程共享 SQLite paper account
+- `make scan-arb db=data/state.db min_edge_bps=0` — 从本地 M1 snapshot 扫描 fresh neg-risk buy-all 机会
+- `make scan-arb-live min_edge_bps=0` — 查询生产 fresh opportunity feed（只读、gross-before-fees）
 - Env var config: `POLYARB_MIN_PROFIT_THRESHOLD_PCT=2.0 make eval-arb` etc.
 
 ---

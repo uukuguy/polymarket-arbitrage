@@ -26,6 +26,7 @@
 | 15 | [成交数量与现金不是一回事：别让一个 size 同时戴两顶帽子](15-成交数量与现金不是一回事.md) | Quantity shares vs Money pUSD / BUY 与 SELL collateral / full-fill quantity equality / Phase 5 余额修复 / SDK side-dependent amount |
 | 16 | [部分成交如何不重不漏](16-部分成交如何不重不漏.md) | remaining authority / residual cost basis / immutable fill identity / response-loss replay / partial-fill fail-closed 边界 |
 | 17 | [Venue truth 对账](17-venue-truth-reconciliation.md) | terminal finality / actual fee vs fee rate / exact settlement receipt / fingerprint conflict / response-loss reconciliation |
+| 18 | [Neg-risk 买齐套利](18-neg-risk买齐套利.md) | complete sibling set / executable asks / gross edge / fail-closed opportunity feed |
 
 ## Phase 02.1 教学增量（2026-05）
 

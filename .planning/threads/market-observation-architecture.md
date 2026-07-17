@@ -976,3 +976,14 @@ REST 侧的 `/prices` / `/prices-history` 是分开的 HTTP endpoint，不在 WS
 2. `prices-history` 对 closed markets 12h 颗粒度退化 — 意味着事后回测能力不能依赖 REST history，必须 Phase 03 起就 **WS-accumulate own trades** 到 L2 表。这反过来强化"WS 主 + REST 补"的混合架构。
 3. Supabase Pro Micro compute (1 GB RAM) 在 L2 负载下绰绰有余，但 Phase 05+ 若加 L3 OHLC 聚合 + dashboard 复杂查询，可能需要 compute add-on（$10-30/mo 升 Small）。不是 Phase 03 立即决策点。
 
+---
+
+### §2.7 M1→M2 neg-risk completeness contract (2026-07-17)
+
+- subset snapshot 不能只按 liquidity 过滤；任何带 `neg_risk_market_id` 的 active sibling
+  都必须保留，否则漏掉低流动性腿会制造假的 `sum(asks) < 1`。
+- scanner 只对同一个 fresh snapshot 运算；任一 sibling inactive/closed/incomplete、缺 ask
+  或缺 ask size 时整组 fail closed。
+- 第一条产品路径只发布 buy-all YES，capacity=`min(best_ask_size)`，收益明确标记
+  `gross-before-fees`；费用后 edge 和持续性证据属于下一质量门。
+- 真实资金 adapter 不在这个 read-only contract 内。

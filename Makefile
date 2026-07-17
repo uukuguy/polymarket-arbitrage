@@ -192,6 +192,14 @@ scan-coin-flip:
 scan-neg-risk-incomplete:
 	uv run python -m polyarb.cli_observation scan --name neg-risk-incomplete --verbose
 
+## scan-arb: Find executable neg-risk buy-all bundles in an M1 SQLite snapshot. Usage: make scan-arb [db=data/state.db] [min_edge_bps=0]
+scan-arb:
+	uv run python -m polyarb.cli_arbitrage scan --db-path "$(or $(db),data/state.db)" --min-edge-bps "$(or $(min_edge_bps),0)"
+
+## scan-arb-live: Query the fresh production M1→M2 opportunity feed. Usage: make scan-arb-live [min_edge_bps=0]
+scan-arb-live:
+	@curl -fsS "https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=$(or $(min_edge_bps),0)" | uv run python -m json.tool
+
 ## scan-by-tag: Tag-level aggregates (market count / total liq / avg spread per tag)
 scan-by-tag:
 	uv run python -m polyarb.cli_observation scan --name by-tag --verbose

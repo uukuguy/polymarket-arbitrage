@@ -3615,3 +3615,33 @@ make status
 ```
 
 先审查并集成 M2 feature branch；之后恢复 M1 L1/L2 数据健康。未经新授权，不接真实资金。
+
+## SESSION 45 — 2026-07-17 (M2 product path + L1 production recovery)
+
+### 已完成
+
+- 审查并 fast-forward 集成 M2 Phase 3–8；修复 durable open 拒绝后伪成功、fill/settlement
+  fingerprint 信息不足、CLI retry identity 不完整，以及危险 post-commit auto-amend。
+- 定位 L1 39 天 stale 的真实根因：Fly `/data` 5GB 打满，SQLite persistence 抛
+  `database or disk is full`；旧 rollback 又遮蔽了原始异常。
+- 将精确 Fly volume 扩到 15GB，恢复新鲜 snapshot；成功 tick 现在由持有 volume 的 app
+  自己执行 7 天 retention，并保留最后 5 个 snapshot。
+- Phase 9 建立第一条真实 M1→M2 路径：完整保留 neg-risk siblings，使用 executable asks
+  fail-closed 扫描 buy-all YES bundle，并提供 HTTP/CLI/Makefile 只读入口。
+- 新增教学 chapter 18 和 `.planning/CURRENT.md` 真实能力口径：真实数据监控/paper 可用，
+  真实资金下单不可用；Phase complete 不再等同于产品闭环。
+
+### 发布门
+
+Phase 9 相关测试、Ruff、planning-status 已通过；仍需完成生产部署后等待一个新 snapshot，
+再现场验证 `make scan-arb-live min_edge_bps=0`。返回 count=0 代表当前无正 gross edge，
+不是系统失败。
+
+### [NEXT — CURRENT]
+
+```bash
+make scan-arb-live min_edge_bps=0
+```
+
+验证 fresh production feed 后，下一主线是修复 L2 WS 新鲜度并积累费用后 paper evidence；
+未经单独授权，不接真实资金。

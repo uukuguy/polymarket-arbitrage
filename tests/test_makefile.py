@@ -24,6 +24,7 @@ def test_help_lists_durable_arbitrage_commands() -> None:
         assert target in result.stdout
     assert "db=" in result.stdout
     assert "operation_id=" in result.stdout
+    assert "scan-arb-live:" in result.stdout
 
 
 def test_status_uses_the_canonical_current_state() -> None:

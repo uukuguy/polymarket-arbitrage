@@ -33,9 +33,18 @@ import pytest
 os.environ["POLYARB_ALLOW_EXTERNAL_PATHS"] = "1"
 
 from polyarb.config import Settings  # noqa: E402
-from polyarb.snapshot.orchestrator import run_snapshot  # noqa: E402
+from polyarb.snapshot.orchestrator import (  # noqa: E402
+    _include_in_snapshot,
+    run_snapshot,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def test_subset_always_keeps_low_liquidity_neg_risk_sibling() -> None:
+    market = {"liquidity_usd": 1.0, "neg_risk_market_id": "group-1"}
+
+    assert _include_in_snapshot("subset", market, threshold=1000.0) is True
 
 
 def _load_gamma_fixture() -> list[dict]:
