@@ -340,6 +340,65 @@ async def test_replaying_venue_fill_uses_immutable_fill_identity(
 
 
 @pytest.mark.asyncio
+async def test_partial_fill_sequence_survives_engine_retry_and_restart(tmp_path):
+    from polyarb.routing.position_tracker import Fill
+
+    path = tmp_path / "positions.db"
+    fills = iter(
+        [
+            Fill("asset-0", 0.45, filled_quantity=30, fill_id="partial-001"),
+            # The venue repeats the same fill after the first response is lost.
+            Fill("asset-0", 0.45, filled_quantity=30, fill_id="partial-001"),
+            Fill("asset-0", 0.50, filled_quantity=70, fill_id="partial-002"),
+        ]
+    )
+
+    async def fill_provider(_leg: ExecutionLeg) -> Fill:
+        return next(fills)
+
+    decision = _make_decision(n_legs=1)
+    decision.plan.legs[0].estimated_price = 0.40
+    first_tracker = PositionTracker(
+        repository=SQLitePositionRepository(path, initial_balance=1000.0)
+    )
+    await ExecutionEngine(
+        tracker=first_tracker, fill_provider=fill_provider
+    ).execute(decision)
+
+    first_remaining = first_tracker.open_positions()[0]
+    assert first_remaining.quantity == 70.0
+    assert first_remaining.cost_basis == 28.0
+    assert first_tracker.balance == pytest.approx(973.5)
+
+    restarted_tracker = PositionTracker(
+        repository=SQLitePositionRepository(path, initial_balance=1000.0)
+    )
+    restarted_engine = ExecutionEngine(
+        tracker=restarted_tracker, fill_provider=fill_provider
+    )
+    await restarted_engine.execute(decision)
+    replayed_remaining = restarted_tracker.open_positions()[0]
+    assert replayed_remaining.quantity == 70.0
+    assert replayed_remaining.cost_basis == 28.0
+    assert restarted_tracker.balance == pytest.approx(973.5)
+
+    await restarted_engine.execute(decision)
+
+    assert restarted_tracker.open_count == 0
+    assert restarted_tracker.balance == pytest.approx(1008.5)
+    assert restarted_tracker.total_realized_pnl == pytest.approx(8.5)
+    with sqlite3.connect(path) as con:
+        close_ids = con.execute(
+            "SELECT operation_id FROM m2_applied_operations "
+            "WHERE operation_type = 'close' ORDER BY operation_id"
+        ).fetchall()
+    assert close_ids == [
+        ("venue-fill:partial-001",),
+        ("venue-fill:partial-002",),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_venue_fill_without_fill_id_warns_and_uses_legacy_identity(
     tmp_path, caplog
 ):

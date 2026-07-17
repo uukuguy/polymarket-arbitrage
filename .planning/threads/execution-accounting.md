@@ -63,3 +63,23 @@ decimal-facing estimate，不扩张 H-003 的 Money 范围。
 - H-005 residual/aggregation authority 必须是 Quantity；每个 fill ID 只能减少一次 remaining quantity。
 - 部分关闭需要按 exact quantity 分配 cost basis，不能把原仓位 Money 与 fill shares 直接相减。
 - H-006 的 venue proceeds/fee 是 Money truth；SDK side-dependent amount 只在 adapter boundary 翻译。
+
+## 2026-07-17 — H-005 verified durable partial fills
+
+### 已验证事实
+
+- position quantity/cost basis 直接表示 remaining authority；partial mutation、cash、PnL 与 receipt
+  在同一 repository transaction 内提交。
+- venue fill identity 固定为 `venue-fill:{fill_id}`；caller operation ID 不能制造第二条事实。
+- proportional allocation 可 HALF_EVEN，但 final fill 必须消费全部 residual Money，才能保证守恒。
+- true subprocess response-loss：首次 partial close 已提交但 stdout 丢失，重启 retry 只返回原 receipt；
+  q/cost/balance/PnL 不重复变化。
+- anonymous partial、zero、overfill 和跨 market fill-ID conflict 全部 rollback；anonymous full
+  operator/paper close 保留兼容。
+
+### 给 H-006 的约束
+
+- H-006 可替换 modeled proceeds/PnL/fee，但不得改变 fill identity 和 remaining Quantity。
+- venue cash/fee 必须进入 exact Money 边界并与同一 fill receipt 原子提交。
+- adapter 必须显式翻译 BUY cash request、SELL share request、matched shares 与 settlement cash，
+  不能复用一个 side-dependent `amount` 字段做领域 authority。

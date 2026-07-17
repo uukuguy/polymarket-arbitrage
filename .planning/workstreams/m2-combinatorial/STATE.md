@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 7
-status: ready
-stopped_at: Phase 7 planned; H-005 ready for TDD execution
+status: complete
+stopped_at: Phase 7 complete; H-005 ready for climb adjudication
 last_updated: "2026-07-17T04:33:10.644Z"
 last_activity: 2026-07-17
 progress:
   total_phases: 6
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 6
-  completed_plans: 5
-  percent: 83
+  completed_plans: 6
+  percent: 100
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
@@ -20,11 +20,11 @@ progress:
 ## Current Position
 
 Phase: 7 (Durable Partial-Fill Accounting)
-Plan: 0 of 1 complete
-**Status:** Ready for execution
+Plan: 1 of 1 complete
+**Status:** Complete
 **Current Phase:** 7
 **Last Activity:** 2026-07-17
-**Last Activity Description:** Phase 6 implementation and verification complete
+**Last Activity Description:** Phase 7 durable partial-fill accounting complete
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 
@@ -70,6 +70,14 @@ Plan: 0 of 1 complete
 - ✅ Transactional v3 migration with one-time legacy balance repair
 - ✅ Explicit CLI quantity/cost basis, teaching chapter 15, SUMMARY, and zero drift
 
+## Phase 7 Plan Progress (`07-01-PLAN.md` — ✅ CLOSED 2026-07-17)
+
+- ✅ Remaining quantity and proportional/final residual cost-basis allocation
+- ✅ Canonical `venue-fill:{fill_id}` identity and exact retry/restart replay
+- ✅ Engine duplicate-fill sequence across restart
+- ✅ CLI/Makefile partial fill ID and true subprocess response-loss recovery
+- ✅ Teaching chapter 16, SUMMARY, learnings, and zero planning drift
+
 ## Test Count (m2)
 
 - **104 tests green**: `routing/test_engine` 12 + `routing/test_position_tracker` 14 + `routing/test_config` 16 (T6) + `models/test_signal` 11 + `models/test_slippage` 7 + `execution/test_engine` 12 + `execution/test_arbitrage_e2e` 25 (T8) + `cli/test_arbitrage_cli` 7
@@ -78,20 +86,21 @@ Plan: 0 of 1 complete
 - **Phase 4 corrected full gate: 145 tests green**; climb H-002 planning/unit/integration/CLI/restart = 100/100 each
 - **Phase 5 corrected full gate: 187 tests green**; exact migration/restart smoke proves INTEGER micros and tagged receipt
 - **Phase 6 corrected full gate: 219 tests green**; raw v3 quantity/cost-basis INTEGER authority and four-process lifecycle verified
+- **Phase 7 corrected full gate: 227 tests green**; duplicate partial fill response-loss replay leaves exact remaining authority and final residual closes cleanly
 
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 7 planned; H-005 ready for TDD execution
+**Stopped At:** Phase 7 complete; H-005 ready for climb adjudication
 **Resume File:** .planning/workstreams/m2-combinatorial/phases/07-durable-partial-fill-accounting/07-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-H-004 已 confirmed；Phase 7 直接实现 immutable partial-fill residual accounting。
+Phase 7 已完成；运行 H-005 climb 五门裁决，然后直接进入 H-006 venue-truth reconciliation。
 
 第一条命令：
 
-`uv run pytest tests/routing/test_position_tracker.py -q`
+`make climb-cycle hypothesis=H-005`
 
 **已交付给用户 (累积)**:
 
@@ -101,6 +110,7 @@ H-004 已 confirmed；Phase 7 直接实现 immutable partial-fill residual accou
 - `make status-arb` — tracker state with balance/realized_pnl/roi_pct/stop_loss
 - `make close-arb market_id=… exit_price=…` — operator-driven close
 - `make close-arb market_id=… exit_price=… operation_id=…` — 响应丢失后跨进程恢复原 close receipt
+- `make close-arb market_id=… exit_price=… size=… fill_id=…` — partial fill 跨进程幂等重放
 - `make run-arb/status-arb/close-arb db=…` — 跨进程共享 SQLite paper account
 - Env var config: `POLYARB_MIN_PROFIT_THRESHOLD_PCT=2.0 make eval-arb` etc.
 

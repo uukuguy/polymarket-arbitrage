@@ -3509,3 +3509,19 @@ $gsd-plan-phase 7 --ws m2-combinatorial
 ```bash
 uv run pytest tests/execution/test_engine.py tests/cli/test_arbitrage_cli_process.py -q
 ```
+
+### SESSION 43 continuation — M2 Phase 7 Durable Partial-Fill Accounting CLOSED
+
+- Engine fill-provider 证明重复 `fill_id` 跨 SQLite restart 只应用一次；第二个 fill 精确消费 q/cost residual。
+- CLI/Makefile 新增 `fill_id` 参数面；venue identity 固定为 `venue-fill:{fill_id}`，`operation_id` 不能覆盖。
+- true subprocess response-loss：BUY 100 @ .40，fill 30 @ .45 首次 stdout 丢弃，retry 恢复 receipt 且保持 q=70/cost=28/balance=973.5；fill 70 @ .50 后 balance=1008.5、PnL=8.5。
+- corrected full M2 **227 passed**；Makefile **4 passed**；targeted Ruff 与 `git diff --check` clean。
+- 教学 chapter 16、07-01-SUMMARY、07-LEARNINGS、execution-accounting thread 与 ROADMAP/STATE 已同步。
+
+### [NEXT]
+
+```bash
+make climb-cycle hypothesis=H-005
+```
+
+H-005 五门确认后不暂停，直接设计并执行 H-006 venue-truth reconciliation。

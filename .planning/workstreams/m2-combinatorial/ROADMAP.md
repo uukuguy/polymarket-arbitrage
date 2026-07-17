@@ -65,17 +65,17 @@ positions, full fills, SQLite restart, and operator views.
 Plans:
 - [x] `06-01-PLAN.md` — exact Quantity, explicit execution/domain fields, correct cash flow, v3 migration, compatibility, teaching, and climb proof
 
-### Phase 7: Durable Partial-Fill Accounting
+### Phase 7: Durable Partial-Fill Accounting ✅
 
 **Goal:** Apply immutable partial fills exactly once while preserving remaining quantity,
 cost basis, cash, and replay state across restart.
 **Requirements:** H-005 internal recovery contract (no live credentials)
 **Depends on:** Phase 6
-**Status:** Planned — ready for autonomous execution
-**Plans:** 0/1 complete
+**Status:** Complete — 2026-07-17
+**Plans:** 1/1 complete
 
 Plans:
-- [ ] `07-01-PLAN.md` — residual allocation, canonical fill identity, restart/replay, engine/process proof, teaching, and climb closure
+- [x] `07-01-PLAN.md` — residual allocation, canonical fill identity, restart/replay, engine/process proof, teaching, and climb closure
 
 ---
 

@@ -5,11 +5,11 @@
 ## Session
 
 - Last cycle: 4
-- Next action: add H-005 engine and CLI subprocess response-loss proof
+- Next action: run H-005 climb adjudication
 
 ## In flight
 
-- H-005
+- None
 
 ## Hypothesis pool
 

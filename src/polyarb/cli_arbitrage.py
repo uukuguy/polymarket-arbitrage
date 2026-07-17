@@ -342,7 +342,7 @@ def close(
     size: float | None = typer.Option(
         None,
         "--size",
-        help="Filled size (defaults to position stake — must equal it; T5 has no partial fills)",
+        help="Filled share quantity (defaults to all remaining shares)",
     ),
     db_path: Path | None = typer.Option(
         None,
@@ -353,6 +353,11 @@ def close(
         None,
         "--operation-id",
         help="Caller-owned immutable close identity for cross-process retry",
+    ),
+    fill_id: str | None = typer.Option(
+        None,
+        "--fill-id",
+        help="Venue-owned immutable fill identity; required for partial fills",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -369,9 +374,11 @@ def close(
     """
     _setup_logger(verbose)
     tracker = _build_tracker(db_path)
-    caller_supplied = operation_id is not None
+    caller_supplied = fill_id is not None or operation_id is not None
     effective_operation_id = (
-        operation_id or f"local:operator-close:{market_id}:{uuid4()}"
+        f"venue-fill:{fill_id}"
+        if fill_id is not None
+        else operation_id or f"local:operator-close:{market_id}:{uuid4()}"
     )
     replayed = False
     receipt = (
@@ -418,6 +425,7 @@ def close(
             market_id=market_id,
             exit_price=exit_price,
             filled_quantity=size if size is not None else pos.quantity,
+            fill_id=fill_id or "",
         )
         try:
             pnl = tracker.close_position_with_fill(
@@ -432,6 +440,7 @@ def close(
             {
                 "closed": market_id,
                 "operation_id": effective_operation_id,
+                "fill_id": fill_id,
                 "replayed": replayed,
                 "retry_safe": caller_supplied,
                 "exit_price": exit_price,

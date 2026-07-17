@@ -238,6 +238,95 @@ def test_close_receipt_recovers_lost_response_across_processes(tmp_path) -> None
         ).fetchone()[0] == 2
 
 
+def test_partial_fill_recovers_lost_response_across_processes(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    opened = _cli(
+        "run",
+        "--mid",
+        "0.40",
+        "--stake",
+        "100",
+        "--legs",
+        "1",
+        "--retry-delay",
+        "0",
+        "--signal-id",
+        "partial-open-001",
+        "--db-path",
+        str(path),
+    )
+    assert opened.returncode == 0, opened.stderr
+
+    partial_args = (
+        "close",
+        "--market-id",
+        "cond-0",
+        "--exit-price",
+        "0.45",
+        "--size",
+        "30",
+        "--fill-id",
+        "venue-partial-001",
+        "--db-path",
+        str(path),
+    )
+    committed = _cli(*partial_args)
+    assert committed.returncode == 0, committed.stderr
+    # Deliberately discard stdout: the subprocess committed, but its response
+    # never reached the caller.
+
+    replay = _cli(*partial_args)
+    assert replay.returncode == 0, replay.stderr
+    replayed = json.loads(replay.stdout)
+    assert replayed["operation_id"] == "venue-fill:venue-partial-001"
+    assert replayed["fill_id"] == "venue-partial-001"
+    assert replayed["replayed"] is True
+    assert replayed["retry_safe"] is True
+    assert replayed["realized_pnl"] == 1.5
+
+    status = _cli("status", "--db-path", str(path))
+    assert status.returncode == 0, status.stderr
+    after_partial = json.loads(status.stdout)
+    assert after_partial["metrics"]["balance"] == 973.5
+    assert after_partial["metrics"]["total_realized_pnl"] == 1.5
+    assert after_partial["open_positions"][0]["quantity"] == 70.0
+    assert after_partial["open_positions"][0]["cost_basis"] == 28.0
+
+    final = _cli(
+        "close",
+        "--market-id",
+        "cond-0",
+        "--exit-price",
+        "0.50",
+        "--size",
+        "70",
+        "--fill-id",
+        "venue-partial-002",
+        "--db-path",
+        str(path),
+    )
+    assert final.returncode == 0, final.stderr
+    final_response = json.loads(final.stdout)
+    assert final_response["operation_id"] == "venue-fill:venue-partial-002"
+    assert final_response["realized_pnl"] == 7.0
+    assert final_response["total_realized_pnl"] == 8.5
+
+    final_status = _cli("status", "--db-path", str(path))
+    assert final_status.returncode == 0, final_status.stderr
+    closed = json.loads(final_status.stdout)
+    assert closed["metrics"]["balance"] == 1008.5
+    assert closed["metrics"]["open_positions"] == 0
+    with sqlite3.connect(path) as con:
+        close_ids = con.execute(
+            "SELECT operation_id FROM m2_applied_operations "
+            "WHERE operation_type = 'close' ORDER BY operation_id"
+        ).fetchall()
+    assert close_ids == [
+        ("venue-fill:venue-partial-001",),
+        ("venue-fill:venue-partial-002",),
+    ]
+
+
 def test_close_without_caller_identity_reports_not_retry_safe(tmp_path) -> None:
     path = tmp_path / "positions.db"
     opened = _cli(

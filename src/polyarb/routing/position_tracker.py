@@ -145,8 +145,8 @@ class Fill:
     after the venue confirms a fill. Paper mode: ExecutionEngine synthesizes
     one at the leg's estimated_price.
 
-    Current scope: filled quantity must equal the open position quantity. Partial
-    fill aggregation (multiple fills per position) is T5+1.
+    Each fill may consume part or all of the remaining position quantity. Partial
+    fills require an immutable venue fill ID so retries cannot book twice.
     """
 
     market_id: str
@@ -443,10 +443,11 @@ class PositionTracker:
     ) -> float:
         """Production close path: a venue fill closes an open position.
 
-        Requires fill quantity to equal position quantity (no partial fills in
-        H-004). Returns realized PnL; updates balance + realized_pnl. If no
-        position is open for `fill.market_id`, returns 0.0 and warns
-        (callers can audit log this).
+        Applies a positive fill no larger than the remaining quantity. Partial
+        fills require an immutable fill ID; the final fill consumes the exact
+        residual cost basis. Returns realized PnL and updates balance/state in
+        the same repository transaction. If no position is open, returns 0.0
+        and warns so callers can audit a late venue event.
         """
         effective_operation_id = (
             f"venue-fill:{fill.fill_id}"

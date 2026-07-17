@@ -52,3 +52,19 @@ def test_close_arbitrage_target_forwards_operation_identity() -> None:
 
     assert result.returncode == 0, result.stderr
     assert '--operation-id "close-001"' in result.stdout
+
+
+def test_close_arbitrage_target_forwards_partial_fill_identity() -> None:
+    result = _make(
+        "-n",
+        "close-arb",
+        "db=build/test-m2-positions.db",
+        "market_id=cond-0",
+        "exit_price=0.5",
+        "size=30",
+        "fill_id=venue-fill-001",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert 'SIZE_FLAG="--size ${size}"' in result.stdout
+    assert '--fill-id "venue-fill-001"' in result.stdout
