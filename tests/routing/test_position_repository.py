@@ -325,9 +325,19 @@ def test_sqlite_corrupt_account_cardinality_fails_closed(tmp_path) -> None:
     with sqlite3.connect(path) as con:
         con.execute(
             "INSERT INTO m2_account_state "
-            "(account_id, snapshot_balance, balance, realized_pnl, updated_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("corrupt-second-account", 1.0, 1.0, 0.0, "2026-07-17T08:00:00Z"),
+            "(account_id, snapshot_balance, balance, realized_pnl, "
+            "snapshot_balance_micros, balance_micros, realized_pnl_micros, "
+            "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "corrupt-second-account",
+                1.0,
+                1.0,
+                0.0,
+                1_000_000,
+                1_000_000,
+                0,
+                "2026-07-17T08:00:00Z",
+            ),
         )
 
     with pytest.raises(RepositoryStateError, match="exactly one account"):
@@ -446,6 +456,21 @@ def test_sqlite_existing_integer_columns_with_null_authority_fail_closed(
 
     with pytest.raises(RepositoryStateError, match="authoritative money"):
         SQLitePositionRepository(path, initial_balance=1000.0)
+
+
+def test_sqlite_load_rejects_runtime_corruption_of_integer_authority(
+    tmp_path,
+) -> None:
+    path = tmp_path / "positions.db"
+    repository = SQLitePositionRepository(path, initial_balance=1000.0)
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "UPDATE m2_account_state SET balance_micros = ?",
+            (1.5,),
+        )
+
+    with pytest.raises(RepositoryStateError, match="authoritative money"):
+        repository.load()
 
 
 def test_sqlite_state_write_dual_writes_legacy_projection_from_micros(
