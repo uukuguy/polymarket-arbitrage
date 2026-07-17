@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS m2_applied_operations (
     operation_type TEXT NOT NULL,
     target_id TEXT NOT NULL,
     result_json TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL DEFAULT '',
     applied_at TEXT NOT NULL
 );
 """
@@ -81,6 +82,7 @@ _REQUIRED_COLUMNS = {
         "operation_type",
         "target_id",
         "result_json",
+        "request_fingerprint",
         "applied_at",
     },
 }
@@ -93,11 +95,17 @@ _MONEY_COLUMNS = {
     "m2_open_positions": {"stake_micros": "stake"},
 }
 _POSITION_UNIT_COLUMNS = {"quantity_micros", "cost_basis_micros"}
+_OPERATION_FINGERPRINT_COLUMN = "request_fingerprint"
 _BASE_REQUIRED_COLUMNS = {
     table: (
         required
         - set(_MONEY_COLUMNS.get(table, {}))
         - (_POSITION_UNIT_COLUMNS if table == "m2_open_positions" else set())
+        - (
+            {_OPERATION_FINGERPRINT_COLUMN}
+            if table == "m2_applied_operations"
+            else set()
+        )
     )
     for table, required in _REQUIRED_COLUMNS.items()
 }
@@ -151,7 +159,31 @@ def _as_money(value: int | float | str | Money) -> Money:
     return value if isinstance(value, Money) else Money.from_value(value)
 
 
-type TransitionResult = bool | float | Money | None
+@dataclass(frozen=True, slots=True)
+class SettlementReceipt:
+    """Exact venue-confirmed cash result stored for one immutable fill."""
+
+    gross_cash: Money
+    fee: Money
+    net_cash: Money
+    realized_pnl: Money
+    source: str = "venue-confirmed"
+
+    def __post_init__(self) -> None:
+        for field_name in ("gross_cash", "fee", "net_cash", "realized_pnl"):
+            if not isinstance(getattr(self, field_name), Money):
+                raise TypeError(f"settlement {field_name} must be Money")
+        if self.source != "venue-confirmed":
+            raise ValueError("settlement receipt source must be venue-confirmed")
+        if self.gross_cash.micros < 0 or self.fee.micros < 0:
+            raise ValueError("settlement gross cash and fee must be non-negative")
+        if self.fee.micros > self.gross_cash.micros:
+            raise ValueError("settlement fee cannot exceed gross cash")
+        if self.net_cash != self.gross_cash - self.fee:
+            raise ValueError("settlement net cash must equal gross cash minus fee")
+
+
+type TransitionResult = bool | float | Money | SettlementReceipt | None
 type Transition = Callable[[PositionState], TransitionResult]
 
 
@@ -161,6 +193,7 @@ class OperationReceipt:
     operation_type: str
     target_id: str
     result: TransitionResult
+    request_fingerprint: str = ""
 
 
 class PositionRepository(Protocol):
@@ -174,6 +207,7 @@ class PositionRepository(Protocol):
         operation_type: str,
         target_id: str,
         transition: Transition,
+        request_fingerprint: str = "",
     ) -> TransitionResult: ...
 
 
@@ -182,13 +216,25 @@ class RepositoryStateError(RuntimeError):
 
 
 def _validate_transition_result(result: object) -> TransitionResult:
-    if result is None or type(result) is bool or isinstance(result, Money):
+    if (
+        result is None
+        or type(result) is bool
+        or isinstance(result, (Money, SettlementReceipt))
+    ):
         return result
     if type(result) is float:
         if not math.isfinite(result):
             raise ValueError("transition float result must be finite")
         return result
-    raise TypeError("transition result must be bool, float, Money, or None")
+    raise TypeError(
+        "transition result must be bool, float, Money, SettlementReceipt, or None"
+    )
+
+
+def _validate_request_fingerprint(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("request fingerprint must be a string")
+    return value
 
 
 def _encode_result(result: TransitionResult) -> str:
@@ -196,6 +242,15 @@ def _encode_result(result: TransitionResult) -> str:
     payload: object
     if isinstance(validated, Money):
         payload = {"kind": "money", "micros": validated.micros}
+    elif isinstance(validated, SettlementReceipt):
+        payload = {
+            "kind": "settlement",
+            "source": validated.source,
+            "gross_micros": validated.gross_cash.micros,
+            "fee_micros": validated.fee.micros,
+            "net_micros": validated.net_cash.micros,
+            "pnl_micros": validated.realized_pnl.micros,
+        }
     else:
         payload = validated
     return json.dumps(payload, allow_nan=False, separators=(",", ":"))
@@ -219,6 +274,31 @@ def _decode_result(raw: str) -> TransitionResult:
             return Money(payload["micros"])
         except (TypeError, OverflowError) as exc:
             raise RepositoryStateError("invalid tagged money receipt") from exc
+    settlement_keys = {
+        "kind",
+        "source",
+        "gross_micros",
+        "fee_micros",
+        "net_micros",
+        "pnl_micros",
+    }
+    if isinstance(payload, dict) and payload.get("kind") == "settlement":
+        if set(payload) != settlement_keys:
+            raise RepositoryStateError("invalid settlement receipt keys")
+        money_keys = ("gross_micros", "fee_micros", "net_micros", "pnl_micros")
+        if payload["source"] != "venue-confirmed" or any(
+            type(payload[key]) is not int for key in money_keys
+        ):
+            raise RepositoryStateError("invalid settlement receipt values")
+        try:
+            return SettlementReceipt(
+                gross_cash=Money(payload["gross_micros"]),
+                fee=Money(payload["fee_micros"]),
+                net_cash=Money(payload["net_micros"]),
+                realized_pnl=Money(payload["pnl_micros"]),
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RepositoryStateError("invalid settlement receipt values") from exc
     raise RepositoryStateError("unsupported receipt result type")
 
 
@@ -243,12 +323,15 @@ class InMemoryPositionRepository:
         operation_type: str,
         target_id: str,
         transition: Transition,
+        request_fingerprint: str = "",
     ) -> TransitionResult:
+        fingerprint = _validate_request_fingerprint(request_fingerprint)
         applied = self._operations.get(operation_id)
         if applied is not None:
             if (
                 applied.operation_type != operation_type
                 or applied.target_id != target_id
+                or applied.request_fingerprint != fingerprint
             ):
                 raise ValueError(
                     "operation identity conflict: "
@@ -266,6 +349,7 @@ class InMemoryPositionRepository:
             operation_type=operation_type,
             target_id=target_id,
             result=deepcopy(result),
+            request_fingerprint=fingerprint,
         )
         return result
 
@@ -297,7 +381,7 @@ class SQLitePositionRepository:
     def get_receipt(self, operation_id: str) -> OperationReceipt | None:
         with self._connect() as con:
             row = con.execute(
-                "SELECT operation_type, target_id, result_json "
+                "SELECT operation_type, target_id, result_json, request_fingerprint "
                 "FROM m2_applied_operations WHERE operation_id = ?",
                 (operation_id,),
             ).fetchone()
@@ -308,6 +392,7 @@ class SQLitePositionRepository:
             operation_type=row[0],
             target_id=row[1],
             result=_decode_result(row[2]),
+            request_fingerprint=row[3],
         )
 
     def apply(
@@ -316,17 +401,23 @@ class SQLitePositionRepository:
         operation_type: str,
         target_id: str,
         transition: Transition,
+        request_fingerprint: str = "",
     ) -> TransitionResult:
+        fingerprint = _validate_request_fingerprint(request_fingerprint)
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
             applied = con.execute(
-                "SELECT operation_type, target_id, result_json "
+                "SELECT operation_type, target_id, result_json, request_fingerprint "
                 "FROM m2_applied_operations WHERE operation_id = ?",
                 (operation_id,),
             ).fetchone()
             if applied is not None:
-                if applied[0] != operation_type or applied[1] != target_id:
+                if (
+                    applied[0] != operation_type
+                    or applied[1] != target_id
+                    or applied[3] != fingerprint
+                ):
                     raise ValueError(
                         "operation identity conflict: "
                         f"{operation_id!r} was already used for "
@@ -343,13 +434,14 @@ class SQLitePositionRepository:
             self._write_state(con, state, now)
             con.execute(
                 "INSERT INTO m2_applied_operations "
-                "(operation_id, operation_type, target_id, result_json, applied_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "(operation_id, operation_type, target_id, result_json, "
+                "request_fingerprint, applied_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     operation_id,
                     operation_type,
                     target_id,
                     _encode_result(result),
+                    fingerprint,
                     now,
                 ),
             )
@@ -382,6 +474,7 @@ class SQLitePositionRepository:
             con.execute("BEGIN IMMEDIATE")
             self._migrate_money_schema(con)
             self._migrate_position_units(con)
+            self._migrate_operation_fingerprints(con)
             self._verify_schema(con, _REQUIRED_COLUMNS)
             rows = con.execute(
                 "SELECT snapshot_balance_micros FROM m2_account_state"
@@ -562,6 +655,26 @@ class SQLitePositionRepository:
         if invalid_count:
             raise RepositoryStateError(
                 "m2_open_positions contains invalid v3 position authority"
+            )
+
+    @classmethod
+    def _migrate_operation_fingerprints(cls, con: sqlite3.Connection) -> None:
+        columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info(m2_applied_operations)")
+        }
+        if _OPERATION_FINGERPRINT_COLUMN not in columns:
+            con.execute(
+                "ALTER TABLE m2_applied_operations "
+                "ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT ''"
+            )
+        invalid_count = con.execute(
+            "SELECT COUNT(*) FROM m2_applied_operations "
+            "WHERE typeof(request_fingerprint) != 'text'"
+        ).fetchone()[0]
+        if invalid_count:
+            raise RepositoryStateError(
+                "m2_applied_operations contains invalid request fingerprints"
             )
 
     @staticmethod
