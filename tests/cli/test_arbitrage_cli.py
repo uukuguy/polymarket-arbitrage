@@ -13,11 +13,21 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from typer.testing import CliRunner
 
+from polyarb import cli_arbitrage as cli_mod
 from polyarb.cli_arbitrage import app
+from polyarb.routing.position_tracker import PositionTracker
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def isolated_tracker(monkeypatch: pytest.MonkeyPatch) -> PositionTracker:
+    tracker = PositionTracker()
+    monkeypatch.setattr(cli_mod, "_build_tracker", lambda db_path=None: tracker)
+    return tracker
 
 
 def test_evaluate_happy_path_returns_routed_decision_json():
@@ -100,11 +110,6 @@ def test_status_returns_expected_envelope():
 def test_run_paper_close_closes_lifecycle_zero_pnl():
     """`run --paper-close` synths Fill at estimated_price → open then close
     same-process → tracker has 0 open positions, realized_pnl ≈ 0."""
-    # Reset module-level tracker so prior tests don't bleed in.
-    from polyarb import cli_arbitrage as cli_mod
-    from polyarb.routing.position_tracker import PositionTracker
-    cli_mod._TRACKER = PositionTracker()
-
     result = runner.invoke(
         app,
         [
@@ -125,14 +130,10 @@ def test_run_paper_close_closes_lifecycle_zero_pnl():
     assert status_payload["metrics"]["total_realized_pnl"] == 0.0
 
 
-def test_close_subcommand_books_realized_pnl():
+def test_close_subcommand_books_realized_pnl(isolated_tracker):
     """run (without paper-close) leaves position open → `close` books PnL.
 
     Same-process flow (CliRunner shares module state across invokes)."""
-    from polyarb import cli_arbitrage as cli_mod
-    from polyarb.routing.position_tracker import PositionTracker
-    cli_mod._TRACKER = PositionTracker()
-
     # mid<0.5 → BUY leg (RoutingEngine sets action by price-vs-0.5).
     # We want a BUY position so close at higher price → profit.
     run_result = runner.invoke(
@@ -146,7 +147,7 @@ def test_close_subcommand_books_realized_pnl():
     # Without --paper-close, position stays open in the tracker. The tracker
     # uses market.condition_id as the position market_id (RoutingEngine
     # sets `leg.asset = market.condition_id` in _build_execution_legs).
-    open_positions = list(cli_mod._TRACKER.open_positions())
+    open_positions = list(isolated_tracker.open_positions())
     assert len(open_positions) == 1, f"expected 1 open position; got {len(open_positions)}"
     open_pos = open_positions[0]
     open_market_id = open_pos.market_id

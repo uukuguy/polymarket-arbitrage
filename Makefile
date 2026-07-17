@@ -1160,14 +1160,15 @@ eval-arb:
 ## but position closes). Without it, positions accumulate as open.
 ##
 ## Usage:
-##   make run-arb                                   # paper-mode happy path (positions stay open)
+##   make run-arb db=data/m2-positions.db           # durable paper-mode state
 ##   make run-arb paper_close=1                     # full lifecycle: open then close at est. price
-##   make run-arb mid=0.45 stake=500 retries=1     # tighten retry budget
+##   make run-arb mid=0.45 stake=500 retries=1      # tighten retry budget
 run-arb:
 	@MID="$${mid:-0.5}"; STAKE="$${stake:-1000}"; LEGS="$${legs:-2}"; VENUE="$${venue:-polymarket}"; THR="$${min_threshold_pct:-1.0}"; RETRIES="$${retries:-3}"; PAPER_CLOSE_FLAG=""; \
 	if [ -n "$${paper_close}" ] && [ "$${paper_close}" != "0" ]; then PAPER_CLOSE_FLAG="--paper-close"; fi; \
-	echo ">> run-arb (paper) mid=$$MID stake=$$STAKE legs=$$LEGS venue=$$VENUE retries=$$RETRIES paper_close=$${paper_close:-0}"; \
-	uv run python -m polyarb.cli_arbitrage run --mid $$MID --stake $$STAKE --legs $$LEGS --venue $$VENUE --min-threshold-pct $$THR --retries $$RETRIES --retry-delay 0 $$PAPER_CLOSE_FLAG
+	SIGNAL_FLAG=""; if [ -n "$${signal_id}" ]; then SIGNAL_FLAG="--signal-id $${signal_id}"; fi; \
+	echo ">> run-arb (paper) db=$(if $(strip $(db)),$(db),data/m2-positions.db) mid=$$MID stake=$$STAKE legs=$$LEGS venue=$$VENUE retries=$$RETRIES paper_close=$${paper_close:-0}"; \
+	uv run python -m polyarb.cli_arbitrage run --mid $$MID --stake $$STAKE --legs $$LEGS --venue $$VENUE --min-threshold-pct $$THR --retries $$RETRIES --retry-delay 0 --db-path "$(if $(strip $(db)),$(db),data/m2-positions.db)" $$SIGNAL_FLAG $$PAPER_CLOSE_FLAG
 .PHONY: run-arb
 
 ## status-arb: dump current PositionTracker state.
@@ -1175,30 +1176,25 @@ run-arb:
 ## T5 (SESSION 37): now includes realized PnL, balance, ROI %, max exposure,
 ## and stop-loss event (if triggered) — not just open positions.
 ##
-## Note: tracker is per-process. Across separate make invocations state
-## resets — cross-call persistence (SQLite/Supabase) is T5+1.
+## State is shared across processes through SQLite. Override with db=<path>.
 status-arb:
-	@echo ">> status-arb"
-	@uv run python -m polyarb.cli_arbitrage status
+	@echo ">> status-arb db=$(if $(strip $(db)),$(db),data/m2-positions.db)"
+	@uv run python -m polyarb.cli_arbitrage status --db-path "$(if $(strip $(db)),$(db),data/m2-positions.db)"
 .PHONY: status-arb
 
 ## close-arb: close an open position via synthesized Fill (operator-driven).
 ##
-## T5 (SESSION 37). Note: per-process tracker state means `make close-arb`
-## after `make run-arb` won't see the open position from the prior process.
-## This target is mostly diagnostic — use it inside a single Python REPL or
-## test fixture to exercise the close path. End-to-end cross-process flow
-## is T5+1 (persistent positions store).
+## Uses the same durable SQLite paper account as run-arb/status-arb.
 ##
 ## Usage:
-##   make close-arb market_id=synth-m0 exit_price=0.55
+##   make close-arb db=data/m2-positions.db market_id=cond-0 exit_price=0.55
 close-arb:
 	@if [ -z "$${market_id}" ] || [ -z "$${exit_price}" ]; then \
-		echo "usage: make close-arb market_id=<id> exit_price=<0..1> [size=<float>]"; \
+		echo "usage: make close-arb db=<path> market_id=<id> exit_price=<0..1> [size=<float>]"; \
 		exit 1; \
 	fi; \
-	echo ">> close-arb market_id=$${market_id} exit_price=$${exit_price}"; \
+	echo ">> close-arb db=$(if $(strip $(db)),$(db),data/m2-positions.db) market_id=$${market_id} exit_price=$${exit_price}"; \
 	SIZE_FLAG=""; \
 	if [ -n "$${size}" ]; then SIZE_FLAG="--size $${size}"; fi; \
-	uv run python -m polyarb.cli_arbitrage close --market-id "$${market_id}" --exit-price $${exit_price} $$SIZE_FLAG
+	uv run python -m polyarb.cli_arbitrage close --market-id "$${market_id}" --exit-price $${exit_price} --db-path "$(if $(strip $(db)),$(db),data/m2-positions.db)" $$SIZE_FLAG
 .PHONY: close-arb

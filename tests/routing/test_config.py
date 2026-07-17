@@ -5,7 +5,7 @@ Tests must isolate env state since BaseSettings reads os.environ at import time.
 """
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 import pytest
 
@@ -70,6 +70,8 @@ class TestPositionConfigEnvOverride:
         assert cfg.initial_balance == 1000.0
         assert cfg.stop_loss_pct == 5.0
         assert cfg.enable_pnl_stop is True
+        assert cfg.db_path == Path("data/m2-positions.db")
+        assert cfg.busy_timeout_ms == 5000
 
     def test_env_override_stop_loss(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("POLYARB_STOP_LOSS_PCT", "10.0")
@@ -82,6 +84,15 @@ class TestPositionConfigEnvOverride:
         monkeypatch.setenv("POLYARB_STOP_LOSS_PCT", "10.0")
         cfg = PositionConfig(stop_loss_pct=3.0)
         assert cfg.stop_loss_pct == 3.0
+
+    def test_position_db_path_env_and_explicit_precedence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("POLYARB_POSITION_DB_PATH", "data/from-env.db")
+        assert PositionConfig().db_path == Path("data/from-env.db")
+        assert PositionConfig(db_path=Path("data/explicit.db")).db_path == Path(
+            "data/explicit.db"
+        )
 
 
 class TestAppConfig:

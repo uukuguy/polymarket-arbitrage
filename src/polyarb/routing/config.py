@@ -18,7 +18,9 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,6 +57,16 @@ class PositionConfig(BaseSettings):
     max_total_exposure: float = 5000.0
     enable_pnl_stop: bool = True
     stop_loss_pct: float = 5.0
+    db_path: Path = Field(
+        default=Path("data/m2-positions.db"),
+        validation_alias=AliasChoices("db_path", "POLYARB_POSITION_DB_PATH"),
+    )
+    busy_timeout_ms: int = Field(
+        default=5000,
+        validation_alias=AliasChoices(
+            "busy_timeout_ms", "POLYARB_POSITION_BUSY_TIMEOUT_MS"
+        ),
+    )
 
 
 @dataclass
@@ -62,7 +74,8 @@ class AppConfig:
     """Root configuration aggregating all sub-configs.
 
     Each sub-config is a BaseSettings so env vars are read independently.
-    Explicit construction overrides env: `AppConfig(routing=RoutingConfig(min_profit_threshold_pct=2.0))`.
+    Explicit construction overrides env, for example
+    `AppConfig(routing=RoutingConfig(min_profit_threshold_pct=2.0))`.
     """
 
     routing: RoutingConfig = field(default_factory=RoutingConfig)

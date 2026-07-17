@@ -23,7 +23,9 @@ operator's window into what the system *would* do.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
+from pathlib import Path
 
 import typer
 from loguru import logger
@@ -34,16 +36,30 @@ from polyarb.models.signal import (
     MarketSignal,
 )
 from polyarb.models.slippage import SlippageCalculator
-from polyarb.routing.config import ExecutionConfig, RoutingConfig
+from polyarb.routing.config import ExecutionConfig, PositionConfig, RoutingConfig
 from polyarb.routing.engine import RoutingEngine
+from polyarb.routing.position_repository import (
+    RepositoryStateError,
+    SQLitePositionRepository,
+)
 from polyarb.routing.position_tracker import Fill, PositionTracker
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
-# Module-level shared tracker so `run` accumulates positions across
-# repeated invocations within a single Python process. Real persistence
-# (SQLite / Supabase) is a T5+ concern; this is enough for CLI smoke.
-_TRACKER = PositionTracker()
+
+def _build_tracker(db_path: Path | None = None) -> PositionTracker:
+    """Build one durable tracker for a CLI command invocation."""
+    config = PositionConfig()
+    try:
+        repository = SQLitePositionRepository(
+            db_path or config.db_path,
+            initial_balance=config.initial_balance,
+            busy_timeout_ms=config.busy_timeout_ms,
+        )
+    except (sqlite3.Error, RepositoryStateError) as exc:
+        typer.secho(f"position database error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+    return PositionTracker(config=config, repository=repository)
 
 
 def _setup_logger(verbose: bool) -> None:
@@ -61,6 +77,7 @@ def _build_synthetic_signal(
     profit_pct: float,
     n_legs: int,
     venue: str,
+    signal_id: str | None = None,
 ) -> ArbitrageSignal:
     """Construct an ArbitrageSignal from CLI inputs.
 
@@ -78,13 +95,16 @@ def _build_synthetic_signal(
                 price=mid,
             )
         )
-    return ArbitrageSignal(
+    signal = ArbitrageSignal(
         opportunity_id="cli-synth",
         markets=markets,
         max_arbitrage_pct=profit_pct,
         max_stake_per_leg=stake,
         confidence=0.8,
     )
+    if signal_id is not None:
+        signal.signal_id = signal_id
+    return signal
 
 
 def _format_decision(decision) -> dict:
@@ -135,7 +155,8 @@ def evaluate(
     decision = engine.route(signal)
     if decision is None:
         typer.secho(
-            f"[gate] signal rejected — profit {profit_pct:.2f}% < threshold {min_threshold_pct:.2f}%",
+            f"[gate] signal rejected — profit {profit_pct:.2f}% "
+            f"< threshold {min_threshold_pct:.2f}%",
             fg=typer.colors.YELLOW,
             err=True,
         )
@@ -158,6 +179,16 @@ def run(
         "--paper-close",
         help="T5: synth Fill at estimated_price → exercise full open→close lifecycle (zero PnL)",
     ),
+    signal_id: str | None = typer.Option(
+        None,
+        "--signal-id",
+        help="Stable synthetic signal identity; reuse only when retrying the same run",
+    ),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite paper-account path (overrides POLYARB_POSITION_DB_PATH)",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Synth signal → route → execute via paper-mode executor → print result.
@@ -176,7 +207,9 @@ def run(
     import asyncio
 
     _setup_logger(verbose)
-    signal = _build_synthetic_signal(mid, stake, profit_pct, n_legs, venue)
+    signal = _build_synthetic_signal(
+        mid, stake, profit_pct, n_legs, venue, signal_id=signal_id
+    )
 
     routing_engine = RoutingEngine(
         config=RoutingConfig(min_profit_threshold_pct=min_threshold_pct),
@@ -185,18 +218,20 @@ def run(
     decision = routing_engine.route(signal)
     if decision is None:
         typer.secho(
-            f"[gate] signal rejected — profit {profit_pct:.2f}% < threshold {min_threshold_pct:.2f}%",
+            f"[gate] signal rejected — profit {profit_pct:.2f}% "
+            f"< threshold {min_threshold_pct:.2f}%",
             fg=typer.colors.YELLOW,
             err=True,
         )
         raise typer.Exit(code=1)
 
+    tracker = _build_tracker(db_path)
     exec_engine = ExecutionEngine(
         config=ExecutionConfig(
             retry_attempts=retry_attempts,
             retry_delay_seconds=retry_delay_seconds,
         ),
-        tracker=_TRACKER,
+        tracker=tracker,
         paper_close=paper_close,
     )
     result = asyncio.run(exec_engine.execute(decision))
@@ -236,15 +271,21 @@ def run(
 
 @app.command()
 def status(
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite paper-account path (overrides POLYARB_POSITION_DB_PATH)",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Print current PositionTracker state (open positions + portfolio metrics).
 
     T5: now uses tracker.snapshot() to surface realized PnL, balance, and ROI.
-    Note: tracker state is per-process. Across separate CLI invocations
-    state resets. Persistent state is T5+1 scope (SQLite/Supabase).
+    State is loaded from SQLite on every invocation, so independent run,
+    status, and close processes share the same paper account.
     """
     _setup_logger(verbose)
+    tracker = _build_tracker(db_path)
     open_positions = [
         {
             "market_id": pos.market_id,
@@ -257,9 +298,9 @@ def status(
             "pnl": round(pos.pnl, 4),
             "pnl_pct": round(pos.pnl_pct, 4),
         }
-        for pos in _TRACKER.open_positions()
+        for pos in tracker.open_positions()
     ]
-    snap = _TRACKER.snapshot()
+    snap = tracker.snapshot()
     metrics = {
         "open_positions": snap.open_positions,
         "balance": round(snap.balance, 4),
@@ -269,7 +310,7 @@ def status(
         "roi_pct": round(snap.roi_pct, 4),
         "max_exposure": round(snap.max_exposure, 4),
     }
-    stop_loss_event = _TRACKER.check_stop_loss_event()
+    stop_loss_event = tracker.check_stop_loss_event()
     stop_loss = (
         {
             "loss_pct": round(stop_loss_event.loss_pct, 4),
@@ -297,6 +338,11 @@ def close(
         "--size",
         help="Filled size (defaults to position stake — must equal it; T5 has no partial fills)",
     ),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite paper-account path (overrides POLYARB_POSITION_DB_PATH)",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Close an open position via a synthesized Fill (operator-driven).
@@ -307,14 +353,13 @@ def close(
     position via `status`, then `close --market-id=... --exit-price=...`
     to see realized PnL flow.
 
-    Note: per-process tracker state. To see the close, run `run` then
-    `close` in the SAME process (e.g., via a Python REPL importing the
-    module). The CLI is mainly diagnostic; cross-process persistence is
-    T5+1.
+    The command loads the configured SQLite paper account, so it can close a
+    position opened by an earlier independent `run` process.
     """
     _setup_logger(verbose)
+    tracker = _build_tracker(db_path)
     pos = next(
-        (p for p in _TRACKER.open_positions() if p.market_id == market_id),
+        (p for p in tracker.open_positions() if p.market_id == market_id),
         None,
     )
     if pos is None:
@@ -330,7 +375,7 @@ def close(
         filled_size=size if size is not None else pos.stake,
     )
     try:
-        pnl = _TRACKER.close_position_with_fill(fill)
+        pnl = tracker.close_position_with_fill(fill)
     except ValueError as exc:
         typer.secho(f"close rejected: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
@@ -340,7 +385,7 @@ def close(
                 "closed": market_id,
                 "exit_price": exit_price,
                 "realized_pnl": round(pnl, 4),
-                "total_realized_pnl": round(_TRACKER.total_realized_pnl, 4),
+                "total_realized_pnl": round(tracker.total_realized_pnl, 4),
             },
             indent=2,
         )
