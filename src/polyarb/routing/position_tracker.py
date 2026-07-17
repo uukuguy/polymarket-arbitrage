@@ -24,9 +24,11 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 from polyarb.routing.config import PositionConfig
+from polyarb.routing.money import Money
 from polyarb.routing.position_repository import (
     InMemoryPositionRepository,
     OperationReceipt,
@@ -37,7 +39,7 @@ from polyarb.routing.position_repository import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(init=False)
 class Position:
     """A single position on a market."""
 
@@ -45,18 +47,52 @@ class Position:
     condition_id: str
     side: str
     outcome: str
-    stake: float
+    stake_money: Money
     entry_price: float
     current_price: float
     leg_id: str = ""
     opened_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
+    def __init__(
+        self,
+        market_id: str,
+        condition_id: str,
+        side: str,
+        outcome: str,
+        stake: int | float | str | Money,
+        entry_price: float,
+        current_price: float,
+        leg_id: str = "",
+        opened_at: datetime | None = None,
+    ) -> None:
+        self.market_id = market_id
+        self.condition_id = condition_id
+        self.side = side
+        self.outcome = outcome
+        self.stake_money = (
+            stake if isinstance(stake, Money) else Money.from_value(stake)
+        )
+        self.entry_price = entry_price
+        self.current_price = current_price
+        self.leg_id = leg_id
+        self.opened_at = opened_at or datetime.now(UTC)
+
+    @property
+    def stake(self) -> float:
+        return self.stake_money.to_float()
+
+    @property
+    def pnl_money(self) -> Money:
+        return Money.pnl_at(
+            self.stake_money,
+            self.entry_price,
+            self.current_price,
+            self.side,
+        )
+
     @property
     def pnl(self) -> float:
-        if self.side == "BUY":
-            return self.stake * (self.current_price - self.entry_price)
-        else:
-            return self.stake * (self.entry_price - self.current_price)
+        return self.pnl_money.to_float()
 
     @property
     def pnl_pct(self) -> float:
@@ -149,13 +185,20 @@ class PositionTracker:
     def can_open_position(self, size: float) -> tuple[bool, str]:
         """Return (True, "") if a position of `size` can be opened, else (False, reason)."""
         state = self.repository.load()
-        if size > state.balance:
-            return False, f"Insufficient balance: need {size:.2f}, have {state.balance:.2f}"
-        total_exposure = sum(p.stake for p in state.open_positions.values())
-        if total_exposure + size > self.config.max_total_exposure:
+        size_money = Money.from_value(size)
+        if size_money.micros > state.balance_money.micros:
             return (
                 False,
-                f"Max exposure exceeded: {total_exposure + size:.2f} > "
+                f"Insufficient balance: need {size_money.to_float():.2f}, "
+                f"have {state.balance:.2f}",
+            )
+        total_exposure = self._exposure_money(state)
+        requested_exposure = total_exposure + size_money
+        max_exposure = Money.from_value(self.config.max_total_exposure)
+        if requested_exposure.micros > max_exposure.micros:
+            return (
+                False,
+                f"Max exposure exceeded: {requested_exposure.to_float():.2f} > "
                 f"{self.config.max_total_exposure:.2f}",
             )
         return True, ""
@@ -171,20 +214,24 @@ class PositionTracker:
         leg_id: str = "",
         operation_id: str | None = None,
     ) -> bool:
+        stake_money = Money.from_value(stake)
+
         def transition(state: PositionState) -> bool:
-            if stake > state.balance:
+            if stake_money.micros > state.balance_money.micros:
                 logger.warning(
                     "Insufficient balance for position: need %.2f, have %.2f",
-                    stake,
+                    stake_money.to_float(),
                     state.balance,
                 )
                 return False
-            total_exposure = sum(p.stake for p in state.open_positions.values())
-            if total_exposure + stake > self.config.max_total_exposure:
+            total_exposure = self._exposure_money(state)
+            requested_exposure = total_exposure + stake_money
+            max_exposure = Money.from_value(self.config.max_total_exposure)
+            if requested_exposure.micros > max_exposure.micros:
                 logger.warning(
                     "Max exposure reached: %.2f + %.2f > %.2f",
-                    total_exposure,
-                    stake,
+                    total_exposure.to_float(),
+                    stake_money.to_float(),
                     self.config.max_total_exposure,
                 )
                 return False
@@ -196,18 +243,18 @@ class PositionTracker:
                 condition_id=condition_id,
                 side=side,
                 outcome=outcome,
-                stake=stake,
+                stake=stake_money,
                 entry_price=price,
                 current_price=price,
                 leg_id=leg_id,
             )
-            state.balance -= stake
+            state.balance_money = state.balance_money - stake_money
             logger.info(
                 "Opened position: %s %s @ %.4f, stake=%.2f",
                 side,
                 market_id,
                 price,
-                stake,
+                stake_money.to_float(),
             )
             return True
 
@@ -230,7 +277,9 @@ class PositionTracker:
         in a follow-up task once the orchestrator is migrated.
         """
         def transition(state: PositionState) -> None:
-            state.realized_pnl += pnl
+            state.realized_pnl_money = (
+                state.realized_pnl_money + Money.from_value(pnl)
+            )
             logger.debug(
                 "Updated tracker (legacy path): +%d legs, PnL=%.2f", legs, pnl
             )
@@ -277,16 +326,16 @@ class PositionTracker:
                 return 0.0
             if exit_price is not None:
                 pos.current_price = exit_price
-            pnl = pos.pnl
-            state.balance += pos.stake + pnl
-            state.realized_pnl += pnl
+            pnl_money = pos.pnl_money
+            state.balance_money = state.balance_money + pos.stake_money + pnl_money
+            state.realized_pnl_money = state.realized_pnl_money + pnl_money
             logger.info(
                 "Closed position: %s @ %.4f, PnL=%.2f",
                 market_id,
                 exit_price if exit_price is not None else pos.current_price,
-                pnl,
+                pnl_money.to_float(),
             )
-            return pnl
+            return pnl_money.to_float()
 
         result = self.repository.apply(
             self._operation_id(operation_id, "close", market_id),
@@ -315,24 +364,25 @@ class PositionTracker:
                     fill.market_id,
                 )
                 return 0.0
-            if fill.filled_size != pos.stake:
+            fill_size_money = Money.from_value(fill.filled_size)
+            if fill_size_money != pos.stake_money:
                 raise ValueError(
                     f"partial fill not supported (T5 scope): position stake "
                     f"{pos.stake} but fill size {fill.filled_size}"
                 )
             del state.open_positions[fill.market_id]
             pos.current_price = fill.exit_price
-            pnl = pos.pnl
-            state.balance += pos.stake + pnl
-            state.realized_pnl += pnl
+            pnl_money = pos.pnl_money
+            state.balance_money = state.balance_money + pos.stake_money + pnl_money
+            state.realized_pnl_money = state.realized_pnl_money + pnl_money
             logger.info(
                 "Closed via fill: %s @ %.4f, size=%.2f, PnL=%.2f",
                 fill.market_id,
                 fill.exit_price,
                 fill.filled_size,
-                pnl,
+                pnl_money.to_float(),
             )
-            return pnl
+            return pnl_money.to_float()
 
         result = self.repository.apply(
             self._operation_id(operation_id, "close-fill", fill.market_id),
@@ -356,31 +406,33 @@ class PositionTracker:
         if not self.config.enable_pnl_stop:
             return None
         state = self.repository.load()
-        if state.snapshot_balance == 0:
+        if state.snapshot_balance_money.micros == 0:
             return None
-        loss_pct = (state.realized_pnl / state.snapshot_balance) * 100.0
+        loss_pct = (
+            Decimal(abs(state.realized_pnl_money.micros))
+            * Decimal(100)
+            / Decimal(state.snapshot_balance_money.micros)
+        )
         # Loss = negative pnl → abs(loss_pct) compared to threshold.
-        if state.realized_pnl >= 0:
+        if state.realized_pnl_money.micros >= 0:
             return None
-        # FP-tolerant threshold compare: "at threshold" must trigger even
-        # when float arithmetic produces e.g. 4.999999999 ≈ 5.0.
-        if abs(loss_pct) + 1e-9 < self.config.stop_loss_pct:
+        if loss_pct < Decimal(str(self.config.stop_loss_pct)):
             return None
         logger.warning(
             "Stop loss triggered: realized_pnl=%.2f, loss=%.2f%% >= %.2f%%",
             state.realized_pnl,
-            abs(loss_pct),
+            float(loss_pct),
             self.config.stop_loss_pct,
         )
         return StopLossEvent(
-            loss_pct=abs(loss_pct),
+            loss_pct=float(loss_pct),
             realized_pnl=state.realized_pnl,
             threshold_pct=self.config.stop_loss_pct,
         )
 
     @property
     def _total_exposure(self) -> float:
-        return sum(p.stake for p in self.repository.load().open_positions.values())
+        return self._exposure_money(self.repository.load()).to_float()
 
     @property
     def _total_unrealized_pnl(self) -> float:
@@ -421,7 +473,7 @@ class PositionTracker:
 
     def snapshot(self) -> PositionSnapshot:
         state = self.repository.load()
-        total_exposure = sum(p.stake for p in state.open_positions.values())
+        total_exposure = self._exposure_money(state).to_float()
         total_unrealized_pnl = sum(p.pnl for p in state.open_positions.values())
         return PositionSnapshot(
             balance=state.balance,
@@ -430,3 +482,10 @@ class PositionTracker:
             open_positions=len(state.open_positions),
             max_exposure=total_exposure,
         )
+
+    @staticmethod
+    def _exposure_money(state: PositionState) -> Money:
+        exposure = Money(0)
+        for position in state.open_positions.values():
+            exposure = exposure + position.stake_money
+        return exposure

@@ -26,7 +26,6 @@ from polyarb.routing.position_tracker import (
     StopLossEvent,
 )
 
-
 # ---------------------------------------------------------------------------
 # T5.1 — PositionSnapshot.roi_pct bug (pre-existing, surfaces in any snapshot)
 # ---------------------------------------------------------------------------
@@ -169,7 +168,9 @@ class TestStopLossTriggerChain:
         # Even a huge realized loss should not trigger when disabled.
         market_id = "asset-1"
         tracker.open_position(market_id, "cond-1", "BUY", "yes", 500.0, 0.50)
-        tracker.close_position_with_fill(Fill(market_id=market_id, exit_price=0.10, filled_size=500.0))
+        tracker.close_position_with_fill(
+            Fill(market_id=market_id, exit_price=0.10, filled_size=500.0)
+        )
         assert tracker.check_stop_loss_event() is None
 
     def test_realized_loss_within_threshold_returns_none(self):
@@ -178,7 +179,9 @@ class TestStopLossTriggerChain:
         market_id = "asset-1"
         tracker.open_position(market_id, "cond-1", "BUY", "yes", 100.0, 0.50)
         # Lose $10 → 1% of balance, below 5% threshold.
-        tracker.close_position_with_fill(Fill(market_id=market_id, exit_price=0.40, filled_size=100.0))
+        tracker.close_position_with_fill(
+            Fill(market_id=market_id, exit_price=0.40, filled_size=100.0)
+        )
         event = tracker.check_stop_loss_event()
         assert event is None
 
@@ -188,7 +191,9 @@ class TestStopLossTriggerChain:
         market_id = "asset-1"
         tracker.open_position(market_id, "cond-1", "BUY", "yes", 500.0, 0.50)
         # Lose $50 → exactly 5% of balance.
-        tracker.close_position_with_fill(Fill(market_id=market_id, exit_price=0.40, filled_size=500.0))
+        tracker.close_position_with_fill(
+            Fill(market_id=market_id, exit_price=0.40, filled_size=500.0)
+        )
         event = tracker.check_stop_loss_event()
         assert isinstance(event, StopLossEvent)
         assert event.loss_pct == pytest.approx(5.0)
@@ -200,7 +205,9 @@ class TestStopLossTriggerChain:
         tracker = PositionTracker(cfg)
         market_id = "asset-1"
         tracker.open_position(market_id, "cond-1", "BUY", "yes", 500.0, 0.50)
-        tracker.close_position_with_fill(Fill(market_id=market_id, exit_price=0.70, filled_size=500.0))
+        tracker.close_position_with_fill(
+            Fill(market_id=market_id, exit_price=0.70, filled_size=500.0)
+        )
         assert tracker.check_stop_loss_event() is None
 
     def test_legacy_bool_form_still_works_via_bool_event(self):
@@ -212,7 +219,9 @@ class TestStopLossTriggerChain:
         tracker = PositionTracker(cfg)
         market_id = "asset-1"
         tracker.open_position(market_id, "cond-1", "BUY", "yes", 500.0, 0.50)
-        tracker.close_position_with_fill(Fill(market_id=market_id, exit_price=0.40, filled_size=500.0))
+        tracker.close_position_with_fill(
+            Fill(market_id=market_id, exit_price=0.40, filled_size=500.0)
+        )
         assert tracker.check_stop_loss() is True
 
 

@@ -6,10 +6,12 @@ import logging
 import sqlite3
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
+
+from polyarb.routing.money import Money
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +72,52 @@ _REQUIRED_COLUMNS = {
 }
 
 
-@dataclass
+@dataclass(init=False)
 class PositionState:
-    balance: float
-    snapshot_balance: float
-    realized_pnl: float = 0.0
-    open_positions: dict[str, Any] = field(default_factory=dict)
+    balance_money: Money
+    snapshot_balance_money: Money
+    realized_pnl_money: Money
+    open_positions: dict[str, Any]
+
+    def __init__(
+        self,
+        balance: int | float | str | Money,
+        snapshot_balance: int | float | str | Money,
+        realized_pnl: int | float | str | Money = 0.0,
+        open_positions: dict[str, Any] | None = None,
+    ) -> None:
+        self.balance_money = _as_money(balance)
+        self.snapshot_balance_money = _as_money(snapshot_balance)
+        self.realized_pnl_money = _as_money(realized_pnl)
+        self.open_positions = open_positions or {}
+
+    @property
+    def balance(self) -> float:
+        return self.balance_money.to_float()
+
+    @balance.setter
+    def balance(self, value: int | float | str | Money) -> None:
+        self.balance_money = _as_money(value)
+
+    @property
+    def snapshot_balance(self) -> float:
+        return self.snapshot_balance_money.to_float()
+
+    @snapshot_balance.setter
+    def snapshot_balance(self, value: int | float | str | Money) -> None:
+        self.snapshot_balance_money = _as_money(value)
+
+    @property
+    def realized_pnl(self) -> float:
+        return self.realized_pnl_money.to_float()
+
+    @realized_pnl.setter
+    def realized_pnl(self, value: int | float | str | Money) -> None:
+        self.realized_pnl_money = _as_money(value)
+
+
+def _as_money(value: int | float | str | Money) -> Money:
+    return value if isinstance(value, Money) else Money.from_value(value)
 
 
 type TransitionResult = bool | float | None
