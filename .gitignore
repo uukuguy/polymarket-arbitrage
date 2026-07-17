@@ -41,6 +41,9 @@ pytestdebug.log
 # Agent implementation worktrees (repository-local, isolated, disposable)
 .worktrees/
 
+# climb execution artifacts; canonical state is tracked in docs/status/climb/
+runs/climb/
+
 # gsd-tools ephemeral runtime state (e.g., _auto_chain_active flag set on every workflow start)
 .planning/config.json
 

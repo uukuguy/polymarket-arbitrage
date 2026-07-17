@@ -1,0 +1,8 @@
+score_name: phase_gate_score
+score_direction: max
+subscores: [planning, unit, integration, cli, restart]
+push_mode: manual-csv
+state_dir: docs/status/climb
+artifact_dir: runs/climb
+run_tag_marker: -climb-
+paradigm_field: implementation_hypothesis
