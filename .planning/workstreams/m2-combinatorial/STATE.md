@@ -27,7 +27,8 @@ last_updated: 2026-06-07
 - m2 test progression: 21 → 30 → 38 → 42 → 63 → **104**
 
 ## Session Continuity
-**Stopped At:** Phase 2 全 task 完成。T6 (env-var config) + T8 (E2E chaos) 落地，SUMMARY written，planning-status zero drift。
+**Last Resumed:** 2026-07-17
+**Stopped At:** Phase 2 closure is now recorded consistently in STATE, SUMMARY, and ROADMAP. Worktree lifecycle repair is in progress; Phase 3 has not been created.
 **Resume File:** None
 
 ## Next Action (2026-06-07)

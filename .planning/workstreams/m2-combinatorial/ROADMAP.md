@@ -11,7 +11,14 @@
 
 ## Phases
 
-(等 m1-perception 接口可用后启动)
+### Phase 2: Arbitrage Execution Engine ✅
+
+**Goal:** Turn Type-2 cross-venue signals into slippage-aware routed executions with position lifecycle, environment-driven risk settings, CLI surfaces, and E2E failure-mode coverage.
+**Status:** Complete — 2026-06-07
+**Plans:** 1/1 complete
+
+Plans:
+- [x] `02-1-PLAN.md` — T1-T8 signal, slippage, routing, execution, position tracking, settings, CLI, and E2E chaos coverage
 
 ---
 
