@@ -90,15 +90,42 @@ class PlanRow:
         return dim("NOT-STARTED")
 
 
-def _git_log_for(phase: str, plan: str) -> list[tuple[str, str]]:
-    """Return [(hash, subject), ...] for commits whose subject scope is (phase-plan)."""
+def _git_log_for(
+    phase: str,
+    plan: str,
+    plan_md: Path,
+) -> list[tuple[str, str]]:
+    """Return scoped commits made after this exact plan entered the branch.
+
+    Plan numbers are only unique inside a workstream. Searching ``--all`` for
+    ``feat(03-01)`` lets an older M1 plan make a new M2 plan look shipped. The
+    plan's creation commit is the earliest safe boundary. An uncommitted plan
+    has no code commits by definition and therefore returns an empty list.
+    """
     pattern = rf"^[a-z]+\({re.escape(phase)}-{re.escape(plan)}\):"
     try:
+        creation_out = subprocess.check_output(
+            [
+                "git",
+                "log",
+                "--follow",
+                "--diff-filter=A",
+                "--format=%H",
+                "--",
+                str(plan_md),
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        creation_commits = [line for line in creation_out.splitlines() if line]
+        if not creation_commits:
+            return []
+        creation_sha = creation_commits[-1]
         out = subprocess.check_output(
             [
                 "git",
                 "log",
-                "--all",
+                f"{creation_sha}..HEAD",
                 "-E",
                 f"--grep={pattern}",
                 "--pretty=%h %s",
@@ -155,7 +182,7 @@ def collect() -> list[PlanRow]:
                         plan_md=plan_md,
                         summary_md=summary_md,
                         summary_exists=summary_md.exists(),
-                        commits=_git_log_for(phase, plan),
+                        commits=_git_log_for(phase, plan, plan_md),
                     )
                 )
     return rows
