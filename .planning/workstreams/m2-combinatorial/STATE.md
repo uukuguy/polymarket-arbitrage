@@ -3,28 +3,28 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 6
-status: ready
-stopped_at: Phase 6 planned; H-004 ready for TDD execution
+status: completed
+stopped_at: Phase 6 closed; H-004 ready for climb evaluation
 last_updated: "2026-07-17T04:33:10.644Z"
 last_activity: 2026-07-17
 progress:
   total_phases: 5
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 5
-  completed_plans: 4
-  percent: 80
+  completed_plans: 5
+  percent: 100
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
 
-Phase: 6 (Unit-Safe Execution Accounting)
-Plan: 0 of 1 complete
-**Status:** Ready for execution
+Phase: 6 (Unit-Safe Execution Accounting) — ✅ CLOSED 2026-07-17
+Plan: 1 of 1 complete
+**Status:** Complete
 **Current Phase:** 6
 **Last Activity:** 2026-07-17
-**Last Activity Description:** Phase 05 planning complete — 1 plans ready
+**Last Activity Description:** Phase 6 implementation and verification complete
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 
@@ -54,13 +54,21 @@ Plan: 0 of 1 complete
 - ✅ True subprocess response-loss recovery proof
 - ✅ Teaching, SUMMARY, learnings, JOURNAL, and H-002 climb closure
 
-## Phase 5 Plan Progress (`05-01-PLAN.md` — READY)
+## Phase 5 Plan Progress (`05-01-PLAN.md` — ✅ CLOSED 2026-07-17)
 
 - ✅ Frozen Money value and exact tracker domain
 - ✅ Transactional SQLite v2 migration and INTEGER authority
 - ✅ Tagged money receipts and CLI restart recovery
 - ✅ Teaching chapter 14, SUMMARY, learnings, and zero planning drift
 - ✅ H-003 climb planning/unit/integration/CLI/restart = 100/100 each
+
+## Phase 6 Plan Progress (`06-01-PLAN.md` — ✅ CLOSED 2026-07-17)
+
+- ✅ Exact micro-share Quantity distinct from micro-pUSD Money
+- ✅ Explicit execution/position/fill quantity and cash cost-basis authority
+- ✅ BUY/SELL collateral and full-fill lifecycle corrected
+- ✅ Transactional v3 migration with one-time legacy balance repair
+- ✅ Explicit CLI quantity/cost basis, teaching chapter 15, SUMMARY, and zero drift
 
 ## Test Count (m2)
 
@@ -69,20 +77,21 @@ Plan: 0 of 1 complete
 - **Phase 3 corrected full gate: 130 tests green** (repository 14 + tracker 18 + expanded engine/CLI/config/process coverage)
 - **Phase 4 corrected full gate: 145 tests green**; climb H-002 planning/unit/integration/CLI/restart = 100/100 each
 - **Phase 5 corrected full gate: 187 tests green**; exact migration/restart smoke proves INTEGER micros and tagged receipt
+- **Phase 6 corrected full gate: 219 tests green**; raw v3 quantity/cost-basis INTEGER authority and four-process lifecycle verified
 
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 6 planned; H-004 ready for TDD execution
-**Resume File:** .planning/workstreams/m2-combinatorial/phases/06-unit-safe-execution-accounting/06-01-PLAN.md
+**Stopped At:** Phase 6 closed; H-004 ready for climb evaluation
+**Resume File:** .planning/workstreams/m2-combinatorial/phases/06-unit-safe-execution-accounting/06-01-SUMMARY.md
 
 ## Next Action (2026-07-17)
 
-H-004 已规划：先拆分 exact shares Quantity 与 pUSD cost basis，再进入 H-005 partial fills。
+Phase 6 已闭环 exact Quantity/cost basis、v3 migration 和 operator contract；下一步先让 climb 裁决 H-004，再自动进入 H-005。
 
 第一条命令：
 
-`uv run pytest tests/routing/test_quantity.py -q`
+`make climb-cycle hypothesis=H-004`
 
 **已交付给用户 (累积)**:
 

@@ -53,17 +53,17 @@ Plans:
 Plans:
 - [x] `05-01-PLAN.md` — Money value object, exact tracker state, additive SQLite migration, tagged receipts, compatibility surfaces, teaching, and climb proof
 
-### Phase 6: Unit-Safe Execution Accounting
+### Phase 6: Unit-Safe Execution Accounting ✅
 
 **Goal:** Separate exact outcome-token quantity from pUSD collateral across routing,
 positions, full fills, SQLite restart, and operator views.
 **Requirements:** H-004 internal unit-safety contract (no live credentials)
 **Depends on:** Phase 5
-**Status:** Planned — ready for autonomous execution
-**Plans:** 0/1 complete
+**Status:** Complete — 2026-07-17
+**Plans:** 1/1 complete
 
 Plans:
-- [ ] `06-01-PLAN.md` — exact Quantity, explicit execution/domain fields, correct cash flow, v3 migration, compatibility, teaching, and climb proof
+- [x] `06-01-PLAN.md` — exact Quantity, explicit execution/domain fields, correct cash flow, v3 migration, compatibility, teaching, and climb proof
 
 ---
 

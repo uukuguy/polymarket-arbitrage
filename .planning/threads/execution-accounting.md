@@ -47,3 +47,19 @@
 先做 H-004，把 exact `Quantity`、position quantity、cash cost basis、fill quantity 分开；之后
 H-005 才允许实现 partial aggregation。H-006 再引入 venue-confirmed cash/fee truth。价格仍保留
 decimal-facing estimate，不扩张 H-003 的 Money 范围。
+
+## 2026-07-17 — H-004 verified unit-safe execution ledger
+
+### 已验证事实
+
+- BUY 100 @ .50 的开放余额是 950、cash exposure 是 50；@ .60 full close 后余额 1010、PnL 10。
+- fully-collateralized paper SELL 100 @ .60 锁 40；@ .50 close 后同样余额 1010、PnL 10。
+- full-fill equality 现在比较 exact Quantity；`0.1 + 0.2` 在 micro-share 边界量化后可确定等于 0.3。
+- Phase 5 legacy BUY 100 @ .50、balance 900 迁移后 balance 950；restart 不重复 refund。
+- partial v3 column、非法 side、非 INTEGER authority 与 cost-basis inconsistency 全部 fail closed。
+
+### 给 H-005/H-006 的约束
+
+- H-005 residual/aggregation authority 必须是 Quantity；每个 fill ID 只能减少一次 remaining quantity。
+- 部分关闭需要按 exact quantity 分配 cost basis，不能把原仓位 Money 与 fill shares 直接相减。
+- H-006 的 venue proceeds/fee 是 Money truth；SDK side-dependent amount 只在 adapter boundary 翻译。

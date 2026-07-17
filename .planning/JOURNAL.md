@@ -3450,3 +3450,35 @@ H-003 五门全 100 后自动选择下一条 bounded hypothesis；live venue ada
 ```bash
 $gsd-plan-phase 6 --ws m2-combinatorial
 ```
+
+## SESSION 43 — 2026-07-17 (M2 Phase 6 Unit-Safe Execution Accounting CLOSED)
+
+### 主线产出
+
+- Knowledge Layer 从 partial-fill 前置检查发现 `size/stake/filled_size` 三重单位碰撞，并将路线拆为 H-004 unit safety → H-005 partial fills → H-006 venue reconciliation。
+- 新增 exact `Quantity(micros)`；`ExecutionLeg`、`Position`、`Fill` 分离 shares quantity 与 pUSD cost basis，旧字段只做兼容投影。
+- paper BUY collateral=`q*p`、SELL collateral=`q*(1-p)`、PnL=`q*side-aware delta`；100@.50 BUY 生命周期为 1000→950→1010。
+- SQLite v3 新增 `quantity_micros/cost_basis_micros`；Phase 5 开仓的多扣余额在同一个 `BEGIN IMMEDIATE` 中一次性修复，partial authority/非法 side/错误类型 fail closed。
+- CLI/decision JSON 新增 `quantity/cost_basis`，保留 `size/stake`；教学 chapter 15、06-01-SUMMARY、06-LEARNINGS 和 execution-accounting thread 已落库。
+
+### TDD 与验证
+
+- 四组 RED→GREEN：Quantity 2 个 import RED；domain 7 failures；migration 5 failures；operator 2 failures。
+- corrected full M2：**219 passed**；Makefile **3 passed**；climb adapter **16 passed**；targeted Ruff 全绿；`git diff --check` clean。
+- 四进程 raw proof：BUY 100 @ .40 开仓后 balance/exposure=960/40，SQLite quantity/cost basis=`100000000/40000000` 且均为 INTEGER；close @ .50 后 balance=1010、PnL=10。
+- `make planning-status` zero drift，Phase 6 所有 code commit 后已立即建立 SUMMARY 锚点。
+
+### 关键学习
+
+- terminal PnL 正确不代表中间账本正确；balance/exposure/cost basis 必须作为独立 gate。
+- venue 字段名不是领域单位；官方 market BUY/SELL 的 `amount` 本身就是 side-dependent。
+- migration 可能需要语义 equity repair；只加新列会把旧错误永久固化。
+- 相同 10^6 scale 仍必须用 Money/Quantity 两个类型阻止维度互换。
+
+### [NEXT]
+
+```bash
+make climb-cycle hypothesis=H-004
+```
+
+H-004 五门 100 后不暂停，直接执行已 pending 的 H-005 durable partial-fill accounting。
