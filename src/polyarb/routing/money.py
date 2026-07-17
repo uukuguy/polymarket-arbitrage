@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Self
 
+from polyarb.routing.quantity import Quantity
+
 MICROS_PER_PUSD = 1_000_000
 SQLITE_INT_MIN = -(2**63)
 SQLITE_INT_MAX = 2**63 - 1
@@ -79,3 +81,55 @@ class Money:
         else:
             raise ValueError("side must be BUY or SELL")
         return cls.from_value(stake.to_decimal() * delta)
+
+    @staticmethod
+    def _price(value: int | float | str | Decimal) -> Decimal:
+        try:
+            price = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"invalid price value: {value!r}") from exc
+        if not price.is_finite():
+            raise ValueError("price must be finite")
+        if not Decimal(0) <= price <= Decimal(1):
+            raise ValueError("price must be between 0 and 1")
+        return price
+
+    @classmethod
+    def collateral_for(
+        cls,
+        quantity: Quantity,
+        entry_price: int | float | str | Decimal,
+        side: str,
+    ) -> Money:
+        """Return fully collateralized pUSD reserved for an execution quantity."""
+        if not isinstance(quantity, Quantity):
+            raise TypeError("collateral quantity must be Quantity")
+        price = cls._price(entry_price)
+        if side == "BUY":
+            per_share = price
+        elif side == "SELL":
+            per_share = Decimal(1) - price
+        else:
+            raise ValueError("side must be BUY or SELL")
+        return cls.from_value(quantity.to_decimal() * per_share)
+
+    @classmethod
+    def pnl_for(
+        cls,
+        quantity: Quantity,
+        entry_price: int | float | str | Decimal,
+        exit_price: int | float | str | Decimal,
+        side: str,
+    ) -> Money:
+        """Return modeled pUSD PnL for an exact outcome-token quantity."""
+        if not isinstance(quantity, Quantity):
+            raise TypeError("PnL quantity must be Quantity")
+        entry = cls._price(entry_price)
+        exit_ = cls._price(exit_price)
+        if side == "BUY":
+            delta = exit_ - entry
+        elif side == "SELL":
+            delta = entry - exit_
+        else:
+            raise ValueError("side must be BUY or SELL")
+        return cls.from_value(quantity.to_decimal() * delta)
