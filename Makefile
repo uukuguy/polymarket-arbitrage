@@ -32,11 +32,14 @@ help:
 
 ## status: Show current project state (milestone / phase / next action)
 status:
-	@echo "=== Project Status ==="
-	@grep -A 5 "## 当前状态" CLAUDE.md | head -10
+	@cat .planning/CURRENT.md
 	@echo ""
-	@echo "=== Recent Journal Entries ==="
-	@tail -20 .planning/JOURNAL.md
+	@echo "## 当前 checkout"
+	@echo ""
+	@echo "- branch: $$(git branch --show-current)"
+	@echo "- commit: $$(git rev-parse --short HEAD)"
+	@echo "- main..HEAD commits: $$(git rev-list --count main..HEAD 2>/dev/null || echo unknown)"
+	@echo "- worktree: $$(if [ -z "$$(git status --short)" ]; then echo clean; else echo dirty; fi)"
 
 ## journal: Open the project journal (activity timeline)
 journal:

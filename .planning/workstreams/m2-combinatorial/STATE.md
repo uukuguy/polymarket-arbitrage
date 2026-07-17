@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 8
-status: complete
-stopped_at: M2 workstream closed; Phase 2-8 complete and H-001 through H-006 confirmed
-last_updated: "2026-07-17T04:33:10.644Z"
+status: foundation_complete
+stopped_at: Execution/accounting foundation complete; M2 product capability remains open
+last_updated: "2026-07-17T08:38:03Z"
 last_activity: 2026-07-17
 progress:
   total_phases: 7
@@ -21,10 +21,10 @@ progress:
 
 Phase: 8 (Venue-Truth Fill Reconciliation)
 Plan: 1 of 1 complete
-**Status:** Complete
+**Status:** Foundation complete; product capability open
 **Current Phase:** 8
 **Last Activity:** 2026-07-17
-**Last Activity Description:** M2 closed with H-006 climb cycle 6 confirmed at five 100 gates
+**Last Activity Description:** Phase 2-8 foundation confirmed; closure wording corrected after product-gap audit
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 
@@ -100,16 +100,25 @@ Plan: 1 of 1 complete
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** M2 workstream closed; no incomplete phase, plan, or climb hypothesis
+**Stopped At:** No incomplete planned phase; discovery, M1 integration, real paper feed, and live adapter remain unplanned product gaps
 **Resume File:** .planning/workstreams/m2-combinatorial/phases/08-venue-truth-fill-reconciliation/08-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-M2 已闭环；Phase 2-8 全部 complete，H-001 至 H-006 全部 confirmed。
+M2 execution/accounting foundation 已闭环；Phase 2-8 全部 complete，H-001 至 H-006
+全部 confirmed。M2 产品能力未闭环，且当前没有已规划的后续 Phase。
 
 第一条命令：
 
 `make status`
+
+## Product Gaps (not yet planned as phases)
+
+- Real combinatorial opportunity discovery from live market state
+- Explicit M1→M2 market-state input contract
+- Sustained real-data paper evidence and strategy-level performance metrics
+- Authorized Polymarket order/fill adapter with operational risk controls
+- Feature-branch review and integration into `main`
 
 **已交付给用户 (累积)**:
 

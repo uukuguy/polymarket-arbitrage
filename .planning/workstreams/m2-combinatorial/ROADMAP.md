@@ -9,6 +9,15 @@
 
 依赖 m1-perception 提供的市场状态视图。
 
+## Capability Status
+
+Phase 2–8 完成的是 execution/accounting foundation：路由壳、paper executor、持久仓位、
+精确 cash/quantity、partial fill 与 venue-truth reconciliation contract。
+
+**M2 产品能力尚未闭环。** 当前仍缺真实 combinatorial opportunity discovery、M1→M2
+market-state contract、真实数据持续 paper evidence，以及经过明确授权的 live venue adapter。
+下方所有现有 Phase complete 不应解读为整体产品可实盘。当前没有已规划的后续 Phase。
+
 ## Phases
 
 ### Phase 2: Arbitrage Execution Engine ✅

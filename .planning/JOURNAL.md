@@ -1,5 +1,8 @@
 # 项目日志（活跃时间线）
 
+> **当前状态不要从历史 `[NEXT]` 推断。唯一入口：`.planning/CURRENT.md`，命令：
+> `make status`。本文件以下内容是追加式历史，旧 `[NEXT]` 在后续 SESSION 出现后即失效。**
+>
 > 每次会话开头：Claude 读取此文件恢复上下文
 > 每次会话结尾：Claude 主动追加本次进展
 > 格式：`[TYPE] 内容`，TYPE ∈ {SESSION, DECISION, LEARNING, BLOCKER, NEXT, NOTE}
@@ -3590,3 +3593,25 @@ make status
 ```
 
 下次会话先读取全局状态，再由用户明确选择其它 workstream 或授权新的 M2 live phase。
+
+### SESSION 44 — 2026-07-17 (CURRENT status audit / M2 closure wording corrected)
+
+- 用户指出仅凭 ROADMAP/追加式 JOURNAL 无法判断项目做到什么程度、什么可以实际使用。
+- 实测交付分叉：主工作区 `main=5b90e6c`；M2 Phase 3–8 位于
+  `feat/m2-position-persistence=67c6405`，相对 main 有 87 个未集成提交。
+- 实测 M1 production：L1 `/healthz` 200 但 `/health` 503，snapshot 严重过期；
+  L2 `/healthz` 200 但 `/health` 503，WS event 严重过期。平台可达不等于业务健康。
+- 实测 M2 local smoke：eval→paper run→SQLite status→exact venue-like close 全链通过；
+  BUY 100 @ .40、gross=46、fee=1 → net=45、PnL=5、balance=1005。
+- 纠正旧口径：H-001～H-006 / Phase 2–8 只证明 execution/accounting foundation；
+  M2 尚无真实 opportunity discovery、M1 输入或 live venue adapter，产品能力线不能称 closed。
+- 新建 `.planning/CURRENT.md` 作为唯一当前状态入口；README 与 `make status` 均路由到它，
+  JOURNAL 顶部明确所有旧 `[NEXT]` 是历史。
+
+### [NEXT — CURRENT]
+
+```bash
+make status
+```
+
+先审查并集成 M2 feature branch；之后恢复 M1 L1/L2 数据健康。未经新授权，不接真实资金。

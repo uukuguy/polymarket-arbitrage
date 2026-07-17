@@ -1,7 +1,7 @@
 # Project Charter: Polymarket Arbitrage
 
 > 项目章程 — 锁定核心目标、约束、技术决策。重大调整需要明确决议。
-> Last updated: 2026-04-28
+> Last updated: 2026-07-17. Current operational truth lives in `CURRENT.md`.
 
 ## Mission
 
@@ -23,11 +23,11 @@
 
 | 能力线 | Workstream | 职责 | 当前重点 |
 |---|---|---|---|
-| M1 市场感知 | `m1-perception` | Gamma/CLOB/异常检测/Dashboard，所有策略的底座 | 主战场，正在长 Phase 1（snapshot tool） |
-| M2 Combinatorial | `m2-combinatorial` | IMDEA Type 2 跨市场组合套利 | 等 m1 接口可用 |
+| M1 市场感知 | `m1-perception` | Gamma/CLOB/异常检测/Dashboard，所有策略的底座 | 恢复 L1/L2 production freshness，完成 Phase 05 final soak |
+| M2 Combinatorial | `m2-combinatorial` | IMDEA Type 2 跨市场组合套利 | execution/accounting foundation 在 feature branch；discovery、M1 输入与 live adapter 未完成 |
 | M3 跨平台 | `m3-cross-platform` | Kalshi 数据源 + Polymarket × Kalshi 套利 | 等账户开通 + 合规判断 |
 | M4 Smart Strategies | `m4-smart-strategies` | LLM 驱动的价值判断（weather/news/MM rebate） | 等 m1 数据沉淀 + 评估基线 |
-| M5 工业化 | `m5-industrialize` | 部署/监控/风控/可观测性 | 任何线证明需要时启动 |
+| M5 工业化 | `m5-industrialize` | 部署/监控/风控/可观测性 | 有计划，当前受 M1 未完成工作阻塞 |
 
 **演进规律**：
 - 每条线"够用了"就允许下游线启动，不要求"完成"——M1 永远在演进

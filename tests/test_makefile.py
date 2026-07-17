@@ -26,6 +26,15 @@ def test_help_lists_durable_arbitrage_commands() -> None:
     assert "operation_id=" in result.stdout
 
 
+def test_status_uses_the_canonical_current_state() -> None:
+    result = _make("status")
+
+    assert result.returncode == 0, result.stderr
+    assert "唯一当前状态入口" in result.stdout
+    assert "还不是可以投入真实资金运行的套利产品" in result.stdout
+    assert "## 当前 checkout" in result.stdout
+
+
 def test_arbitrage_make_targets_forward_database_path() -> None:
     database = "build/test-m2-positions.db"
     cases = (
