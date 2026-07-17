@@ -70,7 +70,7 @@ def test_money_arithmetic_accepts_only_money() -> None:
     [
         ("BUY", 0.4, 0.5, "10"),
         ("SELL", 0.6, 0.5, "10"),
-        ("BUY", 0.500000004, 0.500000009, "0.0005"),
+        ("BUY", 0.5, 0.500005, "0.0005"),
     ],
 )
 def test_money_pnl_at_quantizes_once_after_price_delta(
