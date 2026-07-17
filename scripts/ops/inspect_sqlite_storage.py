@@ -26,14 +26,16 @@ def main() -> int:
         )
         tables = connection.execute(
             "SELECT name FROM sqlite_master "
-            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+            "ORDER BY CASE name WHEN 'snapshots' THEN 0 "
+            "WHEN 'scheduler_state' THEN 1 ELSE 2 END, name"
         ).fetchall()
         for (table,) in tables:
             quoted = table.replace('"', '""')
             rows = connection.execute(
                 f'SELECT count(*) FROM "{quoted}"'  # noqa: S608 - schema-owned name
             ).fetchone()[0]
-            print("ROWS", table, rows)
+            print("ROWS", table, rows, flush=True)
     finally:
         connection.close()
     return 0
