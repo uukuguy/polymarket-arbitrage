@@ -1,6 +1,6 @@
 {
   "in_flight": null,
-  "last_cycle": 5,
-  "next_action": "run H-006 deterministic climb adjudication",
+  "last_cycle": 6,
+  "next_action": "rank next pending hypothesis",
   "session": "2026-07-17-m2-position-persistence"
 }

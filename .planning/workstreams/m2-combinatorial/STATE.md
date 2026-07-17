@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 8
 status: complete
-stopped_at: Phase 8 complete; H-006 ready for climb adjudication
+stopped_at: M2 workstream closed; Phase 2-8 complete and H-001 through H-006 confirmed
 last_updated: "2026-07-17T04:33:10.644Z"
 last_activity: 2026-07-17
 progress:
@@ -24,7 +24,7 @@ Plan: 1 of 1 complete
 **Status:** Complete
 **Current Phase:** 8
 **Last Activity:** 2026-07-17
-**Last Activity Description:** Phase 8 venue-truth reconciliation implemented and verified
+**Last Activity Description:** M2 closed with H-006 climb cycle 6 confirmed at five 100 gates
 
 ## Phase 2 Plan Progress (`02-1-PLAN.md` — ✅ CLOSED 2026-06-07)
 
@@ -100,16 +100,16 @@ Plan: 1 of 1 complete
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 8 complete; H-006 ready for climb adjudication
+**Stopped At:** M2 workstream closed; no incomplete phase, plan, or climb hypothesis
 **Resume File:** .planning/workstreams/m2-combinatorial/phases/08-venue-truth-fill-reconciliation/08-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-Phase 8 已闭环；执行 H-006 deterministic climb adjudication。
+M2 已闭环；Phase 2-8 全部 complete，H-001 至 H-006 全部 confirmed。
 
 第一条命令：
 
-`make climb-cycle hypothesis=H-006`
+`make status`
 
 **已交付给用户 (累积)**:
 

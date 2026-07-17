@@ -4,8 +4,8 @@
 
 ## Session
 
-- Last cycle: 5
-- Next action: run H-006 deterministic climb adjudication
+- Last cycle: 6
+- Next action: rank next pending hypothesis
 
 ## In flight
 
@@ -18,7 +18,7 @@
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
 - **H-002** [confirmed]: Caller-supplied immutable close identities make committed-but-unacknowledged retries observable and idempotent
-- **H-006** [pending]: Venue-confirmed share, cash, and fee amounts supersede paper formulas through an exact reconciliation boundary
+- **H-006** [confirmed]: Venue-confirmed share, cash, and fee amounts supersede paper formulas through an exact reconciliation boundary
 
 ## Runs
 
@@ -27,3 +27,4 @@
 - 20260717-045843-h-003: 100.0 (confirmed)
 - 20260717-052429-h-004: 100.0 (confirmed)
 - 20260717-064120-h-005: 100.0 (confirmed)
+- 20260717-074013-h-006: 100.0 (confirmed)

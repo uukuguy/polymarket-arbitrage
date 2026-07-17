@@ -79,6 +79,8 @@ exact structured receipt, and rejects every changed retry atomically across proc
 - Repository/tracker focused: **102 passed**; Engine/CLI/process/Makefile: **43 passed**.
 - Targeted Ruff over every changed Python file: clean; `git diff --check`: clean.
 - `make planning-status`: zero drift.
+- H-006 climb cycle 6: planning/unit/integration/CLI/restart =
+  **100/100/100/100/100**, total **100**, verdict **confirmed**.
 
 ## Deviations from Plan
 

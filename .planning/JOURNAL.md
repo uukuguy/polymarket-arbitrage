@@ -3571,3 +3571,22 @@ make climb-cycle hypothesis=H-006
 
 H-006 五门确认后审计 M2 workstream 是否还有未闭合 phase/requirement；若无则完成 M2
 能力线闭环，不自动引入 live signing 或真实资金权限。
+
+### SESSION 43 continuation — H-006 climb CONFIRMED / M2 CLOSED
+
+- `make climb-cycle hypothesis=H-006` → cycle 6；planning/unit/integration/CLI/restart
+  五门均 **100**，total **100**，verdict **confirmed**。
+- run `20260717-074013-h-006`、runs ledger、session state 与 research tree 已由 climb
+  adapter 确定性同步；H-001 至 H-006 全部 confirmed，无 pending/falsified hypothesis。
+- M2 ROADMAP Phase 2-8 全部 complete、所有 plan `[x]`、planning-status zero drift；
+  VALIDATION 四项已从 pending 更新为 passed。
+- M2 能力线正式闭环。live signing、真实订单与资金权限未被隐式纳入；如要继续该方向，
+  应建立新的明确 phase/authority contract。
+
+### [NEXT]
+
+```bash
+make status
+```
+
+下次会话先读取全局状态，再由用户明确选择其它 workstream 或授权新的 M2 live phase。
