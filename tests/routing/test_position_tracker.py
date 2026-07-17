@@ -415,3 +415,127 @@ class TestExactCashDomain:
         assert pnl == pytest.approx(0.03)
         assert tracker.open_count == 0
         assert tracker.repository.load().realized_pnl_money.micros == 30_000
+
+
+class TestDurablePartialFillAccounting:
+    def _open(self, tracker: PositionTracker) -> None:
+        assert tracker.open_position(
+            "m1",
+            "c1",
+            "BUY",
+            "YES",
+            price=0.4,
+            quantity=100,
+            operation_id="open:m1",
+        )
+
+    def test_two_partial_fills_release_cost_basis_and_close_residual(self) -> None:
+        tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
+        self._open(tracker)
+
+        first_pnl = tracker.close_position_with_fill(
+            Fill("m1", 0.45, filled_quantity=30, fill_id="fill-1")
+        )
+
+        remaining = tracker.open_positions()[0]
+        assert first_pnl == pytest.approx(1.5)
+        assert remaining.quantity == 70.0
+        assert remaining.cost_basis == 28.0
+        assert tracker.balance == pytest.approx(973.5)
+        assert tracker.total_realized_pnl == pytest.approx(1.5)
+
+        second_pnl = tracker.close_position_with_fill(
+            Fill("m1", 0.50, filled_quantity=70, fill_id="fill-2")
+        )
+
+        assert second_pnl == pytest.approx(7.0)
+        assert tracker.open_count == 0
+        assert tracker.balance == pytest.approx(1008.5)
+        assert tracker.total_realized_pnl == pytest.approx(8.5)
+
+    def test_fill_id_is_canonical_across_different_caller_operation_ids(
+        self, tmp_path
+    ) -> None:
+        path = tmp_path / "positions.db"
+        tracker = PositionTracker(
+            repository=SQLitePositionRepository(path, initial_balance=1000.0)
+        )
+        self._open(tracker)
+        fill = Fill("m1", 0.45, filled_quantity=30, fill_id="venue-123")
+
+        first = tracker.close_position_with_fill(fill, operation_id="caller:a")
+        replay = PositionTracker(
+            repository=SQLitePositionRepository(path, initial_balance=1000.0)
+        ).close_position_with_fill(fill, operation_id="caller:b")
+
+        assert first == replay == pytest.approx(1.5)
+        state = tracker.repository.load()
+        assert state.open_positions["m1"].quantity == 70.0
+        assert state.balance == pytest.approx(973.5)
+        receipt = tracker.operation_receipt("venue-fill:venue-123")
+        assert receipt is not None
+        assert receipt.result == Money.from_value("1.5")
+
+    def test_anonymous_partial_fill_fails_without_mutation(self) -> None:
+        tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
+        self._open(tracker)
+
+        with pytest.raises(ValueError, match="fill_id"):
+            tracker.close_position_with_fill(
+                Fill("m1", 0.45, filled_quantity=30),
+                operation_id="close:anonymous",
+            )
+
+        assert tracker.balance == 960.0
+        assert tracker.open_positions()[0].quantity == 100.0
+        assert tracker.operation_receipt("close:anonymous") is None
+
+    @pytest.mark.parametrize("filled_quantity", [0, 101])
+    def test_zero_or_overfill_fails_without_mutation(
+        self, filled_quantity: float
+    ) -> None:
+        tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
+        self._open(tracker)
+
+        with pytest.raises(ValueError, match="fill quantity"):
+            tracker.close_position_with_fill(
+                Fill(
+                    "m1",
+                    0.45,
+                    filled_quantity=filled_quantity,
+                    fill_id=f"bad-{filled_quantity}",
+                )
+            )
+
+        assert tracker.balance == 960.0
+        assert tracker.open_positions()[0].quantity == 100.0
+
+    def test_final_micro_fill_consumes_all_cost_basis_residual(self) -> None:
+        tracker = PositionTracker(PositionConfig(initial_balance=1.0))
+        assert tracker.open_position(
+            "m1", "c1", "BUY", "YES", price=0.333333, quantity=0.000003
+        )
+
+        for index in range(2):
+            tracker.close_position_with_fill(
+                Fill(
+                    "m1",
+                    0.333333,
+                    filled_quantity=0.000001,
+                    fill_id=f"micro-{index}",
+                )
+            )
+        remaining = tracker.open_positions()[0]
+        assert remaining.quantity_value.micros == 1
+
+        tracker.close_position_with_fill(
+            Fill(
+                "m1",
+                0.333333,
+                filled_quantity=0.000001,
+                fill_id="micro-final",
+            )
+        )
+
+        assert tracker.open_count == 0
+        assert tracker.balance == 1.0
