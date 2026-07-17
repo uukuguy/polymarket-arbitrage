@@ -2,27 +2,27 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 6
-status: completed
-stopped_at: Phase 6 closed; H-004 ready for climb evaluation
+current_phase: 7
+status: ready
+stopped_at: Phase 7 planned; H-005 ready for TDD execution
 last_updated: "2026-07-17T04:33:10.644Z"
 last_activity: 2026-07-17
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 5
-  total_plans: 5
+  total_plans: 6
   completed_plans: 5
-  percent: 100
+  percent: 83
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
 
-Phase: 6 (Unit-Safe Execution Accounting) — ✅ CLOSED 2026-07-17
-Plan: 1 of 1 complete
-**Status:** Complete
-**Current Phase:** 6
+Phase: 7 (Durable Partial-Fill Accounting)
+Plan: 0 of 1 complete
+**Status:** Ready for execution
+**Current Phase:** 7
 **Last Activity:** 2026-07-17
 **Last Activity Description:** Phase 6 implementation and verification complete
 
@@ -82,16 +82,16 @@ Plan: 1 of 1 complete
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 6 closed; H-004 ready for climb evaluation
-**Resume File:** .planning/workstreams/m2-combinatorial/phases/06-unit-safe-execution-accounting/06-01-SUMMARY.md
+**Stopped At:** Phase 7 planned; H-005 ready for TDD execution
+**Resume File:** .planning/workstreams/m2-combinatorial/phases/07-durable-partial-fill-accounting/07-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-Phase 6 已闭环 exact Quantity/cost basis、v3 migration 和 operator contract；下一步先让 climb 裁决 H-004，再自动进入 H-005。
+H-004 已 confirmed；Phase 7 直接实现 immutable partial-fill residual accounting。
 
 第一条命令：
 
-`make climb-cycle hypothesis=H-004`
+`uv run pytest tests/routing/test_position_tracker.py -q`
 
 **已交付给用户 (累积)**:
 
