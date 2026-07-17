@@ -122,6 +122,7 @@ def test_cycle_appends_exactly_one_run_and_advances_state(tmp_path: Path) -> Non
     assert len(rows) == 1
     assert rows[0]["hypothesis_id"] == "H-001"
     assert rows[0]["local_score"] == "100.0"
+    assert b"\r\n" not in (state / "runs.csv").read_bytes()
 
     hypotheses = yaml.safe_load((state / "hypotheses.yaml").read_text())
     hypothesis = hypotheses["hypotheses"][0]
