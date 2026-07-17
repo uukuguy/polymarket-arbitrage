@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from polyarb.routing.money import Money
+from polyarb.routing.quantity import Quantity
 
 
 @pytest.mark.parametrize(
@@ -84,3 +85,36 @@ def test_money_pnl_at_quantizes_once_after_price_delta(
 def test_money_pnl_at_rejects_unknown_side() -> None:
     with pytest.raises(ValueError, match="BUY or SELL"):
         Money.pnl_at(Money.from_value("100"), 0.4, 0.5, "HOLD")
+
+
+@pytest.mark.parametrize(
+    ("side", "price", "expected"),
+    [("BUY", "0.50", "50"), ("SELL", "0.60", "40")],
+)
+def test_money_collateral_for_quantity_is_side_aware(
+    side: str, price: str, expected: str
+) -> None:
+    quantity = Quantity.from_value("100")
+
+    assert Money.collateral_for(quantity, price, side) == Money.from_value(expected)
+
+
+@pytest.mark.parametrize(
+    ("side", "entry", "exit", "expected"),
+    [("BUY", "0.50", "0.60", "10"), ("SELL", "0.60", "0.50", "10")],
+)
+def test_money_pnl_for_quantity_uses_shares_not_cash_stake(
+    side: str, entry: str, exit: str, expected: str
+) -> None:
+    quantity = Quantity.from_value("100")
+
+    assert Money.pnl_for(quantity, entry, exit, side) == Money.from_value(expected)
+
+
+def test_money_quantity_conversion_rejects_invalid_price_and_side() -> None:
+    quantity = Quantity.from_value("100")
+
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        Money.collateral_for(quantity, "1.1", "BUY")
+    with pytest.raises(ValueError, match="BUY or SELL"):
+        Money.collateral_for(quantity, "0.5", "HOLD")
