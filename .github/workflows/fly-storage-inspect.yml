@@ -16,9 +16,8 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          flyctl ssh console --app polyarb-l1 --process-group app --command '
-            set -eu
-            df -h /data
-            du -x -h -d 2 /data 2>/dev/null | sort -h | tail -50
-            find /data -xdev -type f -printf "%s %p\n" 2>/dev/null | sort -n | tail -30
-          '
+          flyctl ssh console --app polyarb-l1 --process-group app --command "/bin/sh -c '
+            df -h /data;
+            du -x -h -d 2 /data 2>/dev/null | sort -h | tail -50;
+            find /data -xdev -type f -printf \"%s %p\\n\" 2>/dev/null | sort -n | tail -30
+          '"
