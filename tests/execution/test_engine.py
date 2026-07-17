@@ -11,6 +11,8 @@ Locks the atomic-execution contract:
 """
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from polyarb.execution.engine import (
@@ -25,6 +27,7 @@ from polyarb.models.signal import (
     RoutingDecision,
 )
 from polyarb.routing.config import ExecutionConfig
+from polyarb.routing.position_repository import SQLitePositionRepository
 from polyarb.routing.position_tracker import PositionTracker
 
 
@@ -256,6 +259,45 @@ async def test_position_tracker_called_only_for_successful_legs():
     assert len(tracker._open_positions) == 1
     assert "asset-0" in tracker._open_positions
     assert "asset-1" not in tracker._open_positions
+
+
+@pytest.mark.asyncio
+async def test_replaying_decision_reuses_one_durable_open_operation(tmp_path):
+    path = tmp_path / "positions.db"
+    tracker = PositionTracker(
+        repository=SQLitePositionRepository(path, initial_balance=1000.0)
+    )
+    engine = ExecutionEngine(tracker=tracker)
+    decision = _make_decision(n_legs=1)
+
+    await engine.execute(decision)
+    await engine.execute(decision)
+
+    assert tracker.balance == pytest.approx(900.0)
+    assert tracker.open_count == 1
+    with sqlite3.connect(path) as con:
+        count = con.execute("SELECT COUNT(*) FROM m2_applied_operations").fetchone()[0]
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_replaying_paper_close_reuses_open_and_close_operations(tmp_path):
+    path = tmp_path / "positions.db"
+    tracker = PositionTracker(
+        repository=SQLitePositionRepository(path, initial_balance=1000.0)
+    )
+    engine = ExecutionEngine(tracker=tracker, paper_close=True)
+    decision = _make_decision(n_legs=1)
+
+    await engine.execute(decision)
+    await engine.execute(decision)
+
+    assert tracker.balance == pytest.approx(1000.0)
+    assert tracker.open_count == 0
+    assert tracker.total_realized_pnl == 0.0
+    with sqlite3.connect(path) as con:
+        count = con.execute("SELECT COUNT(*) FROM m2_applied_operations").fetchone()[0]
+    assert count == 2
 
 
 # ──────────────────────────────────────────────────────────────────────────

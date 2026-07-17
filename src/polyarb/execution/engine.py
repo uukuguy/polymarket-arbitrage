@@ -34,17 +34,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Awaitable, Callable
 
-from polyarb.models.signal import RoutingDecision, ExecutionLeg
+from polyarb.models.signal import ExecutionLeg, RoutingDecision
+from polyarb.routing.config import ExecutionConfig
 from polyarb.routing.position_tracker import (
     Fill,
     PositionTracker,
     StopLossEvent,
 )
-from polyarb.routing.config import ExecutionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +170,8 @@ class ExecutionEngine:
             leg_results.append(leg_result)
 
             if leg_result.success:
-                self._update_tracker_for_leg(leg)
-                await self._maybe_close_for_leg(leg)
+                self._update_tracker_for_leg(decision.signal_id, leg)
+                await self._maybe_close_for_leg(decision.signal_id, leg)
             else:
                 if i == 0:
                     # Atomic invariant: never proceed past a failed first leg.
@@ -255,7 +255,7 @@ class ExecutionEngine:
             leg=leg, success=False, attempts=max_attempts, error=last_error,
         )
 
-    def _update_tracker_for_leg(self, leg: ExecutionLeg) -> None:
+    def _update_tracker_for_leg(self, signal_id: str, leg: ExecutionLeg) -> None:
         """Open a position in the tracker for a successfully-executed leg only.
 
         Failed legs MUST NOT update the tracker — they'd corrupt downstream
@@ -271,9 +271,13 @@ class ExecutionEngine:
             outcome="yes",  # T5+: derive from leg metadata when available
             stake=leg.size,
             price=leg.estimated_price,
+            leg_id=leg.leg_id,
+            operation_id=f"open:{signal_id}:{leg.leg_id}",
         )
 
-    async def _maybe_close_for_leg(self, leg: ExecutionLeg) -> None:
+    async def _maybe_close_for_leg(
+        self, signal_id: str, leg: ExecutionLeg
+    ) -> None:
         """T5 close-path hook — only fires for successfully-executed legs.
 
         Priority:
@@ -291,7 +295,12 @@ class ExecutionEngine:
                 )
                 return
             try:
-                self.tracker.close_position_with_fill(fill)
+                self.tracker.close_position_with_fill(
+                    fill,
+                    operation_id=(
+                        f"close:{signal_id}:{leg.leg_id}:{fill.filled_at.isoformat()}"
+                    ),
+                )
             except ValueError as exc:
                 # Partial fill or other tracker rejection — log and skip close.
                 logger.warning(
@@ -305,7 +314,10 @@ class ExecutionEngine:
                 exit_price=leg.estimated_price,
                 filled_size=leg.size,
             )
-            self.tracker.close_position_with_fill(fill)
+            self.tracker.close_position_with_fill(
+                fill,
+                operation_id=f"close:{signal_id}:{leg.leg_id}:paper-close",
+            )
 
     def _calc_realized_pnl(
         self, decision: RoutingDecision, executed: int, total: int
