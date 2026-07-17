@@ -24,11 +24,16 @@ def main() -> int:
                 "free_bytes": freelist_count * page_size,
             },
         )
-        for row in connection.execute(
-            "SELECT name, sum(pgsize) AS bytes, count(*) AS pages "
-            "FROM dbstat GROUP BY name ORDER BY bytes DESC"
-        ):
-            print(row)
+        tables = connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+        for (table,) in tables:
+            quoted = table.replace('"', '""')
+            rows = connection.execute(
+                f'SELECT count(*) FROM "{quoted}"'  # noqa: S608 - schema-owned name
+            ).fetchone()[0]
+            print("ROWS", table, rows)
     finally:
         connection.close()
     return 0
