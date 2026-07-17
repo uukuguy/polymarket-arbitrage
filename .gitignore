@@ -38,6 +38,9 @@ pytestdebug.log
 # Claude Code harness state
 .claude/
 
+# Agent implementation worktrees (repository-local, isolated, disposable)
+.worktrees/
+
 # gsd-tools ephemeral runtime state (e.g., _auto_chain_active flag set on every workflow start)
 .planning/config.json
 
