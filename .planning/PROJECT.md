@@ -24,7 +24,7 @@
 | 能力线 | Workstream | 职责 | 当前重点 |
 |---|---|---|---|
 | M1 市场感知 | `m1-perception` | Gamma/CLOB/异常检测/Dashboard，所有策略的底座 | 恢复 L1/L2 production freshness，完成 Phase 05 final soak |
-| M2 Combinatorial | `m2-combinatorial` | IMDEA Type 2 跨市场组合套利 | execution/accounting foundation 在 feature branch；discovery、M1 输入与 live adapter 未完成 |
+| M2 Combinatorial | `m2-combinatorial` | IMDEA Type 2 跨市场组合套利 | Phase 2–9 已在 main/production；真实数据监控/paper 可用，live order adapter 未完成 |
 | M3 跨平台 | `m3-cross-platform` | Kalshi 数据源 + Polymarket × Kalshi 套利 | 等账户开通 + 合规判断 |
 | M4 Smart Strategies | `m4-smart-strategies` | LLM 驱动的价值判断（weather/news/MM rebate） | 等 m1 数据沉淀 + 评估基线 |
 | M5 工业化 | `m5-industrialize` | 部署/监控/风控/可观测性 | 有计划，当前受 M1 未完成工作阻塞 |
@@ -66,6 +66,24 @@
 - **开头**：从 `.planning/JOURNAL.md` 恢复上下文，明确告知"上次到哪、本次该做什么、用什么命令"
 - **进行中**：决策点主动给出权衡，不让用户在不知情时选错；教学优先于复制粘贴
 - **结尾**：更新 JOURNAL，给出"下次会话第一条命令"
+
+### `handoff` 触发词（用户定义，2026-07-17）
+
+用户单独说 `handoff` 时，执行一次快速、完整的跨会话收口：
+
+1. 保持工作边界清楚，确认计划/实现/验证/生产事实没有混写。
+2. 把核心分析结论、已排除路径、当前状态和唯一下一动作增量落盘。
+3. 修正已知错误记忆；记忆必须区分：
+   - **VERIFIED**：有测试、代码、生产 probe 或用户直接确认的事实；
+   - **CURRENT-CALL**：基于当前证据的判断/优先级，允许后续改变；
+   - **ARCHIVED**：已过时或被取代，但仍有检索价值的历史。
+4. 技术事实放 `.planning/` / 项目文档；用户偏好和协作反馈才放 MEMORY，禁止双重真相。
+5. 更新可检索入口：`.planning/CURRENT.md`、相关 workstream `STATE/ROADMAP`、
+   `.planning/JOURNAL.md` 最新 `[NEXT — CURRENT]`，以及新增文档的索引/反向链接。
+6. 检查 `make planning-status`、相关验证、`git status` 和远端同步；不擅自处理用户未授权改动。
+7. 保证新会话执行 `/gsd-resume-work --ws <active>` 能恢复完整状态和上下文。
+
+默认采用增量收口，目标几分钟内完成；只有发现真实漂移、错误记忆或未提交工作时才扩展处理。
 
 每个 Phase 末：
 - 强制 `/gsd-extract-learnings`

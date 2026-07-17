@@ -3649,3 +3649,9 @@ make scan-arb-live min_edge_bps=0
 ```
 
 下一主线是修复 L2 WS 新鲜度并积累费用后 paper evidence；未经单独授权，不接真实资金。
+
+## SESSION 46 — 2026-07-17 (handoff trigger contract)
+
+- [VERIFIED] 用户定义 `handoff` 为快速完整跨会话收口：边界、状态、git、MEMORY、索引和 resume 可恢复性。
+- [VERIFIED] 技术事实继续以 `.planning/` 为真相源；MEMORY 只记录用户偏好/协作元信息，避免双重状态。
+- [CURRENT-CALL] 默认只做增量更新；仅在检测到漂移、错误记忆或未提交工作时扩大收口范围。
