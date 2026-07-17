@@ -39,6 +39,7 @@ from polyarb.models.signal import (
 from polyarb.models.slippage import SlippageCalculator
 from polyarb.routing.config import ExecutionConfig, PositionConfig, RoutingConfig
 from polyarb.routing.engine import RoutingEngine
+from polyarb.routing.money import Money
 from polyarb.routing.position_repository import (
     RepositoryStateError,
     SQLitePositionRepository,
@@ -384,15 +385,18 @@ def close(
                 err=True,
             )
             raise typer.Exit(code=2)
-        if type(receipt.result) is not float:
+        if isinstance(receipt.result, Money):
+            pnl = receipt.result.to_float()
+        elif type(receipt.result) is float:
+            pnl = receipt.result
+        else:
             typer.secho(
                 f"corrupt close receipt: {effective_operation_id!r} "
-                "does not contain a float result",
+                "does not contain a money result",
                 fg=typer.colors.RED,
                 err=True,
             )
             raise typer.Exit(code=2)
-        pnl = receipt.result
         replayed = True
     else:
         pos = next(

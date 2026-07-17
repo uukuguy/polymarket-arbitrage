@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from collections.abc import Callable
 from copy import deepcopy
@@ -140,7 +141,7 @@ def _as_money(value: int | float | str | Money) -> Money:
     return value if isinstance(value, Money) else Money.from_value(value)
 
 
-type TransitionResult = bool | float | None
+type TransitionResult = bool | float | Money | None
 type Transition = Callable[[PositionState], TransitionResult]
 
 
@@ -168,6 +169,47 @@ class PositionRepository(Protocol):
 
 class RepositoryStateError(RuntimeError):
     """Durable state violates repository invariants."""
+
+
+def _validate_transition_result(result: object) -> TransitionResult:
+    if result is None or type(result) is bool or isinstance(result, Money):
+        return result
+    if type(result) is float:
+        if not math.isfinite(result):
+            raise ValueError("transition float result must be finite")
+        return result
+    raise TypeError("transition result must be bool, float, Money, or None")
+
+
+def _encode_result(result: TransitionResult) -> str:
+    validated = _validate_transition_result(result)
+    payload: object
+    if isinstance(validated, Money):
+        payload = {"kind": "money", "micros": validated.micros}
+    else:
+        payload = validated
+    return json.dumps(payload, allow_nan=False, separators=(",", ":"))
+
+
+def _decode_result(raw: str) -> TransitionResult:
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RepositoryStateError("invalid receipt JSON") from exc
+    if payload is None or type(payload) is bool:
+        return payload
+    if type(payload) is float:
+        if not math.isfinite(payload):
+            raise RepositoryStateError("receipt float must be finite")
+        return payload
+    if isinstance(payload, dict) and set(payload) == {"kind", "micros"}:
+        if payload["kind"] != "money" or type(payload["micros"]) is not int:
+            raise RepositoryStateError("invalid tagged money receipt")
+        try:
+            return Money(payload["micros"])
+        except (TypeError, OverflowError) as exc:
+            raise RepositoryStateError("invalid tagged money receipt") from exc
+    raise RepositoryStateError("unsupported receipt result type")
 
 
 class InMemoryPositionRepository:
@@ -206,9 +248,7 @@ class InMemoryPositionRepository:
             return deepcopy(applied.result)
 
         candidate = deepcopy(self._state)
-        result = transition(candidate)
-        if result is not None and not isinstance(result, (bool, float)):
-            raise TypeError("transition result must be bool, float, or None")
+        result = _validate_transition_result(transition(candidate))
 
         self._state = candidate
         self._operations[operation_id] = OperationReceipt(
@@ -257,7 +297,7 @@ class SQLitePositionRepository:
             operation_id=operation_id,
             operation_type=row[0],
             target_id=row[1],
-            result=json.loads(row[2]),
+            result=_decode_result(row[2]),
         )
 
     def apply(
@@ -282,14 +322,12 @@ class SQLitePositionRepository:
                         f"{operation_id!r} was already used for "
                         f"{applied[0]!r}/{applied[1]!r}"
                     )
-                result = json.loads(applied[2])
+                result = _decode_result(applied[2])
                 con.commit()
                 return result
 
             state = self._load_state(con)
-            result = transition(state)
-            if result is not None and not isinstance(result, (bool, float)):
-                raise TypeError("transition result must be bool, float, or None")
+            result = _validate_transition_result(transition(state))
 
             now = datetime.now(UTC).isoformat()
             self._write_state(con, state, now)
@@ -301,7 +339,7 @@ class SQLitePositionRepository:
                     operation_id,
                     operation_type,
                     target_id,
-                    json.dumps(result),
+                    _encode_result(result),
                     now,
                 ),
             )

@@ -319,11 +319,11 @@ class PositionTracker:
         size match). This primitive stays for explicit operator close (e.g.,
         `make close-arb market_id=... exit_price=...`).
         """
-        def transition(state: PositionState) -> float:
+        def transition(state: PositionState) -> Money:
             pos = state.open_positions.pop(market_id, None)
             if pos is None:
                 logger.warning("No open position for market %s", market_id)
-                return 0.0
+                return Money(0)
             if exit_price is not None:
                 pos.current_price = exit_price
             pnl_money = pos.pnl_money
@@ -335,7 +335,7 @@ class PositionTracker:
                 exit_price if exit_price is not None else pos.current_price,
                 pnl_money.to_float(),
             )
-            return pnl_money.to_float()
+            return pnl_money
 
         result = self.repository.apply(
             self._operation_id(operation_id, "close", market_id),
@@ -343,7 +343,9 @@ class PositionTracker:
             market_id,
             transition,
         )
-        assert isinstance(result, float)
+        if isinstance(result, Money):
+            return result.to_float()
+        assert type(result) is float
         return result
 
     def close_position_with_fill(
@@ -356,14 +358,14 @@ class PositionTracker:
         position is open for `fill.market_id`, returns 0.0 and warns
         (callers can audit log this).
         """
-        def transition(state: PositionState) -> float:
+        def transition(state: PositionState) -> Money:
             pos = state.open_positions.get(fill.market_id)
             if pos is None:
                 logger.warning(
                     "close_position_with_fill: no open position for market %s",
                     fill.market_id,
                 )
-                return 0.0
+                return Money(0)
             fill_size_money = Money.from_value(fill.filled_size)
             if fill_size_money != pos.stake_money:
                 raise ValueError(
@@ -382,7 +384,7 @@ class PositionTracker:
                 fill.filled_size,
                 pnl_money.to_float(),
             )
-            return pnl_money.to_float()
+            return pnl_money
 
         result = self.repository.apply(
             self._operation_id(operation_id, "close-fill", fill.market_id),
@@ -390,7 +392,9 @@ class PositionTracker:
             fill.market_id,
             transition,
         )
-        assert isinstance(result, float)
+        if isinstance(result, Money):
+            return result.to_float()
+        assert type(result) is float
         return result
 
     def check_stop_loss(self) -> bool:
