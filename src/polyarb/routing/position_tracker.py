@@ -29,6 +29,7 @@ from uuid import uuid4
 from polyarb.routing.config import PositionConfig
 from polyarb.routing.position_repository import (
     InMemoryPositionRepository,
+    OperationReceipt,
     PositionRepository,
     PositionState,
 )
@@ -80,6 +81,7 @@ class Fill:
     exit_price: float
     filled_size: float
     filled_at: datetime = field(default_factory=datetime.utcnow)
+    fill_id: str = ""
 
 
 @dataclass
@@ -135,6 +137,10 @@ class PositionTracker:
         self.repository = repository or InMemoryPositionRepository(
             self.config.initial_balance
         )
+
+    def operation_receipt(self, operation_id: str) -> OperationReceipt | None:
+        """Return the committed result for an immutable operation identity."""
+        return self.repository.get_receipt(operation_id)
 
     @staticmethod
     def _operation_id(provided: str | None, kind: str, target: str) -> str:

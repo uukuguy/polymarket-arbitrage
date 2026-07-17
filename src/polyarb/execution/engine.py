@@ -295,11 +295,23 @@ class ExecutionEngine:
                 )
                 return
             try:
+                if fill.fill_id:
+                    operation_id = (
+                        f"close:{signal_id}:{leg.leg_id}:fill:{fill.fill_id}"
+                    )
+                else:
+                    logger.warning(
+                        "venue fill for leg %s has no fill_id; "
+                        "durable retry guarantees unavailable",
+                        leg.leg_id,
+                    )
+                    operation_id = (
+                        f"close:{signal_id}:{leg.leg_id}:"
+                        f"{fill.filled_at.isoformat()}"
+                    )
                 self.tracker.close_position_with_fill(
                     fill,
-                    operation_id=(
-                        f"close:{signal_id}:{leg.leg_id}:{fill.filled_at.isoformat()}"
-                    ),
+                    operation_id=operation_id,
                 )
             except ValueError as exc:
                 # Partial fill or other tracker rejection — log and skip close.
