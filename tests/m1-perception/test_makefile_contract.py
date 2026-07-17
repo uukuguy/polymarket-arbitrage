@@ -923,3 +923,25 @@ def test_makefile_phase02_plan07_targets_phony() -> None:
     expected = {"soak-status", "soak-export", "soak-fault-inject"}
     missing = expected - phony_targets
     assert not missing, f"missing .PHONY for phase-02 plan-07 soak targets: {missing}"
+
+
+# =============================================================================
+# Quick 260717 — agent worktree lifecycle repair
+# =============================================================================
+
+
+def test_makefile_exposes_safe_worktree_lifecycle_targets() -> None:
+    result = subprocess.run(
+        ["make", "help"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make help failed: {result.stderr}"
+    assert "cleanup-worktrees:" in result.stdout
+    assert "patch-gsd-worktree-cleanup:" in result.stdout
+
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "--apply" in makefile
+    assert "--discard-unmerged" in makefile

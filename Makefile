@@ -46,6 +46,16 @@ journal:
 planning-status:
 	@uv run python scripts/planning_status.py
 
+## cleanup-worktrees: Dry-run stale Claude agent worktree cleanup; use apply=1 and audited discard_unmerged="branch ..." to mutate
+cleanup-worktrees:
+	@uv run python scripts/cleanup_agent_worktrees.py $(if $(apply),--apply,) $(foreach branch,$(discard_unmerged),--discard-unmerged $(branch))
+
+## patch-gsd-worktree-cleanup: Harden installed GSD worktree lifecycle; use check=1 for verification only
+patch-gsd-worktree-cleanup:
+	@uv run python scripts/patch_gsd_worktree_cleanup.py $(if $(check),--check,)
+
+.PHONY: cleanup-worktrees patch-gsd-worktree-cleanup
+
 # ─────────────────────────────────────────────────────────────────────────────
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────

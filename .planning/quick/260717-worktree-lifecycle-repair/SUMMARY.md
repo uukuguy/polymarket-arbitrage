@@ -29,6 +29,6 @@ These are duplicate executor lineages for completed plans, not unplanned work. F
 - [x] M2 ROADMAP Phase 2 metadata restored
 - [x] Safe reaper RED/GREEN — 12 tests pass; dry-run default, PID/dirty/path/ancestry gates, explicit audited discard
 - [x] Makefile operational surface — contract RED observed, target/help contract now GREEN (commit deferred with patcher so no dangling target)
-- [ ] GSD workflow patcher RED/GREEN and installed patch
+- [x] GSD workflow patcher RED/GREEN and installed patch — 5 tests pass; actual-format regression added after shape gate caught execute-phase indentation; installed execute/quick both CURRENT
 - [ ] 21-worktree cleanup
 - [ ] Final verification and JOURNAL closure
