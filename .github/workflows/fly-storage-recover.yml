@@ -1,0 +1,23 @@
+name: Fly Storage Recover
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  extend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@1.6
+      - name: Extend the L1 data volume to recovery capacity
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl volumes extend vol_40olm80dgol2xqn4 \
+            --app polyarb-l1 --size 15 --yes
+          flyctl volumes list --app polyarb-l1
+          flyctl ssh console --app polyarb-l1 --process-group app \
+            --command "/bin/df -h /data"
