@@ -23,6 +23,7 @@ def test_help_lists_durable_arbitrage_commands() -> None:
     for target in ("eval-arb:", "run-arb:", "status-arb:", "close-arb:"):
         assert target in result.stdout
     assert "db=" in result.stdout
+    assert "operation_id=" in result.stdout
 
 
 def test_arbitrage_make_targets_forward_database_path() -> None:
@@ -37,3 +38,17 @@ def test_arbitrage_make_targets_forward_database_path() -> None:
         result = _make("-n", *args, f"db={database}")
         assert result.returncode == 0, result.stderr
         assert f'--db-path "{database}"' in result.stdout
+
+
+def test_close_arbitrage_target_forwards_operation_identity() -> None:
+    result = _make(
+        "-n",
+        "close-arb",
+        "db=build/test-m2-positions.db",
+        "market_id=cond-0",
+        "exit_price=0.5",
+        "operation_id=close-001",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '--operation-id "close-001"' in result.stdout

@@ -69,6 +69,144 @@ def test_run_status_close_status_across_four_processes(tmp_path) -> None:
     assert after["metrics"]["total_realized_pnl"] == closed["realized_pnl"]
 
 
+def test_close_receipt_recovers_lost_response_across_processes(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    run_args = (
+        "run",
+        "--mid",
+        "0.40",
+        "--stake",
+        "100",
+        "--profit-pct",
+        "3.0",
+        "--legs",
+        "1",
+        "--retry-delay",
+        "0",
+        "--db-path",
+        str(path),
+    )
+
+    opened = _cli(*run_args, "--signal-id", "receipt-open-001")
+    assert opened.returncode == 0, opened.stderr
+
+    first_close = _cli(
+        "close",
+        "--market-id",
+        "cond-0",
+        "--exit-price",
+        "0.50",
+        "--operation-id",
+        "close-001",
+        "--db-path",
+        str(path),
+    )
+    assert first_close.returncode == 0, first_close.stderr
+    # Deliberately do not parse first_close.stdout: simulate a lost response.
+
+    replay = _cli(
+        "close",
+        "--market-id",
+        "cond-0",
+        "--exit-price",
+        "0.50",
+        "--operation-id",
+        "close-001",
+        "--db-path",
+        str(path),
+    )
+    assert replay.returncode == 0, replay.stderr
+    recovered = json.loads(replay.stdout)
+    assert recovered["operation_id"] == "close-001"
+    assert recovered["replayed"] is True
+    assert recovered["retry_safe"] is True
+    assert recovered["realized_pnl"] == 10.0
+    assert recovered["total_realized_pnl"] == 10.0
+
+    status = _cli("status", "--db-path", str(path))
+    assert status.returncode == 0, status.stderr
+    state = json.loads(status.stdout)
+    assert state["metrics"]["balance"] == 1010.0
+    assert state["metrics"]["total_realized_pnl"] == 10.0
+    assert state["metrics"]["open_positions"] == 0
+    with sqlite3.connect(path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM m2_applied_operations WHERE operation_id = ?",
+            ("close-001",),
+        ).fetchone()[0] == 1
+
+    conflict = _cli(
+        "close",
+        "--market-id",
+        "cond-other",
+        "--exit-price",
+        "0.50",
+        "--operation-id",
+        "close-001",
+        "--db-path",
+        str(path),
+    )
+    assert conflict.returncode != 0
+    assert "operation identity conflict" in conflict.stderr
+
+    reopened = _cli(*run_args, "--signal-id", "receipt-open-002")
+    assert reopened.returncode == 0, reopened.stderr
+    second_close = _cli(
+        "close",
+        "--market-id",
+        "cond-0",
+        "--exit-price",
+        "0.50",
+        "--operation-id",
+        "close-002",
+        "--db-path",
+        str(path),
+    )
+    assert second_close.returncode == 0, second_close.stderr
+    assert json.loads(second_close.stdout)["total_realized_pnl"] == 20.0
+    with sqlite3.connect(path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM m2_applied_operations "
+            "WHERE operation_type = 'close'"
+        ).fetchone()[0] == 2
+
+
+def test_close_without_caller_identity_reports_not_retry_safe(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    opened = _cli(
+        "run",
+        "--mid",
+        "0.40",
+        "--stake",
+        "100",
+        "--legs",
+        "1",
+        "--retry-delay",
+        "0",
+        "--signal-id",
+        "generated-close-id",
+        "--db-path",
+        str(path),
+    )
+    assert opened.returncode == 0, opened.stderr
+
+    closed = _cli(
+        "close",
+        "--market-id",
+        "cond-0",
+        "--exit-price",
+        "0.50",
+        "--db-path",
+        str(path),
+    )
+
+    assert closed.returncode == 0, closed.stderr
+    response = json.loads(closed.stdout)
+    assert response["operation_id"].startswith("local:operator-close:cond-0:")
+    assert response["replayed"] is False
+    assert response["retry_safe"] is False
+
+
 def test_explicit_db_path_overrides_environment(tmp_path) -> None:
     env_path = tmp_path / "from-env.db"
     explicit_path = tmp_path / "explicit.db"
