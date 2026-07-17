@@ -45,6 +45,38 @@ CREATE TABLE m2_applied_operations (
 );
 """
 
+_PHASE5_SCHEMA = """
+CREATE TABLE m2_account_state (
+    account_id TEXT PRIMARY KEY,
+    snapshot_balance REAL NOT NULL,
+    balance REAL NOT NULL,
+    realized_pnl REAL NOT NULL,
+    snapshot_balance_micros INTEGER NOT NULL,
+    balance_micros INTEGER NOT NULL,
+    realized_pnl_micros INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE m2_open_positions (
+    market_id TEXT PRIMARY KEY,
+    condition_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    stake REAL NOT NULL,
+    stake_micros INTEGER NOT NULL,
+    entry_price REAL NOT NULL,
+    current_price REAL NOT NULL,
+    leg_id TEXT NOT NULL,
+    opened_at TEXT NOT NULL
+);
+CREATE TABLE m2_applied_operations (
+    operation_id TEXT PRIMARY KEY,
+    operation_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+"""
+
 
 def _create_phase4_database(path, *, balance: float = 919.9999999999999) -> None:
     with sqlite3.connect(path) as con:
@@ -76,6 +108,53 @@ def _create_phase4_database(path, *, balance: float = 919.9999999999999) -> None
             "(operation_id, operation_type, target_id, result_json, applied_at) "
             "VALUES (?, ?, ?, ?, ?)",
             ("legacy-close", "close", "m0", "10.0", "2026-07-17T08:00:00Z"),
+        )
+
+
+def _create_phase5_database(
+    path, *, balance_micros: int = 900_000_000, side: str = "BUY"
+) -> None:
+    with sqlite3.connect(path) as con:
+        con.executescript(_PHASE5_SCHEMA)
+        con.execute(
+            "INSERT INTO m2_account_state "
+            "(account_id, snapshot_balance, balance, realized_pnl, "
+            "snapshot_balance_micros, balance_micros, realized_pnl_micros, "
+            "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "paper",
+                1000.0,
+                balance_micros / 1_000_000,
+                0.0,
+                1_000_000_000,
+                balance_micros,
+                0,
+                "2026-07-17T08:00:00Z",
+            ),
+        )
+        con.execute(
+            "INSERT INTO m2_open_positions "
+            "(market_id, condition_id, side, outcome, stake, stake_micros, "
+            "entry_price, current_price, leg_id, opened_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "m1",
+                "c1",
+                side,
+                "YES",
+                100.0,
+                100_000_000,
+                0.5,
+                0.5,
+                "l1",
+                "2026-07-17T08:00:00+00:00",
+            ),
+        )
+        con.execute(
+            "INSERT INTO m2_applied_operations "
+            "(operation_id, operation_type, target_id, result_json, applied_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("open:m1", "open", "m1", "true", "2026-07-17T08:00:00Z"),
         )
 
 
@@ -370,6 +449,124 @@ def test_sqlite_fresh_schema_stores_authoritative_money_as_integer(tmp_path) -> 
         "integer",
     )
     assert position == (100_000_000, "integer")
+
+
+def test_sqlite_fresh_schema_stores_quantity_and_cost_basis_authority(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    tracker = SQLitePositionRepository(path, initial_balance=1000.0)
+    state = tracker.load()
+    position = _position()
+    state.balance_money = Money.from_value("960")
+    state.open_positions["m1"] = position
+    tracker.apply("open:m1", "open", "m1", lambda _: True)
+
+    # Apply above intentionally does not install the detached state. Use a real
+    # transition so the repository serializes the v3 domain object.
+    def install(candidate: PositionState) -> bool:
+        candidate.balance_money = Money.from_value("960")
+        candidate.open_positions["m1"] = position
+        return True
+
+    tracker.apply("install:m1", "open", "m1", install)
+
+    with sqlite3.connect(path) as con:
+        raw = con.execute(
+            "SELECT quantity_micros, cost_basis_micros, "
+            "typeof(quantity_micros), typeof(cost_basis_micros) "
+            "FROM m2_open_positions"
+        ).fetchone()
+
+    assert raw == (100_000_000, 40_000_000, "integer", "integer")
+
+
+def test_sqlite_migrates_phase5_quantity_and_repairs_overreserved_balance(
+    tmp_path,
+) -> None:
+    path = tmp_path / "positions.db"
+    _create_phase5_database(path)
+
+    repository = SQLitePositionRepository(path, initial_balance=1000.0)
+    state = repository.load()
+    position = state.open_positions["m1"]
+
+    assert state.balance_money == Money.from_value("950")
+    assert position.quantity_value.micros == 100_000_000
+    assert position.cost_basis_money == Money.from_value("50")
+    assert repository.get_receipt("open:m1").result is True
+
+    with sqlite3.connect(path) as con:
+        account = con.execute(
+            "SELECT balance_micros, typeof(balance_micros) FROM m2_account_state"
+        ).fetchone()
+        raw_position = con.execute(
+            "SELECT quantity_micros, cost_basis_micros, "
+            "typeof(quantity_micros), typeof(cost_basis_micros) "
+            "FROM m2_open_positions"
+        ).fetchone()
+
+    assert account == (950_000_000, "integer")
+    assert raw_position == (
+        100_000_000,
+        50_000_000,
+        "integer",
+        "integer",
+    )
+
+
+def test_sqlite_phase5_balance_repair_is_idempotent(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    _create_phase5_database(path)
+
+    SQLitePositionRepository(path, initial_balance=1000.0)
+    restarted = SQLitePositionRepository(path, initial_balance=9999.0)
+
+    assert restarted.load().balance_money == Money.from_value("950")
+
+
+def test_sqlite_partial_v3_authority_fails_closed_without_repair(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    _create_phase5_database(path)
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "ALTER TABLE m2_open_positions ADD COLUMN quantity_micros INTEGER"
+        )
+        con.execute(
+            "UPDATE m2_open_positions SET quantity_micros = 100000000"
+        )
+
+    with pytest.raises(RepositoryStateError, match="partial v3"):
+        SQLitePositionRepository(path, initial_balance=1000.0)
+
+    with sqlite3.connect(path) as con:
+        balance = con.execute(
+            "SELECT balance_micros FROM m2_account_state"
+        ).fetchone()[0]
+        columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info(m2_open_positions)")
+        }
+    assert balance == 900_000_000
+    assert "cost_basis_micros" not in columns
+
+
+def test_sqlite_invalid_phase5_side_rolls_back_v3_migration(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    _create_phase5_database(path, side="HOLD")
+
+    with pytest.raises(ValueError, match="BUY or SELL"):
+        SQLitePositionRepository(path, initial_balance=1000.0)
+
+    with sqlite3.connect(path) as con:
+        balance = con.execute(
+            "SELECT balance_micros FROM m2_account_state"
+        ).fetchone()[0]
+        columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info(m2_open_positions)")
+        }
+    assert balance == 900_000_000
+    assert "quantity_micros" not in columns
+    assert "cost_basis_micros" not in columns
 
 
 def test_sqlite_migrates_phase4_real_state_and_preserves_identity(tmp_path) -> None:
