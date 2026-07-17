@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17  
 **Climb hypothesis:** H-002  
-**Status:** Approved approach; implementation pending written-spec review
+**Status:** Approved for implementation
 
 ## Problem
 
