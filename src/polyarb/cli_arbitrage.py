@@ -123,7 +123,7 @@ def _format_decision(decision) -> dict:
                 "exchange": leg.exchange,
                 "action": leg.action,
                 "asset": leg.asset,
-                "size": leg.size,
+                "size": leg.quantity,
                 "limit_price": leg.limit_price,
                 "estimated_price": leg.estimated_price,
                 "estimated_cost": round(leg.estimated_cost, 4),
@@ -413,7 +413,7 @@ def close(
         fill = Fill(
             market_id=market_id,
             exit_price=exit_price,
-            filled_size=size if size is not None else pos.stake,
+            filled_quantity=size if size is not None else pos.quantity,
         )
         try:
             pnl = tracker.close_position_with_fill(

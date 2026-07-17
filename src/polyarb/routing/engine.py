@@ -13,11 +13,11 @@ import logging
 
 from polyarb.models.signal import (
     ArbitrageSignal,
-    MarketSignal,
     ExecutionLeg,
     ExecutionPlan,
-    RoutingDecision,
     LegSide,
+    MarketSignal,
+    RoutingDecision,
 )
 from polyarb.models.slippage import SlippageCalculator, SlippageResult
 from polyarb.routing.config import RoutingConfig
@@ -74,7 +74,12 @@ class RoutingEngine:
             )
 
         expected_profit_pct = signal.max_arbitrage_pct
-        expected_profit_abs = expected_profit_pct / 100.0 * signal.max_stake_per_leg * len(execution_legs)
+        expected_profit_abs = (
+            expected_profit_pct
+            / 100.0
+            * signal.max_stake_per_leg
+            * len(execution_legs)
+        )
 
         plan = ExecutionPlan(
             signal_id=signal.signal_id,
@@ -117,7 +122,7 @@ class RoutingEngine:
         selection when they have richer context than the slippage model.
         """
         legs: list[ExecutionLeg] = []
-        size = signal.max_stake_per_leg
+        quantity = signal.max_stake_per_leg
 
         for market in signal.markets:
             if not isinstance(market, MarketSignal):
@@ -131,7 +136,7 @@ class RoutingEngine:
 
             # Compute size_usd for slippage call. MarketSignal carries `price`
             # as a probability/USD-per-share; total notional = price × stake.
-            size_usd = market.price * size
+            size_usd = market.price * quantity
 
             chosen_venue, slippage_result = self._select_venue(
                 action_side=action,
@@ -165,7 +170,7 @@ class RoutingEngine:
                 exchange=chosen_venue,
                 action=action,
                 asset=market.condition_id,
-                size=size,
+                quantity=quantity,
                 limit_price=limit_price,
                 estimated_price=estimated_price,
                 estimated_cost=estimated_cost,

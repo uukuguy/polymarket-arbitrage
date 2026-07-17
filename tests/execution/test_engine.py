@@ -273,7 +273,7 @@ async def test_replaying_decision_reuses_one_durable_open_operation(tmp_path):
     await engine.execute(decision)
     await engine.execute(decision)
 
-    assert tracker.balance == pytest.approx(900.0)
+    assert tracker.balance == pytest.approx(950.0)
     assert tracker.open_count == 1
     with sqlite3.connect(path) as con:
         count = con.execute("SELECT COUNT(*) FROM m2_applied_operations").fetchone()[0]

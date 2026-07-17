@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from polyarb.routing.config import AppConfig
+from polyarb.execution.engine import ExecutionEngine, ExecutionResult
 from polyarb.models.signal import ArbitrageSignal, RoutingDecision
+from polyarb.routing.config import AppConfig
 from polyarb.routing.engine import RoutingEngine
 from polyarb.routing.position_tracker import PositionTracker
-from polyarb.execution.engine import ExecutionEngine, ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,9 @@ class RoutingOrchestrator:
             return None
 
         # Calculate total stake from execution plan
-        total_stake = sum(leg.size for leg in decision.plan.legs)
+        total_stake = sum(
+            leg.cost_basis_money.to_float() for leg in decision.plan.legs
+        )
 
         position_ok, reason = self.position_tracker.can_open_position(total_stake)
         if not position_ok:
@@ -61,6 +63,10 @@ class RoutingOrchestrator:
         return OrchestrationResult(
             decision=decision,
             execution=execution,
-            profit_realized=execution.realized_pnl if execution.status.name in ("COMPLETED", "PARTIAL") else 0.0,
+            profit_realized=(
+                execution.realized_pnl
+                if execution.status.name in ("COMPLETED", "PARTIAL")
+                else 0.0
+            ),
             status="executed" if execution.status.name in ("COMPLETED", "PARTIAL") else "failed",
         )

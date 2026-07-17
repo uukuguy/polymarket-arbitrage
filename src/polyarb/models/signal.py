@@ -5,13 +5,17 @@ execution pipeline, and position tracker.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-
-_utcnow = lambda: datetime.now(timezone.utc)
-from enum import Enum
-from typing import Optional
 import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import Enum
+
+from polyarb.routing.money import Money
+from polyarb.routing.quantity import Quantity
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 class SignalStatus(Enum):
@@ -106,8 +110,8 @@ class ArbitrageLeg:
     pm_price: float = 0.0
     pm_size: float = 0.0
     gamma_side: LegSide = LegSide.BUY
-    gamma_price: Optional[float] = None
-    gamma_size: Optional[float] = None
+    gamma_price: float | None = None
+    gamma_size: float | None = None
     hedge_ratio: float = 1.0
     slippage_bps: float = 0.0
 
@@ -161,8 +165,8 @@ class ArbitrageSignal:
     legs: list[ArbitrageLeg] = field(default_factory=list)
     signal_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     detected_at: datetime = field(default_factory=_utcnow)
-    signal_price: Optional[float] = None
-    signal_prob: Optional[float] = None
+    signal_price: float | None = None
+    signal_prob: float | None = None
     expected_value_pct: float = 0.0
     confidence: float = 0.0
     updated_at: datetime = field(default_factory=_utcnow)
@@ -204,7 +208,7 @@ class ArbitrageSignal:
         }
 
 
-@dataclass
+@dataclass(init=False)
 class ExecutionLeg:
     """A leg within an execution plan ready for the pipeline.
 
@@ -213,7 +217,7 @@ class ExecutionLeg:
         exchange: Exchange identifier ("polymarket" or "gamma").
         action: "buy" or "sell".
         asset: Ticker/condition identifier.
-        size: Size in dollars.
+        quantity: Outcome-token shares to execute.
         limit_price: Worst acceptable price (None = market).
         estimated_price: Expected fill price.
         estimated_cost: Expected total cost.
@@ -224,11 +228,68 @@ class ExecutionLeg:
     exchange: str
     action: str
     asset: str
-    size: float
-    limit_price: Optional[float] = None
+    quantity_value: Quantity
+    limit_price: float | None = None
     estimated_price: float = 0.0
     estimated_cost: float = 0.0
     hedge_ratio: float = 1.0
+
+    def __init__(
+        self,
+        leg_id: str,
+        exchange: str,
+        action: str,
+        asset: str,
+        quantity: int | float | str | Quantity | None = None,
+        limit_price: float | None = None,
+        estimated_price: float = 0.0,
+        estimated_cost: float = 0.0,
+        hedge_ratio: float = 1.0,
+        *,
+        size: int | float | str | Quantity | None = None,
+    ) -> None:
+        if quantity is not None and size is not None:
+            raise TypeError("provide quantity, not both quantity and legacy size")
+        raw_quantity = quantity if quantity is not None else size
+        if raw_quantity is None:
+            raise TypeError("execution leg quantity is required")
+        self.leg_id = leg_id
+        self.exchange = exchange
+        self.action = action
+        self.asset = asset
+        self.quantity_value = (
+            raw_quantity
+            if isinstance(raw_quantity, Quantity)
+            else Quantity.from_value(raw_quantity)
+        )
+        self.limit_price = limit_price
+        self.estimated_price = estimated_price
+        self.estimated_cost = estimated_cost
+        self.hedge_ratio = hedge_ratio
+
+    @property
+    def quantity(self) -> float:
+        return self.quantity_value.to_float()
+
+    @property
+    def size(self) -> float:
+        """Deprecated compatibility view; the value is shares, never pUSD."""
+        return self.quantity
+
+    @property
+    def cost_basis_money(self) -> Money:
+        return Money.collateral_for(
+            self.quantity_value,
+            self.estimated_price,
+            self.action.upper(),
+        )
+
+    @property
+    def notional_money(self) -> Money:
+        return Money.from_value(
+            self.quantity_value.to_decimal()
+            * Money._price(self.estimated_price)
+        )
 
     @property
     def is_market_order(self) -> bool:
@@ -254,7 +315,7 @@ class ExecutionPlan:
     profit_threshold_pct: float = 1.0
     created_at: datetime = field(default_factory=_utcnow)
 
-    def leg_for(self, leg_id: str) -> Optional[ExecutionLeg]:
+    def leg_for(self, leg_id: str) -> ExecutionLeg | None:
         """Find an ExecutionLeg by its leg_id."""
         for leg in self.legs:
             if leg.leg_id == leg_id:
@@ -281,7 +342,7 @@ class PipelineResult:
     outcome: PipelineOutcome
     filled_legs: list[str] = field(default_factory=list)
     rejected_legs: list[str] = field(default_factory=list)
-    aborted_reason: Optional[str] = None
+    aborted_reason: str | None = None
     net_pnl: float = 0.0
     slippage_realized_bps: float = 0.0
     executed_at: datetime = field(default_factory=_utcnow)
@@ -340,14 +401,14 @@ class RoutingDecision:
                 "signal_id": self.plan.signal_id,
                 "legs": [
                     {
-                        "leg_id": l.leg_id,
-                        "exchange": l.exchange,
-                        "action": l.action,
-                        "asset": l.asset,
-                        "size": l.size,
-                        "limit_price": l.limit_price,
+                        "leg_id": leg.leg_id,
+                        "exchange": leg.exchange,
+                        "action": leg.action,
+                        "asset": leg.asset,
+                        "size": leg.quantity,
+                        "limit_price": leg.limit_price,
                     }
-                    for l in self.plan.legs
+                    for leg in self.plan.legs
                 ],
             },
         }

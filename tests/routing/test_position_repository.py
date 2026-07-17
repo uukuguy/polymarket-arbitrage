@@ -382,7 +382,8 @@ def test_sqlite_migrates_phase4_real_state_and_preserves_identity(tmp_path) -> N
     assert state.snapshot_balance_money.micros == 1_000_000_000
     assert state.balance_money.micros == 920_000_000
     assert state.realized_pnl_money.micros == 20_000_000
-    assert state.open_positions["m1"].stake_money.micros == 100_000_000
+    assert state.open_positions["m1"].quantity_value.micros == 100_000_000
+    assert state.open_positions["m1"].cost_basis_money.micros == 40_000_000
     assert repository.get_receipt("legacy-close").result == 10.0
 
     with sqlite3.connect(path) as con:

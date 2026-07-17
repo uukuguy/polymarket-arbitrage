@@ -295,7 +295,7 @@ class TestRepositoryBackedTracker:
                 0.4,
                 operation_id="open:s1:l1",
             )
-        assert tracker.balance == pytest.approx(900.0)
+        assert tracker.balance == pytest.approx(960.0)
         assert tracker.open_count == 1
 
         fill = Fill("m1", 0.5, 100.0)
@@ -333,7 +333,7 @@ class TestRepositoryBackedTracker:
     def test_rejected_open_and_partial_fill_leave_durable_state_unchanged(
         self, tmp_path
     ):
-        config = PositionConfig(initial_balance=1000.0, max_total_exposure=100.0)
+        config = PositionConfig(initial_balance=1000.0, max_total_exposure=40.0)
         tracker = PositionTracker(
             config,
             repository=SQLitePositionRepository(
@@ -352,7 +352,7 @@ class TestRepositoryBackedTracker:
                 Fill("m1", 0.5, 50.0), operation_id="close:partial"
             )
 
-        assert tracker.balance == pytest.approx(900.0)
+        assert tracker.balance == pytest.approx(960.0)
         assert [position.market_id for position in tracker.open_positions()] == ["m1"]
         assert tracker.total_realized_pnl == 0.0
 
@@ -390,9 +390,10 @@ class TestExactCashDomain:
         assert tracker.open_position("m1", "c1", "BUY", "YES", 0.3000004, 0.4)
 
         position = tracker.open_positions()[0]
-        assert position.stake_money.micros == 300_000
+        assert position.quantity_value.micros == 300_000
+        assert position.cost_basis_money.micros == 120_000
         assert position.stake == 0.3
-        assert tracker.repository.load().balance_money.micros == 0
+        assert tracker.repository.load().balance_money.micros == 180_000
 
     def test_exposure_limit_compares_quantized_stakes(self) -> None:
         tracker = PositionTracker(
@@ -401,7 +402,7 @@ class TestExactCashDomain:
 
         assert tracker.open_position("m1", "c1", "BUY", "YES", 0.1, 0.4)
         assert tracker.open_position("m2", "c2", "BUY", "YES", 0.2, 0.4)
-        assert tracker.snapshot().max_exposure == 0.3
+        assert tracker.snapshot().max_exposure == 0.12
 
     def test_full_fill_equality_uses_quantized_money(self) -> None:
         tracker = PositionTracker(PositionConfig(initial_balance=1.0))

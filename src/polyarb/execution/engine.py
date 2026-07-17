@@ -269,7 +269,7 @@ class ExecutionEngine:
             condition_id=leg.asset,
             side=leg.action.upper(),
             outcome="yes",  # T5+: derive from leg metadata when available
-            stake=leg.size,
+            quantity=leg.quantity_value,
             price=leg.estimated_price,
             leg_id=leg.leg_id,
             operation_id=f"open:{signal_id}:{leg.leg_id}",
@@ -324,7 +324,7 @@ class ExecutionEngine:
             fill = Fill(
                 market_id=leg.asset,
                 exit_price=leg.estimated_price,
-                filled_size=leg.size,
+                filled_quantity=leg.quantity_value,
             )
             self.tracker.close_position_with_fill(
                 fill,

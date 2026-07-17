@@ -12,8 +12,8 @@ T4 wired `open_position`. T5 wires the rest of the lifecycle:
 - **`StopLossEvent`**: richer return type from `check_stop_loss_event` than
   bare bool — carries loss_pct, realized_pnl, recommendation. Legacy bool
   form (`check_stop_loss`) preserved.
-- **Partial-fill rejection**: T5 scope explicitly does NOT do partial fill
-  aggregation. A fill with `filled_size != position.stake` raises ValueError
+- **Partial-fill rejection**: this scope explicitly does NOT do partial fill
+  aggregation. A fill quantity unequal to the position quantity raises ValueError
   loudly rather than silently booking wrong PnL. Aggregation is T5+1.
 - **Bug fix**: `PositionSnapshot.roi_pct` referenced a non-existent
   `self.snapshot_balance` field. Fixed to use `self.balance`.
@@ -35,6 +35,7 @@ from polyarb.routing.position_repository import (
     PositionRepository,
     PositionState,
 )
+from polyarb.routing.quantity import Quantity
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,8 @@ class Position:
     condition_id: str
     side: str
     outcome: str
-    stake_money: Money
+    quantity_value: Quantity
+    cost_basis_money: Money
     entry_price: float
     current_price: float
     leg_id: str = ""
@@ -59,32 +61,64 @@ class Position:
         condition_id: str,
         side: str,
         outcome: str,
-        stake: int | float | str | Money,
-        entry_price: float,
-        current_price: float,
+        stake: int | float | str | Money | Quantity | None = None,
+        entry_price: float = 0.0,
+        current_price: float = 0.0,
         leg_id: str = "",
         opened_at: datetime | None = None,
+        *,
+        quantity: int | float | str | Quantity | None = None,
+        cost_basis: int | float | str | Money | None = None,
     ) -> None:
         self.market_id = market_id
         self.condition_id = condition_id
         self.side = side
         self.outcome = outcome
-        self.stake_money = (
-            stake if isinstance(stake, Money) else Money.from_value(stake)
-        )
+        if stake is not None and quantity is not None:
+            raise TypeError("provide quantity, not both quantity and legacy stake")
+        raw_quantity = quantity if quantity is not None else stake
+        if raw_quantity is None:
+            raise TypeError("position quantity is required")
+        if isinstance(raw_quantity, Quantity):
+            self.quantity_value = raw_quantity
+        elif isinstance(raw_quantity, Money):
+            self.quantity_value = Quantity(raw_quantity.micros)
+        else:
+            self.quantity_value = Quantity.from_value(raw_quantity)
         self.entry_price = entry_price
         self.current_price = current_price
+        self.cost_basis_money = (
+            cost_basis
+            if isinstance(cost_basis, Money)
+            else Money.from_value(cost_basis)
+            if cost_basis is not None
+            else Money.collateral_for(self.quantity_value, entry_price, side)
+        )
         self.leg_id = leg_id
         self.opened_at = opened_at or datetime.now(UTC)
 
     @property
     def stake(self) -> float:
-        return self.stake_money.to_float()
+        """Deprecated compatibility view; historical stake inputs are shares."""
+        return self.quantity
+
+    @property
+    def stake_money(self) -> Money:
+        """Deprecated money alias for the position's cash cost basis."""
+        return self.cost_basis_money
+
+    @property
+    def quantity(self) -> float:
+        return self.quantity_value.to_float()
+
+    @property
+    def cost_basis(self) -> float:
+        return self.cost_basis_money.to_float()
 
     @property
     def pnl_money(self) -> Money:
-        return Money.pnl_at(
-            self.stake_money,
+        return Money.pnl_for(
+            self.quantity_value,
             self.entry_price,
             self.current_price,
             self.side,
@@ -98,10 +132,12 @@ class Position:
     def pnl_pct(self) -> float:
         if self.entry_price == 0:
             return 0.0
-        return (self.pnl / self.stake) * 100.0
+        if self.cost_basis_money.micros == 0:
+            return 0.0
+        return (self.pnl / self.cost_basis) * 100.0
 
 
-@dataclass
+@dataclass(init=False)
 class Fill:
     """A venue fill event — the bridge between executor and tracker close path.
 
@@ -109,15 +145,53 @@ class Fill:
     after the venue confirms a fill. Paper mode: ExecutionEngine synthesizes
     one at the leg's estimated_price.
 
-    T5 scope: filled_size must equal the open position's stake. Partial
+    Current scope: filled quantity must equal the open position quantity. Partial
     fill aggregation (multiple fills per position) is T5+1.
     """
 
     market_id: str
     exit_price: float
-    filled_size: float
-    filled_at: datetime = field(default_factory=datetime.utcnow)
+    filled_quantity_value: Quantity
+    filled_at: datetime
     fill_id: str = ""
+
+    def __init__(
+        self,
+        market_id: str,
+        exit_price: float,
+        filled_quantity: int | float | str | Quantity | None = None,
+        filled_at: datetime | None = None,
+        fill_id: str = "",
+        *,
+        filled_size: int | float | str | Quantity | None = None,
+    ) -> None:
+        if filled_quantity is not None and filled_size is not None:
+            raise TypeError(
+                "provide filled_quantity, not both it and legacy filled_size"
+            )
+        raw_quantity = (
+            filled_quantity if filled_quantity is not None else filled_size
+        )
+        if raw_quantity is None:
+            raise TypeError("fill quantity is required")
+        self.market_id = market_id
+        self.exit_price = exit_price
+        self.filled_quantity_value = (
+            raw_quantity
+            if isinstance(raw_quantity, Quantity)
+            else Quantity.from_value(raw_quantity)
+        )
+        self.filled_at = filled_at or datetime.now(UTC)
+        self.fill_id = fill_id
+
+    @property
+    def filled_quantity(self) -> float:
+        return self.filled_quantity_value.to_float()
+
+    @property
+    def filled_size(self) -> float:
+        """Deprecated compatibility view; fill size is share quantity."""
+        return self.filled_quantity
 
 
 @dataclass
@@ -209,29 +283,42 @@ class PositionTracker:
         condition_id: str,
         side: str,
         outcome: str,
-        stake: float,
-        price: float,
+        stake: int | float | str | Money | Quantity | None = None,
+        price: float = 0.0,
         leg_id: str = "",
         operation_id: str | None = None,
+        *,
+        quantity: int | float | str | Quantity | None = None,
     ) -> bool:
-        stake_money = Money.from_value(stake)
+        if stake is not None and quantity is not None:
+            raise TypeError("provide quantity, not both quantity and legacy stake")
+        raw_quantity = quantity if quantity is not None else stake
+        if raw_quantity is None:
+            raise TypeError("position quantity is required")
+        if isinstance(raw_quantity, Quantity):
+            quantity_value = raw_quantity
+        elif isinstance(raw_quantity, Money):
+            quantity_value = Quantity(raw_quantity.micros)
+        else:
+            quantity_value = Quantity.from_value(raw_quantity)
+        cost_basis_money = Money.collateral_for(quantity_value, price, side)
 
         def transition(state: PositionState) -> bool:
-            if stake_money.micros > state.balance_money.micros:
+            if cost_basis_money.micros > state.balance_money.micros:
                 logger.warning(
                     "Insufficient balance for position: need %.2f, have %.2f",
-                    stake_money.to_float(),
+                    cost_basis_money.to_float(),
                     state.balance,
                 )
                 return False
             total_exposure = self._exposure_money(state)
-            requested_exposure = total_exposure + stake_money
+            requested_exposure = total_exposure + cost_basis_money
             max_exposure = Money.from_value(self.config.max_total_exposure)
             if requested_exposure.micros > max_exposure.micros:
                 logger.warning(
                     "Max exposure reached: %.2f + %.2f > %.2f",
                     total_exposure.to_float(),
-                    stake_money.to_float(),
+                    cost_basis_money.to_float(),
                     self.config.max_total_exposure,
                 )
                 return False
@@ -243,18 +330,19 @@ class PositionTracker:
                 condition_id=condition_id,
                 side=side,
                 outcome=outcome,
-                stake=stake_money,
+                quantity=quantity_value,
+                cost_basis=cost_basis_money,
                 entry_price=price,
                 current_price=price,
                 leg_id=leg_id,
             )
-            state.balance_money = state.balance_money - stake_money
+            state.balance_money = state.balance_money - cost_basis_money
             logger.info(
                 "Opened position: %s %s @ %.4f, stake=%.2f",
                 side,
                 market_id,
                 price,
-                stake_money.to_float(),
+                cost_basis_money.to_float(),
             )
             return True
 
@@ -327,7 +415,9 @@ class PositionTracker:
             if exit_price is not None:
                 pos.current_price = exit_price
             pnl_money = pos.pnl_money
-            state.balance_money = state.balance_money + pos.stake_money + pnl_money
+            state.balance_money = (
+                state.balance_money + pos.cost_basis_money + pnl_money
+            )
             state.realized_pnl_money = state.realized_pnl_money + pnl_money
             logger.info(
                 "Closed position: %s @ %.4f, PnL=%.2f",
@@ -353,8 +443,8 @@ class PositionTracker:
     ) -> float:
         """Production close path: a venue fill closes an open position.
 
-        Requires `fill.filled_size == position.stake` (no partial fills in
-        T5). Returns realized PnL; updates balance + realized_pnl. If no
+        Requires fill quantity to equal position quantity (no partial fills in
+        H-004). Returns realized PnL; updates balance + realized_pnl. If no
         position is open for `fill.market_id`, returns 0.0 and warns
         (callers can audit log this).
         """
@@ -366,22 +456,23 @@ class PositionTracker:
                     fill.market_id,
                 )
                 return Money(0)
-            fill_size_money = Money.from_value(fill.filled_size)
-            if fill_size_money != pos.stake_money:
+            if fill.filled_quantity_value != pos.quantity_value:
                 raise ValueError(
                     f"partial fill not supported (T5 scope): position stake "
-                    f"{pos.stake} but fill size {fill.filled_size}"
+                    f"{pos.quantity} but fill quantity {fill.filled_quantity}"
                 )
             del state.open_positions[fill.market_id]
             pos.current_price = fill.exit_price
             pnl_money = pos.pnl_money
-            state.balance_money = state.balance_money + pos.stake_money + pnl_money
+            state.balance_money = (
+                state.balance_money + pos.cost_basis_money + pnl_money
+            )
             state.realized_pnl_money = state.realized_pnl_money + pnl_money
             logger.info(
                 "Closed via fill: %s @ %.4f, size=%.2f, PnL=%.2f",
                 fill.market_id,
                 fill.exit_price,
-                fill.filled_size,
+                fill.filled_quantity,
                 pnl_money.to_float(),
             )
             return pnl_money
@@ -491,5 +582,5 @@ class PositionTracker:
     def _exposure_money(state: PositionState) -> Money:
         exposure = Money(0)
         for position in state.open_positions.values():
-            exposure = exposure + position.stake_money
+            exposure = exposure + position.cost_basis_money
         return exposure
