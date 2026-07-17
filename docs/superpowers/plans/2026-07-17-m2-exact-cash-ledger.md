@@ -41,7 +41,7 @@
 - [ ] Commit RED then GREEN as `test(m2): define exact money contract` and `feat(m2): add micro-pusd money value`.
 - [ ] Write failing tracker tests that repeat decimal closes, inspect `*_money.micros`, exercise exact exposure/insufficient-balance/stop-loss decisions, and verify existing float properties/results.
 - [ ] Run targeted tracker tests; expect missing exact fields and float drift failures.
-- [ ] Move `Position` stake and `PositionState` account fields to Money authority; quantize opening stake once; compute/accumulate close PnL as Money; make close methods convert the committed Money result to float only at their public return boundary.
+- [ ] Move `Position` stake and `PositionState` account fields to Money authority; quantize opening stake once; compute/accumulate close PnL as Money. Keep the receipt result temporarily float-compatible so the Task 1 commit leaves existing SQLite JSON paths green; switch it atomically after the tagged codec exists.
 - [ ] Run `uv run pytest tests/routing/test_position_tracker.py tests/routing/test_money.py -q`; expect green.
 - [ ] Commit RED then GREEN as `test(m2): require exact tracker cash state` and `feat(m2): book tracker cash in micro-pusd`.
 
@@ -72,7 +72,7 @@
 **Files:**
 - Modify: `src/polyarb/cli_arbitrage.py`
 - Modify: `tests/cli/test_arbitrage_cli.py`
-- Modify: `tests/integration/test_position_persistence_process.py`
+- Modify: `tests/cli/test_arbitrage_cli_process.py`
 - Modify: `tests/test_makefile.py`
 
 **Interfaces:**
@@ -84,7 +84,7 @@
 - [ ] Add/extend Makefile contract tests proving `operation_id=` and `db=` still reach the close command; no new long Python command is introduced.
 - [ ] Run the targeted tests; expect CLI float-only receipt validation and missing micros to fail.
 - [ ] Update CLI close receipt validation to accept only Money for new exact closes and legacy float for old close receipts, converting to float after validation. Preserve exit codes and output schema.
-- [ ] Run `uv run pytest tests/cli/test_arbitrage_cli.py tests/integration/test_position_persistence_process.py tests/test_makefile.py -q`; expect green.
+- [ ] Run `uv run pytest tests/cli/test_arbitrage_cli.py tests/cli/test_arbitrage_cli_process.py tests/test_makefile.py -q`; expect green.
 - [ ] Commit RED then GREEN as `test(m2): prove exact close recovery across restart` and `feat(m2): expose exact receipt replay through cli`.
 - [ ] Run a true shell smoke against a temporary copied Phase 4 DB: migrate, open/close twice with caller IDs, discard one response, retry it, and query raw micros/receipt count. Expected: exact cumulative micros, one booking per ID, zero open positions.
 
