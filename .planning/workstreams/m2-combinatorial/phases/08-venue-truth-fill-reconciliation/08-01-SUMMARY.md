@@ -10,6 +10,7 @@ provides:
   - Exact structured settlement receipt codec
   - Atomic operation request fingerprint migration and replay conflict
   - CONFIRMED venue cash transition with exact net cash and realized PnL
+  - Reconstructible CLI/Makefile delivery and subprocess response-loss recovery
 affects: [position-tracker, execution-engine, cli, live-venue-adapter]
 tech-stack:
   added: []
@@ -19,6 +20,8 @@ key-files:
   modified:
     - src/polyarb/routing/position_repository.py
     - src/polyarb/routing/position_tracker.py
+    - src/polyarb/cli_arbitrage.py
+    - Makefile
     - tests/routing/test_position_repository.py
 key-decisions:
   - "Fingerprint equality is strict: equal replays; any mismatch, including empty/non-empty, conflicts."
@@ -59,8 +62,19 @@ completed: null
 
 ## Remaining
 
-- Engine/CLI/Makefile subprocess response-loss proof.
 - Teaching chapter 17, full regression, learnings/state closure, and H-006 climb cycle.
+
+## Completed Slice: Engine and Operator Delivery
+
+- RED `84509de`: delivery-boundary tests specified Engine fact forwarding,
+  all-or-none CLI inputs, true subprocess response loss, changed-fee conflict,
+  and Makefile flag forwarding.
+- GREEN `bfecdf6`: CLI reconstructs complete venue input on every retry and
+  always invokes repository fingerprint adjudication; Makefile exposes the
+  exact venue fields through the existing `close-arb` target.
+- Focused evidence: **43 Engine/CLI/process/Makefile tests passed**; targeted
+  Ruff and `git diff --check` passed. The changed-fee subprocess returned 2
+  while the SQLite file remained byte-identical.
 
 ---
 *Phase: 08-venue-truth-fill-reconciliation — in progress*
