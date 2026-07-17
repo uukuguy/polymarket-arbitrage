@@ -9,6 +9,7 @@ requires:
 provides:
   - Exact structured settlement receipt codec
   - Atomic operation request fingerprint migration and replay conflict
+  - CONFIRMED venue cash transition with exact net cash and realized PnL
 affects: [position-tracker, execution-engine, cli, live-venue-adapter]
 tech-stack:
   added: []
@@ -17,6 +18,7 @@ key-files:
   created: []
   modified:
     - src/polyarb/routing/position_repository.py
+    - src/polyarb/routing/position_tracker.py
     - tests/routing/test_position_repository.py
 key-decisions:
   - "Fingerprint equality is strict: equal replays; any mismatch, including empty/non-empty, conflicts."
@@ -44,9 +46,19 @@ completed: null
   conflicting apply, A commits, then B observes the committed fingerprint and fails;
   one operation row and one balance mutation remain.
 
+## Completed Slice: Tracker Venue Truth
+
+- RED `a6cde69`: 13 expected failures specified terminal settlement validation,
+  wrong-price supersession, restart replay, and changed-payload conflicts; the
+  modeled compatibility case already passed.
+- GREEN `b581e03`: frozen `VenueSettlement`, deterministic versioned request
+  fingerprint, and exact `net = gross - fee`, `PnL = net - allocated cost`
+  transition returning the durable `SettlementReceipt`.
+- Focused evidence: **14 venue reconciliation tests passed**, then **102 tracker +
+  repository tests passed**; targeted Ruff passed.
+
 ## Remaining
 
-- VenueSettlement tracker transition and formula-supersession proof.
 - Engine/CLI/Makefile subprocess response-loss proof.
 - Teaching chapter 17, full regression, learnings/state closure, and H-006 climb cycle.
 
