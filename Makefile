@@ -46,6 +46,21 @@ journal:
 planning-status:
 	@uv run python scripts/planning_status.py
 
+## climb-status: Show the generated autonomous research/development tree.
+climb-status:
+	@cat docs/status/climb/research-tree.md
+
+## climb-cycle: Run one local climb quality-gate cycle (hypothesis=H-NNN required).
+climb-cycle:
+	@test -n "$(hypothesis)" || (echo "usage: make climb-cycle hypothesis=H-NNN" >&2; exit 2)
+	@tools/climb/cycle.sh "$(hypothesis)"
+
+## climb-check: Verify climb adapter contracts and deterministic state generation.
+climb-check:
+	@uv run pytest tests/climb -q
+
+.PHONY: climb-status climb-cycle climb-check
+
 ## cleanup-worktrees: Dry-run stale Claude agent worktree cleanup; use apply=1 and audited discard_unmerged="branch ..." to mutate
 cleanup-worktrees:
 	@uv run python scripts/cleanup_agent_worktrees.py $(if $(apply),--apply,) $(foreach branch,$(discard_unmerged),--discard-unmerged $(branch))

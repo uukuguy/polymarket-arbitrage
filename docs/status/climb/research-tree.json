@@ -1,4 +1,7 @@
 {
-  "runs": [],
-  "hypotheses": ["H-001"]
+  "hypotheses": [
+    "H-001"
+  ],
+  "last_cycle": 0,
+  "runs": []
 }

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
+import subprocess
 
 import yaml
 
@@ -81,3 +83,86 @@ def test_initial_state_is_resumable_and_best_effort() -> None:
 def test_run_artifacts_are_gitignored() -> None:
     gitignore = (ROOT / ".gitignore").read_text()
     assert "runs/climb/" in gitignore.splitlines()
+
+
+def test_required_adapter_scripts_are_executable() -> None:
+    required = {
+        "train.sh",
+        "eval-local.sh",
+        "cycle.sh",
+        "push.sh",
+        "apply-lb-score.sh",
+        "consult-ais.sh",
+    }
+    scripts = ROOT / "tools/climb"
+
+    for name in required:
+        path = scripts / name
+        assert path.is_file(), name
+        assert os.access(path, os.X_OK), name
+
+
+def test_push_creates_local_artifact_without_external_submission(tmp_path: Path) -> None:
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "hypothesis_id": "H-001",
+                "paradigm": "repository",
+                "git_head": "abc123",
+                "status": "ready-for-eval",
+            }
+        )
+    )
+    (tmp_path / "local-eval.json").write_text(
+        json.dumps({"total": 100.0, "subscores": {}})
+    )
+
+    completed = subprocess.run(
+        ["bash", "tools/climb/push.sh", str(tmp_path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    artifact = json.loads((tmp_path / "verification-artifact.json").read_text())
+    assert artifact == {
+        "external_submission": False,
+        "git_head": "abc123",
+        "hypothesis_id": "H-001",
+        "local_score": 100.0,
+    }
+
+
+def test_external_score_and_consultation_commands_fail_closed() -> None:
+    for script in ("apply-lb-score.sh", "consult-ais.sh"):
+        completed = subprocess.run(
+            ["bash", f"tools/climb/{script}"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode != 0
+        assert "disabled" in completed.stderr.lower()
+
+
+def test_makefile_exposes_climb_entry_points() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    for target in ("climb-status:", "climb-cycle:", "climb-check:"):
+        assert target in makefile
+
+
+def test_regen_tree_script_runs_from_repository_root() -> None:
+    completed = subprocess.run(
+        ["uv", "run", "python", "tools/climb/regen-tree.py"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "# Climb Research Tree" in completed.stdout
+    assert (STATE_DIR / "research-tree.md").is_file()
