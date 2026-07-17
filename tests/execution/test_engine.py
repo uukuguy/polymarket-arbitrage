@@ -43,16 +43,20 @@ def _make_leg(idx: int, action: str = "buy") -> ExecutionLeg:
     )
 
 
-def _make_decision(n_legs: int = 2, profit_abs: float = 5.0) -> RoutingDecision:
+def _make_decision(
+    n_legs: int = 2,
+    profit_abs: float = 5.0,
+    signal_id: str = "sig-1",
+) -> RoutingDecision:
     legs = [_make_leg(i) for i in range(n_legs)]
     plan = ExecutionPlan(
-        signal_id="sig-1",
+        signal_id=signal_id,
         legs=legs,
         total_estimated_cost=sum(leg.estimated_cost for leg in legs),
         profit_threshold_pct=1.0,
     )
     return RoutingDecision(
-        signal_id="sig-1",
+        signal_id=signal_id,
         plan=plan,
         is_profitable=True,
         expected_profit_pct=5.0,
@@ -276,6 +280,28 @@ async def test_replaying_decision_reuses_one_durable_open_operation(tmp_path):
     with sqlite3.connect(path) as con:
         count = con.execute("SELECT COUNT(*) FROM m2_applied_operations").fetchone()[0]
     assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_booking_rejection_fails_leg_instead_of_reporting_profit(tmp_path):
+    """A venue success is not completed until its position is durably booked."""
+    tracker = PositionTracker(
+        repository=SQLitePositionRepository(
+            tmp_path / "positions.db", initial_balance=1000.0
+        )
+    )
+    engine = ExecutionEngine(tracker=tracker)
+
+    first = await engine.execute(_make_decision(n_legs=1, signal_id="sig-1"))
+    rejected = await engine.execute(_make_decision(n_legs=1, signal_id="sig-2"))
+
+    assert first.status == ExecutionStatus.COMPLETED
+    assert rejected.status == ExecutionStatus.ABORTED
+    assert rejected.legs_executed == 0
+    assert rejected.realized_pnl == 0.0
+    assert rejected.leg_results[0].success is False
+    assert "position booking rejected" in (rejected.leg_results[0].error or "")
+    assert tracker.open_count == 1
 
 
 @pytest.mark.asyncio

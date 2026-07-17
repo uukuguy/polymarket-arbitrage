@@ -480,6 +480,36 @@ class TestDurablePartialFillAccounting:
         assert receipt is not None
         assert receipt.result == Money.from_value("1.5")
 
+    @pytest.mark.parametrize(
+        ("changed_quantity", "changed_price"),
+        [(31, 0.45), (30, 0.46)],
+    )
+    def test_modeled_fill_id_rejects_changed_payload(
+        self, tmp_path, changed_quantity: float, changed_price: float
+    ) -> None:
+        path = tmp_path / "positions.db"
+        tracker = PositionTracker(
+            repository=SQLitePositionRepository(path, initial_balance=1000.0)
+        )
+        self._open(tracker)
+        tracker.close_position_with_fill(
+            Fill("m1", 0.45, filled_quantity=30, fill_id="venue-123")
+        )
+
+        with pytest.raises(ValueError, match="operation identity conflict"):
+            tracker.close_position_with_fill(
+                Fill(
+                    "m1",
+                    changed_price,
+                    filled_quantity=changed_quantity,
+                    fill_id="venue-123",
+                )
+            )
+
+        state = tracker.repository.load()
+        assert state.open_positions["m1"].quantity == 70.0
+        assert state.balance == pytest.approx(973.5)
+
     def test_anonymous_partial_fill_fails_without_mutation(self) -> None:
         tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
         self._open(tracker)

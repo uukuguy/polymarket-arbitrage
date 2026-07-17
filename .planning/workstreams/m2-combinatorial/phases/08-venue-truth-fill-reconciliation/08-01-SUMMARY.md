@@ -89,6 +89,21 @@ exact structured receipt, and rejects every changed retry atomically across proc
 - The SUMMARY anchor was created after Task 1 rather than Task 3, strengthening the
   project invariant without changing the delivered contract.
 
+## Pre-Merge Fail-Closed Corrections
+
+- Durable position booking is now part of execution success: a venue-successful leg
+  whose `open_position` is rejected becomes failed, cannot enter the close path, and
+  cannot report expected profit.
+- Modeled immutable fill IDs now bind exact quantity and canonical exit price through
+  the repository fingerprint, so changed retries conflict instead of replaying stale
+  results.
+- CLI fill-ID recovery requires explicit size and reconstructs the original request on
+  every retry; subprocess coverage locks changed-payload rejection.
+- Removed the climb post-commit auto-amend hook. `tools/climb/cycle.py` already performs
+  research-tree regeneration in the command that owns the state mutation.
+- Regression evidence: 192 focused execution/accounting/CLI/Makefile tests passed;
+  targeted Ruff, `git diff --check`, and `make planning-status` passed.
+
 ## User Setup Required
 
 None. This phase performs no live venue authentication, signing, allowance mutation,

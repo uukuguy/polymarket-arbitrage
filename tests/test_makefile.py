@@ -35,6 +35,14 @@ def test_status_uses_the_canonical_current_state() -> None:
     assert "## 当前 checkout" in result.stdout
 
 
+def test_post_commit_hook_never_amends_the_users_commit() -> None:
+    hook = ROOT / ".githooks" / "post-commit"
+    content = hook.read_text() if hook.exists() else ""
+
+    assert "commit --amend" not in content
+    assert "--no-verify" not in content
+
+
 def test_arbitrage_make_targets_forward_database_path() -> None:
     database = "build/test-m2-positions.db"
     cases = (

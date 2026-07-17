@@ -284,6 +284,12 @@ def test_partial_fill_recovers_lost_response_across_processes(tmp_path) -> None:
     assert replayed["retry_safe"] is True
     assert replayed["realized_pnl"] == 1.5
 
+    changed = list(partial_args)
+    changed[changed.index("30")] = "31"
+    conflict = _cli(*changed)
+    assert conflict.returncode == 2
+    assert "operation identity conflict" in conflict.stderr
+
     status = _cli("status", "--db-path", str(path))
     assert status.returncode == 0, status.stderr
     after_partial = json.loads(status.stdout)

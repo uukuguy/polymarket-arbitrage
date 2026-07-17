@@ -491,7 +491,20 @@ class PositionTracker:
         )
 
         request_fingerprint = ""
-        if fill.settlement is not None:
+        if fill.fill_id and fill.settlement is None:
+            canonical_exit_price = format(
+                Decimal(str(fill.exit_price)).normalize(), "f"
+            )
+            request_fingerprint = "modeled-fill:v1:" + json.dumps(
+                {
+                    "exit_price": canonical_exit_price,
+                    "market_id": fill.market_id,
+                    "quantity_micros": fill.filled_quantity_value.micros,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        elif fill.settlement is not None:
             settlement = fill.settlement
             request_fingerprint = "venue-settlement:v1:" + json.dumps(
                 {

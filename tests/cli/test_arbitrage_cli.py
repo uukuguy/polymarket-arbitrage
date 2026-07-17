@@ -102,6 +102,21 @@ def test_close_rejects_incomplete_or_nonreconstructible_venue_truth(args):
     assert "venue" in result.output.lower()
 
 
+def test_close_rejects_fill_id_without_explicit_size():
+    result = runner.invoke(
+        app,
+        [
+            "close",
+            "--market-id", "m1",
+            "--exit-price", "0.5",
+            "--fill-id", "fill-001",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "explicit --size" in result.output
+
+
 def test_status_returns_expected_envelope():
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, f"non-zero exit: {result.exit_code}\n{result.output}"

@@ -170,18 +170,26 @@ class ExecutionEngine:
             leg_results.append(leg_result)
 
             if leg_result.success:
-                self._update_tracker_for_leg(decision.signal_id, leg)
-                await self._maybe_close_for_leg(decision.signal_id, leg)
-            else:
-                if i == 0:
-                    # Atomic invariant: never proceed past a failed first leg.
-                    aborted = True
-                    first_leg_failed = True
-                    logger.warning(
-                        "First leg (id=%s) failed after %d attempts — "
-                        "aborting remaining %d legs",
-                        leg.leg_id, leg_result.attempts, len(plan.legs) - 1,
+                booked = self._update_tracker_for_leg(decision.signal_id, leg)
+                if booked:
+                    await self._maybe_close_for_leg(decision.signal_id, leg)
+                else:
+                    leg_result.success = False
+                    leg_result.error = "position booking rejected"
+                    logger.error(
+                        "Leg %s executed but durable position booking was rejected",
+                        leg.leg_id,
                     )
+
+            if not leg_result.success and i == 0:
+                # Atomic invariant: never proceed past a failed first leg.
+                aborted = True
+                first_leg_failed = True
+                logger.warning(
+                    "First leg (id=%s) failed after %d attempts — "
+                    "aborting remaining %d legs",
+                    leg.leg_id, leg_result.attempts, len(plan.legs) - 1,
+                )
 
         executed = sum(1 for r in leg_results if r.success)
         total = len(plan.legs)
@@ -255,7 +263,7 @@ class ExecutionEngine:
             leg=leg, success=False, attempts=max_attempts, error=last_error,
         )
 
-    def _update_tracker_for_leg(self, signal_id: str, leg: ExecutionLeg) -> None:
+    def _update_tracker_for_leg(self, signal_id: str, leg: ExecutionLeg) -> bool:
         """Open a position in the tracker for a successfully-executed leg only.
 
         Failed legs MUST NOT update the tracker — they'd corrupt downstream
@@ -264,7 +272,7 @@ class ExecutionEngine:
         # ExecutionLeg.action is lowercase ("buy"/"sell"); tracker contract
         # is uppercase ("BUY"/"SELL"). Normalize here to keep the tracker's
         # PnL math sign-consistent.
-        self.tracker.open_position(
+        return self.tracker.open_position(
             market_id=leg.asset,
             condition_id=leg.asset,
             side=leg.action.upper(),

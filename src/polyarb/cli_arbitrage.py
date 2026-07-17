@@ -400,6 +400,13 @@ def close(
             err=True,
         )
         raise typer.Exit(code=2)
+    if fill_id is not None and size is None:
+        typer.secho(
+            "immutable --fill-id requires explicit --size so retries can be verified",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
     settlement = None
     if venue_requested:
         assert venue_cash is not None
@@ -430,7 +437,7 @@ def close(
         if caller_supplied
         else None
     )
-    if receipt is not None and not venue_requested:
+    if receipt is not None and fill_id is None and not venue_requested:
         if receipt.operation_type != "close" or receipt.target_id != market_id:
             typer.secho(
                 "operation identity conflict: "
