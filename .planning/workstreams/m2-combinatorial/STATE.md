@@ -2,27 +2,27 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 5
-status: completed
-stopped_at: Phase 5 closed; H-003 confirmed at 100 local score
+current_phase: 6
+status: ready
+stopped_at: Phase 6 planned; H-004 ready for TDD execution
 last_updated: "2026-07-17T04:33:10.644Z"
 last_activity: 2026-07-17
 progress:
-  total_phases: 4
+  total_phases: 5
   completed_phases: 4
-  total_plans: 4
+  total_plans: 5
   completed_plans: 4
-  percent: 100
+  percent: 80
 ---
 
 # Project State — m2-combinatorial（组合套利能力线）
 
 ## Current Position
 
-Phase: 5 (Exact Cash Ledger) — ✅ CLOSED 2026-07-17
-Plan: 1 of 1 complete
-**Status:** Milestone complete
-**Current Phase:** 5
+Phase: 6 (Unit-Safe Execution Accounting)
+Plan: 0 of 1 complete
+**Status:** Ready for execution
+**Current Phase:** 6
 **Last Activity:** 2026-07-17
 **Last Activity Description:** Phase 05 planning complete — 1 plans ready
 
@@ -73,16 +73,16 @@ Plan: 1 of 1 complete
 ## Session Continuity
 
 **Last Resumed:** 2026-07-17
-**Stopped At:** Phase 5 closed; H-003 confirmed at 100 local score
-**Resume File:** .planning/workstreams/m2-combinatorial/phases/05-exact-cash-ledger/05-01-SUMMARY.md
+**Stopped At:** Phase 6 planned; H-004 ready for TDD execution
+**Resume File:** .planning/workstreams/m2-combinatorial/phases/06-unit-safe-execution-accounting/06-01-PLAN.md
 
 ## Next Action (2026-07-17)
 
-Phase 5 已实现 integer micro-pUSD cash authority、Phase 4 additive migration、tagged receipt 和 response-loss replay；H-003 climb 五门均 100 并 confirmed。当前 pool 无 pending，下一步触发 Knowledge Layer 排序新的 bounded hypothesis。
+H-004 已规划：先拆分 exact shares Quantity 与 pUSD cost basis，再进入 H-005 partial fills。
 
 第一条命令：
 
-`$gsd-explore --ws m2-combinatorial durable partial-fill accounting boundary`
+`uv run pytest tests/routing/test_quantity.py -q`
 
 **已交付给用户 (累积)**:
 
