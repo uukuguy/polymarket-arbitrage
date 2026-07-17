@@ -16,6 +16,68 @@ from polyarb.routing.position_repository import (
 from polyarb.routing.position_tracker import Position
 
 
+_PHASE4_SCHEMA = """
+CREATE TABLE m2_account_state (
+    account_id TEXT PRIMARY KEY,
+    snapshot_balance REAL NOT NULL,
+    balance REAL NOT NULL,
+    realized_pnl REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE m2_open_positions (
+    market_id TEXT PRIMARY KEY,
+    condition_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    stake REAL NOT NULL,
+    entry_price REAL NOT NULL,
+    current_price REAL NOT NULL,
+    leg_id TEXT NOT NULL,
+    opened_at TEXT NOT NULL
+);
+CREATE TABLE m2_applied_operations (
+    operation_id TEXT PRIMARY KEY,
+    operation_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+"""
+
+
+def _create_phase4_database(path, *, balance: float = 919.9999999999999) -> None:
+    with sqlite3.connect(path) as con:
+        con.executescript(_PHASE4_SCHEMA)
+        con.execute(
+            "INSERT INTO m2_account_state "
+            "(account_id, snapshot_balance, balance, realized_pnl, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("paper", 1000.0, balance, 19.999999999999996, "2026-07-17T08:00:00Z"),
+        )
+        con.execute(
+            "INSERT INTO m2_open_positions "
+            "(market_id, condition_id, side, outcome, stake, entry_price, "
+            "current_price, leg_id, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "m1",
+                "c1",
+                "BUY",
+                "YES",
+                100.0000004,
+                0.4,
+                0.5,
+                "l1",
+                "2026-07-17T08:00:00+00:00",
+            ),
+        )
+        con.execute(
+            "INSERT INTO m2_applied_operations "
+            "(operation_id, operation_type, target_id, result_json, applied_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("legacy-close", "close", "m0", "10.0", "2026-07-17T08:00:00Z"),
+        )
+
+
 def _position(market_id: str = "m1") -> Position:
     return Position(
         market_id=market_id,
@@ -262,9 +324,145 @@ def test_sqlite_corrupt_account_cardinality_fails_closed(tmp_path) -> None:
     repository = SQLitePositionRepository(path, initial_balance=1000.0)
     with sqlite3.connect(path) as con:
         con.execute(
-            "INSERT INTO m2_account_state VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO m2_account_state "
+            "(account_id, snapshot_balance, balance, realized_pnl, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
             ("corrupt-second-account", 1.0, 1.0, 0.0, "2026-07-17T08:00:00Z"),
         )
 
     with pytest.raises(RepositoryStateError, match="exactly one account"):
         repository.load()
+
+
+def test_sqlite_fresh_schema_stores_authoritative_money_as_integer(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    repository = SQLitePositionRepository(path, initial_balance=1000.0)
+    repository.apply("open:m1", "open", "m1", _open)
+
+    with sqlite3.connect(path) as con:
+        account = con.execute(
+            "SELECT snapshot_balance_micros, balance_micros, "
+            "realized_pnl_micros, typeof(snapshot_balance_micros), "
+            "typeof(balance_micros), typeof(realized_pnl_micros) "
+            "FROM m2_account_state"
+        ).fetchone()
+        position = con.execute(
+            "SELECT stake_micros, typeof(stake_micros) FROM m2_open_positions"
+        ).fetchone()
+
+    assert account == (
+        1_000_000_000,
+        900_000_000,
+        0,
+        "integer",
+        "integer",
+        "integer",
+    )
+    assert position == (100_000_000, "integer")
+
+
+def test_sqlite_migrates_phase4_real_state_and_preserves_identity(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    _create_phase4_database(path)
+
+    repository = SQLitePositionRepository(path, initial_balance=1000.0)
+    state = repository.load()
+
+    assert state.snapshot_balance_money.micros == 1_000_000_000
+    assert state.balance_money.micros == 920_000_000
+    assert state.realized_pnl_money.micros == 20_000_000
+    assert state.open_positions["m1"].stake_money.micros == 100_000_000
+    assert repository.get_receipt("legacy-close").result == 10.0
+
+    with sqlite3.connect(path) as con:
+        raw = con.execute(
+            "SELECT snapshot_balance_micros, balance_micros, "
+            "realized_pnl_micros FROM m2_account_state"
+        ).fetchone()
+        columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info(m2_open_positions)").fetchall()
+        }
+    assert raw == (1_000_000_000, 920_000_000, 20_000_000)
+    assert "stake_micros" in columns
+
+
+def test_sqlite_phase4_migration_is_idempotent_on_restart(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    _create_phase4_database(path)
+    SQLitePositionRepository(path, initial_balance=1000.0)
+
+    with sqlite3.connect(path) as con:
+        before = con.execute(
+            "SELECT snapshot_balance_micros, balance_micros, "
+            "realized_pnl_micros FROM m2_account_state"
+        ).fetchone()
+
+    restarted = SQLitePositionRepository(path, initial_balance=9999.0)
+
+    with sqlite3.connect(path) as con:
+        after = con.execute(
+            "SELECT snapshot_balance_micros, balance_micros, "
+            "realized_pnl_micros FROM m2_account_state"
+        ).fetchone()
+    assert after == before
+    assert restarted.load().snapshot_balance_money.micros == 1_000_000_000
+
+
+def test_sqlite_invalid_phase4_money_rolls_back_schema_migration(tmp_path) -> None:
+    path = tmp_path / "positions.db"
+    _create_phase4_database(path, balance=float("inf"))
+
+    with pytest.raises(ValueError, match="finite"):
+        SQLitePositionRepository(path, initial_balance=1000.0)
+
+    with sqlite3.connect(path) as con:
+        account_columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info(m2_account_state)").fetchall()
+        }
+        position_columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info(m2_open_positions)").fetchall()
+        }
+    assert "balance_micros" not in account_columns
+    assert "stake_micros" not in position_columns
+
+
+def test_sqlite_existing_integer_columns_with_null_authority_fail_closed(
+    tmp_path,
+) -> None:
+    path = tmp_path / "positions.db"
+    _create_phase4_database(path)
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "ALTER TABLE m2_account_state ADD COLUMN snapshot_balance_micros INTEGER"
+        )
+        con.execute("ALTER TABLE m2_account_state ADD COLUMN balance_micros INTEGER")
+        con.execute(
+            "ALTER TABLE m2_account_state ADD COLUMN realized_pnl_micros INTEGER"
+        )
+        con.execute("ALTER TABLE m2_open_positions ADD COLUMN stake_micros INTEGER")
+
+    with pytest.raises(RepositoryStateError, match="authoritative money"):
+        SQLitePositionRepository(path, initial_balance=1000.0)
+
+
+def test_sqlite_state_write_dual_writes_legacy_projection_from_micros(
+    tmp_path,
+) -> None:
+    path = tmp_path / "positions.db"
+    repository = SQLitePositionRepository(path, initial_balance=1.0)
+
+    def debit(state: PositionState) -> None:
+        state.balance = "0.6666665"
+        state.realized_pnl = "-0.3333335"
+
+    repository.apply("debit", "legacy-update", "paper", debit)
+
+    with sqlite3.connect(path) as con:
+        row = con.execute(
+            "SELECT balance_micros, realized_pnl_micros, balance, realized_pnl "
+            "FROM m2_account_state"
+        ).fetchone()
+    assert row == (666_666, -333_334, 0.666666, -0.333334)
