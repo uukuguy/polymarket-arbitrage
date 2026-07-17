@@ -11,14 +11,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@1.6
       - name: Inspect L1 data volume
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
+          SCRIPT_B64="$(base64 -w0 scripts/ops/inspect_sqlite_storage.py)"
           flyctl ssh console --app polyarb-l1 --process-group app --command "/bin/sh -c '
             df -h /data;
             du -x -h -d 2 /data 2>/dev/null | sort -h | tail -50;
             find /data -xdev -type f -printf \"%s %p\\n\" 2>/dev/null | sort -n | tail -30;
-            /app/.venv/bin/python -c \"import sqlite3; c=sqlite3.connect('file:/data/state.db?mode=ro', uri=True); print('PRAGMA', dict(page_count=c.execute('pragma page_count').fetchone()[0], page_size=c.execute('pragma page_size').fetchone()[0], freelist_count=c.execute('pragma freelist_count').fetchone()[0])); [print(row) for row in c.execute('select name, sum(pgsize) as bytes, count(*) as pages from dbstat group by name order by bytes desc')]\"
+            printf %s \"$SCRIPT_B64\" | base64 -d | /app/.venv/bin/python - /data/state.db
           '"
