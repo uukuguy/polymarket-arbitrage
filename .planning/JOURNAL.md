@@ -3482,3 +3482,16 @@ make climb-cycle hypothesis=H-004
 ```
 
 H-004 五门 100 后不暂停，直接执行已 pending 的 H-005 durable partial-fill accounting。
+
+### SESSION 43 continuation — H-004 climb CONFIRMED
+
+- `make climb-cycle hypothesis=H-004` → cycle 4；planning/unit/integration/CLI/restart 五门均 **100**，total **100**。
+- H-004 自动从 pending 变为 confirmed；run `20260717-052429-h-004` 和 research tree 已由 adapter 确定性同步。
+- target 仍显示 evaluation not configured，符合 local GSD gates authoritative 的 adapter 合同。
+- 下一 ranked hypothesis 是 H-005：immutable fill identity + exact cumulative quantity/proceeds，目标是 partial close 跨 retry/restart 不重复扣量或记账。
+
+下一步不等待用户，直接规划并执行 H-005；第一条命令：
+
+```bash
+$gsd-plan-phase 7 --ws m2-combinatorial
+```

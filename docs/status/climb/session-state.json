@@ -1,6 +1,6 @@
 {
   "in_flight": null,
-  "last_cycle": 3,
-  "next_action": "execute H-004 unit-safe execution accounting",
+  "last_cycle": 4,
+  "next_action": "execute H-005 durable partial-fill accounting",
   "session": "2026-07-17-m2-position-persistence"
 }
