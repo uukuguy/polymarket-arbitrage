@@ -406,6 +406,8 @@ class RoutingDecision:
                         "action": leg.action,
                         "asset": leg.asset,
                         "size": leg.quantity,
+                        "quantity": leg.quantity,
+                        "cost_basis": leg.cost_basis_money.to_float(),
                         "limit_price": leg.limit_price,
                     }
                     for leg in self.plan.legs

@@ -166,7 +166,9 @@ def test_close_subcommand_books_realized_pnl(isolated_tracker):
             "--exit-price", str(open_pos.entry_price + 0.05),  # 5¢ profit
         ],
     )
-    assert close_result.exit_code == 0, f"close exit={close_result.exit_code}\n{close_result.output}"
+    assert close_result.exit_code == 0, (
+        f"close exit={close_result.exit_code}\n{close_result.output}"
+    )
     close_payload = json.loads(close_result.stdout)
     # BUY profit: stake × (exit - entry) = stake × 0.05
     expected_pnl = open_stake * 0.05
