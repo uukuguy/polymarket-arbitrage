@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -187,3 +188,24 @@ def test_staged_unicode_manual_path_runs_validation(
     assert main(["--staged"]) == 0
     assert path_calls == [("diff", "--cached", "--name-only", "-z")]
     assert validations == [(root, _valid_manual())]
+
+
+def test_repository_m1_manual_passes_contract() -> None:
+    manual = ROOT / "docs/M1-市场感知平台使用手册.md"
+    assert manual.is_file(), "living M1 manual must exist"
+    assert validate_manual(ROOT, manual.read_text()) == []
+
+
+def test_manual_keeps_real_money_boundary_explicit() -> None:
+    text = (ROOT / "docs/M1-市场感知平台使用手册.md").read_text()
+    assert "不构成真实资金下单授权" in text
+    assert "`.planning/CURRENT.md`" in text
+    assert "本地数据不代表生产状态" in text
+
+
+def test_docs_m1_check_make_target() -> None:
+    result = subprocess.run(
+        ["make", "docs-m1-check"], cwd=ROOT, text=True, capture_output=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "M1 manual contract: OK" in result.stdout

@@ -26,6 +26,12 @@ help:
 	@echo ""
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed -E 's/^## /  /' | sort
 
+.PHONY: docs-m1-check
+
+## docs-m1-check: Offline verification of the M1 platform manual's commands, links, routes, health names, and readiness matrix
+docs-m1-check:
+	@uv run python scripts/check_m1_manual.py
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Project state (gsd-aware shortcuts)
 # ─────────────────────────────────────────────────────────────────────────────
