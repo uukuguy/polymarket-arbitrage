@@ -782,6 +782,79 @@ async def test_on_snapshot_complete_no_mirror_call_when_none(
     assert ok is True  # refresh ran (debounce not blocking)
 
 
+@pytest.mark.asyncio
+async def test_refresh_reconciles_durable_desired_rows_even_without_memory_diff(
+    settings_with_db, tmp_path
+):
+    """Cold-start DB drift is repaired even when the process set already matches."""
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings, db_path = settings_with_db
+    _create_minimal_sqlite(db_path, _seed_markets(2, "R"))
+    scanner_yaml = tmp_path / "recipes.yaml"
+    scanner_yaml.write_text(
+        "recipes:\n  r-only:\n    description: x\n"
+        "    where: market_id LIKE 'R%'\n    order_by: liquidity_usd DESC\n"
+        "    limit: 10\n"
+    )
+    settings.candidate_scanner_yaml = scanner_yaml
+    settings.candidate_watchlist_yaml = None
+    ws = MagicMock()
+    ws._candidate_set = {"YES-R0", "YES-R1"}
+    ws._l3_active_set = {"L3-A"}
+    ws.subscribe_candidates_payload = AsyncMock(return_value=True)
+    ws.unsubscribe_candidates_payload = AsyncMock(return_value=True)
+    mirror = MagicMock()
+    mirror.reconcile_candidates.return_value = True
+
+    assert await mod.on_snapshot_complete(
+        {"snapshot_id": 77}, ws_consumer=ws, settings=settings, mirror=mirror
+    ) is True
+
+    mirror.reconcile_candidates.assert_called_once()
+    desired = mirror.reconcile_candidates.call_args.args[0]
+    assert {(row["asset_id"], row["recipe_name"]) for row in desired} == {
+        ("YES-R0", "r-only"),
+        ("YES-R1", "r-only"),
+    }
+    ws.update_candidate_set.assert_called_once_with(["YES-R0", "YES-R1"])
+    assert ws._l3_active_set == {"L3-A"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["subscribe_false", "unsubscribe_error", "mirror_false"])
+async def test_refresh_required_convergence_failure_returns_false(
+    settings_with_db, tmp_path, failure
+):
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings, db_path = settings_with_db
+    _create_minimal_sqlite(db_path, _seed_markets(1, "R"))
+    scanner_yaml = tmp_path / "recipes.yaml"
+    scanner_yaml.write_text(
+        "recipes:\n  r-only:\n    description: x\n"
+        "    where: market_id LIKE 'R%'\n    order_by: liquidity_usd DESC\n"
+        "    limit: 10\n"
+    )
+    settings.candidate_scanner_yaml = scanner_yaml
+    ws = MagicMock()
+    ws._candidate_set = {"OLD"}
+    ws._l3_active_set = {"L3-A"}
+    ws.subscribe_candidates_payload = AsyncMock(
+        return_value=failure != "subscribe_false"
+    )
+    ws.unsubscribe_candidates_payload = AsyncMock(return_value=True)
+    if failure == "unsubscribe_error":
+        ws.unsubscribe_candidates_payload.side_effect = RuntimeError("send failed")
+    mirror = MagicMock()
+    mirror.reconcile_candidates.return_value = failure != "mirror_false"
+
+    assert await mod.on_snapshot_complete(
+        {"snapshot_id": 78}, ws_consumer=ws, settings=settings, mirror=mirror
+    ) is False
+    assert ws._l3_active_set == {"L3-A"}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 04 Plan 02 — D-01 Supabase fetch + D-03 cap + D-04 fallback tests
 # ─────────────────────────────────────────────────────────────────────────────

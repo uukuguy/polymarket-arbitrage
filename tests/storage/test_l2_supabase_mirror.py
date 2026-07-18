@@ -261,6 +261,111 @@ def test_upsert_candidates_inserts_new_rows() -> None:
     assert "l2_candidates" in tables_used
 
 
+def _candidate(asset_id: str, recipe_name: str, snapshot_id: int = 7) -> dict:
+    return {
+        "snapshot_id": snapshot_id,
+        "recipe_name": recipe_name,
+        "asset_id": asset_id,
+        "market_id": f"market-{asset_id}",
+        "event_id": f"event-{asset_id}",
+        "source": "recipe",
+        "ranking_score": None,
+        "included_at_ts": "2026-07-18T00:00:00+00:00",
+    }
+
+
+def test_reconcile_candidates_closes_and_inserts_by_asset_recipe_key() -> None:
+    """Cold-start reconciliation uses durable composite identity, not memory."""
+    from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
+
+    client = MagicMock()
+    active = [
+        {"asset_id": "A", "recipe_name": "keep"},
+        {"asset_id": "A", "recipe_name": "stale"},
+        {"asset_id": "B", "recipe_name": "stale"},
+    ]
+    selects: list[tuple] = []
+    updates: list[dict] = []
+    inserts: list[list[dict]] = []
+
+    def _table(_name: str) -> MagicMock:
+        query = MagicMock()
+        query.select.side_effect = lambda *args: (selects.append(args) or query)
+        query.eq.return_value = query
+        query.is_.return_value = query
+        query.update.side_effect = lambda values: (updates.append(values) or query)
+        query.insert.side_effect = lambda rows: (inserts.append(rows) or query)
+        query.execute.return_value = MagicMock(data=active if selects else [])
+        return query
+
+    client.table.side_effect = _table
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=client):
+        mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
+        assert mirror.reconcile_candidates([
+            _candidate("A", "keep"),
+            _candidate("A", "new"),
+        ]) is True
+
+    # Two stale composite keys close independently; the unchanged key is retained.
+    update_queries = [call.return_value for call in client.table.call_args_list]
+    assert len(updates) == 2
+    assert len(inserts) == 1
+    assert {(row["asset_id"], row["recipe_name"]) for row in inserts[0]} == {
+        ("A", "new")
+    }
+
+
+def test_reconcile_candidates_empty_desired_closes_all_active_keys() -> None:
+    from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
+
+    client = _make_supabase_mock()
+    table = client.table("l2_candidates")
+    table.execute.return_value = MagicMock(
+        data=[
+            {"asset_id": "A", "recipe_name": "r1"},
+            {"asset_id": "A", "recipe_name": "r2"},
+        ]
+    )
+    client.table.side_effect = None
+    client.table.return_value = table
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=client):
+        mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
+        assert mirror.reconcile_candidates([]) is True
+
+    assert table.update.call_count == 2
+    assert table.insert.call_count == 0
+
+
+@pytest.mark.parametrize("failure_stage", ["read", "update", "insert"])
+def test_reconcile_candidates_returns_false_for_any_rest_failure(
+    failure_stage: str,
+) -> None:
+    from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
+
+    client = MagicMock()
+    query = MagicMock()
+    query.select.return_value = query
+    query.eq.return_value = query
+    query.is_.return_value = query
+    query.update.return_value = query
+    query.insert.return_value = query
+    active = [{"asset_id": "OLD", "recipe_name": "old"}]
+    execute_count = {"n": 0}
+
+    def _execute() -> MagicMock:
+        execute_count["n"] += 1
+        stage = {1: "read", 2: "update", 3: "insert"}[execute_count["n"]]
+        if stage == failure_stage:
+            raise RuntimeError(f"{stage} failed")
+        return MagicMock(data=active if stage == "read" else [])
+
+    query.execute.side_effect = _execute
+    client.table.return_value = query
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=client):
+        mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
+        assert mirror.reconcile_candidates([_candidate("NEW", "new")]) is False
+
+
 def test_category_l2_mirror_not_plain_mirror() -> None:
     """Sentry breadcrumb category must be 'l2-mirror' (NOT 'mirror' — L1 namespace)."""
     from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
