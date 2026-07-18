@@ -22,6 +22,7 @@ operator's window into what the system *would* do.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import sys
@@ -31,6 +32,8 @@ from uuid import uuid4
 import typer
 from loguru import logger
 
+from polyarb.clients.clob_client import ClobReaderClient
+from polyarb.config import Settings
 from polyarb.execution.engine import ExecutionEngine
 from polyarb.models.signal import (
     ArbitrageSignal,
@@ -40,6 +43,8 @@ from polyarb.models.slippage import SlippageCalculator
 from polyarb.routing.config import ExecutionConfig, PositionConfig, RoutingConfig
 from polyarb.routing.engine import RoutingEngine
 from polyarb.routing.money import Money
+from polyarb.routing.neg_risk_quote_collector import collect_neg_risk_quotes
+from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
 from polyarb.routing.opportunity_diagnosis import diagnose_opportunity_feed
 from polyarb.routing.opportunity_scanner import (
     StaleSnapshotError,
@@ -51,6 +56,7 @@ from polyarb.routing.position_repository import (
     SQLitePositionRepository,
 )
 from polyarb.routing.position_tracker import Fill, PositionTracker, VenueSettlement
+from polyarb.storage.sqlite_store import SQLiteStore
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
@@ -76,6 +82,44 @@ def _setup_logger(verbose: bool) -> None:
         sys.stderr,
         level="DEBUG" if verbose else "INFO",
         format="<green>{time:HH:mm:ss}</green> | <level>{level:<7}</level> | {message}",
+    )
+
+
+@app.command("collect-neg-risk-quotes")
+def collect_neg_risk_quotes_command(
+    db_path: Path = typer.Option(
+        Path("data/state.db"),
+        "--db-path",
+        help="Local SQLite sidecar written by this one collection only",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Collect one local read-only CLOB quote run; not a scheduler or order command."""
+    _setup_logger(verbose)
+    try:
+        SQLiteStore(db_path).init_schema()
+        result = asyncio.run(
+            collect_neg_risk_quotes(
+                quote_store=NegRiskQuoteStore(db_path),
+                reader=ClobReaderClient(Settings()),
+            )
+        )
+    except Exception as error:
+        typer.secho(f"quote collection failed: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from error
+    typer.echo(
+        json.dumps(
+            {
+                "elapsed_ms": result.elapsed_ms,
+                "quote_taken_at_ms": result.quote_taken_at_ms,
+                "requested_token_count": result.requested_token_count,
+                "run_id": result.run_id,
+                "status": result.status,
+                "successful_response_count": result.successful_response_count,
+                "universe_snapshot_id": result.universe_snapshot_id,
+            },
+            sort_keys=True,
+        )
     )
 
 

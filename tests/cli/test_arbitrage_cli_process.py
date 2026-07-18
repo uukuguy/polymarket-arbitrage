@@ -97,6 +97,23 @@ def test_diagnose_feed_missing_body_is_bounded_and_path_safe(tmp_path) -> None:
     assert str(missing_body) not in result.stderr
 
 
+def test_collect_neg_risk_quotes_without_universe_exits_two_without_success_claim(tmp_path) -> None:
+    path = tmp_path / "quote-sidecar.db"
+
+    result = _cli(
+        "collect-neg-risk-quotes",
+        "--db-path",
+        str(path),
+        env={"POLYARB_ALLOW_EMPTY_SECRET": "1"},
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "quote collection failed: quote-universe-unavailable" in result.stderr
+    with sqlite3.connect(path) as con:
+        assert con.execute("SELECT COUNT(*) FROM neg_risk_quote_runs").fetchone()[0] == 0
+
+
 def test_run_status_close_status_across_four_processes(tmp_path) -> None:
     path = tmp_path / "positions.db"
 

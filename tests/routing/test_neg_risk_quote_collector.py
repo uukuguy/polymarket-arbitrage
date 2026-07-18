@@ -1,0 +1,279 @@
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+from dataclasses import dataclass
+
+import pytest
+
+from polyarb.routing.neg_risk_quote_collector import (
+    QuoteCollectionIntegrityError,
+    QuoteUniverseUnavailableError,
+    collect_neg_risk_quotes,
+)
+from polyarb.routing.neg_risk_quote_store import (
+    NegRiskQuoteStore,
+    QuoteRunBusyError,
+    UniverseLeg,
+)
+from polyarb.storage.sqlite_store import SQLiteStore
+
+NOW_MS = 1_700_000_000_000
+
+
+@dataclass
+class FixtureBook:
+    asset_id: str
+    asks: list[object]
+
+
+class FakeReader:
+    def __init__(self, response: object) -> None:
+        self.response = response
+        self.requests: list[list[str]] = []
+
+    async def get_books(self, token_ids: list[str]) -> object:
+        self.requests.append(token_ids)
+        if isinstance(self.response, BaseException):
+            raise self.response
+        return self.response
+
+
+@pytest.fixture
+def quote_db(tmp_path):
+    path = tmp_path / "state.db"
+    SQLiteStore(path).init_schema()
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms, finished_at_ms, mode, market_count, is_valid, parquet_path"
+            ") VALUES (?, ?, 'subset', 2, 1, 'fixture.parquet')",
+            (NOW_MS - 1_000, NOW_MS - 900),
+        )
+        snapshot_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
+        con.executemany(
+            "INSERT INTO markets("
+            "market_id, condition_id, slug, yes_token_id, active, closed, "
+            "neg_risk_market_id, fetched_at_ms, snapshot_id"
+            ") VALUES (?, ?, ?, ?, 1, 0, ?, ?, ?)",
+            [
+                ("market-a", "condition-a", "alpha", "token-a", "group-a", NOW_MS, snapshot_id),
+                ("market-b", "condition-b", "beta", "token-b", "group-a", NOW_MS, snapshot_id),
+            ],
+        )
+    return path
+
+
+def _now_sequence(*values: int):
+    iterator = iter(values)
+    return lambda: next(iterator)
+
+
+def _collect(store: NegRiskQuoteStore, reader: FakeReader, *, start: int = NOW_MS):
+    return asyncio.run(
+        collect_neg_risk_quotes(
+            quote_store=store,
+            reader=reader,
+            now_ms=_now_sequence(start, start + 25),
+        )
+    )
+
+
+def _legs() -> tuple[UniverseLeg, ...]:
+    return (
+        UniverseLeg("group-a", "market-a", "condition-a", "alpha", "token-a"),
+        UniverseLeg("group-a", "market-b", "condition-b", "beta", "token-b"),
+    )
+
+
+def test_collects_latest_universe_once_and_persists_lowest_valid_ask(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    reader = FakeReader(
+        [
+            FixtureBook(
+                "token-a",
+                [
+                    {"price": "0.71", "size": "4"},
+                    {"price": "0.42", "size": "11"},
+                ],
+            ),
+            {"asset_id": "token-b", "asks": [{"price": 0.51, "size": 8}]},
+        ]
+    )
+
+    result = _collect(store, reader)
+
+    assert reader.requests == [["token-a", "token-b"]]
+    assert result.status == "complete"
+    assert result.universe_snapshot_id == 1
+    assert result.requested_token_count == 2
+    assert result.successful_response_count == 2
+    assert result.quote_taken_at_ms == NOW_MS
+    assert result.elapsed_ms == 25
+    projection = store.latest_complete_projection()
+    assert projection is not None
+    quotes = [
+        (q.yes_token_id, q.terminal_state, q.best_ask_price, q.best_ask_size)
+        for q in projection.quotes
+    ]
+    assert quotes == [
+        ("token-a", "executable", 0.42, 11.0),
+        ("token-b", "executable", 0.51, 8.0),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("book", "state"),
+    [
+        (None, "missing-book"),
+        (FixtureBook("token-b", []), "missing-ask"),
+        (FixtureBook("token-b", [{"price": "wat", "size": "4"}]), "invalid-ask-price"),
+        (FixtureBook("token-b", [{"price": "0.4", "size": "0"}]), "invalid-ask-size"),
+    ],
+)
+def test_partial_responses_persist_visible_terminal_non_executable_reason(
+    quote_db, book: FixtureBook | None, state: str
+) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    books: list[object] = [FixtureBook("token-a", [{"price": "0.4", "size": "4"}])]
+    if book is not None:
+        books.append(book)
+
+    result = _collect(store, FakeReader(books))
+
+    assert result.status == "complete"
+    assert result.successful_response_count == 1
+    projection = store.latest_complete_projection()
+    assert projection is not None
+    sibling = next(quote for quote in projection.quotes if quote.yes_token_id == "token-b")
+    assert (
+        sibling.terminal_state,
+        sibling.best_ask_price,
+        sibling.best_ask_size,
+    ) == (state, None, None)
+
+
+def test_transport_failure_fails_new_run_without_displacing_prior_complete_run(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    first = _collect(
+        store,
+        FakeReader(
+            [
+                FixtureBook("token-a", [{"price": "0.4", "size": "4"}]),
+                FixtureBook("token-b", [{"price": "0.5", "size": "4"}]),
+            ]
+        ),
+    )
+
+    with pytest.raises(ConnectionError, match="fixture transport failure"):
+        _collect(
+            store,
+            FakeReader(ConnectionError("fixture transport failure")),
+            start=NOW_MS + 100,
+        )
+
+    projection = store.latest_complete_projection()
+    assert projection is not None
+    assert projection.run_id == first.run_id
+    with sqlite3.connect(quote_db) as con:
+        failed = con.execute(
+            "SELECT status, failure_reason FROM neg_risk_quote_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert failed == ("failed", "clob-fetch-failed")
+
+
+def test_persistence_failure_fails_new_run_without_displacing_prior_complete_run(
+    quote_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    first = _collect(
+        store,
+        FakeReader(
+            [
+                FixtureBook("token-a", [{"price": "0.4", "size": "4"}]),
+                FixtureBook("token-b", [{"price": "0.5", "size": "4"}]),
+            ]
+        ),
+    )
+
+    def fail_record(*args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("fixture write failure")
+
+    monkeypatch.setattr(store, "record_terminal_quotes", fail_record)
+    with pytest.raises(sqlite3.OperationalError, match="fixture write failure"):
+        _collect(
+            store,
+            FakeReader(
+                [
+                    FixtureBook("token-a", [{"price": "0.4", "size": "4"}]),
+                    FixtureBook("token-b", [{"price": "0.5", "size": "4"}]),
+                ]
+            ),
+            start=NOW_MS + 100,
+        )
+
+    projection = store.latest_complete_projection()
+    assert projection is not None
+    assert projection.run_id == first.run_id
+    with sqlite3.connect(quote_db) as con:
+        failed = con.execute(
+            "SELECT status, failure_reason FROM neg_risk_quote_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert failed == ("failed", "collector-error")
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        [FixtureBook("token-a", [{"price": "0.4", "size": "4"}]), FixtureBook("token-z", [])],
+        [FixtureBook("token-a", []), FixtureBook("token-a", [])],
+        object(),
+    ],
+)
+def test_unusable_or_mismatched_clob_payload_fails_new_run(response, quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+
+    with pytest.raises(QuoteCollectionIntegrityError):
+        _collect(store, FakeReader(response))
+
+    assert store.latest_complete_projection() is None
+    with sqlite3.connect(quote_db) as con:
+        failed = con.execute(
+            "SELECT status, failure_reason FROM neg_risk_quote_runs"
+        ).fetchone()
+    assert failed == ("failed", "clob-response-integrity-failed")
+
+
+def test_busy_or_unavailable_universe_does_not_call_clob(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    busy_run = store.begin_run(
+        universe_snapshot_id=1,
+        universe_taken_at_ms=NOW_MS - 1_000,
+        legs=_legs(),
+        quoted_at_ms=NOW_MS,
+    )
+    busy_reader = FakeReader([])
+
+    with pytest.raises(QuoteRunBusyError):
+        _collect(store, busy_reader)
+    assert busy_reader.requests == []
+    store.fail_run(busy_run, failure_reason="collector-aborted")
+
+    empty_path = quote_db.parent / "empty.db"
+    SQLiteStore(empty_path).init_schema()
+    unavailable_reader = FakeReader([])
+    with pytest.raises(QuoteUniverseUnavailableError, match="quote-universe-unavailable"):
+        _collect(NegRiskQuoteStore(empty_path), unavailable_reader)
+    assert unavailable_reader.requests == []
+
+    with sqlite3.connect(empty_path) as con:
+        con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms, finished_at_ms, mode, market_count, is_valid, parquet_path"
+            ") VALUES (?, ?, 'subset', 0, 1, 'fixture.parquet')",
+            (NOW_MS, NOW_MS),
+        )
+    zero_eligible_reader = FakeReader([])
+    with pytest.raises(QuoteUniverseUnavailableError, match="quote-universe-unavailable"):
+        _collect(NegRiskQuoteStore(empty_path), zero_eligible_reader)
+    assert zero_eligible_reader.requests == []
