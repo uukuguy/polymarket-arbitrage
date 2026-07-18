@@ -57,6 +57,9 @@ def test_connected_caught_up_chain_exposes_live_facts() -> None:
     assert checks["event_bus:cursor_lag"][0]["status"] == "pass"
     reconnect = checks["event_bus:reconnect_count"][0]
     assert reconnect["observedValue"] == 2
+    notification_at = checks["event_bus:last_notification_at"][0]
+    assert notification_at["observedValue"] == 100.0
+    assert notification_at["status"] == "pass"
 
 
 def test_quiet_notifications_do_not_fail_caught_up_chain() -> None:
