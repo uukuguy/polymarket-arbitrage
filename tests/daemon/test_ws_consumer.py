@@ -150,3 +150,15 @@ def test_subscribed_assets_tracked() -> None:
     assert consumer.subscribed_assets == ["0xabc", "0xdef"], (
         "subscribed_assets returned the internal list (not a copy)"
     )
+
+
+def test_l2_main_owns_quiet_refresh_task_lifecycle() -> None:
+    """The refresh loop is named, cancelled, and bounded with daemon peers."""
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "src/polyarb/daemon/l2_main.py").read_text()
+
+    assert "quiet_refresh_task = asyncio.create_task(" in source
+    assert "ws_consumer.run_quiet_refresh(stop_event)" in source
+    assert 'name="ws-quiet-refresh"' in source
+    assert "quiet_refresh_task.cancel()" in source
+    assert '(quiet_refresh_task, "ws-quiet-refresh")' in source

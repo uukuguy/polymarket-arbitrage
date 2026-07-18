@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -52,7 +53,6 @@ async def test_request_book_refresh_sends_sorted_union_without_mutating_truth() 
     assert consumer._l3_active_set == l3_before
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before
-
 
 @pytest.mark.asyncio
 async def test_refresh_if_quiet_obeys_quiet_boundary_and_retry_cooldown() -> None:
@@ -121,3 +121,50 @@ async def test_due_refresh_failures_do_not_forge_freshness(failure: str) -> None
     assert ws.send.await_count == (2 if failure == "closed" else 0)
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before
+
+
+@pytest.mark.asyncio
+async def test_run_quiet_refresh_sends_once_then_stops_cleanly() -> None:
+    consumer, watchdog, ws = _make_consumer()
+    stop_event = asyncio.Event()
+    event_before = consumer.last_event_at_s
+    watchdog_before = watchdog.last_event_at_s
+
+    async def _send_then_stop(_payload: str) -> None:
+        stop_event.set()
+
+    ws.send.side_effect = _send_then_stop
+
+    await asyncio.wait_for(
+        consumer.run_quiet_refresh(
+            stop_event,
+            quiet_after_s=0,
+            retry_s=30,
+            check_interval_s=0.01,
+        ),
+        timeout=0.2,
+    )
+
+    ws.send.assert_awaited_once()
+    assert consumer.last_event_at_s == event_before
+    assert watchdog.last_event_at_s == watchdog_before
+
+
+@pytest.mark.asyncio
+async def test_run_quiet_refresh_propagates_cancellation() -> None:
+    consumer, _watchdog, _ws = _make_consumer()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        consumer.run_quiet_refresh(
+            stop_event,
+            quiet_after_s=10_000,
+            retry_s=30,
+            check_interval_s=30,
+        )
+    )
+    await asyncio.sleep(0)
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
