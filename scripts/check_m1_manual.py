@@ -20,12 +20,19 @@ M1_TARGET_RE = re.compile(
     r"dashboard|fly-l2|verify-keepalive|l3|ohlc|chaos-l2|docs-m1)[a-z0-9-]*:",
     re.MULTILINE,
 )
-HEALTH_RE = re.compile(r'^[+-](?![+-]).*checks\["[a-z0-9_:-]+"\]', re.MULTILINE)
+HEALTH_RE = re.compile(
+    r'^[+-](?![+-])[ \t]*checks\["[a-z0-9_:-]+"\][ \t]*=', re.MULTILINE
+)
 CLI_RE = re.compile(
-    r"^[+-](?![+-]).*(@app\.command|typer\.(Option|Argument))", re.MULTILINE
+    r"^[+-](?![+-])[ \t]*(?:"
+    r"@app\.command[ \t]*(?:\(|$)|"
+    r"[a-zA-Z_]\w*(?:[ \t]*:[ \t]*[^=\n#'\"]+)?[ \t]*=[ \t]*"
+    r"typer\.(?:Option|Argument)[ \t]*\()",
+    re.MULTILINE,
 )
 ROUTE_RE = re.compile(
-    r'^[+-](?![+-]).*Route\("/[a-z0-9_/{}/.-]+"', re.MULTILINE
+    r'^[+-](?![+-])[ \t]*Route[ \t]*\([ \t]*"/[a-z0-9_/{}/.-]+"',
+    re.MULTILINE,
 )
 DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
 HEALTH_PATHS = {

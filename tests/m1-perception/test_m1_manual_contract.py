@@ -188,6 +188,41 @@ def test_staged_classifier_matches_contract_syntax_on_production_paths() -> None
     assert classify_staged_impact(["src/polyarb/http/app.py"], route_diff)
 
 
+@pytest.mark.parametrize(
+    ("path", "line"),
+    [
+        (
+            "src/polyarb/http/health.py",
+            '+logger.info(\'example checks["snapshot:freshness"] = []\')\n',
+        ),
+        (
+            "src/polyarb/http/l2_health.py",
+            '+# checks["event_bus:cursor_lag"] = [] is documented elsewhere\n',
+        ),
+        (
+            "src/polyarb/cli_observation.py",
+            "+logger.info('example @app.command() and typer.Option(...)')\n",
+        ),
+        (
+            "src/polyarb/cli_translation.py",
+            "+# verbose: bool = typer.Option(False, '--verbose')\n",
+        ),
+        (
+            "src/polyarb/http/app.py",
+            "+logger.info('example Route(\"/status\", status)')\n",
+        ),
+        (
+            "src/polyarb/http/l2_app.py",
+            '+# Route("/status", status) is intentionally absent\n',
+        ),
+    ],
+)
+def test_staged_classifier_ignores_contract_wording_in_logs_and_comments(
+    path: str, line: str
+) -> None:
+    assert not classify_staged_impact([path], line)
+
+
 def test_nul_staged_paths_preserve_unicode_manual_path() -> None:
     raw = os.fsencode(str(MANUAL)) + b"\0"
     assert _decode_nul_paths(raw) == ["docs/M1-市场感知平台使用手册.md"]
@@ -255,7 +290,12 @@ def test_precommit_allows_staged_public_contract_with_manual_sync(
         health.read_text() + 'checks["snapshot:freshness"] = []\n'
     )
     manual = repo / MANUAL
-    manual.write_text(manual.read_text() + "\n2026-07-18 | no operator impact\n")
+    manual.write_text(
+        manual.read_text()
+        + "\n- `2026-07-18 | review fixture | snapshot:freshness health field "
+        "added | no operator workflow change; field is diagnostic-only | "
+        "make docs-m1-check: OK | Test Reviewer`\n"
+    )
     assert _git(repo, "add", str(health.relative_to(repo)), str(MANUAL)).returncode == 0
 
     result = _run_precommit(repo)
@@ -267,7 +307,18 @@ def test_precommit_allows_staged_public_contract_with_manual_sync(
 @pytest.mark.parametrize(
     ("path", "addition"),
     [
-        ("src/polyarb/http/health.py", "logger.info('refactor only')\n"),
+        (
+            "src/polyarb/http/health.py",
+            'logger.info(\'example checks["snapshot:freshness"] = []\')\n',
+        ),
+        (
+            "src/polyarb/cli_observation.py",
+            "# @app.command() and typer.Option(...) are docs examples\n",
+        ),
+        (
+            "src/polyarb/http/app.py",
+            'logger.info(\'example Route("/status", status)\')\n',
+        ),
         (
             "tests/m1-perception/test_health_endpoint.py",
             'checks["fake:age"] = []\n',
