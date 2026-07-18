@@ -1166,7 +1166,7 @@ ohlc-spot-check:
 ##
 ## Usage:
 ##   make smoke-l3-dashboard asset_id=<asset_id>
-##   make smoke-l3-dashboard asset_id=<asset_id> URL=https://polyarb-dashboard.vercel.app
+##   make smoke-l3-dashboard asset_id=<asset_id> URL=https://polymarket-arbitrage.vercel.app
 ##
 ## Default URL is http://localhost:3000 (run `cd dashboard && pnpm dev` first).
 ## Returns HTTP status + payload size + grep for "asset_id" marker. Fail-soft:

@@ -336,8 +336,16 @@ def test_staged_unicode_manual_path_runs_validation(
     monkeypatch.setattr(manual_checker, "_git", lambda *args: "")
     monkeypatch.setattr(
         manual_checker,
+        "_index_view",
+        lambda: (
+            lambda path: _valid_manual() if path == MANUAL else "fixture",
+            lambda path: True,
+        ),
+    )
+    monkeypatch.setattr(
+        manual_checker,
         "validate_manual",
-        lambda checked_root, text: validations.append((checked_root, text)) or [],
+        lambda checked_root, text, **kwargs: validations.append((checked_root, text)) or [],
     )
 
     assert main(["--staged"]) == 0
@@ -438,6 +446,52 @@ def test_precommit_rejects_trivial_manual_edit_for_public_contract(
 
     assert result.returncode == 1
     assert "whitespace/unowned text" in result.stdout
+
+
+def test_precommit_validates_staged_manual_not_unstaged_repair(tmp_path: Path) -> None:
+    repo = _hook_repo(tmp_path)
+    health = repo / "src/polyarb/http/health.py"
+    health.write_text(health.read_text() + 'checks["snapshot:freshness"] = []\n')
+    manual = repo / MANUAL
+    original = manual.read_text()
+    staged_invalid = original.replace(
+        "## 7. section-7\nbody", "## 7. section-7\nupdated operator action"
+    ).replace(
+        "<!-- m1-contract: route=/signals file=dashboard/app/signals/page.tsx -->\n",
+        "",
+    )
+    manual.write_text(staged_invalid)
+    assert _git(repo, "add", str(health.relative_to(repo)), str(MANUAL)).returncode == 0
+    manual.write_text(original)
+    assert _git(repo, "status", "--short", str(MANUAL)).stdout.startswith("MM")
+
+    result = _run_precommit(repo)
+
+    assert result.returncode == 1
+    assert "required contract marker is missing" in result.stdout
+
+
+def test_precommit_validates_staged_surface_not_unstaged_repair(tmp_path: Path) -> None:
+    repo = _hook_repo(tmp_path)
+    health = repo / "src/polyarb/http/health.py"
+    original_health = health.read_text()
+    health.write_text(
+        original_health.replace("snapshot:last_success_age_seconds", "snapshot:renamed")
+    )
+    manual = repo / MANUAL
+    manual.write_text(
+        manual.read_text()
+        + "\n- `2026-07-18 | staged-source-fixture | health rename | no operator impact: fixture | "
+        "make docs-m1-check | Test Reviewer`\n"
+    )
+    assert _git(repo, "add", str(health.relative_to(repo)), str(MANUAL)).returncode == 0
+    health.write_text(original_health)
+    assert _git(repo, "status", "--short", str(health.relative_to(repo))).stdout.startswith("MM")
+
+    result = _run_precommit(repo)
+
+    assert result.returncode == 1
+    assert "health snapshot:last_success_age_seconds is absent" in result.stdout
 
 
 @pytest.mark.parametrize(

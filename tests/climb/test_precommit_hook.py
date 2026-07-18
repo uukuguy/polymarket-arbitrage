@@ -60,8 +60,13 @@ def test_hook_generates_but_refuses_unreviewed_tree(tmp_path: Path) -> None:
     assert _git(repo, "log", "-1", "--format=%s").stdout.strip() == "fixture"
 
 
-def test_hook_rejects_dirty_climb_source_before_generation(tmp_path: Path) -> None:
-    repo = _repo(tmp_path, "raise SystemExit('generator must not run')\n")
+def test_hook_allows_dirty_source_when_projection_is_byte_identical_to_index(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(
+        tmp_path,
+        "from pathlib import Path\nPath('generator-ran').write_text('yes')\n",
+    )
     source = repo / "docs/status/climb/hypotheses.yaml"
     source.write_text("items: [staged]\n")
     assert _git(repo, "add", str(source.relative_to(repo))).returncode == 0
@@ -69,9 +74,23 @@ def test_hook_rejects_dirty_climb_source_before_generation(tmp_path: Path) -> No
 
     result = _run(repo)
 
-    assert result.returncode == 1
-    assert "unstaged climb source" in result.stderr
-    assert "generator must not run" not in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert (repo / "generator-ran").read_text() == "yes"
+
+
+def test_hook_detects_staged_source_deletion_and_runs_generator(tmp_path: Path) -> None:
+    repo = _repo(
+        tmp_path,
+        "from pathlib import Path\nPath('generator-ran').write_text('deleted')\n",
+    )
+    source = repo / "docs/status/climb/hypotheses.yaml"
+    source.unlink()
+    assert _git(repo, "add", "-u", str(source.relative_to(repo))).returncode == 0
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert (repo / "generator-ran").read_text() == "deleted"
 
 
 def test_hook_reports_generator_failure_without_committing(tmp_path: Path) -> None:

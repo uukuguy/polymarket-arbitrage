@@ -4,7 +4,7 @@ import argparse
 import os
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 MANUAL = Path("docs/M1-市场感知平台使用手册.md")
@@ -102,8 +102,7 @@ SYNC_LOG_RE = re.compile(
 )
 
 
-def _make_targets(root: Path) -> set[str]:
-    text = (root / "Makefile").read_text()
+def _make_targets(text: str) -> set[str]:
     return set(re.findall(r"^([a-zA-Z0-9_.-]+):(?:\s|$)", text, re.MULTILINE))
 
 
@@ -122,7 +121,25 @@ def _table_rows(text: str) -> list[list[str]]:
     return rows
 
 
-def validate_manual(root: Path, text: str) -> list[str]:
+def validate_manual(
+    root: Path,
+    text: str,
+    *,
+    read_repo_text: Callable[[Path], str | None] | None = None,
+    repo_path_exists: Callable[[Path], bool] | None = None,
+) -> list[str]:
+    if read_repo_text is None:
+
+        def filesystem_read_text(path: Path) -> str | None:
+            return (root / path).read_text() if (root / path).is_file() else None
+
+        read_repo_text = filesystem_read_text
+    if repo_path_exists is None:
+
+        def filesystem_path_exists(path: Path) -> bool:
+            return (root / path).exists()
+
+        repo_path_exists = filesystem_path_exists
     errors: list[str] = []
     for number in range(1, 11):
         if not re.search(rf"^## {number}\. ", text, re.MULTILINE):
@@ -142,7 +159,8 @@ def validate_manual(root: Path, text: str) -> list[str]:
         if any(not cell for cell in row):
             errors.append(f"capability row has an empty required field: {row[0]}")
 
-    targets = _make_targets(root)
+    makefile_text = read_repo_text(Path("Makefile"))
+    targets = _make_targets(makefile_text or "")
     for target in sorted(set(MAKE_RE.findall(text))):
         if target not in targets:
             errors.append(f"Make target {target} does not exist")
@@ -152,7 +170,12 @@ def validate_manual(root: Path, text: str) -> list[str]:
         if not link or link.startswith(("http://", "https://", "mailto:")):
             continue
         destination = (root / MANUAL.parent / link).resolve()
-        if not destination.exists():
+        try:
+            relative_destination = destination.relative_to(root)
+        except ValueError:
+            errors.append(f"local link escapes repository: {raw_link}")
+            continue
+        if not repo_path_exists(relative_destination):
             errors.append(f"local link does not resolve: {raw_link}")
 
     markers = set(MARKER_RE.findall(text))
@@ -161,11 +184,12 @@ def validate_manual(root: Path, text: str) -> list[str]:
             f"required contract marker is missing: {missing[0]}={missing[1]} file={missing[2]}"
         )
     for kind, name, source in markers:
-        source_path = root / source
-        if not source_path.is_file():
+        source_path = Path(source)
+        source_text = read_repo_text(source_path)
+        if source_text is None:
             errors.append(f"{kind} {name} source does not exist: {source}")
             continue
-        if kind == "health" and name not in source_path.read_text():
+        if kind == "health" and name not in source_text:
             errors.append(f"health {name} is absent from {source}")
         if kind == "route":
             parts = Path(source).parts
@@ -270,6 +294,25 @@ def _git_paths(*args: str) -> list[str]:
     return _decode_nul_paths(result.stdout)
 
 
+def _index_view() -> tuple[Callable[[Path], str | None], Callable[[Path], bool]]:
+    index_paths = set(_git_paths("ls-files", "--cached", "-z"))
+
+    def read_text(path: Path) -> str | None:
+        name = path.as_posix()
+        if name not in index_paths:
+            return None
+        try:
+            return _git("show", f":{name}")
+        except subprocess.CalledProcessError:
+            return None
+
+    def exists(path: Path) -> bool:
+        name = path.as_posix().rstrip("/")
+        return name in index_paths or any(item.startswith(f"{name}/") for item in index_paths)
+
+    return read_text, exists
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--staged", action="store_true")
@@ -293,7 +336,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 before = _git("show", f"HEAD:{MANUAL}")
             except subprocess.CalledProcessError:
                 before = ""
-            after = _git("show", f":{MANUAL}")
+            try:
+                after = _git("show", f":{MANUAL}")
+            except subprocess.CalledProcessError:
+                print(f"manual missing from staged tree: {MANUAL}")
+                return 1
             if not manual_sync_is_meaningful(before, after):
                 print(
                     "M1 operator contract changed; the staged manual edit is only "
@@ -303,6 +350,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1
         if not self_changed and not classify_staged_impact(paths, diff):
             return 0
+
+        read_repo_text, repo_path_exists = _index_view()
+        staged_manual = read_repo_text(MANUAL)
+        if staged_manual is None:
+            print(f"manual missing from staged tree: {MANUAL}")
+            return 1
+        errors = validate_manual(
+            root,
+            staged_manual,
+            read_repo_text=read_repo_text,
+            repo_path_exists=repo_path_exists,
+        )
+        for error in errors:
+            print(f"ERROR: {error}")
+        if errors:
+            return 1
+        print("M1 manual contract: OK")
+        return 0
 
     if not manual.is_file():
         print(f"manual missing: {MANUAL}")

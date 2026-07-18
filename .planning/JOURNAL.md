@@ -3795,3 +3795,14 @@ $gsd-resume-work --ws m1-perception
 ### [NEXT — CURRENT]
 
 先只读诊断 H-008 opportunity feed HTTP 503 chain；不将 endpoint unavailable 报成合法零机会。
+
+## SESSION 56 — 2026-07-18 (Phase 05.2 re-review index exactness)
+
+- [GUARD] staged M1 checker 现从 Git index 读手册、Makefile、marker source 和 link 存在性；“暂存无效 + 工作区修复”的 MM 状态不再能绕过。
+- [HOOK] climb pre-commit 以 generated worktree 与 index 的字节差异为唯一 projection 门；source-only 且 projection 不变可通过，projection 改变才要求 review/stage，ACMRD 删除路径也已覆盖。
+- [DOC] L3 Dashboard 生产 URL 统一为 `https://polymarket-arbitrage.vercel.app`。
+- [BOUNDARY] 本轮未访问或修改生产；H-008 仍为下一个只读诊断。
+
+### [NEXT — CURRENT]
+
+先只读诊断 H-008 opportunity feed HTTP 503 chain。
