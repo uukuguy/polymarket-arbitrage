@@ -168,6 +168,61 @@ CREATE TABLE IF NOT EXISTS question_translations (
 
 CREATE INDEX IF NOT EXISTS idx_qt_dead ON question_translations(is_dead);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_qt_question_en ON question_translations(question_en);
+
+-- H-009 Task 1: an atomic, read-only CLOB quote-run sidecar. Snapshot writes
+-- continue to own `snapshots`/`markets`; this schema only records the versioned
+-- membership that a quote run was asked to cover and its terminal observations.
+CREATE TABLE IF NOT EXISTS neg_risk_quote_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  universe_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+  universe_taken_at_ms INTEGER NOT NULL,
+  quoted_at_ms INTEGER NOT NULL,
+  requested_token_count INTEGER NOT NULL CHECK(requested_token_count >= 0),
+  successful_response_count INTEGER NOT NULL DEFAULT 0
+      CHECK(successful_response_count >= 0),
+  status TEXT NOT NULL CHECK(status IN ('collecting', 'complete', 'failed')),
+  failure_reason TEXT,
+  completed_at_ms INTEGER,
+  CHECK((status = 'complete' AND failure_reason IS NULL AND completed_at_ms IS NOT NULL)
+     OR (status = 'failed' AND failure_reason IS NOT NULL)
+     OR (status = 'collecting' AND failure_reason IS NULL AND completed_at_ms IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_quote_runs_select
+  ON neg_risk_quote_runs(status, quoted_at_ms DESC, id DESC);
+
+-- The requested set must be durable so independently-created store instances
+-- can reject quote rows for tokens outside their run's snapshot universe.
+CREATE TABLE IF NOT EXISTS neg_risk_quote_run_legs (
+  quote_run_id INTEGER NOT NULL REFERENCES neg_risk_quote_runs(id),
+  neg_risk_market_id TEXT NOT NULL,
+  market_id TEXT NOT NULL,
+  condition_id TEXT NOT NULL,
+  slug TEXT,
+  yes_token_id TEXT NOT NULL,
+  PRIMARY KEY(quote_run_id, yes_token_id)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_quotes (
+  quote_run_id INTEGER NOT NULL REFERENCES neg_risk_quote_runs(id),
+  neg_risk_market_id TEXT NOT NULL,
+  market_id TEXT NOT NULL,
+  condition_id TEXT NOT NULL,
+  slug TEXT,
+  yes_token_id TEXT NOT NULL,
+  terminal_state TEXT NOT NULL CHECK(terminal_state IN (
+    'executable', 'missing-book', 'missing-ask', 'invalid-ask-price',
+    'invalid-ask-size', 'collector-error'
+  )),
+  best_ask_price REAL,
+  best_ask_size REAL,
+  PRIMARY KEY(quote_run_id, yes_token_id),
+  CHECK((terminal_state = 'executable' AND best_ask_price > 0
+      AND best_ask_price <= 1 AND best_ask_size > 0)
+    OR (terminal_state != 'executable' AND best_ask_price IS NULL
+      AND best_ask_size IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_quotes_run_group
+  ON neg_risk_quotes(quote_run_id, neg_risk_market_id, market_id);
 """
 
 # Order MUST match the DDL `CREATE TABLE markets(...)` declaration
