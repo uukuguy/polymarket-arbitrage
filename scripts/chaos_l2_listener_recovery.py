@@ -52,9 +52,13 @@ class Position:
 
 
 def _fly(*args: str) -> str:
-    """Run flyctl through keychain auth; returned output must be non-secret."""
+    """Run flyctl through operator auth; returned output must be non-secret.
+
+    The checkpoint supports either the normal Fly keychain session or a
+    short-lived, app-scoped ``FLY_API_TOKEN``.  The token is inherited only by
+    flyctl and is never included in stdout, stderr, or exception text.
+    """
     env = dict(__import__("os").environ)
-    env.pop("FLY_API_TOKEN", None)
     result = subprocess.run(
         ["flyctl", *args],
         check=False,
