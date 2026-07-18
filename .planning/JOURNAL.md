@@ -3752,3 +3752,21 @@ $gsd-resume-work --ws m1-perception
 ### [NEXT — CURRENT]
 
 避免把短窗口重复执行误当进展；下一次先查 rolling logs，再决定是否值得继续 live monitor。若 instance 变化，先重建 >=180 秒 baseline。
+
+## SESSION 53 — 2026-07-18 (Phase 05.2 living manual verified closure)
+
+- [VERIFIED] [`docs/M1-市场感知平台使用手册.md`](../docs/M1-市场感知平台使用手册.md) 已作为 M1 产品说明 + 日常运维入口；功能矩阵持续使用“已验证可用 / 有条件可用 / 尚不可用”标签，所有 M1 输出明确不构成真实资金下单授权。
+- [VERIFIED] 用 TDD 新增 `make smoke-l2-health-strict-prod`：它只读 GET `https://polyarb-l2.fly.dev/health`，打印 HTTP/body，且 strict HTTP 非 200 时退出非零；不包含 flyctl、scale、deploy、POST、restart、secret 或 chaos mutation。`make smoke-l2-health-prod` 继续只表示 `/healthz` 可达。
+- [VERIFIED] 手册的五分钟巡检、生产只读索引、L1→L2 候选链流程和 sync log 已统一改用新 Make 入口；`make docs-m1-check` 和已生效的 scoped staged pre-commit guard 保持这个 public contract 与实现同步。
+- [VERIFIED] 比例验证通过：`make docs-m1-check`；108 个 focused pytest；`bash -n .githooks/pre-commit`；`make planning-status`；`git diff --check`。TDD RED 精确因 target/手册路由缺失而 2 项失败，GREEN 后 2 项通过。
+- [VERIFIED] 2026-07-18T11:25:50Z–11:26:13Z 只读 walkthrough：`make status` exit 0；L1 strict HTTP 200/status=warn（R2 warn）；L2 `/healthz` HTTP 200/status=warn；L2 strict HTTP 200/status=warn，cursor lag 0、5 subscriptions、mirror/candidate fresh，但 L3 `0/10` 且 book levels 从未写入；`make scan-arb-live min_edge_bps=0` 收到 HTTP 503/exit 2。这些是当时生产事实，不是文档交付失败。
+- [BOUNDARY] 本轮未运行 `make smoke-test`，未部署、restart、改 secrets/schema、运行 chaos 或修复生产；也未修改 climb hypothesis/runs/tree，H-007 尚未由 controller 评估，不宣称 confirmed。
+- [OPEN] Phase 05.1 仍独立开放：自然 60 秒 quiet-edge receive→mirror 证据与后续 Phase 05 Plan 06 strict soak 均未关闭。
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+恢复后以当时生产 strict health 和 Phase 05.1 证据为准；不用 Phase 05.2 文档闭环替代 quiet-edge 生产门。
