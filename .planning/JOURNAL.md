@@ -3884,3 +3884,19 @@ Then decide the H-009 opportunity-feed producer cadence/SLA boundary; keep the c
 ### [NEXT — CURRENT]
 
 先只读诊断 H-008 opportunity feed HTTP 503 chain。
+
+## SESSION 63 — 2026-07-19 (H-009 executable quote producer local closure)
+
+- [VERIFIED] H-009 的 SQLite quote-run sidecar、read-only CLOB collector、complete-run scanner、HTTP fail-closed contract、Make/evaluator/manual/learning surface 已完成本地实现。报价与 universe SLA 分别为 300s / 50400s；不存在完整新鲜 run 时必须返回 unavailable/stale，而非 zero opportunity。
+- [VERIFIED] collector ownership 已以 30s lease / 10s heartbeat 落地。`BEGIN IMMEDIATE` 后才采样 store-owned clock；renew、terminal write 与 complete 都在同一写事务中证明 lease 仍 live。遗留 `collecting` rows 的 default/zero/NULL lease 可恢复为 `collector-lease-expired`，不会永久占锁。
+- [VERIFIED] `successful_response_count` 现在只统计已通过完整性校验的 CLOB book 响应；没有 ask 的有效响应仍计数但会保留 non-executable terminal state。
+- [VERIFIED] 最终本地 profile 5/5=100；`make docs-m1-check`、`make planning-status` 与 diff 检查通过；whole-branch review 无 Critical/Important/Minor。
+- [BOUNDARY] H-009 仍为 `pending`。本轮没有生产 CLOB collection、部署、调度、cron、Fly 配置、钱包、订单或 credentials 操作。生产 readiness 仍需单独授权部署/调度、时间戳化只读容量观察与重复 complete-run 证据。
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+继续以 Phase 05.1 的 natural quiet-edge 生产证据为主任务。仅在获得单独生产授权后，才对 H-009 做部署/调度与容量观察；不得把本地 quote-run contract 说成机会 feed 已 ready。
