@@ -119,6 +119,29 @@ def test_regen_tree_is_deterministic(tmp_path: Path) -> None:
     assert (state / "research-tree.md").read_text() == first
 
 
+def test_regen_tree_projects_append_only_supersession(tmp_path: Path) -> None:
+    state = _state_dir(tmp_path)
+    completed = _completed_run(state)
+    sync_cycle(state, completed)
+    hypotheses = yaml.safe_load((state / "hypotheses.yaml").read_text())
+    hypotheses["hypotheses"][0]["results"].append(
+        {
+            "run": "correction-20260717-climb-h001",
+            "verdict": "superseded",
+            "supersedes_run": "20260717-climb-h001",
+        }
+    )
+    (state / "hypotheses.yaml").write_text(
+        yaml.safe_dump(hypotheses, sort_keys=False)
+    )
+
+    rendered = regenerate(state)
+
+    assert "20260717-climb-h001: 100.0 (superseded)" in rendered
+    projection = json.loads((state / "research-tree.json").read_text())
+    assert projection["superseded_runs"] == ["20260717-climb-h001"]
+
+
 def test_cycle_appends_exactly_one_run_and_advances_state(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
 

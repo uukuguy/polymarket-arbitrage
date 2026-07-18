@@ -21,6 +21,12 @@ def regenerate(state_dir: Path) -> str:
         and isinstance(result.get("production_evidence"), dict)
         and isinstance(result["production_evidence"].get("digest"), str)
     }
+    superseded_runs = {
+        result["supersedes_run"]
+        for hypothesis in hypotheses.get("hypotheses", [])
+        for result in hypothesis.get("results", [])
+        if isinstance(result, dict) and isinstance(result.get("supersedes_run"), str)
+    }
 
     lines = [
         "# Climb Research Tree",
@@ -56,7 +62,8 @@ def regenerate(state_dir: Path) -> str:
         lines.append("- None")
     else:
         for run in runs:
-            line = f"- {run['run_id']}: {run['local_score']} ({run['verdict']})"
+            verdict = "superseded" if run["run_id"] in superseded_runs else run["verdict"]
+            line = f"- {run['run_id']}: {run['local_score']} ({verdict})"
             digest = evidence_by_run.get(run["run_id"])
             if digest:
                 line += f" evidence={digest[:12]}"
@@ -69,6 +76,7 @@ def regenerate(state_dir: Path) -> str:
         "hypotheses": [item["id"] for item in hypotheses.get("hypotheses", [])],
         "last_cycle": session.get("last_cycle", 0),
         "production_evidence": evidence_by_run,
+        "superseded_runs": sorted(superseded_runs),
     }
     (state_dir / "research-tree.json").write_text(
         json.dumps(projection, indent=2, sort_keys=True) + "\n"
