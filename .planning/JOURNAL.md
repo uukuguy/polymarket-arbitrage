@@ -3900,3 +3900,17 @@ Then decide the H-009 opportunity-feed producer cadence/SLA boundary; keep the c
 ```
 
 继续以 Phase 05.1 的 natural quiet-edge 生产证据为主任务。仅在获得单独生产授权后，才对 H-009 做部署/调度与容量观察；不得把本地 quote-run contract 说成机会 feed 已 ready。
+
+## SESSION 64 — 2026-07-19 (H-009 main handoff)
+
+- [MERGED] H-009 已 fast-forward 合入 `main`，最终 HEAD `f7bf83f`；本次隔离 worktree 与 feature branch 已清理。没有 push、部署或生产调用。
+- [VERIFIED] 合并后 `make eval-local profile=opportunity-feed-cadence-sla` 为 5/5、100 分；`make docs-m1-check`、`make planning-status`、`git diff --check` 均通过。
+- [KNOWN-BASELINE] 全仓 pytest 首个失败仍为 `tests/alembic/test_003.py::test_003_creates_all_tables`，本地 Postgres 缺少 `anon` role；非 H-009 回归。
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+优先恢复 Phase 05.1 natural quiet-edge 证据；H-009 仅在单独授权生产部署/调度后才可进入 capacity observation，不得把 local 100 分升格为 production ready。
