@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -u
+cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -d docs/status/climb ] || exit 0
+[ -n "${CLIMB_HOOK_RUNNING:-}" ] && exit 0
+export CLIMB_HOOK_RUNNING=1
+
+MSG=$(git log -1 --format=%B 2>/dev/null)
+CHANGED=$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null)
+
+if echo "$CHANGED" | grep -qE 'docs/status/climb/(hypotheses|runs|calibration|pending-lb|session-state)'; then
+  if ! echo "$CHANGED" | grep -q 'docs/status/climb/research-tree'; then
+    if [ -f tools/climb/regen-tree.py ]; then
+      python3 tools/climb/regen-tree.py >/dev/null 2>&1
+      git add docs/status/climb/research-tree.md docs/status/climb/research-tree.json
+      git commit --amend --no-edit --no-verify >/dev/null 2>&1
+      echo "[post-commit] auto-regenerated climb research tree" >&2
+    fi
+  fi
+fi
+
+if echo "$MSG" | grep -qiE '范式|paradigm|锁定|证伪|falsif|路线|decision|invariant|SOTA|breakthrough|突破'; then
+  echo "$CHANGED" | grep -q 'docs/status/DECISIONS.md' || \
+    echo "[post-commit] warning: architectural decision may need DECISIONS.md" >&2
+fi
+
+exit 0
