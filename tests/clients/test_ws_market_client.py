@@ -405,3 +405,185 @@ async def test_failed_consumer_initializer_reconnects_with_latest_union(
     assert json.loads(second.sent[0])["assets_ids"] == ["b", "c"]
     assert consumer._current_ws is second
     assert received[0]["asset_id"] == "b"
+
+
+async def test_initializer_cancel_chain_bounds_transport_second_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from polyarb.clients import ws_market_client
+    from polyarb.daemon.ws_consumer import WsConsumer
+    from polyarb.daemon.ws_watchdog import WsWatchdog
+
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=WsWatchdog(stale_s=30),
+        on_event=lambda event: True,
+        initial_assets=["a"],
+    )
+    ws = FakeWs()
+    send_entered = asyncio.Event()
+    blocked_send = asyncio.Event()
+    close_calls = 0
+    second_close_never_returns = asyncio.Event()
+
+    async def _blocked_initial_send(_raw: str) -> None:
+        send_entered.set()
+        await blocked_send.wait()
+
+    async def _close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        if close_calls >= 2:
+            await second_close_never_returns.wait()
+
+    ws.send = _blocked_initial_send
+    ws.close = _close
+    monkeypatch.setattr(
+        "polyarb.clients.ws_market_client.websockets.connect",
+        _make_connect([ws], []),
+    )
+    monkeypatch.setattr(
+        ws_market_client, "CANCEL_CLOSE_TIMEOUT_S", 0.01, raising=False
+    )
+
+    async def _drain() -> None:
+        async for _ in ws_market_client.stream_market_events(
+            consumer._compute_active_assets,
+            connection_initializer=consumer._initialize_connection,
+        ):
+            pass
+
+    task = asyncio.create_task(_drain())
+    await asyncio.wait_for(send_entered.wait(), timeout=0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
+    assert close_calls == 2
+
+
+async def test_initializer_budget_exhaustion_waits_then_uses_latest_union(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from polyarb.clients.ws_market_client import stream_market_events
+    from polyarb.daemon import ws_watchdog as watchdog_module
+    from polyarb.daemon.ws_consumer import WsConsumer
+    from polyarb.daemon.ws_watchdog import WsWatchdog
+
+    monkeypatch.setattr(watchdog_module, "_STORM_WINDOW_S", 0.05)
+    watchdog = WsWatchdog(stale_s=30)
+    now = watchdog_module.time.monotonic()
+    watchdog._reconnect_timestamps.extend([now] * 10)
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=watchdog,
+        on_event=lambda event: True,
+        initial_assets=["a"],
+    )
+    first = FakeWs()
+
+    async def _fail(_raw: str) -> None:
+        raise RuntimeError("initial failure")
+
+    async def _close_and_update() -> None:
+        first.closed = True
+        await consumer.replace_candidate_set(["latest"])
+
+    first.send = _fail
+    first.close = _close_and_update
+    second = FakeWs(frames=['{"event_type":"book","asset_id":"latest"}'])
+    yielded_connections = 0
+
+    def _connect(*args, **kwargs):
+        async def _connections():
+            nonlocal yielded_connections
+            for candidate in (first, second):
+                yielded_connections += 1
+                yield candidate
+
+        return _connections()
+
+    monkeypatch.setattr("polyarb.clients.ws_market_client.websockets.connect", _connect)
+
+    async def _receive() -> dict:
+        async for event in stream_market_events(
+            consumer._compute_active_assets,
+            connection_initializer=consumer._initialize_connection,
+        ):
+            return event
+        raise AssertionError("stream ended before reconnect")
+
+    task = asyncio.create_task(_receive())
+    async with asyncio.timeout(0.2):
+        while not first.closed:
+            await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+    assert yielded_connections == 1
+    event = await asyncio.wait_for(task, timeout=0.2)
+    assert event["asset_id"] == "latest"
+    assert json.loads(second.sent[0])["assets_ids"] == ["latest"]
+
+
+async def test_initializer_budget_backoff_is_cancellable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from polyarb.clients.ws_market_client import stream_market_events
+    from polyarb.daemon import ws_watchdog as watchdog_module
+    from polyarb.daemon.ws_consumer import WsConsumer
+    from polyarb.daemon.ws_watchdog import WsWatchdog
+
+    watchdog = WsWatchdog(stale_s=30)
+    now = watchdog_module.time.monotonic()
+    watchdog._reconnect_timestamps.extend([now] * 10)
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=watchdog,
+        on_event=lambda event: True,
+        initial_assets=["a"],
+    )
+    first = FakeWs()
+
+    async def _fail(_raw: str) -> None:
+        raise RuntimeError("initial failure")
+
+    first.send = _fail
+    failed_closed = asyncio.Event()
+
+    async def _close() -> None:
+        failed_closed.set()
+
+    first.close = _close
+    yielded_connections = 0
+
+    def _connect(*args, **kwargs):
+        async def _connections():
+            nonlocal yielded_connections
+            yielded_connections += 1
+            yield first
+            yielded_connections += 1
+            yield FakeWs()
+
+        return _connections()
+
+    monkeypatch.setattr("polyarb.clients.ws_market_client.websockets.connect", _connect)
+
+    async def _drain() -> None:
+        async for _ in stream_market_events(
+            consumer._compute_active_assets,
+            connection_initializer=consumer._initialize_connection,
+        ):
+            pass
+
+    task = asyncio.create_task(_drain())
+    await asyncio.wait_for(failed_closed.wait(), timeout=0.2)
+    await asyncio.sleep(0)
+    assert yielded_connections == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
+    assert yielded_connections == 1
