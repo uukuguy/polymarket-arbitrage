@@ -6,11 +6,17 @@ import sys
 from pathlib import Path
 
 import yaml
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from tools.climb.cycle import sync_cycle  # noqa: E402
+from tools.climb.cycle import (  # noqa: E402
+    DIAGNOSE_FEED_COMMAND,
+    collect_opportunity_feed_evidence,
+    record_production_evidence_after_gates,
+    sync_cycle,
+)
 from tools.climb.regen_tree import regenerate  # noqa: E402
 
 RUN_HEADER = (
@@ -144,3 +150,97 @@ def test_cycle_rejects_duplicate_run_id(tmp_path: Path) -> None:
         assert "duplicate run_id" in str(exc)
     else:
         raise AssertionError("duplicate run_id was accepted")
+
+
+def test_opportunity_feed_cycle_cannot_confirm_without_production_evidence(
+    tmp_path: Path,
+) -> None:
+    """A local-only 100-point H-008 run must leave durable state untouched."""
+    state = _state_dir(tmp_path)
+    completed = _completed_run(state)
+    manifest_path = Path(completed["manifest_path"])
+    manifest = json.loads(manifest_path.read_text())
+    manifest["paradigm"] = "opportunity-feed-chain-truth"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="production evidence"):
+        sync_cycle(state, completed)
+
+    with (state / "runs.csv").open(newline="") as handle:
+        assert list(csv.DictReader(handle)) == []
+    hypotheses = yaml.safe_load((state / "hypotheses.yaml").read_text())
+    assert hypotheses["hypotheses"][0]["status"] == "in-flight"
+
+
+def test_opportunity_feed_evidence_runs_one_diagnostic_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    """The one diagnostic is recorded before state can be confirmed."""
+    state = _state_dir(tmp_path)
+    completed = _completed_run(state)
+    manifest_path = Path(completed["manifest_path"])
+    manifest = json.loads(manifest_path.read_text())
+    manifest["paradigm"] = "opportunity-feed-chain-truth"
+    manifest_path.write_text(json.dumps(manifest))
+    invocations: list[list[str]] = []
+
+    class Result:
+        returncode = 2
+        stdout = json.dumps(
+            {
+                "http_status": 503,
+                "kind": "stale-snapshot",
+                "reason": "snapshot-age-exceeded",
+            }
+        )
+        stderr = ""
+
+    def runner(command: list[str]) -> Result:
+        invocations.append(command)
+        return Result()
+
+    evidence_path = collect_opportunity_feed_evidence(
+        Path(completed["run_dir"]),
+        manifest,
+        runner=runner,
+        observed_at="2026-07-19T00:00:00Z",
+    )
+
+    assert invocations == [DIAGNOSE_FEED_COMMAND]
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["command"] == {
+        "argv": DIAGNOSE_FEED_COMMAND,
+        "count": 1,
+        "returncode": 2,
+    }
+    assert evidence["classification"] == evidence["response"]["kind"]
+    assert evidence["reason"] == evidence["response"]["reason"]
+    hypotheses = yaml.safe_load((state / "hypotheses.yaml").read_text())
+    assert hypotheses["hypotheses"][0]["status"] == "in-flight"
+
+    sync_cycle(state, completed)
+
+    hypotheses = yaml.safe_load((state / "hypotheses.yaml").read_text())
+    assert hypotheses["hypotheses"][0]["status"] == "confirmed"
+
+
+def test_opportunity_feed_evidence_never_invokes_production_before_gates(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest = {
+        "hypothesis_id": "H-008",
+        "paradigm": "opportunity-feed-chain-truth",
+    }
+    invocations: list[list[str]] = []
+
+    with pytest.raises(ValueError, match="local gates"):
+        record_production_evidence_after_gates(
+            run_dir,
+            manifest,
+            local_gates_passed=False,
+            runner=lambda command: invocations.append(command),
+        )
+
+    assert invocations == []

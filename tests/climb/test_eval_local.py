@@ -58,9 +58,35 @@ def test_opportunity_feed_chain_truth_profile_is_dedicated() -> None:
         {"paradigm": "opportunity-feed-chain-truth"}
     )
 
-    assert set(commands) == {"planning", "unit", "integration", "cli", "restart"}
-    assert commands["unit"][-2:] == ["tests/routing/test_opportunity_diagnosis.py", "-q"]
-    assert commands["cli"] == ["make", "docs-m1-check"]
+    assert commands == {
+        "planning": ["make", "planning-status"],
+        "unit": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/routing/test_opportunity_diagnosis.py",
+            "-q",
+        ],
+        "integration": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/cli/test_arbitrage_cli_process.py",
+            "-k",
+            "diagnose_feed",
+            "-q",
+        ],
+        "cli": ["make", "docs-m1-check"],
+        "restart": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_m1_manual_contract.py",
+            "-k",
+            "opportunity_diagnosis",
+            "-q",
+        ],
+    }
 
 
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:

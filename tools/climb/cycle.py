@@ -4,7 +4,10 @@ import argparse
 import csv
 import io
 import json
+import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Callable
 
 import yaml
 
@@ -31,6 +34,11 @@ RUN_FIELDS = [
     "manifest_path",
 ]
 
+OPPORTUNITY_FEED_CHAIN_TRUTH = "opportunity-feed-chain-truth"
+PRODUCTION_EVIDENCE_FILENAME = "production-evidence.json"
+DIAGNOSE_FEED_COMMAND = ["make", "diagnose-arb-feed-prod"]
+ROOT = Path(__file__).resolve().parents[2]
+
 
 def _atomic_write(path: Path, content: str) -> None:
     temp = path.with_suffix(path.suffix + ".tmp")
@@ -38,9 +46,118 @@ def _atomic_write(path: Path, content: str) -> None:
     temp.replace(path)
 
 
+def _require_opportunity_feed_evidence(run_dir: Path, manifest: dict) -> None:
+    """Reject a local-only opportunity-feed result before it can mutate state."""
+    if manifest.get("paradigm") != OPPORTUNITY_FEED_CHAIN_TRUTH:
+        return
+
+    evidence_path = run_dir / PRODUCTION_EVIDENCE_FILENAME
+    if not evidence_path.is_file():
+        raise ValueError("opportunity-feed production evidence is required")
+    try:
+        evidence = json.loads(evidence_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid opportunity-feed production evidence: {exc}") from exc
+
+    response = evidence.get("response")
+    command = evidence.get("command")
+    if not isinstance(response, dict) or not isinstance(command, dict):
+        raise ValueError("invalid opportunity-feed production evidence structure")
+    if evidence.get("hypothesis_id") != manifest.get("hypothesis_id"):
+        raise ValueError("opportunity-feed production evidence hypothesis mismatch")
+    if evidence.get("paradigm") != OPPORTUNITY_FEED_CHAIN_TRUTH:
+        raise ValueError("opportunity-feed production evidence paradigm mismatch")
+    if not isinstance(evidence.get("observed_at"), str) or not evidence["observed_at"]:
+        raise ValueError("opportunity-feed production evidence timestamp is required")
+    if command.get("argv") != DIAGNOSE_FEED_COMMAND or command.get("count") != 1:
+        raise ValueError("opportunity-feed production evidence must record one diagnostic")
+    if not isinstance(response.get("kind"), str) or not response["kind"]:
+        raise ValueError("opportunity-feed production classification is required")
+    if not isinstance(response.get("reason"), str) or not response["reason"]:
+        raise ValueError("opportunity-feed production reason is required")
+    if evidence.get("classification") != response["kind"]:
+        raise ValueError("opportunity-feed production classification disagrees with response")
+    if evidence.get("reason") != response["reason"]:
+        raise ValueError("opportunity-feed production reason disagrees with response")
+    if not isinstance(response.get("http_status"), int):
+        raise ValueError("opportunity-feed production evidence HTTP status is required")
+
+
+def collect_opportunity_feed_evidence(
+    run_dir: Path,
+    manifest: dict,
+    *,
+    runner: Callable[[list[str]], object] | None = None,
+    observed_at: str | None = None,
+) -> Path:
+    """Run the single read-only diagnostic and persist its unmodified response."""
+    if manifest.get("paradigm") != OPPORTUNITY_FEED_CHAIN_TRUTH:
+        raise ValueError("production evidence only applies to opportunity-feed-chain-truth")
+
+    if runner is None:
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                command,
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+    result = runner(list(DIAGNOSE_FEED_COMMAND))
+    try:
+        response = json.loads(str(result.stdout))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"diagnostic did not produce JSON evidence: {exc}") from exc
+    if not isinstance(response, dict):
+        raise ValueError("diagnostic JSON response must be an object")
+
+    evidence_path = run_dir / PRODUCTION_EVIDENCE_FILENAME
+    evidence = {
+        "hypothesis_id": manifest.get("hypothesis_id"),
+        "paradigm": manifest.get("paradigm"),
+        "observed_at": observed_at
+        or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "command": {
+            "argv": DIAGNOSE_FEED_COMMAND,
+            "count": 1,
+            "returncode": result.returncode,
+        },
+        "classification": response.get("kind"),
+        "reason": response.get("reason"),
+        "response": response,
+    }
+    _atomic_write(evidence_path, json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    _require_opportunity_feed_evidence(run_dir, manifest)
+    return evidence_path
+
+
+def record_production_evidence_after_gates(
+    run_dir: Path,
+    manifest: dict,
+    *,
+    local_gates_passed: bool,
+    runner: Callable[[list[str]], object] | None = None,
+    observed_at: str | None = None,
+) -> Path | None:
+    """Allow the one production read only after all local gates succeed."""
+    if manifest.get("paradigm") != OPPORTUNITY_FEED_CHAIN_TRUTH:
+        return None
+    if not local_gates_passed:
+        raise ValueError("opportunity-feed production evidence requires local gates")
+    return collect_opportunity_feed_evidence(
+        run_dir,
+        manifest,
+        runner=runner,
+        observed_at=observed_at,
+    )
+
+
 def sync_cycle(state_dir: Path, completed_run: dict) -> None:
     manifest = json.loads(Path(completed_run["manifest_path"]).read_text())
     evaluation = json.loads(Path(completed_run["local_eval_path"]).read_text())
+    _require_opportunity_feed_evidence(Path(completed_run["run_dir"]), manifest)
     session_path = state_dir / "session-state.json"
     session = json.loads(session_path.read_text())
     hypotheses_path = state_dir / "hypotheses.yaml"

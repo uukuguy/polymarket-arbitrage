@@ -17,6 +17,9 @@ set -e
 if [[ $EVAL_STATUS -eq 0 ]]; then
   DECISION="PUSH"
   REASON="all local gates passed"
+  # This script is only reached after eval-local exits 0. The recorder is a
+  # no-op for legacy paradigms and performs exactly one read-only GET for H-008.
+  uv run python tools/climb/record-production-evidence.py "$RUN_DIR"
   tools/climb/push.sh "$RUN_DIR"
 else
   DECISION="SKIP"
