@@ -450,19 +450,33 @@ def test_smoke_l2_health_strict_prod_make_target_is_strict_and_read_only() -> No
     )
     assert match is not None, "strict L2 production health target must exist"
     recipe = match.group("recipe")
+    assert "curl --disable" in recipe
+    assert re.search(r"--request\s+GET\b", recipe)
     assert "https://polyarb-l2.fly.dev/health" in recipe
     assert "/healthz" not in recipe
-    assert '"200"' in recipe
+    assert re.search(
+        r'if \[ "\$\$HTTP_STATUS" = "200" \]; then.*else.*exit 1; fi',
+        recipe,
+        re.DOTALL,
+    ), "strict target must exit nonzero unless HTTP status is 200"
     forbidden = (
         "flyctl",
-        "scale ",
+        "scale",
         "post",
         "deploy",
+        "secret",
         "secrets",
         "restart",
+        "schema",
+        "migrate",
+        "migration",
         "chaos",
     )
-    assert not any(token in recipe.lower() for token in forbidden)
+    recipe_lower = recipe.lower()
+    assert not any(
+        re.search(rf"\b{re.escape(operation)}\b", recipe_lower)
+        for operation in forbidden
+    )
 
 
 def test_manual_routes_l2_strict_health_through_make() -> None:

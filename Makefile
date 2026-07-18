@@ -369,7 +369,7 @@ smoke-l2-health-strict-prod:
 	@BODY=$$(mktemp); trap 'rm -f "$$BODY"' EXIT; \
 	URL="https://polyarb-l2.fly.dev/health"; \
 	echo ">> smoke-l2-health-strict-prod — GET $$URL"; \
-	HTTP_STATUS=$$(curl -sS -o "$$BODY" -w "%{http_code}" "$$URL") || { rc=$$?; echo "FAIL: request error" >&2; exit $$rc; }; \
+	HTTP_STATUS=$$(curl --disable --request GET -sS -o "$$BODY" -w "%{http_code}" "$$URL") || { rc=$$?; echo "FAIL: request error" >&2; exit $$rc; }; \
 	echo "HTTP $$HTTP_STATUS"; \
 	python3 -m json.tool < "$$BODY" || cat "$$BODY"; \
 	if [ "$$HTTP_STATUS" = "200" ]; then echo "PASS: L2 strict /health returned 200"; else echo "FAIL: L2 strict /health returned $$HTTP_STATUS" >&2; exit 1; fi
