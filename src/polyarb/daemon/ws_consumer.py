@@ -34,6 +34,8 @@ from websockets.protocol import State as WsState
 from polyarb.clients.ws_market_client import stream_market_events
 from polyarb.daemon.ws_watchdog import WsWatchdog
 
+_QUIET_REFRESH_SEND_TIMEOUT_S: float = 5.0
+
 # ── Phase 03.1-06 D-04 / Phase 04.1 G-03: POLYARB_WS_TEST_KILL chaos primitive ─
 #
 # Used by `make chaos-l2-inj4` to drop the WS connection mid-stream WITHOUT
@@ -232,8 +234,12 @@ class WsConsumer:
             "assets_ids": active_assets,
             "initial_dump": True,
         }
+        logger.info(f"ws quiet refresh: sending assets={len(active_assets)}")
         try:
-            await ws.send(json.dumps(payload))
+            await asyncio.wait_for(
+                ws.send(json.dumps(payload)),
+                timeout=_QUIET_REFRESH_SEND_TIMEOUT_S,
+            )
         except Exception as e:  # noqa: BLE001 — strict health remains truthful
             logger.warning(
                 f"ws quiet refresh: send failed assets={len(active_assets)} "
