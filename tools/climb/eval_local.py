@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import json
-from pathlib import Path
 import subprocess
-from typing import Callable, Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,42 @@ GATE_COMMANDS = {
         "tests/cli/test_arbitrage_cli_process.py", "-q",
     ],
 }
+LIVING_DOC_CONTRACT_GATE_COMMANDS = {
+    "planning": ["make", "planning-status"],
+    "unit": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_m1_manual_contract.py",
+        "-q",
+    ],
+    "integration": ["make", "docs-m1-check"],
+    "cli": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_makefile_contract.py",
+        "tests/test_makefile.py",
+        "-q",
+    ],
+    "restart": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_m1_manual_contract.py",
+        "-k",
+        "precommit",
+        "-q",
+    ],
+}
+
+
+def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]:
+    if manifest.get("paradigm") == "living-doc-contract":
+        commands = LIVING_DOC_CONTRACT_GATE_COMMANDS
+    else:
+        commands = GATE_COMMANDS
+    return {name: list(command) for name, command in commands.items()}
 
 
 def run_command(command: list[str]) -> GateResult:
@@ -88,9 +124,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
     args = parser.parse_args()
+    manifest = json.loads((args.run_dir / "manifest.json").read_text())
     output_path = args.run_dir / "local-eval.json"
     payload = evaluate_gates(
-        GATE_COMMANDS,
+        gate_commands_for(manifest),
         runner=run_command,
         output_path=output_path,
     )

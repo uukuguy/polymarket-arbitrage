@@ -2,15 +2,84 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from tools.climb.eval_local import GateResult, build_score, evaluate_gates  # noqa: E402
+from tools.climb import eval_local  # noqa: E402
+from tools.climb.eval_local import (  # noqa: E402
+    GATE_COMMANDS,
+    GateResult,
+    build_score,
+    evaluate_gates,
+)
+
+
+def test_living_doc_contract_selects_focused_gates() -> None:
+    commands = eval_local.gate_commands_for({"paradigm": "living-doc-contract"})
+
+    assert commands == {
+        "planning": ["make", "planning-status"],
+        "unit": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_m1_manual_contract.py",
+            "-q",
+        ],
+        "integration": ["make", "docs-m1-check"],
+        "cli": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_makefile_contract.py",
+            "tests/test_makefile.py",
+            "-q",
+        ],
+        "restart": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_m1_manual_contract.py",
+            "-k",
+            "precommit",
+            "-q",
+        ],
+    }
+
+
+def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
+    assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
+    assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS
+    assert eval_local.gate_commands_for({}) == GATE_COMMANDS
+
+
+def test_main_selects_gates_from_run_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(json.dumps({"paradigm": "living-doc-contract"}))
+    executed: list[list[str]] = []
+
+    def runner(command: list[str]) -> GateResult:
+        executed.append(command)
+        return GateResult(True, 0, "ok")
+
+    monkeypatch.setattr(eval_local, "run_command", runner)
+    monkeypatch.setattr(sys, "argv", ["eval_local.py", str(run_dir)])
+
+    assert eval_local.main() == 0
+    assert executed == list(
+        eval_local.gate_commands_for({"paradigm": "living-doc-contract"}).values()
+    )
+    payload = json.loads((run_dir / "local-eval.json").read_text())
+    assert payload["total"] == 100.0
 
 
 def test_score_is_mean_of_five_binary_gates() -> None:
