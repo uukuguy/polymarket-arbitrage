@@ -1,6 +1,6 @@
 {
   "in_flight": null,
-  "last_cycle": 8,
-  "next_action": "re-run H-008 with verified local gates and one immutable read-only production diagnostic",
+  "last_cycle": 9,
+  "next_action": "rank next pending hypothesis",
   "session": "2026-07-18-m1-living-manual"
 }

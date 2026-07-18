@@ -3822,6 +3822,21 @@ $gsd-resume-work --ws m1-perception
 
 随后讨论并实现 H-009 的 producer cadence/SLA 契约；保持现有 feed 为条件可用。
 
+## SESSION 61 — 2026-07-19 (H-008 immutable-evidence correction)
+
+- [SUPERSEDED] `20260718-185917-h-008` recorded a production diagnostic but did not independently validate `local-eval.json` before the request and did not bind the artifact with a digest in tracked state. Its existing result remains append-only history and is marked superseded; it is not confirmation evidence.
+- [GUARD] The executable recorder now validates every configured H-008 gate command, return code, subscore, total, and disaster flag from the run-local `local-eval.json`; an existing evidence artifact aborts before Make. The new artifact has a deterministic SHA-256 digest, and sync validates timestamp, exact argv/count, return code, HTTP/classification/reason, digest, and stale age/limit before durable confirmation.
+- [VERIFIED] New run `20260718-191126-h-008` passed all five local gates at `100.0`, then performed exactly one read-only `make diagnose-arb-feed-prod`: HTTP `503`, `stale-snapshot`, `snapshot-age-exceeded`, age `3177.6s` versus `900.0s`, command return code `2`, digest `6db94caf54d3…`. The tracked result contains the complete required evidence summary.
+- [BOUNDARY] No deploy, restart, configuration, schema, secret, retry, or additional production request occurred after that corrected one-shot run. H-009 remains pending.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+Continue with H-009's producer cadence/SLA contract; do not treat the stale H-008 feed as zero opportunity.
+
 ## SESSION 59 — 2026-07-19 (superseded H-008 local-only confirmation)
 
 - [SUPERSEDED] `20260718-184213-h-008` established the dedicated five-gate evaluator and observed a stale response, but its confirmation path did not require the production evidence artifact. It was therefore removed from the tracked ledger and does not support the current H-008 conclusion.

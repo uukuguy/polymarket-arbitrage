@@ -179,7 +179,7 @@ hypotheses:
   expected_lift: +100 opportunity availability diagnosis points
   cost_h: 1.0
   ranking: 1.0
-  status: pending
+  status: confirmed
   created_at: '2026-07-18T19:50:00+08:00'
   results:
   - session: 2026-07-18-m1-living-manual
@@ -207,5 +207,33 @@ hypotheses:
       unit: 100.0
     online: null
     verdict: superseded
-    decision_reason: supersedes 20260718-185917-h-008 because the recorder accepted a hardcoded local-gate result and its artifact was not digest-bound to tracked state
+    decision_reason: supersedes 20260718-185917-h-008 because the recorder accepted
+      a hardcoded local-gate result and its artifact was not digest-bound to tracked
+      state
     supersedes_run: 20260718-185917-h-008
+  - session: 2026-07-18-m1-living-manual
+    cycle: 9
+    run: 20260718-191126-h-008
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed; production evidence recorded
+    production_evidence:
+      digest: 6db94caf54d364fd2549ca8c8de60762b760251e57a4c8672fc33639a9e1c96a
+      observed_at: '2026-07-18T19:11:44.864164Z'
+      argv:
+      - make
+      - diagnose-arb-feed-prod
+      count: 1
+      returncode: 2
+      http_status: 503
+      classification: stale-snapshot
+      reason: snapshot-age-exceeded
+      snapshot_age_seconds: 3177.6
+      max_snapshot_age_seconds: 900.0
