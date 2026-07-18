@@ -12,6 +12,15 @@ def regenerate(state_dir: Path) -> str:
         runs = list(csv.DictReader(handle))
     hypotheses = yaml.safe_load((state_dir / "hypotheses.yaml").read_text())
     session = json.loads((state_dir / "session-state.json").read_text())
+    evidence_by_run = {
+        result["run"]: result["production_evidence"]["digest"]
+        for hypothesis in hypotheses.get("hypotheses", [])
+        for result in hypothesis.get("results", [])
+        if isinstance(result, dict)
+        and isinstance(result.get("run"), str)
+        and isinstance(result.get("production_evidence"), dict)
+        and isinstance(result["production_evidence"].get("digest"), str)
+    }
 
     lines = [
         "# Climb Research Tree",
@@ -46,11 +55,12 @@ def regenerate(state_dir: Path) -> str:
     if not runs:
         lines.append("- None")
     else:
-        lines.extend(
-            f"- {run['run_id']}: {run['local_score']} "
-            f"({run['verdict']})"
-            for run in runs
-        )
+        for run in runs:
+            line = f"- {run['run_id']}: {run['local_score']} ({run['verdict']})"
+            digest = evidence_by_run.get(run["run_id"])
+            if digest:
+                line += f" evidence={digest[:12]}"
+            lines.append(line)
 
     rendered = "\n".join(lines) + "\n"
     (state_dir / "research-tree.md").write_text(rendered)
@@ -58,6 +68,7 @@ def regenerate(state_dir: Path) -> str:
         "runs": [run["run_id"] for run in runs],
         "hypotheses": [item["id"] for item in hypotheses.get("hypotheses", [])],
         "last_cycle": session.get("last_cycle", 0),
+        "production_evidence": evidence_by_run,
     }
     (state_dir / "research-tree.json").write_text(
         json.dumps(projection, indent=2, sort_keys=True) + "\n"

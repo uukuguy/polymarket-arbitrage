@@ -1,6 +1,6 @@
 {
   "in_flight": null,
   "last_cycle": 8,
-  "next_action": "decide H-009 opportunity-feed producer cadence/SLA",
+  "next_action": "re-run H-008 with verified local gates and one immutable read-only production diagnostic",
   "session": "2026-07-18-m1-living-manual"
 }

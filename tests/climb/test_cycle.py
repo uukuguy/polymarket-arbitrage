@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.climb.cycle import (  # noqa: E402
     DIAGNOSE_FEED_COMMAND,
+    _canonical_evidence_digest,
     collect_opportunity_feed_evidence,
     record_production_evidence_after_gates,
     sync_cycle,
@@ -191,6 +194,8 @@ def test_opportunity_feed_evidence_runs_one_diagnostic_before_confirmation(
                 "http_status": 503,
                 "kind": "stale-snapshot",
                 "reason": "snapshot-age-exceeded",
+                "snapshot_age_seconds": 901.0,
+                "max_snapshot_age_seconds": 900.0,
             }
         )
         stderr = ""
@@ -215,6 +220,7 @@ def test_opportunity_feed_evidence_runs_one_diagnostic_before_confirmation(
     }
     assert evidence["classification"] == evidence["response"]["kind"]
     assert evidence["reason"] == evidence["response"]["reason"]
+    _write_passing_opportunity_eval(Path(completed["run_dir"]))
     hypotheses = yaml.safe_load((state / "hypotheses.yaml").read_text())
     assert hypotheses["hypotheses"][0]["status"] == "in-flight"
 
@@ -225,9 +231,19 @@ def test_opportunity_feed_evidence_runs_one_diagnostic_before_confirmation(
     assert hypotheses["hypotheses"][0]["results"][0]["decision_reason"] == (
         "all local gates passed; production evidence recorded"
     )
+    summary = hypotheses["hypotheses"][0]["results"][0]["production_evidence"]
+    assert summary["argv"] == DIAGNOSE_FEED_COMMAND
+    assert summary["count"] == 1
+    assert summary["returncode"] == 2
+    assert summary["http_status"] == 503
+    assert summary["classification"] == "stale-snapshot"
+    assert summary["reason"] == "snapshot-age-exceeded"
+    assert summary["snapshot_age_seconds"] == 901.0
+    assert summary["max_snapshot_age_seconds"] == 900.0
+    assert len(summary["digest"]) == 64
 
 
-def test_opportunity_feed_evidence_never_invokes_production_before_gates(
+def test_opportunity_feed_evidence_never_invokes_production_without_verified_eval(
     tmp_path: Path,
 ) -> None:
     run_dir = tmp_path / "run"
@@ -238,12 +254,144 @@ def test_opportunity_feed_evidence_never_invokes_production_before_gates(
     }
     invocations: list[list[str]] = []
 
-    with pytest.raises(ValueError, match="local gates"):
+    with pytest.raises(ValueError, match="local evaluation"):
         record_production_evidence_after_gates(
             run_dir,
             manifest,
-            local_gates_passed=False,
             runner=lambda command: invocations.append(command),
         )
 
     assert invocations == []
+
+
+def _write_passing_opportunity_eval(run_dir: Path) -> None:
+    (run_dir / "local-eval.json").write_text(
+        json.dumps(
+            {
+                "total": 100.0,
+                "subscores": {
+                    "planning": 100.0,
+                    "unit": 100.0,
+                    "integration": 100.0,
+                    "cli": 100.0,
+                    "restart": 100.0,
+                },
+                "disaster_pattern": False,
+                "commands": {
+                    "planning": {
+                        "argv": ["make", "planning-status"], "returncode": 0
+                    },
+                    "unit": {
+                        "argv": [
+                            "uv", "run", "pytest",
+                            "tests/routing/test_opportunity_diagnosis.py", "-q",
+                        ],
+                        "returncode": 0,
+                    },
+                    "integration": {
+                        "argv": [
+                            "uv", "run", "pytest",
+                            "tests/cli/test_arbitrage_cli_process.py", "-k",
+                            "diagnose_feed", "-q",
+                        ],
+                        "returncode": 0,
+                    },
+                    "cli": {"argv": ["make", "docs-m1-check"], "returncode": 0},
+                    "restart": {
+                        "argv": [
+                            "uv", "run", "pytest",
+                            "tests/m1-perception/test_m1_manual_contract.py", "-k",
+                            "opportunity_diagnosis", "-q",
+                        ],
+                        "returncode": 0,
+                    },
+                },
+            }
+        )
+    )
+
+
+def test_recorder_cli_requires_verified_local_eval_and_refuses_second_evidence(
+    tmp_path: Path,
+) -> None:
+    """The executable recorder itself gates and never repeats the production GET."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "hypothesis_id": "H-008",
+                "paradigm": "opportunity-feed-chain-truth",
+            }
+        )
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    call_log = tmp_path / "make-calls"
+    fake_make = fake_bin / "make"
+    fake_make.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$MAKE_CALL_LOG\"\n"
+        "printf '%s\\n' '{\"http_status\":503,\"kind\":\"stale-snapshot\",\"reason\":\"snapshot-age-exceeded\",\"snapshot_age_seconds\":901.0,\"max_snapshot_age_seconds\":900.0}'\n"
+        "exit 2\n"
+    )
+    fake_make.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "MAKE_CALL_LOG": str(call_log),
+    }
+    command = [sys.executable, "tools/climb/record-production-evidence.py", str(run_dir)]
+
+    missing_eval = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, env=env)
+    assert missing_eval.returncode != 0
+    assert not call_log.exists()
+
+    _write_passing_opportunity_eval(run_dir)
+    first = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, env=env)
+    assert first.returncode == 0, first.stderr
+    assert call_log.read_text().splitlines() == ["diagnose-arb-feed-prod"]
+
+    second = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, env=env)
+    assert second.returncode != 0
+    assert call_log.read_text().splitlines() == ["diagnose-arb-feed-prod"]
+
+
+def test_sync_rejects_tampered_evidence_digest_and_requires_stale_age_summary(
+    tmp_path: Path,
+) -> None:
+    state = _state_dir(tmp_path)
+    completed = _completed_run(state)
+    manifest_path = Path(completed["manifest_path"])
+    manifest = json.loads(manifest_path.read_text())
+    manifest["paradigm"] = "opportunity-feed-chain-truth"
+    manifest_path.write_text(json.dumps(manifest))
+
+    class Result:
+        returncode = 2
+        stdout = json.dumps(
+            {
+                "http_status": 503,
+                "kind": "stale-snapshot",
+                "reason": "snapshot-age-exceeded",
+                "snapshot_age_seconds": 901.0,
+                "max_snapshot_age_seconds": 900.0,
+            }
+        )
+        stderr = ""
+
+    evidence_path = collect_opportunity_feed_evidence(
+        Path(completed["run_dir"]), manifest, runner=lambda _: Result()
+    )
+    evidence = json.loads(evidence_path.read_text())
+    evidence["digest"] = "0" * 64
+    evidence_path.write_text(json.dumps(evidence))
+
+    with pytest.raises(ValueError, match="digest"):
+        sync_cycle(state, completed)
+
+    evidence["response"].pop("snapshot_age_seconds")
+    evidence["digest"] = _canonical_evidence_digest(evidence)
+    evidence_path.write_text(json.dumps(evidence))
+    with pytest.raises(ValueError, match="snapshot_age_seconds"):
+        sync_cycle(state, completed)

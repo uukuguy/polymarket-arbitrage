@@ -24,7 +24,6 @@ def main() -> None:
     record_production_evidence_after_gates(
         run_dir,
         manifest,
-        local_gates_passed=True,
     )
 
 

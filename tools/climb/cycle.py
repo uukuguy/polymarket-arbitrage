@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
+import math
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,10 +48,63 @@ def _atomic_write(path: Path, content: str) -> None:
     temp.replace(path)
 
 
-def _require_opportunity_feed_evidence(run_dir: Path, manifest: dict) -> None:
+def _canonical_evidence_digest(evidence: dict) -> str:
+    """Return the stable digest for the artifact, excluding its own digest field."""
+    unsigned = {key: value for key, value in evidence.items() if key != "digest"}
+    encoded = json.dumps(
+        unsigned,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_finite_number(value: object) -> bool:
+    return type(value) in {int, float} and math.isfinite(float(value))
+
+
+def _require_verified_local_gates(run_dir: Path, manifest: dict) -> dict:
+    """Independently validate every configured local evaluator gate for this run."""
+    from tools.climb.eval_local import gate_commands_for
+
+    local_eval_path = run_dir / "local-eval.json"
+    try:
+        evaluation = json.loads(local_eval_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"opportunity-feed local evaluation is required: {exc}") from exc
+    if not isinstance(evaluation, dict):
+        raise ValueError("opportunity-feed local evaluation must be an object")
+
+    expected_commands = gate_commands_for(manifest)
+    commands = evaluation.get("commands")
+    subscores = evaluation.get("subscores")
+    if not isinstance(commands, dict) or not isinstance(subscores, dict):
+        raise ValueError("opportunity-feed local evaluation gate records are required")
+    if evaluation.get("disaster_pattern") is not False:
+        raise ValueError("opportunity-feed local gates did not pass")
+    if not _is_finite_number(evaluation.get("total")) or evaluation["total"] != 100.0:
+        raise ValueError("opportunity-feed local evaluation total must be 100")
+
+    for name, expected_argv in expected_commands.items():
+        result = commands.get(name)
+        if not isinstance(result, dict):
+            raise ValueError(f"opportunity-feed local gate {name} is missing")
+        if result.get("argv") != expected_argv:
+            raise ValueError(f"opportunity-feed local gate {name} command mismatch")
+        returncode = result.get("returncode")
+        if type(returncode) is not int or returncode != 0:
+            raise ValueError(f"opportunity-feed local gate {name} did not pass")
+        score = subscores.get(name)
+        if not _is_finite_number(score) or score != 100.0:
+            raise ValueError(f"opportunity-feed local gate {name} score did not pass")
+    return evaluation
+
+
+def _require_opportunity_feed_evidence(run_dir: Path, manifest: dict) -> dict | None:
     """Reject a local-only opportunity-feed result before it can mutate state."""
     if manifest.get("paradigm") != OPPORTUNITY_FEED_CHAIN_TRUTH:
-        return
+        return None
 
     evidence_path = run_dir / PRODUCTION_EVIDENCE_FILENAME
     if not evidence_path.is_file():
@@ -71,6 +126,8 @@ def _require_opportunity_feed_evidence(run_dir: Path, manifest: dict) -> None:
         raise ValueError("opportunity-feed production evidence timestamp is required")
     if command.get("argv") != DIAGNOSE_FEED_COMMAND or command.get("count") != 1:
         raise ValueError("opportunity-feed production evidence must record one diagnostic")
+    if type(command.get("returncode")) is not int:
+        raise ValueError("opportunity-feed production evidence returncode is required")
     if not isinstance(response.get("kind"), str) or not response["kind"]:
         raise ValueError("opportunity-feed production classification is required")
     if not isinstance(response.get("reason"), str) or not response["reason"]:
@@ -79,8 +136,20 @@ def _require_opportunity_feed_evidence(run_dir: Path, manifest: dict) -> None:
         raise ValueError("opportunity-feed production classification disagrees with response")
     if evidence.get("reason") != response["reason"]:
         raise ValueError("opportunity-feed production reason disagrees with response")
-    if not isinstance(response.get("http_status"), int):
+    if type(response.get("http_status")) is not int:
         raise ValueError("opportunity-feed production evidence HTTP status is required")
+    digest = evidence.get("digest")
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise ValueError("opportunity-feed production evidence digest is required")
+    if digest != _canonical_evidence_digest(evidence):
+        raise ValueError("opportunity-feed production evidence digest mismatch")
+    if response["kind"] == "stale-snapshot":
+        for field in ("snapshot_age_seconds", "max_snapshot_age_seconds"):
+            if not _is_finite_number(response.get(field)):
+                raise ValueError(
+                    f"opportunity-feed stale evidence {field} is required"
+                )
+    return evidence
 
 
 def collect_opportunity_feed_evidence(
@@ -93,6 +162,10 @@ def collect_opportunity_feed_evidence(
     """Run the single read-only diagnostic and persist its unmodified response."""
     if manifest.get("paradigm") != OPPORTUNITY_FEED_CHAIN_TRUTH:
         raise ValueError("production evidence only applies to opportunity-feed-chain-truth")
+
+    evidence_path = run_dir / PRODUCTION_EVIDENCE_FILENAME
+    if evidence_path.exists():
+        raise ValueError("opportunity-feed production evidence already exists")
 
     if runner is None:
         def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -113,7 +186,6 @@ def collect_opportunity_feed_evidence(
     if not isinstance(response, dict):
         raise ValueError("diagnostic JSON response must be an object")
 
-    evidence_path = run_dir / PRODUCTION_EVIDENCE_FILENAME
     evidence = {
         "hypothesis_id": manifest.get("hypothesis_id"),
         "paradigm": manifest.get("paradigm"),
@@ -128,6 +200,7 @@ def collect_opportunity_feed_evidence(
         "reason": response.get("reason"),
         "response": response,
     }
+    evidence["digest"] = _canonical_evidence_digest(evidence)
     _atomic_write(evidence_path, json.dumps(evidence, indent=2, sort_keys=True) + "\n")
     _require_opportunity_feed_evidence(run_dir, manifest)
     return evidence_path
@@ -137,15 +210,15 @@ def record_production_evidence_after_gates(
     run_dir: Path,
     manifest: dict,
     *,
-    local_gates_passed: bool,
     runner: Callable[[list[str]], object] | None = None,
     observed_at: str | None = None,
 ) -> Path | None:
     """Allow the one production read only after all local gates succeed."""
     if manifest.get("paradigm") != OPPORTUNITY_FEED_CHAIN_TRUTH:
         return None
-    if not local_gates_passed:
-        raise ValueError("opportunity-feed production evidence requires local gates")
+    if (run_dir / PRODUCTION_EVIDENCE_FILENAME).exists():
+        raise ValueError("opportunity-feed production evidence already exists")
+    _require_verified_local_gates(run_dir, manifest)
     return collect_opportunity_feed_evidence(
         run_dir,
         manifest,
@@ -157,7 +230,9 @@ def record_production_evidence_after_gates(
 def sync_cycle(state_dir: Path, completed_run: dict) -> None:
     manifest = json.loads(Path(completed_run["manifest_path"]).read_text())
     evaluation = json.loads(Path(completed_run["local_eval_path"]).read_text())
-    _require_opportunity_feed_evidence(Path(completed_run["run_dir"]), manifest)
+    evidence = _require_opportunity_feed_evidence(Path(completed_run["run_dir"]), manifest)
+    if manifest.get("paradigm") == OPPORTUNITY_FEED_CHAIN_TRUTH:
+        _require_verified_local_gates(Path(completed_run["run_dir"]), manifest)
     decision_reason = completed_run["reason"]
     if manifest.get("paradigm") == OPPORTUNITY_FEED_CHAIN_TRUTH:
         decision_reason += "; production evidence recorded"
@@ -216,8 +291,7 @@ def sync_cycle(state_dir: Path, completed_run: dict) -> None:
         if item["id"] == manifest["hypothesis_id"]
     )
     hypothesis["status"] = verdict
-    hypothesis.setdefault("results", []).append(
-        {
+    result = {
             "session": session["session"],
             "cycle": cycle,
             "run": completed_run["run_id"],
@@ -227,7 +301,27 @@ def sync_cycle(state_dir: Path, completed_run: dict) -> None:
             "verdict": verdict,
             "decision_reason": decision_reason,
         }
-    )
+    if evidence is not None:
+        response = evidence["response"]
+        production_evidence = {
+            "digest": evidence["digest"],
+            "observed_at": evidence["observed_at"],
+            "argv": evidence["command"]["argv"],
+            "count": evidence["command"]["count"],
+            "returncode": evidence["command"]["returncode"],
+            "http_status": response["http_status"],
+            "classification": evidence["classification"],
+            "reason": evidence["reason"],
+        }
+        if response["kind"] == "stale-snapshot":
+            production_evidence["snapshot_age_seconds"] = response[
+                "snapshot_age_seconds"
+            ]
+            production_evidence["max_snapshot_age_seconds"] = response[
+                "max_snapshot_age_seconds"
+            ]
+        result["production_evidence"] = production_evidence
+    hypothesis.setdefault("results", []).append(result)
     _atomic_write(
         hypotheses_path,
         yaml.safe_dump(hypotheses, sort_keys=False, allow_unicode=True),

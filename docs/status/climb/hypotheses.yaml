@@ -179,7 +179,7 @@ hypotheses:
   expected_lift: +100 opportunity availability diagnosis points
   cost_h: 1.0
   ranking: 1.0
-  status: confirmed
+  status: pending
   created_at: '2026-07-18T19:50:00+08:00'
   results:
   - session: 2026-07-18-m1-living-manual
@@ -195,3 +195,17 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed; production evidence recorded
+  - session: 2026-07-19-h008-evidence-correction
+    cycle: 8
+    run: correction-20260718-185917-h-008
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: superseded
+    decision_reason: supersedes 20260718-185917-h-008 because the recorder accepted a hardcoded local-gate result and its artifact was not digest-bound to tracked state
+    supersedes_run: 20260718-185917-h-008
