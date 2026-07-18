@@ -127,6 +127,35 @@ OPPORTUNITY_FEED_CHAIN_TRUTH_GATE_COMMANDS = {
         "-q",
     ],
 }
+OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS = {
+    "collect-dry-run": ["make", "-n", "collect-neg-risk-quotes"],
+    "quote-store-collector": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/routing/test_neg_risk_quote_store.py",
+        "tests/routing/test_neg_risk_quote_collector.py",
+        "-q",
+    ],
+    "scanner-http": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/routing/test_opportunity_scanner.py",
+        "tests/m1-perception/test_arbitrage_opportunities_http.py",
+        "-q",
+    ],
+    "quote-cli": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/cli/test_arbitrage_cli_process.py",
+        "-k",
+        "collect_neg_risk_quotes or scan_quotes",
+        "-q",
+    ],
+    "scan-dry-run": ["make", "-n", "scan-arb-quotes"],
+}
 
 
 def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]:
@@ -134,6 +163,8 @@ def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]
         commands = LIVING_DOC_CONTRACT_GATE_COMMANDS
     elif manifest.get("paradigm") == "opportunity-feed-chain-truth":
         commands = OPPORTUNITY_FEED_CHAIN_TRUTH_GATE_COMMANDS
+    elif manifest.get("paradigm") == "opportunity-feed-cadence-sla":
+        commands = OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS
     else:
         commands = GATE_COMMANDS
     return {name: list(command) for name, command in commands.items()}

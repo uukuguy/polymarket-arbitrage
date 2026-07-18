@@ -68,7 +68,14 @@ climb-cycle:
 climb-check:
 	@uv run pytest tests/climb -q
 
-.PHONY: climb-status climb-cycle climb-check
+.PHONY: climb-status climb-cycle climb-check eval-local
+
+## eval-local: Run the named fixture-only local climb evaluator profile; no deploy, scheduler, or production request.
+eval-local:
+	@test "$(profile)" = "opportunity-feed-cadence-sla" || (echo "usage: make eval-local profile=opportunity-feed-cadence-sla" >&2; exit 2)
+	@RUN_DIR="$$(mktemp -d)"; trap 'rm -rf "$$RUN_DIR"' EXIT; \
+	printf '%s\n' '{"paradigm":"$(profile)"}' > "$$RUN_DIR/manifest.json"; \
+	uv run python -m tools.climb.eval_local "$$RUN_DIR"
 
 ## cleanup-worktrees: Dry-run stale Claude agent worktree cleanup; use apply=1 and audited discard_unmerged="branch ..." to mutate
 cleanup-worktrees:
@@ -201,6 +208,14 @@ scan-neg-risk-incomplete:
 ## scan-arb: Find executable neg-risk buy-all bundles in an M1 SQLite snapshot. Usage: make scan-arb [db=data/state.db] [min_edge_bps=0]
 scan-arb:
 	uv run python -m polyarb.cli_arbitrage scan --db-path "$(or $(db),data/state.db)" --min-edge-bps "$(or $(min_edge_bps),0)"
+
+## collect-neg-risk-quotes: One local read-only CLOB quote collection for the known latest snapshot universe; never deploys or orders.
+collect-neg-risk-quotes:
+	@uv run python -m polyarb.cli_arbitrage collect-neg-risk-quotes --db-path "$(if $(strip $(db)),$(db),data/state.db)"
+
+## scan-arb-quotes: Inspect the latest complete known-universe quote run from a local SQLite DB; returns nonzero if unavailable/stale.
+scan-arb-quotes:
+	@uv run python -m polyarb.cli_arbitrage scan-quotes --db-path "$(if $(strip $(db)),$(db),data/state.db)" --min-edge-bps "$(or $(min_edge_bps),0)" --max-quote-age-s "$(or $(max_quote_age_s),300)" --max-universe-age-s "$(or $(max_universe_age_s),50400)"
 
 ## scan-arb-live: Query the fresh production M1→M2 opportunity feed. Usage: make scan-arb-live [min_edge_bps=0]
 scan-arb-live:

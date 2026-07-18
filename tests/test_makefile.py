@@ -59,6 +59,58 @@ def test_diagnose_arb_feed_make_entry_is_listed_and_dry_runs() -> None:
     assert "https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=0" in dry_run.stdout
 
 
+def test_local_quote_make_entries_are_safe_discoverable_and_forward_options() -> None:
+    collect_recipe = _make_recipe("collect-neg-risk-quotes")
+    scan_recipe = _make_recipe("scan-arb-quotes")
+    unsafe = r"\b(flyctl|POST|PUT|PATCH|DELETE|deploy|scale|restart|secret|schema|migrat|order|wallet|cron)\b"
+
+    assert 'cli_arbitrage collect-neg-risk-quotes --db-path "$(if $(strip $(db)),$(db),data/state.db)"' in collect_recipe
+    assert "cli_arbitrage scan-quotes" in scan_recipe
+    assert '--db-path "$(if $(strip $(db)),$(db),data/state.db)"' in scan_recipe
+    assert '--min-edge-bps "$(or $(min_edge_bps),0)"' in scan_recipe
+    assert '--max-quote-age-s "$(or $(max_quote_age_s),300)"' in scan_recipe
+    assert '--max-universe-age-s "$(or $(max_universe_age_s),50400)"' in scan_recipe
+    assert not re.search(unsafe, collect_recipe, re.I)
+    assert not re.search(unsafe, scan_recipe, re.I)
+
+    help_result = _make("help")
+    assert help_result.returncode == 0, help_result.stderr
+    for target in ("collect-neg-risk-quotes:", "scan-arb-quotes:"):
+        assert target in help_result.stdout
+
+    default_collect = _make("-n", "collect-neg-risk-quotes")
+    default_scan = _make("-n", "scan-arb-quotes")
+    override_collect = _make("-n", "collect-neg-risk-quotes", "db=build/quotes.db")
+    override_scan = _make(
+        "-n",
+        "scan-arb-quotes",
+        "db=build/quotes.db",
+        "min_edge_bps=25",
+        "max_quote_age_s=30",
+        "max_universe_age_s=900",
+    )
+    for result in (default_collect, default_scan, override_collect, override_scan):
+        assert result.returncode == 0, result.stderr
+    assert '--db-path "data/state.db"' in default_collect.stdout
+    assert '--db-path "data/state.db"' in default_scan.stdout
+    assert '--db-path "build/quotes.db"' in override_collect.stdout
+    for expected in (
+        '--db-path "build/quotes.db"',
+        '--min-edge-bps "25"',
+        '--max-quote-age-s "30"',
+        '--max-universe-age-s "900"',
+    ):
+        assert expected in override_scan.stdout
+
+
+def test_eval_local_quote_profile_is_offline_and_discoverable() -> None:
+    dry_run = _make("-n", "eval-local", "profile=opportunity-feed-cadence-sla")
+
+    assert dry_run.returncode == 0, dry_run.stderr
+    assert "opportunity-feed-cadence-sla" in dry_run.stdout
+    assert "eval_local" in dry_run.stdout
+
+
 def test_status_uses_the_canonical_current_state() -> None:
     result = _make("status")
 

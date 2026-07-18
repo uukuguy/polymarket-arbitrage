@@ -1,6 +1,6 @@
 # 当前项目状态
 
-> 唯一当前状态入口。最后核验：2026-07-18 19:59 CST。
+> 唯一当前状态入口。最后核验：2026-07-19（H-009 Task 4 本地实现/文档合同）。
 > `JOURNAL.md` 是追加式历史；其中旧 `[NEXT]` 均不代表当前任务。
 
 稳定的使用流程、健康语义和命令安全分级见
@@ -9,7 +9,7 @@
 ## 一句话结论
 
 这是一个已经恢复新鲜 M1 生产快照、具备 paper 精确账本的研发系统；
-M2 neg-risk 机会 endpoint 最近只读实测返回 HTTP 503，所以**快照/健康监控与 paper 账本可用，但机会 feed 暂不能当作可用输入，还不是可以投入真实资金运行的套利产品**。H-008 的只读诊断只会区分响应状态，**不会修复 producer cadence/SLA mismatch，也不会把 feed 宣布为 ready**。
+M2 neg-risk 机会 endpoint 最近只读实测返回 HTTP 503；H-009 只新增了本地 known-universe quote collector/complete-run scanner 与离线合同，故**快照/健康监控与 paper 账本可用，但机会 feed 生产仍是有条件/未 ready，还不是可以投入真实资金运行的套利产品**。H-008 的只读诊断只会区分响应状态，H-009 的本地代码也**不会修复或证明 production producer cadence/SLA，更不会把 feed 宣布为 ready**。
 
 ## 交付状态
 
@@ -19,7 +19,7 @@ M2 neg-risk 机会 endpoint 最近只读实测返回 HTTP 503，所以**快照/�
 | M1 L1 Fly 服务 | 39 天 stale 根因已修复；snapshot 恢复到分钟级，Supabase pass | 可作为 M2 机会发现输入 |
 | M1 L2 Fly 服务 | 40 天 stale 主链已恢复；candidate=5、WS=5、真实 book→Supabase mirror 与同实例 ≥180s 基线已通过；quiet-refresh 自然 60s 边沿尚未触发，L3 仍为 0/10 | 主链已恢复，但 Phase 05.1/05 最终生产门未关闭 |
 | M2 paper execution/accounting | Phase 2–8、H-001～H-006 已通过本地质量门 | 可用于本地模拟、账本和恢复测试 |
-| M2 真实组合套利 | Phase 9 已实现 executable-ask neg-risk buy-all feed；最近生产请求 HTTP 503 | 当前不可用；H-008 先区分 endpoint 失败、上游 stale 和合法零机会 |
+| M2 真实组合套利 | 本地已实现 known-universe quote complete-run collector/scanner；最近生产请求 HTTP 503 | 生产当前有条件/未 ready；H-009 仍 pending，需单独授权部署/调度和时间戳化只读容量观察 |
 | M3 | 未开始 | 不可用 |
 | M4 | 未开始 | 不可用 |
 | M5 | 有一个计划，但依赖 M1 未完成工作 | 尚不可用 |
@@ -46,6 +46,9 @@ make close-arb db=/tmp/m2-paper.db market_id=cond-0 exit_price=0.99 \
 
 # 诊断性查询；只有 available-zero/available-opportunities 的 exit=0 才能解读机会数，HTTP 503 不是零机会
 make diagnose-arb-feed-prod min_edge_bps=0
+
+# 仅离线 fixture/Make dry-run 的 H-009 合同，不访问生产
+make eval-local profile=opportunity-feed-cadence-sla
 ```
 
 审计向量结果：BUY 100 @ .40 锁定 40 pUSD；gross=46、fee=1 后 net=45、
@@ -61,13 +64,14 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 - 全仓 CI 仍被历史 repo-wide Ruff 基线阻断；本次相关 tests/targeted Ruff 与 Fly deploy 通过，不等于全仓 CI 绿色。
 - Phase 2–8 complete 表示 foundation plans 完成，不表示 M2 产品使命完成。
 - `make diagnose-arb-feed-prod min_edge_bps=0` 最近对应 HTTP 503 的不可用语义；在 H-008 打通 chain-truth 前，不得把它说成“当前无正 edge”。只有 `available-zero`/exit=0 且 payload 可解析的 0 条才是合法零机会；诊断本身不修复 producer cadence/SLA mismatch。
+- `make collect-neg-risk-quotes` 只读 CLOB、但写本地 SQLite；`make scan-arb-quotes` 只读完整 quote run。它们未部署、未调度，且 local contract 通过不等于生产 capacity、freshness 或 readiness。
 
 ## 距离可实际 paper/live 使用还缺什么
 
 按依赖顺序：
 
 1. 在同一 L2 instance 上完成自然 quiet-refresh 的 receive→mirror 证据；若 instance 变化，先重建 ≥180 秒主链基线。
-2. H-008 已增加只读响应分类；仍须修复并验证 producer cadence/SLA mismatch，使机会 endpoint 持续满足可解析 exit=0 契约，再持续记录机会频率、存活时间、费用后 edge 与失败腿风险。
+2. H-009 本地实现保持 pending：先取得**生产部署/调度的单独授权**，再进行**时间戳化只读容量观察**；之后仍须积累重复 complete run、可解析 exit=0 契约和不可变证据，才可评估 producer cadence/SLA。没有这些证据，HTTP 503 绝不等于零机会。
 3. 实现经过明确授权的 Polymarket order/fill adapter、认证、allowance、限额与 kill switch。
 4. 通过 paper→小额 live 质量门后，才讨论真实资金运行。
 

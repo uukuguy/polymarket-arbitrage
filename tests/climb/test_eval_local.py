@@ -89,6 +89,31 @@ def test_opportunity_feed_chain_truth_profile_is_dedicated() -> None:
     }
 
 
+def test_opportunity_feed_cadence_sla_profile_is_fixture_only() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "opportunity-feed-cadence-sla"}
+    )
+
+    required_tests = {
+        "tests/routing/test_neg_risk_quote_store.py",
+        "tests/routing/test_neg_risk_quote_collector.py",
+        "tests/routing/test_opportunity_scanner.py",
+        "tests/m1-perception/test_arbitrage_opportunities_http.py",
+    }
+    flattened = [argument for command in commands.values() for argument in command]
+    assert required_tests <= set(flattened)
+    assert ["make", "-n", "collect-neg-risk-quotes"] in commands.values()
+    assert ["make", "-n", "scan-arb-quotes"] in commands.values()
+    assert not {
+        argument.lower()
+        for argument in flattened
+        if any(
+            forbidden in argument.lower()
+            for forbidden in ("http://", "https://", "flyctl", "deploy", "cron")
+        )
+    }
+
+
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS

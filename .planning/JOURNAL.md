@@ -3807,6 +3807,21 @@ $gsd-resume-work --ws m1-perception
 
 先只读诊断 H-008 opportunity feed HTTP 503 chain。
 
+## SESSION 62 — 2026-07-19 (H-009 Task 4 local operator contract)
+
+- [VERIFIED] TDD added local Make/evaluator contracts before implementation: `collect-neg-risk-quotes` forwards an explicit local DB path to the read-only CLOB collector; `scan-arb-quotes` invokes the distinct `scan-quotes` CLI and forwards both freshness clocks. The legacy snapshot `scan` command remains unchanged.
+- [VERIFIED] `opportunity-feed-cadence-sla` is a fixture-only evaluator profile: quote-store/collector/scanner/HTTP and narrow CLI tests plus `make -n` checks. It makes no production request, deploy, scheduling, order, wallet, or mutation outside its temporary local evaluator directory.
+- [DOC] The M1 manual and learning document 19 now distinguish a complete known-universe local quote run from production readiness; HTTP 503/unavailable/stale is never a zero opportunity, and gross-before-fees is not an order instruction.
+- [BOUNDARY] H-009 remains `pending`. No production deployment, scheduling, capacity observation, CLOB collection, cron change, or immutable production evidence was performed. The exact next authorization is production deployment/scheduling and a timestamped read-only capacity observation; repeated complete runs and immutable evidence remain subsequent gates.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+Keep H-009 pending until the separately authorized production deployment/scheduling and timestamped read-only capacity observation have occurred; do not turn local evaluator success into production readiness.
+
 ## SESSION 60 — 2026-07-19 (H-008 evidence-gated correction)
 
 - [FIX] 旧 H-008 的 cycle 在本地五 gate 后即可确认，生产诊断虽曾执行但不属于 confirmation 的输入。该无效记录已从 tracked ledger 重置；`opportunity-feed-chain-truth` 现在必须有结构化 `production-evidence.json` 才可 state sync。

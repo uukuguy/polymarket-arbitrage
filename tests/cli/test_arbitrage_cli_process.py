@@ -66,7 +66,8 @@ def test_diagnose_feed_reports_zero_as_success(tmp_path) -> None:
     body = tmp_path / "zero.json"
     body.write_text(
         '{"strategy":"neg-risk-buy-all","profit_basis":"gross-before-fees",'
-        '"count":0,"opportunities":[]}'
+        '"coverage":"known-universe","quote_sla_seconds":300,'
+        '"universe_sla_seconds":50400,"count":0,"opportunities":[]}'
     )
 
     result = _cli("diagnose-feed", "--http-status", "200", "--body-file", str(body))
@@ -112,6 +113,26 @@ def test_collect_neg_risk_quotes_without_universe_exits_two_without_success_clai
     assert "quote collection failed: quote-universe-unavailable" in result.stderr
     with sqlite3.connect(path) as con:
         assert con.execute("SELECT COUNT(*) FROM neg_risk_quote_runs").fetchone()[0] == 0
+
+
+def test_scan_quotes_keeps_legacy_scan_separate_and_fails_closed_without_a_run(
+    tmp_path,
+) -> None:
+    path = tmp_path / "quote-sidecar.db"
+
+    result = _cli(
+        "scan-quotes",
+        "--db-path",
+        str(path),
+        "--max-quote-age-s",
+        "30",
+        "--max-universe-age-s",
+        "900",
+    )
+
+    assert result.returncode == 2
+    assert "quote opportunity scan failed:" in result.stderr
+    assert result.stdout == ""
 
 
 def test_run_status_close_status_across_four_processes(tmp_path) -> None:

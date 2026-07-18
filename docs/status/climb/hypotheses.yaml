@@ -53,6 +53,10 @@ hypotheses:
   cost_h: 2.0
   ranking: 1.0
   status: pending
+  pending_reason: Local collector/scanner and fixture-only evaluator are implementation
+    evidence only; confirmation requires separately authorized production deployment/scheduling
+    and a timestamped read-only capacity observation, followed by repeated complete runs
+    and immutable evidence.
   created_at: '2026-07-19T02:42:36+08:00'
   results: []
 - id: H-003
