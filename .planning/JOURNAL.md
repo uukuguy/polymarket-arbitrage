@@ -3674,3 +3674,33 @@ make scan-arb-live min_edge_bps=0
 恢复后先跑 `make planning-status` 和 strict L2 `/health`，从 candidate refresh 写入/错误链开始定位。
 
 - [VERIFIED] handoff commit `c0abdfa` Fly deploy passed；repo-wide CI 仍在历史 Ruff baseline 失败，不能宣称全仓 CI green。
+
+## SESSION 48 — 2026-07-18 (Phase 05.1 Plan 04 production checkpoint)
+
+- [VERIFIED] `889fab4` 已部署为
+  `deployment-01KXSMPKM78105Q9JZG58GBZYP`，digest
+  `sha256:ec90d98e20c6ffe7ee48c899c939dab7a67addf45c28adda6695d13ed6269c4d`；
+  machine `85e647c4eed598` 未变，新 instance 为
+  `01KXSMS80B5AX2FGT5EPRC6V82`。
+- [VERIFIED] 同一 instance 的 startup→candidate=5→WS book→Supabase mirror 主链稳定
+  >=180 秒；健康仅因未放宽的 L3 `0/10` gate 保持 warn。
+- [VERIFIED] 精确部署 digest 内存在 `kill/which/curl/python`，缺少
+  `pkill/ps/dig/ping`；未安装包、未改变 image/tool threshold。
+- [BLOCKER] Plan 04 Task 3 保持开放：随后额外十分钟内自然业务帧持续到达，
+  `ws_age` 从未达到 45 秒，因此新实例没有形成自然 60 秒静默窗口；这不是 quiet
+  refresh 路径已经触发后失败，也不能据此判定协议失败。
+- [LEARNING] duplicate subscribe 不是 resnapshot；安全刷新需要真实
+  unsubscribe→subscribe edge、receive/mirror evidence，以及与动态订阅共享的 reconnect
+  gate。活跃市场无法验证 quiet edge，不等于 quiet edge 失败。
+- [VERIFIED] 临时 `codex-phase-05-1-quiet-refresh` Fly organization token 已撤销，
+  页面显示 `No organization tokens`；未保存 token value，认证 shell 已关闭。
+
+### [NEXT — CURRENT]
+
+```bash
+$gsd-resume-work --ws m1-perception
+```
+
+恢复后只读监控同一 instance `01KXSMS80B5AX2FGT5EPRC6V82` 的自然 quiet；若 instance
+变化，先重建 >=180 秒主链 baseline。没有真实 book/mirror evidence 前，不关闭 Phase
+05.1、Plan 04 或 Task 3。

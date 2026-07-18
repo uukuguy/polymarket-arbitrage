@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.1
 status: executing
-stopped_at: Phase 05.1 Plan 03 core recovery PASS; next execute 05.1-04
-last_updated: "2026-07-18T01:41:00Z"
+stopped_at: Phase 05.1 Plan 04 Task 3 open; await natural 60s quiet edge on instance 01KXSMS80B5AX2FGT5EPRC6V82
+last_updated: "2026-07-18T04:08:48Z"
 last_activity: 2026-07-18
 progress:
   total_phases: 11
@@ -20,8 +20,8 @@ progress:
 ## Current Position
 
 - **Phase:** 05.1 — Durable L2 data-chain recovery (inserted gap phase)
-- **Plan:** 05.1-04 pending — quiet-market in-band book refresh and strict-health proof
-- **Status:** Plan 03 core recovery proven in production; strict health remains blocked by quiet-market freshness
+- **Plan:** 05.1-04 Task 3 open — production natural quiet-edge and mirror-evidence proof
+- **Status:** `889fab4` deployed; >=180-second main chain passed, but no natural 60-second quiet window occurred
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -46,19 +46,32 @@ progress:
   were quiet: WS business-frame age and TOB mirror age exceeded their unchanged
   thresholds while socket pong liveness, cursor, reconciliation, and projection
   were healthy. This is Plan 04's blocker, not a core recovery failure.
+- Plan 04 reconnect-gating code `889fab4` is deployed as image
+  `deployment-01KXSMPKM78105Q9JZG58GBZYP`, digest
+  `sha256:ec90d98e20c6ffe7ee48c899c939dab7a67addf45c28adda6695d13ed6269c4d`,
+  on machine `85e647c4eed598`, instance `01KXSMS80B5AX2FGT5EPRC6V82`.
+- That exact instance passed the >=180-second startup/candidate/WS/mirror main
+  chain. During the following ten-minute read-only monitor, organic business
+  frames kept `ws_age < 45s`; no natural 60-second quiet trigger occurred.
+- Therefore Plan 04 Task 3 is unproven, not protocol-failed. If the instance
+  changes, rebuild the >=180-second baseline before accepting later quiet proof.
+- Exact image matrix: present `kill/which/curl/python`; missing
+  `pkill/ps/dig/ping`. Temporary Fly organization token was revoked and no token
+  value was retained.
 
 ## CURRENT-CALL — approved repair
 
-Plans 05.1-01/02/03 are complete. NOTIFY is a wake-up hint, the 60-second durable
-cursor pump is the only cursor owner, candidate history converges by composite key,
-and production proved recovery without an L2 restart. Execute Plan 04 next to
-refresh quiet-market books in-band and recover strict freshness truth.
-Do not relax Phase 05's strict N=5 gate merely to make the phase green.
+Plans 05.1-01/02/03 are complete. Plan 04 implementation is deployed, but Task 3
+remains open until the same instance naturally becomes quiet for 60 seconds and
+the receive→mirror evidence chain is observed. Do not infer failure from an active
+market that never reaches the trigger, and do not relax Phase 05's strict N=5 gate.
 
 ## Remaining Work
 
-- Execute `05.1-04-PLAN.md` quiet-market in-band book refresh.
-- Prove strict production health after the refresh without changing thresholds.
+- Read-only monitor instance `01KXSMS80B5AX2FGT5EPRC6V82` for a natural
+  60-second quiet window and the complete refresh→book→mirror evidence chain.
+- If the instance changes, first rebuild the >=180-second healthy main-chain baseline.
+- Keep Plan 04 Task 3 open until receive/mirror evidence exists; send success alone is not PASS.
 - Start Plan 05-06 only when `/health` is no longer failing on the L2 prerequisites.
 - Complete 24h strict soak, teaching chapter 11, VALIDATION flip, SUMMARY, learnings,
   ROADMAP/STATE closure.
@@ -73,16 +86,15 @@ Do not relax Phase 05's strict N=5 gate merely to make the phase green.
 ## Resume
 
 ```bash
-/gsd-resume-work --ws m1-perception
+$gsd-resume-work --ws m1-perception
 make planning-status
-/gsd-execute-phase 05.1 --ws m1-perception
 ```
 
 ## Session Continuity
 
 - **Last session:** 2026-07-18 (Asia/Shanghai)
-- **Stopped at:** Plan 05.1-03 core recovery proof complete; strict health truthfully HTTP 503 on quiet markets.
-- **Proceeding to:** Execute Phase 05.1 Plan 04 quiet-market refresh and strict-health proof.
+- **Stopped at:** Plan 05.1-04 Task 3 open after `889fab4` deploy and >=180-second main-chain PASS; the new instance stayed organically active for the extra ten-minute monitor.
+- **Proceeding to:** Read-only monitor the same instance for a natural quiet edge; rebuild the baseline if instance identity changes.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05.1-durable-l2-data-chain-recovery/05.1-04-PLAN.md`
 
 ## Accumulated Context

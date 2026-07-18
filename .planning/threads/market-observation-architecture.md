@@ -987,3 +987,35 @@ REST 侧的 `/prices` / `/prices-history` 是分开的 HTTP endpoint，不在 WS
 - 第一条产品路径只发布 buy-all YES，capacity=`min(best_ask_size)`，收益明确标记
   `gross-before-fees`；费用后 edge 和持续性证据属于下一质量门。
 - 真实资金 adapter 不在这个 read-only contract 内。
+
+---
+
+### §2.8 Quiet refresh protocol and evidence contract (2026-07-18)
+
+Plan 04 production established a sharper distinction between subscription
+transport activity and an orderbook resnapshot:
+
+- `subscribe(existing_asset, initial_dump=true)` is not a resnapshot operation.
+  Polymarket documents `initial_dump` on subscription, while its official client
+  multiplexes duplicate asset subscriptions without sending another wire request.
+  Production agreed: duplicate subscribe logged send/request but produced no book.
+- A real in-band resnapshot therefore needs an absent→present edge:
+  `unsubscribe(asset_ids)` followed by `subscribe(asset_ids, initial_dump=true)`.
+  The pair must preserve candidate/L3 desired state; it changes wire membership,
+  not business ownership.
+- Send completion is only transport truth. Refresh success requires receive-side
+  `book` evidence and a successful mirror write. Neither the quiet-refresh sender
+  nor an optimistic local subscription set may advance freshness.
+- Quiet refresh, candidate reconciliation, L3 promotion/demotion, and reconnect
+  must share one subscription-control/reconnect gate. WebSocket concurrent-send
+  safety does not protect semantic ordering. Partial send, cancellation, timeout,
+  or connection-generation change makes wire membership uncertain and must force
+  convergence from the latest desired union.
+- Production validation is trigger-sensitive. Instance
+  `01KXSMS80B5AX2FGT5EPRC6V82` stayed naturally active for an extra ten minutes,
+  never reaching even 45 seconds of WS age; therefore no natural 60-second quiet
+  trigger occurred. An active market cannot validate the quiet edge, but this is
+  not evidence that the edge failed.
+- Evidence is instance-bound. If the deployed instance changes before the natural
+  quiet proof, first rebuild the >=180-second healthy startup/candidate/WS/mirror
+  baseline, then observe quiet trigger→book receive→mirror success on that instance.
