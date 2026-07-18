@@ -14,10 +14,12 @@ sys.path.insert(0, str(ROOT))
 
 import scripts.check_m1_manual as manual_checker  # noqa: E402
 from scripts.check_m1_manual import (  # noqa: E402
+    M1_MAKE_TARGETS,
     MANUAL,
     _decode_nul_paths,
     classify_staged_impact,
     main,
+    manual_sync_is_meaningful,
     validate_manual,
 )
 
@@ -27,12 +29,8 @@ HEADINGS = tuple(f"## {n}. " for n in range(1, 11))
 def test_canonical_entry_points_link_the_manual() -> None:
     expected = "M1-市场感知平台使用手册.md"
     assert expected in (ROOT / "README.md").read_text()
-    assert "../M1-市场感知平台使用手册.md" in (
-        ROOT / "docs/learning/00-INDEX.md"
-    ).read_text()
-    assert "../docs/M1-市场感知平台使用手册.md" in (
-        ROOT / ".planning/CURRENT.md"
-    ).read_text()
+    assert "../M1-市场感知平台使用手册.md" in (ROOT / "docs/learning/00-INDEX.md").read_text()
+    assert "../docs/M1-市场感知平台使用手册.md" in (ROOT / ".planning/CURRENT.md").read_text()
 
 
 def _valid_manual() -> str:
@@ -50,13 +48,21 @@ def _valid_manual() -> str:
 
 [CURRENT](../.planning/CURRENT.md)
 <!-- m1-contract: health=snapshot:last_success_age_seconds file=src/polyarb/http/health.py -->
+<!-- m1-contract: health=event_bus:cursor_lag file=src/polyarb/http/l2_health.py -->
+<!-- m1-contract: health=ws:last_event_age_seconds file=src/polyarb/http/l2_health.py -->
+<!-- m1-contract: health=mirror:l2_tob_age_seconds file=src/polyarb/http/l2_health.py -->
+<!-- m1-contract: health=l3:active_count file=src/polyarb/http/l2_health.py -->
 <!-- m1-contract: route=/status file=dashboard/app/status/page.tsx -->
+<!-- m1-contract: route=/candidates file=dashboard/app/candidates/page.tsx -->
+<!-- m1-contract: route=/signals file=dashboard/app/signals/page.tsx -->
+<!-- m1-contract: route=/l3/[asset_id] file=dashboard/app/l3/[asset_id]/page.tsx -->
 """
 
 
 def _repo(tmp_path: Path) -> Path:
     (tmp_path / "src/polyarb/http").mkdir(parents=True)
-    (tmp_path / "dashboard/app/status").mkdir(parents=True)
+    for path in ("status", "candidates", "signals", "l3/[asset_id]"):
+        (tmp_path / "dashboard/app" / path).mkdir(parents=True)
     (tmp_path / "docs").mkdir()
     (tmp_path / ".planning").mkdir()
     (tmp_path / "Makefile").write_text("snapshot-status:\n\t@true\n")
@@ -64,22 +70,29 @@ def _repo(tmp_path: Path) -> Path:
     (tmp_path / "src/polyarb/http/health.py").write_text(
         'checks["snapshot:last_success_age_seconds"] = []\n'
     )
-    (tmp_path / "dashboard/app/status/page.tsx").write_text("export default 1\n")
+    (tmp_path / "src/polyarb/http/l2_health.py").write_text(
+        'checks["event_bus:cursor_lag"] = []\n'
+        'checks["ws:last_event_age_seconds"] = []\n'
+        'checks["mirror:l2_tob_age_seconds"] = []\n'
+        'checks["l3:active_count"] = []\n'
+    )
+    for path in ("status", "candidates", "signals", "l3/[asset_id]"):
+        (tmp_path / "dashboard/app" / path / "page.tsx").write_text("export default 1\n")
     return tmp_path
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=repo, text=True, capture_output=True, check=False
-    )
+    return subprocess.run(["git", *args], cwd=repo, text=True, capture_output=True, check=False)
 
 
 def _hook_repo(tmp_path: Path) -> Path:
     repo = _repo(tmp_path)
     (repo / "scripts").mkdir()
     (repo / ".githooks").mkdir()
+    (repo / "tools/climb/hooks").mkdir(parents=True)
     shutil.copy(ROOT / "scripts/check_m1_manual.py", repo / "scripts")
     shutil.copy(ROOT / ".githooks/pre-commit", repo / ".githooks")
+    shutil.copy(ROOT / "tools/climb/hooks/pre-commit", repo / "tools/climb/hooks")
     (repo / MANUAL).write_text(_valid_manual())
     assert _git(repo, "init", "-q").returncode == 0
     assert _git(repo, "config", "user.email", "test@example.com").returncode == 0
@@ -130,17 +143,16 @@ def test_rejects_empty_capability_field(tmp_path: Path) -> None:
 
 
 def test_staged_classifier_is_narrow() -> None:
-    assert classify_staged_impact(
-        ["Makefile"], "+## snapshot-status: changed operator contract\n"
-    )
+    assert classify_staged_impact(["Makefile"], " snapshot-status:\n-\told recipe\n+\tnew recipe\n")
     assert classify_staged_impact(
         ["src/polyarb/http/l2_health.py"],
         '+    checks["event_bus:cursor_lag"] = []\n',
     )
+    assert classify_staged_impact(["dashboard/app/status/page.tsx"], "+export default Status\n")
     assert classify_staged_impact(
-        ["dashboard/app/new-view/page.tsx"], "diff --git a/x b/x\n"
+        ["alembic/versions/0001_contract.py"],
+        "+op.create_table('l2_book_levels')\n",
     )
-    assert classify_staged_impact(["alembic/versions/0001_contract.py"], "")
     assert not classify_staged_impact(
         ["src/polyarb/http/l2_health.py"], "+    logger.info('refactor only')\n"
     )
@@ -171,6 +183,57 @@ def test_staged_classifier_ignores_contract_syntax_outside_production_paths() ->
         ["tools/admin.py", "src/polyarb/cli_observation.py"],
         unrelated_tool_diff,
     )
+
+
+def test_staged_classifier_uses_explicit_dashboard_and_migration_registry() -> None:
+    assert classify_staged_impact(
+        ["dashboard/app/status/page.tsx"], "+export const status = true\n"
+    )
+    assert not classify_staged_impact(
+        ["dashboard/app/login/page.tsx"], "+export const login = true\n"
+    )
+    assert not classify_staged_impact(
+        ["alembic/versions/999_unrelated.py"], "+op.create_table('users')\n"
+    )
+
+
+def test_make_trigger_requires_registered_target_recipe_change() -> None:
+    assert classify_staged_impact(
+        ["Makefile"],
+        "diff --git a/Makefile b/Makefile\n smoke-health-prod:\n-\tcurl old\n+\tcurl new\n",
+    )
+    assert not classify_staged_impact(
+        ["Makefile"],
+        "diff --git a/Makefile b/Makefile\n unrelated-tool:\n-\told\n+\tnew\n",
+    )
+    assert not classify_staged_impact(["Makefile"], "+## smoke-health-prod: comment wording only\n")
+
+
+def test_required_markers_cannot_be_silently_removed(tmp_path: Path) -> None:
+    text = _valid_manual().replace(
+        "<!-- m1-contract: route=/signals file=dashboard/app/signals/page.tsx -->\n",
+        "",
+    )
+    errors = validate_manual(_repo(tmp_path), text)
+    assert any("required contract marker" in error for error in errors)
+
+
+def test_manual_sync_rejects_whitespace_and_unowned_edits() -> None:
+    before = _valid_manual()
+    assert not manual_sync_is_meaningful(before, before.replace("body", "body  ", 1))
+    assert not manual_sync_is_meaningful(before, before + "\nunrelated appendix\n")
+
+
+def test_manual_sync_accepts_owned_section_or_valid_new_six_field_record() -> None:
+    before = _valid_manual()
+    assert manual_sync_is_meaningful(
+        before, before.replace("## 7. section-7\nbody", "## 7. section-7\nnew operator action")
+    )
+    record = (
+        "\n- `2026-07-18 | abc123 | L1 health field | no operator impact: rename only | "
+        "make docs-m1-check | Reviewer`\n"
+    )
+    assert manual_sync_is_meaningful(before, before + record)
 
 
 def test_staged_classifier_matches_contract_syntax_on_production_paths() -> None:
@@ -210,9 +273,7 @@ def test_staged_classifier_matches_contract_syntax_on_production_paths() -> None
         ("src/polyarb/cli_observation.py", '+        "-x",\n'),
     ],
 )
-def test_staged_classifier_matches_multiline_contract_continuations(
-    path: str, line: str
-) -> None:
+def test_staged_classifier_matches_multiline_contract_continuations(path: str, line: str) -> None:
     assert classify_staged_impact([path], line)
 
 
@@ -221,7 +282,7 @@ def test_staged_classifier_matches_multiline_contract_continuations(
     [
         (
             "src/polyarb/http/health.py",
-            '+logger.info(\'example checks["snapshot:freshness"] = []\')\n',
+            "+logger.info('example checks[\"snapshot:freshness\"] = []')\n",
         ),
         (
             "src/polyarb/http/l2_health.py",
@@ -270,9 +331,7 @@ def test_staged_unicode_manual_path_runs_validation(
         path_calls.append(args)
         return parsed_paths
 
-    monkeypatch.setattr(
-        manual_checker, "__file__", str(root / "scripts/check_m1_manual.py")
-    )
+    monkeypatch.setattr(manual_checker, "__file__", str(root / "scripts/check_m1_manual.py"))
     monkeypatch.setattr(manual_checker, "_git_paths", fake_git_paths)
     monkeypatch.setattr(manual_checker, "_git", lambda *args: "")
     monkeypatch.setattr(
@@ -298,9 +357,7 @@ def test_precommit_blocks_staged_public_contract_without_manual_sync(
 ) -> None:
     repo = _hook_repo(tmp_path)
     health = repo / "src/polyarb/http/health.py"
-    health.write_text(
-        health.read_text() + 'checks["snapshot:freshness"] = []\n'
-    )
+    health.write_text(health.read_text() + 'checks["snapshot:freshness"] = []\n')
     assert _git(repo, "add", str(health.relative_to(repo))).returncode == 0
 
     result = _run_precommit(repo)
@@ -315,9 +372,9 @@ def test_precommit_blocks_staged_public_contract_without_manual_sync(
         (
             "src/polyarb/http/l2_app.py",
             'routes = [\n    Route(\n        "/control/chaos/ws-test-kill",\n'
-            '        ws_test_kill_handler,\n    ),\n]\n',
+            "        ws_test_kill_handler,\n    ),\n]\n",
             'routes = [\n    Route(\n        "/control/chaos/ws-test-kill-v2",\n'
-            '        ws_test_kill_handler,\n    ),\n]\n',
+            "        ws_test_kill_handler,\n    ),\n]\n",
         ),
         (
             "src/polyarb/snapshot/cli.py",
@@ -336,10 +393,7 @@ def test_precommit_blocks_multiline_contract_continuation_without_manual_sync(
     changed.parent.mkdir(parents=True, exist_ok=True)
     changed.write_text(before)
     assert _git(repo, "add", path).returncode == 0
-    assert (
-        _git(repo, "commit", "--no-verify", "-qm", "multiline fixture").returncode
-        == 0
-    )
+    assert _git(repo, "commit", "--no-verify", "-qm", "multiline fixture").returncode == 0
     changed.write_text(after)
     assert _git(repo, "add", path).returncode == 0
 
@@ -354,13 +408,10 @@ def test_precommit_allows_staged_public_contract_with_manual_sync(
 ) -> None:
     repo = _hook_repo(tmp_path)
     health = repo / "src/polyarb/http/health.py"
-    health.write_text(
-        health.read_text() + 'checks["snapshot:freshness"] = []\n'
-    )
+    health.write_text(health.read_text() + 'checks["snapshot:freshness"] = []\n')
     manual = repo / MANUAL
     manual.write_text(
-        manual.read_text()
-        + "\n- `2026-07-18 | review fixture | snapshot:freshness health field "
+        manual.read_text() + "\n- `2026-07-18 | review fixture | snapshot:freshness health field "
         "added | no operator workflow change; field is diagnostic-only | "
         "make docs-m1-check: OK | Test Reviewer`\n"
     )
@@ -372,12 +423,29 @@ def test_precommit_allows_staged_public_contract_with_manual_sync(
     assert "M1 manual contract: OK" in result.stdout
 
 
+@pytest.mark.parametrize("manual_edit", ["\n", "\nunrelated appendix\n"])
+def test_precommit_rejects_trivial_manual_edit_for_public_contract(
+    tmp_path: Path, manual_edit: str
+) -> None:
+    repo = _hook_repo(tmp_path)
+    health = repo / "src/polyarb/http/health.py"
+    health.write_text(health.read_text() + 'checks["snapshot:freshness"] = []\n')
+    manual = repo / MANUAL
+    manual.write_text(manual.read_text() + manual_edit)
+    assert _git(repo, "add", str(health.relative_to(repo)), str(MANUAL)).returncode == 0
+
+    result = _run_precommit(repo)
+
+    assert result.returncode == 1
+    assert "whitespace/unowned text" in result.stdout
+
+
 @pytest.mark.parametrize(
     ("path", "addition"),
     [
         (
             "src/polyarb/http/health.py",
-            'logger.info(\'example checks["snapshot:freshness"] = []\')\n',
+            "logger.info('example checks[\"snapshot:freshness\"] = []')\n",
         ),
         (
             "src/polyarb/cli_observation.py",
@@ -385,7 +453,7 @@ def test_precommit_allows_staged_public_contract_with_manual_sync(
         ),
         (
             "src/polyarb/http/app.py",
-            'logger.info(\'example Route("/status", status)\')\n',
+            "logger.info('example Route(\"/status\", status)')\n",
         ),
         (
             "tests/m1-perception/test_health_endpoint.py",
@@ -415,6 +483,12 @@ def test_repository_m1_manual_passes_contract() -> None:
     assert validate_manual(ROOT, manual.read_text()) == []
 
 
+def test_surface_registry_covers_every_make_target_named_by_manual() -> None:
+    text = (ROOT / MANUAL).read_text()
+    referenced = set(re.findall(r"`make ([a-z0-9][a-z0-9-]*)", text))
+    assert referenced <= M1_MAKE_TARGETS
+
+
 def test_manual_keeps_real_money_boundary_explicit() -> None:
     text = (ROOT / "docs/M1-市场感知平台使用手册.md").read_text()
     assert "不构成真实资金下单授权" in text
@@ -423,31 +497,27 @@ def test_manual_keeps_real_money_boundary_explicit() -> None:
 
 
 def test_docs_m1_check_make_target() -> None:
-    result = subprocess.run(
-        ["make", "docs-m1-check"], cwd=ROOT, text=True, capture_output=True
-    )
+    result = subprocess.run(["make", "docs-m1-check"], cwd=ROOT, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "M1 manual contract: OK" in result.stdout
 
 
 def test_smoke_health_prod_make_target_is_strict_and_read_only() -> None:
     makefile = (ROOT / "Makefile").read_text()
-    match = re.search(
-        r"(?m)^smoke-health-prod:\n(?P<recipe>(?:\t.*\n)+)", makefile
-    )
+    match = re.search(r"(?m)^smoke-health-prod:\n(?P<recipe>(?:\t.*\n)+)", makefile)
     assert match is not None, "strict production health target must exist"
     recipe = match.group("recipe")
+    assert "curl --disable" in recipe
+    assert re.search(r"--request\s+GET\b", recipe)
     assert "https://polyarb-l1.fly.dev/health" in recipe
     assert "/healthz" not in recipe
-    forbidden = ("flyctl", "scale ", " post ", "deploy", "secrets", "restart")
-    assert not any(token in recipe.lower() for token in forbidden)
+    forbidden = ("flyctl", "scale", "post", "deploy", "secret", "restart", "chaos")
+    assert not any(re.search(rf"\b{token}\b", recipe.lower()) for token in forbidden)
 
 
 def test_smoke_l2_health_strict_prod_make_target_is_strict_and_read_only() -> None:
     makefile = (ROOT / "Makefile").read_text()
-    match = re.search(
-        r"(?m)^smoke-l2-health-strict-prod:\n(?P<recipe>(?:\t.*\n)+)", makefile
-    )
+    match = re.search(r"(?m)^smoke-l2-health-strict-prod:\n(?P<recipe>(?:\t.*\n)+)", makefile)
     assert match is not None, "strict L2 production health target must exist"
     recipe = match.group("recipe")
     assert "curl --disable" in recipe
@@ -474,20 +544,15 @@ def test_smoke_l2_health_strict_prod_make_target_is_strict_and_read_only() -> No
     )
     recipe_lower = recipe.lower()
     assert not any(
-        re.search(rf"\b{re.escape(operation)}\b", recipe_lower)
-        for operation in forbidden
+        re.search(rf"\b{re.escape(operation)}\b", recipe_lower) for operation in forbidden
     )
 
 
 def test_manual_routes_l2_strict_health_through_make() -> None:
     text = (ROOT / "docs/M1-市场感知平台使用手册.md").read_text()
     daily = text.split("## 3. ", 1)[1].split("## 4. ", 1)[0]
-    read_only = text.split("生产巡检（只读）", 1)[1].split(
-        "L1→L2 市场候选链（只读观察）", 1
-    )[0]
-    candidates = text.split("L1→L2 市场候选链（只读观察）", 1)[1].split(
-        "### 本地验证", 1
-    )[0]
+    read_only = text.split("生产巡检（只读）", 1)[1].split("L1→L2 市场候选链（只读观察）", 1)[0]
+    candidates = text.split("L1→L2 市场候选链（只读观察）", 1)[1].split("### 本地验证", 1)[0]
 
     for section in (daily, read_only, candidates):
         assert "`make smoke-l2-health-strict-prod`" in section

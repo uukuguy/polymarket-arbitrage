@@ -3782,3 +3782,16 @@ $gsd-resume-work --ws m1-perception
 ### [NEXT — CURRENT]
 
 先只读诊断 H-008 的 HTTP 503 来源；不部署、不重启、不调整 health 阈值，也不把文档完成度当作生产可用性。
+
+## SESSION 55 — 2026-07-18 (Phase 05.2 whole-branch review remediation)
+
+- [TRUTH] CURRENT 和 M1 手册已同步最近 opportunity endpoint HTTP 503；机会 feed 降为“有条件可用”，只有 exit=0 + 可解析 payload 的 0 条才能解读为 no edge。
+- [GUARD] M1 staged guard 改用显式 surface registry，实际 Make recipe 改动才触发；required markers 不得静默删除，whitespace/unowned 手册编辑不能绕过。
+- [SAFETY] L1 strict health curl 已加 `--disable --request GET`；Dashboard L3 生产说明现显式 URL 和 Vercel Auth 内容验证边界。
+- [HOOK] 删除 post-commit `commit --amend --no-verify`；climb tree 改为 pre-commit 生成后 fail，必须人工 review/stage，且 dirty source / generator failure 都不改写 commit。
+- [COMPAT] climb evaluator 缺 manifest 时保留旧 repository gates，malformed manifest 以可操作错误 exit 2，不运行任何 gate。
+- [BOUNDARY] 本轮仅修改仓库文档/检查/本地测试；未部署、restart、改 secret/schema/health 阈值或运行 chaos。H-008 仍是下一个只读任务。
+
+### [NEXT — CURRENT]
+
+先只读诊断 H-008 opportunity feed HTTP 503 chain；不将 endpoint unavailable 报成合法零机会。

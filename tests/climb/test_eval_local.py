@@ -82,6 +82,41 @@ def test_main_selects_gates_from_run_manifest(
     assert payload["total"] == 100.0
 
 
+def test_main_without_manifest_preserves_legacy_direct_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "legacy-run"
+    run_dir.mkdir()
+    executed: list[list[str]] = []
+
+    def runner(command: list[str]) -> GateResult:
+        executed.append(command)
+        return GateResult(True, 0, "ok")
+
+    monkeypatch.setattr(eval_local, "run_command", runner)
+
+    assert eval_local.main([str(run_dir)]) == 0
+    assert executed == list(GATE_COMMANDS.values())
+    assert (run_dir / "local-eval.json").is_file()
+
+
+def test_main_reports_malformed_manifest_without_running_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_dir = tmp_path / "bad-run"
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text("{not json")
+    monkeypatch.setattr(
+        eval_local,
+        "run_command",
+        lambda command: pytest.fail(f"must not run gate: {command}"),
+    )
+
+    assert eval_local.main([str(run_dir)]) == 2
+    assert "invalid climb manifest" in capsys.readouterr().err
+    assert not (run_dir / "local-eval.json").exists()
+
+
 def test_score_is_mean_of_five_binary_gates() -> None:
     results = {
         "planning": GateResult(True, 0, "ok"),

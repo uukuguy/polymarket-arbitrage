@@ -36,12 +36,14 @@ def test_status_uses_the_canonical_current_state() -> None:
     assert "## 当前 checkout" in result.stdout
 
 
-def test_post_commit_hook_never_amends_the_users_commit() -> None:
-    hook = ROOT / ".githooks" / "post-commit"
-    content = hook.read_text() if hook.exists() else ""
+def test_climb_hook_never_amends_the_users_commit() -> None:
+    post_hook = ROOT / ".githooks" / "post-commit"
+    hook = ROOT / "tools" / "climb" / "hooks" / "pre-commit"
+    content = (post_hook.read_text() if post_hook.exists() else "") + hook.read_text()
 
     assert "commit --amend" not in content
     assert "--no-verify" not in content
+    assert "git commit" not in content
 
 
 def test_arbitrage_make_targets_forward_database_path() -> None:
@@ -90,14 +92,23 @@ def test_close_arbitrage_target_forwards_partial_fill_identity() -> None:
 
 def test_close_arbitrage_target_forwards_complete_venue_truth() -> None:
     result = _make(
-        "-n", "close-arb", "market_id=cond-0", "exit_price=0.99", "size=30",
-        "fill_id=fill-001", "venue_cash=13.80", "venue_fee=0.30",
-        "venue_status=CONFIRMED", "venue_ref=trade-001",
+        "-n",
+        "close-arb",
+        "market_id=cond-0",
+        "exit_price=0.99",
+        "size=30",
+        "fill_id=fill-001",
+        "venue_cash=13.80",
+        "venue_fee=0.30",
+        "venue_status=CONFIRMED",
+        "venue_ref=trade-001",
     )
 
     assert result.returncode == 0, result.stderr
     for expected in (
-        '--venue-cash "13.80"', '--venue-fee "0.30"',
-        '--venue-status "CONFIRMED"', '--venue-ref "trade-001"',
+        '--venue-cash "13.80"',
+        '--venue-fee "0.30"',
+        '--venue-status "CONFIRMED"',
+        '--venue-ref "trade-001"',
     ):
         assert expected in result.stdout

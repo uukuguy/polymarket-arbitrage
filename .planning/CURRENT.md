@@ -1,6 +1,6 @@
 # 当前项目状态
 
-> 唯一当前状态入口。最后核验：2026-07-18 15:19 CST。
+> 唯一当前状态入口。最后核验：2026-07-18 19:59 CST。
 > `JOURNAL.md` 是追加式历史；其中旧 `[NEXT]` 均不代表当前任务。
 
 稳定的使用流程、健康语义和命令安全分级见
@@ -8,8 +8,8 @@
 
 ## 一句话结论
 
-这是一个已经恢复新鲜 M1 生产快照、具备 M2 可成交 neg-risk 机会发现和
-paper 精确账本的研发系统；**可用于真实数据监控/paper 决策，但还不是可以投入真实资金运行的套利产品**。
+这是一个已经恢复新鲜 M1 生产快照、具备 paper 精确账本的研发系统；
+M2 neg-risk 机会 endpoint 最近只读实测返回 HTTP 503，所以**快照/健康监控与 paper 账本可用，但机会 feed 暂不能当作可用输入，还不是可以投入真实资金运行的套利产品**。
 
 ## 交付状态
 
@@ -19,7 +19,7 @@ paper 精确账本的研发系统；**可用于真实数据监控/paper 决策�
 | M1 L1 Fly 服务 | 39 天 stale 根因已修复；snapshot 恢复到分钟级，Supabase pass | 可作为 M2 机会发现输入 |
 | M1 L2 Fly 服务 | 40 天 stale 主链已恢复；candidate=5、WS=5、真实 book→Supabase mirror 与同实例 ≥180s 基线已通过；quiet-refresh 自然 60s 边沿尚未触发，L3 仍为 0/10 | 主链已恢复，但 Phase 05.1/05 最终生产门未关闭 |
 | M2 paper execution/accounting | Phase 2–8、H-001～H-006 已通过本地质量门 | 可用于本地模拟、账本和恢复测试 |
-| M2 真实组合套利 | Phase 9 提供 fresh executable-ask neg-risk buy-all feed | 线上真实数据监控可用；当前无正 gross edge |
+| M2 真实组合套利 | Phase 9 已实现 executable-ask neg-risk buy-all feed；最近生产请求 HTTP 503 | 当前不可用；H-008 先区分 endpoint 失败、上游 stale 和合法零机会 |
 | M3 | 未开始 | 不可用 |
 | M4 | 未开始 | 不可用 |
 | M5 | 有一个计划，但依赖 M1 未完成工作 | 尚不可用 |
@@ -44,7 +44,7 @@ make close-arb db=/tmp/m2-paper.db market_id=cond-0 exit_price=0.99 \
   size=100 fill_id=fill-001 venue_cash=46.00 venue_fee=1.00 \
   venue_status=CONFIRMED venue_ref=trade-001
 
-# 查询生产 M1 的真实 neg-risk 可成交 ask 机会（gross-before-fees）
+# 诊断性查询；只有 exit=0 时才能解读机会数，HTTP 503 不是零机会
 make scan-arb-live min_edge_bps=0
 ```
 
@@ -60,13 +60,14 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 - L2 `889fab4` 的主链恢复证据已通过，但不能把持续活跃流量当作 quiet-refresh 证据；必须等自然 60 秒静默后的 receive→mirror 链。
 - 全仓 CI 仍被历史 repo-wide Ruff 基线阻断；本次相关 tests/targeted Ruff 与 Fly deploy 通过，不等于全仓 CI 绿色。
 - Phase 2–8 complete 表示 foundation plans 完成，不表示 M2 产品使命完成。
+- `make scan-arb-live min_edge_bps=0` 最近返回 HTTP 503/exit 2；在 H-008 打通 chain-truth 前，不得把它说成“当前无正 edge”。只有 exit=0 且 payload 可解析的 0 条才是合法零机会。
 
 ## 距离可实际 paper/live 使用还缺什么
 
 按依赖顺序：
 
 1. 在同一 L2 instance 上完成自然 quiet-refresh 的 receive→mirror 证据；若 instance 变化，先重建 ≥180 秒主链基线。
-2. 用真实机会 feed 持续记录机会频率、存活时间、费用后 edge 与失败腿风险。
+2. 先完成 H-008 只读诊断并恢复机会 endpoint 的可解析 exit=0 契约，再持续记录机会频率、存活时间、费用后 edge 与失败腿风险。
 3. 实现经过明确授权的 Polymarket order/fill adapter、认证、allowance、限额与 kill switch。
 4. 通过 paper→小额 live 质量门后，才讨论真实资金运行。
 

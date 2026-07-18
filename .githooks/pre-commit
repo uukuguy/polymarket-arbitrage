@@ -17,6 +17,11 @@ set -euo pipefail
 # The checker is offline and exits immediately for unrelated staged changes.
 uv run python scripts/check_m1_manual.py --staged
 
+# Climb state is rendered before commit. The helper may regenerate derived tree
+# files, but it never commits or rewrites the user's commit; when output changes
+# it fails and asks the user to stage the generated files explicitly.
+tools/climb/hooks/pre-commit
+
 # Read the prepared commit message (first line is subject)
 COMMIT_MSG_FILE="${1:-}"
 if [ -n "$COMMIT_MSG_FILE" ] && [ -f "$COMMIT_MSG_FILE" ]; then

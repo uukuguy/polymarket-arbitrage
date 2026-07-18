@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,10 +19,7 @@ class GateResult:
 def build_score(results: Mapping[str, GateResult]) -> dict:
     if not results:
         raise ValueError("at least one gate is required")
-    subscores = {
-        name: 100.0 if result.passed else 0.0
-        for name, result in results.items()
-    }
+    subscores = {name: 100.0 if result.passed else 0.0 for name, result in results.items()}
     total = sum(subscores.values()) / len(subscores)
     return {
         "total": total,
@@ -55,15 +53,21 @@ ROOT = Path(__file__).resolve().parents[2]
 GATE_COMMANDS = {
     "planning": ["make", "planning-status"],
     "unit": [
-        "uv", "run", "pytest",
+        "uv",
+        "run",
+        "pytest",
         "tests/routing/test_position_repository.py",
-        "tests/routing/test_position_tracker.py", "-q",
+        "tests/routing/test_position_tracker.py",
+        "-q",
     ],
     "integration": ["uv", "run", "pytest", "tests/execution", "-q"],
     "cli": ["uv", "run", "pytest", "tests/cli", "-q"],
     "restart": [
-        "uv", "run", "pytest",
-        "tests/cli/test_arbitrage_cli_process.py", "-q",
+        "uv",
+        "run",
+        "pytest",
+        "tests/cli/test_arbitrage_cli_process.py",
+        "-q",
     ],
 }
 LIVING_DOC_CONTRACT_GATE_COMMANDS = {
@@ -120,11 +124,30 @@ def run_command(command: list[str]) -> GateResult:
     )
 
 
-def main() -> int:
+def load_manifest(run_dir: Path) -> Mapping[str, object]:
+    path = run_dir / "manifest.json"
+    if not path.exists():
+        # Backward compatibility: old/direct evaluator invocations predate
+        # manifests and always used the repository gate profile.
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid climb manifest {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid climb manifest {path}: expected a JSON object")
+    return payload
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
-    args = parser.parse_args()
-    manifest = json.loads((args.run_dir / "manifest.json").read_text())
+    args = parser.parse_args(argv)
+    try:
+        manifest = load_manifest(args.run_dir)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     output_path = args.run_dir / "local-eval.json"
     payload = evaluate_gates(
         gate_commands_for(manifest),

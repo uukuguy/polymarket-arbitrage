@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+SOURCE_RE='^docs/status/climb/(hypotheses\.yaml|runs\.csv|calibration\.json|pending-lb\.json|session-state\.json|config\.yaml|session-target\.md)$'
+TREE_MD='docs/status/climb/research-tree.md'
+TREE_JSON='docs/status/climb/research-tree.json'
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+if ! printf '%s\n' "$STAGED" | grep -Eq "$SOURCE_RE"; then
+  exit 0
+fi
+
+# The generator reads the working tree. Refuse an ambiguous index/working-tree
+# split so derived output always corresponds exactly to what will be committed.
+UNSTAGED=$(git diff --name-only --diff-filter=ACMR)
+if printf '%s\n' "$UNSTAGED" | grep -Eq "$SOURCE_RE"; then
+  echo "climb tree check: unstaged climb source changes make generation ambiguous" >&2
+  echo "stage or revert those source changes, then retry" >&2
+  exit 1
+fi
+
+if ! python3 tools/climb/regen-tree.py; then
+  echo "climb tree check: generator failed; commit was not modified" >&2
+  exit 1
+fi
+
+if ! printf '%s\n' "$STAGED" | grep -qxF "$TREE_MD" \
+  || ! printf '%s\n' "$STAGED" | grep -qxF "$TREE_JSON" \
+  || ! git diff --quiet -- "$TREE_MD" "$TREE_JSON"; then
+  echo "climb tree check: generated research tree must be reviewed and staged" >&2
+  echo "git add $TREE_MD $TREE_JSON && retry commit" >&2
+  exit 1
+fi
+
+exit 0
