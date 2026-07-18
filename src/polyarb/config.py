@@ -206,6 +206,22 @@ class Settings(BaseSettings):
             "after Plan 07 chaos PASS for Inj L2-3."
         ),
     )
+    event_reconcile_poll_seconds: int = Field(
+        default=60,
+        gt=0,
+        description=(
+            "L2 durable cursor reconciliation interval. NOTIFY may wake the "
+            "same serialized pump earlier."
+        ),
+    )
+    event_reconcile_stale_seconds: int = Field(
+        default=180,
+        gt=0,
+        description=(
+            "Health stale threshold for successful L2 reconciliation; sized "
+            "to allow three default polling intervals."
+        ),
+    )
     # Plan 05 D-04 — scanner-recipes YAML path (REUSE Phase 01.1 scanner verbatim)
     candidate_scanner_yaml: Path | None = Field(
         default=None,

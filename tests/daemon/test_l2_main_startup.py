@@ -54,6 +54,7 @@ def _make_fake_settings():
     s.supabase_url = ""
     s.supabase_mirror_enabled = False
     s.l2_mirror_enabled = False
+    s.event_reconcile_poll_seconds = 60
     s.scan_shared_secret = MagicMock(get_secret_value=lambda: "")
     s.supabase_db_dsn = MagicMock(get_secret_value=lambda: "")
     return s

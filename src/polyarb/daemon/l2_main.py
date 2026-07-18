@@ -44,7 +44,6 @@ import asyncio
 import os
 import signal
 import sys
-import time
 from typing import Any
 
 import sentry_sdk
@@ -56,14 +55,18 @@ from loguru import logger
 from polyarb.config import load_settings
 from polyarb.daemon.ws_consumer import WsConsumer
 from polyarb.daemon.ws_watchdog import WsWatchdog
-from polyarb.events.listener import catchup_from_cursor, listen_snapshot_complete
+from polyarb.events.listener import listen_snapshot_complete
+from polyarb.events.reconciliation import (
+    AsyncpgCursorStore,
+    ReconciliationPump,
+    ReconciliationState,
+)
 from polyarb.http.l2_app import create_l2_app
 from polyarb.observability.logging import init_logging
 from polyarb.observability.sentry import init_sentry
 from polyarb.observation.l2_candidate_refresh import on_snapshot_complete
 from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 from polyarb.storage.sqlite_store import SQLiteStore
-
 
 # ── Plan 06 D-07: WS frame → l2_* row builders ───────────────────────────
 # Polymarket WS market-channel event shapes (empirical):
@@ -318,19 +321,6 @@ def _book_levels_rows_from_frame(
     return rows
 
 
-class _EventListenerWrapper:
-    """Health-surface shim — health endpoint reads is_listening + last event ts.
-
-    Plan 05 D-05: the listener task itself flips is_listening=True after a
-    successful LISTEN snapshot_complete; the dispatch wrapper bumps
-    last_event_received_s on each NOTIFY received.
-    """
-
-    def __init__(self) -> None:
-        self.is_listening: bool = False
-        self.last_event_received_s: float = time.time()
-
-
 async def main() -> int:
     # 1. FIRST — sets up JSON stdout sink + InterceptHandler
     init_logging()
@@ -447,34 +437,35 @@ async def main() -> int:
         initial_assets=_bootstrap_ids,
     )
 
-    # ── Plan 05 wires: EventListener + on_snapshot_complete dispatch ─────
-    event_listener: Any = _EventListenerWrapper()
+    # Phase 05.1: NOTIFY is only a doorbell. One durable pump owns refresh and
+    # cursor advancement; its initial wake replaces catch-up fan-out + sentinel
+    # prime, and its timer keeps working while LISTEN is disconnected.
+    reconciliation_state = ReconciliationState()
+    dsn = settings.supabase_db_dsn.get_secret_value()
 
-    def _dispatch_on_snapshot(payload: dict) -> None:
-        """Sync-callback bridge from asyncpg loop to async refresh handler.
+    async def _refresh_latest(payload: dict) -> bool:
+        return await on_snapshot_complete(
+            payload,
+            ws_consumer=ws_consumer,
+            settings=settings,
+            mirror=l2_mirror,
+        )
 
-        Plan 06: pass `mirror=l2_mirror` so candidate refresh persists
-        diff to l2_candidates (D-07 dashboard write path).
-        """
-        event_listener.last_event_received_s = time.time()
-        try:
-            asyncio.create_task(
-                on_snapshot_complete(
-                    payload,
-                    ws_consumer=ws_consumer,
-                    settings=settings,
-                    mirror=l2_mirror,
-                )
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"on_snapshot_complete dispatch failed: {e!r}")
-    # ─────────────────────────────────────────────────────────────────────────
+    reconciliation_pump = ReconciliationPump(
+        store=AsyncpgCursorStore(dsn=dsn),
+        refresh=_refresh_latest,
+        state=reconciliation_state,
+        poll_seconds=settings.event_reconcile_poll_seconds,
+    )
+
+    def _on_snapshot_notification(payload: dict) -> None:
+        reconciliation_pump.notify(payload)
 
     app = create_l2_app(
         sqlite_store=sqlite_store,
         settings=settings,
         ws_consumer=ws_consumer,
-        event_listener=event_listener,
+        event_listener=reconciliation_state,
     )
 
     config = uvicorn.Config(
@@ -517,89 +508,28 @@ async def main() -> int:
     )
 
     # Plan 04 wiring — watchdog + consumer tasks alongside server_task.
-    # Plan 05 wiring — event listener task (asyncpg LISTEN) + startup catchup.
+    # Phase 05.1 — event listener and durable reconciliation remain independent.
     watchdog_task = asyncio.create_task(watchdog.watch(stop_event))
     consumer_task = asyncio.create_task(ws_consumer.run(stop_event))
-
-    # ── Plan 05: startup catch-up (Plan 06 cursor table absence tolerated) ──
-    # P0 fix (2026-05-25): catchup must REPLAY each missed snapshot through the
-    # dispatch chain, then advance l2_event_cursor.last_snapshot_id so the next
-    # restart is monotonic. Prior code only logged the count; missed snapshots
-    # silently never reached candidate_refresh, leaving WS subscribed_assets
-    # empty on every cold start.
-    try:
-        dsn = settings.supabase_db_dsn.get_secret_value()
-        if dsn:
-            missed = await catchup_from_cursor(dsn=dsn, consumer="l2-candidate-refresh")
-            if missed:
-                logger.info(
-                    f"event-bus catchup: replaying {len(missed)} missed snapshots"
-                )
-                for row in missed:
-                    _dispatch_on_snapshot(
-                        {"snapshot_id": row["id"], "ts_s": row["taken_at_ms"] / 1000.0}
-                    )
-                # Advance cursor — best-effort; cursor table is in Supabase, so
-                # use the same dsn. fail-soft on connection error.
-                try:
-                    import asyncpg as _asyncpg
-                    _conn = await _asyncpg.connect(dsn=dsn)
-                    try:
-                        await _conn.execute(
-                            "INSERT INTO l2_event_cursor (consumer, last_snapshot_id) "
-                            "VALUES ($1, $2) ON CONFLICT (consumer) DO UPDATE "
-                            "SET last_snapshot_id = EXCLUDED.last_snapshot_id",
-                            "l2-candidate-refresh",
-                            int(missed[-1]["id"]),
-                        )
-                        logger.info(
-                            f"event-bus catchup: cursor advanced to snapshot_id={missed[-1]['id']}"
-                        )
-                    finally:
-                        await _conn.close()
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        f"event-bus catchup: cursor advance failed (fail-soft): {e!r}"
-                    )
-            else:
-                logger.info("event-bus catchup: no missed snapshots")
-        else:
-            logger.info("event-bus catchup skipped: supabase_db_dsn not set")
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            f"catchup_from_cursor failed (fail-soft, Plan 06 may not have shipped yet): {e!r}"
-        )
-
-    # ── Phase 04.1 G-02: eager startup-prime (D-01.1/D-01.2) ────────────────
-    # Catchup-with-no-missed leaves candidate set at bootstrap ids only
-    # (04-SOAK-LOG §G-02). Force ONE markets_latest fetch so the WS subscribes
-    # to the real candidate set on every cold start, independent of missed
-    # count. Additive — does NOT replace D-04 bootstrap fallback (bootstrap_ids
-    # already drive WS before this fires). Sentinel snapshot_id=-1 is safe:
-    # on_snapshot_complete uses snapshot_id only for log lines, never a row read.
-    # G-01 fix (39c60ef) guarantees this first call passes the refresh debounce.
-    _dispatch_on_snapshot(
-        {"snapshot_id": -1, "_startup_prime": True, "ts_s": time.time()}
+    pump_task = asyncio.create_task(
+        reconciliation_pump.run(stop_event), name="reconciliation-pump"
     )
-    logger.info("event-bus startup-prime dispatched (G-02 cross-restart robustness)")
 
     # ── Plan 05: long-running listener task ─────────────────────────────────
     async def _listener_runner() -> None:
-        """Wrap listen_snapshot_complete so health wrapper flips is_listening."""
-        try:
-            event_listener.is_listening = True
-            dsn = settings.supabase_db_dsn.get_secret_value()
-            if not dsn:
-                logger.warning(
-                    "event listener: supabase_db_dsn not set; idling until shutdown"
-                )
-                await stop_event.wait()
-                return
-            await listen_snapshot_complete(
-                dsn=dsn, on_event=_dispatch_on_snapshot, stop_event=stop_event
+        """Run LISTEN independently; termination state is updated by listener."""
+        if not dsn:
+            logger.warning(
+                "event listener: supabase_db_dsn not set; idling until shutdown"
             )
-        finally:
-            event_listener.is_listening = False
+            await stop_event.wait()
+            return
+        await listen_snapshot_complete(
+            dsn=dsn,
+            on_event=_on_snapshot_notification,
+            stop_event=stop_event,
+            state=reconciliation_state,
+        )
 
     listener_task = asyncio.create_task(_listener_runner())
 
@@ -648,6 +578,7 @@ async def main() -> int:
         watchdog_task.cancel()
         consumer_task.cancel()
         listener_task.cancel()
+        pump_task.cancel()
         l3_promoter_task.cancel()
         # F-04 bounded shutdown — even if any task ignores cancel, exit within 5s each
         for task, name in (
@@ -655,6 +586,7 @@ async def main() -> int:
             (watchdog_task, "watchdog"),
             (consumer_task, "consumer"),
             (listener_task, "listener"),
+            (pump_task, "reconciliation-pump"),
             (l3_promoter_task, "l3-promoter"),
         ):
             try:

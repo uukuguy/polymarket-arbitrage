@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Protocol
+from typing import Protocol
 
 import asyncpg
 from loguru import logger
@@ -27,6 +28,11 @@ class ReconciliationState:
     committed_cursor: int = 0
     cursor_lag: int = 0
     last_error: str | None = None
+
+    @property
+    def is_listening(self) -> bool:
+        """Backward-compatible health name; value is actual connection truth."""
+        return self.is_connected
 
 
 class CursorStore(Protocol):
@@ -59,7 +65,11 @@ class AsyncpgCursorStore:
             await conn.close()
 
     async def commit(self, snapshot_id: int) -> None:
-        if isinstance(snapshot_id, bool) or not isinstance(snapshot_id, int) or snapshot_id < 0:
+        if (
+            isinstance(snapshot_id, bool)
+            or not isinstance(snapshot_id, int)
+            or snapshot_id < 0
+        ):
             raise ValueError("snapshot_id must be a non-negative integer")
         conn = await asyncpg.connect(dsn=self._dsn)
         try:

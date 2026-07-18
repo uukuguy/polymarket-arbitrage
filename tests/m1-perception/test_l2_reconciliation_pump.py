@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -170,6 +170,28 @@ async def test_cursor_commit_failure_retains_cursor():
     assert state.committed_cursor == 5
     assert state.cursor_lag == 1
     assert "write failed" in state.last_error
+
+
+@pytest.mark.asyncio
+async def test_asyncpg_cursor_commit_updates_freshness(monkeypatch):
+    from polyarb.events import reconciliation
+
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value="INSERT 0 1")
+    conn.close = AsyncMock()
+    monkeypatch.setattr(
+        reconciliation.asyncpg, "connect", AsyncMock(return_value=conn)
+    )
+    store = reconciliation.AsyncpgCursorStore(
+        dsn="postgresql://test", consumer="l2-candidate-refresh"
+    )
+
+    await store.commit(42)
+
+    sql, consumer, snapshot_id = conn.execute.await_args.args
+    assert "updated_at=now()" in sql
+    assert (consumer, snapshot_id) == ("l2-candidate-refresh", 42)
+    conn.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
