@@ -26,6 +26,20 @@ CLI_RE = re.compile(
 ROUTE_RE = re.compile(
     r'^[+-](?![+-]).*Route\("/[a-z0-9_/{}/.-]+"', re.MULTILINE
 )
+DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
+HEALTH_PATHS = {
+    "src/polyarb/http/health.py",
+    "src/polyarb/http/l2_health.py",
+}
+M1_CLI_PATHS = {
+    "src/polyarb/cli_observation.py",
+    "src/polyarb/cli_translation.py",
+    "src/polyarb/snapshot/cli.py",
+}
+ROUTE_PATHS = {
+    "src/polyarb/http/app.py",
+    "src/polyarb/http/l2_app.py",
+}
 
 
 def _make_targets(root: Path) -> set[str]:
@@ -102,6 +116,21 @@ def validate_manual(root: Path, text: str) -> list[str]:
     return errors
 
 
+def _diff_by_path(paths: list[str], diff: str) -> dict[str, str]:
+    chunks: dict[str, list[str]] = {}
+    current_path: str | None = None
+    for line in diff.splitlines(keepends=True):
+        header = DIFF_HEADER_RE.match(line.rstrip("\n"))
+        if header:
+            current_path = header.group(2)
+            chunks.setdefault(current_path, [])
+        elif current_path is not None:
+            chunks[current_path].append(line)
+    if not chunks and len(paths) == 1:
+        return {paths[0]: diff}
+    return {path: "".join(lines) for path, lines in chunks.items()}
+
+
 def classify_staged_impact(paths: list[str], diff: str) -> bool:
     if any(path.startswith("alembic/versions/") for path in paths):
         return True
@@ -110,8 +139,14 @@ def classify_staged_impact(paths: list[str], diff: str) -> bool:
         for path in paths
     ):
         return True
-    patterns = (M1_TARGET_RE, HEALTH_RE, CLI_RE, ROUTE_RE)
-    return any(pattern.search(diff) for pattern in patterns)
+    changed = _diff_by_path(paths, diff)
+    return any(
+        (path == "Makefile" and M1_TARGET_RE.search(chunk))
+        or (path in HEALTH_PATHS and HEALTH_RE.search(chunk))
+        or (path in M1_CLI_PATHS and CLI_RE.search(chunk))
+        or (path in ROUTE_PATHS and ROUTE_RE.search(chunk))
+        for path, chunk in changed.items()
+    )
 
 
 def _git(*args: str) -> str:

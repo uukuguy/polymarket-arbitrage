@@ -85,9 +85,60 @@ def test_staged_classifier_is_narrow() -> None:
     assert classify_staged_impact(
         ["dashboard/app/new-view/page.tsx"], "diff --git a/x b/x\n"
     )
+    assert classify_staged_impact(["alembic/versions/0001_contract.py"], "")
     assert not classify_staged_impact(
         ["src/polyarb/http/l2_health.py"], "+    logger.info('refactor only')\n"
     )
     assert not classify_staged_impact(
         ["tests/m1-perception/test_health_endpoint.py"], "+def test_internal(): pass\n"
     )
+
+
+def test_staged_classifier_ignores_contract_syntax_outside_production_paths() -> None:
+    test_only_diff = """diff --git a/tests/unit/test_helpers.py b/tests/unit/test_helpers.py
+--- a/tests/unit/test_helpers.py
++++ b/tests/unit/test_helpers.py
+@@ -0,0 +1 @@
++checks["fake:age"] = []
+"""
+    assert not classify_staged_impact(
+        ["tests/unit/test_helpers.py", "src/polyarb/http/health.py"],
+        test_only_diff,
+    )
+
+    unrelated_tool_diff = """diff --git a/tools/admin.py b/tools/admin.py
+--- a/tools/admin.py
++++ b/tools/admin.py
+@@ -0,0 +1 @@
++@app.command()
+"""
+    assert not classify_staged_impact(
+        ["tools/admin.py", "src/polyarb/cli_observation.py"],
+        unrelated_tool_diff,
+    )
+
+
+def test_staged_classifier_matches_contract_syntax_on_production_paths() -> None:
+    health_diff = """diff --git a/src/polyarb/http/health.py b/src/polyarb/http/health.py
+--- a/src/polyarb/http/health.py
++++ b/src/polyarb/http/health.py
+@@ -0,0 +1 @@
++checks["snapshot:freshness"] = []
+"""
+    assert classify_staged_impact(["src/polyarb/http/health.py"], health_diff)
+
+    cli_diff = """diff --git a/src/polyarb/cli_observation.py b/src/polyarb/cli_observation.py
+--- a/src/polyarb/cli_observation.py
++++ b/src/polyarb/cli_observation.py
+@@ -0,0 +1 @@
++@app.command()
+"""
+    assert classify_staged_impact(["src/polyarb/cli_observation.py"], cli_diff)
+
+    route_diff = """diff --git a/src/polyarb/http/app.py b/src/polyarb/http/app.py
+--- a/src/polyarb/http/app.py
++++ b/src/polyarb/http/app.py
+@@ -0,0 +1 @@
++Route("/status", status)
+"""
+    assert classify_staged_impact(["src/polyarb/http/app.py"], route_diff)
