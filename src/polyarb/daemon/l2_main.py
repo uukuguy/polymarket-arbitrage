@@ -45,6 +45,7 @@ import asyncio
 import os
 import signal
 import sys
+from collections.abc import Callable
 from datetime import UTC
 from typing import Any
 
@@ -317,6 +318,40 @@ def _book_levels_rows_from_frame(frame: dict, max_levels: int = 10) -> list[dict
     return rows
 
 
+def make_l2_event_handler(
+    l2_mirror: L2SupabaseMirror | None,
+) -> Callable[[dict], bool]:
+    """Build the production WS-frame dispatcher and expose mirror truth."""
+
+    def _on_event(frame: dict) -> bool:
+        event_type = frame.get("event_type", "unknown")
+        asset_id_raw = frame.get("asset_id") or ""
+        logger.debug(f"ws frame type={event_type} asset={asset_id_raw[:16]}")
+        if l2_mirror is None:
+            return False
+
+        if event_type in ("price_change", "best_bid_ask", "book"):
+            row = _tob_row_from_frame(frame)
+            mirror_succeeded = False
+            if row is not None:
+                mirror_succeeded = l2_mirror.push_top_of_book([row]) is True
+            if event_type == "book":
+                from polyarb.observation import l3_promote
+
+                if asset_id_raw and asset_id_raw in l3_promote.get_l3_active_set():
+                    book_rows = _book_levels_rows_from_frame(frame, max_levels=10)
+                    if book_rows:
+                        l2_mirror.push_book_levels(book_rows)
+            return mirror_succeeded
+        if event_type == "last_trade_price":
+            row = _trade_row_from_frame(frame)
+            if row is not None:
+                l2_mirror.push_trades([row])
+        return False
+
+    return _on_event
+
+
 async def main() -> int:
     # 1. FIRST — sets up JSON stdout sink + InterceptHandler
     init_logging()
@@ -380,41 +415,7 @@ async def main() -> int:
             message="l2-mirror disabled (config); no l2_* writes will occur",
         )
 
-    def _on_event(frame: dict) -> bool:
-        """Plan 06 D-07: dispatch WS frame to L2SupabaseMirror by event_type.
-
-        T-03-04-01 mitigation: log only event_type + asset prefix, never body.
-        Mirror is fail-soft — call returns False on failure but never raises.
-        """
-        event_type = frame.get("event_type", "unknown")
-        asset_id_raw = frame.get("asset_id") or ""
-        logger.debug(f"ws frame type={event_type} asset={asset_id_raw[:16]}")
-        if l2_mirror is None:
-            return False  # disabled — no production mirror evidence
-
-        if event_type in ("price_change", "best_bid_ask", "book"):
-            row = _tob_row_from_frame(frame)
-            mirror_succeeded = False
-            if row is not None:
-                mirror_succeeded = l2_mirror.push_top_of_book([row]) is True
-            # Phase 05 D-04: book events for L3-promoted assets ALSO write
-            # full depth. TOB path above remains the unconditional baseline;
-            # this depth write is gated on the L3 active set populated by the
-            # promoter (Plan 04). Local import avoids picking up a stale
-            # binding if l3_promote._l3_active_set is reassigned at runtime.
-            if event_type == "book":
-                from polyarb.observation import l3_promote
-
-                if asset_id_raw and asset_id_raw in l3_promote.get_l3_active_set():
-                    book_rows = _book_levels_rows_from_frame(frame, max_levels=10)
-                    if book_rows:
-                        l2_mirror.push_book_levels(book_rows)
-            return mirror_succeeded
-        elif event_type == "last_trade_price":
-            row = _trade_row_from_frame(frame)
-            if row is not None:
-                l2_mirror.push_trades([row])
-        return False
+    _on_event = make_l2_event_handler(l2_mirror)
 
     # Bootstrap asset_ids from env (Phase 03 Wave 5 deploy aid 2026-05-25):
     # without this, L2 cold-starts with empty subscribed_assets and idles

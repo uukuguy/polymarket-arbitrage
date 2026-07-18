@@ -159,6 +159,7 @@ async def test_refresh_cancellation_compensates_then_propagates() -> None:
         await asyncio.wait_for(task, timeout=0.2)
     ws.close.assert_awaited_once()
     assert len(consumer._watchdog._reconnect_timestamps) == 1
+    assert consumer._book_evidence_waiters == {}
 
 
 @pytest.mark.asyncio
@@ -230,6 +231,21 @@ async def test_initializer_cancellation_compensates_then_propagates() -> None:
         await asyncio.wait_for(task, timeout=0.2)
     candidate.close.assert_awaited_once()
     assert len(consumer._watchdog._reconnect_timestamps) == 1
+
+
+@pytest.mark.asyncio
+async def test_compensated_generation_history_is_bounded() -> None:
+    consumer, _ws = _consumer()
+
+    async def _exercise() -> None:
+        for generation in range(140):
+            ws = MagicMock()
+            ws.close = AsyncMock(return_value=None)
+            await consumer._compensate_generation(ws, generation)
+
+    await asyncio.wait_for(_exercise(), timeout=0.3)
+    assert len(consumer._compensated_generations) <= 128
+    assert len(consumer._compensated_generation_order) <= 128
 
 
 @pytest.mark.asyncio

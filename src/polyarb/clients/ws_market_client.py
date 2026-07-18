@@ -44,6 +44,10 @@ PING_INTERVAL_S = 10
 MAX_FRAME_SIZE = 2**22
 
 
+class WsConnectionInitializationFailed(RuntimeError):
+    """A compensated candidate connection failed before becoming current."""
+
+
 async def stream_market_events(
     assets_ids: list[str] | Callable[[], list[str]],
     *,
@@ -139,6 +143,11 @@ async def stream_market_events(
             code = getattr(rcvd, "code", None) if rcvd is not None else None
             reason = getattr(rcvd, "reason", None) if rcvd is not None else None
             logger.warning(f"ws connection closed code={code} reason={reason!r}; reconnecting…")
+            continue
+        except WsConnectionInitializationFailed as e:
+            # The consumer already bounded and compensated the ambiguous
+            # candidate socket. Keep ownership in the reconnect iterator.
+            logger.warning(f"ws connection initialization failed: {e}; reconnecting…")
             continue
         except asyncio.CancelledError:
             # F-04: must NOT be swallowed. SIGTERM relies on this.

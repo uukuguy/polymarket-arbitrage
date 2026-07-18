@@ -22,6 +22,7 @@ import json
 import os
 import time
 import warnings
+from collections import deque
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -32,11 +33,15 @@ from loguru import logger
 # websockets.connection is deprecated and emits a DeprecationWarning).
 from websockets.protocol import State as WsState
 
-from polyarb.clients.ws_market_client import stream_market_events
+from polyarb.clients.ws_market_client import (
+    WsConnectionInitializationFailed,
+    stream_market_events,
+)
 from polyarb.daemon.ws_watchdog import WsWatchdog
 
 _QUIET_REFRESH_SEND_TIMEOUT_S: float = 5.0
 _BOOK_EVIDENCE_TIMEOUT_S: float = 5.0
+_COMPENSATED_GENERATIONS_MAX: int = 128
 
 # ── Phase 03.1-06 D-04 / Phase 04.1 G-03: POLYARB_WS_TEST_KILL chaos primitive ─
 #
@@ -158,6 +163,7 @@ class WsConsumer:
         self._connection_generation = 0
         self._book_evidence_waiters: dict[tuple[int, str], set[asyncio.Future[bool]]] = {}
         self._compensated_generations: set[int] = set()
+        self._compensated_generation_order: deque[int] = deque()
         # Wire the liveness closure into the watchdog so it uses it for the gate.
         self._watchdog._liveness_check = self._liveness_check
 
@@ -186,30 +192,39 @@ class WsConsumer:
 
     async def _initialize_connection(self, ws: Any) -> None:
         """Fence generation, initial subscribe, and publication atomically."""
-        async with self._subscription_control_lock:
-            generation = self._connection_generation + 1
-            self._connection_generation = generation
-            active_assets = self._compute_active_assets()
-            ok = await self._send_control(
-                ws,
-                {
-                    "type": "market",
-                    "assets_ids": active_assets,
-                    "initial_dump": True,
-                },
-            )
-            if ok:
-                self._current_ws = ws
-                return
+        generation = self._connection_generation + 1
+        try:
+            async with self._subscription_control_lock:
+                generation = self._connection_generation + 1
+                self._connection_generation = generation
+                active_assets = self._compute_active_assets()
+                ok = await self._send_control(
+                    ws,
+                    {
+                        "type": "market",
+                        "assets_ids": active_assets,
+                        "initial_dump": True,
+                    },
+                )
+                if ok:
+                    self._current_ws = ws
+                    return
+        except asyncio.CancelledError:
+            await self._compensate_generation(ws, generation)
+            raise
         await self._compensate_generation(ws, generation)
-        raise RuntimeError("initial WS subscription failed")
+        raise WsConnectionInitializationFailed("initial WS subscription failed")
 
     async def _compensate_generation(self, ws: Any, generation: int) -> None:
         """Close exactly one ambiguous socket per generation, preserving cancel."""
         async with self._subscription_control_lock:
             if generation in self._compensated_generations:
                 return
+            if len(self._compensated_generation_order) >= _COMPENSATED_GENERATIONS_MAX:
+                expired = self._compensated_generation_order.popleft()
+                self._compensated_generations.discard(expired)
             self._compensated_generations.add(generation)
+            self._compensated_generation_order.append(generation)
             if not self._watchdog.reserve_reconnect():
                 logger.warning("ws compensation skipped: reconnect budget exhausted")
                 return
@@ -531,10 +546,8 @@ class WsConsumer:
              must not include the failed token after this path runs.)
           5. Send succeeds → mutate _l3_active_set, return True.
 
-        Concurrent safety: websockets 15+ supports send + recv from different
-        async tasks; this method does not need synchronization (the recv loop
-        runs in a separate task and the library handles send/recv decoupling
-        internally).
+        Subscription control is serialized with candidate refresh, reconnect
+        initialization, and every desired-state commit.
         """
         if not asset_ids:
             return True

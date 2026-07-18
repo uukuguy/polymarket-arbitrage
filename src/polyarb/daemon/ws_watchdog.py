@@ -187,18 +187,10 @@ class WsWatchdog:
             self._state.state = "WAITING_FOR_EVENT"
             return
 
-        now = time.monotonic()
-
-        # Prune timestamps older than the storm window
-        cutoff = now - _STORM_WINDOW_S
-        while self._reconnect_timestamps and self._reconnect_timestamps[0] < cutoff:
-            self._reconnect_timestamps.popleft()
-
-        recent = len(self._reconnect_timestamps)
-
         # R5 storm cap — switch to DEGRADED_REST_POLLING (no more reconnects
         # for _DEGRADED_SLEEP_S; emit Sentry warning so the operator sees it).
-        if recent > _STORM_THRESHOLD:
+        if not self.reserve_reconnect():
+            recent = len(self._reconnect_timestamps)
             if self._state.state != "DEGRADED_REST_POLLING":
                 self._state.state = "DEGRADED_REST_POLLING"
                 logger.warning(
@@ -223,7 +215,6 @@ class WsWatchdog:
         wait_s = _BACKOFF_S[attempt_idx]
 
         self._state.state = "RECONNECTING"
-        self._reconnect_timestamps.append(now)
         self._state.reconnect_attempt += 1
 
         logger.info(
