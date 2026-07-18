@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,37 @@ def _repo(tmp_path: Path) -> Path:
     )
     (tmp_path / "dashboard/app/status/page.tsx").write_text("export default 1\n")
     return tmp_path
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args], cwd=repo, text=True, capture_output=True, check=False
+    )
+
+
+def _hook_repo(tmp_path: Path) -> Path:
+    repo = _repo(tmp_path)
+    (repo / "scripts").mkdir()
+    (repo / ".githooks").mkdir()
+    shutil.copy(ROOT / "scripts/check_m1_manual.py", repo / "scripts")
+    shutil.copy(ROOT / ".githooks/pre-commit", repo / ".githooks")
+    (repo / MANUAL).write_text(_valid_manual())
+    assert _git(repo, "init", "-q").returncode == 0
+    assert _git(repo, "config", "user.email", "test@example.com").returncode == 0
+    assert _git(repo, "config", "user.name", "Test User").returncode == 0
+    assert _git(repo, "add", ".").returncode == 0
+    assert _git(repo, "commit", "--no-verify", "-qm", "fixture").returncode == 0
+    return repo
+
+
+def _run_precommit(repo: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", ".githooks/pre-commit"],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 def test_valid_manual_has_no_errors(tmp_path: Path) -> None:
@@ -191,6 +223,73 @@ def test_staged_unicode_manual_path_runs_validation(
     assert validations == [(root, _valid_manual())]
 
 
+def test_precommit_invokes_staged_m1_manual_check_before_summary_exit() -> None:
+    text = (ROOT / ".githooks/pre-commit").read_text()
+    check = "uv run python scripts/check_m1_manual.py --staged"
+    assert check in text
+    assert text.index(check) < text.index("PHASE_PLAN=")
+
+
+def test_precommit_blocks_staged_public_contract_without_manual_sync(
+    tmp_path: Path,
+) -> None:
+    repo = _hook_repo(tmp_path)
+    health = repo / "src/polyarb/http/health.py"
+    health.write_text(
+        health.read_text() + 'checks["snapshot:freshness"] = []\n'
+    )
+    assert _git(repo, "add", str(health.relative_to(repo))).returncode == 0
+
+    result = _run_precommit(repo)
+
+    assert result.returncode == 1
+    assert "M1 operator contract changed" in result.stdout
+
+
+def test_precommit_allows_staged_public_contract_with_manual_sync(
+    tmp_path: Path,
+) -> None:
+    repo = _hook_repo(tmp_path)
+    health = repo / "src/polyarb/http/health.py"
+    health.write_text(
+        health.read_text() + 'checks["snapshot:freshness"] = []\n'
+    )
+    manual = repo / MANUAL
+    manual.write_text(manual.read_text() + "\n2026-07-18 | no operator impact\n")
+    assert _git(repo, "add", str(health.relative_to(repo)), str(MANUAL)).returncode == 0
+
+    result = _run_precommit(repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "M1 manual contract: OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("path", "addition"),
+    [
+        ("src/polyarb/http/health.py", "logger.info('refactor only')\n"),
+        (
+            "tests/m1-perception/test_health_endpoint.py",
+            'checks["fake:age"] = []\n',
+        ),
+        ("scripts/maintenance.py", "print('operational log only')\n"),
+    ],
+)
+def test_precommit_ignores_staged_non_contract_changes(
+    tmp_path: Path, path: str, addition: str
+) -> None:
+    repo = _hook_repo(tmp_path)
+    changed = repo / path
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text((changed.read_text() if changed.exists() else "") + addition)
+    assert _git(repo, "add", path).returncode == 0
+
+    result = _run_precommit(repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == ""
+
+
 def test_repository_m1_manual_passes_contract() -> None:
     manual = ROOT / "docs/M1-市场感知平台使用手册.md"
     assert manual.is_file(), "living M1 manual must exist"
@@ -236,7 +335,11 @@ def test_manual_keeps_reviewed_operator_safety_facts() -> None:
     assert "`make smoke-test`" not in read_only
     assert "候选不是独立 staging 部署" in text
     assert "`POLYARB_SCAN_SHARED_SECRET`" in text
-    assert "05.2-03 将把检查器集成到 pre-commit hook" in text
+    section_10 = text.split("## 10. ", 1)[1]
+    assert "staged guard 已在 pre-commit hook 生效" in section_10
+    assert "public contract" in section_10
+    assert "unrelated、test-only、log-only" in section_10
+    assert "05.2-03 将把检查器集成到 pre-commit hook" not in section_10
     assert "candidates、asset TOB/trades 和 signals" in text
     assert "`make smoke-l3-dashboard asset_id=...`" in text
     assert "手工检查 `/status`" in text

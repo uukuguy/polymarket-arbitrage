@@ -13,6 +13,10 @@
 
 set -euo pipefail
 
+# Keep the M1 product/operations manual synchronized with public contracts.
+# The checker is offline and exits immediately for unrelated staged changes.
+uv run python scripts/check_m1_manual.py --staged
+
 # Read the prepared commit message (first line is subject)
 COMMIT_MSG_FILE="${1:-}"
 if [ -n "$COMMIT_MSG_FILE" ] && [ -f "$COMMIT_MSG_FILE" ]; then
