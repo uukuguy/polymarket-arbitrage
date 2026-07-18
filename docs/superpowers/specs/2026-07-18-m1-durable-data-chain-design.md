@@ -201,3 +201,79 @@ The learning documentation must explain the core mental model:
 Phase 05's 24-hour strict N=5 soak begins only after this phase proves the
 upstream prerequisites remain fresh. This design does not authorize relaxing
 candidate or L3 thresholds to obtain a green verdict.
+
+## 8. Production amendment: quiet-market book refresh
+
+### 8.1 Evidence and contradiction
+
+The no-restart production proof passed for LISTEN reconnect, polling recovery,
+cursor convergence, and candidate projection. A later strict health check still
+failed after the five subscribed candidates produced no business frame for more
+than 600 seconds:
+
+- the WebSocket remained open and continued completing ping/pong keepalives;
+- `ws:connection_state` was `WAITING_FOR_EVENT`;
+- `ws:last_event_age_seconds` and `mirror:l2_tob_age_seconds` crossed their
+  existing fail thresholds;
+- the watchdog intentionally treated a live-but-quiet socket as benign and did
+  not reconnect.
+
+This is a contract contradiction, not proof that the socket transport failed:
+the runtime accepts indefinite market silence while strict health requires a
+recent business snapshot. The freshness thresholds remain unchanged.
+
+### 8.2 Chosen behavior
+
+Before a quiet subscription reaches the existing warning boundary, the
+consumer sends one in-band dynamic subscription update for the complete active
+asset set:
+
+```json
+{
+  "operation": "subscribe",
+  "assets_ids": ["..."],
+  "initial_dump": true
+}
+```
+
+Polymarket's official WebSocket contract permits subscription changes without
+reconnecting, and its changelog defines `initial_dump` as the optional request
+for initial order-book state. A `book` event is emitted when subscribing to a
+market. The relevant primary references are:
+
+- https://docs.polymarket.com/market-data/websocket/overview
+- https://docs.polymarket.com/market-data/websocket/market-channel
+- https://docs.polymarket.com/changelog
+
+The refresh is single-flight and rate-limited. It uses the real current union of
+candidate and L3 asset sets, does not mutate either set, and does not mark the
+data path fresh merely because the send succeeded. Only a received business
+frame may update `last_event_at_s`, touch the watchdog, and write the mirror.
+
+### 8.3 Failure behavior
+
+- No live socket or a failed send leaves all freshness timestamps unchanged;
+  strict health therefore continues to expose the failure.
+- Repeated refresh requests are bounded so an upstream outage cannot produce a
+  send storm.
+- Normal subscription diffing and transport reconnect behavior remain
+  unchanged.
+- This amendment does not alter WS, mirror, candidate, or L3 health thresholds.
+
+### 8.4 Verification
+
+Automated tests must prove:
+
+1. quiet live sockets send one refresh payload containing the current active
+   union and `initial_dump=true`;
+2. refresh is suppressed before the trigger age and during its cooldown;
+3. empty sets, missing sockets, and send failures do not forge freshness;
+4. a returned `book` frame follows the normal dispatch path and refreshes the
+   mirror;
+5. cancellation remains prompt.
+
+Production acceptance requires the same Fly machine identity throughout, a
+logged quiet refresh followed by real `book` frames, cursor lag zero, converged
+five-asset candidate projection, and strict health with the existing freshness
+thresholds. Phase 05's independent L3 `0/10` gate remains a warning/verdict and
+is not relaxed by this recovery amendment.
