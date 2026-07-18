@@ -39,6 +39,14 @@ def _make_fake_conn(*, fetchrow_val=None, fetch_val=None, fetchrow_exc=None, fet
     return conn
 
 
+class _LifecycleState:
+    """Minimal state spy matching the listener's Phase 05.1 contract."""
+
+    def __init__(self) -> None:
+        self.is_connected = False
+        self.reconnect_count = 0
+
+
 @pytest.mark.asyncio
 async def test_listener_calls_on_event_with_parsed_payload():
     """add_listener callback parses JSON payload and dispatches to on_event."""
@@ -190,3 +198,133 @@ async def test_listener_propagates_cancellederror():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_listener_connection_termination_drives_reconnect_and_live_state():
+    """A dead LISTEN connection wakes the outer loop without daemon restart."""
+    from polyarb.events import listener
+
+    real_sleep = asyncio.sleep
+    states_seen_at_connect: list[bool] = []
+    termination_callbacks: list = []
+    state = _LifecycleState()
+
+    def _connection() -> MagicMock:
+        conn = _make_fake_conn()
+        conn.add_termination_listener = MagicMock(
+            side_effect=lambda callback: termination_callbacks.append(callback)
+        )
+        return conn
+
+    first = _connection()
+    second = _connection()
+
+    async def _connect(*, dsn: str):  # noqa: ARG001
+        states_seen_at_connect.append(state.is_connected)
+        return first if len(states_seen_at_connect) == 1 else second
+
+    async def _no_backoff(_: float) -> None:
+        await real_sleep(0)
+
+    stop_event = asyncio.Event()
+    with (
+        patch.object(listener.asyncpg, "connect", side_effect=_connect),
+        patch.object(listener.asyncio, "sleep", side_effect=_no_backoff),
+    ):
+        task = asyncio.create_task(
+            listener.listen_snapshot_complete(
+                dsn="postgresql://test",
+                on_event=lambda payload: None,
+                stop_event=stop_event,
+                state=state,
+            )
+        )
+        for _ in range(50):
+            await real_sleep(0.01)
+            if termination_callbacks and state.is_connected:
+                break
+
+        assert state.is_connected is True
+        termination_callbacks[0](first)
+
+        for _ in range(50):
+            await real_sleep(0.01)
+            if len(states_seen_at_connect) >= 2 and state.is_connected:
+                break
+
+        assert len(states_seen_at_connect) >= 2
+        assert states_seen_at_connect == [False, False]
+        assert state.reconnect_count == 1
+        assert state.is_connected is True
+
+        stop_event.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert state.is_connected is False
+    first.close.assert_awaited_once()
+    second.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_listener_sets_connected_only_after_listen_succeeds():
+    """Health state is connection truth, not listener task intent."""
+    from polyarb.events import listener
+
+    state = _LifecycleState()
+    failed = _make_fake_conn()
+    failed.add_listener = AsyncMock(side_effect=RuntimeError("LISTEN denied"))
+    good = _make_fake_conn()
+    good.add_termination_listener = MagicMock()
+    stop_event = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def _no_backoff(_: float) -> None:
+        assert state.is_connected is False
+        stop_event.set()
+        await real_sleep(0)
+
+    with (
+        patch.object(listener.asyncpg, "connect", AsyncMock(side_effect=[failed, good])),
+        patch.object(listener.asyncio, "sleep", side_effect=_no_backoff),
+    ):
+        await listener.listen_snapshot_complete(
+            dsn="postgresql://test",
+            on_event=lambda payload: None,
+            stop_event=stop_event,
+            state=state,
+        )
+
+    assert state.is_connected is False
+    assert state.reconnect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_listener_cancellation_clears_state_and_closes_connection():
+    """Cancellation propagates after pending race helpers and connection close."""
+    from polyarb.events import listener
+
+    state = _LifecycleState()
+    conn = _make_fake_conn()
+    conn.add_termination_listener = MagicMock()
+    stop_event = asyncio.Event()
+
+    with patch.object(listener.asyncpg, "connect", AsyncMock(return_value=conn)):
+        task = asyncio.create_task(
+            listener.listen_snapshot_complete(
+                dsn="postgresql://test",
+                on_event=lambda payload: None,
+                stop_event=stop_event,
+                state=state,
+            )
+        )
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if state.is_connected:
+                break
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert state.is_connected is False
+    conn.close.assert_awaited_once()
