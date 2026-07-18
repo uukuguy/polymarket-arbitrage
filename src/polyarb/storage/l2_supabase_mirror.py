@@ -38,8 +38,9 @@ Threat model carry-over (T-03-06-04/-05):
 from __future__ import annotations
 
 import time as _time
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterator
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import sentry_sdk
 from loguru import logger
@@ -132,7 +133,7 @@ class L2SupabaseMirror:
         self,
         url: str,
         service_key: str,
-        store: "SQLiteStore | None" = None,
+        store: SQLiteStore | None = None,
     ) -> None:
         """Create supabase client. Exactly ONE client per instance.
 
@@ -151,7 +152,7 @@ class L2SupabaseMirror:
         self._client: Client = create_client(url, service_key)
         # Phase 03.1 Plan 01: optional freshness-cache writer. Daemon wires this
         # in Plan 02; legacy / direct callers may pass None.
-        self._store: "SQLiteStore | None" = store
+        self._store: SQLiteStore | None = store
 
     # ── _refresh_freshness_cache (Phase 03.1 Plan 01) ────────────────────────
 
@@ -390,7 +391,7 @@ class L2SupabaseMirror:
         }
 
         try:
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = datetime.now(UTC).isoformat()
             stale_keys = sorted(active_keys - desired_by_key.keys())
             for asset_id, recipe_name in stale_keys:
                 (
@@ -453,9 +454,7 @@ class L2SupabaseMirror:
         if not asset_ids:
             return True
         try:
-            from datetime import datetime, timezone
-
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = datetime.now(UTC).isoformat()
             (
                 self._client.table("l2_candidates")
                 .update({"removed_at_ts": now_iso})

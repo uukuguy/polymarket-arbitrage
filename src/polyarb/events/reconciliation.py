@@ -27,6 +27,7 @@ class ReconciliationState:
     latest_snapshot_id: int = 0
     committed_cursor: int = 0
     cursor_lag: int = 0
+    cursor_lag_since_s: float | None = None
     last_error: str | None = None
 
     @property
@@ -124,6 +125,11 @@ class ReconciliationPump:
             self.state.committed_cursor = cursor
             self.state.latest_snapshot_id = latest
             self.state.cursor_lag = max(0, latest - cursor)
+            if self.state.cursor_lag > 0:
+                if self.state.cursor_lag_since_s is None:
+                    self.state.cursor_lag_since_s = time.time()
+            else:
+                self.state.cursor_lag_since_s = None
 
             if latest <= cursor:
                 self.state.last_reconciliation_success_s = time.time()
@@ -140,6 +146,7 @@ class ReconciliationPump:
             await self.store.commit(latest)
             self.state.committed_cursor = latest
             self.state.cursor_lag = 0
+            self.state.cursor_lag_since_s = None
             self.state.last_reconciliation_success_s = time.time()
             self.state.last_error = None
             return True

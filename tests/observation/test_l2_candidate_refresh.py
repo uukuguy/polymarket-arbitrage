@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from datetime import UTC
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -539,7 +540,7 @@ async def test_on_snapshot_complete_upsert_rows_include_included_at_ts(
     mirroring `mark_candidates_removed`'s `now_iso` pattern. The stamp is an
     ISO-8601 UTC string (e.g. '2026-06-02T00:00:00+00:00').
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import polyarb.observation.l2_candidate_refresh as mod
 
@@ -564,14 +565,14 @@ async def test_on_snapshot_complete_upsert_rows_include_included_at_ts(
     fake_mirror = MagicMock()
     fake_mirror.reconcile_candidates.return_value = True
 
-    before = datetime.now(timezone.utc)
+    before = datetime.now(UTC)
     ok = await mod.on_snapshot_complete(
         {"snapshot_id": 99, "taken_at_ms": 1},
         ws_consumer=fake_ws,
         settings=settings,
         mirror=fake_mirror,
     )
-    after = datetime.now(timezone.utc)
+    after = datetime.now(UTC)
     assert ok is True
 
     fake_mirror.reconcile_candidates.assert_called_once()

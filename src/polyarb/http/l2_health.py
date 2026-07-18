@@ -19,7 +19,7 @@ T-03-03-06 mitigation: response body whitelists fields; never dict(settings) dum
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
@@ -55,7 +55,7 @@ _CANDIDATES_FETCH_FAIL_S = 600
 
 def _utc_now_iso() -> str:
     """Current UTC timestamp in ISO 8601 format with Z suffix."""
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _severity(a: str, b: str) -> str:
@@ -184,28 +184,131 @@ def _build_l2_health_checks(
             "time": _utc_now_iso(),
         }]
 
-    # ── Check 3: event_bus:listener_state ──────────────────────────────────
-    if event_listener is None:
-        checks["event_bus:listener_state"] = [{
-            "componentId": "event-listener",
-            "componentType": "asyncpg-listener",
-            "observedValue": "not_configured",
-            "status": "warn",
-            "output": "event_listener not yet wired (Plan 05 deliverable)",
-            "time": _utc_now_iso(),
-        }]
-        overall = _severity(overall, "warn")
+    # ── Check 3: event-bus chain truth (Phase 05.1) ────────────────────────
+    dsn_value = ""
+    try:
+        dsn_value = settings.supabase_db_dsn.get_secret_value()
+    except AttributeError:
+        pass
+    state_configured = event_listener is not None and bool(dsn_value)
+    is_connected = bool(getattr(event_listener, "is_connected", False))
+    if not state_configured:
+        connection_value = "not_configured"
+        connection_status = "warn"
+        connection_output = "supabase_db_dsn or event runtime state is missing"
     else:
-        is_listening = bool(getattr(event_listener, "is_listening", False))
-        listener_status = "pass" if is_listening else "warn"
-        checks["event_bus:listener_state"] = [{
+        connection_value = "listening" if is_connected else "reconnecting"
+        connection_status = "pass" if is_connected else "warn"
+        connection_output = "actual LISTEN connection state"
+    connection_entry = {
+        "componentId": "event-listener",
+        "componentType": "asyncpg-listener",
+        "observedValue": connection_value,
+        "status": connection_status,
+        "output": connection_output,
+        "time": _utc_now_iso(),
+    }
+    checks["event_bus:connection_state"] = [connection_entry]
+    # Compatibility alias for existing dashboards; value is now actual state.
+    checks["event_bus:listener_state"] = [dict(connection_entry)]
+    overall = _severity(overall, connection_status)
+
+    if event_listener is not None:
+        last_notification = getattr(event_listener, "last_notification_s", None)
+        try:
+            notification_age = max(0.0, now_s - float(last_notification))
+        except (TypeError, ValueError):
+            notification_age = None
+        checks["event_bus:last_notification_age_seconds"] = [{
             "componentId": "event-listener",
             "componentType": "asyncpg-listener",
-            "observedValue": "listening" if is_listening else "reconnecting",
-            "status": listener_status,
+            "observedValue": (
+                round(notification_age, 1) if notification_age is not None else None
+            ),
+            "observedUnit": "s",
+            "status": "pass",
+            "output": "diagnostic only; quiet notifications do not imply stalled work",
             "time": _utc_now_iso(),
         }]
-        overall = _severity(overall, listener_status)
+
+        stale_seconds_raw = getattr(settings, "event_reconcile_stale_seconds", 180)
+        try:
+            stale_seconds = float(stale_seconds_raw)
+        except (TypeError, ValueError):
+            stale_seconds = 180.0
+        last_success = getattr(
+            event_listener, "last_reconciliation_success_s", None
+        )
+        try:
+            reconciliation_age = max(0.0, now_s - float(last_success))
+        except (TypeError, ValueError):
+            reconciliation_age = None
+        if reconciliation_age is None:
+            reconciliation_status = "warn"
+            reconciliation_output = "cold-start: no successful reconciliation yet"
+        elif reconciliation_age > stale_seconds:
+            reconciliation_status = "fail"
+            reconciliation_output = "durable reconciliation is stale"
+        else:
+            reconciliation_status = "pass"
+            reconciliation_output = "durable reconciliation is fresh"
+        checks["event_bus:last_reconciliation_age_seconds"] = [{
+            "componentId": "event-reconciliation",
+            "componentType": "durable-cursor",
+            "observedValue": (
+                round(reconciliation_age, 1) if reconciliation_age is not None else None
+            ),
+            "observedUnit": "s",
+            "status": reconciliation_status,
+            "output": reconciliation_output,
+            "time": _utc_now_iso(),
+        }]
+        overall = _severity(overall, reconciliation_status)
+
+        try:
+            cursor_lag = max(0, int(getattr(event_listener, "cursor_lag", 0)))
+        except (TypeError, ValueError):
+            cursor_lag = 0
+        lag_since = getattr(event_listener, "cursor_lag_since_s", None)
+        try:
+            lag_age = max(0.0, now_s - float(lag_since))
+        except (TypeError, ValueError):
+            lag_age = None
+        if cursor_lag == 0:
+            lag_status = "pass"
+            lag_output = "durable cursor is caught up"
+        elif lag_age is not None and lag_age > stale_seconds:
+            lag_status = "fail"
+            lag_output = f"cursor lag persisted for {lag_age:.1f}s"
+        else:
+            lag_status = "warn"
+            lag_output = "cursor lag is within reconciliation grace"
+        checks["event_bus:cursor_lag"] = [{
+            "componentId": "event-reconciliation",
+            "componentType": "durable-cursor",
+            "observedValue": cursor_lag,
+            "observedUnit": "snapshots",
+            "status": lag_status,
+            "output": lag_output,
+            "time": _utc_now_iso(),
+        }]
+        overall = _severity(overall, lag_status)
+
+        try:
+            reconnect_count = max(
+                0, int(getattr(event_listener, "reconnect_count", 0))
+            )
+        except (TypeError, ValueError):
+            reconnect_count = 0
+        checks["event_bus:reconnect_count"] = [{
+            "componentId": "event-listener",
+            "componentType": "asyncpg-listener",
+            "observedValue": reconnect_count,
+            "observedUnit": "reconnects",
+            "status": "pass",
+            "output": "diagnostic reconnect counter",
+            "time": _utc_now_iso(),
+        }]
 
     # ── Check 4: mirror:l2_tob_age_seconds — D-08 three-branch (GAP-200) ──
     # Phase 04 Plan 03: three-branch chain-truth gate. Inverse of Phase 03.1

@@ -149,6 +149,7 @@ async def test_refresh_failure_retains_cursor(outcome):
     assert store.commits == []
     assert state.committed_cursor == 3
     assert state.cursor_lag == 1
+    assert state.cursor_lag_since_s is not None
     assert state.last_error
 
 
@@ -207,6 +208,7 @@ async def test_caught_up_poll_records_reconciliation_success_without_refresh():
     assert state.committed_cursor == 9
     assert state.latest_snapshot_id == 9
     assert state.cursor_lag == 0
+    assert state.cursor_lag_since_s is None
     assert state.last_reconciliation_success_s is not None
     assert state.last_error is None
 

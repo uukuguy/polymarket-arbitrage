@@ -17,7 +17,6 @@ W6 invariant: constructor receives REST URL (https://...supabase.co), NOT DSN.
 from __future__ import annotations
 
 import os
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest

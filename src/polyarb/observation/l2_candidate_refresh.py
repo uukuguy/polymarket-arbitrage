@@ -35,7 +35,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -458,7 +458,7 @@ async def on_snapshot_complete(
     # active DB keys every time repairs stale cold-start projections.
     if mirror is not None:
         snapshot_id = payload.get("snapshot_id")
-        included_at_ts = datetime.now(timezone.utc).isoformat()
+        included_at_ts = datetime.now(UTC).isoformat()
         desired_rows = [
             {
                 "snapshot_id": snapshot_id,
