@@ -234,6 +234,41 @@ class WsConsumer:
             if not future.done():
                 future.set_result(True)
 
+    async def _send_single_control_transaction(
+        self,
+        payload: dict[str, Any],
+        *,
+        commit: Callable[[], None] | None = None,
+        offline_commit: Callable[[], None] | None = None,
+    ) -> bool:
+        """Fence one control send, identity check, and optional state commit."""
+        ws: Any = None
+        generation = 0
+        try:
+            async with self._subscription_control_lock:
+                ws = self._current_ws
+                generation = self._connection_generation
+                if ws is None:
+                    if offline_commit is not None:
+                        offline_commit()
+                    return False
+                succeeded = await self._send_control(ws, payload)
+                identity_matches = (
+                    self._current_ws is ws
+                    and self._connection_generation == generation
+                )
+                if succeeded and identity_matches:
+                    if commit is not None:
+                        commit()
+                    return True
+        except asyncio.CancelledError:
+            if ws is not None:
+                await self._compensate_generation(ws, generation)
+            raise
+        if ws is not None:
+            await self._compensate_generation(ws, generation)
+        return False
+
     def _liveness_check(self) -> bool:
         """Return True when the current WS connection is provably alive.
 
@@ -433,42 +468,48 @@ class WsConsumer:
         ws: Any = None
         generation = 0
         failed = False
-        async with self._subscription_control_lock:
-            added = sorted(desired - self._candidate_set)
-            removed = sorted(self._candidate_set - desired)
-            ws = self._current_ws
-            generation = self._connection_generation
-            if ws is None:
-                # Publish desired state so a cold-start consumer can leave its
-                # empty-set wait and the next connection provider subscribes
-                # the newest candidates. False keeps the durable cursor
-                # retryable until live convergence is proven.
-                self._candidate_set = desired
-                return False
-            if added and not await self._send_control(
-                ws,
-                {
-                    "operation": "subscribe",
-                    "assets_ids": added,
-                    "initial_dump": True,
-                },
-            ):
-                failed = True
-            if (
-                not failed
-                and removed
-                and not await self._send_control(
-                    ws, {"operation": "unsubscribe", "assets_ids": removed}
-                )
-            ):
-                failed = True
-            if not failed and (
-                self._current_ws is not ws or self._connection_generation != generation
-            ):
-                failed = True
-            if not failed:
-                self._candidate_set = desired
-                return True
+        try:
+            async with self._subscription_control_lock:
+                added = sorted(desired - self._candidate_set)
+                removed = sorted(self._candidate_set - desired)
+                ws = self._current_ws
+                generation = self._connection_generation
+                if ws is None:
+                    # Publish desired state so a cold-start consumer can leave its
+                    # empty-set wait and the next connection provider subscribes
+                    # the newest candidates. False keeps the durable cursor
+                    # retryable until live convergence is proven.
+                    self._candidate_set = desired
+                    return False
+                if added and not await self._send_control(
+                    ws,
+                    {
+                        "operation": "subscribe",
+                        "assets_ids": added,
+                        "initial_dump": True,
+                    },
+                ):
+                    failed = True
+                if (
+                    not failed
+                    and removed
+                    and not await self._send_control(
+                        ws, {"operation": "unsubscribe", "assets_ids": removed}
+                    )
+                ):
+                    failed = True
+                if not failed and (
+                    self._current_ws is not ws
+                    or self._connection_generation != generation
+                ):
+                    failed = True
+                if not failed:
+                    self._candidate_set = desired
+                    return True
+        except asyncio.CancelledError:
+            if ws is not None:
+                await self._compensate_generation(ws, generation)
+            raise
         if ws is not None:
             await self._compensate_generation(ws, generation)
         return False
@@ -497,24 +538,15 @@ class WsConsumer:
         """
         if not asset_ids:
             return True
-        async with self._subscription_control_lock:
-            ws = self._current_ws
-            generation = self._connection_generation
-            if ws is None:
-                self._l3_active_set.update(asset_ids)
-                return False
-            if await self._send_control(
-                ws,
-                {
-                    "operation": "subscribe",
-                    "assets_ids": list(asset_ids),
-                    "initial_dump": True,
-                },
-            ):
-                self._l3_active_set.update(asset_ids)
-                return True
-        await self._compensate_generation(ws, generation)
-        return False
+        return await self._send_single_control_transaction(
+            {
+                "operation": "subscribe",
+                "assets_ids": list(asset_ids),
+                "initial_dump": True,
+            },
+            commit=lambda: self._l3_active_set.update(asset_ids),
+            offline_commit=lambda: self._l3_active_set.update(asset_ids),
+        )
 
     async def remove_subscriptions(self, asset_ids: list[str]) -> bool:
         """Remove asset_ids from L3 subscriptions; send unsubscribe payload if live.
@@ -528,19 +560,11 @@ class WsConsumer:
         """
         if not asset_ids:
             return True
-        async with self._subscription_control_lock:
-            ws = self._current_ws
-            generation = self._connection_generation
-            if ws is None:
-                self._l3_active_set.difference_update(asset_ids)
-                return False
-            if await self._send_control(
-                ws, {"operation": "unsubscribe", "assets_ids": list(asset_ids)}
-            ):
-                self._l3_active_set.difference_update(asset_ids)
-                return True
-        await self._compensate_generation(ws, generation)
-        return False
+        return await self._send_single_control_transaction(
+            {"operation": "unsubscribe", "assets_ids": list(asset_ids)},
+            commit=lambda: self._l3_active_set.difference_update(asset_ids),
+            offline_commit=lambda: self._l3_active_set.difference_update(asset_ids),
+        )
 
     # ── Quick task 260602-ws-dynamic-subscribe ──────────────────────────────
     #
@@ -563,38 +587,21 @@ class WsConsumer:
         """Send mid-conn `subscribe` payload for L2 candidate add diff."""
         if not asset_ids:
             return True
-        async with self._subscription_control_lock:
-            ws = self._current_ws
-            generation = self._connection_generation
-            if ws is None:
-                return False
-            if await self._send_control(
-                ws,
-                {
-                    "operation": "subscribe",
-                    "assets_ids": list(asset_ids),
-                    "initial_dump": True,
-                },
-            ):
-                return True
-        await self._compensate_generation(ws, generation)
-        return False
+        return await self._send_single_control_transaction(
+            {
+                "operation": "subscribe",
+                "assets_ids": list(asset_ids),
+                "initial_dump": True,
+            }
+        )
 
     async def unsubscribe_candidates_payload(self, asset_ids: list[str]) -> bool:
         """Send mid-conn `unsubscribe` payload for L2 candidate remove diff."""
         if not asset_ids:
             return True
-        async with self._subscription_control_lock:
-            ws = self._current_ws
-            generation = self._connection_generation
-            if ws is None:
-                return False
-            if await self._send_control(
-                ws, {"operation": "unsubscribe", "assets_ids": list(asset_ids)}
-            ):
-                return True
-        await self._compensate_generation(ws, generation)
-        return False
+        return await self._send_single_control_transaction(
+            {"operation": "unsubscribe", "assets_ids": list(asset_ids)}
+        )
 
     @property
     def frame_count(self) -> int:
