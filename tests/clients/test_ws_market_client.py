@@ -587,3 +587,142 @@ async def test_initializer_budget_backoff_is_cancellable(
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=0.2)
     assert yielded_connections == 1
+
+
+async def test_dynamic_control_close_uses_shared_gate_then_latest_union(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import websockets
+    from unittest.mock import MagicMock
+
+    from polyarb.daemon import ws_watchdog as watchdog_module
+    from polyarb.daemon.ws_consumer import WsConsumer
+    from polyarb.daemon.ws_watchdog import WsWatchdog
+
+    monkeypatch.setattr(watchdog_module, "_STORM_WINDOW_S", 0.05)
+    watchdog = WsWatchdog(stale_s=30)
+    now = watchdog_module.time.monotonic()
+    watchdog._reconnect_timestamps.extend([now] * 10)
+    stop = asyncio.Event()
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=watchdog,
+        on_event=lambda event: stop.set() or True,
+        initial_assets=["a"],
+    )
+
+    class LiveThenFails(FakeWs):
+        def __init__(self) -> None:
+            super().__init__()
+            self.receive_entered = asyncio.Event()
+            self.closed_event = asyncio.Event()
+
+        async def send(self, raw: str) -> None:
+            self.sent.append(raw)
+            if len(self.sent) > 1:
+                raise RuntimeError("dynamic control failed")
+
+        async def __anext__(self):
+            self.receive_entered.set()
+            await self.closed_event.wait()
+            raise websockets.ConnectionClosed(rcvd=None, sent=None)
+
+        async def close(self) -> None:
+            self.closed = True
+            self.closed_event.set()
+
+    first = LiveThenFails()
+    second = FakeWs(frames=['{"event_type":"book","asset_id":"latest"}'])
+    yielded_connections = 0
+
+    def _connect(*args, **kwargs):
+        async def _connections():
+            nonlocal yielded_connections
+            for candidate in (first, second):
+                yielded_connections += 1
+                yield candidate
+
+        return _connections()
+
+    monkeypatch.setattr("polyarb.clients.ws_market_client.websockets.connect", _connect)
+    task = asyncio.create_task(consumer.run(stop))
+    await asyncio.wait_for(first.receive_entered.wait(), timeout=0.2)
+    assert await consumer.add_subscriptions(["latest"]) is False
+
+    async with asyncio.timeout(0.2):
+        while consumer._current_ws is not None:
+            await asyncio.sleep(0)
+    assert await consumer.add_subscriptions(["latest"]) is False
+    await asyncio.sleep(0.01)
+    assert yielded_connections == 1
+
+    await asyncio.wait_for(task, timeout=0.2)
+    assert json.loads(second.sent[0])["assets_ids"] == ["a", "latest"]
+
+
+async def test_dynamic_control_shared_gate_is_cancellable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import websockets
+    from unittest.mock import MagicMock
+
+    from polyarb.daemon import ws_watchdog as watchdog_module
+    from polyarb.daemon.ws_consumer import WsConsumer
+    from polyarb.daemon.ws_watchdog import WsWatchdog
+
+    watchdog = WsWatchdog(stale_s=30)
+    now = watchdog_module.time.monotonic()
+    watchdog._reconnect_timestamps.extend([now] * 10)
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=watchdog,
+        on_event=lambda event: True,
+        initial_assets=["a"],
+    )
+
+    class LiveThenFails(FakeWs):
+        def __init__(self) -> None:
+            super().__init__()
+            self.receive_entered = asyncio.Event()
+            self.closed_event = asyncio.Event()
+
+        async def send(self, raw: str) -> None:
+            self.sent.append(raw)
+            if len(self.sent) > 1:
+                raise RuntimeError("dynamic control failed")
+
+        async def __anext__(self):
+            self.receive_entered.set()
+            await self.closed_event.wait()
+            raise websockets.ConnectionClosed(rcvd=None, sent=None)
+
+        async def close(self) -> None:
+            self.closed_event.set()
+
+    first = LiveThenFails()
+    yielded_connections = 0
+
+    def _connect(*args, **kwargs):
+        async def _connections():
+            nonlocal yielded_connections
+            yielded_connections += 1
+            yield first
+            yielded_connections += 1
+            yield FakeWs()
+
+        return _connections()
+
+    monkeypatch.setattr("polyarb.clients.ws_market_client.websockets.connect", _connect)
+    task = asyncio.create_task(consumer.run(asyncio.Event()))
+    await asyncio.wait_for(first.receive_entered.wait(), timeout=0.2)
+    assert await consumer.add_subscriptions(["latest"]) is False
+    async with asyncio.timeout(0.2):
+        while consumer._current_ws is not None:
+            await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert yielded_connections == 1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
+    assert yielded_connections == 1
