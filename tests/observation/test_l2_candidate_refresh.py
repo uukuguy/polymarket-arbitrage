@@ -137,12 +137,16 @@ def _reset_debounce_state():
         mod._last_known_markets_rows = None
     if hasattr(mod, "_last_fetch_success_at_s"):
         mod._last_fetch_success_at_s = None
+    if hasattr(mod, "_last_convergence_success_at_s"):
+        mod._last_convergence_success_at_s = -mod.REFRESH_DEBOUNCE_S - 1.0
     yield
     mod._last_refresh_at_s = 0.0
     if hasattr(mod, "_last_known_markets_rows"):
         mod._last_known_markets_rows = None
     if hasattr(mod, "_last_fetch_success_at_s"):
         mod._last_fetch_success_at_s = None
+    if hasattr(mod, "_last_convergence_success_at_s"):
+        mod._last_convergence_success_at_s = -mod.REFRESH_DEBOUNCE_S - 1.0
 
 
 def _seed_markets(n: int, prefix: str = "M", *, liquidity_base: float = 200_000.0) -> list[dict]:
@@ -844,6 +848,66 @@ async def test_refresh_required_convergence_failure_returns_false(
         {"snapshot_id": 78}, ws_consumer=ws, settings=settings, mirror=mirror
     ) is False
     assert ws._l3_active_set == {"L3-A"}
+
+
+@pytest.mark.asyncio
+async def test_maintenance_debounce_is_anchored_only_to_full_success(monkeypatch):
+    """A failed attempt must not suppress the next caught-up maintenance fetch."""
+    from pydantic import SecretStr
+
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings = MagicMock()
+    settings.supabase_url = "https://example.supabase.co"
+    settings.supabase_service_key = SecretStr("service-key")
+    settings.candidate_scanner_yaml = None
+    settings.candidate_watchlist_yaml = None
+    ws = MagicMock()
+    ws._candidate_set = set()
+    ws._l3_active_set = set()
+    ws.replace_candidate_set = AsyncMock(side_effect=[False, True])
+    monkeypatch.setattr(mod, "compute_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(mod, "_fetch_all_markets_latest", lambda client: [])
+    monkeypatch.setattr(mod, "create_client", lambda *args: MagicMock())
+    monkeypatch.setattr(mod.time, "monotonic", lambda: 100.0)
+
+    payload = {"snapshot_id": 4, "_maintenance": True}
+    assert await mod.on_snapshot_complete(payload, ws_consumer=ws, settings=settings) is False
+    assert await mod.on_snapshot_complete(payload, ws_consumer=ws, settings=settings) is True
+    assert await mod.on_snapshot_complete(payload, ws_consumer=ws, settings=settings) is False
+    assert ws.replace_candidate_set.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_maintenance_live_fetch_failure_rejects_cached_rows(monkeypatch):
+    from pydantic import SecretStr
+
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings = MagicMock()
+    settings.supabase_url = "https://example.supabase.co"
+    settings.supabase_service_key = SecretStr("service-key")
+    ws = MagicMock()
+    ws._candidate_set = set()
+    ws._l3_active_set = set()
+    ws.replace_candidate_set = AsyncMock(return_value=True)
+    mod._last_known_markets_rows = [{"market_id": "stale"}]
+    monkeypatch.setattr(mod, "create_client", lambda *args: MagicMock())
+    monkeypatch.setattr(
+        mod,
+        "_fetch_all_markets_latest",
+        MagicMock(side_effect=RuntimeError("supabase unavailable")),
+    )
+    compute = MagicMock(return_value=[])
+    monkeypatch.setattr(mod, "compute_candidates", compute)
+
+    assert await mod.on_snapshot_complete(
+        {"snapshot_id": 4, "_maintenance": True},
+        ws_consumer=ws,
+        settings=settings,
+    ) is False
+    compute.assert_not_called()
+    ws.replace_candidate_set.assert_not_awaited()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

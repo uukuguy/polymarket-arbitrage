@@ -196,7 +196,7 @@ async def test_asyncpg_cursor_commit_updates_freshness(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_caught_up_poll_records_reconciliation_success_without_refresh():
+async def test_caught_up_poll_runs_maintenance_without_committing_cursor():
     ReconciliationPump, ReconciliationState = _api()
     store = FakeCursorStore(cursor=9, latest=9)
     refresh = AsyncMock(return_value=True)
@@ -204,13 +204,36 @@ async def test_caught_up_poll_records_reconciliation_success_without_refresh():
     pump = ReconciliationPump(store=store, refresh=refresh, state=state, poll_seconds=60)
     await pump.reconcile_once()
 
-    refresh.assert_not_awaited()
+    refresh.assert_awaited_once()
+    payload = refresh.await_args.args[0]
+    assert payload["snapshot_id"] == 9
+    assert payload["_maintenance"] is True
+    assert payload.get("_reconciliation") is None
+    assert store.commits == []
     assert state.committed_cursor == 9
     assert state.latest_snapshot_id == 9
     assert state.cursor_lag == 0
     assert state.cursor_lag_since_s is None
     assert state.last_reconciliation_success_s is not None
     assert state.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_caught_up_maintenance_failure_does_not_forge_success():
+    ReconciliationPump, ReconciliationState = _api()
+    store = FakeCursorStore(cursor=9, latest=9)
+    state = ReconciliationState(last_reconciliation_success_s=123.0)
+    pump = ReconciliationPump(
+        store=store,
+        refresh=AsyncMock(return_value=False),
+        state=state,
+        poll_seconds=60,
+    )
+
+    assert await pump.reconcile_once() is False
+    assert store.commits == []
+    assert state.last_reconciliation_success_s == 123.0
+    assert state.last_error == "candidate maintenance returned false"
 
 
 def test_notify_rejects_negative_id_but_still_wakes_reconciliation():
