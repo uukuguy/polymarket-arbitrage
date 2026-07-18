@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.1
-status: ready_to_execute
-stopped_at: Phase 05.1 planned in 3 waves; next execute 05.1-01
-last_updated: "2026-07-18T00:21:46Z"
+status: executing
+stopped_at: Phase 05.1 Plan 01 complete; next execute 05.1-02
+last_updated: "2026-07-18T00:37:06Z"
 last_activity: 2026-07-18
 progress:
   total_phases: 11
   completed_phases: 8
   total_plans: 56
-  completed_plans: 52
-  percent: 93
+  completed_plans: 53
+  percent: 95
 ---
 
 # M1 Perception — Current State
@@ -20,8 +20,8 @@ progress:
 ## Current Position
 
 - **Phase:** 05.1 — Durable L2 data-chain recovery (inserted gap phase)
-- **Plan:** 05.1-01 ready — listener lifecycle + durable reconciliation pump
-- **Status:** production chain operationally restored, permanent self-heal not implemented
+- **Plan:** 05.1-02 ready — projection reconciliation + chain-truth health
+- **Status:** durable listener/pump implemented locally; production not deployed
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -41,10 +41,10 @@ progress:
 
 ## CURRENT-CALL — approved repair
 
-Execute `05.1-01-PLAN.md`: NOTIFY as wake-up hint, 60-second durable cursor
-reconciliation, cursor commit after awaited success, and real LISTEN termination
-state. Plans 02-03 then add candidate projection reconciliation, chain-truth health,
-and no-restart chaos proof.
+Plan 05.1-01 completed locally: NOTIFY is a wake-up hint, the 60-second durable
+cursor pump is the only cursor owner, commits follow awaited success, and real
+LISTEN termination drives reconnect. Execute Plan 02 next for candidate projection
+reconciliation and chain-truth health; production remains unchanged until Plan 03.
 Do not relax Phase 05's strict N=5 gate merely to make the phase green.
 
 ## Remaining Work
