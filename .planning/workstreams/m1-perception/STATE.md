@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.1
 status: executing
-stopped_at: Phase 05.1 Plan 04 Task 3 open; authenticated 13m32s same-instance monitor stayed active, max ws_age 3.0s, quiet logs 0/0/0
-last_updated: "2026-07-18T08:08:31Z"
+stopped_at: Phase 05.1 Plan 04 Task 3 open; latest same-instance monitor stayed active, max ws_age 2.6s, quiet logs 0/0/0
+last_updated: "2026-07-18T08:26:37Z"
 last_activity: 2026-07-18
 progress:
   total_phases: 11
@@ -21,7 +21,7 @@ progress:
 
 - **Phase:** 05.1 — Durable L2 data-chain recovery (inserted gap phase)
 - **Plan:** 05.1-04 Task 3 open — production natural quiet-edge and mirror-evidence proof
-- **Status:** `889fab4` deployed; >=180-second main chain passed; latest authenticated 13m32s window stayed active and did not trigger natural quiet refresh
+- **Status:** `889fab4` deployed; >=180-second main chain passed; latest authenticated 11m03s window stayed active and did not trigger natural quiet refresh
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -75,6 +75,10 @@ progress:
   WS/mirror ages were `3.0s/84.8s`, and exact quiet log counts were
   `sending/evidenced/failed = 0/0/0`. Only ordinary mirror writes occurred.
 
+- A subsequent log search (`08:07:30Z`–`08:13:39Z`) and 60-sample live window
+  (`08:15:34Z`–`08:26:37Z`) again found quiet counts `0/0/0`. All live
+  probes were HTTP 200, max WS age was `2.6s`, and exact identity remained unchanged.
+
 - Therefore Plan 04 Task 3 is unproven, not protocol-failed. If the instance
   changes, rebuild the >=180-second baseline before accepting later quiet proof.
 
@@ -116,8 +120,8 @@ make planning-status
 
 ## Session Continuity
 
-- **Last session:** 2026-07-18 16:08 (Asia/Shanghai)
-- **Stopped at:** Plan 05.1-04 Task 3 checkpoint after 72 authenticated same-instance samples; no natural 60-second quiet edge occurred.
+- **Last session:** 2026-07-18 16:26 (Asia/Shanghai)
+- **Stopped at:** Plan 05.1-04 Task 3 checkpoint after another 60 authenticated same-instance samples; no natural 60-second quiet edge occurred.
 - **Proceeding to:** Wait for and monitor a natural quiet edge on the same instance; rebuild the baseline if instance identity changes.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05.1-durable-l2-data-chain-recovery/05.1-04-PLAN.md`
 

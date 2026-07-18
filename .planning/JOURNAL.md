@@ -3740,3 +3740,15 @@ $gsd-resume-work --ws m1-perception
 ### [NEXT — CURRENT]
 
 下一次执行先复核 exact instance；若未变，继续等待自然 quiet transaction。若已变，先重建 >=180 秒主链 baseline。
+
+## SESSION 52 — 2026-07-18 (repeated quiet checkpoint)
+
+- [VERIFIED] exact machine/instance/start/image/digest/release 再次保持不变。
+- [VERIFIED] 历史缓冲 `08:07:30Z–08:13:39Z` quiet `0/0/0`；24 个 ordinary mirror success 全部排除。
+- [VERIFIED] live window `08:15:34Z–08:26:37Z` 为 60/60 HTTP 200；最大 WS/mirror/reconciliation/candidate age `2.6s/66.2s/59.9s/60.0s`，quiet `0/0/0`。
+- [NOTE] Fly rolling buffer 对 `08:13:39Z–08:15:40Z` 不可见，因此不对该区间作断言。
+- [BLOCKER] 自然流量再次持续活跃；Task 3 仍只缺 natural quiet transaction，Task 4 未开始。
+
+### [NEXT — CURRENT]
+
+避免把短窗口重复执行误当进展；下一次先查 rolling logs，再决定是否值得继续 live monitor。若 instance 变化，先重建 >=180 秒 baseline。

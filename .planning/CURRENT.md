@@ -76,7 +76,7 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 ## 当前下一步
 
-继续监控已核实的 L2 instance `01KXSMS80B5AX2FGT5EPRC6V82` 的自然 60 秒 quiet edge，要求 `sending → real book/mirror write → evidenced` 完整证据。最新 authenticated 13m32s 窗口最大 `ws_age=3.0s`，quiet 日志 `0/0/0`，仍未触发。Phase 05 Plan 06 的 24h soak 在 Phase 05.1 关闭前不得启动。
+继续监控已核实的 L2 instance `01KXSMS80B5AX2FGT5EPRC6V82` 的自然 60 秒 quiet edge，要求 `sending → real book/mirror write → evidenced` 完整证据。最新 authenticated 11m03s 窗口最大 `ws_age=2.6s`，quiet 日志 `0/0/0`，仍未触发。Phase 05 Plan 06 的 24h soak 在 Phase 05.1 关闭前不得启动。
 
 ```bash
 /gsd-resume-work --ws m1-perception
