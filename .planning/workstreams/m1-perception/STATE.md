@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.1
 status: executing
-stopped_at: Phase 05.1 Plan 02 complete; next execute 05.1-03
-last_updated: "2026-07-18T00:47:03Z"
+stopped_at: Phase 05.1 Plan 03 core recovery PASS; next execute 05.1-04
+last_updated: "2026-07-18T01:41:00Z"
 last_activity: 2026-07-18
 progress:
   total_phases: 11
   completed_phases: 8
-  total_plans: 56
-  completed_plans: 54
+  total_plans: 57
+  completed_plans: 55
   percent: 96
 ---
 
@@ -20,8 +20,8 @@ progress:
 ## Current Position
 
 - **Phase:** 05.1 — Durable L2 data-chain recovery (inserted gap phase)
-- **Plan:** 05.1-03 ready — chaos diagnostic, deploy, production proof, teaching/closure
-- **Status:** durable listener/pump/projection/health implemented locally; production not deployed
+- **Plan:** 05.1-04 pending — quiet-market in-band book refresh and strict-health proof
+- **Status:** Plan 03 core recovery proven in production; strict health remains blocked by quiet-market freshness
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -33,24 +33,32 @@ progress:
 - Enabled `POLYARB_EVENT_BUS_ENABLED=1` on L1 and restarted the single L2 machine.
 - L2 startup catch-up advanced cursor `482 → 516`; candidate, WS, and mirror ages
   returned to seconds; strict `/health` returned HTTP 200 and fresh TOB rows appeared.
-- Supabase still reports 117 distinct active candidate assets while the real WS set has
-  2 assets, proving candidate projection drift across cold start.
-- `l3:active_count = 0/10`; Phase 05 Plan 06 soak remains blocked until Phase 05.1
-  implements and proves durable self-healing.
+- The pre-repair projection drift was 117 active database assets versus 2 WS
+  assets. Plan 03 production proof confirms it is now resolved at 5 desired
+  keys, 5 active keys, and 5 WS assets with zero stale/missing keys.
+- `l3:active_count = 0/10`; Phase 05 Plan 06 soak remains blocked until Plan 04
+  restores strict quiet-market freshness and closes Phase 05.1.
 - No local polyarb/pytest/flyctl/uvicorn workflow process remains running.
+- Phase 05.1 Plan 03 deployed and proved LISTEN reconnect `0 → 1`, poll-only
+  cursor `520 → 521` with an exact unchanged notification anchor, L1 publishing
+  restoration, and candidate/WS projection `5/5` without restarting L2.
+- Final strict `/health` remains HTTP 503 because five valid subscribed markets
+  were quiet: WS business-frame age and TOB mirror age exceeded their unchanged
+  thresholds while socket pong liveness, cursor, reconciliation, and projection
+  were healthy. This is Plan 04's blocker, not a core recovery failure.
 
 ## CURRENT-CALL — approved repair
 
-Plans 05.1-01/02 completed locally: NOTIFY is a wake-up hint, the 60-second durable
+Plans 05.1-01/02/03 are complete. NOTIFY is a wake-up hint, the 60-second durable
 cursor pump is the only cursor owner, candidate history converges by composite key,
-and strict health reads live listener/pump truth. Execute Plan 03 next for the
-image-aware diagnostic, deploy, and no-restart production proof.
+and production proved recovery without an L2 restart. Execute Plan 04 next to
+refresh quiet-market books in-band and recover strict freshness truth.
 Do not relax Phase 05's strict N=5 gate merely to make the phase green.
 
 ## Remaining Work
 
-- Deploy and prove Phase 05.1 self-healing without an L2 restart.
-- Re-run GAP-401 watchdog/reconnect proof after recovery.
+- Execute `05.1-04-PLAN.md` quiet-market in-band book refresh.
+- Prove strict production health after the refresh without changing thresholds.
 - Start Plan 05-06 only when `/health` is no longer failing on the L2 prerequisites.
 - Complete 24h strict soak, teaching chapter 11, VALIDATION flip, SUMMARY, learnings,
   ROADMAP/STATE closure.
@@ -73,9 +81,9 @@ make planning-status
 ## Session Continuity
 
 - **Last session:** 2026-07-18 (Asia/Shanghai)
-- **Stopped at:** Plans 05.1-01/02 complete locally; full phase suite 82 passed.
-- **Proceeding to:** Execute Phase 05.1 Plan 03 production chaos proof and closure.
-- **Resume file:** `.planning/workstreams/m1-perception/phases/05.1-durable-l2-data-chain-recovery/05.1-03-PLAN.md`
+- **Stopped at:** Plan 05.1-03 core recovery proof complete; strict health truthfully HTTP 503 on quiet markets.
+- **Proceeding to:** Execute Phase 05.1 Plan 04 quiet-market refresh and strict-health proof.
+- **Resume file:** `.planning/workstreams/m1-perception/phases/05.1-durable-l2-data-chain-recovery/05.1-04-PLAN.md`
 
 ## Accumulated Context
 
