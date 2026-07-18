@@ -132,6 +132,12 @@ class ReconciliationPump:
                 self.state.cursor_lag_since_s = None
 
             if latest <= cursor:
+                succeeded = await self.refresh(
+                    {"snapshot_id": latest, "ts_s": time.time(), "_maintenance": True}
+                )
+                if not succeeded:
+                    self.state.last_error = "candidate maintenance returned false"
+                    return False
                 self.state.last_reconciliation_success_s = time.time()
                 self.state.last_error = None
                 return True

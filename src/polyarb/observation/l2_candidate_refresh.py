@@ -64,6 +64,11 @@ REFRESH_DEBOUNCE_S: float = 60.0  # SP8 cross-bug check #1
 # Memory: feedback_cold-start-debounce-trap-2026-05.
 _last_refresh_at_s: float = -REFRESH_DEBOUNCE_S - 1.0
 
+# Maintenance is debounced from the last *complete convergence*, not the last
+# attempt. A failed live fetch or downstream update must remain immediately
+# retryable on the next reconciliation wake.
+_last_convergence_success_at_s: float = -REFRESH_DEBOUNCE_S - 1.0
+
 # ── Phase 04 Plan 02 — D-01 fail-soft state ──────────────────────────────
 # Last successfully-fetched markets_latest rows. on_snapshot_complete falls
 # back to this snapshot if a fresh Supabase fetch raises (fail-soft envelope,
@@ -356,9 +361,13 @@ async def on_snapshot_complete(
     projection on every refresh. Mirror or live WS failure blocks cursor
     advancement; retries remain idempotent.
     """
-    global _last_refresh_at_s, _last_known_markets_rows
+    global _last_refresh_at_s, _last_known_markets_rows, _last_convergence_success_at_s
     now = time.monotonic()
-    elapsed = now - _last_refresh_at_s
+    maintenance = payload.get("_maintenance") is True
+    debounce_anchor = (
+        _last_convergence_success_at_s if maintenance else _last_refresh_at_s
+    )
+    elapsed = now - debounce_anchor
     if elapsed < REFRESH_DEBOUNCE_S:
         logger.info(
             f"candidate refresh debounced "
@@ -366,7 +375,8 @@ async def on_snapshot_complete(
             f"snapshot_id={payload.get('snapshot_id')}"
         )
         return False
-    _last_refresh_at_s = now
+    if not maintenance:
+        _last_refresh_at_s = now
 
     # ── Phase 04 D-01: fetch markets_latest from Supabase (fail-soft) ────
     # NOTIFY payload only carries snapshot_id (RESEARCH Q5); the candidate
@@ -395,6 +405,11 @@ async def on_snapshot_complete(
                 f"candidate refresh: supabase fetch failed: {e!r} — "
                 f"using last known rows (count={len(_last_known_markets_rows or [])})"
             )
+            if maintenance:
+                # A caught-up maintenance pass exists specifically to prove
+                # the live source is fresh. Cached rows cannot provide that
+                # evidence and must not advance reconciliation freshness.
+                return False
             markets_rows = _last_known_markets_rows
     # else: Supabase not configured (D-04 cold-start) — fall through with
     #       markets_rows=None so compute_candidates uses settings.db_path.
@@ -430,29 +445,42 @@ async def on_snapshot_complete(
     #
     # These are required convergence steps. A failed payload retains the old
     # in-memory projection and durable cursor so the next pump pass retries.
-    added_asset_ids = sorted(r.asset_id for r in added)
-    sub_payload = getattr(ws_consumer, "subscribe_candidates_payload", None)
-    if added_asset_ids and inspect.iscoroutinefunction(sub_payload):
+    replace_candidate_set = getattr(ws_consumer, "replace_candidate_set", None)
+    used_transactional_replace = inspect.iscoroutinefunction(replace_candidate_set)
+    if used_transactional_replace:
         try:
-            if not await sub_payload(added_asset_ids):
-                logger.warning("candidate refresh: WS subscribe returned false")
+            if not await replace_candidate_set(new_asset_ids):
+                logger.warning("candidate refresh: transactional WS replacement failed")
                 return False
-        except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
-            logger.warning(
-                f"candidate refresh: ws subscribe_candidates_payload raised: {e!r}"
-            )
+        except Exception as e:  # noqa: BLE001 — explicit convergence boundary
+            logger.warning(f"candidate refresh: transactional WS replacement raised: {e!r}")
             return False
-    unsub_payload = getattr(ws_consumer, "unsubscribe_candidates_payload", None)
-    if removed and inspect.iscoroutinefunction(unsub_payload):
-        try:
-            if not await unsub_payload(sorted(removed)):
-                logger.warning("candidate refresh: WS unsubscribe returned false")
+    else:
+        # Backward-compatible adapter for test doubles and non-WsConsumer
+        # callers. Production WsConsumer always takes the fenced transaction.
+        added_asset_ids = sorted(r.asset_id for r in added)
+        sub_payload = getattr(ws_consumer, "subscribe_candidates_payload", None)
+        if added_asset_ids and inspect.iscoroutinefunction(sub_payload):
+            try:
+                if not await sub_payload(added_asset_ids):
+                    logger.warning("candidate refresh: WS subscribe returned false")
+                    return False
+            except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
+                logger.warning(
+                    f"candidate refresh: ws subscribe_candidates_payload raised: {e!r}"
+                )
                 return False
-        except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
-            logger.warning(
-                f"candidate refresh: ws unsubscribe_candidates_payload raised: {e!r}"
-            )
-            return False
+        unsub_payload = getattr(ws_consumer, "unsubscribe_candidates_payload", None)
+        if removed and inspect.iscoroutinefunction(unsub_payload):
+            try:
+                if not await unsub_payload(sorted(removed)):
+                    logger.warning("candidate refresh: WS unsubscribe returned false")
+                    return False
+            except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
+                logger.warning(
+                    f"candidate refresh: ws unsubscribe_candidates_payload raised: {e!r}"
+                )
+                return False
 
     # Durable desired rows are independent of process-local history. Reading
     # active DB keys every time repairs stale cold-start projections.
@@ -482,13 +510,15 @@ async def on_snapshot_complete(
 
     # Commit process-local candidate projection last; update_candidate_set
     # preserves the independently-owned L3 active set.
-    try:
-        result = ws_consumer.update_candidate_set(new_asset_ids)
-        if result is False:
-            logger.warning("candidate refresh: update_candidate_set returned false")
+    if not used_transactional_replace:
+        try:
+            result = ws_consumer.update_candidate_set(new_asset_ids)
+            if result is False:
+                logger.warning("candidate refresh: update_candidate_set returned false")
+                return False
+        except Exception as e:  # noqa: BLE001 — explicit failure boundary
+            logger.warning(f"candidate refresh: update_candidate_set raised: {e!r}")
             return False
-    except Exception as e:  # noqa: BLE001 — explicit failure boundary
-        logger.warning(f"candidate refresh: update_candidate_set raised: {e!r}")
-        return False
 
+    _last_convergence_success_at_s = now
     return True
