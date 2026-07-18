@@ -7,7 +7,9 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from loguru import logger
 
+from polyarb.daemon import ws_consumer as ws_consumer_module
 from polyarb.daemon.ws_consumer import WsConsumer
 from polyarb.daemon.ws_watchdog import WsWatchdog
 
@@ -168,3 +170,35 @@ async def test_run_quiet_refresh_propagates_cancellation() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_request_book_refresh_bounds_hung_send_without_forging_freshness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    consumer, watchdog, ws = _make_consumer()
+    never_returns = asyncio.Event()
+    event_before = consumer.last_event_at_s
+    watchdog_before = watchdog.last_event_at_s
+    messages: list[str] = []
+
+    async def _hung_send(_payload: str) -> None:
+        await never_returns.wait()
+
+    ws.send.side_effect = _hung_send
+    monkeypatch.setattr(
+        ws_consumer_module, "_QUIET_REFRESH_SEND_TIMEOUT_S", 0.01, raising=False
+    )
+    sink_id = logger.add(lambda message: messages.append(str(message)), level="INFO")
+    try:
+        result = await asyncio.wait_for(
+            consumer.request_book_refresh(), timeout=0.2
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert result is False
+    assert any("ws quiet refresh: sending assets=3" in msg for msg in messages)
+    assert any("ws quiet refresh: send failed assets=3" in msg for msg in messages)
+    assert consumer.last_event_at_s == event_before
+    assert watchdog.last_event_at_s == watchdog_before
