@@ -77,7 +77,8 @@ def test_tracked_state_is_resumable_and_best_effort() -> None:
         item["status"] in {"pending", "confirmed", "falsified"}
         for item in by_id.values()
     )
-    assert session["session"] == "2026-07-17-m2-position-persistence"
+    assert isinstance(session["session"], str)
+    assert session["session"].strip()
     assert session["last_cycle"] == len(runs)
     assert session["in_flight"] is None
     pending = [item for item in by_id.values() if item["status"] == "pending"]

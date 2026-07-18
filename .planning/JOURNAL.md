@@ -3816,3 +3816,13 @@ $gsd-resume-work --ws m1-perception
 ### [NEXT — CURRENT]
 
 先只读诊断 H-008 opportunity feed HTTP 503 chain。
+
+## SESSION 58 — 2026-07-18 (Phase 05.2 full-suite comparison)
+
+- [FIX] climb adapter 的 resumability 测试不再把 session 固定为历史 M2 名称；仍要求 session 为非空字符串，并继续验证 cycle 数、in-flight 与 next-action 契约。
+- [VERIFIED] climb adapter/cycle/evaluator/hook 定向套件 26 项通过；全量测试中的其余 Alembic `anon` role 与 candidate-refresh 失败均在基线 `68ad1b8` 独立复现，不属于 Phase 05.2 回归。
+- [BOUNDARY] 未修改生产代码、未访问或修改生产环境；H-008 仍为下一项只读诊断。
+
+### [NEXT — CURRENT]
+
+先只读诊断 H-008 opportunity feed HTTP 503 chain。
