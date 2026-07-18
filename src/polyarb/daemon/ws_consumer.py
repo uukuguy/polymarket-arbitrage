@@ -439,6 +439,11 @@ class WsConsumer:
             ws = self._current_ws
             generation = self._connection_generation
             if ws is None:
+                # Publish desired state so a cold-start consumer can leave its
+                # empty-set wait and the next connection provider subscribes
+                # the newest candidates. False keeps the durable cursor
+                # retryable until live convergence is proven.
+                self._candidate_set = desired
                 return False
             if added and not await self._send_control(
                 ws,

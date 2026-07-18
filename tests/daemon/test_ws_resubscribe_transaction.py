@@ -104,3 +104,13 @@ async def test_candidate_partial_send_failure_does_not_commit_and_compensates() 
 
     assert consumer._candidate_set == {"a", "b"}
     ws.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_candidate_replacement_without_socket_publishes_reconnect_desire() -> None:
+    consumer, _ws = _consumer()
+    consumer._current_ws = None
+
+    assert await consumer.replace_candidate_set(["cold-start"]) is False
+    assert consumer._candidate_set == {"cold-start"}
+    assert consumer._compute_active_assets() == ["cold-start"]
