@@ -48,18 +48,12 @@ async def test_quiet_refresh_requires_exact_pair_and_matching_mirror_evidence() 
     ]
     assert task.done() is False
 
-    consumer.record_book_evidence(
-        asset_id="a", generation=6, mirror_succeeded=True
-    )
-    consumer.record_book_evidence(
-        asset_id="a", generation=7, mirror_succeeded=False
-    )
+    consumer.record_book_evidence(asset_id="a", generation=6, mirror_succeeded=True)
+    consumer.record_book_evidence(asset_id="a", generation=7, mirror_succeeded=False)
     await asyncio.sleep(0)
     assert task.done() is False
 
-    consumer.record_book_evidence(
-        asset_id="a", generation=7, mirror_succeeded=True
-    )
+    consumer.record_book_evidence(asset_id="a", generation=7, mirror_succeeded=True)
     assert await task is True
 
 
@@ -70,9 +64,7 @@ async def test_quiet_refresh_evidence_timeout_closes_only_captured_socket(
     consumer, old_ws = _consumer()
     new_ws = MagicMock()
     new_ws.close = AsyncMock(return_value=None)
-    monkeypatch.setattr(
-        ws_consumer_module, "_BOOK_EVIDENCE_TIMEOUT_S", 0.01, raising=False
-    )
+    monkeypatch.setattr(ws_consumer_module, "_BOOK_EVIDENCE_TIMEOUT_S", 0.01, raising=False)
 
     task = asyncio.create_task(consumer.request_book_refresh())
     async with asyncio.timeout(0.1):

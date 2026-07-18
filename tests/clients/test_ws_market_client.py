@@ -12,17 +12,16 @@ Plan 04 Wave 0 (RED). Asserts:
 Mock pattern: patch `polyarb.clients.ws_market_client.websockets.connect`
 at IMPORT SITE (Phase 02 L9). FakeWs implements minimal __aiter__/send/close.
 """
+
 from __future__ import annotations
 
 import asyncio
 import io
 import json
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from loguru import logger
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Loguru sink fixture (Phase 02.1 L4 — caplog doesn't see loguru output)
@@ -327,3 +326,35 @@ async def test_cancelledError_propagates_from_stream(monkeypatch: pytest.MonkeyP
 
     # Saw the first frame before the cancel
     assert len(received) == 1
+
+
+async def test_reconnect_resolves_asset_provider_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import websockets
+
+    fake1 = FakeWs(
+        frames=[
+            '{"event_type":"book"}',
+            websockets.ConnectionClosed(rcvd=None, sent=None),
+        ]
+    )
+    fake2 = FakeWs(frames=['{"event_type":"book"}'])
+    monkeypatch.setattr(
+        "polyarb.clients.ws_market_client.websockets.connect",
+        _make_connect([fake1, fake2], []),
+    )
+    desired = ["a"]
+
+    from polyarb.clients.ws_market_client import stream_market_events
+
+    count = 0
+    async for _ in stream_market_events(lambda: list(desired)):
+        count += 1
+        if count == 1:
+            desired[:] = ["b", "c"]
+        if count == 2:
+            break
+
+    assert json.loads(fake1.sent[0])["assets_ids"] == ["a"]
+    assert json.loads(fake2.sent[0])["assets_ids"] == ["b", "c"]

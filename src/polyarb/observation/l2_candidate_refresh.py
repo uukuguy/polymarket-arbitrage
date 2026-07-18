@@ -28,6 +28,7 @@ overwrite of the private subscriptions attribute is no longer used — that
 path would clobber L3 tokens (race condition documented in 05-PATTERNS.md /
 05-RESEARCH.md §Pitfall 5).
 """
+
 from __future__ import annotations
 
 import inspect
@@ -151,9 +152,7 @@ def _safe_str(v: Any) -> str | None:
 def _ranking_score_from_row(row: dict) -> dict:
     """Pull a small ranking blob — used for cap-truncation ordering."""
     return {
-        "liquidity": float(row["liquidity_usd"])
-        if row.get("liquidity_usd") is not None
-        else None,
+        "liquidity": float(row["liquidity_usd"]) if row.get("liquidity_usd") is not None else None,
         "volume": float(row["volume_usd"]) if row.get("volume_usd") is not None else None,
     }
 
@@ -301,6 +300,7 @@ def _compute_candidates_against(
     # ── 3) Apply MAX_CANDIDATES cap — watchlist always retained ──────────
     watchlist_rows = [r for r in out.values() if r.source == "watchlist"]
     recipe_rows = [r for r in out.values() if r.source == "recipe"]
+
     # Sort recipe rows by liquidity desc, None-safe (None goes last).
     def _liquidity_key(r: CandidateRow) -> tuple[float]:
         if r.ranking_score:
@@ -364,9 +364,7 @@ async def on_snapshot_complete(
     global _last_refresh_at_s, _last_known_markets_rows, _last_convergence_success_at_s
     now = time.monotonic()
     maintenance = payload.get("_maintenance") is True
-    debounce_anchor = (
-        _last_convergence_success_at_s if maintenance else _last_refresh_at_s
-    )
+    debounce_anchor = _last_convergence_success_at_s if maintenance else _last_refresh_at_s
     elapsed = now - debounce_anchor
     if elapsed < REFRESH_DEBOUNCE_S:
         logger.info(
@@ -397,9 +395,7 @@ async def on_snapshot_complete(
             markets_rows = _fetch_all_markets_latest(client)
             _last_known_markets_rows = markets_rows
             _record_fetch_success()
-            logger.info(
-                f"candidate refresh: fetched {len(markets_rows)} rows from markets_latest"
-            )
+            logger.info(f"candidate refresh: fetched {len(markets_rows)} rows from markets_latest")
         except Exception as e:  # noqa: BLE001 — fail-soft envelope (same as recipe loop)
             logger.error(
                 f"candidate refresh: supabase fetch failed: {e!r} — "
@@ -466,9 +462,7 @@ async def on_snapshot_complete(
                     logger.warning("candidate refresh: WS subscribe returned false")
                     return False
             except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
-                logger.warning(
-                    f"candidate refresh: ws subscribe_candidates_payload raised: {e!r}"
-                )
+                logger.warning(f"candidate refresh: ws subscribe_candidates_payload raised: {e!r}")
                 return False
         unsub_payload = getattr(ws_consumer, "unsubscribe_candidates_payload", None)
         if removed and inspect.iscoroutinefunction(unsub_payload):

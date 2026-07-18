@@ -22,11 +22,13 @@ Critical gotchas (do NOT relax):
 T-03-04-01 mitigation: log only frame *type* at DEBUG, never the body. Frame
 contents are market data — low-value but unnecessary to leak to logs.
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 import websockets
 from loguru import logger
@@ -43,11 +45,12 @@ MAX_FRAME_SIZE = 2**22
 
 
 async def stream_market_events(
-    assets_ids: list[str],
+    assets_ids: list[str] | Callable[[], list[str]],
     *,
     initial_dump: bool = True,
     ping_interval_s: int = PING_INTERVAL_S,
     on_connect: Callable[[Any], None] | None = None,
+    connection_initializer: Callable[[Any], Awaitable[None]] | None = None,
 ) -> AsyncIterator[dict]:
     """Long-lived async iterator yielding market-channel events.
 
@@ -71,7 +74,8 @@ async def stream_market_events(
     Raises:
         asyncio.CancelledError: propagated unchanged (Phase 02 F-04).
     """
-    if not assets_ids:
+    initial_assets = assets_ids() if callable(assets_ids) else assets_ids
+    if not initial_assets:
         logger.warning("ws_market_client: empty assets_ids list — nothing to subscribe")
         return
 
@@ -82,15 +86,17 @@ async def stream_market_events(
         max_size=MAX_FRAME_SIZE,
     ):
         try:
-            sub = {
-                "type": "market",
-                "assets_ids": assets_ids,
-                "initial_dump": initial_dump,
-            }
-            await ws.send(json.dumps(sub))
-            logger.info(
-                f"ws subscribed: {len(assets_ids)} assets, initial_dump={initial_dump}"
-            )
+            current_assets = assets_ids() if callable(assets_ids) else assets_ids
+            if connection_initializer is not None:
+                await connection_initializer(ws)
+            else:
+                sub = {
+                    "type": "market",
+                    "assets_ids": current_assets,
+                    "initial_dump": initial_dump,
+                }
+                await ws.send(json.dumps(sub))
+            logger.info(f"ws subscribed: {len(current_assets)} assets, initial_dump={initial_dump}")
             # GAP-401: notify consumer of the live ws object (side-channel).
             if on_connect is not None:
                 try:
@@ -112,9 +118,7 @@ async def stream_market_events(
                     for item in data:
                         if isinstance(item, dict):
                             # T-03-04-01: log frame type only, NEVER body
-                            logger.debug(
-                                f"ws event type={item.get('event_type', 'unknown')}"
-                            )
+                            logger.debug(f"ws event type={item.get('event_type', 'unknown')}")
                             yield item
                         else:
                             logger.warning(
@@ -134,9 +138,7 @@ async def stream_market_events(
             rcvd = getattr(e, "rcvd", None)
             code = getattr(rcvd, "code", None) if rcvd is not None else None
             reason = getattr(rcvd, "reason", None) if rcvd is not None else None
-            logger.warning(
-                f"ws connection closed code={code} reason={reason!r}; reconnecting…"
-            )
+            logger.warning(f"ws connection closed code={code} reason={reason!r}; reconnecting…")
             continue
         except asyncio.CancelledError:
             # F-04: must NOT be swallowed. SIGTERM relies on this.

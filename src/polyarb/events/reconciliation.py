@@ -4,6 +4,7 @@ Postgres NOTIFY is a doorbell, not a queue.  The durable cursor is the ledger:
 notifications and a periodic timer merely wake one serialized pump, which reads
 the latest snapshot and advances the cursor only after awaited business success.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -66,11 +67,7 @@ class AsyncpgCursorStore:
             await conn.close()
 
     async def commit(self, snapshot_id: int) -> None:
-        if (
-            isinstance(snapshot_id, bool)
-            or not isinstance(snapshot_id, int)
-            or snapshot_id < 0
-        ):
+        if isinstance(snapshot_id, bool) or not isinstance(snapshot_id, int) or snapshot_id < 0:
             raise ValueError("snapshot_id must be a non-negative integer")
         conn = await asyncpg.connect(dsn=self._dsn)
         try:
@@ -110,11 +107,7 @@ class ReconciliationPump:
     def notify(self, payload: dict | None = None) -> None:
         """Record valid notification metadata and coalesce the wake hint."""
         snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
-        if (
-            isinstance(snapshot_id, int)
-            and not isinstance(snapshot_id, bool)
-            and snapshot_id >= 0
-        ):
+        if isinstance(snapshot_id, int) and not isinstance(snapshot_id, bool) and snapshot_id >= 0:
             self.state.last_notification_s = time.time()
         self.wake_event.set()
 

@@ -14,6 +14,7 @@ Phase 02 F-04: ``run(stop_event)`` propagates ``asyncio.CancelledError``.
 T-03-04-01: on_event callback failures are logged at warning but never
 crash the consume loop (only the placeholder dispatches downstream).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,6 +36,7 @@ from polyarb.clients.ws_market_client import stream_market_events
 from polyarb.daemon.ws_watchdog import WsWatchdog
 
 _QUIET_REFRESH_SEND_TIMEOUT_S: float = 5.0
+_BOOK_EVIDENCE_TIMEOUT_S: float = 5.0
 
 # ── Phase 03.1-06 D-04 / Phase 04.1 G-03: POLYARB_WS_TEST_KILL chaos primitive ─
 #
@@ -67,7 +69,7 @@ _QUIET_REFRESH_SEND_TIMEOUT_S: float = 5.0
 # `flyctl secrets set POLYARB_WS_TEST_KILL=1` before deploy still works).
 # Runtime value is controlled by set_ws_test_kill() via the HTTP endpoint.
 # Opt-in seed: only the literal string "1" triggers (same semantics as before).
-_ws_test_kill_flag: bool = (os.getenv("POLYARB_WS_TEST_KILL") == "1")
+_ws_test_kill_flag: bool = os.getenv("POLYARB_WS_TEST_KILL") == "1"
 
 
 def set_ws_test_kill(enabled: bool) -> None:
@@ -152,6 +154,10 @@ class WsConsumer:
         # stream_market_events. Read by _liveness_check() to tell the watchdog
         # whether the socket is provably alive (OPEN + keepalive pong received).
         self._current_ws: Any = None
+        self._subscription_control_lock = asyncio.Lock()
+        self._connection_generation = 0
+        self._book_evidence_waiters: dict[tuple[int, str], set[asyncio.Future[bool]]] = {}
+        self._compensated_generations: set[int] = set()
         # Wire the liveness closure into the watchdog so it uses it for the gate.
         self._watchdog._liveness_check = self._liveness_check
 
@@ -164,6 +170,69 @@ class WsConsumer:
         so the liveness closure always reads the CURRENT connection's state/latency.
         """
         self._current_ws = ws
+
+    async def _send_control(self, ws: Any, payload: dict[str, Any]) -> bool:
+        """Bound every subscription-control write by one production timeout."""
+        try:
+            await asyncio.wait_for(
+                ws.send(json.dumps(payload)), timeout=_QUIET_REFRESH_SEND_TIMEOUT_S
+            )
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"ws subscription control send failed: {exc!r}")
+            return False
+
+    async def _initialize_connection(self, ws: Any) -> None:
+        """Fence generation, initial subscribe, and publication atomically."""
+        async with self._subscription_control_lock:
+            generation = self._connection_generation + 1
+            self._connection_generation = generation
+            active_assets = self._compute_active_assets()
+            ok = await self._send_control(
+                ws,
+                {
+                    "type": "market",
+                    "assets_ids": active_assets,
+                    "initial_dump": True,
+                },
+            )
+            if ok:
+                self._current_ws = ws
+                return
+        await self._compensate_generation(ws, generation)
+        raise RuntimeError("initial WS subscription failed")
+
+    async def _compensate_generation(self, ws: Any, generation: int) -> None:
+        """Close exactly one ambiguous socket per generation, preserving cancel."""
+        async with self._subscription_control_lock:
+            if generation in self._compensated_generations:
+                return
+            self._compensated_generations.add(generation)
+            if not self._watchdog.reserve_reconnect():
+                logger.warning("ws compensation skipped: reconnect budget exhausted")
+                return
+        close_task = asyncio.create_task(
+            asyncio.wait_for(ws.close(), timeout=_QUIET_REFRESH_SEND_TIMEOUT_S)
+        )
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            await asyncio.shield(close_task)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"ws compensation close failed: {exc!r}")
+
+    def record_book_evidence(
+        self, *, asset_id: str, generation: int, mirror_succeeded: bool
+    ) -> None:
+        """Resolve only same-generation book waiters after production mirror success."""
+        if not mirror_succeeded:
+            return
+        for future in tuple(self._book_evidence_waiters.get((generation, asset_id), set())):
+            if not future.done():
+                future.set_result(True)
 
     def _liveness_check(self) -> bool:
         """Return True when the current WS connection is provably alive.
@@ -225,29 +294,60 @@ class WsConsumer:
         this method intentionally leaves candidate/L3 state, event timestamps,
         and the watchdog untouched. Only the receive path may advance them.
         """
-        active_assets = self._compute_active_assets()
-        ws = self._current_ws
-        if not active_assets or ws is None:
-            return False
-        payload = {
-            "operation": "subscribe",
-            "assets_ids": active_assets,
-            "initial_dump": True,
-        }
-        logger.info(f"ws quiet refresh: sending assets={len(active_assets)}")
+        waiter: asyncio.Future[bool] | None = None
+        ws: Any = None
+        generation = 0
+        active_assets: list[str] = []
         try:
-            await asyncio.wait_for(
-                ws.send(json.dumps(payload)),
-                timeout=_QUIET_REFRESH_SEND_TIMEOUT_S,
-            )
-        except Exception as e:  # noqa: BLE001 — strict health remains truthful
-            logger.warning(
-                f"ws quiet refresh: send failed assets={len(active_assets)} "
-                f"error={e!r}"
-            )
+            async with self._subscription_control_lock:
+                active_assets = self._compute_active_assets()
+                ws = self._current_ws
+                generation = self._connection_generation
+                if not active_assets or ws is None:
+                    return False
+                waiter = asyncio.get_running_loop().create_future()
+                for asset_id in active_assets:
+                    self._book_evidence_waiters.setdefault((generation, asset_id), set()).add(
+                        waiter
+                    )
+                logger.info(f"ws quiet refresh: sending assets={len(active_assets)}")
+                if not await self._send_control(
+                    ws,
+                    {"operation": "unsubscribe", "assets_ids": active_assets},
+                ):
+                    raise RuntimeError("quiet unsubscribe failed")
+                if self._current_ws is not ws or self._connection_generation != generation:
+                    raise RuntimeError("connection identity changed during refresh")
+                if not await self._send_control(
+                    ws,
+                    {
+                        "operation": "subscribe",
+                        "assets_ids": active_assets,
+                        "initial_dump": True,
+                    },
+                ):
+                    raise RuntimeError("quiet subscribe failed")
+            assert waiter is not None
+            await asyncio.wait_for(asyncio.shield(waiter), timeout=_BOOK_EVIDENCE_TIMEOUT_S)
+            logger.info(f"ws quiet refresh: evidenced assets={len(active_assets)}")
+            return True
+        except asyncio.CancelledError:
+            if ws is not None:
+                await self._compensate_generation(ws, generation)
+            raise
+        except Exception as e:  # noqa: BLE001 — ambiguity requires reconnect
+            logger.warning(f"ws quiet refresh failed assets={len(active_assets)} error={e!r}")
+            if ws is not None:
+                await self._compensate_generation(ws, generation)
             return False
-        logger.info(f"ws quiet refresh: requested assets={len(active_assets)}")
-        return True
+        finally:
+            if waiter is not None:
+                for asset_id in active_assets:
+                    waiters = self._book_evidence_waiters.get((generation, asset_id))
+                    if waiters is not None:
+                        waiters.discard(waiter)
+                        if not waiters:
+                            self._book_evidence_waiters.pop((generation, asset_id), None)
 
     async def refresh_if_quiet(
         self,
@@ -284,9 +384,7 @@ class WsConsumer:
                 retry_s=retry_s,
             )
             try:
-                await asyncio.wait_for(
-                    stop_event.wait(), timeout=check_interval_s
-                )
+                await asyncio.wait_for(stop_event.wait(), timeout=check_interval_s)
             except TimeoutError:
                 continue
 
@@ -329,6 +427,47 @@ class WsConsumer:
         """
         self._candidate_set = set(asset_ids)
 
+    async def replace_candidate_set(self, asset_ids: Iterable[str]) -> bool:
+        """Atomically send the candidate diff and commit desired state."""
+        desired = set(asset_ids)
+        ws: Any = None
+        generation = 0
+        failed = False
+        async with self._subscription_control_lock:
+            added = sorted(desired - self._candidate_set)
+            removed = sorted(self._candidate_set - desired)
+            ws = self._current_ws
+            generation = self._connection_generation
+            if ws is None:
+                return False
+            if added and not await self._send_control(
+                ws,
+                {
+                    "operation": "subscribe",
+                    "assets_ids": added,
+                    "initial_dump": True,
+                },
+            ):
+                failed = True
+            if (
+                not failed
+                and removed
+                and not await self._send_control(
+                    ws, {"operation": "unsubscribe", "assets_ids": removed}
+                )
+            ):
+                failed = True
+            if not failed and (
+                self._current_ws is not ws or self._connection_generation != generation
+            ):
+                failed = True
+            if not failed:
+                self._candidate_set = desired
+                return True
+        if ws is not None:
+            await self._compensate_generation(ws, generation)
+        return False
+
     async def add_subscriptions(self, asset_ids: list[str]) -> bool:
         """Add asset_ids to L3 subscriptions; send subscribe payload if ws is live.
 
@@ -353,29 +492,24 @@ class WsConsumer:
         """
         if not asset_ids:
             return True
-        ws = self._current_ws
-        if ws is None:
-            # Fallback path — no live socket yet. Mutate _l3_active_set so the
-            # next reconnect picks up the new tokens via _compute_active_assets.
-            self._l3_active_set.update(asset_ids)
-            return False
-        payload = {
-            "operation": "subscribe",
-            "assets_ids": list(asset_ids),
-            "initial_dump": True,
-        }
-        try:
-            await ws.send(json.dumps(payload))
-        except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
-            logger.warning(
-                f"ws_consumer.add_subscriptions: send failed ({e!r}) — "
-                f"asset_ids={list(asset_ids)[:5]}{'...' if len(asset_ids) > 5 else ''} "
-                f"(Warning #12: _l3_active_set NOT polluted; caller may retry)"
-            )
-            return False
-        # Send succeeded — commit to _l3_active_set.
-        self._l3_active_set.update(asset_ids)
-        return True
+        async with self._subscription_control_lock:
+            ws = self._current_ws
+            generation = self._connection_generation
+            if ws is None:
+                self._l3_active_set.update(asset_ids)
+                return False
+            if await self._send_control(
+                ws,
+                {
+                    "operation": "subscribe",
+                    "assets_ids": list(asset_ids),
+                    "initial_dump": True,
+                },
+            ):
+                self._l3_active_set.update(asset_ids)
+                return True
+        await self._compensate_generation(ws, generation)
+        return False
 
     async def remove_subscriptions(self, asset_ids: list[str]) -> bool:
         """Remove asset_ids from L3 subscriptions; send unsubscribe payload if live.
@@ -389,26 +523,19 @@ class WsConsumer:
         """
         if not asset_ids:
             return True
-        ws = self._current_ws
-        if ws is None:
-            # Fallback path — no live socket. Discard from _l3_active_set so
-            # the next reconnect omits the tokens via _compute_active_assets.
-            self._l3_active_set.difference_update(asset_ids)
-            return False
-        payload = {
-            "operation": "unsubscribe",
-            "assets_ids": list(asset_ids),
-        }
-        try:
-            await ws.send(json.dumps(payload))
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                f"ws_consumer.remove_subscriptions: send failed ({e!r}) — "
-                f"asset_ids={list(asset_ids)[:5]}{'...' if len(asset_ids) > 5 else ''}"
-            )
-            return False
-        self._l3_active_set.difference_update(asset_ids)
-        return True
+        async with self._subscription_control_lock:
+            ws = self._current_ws
+            generation = self._connection_generation
+            if ws is None:
+                self._l3_active_set.difference_update(asset_ids)
+                return False
+            if await self._send_control(
+                ws, {"operation": "unsubscribe", "assets_ids": list(asset_ids)}
+            ):
+                self._l3_active_set.difference_update(asset_ids)
+                return True
+        await self._compensate_generation(ws, generation)
+        return False
 
     # ── Quick task 260602-ws-dynamic-subscribe ──────────────────────────────
     #
@@ -431,44 +558,38 @@ class WsConsumer:
         """Send mid-conn `subscribe` payload for L2 candidate add diff."""
         if not asset_ids:
             return True
-        ws = self._current_ws
-        if ws is None:
-            return False
-        payload = {
-            "operation": "subscribe",
-            "assets_ids": list(asset_ids),
-            "initial_dump": True,
-        }
-        try:
-            await ws.send(json.dumps(payload))
-        except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
-            logger.warning(
-                f"ws_consumer.subscribe_candidates_payload: send failed ({e!r}) — "
-                f"asset_ids={list(asset_ids)[:5]}{'...' if len(asset_ids) > 5 else ''}"
-            )
-            return False
-        return True
+        async with self._subscription_control_lock:
+            ws = self._current_ws
+            generation = self._connection_generation
+            if ws is None:
+                return False
+            if await self._send_control(
+                ws,
+                {
+                    "operation": "subscribe",
+                    "assets_ids": list(asset_ids),
+                    "initial_dump": True,
+                },
+            ):
+                return True
+        await self._compensate_generation(ws, generation)
+        return False
 
     async def unsubscribe_candidates_payload(self, asset_ids: list[str]) -> bool:
         """Send mid-conn `unsubscribe` payload for L2 candidate remove diff."""
         if not asset_ids:
             return True
-        ws = self._current_ws
-        if ws is None:
-            return False
-        payload = {
-            "operation": "unsubscribe",
-            "assets_ids": list(asset_ids),
-        }
-        try:
-            await ws.send(json.dumps(payload))
-        except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
-            logger.warning(
-                f"ws_consumer.unsubscribe_candidates_payload: send failed ({e!r}) — "
-                f"asset_ids={list(asset_ids)[:5]}{'...' if len(asset_ids) > 5 else ''}"
-            )
-            return False
-        return True
+        async with self._subscription_control_lock:
+            ws = self._current_ws
+            generation = self._connection_generation
+            if ws is None:
+                return False
+            if await self._send_control(
+                ws, {"operation": "unsubscribe", "assets_ids": list(asset_ids)}
+            ):
+                return True
+        await self._compensate_generation(ws, generation)
+        return False
 
     @property
     def frame_count(self) -> int:
@@ -510,17 +631,16 @@ class WsConsumer:
                 return
 
             self._state = "CONNECTED"
-            active_assets = self._compute_active_assets()
             logger.info(
                 f"ws_consumer: starting consume loop with "
-                f"{len(active_assets)} subscribed assets "
+                f"{len(self._compute_active_assets())} subscribed assets "
                 f"(candidate={len(self._candidate_set)} l3={len(self._l3_active_set)})"
             )
 
             async for event in stream_market_events(
-                active_assets,
+                self._compute_active_assets,
                 initial_dump=True,
-                on_connect=self._stash_ws,  # GAP-401: stash ws for liveness gate
+                connection_initializer=self._initialize_connection,
             ):
                 if stop_event.is_set():
                     break
@@ -535,7 +655,13 @@ class WsConsumer:
                 self._watchdog.touch()
                 # Dispatch to placeholder/mirror; isolated failure must NOT crash loop
                 try:
-                    self._on_event(event)
+                    mirror_succeeded = self._on_event(event)
+                    if event.get("event_type") == "book":
+                        self.record_book_evidence(
+                            asset_id=str(event.get("asset_id") or ""),
+                            generation=self._connection_generation,
+                            mirror_succeeded=mirror_succeeded is True,
+                        )
                 except Exception as e:  # noqa: BLE001
                     # Phase 04 Plan 04 D-06 indicator 1: count the drop so the
                     # throughput chaos run has a numeric signal beyond log-grep.

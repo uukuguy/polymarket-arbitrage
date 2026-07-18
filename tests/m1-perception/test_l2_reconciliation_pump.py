@@ -1,4 +1,5 @@
 """Phase 05.1 durable L2 reconciliation pump contracts."""
+
 from __future__ import annotations
 
 import asyncio
@@ -180,9 +181,7 @@ async def test_asyncpg_cursor_commit_updates_freshness(monkeypatch):
     conn = MagicMock()
     conn.execute = AsyncMock(return_value="INSERT 0 1")
     conn.close = AsyncMock()
-    monkeypatch.setattr(
-        reconciliation.asyncpg, "connect", AsyncMock(return_value=conn)
-    )
+    monkeypatch.setattr(reconciliation.asyncpg, "connect", AsyncMock(return_value=conn))
     store = reconciliation.AsyncpgCursorStore(
         dsn="postgresql://test", consumer="l2-candidate-refresh"
     )

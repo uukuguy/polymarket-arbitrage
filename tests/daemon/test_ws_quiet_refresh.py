@@ -30,7 +30,18 @@ def _make_consumer() -> tuple[WsConsumer, WsWatchdog, MagicMock]:
     consumer._last_event_at_s = BASE_S
     ws = MagicMock()
     ws.send = AsyncMock(return_value=None)
+    ws.close = AsyncMock(return_value=None)
     consumer._current_ws = ws
+
+    async def _send_with_evidence(payload: str) -> None:
+        if json.loads(payload).get("operation") == "subscribe":
+            consumer.record_book_evidence(
+                asset_id="candidate-a",
+                generation=consumer._connection_generation,
+                mirror_succeeded=True,
+            )
+
+    ws.send.side_effect = _send_with_evidence
     return consumer, watchdog, ws
 
 
@@ -45,16 +56,19 @@ async def test_request_book_refresh_sends_sorted_union_without_mutating_truth() 
     result = await consumer.request_book_refresh()
 
     assert result is True
-    ws.send.assert_awaited_once()
-    assert json.loads(ws.send.await_args.args[0]) == {
-        "operation": "subscribe",
-        "assets_ids": ["candidate-a", "candidate-b", "l3-c"],
-        "initial_dump": True,
-    }
+    assert [json.loads(call.args[0]) for call in ws.send.await_args_list] == [
+        {"operation": "unsubscribe", "assets_ids": ["candidate-a", "candidate-b", "l3-c"]},
+        {
+            "operation": "subscribe",
+            "assets_ids": ["candidate-a", "candidate-b", "l3-c"],
+            "initial_dump": True,
+        },
+    ]
     assert consumer._candidate_set == candidates_before
     assert consumer._l3_active_set == l3_before
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before
+
 
 @pytest.mark.asyncio
 async def test_refresh_if_quiet_obeys_quiet_boundary_and_retry_cooldown() -> None:
@@ -65,14 +79,14 @@ async def test_refresh_if_quiet_obeys_quiet_boundary_and_retry_cooldown() -> Non
 
     assert await consumer.refresh_if_quiet(now_s=BASE_S + 60) is True
     assert consumer._last_quiet_refresh_attempt_at_s == BASE_S + 60
-    assert ws.send.await_count == 1
+    assert ws.send.await_count == 2
 
     assert await consumer.refresh_if_quiet(now_s=BASE_S + 89) is None
-    assert ws.send.await_count == 1
+    assert ws.send.await_count == 2
 
     assert await consumer.refresh_if_quiet(now_s=BASE_S + 90) is True
     assert consumer._last_quiet_refresh_attempt_at_s == BASE_S + 90
-    assert ws.send.await_count == 2
+    assert ws.send.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -83,7 +97,7 @@ async def test_new_business_frame_suppresses_refresh_after_cooldown() -> None:
     consumer._last_event_at_s = BASE_S + 85
 
     assert await consumer.refresh_if_quiet(now_s=BASE_S + 100) is None
-    assert ws.send.await_count == 1
+    assert ws.send.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -133,7 +147,13 @@ async def test_run_quiet_refresh_sends_once_then_stops_cleanly() -> None:
     watchdog_before = watchdog.last_event_at_s
 
     async def _send_then_stop(_payload: str) -> None:
-        stop_event.set()
+        if json.loads(_payload).get("operation") == "subscribe":
+            consumer.record_book_evidence(
+                asset_id="candidate-a",
+                generation=consumer._connection_generation,
+                mirror_succeeded=True,
+            )
+            stop_event.set()
 
     ws.send.side_effect = _send_then_stop
 
@@ -147,7 +167,7 @@ async def test_run_quiet_refresh_sends_once_then_stops_cleanly() -> None:
         timeout=0.2,
     )
 
-    ws.send.assert_awaited_once()
+    assert ws.send.await_count == 2
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before
 
@@ -186,19 +206,15 @@ async def test_request_book_refresh_bounds_hung_send_without_forging_freshness(
         await never_returns.wait()
 
     ws.send.side_effect = _hung_send
-    monkeypatch.setattr(
-        ws_consumer_module, "_QUIET_REFRESH_SEND_TIMEOUT_S", 0.01, raising=False
-    )
+    monkeypatch.setattr(ws_consumer_module, "_QUIET_REFRESH_SEND_TIMEOUT_S", 0.01, raising=False)
     sink_id = logger.add(lambda message: messages.append(str(message)), level="INFO")
     try:
-        result = await asyncio.wait_for(
-            consumer.request_book_refresh(), timeout=0.2
-        )
+        result = await asyncio.wait_for(consumer.request_book_refresh(), timeout=0.2)
     finally:
         logger.remove(sink_id)
 
     assert result is False
     assert any("ws quiet refresh: sending assets=3" in msg for msg in messages)
-    assert any("ws quiet refresh: send failed assets=3" in msg for msg in messages)
+    assert any("ws quiet refresh failed assets=3" in msg for msg in messages)
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before

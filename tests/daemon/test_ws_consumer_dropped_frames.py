@@ -17,6 +17,7 @@ received (frame_count += 1) AND as dropped (dropped_frame_count += 1). This
 distinguishes "frames the WS delivered" from "frames the downstream actually
 processed", which is exactly what D-06 indicator 1 needs.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -77,7 +78,7 @@ def test_dropped_frame_increments_on_callback_raise(monkeypatch) -> None:
     )
 
     # Inject a one-frame fake stream and run the consumer briefly.
-    async def fake_stream(asset_ids, initial_dump=True):  # noqa: ARG001
+    async def fake_stream(asset_ids, initial_dump=True, **kwargs):  # noqa: ARG001
         yield {"asset_id": "0xabc", "type": "tob", "ts_ms": 1}
 
     monkeypatch.setattr(
@@ -95,7 +96,8 @@ def test_dropped_frame_increments_on_callback_raise(monkeypatch) -> None:
     asyncio.run(_run())
 
     assert consumer.frame_count == 1, (
-        f"frame_count: a received frame must increment regardless of dispatch outcome, got {consumer.frame_count}"
+        "frame_count: a received frame must increment regardless of "
+        f"dispatch outcome, got {consumer.frame_count}"
     )
     assert consumer.dropped_frame_count == 1, (
         f"dropped_frame_count: on_event raised → expected 1, got {consumer.dropped_frame_count}"
@@ -120,7 +122,7 @@ def test_dropped_frame_not_incremented_on_success(monkeypatch) -> None:
         initial_assets=["0xabc"],
     )
 
-    async def fake_stream(asset_ids, initial_dump=True):  # noqa: ARG001
+    async def fake_stream(asset_ids, initial_dump=True, **kwargs):  # noqa: ARG001
         yield {"asset_id": "0xabc", "type": "tob", "ts_ms": 2}
 
     monkeypatch.setattr(
@@ -134,10 +136,9 @@ def test_dropped_frame_not_incremented_on_success(monkeypatch) -> None:
 
     asyncio.run(_run())
 
-    assert consumer.frame_count == 1, (
-        f"frame_count should be 1, got {consumer.frame_count}"
-    )
+    assert consumer.frame_count == 1, f"frame_count should be 1, got {consumer.frame_count}"
     assert consumer.dropped_frame_count == 0, (
-        f"dropped_frame_count must stay 0 when on_event succeeds, got {consumer.dropped_frame_count}"
+        "dropped_frame_count must stay 0 when on_event succeeds, "
+        f"got {consumer.dropped_frame_count}"
     )
     assert received == [{"asset_id": "0xabc", "type": "tob", "ts_ms": 2}]

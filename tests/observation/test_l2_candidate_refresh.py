@@ -3,6 +3,7 @@
 Plan 03-05 Task 3 — compute_candidates (union) + diff_candidate_sets +
 on_snapshot_complete (debounce + cap + ws_consumer mutation).
 """
+
 from __future__ import annotations
 
 import os
@@ -131,6 +132,7 @@ def settings_with_db(tmp_path):
 def _reset_debounce_state():
     """Reset module-level debounce + Phase-04 D-01 fail-soft state between tests."""
     import polyarb.observation.l2_candidate_refresh as mod
+
     mod._last_refresh_at_s = 0.0
     # Phase 04 Plan 02 — D-01 fail-soft state.
     if hasattr(mod, "_last_known_markets_rows"):
@@ -233,9 +235,7 @@ def test_compute_candidates_watchlist_overrides_recipe(settings_with_db, tmp_pat
         "    limit: 100\n"
     )
     watchlist_yaml = tmp_path / "watchlist.yaml"
-    watchlist_yaml.write_text(
-        "- slug: slug-r-0\n  reason: overlap\n  added: 2026-05-24\n"
-    )
+    watchlist_yaml.write_text("- slug: slug-r-0\n  reason: overlap\n  added: 2026-05-24\n")
 
     rows = compute_candidates(settings, scanner_yaml, watchlist_yaml)
     # find the R0 (yes_token_id=YES-R0) row
@@ -251,9 +251,7 @@ def test_compute_candidates_empty_scanner_yaml(settings_with_db, tmp_path):
     settings, db_path = settings_with_db
     _create_minimal_sqlite(db_path, _seed_markets(2, "W"))
     watchlist_yaml = tmp_path / "watchlist.yaml"
-    watchlist_yaml.write_text(
-        "- slug: slug-w-0\n  reason: only\n  added: 2026-05-24\n"
-    )
+    watchlist_yaml.write_text("- slug: slug-w-0\n  reason: only\n  added: 2026-05-24\n")
 
     rows = compute_candidates(settings, None, watchlist_yaml)
     asset_ids = {r.asset_id for r in rows}
@@ -284,12 +282,30 @@ def test_diff_candidate_sets_added_removed():
     from polyarb.observation.l2_candidate_refresh import CandidateRow, diff_candidate_sets
 
     new_rows = [
-        CandidateRow(asset_id="D", market_id=None, event_id=None,
-                     recipe_name="r", source="recipe", ranking_score=None),
-        CandidateRow(asset_id="E", market_id=None, event_id=None,
-                     recipe_name="r", source="recipe", ranking_score=None),
-        CandidateRow(asset_id="A", market_id=None, event_id=None,
-                     recipe_name="r", source="recipe", ranking_score=None),
+        CandidateRow(
+            asset_id="D",
+            market_id=None,
+            event_id=None,
+            recipe_name="r",
+            source="recipe",
+            ranking_score=None,
+        ),
+        CandidateRow(
+            asset_id="E",
+            market_id=None,
+            event_id=None,
+            recipe_name="r",
+            source="recipe",
+            ranking_score=None,
+        ),
+        CandidateRow(
+            asset_id="A",
+            market_id=None,
+            event_id=None,
+            recipe_name="r",
+            source="recipe",
+            ranking_score=None,
+        ),
     ]
     removed, added = diff_candidate_sets({"A", "B", "C"}, new_rows)
     assert removed == {"B", "C"}
@@ -300,10 +316,22 @@ def test_diff_candidate_sets_no_change():
     from polyarb.observation.l2_candidate_refresh import CandidateRow, diff_candidate_sets
 
     new_rows = [
-        CandidateRow(asset_id="A", market_id=None, event_id=None,
-                     recipe_name="r", source="recipe", ranking_score=None),
-        CandidateRow(asset_id="B", market_id=None, event_id=None,
-                     recipe_name="r", source="recipe", ranking_score=None),
+        CandidateRow(
+            asset_id="A",
+            market_id=None,
+            event_id=None,
+            recipe_name="r",
+            source="recipe",
+            ranking_score=None,
+        ),
+        CandidateRow(
+            asset_id="B",
+            market_id=None,
+            event_id=None,
+            recipe_name="r",
+            source="recipe",
+            ranking_score=None,
+        ),
     ]
     removed, added = diff_candidate_sets({"A", "B"}, new_rows)
     assert removed == set()
@@ -331,10 +359,7 @@ def test_candidate_set_cap_500(settings_with_db, tmp_path):
     )
     watchlist_yaml = tmp_path / "watchlist.yaml"
     watchlist_yaml.write_text(
-        "".join(
-            f"- slug: slug-w-{i}\n  reason: keep\n  added: 2026-05-24\n"
-            for i in range(10)
-        )
+        "".join(f"- slug: slug-w-{i}\n  reason: keep\n  added: 2026-05-24\n" for i in range(10))
     )
 
     rows = compute_candidates(settings, scanner_yaml, watchlist_yaml)
@@ -529,9 +554,7 @@ async def test_on_snapshot_complete_reconciles_complete_mirror_projection(
 
 
 @pytest.mark.asyncio
-async def test_on_snapshot_complete_upsert_rows_include_included_at_ts(
-    settings_with_db, tmp_path
-):
+async def test_on_snapshot_complete_upsert_rows_include_included_at_ts(settings_with_db, tmp_path):
     """Quick task 260601-included-at-ts (RED).
 
     Prod incident 2026-06-01: `l2_candidates.included_at_ts` is NOT NULL but the
@@ -594,9 +617,7 @@ async def test_on_snapshot_complete_upsert_rows_include_included_at_ts(
         parsed = datetime.fromisoformat(val)
         assert parsed.tzinfo is not None, "included_at_ts must be tz-aware"
         # Stamped at-or-near 'now' (within the test wall-clock window).
-        assert before <= parsed <= after, (
-            f"included_at_ts {parsed} not within [{before}, {after}]"
-        )
+        assert before <= parsed <= after, f"included_at_ts {parsed} not within [{before}, {after}]"
 
 
 @pytest.mark.asyncio
@@ -652,8 +673,7 @@ async def test_on_snapshot_complete_calls_ws_add_subscriptions_for_added(
     fake_ws.subscribe_candidates_payload.assert_awaited_once()
     added_arg = fake_ws.subscribe_candidates_payload.await_args[0][0]
     assert sorted(added_arg) == sorted(["YES-R0", "YES-R1", "YES-R2"]), (
-        f"expected all 3 R-markets passed to subscribe_candidates_payload, "
-        f"got {added_arg}"
+        f"expected all 3 R-markets passed to subscribe_candidates_payload, got {added_arg}"
     )
 
 
@@ -702,15 +722,12 @@ async def test_on_snapshot_complete_calls_ws_remove_subscriptions_for_removed(
     fake_ws.unsubscribe_candidates_payload.assert_awaited_once()
     removed_arg = fake_ws.unsubscribe_candidates_payload.await_args[0][0]
     assert sorted(removed_arg) == sorted(["OLD-X", "OLD-Y"]), (
-        f"expected old assets passed to unsubscribe_candidates_payload, "
-        f"got {removed_arg}"
+        f"expected old assets passed to unsubscribe_candidates_payload, got {removed_arg}"
     )
 
 
 @pytest.mark.asyncio
-async def test_on_snapshot_complete_no_ws_subscribe_calls_when_no_diff(
-    settings_with_db, tmp_path
-):
+async def test_on_snapshot_complete_no_ws_subscribe_calls_when_no_diff(settings_with_db, tmp_path):
     """Edge case: when diff yields neither added nor removed (candidate set
     unchanged across refresh), we MUST NOT send no-op WS payloads."""
     import polyarb.observation.l2_candidate_refresh as mod
@@ -750,9 +767,7 @@ async def test_on_snapshot_complete_no_ws_subscribe_calls_when_no_diff(
 
 
 @pytest.mark.asyncio
-async def test_on_snapshot_complete_no_mirror_call_when_none(
-    settings_with_db, tmp_path
-):
+async def test_on_snapshot_complete_no_mirror_call_when_none(settings_with_db, tmp_path):
     """mirror=None (config-disabled) → no mirror method calls; refresh still runs."""
     import polyarb.observation.l2_candidate_refresh as mod
 
@@ -801,9 +816,12 @@ async def test_refresh_reconciles_durable_desired_rows_even_without_memory_diff(
     mirror = MagicMock()
     mirror.reconcile_candidates.return_value = True
 
-    assert await mod.on_snapshot_complete(
-        {"snapshot_id": 77}, ws_consumer=ws, settings=settings, mirror=mirror
-    ) is True
+    assert (
+        await mod.on_snapshot_complete(
+            {"snapshot_id": 77}, ws_consumer=ws, settings=settings, mirror=mirror
+        )
+        is True
+    )
 
     mirror.reconcile_candidates.assert_called_once()
     desired = mirror.reconcile_candidates.call_args.args[0]
@@ -835,18 +853,19 @@ async def test_refresh_required_convergence_failure_returns_false(
     ws = MagicMock()
     ws._candidate_set = {"OLD"}
     ws._l3_active_set = {"L3-A"}
-    ws.subscribe_candidates_payload = AsyncMock(
-        return_value=failure != "subscribe_false"
-    )
+    ws.subscribe_candidates_payload = AsyncMock(return_value=failure != "subscribe_false")
     ws.unsubscribe_candidates_payload = AsyncMock(return_value=True)
     if failure == "unsubscribe_error":
         ws.unsubscribe_candidates_payload.side_effect = RuntimeError("send failed")
     mirror = MagicMock()
     mirror.reconcile_candidates.return_value = failure != "mirror_false"
 
-    assert await mod.on_snapshot_complete(
-        {"snapshot_id": 78}, ws_consumer=ws, settings=settings, mirror=mirror
-    ) is False
+    assert (
+        await mod.on_snapshot_complete(
+            {"snapshot_id": 78}, ws_consumer=ws, settings=settings, mirror=mirror
+        )
+        is False
+    )
     assert ws._l3_active_set == {"L3-A"}
 
 
@@ -901,11 +920,14 @@ async def test_maintenance_live_fetch_failure_rejects_cached_rows(monkeypatch):
     compute = MagicMock(return_value=[])
     monkeypatch.setattr(mod, "compute_candidates", compute)
 
-    assert await mod.on_snapshot_complete(
-        {"snapshot_id": 4, "_maintenance": True},
-        ws_consumer=ws,
-        settings=settings,
-    ) is False
+    assert (
+        await mod.on_snapshot_complete(
+            {"snapshot_id": 4, "_maintenance": True},
+            ws_consumer=ws,
+            settings=settings,
+        )
+        is False
+    )
     compute.assert_not_called()
     ws.replace_candidate_set.assert_not_awaited()
 
@@ -1006,6 +1028,7 @@ def test_compute_candidates_uses_temp_db_when_markets_rows(tmp_path):
     # Track build_temp_db return so we can verify cleanup.
     built_paths: list[Path] = []
     import polyarb.observation.l2_candidate_refresh as mod
+
     real_build = mod.build_temp_db
 
     def _spy(rows):

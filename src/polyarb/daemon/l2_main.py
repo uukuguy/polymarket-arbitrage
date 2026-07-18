@@ -38,6 +38,7 @@ Cross-pollination guard (T-03-03-03): this module MUST NOT import from
 parallel implementations; symbol sharing would obscure the separate
 process boundary.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -230,11 +231,7 @@ def _trade_row_from_frame(frame: dict) -> dict | None:
         return None
     # Polymarket WS may key the tx hash under different names depending on
     # source; accept the common variants.
-    trade_hash = (
-        frame.get("trade_hash")
-        or frame.get("transactionHash")
-        or frame.get("txHash")
-    )
+    trade_hash = frame.get("trade_hash") or frame.get("transactionHash") or frame.get("txHash")
     if not trade_hash:
         return None
     try:
@@ -256,9 +253,7 @@ def _trade_row_from_frame(frame: dict) -> dict | None:
     }
 
 
-def _book_levels_rows_from_frame(
-    frame: dict, max_levels: int = 10
-) -> list[dict]:
+def _book_levels_rows_from_frame(frame: dict, max_levels: int = 10) -> list[dict]:
     """Project a WS ``book`` frame to up to ``2 * max_levels`` l2_book_levels rows.
 
     Phase 05 D-04 + D-07. Returns ``[]`` (never None, never raises) for:
@@ -385,7 +380,7 @@ async def main() -> int:
             message="l2-mirror disabled (config); no l2_* writes will occur",
         )
 
-    def _on_event(frame: dict) -> None:
+    def _on_event(frame: dict) -> bool:
         """Plan 06 D-07: dispatch WS frame to L2SupabaseMirror by event_type.
 
         T-03-04-01 mitigation: log only event_type + asset prefix, never body.
@@ -395,12 +390,13 @@ async def main() -> int:
         asset_id_raw = frame.get("asset_id") or ""
         logger.debug(f"ws frame type={event_type} asset={asset_id_raw[:16]}")
         if l2_mirror is None:
-            return  # disabled — startup breadcrumb already explains why
+            return False  # disabled — no production mirror evidence
 
         if event_type in ("price_change", "best_bid_ask", "book"):
             row = _tob_row_from_frame(frame)
+            mirror_succeeded = False
             if row is not None:
-                l2_mirror.push_top_of_book([row])
+                mirror_succeeded = l2_mirror.push_top_of_book([row]) is True
             # Phase 05 D-04: book events for L3-promoted assets ALSO write
             # full depth. TOB path above remains the unconditional baseline;
             # this depth write is gated on the L3 active set populated by the
@@ -408,14 +404,17 @@ async def main() -> int:
             # binding if l3_promote._l3_active_set is reassigned at runtime.
             if event_type == "book":
                 from polyarb.observation import l3_promote
+
                 if asset_id_raw and asset_id_raw in l3_promote.get_l3_active_set():
                     book_rows = _book_levels_rows_from_frame(frame, max_levels=10)
                     if book_rows:
                         l2_mirror.push_book_levels(book_rows)
+            return mirror_succeeded
         elif event_type == "last_trade_price":
             row = _trade_row_from_frame(frame)
             if row is not None:
                 l2_mirror.push_trades([row])
+        return False
 
     # Bootstrap asset_ids from env (Phase 03 Wave 5 deploy aid 2026-05-25):
     # without this, L2 cold-starts with empty subscribed_assets and idles
@@ -471,9 +470,9 @@ async def main() -> int:
 
     config = uvicorn.Config(
         app,
-        host="0.0.0.0",   # Fly internal network only — fly-l2.toml controls exposure
+        host="0.0.0.0",  # Fly internal network only — fly-l2.toml controls exposure
         port=settings.http_port,
-        log_config=None,   # use loguru, not uvicorn's logger
+        log_config=None,  # use loguru, not uvicorn's logger
         access_log=False,  # Axiom doesn't need access logs at this volume
         loop="asyncio",
     )
@@ -515,17 +514,13 @@ async def main() -> int:
     quiet_refresh_task = asyncio.create_task(
         ws_consumer.run_quiet_refresh(stop_event), name="ws-quiet-refresh"
     )
-    pump_task = asyncio.create_task(
-        reconciliation_pump.run(stop_event), name="reconciliation-pump"
-    )
+    pump_task = asyncio.create_task(reconciliation_pump.run(stop_event), name="reconciliation-pump")
 
     # ── Plan 05: long-running listener task ─────────────────────────────────
     async def _listener_runner() -> None:
         """Run LISTEN independently; termination state is updated by listener."""
         if not dsn:
-            logger.warning(
-                "event listener: supabase_db_dsn not set; idling until shutdown"
-            )
+            logger.warning("event listener: supabase_db_dsn not set; idling until shutdown")
             await stop_event.wait()
             return
         await listen_snapshot_complete(
@@ -553,9 +548,7 @@ async def main() -> int:
 
     # Recipe path: src/polyarb/scan_recipes/l3-promote.yaml (source-controlled
     # yaml, 3rd recipe trust tier — see scanner.py docstring).
-    _l3_recipe_path = (
-        _Path(__file__).resolve().parents[1] / "scan_recipes" / "l3-promote.yaml"
-    )
+    _l3_recipe_path = _Path(__file__).resolve().parents[1] / "scan_recipes" / "l3-promote.yaml"
     l3_promoter_task = asyncio.create_task(
         l3_promote_module.run_periodic(
             stop_event=stop_event,

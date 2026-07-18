@@ -24,13 +24,14 @@ Hard locks (do NOT relax without a D-XX amendment):
 Phase 02 F-04 invariant: ``asyncio.CancelledError`` MUST propagate from
 ``watch()`` (NOT swallowed). SIGTERM relies on this.
 """
+
 from __future__ import annotations
 
 import asyncio
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 import sentry_sdk
 from loguru import logger
@@ -72,8 +73,8 @@ class WsWatchdog:
     def __init__(
         self,
         stale_s: float = 30.0,  # D-03 LOCKED — DO NOT make user-configurable
-        on_reconnect: Optional[Callable[[], None]] = None,
-        liveness_check: Optional[Callable[[], bool]] = None,
+        on_reconnect: Callable[[], None] | None = None,
+        liveness_check: Callable[[], bool] | None = None,
     ) -> None:
         self.stale_s = stale_s
         self._state = WatchdogState()
@@ -121,6 +122,17 @@ class WsWatchdog:
         self._last_touch_event.clear()
         self._state.reconnect_attempt = 0
 
+    def reserve_reconnect(self) -> bool:
+        """Reserve one reconnect from the shared 10/hour storm budget."""
+        now = time.monotonic()
+        cutoff = now - _STORM_WINDOW_S
+        while self._reconnect_timestamps and self._reconnect_timestamps[0] < cutoff:
+            self._reconnect_timestamps.popleft()
+        if len(self._reconnect_timestamps) >= MAX_RECONNECTS_PER_HOUR:
+            return False
+        self._reconnect_timestamps.append(now)
+        return True
+
     # ── Main loop ──────────────────────────────────────────────────────────
 
     async def watch(self, stop_event: asyncio.Event) -> None:
@@ -149,7 +161,7 @@ class WsWatchdog:
                             self._last_touch_event.wait(),
                             timeout=timeout,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # Recheck on next iteration
                         pass
         except asyncio.CancelledError:
@@ -191,7 +203,7 @@ class WsWatchdog:
                 self._state.state = "DEGRADED_REST_POLLING"
                 logger.warning(
                     f"ws_watchdog: reconnect storm cap hit "
-                    f"({recent} reconnects in last {_STORM_WINDOW_S/60:.0f}min); "
+                    f"({recent} reconnects in last {_STORM_WINDOW_S / 60:.0f}min); "
                     f"degrading to REST polling"
                 )
                 sentry_sdk.add_breadcrumb(
