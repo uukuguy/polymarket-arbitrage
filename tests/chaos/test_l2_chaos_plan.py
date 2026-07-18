@@ -24,8 +24,12 @@ Claude with results recorded in 03-SOAK-LOG.md).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass
@@ -309,3 +313,32 @@ def test_every_injection_documents_cleanup(inj: ChaosInjection) -> None:
             f"Inj {inj.inj_id} has no cleanup_cmds AND no natural-recovery "
             f"language in expected_truth — explicit cleanup required"
         )
+
+
+def test_listener_recovery_make_target_is_image_aware_and_has_two_modes() -> None:
+    """Phase 05.1: one stable entry proves listener and poll recovery separately."""
+    makefile = (ROOT / "Makefile").read_text()
+    script = (ROOT / "scripts/chaos_l2_listener_recovery.py").read_text()
+
+    assert "## chaos-l2-listener-recovery:" in makefile
+    assert "chaos-l2-listener-recovery:" in makefile
+    assert "--mode $(mode)" in makefile
+    assert 'choices=("listener", "poll")' in script
+
+    # The production image is python:3.12-slim. The new primitive may not rely
+    # on binaries known to be absent there.
+    for unavailable in ("pkill", "ps ", "dig ", "ping ", "which "):
+        assert unavailable not in script
+
+
+def test_poll_recovery_contract_uses_an_exact_notification_anchor_and_restores_l1() -> None:
+    """Timer proof is invalid unless NOTIFY stays exactly unchanged and is restored."""
+    script = (ROOT / "scripts/chaos_l2_listener_recovery.py").read_text()
+
+    assert "event_bus:last_notification_at" in script
+    assert "notification_after_poll != notification_before" in script
+    assert "POLYARB_EVENT_BUS_ENABLED=0" in script
+    assert "POLYARB_EVENT_BUS_ENABLED=1" in script
+    assert "MAX_RECOVERY_SECONDS = 180" in script
+    assert "POLL_PROOF_SECONDS = 60" in script
+    assert "no L2 restart" in script
