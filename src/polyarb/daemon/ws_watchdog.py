@@ -133,6 +133,16 @@ class WsWatchdog:
         self._reconnect_timestamps.append(now)
         return True
 
+    def reconnect_retry_after_s(self) -> float:
+        """Seconds until the shared reconnect budget admits one reservation."""
+        now = time.monotonic()
+        cutoff = now - _STORM_WINDOW_S
+        while self._reconnect_timestamps and self._reconnect_timestamps[0] < cutoff:
+            self._reconnect_timestamps.popleft()
+        if len(self._reconnect_timestamps) < MAX_RECONNECTS_PER_HOUR:
+            return 0.0
+        return max(0.0, self._reconnect_timestamps[0] + _STORM_WINDOW_S - now)
+
     # ── Main loop ──────────────────────────────────────────────────────────
 
     async def watch(self, stop_event: asyncio.Event) -> None:

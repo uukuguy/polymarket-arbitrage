@@ -212,22 +212,28 @@ class WsConsumer:
         except asyncio.CancelledError:
             await self._compensate_generation(ws, generation)
             raise
-        await self._compensate_generation(ws, generation)
-        raise WsConnectionInitializationFailed("initial WS subscription failed")
+        retry_after_s = await self._compensate_generation(ws, generation)
+        raise WsConnectionInitializationFailed(
+            "initial WS subscription failed", retry_after_s=retry_after_s
+        )
 
-    async def _compensate_generation(self, ws: Any, generation: int) -> None:
+    async def _compensate_generation(self, ws: Any, generation: int) -> float:
         """Close exactly one ambiguous socket per generation, preserving cancel."""
+        retry_after_s = 0.0
         async with self._subscription_control_lock:
             if generation in self._compensated_generations:
-                return
+                return self._watchdog.reconnect_retry_after_s()
             if len(self._compensated_generation_order) >= _COMPENSATED_GENERATIONS_MAX:
                 expired = self._compensated_generation_order.popleft()
                 self._compensated_generations.discard(expired)
             self._compensated_generations.add(generation)
             self._compensated_generation_order.append(generation)
             if not self._watchdog.reserve_reconnect():
-                logger.warning("ws compensation skipped: reconnect budget exhausted")
-                return
+                retry_after_s = self._watchdog.reconnect_retry_after_s()
+                logger.warning(
+                    "ws reconnect deferred: reconnect budget exhausted "
+                    f"retry_after_s={retry_after_s:.3f}"
+                )
         close_task = asyncio.create_task(
             asyncio.wait_for(ws.close(), timeout=_QUIET_REFRESH_SEND_TIMEOUT_S)
         )
@@ -238,6 +244,7 @@ class WsConsumer:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"ws compensation close failed: {exc!r}")
+        return retry_after_s
 
     def record_book_evidence(
         self, *, asset_id: str, generation: int, mirror_succeeded: bool

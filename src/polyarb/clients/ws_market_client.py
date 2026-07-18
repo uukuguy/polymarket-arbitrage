@@ -42,10 +42,15 @@ PING_INTERVAL_S = 10
 # 4 MiB cap for fat initial_dump book snapshots. Default 2**20 (1 MiB) is
 # insufficient on large orderbooks. Phase 02 D-23 OOM precedent.
 MAX_FRAME_SIZE = 2**22
+CANCEL_CLOSE_TIMEOUT_S: float = 5.0
 
 
 class WsConnectionInitializationFailed(RuntimeError):
     """A compensated candidate connection failed before becoming current."""
+
+    def __init__(self, message: str, *, retry_after_s: float = 0.0) -> None:
+        super().__init__(message)
+        self.retry_after_s = max(0.0, float(retry_after_s))
 
 
 async def stream_market_events(
@@ -148,12 +153,14 @@ async def stream_market_events(
             # The consumer already bounded and compensated the ambiguous
             # candidate socket. Keep ownership in the reconnect iterator.
             logger.warning(f"ws connection initialization failed: {e}; reconnecting…")
+            if e.retry_after_s > 0:
+                await asyncio.sleep(e.retry_after_s)
             continue
         except asyncio.CancelledError:
             # F-04: must NOT be swallowed. SIGTERM relies on this.
             logger.info("ws_market_client: cancelled, closing socket and propagating")
             try:
-                await ws.close()
+                await asyncio.wait_for(ws.close(), timeout=CANCEL_CLOSE_TIMEOUT_S)
             except Exception:  # noqa: BLE001
                 pass
             raise
