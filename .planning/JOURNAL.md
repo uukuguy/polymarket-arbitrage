@@ -3716,3 +3716,15 @@ $gsd-resume-work --ws m1-perception
 ### [NEXT — CURRENT]
 
 先验证 machine/instance identity，再监控完整 `sending → real book/mirror write → evidenced` 链；若 instance 已变化，先重建 >=180 秒主链 baseline。
+
+## SESSION 50 — 2026-07-18 (Phase 05.1 Plan 04 Task 3 checkpoint)
+
+- [VERIFIED] 只读窗口 `07:25:44Z–07:36:20Z` 共 60 个样本、全部 HTTP 200；machine 强制路由到 `85e647c4eed598`。
+- [VERIFIED] 最大 WS/mirror/reconciliation/candidate age 为 `3.2s/74.2s/60.1s/60.2s`；listener 始终 `listening`、cursor lag 0、WS assets 5、L3 保持 0/10。
+- [BLOCKER] 生产流量持续活跃，没有自然 60 秒 quiet edge；ordinary mirror reset 不构成 quiet-refresh 证据。
+- [BLOCKER] 无 Fly CLI/browser 认证时，公共 health probe 不暴露 exact instance incarnation 或 `sending/evidenced` 日志；本轮未创建 token、未改变云状态。
+- [DECISION] Task 3、validation、Task 4 和 `05.1-04-SUMMARY.md` 全部保持开放；没有降低阈值或使用 synthetic trigger。
+
+### [NEXT — CURRENT]
+
+先建立 Fly read-only identity/log access，再恢复 `$gsd-execute-phase 05.1 --ws m1-perception`。若 instance 已变化，先重建 >=180 秒主链 baseline。
