@@ -224,9 +224,10 @@ recent business snapshot. The freshness thresholds remain unchanged.
 
 ### 8.2 Chosen behavior
 
-Before a quiet subscription reaches the existing warning boundary, the
-consumer sends one in-band dynamic subscription update for the complete active
-asset set:
+Before a quiet subscription reaches the existing fail boundary, the consumer
+sends one in-band dynamic subscription update for the complete active asset
+set. The first refresh may occur while the WS freshness check is warning; it
+must leave enough time for a real book frame to arrive before failure:
 
 ```json
 {
