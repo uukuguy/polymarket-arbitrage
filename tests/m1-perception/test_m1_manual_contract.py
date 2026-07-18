@@ -192,6 +192,23 @@ def test_staged_classifier_matches_contract_syntax_on_production_paths() -> None
     ("path", "line"),
     [
         (
+            "src/polyarb/http/l2_app.py",
+            '+            "/control/chaos/ws-test-kill-v2",\n',
+        ),
+        ("src/polyarb/snapshot/cli.py", '+        "--no-cache-v2",\n'),
+        ("src/polyarb/cli_observation.py", '+        "-x",\n'),
+    ],
+)
+def test_staged_classifier_matches_multiline_contract_continuations(
+    path: str, line: str
+) -> None:
+    assert classify_staged_impact([path], line)
+
+
+@pytest.mark.parametrize(
+    ("path", "line"),
+    [
+        (
             "src/polyarb/http/health.py",
             '+logger.info(\'example checks["snapshot:freshness"] = []\')\n',
         ),
@@ -274,6 +291,46 @@ def test_precommit_blocks_staged_public_contract_without_manual_sync(
         health.read_text() + 'checks["snapshot:freshness"] = []\n'
     )
     assert _git(repo, "add", str(health.relative_to(repo))).returncode == 0
+
+    result = _run_precommit(repo)
+
+    assert result.returncode == 1
+    assert "M1 operator contract changed" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("path", "before", "after"),
+    [
+        (
+            "src/polyarb/http/l2_app.py",
+            'routes = [\n    Route(\n        "/control/chaos/ws-test-kill",\n'
+            '        ws_test_kill_handler,\n    ),\n]\n',
+            'routes = [\n    Route(\n        "/control/chaos/ws-test-kill-v2",\n'
+            '        ws_test_kill_handler,\n    ),\n]\n',
+        ),
+        (
+            "src/polyarb/snapshot/cli.py",
+            'no_cache: bool = typer.Option(\n    False,\n    "--no-cache",\n'
+            '    help="Disable cache",\n)\n',
+            'no_cache: bool = typer.Option(\n    False,\n    "--no-cache-v2",\n'
+            '    help="Disable cache",\n)\n',
+        ),
+    ],
+)
+def test_precommit_blocks_multiline_contract_continuation_without_manual_sync(
+    tmp_path: Path, path: str, before: str, after: str
+) -> None:
+    repo = _hook_repo(tmp_path)
+    changed = repo / path
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text(before)
+    assert _git(repo, "add", path).returncode == 0
+    assert (
+        _git(repo, "commit", "--no-verify", "-qm", "multiline fixture").returncode
+        == 0
+    )
+    changed.write_text(after)
+    assert _git(repo, "add", path).returncode == 0
 
     result = _run_precommit(repo)
 

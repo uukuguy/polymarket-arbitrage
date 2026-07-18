@@ -27,11 +27,13 @@ CLI_RE = re.compile(
     r"^[+-](?![+-])[ \t]*(?:"
     r"@app\.command[ \t]*(?:\(|$)|"
     r"[a-zA-Z_]\w*(?:[ \t]*:[ \t]*[^=\n#'\"]+)?[ \t]*=[ \t]*"
-    r"typer\.(?:Option|Argument)[ \t]*\()",
+    r"typer\.(?:Option|Argument)[ \t]*\(|"
+    r'"-{1,2}[a-zA-Z0-9][a-zA-Z0-9-]*"[ \t]*[,)])',
     re.MULTILINE,
 )
 ROUTE_RE = re.compile(
-    r'^[+-](?![+-])[ \t]*Route[ \t]*\([ \t]*"/[a-z0-9_/{}/.-]+"',
+    r'^[+-](?![+-])[ \t]*(?:Route[ \t]*\([ \t]*"/[a-z0-9_/{}/.-]+"|'
+    r'"/[a-z0-9_/{}/.-]+"[ \t]*[,)])',
     re.MULTILINE,
 )
 DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
