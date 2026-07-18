@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.check_m1_manual import classify_staged_impact, validate_manual  # noqa: E402
+import scripts.check_m1_manual as manual_checker  # noqa: E402
+from scripts.check_m1_manual import (  # noqa: E402
+    MANUAL,
+    _decode_nul_paths,
+    classify_staged_impact,
+    main,
+    validate_manual,
+)
 
 HEADINGS = tuple(f"## {n}. " for n in range(1, 11))
 
@@ -142,3 +152,38 @@ def test_staged_classifier_matches_contract_syntax_on_production_paths() -> None
 +Route("/status", status)
 """
     assert classify_staged_impact(["src/polyarb/http/app.py"], route_diff)
+
+
+def test_nul_staged_paths_preserve_unicode_manual_path() -> None:
+    raw = os.fsencode(str(MANUAL)) + b"\0"
+    assert _decode_nul_paths(raw) == ["docs/M1-市场感知平台使用手册.md"]
+
+
+def test_staged_unicode_manual_path_runs_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path)
+    manual = root / MANUAL
+    manual.write_text(_valid_manual())
+    parsed_paths = _decode_nul_paths(os.fsencode(str(MANUAL)) + b"\0")
+    path_calls: list[tuple[str, ...]] = []
+    validations: list[tuple[Path, str]] = []
+
+    def fake_git_paths(*args: str) -> list[str]:
+        path_calls.append(args)
+        return parsed_paths
+
+    monkeypatch.setattr(
+        manual_checker, "__file__", str(root / "scripts/check_m1_manual.py")
+    )
+    monkeypatch.setattr(manual_checker, "_git_paths", fake_git_paths)
+    monkeypatch.setattr(manual_checker, "_git", lambda *args: "")
+    monkeypatch.setattr(
+        manual_checker,
+        "validate_manual",
+        lambda checked_root, text: validations.append((checked_root, text)) or [],
+    )
+
+    assert main(["--staged"]) == 0
+    assert path_calls == [("diff", "--cached", "--name-only", "-z")]
+    assert validations == [(root, _valid_manual())]

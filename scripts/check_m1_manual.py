@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 from collections.abc import Sequence
@@ -155,6 +156,15 @@ def _git(*args: str) -> str:
     ).stdout
 
 
+def _decode_nul_paths(data: bytes) -> list[str]:
+    return [os.fsdecode(path) for path in data.split(b"\0") if path]
+
+
+def _git_paths(*args: str) -> list[str]:
+    result = subprocess.run(["git", *args], check=True, capture_output=True)
+    return _decode_nul_paths(result.stdout)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--staged", action="store_true")
@@ -163,7 +173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manual = root / MANUAL
 
     if args.staged:
-        paths = _git("diff", "--cached", "--name-only").splitlines()
+        paths = _git_paths("diff", "--cached", "--name-only", "-z")
         diff = _git("diff", "--cached", "--unified=0")
         self_changed = any(
             path in {str(MANUAL), "scripts/check_m1_manual.py"} for path in paths
