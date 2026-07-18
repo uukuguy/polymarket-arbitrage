@@ -3,9 +3,10 @@
 `listen_snapshot_complete` runs an outer reconnect loop. It opens an
 asyncpg connection, registers an `add_listener` callback that parses each
 NOTIFY payload as JSON and forwards the parsed dict to `on_event`, then
-issues `LISTEN snapshot_complete` and blocks on `stop_event.wait()`. If
-the connection drops the outer loop logs a warning, sleeps 5s, and
-reconnects. CancelledError propagates per F-04.
+issues `LISTEN snapshot_complete` and races process shutdown against the
+asyncpg connection termination callback. Connection death therefore wakes
+the outer loop and reconnects without a process restart. CancelledError
+propagates per F-04.
 
 `catchup_from_cursor` is the startup procedure. It reads the consumer's
 last seen snapshot_id from `l2_event_cursor` (created by Plan 06 Alembic
@@ -41,10 +42,7 @@ def _make_callback(on_event: Callable[[dict], None]) -> Callable:
         try:
             data = json.loads(payload)
         except (json.JSONDecodeError, TypeError) as e:
-            logger.error(
-                f"event listener: malformed payload, json parse failed: {e!r} "
-                f"payload[:200]={str(payload)[:200]!r}"
-            )
+            logger.error(f"event listener: malformed payload, json parse failed: {e!r}")
             return
         try:
             on_event(data)
@@ -58,6 +56,10 @@ async def listen_snapshot_complete(
     dsn: str,
     on_event: Callable[[dict], None],
     stop_event: asyncio.Event,
+    state: object | None = None,
+    *,
+    initial_backoff_s: float = 1.0,
+    max_backoff_s: float = 30.0,
 ) -> None:
     """Outer reconnect loop: LISTEN snapshot_complete → dispatch to on_event.
 
@@ -65,16 +67,48 @@ async def listen_snapshot_complete(
     (F-04 contract — propagate, never swallow). Any other exception causes
     a 5s sleep + reconnect.
     """
+    backoff_s = initial_backoff_s
     while not stop_event.is_set():
+        conn = None
+        stop_task: asyncio.Task | None = None
+        terminated: asyncio.Future | None = None
         try:
             conn = await asyncpg.connect(dsn=dsn)
             try:
                 await conn.add_listener("snapshot_complete", _make_callback(on_event))
                 await conn.execute("LISTEN snapshot_complete")
+                terminated = asyncio.get_running_loop().create_future()
+
+                def _on_termination(_conn: object) -> None:
+                    if not terminated.done():
+                        terminated.set_result(None)
+
+                conn.add_termination_listener(_on_termination)
+                if state is not None:
+                    setattr(state, "is_connected", True)
+                    setattr(state, "last_error", None)
                 logger.info("event listener connected to snapshot_complete channel")
-                await stop_event.wait()
-                return
+                backoff_s = initial_backoff_s
+                stop_task = asyncio.create_task(stop_event.wait())
+                done, _ = await asyncio.wait(
+                    {stop_task, terminated}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if stop_task in done and stop_event.is_set():
+                    return
+                if state is not None:
+                    setattr(state, "is_connected", False)
+                raise ConnectionError("LISTEN connection terminated")
             finally:
+                if state is not None:
+                    setattr(state, "is_connected", False)
+                if stop_task is not None and not stop_task.done():
+                    stop_task.cancel()
+                    try:
+                        await stop_task
+                    except asyncio.CancelledError:
+                        pass
+                if terminated is not None and not terminated.done():
+                    terminated.cancel()
                 try:
                     await conn.close()
                 except Exception:  # noqa: BLE001
@@ -86,11 +120,18 @@ async def listen_snapshot_complete(
         except Exception as e:  # noqa: BLE001
             if stop_event.is_set():
                 return
-            logger.warning(f"event listener reconnecting in 5s: {e!r}")
+            if state is not None:
+                setattr(state, "is_connected", False)
+                setattr(state, "reconnect_count", getattr(state, "reconnect_count", 0) + 1)
+                setattr(state, "last_error", type(e).__name__)
+            logger.warning(
+                f"event listener reconnecting in {backoff_s:g}s: {type(e).__name__}"
+            )
             try:
-                await asyncio.sleep(5)
+                await asyncio.sleep(backoff_s)
             except asyncio.CancelledError:
                 raise
+            backoff_s = min(max_backoff_s, max(initial_backoff_s, backoff_s * 2))
 
 
 async def catchup_from_cursor(
