@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -209,3 +210,33 @@ def test_docs_m1_check_make_target() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "M1 manual contract: OK" in result.stdout
+
+
+def test_smoke_health_prod_make_target_is_strict_and_read_only() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    match = re.search(
+        r"(?m)^smoke-health-prod:\n(?P<recipe>(?:\t.*\n)+)", makefile
+    )
+    assert match is not None, "strict production health target must exist"
+    recipe = match.group("recipe")
+    assert "https://polyarb-l1.fly.dev/health" in recipe
+    assert "/healthz" not in recipe
+    forbidden = ("flyctl", "scale ", " post ", "deploy", "secrets", "restart")
+    assert not any(token in recipe.lower() for token in forbidden)
+
+
+def test_manual_keeps_reviewed_operator_safety_facts() -> None:
+    text = (ROOT / "docs/M1-市场感知平台使用手册.md").read_text()
+    daily = text.split("## 3. ", 1)[1].split("## 4. ", 1)[0]
+    read_only = text.split("### 日常只读", 1)[1].split("### 本地 mutation", 1)[0]
+
+    assert "`make smoke-health-prod`" in daily
+    assert "`make smoke-test`" not in daily
+    assert "`make smoke-health-prod`" in read_only
+    assert "`make smoke-test`" not in read_only
+    assert "候选不是独立 staging 部署" in text
+    assert "`POLYARB_SCAN_SHARED_SECRET`" in text
+    assert "05.2-03 将把检查器集成到 pre-commit hook" in text
+    assert "candidates、asset TOB/trades 和 signals" in text
+    assert "`make smoke-l3-dashboard asset_id=...`" in text
+    assert "手工检查 `/status`" in text
