@@ -106,3 +106,18 @@ async def test_due_refresh_failures_do_not_forge_freshness(failure: str) -> None
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before
 
+    # A failed attempt still owns the retry cooldown. In particular, the
+    # closed transport must not be hammered once per scheduler tick.
+    assert await consumer.refresh_if_quiet(now_s=BASE_S + 89) is None
+    assert consumer._last_quiet_refresh_attempt_at_s == BASE_S + 60
+    assert ws.send.await_count == (1 if failure == "closed" else 0)
+    assert consumer.last_event_at_s == event_before
+    assert watchdog.last_event_at_s == watchdog_before
+
+    # The exact cooldown boundary permits another attempt. Empty/no-WS paths
+    # remain transport-free; a closed live transport observes the retry.
+    assert await consumer.refresh_if_quiet(now_s=BASE_S + 90) is False
+    assert consumer._last_quiet_refresh_attempt_at_s == BASE_S + 90
+    assert ws.send.await_count == (2 if failure == "closed" else 0)
+    assert consumer.last_event_at_s == event_before
+    assert watchdog.last_event_at_s == watchdog_before
