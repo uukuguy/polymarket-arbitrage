@@ -62,6 +62,41 @@ def _cli(
     )
 
 
+def test_diagnose_feed_reports_zero_as_success(tmp_path) -> None:
+    body = tmp_path / "zero.json"
+    body.write_text(
+        '{"strategy":"neg-risk-buy-all","profit_basis":"gross-before-fees",'
+        '"count":0,"opportunities":[]}'
+    )
+
+    result = _cli("diagnose-feed", "--http-status", "200", "--body-file", str(body))
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["kind"] == "available-zero"
+
+
+def test_diagnose_feed_reports_stale_as_nonzero(tmp_path) -> None:
+    body = tmp_path / "stale.json"
+    body.write_text('{"error":"snapshot age 1200.0s exceeds 900.0s"}')
+
+    result = _cli("diagnose-feed", "--http-status", "503", "--body-file", str(body))
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["kind"] == "stale-snapshot"
+
+
+def test_diagnose_feed_missing_body_is_bounded_and_path_safe(tmp_path) -> None:
+    missing_body = tmp_path / "private-input.json"
+
+    result = _cli(
+        "diagnose-feed", "--http-status", "200", "--body-file", str(missing_body)
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == "opportunity diagnostic input unavailable: read error"
+    assert str(missing_body) not in result.stderr
+
+
 def test_run_status_close_status_across_four_processes(tmp_path) -> None:
     path = tmp_path / "positions.db"
 

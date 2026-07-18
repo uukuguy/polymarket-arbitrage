@@ -40,6 +40,7 @@ from polyarb.models.slippage import SlippageCalculator
 from polyarb.routing.config import ExecutionConfig, PositionConfig, RoutingConfig
 from polyarb.routing.engine import RoutingEngine
 from polyarb.routing.money import Money
+from polyarb.routing.opportunity_diagnosis import diagnose_opportunity_feed
 from polyarb.routing.opportunity_scanner import (
     StaleSnapshotError,
     scan_neg_risk_buy_all,
@@ -309,6 +310,26 @@ def scan(
             indent=2,
         )
     )
+
+
+@app.command("diagnose-feed")
+def diagnose_feed(
+    http_status: int = typer.Option(..., "--http-status"),
+    body_file: Path = typer.Option(..., "--body-file"),
+) -> None:
+    """Classify one saved opportunity-feed HTTP response."""
+    try:
+        body = body_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        typer.secho(
+            "opportunity diagnostic input unavailable: read error",
+            err=True,
+        )
+        raise typer.Exit(code=2) from exc
+
+    diagnostic = diagnose_opportunity_feed(http_status, body)
+    typer.echo(json.dumps(diagnostic.to_dict(), sort_keys=True))
+    raise typer.Exit(code=diagnostic.exit_code)
 
 
 @app.command()
