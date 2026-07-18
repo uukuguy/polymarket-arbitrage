@@ -3807,12 +3807,25 @@ $gsd-resume-work --ws m1-perception
 
 先只读诊断 H-008 opportunity feed HTTP 503 chain。
 
-## SESSION 59 — 2026-07-19 (H-008 opportunity-feed chain truth confirmed)
+## SESSION 60 — 2026-07-19 (H-008 evidence-gated correction)
 
-- [VERIFIED] Dedicated `opportunity-feed-chain-truth` evaluator profile preserves the legacy and `living-doc-contract` profiles and runs the five H-008 gates: planning, opportunity-diagnosis unit, diagnose-feed subprocess integration, documentation contract, and the diagnosis restart/manual contract.
-- [VERIFIED] `make climb-cycle hypothesis=H-008` created run `20260718-184213-h-008`; planning/unit/integration/CLI/restart all scored `100.0`, total `100.0`, and the deterministic state path recorded H-008 as confirmed.
-- [OBSERVED] After all local gates, exactly one `make diagnose-arb-feed-prod` ran at `2026-07-18T18:42:36Z`: HTTP `503`, classification `stale-snapshot`, reason `snapshot-age-exceeded`, `snapshot_age_seconds=1430.7`, `max_snapshot_age_seconds=900.0`. This confirms the diagnosis agrees with the observed response: stale producer data is neither endpoint success nor a legal zero-opportunity result.
-- [NEXT-HYPOTHESIS] H-009 is pending: choose and validate the opportunity-feed producer cadence/freshness SLA before any readiness promotion. No deploy, restart, push, secret/schema/configuration change, or producer repair occurred in H-008.
+- [FIX] 旧 H-008 的 cycle 在本地五 gate 后即可确认，生产诊断虽曾执行但不属于 confirmation 的输入。该无效记录已从 tracked ledger 重置；`opportunity-feed-chain-truth` 现在必须有结构化 `production-evidence.json` 才可 state sync。
+- [GUARD] 证据记录器只会在 local gates 成功后调用一次只读 `make diagnose-arb-feed-prod`；artifact 固化 UTC 时间、argv、`count=1`、返回码、完整 JSON response、classification 和 reason，并在 confirmation 前验证 classification/reason 与 response body 一致。
+- [VERIFIED] 修复后的 run `20260718-185917-h-008` 五项本地 gate 均 `100.0`，随后唯一生产读取在 `2026-07-18T18:59:34.408338Z` 返回 HTTP `503`、`stale-snapshot`、`snapshot-age-exceeded`，snapshot age `2447.2s`（maximum `900.0s`）。它确认的是“陈旧数据而非合法 zero edge”，没有部署、重启、push、重试或生产配置修改。
+- [NEXT-HYPOTHESIS] H-009 继续 pending：明确 producer cadence/freshness SLA，再评估任何机会 feed readiness promotion。
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+随后讨论并实现 H-009 的 producer cadence/SLA 契约；保持现有 feed 为条件可用。
+
+## SESSION 59 — 2026-07-19 (superseded H-008 local-only confirmation)
+
+- [SUPERSEDED] `20260718-184213-h-008` established the dedicated five-gate evaluator and observed a stale response, but its confirmation path did not require the production evidence artifact. It was therefore removed from the tracked ledger and does not support the current H-008 conclusion.
+- [REPLACED-BY] SESSION 60's `20260718-185917-h-008` binds the same diagnostic classification to a timestamped, single-invocation artifact before confirmation. H-009 remains pending; no producer repair was made in either run.
 
 ### [NEXT — CURRENT]
 

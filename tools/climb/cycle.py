@@ -158,6 +158,9 @@ def sync_cycle(state_dir: Path, completed_run: dict) -> None:
     manifest = json.loads(Path(completed_run["manifest_path"]).read_text())
     evaluation = json.loads(Path(completed_run["local_eval_path"]).read_text())
     _require_opportunity_feed_evidence(Path(completed_run["run_dir"]), manifest)
+    decision_reason = completed_run["reason"]
+    if manifest.get("paradigm") == OPPORTUNITY_FEED_CHAIN_TRUTH:
+        decision_reason += "; production evidence recorded"
     session_path = state_dir / "session-state.json"
     session = json.loads(session_path.read_text())
     hypotheses_path = state_dir / "hypotheses.yaml"
@@ -191,7 +194,7 @@ def sync_cycle(state_dir: Path, completed_run: dict) -> None:
         "cli": subscores.get("cli", 0.0),
         "restart": subscores.get("restart", 0.0),
         "push_decision": completed_run["decision"],
-        "decision_reason": completed_run["reason"],
+        "decision_reason": decision_reason,
         "verdict": verdict,
         "cost_h": completed_run["cost_h"],
         "manifest_path": completed_run["manifest_path"],
@@ -222,7 +225,7 @@ def sync_cycle(state_dir: Path, completed_run: dict) -> None:
             "local_per_task": subscores,
             "online": None,
             "verdict": verdict,
-            "decision_reason": completed_run["reason"],
+            "decision_reason": decision_reason,
         }
     )
     _atomic_write(

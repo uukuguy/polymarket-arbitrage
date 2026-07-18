@@ -45,9 +45,9 @@ hypotheses:
     verdict: confirmed
     decision_reason: all local gates passed
 - id: H-009
-  description: An explicit producer cadence and freshness SLA can turn a classified stale
-    opportunity feed into an operationally consumable M2 input without treating stale
-    data as a valid zero-opportunity result
+  description: An explicit producer cadence and freshness SLA can turn a classified
+    stale opportunity feed into an operationally consumable M2 input without treating
+    stale data as a valid zero-opportunity result
   parent_paradigm: opportunity-feed-cadence-sla
   expected_lift: +100 opportunity-feed freshness contract points
   cost_h: 2.0
@@ -184,7 +184,7 @@ hypotheses:
   results:
   - session: 2026-07-18-m1-living-manual
     cycle: 8
-    run: 20260718-184213-h-008
+    run: 20260718-185917-h-008
     local: 100.0
     local_per_task:
       cli: 100.0
@@ -194,4 +194,4 @@ hypotheses:
       unit: 100.0
     online: null
     verdict: confirmed
-    decision_reason: all local gates passed
+    decision_reason: all local gates passed; production evidence recorded

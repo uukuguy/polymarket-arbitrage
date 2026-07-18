@@ -222,6 +222,9 @@ def test_opportunity_feed_evidence_runs_one_diagnostic_before_confirmation(
 
     hypotheses = yaml.safe_load((state / "hypotheses.yaml").read_text())
     assert hypotheses["hypotheses"][0]["status"] == "confirmed"
+    assert hypotheses["hypotheses"][0]["results"][0]["decision_reason"] == (
+        "all local gates passed; production evidence recorded"
+    )
 
 
 def test_opportunity_feed_evidence_never_invokes_production_before_gates(
