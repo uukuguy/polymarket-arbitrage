@@ -217,6 +217,12 @@ class WsConsumer:
             "initial WS subscription failed", retry_after_s=retry_after_s
         )
 
+    async def _release_connection(self, ws: Any) -> None:
+        """Clear only the disconnected generation's published socket."""
+        async with self._subscription_control_lock:
+            if self._current_ws is ws:
+                self._current_ws = None
+
     async def _compensate_generation(self, ws: Any, generation: int) -> float:
         """Close exactly one ambiguous socket per generation, preserving cancel."""
         retry_after_s = 0.0
@@ -673,6 +679,8 @@ class WsConsumer:
                 self._compute_active_assets,
                 initial_dump=True,
                 connection_initializer=self._initialize_connection,
+                on_disconnect=self._release_connection,
+                reconnect_retry_after=self._watchdog.reconnect_retry_after_s,
             ):
                 if stop_event.is_set():
                     break

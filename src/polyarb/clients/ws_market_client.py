@@ -60,6 +60,8 @@ async def stream_market_events(
     ping_interval_s: int = PING_INTERVAL_S,
     on_connect: Callable[[Any], None] | None = None,
     connection_initializer: Callable[[Any], Awaitable[None]] | None = None,
+    on_disconnect: Callable[[Any], Awaitable[None]] | None = None,
+    reconnect_retry_after: Callable[[], float] | None = None,
 ) -> AsyncIterator[dict]:
     """Long-lived async iterator yielding market-channel events.
 
@@ -148,6 +150,12 @@ async def stream_market_events(
             code = getattr(rcvd, "code", None) if rcvd is not None else None
             reason = getattr(rcvd, "reason", None) if rcvd is not None else None
             logger.warning(f"ws connection closed code={code} reason={reason!r}; reconnecting…")
+            if on_disconnect is not None:
+                await on_disconnect(ws)
+            if reconnect_retry_after is not None:
+                retry_after_s = max(0.0, float(reconnect_retry_after()))
+                if retry_after_s > 0:
+                    await asyncio.sleep(retry_after_s)
             continue
         except WsConnectionInitializationFailed as e:
             # The consumer already bounded and compensated the ambiguous

@@ -592,8 +592,9 @@ async def test_initializer_budget_backoff_is_cancellable(
 async def test_dynamic_control_close_uses_shared_gate_then_latest_union(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import websockets
     from unittest.mock import MagicMock
+
+    import websockets
 
     from polyarb.daemon import ws_watchdog as watchdog_module
     from polyarb.daemon.ws_consumer import WsConsumer
@@ -663,8 +664,9 @@ async def test_dynamic_control_close_uses_shared_gate_then_latest_union(
 async def test_dynamic_control_shared_gate_is_cancellable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import websockets
     from unittest.mock import MagicMock
+
+    import websockets
 
     from polyarb.daemon import ws_watchdog as watchdog_module
     from polyarb.daemon.ws_consumer import WsConsumer
