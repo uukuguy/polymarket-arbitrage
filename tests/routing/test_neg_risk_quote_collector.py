@@ -8,6 +8,7 @@ import pytest
 
 from polyarb.routing.neg_risk_quote_collector import (
     QuoteCollectionIntegrityError,
+    QuoteRunLeaseLostError,
     QuoteUniverseUnavailableError,
     collect_neg_risk_quotes,
 )
@@ -37,6 +38,40 @@ class FakeReader:
         if isinstance(self.response, BaseException):
             raise self.response
         return self.response
+
+
+class BlockingReader(FakeReader):
+    def __init__(self, response: object) -> None:
+        super().__init__(response)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = False
+
+    async def get_books(self, token_ids: list[str]) -> object:
+        self.requests.append(token_ids)
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return self.response
+
+
+class OneTickSleeper:
+    def __init__(self) -> None:
+        self.first_tick_started = asyncio.Event()
+        self.permit_first_tick = asyncio.Event()
+        self._never = asyncio.Event()
+        self._calls = 0
+
+    async def __call__(self, _: float) -> None:
+        self._calls += 1
+        if self._calls == 1:
+            self.first_tick_started.set()
+            await self.permit_first_tick.wait()
+            return
+        await self._never.wait()
 
 
 @pytest.fixture
@@ -74,7 +109,7 @@ def _collect(store: NegRiskQuoteStore, reader: FakeReader, *, start: int = NOW_M
         collect_neg_risk_quotes(
             quote_store=store,
             reader=reader,
-            now_ms=_now_sequence(start, start + 25),
+            now_ms=_now_sequence(start, start + 25, start + 25),
         )
     )
 
@@ -83,6 +118,15 @@ def _legs() -> tuple[UniverseLeg, ...]:
     return (
         UniverseLeg("group-a", "market-a", "condition-a", "alpha", "token-a"),
         UniverseLeg("group-a", "market-b", "condition-b", "beta", "token-b"),
+    )
+
+
+def _begin(store: NegRiskQuoteStore) -> int:
+    return store.begin_run(
+        universe_snapshot_id=1,
+        universe_taken_at_ms=NOW_MS - 1_000,
+        legs=_legs(),
+        quoted_at_ms=NOW_MS,
     )
 
 
@@ -277,3 +321,98 @@ def test_busy_or_unavailable_universe_does_not_call_clob(quote_db) -> None:
     with pytest.raises(QuoteUniverseUnavailableError, match="quote-universe-unavailable"):
         _collect(NegRiskQuoteStore(empty_path), zero_eligible_reader)
     assert zero_eligible_reader.requests == []
+
+
+def test_slow_collector_renews_lease_before_an_expired_run_can_be_reclaimed(
+    quote_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        store = NegRiskQuoteStore(quote_db)
+        reader = BlockingReader(
+            [
+                FixtureBook("token-a", [{"price": "0.4", "size": "4"}]),
+                FixtureBook("token-b", [{"price": "0.5", "size": "4"}]),
+            ]
+        )
+        sleeper = OneTickSleeper()
+        clock = {"now": NOW_MS}
+        lease_renewed = asyncio.Event()
+        actual_renew = store.renew_run_lease
+
+        def observe_renew(run_id: int, *, now_ms: int) -> None:
+            actual_renew(run_id, now_ms=now_ms)
+            lease_renewed.set()
+
+        monkeypatch.setattr(store, "renew_run_lease", observe_renew)
+        collection = asyncio.create_task(
+            collect_neg_risk_quotes(
+                quote_store=store,
+                reader=reader,
+                now_ms=lambda: clock["now"],
+                lease_sleep=sleeper,
+            )
+        )
+        await reader.started.wait()
+        await sleeper.first_tick_started.wait()
+
+        # Renew just before expiry, then advance beyond the original lease.
+        # A second process must still see the renewed owner as live.
+        clock["now"] = NOW_MS + 29_999
+        sleeper.permit_first_tick.set()
+        await lease_renewed.wait()
+        clock["now"] = NOW_MS + 30_000
+        with pytest.raises(QuoteRunBusyError, match="collecting quote run"):
+            store.begin_run(
+                universe_snapshot_id=1,
+                universe_taken_at_ms=NOW_MS - 1_000,
+                legs=_legs(),
+                quoted_at_ms=clock["now"],
+            )
+
+        reader.release.set()
+        assert (await collection).status == "complete"
+
+    asyncio.run(scenario())
+
+
+def test_lease_renewal_failure_cancels_collection_and_fails_closed(
+    quote_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        store = NegRiskQuoteStore(quote_db)
+        reader = BlockingReader([])
+        sleeper = OneTickSleeper()
+        renewal_attempted = asyncio.Event()
+
+        def fail_renew(*_: object, **__: object) -> None:
+            renewal_attempted.set()
+            raise sqlite3.OperationalError("fixture lease write failure")
+
+        monkeypatch.setattr(store, "renew_run_lease", fail_renew)
+        collection = asyncio.create_task(
+            collect_neg_risk_quotes(
+                quote_store=store,
+                reader=reader,
+                now_ms=lambda: NOW_MS,
+                lease_sleep=sleeper,
+            )
+        )
+        await reader.started.wait()
+        await sleeper.first_tick_started.wait()
+        sleeper.permit_first_tick.set()
+        await renewal_attempted.wait()
+
+        with pytest.raises(QuoteRunLeaseLostError, match="quote-run-lease-lost"):
+            await collection
+        assert reader.cancelled is True
+        with sqlite3.connect(quote_db) as con:
+            assert con.execute(
+                "SELECT status, failure_reason FROM neg_risk_quote_runs"
+            ).fetchone() == ("failed", "collector-lease-lost")
+
+        # The aborted collector did not finish its CLOB request or leave a
+        # competing live run behind; a later owner may acquire the lease.
+        recovered_run = _begin(store)
+        store.fail_run(recovered_run, failure_reason="fixture-cleanup")
+
+    asyncio.run(scenario())

@@ -25,6 +25,8 @@ _TERMINAL_STATES = frozenset(
     }
 )
 
+QUOTE_RUN_LEASE_MS = 30_000
+
 
 class QuoteRunStateError(RuntimeError):
     """A quote-run state transition would violate the atomic-run contract."""
@@ -124,12 +126,19 @@ class NegRiskQuoteStore:
         legs: tuple[UniverseLeg, ...],
         quoted_at_ms: int,
     ) -> int:
-        """Create a collecting run after atomically acquiring the DB lock."""
+        """Create a collecting run after atomically acquiring the DB lease."""
         requested_legs = _deduplicate_legs(legs)
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
             try:
+                con.execute(
+                    "UPDATE neg_risk_quote_runs SET status = 'failed', "
+                    "failure_reason = 'collector-lease-expired' "
+                    "WHERE status = 'collecting' "
+                    "AND COALESCE(lease_expires_at_ms, 0) <= ?",
+                    (quoted_at_ms,),
+                )
                 busy = con.execute(
                     "SELECT id FROM neg_risk_quote_runs WHERE status = 'collecting' LIMIT 1"
                 ).fetchone()
@@ -157,13 +166,14 @@ class NegRiskQuoteStore:
                 cur = con.execute(
                     "INSERT INTO neg_risk_quote_runs("
                     "universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
-                    "requested_token_count, status"
-                    ") VALUES (?, ?, ?, ?, 'collecting')",
+                    "requested_token_count, lease_expires_at_ms, status"
+                    ") VALUES (?, ?, ?, ?, ?, 'collecting')",
                     (
                         universe_snapshot_id,
                         universe_taken_at_ms,
                         quoted_at_ms,
                         len(requested_legs),
+                        quoted_at_ms + QUOTE_RUN_LEASE_MS,
                     ),
                 )
                 run_id = int(cur.lastrowid)
@@ -185,6 +195,29 @@ class NegRiskQuoteStore:
                 )
                 con.execute("COMMIT")
                 return run_id
+            except Exception:
+                _rollback_without_masking(con)
+                raise
+        finally:
+            con.close()
+
+    def renew_run_lease(self, run_id: int, *, now_ms: int) -> None:
+        """Extend a still-live collecting run lease, never reviving an expired one."""
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                cur = con.execute(
+                    "UPDATE neg_risk_quote_runs SET lease_expires_at_ms = ? "
+                    "WHERE id = ? AND status = 'collecting' "
+                    "AND lease_expires_at_ms > ?",
+                    (now_ms + QUOTE_RUN_LEASE_MS, run_id, now_ms),
+                )
+                if cur.rowcount != 1:
+                    raise QuoteRunStateError(
+                        f"quote run {run_id} no longer owns a live collection lease"
+                    )
+                con.execute("COMMIT")
             except Exception:
                 _rollback_without_masking(con)
                 raise

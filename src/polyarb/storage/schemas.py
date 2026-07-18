@@ -180,6 +180,10 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_runs (
   requested_token_count INTEGER NOT NULL CHECK(requested_token_count >= 0),
   successful_response_count INTEGER NOT NULL DEFAULT 0
       CHECK(successful_response_count >= 0),
+  -- A collecting run owns the quote producer only until this timestamp.  A
+  -- crashed process stops renewing it, allowing the next BEGIN IMMEDIATE to
+  -- recover the run without ever taking a live collector's lease.
+  lease_expires_at_ms INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL CHECK(status IN ('collecting', 'complete', 'failed')),
   failure_reason TEXT,
   completed_at_ms INTEGER,

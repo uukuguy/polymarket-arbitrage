@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from polyarb.routing.neg_risk_quote_store import (
+    QUOTE_RUN_LEASE_MS,
     NegRiskQuoteStore,
     PersistedQuote,
     UniverseLeg,
@@ -29,6 +32,13 @@ class QuoteCollectionIntegrityError(RuntimeError):
         super().__init__("clob-response-integrity-failed")
 
 
+class QuoteRunLeaseLostError(RuntimeError):
+    """The collector can no longer prove exclusive ownership of its run."""
+
+    def __init__(self) -> None:
+        super().__init__("quote-run-lease-lost")
+
+
 class BooksReader(Protocol):
     """The read-only slice of ``ClobReaderClient`` required by collection."""
 
@@ -47,6 +57,7 @@ class QuoteCollectionResult:
 
 
 _MISSING = object()
+_QUOTE_RUN_LEASE_RENEWAL_S = QUOTE_RUN_LEASE_MS / 3_000
 
 
 async def collect_neg_risk_quotes(
@@ -54,13 +65,16 @@ async def collect_neg_risk_quotes(
     quote_store: NegRiskQuoteStore,
     reader: BooksReader,
     now_ms: Callable[[], int] | None = None,
+    lease_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> QuoteCollectionResult:
     """Collect every latest-universe YES quote into one complete-or-failed run.
 
     The snapshot universe is checked before acquiring a run lock or making any
     CLOB request. Once the durable run begins, no exception can promote a
     partial set: the run is best-effort marked failed and the original error is
-    re-raised for the caller to classify.
+    re-raised for the caller to classify. While the CLOB request is pending,
+    this collector renews its own lease; losing that lease cancels the request
+    so the collector can never finish alongside a replacement run.
     """
     clock = now_ms or _wall_clock_ms
     universe = quote_store.latest_universe()
@@ -78,7 +92,16 @@ async def collect_neg_risk_quotes(
     failure_reason = "collector-error"
     try:
         try:
-            books = await reader.get_books(token_ids)
+            books = await _get_books_with_lease(
+                quote_store=quote_store,
+                reader=reader,
+                token_ids=token_ids,
+                run_id=run_id,
+                clock=clock,
+                lease_sleep=lease_sleep,
+            )
+        except QuoteRunLeaseLostError:
+            raise
         except Exception:
             failure_reason = "clob-fetch-failed"
             raise
@@ -90,6 +113,10 @@ async def collect_neg_risk_quotes(
         quote_store.record_terminal_quotes(run_id, terminal_quotes)
         completed_at_ms = clock()
         completed = quote_store.complete_run(run_id, completed_at_ms=completed_at_ms)
+    except QuoteRunLeaseLostError:
+        failure_reason = "collector-lease-lost"
+        _best_effort_fail(quote_store, run_id, failure_reason)
+        raise
     except QuoteCollectionIntegrityError:
         failure_reason = "clob-response-integrity-failed"
         _best_effort_fail(quote_store, run_id, failure_reason)
@@ -110,6 +137,72 @@ async def collect_neg_risk_quotes(
 
 def _wall_clock_ms() -> int:
     return time.time_ns() // 1_000_000
+
+
+async def _get_books_with_lease(
+    *,
+    quote_store: NegRiskQuoteStore,
+    reader: BooksReader,
+    token_ids: list[str],
+    run_id: int,
+    clock: Callable[[], int],
+    lease_sleep: Callable[[float], Awaitable[None]],
+) -> Sequence[Any]:
+    """Await CLOB while proving that this task still owns its durable lease."""
+    reader_task = asyncio.create_task(reader.get_books(token_ids))
+    renewal_task = asyncio.create_task(
+        _renew_lease_until_cancelled(
+            quote_store=quote_store,
+            run_id=run_id,
+            clock=clock,
+            lease_sleep=lease_sleep,
+        )
+    )
+    try:
+        done, _ = await asyncio.wait(
+            (reader_task, renewal_task), return_when=asyncio.FIRST_COMPLETED
+        )
+        if renewal_task in done:
+            try:
+                renewal_task.result()
+            except Exception as error:
+                await _cancel_task(reader_task)
+                raise QuoteRunLeaseLostError() from error
+            await _cancel_task(reader_task)
+            raise QuoteRunLeaseLostError()
+
+        books = reader_task.result()
+        try:
+            quote_store.renew_run_lease(run_id, now_ms=clock())
+        except Exception as error:
+            raise QuoteRunLeaseLostError() from error
+        return books
+    finally:
+        await _cancel_task(renewal_task, suppress_errors=True)
+        await _cancel_task(reader_task, suppress_errors=True)
+
+
+async def _renew_lease_until_cancelled(
+    *,
+    quote_store: NegRiskQuoteStore,
+    run_id: int,
+    clock: Callable[[], int],
+    lease_sleep: Callable[[float], Awaitable[None]],
+) -> None:
+    while True:
+        await lease_sleep(_QUOTE_RUN_LEASE_RENEWAL_S)
+        quote_store.renew_run_lease(run_id, now_ms=clock())
+
+
+async def _cancel_task(task: asyncio.Task[object], *, suppress_errors: bool = False) -> None:
+    if not task.done():
+        task.cancel()
+    if suppress_errors:
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+        return
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 def _best_effort_fail(

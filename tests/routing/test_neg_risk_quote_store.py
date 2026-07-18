@@ -274,6 +274,56 @@ def test_begin_run_lock_is_database_state_not_instance_state(quote_db) -> None:
     assert after_complete_run > third_run > second_run > first_run
 
 
+def test_begin_run_recovers_only_an_expired_crashed_collecting_run(quote_db) -> None:
+    first = NegRiskQuoteStore(quote_db)
+    second = NegRiskQuoteStore(quote_db)
+    crashed_run = _begin(first)
+
+    # This is the durable shape of a collector that died after begin_run() and
+    # before its best-effort failure transition could reach SQLite.
+    with sqlite3.connect(quote_db) as con:
+        con.execute(
+            "UPDATE neg_risk_quote_runs SET lease_expires_at_ms = ? WHERE id = ?",
+            (NOW_MS - 1, crashed_run),
+        )
+
+    recovered_run = _begin(second)
+
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT status, failure_reason FROM neg_risk_quote_runs WHERE id = ?",
+            (crashed_run,),
+        ).fetchone() == ("failed", "collector-lease-expired")
+        con.execute(
+            "UPDATE neg_risk_quote_runs SET lease_expires_at_ms = ? WHERE id = ?",
+            (NOW_MS + 1, recovered_run),
+        )
+
+    with pytest.raises(QuoteRunBusyError, match="collecting quote run"):
+        _begin(first)
+
+
+def test_init_schema_adds_quote_lease_to_legacy_quote_runs_table(tmp_path) -> None:
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "CREATE TABLE neg_risk_quote_runs ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "universe_snapshot_id INTEGER NOT NULL, "
+            "universe_taken_at_ms INTEGER NOT NULL, "
+            "quoted_at_ms INTEGER NOT NULL, "
+            "requested_token_count INTEGER NOT NULL, "
+            "successful_response_count INTEGER NOT NULL DEFAULT 0, "
+            "status TEXT NOT NULL, failure_reason TEXT, completed_at_ms INTEGER)"
+        )
+
+    SQLiteStore(path).init_schema()
+
+    with sqlite3.connect(path) as con:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(neg_risk_quote_runs)")}
+    assert "lease_expires_at_ms" in columns
+
+
 def test_latest_complete_projection_has_one_atomic_run_and_all_metadata(quote_db) -> None:
     store = NegRiskQuoteStore(quote_db)
     assert store.latest_complete_projection() is None

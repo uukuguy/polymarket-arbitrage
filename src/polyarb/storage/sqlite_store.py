@@ -150,6 +150,14 @@ class SQLiteStore:
 
             _ensure_column("snapshots", "supabase_mirror_at_ms", "INTEGER")
             _ensure_column("snapshots", "parquet_r2_url", "TEXT")
+            # H-009: quote collectors lease their collecting run.  A default
+            # of zero makes any legacy collecting row immediately recoverable
+            # rather than leaving the single-run gate permanently wedged.
+            _ensure_column(
+                "neg_risk_quote_runs",
+                "lease_expires_at_ms",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
         finally:
             con.close()
 
