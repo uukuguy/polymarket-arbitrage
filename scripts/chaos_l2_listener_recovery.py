@@ -162,7 +162,7 @@ async def _listener_mode(conn: asyncpg.Connection) -> None:
     rows = await conn.fetch(
         "SELECT pid FROM pg_stat_activity "
         "WHERE pid <> pg_backend_pid() AND backend_type='client backend' "
-        "AND query ~* '^\\s*LISTEN\\s+snapshot_complete\\s*;?\\s*$'"
+        "AND query ~* '^\\s*LISTEN\\s+\"?snapshot_complete\"?\\s*;?\\s*$'"
     )
     if len(rows) != 1:
         raise ProofFailure(
@@ -298,7 +298,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         asyncio.run(_run(args.mode))
-    except (ProofFailure, asyncpg.PostgresError, OSError) as exc:
+    except ProofFailure as exc:
         print(f"FAIL {args.mode}: {type(exc).__name__}: {exc}", file=sys.stderr)
         if args.mode == "poll":
             print(
@@ -306,6 +306,11 @@ def main() -> int:
                 "this checkpoint.",
                 file=sys.stderr,
             )
+        return 1
+    except (asyncpg.PostgresError, OSError) as exc:
+        # External exception messages may contain host or database identifiers.
+        # The type is enough to route diagnosis without risking credential output.
+        print(f"FAIL {args.mode}: {type(exc).__name__}", file=sys.stderr)
         return 1
     return 0
 
