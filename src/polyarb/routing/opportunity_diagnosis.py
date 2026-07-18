@@ -11,12 +11,20 @@ DiagnosticKind = Literal[
     "available-zero",
     "available-opportunities",
     "stale-snapshot",
+    "stale-quote-run",
+    "stale-universe",
     "feed-unavailable",
     "invalid-response",
 ]
 
 _STALE_SNAPSHOT_ERROR = re.compile(
     r"^snapshot age (?P<age>\d+(?:\.\d+)?)s exceeds (?P<limit>\d+(?:\.\d+)?)s$"
+)
+_STALE_QUOTE_RUN_ERROR = re.compile(
+    r"^quote age (?P<age>\d+(?:\.\d+)?)s exceeds (?P<limit>\d+(?:\.\d+)?)s$"
+)
+_STALE_UNIVERSE_ERROR = re.compile(
+    r"^universe age (?P<age>\d+(?:\.\d+)?)s exceeds (?P<limit>\d+(?:\.\d+)?)s$"
 )
 
 
@@ -28,8 +36,14 @@ class OpportunityFeedDiagnostic:
     http_status: int
     reason: str
     count: int | None = None
+    age_seconds: float | None = None
+    max_age_seconds: float | None = None
     snapshot_age_seconds: float | None = None
     max_snapshot_age_seconds: float | None = None
+    quote_age_seconds: float | None = None
+    max_quote_age_seconds: float | None = None
+    universe_age_seconds: float | None = None
+    max_universe_age_seconds: float | None = None
     strategy: str | None = None
     profit_basis: str | None = None
 
@@ -45,8 +59,14 @@ class OpportunityFeedDiagnostic:
                 "http_status": self.http_status,
                 "reason": self.reason,
                 "count": self.count,
+                "age_seconds": self.age_seconds,
+                "max_age_seconds": self.max_age_seconds,
                 "snapshot_age_seconds": self.snapshot_age_seconds,
                 "max_snapshot_age_seconds": self.max_snapshot_age_seconds,
+                "quote_age_seconds": self.quote_age_seconds,
+                "max_quote_age_seconds": self.max_quote_age_seconds,
+                "universe_age_seconds": self.universe_age_seconds,
+                "max_universe_age_seconds": self.max_universe_age_seconds,
                 "strategy": self.strategy,
                 "profit_basis": self.profit_basis,
             }.items()
@@ -102,12 +122,42 @@ def _diagnose_service_unavailable(body: str) -> OpportunityFeedDiagnostic:
     error = payload.get("error") if isinstance(payload, dict) else None
     match = _STALE_SNAPSHOT_ERROR.fullmatch(error) if isinstance(error, str) else None
     if match is not None:
+        age = float(match["age"])
+        limit = float(match["limit"])
         return OpportunityFeedDiagnostic(
             kind="stale-snapshot",
             http_status=503,
             reason="snapshot-age-exceeded",
-            snapshot_age_seconds=float(match["age"]),
-            max_snapshot_age_seconds=float(match["limit"]),
+            age_seconds=age,
+            max_age_seconds=limit,
+            snapshot_age_seconds=age,
+            max_snapshot_age_seconds=limit,
+        )
+    match = _STALE_QUOTE_RUN_ERROR.fullmatch(error) if isinstance(error, str) else None
+    if match is not None:
+        age = float(match["age"])
+        limit = float(match["limit"])
+        return OpportunityFeedDiagnostic(
+            kind="stale-quote-run",
+            http_status=503,
+            reason="quote-age-exceeded",
+            age_seconds=age,
+            max_age_seconds=limit,
+            quote_age_seconds=age,
+            max_quote_age_seconds=limit,
+        )
+    match = _STALE_UNIVERSE_ERROR.fullmatch(error) if isinstance(error, str) else None
+    if match is not None:
+        age = float(match["age"])
+        limit = float(match["limit"])
+        return OpportunityFeedDiagnostic(
+            kind="stale-universe",
+            http_status=503,
+            reason="universe-age-exceeded",
+            age_seconds=age,
+            max_age_seconds=limit,
+            universe_age_seconds=age,
+            max_universe_age_seconds=limit,
         )
     return OpportunityFeedDiagnostic(
         kind="feed-unavailable",
@@ -122,6 +172,9 @@ def _is_valid_success_payload(payload: object) -> bool:
 
     strategy = payload.get("strategy")
     profit_basis = payload.get("profit_basis")
+    coverage = payload.get("coverage")
+    quote_sla_seconds = payload.get("quote_sla_seconds")
+    universe_sla_seconds = payload.get("universe_sla_seconds")
     count = payload.get("count")
     opportunities = payload.get("opportunities")
     return (
@@ -129,6 +182,11 @@ def _is_valid_success_payload(payload: object) -> bool:
         and bool(strategy)
         and isinstance(profit_basis, str)
         and bool(profit_basis)
+        and coverage == "known-universe"
+        and type(quote_sla_seconds) is int
+        and quote_sla_seconds == 300
+        and type(universe_sla_seconds) is int
+        and universe_sla_seconds == 50_400
         and type(count) is int
         and count >= 0
         and isinstance(opportunities, list)

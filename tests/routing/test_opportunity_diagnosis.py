@@ -6,6 +6,8 @@ from polyarb.routing.opportunity_diagnosis import diagnose_opportunity_feed
 
 VALID_ZERO_BODY = (
     '{"strategy":"neg-risk-buy-all","profit_basis":"gross-before-fees",'
+    '"coverage":"known-universe","quote_sla_seconds":300,'
+    '"universe_sla_seconds":50400,'
     '"count":0,"opportunities":[]}'
 )
 
@@ -24,6 +26,8 @@ def test_200_nonzero_is_available_with_safe_metadata() -> None:
     result = diagnose_opportunity_feed(
         200,
         '{"strategy":"neg-risk-buy-all","profit_basis":"gross-before-fees",'
+        '"coverage":"known-universe","quote_sla_seconds":300,'
+        '"universe_sla_seconds":50400,'
         '"count":1,"opportunities":[{"group_id":"g1"}]}',
     )
 
@@ -42,7 +46,34 @@ def test_503_snapshot_age_is_stale_not_zero() -> None:
     assert result.kind == "stale-snapshot"
     assert result.snapshot_age_seconds == 1216.9
     assert result.max_snapshot_age_seconds == 900.0
+    assert result.age_seconds == 1216.9
+    assert result.max_age_seconds == 900.0
     assert result.exit_code == 2
+
+
+def test_503_quote_and_universe_ages_are_bounded_stale_kinds() -> None:
+    quote = diagnose_opportunity_feed(503, '{"error":"quote age 300.1s exceeds 300.0s"}')
+    universe = diagnose_opportunity_feed(503, '{"error":"universe age 50400.1s exceeds 50400.0s"}')
+
+    assert (quote.kind, quote.reason, quote.quote_age_seconds, quote.max_quote_age_seconds) == (
+        "stale-quote-run",
+        "quote-age-exceeded",
+        300.1,
+        300.0,
+    )
+    assert (
+        universe.kind,
+        universe.reason,
+        universe.universe_age_seconds,
+        universe.max_universe_age_seconds,
+    ) == (
+        "stale-universe",
+        "universe-age-exceeded",
+        50400.1,
+        50400.0,
+    )
+    assert quote.age_seconds == 300.1
+    assert universe.max_age_seconds == 50400.0
 
 
 def test_unrelated_503_is_unavailable() -> None:
@@ -89,6 +120,27 @@ def test_200_invalid_payload_is_not_a_zero_result(body: str, expected_reason: st
     )
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        VALID_ZERO_BODY.replace('"coverage":"known-universe",', ""),
+        VALID_ZERO_BODY.replace('"coverage":"known-universe"', '"coverage":"snapshot"'),
+        VALID_ZERO_BODY.replace('"quote_sla_seconds":300', '"quote_sla_seconds":"300"'),
+        VALID_ZERO_BODY.replace('"quote_sla_seconds":300', '"quote_sla_seconds":301'),
+        VALID_ZERO_BODY.replace('"universe_sla_seconds":50400', '"universe_sla_seconds":"50400"'),
+        VALID_ZERO_BODY.replace('"universe_sla_seconds":50400', '"universe_sla_seconds":50401'),
+    ],
+)
+def test_200_requires_fixed_known_universe_coverage_and_slas(body: str) -> None:
+    result = diagnose_opportunity_feed(200, body)
+
+    assert (result.kind, result.reason, result.exit_code) == (
+        "invalid-response",
+        "invalid-schema",
+        2,
+    )
+
+
 def test_non_503_non_2xx_is_unavailable() -> None:
     result = diagnose_opportunity_feed(502, '{"error":"database /secret/path"}')
 
@@ -115,6 +167,8 @@ def test_reasons_are_limited_to_operator_safe_vocabulary() -> None:
         diagnose_opportunity_feed(
             200,
             '{"strategy":"neg-risk-buy-all","profit_basis":"gross-before-fees",'
+            '"coverage":"known-universe","quote_sla_seconds":300,'
+            '"universe_sla_seconds":50400,'
             '"count":1,"opportunities":[{}]}',
         ),
         diagnose_opportunity_feed(503, '{"error":"snapshot age 1200s exceeds 900s"}'),
@@ -127,6 +181,8 @@ def test_reasons_are_limited_to_operator_safe_vocabulary() -> None:
         "valid-empty-feed",
         "valid-feed",
         "snapshot-age-exceeded",
+        "quote-age-exceeded",
+        "universe-age-exceeded",
         "non-success-status",
         "invalid-json",
         "invalid-schema",
