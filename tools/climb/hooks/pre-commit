@@ -4,12 +4,24 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 SOURCE_RE='^docs/status/climb/(hypotheses\.yaml|runs\.csv|calibration\.json|pending-lb\.json|session-state\.json|config\.yaml|session-target\.md)$'
+PROJECTION_INPUT_RE='^docs/status/climb/(hypotheses\.yaml|runs\.csv|session-state\.json)$'
 TREE_MD='docs/status/climb/research-tree.md'
 TREE_JSON='docs/status/climb/research-tree.json'
 
 STAGED=$(git diff --cached --name-only --diff-filter=ACMRD)
 if ! printf '%s\n' "$STAGED" | grep -Eq "$SOURCE_RE"; then
   exit 0
+fi
+
+# regen-tree.py reads these three files from the working tree. An MM split on
+# an actual projection input could otherwise validate H2 output while committing
+# staged H1 state. Non-input climb files remain eligible for the byte-identical
+# fast path below.
+UNSTAGED=$(git diff --name-only --diff-filter=ACMRD)
+if printf '%s\n' "$UNSTAGED" | grep -Eq "$PROJECTION_INPUT_RE"; then
+  echo "climb tree check: unstaged projection input differs from the index" >&2
+  echo "stage or revert hypotheses.yaml, runs.csv, or session-state.json, then retry" >&2
+  exit 1
 fi
 
 if ! python3 tools/climb/regen-tree.py; then

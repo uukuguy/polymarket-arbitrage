@@ -3806,3 +3806,13 @@ $gsd-resume-work --ws m1-perception
 ### [NEXT — CURRENT]
 
 先只读诊断 H-008 opportunity feed HTTP 503 chain。
+
+## SESSION 57 — 2026-07-18 (climb projection-input split guard)
+
+- [FIX] climb pre-commit 对 `hypotheses.yaml`、`runs.csv`、`session-state.json` 三个 regen-tree 真实输入禁止 index/worktree split，避免暂存 H1 却用未暂存 H2 生成 projection。
+- [TEST] 精确 H1 staged / H2 unstaged MM 回归证明 hook 在 generator 之前失败；非 projection input 仍保留 byte-identical 快速路径，ACMRD 删除覆盖不变。
+- [BOUNDARY] 仅本地 hook/测试/记录变更；未访问或修改生产。
+
+### [NEXT — CURRENT]
+
+先只读诊断 H-008 opportunity feed HTTP 503 chain。

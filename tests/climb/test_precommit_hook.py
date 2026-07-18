@@ -60,22 +60,45 @@ def test_hook_generates_but_refuses_unreviewed_tree(tmp_path: Path) -> None:
     assert _git(repo, "log", "-1", "--format=%s").stdout.strip() == "fixture"
 
 
-def test_hook_allows_dirty_source_when_projection_is_byte_identical_to_index(
+def test_hook_allows_dirty_non_input_when_projection_is_byte_identical_to_index(
     tmp_path: Path,
 ) -> None:
     repo = _repo(
         tmp_path,
         "from pathlib import Path\nPath('generator-ran').write_text('yes')\n",
     )
-    source = repo / "docs/status/climb/hypotheses.yaml"
-    source.write_text("items: [staged]\n")
+    source = repo / "docs/status/climb/calibration.json"
+    source.write_text('{"value": "staged"}\n')
     assert _git(repo, "add", str(source.relative_to(repo))).returncode == 0
-    source.write_text("items: [unstaged]\n")
+    source.write_text('{"value": "unstaged"}\n')
 
     result = _run(repo)
 
     assert result.returncode == 0, result.stderr
     assert (repo / "generator-ran").read_text() == "yes"
+
+
+def test_hook_rejects_h1_staged_h2_unstaged_projection_input_mismatch(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(
+        tmp_path,
+        "from pathlib import Path\n"
+        "source = Path('docs/status/climb/hypotheses.yaml').read_text()\n"
+        "Path('docs/status/climb/research-tree.md').write_text(source)\n"
+        "Path('docs/status/climb/research-tree.json').write_text('{}\\n')\n",
+    )
+    source = repo / "docs/status/climb/hypotheses.yaml"
+    source.write_text("hypotheses: [H1]\n")
+    assert _git(repo, "add", str(source.relative_to(repo))).returncode == 0
+    source.write_text("hypotheses: [H2]\n")
+    assert _git(repo, "status", "--short", str(source.relative_to(repo))).stdout.startswith("MM")
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "unstaged projection input differs from the index" in result.stderr
+    assert (repo / "docs/status/climb/research-tree.md").read_text() == "old\n"
 
 
 def test_hook_detects_staged_source_deletion_and_runs_generator(tmp_path: Path) -> None:
