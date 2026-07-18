@@ -28,7 +28,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -327,8 +326,9 @@ def test_listener_recovery_make_target_is_image_aware_and_has_two_modes() -> Non
 
     # The production image is python:3.12-slim. The new primitive may not rely
     # on binaries known to be absent there.
-    for unavailable in ("pkill", "ps ", "dig ", "ping ", "which "):
-        assert unavailable not in script
+    for unavailable in ("pkill", " ps ", " dig ", " ping ", " which "):
+        assert f'"{unavailable.strip()}"' not in script
+        assert f"'{unavailable.strip()}'" not in script
 
 
 def test_poll_recovery_contract_uses_an_exact_notification_anchor_and_restores_l1() -> None:

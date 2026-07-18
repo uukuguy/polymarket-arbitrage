@@ -230,6 +230,17 @@ def _build_l2_health_checks(
             "output": "diagnostic only; quiet notifications do not imply stalled work",
             "time": _utc_now_iso(),
         }]
+        checks["event_bus:last_notification_at"] = [{
+            "componentId": "event-listener",
+            "componentType": "asyncpg-listener",
+            "observedValue": (
+                float(last_notification) if notification_age is not None else None
+            ),
+            "observedUnit": "unix-seconds",
+            "status": "pass",
+            "output": "exact diagnostic anchor for NOTIFY-vs-poll recovery proof",
+            "time": _utc_now_iso(),
+        }]
 
         stale_seconds_raw = getattr(settings, "event_reconcile_stale_seconds", 180)
         try:

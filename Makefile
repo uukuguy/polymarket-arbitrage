@@ -856,6 +856,20 @@ chaos-l2-fly-image-check:
 	exit $$rc
 .PHONY: chaos-l2-fly-image-check
 
+## chaos-l2-listener-recovery: Prove L2 LISTEN reconnect or timer-only cursor recovery; usage: make chaos-l2-listener-recovery mode=listener|poll
+##
+## Phase 05.1. Runs on the operator host with Python/asyncpg, Fly APIs, and
+## HTTP probes; it assumes no optional binary inside python:3.12-slim. The
+## listener mode terminates only the uniquely identified LISTEN backend. The
+## poll mode requires the operator to set L1 EVENT_BUS to 0, proves an exact
+## unchanged notification anchor, and blocks until the operator restores 1.
+chaos-l2-listener-recovery:
+	@if [ "$(mode)" != "listener" ] && [ "$(mode)" != "poll" ]; then \
+		echo "usage: make chaos-l2-listener-recovery mode=listener|poll"; exit 2; \
+	fi
+	@uv run python scripts/chaos_l2_listener_recovery.py --mode $(mode)
+.PHONY: chaos-l2-listener-recovery
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 03.1 — DNS observability (Plan 04)
 # ─────────────────────────────────────────────────────────────────────────────
