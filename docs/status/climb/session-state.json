@@ -1,6 +1,9 @@
 {
-  "in_flight": null,
+  "in_flight": {
+    "hypothesis_id": "H-007",
+    "phase": "implementation"
+  },
   "last_cycle": 6,
-  "next_action": "rank next pending hypothesis",
-  "session": "2026-07-17-m2-position-persistence"
+  "next_action": "implement Phase 05.2 Task 1 for H-007",
+  "session": "2026-07-18-m1-living-manual"
 }

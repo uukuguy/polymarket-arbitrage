@@ -136,3 +136,14 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-007
+  description: A hybrid M1 living manual with offline contract validation and a
+    narrow staged-change guard prevents operator-document drift without copying
+    volatile production state
+  parent_paradigm: living-doc-contract
+  expected_lift: +100 M1 operator-readiness gate points
+  cost_h: 3.0
+  ranking: 1.0
+  status: in-flight
+  created_at: '2026-07-18T18:30:00+08:00'
+  results: []

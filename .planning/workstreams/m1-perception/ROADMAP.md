@@ -311,6 +311,22 @@ Plans:
 - [x] 05.1-03-PLAN.md — Wave 3 (depends 01+02): image-aware chaos target + no-restart LISTEN/poll/projection production proof
 - [ ] 05.1-04-PLAN.md — Wave 4 (depends 03): quiet-market in-band book refresh + strict-health production proof + teaching/validation/closure
 
+### Phase 05.2: M1 platform living manual (INSERTED)
+
+**Goal:** Give operators one continuously checked product-and-operations manual for M1 capability readiness, daily use, troubleshooting, and real-money boundaries without duplicating volatile production truth.
+**Requirements:** PHASE05.2-R01, PHASE05.2-R02, PHASE05.2-R03, PHASE05.2-R04, PHASE05.2-R05
+**Depends on:** Delivered M1 L1/L2/L3 interfaces; independent of the open Phase 05.1 quiet-edge production proof
+**Design:** `docs/superpowers/specs/2026-07-18-m1-market-perception-manual-design.md`
+**Implementation plan:** `docs/superpowers/plans/2026-07-18-m1-market-perception-manual.md`
+**Plans:** 5 plans across 5 sequential waves
+
+Plans:
+- [ ] 05.2-01-PLAN.md — Wave 1: offline manual contract checker and focused tests
+- [ ] 05.2-02-PLAN.md — Wave 2: Chinese product/operations manual and Make target
+- [ ] 05.2-03-PLAN.md — Wave 3: narrowly scoped staged synchronization guard
+- [ ] 05.2-04-PLAN.md — Wave 4: README, learning-index, and CURRENT entry points
+- [ ] 05.2-05-PLAN.md — Wave 5: read-only walkthrough, full gates, JOURNAL, and closure
+
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 
 **Goal:** [To be planned]

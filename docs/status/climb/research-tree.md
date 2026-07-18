@@ -5,15 +5,16 @@
 ## Session
 
 - Last cycle: 6
-- Next action: rank next pending hypothesis
+- Next action: implement Phase 05.2 Task 1 for H-007
 
 ## In flight
 
-- None
+- H-007
 
 ## Hypothesis pool
 
 - **H-001** [confirmed]: Transactional SQLite repository prevents cross-process state loss
+- **H-007** [in-flight]: A hybrid M1 living manual with offline contract validation and a narrow staged-change guard prevents operator-document drift without copying volatile production state
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
