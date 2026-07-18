@@ -210,6 +210,7 @@ def daemon_settings_for_test(
         # when .env has POLYARB_SUPABASE_URL / POLYARB_R2_ENDPOINT set.
         supabase_url="",
         supabase_service_key=SecretStr(""),
+        supabase_db_dsn=SecretStr("postgresql://test.invalid/test"),
         r2_endpoint="",
         r2_access_key_id=SecretStr(""),
         r2_secret_access_key=SecretStr(""),
@@ -599,10 +600,18 @@ def mock_ws_consumer() -> Any:
 
 @pytest.fixture
 def mock_event_listener() -> Any:
-    """MagicMock event listener for Plan 05 wiring."""
+    """Complete live event-chain state consumed by Phase 05.1 health checks."""
     listener = MagicMock()
     listener.is_listening = True
+    listener.is_connected = True
     listener.last_event_received_s = time.time()
+    listener.last_notification_s = time.time()
+    listener.last_reconciliation_success_s = time.time()
+    listener.latest_snapshot_id = 0
+    listener.committed_cursor = 0
+    listener.cursor_lag = 0
+    listener.cursor_lag_since_s = None
+    listener.reconnect_count = 0
     return listener
 
 
@@ -660,4 +669,3 @@ def daemon_settings_with_observability(
         alert_dedupe_window_seconds=300,
         release_id="v0.2.0-abc123",
     )
-

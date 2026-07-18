@@ -8,14 +8,11 @@ Plan 04 Wave 0. Drives WsConsumer implementation:
 """
 from __future__ import annotations
 
-import asyncio
 import os
 import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
-
-import pytest
 
 # F-3 SECURITY ESCAPE HATCH (Phase 02.1 — pytest tmp_path lives outside project root by design)
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
@@ -63,6 +60,7 @@ def test_consumer_initial_state_disconnected() -> None:
 def test_state_visible_to_health_endpoint(tmp_path: Path) -> None:
     """Real WsConsumer wired into create_l2_app → /health reads .current_state."""
     from starlette.testclient import TestClient
+
     from polyarb.daemon.ws_consumer import WsConsumer
     from polyarb.daemon.ws_watchdog import WsWatchdog
     from polyarb.http.l2_app import create_l2_app

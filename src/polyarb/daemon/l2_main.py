@@ -44,6 +44,7 @@ import asyncio
 import os
 import signal
 import sys
+from datetime import UTC
 from typing import Any
 
 import sentry_sdk
@@ -94,7 +95,7 @@ def _isoformat_ts(ts: int | float | str | None) -> str | None:
     """
     if ts is None:
         return None
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     # Numeric path: unix seconds (or ms via the 1e12 heuristic).
     if isinstance(ts, (int, float)):
@@ -102,7 +103,7 @@ def _isoformat_ts(ts: int | float | str | None) -> str | None:
             ts_num = float(ts)
             if ts_num > 1e12:
                 ts_num /= 1000.0
-            return datetime.fromtimestamp(ts_num, tz=timezone.utc).isoformat()
+            return datetime.fromtimestamp(ts_num, tz=UTC).isoformat()
         except Exception:
             return None
 
@@ -116,15 +117,15 @@ def _isoformat_ts(ts: int | float | str | None) -> str | None:
             ts_num = float(s)
             if ts_num > 1e12:
                 ts_num /= 1000.0
-            return datetime.fromtimestamp(ts_num, tz=timezone.utc).isoformat()
+            return datetime.fromtimestamp(ts_num, tz=UTC).isoformat()
         except (TypeError, ValueError):
             pass
         try:
             iso_s = s.replace("Z", "+00:00") if s.endswith("Z") else s
             dt = datetime.fromisoformat(iso_s)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc).isoformat()
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC).isoformat()
         except (TypeError, ValueError):
             return None
 
@@ -511,6 +512,9 @@ async def main() -> int:
     # Phase 05.1 — event listener and durable reconciliation remain independent.
     watchdog_task = asyncio.create_task(watchdog.watch(stop_event))
     consumer_task = asyncio.create_task(ws_consumer.run(stop_event))
+    quiet_refresh_task = asyncio.create_task(
+        ws_consumer.run_quiet_refresh(stop_event), name="ws-quiet-refresh"
+    )
     pump_task = asyncio.create_task(
         reconciliation_pump.run(stop_event), name="reconciliation-pump"
     )
@@ -577,6 +581,7 @@ async def main() -> int:
         # any blocking await).
         watchdog_task.cancel()
         consumer_task.cancel()
+        quiet_refresh_task.cancel()
         listener_task.cancel()
         pump_task.cancel()
         l3_promoter_task.cancel()
@@ -585,13 +590,14 @@ async def main() -> int:
             (server_task, "server"),
             (watchdog_task, "watchdog"),
             (consumer_task, "consumer"),
+            (quiet_refresh_task, "ws-quiet-refresh"),
             (listener_task, "listener"),
             (pump_task, "reconciliation-pump"),
             (l3_promoter_task, "l3-promoter"),
         ):
             try:
                 await asyncio.wait_for(task, timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(f"{name} task did not stop within 5s — forcing")
             except asyncio.CancelledError:
                 # Expected for watchdog_task / consumer_task because we cancelled them.

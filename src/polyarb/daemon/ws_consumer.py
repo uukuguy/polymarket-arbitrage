@@ -263,6 +263,27 @@ class WsConsumer:
         self._last_quiet_refresh_attempt_at_s = now
         return await self.request_book_refresh()
 
+    async def run_quiet_refresh(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        quiet_after_s: float = 60.0,
+        retry_s: float = 30.0,
+        check_interval_s: float = 5.0,
+    ) -> None:
+        """Request truthful initial dumps on a bounded quiet-market cadence."""
+        while not stop_event.is_set():
+            await self.refresh_if_quiet(
+                quiet_after_s=quiet_after_s,
+                retry_s=retry_s,
+            )
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=check_interval_s
+                )
+            except TimeoutError:
+                continue
+
     @property
     def _subscribed_assets(self) -> list[str]:
         """Backward-compat read of the union (matches pre-Plan-02 semantics)."""
