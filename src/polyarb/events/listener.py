@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Callable
+from collections.abc import Callable
 
 import asyncpg
 import asyncpg.exceptions
