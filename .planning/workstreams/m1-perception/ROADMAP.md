@@ -297,6 +297,17 @@ Makefile targets to deliver (per Plan 05-01 + 05-05):
 - `make ohlc-spot-check` — query /health for current L3 active set + freshness anchors (Plan 05-05)
 - `make smoke-l3-dashboard asset_id=<id>` — HTTP smoke against `/l3/[asset_id]` route (Plan 05-05)
 
+### Phase 05.1: Durable L2 data-chain recovery (INSERTED)
+
+**Goal:** Make the L1 snapshot → candidate refresh → WS → mirror chain self-healing by treating NOTIFY as a wake-up hint, committing a durable cursor only after successful serialized reconciliation, exposing live chain-truth health, and reconciling Supabase candidate history with the real WS candidate set.
+**Requirements:** PHASE05.1-R01, PHASE05.1-R02, PHASE05.1-R03, PHASE05.1-R04, PHASE05.1-R05, PHASE05.1-R06
+**Depends on:** Phase 05 Plans 01-05; blocks Phase 05 Plan 06 soak
+**Design:** `docs/superpowers/specs/2026-07-18-m1-durable-data-chain-design.md`
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 05.1 to break down)
+
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 
 **Goal:** [To be planned]
