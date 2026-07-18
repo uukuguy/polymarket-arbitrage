@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).parents[2]
+sys.path.insert(0, str(ROOT))
+
+from scripts.check_m1_manual import classify_staged_impact, validate_manual  # noqa: E402
+
+HEADINGS = tuple(f"## {n}. " for n in range(1, 11))
+
+
+def _valid_manual() -> str:
+    sections = "\n".join(f"## {n}. section-{n}\nbody" for n in range(1, 11))
+    return f"""# M1 市场感知平台使用手册
+
+> 最后核验：2026-07-18
+> 动态状态：`.planning/CURRENT.md`
+
+{sections}
+
+| 能力 | 状态 | 用途 | 数据源 | 验证方法 | 已知限制 | 禁止用途 |
+|---|---|---|---|---|---|---|
+| L1 | 已验证可用 | snapshot | Gamma+CLOB | `make snapshot-status` | local only | live order |
+
+[CURRENT](../.planning/CURRENT.md)
+<!-- m1-contract: health=snapshot:last_success_age_seconds file=src/polyarb/http/health.py -->
+<!-- m1-contract: route=/status file=dashboard/app/status/page.tsx -->
+"""
+
+
+def _repo(tmp_path: Path) -> Path:
+    (tmp_path / "src/polyarb/http").mkdir(parents=True)
+    (tmp_path / "dashboard/app/status").mkdir(parents=True)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / ".planning").mkdir()
+    (tmp_path / "Makefile").write_text("snapshot-status:\n\t@true\n")
+    (tmp_path / ".planning/CURRENT.md").write_text("current\n")
+    (tmp_path / "src/polyarb/http/health.py").write_text(
+        'checks["snapshot:last_success_age_seconds"] = []\n'
+    )
+    (tmp_path / "dashboard/app/status/page.tsx").write_text("export default 1\n")
+    return tmp_path
+
+
+def test_valid_manual_has_no_errors(tmp_path: Path) -> None:
+    assert validate_manual(_repo(tmp_path), _valid_manual()) == []
+
+
+def test_rejects_missing_section_and_unknown_label(tmp_path: Path) -> None:
+    text = _valid_manual().replace("## 10. section-10\nbody\n", "")
+    text = text.replace("已验证可用", "大概可用")
+    errors = validate_manual(_repo(tmp_path), text)
+    assert any("required section 10" in error for error in errors)
+    assert any("大概可用" in error for error in errors)
+
+
+def test_rejects_missing_make_link_route_and_health(tmp_path: Path) -> None:
+    text = _valid_manual().replace("snapshot-status", "missing-target")
+    text = text.replace("../.planning/CURRENT.md", "missing.md")
+    text = text.replace("snapshot:last_success_age_seconds", "missing:health")
+    text = text.replace("dashboard/app/status/page.tsx", "dashboard/app/missing/page.tsx")
+    errors = validate_manual(_repo(tmp_path), text)
+    assert any("Make target missing-target" in error for error in errors)
+    assert any("link" in error for error in errors)
+    assert any("health missing:health" in error for error in errors)
+    assert any("route /status" in error for error in errors)
+
+
+def test_rejects_empty_capability_field(tmp_path: Path) -> None:
+    text = _valid_manual().replace("| local only |", "|  |")
+    errors = validate_manual(_repo(tmp_path), text)
+    assert any("empty required field" in error for error in errors)
+
+
+def test_staged_classifier_is_narrow() -> None:
+    assert classify_staged_impact(
+        ["Makefile"], "+## snapshot-status: changed operator contract\n"
+    )
+    assert classify_staged_impact(
+        ["src/polyarb/http/l2_health.py"],
+        '+    checks["event_bus:cursor_lag"] = []\n',
+    )
+    assert classify_staged_impact(
+        ["dashboard/app/new-view/page.tsx"], "diff --git a/x b/x\n"
+    )
+    assert not classify_staged_impact(
+        ["src/polyarb/http/l2_health.py"], "+    logger.info('refactor only')\n"
+    )
+    assert not classify_staged_impact(
+        ["tests/m1-perception/test_health_endpoint.py"], "+def test_internal(): pass\n"
+    )
