@@ -24,6 +24,7 @@ M1_MAKE_TARGETS = {
     "smoke-l2-health-prod",
     "smoke-l2-health-strict-prod",
     "scan-arb-live",
+    "diagnose-arb-feed-prod",
     "l3-promote-dry-run",
     "ohlc-spot-check",
     "dashboard-dev",

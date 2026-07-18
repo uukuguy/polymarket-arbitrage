@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -16,6 +17,13 @@ def _make(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _make_recipe(target: str) -> str:
+    makefile = (ROOT / "Makefile").read_text()
+    match = re.search(rf"(?m)^{re.escape(target)}:\n(?P<recipe>(?:\t.*\n)+)", makefile)
+    assert match is not None, f"{target} target must exist"
+    return match.group("recipe")
+
+
 def test_help_lists_durable_arbitrage_commands() -> None:
     result = _make("help")
 
@@ -25,6 +33,30 @@ def test_help_lists_durable_arbitrage_commands() -> None:
     assert "db=" in result.stdout
     assert "operation_id=" in result.stdout
     assert "scan-arb-live:" in result.stdout
+
+
+def test_opportunity_diagnosis_target_is_read_only_and_preserves_body() -> None:
+    recipe = _make_recipe("diagnose-arb-feed-prod")
+    assert "curl --disable --request GET" in recipe
+    assert '-o "$$BODY" -w "%{http_code}"' in recipe
+    assert "cli_arbitrage diagnose-feed" in recipe
+    assert "polyarb-l1.fly.dev/arbitrage/opportunities" in recipe
+    assert not re.search(
+        r"\b(flyctl|POST|deploy|scale|restart|secret|schema|migrat|chaos)\b",
+        recipe,
+        re.I,
+    )
+
+
+def test_diagnose_arb_feed_make_entry_is_listed_and_dry_runs() -> None:
+    help_result = _make("help")
+    dry_run = _make("-n", "diagnose-arb-feed-prod")
+
+    assert help_result.returncode == 0, help_result.stderr
+    assert "diagnose-arb-feed-prod:" in help_result.stdout
+    assert dry_run.returncode == 0, dry_run.stderr
+    assert "curl --disable --request GET" in dry_run.stdout
+    assert "https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=0" in dry_run.stdout
 
 
 def test_status_uses_the_canonical_current_state() -> None:

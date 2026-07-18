@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test
+.PHONY: help test diagnose-arb-feed-prod
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -205,6 +205,15 @@ scan-arb:
 ## scan-arb-live: Query the fresh production M1→M2 opportunity feed. Usage: make scan-arb-live [min_edge_bps=0]
 scan-arb-live:
 	@curl -fsS "https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=$(or $(min_edge_bps),0)" | uv run python -m json.tool
+
+## diagnose-arb-feed-prod: Explain fresh/zero/stale/unavailable opportunity-feed state. Read-only GET.
+diagnose-arb-feed-prod:
+	@URL="$(or $(URL),https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=$(or $(min_edge_bps),0))"; \
+	BODY="$$(mktemp)"; trap 'rm -f "$$BODY"' EXIT; \
+	HTTP_STATUS=$$(curl --disable --request GET -sS -o "$$BODY" -w "%{http_code}" "$$URL") || { \
+	  printf '%s\n' '{"kind":"transport-error","reason":"request-failed"}'; exit 2; \
+	}; \
+	uv run python -m polyarb.cli_arbitrage diagnose-feed --http-status "$$HTTP_STATUS" --body-file "$$BODY"
 
 ## scan-by-tag: Tag-level aggregates (market count / total liq / avg spread per tag)
 scan-by-tag:

@@ -9,7 +9,7 @@
 ## 一句话结论
 
 这是一个已经恢复新鲜 M1 生产快照、具备 paper 精确账本的研发系统；
-M2 neg-risk 机会 endpoint 最近只读实测返回 HTTP 503，所以**快照/健康监控与 paper 账本可用，但机会 feed 暂不能当作可用输入，还不是可以投入真实资金运行的套利产品**。
+M2 neg-risk 机会 endpoint 最近只读实测返回 HTTP 503，所以**快照/健康监控与 paper 账本可用，但机会 feed 暂不能当作可用输入，还不是可以投入真实资金运行的套利产品**。H-008 的只读诊断只会区分响应状态，**不会修复 producer cadence/SLA mismatch，也不会把 feed 宣布为 ready**。
 
 ## 交付状态
 
@@ -44,8 +44,8 @@ make close-arb db=/tmp/m2-paper.db market_id=cond-0 exit_price=0.99 \
   size=100 fill_id=fill-001 venue_cash=46.00 venue_fee=1.00 \
   venue_status=CONFIRMED venue_ref=trade-001
 
-# 诊断性查询；只有 exit=0 时才能解读机会数，HTTP 503 不是零机会
-make scan-arb-live min_edge_bps=0
+# 诊断性查询；只有 available-zero/available-opportunities 的 exit=0 才能解读机会数，HTTP 503 不是零机会
+make diagnose-arb-feed-prod min_edge_bps=0
 ```
 
 审计向量结果：BUY 100 @ .40 锁定 40 pUSD；gross=46、fee=1 后 net=45、
@@ -60,14 +60,14 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 - L2 `889fab4` 的主链恢复证据已通过，但不能把持续活跃流量当作 quiet-refresh 证据；必须等自然 60 秒静默后的 receive→mirror 链。
 - 全仓 CI 仍被历史 repo-wide Ruff 基线阻断；本次相关 tests/targeted Ruff 与 Fly deploy 通过，不等于全仓 CI 绿色。
 - Phase 2–8 complete 表示 foundation plans 完成，不表示 M2 产品使命完成。
-- `make scan-arb-live min_edge_bps=0` 最近返回 HTTP 503/exit 2；在 H-008 打通 chain-truth 前，不得把它说成“当前无正 edge”。只有 exit=0 且 payload 可解析的 0 条才是合法零机会。
+- `make diagnose-arb-feed-prod min_edge_bps=0` 最近对应 HTTP 503 的不可用语义；在 H-008 打通 chain-truth 前，不得把它说成“当前无正 edge”。只有 `available-zero`/exit=0 且 payload 可解析的 0 条才是合法零机会；诊断本身不修复 producer cadence/SLA mismatch。
 
 ## 距离可实际 paper/live 使用还缺什么
 
 按依赖顺序：
 
 1. 在同一 L2 instance 上完成自然 quiet-refresh 的 receive→mirror 证据；若 instance 变化，先重建 ≥180 秒主链基线。
-2. 先完成 H-008 只读诊断并恢复机会 endpoint 的可解析 exit=0 契约，再持续记录机会频率、存活时间、费用后 edge 与失败腿风险。
+2. H-008 已增加只读响应分类；仍须修复并验证 producer cadence/SLA mismatch，使机会 endpoint 持续满足可解析 exit=0 契约，再持续记录机会频率、存活时间、费用后 edge 与失败腿风险。
 3. 实现经过明确授权的 Polymarket order/fill adapter、认证、allowance、限额与 kill switch。
 4. 通过 paper→小额 live 质量门后，才讨论真实资金运行。
 

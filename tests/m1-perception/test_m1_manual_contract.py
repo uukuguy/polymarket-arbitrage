@@ -374,6 +374,26 @@ def test_precommit_blocks_staged_public_contract_without_manual_sync(
     assert "M1 operator contract changed" in result.stdout
 
 
+def test_precommit_blocks_staged_opportunity_diagnosis_recipe_without_manual_sync(
+    tmp_path: Path,
+) -> None:
+    repo = _hook_repo(tmp_path)
+    makefile = repo / "Makefile"
+    makefile.write_text(
+        makefile.read_text()
+        + "\ndiagnose-arb-feed-prod:\n\t@curl --disable --request GET https://example.test\n"
+    )
+    assert _git(repo, "add", "Makefile").returncode == 0
+    assert _git(repo, "commit", "--no-verify", "-qm", "diagnosis fixture").returncode == 0
+    makefile.write_text(makefile.read_text().replace("example.test", "changed.example.test"))
+    assert _git(repo, "add", "Makefile").returncode == 0
+
+    result = _run_precommit(repo)
+
+    assert result.returncode == 1
+    assert "M1 operator contract changed" in result.stdout
+
+
 @pytest.mark.parametrize(
     ("path", "before", "after"),
     [
@@ -548,6 +568,16 @@ def test_manual_keeps_real_money_boundary_explicit() -> None:
     assert "不构成真实资金下单授权" in text
     assert "`.planning/CURRENT.md`" in text
     assert "本地数据不代表生产状态" in text
+
+
+def test_manual_explains_opportunity_feed_diagnosis_and_non_readiness() -> None:
+    text = (ROOT / "docs/M1-市场感知平台使用手册.md").read_text()
+
+    assert "`make diagnose-arb-feed-prod`" in text
+    assert "HTTP 503" in text
+    assert "不是零机会" in text
+    assert "exit=0" in text
+    assert "仍不代表机会 feed 已准备就绪" in text
 
 
 def test_docs_m1_check_make_target() -> None:
