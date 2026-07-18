@@ -307,7 +307,7 @@ Makefile targets to deliver (per Plan 05-01 + 05-05):
 
 Plans:
 - [x] 05.1-01-PLAN.md — Wave 1: termination-aware asyncpg LISTEN + serialized NOTIFY/poll reconciliation pump + success-only cursor commit
-- [ ] 05.1-02-PLAN.md — Wave 2 (depends 01): keyed candidate history reconciliation + required success propagation + live chain-truth health
+- [x] 05.1-02-PLAN.md — Wave 2 (depends 01): keyed candidate history reconciliation + required success propagation + live chain-truth health
 - [ ] 05.1-03-PLAN.md — Wave 3 (depends 01+02): image-aware chaos target + no-restart production proof + teaching/validation/closure
 
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
