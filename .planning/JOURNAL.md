@@ -3770,3 +3770,15 @@ $gsd-resume-work --ws m1-perception
 ```
 
 恢复后以当时生产 strict health 和 Phase 05.1 证据为准；不用 Phase 05.2 文档闭环替代 quiet-edge 生产门。
+
+## SESSION 54 — 2026-07-18 (climb H-007 confirmed, H-008 seeded)
+
+- [VERIFIED] `living-doc-contract` evaluator 不再复用旧 M2 gates；它分别运行 planning、manual unit、offline integration、Make CLI contract 和 staged-hook gates。
+- [VERIFIED] climb run `20260718-114314-h-007` 总分 `100.0`，五个 subscore 均为 `100.0`；H-007 已 confirmed，research tree 和 runs ledger 由 cycle 主路径确定性同步。
+- [BOUNDARY] H-007 确认的是 M1 常青手册的软件/文档契约，不代表 L3、机会 feed 或 Phase 05.1 生产门通过。
+- [OBSERVED] 最近只读 walkthrough 中 `make scan-arb-live min_edge_bps=0` 返回 HTTP 503；这与“成功返回 0 条机会”语义不同。
+- [NEXT-HYPOTHESIS] H-008：只读打通 opportunity endpoint 的 chain-truth，区分 endpoint unavailable、上游数据不新鲜与合法零机会，再决定是否需要独立修复 phase。
+
+### [NEXT — CURRENT]
+
+先只读诊断 H-008 的 HTTP 503 来源；不部署、不重启、不调整 health 阈值，也不把文档完成度当作生产可用性。

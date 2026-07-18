@@ -321,11 +321,11 @@ Plans:
 **Plans:** 5 plans across 5 sequential waves
 
 Plans:
-- [ ] 05.2-01-PLAN.md — Wave 1: offline manual contract checker and focused tests
-- [ ] 05.2-02-PLAN.md — Wave 2: Chinese product/operations manual and Make target
-- [ ] 05.2-03-PLAN.md — Wave 3: narrowly scoped staged synchronization guard
-- [ ] 05.2-04-PLAN.md — Wave 4: README, learning-index, and CURRENT entry points
-- [ ] 05.2-05-PLAN.md — Wave 5: read-only walkthrough, full gates, JOURNAL, and closure
+- [x] 05.2-01-PLAN.md — Wave 1: offline manual contract checker and focused tests
+- [x] 05.2-02-PLAN.md — Wave 2: Chinese product/operations manual and Make target
+- [x] 05.2-03-PLAN.md — Wave 3: narrowly scoped staged synchronization guard
+- [x] 05.2-04-PLAN.md — Wave 4: README, learning-index, and CURRENT entry points
+- [x] 05.2-05-PLAN.md — Wave 5: read-only walkthrough, full gates, JOURNAL, and closure
 
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 
