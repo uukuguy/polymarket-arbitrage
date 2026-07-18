@@ -21,18 +21,18 @@ import json
 import os
 import time
 import warnings
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 from loguru import logger
-
-from polyarb.clients.ws_market_client import stream_market_events
-from polyarb.daemon.ws_watchdog import WsWatchdog
 
 # GAP-401: websockets State enum for the liveness closure.
 # Import from websockets.protocol (canonical in websockets 15+;
 # websockets.connection is deprecated and emits a DeprecationWarning).
 from websockets.protocol import State as WsState
 
+from polyarb.clients.ws_market_client import stream_market_events
+from polyarb.daemon.ws_watchdog import WsWatchdog
 
 # ── Phase 03.1-06 D-04 / Phase 04.1 G-03: POLYARB_WS_TEST_KILL chaos primitive ─
 #
@@ -137,6 +137,7 @@ class WsConsumer:
         self._l3_active_set: set[str] = set()
         self._state: str = "DISCONNECTED"
         self._last_event_at_s: float = time.time()
+        self._last_quiet_refresh_attempt_at_s: float = 0.0
         self._frame_count: int = 0
         # Phase 04 Plan 04 D-06 indicator 1 — frames RECEIVED but downstream
         # on_event dispatch raised. Distinct from frame_count: a frame may be
@@ -214,6 +215,53 @@ class WsConsumer:
           - _subscribed_assets backward-compat property getter
         """
         return sorted(self._candidate_set | self._l3_active_set)
+
+    async def request_book_refresh(self) -> bool:
+        """Request an initial book dump for the current active asset union.
+
+        Sending a request is transport activity, not business-data freshness:
+        this method intentionally leaves candidate/L3 state, event timestamps,
+        and the watchdog untouched. Only the receive path may advance them.
+        """
+        active_assets = self._compute_active_assets()
+        ws = self._current_ws
+        if not active_assets or ws is None:
+            return False
+        payload = {
+            "operation": "subscribe",
+            "assets_ids": active_assets,
+            "initial_dump": True,
+        }
+        try:
+            await ws.send(json.dumps(payload))
+        except Exception as e:  # noqa: BLE001 — strict health remains truthful
+            logger.warning(
+                f"ws quiet refresh: send failed assets={len(active_assets)} "
+                f"error={e!r}"
+            )
+            return False
+        logger.info(f"ws quiet refresh: requested assets={len(active_assets)}")
+        return True
+
+    async def refresh_if_quiet(
+        self,
+        *,
+        now_s: float | None = None,
+        quiet_after_s: float = 60.0,
+        retry_s: float = 30.0,
+    ) -> bool | None:
+        """Request a book dump when business frames are quiet and retry is due."""
+        now = time.time() if now_s is None else now_s
+        if now - self._last_event_at_s < quiet_after_s:
+            return None
+        if (
+            self._last_quiet_refresh_attempt_at_s != 0.0
+            and now - self._last_quiet_refresh_attempt_at_s < retry_s
+        ):
+            return None
+        # Record before awaiting so a slow or failed send cannot create a storm.
+        self._last_quiet_refresh_attempt_at_s = now
+        return await self.request_book_refresh()
 
     @property
     def _subscribed_assets(self) -> list[str]:
@@ -428,7 +476,7 @@ class WsConsumer:
                 )
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
 
             if stop_event.is_set():
