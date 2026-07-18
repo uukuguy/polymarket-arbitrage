@@ -53,6 +53,16 @@ def test_living_doc_contract_selects_focused_gates() -> None:
     }
 
 
+def test_opportunity_feed_chain_truth_profile_is_dedicated() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "opportunity-feed-chain-truth"}
+    )
+
+    assert set(commands) == {"planning", "unit", "integration", "cli", "restart"}
+    assert commands["unit"][-2:] == ["tests/routing/test_opportunity_diagnosis.py", "-q"]
+    assert commands["cli"] == ["make", "docs-m1-check"]
+
+
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS

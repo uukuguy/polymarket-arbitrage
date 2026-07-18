@@ -3807,6 +3807,21 @@ $gsd-resume-work --ws m1-perception
 
 先只读诊断 H-008 opportunity feed HTTP 503 chain。
 
+## SESSION 59 — 2026-07-19 (H-008 opportunity-feed chain truth confirmed)
+
+- [VERIFIED] Dedicated `opportunity-feed-chain-truth` evaluator profile preserves the legacy and `living-doc-contract` profiles and runs the five H-008 gates: planning, opportunity-diagnosis unit, diagnose-feed subprocess integration, documentation contract, and the diagnosis restart/manual contract.
+- [VERIFIED] `make climb-cycle hypothesis=H-008` created run `20260718-184213-h-008`; planning/unit/integration/CLI/restart all scored `100.0`, total `100.0`, and the deterministic state path recorded H-008 as confirmed.
+- [OBSERVED] After all local gates, exactly one `make diagnose-arb-feed-prod` ran at `2026-07-18T18:42:36Z`: HTTP `503`, classification `stale-snapshot`, reason `snapshot-age-exceeded`, `snapshot_age_seconds=1430.7`, `max_snapshot_age_seconds=900.0`. This confirms the diagnosis agrees with the observed response: stale producer data is neither endpoint success nor a legal zero-opportunity result.
+- [NEXT-HYPOTHESIS] H-009 is pending: choose and validate the opportunity-feed producer cadence/freshness SLA before any readiness promotion. No deploy, restart, push, secret/schema/configuration change, or producer repair occurred in H-008.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+Then decide the H-009 opportunity-feed producer cadence/SLA boundary; keep the current feed conditional until a fresh, parseable exit-0 contract is evidenced.
+
 ## SESSION 57 — 2026-07-18 (climb projection-input split guard)
 
 - [FIX] climb pre-commit 对 `hypotheses.yaml`、`runs.csv`、`session-state.json` 三个 regen-tree 真实输入禁止 index/worktree split，避免暂存 H1 却用未暂存 H2 生成 projection。

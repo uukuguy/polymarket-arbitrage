@@ -1,6 +1,6 @@
 {
   "in_flight": null,
-  "last_cycle": 7,
-  "next_action": "read-only diagnose H-008 opportunity feed HTTP 503 chain",
+  "last_cycle": 8,
+  "next_action": "decide H-009 opportunity-feed producer cadence/SLA",
   "session": "2026-07-18-m1-living-manual"
 }

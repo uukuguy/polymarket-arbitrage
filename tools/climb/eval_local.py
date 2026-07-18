@@ -98,11 +98,42 @@ LIVING_DOC_CONTRACT_GATE_COMMANDS = {
         "-q",
     ],
 }
+OPPORTUNITY_FEED_CHAIN_TRUTH_GATE_COMMANDS = {
+    "planning": ["make", "planning-status"],
+    "unit": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/routing/test_opportunity_diagnosis.py",
+        "-q",
+    ],
+    "integration": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/cli/test_arbitrage_cli_process.py",
+        "-k",
+        "diagnose_feed",
+        "-q",
+    ],
+    "cli": ["make", "docs-m1-check"],
+    "restart": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_m1_manual_contract.py",
+        "-k",
+        "opportunity_diagnosis",
+        "-q",
+    ],
+}
 
 
 def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]:
     if manifest.get("paradigm") == "living-doc-contract":
         commands = LIVING_DOC_CONTRACT_GATE_COMMANDS
+    elif manifest.get("paradigm") == "opportunity-feed-chain-truth":
+        commands = OPPORTUNITY_FEED_CHAIN_TRUTH_GATE_COMMANDS
     else:
         commands = GATE_COMMANDS
     return {name: list(command) for name, command in commands.items()}
