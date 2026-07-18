@@ -167,16 +167,24 @@ def test_collects_latest_universe_once_and_persists_lowest_valid_ask(quote_db) -
 
 
 @pytest.mark.parametrize(
-    ("book", "state"),
+    ("book", "state", "successful_response_count"),
     [
-        (None, "missing-book"),
-        (FixtureBook("token-b", []), "missing-ask"),
-        (FixtureBook("token-b", [{"price": "wat", "size": "4"}]), "invalid-ask-price"),
-        (FixtureBook("token-b", [{"price": "0.4", "size": "0"}]), "invalid-ask-size"),
+        (None, "missing-book", 1),
+        (FixtureBook("token-b", []), "missing-ask", 2),
+        (
+            FixtureBook("token-b", [{"price": "wat", "size": "4"}]),
+            "invalid-ask-price",
+            2,
+        ),
+        (
+            FixtureBook("token-b", [{"price": "0.4", "size": "0"}]),
+            "invalid-ask-size",
+            2,
+        ),
     ],
 )
 def test_partial_responses_persist_visible_terminal_non_executable_reason(
-    quote_db, book: FixtureBook | None, state: str
+    quote_db, book: FixtureBook | None, state: str, successful_response_count: int
 ) -> None:
     store = NegRiskQuoteStore(quote_db)
     books: list[object] = [FixtureBook("token-a", [{"price": "0.4", "size": "4"}])]
@@ -186,9 +194,10 @@ def test_partial_responses_persist_visible_terminal_non_executable_reason(
     result = _collect(store, FakeReader(books))
 
     assert result.status == "complete"
-    assert result.successful_response_count == 1
+    assert result.successful_response_count == successful_response_count
     projection = store.latest_complete_projection()
     assert projection is not None
+    assert projection.successful_response_count == successful_response_count
     sibling = next(quote for quote in projection.quotes if quote.yes_token_id == "token-b")
     assert (
         sibling.terminal_state,
@@ -283,9 +292,9 @@ def test_unusable_or_mismatched_clob_payload_fails_new_run(response, quote_db) -
     assert store.latest_complete_projection() is None
     with sqlite3.connect(quote_db) as con:
         failed = con.execute(
-            "SELECT status, failure_reason FROM neg_risk_quote_runs"
+            "SELECT status, failure_reason, successful_response_count FROM neg_risk_quote_runs"
         ).fetchone()
-    assert failed == ("failed", "clob-response-integrity-failed")
+    assert failed == ("failed", "clob-response-integrity-failed", 0)
 
 
 def test_busy_or_unavailable_universe_does_not_call_clob(quote_db) -> None:

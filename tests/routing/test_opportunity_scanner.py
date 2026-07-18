@@ -148,7 +148,11 @@ def _complete_quote_run(
             )
         )
     store.record_terminal_quotes(run_id, tuple(quotes))
-    store.complete_run(run_id, completed_at_ms=quoted_at_ms + 1)
+    store.complete_run(
+        run_id,
+        completed_at_ms=quoted_at_ms + 1,
+        successful_response_count=len(quotes),
+    )
     return run_id
 
 

@@ -312,8 +312,18 @@ class NegRiskQuoteStore:
         finally:
             con.close()
 
-    def complete_run(self, run_id: int, *, completed_at_ms: int) -> QuoteRun:
-        """Atomically promote a fully terminal collecting run to complete."""
+    def complete_run(
+        self,
+        run_id: int,
+        *,
+        completed_at_ms: int,
+        successful_response_count: int,
+    ) -> QuoteRun:
+        """Atomically promote a terminal run with its accepted CLOB response count."""
+        if isinstance(successful_response_count, bool) or not isinstance(
+            successful_response_count, int
+        ):
+            raise ValueError("successful_response_count must be an integer")
         con = self._connect()
         try:
             self._begin_immediate(con)
@@ -337,17 +347,14 @@ class NegRiskQuoteStore:
                         "cannot complete quote run: "
                         f"requested {requested} terminal rows, found {persisted}"
                     )
-                successful = int(
-                    con.execute(
-                        "SELECT COUNT(*) FROM neg_risk_quotes "
-                        "WHERE quote_run_id = ? AND terminal_state = 'executable'",
-                        (run_id,),
-                    ).fetchone()[0]
-                )
+                if not 0 <= successful_response_count <= requested:
+                    raise ValueError(
+                        "successful_response_count must be between 0 and requested_token_count"
+                    )
                 con.execute(
                     "UPDATE neg_risk_quote_runs SET status = 'complete', "
                     "successful_response_count = ?, completed_at_ms = ? WHERE id = ?",
-                    (successful, completed_at_ms, run_id),
+                    (successful_response_count, completed_at_ms, run_id),
                 )
                 row = con.execute(
                     "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "

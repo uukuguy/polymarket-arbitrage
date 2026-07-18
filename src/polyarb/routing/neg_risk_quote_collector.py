@@ -106,7 +106,11 @@ async def collect_neg_risk_quotes(
         )
         quote_store.record_terminal_quotes(run_id, terminal_quotes)
         completed_at_ms = clock()
-        completed = quote_store.complete_run(run_id, completed_at_ms=completed_at_ms)
+        completed = quote_store.complete_run(
+            run_id,
+            completed_at_ms=completed_at_ms,
+            successful_response_count=len(indexed_books),
+        )
     except QuoteRunLeaseLostError:
         failure_reason = "collector-lease-lost"
         _best_effort_fail(quote_store, run_id, failure_reason)

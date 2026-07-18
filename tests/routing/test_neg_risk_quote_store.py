@@ -88,7 +88,11 @@ def _begin(store: NegRiskQuoteStore) -> int:
 def _complete(store: NegRiskQuoteStore) -> int:
     run_id = _begin(store)
     store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
-    store.complete_run(run_id, completed_at_ms=NOW_MS + 1)
+    store.complete_run(
+        run_id,
+        completed_at_ms=NOW_MS + 1,
+        successful_response_count=2,
+    )
     return run_id
 
 
@@ -149,13 +153,33 @@ def test_run_requires_one_terminal_row_for_every_requested_token(quote_db) -> No
     store.record_terminal_quotes(run_id, (_quote("token-a"),))
 
     with pytest.raises(QuoteRunStateError, match="cannot complete quote run"):
-        store.complete_run(run_id, completed_at_ms=NOW_MS + 1)
+        store.complete_run(
+            run_id,
+            completed_at_ms=NOW_MS + 1,
+            successful_response_count=1,
+        )
 
     with sqlite3.connect(quote_db) as con:
         status = con.execute(
             "SELECT status FROM neg_risk_quote_runs WHERE id = ?", (run_id,)
         ).fetchone()[0]
     assert status == "collecting"
+
+
+@pytest.mark.parametrize("successful_response_count", (-1, 3))
+def test_complete_run_rejects_response_count_outside_requested_bounds(
+    quote_db, successful_response_count: int
+) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    run_id = _begin(store)
+    store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
+
+    with pytest.raises(ValueError, match="successful_response_count"):
+        store.complete_run(
+            run_id,
+            completed_at_ms=NOW_MS + 1,
+            successful_response_count=successful_response_count,
+        )
 
 
 @pytest.mark.parametrize(
@@ -377,7 +401,11 @@ def test_expired_collecting_run_cannot_complete_terminal_quotes(quote_db) -> Non
     clock["now"] += QUOTE_RUN_LEASE_MS
 
     with pytest.raises(QuoteRunStateError, match="live collection lease"):
-        store.complete_run(run_id, completed_at_ms=NOW_MS + QUOTE_RUN_LEASE_MS)
+        store.complete_run(
+            run_id,
+            completed_at_ms=NOW_MS + QUOTE_RUN_LEASE_MS,
+            successful_response_count=2,
+        )
 
     with sqlite3.connect(quote_db) as con:
         assert con.execute(
@@ -544,7 +572,11 @@ def test_complete_does_not_finish_after_waiting_to_begin_transaction(quote_db) -
     error = _run_after_begin_gate(
         gate,
         clock,
-        lambda: store.complete_run(run_id, completed_at_ms=NOW_MS),
+        lambda: store.complete_run(
+            run_id,
+            completed_at_ms=NOW_MS,
+            successful_response_count=2,
+        ),
     )
 
     assert isinstance(error, QuoteRunStateError)
@@ -584,7 +616,11 @@ def test_latest_complete_projection_has_one_atomic_run_and_all_metadata(quote_db
         run_id,
         (_quote("token-a"), _quote("token-b", terminal_state="missing-ask")),
     )
-    store.complete_run(run_id, completed_at_ms=NOW_MS + 5)
+    store.complete_run(
+        run_id,
+        completed_at_ms=NOW_MS + 5,
+        successful_response_count=2,
+    )
 
     projection = store.latest_complete_projection()
 
@@ -594,7 +630,7 @@ def test_latest_complete_projection_has_one_atomic_run_and_all_metadata(quote_db
     assert projection.universe_taken_at_ms == NOW_MS - 1_000
     assert projection.quoted_at_ms == NOW_MS
     assert projection.requested_token_count == 2
-    assert projection.successful_response_count == 1
+    assert projection.successful_response_count == 2
     assert [(quote.yes_token_id, quote.terminal_state) for quote in projection.quotes] == [
         ("token-a", "executable"),
         ("token-b", "missing-ask"),
