@@ -372,7 +372,9 @@ async def on_snapshot_complete(
             f"(elapsed={elapsed:.1f}s < {REFRESH_DEBOUNCE_S}s) "
             f"snapshot_id={payload.get('snapshot_id')}"
         )
-        return False
+        # A maintenance pass may reuse only a recent *full convergence*.
+        # Cursor-critical work must retry until it processes its own snapshot.
+        return maintenance
     if not maintenance:
         _last_refresh_at_s = now
 

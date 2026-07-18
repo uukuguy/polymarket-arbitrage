@@ -893,7 +893,7 @@ async def test_maintenance_debounce_is_anchored_only_to_full_success(monkeypatch
     payload = {"snapshot_id": 4, "_maintenance": True}
     assert await mod.on_snapshot_complete(payload, ws_consumer=ws, settings=settings) is False
     assert await mod.on_snapshot_complete(payload, ws_consumer=ws, settings=settings) is True
-    assert await mod.on_snapshot_complete(payload, ws_consumer=ws, settings=settings) is False
+    assert await mod.on_snapshot_complete(payload, ws_consumer=ws, settings=settings) is True
     assert ws.replace_candidate_set.await_count == 2
 
 
