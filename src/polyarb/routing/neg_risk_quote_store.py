@@ -112,6 +112,10 @@ class NegRiskQuoteStore:
         con.execute("PRAGMA foreign_keys=ON")
         return con
 
+    def _begin_immediate(self, con: sqlite3.Connection) -> None:
+        """Serialize a lease transition before taking its authoritative time."""
+        con.execute("BEGIN IMMEDIATE")
+
     def latest_universe(self) -> tuple[int, int, tuple[UniverseLeg, ...]] | None:
         """Return membership from exactly the newest snapshot, if one exists."""
         con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
@@ -147,11 +151,11 @@ class NegRiskQuoteStore:
     ) -> int:
         """Create a collecting run after atomically acquiring the DB lease."""
         requested_legs = _deduplicate_legs(legs)
-        now_ms = self.current_time_ms()
         con = self._connect()
         try:
-            con.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(con)
             try:
+                now_ms = self.current_time_ms()
                 con.execute(
                     "UPDATE neg_risk_quote_runs SET status = 'failed', "
                     "failure_reason = 'collector-lease-expired' "
@@ -223,11 +227,11 @@ class NegRiskQuoteStore:
 
     def renew_run_lease(self, run_id: int) -> None:
         """Extend a still-live collecting run lease, never reviving an expired one."""
-        now_ms = self.current_time_ms()
         con = self._connect()
         try:
-            con.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(con)
             try:
+                now_ms = self.current_time_ms()
                 cur = con.execute(
                     "UPDATE neg_risk_quote_runs SET lease_expires_at_ms = ? "
                     "WHERE id = ? AND status = 'collecting' "
@@ -250,11 +254,11 @@ class NegRiskQuoteStore:
     ) -> None:
         """Append observations only while this run still owns its live lease."""
         _validate_quotes(quotes)
-        now_ms = self.current_time_ms()
         con = self._connect()
         try:
-            con.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(con)
             try:
+                now_ms = self.current_time_ms()
                 _require_live_collecting(con, run_id, now_ms=now_ms)
                 requested = {
                     str(row[4]): UniverseLeg(*row)
@@ -310,11 +314,11 @@ class NegRiskQuoteStore:
 
     def complete_run(self, run_id: int, *, completed_at_ms: int) -> QuoteRun:
         """Atomically promote a fully terminal collecting run to complete."""
-        now_ms = self.current_time_ms()
         con = self._connect()
         try:
-            con.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(con)
             try:
+                now_ms = self.current_time_ms()
                 _require_live_collecting(con, run_id, now_ms=now_ms)
                 requested = int(
                     con.execute(

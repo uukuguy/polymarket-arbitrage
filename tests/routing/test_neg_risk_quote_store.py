@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+from collections.abc import Callable
 
 import pytest
 
@@ -88,6 +90,48 @@ def _complete(store: NegRiskQuoteStore) -> int:
     store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
     store.complete_run(run_id, completed_at_ms=NOW_MS + 1)
     return run_id
+
+
+class BeginGate:
+    def __init__(self) -> None:
+        self.enabled = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+
+class GatedQuoteStore(NegRiskQuoteStore):
+    """Test seam that pauses an owner before it serializes BEGIN IMMEDIATE."""
+
+    def __init__(self, *args: object, gate: BeginGate, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._gate = gate
+
+    def _begin_immediate(self, con: sqlite3.Connection) -> None:
+        if self._gate.enabled:
+            self._gate.entered.set()
+            assert self._gate.release.wait(timeout=1)
+        super()._begin_immediate(con)
+
+
+def _run_after_begin_gate(
+    gate: BeginGate, clock: dict[str, int], operation: Callable[[], object]
+) -> object | BaseException | None:
+    outcome: dict[str, object] = {}
+
+    def invoke() -> None:
+        try:
+            outcome["value"] = operation()
+        except BaseException as error:
+            outcome["error"] = error
+
+    worker = threading.Thread(target=invoke)
+    worker.start()
+    assert gate.entered.wait(timeout=1)
+    clock["now"] += QUOTE_RUN_LEASE_MS
+    gate.release.set()
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    return outcome.get("error", outcome.get("value"))
 
 
 def test_started_run_is_invisible_to_latest_complete_projection(quote_db) -> None:
@@ -424,6 +468,90 @@ def test_renew_rejects_expired_and_reclaimed_original_owner(quote_db) -> None:
     with pytest.raises(QuoteRunStateError, match="live collection lease"):
         store.renew_run_lease(original_run)
     store.fail_run(replacement_run, failure_reason="fixture-cleanup")
+
+
+def test_renew_does_not_resurrect_after_waiting_to_begin_transaction(quote_db) -> None:
+    clock = {"now": NOW_MS}
+    gate = BeginGate()
+    store = GatedQuoteStore(quote_db, now_ms=lambda: clock["now"], gate=gate)
+    run_id = _begin(store)
+    gate.enabled = True
+
+    error = _run_after_begin_gate(gate, clock, lambda: store.renew_run_lease(run_id))
+
+    assert isinstance(error, QuoteRunStateError)
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT lease_expires_at_ms FROM neg_risk_quote_runs WHERE id = ?", (run_id,)
+        ).fetchone() == (NOW_MS + QUOTE_RUN_LEASE_MS,)
+
+
+def test_begin_recovers_after_waiting_to_begin_transaction(quote_db) -> None:
+    clock = {"now": NOW_MS}
+    gate = BeginGate()
+    store = GatedQuoteStore(quote_db, now_ms=lambda: clock["now"], gate=gate)
+    expired_owner = _begin(store)
+    gate.enabled = True
+
+    replacement = _run_after_begin_gate(
+        gate,
+        clock,
+        lambda: store.begin_run(
+            universe_snapshot_id=1,
+            universe_taken_at_ms=NOW_MS - 1_000,
+            legs=_legs(),
+            quoted_at_ms=NOW_MS,
+        ),
+    )
+
+    assert isinstance(replacement, int)
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT status, failure_reason FROM neg_risk_quote_runs WHERE id = ?",
+            (expired_owner,),
+        ).fetchone() == ("failed", "collector-lease-expired")
+    store.fail_run(replacement, failure_reason="fixture-cleanup")
+
+
+def test_record_does_not_write_after_waiting_to_begin_transaction(quote_db) -> None:
+    clock = {"now": NOW_MS}
+    gate = BeginGate()
+    store = GatedQuoteStore(quote_db, now_ms=lambda: clock["now"], gate=gate)
+    run_id = _begin(store)
+    gate.enabled = True
+
+    error = _run_after_begin_gate(
+        gate,
+        clock,
+        lambda: store.record_terminal_quotes(
+            run_id, (_quote("token-a"), _quote("token-b"))
+        ),
+    )
+
+    assert isinstance(error, QuoteRunStateError)
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute("SELECT COUNT(*) FROM neg_risk_quotes").fetchone()[0] == 0
+
+
+def test_complete_does_not_finish_after_waiting_to_begin_transaction(quote_db) -> None:
+    clock = {"now": NOW_MS}
+    gate = BeginGate()
+    store = GatedQuoteStore(quote_db, now_ms=lambda: clock["now"], gate=gate)
+    run_id = _begin(store)
+    store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
+    gate.enabled = True
+
+    error = _run_after_begin_gate(
+        gate,
+        clock,
+        lambda: store.complete_run(run_id, completed_at_ms=NOW_MS),
+    )
+
+    assert isinstance(error, QuoteRunStateError)
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT status FROM neg_risk_quote_runs WHERE id = ?", (run_id,)
+        ).fetchone() == ("collecting",)
 
 
 def test_init_schema_adds_quote_lease_to_legacy_quote_runs_table(tmp_path) -> None:

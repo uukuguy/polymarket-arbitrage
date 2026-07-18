@@ -46,15 +46,18 @@ use an injected clock and gate-controlled sleeper (no wall-clock sleeps):
   Thirty seconds accommodates normal request latency and scheduling jitter;
   ten seconds leaves two renewal opportunities before expiry, while a crash
   becomes recoverable within one bounded TTL.
-- `begin_run()` holds `BEGIN IMMEDIATE`, atomically marks only
-  `collecting AND COALESCE(lease_expires_at_ms, 0) <= quoted_at_ms` rows failed
-  with `collector-lease-expired`, then checks for a remaining live collector and
-  inserts the new owner. A live row is never reclaimed.
-- `renew_run_lease()` also holds `BEGIN IMMEDIATE` and updates only when the run
-  is still collecting **and** `lease_expires_at_ms > now_ms`; it cannot revive a
-  lease that is already expired or reclaimed. SQLite's write transaction
-  serializes a competing recovery and renewal: the first committer wins; the
-  losing collector detects lease loss and stops.
+- `begin_run()` obtains `BEGIN IMMEDIATE` first, then samples the store-owned
+  current clock and atomically marks only
+  `collecting AND COALESCE(lease_expires_at_ms, 0) <= current_time` rows failed
+  with `collector-lease-expired`. It then checks for a remaining live collector
+  and inserts the new owner. `quoted_at_ms` is quote metadata, never lease
+  authority. A live row is never reclaimed.
+- `renew_run_lease()` also obtains `BEGIN IMMEDIATE` before sampling its clock,
+  then updates only when the run is still collecting **and**
+  `lease_expires_at_ms > current_time`; it cannot revive a lease that is already
+  expired or reclaimed. SQLite's write transaction serializes a competing
+  recovery and renewal: the first committer wins; the losing collector detects
+  lease loss and stops.
 - The collector runs reader and heartbeat tasks concurrently. It performs one
   final ownership renewal when the reader returns, before persisting terminal
   quotes. A heartbeat/final-renewal error cancels the reader, best-effort fails
@@ -140,4 +143,52 @@ uv run python -m pytest \
   tests/routing/test_neg_risk_quote_collector.py \
   tests/routing/test_opportunity_scanner.py -q
 # 59 passed
+```
+
+## Review follow-up: transaction-time linearization
+
+Review found a final timing boundary: the store-owned clock was sampled before
+calling `BEGIN IMMEDIATE`. A process could wait for the SQLite write lock (or be
+paused) until its lease expired, then evaluate the predicate with its earlier
+timestamp. That could resurrect an expired lease or accept terminal work after
+expiry.
+
+### RED then GREEN
+
+New no-sleep deterministic tests use a narrow test-only `_begin_immediate`
+seam that pauses a worker immediately before it serializes the transaction.
+While paused, the fake clock advances one full TTL. Against the old ordering,
+the gate was never part of the lease path and the tests failed RED; in the
+pre-seam equivalent, each operation used the stale pre-wait sample.
+
+The production repair is a single linearization change: `begin_run`,
+`renew_run_lease`, `record_terminal_quotes`, and `complete_run` all acquire
+`BEGIN IMMEDIATE` first and only then call the store-owned authoritative clock.
+Thus the lease comparison and mutation are evaluated in one serialized temporal
+boundary. The helper is a direct `BEGIN IMMEDIATE` wrapper in production; the
+gate exists only in the test subclass.
+
+The contention regressions prove that after a pre-BEGIN wait crosses TTL:
+
+- renewal rejects rather than resurrecting the original owner;
+- begin recovers the expired collecting owner rather than returning stale busy;
+- terminal recording inserts no rows; and
+- completion leaves the run collecting.
+
+Focused final verification:
+
+```
+uv run python -m pytest \
+  tests/routing/test_neg_risk_quote_store.py \
+  tests/routing/test_neg_risk_quote_collector.py \
+  tests/routing/test_opportunity_scanner.py -q
+# 63 passed
+
+uv run ruff check \
+  src/polyarb/routing/neg_risk_quote_store.py \
+  src/polyarb/routing/neg_risk_quote_collector.py \
+  tests/routing/test_neg_risk_quote_store.py \
+  tests/routing/test_neg_risk_quote_collector.py \
+  tests/routing/test_opportunity_scanner.py
+# All checks passed
 ```
