@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.1
 status: executing
-stopped_at: Phase 05.1 Plan 04 Task 3 open; 10m36s read-only monitor stayed active, max ws_age 3.2s, and no natural quiet edge occurred
-last_updated: "2026-07-18T07:36:20Z"
+stopped_at: Phase 05.1 Plan 04 Task 3 open; authenticated 13m32s same-instance monitor stayed active, max ws_age 3.0s, quiet logs 0/0/0
+last_updated: "2026-07-18T08:08:31Z"
 last_activity: 2026-07-18
 progress:
   total_phases: 11
@@ -21,7 +21,7 @@ progress:
 
 - **Phase:** 05.1 — Durable L2 data-chain recovery (inserted gap phase)
 - **Plan:** 05.1-04 Task 3 open — production natural quiet-edge and mirror-evidence proof
-- **Status:** `889fab4` deployed; >=180-second main chain passed; latest 10m36s window stayed active and did not trigger natural quiet refresh
+- **Status:** `889fab4` deployed; >=180-second main chain passed; latest authenticated 13m32s window stayed active and did not trigger natural quiet refresh
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -69,6 +69,12 @@ progress:
   Exact instance incarnation and quiet-refresh logs were unavailable without
   Fly read-only authentication, and no token was created.
 
+- Authenticated monitoring then confirmed the exact same machine, instance,
+  creation/start anchor, image digest, and release before and after a 72-sample
+  `07:53:56Z`–`08:07:28Z` window. All probes were HTTP 200; max
+  WS/mirror ages were `3.0s/84.8s`, and exact quiet log counts were
+  `sending/evidenced/failed = 0/0/0`. Only ordinary mirror writes occurred.
+
 - Therefore Plan 04 Task 3 is unproven, not protocol-failed. If the instance
   changes, rebuild the >=180-second baseline before accepting later quiet proof.
 
@@ -110,9 +116,9 @@ make planning-status
 
 ## Session Continuity
 
-- **Last session:** 2026-07-18 15:36 (Asia/Shanghai)
-- **Stopped at:** Plan 05.1-04 Task 3 checkpoint after 60 active-traffic samples; no natural 60-second quiet edge occurred.
-- **Proceeding to:** Establish Fly read-only identity/log access, then monitor the same instance for a natural quiet edge; rebuild the baseline if instance identity changes.
+- **Last session:** 2026-07-18 16:08 (Asia/Shanghai)
+- **Stopped at:** Plan 05.1-04 Task 3 checkpoint after 72 authenticated same-instance samples; no natural 60-second quiet edge occurred.
+- **Proceeding to:** Wait for and monitor a natural quiet edge on the same instance; rebuild the baseline if instance identity changes.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05.1-durable-l2-data-chain-recovery/05.1-04-PLAN.md`
 
 ## Accumulated Context

@@ -3728,3 +3728,15 @@ $gsd-resume-work --ws m1-perception
 ### [NEXT — CURRENT]
 
 先建立 Fly read-only identity/log access，再恢复 `$gsd-execute-phase 05.1 --ws m1-perception`。若 instance 已变化，先重建 >=180 秒主链 baseline。
+
+## SESSION 51 — 2026-07-18 (authenticated quiet checkpoint)
+
+- [VERIFIED] `flyctl auth whoami` 成功且未暴露 secret；窗口首尾 exact machine/instance/start/image/digest/release 与既有证据完全一致，无需重建 baseline。
+- [VERIFIED] `07:53:56Z–08:07:28Z` 共 72/72 HTTP-200 样本；最大 WS/mirror/reconciliation/candidate age 为 `3.0s/84.8s/59.6s/59.7s`，cursor lag 0、listener listening、WS assets 5、L3 0/10。
+- [VERIFIED] exact log count `quiet_sending/evidenced/failed = 0/0/0`；日志只有 ordinary HTTP 201 mirror writes，正确排除为非 quiet 证据。
+- [BLOCKER] 唯一剩余阻塞是自然业务流量持续活跃，始终没有形成 60 秒 quiet edge；Task 3 不是协议失败。
+- [DECISION] Task 4、validation 和 Plan 04 SUMMARY 保持未开始；无部署、token 创建、secret/threshold/candidate/cloud-state 变更。
+
+### [NEXT — CURRENT]
+
+下一次执行先复核 exact instance；若未变，继续等待自然 quiet transaction。若已变，先重建 >=180 秒主链 baseline。
