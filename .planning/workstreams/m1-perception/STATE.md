@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.1
-status: planning
-stopped_at: Phase 05.1 durable L2 data-chain recovery design approved; planning in progress
-last_updated: "2026-07-17T23:06:40Z"
+status: ready_to_execute
+stopped_at: Phase 05.1 planned in 3 waves; next execute 05.1-01
+last_updated: "2026-07-18T00:21:46Z"
 last_activity: 2026-07-18
 progress:
   total_phases: 11
   completed_phases: 8
-  total_plans: 53
+  total_plans: 56
   completed_plans: 52
-  percent: 98
+  percent: 93
 ---
 
 # M1 Perception — Current State
@@ -20,7 +20,7 @@ progress:
 ## Current Position
 
 - **Phase:** 05.1 — Durable L2 data-chain recovery (inserted gap phase)
-- **Plan:** design approved; executable plans being created
+- **Plan:** 05.1-01 ready — listener lifecycle + durable reconciliation pump
 - **Status:** production chain operationally restored, permanent self-heal not implemented
 - **Active workstream:** `m1-perception`
 
@@ -41,9 +41,10 @@ progress:
 
 ## CURRENT-CALL — approved repair
 
-Implement the approved Phase 05.1 design: NOTIFY as wake-up hint, 60-second durable
-cursor reconciliation, cursor commit after awaited success, real LISTEN termination
-state, candidate projection reconciliation, chain-truth health, and chaos proof.
+Execute `05.1-01-PLAN.md`: NOTIFY as wake-up hint, 60-second durable cursor
+reconciliation, cursor commit after awaited success, and real LISTEN termination
+state. Plans 02-03 then add candidate projection reconciliation, chain-truth health,
+and no-restart chaos proof.
 Do not relax Phase 05's strict N=5 gate merely to make the phase green.
 
 ## Remaining Work
@@ -66,14 +67,14 @@ Do not relax Phase 05's strict N=5 gate merely to make the phase green.
 ```bash
 /gsd-resume-work --ws m1-perception
 make planning-status
-curl -sS https://polyarb-l2.fly.dev/health | uv run python -m json.tool
+/gsd-execute-phase 05.1 --ws m1-perception
 ```
 
 ## Session Continuity
 
 - **Last session:** 2026-07-18 (Asia/Shanghai)
 - **Stopped at:** Production chain operationally restored; permanent design approved.
-- **Proceeding to:** Plan Phase 05.1 from the approved design.
+- **Proceeding to:** Execute Phase 05.1 Plan 01 with RED-first tests.
 - **Resume file:** `docs/superpowers/specs/2026-07-18-m1-durable-data-chain-design.md`
 
 ## Accumulated Context

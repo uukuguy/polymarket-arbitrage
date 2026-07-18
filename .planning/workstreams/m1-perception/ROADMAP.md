@@ -303,10 +303,12 @@ Makefile targets to deliver (per Plan 05-01 + 05-05):
 **Requirements:** PHASE05.1-R01, PHASE05.1-R02, PHASE05.1-R03, PHASE05.1-R04, PHASE05.1-R05, PHASE05.1-R06
 **Depends on:** Phase 05 Plans 01-05; blocks Phase 05 Plan 06 soak
 **Design:** `docs/superpowers/specs/2026-07-18-m1-durable-data-chain-design.md`
-**Plans:** 0 plans
+**Plans:** 3 plans across 3 sequential waves
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 05.1 to break down)
+- [ ] 05.1-01-PLAN.md — Wave 1: termination-aware asyncpg LISTEN + serialized NOTIFY/poll reconciliation pump + success-only cursor commit
+- [ ] 05.1-02-PLAN.md — Wave 2 (depends 01): keyed candidate history reconciliation + required success propagation + live chain-truth health
+- [ ] 05.1-03-PLAN.md — Wave 3 (depends 01+02): image-aware chaos target + no-restart production proof + teaching/validation/closure
 
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 
