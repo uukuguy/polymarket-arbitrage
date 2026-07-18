@@ -5,7 +5,7 @@ milestone_name: market-perception
 current_phase: 05.1
 status: executing
 stopped_at: Phase 05.1 Plan 04 Task 3 open; await natural 60s quiet edge on instance 01KXSMS80B5AX2FGT5EPRC6V82
-last_updated: "2026-07-18T04:08:48Z"
+last_updated: "2026-07-18T07:19:05Z"
 last_activity: 2026-07-18
 progress:
   total_phases: 11
@@ -92,9 +92,9 @@ make planning-status
 
 ## Session Continuity
 
-- **Last session:** 2026-07-18 (Asia/Shanghai)
-- **Stopped at:** Plan 05.1-04 Task 3 open after `889fab4` deploy and >=180-second main-chain PASS; the new instance stayed organically active for the extra ten-minute monitor.
-- **Proceeding to:** Read-only monitor the same instance for a natural quiet edge; rebuild the baseline if instance identity changes.
+- **Last session:** 2026-07-18 15:19 (Asia/Shanghai)
+- **Stopped at:** Structured handoff restored; Plan 05.1-04 Task 3 remains open after `889fab4` deploy and >=180-second main-chain PASS.
+- **Proceeding to:** Verify instance identity, then read-only monitor the same instance for a natural quiet edge; rebuild the baseline if instance identity changes.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05.1-durable-l2-data-chain-recovery/05.1-04-PLAN.md`
 
 ## Accumulated Context

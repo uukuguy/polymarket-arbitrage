@@ -3704,3 +3704,15 @@ $gsd-resume-work --ws m1-perception
 恢复后只读监控同一 instance `01KXSMS80B5AX2FGT5EPRC6V82` 的自然 quiet；若 instance
 变化，先重建 >=180 秒主链 baseline。没有真实 book/mirror evidence 前，不关闭 Phase
 05.1、Plan 04 或 Task 3。
+
+## SESSION 49 — 2026-07-18 (m1-perception resume)
+
+- [VERIFIED] `make planning-status` 零漂移；所有已交付 plan 均有 SUMMARY，05.1-04 与 05-06 正确保持未完成。
+- [VERIFIED] Git hook 已指向 `.githooks`，恢复前工作树干净；无中断 agent 或本地后台 monitor。
+- [VERIFIED] 结构化 handoff 已恢复并消费：05.1-04 Task 3 仍在等待自然 60 秒 quiet edge，Task 4 未开始。
+- [DECISION] 修正 `.planning/CURRENT.md` 的旧 L2 stale 口径：主链已经恢复并通过同实例 >=180 秒证据；quiet-refresh receive→mirror 证据和 L3 strict gate 仍未关闭。
+- [CURRENT-CALL] 下一动作仅为验证 instance identity 后只读监控；不改阈值、不改候选、不用 chaos WS-kill 代替自然 quiet 证据。
+
+### [NEXT — CURRENT]
+
+先验证 machine/instance identity，再监控完整 `sending → real book/mirror write → evidenced` 链；若 instance 已变化，先重建 >=180 秒主链 baseline。
