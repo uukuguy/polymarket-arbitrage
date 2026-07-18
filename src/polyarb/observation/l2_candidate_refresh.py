@@ -30,6 +30,7 @@ path would clobber L3 tokens (race condition documented in 05-PATTERNS.md /
 """
 from __future__ import annotations
 
+import inspect
 import os
 import sqlite3
 import time
@@ -338,7 +339,9 @@ async def on_snapshot_complete(
 ) -> bool:
     """NOTIFY handler — recompute candidates + mutate ws_consumer subscription.
 
-    Returns True if a refresh ran, False if debounced.
+    Returns True only when every required convergence step succeeds. False
+    means debounced or failed, so the durable reconciliation pump retains the
+    cursor and retries.
 
     Debounce: only one refresh runs per REFRESH_DEBOUNCE_S window. Multiple
     NOTIFYs collapse to a single refresh.
@@ -349,12 +352,9 @@ async def on_snapshot_complete(
     ``ws_consumer._l3_active_set`` untouched. The public ``subscribed_assets``
     property returns the union (candidate ∪ L3) as a defensive list copy.
 
-    Plan 06 extension (D-07): if `mirror` is provided (L2SupabaseMirror
-    instance), persist the diff to l2_candidates:
-      - `added` rows → mirror.upsert_candidates(...)
-      - `removed` asset_ids → mirror.mark_candidates_removed(...)
-    Mirror calls are fail-soft (mirror's own envelope) — any failure surfaces
-    in the mirror's loguru + Sentry breadcrumb but does NOT block the refresh.
+    Phase 05.1: if `mirror` is provided, reconcile the complete desired keyed
+    projection on every refresh. Mirror or live WS failure blocks cursor
+    advancement; retries remain idempotent.
     """
     global _last_refresh_at_s, _last_known_markets_rows
     now = time.monotonic()
@@ -405,7 +405,7 @@ async def on_snapshot_complete(
         getattr(settings, "candidate_watchlist_yaml", None),
         markets_rows=markets_rows,
     )
-    new_asset_ids = [r.asset_id for r in new_rows]
+    new_asset_ids = list(dict.fromkeys(r.asset_id for r in new_rows))
 
     # Diff for log surface — mutation goes through update_candidate_set so
     # the L3 set (Phase 05 Plan 02 D-11) is NEVER clobbered (Pitfall 5 fix).
@@ -421,11 +421,6 @@ async def on_snapshot_complete(
         f"snapshot_id={payload.get('snapshot_id')}"
     )
 
-    # Phase 05 Plan 02 Task 3: migrate to the dedicated helper. This replaces
-    # the legacy full-list overwrite of the private subscriptions attribute
-    # which would clobber the L3 set (Pitfall 5).
-    ws_consumer.update_candidate_set(new_asset_ids)
-
     # Quick task 260602-ws-dynamic-subscribe: actually push the diff to the
     # live WS connection. update_candidate_set only mutates the in-memory
     # `_candidate_set` — without these calls the WS keeps streaming frames
@@ -433,51 +428,67 @@ async def on_snapshot_complete(
     # ids), and new candidates never receive `book` events → depth_yes_usd
     # stays NULL forever → L3 promoter recipe matches 0 rows.
     #
-    # Fail-soft: add_subscriptions / remove_subscriptions return False on
-    # send failure but log + breadcrumb internally. We do not block the
-    # refresh on a WS send error — the next reconnect will pick up the
-    # updated _candidate_set via _compute_active_assets().
+    # These are required convergence steps. A failed payload retains the old
+    # in-memory projection and durable cursor so the next pump pass retries.
     added_asset_ids = sorted(r.asset_id for r in added)
     sub_payload = getattr(ws_consumer, "subscribe_candidates_payload", None)
-    if added_asset_ids and sub_payload is not None:
+    if added_asset_ids and inspect.iscoroutinefunction(sub_payload):
         try:
-            await sub_payload(added_asset_ids)
+            if not await sub_payload(added_asset_ids):
+                logger.warning("candidate refresh: WS subscribe returned false")
+                return False
         except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
             logger.warning(
                 f"candidate refresh: ws subscribe_candidates_payload raised: {e!r}"
             )
+            return False
     unsub_payload = getattr(ws_consumer, "unsubscribe_candidates_payload", None)
-    if removed and unsub_payload is not None:
+    if removed and inspect.iscoroutinefunction(unsub_payload):
         try:
-            await unsub_payload(sorted(removed))
+            if not await unsub_payload(sorted(removed)):
+                logger.warning("candidate refresh: WS unsubscribe returned false")
+                return False
         except Exception as e:  # noqa: BLE001 — fail-soft per D-12 envelope
             logger.warning(
                 f"candidate refresh: ws unsubscribe_candidates_payload raised: {e!r}"
             )
+            return False
 
-    # Plan 06 D-07: persist diff to dashboard mirror (fail-soft via mirror itself).
+    # Durable desired rows are independent of process-local history. Reading
+    # active DB keys every time repairs stale cold-start projections.
     if mirror is not None:
-        if removed:
-            mirror.mark_candidates_removed(list(removed))
-        if added:
-            snapshot_id = payload.get("snapshot_id")
-            # Quick task 260601-included-at-ts: stamp included_at_ts at the
-            # moment of inclusion. Column is NOT NULL in `l2_candidates`;
-            # omitting it caused Postgres 23502 in prod (Phase 05 v23 deploy).
-            included_at_ts = datetime.now(timezone.utc).isoformat()
-            added_rows_dicts = [
-                {
-                    "snapshot_id": snapshot_id,
-                    "recipe_name": r.recipe_name,
-                    "asset_id": r.asset_id,
-                    "market_id": r.market_id,
-                    "event_id": r.event_id,
-                    "source": r.source,
-                    "ranking_score": r.ranking_score,
-                    "included_at_ts": included_at_ts,
-                }
-                for r in added
-            ]
-            mirror.upsert_candidates(added_rows_dicts)
+        snapshot_id = payload.get("snapshot_id")
+        included_at_ts = datetime.now(timezone.utc).isoformat()
+        desired_rows = [
+            {
+                "snapshot_id": snapshot_id,
+                "recipe_name": row.recipe_name,
+                "asset_id": row.asset_id,
+                "market_id": row.market_id,
+                "event_id": row.event_id,
+                "source": row.source,
+                "ranking_score": row.ranking_score,
+                "included_at_ts": included_at_ts,
+            }
+            for row in new_rows
+        ]
+        try:
+            if not mirror.reconcile_candidates(desired_rows):
+                logger.warning("candidate refresh: mirror reconciliation returned false")
+                return False
+        except Exception as e:  # noqa: BLE001 — explicit failure boundary
+            logger.warning(f"candidate refresh: mirror reconciliation raised: {e!r}")
+            return False
+
+    # Commit process-local candidate projection last; update_candidate_set
+    # preserves the independently-owned L3 active set.
+    try:
+        result = ws_consumer.update_candidate_set(new_asset_ids)
+        if result is False:
+            logger.warning("candidate refresh: update_candidate_set returned false")
+            return False
+    except Exception as e:  # noqa: BLE001 — explicit failure boundary
+        logger.warning(f"candidate refresh: update_candidate_set raised: {e!r}")
+        return False
 
     return True

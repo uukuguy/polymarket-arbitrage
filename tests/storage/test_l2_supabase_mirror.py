@@ -290,12 +290,19 @@ def test_reconcile_candidates_closes_and_inserts_by_asset_recipe_key() -> None:
 
     def _table(_name: str) -> MagicMock:
         query = MagicMock()
-        query.select.side_effect = lambda *args: (selects.append(args) or query)
+        query._is_select = False
+        def _select(*args):
+            selects.append(args)
+            query._is_select = True
+            return query
+        query.select.side_effect = _select
         query.eq.return_value = query
         query.is_.return_value = query
         query.update.side_effect = lambda values: (updates.append(values) or query)
         query.insert.side_effect = lambda rows: (inserts.append(rows) or query)
-        query.execute.return_value = MagicMock(data=active if selects else [])
+        query.execute.side_effect = lambda: MagicMock(
+            data=active if query._is_select else []
+        )
         return query
 
     client.table.side_effect = _table
@@ -307,7 +314,6 @@ def test_reconcile_candidates_closes_and_inserts_by_asset_recipe_key() -> None:
         ]) is True
 
     # Two stale composite keys close independently; the unchanged key is retained.
-    update_queries = [call.return_value for call in client.table.call_args_list]
     assert len(updates) == 2
     assert len(inserts) == 1
     assert {(row["asset_id"], row["recipe_name"]) for row in inserts[0]} == {

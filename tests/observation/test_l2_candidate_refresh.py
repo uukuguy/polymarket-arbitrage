@@ -478,12 +478,10 @@ def test_compute_candidates_recipe_failure_continues(settings_with_db, tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_on_snapshot_complete_calls_mirror_upsert_when_provided(
+async def test_on_snapshot_complete_reconciles_complete_mirror_projection(
     settings_with_db, tmp_path
 ):
-    """When `mirror=<L2SupabaseMirror-like>` is passed, the tail calls
-    mirror.upsert_candidates(added) AND mirror.mark_candidates_removed(removed).
-    """
+    """The durable mirror receives complete desired rows, not a memory diff."""
     import polyarb.observation.l2_candidate_refresh as mod
 
     settings, db_path = settings_with_db
@@ -509,8 +507,7 @@ async def test_on_snapshot_complete_calls_mirror_upsert_when_provided(
     fake_ws._l3_active_set = set()
 
     fake_mirror = MagicMock()
-    fake_mirror.upsert_candidates.return_value = True
-    fake_mirror.mark_candidates_removed.return_value = True
+    fake_mirror.reconcile_candidates.return_value = True
 
     ok = await mod.on_snapshot_complete(
         {"snapshot_id": 42, "taken_at_ms": 1},
@@ -520,17 +517,10 @@ async def test_on_snapshot_complete_calls_mirror_upsert_when_provided(
     )
     assert ok is True
 
-    # 3 new R-markets added
-    fake_mirror.upsert_candidates.assert_called_once()
-    added_arg = fake_mirror.upsert_candidates.call_args[0][0]
-    assert len(added_arg) == 3, f"expected 3 added rows, got {len(added_arg)}"
-    # Each upsert row must carry snapshot_id from payload
-    assert all(r["snapshot_id"] == 42 for r in added_arg)
-
-    # 2 old assets removed
-    fake_mirror.mark_candidates_removed.assert_called_once()
-    removed_arg = fake_mirror.mark_candidates_removed.call_args[0][0]
-    assert set(removed_arg) == {"OLD-A", "OLD-B"}
+    fake_mirror.reconcile_candidates.assert_called_once()
+    desired = fake_mirror.reconcile_candidates.call_args[0][0]
+    assert len(desired) == 3
+    assert all(r["snapshot_id"] == 42 for r in desired)
 
 
 @pytest.mark.asyncio
@@ -572,8 +562,7 @@ async def test_on_snapshot_complete_upsert_rows_include_included_at_ts(
     fake_ws._l3_active_set = set()
 
     fake_mirror = MagicMock()
-    fake_mirror.upsert_candidates.return_value = True
-    fake_mirror.mark_candidates_removed.return_value = True
+    fake_mirror.reconcile_candidates.return_value = True
 
     before = datetime.now(timezone.utc)
     ok = await mod.on_snapshot_complete(
@@ -585,8 +574,8 @@ async def test_on_snapshot_complete_upsert_rows_include_included_at_ts(
     after = datetime.now(timezone.utc)
     assert ok is True
 
-    fake_mirror.upsert_candidates.assert_called_once()
-    added_arg = fake_mirror.upsert_candidates.call_args[0][0]
+    fake_mirror.reconcile_candidates.assert_called_once()
+    added_arg = fake_mirror.reconcile_candidates.call_args[0][0]
     assert len(added_arg) == 2
 
     for row in added_arg:
@@ -817,7 +806,8 @@ async def test_refresh_reconciles_durable_desired_rows_even_without_memory_diff(
         ("YES-R0", "r-only"),
         ("YES-R1", "r-only"),
     }
-    ws.update_candidate_set.assert_called_once_with(["YES-R0", "YES-R1"])
+    ws.update_candidate_set.assert_called_once()
+    assert set(ws.update_candidate_set.call_args.args[0]) == {"YES-R0", "YES-R1"}
     assert ws._l3_active_set == {"L3-A"}
 
 

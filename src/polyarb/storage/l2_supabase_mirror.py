@@ -38,6 +38,7 @@ Threat model carry-over (T-03-06-04/-05):
 from __future__ import annotations
 
 import time as _time
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Iterator
 
 import sentry_sdk
@@ -339,6 +340,99 @@ class L2SupabaseMirror:
                 level="warning",
                 message=f"upsert_candidates failed rows={len(rows)}",
                 data={"rows": len(rows), "table": "l2_candidates", "error": str(e)[:200]},
+            )
+            return False
+
+    def fetch_active_candidates(self) -> list[dict] | None:
+        """Return active candidate identities, or ``None`` on REST failure."""
+        try:
+            response = (
+                self._client.table("l2_candidates")
+                .select("asset_id,recipe_name")
+                .is_("removed_at_ts", None)
+                .execute()
+            )
+            return list(response.data or [])
+        except Exception as e:  # noqa: BLE001 — fail-soft per D-12
+            logger.error(
+                f"l2-mirror fetch_active_candidates failed: {str(e)[:200]}"
+            )
+            sentry_sdk.add_breadcrumb(
+                category="l2-mirror",
+                level="warning",
+                message="fetch_active_candidates failed",
+                data={"table": "l2_candidates", "error": str(e)[:200]},
+            )
+            return None
+
+    def reconcile_candidates(self, desired_rows: list[dict]) -> bool:
+        """Converge active history to desired ``(asset_id, recipe_name)`` keys.
+
+        Unchanged active rows remain untouched. Stale keys are closed with both
+        identity filters, while missing keys are inserted as a new history
+        cycle. Any REST failure returns ``False`` so the durable event cursor
+        remains retryable.
+        """
+        active_rows = self.fetch_active_candidates()
+        if active_rows is None:
+            return False
+
+        desired_by_key: dict[tuple[str, str], dict] = {}
+        for row in desired_rows:
+            key = (str(row.get("asset_id", "")), str(row.get("recipe_name", "")))
+            if not all(key):
+                logger.error("l2-mirror reconcile_candidates invalid candidate identity")
+                return False
+            desired_by_key[key] = row
+        active_keys = {
+            (str(row.get("asset_id", "")), str(row.get("recipe_name", "")))
+            for row in active_rows
+        }
+
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            stale_keys = sorted(active_keys - desired_by_key.keys())
+            for asset_id, recipe_name in stale_keys:
+                (
+                    self._client.table("l2_candidates")
+                    .update({"removed_at_ts": now_iso})
+                    .eq("asset_id", asset_id)
+                    .eq("recipe_name", recipe_name)
+                    .is_("removed_at_ts", None)
+                    .execute()
+                )
+
+            missing_keys = sorted(desired_by_key.keys() - active_keys)
+            missing_rows = [desired_by_key[key] for key in missing_keys]
+            if missing_rows and not self.upsert_candidates(missing_rows):
+                return False
+
+            sentry_sdk.add_breadcrumb(
+                category="l2-mirror",
+                level="info",
+                message="reconcile_candidates ok",
+                data={
+                    "active": len(desired_by_key),
+                    "closed": len(stale_keys),
+                    "inserted": len(missing_rows),
+                    "table": "l2_candidates",
+                },
+            )
+            logger.info(
+                "l2-mirror: candidate projection converged "
+                f"active={len(desired_by_key)} closed={len(stale_keys)} "
+                f"inserted={len(missing_rows)}"
+            )
+            return True
+        except Exception as e:  # noqa: BLE001 — fail-soft per D-12
+            logger.error(
+                f"l2-mirror reconcile_candidates failed: {str(e)[:200]}"
+            )
+            sentry_sdk.add_breadcrumb(
+                category="l2-mirror",
+                level="warning",
+                message="reconcile_candidates failed",
+                data={"table": "l2_candidates", "error": str(e)[:200]},
             )
             return False
 
