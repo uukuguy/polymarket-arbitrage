@@ -137,6 +137,23 @@ class NegRiskQuoteStore:
                     raise QuoteRunBusyError(
                         f"collecting quote run already exists: {int(busy[0])}"
                     )
+                snapshot = con.execute(
+                    "SELECT taken_at_ms FROM snapshots WHERE id = ?",
+                    (universe_snapshot_id,),
+                ).fetchone()
+                if snapshot is None:
+                    raise QuoteRunStateError(
+                        f"universe snapshot {universe_snapshot_id} does not exist"
+                    )
+                if int(snapshot[0]) != universe_taken_at_ms:
+                    raise QuoteRunStateError(
+                        "universe_taken_at_ms does not match the stored snapshot"
+                    )
+                snapshot_legs = _snapshot_legs(con, universe_snapshot_id)
+                if _legs_by_token(requested_legs) != _legs_by_token(snapshot_legs):
+                    raise QuoteRunStateError(
+                        "requested legs do not match snapshot membership"
+                    )
                 cur = con.execute(
                     "INSERT INTO neg_risk_quote_runs("
                     "universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
@@ -185,15 +202,30 @@ class NegRiskQuoteStore:
             try:
                 _require_collecting(con, run_id)
                 requested = {
-                    str(row[0])
+                    str(row[4]): UniverseLeg(*row)
                     for row in con.execute(
-                        "SELECT yes_token_id FROM neg_risk_quote_run_legs WHERE quote_run_id = ?",
+                        "SELECT neg_risk_market_id, market_id, condition_id, slug, yes_token_id "
+                        "FROM neg_risk_quote_run_legs WHERE quote_run_id = ?",
                         (run_id,),
                     )
                 }
-                incoming = {quote.yes_token_id for quote in quotes}
-                if not incoming.issubset(requested):
-                    raise ValueError("terminal quote token is not requested by this run")
+                for quote in quotes:
+                    requested_leg = requested.get(quote.yes_token_id)
+                    if requested_leg is None:
+                        raise ValueError(
+                            "terminal quote token is not requested by this run"
+                        )
+                    quote_leg = UniverseLeg(
+                        quote.neg_risk_market_id,
+                        quote.market_id,
+                        quote.condition_id,
+                        quote.slug,
+                        quote.yes_token_id,
+                    )
+                    if quote_leg != requested_leg:
+                        raise ValueError(
+                            "terminal quote identity does not match requested leg"
+                        )
                 con.executemany(
                     "INSERT INTO neg_risk_quotes("
                     "quote_run_id, neg_risk_market_id, market_id, condition_id, slug, "
@@ -348,6 +380,27 @@ def _deduplicate_legs(legs: tuple[UniverseLeg, ...]) -> tuple[UniverseLeg, ...]:
             )
         by_token[leg.yes_token_id] = leg
     return tuple(by_token.values())
+
+
+def _snapshot_legs(
+    con: sqlite3.Connection, universe_snapshot_id: int
+) -> tuple[UniverseLeg, ...]:
+    rows = con.execute(
+        "SELECT neg_risk_market_id, market_id, condition_id, slug, yes_token_id "
+        "FROM markets WHERE snapshot_id = ? AND active = 1 AND closed = 0 "
+        "AND neg_risk_market_id IS NOT NULL AND neg_risk_market_id != '' "
+        "AND yes_token_id IS NOT NULL AND yes_token_id != '' "
+        "ORDER BY neg_risk_market_id, market_id",
+        (universe_snapshot_id,),
+    ).fetchall()
+    try:
+        return _deduplicate_legs(tuple(UniverseLeg(*row) for row in rows))
+    except ValueError as error:
+        raise QuoteRunStateError("snapshot membership contains inconsistent token IDs") from error
+
+
+def _legs_by_token(legs: tuple[UniverseLeg, ...]) -> dict[str, UniverseLeg]:
+    return {leg.yes_token_id: leg for leg in legs}
 
 
 def _validate_quotes(quotes: tuple[PersistedQuote, ...]) -> None:

@@ -169,6 +169,28 @@ def test_quote_table_constraints_reject_invalid_terminal_row(quote_db) -> None:
             )
 
 
+@pytest.mark.parametrize(
+    ("price", "size"),
+    [(0.0, 1.0), (1.01, 1.0), (0.4, 0.0), (0.4, -1.0)],
+)
+def test_quote_table_constraints_reject_non_executable_values_for_executable_state(
+    quote_db, price: float, size: float
+) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    run_id = _begin(store)
+
+    with sqlite3.connect(quote_db) as con:
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                "INSERT INTO neg_risk_quotes("
+                "quote_run_id, neg_risk_market_id, market_id, condition_id, "
+                "yes_token_id, terminal_state, best_ask_price, best_ask_size"
+                ") VALUES (?, 'group-a', 'market-a', 'condition-a', 'raw-token', "
+                "'executable', ?, ?)",
+                (run_id, price, size),
+            )
+
+
 def test_terminal_quotes_must_belong_to_the_run_requested_set(quote_db) -> None:
     store = NegRiskQuoteStore(quote_db)
     run_id = _begin(store)
@@ -185,6 +207,41 @@ def test_terminal_quotes_must_belong_to_the_run_requested_set(quote_db) -> None:
 
     with pytest.raises(ValueError, match="not requested"):
         store.record_terminal_quotes(run_id, (unknown,))
+
+
+@pytest.mark.parametrize(
+    "forged_quote",
+    [
+        PersistedQuote(
+            "forged-group",
+            "market-a",
+            "condition-a",
+            "alpha",
+            "token-a",
+            "missing-book",
+            None,
+            None,
+        ),
+        PersistedQuote(
+            "group-a",
+            "forged-market",
+            "condition-a",
+            "alpha",
+            "token-a",
+            "missing-book",
+            None,
+            None,
+        ),
+    ],
+)
+def test_terminal_quotes_must_match_durable_requested_leg_identity(
+    quote_db, forged_quote: PersistedQuote
+) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    run_id = _begin(store)
+
+    with pytest.raises(ValueError, match="identity"):
+        store.record_terminal_quotes(run_id, (forged_quote,))
 
 
 def test_failed_run_does_not_displace_prior_complete_run(quote_db) -> None:
@@ -281,5 +338,37 @@ def test_begin_rejects_duplicate_token_with_inconsistent_identity(quote_db) -> N
             universe_snapshot_id=1,
             universe_taken_at_ms=NOW_MS,
             legs=conflicting,
+            quoted_at_ms=NOW_MS,
+        )
+
+
+@pytest.mark.parametrize(
+    "forged_leg",
+    [
+        UniverseLeg("forged-group", "market-a", "condition-a", "alpha", "token-a"),
+        UniverseLeg("group-a", "forged-market", "condition-a", "alpha", "token-a"),
+    ],
+)
+def test_begin_rejects_forged_snapshot_leg_identity(quote_db, forged_leg: UniverseLeg) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    requested = (forged_leg, _legs()[1])
+
+    with pytest.raises(QuoteRunStateError, match="snapshot membership"):
+        store.begin_run(
+            universe_snapshot_id=1,
+            universe_taken_at_ms=NOW_MS - 1_000,
+            legs=requested,
+            quoted_at_ms=NOW_MS,
+        )
+
+
+def test_begin_rejects_mismatched_snapshot_taken_timestamp(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+
+    with pytest.raises(QuoteRunStateError, match="taken_at_ms"):
+        store.begin_run(
+            universe_snapshot_id=1,
+            universe_taken_at_ms=NOW_MS - 999,
+            legs=_legs(),
             quoted_at_ms=NOW_MS,
         )
