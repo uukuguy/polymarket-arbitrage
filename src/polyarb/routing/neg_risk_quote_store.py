@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +36,16 @@ class QuoteRunStateError(RuntimeError):
 
 class QuoteRunBusyError(QuoteRunStateError):
     """Another quote run is still collecting in the database."""
+
+
+class QuoteRunLeaseLostError(QuoteRunStateError):
+    """A run no longer owns a live lease for a terminal state transition."""
+
+    def __init__(self, run_id: int | None = None) -> None:
+        detail = "quote-run-lease-lost"
+        if run_id is not None:
+            detail += f": quote run {run_id} no longer owns a live collection lease"
+        super().__init__(detail)
 
 
 @dataclass(frozen=True)
@@ -84,8 +96,15 @@ class CompleteQuoteProjection:
 class NegRiskQuoteStore:
     """SQLite API for one complete-or-failed neg-risk quote collection."""
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(
+        self, db_path: Path | str, *, now_ms: Callable[[], int] | None = None
+    ) -> None:
         self._db_path = Path(db_path)
+        self._now_ms = now_ms or _wall_clock_ms
+
+    def current_time_ms(self) -> int:
+        """Return this store's authoritative, injectable lease clock."""
+        return self._now_ms()
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self._db_path, isolation_level=None)
@@ -128,6 +147,7 @@ class NegRiskQuoteStore:
     ) -> int:
         """Create a collecting run after atomically acquiring the DB lease."""
         requested_legs = _deduplicate_legs(legs)
+        now_ms = self.current_time_ms()
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -137,7 +157,7 @@ class NegRiskQuoteStore:
                     "failure_reason = 'collector-lease-expired' "
                     "WHERE status = 'collecting' "
                     "AND COALESCE(lease_expires_at_ms, 0) <= ?",
-                    (quoted_at_ms,),
+                    (now_ms,),
                 )
                 busy = con.execute(
                     "SELECT id FROM neg_risk_quote_runs WHERE status = 'collecting' LIMIT 1"
@@ -173,7 +193,7 @@ class NegRiskQuoteStore:
                         universe_taken_at_ms,
                         quoted_at_ms,
                         len(requested_legs),
-                        quoted_at_ms + QUOTE_RUN_LEASE_MS,
+                        now_ms + QUOTE_RUN_LEASE_MS,
                     ),
                 )
                 run_id = int(cur.lastrowid)
@@ -201,8 +221,9 @@ class NegRiskQuoteStore:
         finally:
             con.close()
 
-    def renew_run_lease(self, run_id: int, *, now_ms: int) -> None:
+    def renew_run_lease(self, run_id: int) -> None:
         """Extend a still-live collecting run lease, never reviving an expired one."""
+        now_ms = self.current_time_ms()
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -214,9 +235,7 @@ class NegRiskQuoteStore:
                     (now_ms + QUOTE_RUN_LEASE_MS, run_id, now_ms),
                 )
                 if cur.rowcount != 1:
-                    raise QuoteRunStateError(
-                        f"quote run {run_id} no longer owns a live collection lease"
-                    )
+                    raise QuoteRunLeaseLostError(run_id)
                 con.execute("COMMIT")
             except Exception:
                 _rollback_without_masking(con)
@@ -225,15 +244,18 @@ class NegRiskQuoteStore:
             con.close()
 
     def record_terminal_quotes(
-        self, run_id: int, quotes: tuple[PersistedQuote, ...]
+        self,
+        run_id: int,
+        quotes: tuple[PersistedQuote, ...],
     ) -> None:
-        """Append terminal observations for a collecting run without replacement."""
+        """Append observations only while this run still owns its live lease."""
         _validate_quotes(quotes)
+        now_ms = self.current_time_ms()
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
             try:
-                _require_collecting(con, run_id)
+                _require_live_collecting(con, run_id, now_ms=now_ms)
                 requested = {
                     str(row[4]): UniverseLeg(*row)
                     for row in con.execute(
@@ -288,11 +310,12 @@ class NegRiskQuoteStore:
 
     def complete_run(self, run_id: int, *, completed_at_ms: int) -> QuoteRun:
         """Atomically promote a fully terminal collecting run to complete."""
+        now_ms = self.current_time_ms()
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
             try:
-                _require_collecting(con, run_id)
+                _require_live_collecting(con, run_id, now_ms=now_ms)
                 requested = int(
                     con.execute(
                         "SELECT COUNT(*) FROM neg_risk_quote_run_legs WHERE quote_run_id = ?",
@@ -465,14 +488,19 @@ def _is_valid_executable_value(
     return upper is None or value <= upper
 
 
-def _require_collecting(con: sqlite3.Connection, run_id: int) -> None:
+def _require_live_collecting(
+    con: sqlite3.Connection, run_id: int, *, now_ms: int
+) -> None:
     row = con.execute(
-        "SELECT status FROM neg_risk_quote_runs WHERE id = ?", (run_id,)
+        "SELECT status, lease_expires_at_ms FROM neg_risk_quote_runs WHERE id = ?",
+        (run_id,),
     ).fetchone()
     if row is None:
         raise QuoteRunStateError(f"quote run {run_id} does not exist")
     if row[0] != "collecting":
         raise QuoteRunStateError(f"quote run {run_id} is not collecting")
+    if row[1] is None or int(row[1]) <= now_ms:
+        raise QuoteRunLeaseLostError(run_id)
 
 
 def _quote_run_from_row(row: tuple[object, ...]) -> QuoteRun:
@@ -487,3 +515,7 @@ def _quote_run_from_row(row: tuple[object, ...]) -> QuoteRun:
         failure_reason=str(row[7]) if row[7] is not None else None,
         completed_at_ms=int(row[8]) if row[8] is not None else None,
     )
+
+
+def _wall_clock_ms() -> int:
+    return time.time_ns() // 1_000_000

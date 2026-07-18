@@ -14,6 +14,7 @@ from polyarb.routing.neg_risk_quote_store import (
     QUOTE_RUN_LEASE_MS,
     NegRiskQuoteStore,
     PersistedQuote,
+    QuoteRunLeaseLostError,
     UniverseLeg,
 )
 
@@ -30,13 +31,6 @@ class QuoteCollectionIntegrityError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("clob-response-integrity-failed")
-
-
-class QuoteRunLeaseLostError(RuntimeError):
-    """The collector can no longer prove exclusive ownership of its run."""
-
-    def __init__(self) -> None:
-        super().__init__("quote-run-lease-lost")
 
 
 class BooksReader(Protocol):
@@ -76,7 +70,7 @@ async def collect_neg_risk_quotes(
     this collector renews its own lease; losing that lease cancels the request
     so the collector can never finish alongside a replacement run.
     """
-    clock = now_ms or _wall_clock_ms
+    clock = now_ms or quote_store.current_time_ms
     universe = quote_store.latest_universe()
     if universe is None or not universe[2]:
         raise QuoteUniverseUnavailableError()
@@ -173,7 +167,7 @@ async def _get_books_with_lease(
 
         books = reader_task.result()
         try:
-            quote_store.renew_run_lease(run_id, now_ms=clock())
+            quote_store.renew_run_lease(run_id)
         except Exception as error:
             raise QuoteRunLeaseLostError() from error
         return books
@@ -191,7 +185,7 @@ async def _renew_lease_until_cancelled(
 ) -> None:
     while True:
         await lease_sleep(_QUOTE_RUN_LEASE_RENEWAL_S)
-        quote_store.renew_run_lease(run_id, now_ms=clock())
+        quote_store.renew_run_lease(run_id)
 
 
 async def _cancel_task(task: asyncio.Task[object], *, suppress_errors: bool = False) -> None:

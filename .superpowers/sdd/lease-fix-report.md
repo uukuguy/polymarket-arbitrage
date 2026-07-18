@@ -92,3 +92,52 @@ git diff --check
 `uv run ruff check .` was also run. It reports 335 pre-existing violations in
 unrelated historical files (for example `alembic/`, `scripts/`, and older test
 modules); none are in this change's scoped ruff set.
+
+## Review follow-up: terminal mutation ownership proof
+
+Review found a remaining ownership gap in the first fix: `record_terminal_quotes`
+and `complete_run` used a status-only collecting check. A collector could renew,
+be paused past its TTL, then insert and complete before a replacement ran
+`begin_run()`.
+
+### RED then GREEN
+
+New deterministic tests first demonstrated RED:
+
+- after the collector's final successful renewal, the injected clock advances
+  exactly one TTL before terminal persistence; the old implementation returned
+  a complete run instead of raising lease loss;
+- store tests showed terminal recording could use status alone after a lease
+  had expired.
+
+The completed fix makes every terminal mutation prove a live lease inside its
+own existing `BEGIN IMMEDIATE` transaction. The `NegRiskQuoteStore` owns an
+injectable authoritative clock (wall clock in production); begin, renew, record,
+and complete read that clock inside their own operation. Terminal APIs no longer
+accept a caller-supplied timestamp, so a stale caller cannot bypass a lease by
+passing old time. `_require_live_collecting` requires `status='collecting'` and
+a non-null `lease_expires_at_ms > store_current_time`; otherwise it raises the
+bounded `QuoteRunLeaseLostError` without inserting or completing. The collector
+uses the same store clock by default, while deterministic tests construct both
+with one controlled clock. `completed_at_ms` remains completion metadata, not
+lease authority.
+
+The follow-up tests have no wall-clock sleeps and cover:
+
+- final-renewal then TTL expiry: no quote rows, no completion,
+  `collector-lease-lost`, followed only then by a new owner;
+- direct expired terminal record and direct expired completion both reject;
+- collecting legacy lease rows with default, explicit zero, and nullable NULL
+  expiry all recover through `begin_run`;
+- an expired original owner cannot renew, including after a replacement has
+  reclaimed its run.
+
+Focused follow-up verification:
+
+```
+uv run python -m pytest \
+  tests/routing/test_neg_risk_quote_store.py \
+  tests/routing/test_neg_risk_quote_collector.py \
+  tests/routing/test_opportunity_scanner.py -q
+# 59 passed
+```

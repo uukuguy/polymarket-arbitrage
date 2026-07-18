@@ -109,7 +109,7 @@ def _collect(store: NegRiskQuoteStore, reader: FakeReader, *, start: int = NOW_M
         collect_neg_risk_quotes(
             quote_store=store,
             reader=reader,
-            now_ms=_now_sequence(start, start + 25, start + 25),
+            now_ms=_now_sequence(start, start + 25, start + 25, start + 25),
         )
     )
 
@@ -327,7 +327,8 @@ def test_slow_collector_renews_lease_before_an_expired_run_can_be_reclaimed(
     quote_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
-        store = NegRiskQuoteStore(quote_db)
+        clock = {"now": NOW_MS}
+        store = NegRiskQuoteStore(quote_db, now_ms=lambda: clock["now"])
         reader = BlockingReader(
             [
                 FixtureBook("token-a", [{"price": "0.4", "size": "4"}]),
@@ -335,12 +336,11 @@ def test_slow_collector_renews_lease_before_an_expired_run_can_be_reclaimed(
             ]
         )
         sleeper = OneTickSleeper()
-        clock = {"now": NOW_MS}
         lease_renewed = asyncio.Event()
         actual_renew = store.renew_run_lease
 
-        def observe_renew(run_id: int, *, now_ms: int) -> None:
-            actual_renew(run_id, now_ms=now_ms)
+        def observe_renew(run_id: int) -> None:
+            actual_renew(run_id)
             lease_renewed.set()
 
         monkeypatch.setattr(store, "renew_run_lease", observe_renew)
@@ -379,7 +379,8 @@ def test_lease_renewal_failure_cancels_collection_and_fails_closed(
     quote_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def scenario() -> None:
-        store = NegRiskQuoteStore(quote_db)
+        clock = {"now": NOW_MS}
+        store = NegRiskQuoteStore(quote_db, now_ms=lambda: clock["now"])
         reader = BlockingReader([])
         sleeper = OneTickSleeper()
         renewal_attempted = asyncio.Event()
@@ -393,7 +394,7 @@ def test_lease_renewal_failure_cancels_collection_and_fails_closed(
             collect_neg_risk_quotes(
                 quote_store=store,
                 reader=reader,
-                now_ms=lambda: NOW_MS,
+                now_ms=lambda: clock["now"],
                 lease_sleep=sleeper,
             )
         )
@@ -412,6 +413,44 @@ def test_lease_renewal_failure_cancels_collection_and_fails_closed(
 
         # The aborted collector did not finish its CLOB request or leave a
         # competing live run behind; a later owner may acquire the lease.
+        recovered_run = _begin(store)
+        store.fail_run(recovered_run, failure_reason="fixture-cleanup")
+
+    asyncio.run(scenario())
+
+
+def test_collector_does_not_persist_after_final_renewal_lease_expires(
+    quote_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        clock = {"now": NOW_MS}
+        store = NegRiskQuoteStore(quote_db, now_ms=lambda: clock["now"])
+        actual_renew = store.renew_run_lease
+
+        def expire_after_final_renewal(run_id: int) -> None:
+            actual_renew(run_id)
+            clock["now"] = NOW_MS + 30_000
+
+        monkeypatch.setattr(store, "renew_run_lease", expire_after_final_renewal)
+        with pytest.raises(QuoteRunLeaseLostError, match="quote-run-lease-lost"):
+            await collect_neg_risk_quotes(
+                quote_store=store,
+                reader=FakeReader(
+                    [
+                        FixtureBook("token-a", [{"price": "0.4", "size": "4"}]),
+                        FixtureBook("token-b", [{"price": "0.5", "size": "4"}]),
+                    ]
+                ),
+                now_ms=lambda: clock["now"],
+                lease_sleep=OneTickSleeper(),
+            )
+
+        with sqlite3.connect(quote_db) as con:
+            assert con.execute("SELECT COUNT(*) FROM neg_risk_quotes").fetchone()[0] == 0
+            assert con.execute(
+                "SELECT status, failure_reason FROM neg_risk_quote_runs"
+            ).fetchone() == ("failed", "collector-lease-lost")
+
         recovered_run = _begin(store)
         store.fail_run(recovered_run, failure_reason="fixture-cleanup")
 

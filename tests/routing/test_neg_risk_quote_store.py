@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from polyarb.routing.neg_risk_quote_store import (
+    QUOTE_RUN_LEASE_MS,
     NegRiskQuoteStore,
     PersistedQuote,
     QuoteRunBusyError,
@@ -275,8 +276,9 @@ def test_begin_run_lock_is_database_state_not_instance_state(quote_db) -> None:
 
 
 def test_begin_run_recovers_only_an_expired_crashed_collecting_run(quote_db) -> None:
-    first = NegRiskQuoteStore(quote_db)
-    second = NegRiskQuoteStore(quote_db)
+    clock = {"now": NOW_MS}
+    first = NegRiskQuoteStore(quote_db, now_ms=lambda: clock["now"])
+    second = NegRiskQuoteStore(quote_db, now_ms=lambda: clock["now"])
     crashed_run = _begin(first)
 
     # This is the durable shape of a collector that died after begin_run() and
@@ -301,6 +303,127 @@ def test_begin_run_recovers_only_an_expired_crashed_collecting_run(quote_db) -> 
 
     with pytest.raises(QuoteRunBusyError, match="collecting quote run"):
         _begin(first)
+
+
+def test_expired_collecting_run_cannot_write_terminal_quotes(quote_db) -> None:
+    clock = {"now": NOW_MS}
+    store = NegRiskQuoteStore(quote_db, now_ms=lambda: clock["now"])
+    run_id = _begin(store)
+    clock["now"] += QUOTE_RUN_LEASE_MS
+
+    with pytest.raises(QuoteRunStateError, match="live collection lease"):
+        store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
+
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute("SELECT COUNT(*) FROM neg_risk_quotes").fetchone()[0] == 0
+    recovered_run = store.begin_run(
+        universe_snapshot_id=1,
+        universe_taken_at_ms=NOW_MS - 1_000,
+        legs=_legs(),
+        quoted_at_ms=NOW_MS + QUOTE_RUN_LEASE_MS,
+    )
+    store.fail_run(recovered_run, failure_reason="fixture-cleanup")
+
+
+def test_expired_collecting_run_cannot_complete_terminal_quotes(quote_db) -> None:
+    clock = {"now": NOW_MS}
+    store = NegRiskQuoteStore(quote_db, now_ms=lambda: clock["now"])
+    run_id = _begin(store)
+    store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
+    clock["now"] += QUOTE_RUN_LEASE_MS
+
+    with pytest.raises(QuoteRunStateError, match="live collection lease"):
+        store.complete_run(run_id, completed_at_ms=NOW_MS + QUOTE_RUN_LEASE_MS)
+
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT status FROM neg_risk_quote_runs WHERE id = ?", (run_id,)
+        ).fetchone() == ("collecting",)
+
+
+@pytest.mark.parametrize("lease_value", ("default", 0))
+def test_begin_recovers_legacy_default_and_zero_collecting_leases(quote_db, lease_value) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    with sqlite3.connect(quote_db) as con:
+        if lease_value == "default":
+            con.execute(
+                "INSERT INTO neg_risk_quote_runs("
+                "universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
+                "requested_token_count, status"
+                ") VALUES (1, ?, ?, 0, 'collecting')",
+                (NOW_MS - 1_000, NOW_MS - 1),
+            )
+        else:
+            con.execute(
+                "INSERT INTO neg_risk_quote_runs("
+                "universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
+                "requested_token_count, lease_expires_at_ms, status"
+                ") VALUES (1, ?, ?, 0, ?, 'collecting')",
+                (NOW_MS - 1_000, NOW_MS - 1, lease_value),
+            )
+        legacy_run = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    recovered_run = _begin(store)
+
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT status, failure_reason FROM neg_risk_quote_runs WHERE id = ?",
+            (legacy_run,),
+        ).fetchone() == ("failed", "collector-lease-expired")
+    store.fail_run(recovered_run, failure_reason="fixture-cleanup")
+
+
+def test_begin_recovers_legacy_null_collecting_lease(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    with sqlite3.connect(quote_db) as con:
+        con.execute("PRAGMA foreign_keys=OFF")
+        con.execute("DROP TABLE neg_risk_quote_runs")
+        con.execute(
+            "CREATE TABLE neg_risk_quote_runs ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, universe_snapshot_id INTEGER NOT NULL, "
+            "universe_taken_at_ms INTEGER NOT NULL, quoted_at_ms INTEGER NOT NULL, "
+            "requested_token_count INTEGER NOT NULL, "
+            "successful_response_count INTEGER NOT NULL DEFAULT 0, "
+            "lease_expires_at_ms INTEGER, status TEXT NOT NULL, failure_reason TEXT, "
+            "completed_at_ms INTEGER)"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_quote_runs("
+            "universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
+            "requested_token_count, lease_expires_at_ms, status"
+            ") VALUES (1, ?, ?, 0, NULL, 'collecting')",
+            (NOW_MS - 1_000, NOW_MS - 1),
+        )
+        legacy_run = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    recovered_run = _begin(store)
+
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT status, failure_reason FROM neg_risk_quote_runs WHERE id = ?",
+            (legacy_run,),
+        ).fetchone() == ("failed", "collector-lease-expired")
+    store.fail_run(recovered_run, failure_reason="fixture-cleanup")
+
+
+def test_renew_rejects_expired_and_reclaimed_original_owner(quote_db) -> None:
+    clock = {"now": NOW_MS}
+    store = NegRiskQuoteStore(quote_db, now_ms=lambda: clock["now"])
+    original_run = _begin(store)
+    clock["now"] += QUOTE_RUN_LEASE_MS
+
+    with pytest.raises(QuoteRunStateError, match="live collection lease"):
+        store.renew_run_lease(original_run)
+
+    replacement_run = store.begin_run(
+        universe_snapshot_id=1,
+        universe_taken_at_ms=NOW_MS - 1_000,
+        legs=_legs(),
+        quoted_at_ms=clock["now"],
+    )
+    with pytest.raises(QuoteRunStateError, match="live collection lease"):
+        store.renew_run_lease(original_run)
+    store.fail_run(replacement_run, failure_reason="fixture-cleanup")
 
 
 def test_init_schema_adds_quote_lease_to_legacy_quote_runs_table(tmp_path) -> None:
@@ -330,7 +453,8 @@ def test_latest_complete_projection_has_one_atomic_run_and_all_metadata(quote_db
 
     run_id = _begin(store)
     store.record_terminal_quotes(
-        run_id, (_quote("token-a"), _quote("token-b", terminal_state="missing-ask"))
+        run_id,
+        (_quote("token-a"), _quote("token-b", terminal_state="missing-ask")),
     )
     store.complete_run(run_id, completed_at_ms=NOW_MS + 5)
 
