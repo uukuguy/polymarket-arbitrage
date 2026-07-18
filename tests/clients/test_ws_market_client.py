@@ -358,3 +358,50 @@ async def test_reconnect_resolves_asset_provider_again(
 
     assert json.loads(fake1.sent[0])["assets_ids"] == ["a"]
     assert json.loads(fake2.sent[0])["assets_ids"] == ["b", "c"]
+
+
+async def test_failed_consumer_initializer_reconnects_with_latest_union(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from polyarb.clients.ws_market_client import stream_market_events
+    from polyarb.daemon.ws_consumer import WsConsumer
+    from polyarb.daemon.ws_watchdog import WsWatchdog
+
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=WsWatchdog(stale_s=30),
+        on_event=lambda event: True,
+        initial_assets=["a"],
+    )
+    first = FakeWs()
+
+    async def _fail_first(_raw: str) -> None:
+        raise RuntimeError("transport failed")
+
+    async def _close_and_publish_latest() -> None:
+        first.closed = True
+        await consumer.replace_candidate_set(["b", "c"])
+
+    first.send = _fail_first
+    first.close = _close_and_publish_latest
+    second = FakeWs(frames=['{"event_type":"book","asset_id":"b"}'])
+    monkeypatch.setattr(
+        "polyarb.clients.ws_market_client.websockets.connect",
+        _make_connect([first, second], []),
+    )
+
+    received = []
+    async with asyncio.timeout(0.3):
+        async for event in stream_market_events(
+            consumer._compute_active_assets,
+            connection_initializer=consumer._initialize_connection,
+        ):
+            received.append(event)
+            break
+
+    assert first.closed is True
+    assert json.loads(second.sent[0])["assets_ids"] == ["b", "c"]
+    assert consumer._current_ws is second
+    assert received[0]["asset_id"] == "b"

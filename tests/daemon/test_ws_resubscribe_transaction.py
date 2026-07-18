@@ -207,3 +207,45 @@ async def test_candidate_control_cancellation_compensates_without_commit() -> No
 
     assert consumer._candidate_set == {"a", "b"}
     ws.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_initializer_cancellation_compensates_then_propagates() -> None:
+    consumer, _old_ws = _consumer()
+    candidate = MagicMock()
+    entered = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def _blocked_send(_payload: str) -> None:
+        entered.set()
+        await blocked.wait()
+
+    candidate.send = AsyncMock(side_effect=_blocked_send)
+    candidate.close = AsyncMock(return_value=None)
+    task = asyncio.create_task(consumer._initialize_connection(candidate))
+    await asyncio.wait_for(entered.wait(), timeout=0.2)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
+    candidate.close.assert_awaited_once()
+    assert len(consumer._watchdog._reconnect_timestamps) == 1
+
+
+@pytest.mark.asyncio
+async def test_identity_change_after_first_unsubscribe_closes_only_captured_old() -> None:
+    consumer, old_ws = _consumer()
+    replacement = MagicMock()
+    replacement.close = AsyncMock(return_value=None)
+
+    async def _replace_after_unsubscribe(_payload: str) -> None:
+        consumer._current_ws = replacement
+        consumer._connection_generation = 8
+
+    old_ws.send.side_effect = _replace_after_unsubscribe
+
+    assert await asyncio.wait_for(consumer.request_book_refresh(), timeout=0.2) is False
+    assert old_ws.send.await_count == 1
+    old_ws.close.assert_awaited_once()
+    replacement.close.assert_not_awaited()
+    assert consumer._book_evidence_waiters == {}
