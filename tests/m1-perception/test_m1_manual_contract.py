@@ -24,6 +24,17 @@ from scripts.check_m1_manual import (  # noqa: E402
 HEADINGS = tuple(f"## {n}. " for n in range(1, 11))
 
 
+def test_canonical_entry_points_link_the_manual() -> None:
+    expected = "M1-市场感知平台使用手册.md"
+    assert expected in (ROOT / "README.md").read_text()
+    assert "../M1-市场感知平台使用手册.md" in (
+        ROOT / "docs/learning/00-INDEX.md"
+    ).read_text()
+    assert "../docs/M1-市场感知平台使用手册.md" in (
+        ROOT / ".planning/CURRENT.md"
+    ).read_text()
+
+
 def _valid_manual() -> str:
     sections = "\n".join(f"## {n}. section-{n}\nbody" for n in range(1, 11))
     return f"""# M1 市场感知平台使用手册

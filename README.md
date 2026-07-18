@@ -2,8 +2,9 @@
 
 研发中的 Polymarket 市场感知与组合套利系统。
 
-当前不是可投入真实资金的套利产品。M1 生产数据目前 unhealthy；M2 已完成的是本地
-paper execution/accounting foundation，尚无真实信号发现和交易所下单 adapter。
+先读 [M1 市场感知平台使用手册](docs/M1-市场感知平台使用手册.md)，了解功能完成度、
+日常巡检、故障排查和真实资金边界。部署状态会变化，当前事实以
+[`.planning/CURRENT.md`](.planning/CURRENT.md) 为准。
 
 先运行：
 
