@@ -1112,3 +1112,10 @@ transport activity and an orderbook resnapshot:
   limit. The candidate start was rejected rather than stitched to an earlier
   green sample. T+0 is therefore a same-sample conjunction across identity,
   membership, and the dedicated book-level freshness clock.
+- The accepted retry also showed why identity must be resolved after the
+  promoter tick, not merely near it. A pre-baseline read included market
+  `908713`; the `13:30:35Z` tick then applied `+2/-2`, and the authoritative
+  post-tick five-market mapping changed before the strict `13:30:55Z` sample.
+  The formal soak therefore binds its T+0 health and SQL coverage to that
+  post-tick mapping. Initial one-market coverage is retained as an honest
+  boundary reading, not treated as an early D-12 failure or backfilled to 5/5.

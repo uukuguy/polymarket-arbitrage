@@ -4270,3 +4270,35 @@ sampling without changing N=5 or any recipe threshold.
 Re-probe the same exact release identity. Create a new `05-SOAK-LOG.md` and T+0
 only when all strict checks, including `l3:last_book_levels_write_at_s < 120s`,
 are green in the same sample; never splice in the rejected attempt.
+
+## SESSION 76 — 2026-07-20 (Phase 05 formal 24h soak started)
+
+- [RETRY] Re-ran Wave 5 / Plan 05-06 Task 2 from a fresh executor; the rejected
+  `12:49:25Z` candidate remained historical evidence and was not reused.
+- [CHURN TRUTH] A pre-baseline mapping briefly included market `908713`, but the
+  real `13:30:35Z` promoter tick applied `+2/-2`. The accepted evidence re-resolved
+  the post-tick authoritative set as markets `540819`, `562802`, `565064`,
+  `601819`, and `665374`, each with its Yes/No pair.
+- [FORMAL T+0] Started the immutable window at `2026-07-20T13:30:55Z`; T+24 is
+  `2026-07-21T13:30:55Z`. Exact release 37 identity was unchanged. One forced
+  machine response returned HTTP 200 with active `10/10`, promoter age `20.0s`,
+  book-write age `19.9s`, and all other named main-chain checks green.
+- [BOUNDARY SQL] The literal initial interval contained 40 book rows over two
+  tokens / one mapped market and one Yes-side OHLC row / one market. This is
+  intentionally retained as boundary evidence, not a coverage verdict or a
+  backfilled 5/5 claim.
+- [WATCHDOG] The exact-machine initial interval contained 43 log rows and zero
+  `ws_watchdog: stale` matches.
+- [BOUNDARY] Created `05-SOAK-LOG.md` and committed the checkpoint as `b847c7a`.
+  VALIDATION remains draft, no SUMMARY exists, Phase 05 remains open, and no
+  deploy/restart/config/secret/threshold/trading/H-009/external action occurred.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05 --ws m1-perception
+```
+
+Run no earlier than T+6 `2026-07-20T19:30:55Z` (Asia/Shanghai
+`2026-07-21 03:30:55`). Preserve the immutable T+0 and append exact identity,
+one-sample strict health, mapped interval SQL coverage, and watchdog evidence.
