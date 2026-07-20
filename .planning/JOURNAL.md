@@ -4180,3 +4180,37 @@ before starting a fresh 24-hour Phase 05 Plan 06 soak.
 
 Start the explicit Phase 05 Plan 06 24-hour soak, recording exact-instance
 health, five-market book/OHLC coverage, and watchdog evidence every ~6 hours.
+
+## SESSION 73 — 2026-07-20 (handoff before the formal 24-hour soak)
+
+- [HANDOFF] User requested a durable handoff after the production rollout and
+  before starting the separate 24-hour operation. Created the root
+  `HANDOFF.json` and refreshed Phase 05's `.continue-here.md` with exact resume
+  state, blocking constraints, anti-patterns, and required reading.
+- [FRESH BASELINE] At `11:52:11Z`, the exact release 37 machine, instance,
+  image, and digest were unchanged. `/health` returned HTTP 200 with active
+  `10/10`, promote age `107.7s`, book-write age `4.6s`, cursor lag `0`, and 108
+  subscriptions. Top-level `warn` came from informational
+  `ws:connection_state=WAITING_FOR_EVENT`; all named strict checks passed.
+- [SQL COVERAGE] Direct SQL from release start `10:55:01Z` returned 3840
+  `l2_book_levels` rows across ten distinct token asset IDs, latest at
+  `11:52:36.676Z`; all five promoted Yes markets had OHLC coverage.
+- [MEASUREMENT TRAP] The capped newest-1000 PostgREST page contained only four
+  hottest assets although interval SQL proved all ten. Formal soak coverage
+  must use SQL `COUNT(DISTINCT ...)` over the exact T+0/T+24 interval and map
+  ten token IDs back to five promoted Yes-market identities.
+- [BOUNDARY] The formal 24-hour soak has not started and no observation was
+  backdated as T+0. No local pytest, flyctl deploy, uvicorn, or polyarb daemon
+  remains. No real trade, order, funds, config/secret change, external
+  submission, or push occurred. Local `main` is 15 commits ahead of
+  `origin/main` (`f4f095b`).
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+After restoration, execute Phase 05 Plan 06, acknowledge the three blocking
+constraints in `.continue-here.md`, create `05-SOAK-LOG.md` at a fresh T+0, and
+start the strict 24-hour monitor against release 37 without backdating.

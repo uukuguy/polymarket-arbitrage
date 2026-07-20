@@ -1099,3 +1099,9 @@ transport activity and an orderbook resnapshot:
   release 37 then stayed five/ten across the second real tick and wrote 280
   release-local depth rows. This proves feedback-loop reachability, not 24-hour
   stability.
+- Soak coverage is also an interval-query contract. At handoff, the newest 1000
+  PostgREST book rows contained only four hottest assets, while direct SQL over
+  the identical release interval counted 3840 rows across all ten token assets.
+  Never infer distinct-asset coverage from a capped time-series page; aggregate
+  in SQL over the exact T+0/T+24 window, then map the ten token IDs back to the
+  five promoted Yes-market identities.

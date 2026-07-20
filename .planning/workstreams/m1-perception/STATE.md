@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
-status: production_rollout_verified_awaiting_soak
-stopped_at: Alembic 006 and L1/L2 rollout verified; 10/10 plus real book writes proven
-last_updated: "2026-07-20T19:02:00+08:00"
+status: paused_before_24h_soak
+stopped_at: Production prerequisite green; formal 24h soak not started
+last_updated: "2026-07-20T20:27:33+08:00"
 last_activity: 2026-07-20
 progress:
   total_phases: 12
@@ -21,7 +21,7 @@ progress:
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Production Alembic 006 and L1/L2 rollout are verified. L3 is exactly 10/10 with fresh real book-level writes; the separate 24-hour soak has not started.
+- **Status:** Paused at a committed handoff after production rollout verification. L3 is exactly 10/10 with fresh real book-level writes; the separate 24-hour soak has not started.
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -143,6 +143,13 @@ markets, ten complete Yes/No tokens, and 280 real `l2_book_levels` rows over
 eight immediately active tokens. The prerequisite is passed across the feedback
 tick; this is not yet the 24-hour stability verdict.
 
+A fresh handoff read at `11:52:11Z` confirmed the same release, machine,
+instance, image, and digest: HTTP 200, active 10/10, promote age `107.7s`,
+book-write age `4.6s`, cursor lag `0`, and 108 subscriptions. Direct SQL from
+the release start returned 3840 book rows across ten distinct token asset IDs;
+all five promoted Yes markets had OHLC. A capped newest-1000 REST page exposed
+only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
+
 ## Remaining Work
 
 - Start a fresh Phase 05 Plan 06 24-hour soak only as an explicit next operation;
@@ -166,10 +173,10 @@ tick; this is not yet the 24-hour stability verdict.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-20 19:02 (Asia/Shanghai)
-- **Stopped at:** Production rollout prerequisite verified (`10/10` + real book-level write).
+- **Last session:** 2026-07-20 20:27 (Asia/Shanghai)
+- **Stopped at:** Handoff committed before the formal 24-hour soak; production prerequisite remains green.
 - **Proceeding to:** Start and monitor the separate 24-hour Phase 05 Plan 06 soak when explicitly continued.
-- **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-06-PLAN.md`
+- **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/.continue-here.md`
 
 ## Accumulated Context
 
