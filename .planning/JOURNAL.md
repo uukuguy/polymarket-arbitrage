@@ -3914,3 +3914,19 @@ Then decide the H-009 opportunity-feed producer cadence/SLA boundary; keep the c
 ```
 
 优先恢复 Phase 05.1 natural quiet-edge 证据；H-009 仅在单独授权生产部署/调度后才可进入 capacity observation，不得把 local 100 分升格为 production ready。
+
+## SESSION 65 — 2026-07-20 (Phase 05.1 Plan 04 Task 3 chain-truth checkpoint)
+
+- [VERIFIED] authenticated read-only inspection confirmed the same machine, instance, start anchor, release, image, and digest; no baseline rebuild was needed for identity.
+- [VERIFIED] rolling logs `04:25:40Z–04:51:36Z` contained quiet `sending/evidenced/failed=0/0/0`, received-book debug `0`, and TOB/trade mirror success `0/0`; candidate/WS naturally converged to `3` assets.
+- [BLOCKER] forced-instance strict `/health` at `04:52:31Z` returned HTTP 503: WS age `0.2s` but mirror age `6306.2s`; listener, cursor lag, reconciliation, and candidate refresh remained healthy, L3 stayed `0/10`.
+- [DECISION] Task 3 remains open and Task 4/VALIDATION/SUMMARY remain untouched. Repeating another short quiet monitor is not progress while the mirror link is stale; first diagnose which received frame types advance WS freshness without producing a valid TOB/trade mirror write.
+- [BOUNDARY] no deploy, restart, scale, candidate/chaos/secret/config/threshold/code/cloud mutation occurred; no token was created, printed, or saved.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+Then perform a read-only WS-frame→mirror chain diagnosis on the unchanged instance. Restore strict main-chain freshness before resuming natural quiet-edge monitoring; if identity changes, rebuild the >=180-second baseline first.

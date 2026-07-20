@@ -1019,3 +1019,9 @@ transport activity and an orderbook resnapshot:
 - Evidence is instance-bound. If the deployed instance changes before the natural
   quiet proof, first rebuild the >=180-second healthy startup/candidate/WS/mirror
   baseline, then observe quiet trigger→book receive→mirror success on that instance.
+- 2026-07-20 follow-up exposed a new open chain-truth question on the same instance:
+  strict health showed WS age `0.2s` while mirror age was `6306.2s`, and rolling
+  logs had no received-book debug or TOB/trade mirror success. Before another
+  quiet-window monitor, identify which frame types advance the coarse WS freshness
+  clock without producing mirror-eligible data; do not treat a fresh aggregate WS
+  age as proof that the book→mirror business chain is live.

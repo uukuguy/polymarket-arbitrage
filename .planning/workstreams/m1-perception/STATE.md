@@ -4,9 +4,9 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.1
 status: executing
-stopped_at: Phase 05.1 Plan 04 Task 3 open; latest same-instance monitor stayed active, max ws_age 2.6s, quiet logs 0/0/0
-last_updated: "2026-07-18T08:26:37Z"
-last_activity: 2026-07-18
+stopped_at: Phase 05.1 Plan 04 Task 3 open; same instance now has fresh WS activity but stale mirror, with quiet logs 0/0/0
+last_updated: "2026-07-20T12:53:34+08:00"
+last_activity: 2026-07-20
 progress:
   total_phases: 11
   completed_phases: 8
@@ -21,7 +21,7 @@ progress:
 
 - **Phase:** 05.1 — Durable L2 data-chain recovery (inserted gap phase)
 - **Plan:** 05.1-04 Task 3 open — production natural quiet-edge and mirror-evidence proof
-- **Status:** `889fab4` deployed; >=180-second main chain passed; latest authenticated 11m03s window stayed active and did not trigger natural quiet refresh
+- **Status:** Same instance unchanged; strict health HTTP 503 because WS age is 0.2s while mirror age is 6306.2s; quiet chain remains 0/0/0
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -86,6 +86,17 @@ progress:
   `pkill/ps/dig/ping`. Temporary Fly organization token was revoked and no token
   value was retained.
 
+- 2026-07-20 authenticated read-only recheck confirmed the exact same machine,
+  instance, start anchor, release, image, and digest. Rolling logs from
+  `04:25:40Z` to `04:51:36Z` contained quiet `sending/evidenced/failed=0/0/0`,
+  received-book debug `0`, and TOB/trade mirror success `0/0`.
+
+- The forced-instance strict `/health` at `04:52:31Z` returned HTTP 503:
+  WS age `0.2s`, WS assets `3`, mirror age `6306.2s`, listener `listening`,
+  cursor lag `0`, reconciliation age `54.3s`, candidate age `54.4s`, and L3
+  `0/10`. The first broken link is now mirror freshness, so another short
+  quiet-window monitor would not establish Task 3.
+
 ## CURRENT-CALL — approved repair
 
 Plans 05.1-01/02/03 are complete. Plan 04 implementation is deployed, but Task 3
@@ -95,10 +106,11 @@ market that never reaches the trigger, and do not relax Phase 05's strict N=5 ga
 
 ## Remaining Work
 
-- Read-only monitor instance `01KXSMS80B5AX2FGT5EPRC6V82` for a natural
-  60-second quiet window and the complete refresh→book→mirror evidence chain.
+- Read-only diagnose which received frame types keep WS freshness at seconds while
+  producing no valid TOB/trade mirror writes and leaving mirror freshness stale.
 
 - If the instance changes, first rebuild the >=180-second healthy main-chain baseline.
+- Restore the strict main chain before treating another quiet-window observation as evidence-worthy.
 - Keep Plan 04 Task 3 open until receive/mirror evidence exists; send success alone is not PASS.
 - Start Plan 05-06 only when `/health` is no longer failing on the L2 prerequisites.
 - Complete 24h strict soak, teaching chapter 11, VALIDATION flip, SUMMARY, learnings,
@@ -120,9 +132,9 @@ make planning-status
 
 ## Session Continuity
 
-- **Last session:** 2026-07-18 16:26 (Asia/Shanghai)
-- **Stopped at:** Plan 05.1-04 Task 3 checkpoint after another 60 authenticated same-instance samples; no natural 60-second quiet edge occurred.
-- **Proceeding to:** Wait for and monitor a natural quiet edge on the same instance; rebuild the baseline if instance identity changes.
+- **Last session:** 2026-07-20 12:53 (Asia/Shanghai)
+- **Stopped at:** Same-instance read-only checkpoint: quiet logs remain 0/0/0 and strict health is HTTP 503 because mirror age is 6306.2s despite WS age 0.2s.
+- **Proceeding to:** Diagnose the WS-fresh/mirror-stale chain truth read-only before any further quiet-window monitoring; rebuild the >=180-second baseline if instance identity changes.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05.1-durable-l2-data-chain-recovery/05.1-04-PLAN.md`
 
 ## Accumulated Context
