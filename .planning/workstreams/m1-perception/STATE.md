@@ -2,26 +2,26 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
-current_phase: 05
+current_phase: 05.3
 status: executing
-stopped_at: Phase 05 Plan 06; L3 0/10 root-caused to candidate seed starvation plus invalid token-map schema assumptions
-last_updated: "2026-07-20T15:10:00+08:00"
+stopped_at: Phase 05.3 Plan 01 ready for local RED tests
+last_updated: "2026-07-20T16:54:25+08:00"
 last_activity: 2026-07-20
 progress:
-  total_phases: 11
+  total_phases: 12
   completed_phases: 9
-  total_plans: 57
+  total_plans: 61
   completed_plans: 56
-  percent: 98
+  percent: 92
 ---
 
 # M1 Perception — Current State
 
 ## Current Position
 
-- **Phase:** 05 — WS book/prices and L3 promotion
-- **Plan:** 05-06 — strict N=5 / 10-token production soak
-- **Status:** Phase 05.1 is complete; L2 strict health is HTTP 200, but L3 remains `0/10`, so the 24h soak has not started
+- **Phase:** 05.3 — L3 prerequisite repair
+- **Plan:** 05.3-01 — durable Yes/No token projection
+- **Status:** Written design approved; four-plan local TDD execution registered. Phase 05 soak remains blocked at production `0/10`.
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts

@@ -5,7 +5,7 @@
 ## Session
 
 - Last cycle: 9
-- Next action: review H-010 written design, then plan and execute local TDD
+- Next action: execute H-010 Phase 05.3 locally under TDD
 
 ## In flight
 

@@ -1,6 +1,6 @@
 {
   "in_flight": null,
   "last_cycle": 9,
-  "next_action": "review H-010 written design, then plan and execute local TDD",
+  "next_action": "execute H-010 Phase 05.3 locally under TDD",
   "session": "2026-07-20-m1-l3-prerequisite"
 }

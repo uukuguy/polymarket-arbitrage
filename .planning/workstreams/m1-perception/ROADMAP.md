@@ -328,6 +328,23 @@ Plans:
 - [x] 05.2-04-PLAN.md — Wave 4: README, learning-index, and CURRENT entry points
 - [x] 05.2-05-PLAN.md — Wave 5: read-only walkthrough, full gates, JOURNAL, and closure
 
+### Phase 05.3: L3 prerequisite repair (INSERTED)
+
+**Goal:** Make the Phase 05 strict five-market/ten-token L3 gate reachable by
+persisting complete Yes/No identity, seeding representative L2 books, resolving
+pairs by Yes asset, and making the diagnostic dry-run genuinely mutation-free.
+**Requirements:** PHASE05.3-R01, PHASE05.3-R02, PHASE05.3-R03, PHASE05.3-R04
+**Depends on:** Phase 05 Plans 01-05 and completed Phase 05.1; blocks Phase 05 Plan 06 soak
+**Design:** `docs/superpowers/specs/2026-07-20-m1-l3-prerequisite-repair-design.md`
+**Implementation plan:** `docs/superpowers/plans/2026-07-20-m1-l3-prerequisite-repair.md`
+**Plans:** 4 plans across 4 sequential waves
+
+Plans:
+- [ ] 05.3-01-PLAN.md — Wave 1: Alembic 006 + 12-column token-pair mirror/temp projection
+- [ ] 05.3-02-PLAN.md — Wave 2: deterministic 100-row liquid mid-market L3 seed + Make target
+- [ ] 05.3-03-PLAN.md — Wave 3: Yes-keyed complete-pair promotion with fail-closed under-fill
+- [ ] 05.3-04-PLAN.md — Wave 4: mutation-free dry-run + full local gates + teaching/closure
+
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 
 **Goal:** [To be planned]

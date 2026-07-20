@@ -92,9 +92,10 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 Phase 05 Plan 06 的只读诊断已完成：最近 1h 只有 3 个 near-end TOB asset，两个
 spread≈0.998、一个不完整，L3 recipe 命中 0；同时 production `markets_latest` 只有
 `yes_token_id`，而 promoter 错查不存在的 `asset_id/no_token_id`。推荐设计已获继续执行授权并写入
-`docs/superpowers/specs/2026-07-20-m1-l3-prerequisite-repair-design.md`；下一步先完成书面规格审阅，
-再写实施计划。24h soak 必须从 `l3:active_count=10` 开始，未经单独授权不迁移/部署，不改变 N=5 阈值。
+`docs/superpowers/specs/2026-07-20-m1-l3-prerequisite-repair-design.md`，且书面规格已获批准。
+Phase 05.3 四个本地 TDD plan 已注册，当前从 05.3-01 token projection 开始。24h soak 必须从
+`l3:active_count=10` 开始，未经单独授权不迁移/部署，不改变 N=5 阈值。
 
 ```bash
-/gsd-execute-phase 05 --ws m1-perception
+/gsd-execute-phase 05.3 --ws m1-perception
 ```
