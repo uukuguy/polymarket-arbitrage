@@ -93,8 +93,23 @@ def test_narrow_yes_token_id_none_when_explicit_none() -> None:
     assert out["yes_token_id"] is None
 
 
-def test_narrow_projection_is_eleven_columns() -> None:
-    """D-07 widens narrow projection from 10 to 11 columns.
+def test_narrow_no_token_id_passthrough_and_nullable() -> None:
+    from polyarb.storage.supabase_mirror import narrow_market_row
+
+    assert narrow_market_row(
+        _make_full_row(no_token_id="NO-X"), snapshot_id=42
+    )["no_token_id"] == "NO-X"
+
+    missing = _make_full_row()
+    missing.pop("no_token_id")
+    assert narrow_market_row(missing, snapshot_id=42)["no_token_id"] is None
+    assert narrow_market_row(
+        _make_full_row(no_token_id=None), snapshot_id=42
+    )["no_token_id"] is None
+
+
+def test_narrow_projection_is_twelve_columns() -> None:
+    """Phase 05.3 widens the narrow projection to both outcome tokens.
 
     Post-D-07 expected keys (snapshot_id is always present + projected from arg):
     market_id, question, slug, event_slug, mid_price, liquidity_usd,
@@ -117,13 +132,14 @@ def test_narrow_projection_is_eleven_columns() -> None:
         "snapshot_id",
         "question_zh",
         "yes_token_id",
+        "no_token_id",
     }
     assert set(_NARROW_MARKET_COLUMNS) == expected_columns, (
-        f"_NARROW_MARKET_COLUMNS must be 11-column post-D-07; "
+        f"_NARROW_MARKET_COLUMNS must be 12-column post-05.3; "
         f"got {set(_NARROW_MARKET_COLUMNS)!r}"
     )
-    assert len(_NARROW_MARKET_COLUMNS) == 11, (
-        f"_NARROW_MARKET_COLUMNS must have exactly 11 entries; "
+    assert len(_NARROW_MARKET_COLUMNS) == 12, (
+        f"_NARROW_MARKET_COLUMNS must have exactly 12 entries; "
         f"got {len(_NARROW_MARKET_COLUMNS)}"
     )
 

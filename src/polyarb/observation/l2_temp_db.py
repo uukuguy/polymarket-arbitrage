@@ -64,6 +64,7 @@ _NARROW_TO_MARKETS: dict[str, str] = {
     "end_time_ms": "end_time_ms",
     "snapshot_id": "snapshot_id",
     "yes_token_id": "yes_token_id",  # D-07 added (Plan 01)
+    "no_token_id": "no_token_id",  # Phase 05.3 durable outcome-pair projection
     # "question_zh" is NOT a markets column — it lives in question_translations.
 }
 
@@ -72,7 +73,6 @@ _NARROW_TO_MARKETS: dict[str, str] = {
 # (and a WARNING via warn_null_filled_recipe_columns) — never a SQL error.
 _NULL_FILLED_COLS: frozenset[str] = frozenset(
     [
-        "no_token_id",
         "best_bid_price",
         "best_bid_size",
         "best_ask_price",

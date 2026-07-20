@@ -38,6 +38,7 @@ def _narrow_row(market_id: str = "m1", **overrides) -> dict:
         "snapshot_id": 1,
         "question_zh": None,
         "yes_token_id": f"YES-{market_id}",
+        "no_token_id": f"NO-{market_id}",
     }
     base.update(overrides)
     return base
@@ -78,7 +79,13 @@ def test_build_temp_db_schema(tmp_path):
         ):
             assert expected in cols, f"DDL column {expected!r} missing"
         # All auxiliary tables that scanner recipes may reference must exist.
-        for table in ("question_translations", "validation_issues", "event_tags", "events", "snapshots"):
+        for table in (
+            "question_translations",
+            "validation_issues",
+            "event_tags",
+            "events",
+            "snapshots",
+        ):
             cur2 = con.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (table,),
@@ -112,6 +119,21 @@ def test_build_temp_db_is_real_file_not_memory(tmp_path):
             con2.close()
     finally:
         os.unlink(tmp_path_returned)
+
+
+def test_build_temp_db_preserves_token_pair() -> None:
+    from polyarb.observation.l2_temp_db import build_temp_db
+
+    tmp = build_temp_db([_narrow_row("m1", no_token_id="NO-custom")])
+    try:
+        with sqlite3.connect(tmp) as con:
+            pair = con.execute(
+                "SELECT yes_token_id, no_token_id "
+                "FROM markets WHERE market_id='m1'"
+            ).fetchone()
+        assert pair == ("YES-m1", "NO-custom")
+    finally:
+        os.unlink(tmp)
 
 
 def test_null_filled_column_warns(caplog):
