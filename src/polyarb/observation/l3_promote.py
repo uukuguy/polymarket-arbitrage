@@ -133,11 +133,11 @@ def is_book_levels_write_overdue(now_s: float, warn_s: float = 120.0) -> bool:
 
 
 def _fetch_latest_tob_rows_from_supabase(client: Any) -> list[dict]:
-    """Pull recent ``l2_top_of_book`` rows from the last hour.
+    """Pull the newest recent ``l2_top_of_book`` row per asset.
 
     Bounded to first 1000 rows (PostgREST page-cap per Phase 04 D-01
-    research) — N=5 selection happens server-side via ORDER BY + LIMIT in
-    the recipe SQL, so we don't paginate here.
+    research). PostgREST returns rows newest-first; collapse repeated snapshots
+    before the recipe LIMIT so five rows mean five distinct markets.
     """
     cutoff_ms = int(time.time() * 1000) - 3600 * 1000
     cutoff_iso = (
@@ -156,7 +156,15 @@ def _fetch_latest_tob_rows_from_supabase(client: Any) -> list[dict]:
         .limit(1000)
         .execute()
     )
-    return list(resp.data or [])
+    latest: list[dict] = []
+    seen_assets: set[str] = set()
+    for row in resp.data or []:
+        asset_id = str(row.get("asset_id") or "").strip()
+        if not asset_id or asset_id in seen_assets:
+            continue
+        seen_assets.add(asset_id)
+        latest.append(row)
+    return latest
 
 
 def _fetch_market_token_map(

@@ -179,6 +179,22 @@ def test_recipe_ts_predicate_filters_synthetic_rows_correctly() -> None:
     assert asset_ids == ["a"], f"expected only 'a' (recent), got {asset_ids}"
 
 
+def test_fetch_latest_tob_rows_keeps_one_newest_row_per_asset() -> None:
+    """The recipe limit counts markets, not repeated snapshots of one market."""
+    from polyarb.observation import l3_promote
+
+    rows = [
+        {"asset_id": "a", "ts": "2026-07-20T10:02:00Z", "spread": 0.01},
+        {"asset_id": "a", "ts": "2026-07-20T10:01:00Z", "spread": 0.02},
+        {"asset_id": "b", "ts": "2026-07-20T10:00:00Z", "spread": 0.03},
+    ]
+    client = _make_supabase_client_mock(rows, [])
+
+    latest = l3_promote._fetch_latest_tob_rows_from_supabase(client)
+
+    assert latest == [rows[0], rows[2]]
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Test 3b — Quick task 260602-diag-depth: env override for depth threshold
 # ────────────────────────────────────────────────────────────────────────
