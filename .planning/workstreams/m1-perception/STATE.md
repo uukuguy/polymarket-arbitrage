@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
-status: paused_before_24h_soak
-stopped_at: Resume restored; production prerequisite green and formal 24h soak still not started
-last_updated: "2026-07-20T20:36:25+08:00"
+status: executing
+stopped_at: Phase 05 Plan 06 Task 2 executing; production prerequisite green and fresh soak T+0 not yet captured
+last_updated: "2026-07-20T20:42:06+08:00"
 last_activity: 2026-07-20
 progress:
   total_phases: 12
@@ -19,9 +19,12 @@ progress:
 
 ## Current Position
 
+Phase: 05 (ws-book-prices) — EXECUTING
+Plan: 6 of 6
+
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Paused at a committed handoff after production rollout verification. L3 is exactly 10/10 with fresh real book-level writes; the separate 24-hour soak has not started.
+- **Status:** Executing Plan 05-06 Task 2; production prerequisite is green and the fresh 24-hour soak has not yet started.
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
