@@ -50,12 +50,12 @@ class Recipe:
     _is_trusted: bool = False
 
     @classmethod
-    def from_builtin(cls, **kw) -> "Recipe":
+    def from_builtin(cls, **kw) -> Recipe:
         """Constructor for built-in recipes — sets _is_trusted=True automatically."""
         return cls(**{**kw, "_is_trusted": True})
 
     @classmethod
-    def from_yaml(cls, name: str, body: dict) -> "Recipe":
+    def from_yaml(cls, name: str, body: dict) -> Recipe:
         """Constructor for user-supplied yaml recipes — _is_trusted=False (strict).
 
         Yaml MAY NOT set group_by — that key is silently dropped by load_yaml_recipes
@@ -78,6 +78,17 @@ class Recipe:
 # ─────────────────────────────────────────────────────────────────────────────
 
 BUILTIN_RECIPES: dict[str, Recipe] = {
+    "l3-seed": Recipe.from_builtin(
+        name="l3-seed",
+        description="L3 观察覆盖：流动性中间价市场（上限 100）",
+        where=(
+            "yes_token_id IS NOT NULL "
+            "AND mid_price BETWEEN 0.1 AND 0.9 "
+            "AND liquidity_usd >= 500"
+        ),
+        order_by="liquidity_usd DESC, market_id ASC",
+        limit=100,
+    ),
     "thick-but-slippery": Recipe.from_builtin(
         name="thick-but-slippery",
         description="陷阱市场：厚但价差大（liq>$100k, spread>$0.10）",

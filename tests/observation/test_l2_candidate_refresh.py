@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from datetime import UTC
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -275,6 +276,86 @@ def test_compute_candidates_empty_watchlist(settings_with_db, tmp_path):
     )
     rows = compute_candidates(settings, scanner_yaml, None)
     assert len(rows) == 3
+
+
+def test_l3_seed_is_bounded_and_excludes_nonqualifying_rows(settings_with_db):
+    from polyarb.observation.l2_candidate_refresh import compute_candidates
+
+    settings, _db_path = settings_with_db
+    qualifying = [
+        {
+            "market_id": f"seed-{i:03d}",
+            "question": f"Seed {i}?",
+            "slug": f"seed-{i:03d}",
+            "event_slug": "seed-event",
+            "yes_token_id": f"YES-seed-{i:03d}",
+            "no_token_id": f"NO-seed-{i:03d}",
+            "mid_price": 0.5,
+            "liquidity_usd": 10_000.0 - i,
+            "volume_usd": 1_000.0,
+            "end_time_ms": None,
+            "snapshot_id": 1,
+            "question_zh": None,
+        }
+        for i in range(105)
+    ]
+    nonqualifying = [
+        {
+            **qualifying[0],
+            "market_id": "out-low",
+            "yes_token_id": "YES-out-low",
+            "mid_price": 0.099,
+        },
+        {
+            **qualifying[0],
+            "market_id": "out-high",
+            "yes_token_id": "YES-out-high",
+            "mid_price": 0.901,
+        },
+        {
+            **qualifying[0],
+            "market_id": "out-liq",
+            "yes_token_id": "YES-out-liq",
+            "liquidity_usd": 499.99,
+        },
+        {**qualifying[0], "market_id": "out-token", "yes_token_id": None},
+    ]
+
+    rows = compute_candidates(settings, markets_rows=qualifying + nonqualifying)
+    seed = [row for row in rows if row.recipe_name == "l3-seed"]
+    asset_ids = {row.asset_id for row in seed}
+
+    assert len(seed) == 100
+    assert all(row.asset_id for row in seed)
+    assert "YES-out-low" not in asset_ids
+    assert "YES-out-high" not in asset_ids
+    assert "YES-out-liq" not in asset_ids
+
+
+def test_specialized_recipe_label_overrides_l3_seed(settings_with_db):
+    from polyarb.observation.l2_candidate_refresh import compute_candidates
+
+    settings, _db_path = settings_with_db
+    row = {
+        "market_id": "overlap",
+        "question": "Resolves soon?",
+        "slug": "overlap",
+        "event_slug": "overlap-event",
+        "yes_token_id": "YES-overlap",
+        "no_token_id": "NO-overlap",
+        "mid_price": 0.5,
+        "liquidity_usd": 2_000.0,
+        "volume_usd": 1_000.0,
+        "end_time_ms": int(time.time() * 1000) + 3_600_000,
+        "snapshot_id": 1,
+        "question_zh": None,
+    }
+
+    candidates = compute_candidates(settings, markets_rows=[row])
+
+    assert len(candidates) == 1
+    assert candidates[0].asset_id == "YES-overlap"
+    assert candidates[0].recipe_name == "near-end"
 
 
 def test_diff_candidate_sets_added_removed():

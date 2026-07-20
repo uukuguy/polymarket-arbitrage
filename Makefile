@@ -179,11 +179,15 @@ translation-stats:
 # Recipe scans (plan 03) + cross-snapshot diff & tracker (plan 04) +
 # show-market & watchlist (plan 05)
 
-.PHONY: scan scan-thick-but-slippery scan-near-end scan-ghost-suspicious scan-coin-flip scan-neg-risk-incomplete scan-by-tag list-recipes scans-purge compare-snapshots track-market show-market watchlist overview watchlist-alerts
+.PHONY: scan scan-l3-seed scan-thick-but-slippery scan-near-end scan-ghost-suspicious scan-coin-flip scan-neg-risk-incomplete scan-by-tag list-recipes scans-purge compare-snapshots track-market show-market watchlist overview watchlist-alerts
 
 ## scan: Generic recipe runner — usage: make scan name=<recipe>
 scan:
 	uv run python -m polyarb.cli_observation scan --name $(name) --verbose
+
+## scan-l3-seed: Liquid mid-price markets used to give L3 representative books
+scan-l3-seed:
+	uv run python -m polyarb.cli_observation scan --name l3-seed --verbose
 
 ## scan-thick-but-slippery: Trap markets — high liq ($100k+) but wide spread (>$0.10)
 scan-thick-but-slippery:

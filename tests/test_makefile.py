@@ -35,6 +35,18 @@ def test_help_lists_durable_arbitrage_commands() -> None:
     assert "scan-arb-live:" in result.stdout
 
 
+def test_scan_l3_seed_make_entry_is_discoverable_and_exact() -> None:
+    recipe = _make_recipe("scan-l3-seed")
+    help_result = _make("help")
+    dry_run = _make("-n", "scan-l3-seed")
+
+    assert "cli_observation scan --name l3-seed --verbose" in recipe
+    assert help_result.returncode == 0, help_result.stderr
+    assert "scan-l3-seed:" in help_result.stdout
+    assert dry_run.returncode == 0, dry_run.stderr
+    assert "cli_observation scan --name l3-seed --verbose" in dry_run.stdout
+
+
 def test_opportunity_diagnosis_target_is_read_only_and_preserves_body() -> None:
     recipe = _make_recipe("diagnose-arb-feed-prod")
     assert "curl --disable --request GET" in recipe
