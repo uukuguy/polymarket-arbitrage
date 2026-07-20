@@ -4109,6 +4109,10 @@ L2 temp token-pair projection.
 - [TEACH] Added chapter 21, Phase learnings, five adversarial self-checks, and a
   signed-local validation artifact. H-010 received a dedicated local-only gate
   profile so unrelated M2 evidence cannot score the L3 repair.
+- [CLIMB] Cycle 10 run `20260720-100100-h-010` scored 100 across planning,
+  unit, integration, CLI, and restart gates and confirmed H-010 locally. Its
+  verification artifact records `external_submission=false`; no production
+  evidence was attached.
 - [BOUNDARY] No production Alembic, deploy, restart, config, secret, external
   submission, real-money action, `10/10` proof, book-level proof, or soak ran.
 

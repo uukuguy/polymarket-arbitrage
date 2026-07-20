@@ -55,8 +55,8 @@ hypotheses:
   status: pending
   pending_reason: Local collector/scanner and fixture-only evaluator are implementation
     evidence only; confirmation requires separately authorized production deployment/scheduling
-    and a timestamped read-only capacity observation, followed by repeated complete runs
-    and immutable evidence.
+    and a timestamped read-only capacity observation, followed by repeated complete
+    runs and immutable evidence.
   created_at: '2026-07-19T02:42:36+08:00'
   results: []
 - id: H-003
@@ -249,6 +249,19 @@ hypotheses:
   expected_lift: +100 L3 prerequisite reachability points
   cost_h: 4.0
   ranking: 1.0
-  status: pending
+  status: confirmed
   created_at: '2026-07-20T15:48:14+08:00'
-  results: []
+  results:
+  - session: 2026-07-20-m1-l3-prerequisite
+    cycle: 10
+    run: 20260720-100100-h-010
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
