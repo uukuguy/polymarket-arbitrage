@@ -75,7 +75,7 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 按依赖顺序：
 
-1. 先批准并实施 L3 prerequisite 修复设计：补齐 `markets_latest.no_token_id` / 正确 yes-token lookup，并给 L2 增加不依赖临近结算的中间价 seed 候选。只有达到锁定的 5 市场/10 token 后才能开始 24h soak。部署仍需单独授权，L3 阈值不得直接放宽。
+1. 审阅并实施已批准的 L3 prerequisite 设计：补齐 `markets_latest.no_token_id` / 正确 yes-token lookup，并给 L2 增加上限 100 的中间价 seed 候选。只读 CLOB 样本中 100/100 book 完整、86/100 在原阈值下合格；无需放宽 L3 recipe。只有达到锁定的 5 市场/10 token 后才能开始 24h soak。生产迁移/部署仍需单独授权。
 2. H-009 本地实现保持 pending：先取得**生产部署/调度的单独授权**，再进行**时间戳化只读容量观察**；之后仍须积累重复 complete run、可解析 exit=0 契约和不可变证据，才可评估 producer cadence/SLA。没有这些证据，HTTP 503 绝不等于零机会。
 3. 实现经过明确授权的 Polymarket order/fill adapter、认证、allowance、限额与 kill switch。
 4. 通过 paper→小额 live 质量门后，才讨论真实资金运行。
@@ -91,8 +91,9 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 Phase 05 Plan 06 的只读诊断已完成：最近 1h 只有 3 个 near-end TOB asset，两个
 spread≈0.998、一个不完整，L3 recipe 命中 0；同时 production `markets_latest` 只有
-`yes_token_id`，而 promoter 错查不存在的 `asset_id/no_token_id`。下一步先批准修复设计；
-24h soak 必须从 `l3:active_count=10` 开始，未经单独授权不部署，不改变 N=5 阈值。
+`yes_token_id`，而 promoter 错查不存在的 `asset_id/no_token_id`。推荐设计已获继续执行授权并写入
+`docs/superpowers/specs/2026-07-20-m1-l3-prerequisite-repair-design.md`；下一步先完成书面规格审阅，
+再写实施计划。24h soak 必须从 `l3:active_count=10` 开始，未经单独授权不迁移/部署，不改变 N=5 阈值。
 
 ```bash
 /gsd-execute-phase 05 --ws m1-perception

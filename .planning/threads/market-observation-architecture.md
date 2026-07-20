@@ -1073,3 +1073,12 @@ transport activity and an orderbook resnapshot:
   a bounded L2 seed selected from snapshot facts; only then calibrate/validate
   the unchanged L3 spread/depth recipe on observed TOB data. Lowering L3
   thresholds before supplying representative input confounds two variables.
+- Read-only feasibility evidence supports a seed cap of 100: the 100 most liquid
+  rows with `mid_price BETWEEN 0.1 AND 0.9` and `liquidity_usd >= 500` yielded
+  100 complete public-CLOB books, 86 of which already satisfied the unchanged
+  `spread < 0.02` and Yes top-10 depth > $500 recipe. Two later smaller probes
+  timed out during TLS handshake, so bounded diagnostics stopped without using
+  transport failure to overturn the successful sample.
+- The seed is an observation-coverage mechanism, not a promotion shortcut. It
+  must remain under the existing candidate cap and the promoter must fail closed
+  on incomplete Yes/No identity; only ten distinct tokens may satisfy N=5.

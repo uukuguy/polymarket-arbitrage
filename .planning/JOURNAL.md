@@ -4048,3 +4048,28 @@ gate; do not lower N=5 and do not fold H-009 into this work.
 Approve the L3 prerequisite design, then write/commit its spec and implementation
 plan. TDD local changes may follow; production migration/deploy and 24h soak stay
 separate hard gates.
+
+## SESSION 69 — 2026-07-20 (L3 seed feasibility + written design gate)
+
+- [APPROVAL] User resumed with “继续执行” after the recommended design-A approval
+  question; this authorizes writing the design spec, not production mutation.
+- [FEASIBILITY] A read-only public-CLOB probe of the 100 most liquid
+  `mid_price 0.1..0.9` and `liquidity_usd >= 500` markets returned 100 complete
+  books; 86 met the unchanged L3 `spread < 0.02` plus Yes top-10 depth > $500
+  recipe. This supports a seed cap of 100 without threshold relaxation.
+- [BOUNDED FAILURE] Two subsequent smaller probes failed at TLS handshake. The
+  diagnostic stopped after the bounded retry; no business response contradicted
+  the first successful sample.
+- [DESIGN] Wrote `2026-07-20-m1-l3-prerequisite-repair-design.md`: Alembic 006
+  nullable `no_token_id`, 12-column L1 mirror, Yes-keyed token-pair lookup,
+  fail-closed expansion, built-in `l3-seed` limit 100, and a truthful non-mutating
+  dry-run boundary.
+- [BOUNDARY] No code behavior, schema, production state, deploy, restart,
+  threshold, secret, or external submission changed. Written-spec review remains
+  the brainstorming gate before implementation planning.
+
+### [NEXT — CURRENT]
+
+Review and approve the written L3 prerequisite spec. Then create a focused M1
+gap-phase implementation plan, execute it locally under TDD, and stop before
+production Alembic 006 or deployment.

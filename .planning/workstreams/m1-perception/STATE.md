@@ -136,13 +136,16 @@ The next first broken link is L3 promotion. Read-only evidence shows:
   or `no_token_id`; `_fetch_market_token_map` queries both missing columns.
 
 Therefore the current 10-token contract is structurally unreachable even after
-candidate diversity improves. A design approval is required before changing
-the schema contract and candidate seed behavior.
+candidate diversity improves. A read-only 100-market feasibility sample then
+returned 100 complete books and 86 matches under the unchanged L3 recipe. Two
+smaller follow-up probes timed out at TLS handshake and were not retried. The
+approved design therefore uses a bounded 100-market seed; no threshold change is
+needed. Its written spec is awaiting user review before implementation planning.
 
 ## Remaining Work
 
-- Approve a narrow design for two prerequisites: durable Yes/No token mapping
-  and a bounded mid-market L2 seed recipe that supplies L3-observable books.
+- Review the written design for two prerequisites: durable Yes/No token mapping
+  and a bounded 100-row mid-market L2 seed recipe that supplies L3-observable books.
 - Do not start the 24-hour soak until active count is exactly 10 tokens and the
   other Plan 06 prerequisites are present.
 - Production deploy remains outside the climb adapter's authorization boundary;
@@ -166,8 +169,8 @@ $gsd-execute-phase 05 --ws m1-perception
 ## Session Continuity
 
 - **Last session:** 2026-07-20 15:10 (Asia/Shanghai)
-- **Stopped at:** L3 prerequisite diagnosis complete; schema and candidate-seed design approval required.
-- **Proceeding to:** Write the approved design/spec, then TDD the local repair; stop again before production migration/deploy.
+- **Stopped at:** Approved L3 prerequisite design written; written-spec review required.
+- **Proceeding to:** After spec review, write the implementation plan and TDD the local repair; stop again before production migration/deploy.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-06-PLAN.md`
 
 ## Accumulated Context

@@ -241,3 +241,14 @@ hypotheses:
       reason: snapshot-age-exceeded
       snapshot_age_seconds: 3177.6
       max_snapshot_age_seconds: 900.0
+- id: H-010
+  description: A bounded liquid mid-market L2 seed plus durable Yes/No token-pair
+    projection can make the strict five-market L3 gate reachable without relaxing
+    spread or depth thresholds
+  parent_paradigm: l3-prerequisite-chain-truth
+  expected_lift: +100 L3 prerequisite reachability points
+  cost_h: 4.0
+  ranking: 1.0
+  status: pending
+  created_at: '2026-07-20T15:48:14+08:00'
+  results: []

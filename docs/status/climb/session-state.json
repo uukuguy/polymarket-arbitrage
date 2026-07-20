@@ -1,6 +1,6 @@
 {
   "in_flight": null,
   "last_cycle": 9,
-  "next_action": "rank next pending hypothesis",
-  "session": "2026-07-18-m1-living-manual"
+  "next_action": "review H-010 written design, then plan and execute local TDD",
+  "session": "2026-07-20-m1-l3-prerequisite"
 }
