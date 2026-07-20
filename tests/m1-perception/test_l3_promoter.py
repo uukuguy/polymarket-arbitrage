@@ -497,6 +497,61 @@ async def test_promote_run_happy_path_top_5_markets_expanded_to_10_tokens_yes_no
 
 
 @pytest.mark.asyncio
+async def test_promote_run_filters_no_side_tob_before_recipe_limit() -> None:
+    """A promoted No token must not consume one of five Yes-market slots."""
+    from polyarb.observation import l3_promote
+
+    now_ms = int(time.time() * 1000)
+    tob_rows = [
+        {
+            "asset_id": f"yes_{i}",
+            "ts": now_ms - 60_000,
+            "best_bid": 0.50,
+            "best_ask": 0.51,
+            "spread": 0.01,
+            "mid_price": 0.505,
+            "depth_yes_usd": 5_000.0 - i,
+            "depth_no_usd": 5_000.0,
+        }
+        for i in range(5)
+    ]
+    tob_rows.append(
+        {
+            "asset_id": "no_0",
+            "ts": now_ms,
+            "best_bid": 0.49,
+            "best_ask": 0.50,
+            "spread": 0.01,
+            "mid_price": 0.495,
+            "depth_yes_usd": 10_000.0,
+            "depth_no_usd": 10_000.0,
+        }
+    )
+    token_rows = [
+        {"yes_token_id": f"yes_{i}", "no_token_id": f"no_{i}"}
+        for i in range(5)
+    ]
+    consumer = MagicMock()
+    consumer.add_subscriptions = AsyncMock(return_value=True)
+    consumer.remove_subscriptions = AsyncMock(return_value=True)
+
+    with patch(
+        "polyarb.observation.l3_promote.create_client",
+        return_value=_make_supabase_client_mock(tob_rows, token_rows),
+    ):
+        result = await l3_promote.promote_run(
+            settings=_make_settings(),
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+        )
+
+    assert len(result["active"]) == 10
+    assert set(result["active"]) == {
+        token for i in range(5) for token in (f"yes_{i}", f"no_{i}")
+    }
+
+
+@pytest.mark.asyncio
 async def test_promote_run_rejects_incomplete_or_duplicate_token_pairs() -> None:
     from polyarb.observation import l3_promote
 

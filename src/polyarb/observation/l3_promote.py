@@ -462,16 +462,17 @@ async def promote_run(
       1. Resolve Supabase creds; freeze on missing.
       2. Build supabase client; freeze on create_client error.
       3. Fetch latest tob rows (last 1h) — on outage, use last-known-good.
-      4. Apply recipe (yaml → trusted Recipe) via scanner+temp-DB
+      4. Resolve recent assets against ``markets_latest.yes_token_id`` and
+         remove No-side TOB rows before the recipe limit.
+      5. Apply recipe (yaml → trusted Recipe) via scanner+temp-DB
          (Blocker #2 epoch-ms predicate).
-      5. Fetch ``yes_token_id`` + ``no_token_id`` from ``markets_latest``
-         for the 5 promoted markets — expand to 10 tokens (D-05 N=5).
-      6. Diff new token set vs ``_l3_active_set``; map to MARKET-level
+      6. Expand the 5 selected markets to 10 tokens (D-05 N=5).
+      7. Diff new token set vs ``_l3_active_set``; map to MARKET-level
          diff for the l2_candidates write-through.
-      7. Apply ws_consumer.add_subscriptions / remove_subscriptions.
-      8. Write-through l2_candidates.l3_promoted_at_ts (Blocker #1,
+      8. Apply ws_consumer.add_subscriptions / remove_subscriptions.
+      9. Write-through l2_candidates.l3_promoted_at_ts (Blocker #1,
          fail-soft).
-      9. Mutate state + chain-truth anchor.
+      10. Mutate state + chain-truth anchor.
 
     Returns ``{"added": [...], "removed": [...], ...}`` for logging.
     """
@@ -532,12 +533,67 @@ async def promote_run(
             }
         tob_rows = _last_known_tob_rows
 
-    # ── 4) Apply recipe via scanner + temp DB ───────────────────────────
+    # Snapshot the prior MARKET→TOKEN map before refreshing identity so the
+    # later diff can still resolve removed markets.
+    prior_market_token_map: dict[str, tuple[str | None, str | None]] = dict(
+        _last_known_market_token_map or {}
+    )
+
+    # ── 4) Restrict recipe input to authoritative Yes-side assets ───────
+    # Once L3 subscribes both outcomes, l2_top_of_book contains both Yes and
+    # No rows. A high-depth No row must not consume one of recipe.limit's five
+    # market slots, so resolve identity before scanning rather than rejecting
+    # the row only after LIMIT has already run.
+    recent_asset_ids = sorted(
+        {
+            str(row.get("asset_id") or "").strip()
+            for row in tob_rows
+            if str(row.get("asset_id") or "").strip()
+        }
+    )
+    try:
+        token_map = _fetch_market_token_map(client, recent_asset_ids)
+        if not token_map:
+            logger.warning(
+                "l3-promote: recent TOB resolved zero Yes-side identities — freezing"
+            )
+            return {
+                "added": [],
+                "removed": [],
+                "skipped": "empty-yes-token-map",
+            }
+        if apply_mutations:
+            _last_known_market_token_map = token_map
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            f"l3-promote: market token map fetch failed: {e!r} — using last-known"
+        )
+        sentry_sdk.add_breadcrumb(
+            category="l3-promote",
+            level="warning",
+            message="market token map fetch failed",
+            data={"error": str(e)[:200]},
+        )
+        token_map = _last_known_market_token_map or {}
+        if not token_map:
+            return {
+                "added": [],
+                "removed": [],
+                "skipped": "token-map-failed-no-fallback",
+            }
+
+    yes_tob_rows = [
+        row
+        for row in tob_rows
+        if str(row.get("asset_id") or "").strip() in token_map
+    ]
+
+    # ── 5) Apply recipe via scanner + temp DB ───────────────────────────
     try:
         from polyarb.observation.scanner import run_recipe
 
         recipe = _load_recipe(recipe_yaml_path)
-        db_path = _build_tob_temp_db(tob_rows)
+        db_path = _build_tob_temp_db(yes_tob_rows)
         try:
             df = run_recipe(db_path, recipe)
         finally:
@@ -564,32 +620,7 @@ async def promote_run(
         str(aid) for aid in df["asset_id"].tolist() if aid
     )
 
-    # Snapshot the prior MARKET→TOKEN map BEFORE step 5 overwrites it, so
-    # step 6 can compute the MARKET-level removed set correctly. Without
-    # this snapshot, step 5's _fetch_market_token_map result (containing
-    # only NEW markets) would replace the prior map, leaving step 6's
-    # reverse lookup blind to any removed market (Blocker #1 regression).
-    prior_market_token_map: dict[str, tuple[str | None, str | None]] = dict(
-        _last_known_market_token_map or {}
-    )
-
-    # ── 5) Expand 5 markets → 10 tokens (Yes+No per D-05 / Warning #13) ─
-    try:
-        token_map = _fetch_market_token_map(client, new_yes_asset_ids)
-        if apply_mutations:
-            _last_known_market_token_map = token_map
-    except Exception as e:  # noqa: BLE001
-        logger.error(
-            f"l3-promote: market token map fetch failed: {e!r} — using last-known"
-        )
-        sentry_sdk.add_breadcrumb(
-            category="l3-promote",
-            level="warning",
-            message="market token map fetch failed",
-            data={"error": str(e)[:200]},
-        )
-        token_map = _last_known_market_token_map or {}
-
+    # ── 6) Expand 5 markets → 10 tokens (Yes+No per D-05 / Warning #13) ─
     new_token_set: set[str] = set()
     accepted_yes_asset_ids: set[str] = set()
     for yes_asset_id in new_yes_asset_ids:
@@ -612,7 +643,7 @@ async def promote_run(
         new_token_set.update(pair)
         accepted_yes_asset_ids.add(yes_asset_id)
 
-    # ── 6) Diff token sets + MARKET-level diff for the mirror ───────────
+    # ── 7) Diff token sets + MARKET-level diff for the mirror ───────────
     added = sorted(new_token_set - _l3_active_set)
     removed = sorted(_l3_active_set - new_token_set)
 
@@ -627,7 +658,7 @@ async def promote_run(
     removed_markets = sorted(old_market_set - new_market_set)
 
     if apply_mutations:
-        # ── 7) Apply WS subscribe diff (fail-soft per D-12) ─────────────
+        # ── 8) Apply WS subscribe diff (fail-soft per D-12) ─────────────
         try:
             if added:
                 await ws_consumer.add_subscriptions(added)
@@ -643,10 +674,10 @@ async def promote_run(
             )
             # Fall through: health should reflect intended membership.
 
-        # ── 8) Write-through l2_candidates.l3_promoted_at_ts ────────────
+        # ── 9) Write-through l2_candidates.l3_promoted_at_ts ────────────
         _mirror_l3_promoted_at_ts(client, added_markets, removed_markets)
 
-        # ── 9) Mutate state + chain-truth anchor ────────────────────────
+        # ── 10) Mutate state + chain-truth anchor ───────────────────────
         _l3_active_set = new_token_set
         _last_promote_at_s = time.time()
 
