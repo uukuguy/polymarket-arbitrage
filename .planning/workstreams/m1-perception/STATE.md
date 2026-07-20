@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
-status: blocked_before_24h_soak
-stopped_at: Candidate T+0 rejected because L3 book-level write age was 207.2s against the strict 120s baseline
-last_updated: "2026-07-20T20:53:13+08:00"
+status: soak_in_progress
+stopped_at: Formal Phase 05 T+0 established at 2026-07-20T13:30:55Z; next checkpoint is T+6 at 2026-07-20T19:30:55Z
+last_updated: "2026-07-20T21:33:22+08:00"
 last_activity: 2026-07-20
 progress:
   total_phases: 12
@@ -24,7 +24,10 @@ Plan: 6 of 6
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Plan 05-06 Task 2 is blocked before T+0. Exact release identity and active 10/10 remain green, but the candidate baseline's book-level write age was 207.2s against the strict 120s gate; the 24-hour soak did not start.
+- **Status:** Plan 05-06 Task 2 is in progress. A new exact-instance sample at
+  `2026-07-20T13:30:55Z` returned HTTP 200 with active 10/10, promoter age
+  20.0s, and book-write age 19.9s; the formal 24-hour soak ends at
+  `2026-07-21T13:30:55Z`.
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -146,6 +149,15 @@ markets, ten complete Yes/No tokens, and 280 real `l2_book_levels` rows over
 eight immediately active tokens. The prerequisite is passed across the feedback
 tick; this is not yet the 24-hour stability verdict.
 
+Formal T+0 was established at `2026-07-20T13:30:55Z` from one new forced-machine
+response after re-resolving the post-promoter mapping. Exact release 37 identity
+was unchanged; HTTP was 200; active was 10/10 pass; promoter/book ages were
+20.0s/19.9s pass; WS, mirror, candidates, listener, reconciliation, and cursor
+main-chain checks were green. The current five Yes identities map to five No
+pairs across markets `540819`, `562802`, `565064`, `601819`, and `665374`.
+Initial exact-window SQL and zero-stale watchdog evidence are recorded in
+`05-SOAK-LOG.md`; they are boundary evidence, not the T+24 verdict.
+
 A fresh handoff read at `11:52:11Z` confirmed the same release, machine,
 instance, image, and digest: HTTP 200, active 10/10, promote age `107.7s`,
 book-write age `4.6s`, cursor lag `0`, and 108 subscriptions. Direct SQL from
@@ -155,8 +167,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Start a fresh Phase 05 Plan 06 24-hour soak only as an explicit next operation;
-  sample strict 10-token health and per-market book/OHLC coverage every ~6 hours.
+- Continue the formal Phase 05 Plan 06 window from immutable T+0
+  `2026-07-20T13:30:55Z`; sample strict 10-token health, mapped book/OHLC
+  coverage, and watchdog evidence at T+6/T+12/T+18/T+24.
 - Preserve strict N=5 and the unchanged spread/depth/recency thresholds.
 - Keep H-009 pending until separately authorized production deployment/scheduling
   and timestamped capacity evidence; Phase 05.1 completion does not promote it.
@@ -176,9 +189,12 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-20 20:53 (Asia/Shanghai)
-- **Stopped at:** Candidate T+0 `2026-07-20T12:49:25Z` was rejected: exact identity and active 10/10 passed, but `l3:last_book_levels_write_at_s=207.2s` was warn. No formal soak window exists.
-- **Proceeding to:** Re-run the exact-instance baseline and create a new T+0 only when every strict check, including book-level write age `<120s`, is green in the same sample.
+- **Last session:** 2026-07-20 21:33 (Asia/Shanghai)
+- **Stopped at:** Formal T+0 `2026-07-20T13:30:55Z` was accepted from one
+  exact-instance HTTP-200 sample with active `10/10`, promote age `20.0s`, and
+  book-write age `19.9s`; all named main-chain gates passed.
+- **Proceeding to:** At or after `2026-07-20T19:30:55Z`, append T+6 exact
+  identity, one-sample strict health, mapped interval SQL, and watchdog evidence.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/.continue-here.md`
 
 ## Accumulated Context
