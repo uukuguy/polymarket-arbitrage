@@ -3930,3 +3930,90 @@ Then decide the H-009 opportunity-feed producer cadence/SLA boundary; keep the c
 ```
 
 Then perform a read-only WS-frame→mirror chain diagnosis on the unchanged instance. Restore strict main-chain freshness before resuming natural quiet-edge monitoring; if identity changes, rebuild the >=180-second baseline first.
+
+## SESSION 66 — 2026-07-20 (Phase 05.1 quiet PASS, then empty-projection reopen)
+
+- [VERIFIED] Same machine `85e647c4eed598`, instance
+  `01KXSMS80B5AX2FGT5EPRC6V82`, image
+  `deployment-01KXSMPKM78105Q9JZG58GBZYP`, and digest
+  `sha256:ec90d98e20c6ffe7ee48c899c939dab7a67addf45c28adda6695d13ed6269c4d`
+  naturally entered the missing quiet edge. The complete buffer-visible sequence
+  was `05:32:41.823Z sending → 05:32:42.567Z l2_top_of_book HTTP 201 →
+  05:32:42.684Z evidenced`.
+- [VERIFIED] Forced-instance acceptance from `05:34:29.106Z` to
+  `05:37:47.356Z` lasted 198 seconds: strict HTTP 200 was 10/10, WS age max
+  `50.1s < 120s`, mirror age max `162.2s < 600s`, cursor lag stayed `0`,
+  listener stayed `listening`, and machine/instance/creation/image anchors were
+  identical at both ends. L3 stayed truthfully `0/10`.
+- [FIX] `make chaos-l2-fly-image-check` now resolves both legacy `.ImageRef` and
+  current `.Machines[0].image_ref` Fly JSON shapes. Its new test was observed RED
+  before the Makefile change and GREEN after; the exact digest again showed
+  present `kill/which/curl/python`, missing `pkill/ps/dig/ping`. Temporary Docker
+  registry credentials were removed after the read-only pull.
+- [VERIFIED] Final Phase 05.1/quiet suite `139 passed`; focused Ruff and
+  `compileall`, Makefile contracts 12/12, climb adapter, M1 manual contract, and
+  planning checks passed. Full-repository pytest still reaches the known local
+  Alembic 003/004 role-fixture failures; no migration changed here.
+- [REGRESSION] A final `05:51:57Z` strict probe invalidated closure: HTTP 503,
+  WS age `613.5s`, mirror age `834.3s`, candidate `0`, cursor lag `0`. Snapshot
+  573 remained valid with `market_count=1939`, while `markets_latest` was exactly
+  empty. L2 logs showed an HTTP-success zero-row fetch followed by candidate `3→0`.
+- [ROOT CAUSE] `Settings` loads project `.env`, while M1 mocked orchestrator
+  fixtures omitted explicit empty cloud credentials. The earlier full
+  `make test` therefore auto-enabled real Supabase/R2 adapters after Fly snapshot
+  573; local HTTP calls explain the absent Fly DELETE log. The database has no
+  trigger, pg_cron job, or cascade delete.
+- [FIX LOCAL] Added two RED→GREEN guards: L1 rejects empty market rows before any
+  remote write; L2 rejects empty live projections before LKG/freshness/candidate/
+  WS/cursor mutation. A repository-wide autouse fixture now disables all cloud/
+  event/alert adapters by default. Focused suites pass 42/42; 27 orchestrator
+  tests and the complete 1413-test repository suite passed with production write
+  counters unchanged. Alembic 003/004 container drift is fixed. No deploy.
+- [DOC] Created `docs/learning/20-NOTIFY门铃与游标账本.md` and retained the
+  historical quiet PASS in `05.1-RECOVERY-LOG.md`; validation, Plan 04 SUMMARY,
+  and phase learnings remain open/pending. Chapter 20 was used because H-009
+  already occupied sequence 19.
+- [REOPENED] Phase 05.1 Plan 04 Task 3 remains current. Phase 05 Plan 06 stays
+  blocked. H-009 remains pending behind separate production authorization.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05.1 --ws m1-perception
+```
+
+Observe the next natural L1 tick, finish empty-projection diagnosis and wider
+regression, and re-prove current strict L2 health before any Phase 05 soak. Do not
+deploy or promote H-009 from local evidence.
+
+## SESSION 67 — 2026-07-20 (Phase 05.1 closed; Phase 05 L3 gate resumed)
+
+- [RECOVERED] Without deploy, restart, scale, secret, or config change, L1 wrote
+  valid snapshot 574 with 1942 markets at `06:38:03Z`, mirrored 1942 current rows,
+  and published `snapshot_complete`. The unchanged L2 instance fetched all 1942
+  rows and restored three candidates by `06:38:05.940Z`.
+- [CONSISTENCY] Direct database reads agreed on latest snapshot
+  `574/ok/1942`, `markets_latest=1942`, and projection snapshot IDs `[574]`.
+- [ACCEPTED] A fresh `06:42:59Z–06:47:17Z` 258-second window returned strict
+  HTTP 200 for 10/10 final requests. WS age max `10.2s`, mirror age max `565.4s`,
+  cursor lag `0`, listener `listening`, subscriptions `3`, and L3 `0/10`.
+- [BOUNDARY] A real `l2_top_of_book` HTTP 201 at `06:48:06.245Z` reset mirror
+  freshness; the `06:49:07Z` strict probe remained HTTP 200 with mirror age
+  `61.7s`. Machine, instance, image, and digest were unchanged at both anchors.
+- [CLOSED] Phase 05.1 Plan 04 now has SUMMARY, phase LEARNINGS, signed VALIDATION,
+  teaching chapter 20, recovery log, and completed ROADMAP/STATE routing. The
+  locally verified empty-projection runtime guards remain undeployed and are not
+  represented as production-proven behavior.
+- [NEXT BLOCKER] Phase 05 Plan 06 resumes. L3 remains `0/10`; no 24h soak can
+  start until the locked five-market/ten-token prerequisite is met. No threshold
+  change or production deploy is authorized by climb.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05 --ws m1-perception
+```
+
+Diagnose the L3 promoter chain read-only: TOB input, recipe predicates, selected
+tokens, WS projection, and book-level anchor. Stop at a deployment/24-hour time
+gate; do not lower N=5 and do not fold H-009 into this work.

@@ -4,7 +4,7 @@ Phase 04 Plan 01 Task 1 (Wave 1 RED → GREEN).
 
 Static checks (no Docker): revision chain, no op.drop_* in upgrade(), revision id.
 Live-DB checks (require Docker testcontainer): column exists in markets_latest and
-is nullable after `alembic upgrade head`.
+is nullable after `alembic upgrade 004`.
 
 Skip gracefully when Docker is unavailable on the host (developer laptop without
 OrbStack/Docker Desktop). Static text-grep tests run regardless.
@@ -79,7 +79,7 @@ def _docker_available() -> bool:
 
 @pytest.fixture(scope="module")
 def pg_dsn():
-    """Spin up a Postgres 16 testcontainer for alembic to target."""
+    """Spin up Postgres 16 with the Supabase base role expected by migrations."""
     if not _docker_available():
         pytest.skip("Docker daemon unavailable; live-DB alembic tests skipped")
     from testcontainers.postgres import PostgresContainer
@@ -92,7 +92,19 @@ def pg_dsn():
             if url.startswith(prefix):
                 url = "postgresql://" + url[len(prefix):]
                 break
+        asyncio.run(_create_supabase_roles(url))
         yield url
+
+
+async def _create_supabase_roles(dsn: str) -> None:
+    """Make vanilla Postgres match Supabase's pre-existing role surface."""
+    import asyncpg
+
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        await conn.execute("CREATE ROLE anon NOLOGIN")
+    finally:
+        await conn.close()
 
 
 def _run_alembic(dsn: str, cmd: str) -> subprocess.CompletedProcess:
@@ -123,8 +135,8 @@ def _q(dsn: str, query: str) -> list[dict]:
 
 @pytest.mark.slow
 def test_004_up(pg_dsn):
-    """After `upgrade head`, markets_latest must have yes_token_id (nullable TEXT)."""
-    r = _run_alembic(pg_dsn, "upgrade head")
+    """After `upgrade 004`, markets_latest must have yes_token_id (nullable TEXT)."""
+    r = _run_alembic(pg_dsn, "upgrade 004")
     assert r.returncode == 0, (
         f"alembic upgrade failed:\nSTDOUT={r.stdout}\nSTDERR={r.stderr}"
     )
@@ -146,8 +158,8 @@ def test_004_up(pg_dsn):
 
 @pytest.mark.slow
 def test_004_idempotent_replay(pg_dsn):
-    """upgrade head → downgrade -1 → upgrade head must succeed end-to-end."""
-    r1 = _run_alembic(pg_dsn, "upgrade head")
+    """upgrade 004 → downgrade -1 → upgrade 004 must succeed end-to-end."""
+    r1 = _run_alembic(pg_dsn, "upgrade 004")
     assert r1.returncode == 0, f"first upgrade failed: {r1.stderr}"
     r2 = _run_alembic(pg_dsn, "downgrade -1")
     assert r2.returncode == 0, f"downgrade failed: {r2.stderr}"
@@ -160,7 +172,7 @@ def test_004_idempotent_replay(pg_dsn):
     assert not rows_after_down, (
         "yes_token_id should be absent after downgrade -1 from 004"
     )
-    r3 = _run_alembic(pg_dsn, "upgrade head")
+    r3 = _run_alembic(pg_dsn, "upgrade 004")
     assert r3.returncode == 0, f"second upgrade failed: {r3.stderr}"
     rows_after_up = _q(
         pg_dsn,

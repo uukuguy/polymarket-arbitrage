@@ -255,7 +255,7 @@ Plans:
 > PLANNED 2026-06-01 (SESSION 34) — 16 D-XX decisions locked in CONTEXT, 1402-line RESEARCH, 13-file pattern map. Scope re-defined per D-01: 字面 "WS /book+/prices" 已在 Phase 03 落地; 本 phase 是 L2→L3 跨层升级 — full depth 持久化 + OHLC K 线 + 自动 promote + dashboard `/l3/[asset_id]`。
 
 **Goal:** 把 Phase 03 已落地的 L2 通路升级到 L3 单市场层：自动 promote (5-min cron, top-5 markets) + full book depth (`l2_book_levels` top-10 levels/边) + OHLC views (`l2_ohlc_1m/5m/1h` via Postgres `date_trunc`, NOT `time_bucket` — TimescaleDB deprecated on Supabase PG17) + WS 动态 subscribe/unsubscribe API + 3 /health L3 sub-checks (chain-truth) + dashboard /l3/[asset_id] K-line via lightweight-charts v5.
-**Status:** ⛔ 5/6 plans landed; Plan 06 soak blocked by stale production L2 chain (verified 2026-07-17)
+**Status:** ⛔ 5/6 plans landed; Phase 05.1 is closed and Plan 06 is next, but its 24h strict N=5 / 10-token soak remains a blocking production gate
 **Depends on:** Phase 03 (L2 daemon ready) + Phase 04 (Supabase markets_latest read path) + Phase 04.1 (GAP-401 watchdog liveness gate — must NOT regress)
 **Plans:** 5/6 plans executed
 **Refs:**
@@ -289,7 +289,7 @@ Plans (6 plans across 5 waves; Wave 1 parallel; Wave 5 has 2 checkpoints — dep
 - [x] 05-03-PLAN.md — Wave 2 (autonomous, depends 01+02): `_book_levels_rows_from_frame` projector + `L2SupabaseMirror.push_book_levels` (fail-soft envelope + chain-truth anchor mutation) + `l2_main._on_event` dispatcher gate on `_l3_active_set` + `l3_promote.py` module scaffold (state + getters + stub `promote_run`)
 - [x] 05-04-PLAN.md — Wave 3 (autonomous, depends 03): `l3-promote.yaml` (D-13 thresholds) + full `promote_run` (Supabase tob fetch + scanner temp-DB + diff + ws_consumer add/remove + last-known-good freeze on outage) + raw asyncio `run_periodic` (5-min cron, NO apscheduler dep) + 3 /health L3 sub-checks (chain-truth getters)
 - [x] 05-05-PLAN.md — Wave 4 (autonomous: false — [BLOCKING] alembic push to prod; depends 01+02+03+04): Task 1 [BLOCKING] `make supabase-migrate` push 005 to prod Supabase + dashboard `/l3/[asset_id]` page + `KlineChart.tsx` (lightweight-charts v5 dynamic import) + `DepthLadder.tsx` + candidates page L3 badge column + 3 new Makefile targets (`l3-promote-dry-run` / `ohlc-spot-check` / `smoke-l3-dashboard`)
-- [ ] 05-06-PLAN.md — Wave 5: Phase 05 code is deployed and teaching doc exists, but 24h soak/closure are blocked. Restore fresh candidate→WS→mirror chain first; do not soften STRICT N=5.
+- [ ] 05-06-PLAN.md — Wave 5: Phase 05 code is deployed and Phase 05.1 restored L2; diagnose current L3 `0/10`, then run the 24h strict N=5 / 10-token soak without softening the gate.
 
 Makefile targets to deliver (per Plan 05-01 + 05-05):
 - `make supabase-migrate-test` — Alembic 005 forward+reverse roundtrip validation (Plan 05-01)
@@ -300,6 +300,7 @@ Makefile targets to deliver (per Plan 05-01 + 05-05):
 ### Phase 05.1: Durable L2 data-chain recovery (INSERTED)
 
 **Goal:** Make the L1 snapshot → candidate refresh → WS → mirror chain self-healing by treating NOTIFY as a wake-up hint, committing a durable cursor only after successful serialized reconciliation, exposing live chain-truth health, and reconciling Supabase candidate history with the real WS candidate set.
+**Status:** ✅ COMPLETE 2026-07-20 — natural quiet `book → mirror`, empty-projection root-cause containment, natural current-chain recovery, and strict re-acceptance passed
 **Requirements:** PHASE05.1-R01, PHASE05.1-R02, PHASE05.1-R03, PHASE05.1-R04, PHASE05.1-R05, PHASE05.1-R06
 **Depends on:** Phase 05 Plans 01-05; blocks Phase 05 Plan 06 soak
 **Design:** `docs/superpowers/specs/2026-07-18-m1-durable-data-chain-design.md`
@@ -309,7 +310,7 @@ Plans:
 - [x] 05.1-01-PLAN.md — Wave 1: termination-aware asyncpg LISTEN + serialized NOTIFY/poll reconciliation pump + success-only cursor commit
 - [x] 05.1-02-PLAN.md — Wave 2 (depends 01): keyed candidate history reconciliation + required success propagation + live chain-truth health
 - [x] 05.1-03-PLAN.md — Wave 3 (depends 01+02): image-aware chaos target + no-restart LISTEN/poll/projection production proof
-- [ ] 05.1-04-PLAN.md — Wave 4 (depends 03): quiet-market in-band book refresh + strict-health production proof + teaching/validation/closure
+- [x] 05.1-04-PLAN.md — Wave 4 (depends 03): quiet-market in-band book refresh + strict-health production proof + empty-projection fail-closed recovery + teaching/validation/closure
 
 ### Phase 05.2: M1 platform living manual (INSERTED)
 

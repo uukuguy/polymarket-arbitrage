@@ -31,6 +31,7 @@
 | 17 | [Venue truth 对账](17-venue-truth-reconciliation.md) | terminal finality / actual fee vs fee rate / exact settlement receipt / fingerprint conflict / response-loss reconciliation |
 | 18 | [Neg-risk 买齐套利](18-neg-risk买齐套利.md) | complete sibling set / executable asks / gross edge / fail-closed opportunity feed |
 | 19 | [独立报价运行与已知市场覆盖](19-独立报价运行与已知市场覆盖.md) | known-universe snapshot / atomic quote run / dual freshness clocks / local-only operator boundary |
+| 20 | [NOTIFY 门铃与游标账本](20-NOTIFY门铃与游标账本.md) | NOTIFY wake hint / durable cursor / candidate→WS→mirror 收敛 / quiet refresh 为什么必须等 book→mirror evidence |
 
 ## Phase 02.1 教学增量（2026-05）
 

@@ -14,8 +14,8 @@ import json
 import os
 import sqlite3
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pyarrow.parquet as pq
 import pytest
@@ -84,6 +84,13 @@ async def test_parquet_row_count_matches_sqlite_market_count(tmp_path: Path) -> 
     fake_gamma = AsyncMock()
     fake_gamma.fetch_all_active_markets.return_value = gamma_data
     fake_gamma.fetch_all_active_events.return_value = _events_for_markets(gamma_data)
+
+    async def _iter_rows(rows: list[dict]):
+        for row in rows:
+            yield row
+
+    fake_gamma.iter_active_markets = lambda: _iter_rows(gamma_data)
+    fake_gamma.iter_active_events = lambda: _iter_rows(_events_for_markets(gamma_data))
     fake_gamma.aclose = AsyncMock()
     fake_gamma.__aenter__.return_value = fake_gamma
     fake_gamma.__aexit__.return_value = None
@@ -245,4 +252,3 @@ def test_streaming_sqlite_matches_legacy_sqlite(tmp_path: Path) -> None:
     finally:
         con_a.close()
         con_b.close()
-

@@ -1025,3 +1025,33 @@ transport activity and an orderbook resnapshot:
   quiet-window monitor, identify which frame types advance the coarse WS freshness
   clock without producing mirror-eligible data; do not treat a fresh aggregate WS
   age as proof that the book→mirror business chain is live.
+- The same-instance follow-up later supplied the missing natural edge without a
+  code or cloud change. At `05:32:41.823Z` the daemon logged quiet `sending`, at
+  `05:32:42.567Z` Supabase accepted `l2_top_of_book` with HTTP 201, and at
+  `05:32:42.684Z` the same-generation waiter logged `evidenced`. The following
+  198-second window stayed below the unchanged WS/mirror fail thresholds with
+  cursor lag zero and identical machine/instance/image anchors. This proves the
+  quiet-refresh mechanism without claiming Phase closure; the two clocks remain
+  intentionally separate.
+- A later fresh probe exposed a different upstream failure: `markets_latest`
+  returned HTTP-success with zero rows even though snapshot 573 remained valid
+  with 1939 markets. Candidate refresh accepted the empty response, replaced the
+  3-asset desired set with zero, and thereby prevented quiet refresh from asking
+  for new books. New chain discipline: **zero remote projection is not zero real
+  universe**. Writers reject empty rows before mutation; readers freeze LKG,
+  freshness, membership, and cursor until a non-empty projection returns.
+- The writer was not Fly: mocked M1 orchestrator tests inherited production
+  credentials through `SettingsConfigDict(env_file=".env")`. A unit test can be
+  deterministic locally yet externally destructive unless every cloud adapter
+  is explicitly disabled. The repository-wide test fixture now defaults
+  Supabase, R2, event bus, Sentry, Better Stack, and Telegram to off; opt-in
+  tests use localhost/dummy settings or a Testcontainer DSN.
+- Snapshot 574 then naturally restored 1942 projection rows. The unchanged L2
+  instance recovered three candidates and passed a new 258-second strict window
+  10/10 with cursor lag zero. Because mirror age reached 565.4s near its 600s
+  failure boundary, validation continued until a real TOB 201 reset the clock;
+  this prevents a threshold-adjacent false pass.
+- Phase 05.1 can close without deploying the new guards because the production
+  mutation source was the local test process, now contained, and the unchanged
+  deployed chain naturally re-proved recovery. The guard remains explicitly
+  "locally verified, undeployed defense-in-depth," not production evidence.

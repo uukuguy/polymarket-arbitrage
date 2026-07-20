@@ -395,6 +395,17 @@ async def on_snapshot_complete(
         try:
             client = create_client(supabase_url, service_key)
             markets_rows = _fetch_all_markets_latest(client)
+            if not markets_rows:
+                # HTTP 200 + [] can be a transient DELETE→INSERT mirror window
+                # or a failed DELETE-only projection. Neither is evidence that
+                # the real Polymarket universe vanished. Keep the prior desired
+                # state and cursor so reconciliation retries after recovery.
+                logger.error(
+                    "candidate refresh: markets_latest returned an invalid empty "
+                    f"projection — freezing candidates and retaining cursor "
+                    f"(last_known_count={len(_last_known_markets_rows or [])})"
+                )
+                return False
             _last_known_markets_rows = markets_rows
             _record_fetch_success()
             logger.info(f"candidate refresh: fetched {len(markets_rows)} rows from markets_latest")

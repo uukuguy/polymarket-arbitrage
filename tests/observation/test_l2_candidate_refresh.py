@@ -886,7 +886,11 @@ async def test_maintenance_debounce_is_anchored_only_to_full_success(monkeypatch
     ws._l3_active_set = set()
     ws.replace_candidate_set = AsyncMock(side_effect=[False, True])
     monkeypatch.setattr(mod, "compute_candidates", lambda *args, **kwargs: [])
-    monkeypatch.setattr(mod, "_fetch_all_markets_latest", lambda client: [])
+    monkeypatch.setattr(
+        mod,
+        "_fetch_all_markets_latest",
+        lambda client: [{"market_id": "m1"}],
+    )
     monkeypatch.setattr(mod, "create_client", lambda *args: MagicMock())
     monkeypatch.setattr(mod.time, "monotonic", lambda: 100.0)
 
@@ -928,6 +932,41 @@ async def test_maintenance_live_fetch_failure_rejects_cached_rows(monkeypatch):
         )
         is False
     )
+    compute.assert_not_called()
+    ws.replace_candidate_set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_empty_live_projection_fails_closed_without_collapsing_candidates(monkeypatch):
+    """A successful HTTP response with zero rows is not a valid market universe."""
+    from pydantic import SecretStr
+
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings = MagicMock()
+    settings.supabase_url = "https://example.supabase.co"
+    settings.supabase_service_key = SecretStr("service-key")
+    ws = MagicMock()
+    ws._candidate_set = {"KEEP"}
+    ws._l3_active_set = set()
+    ws.replace_candidate_set = AsyncMock(return_value=True)
+    last_known = [{"market_id": "known-good"}]
+    mod._last_known_markets_rows = last_known
+    monkeypatch.setattr(mod, "create_client", lambda *args: MagicMock())
+    monkeypatch.setattr(mod, "_fetch_all_markets_latest", lambda client: [])
+    compute = MagicMock(return_value=[])
+    monkeypatch.setattr(mod, "compute_candidates", compute)
+
+    assert (
+        await mod.on_snapshot_complete(
+            {"snapshot_id": 4, "_maintenance": True},
+            ws_consumer=ws,
+            settings=settings,
+        )
+        is False
+    )
+    assert mod._last_known_markets_rows is last_known
+    assert mod._last_fetch_success_at_s is None
     compute.assert_not_called()
     ws.replace_candidate_set.assert_not_awaited()
 

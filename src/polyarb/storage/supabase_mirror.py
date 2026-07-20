@@ -18,7 +18,8 @@ Design decisions:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Iterator
+from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 from loguru import logger
 from supabase import Client, create_client
@@ -115,6 +116,16 @@ class SupabaseMirror:
         On failure: logs error with snapshot_id context, returns False.
         The orchestrator step 7.5 adds an Issue(DEGRADED) and continues normally.
         """
+        if not market_rows:
+            # DELETE+INSERT is intentionally non-transactional over PostgREST.
+            # Treat an empty projection as invalid input before *any* remote
+            # mutation; otherwise this method degenerates into DELETE-only and
+            # erases the last known-good market universe.
+            logger.error(
+                f"Supabase mirror rejected empty market projection "
+                f"snapshot_id={snapshot_id}"
+            )
+            return False
         try:
             self._client.table("snapshots").upsert(snapshot_meta).execute()
             self._client.table("markets_latest").delete().neq("market_id", "").execute()
@@ -192,7 +203,7 @@ class SupabaseMirror:
             logger.warning(f"get_latest_remote_snapshot_id failed: {str(e)[:200]}")
             return None
 
-    def reconcile(self, sqlite_store: "SQLiteStore") -> list[int]:
+    def reconcile(self, sqlite_store: SQLiteStore) -> list[int]:
         """Find local snapshot_ids missing on Supabase and push them.
 
         Compares latest SQLite snapshot_id vs latest Supabase snapshot_id.

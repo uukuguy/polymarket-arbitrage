@@ -67,6 +67,15 @@ def _make_settings(tmp_path: Path) -> Settings:
     )
 
 
+def test_unit_settings_never_inherit_cloud_credentials(tmp_path: Path) -> None:
+    """Mocked snapshot tests must never auto-enable production cloud adapters."""
+    settings = _make_settings(tmp_path)
+
+    assert settings.supabase_mirror_enabled is False
+    assert settings.l2_mirror_enabled is False
+    assert settings.r2_enabled is False
+
+
 def _books_as_objects(book_dicts: list[dict]) -> list[SimpleNamespace]:
     """Wrap dicts as ``SimpleNamespace`` so the orchestrator's
     ``hasattr(b, '__dict__')`` indexing path is exercised (matches what the real
@@ -669,13 +678,14 @@ async def test_phase_timing_lines_emitted(tmp_path: Path) -> None:
 
     # Each phase must emit one 'start' and one 'done in <duration>' line
     for phase_num in range(1, 8):
-        starts = [m for m in captured if f"Phase {phase_num}/7" in m and "start" in m]
-        dones = [m for m in captured if f"Phase {phase_num}/7" in m and "done in" in m]
+        phase_messages = [m for m in captured if f"Phase {phase_num}/7" in m]
+        starts = [m for m in phase_messages if "start" in m]
+        dones = [m for m in phase_messages if "done in" in m]
         assert len(starts) == 1, (
-            f"phase {phase_num}/7 missing 'start' (or duplicated): {[m for m in captured if f'Phase {phase_num}/7' in m]}"
+            f"phase {phase_num}/7 missing 'start' (or duplicated): {phase_messages}"
         )
         assert len(dones) == 1, (
-            f"phase {phase_num}/7 missing 'done in' (or duplicated): {[m for m in captured if f'Phase {phase_num}/7' in m]}"
+            f"phase {phase_num}/7 missing 'done in' (or duplicated): {phase_messages}"
         )
 
     # Overall completion summary must be present

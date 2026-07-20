@@ -41,6 +41,7 @@ def _make_consumer(initial_assets: list[str] | None = None):
 def _settings_no_supabase(tmp_path: Path):
     """Settings with empty Supabase config so the fetch branch short-circuits."""
     from pydantic import SecretStr
+
     from polyarb.config import Settings
 
     s = Settings(
@@ -122,7 +123,10 @@ async def test_on_snapshot_complete_does_not_clobber_l3_active_set(tmp_path: Pat
             settings=settings,
         )
 
-    assert ok is True, "first call after reset must pass debounce"
+    # The real consumer has no live socket in this unit test. Phase 05.1's
+    # success-only convergence contract therefore publishes the desired local
+    # state but returns False so the durable cursor remains retryable.
+    assert ok is False
 
     # CORE ASSERTIONS — the race regression we are guarding:
     assert consumer._l3_active_set == {"l3_token_1", "l3_token_2"}, (

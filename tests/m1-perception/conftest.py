@@ -29,8 +29,9 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -45,8 +46,8 @@ os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 
 from polyarb.config import Settings  # noqa: E402  (must follow env-var setup)
 
-
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
 
 # F-4 SECURITY: fixtures are committed to git and recorded from real APIs.
 # Run a credential-leak grep at collection time so a bad fixture fails fast.
@@ -224,6 +225,7 @@ def http_test_client(daemon_settings_for_test: Settings) -> Any:
     Uses a mock scheduler so no real snapshot runs occur in tests.
     """
     from starlette.testclient import TestClient
+
     from polyarb.http.app import create_app
     from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -243,6 +245,7 @@ def http_test_client(daemon_settings_for_test: Settings) -> Any:
 def make_http_test_client(settings: Settings) -> Any:
     """Non-fixture helper for creating a TestClient directly (used in test helpers)."""
     from starlette.testclient import TestClient
+
     from polyarb.http.app import create_app
     from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -546,7 +549,7 @@ def mocked_better_stack(monkeypatch: pytest.MonkeyPatch) -> Any:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        async def __aenter__(self) -> "_FakeAsyncClient":
+        async def __aenter__(self) -> _FakeAsyncClient:
             return self
 
         async def __aexit__(self, *args: Any) -> None:
@@ -623,6 +626,7 @@ def l2_http_test_client(
 ) -> Any:
     """Starlette TestClient using create_l2_app factory + injected mocks."""
     from starlette.testclient import TestClient
+
     from polyarb.http.l2_app import create_l2_app
     from polyarb.storage.sqlite_store import SQLiteStore
 

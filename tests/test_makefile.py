@@ -62,9 +62,16 @@ def test_diagnose_arb_feed_make_entry_is_listed_and_dry_runs() -> None:
 def test_local_quote_make_entries_are_safe_discoverable_and_forward_options() -> None:
     collect_recipe = _make_recipe("collect-neg-risk-quotes")
     scan_recipe = _make_recipe("scan-arb-quotes")
-    unsafe = r"\b(flyctl|POST|PUT|PATCH|DELETE|deploy|scale|restart|secret|schema|migrat|order|wallet|cron)\b"
+    unsafe = (
+        r"\b(flyctl|POST|PUT|PATCH|DELETE|deploy|scale|restart|secret|schema|migrat|"
+        r"order|wallet|cron)\b"
+    )
 
-    assert 'cli_arbitrage collect-neg-risk-quotes --db-path "$(if $(strip $(db)),$(db),data/state.db)"' in collect_recipe
+    collect_entry = (
+        'cli_arbitrage collect-neg-risk-quotes --db-path '
+        '"$(if $(strip $(db)),$(db),data/state.db)"'
+    )
+    assert collect_entry in collect_recipe
     assert "cli_arbitrage scan-quotes" in scan_recipe
     assert '--db-path "$(if $(strip $(db)),$(db),data/state.db)"' in scan_recipe
     assert '--min-edge-bps "$(or $(min_edge_bps),0)"' in scan_recipe
@@ -109,6 +116,14 @@ def test_eval_local_quote_profile_is_offline_and_discoverable() -> None:
     assert dry_run.returncode == 0, dry_run.stderr
     assert "opportunity-feed-cadence-sla" in dry_run.stdout
     assert "eval_local" in dry_run.stdout
+
+
+def test_chaos_image_check_accepts_current_and_legacy_fly_status_shapes() -> None:
+    recipe = _make_recipe("chaos-l2-fly-image-check")
+
+    assert ".Machines[0].image_ref" in recipe
+    assert ".ImageRef" in recipe
+    assert "docker run --rm --entrypoint /bin/sh" in recipe
 
 
 def test_status_uses_the_canonical_current_state() -> None:

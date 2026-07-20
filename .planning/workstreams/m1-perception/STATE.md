@@ -2,26 +2,26 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
-current_phase: 05.1
+current_phase: 05
 status: executing
-stopped_at: Phase 05.1 Plan 04 Task 3 open; same instance now has fresh WS activity but stale mirror, with quiet logs 0/0/0
-last_updated: "2026-07-20T12:53:34+08:00"
+stopped_at: Phase 05 Plan 06; Phase 05.1 closed and L3 0/10 is the first strict soak blocker
+last_updated: "2026-07-20T14:50:05+08:00"
 last_activity: 2026-07-20
 progress:
   total_phases: 11
-  completed_phases: 8
+  completed_phases: 9
   total_plans: 57
-  completed_plans: 55
-  percent: 96
+  completed_plans: 56
+  percent: 98
 ---
 
 # M1 Perception — Current State
 
 ## Current Position
 
-- **Phase:** 05.1 — Durable L2 data-chain recovery (inserted gap phase)
-- **Plan:** 05.1-04 Task 3 open — production natural quiet-edge and mirror-evidence proof
-- **Status:** Same instance unchanged; strict health HTTP 503 because WS age is 0.2s while mirror age is 6306.2s; quiet chain remains 0/0/0
+- **Phase:** 05 — WS book/prices and L3 promotion
+- **Plan:** 05-06 — strict N=5 / 10-token production soak
+- **Status:** Phase 05.1 is complete; L2 strict health is HTTP 200, but L3 remains `0/10`, so the 24h soak has not started
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -97,45 +97,68 @@ progress:
   `0/10`. The first broken link is now mirror freshness, so another short
   quiet-window monitor would not establish Task 3.
 
-## CURRENT-CALL — approved repair
+- At `05:32:41.823Z` the unchanged instance naturally entered quiet refresh;
+  Supabase accepted `l2_top_of_book` at `05:32:42.567Z` and the same-generation
+  waiter logged `evidenced` at `05:32:42.684Z`.
 
-Plans 05.1-01/02/03 are complete. Plan 04 implementation is deployed, but Task 3
-remains open until the same instance naturally becomes quiet for 60 seconds and
-the receive→mirror evidence chain is observed. Do not infer failure from an active
-market that never reaches the trigger, and do not relax Phase 05's strict N=5 gate.
+- The subsequent `05:34:29Z–05:37:47Z` 198-second acceptance window returned
+  strict HTTP 200 for 10/10 samples. WS age max `50.1s`, mirror age max `162.2s`,
+  cursor lag `0`, listener `listening`, and machine/instance/image anchors were
+  unchanged. L3 stayed `0/10` and remains Phase 05 Plan 06's strict gate.
+
+- Pre-regression verification: Phase 05.1/quiet surface `139 passed`; focused Ruff,
+  compile, climb adapter, M1 manual contract, and planning checks passed. Exact
+  image matrix remains present `kill/which/curl/python`, missing
+  `pkill/ps/dig/ping`; temporary registry credentials were removed.
+
+- A fresh strict probe at `05:51:57Z` invalidated closure: HTTP 503, WS age
+  `613.5s`, mirror age `834.3s`, candidate set `0`, cursor lag `0`. L2 logs show
+  a successful empty `markets_latest` fetch immediately before candidate `3→0`.
+
+## CURRENT-CALL — Phase 05 strict L3 gate
+
+Phase 05.1 is closed. Snapshot 574 naturally restored 1942 `markets_latest`
+rows; the unchanged L2 instance restored three candidates, cursor lag zero, and
+strict HTTP 200. The final current-chain window ran for 258 seconds with 10/10
+HTTP 200 responses, and a real TOB write reset mirror freshness after the window.
+The local empty-projection guards remain undeployed defense-in-depth; the actual
+production mutation source was the local test suite, which is now isolated from
+all external adapters by default.
+
+The next first broken link is L3 promotion: `l3:active_count=0/10`, no book-level
+write has ever been observed, and Phase 05 Plan 06 requires a strict five-market,
+ten-token start followed by 24 hours of evidence.
 
 ## Remaining Work
 
-- Read-only diagnose which received frame types keep WS freshness at seconds while
-  producing no valid TOB/trade mirror writes and leaving mirror freshness stale.
-
-- If the instance changes, first rebuild the >=180-second healthy main-chain baseline.
-- Restore the strict main chain before treating another quiet-window observation as evidence-worthy.
-- Keep Plan 04 Task 3 open until receive/mirror evidence exists; send success alone is not PASS.
-- Start Plan 05-06 only when `/health` is no longer failing on the L2 prerequisites.
-- Complete 24h strict soak, teaching chapter 11, VALIDATION flip, SUMMARY, learnings,
-  ROADMAP/STATE closure.
+- Diagnose the L3 promoter chain read-only: input TOB rows, recipe predicates,
+  candidate count, promoter logs, and health write anchors.
+- Do not start the 24-hour soak until active count is exactly 10 tokens and the
+  other Plan 06 prerequisites are present.
+- Production deploy remains outside the climb adapter's authorization boundary;
+  preserve strict N=5 rather than changing thresholds to manufacture readiness.
+- Keep H-009 pending until separately authorized production deployment/scheduling
+  and timestamped capacity evidence; Phase 05.1 completion does not promote it.
 
 ## Required Reading
 
 1. `.planning/CURRENT.md` — cross-workstream operational truth.
-2. `docs/superpowers/specs/2026-07-18-m1-durable-data-chain-design.md` — approved design.
-3. `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-06-PLAN.md` — original soak gate; do not execute before repair.
+2. `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-06-PLAN.md` — current acceptance gate.
+3. `.planning/workstreams/m1-perception/phases/05.1-durable-l2-data-chain-recovery/05.1-LEARNINGS.md` — closed gap-phase lessons.
 4. `.planning/threads/market-observation-architecture.md` §1.6 — chain-truth discipline.
 
 ## Resume
 
 ```bash
-$gsd-resume-work --ws m1-perception
-make planning-status
+$gsd-execute-phase 05 --ws m1-perception
 ```
 
 ## Session Continuity
 
-- **Last session:** 2026-07-20 12:53 (Asia/Shanghai)
-- **Stopped at:** Same-instance read-only checkpoint: quiet logs remain 0/0/0 and strict health is HTTP 503 because mirror age is 6306.2s despite WS age 0.2s.
-- **Proceeding to:** Diagnose the WS-fresh/mirror-stale chain truth read-only before any further quiet-window monitoring; rebuild the >=180-second baseline if instance identity changes.
-- **Resume file:** `.planning/workstreams/m1-perception/phases/05.1-durable-l2-data-chain-recovery/05.1-04-PLAN.md`
+- **Last session:** 2026-07-20 14:50 (Asia/Shanghai)
+- **Stopped at:** Phase 05.1 closed; L2 strict health restored, L3 remains `0/10`.
+- **Proceeding to:** Read-only L3 promoter chain diagnosis before any 24-hour soak or deployment request.
+- **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-06-PLAN.md`
 
 ## Accumulated Context
 

@@ -13,7 +13,7 @@ Tests use unittest.mock (no real network calls). Mirror API contract:
 from __future__ import annotations
 
 import os
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -57,7 +57,7 @@ def _make_snapshot_meta(snapshot_id: int = 1) -> dict:
 
 
 def _make_supabase_mock() -> MagicMock:
-    """Create a MagicMock supabase client that supports table().upsert/insert/delete/select chain."""
+    """Create a Supabase mock supporting table upsert/insert/delete/select chains."""
     client = MagicMock()
 
     def _table_mock(name: str) -> MagicMock:
@@ -103,6 +103,24 @@ def test_push_snapshot_writes_snapshots_and_markets_latest() -> None:
     # markets_latest delete must have been called
     markets_calls = [c for c in mock_client.table.call_args_list if c.args[0] == "markets_latest"]
     assert markets_calls, "client.table('markets_latest') was never called"
+
+
+def test_push_snapshot_rejects_empty_market_projection_before_any_remote_write() -> None:
+    """An empty projection must never turn DELETE+INSERT into DELETE-only."""
+    from polyarb.storage.supabase_mirror import SupabaseMirror
+
+    mock_client = _make_supabase_mock()
+
+    with patch("polyarb.storage.supabase_mirror.create_client", return_value=mock_client):
+        mirror = SupabaseMirror(url="http://localhost:0", service_key="dummy")
+        ok = mirror.push_snapshot(
+            snapshot_id=42,
+            snapshot_meta=_make_snapshot_meta(42),
+            market_rows=[],
+        )
+
+    assert ok is False
+    mock_client.table.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +308,9 @@ def test_supabase_client_initialized_once() -> None:
 
     mock_client = _make_supabase_mock()
 
-    with patch("polyarb.storage.supabase_mirror.create_client", return_value=mock_client) as create_mock:
+    with patch(
+        "polyarb.storage.supabase_mirror.create_client", return_value=mock_client
+    ) as create_mock:
         mirror = SupabaseMirror(url="https://test.supabase.co", service_key="test-key")
         # Multiple operations — client should still only be created once
         mirror.push_snapshot(1, _make_snapshot_meta(1), _make_market_rows(2, 1))
@@ -396,9 +416,6 @@ def test_step_7_5_skips_mirror_when_snapshot_invalid() -> None:
     snapshot would still trigger a mirror upsert with status="failed" and 0
     markets, polluting Supabase's snapshots table with degenerate rows.
     """
-    import asyncio
-    from unittest.mock import AsyncMock, MagicMock as MM, patch
-
     from polyarb.config import load_settings
     from polyarb.snapshot import orchestrator as orch_mod
 
@@ -420,7 +437,12 @@ def test_step_7_5_skips_mirror_when_snapshot_invalid() -> None:
     # mirror.push_snapshot in step 7.5. We assert the conditional is present
     # in the source. This is a structural test — narrow but catches regressions
     # where someone removes the guard.
-    assert "if not is_valid" in src or "if is_valid" in src or "is_valid=False" in src.replace(" ", ""), (
+    has_validity_guard = (
+        "if not is_valid" in src
+        or "if is_valid" in src
+        or "is_valid=False" in src.replace(" ", "")
+    )
+    assert has_validity_guard, (
         "step 7.5 must guard mirror.push_snapshot with an is_valid check (F-05)"
     )
 

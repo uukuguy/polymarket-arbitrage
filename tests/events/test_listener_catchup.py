@@ -151,10 +151,13 @@ async def test_catchup_empty_when_no_cursor():
 async def test_catchup_handles_missing_table(loguru_sink):
     """UndefinedTableError → return [] (Plan 06 hasn't created the table yet)."""
     import asyncpg.exceptions
+
     from polyarb.events import listener
 
     fake_conn = _make_fake_conn(
-        fetchrow_exc=asyncpg.exceptions.UndefinedTableError("relation l2_event_cursor does not exist"),
+        fetchrow_exc=asyncpg.exceptions.UndefinedTableError(
+            "relation l2_event_cursor does not exist"
+        ),
     )
     with patch.object(listener.asyncpg, "connect", AsyncMock(return_value=fake_conn)):
         missed = await listener.catchup_from_cursor("postgresql://test")
