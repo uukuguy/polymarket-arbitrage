@@ -1105,3 +1105,10 @@ transport activity and an orderbook resnapshot:
   Never infer distinct-asset coverage from a capped time-series page; aggregate
   in SQL over the exact T+0/T+24 window, then map the ten token IDs back to the
   five promoted Yes-market identities.
+- A later formal-start attempt proved that `active_count=10/10` plus root HTTP
+  200 is still not a sufficient T+0 predicate. On the unchanged release 37
+  identity, WS, mirror, cursor, candidate, and promoter checks passed while
+  `l3:last_book_levels_write_at_s=207.2s` remained warn against the strict 120s
+  limit. The candidate start was rejected rather than stitched to an earlier
+  green sample. T+0 is therefore a same-sample conjunction across identity,
+  membership, and the dedicated book-level freshness clock.

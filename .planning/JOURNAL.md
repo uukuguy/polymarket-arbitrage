@@ -4241,3 +4241,32 @@ start the strict 24-hour monitor against release 37 without backdating.
 Resume Plan 05-06 Task 2, acknowledge all three checkpoint constraints, create
 `05-SOAK-LOG.md` at a fresh T+0, and start exact-instance health plus SQL coverage
 sampling without changing N=5 or any recipe threshold.
+
+## SESSION 75 — 2026-07-20 (Phase 05 formal soak start rejected)
+
+- [EXECUTE] Resumed Wave 5 / Plan 05-06 Task 2 and explicitly enforced the four
+  production anti-pattern mechanisms before attempting a formal T+0.
+- [IDENTITY] Release 37 remained on machine `85e647c4eed598`, instance
+  `01KXZJKY9SKEJAY2DD8MMPNB2E`, image
+  `deployment-01KXZJHS9QT8T6X0J33KVPTB5V`, with the unchanged digest.
+- [SQL CHAIN] Direct pre-start interval SQL mapped five promoted Yes tokens to
+  five markets and five paired No tokens. It found 4240 book rows across all ten
+  token IDs and Yes-side OHLC for all five market identities; no capped REST page
+  was used.
+- [REJECTED T+0] Candidate `2026-07-20T12:49:25Z` was not accepted. The exact
+  machine returned HTTP 200 with active 10/10, promoter/WS/mirror/candidate/cursor
+  checks green, but book-level write age was `207.2s` and warn against the strict
+  `<120s` baseline. The earlier green sample was not stitched or backdated.
+- [BOUNDARY] `05-SOAK-LOG.md` was not created, so no formal T+0/T+6 schedule
+  exists. No deploy, restart, secret/config/threshold change, trade, H-009 action,
+  or external submission occurred. `make planning-status` remained zero drift.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05 --ws m1-perception
+```
+
+Re-probe the same exact release identity. Create a new `05-SOAK-LOG.md` and T+0
+only when all strict checks, including `l3:last_book_levels_write_at_s < 120s`,
+are green in the same sample; never splice in the rejected attempt.

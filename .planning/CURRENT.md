@@ -82,7 +82,7 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 ## Workstream 摘要
 
-- **M1：L1 fresh；L2 durable chain strict HTTP 200；L3 `10/10` 且真实 depth 已写入；等待 24h soak。**
+- **M1：L1 fresh；L2 durable chain HTTP 200；L3 `10/10`，但一次正式 T+0 因 book-write age `207.2s` 超过严格 `120s` 门槛而被拒绝；24h soak 未启动。**
 - **M2：execution/accounting + neg-risk buy-all discovery 可用于真实数据监控/paper。**
 - **M3/M4：未开始。**
 - **M5：计划存在，但当前不应先于 M1 恢复。**
@@ -94,7 +94,11 @@ Production Alembic 已是 006，L1 release 127 与 L2 release 37 已部署。exa
 `+0 -0 markets=5 tokens=10`；`11:00:50Z` health 仍为 10/10，book-write age 59.3s，
 数据库已有 280 条 release 后真实 book rows。生产发现的 book 数组方向、时序重复行和
 No-side 反馈污染已在 `7ccd2da` / `57d3fc0` / `9451b4b` 修复，recipe 阈值未改变。
-下一步仅剩启动严格 24h soak；本次没有启动 soak，也没有真实交易。
+`2026-07-20T12:49:25Z` 的候选 T+0 在 exact identity 与 active `10/10` 均通过时，
+仍因 book-level write age `207.2s` 超过严格 `<120s` gate 被拒绝；没有拼接更早的绿样本。
+预窗口 SQL 只作为诊断，证明 5/5 市场、10/10 token、4240 book rows 和 5/5 Yes-side
+OHLC。下一步重新取得所有 strict checks 同一样本全绿的新 T+0；本次没有启动 soak，
+也没有真实交易。
 
 ```bash
 /gsd-execute-phase 05 --ws m1-perception

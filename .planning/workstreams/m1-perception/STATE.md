@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
-status: executing
-stopped_at: Phase 05 Plan 06 Task 2 executing; production prerequisite green and fresh soak T+0 not yet captured
-last_updated: "2026-07-20T20:42:06+08:00"
+status: blocked_before_24h_soak
+stopped_at: Candidate T+0 rejected because L3 book-level write age was 207.2s against the strict 120s baseline
+last_updated: "2026-07-20T20:53:13+08:00"
 last_activity: 2026-07-20
 progress:
   total_phases: 12
@@ -24,7 +24,7 @@ Plan: 6 of 6
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Executing Plan 05-06 Task 2; production prerequisite is green and the fresh 24-hour soak has not yet started.
+- **Status:** Plan 05-06 Task 2 is blocked before T+0. Exact release identity and active 10/10 remain green, but the candidate baseline's book-level write age was 207.2s against the strict 120s gate; the 24-hour soak did not start.
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -176,9 +176,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-20 20:36 (Asia/Shanghai)
-- **Stopped at:** Structured handoff restored and consumed; production prerequisite remains green and the formal 24-hour soak remains unstarted.
-- **Proceeding to:** Start Phase 05 Plan 06 only after explicitly acknowledging the three checkpoint constraints, then create a fresh T+0 and monitor the separate 24-hour soak.
+- **Last session:** 2026-07-20 20:53 (Asia/Shanghai)
+- **Stopped at:** Candidate T+0 `2026-07-20T12:49:25Z` was rejected: exact identity and active 10/10 passed, but `l3:last_book_levels_write_at_s=207.2s` was warn. No formal soak window exists.
+- **Proceeding to:** Re-run the exact-instance baseline and create a new T+0 only when every strict check, including book-level write age `<120s`, is green in the same sample.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/.continue-here.md`
 
 ## Accumulated Context
