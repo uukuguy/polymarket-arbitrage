@@ -4214,3 +4214,30 @@ health, five-market book/OHLC coverage, and watchdog evidence every ~6 hours.
 After restoration, execute Phase 05 Plan 06, acknowledge the three blocking
 constraints in `.continue-here.md`, create `05-SOAK-LOG.md` at a fresh T+0, and
 start the strict 24-hour monitor against release 37 without backdating.
+
+## SESSION 74 — 2026-07-20 (m1-perception resume before soak)
+
+- [VERIFIED] `gsd-tools init resume` resolved the active workstream to
+  `m1-perception`; no interrupted agent or pending todo was found.
+- [VERIFIED] `make planning-status` reports zero drift, the pre-commit hook points
+  to `.githooks`, and the restore-time working tree matched the handoff's clean
+  state. Plan 05-06 correctly remains without a SUMMARY because its soak task has
+  not started.
+- [RESTORED] The structured handoff was read and consumed. Production Alembic 006,
+  L1 release 127, and L2 release 37 remain the canonical prerequisite baseline;
+  the prior 10/10 and SQL readings remain pre-soak evidence only.
+- [CONSTRAINT] A fresh T+0 must cover the full 24 hours; interval coverage must use
+  SQL rather than a newest-1000 REST page; ten token identities must be mapped to
+  five promoted Yes-market identities before judging D-12.
+- [BOUNDARY] This resume did not probe or mutate production and did not start or
+  backdate the soak. H-009 remains separately unauthorized.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05 --ws m1-perception
+```
+
+Resume Plan 05-06 Task 2, acknowledge all three checkpoint constraints, create
+`05-SOAK-LOG.md` at a fresh T+0, and start exact-instance health plus SQL coverage
+sampling without changing N=5 or any recipe threshold.

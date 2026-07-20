@@ -97,5 +97,5 @@ No-side 反馈污染已在 `7ccd2da` / `57d3fc0` / `9451b4b` 修复，recipe 阈
 下一步仅剩启动严格 24h soak；本次没有启动 soak，也没有真实交易。
 
 ```bash
-/gsd-resume-work --ws m1-perception
+/gsd-execute-phase 05 --ws m1-perception
 ```

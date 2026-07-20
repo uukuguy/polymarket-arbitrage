@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: paused_before_24h_soak
-stopped_at: Production prerequisite green; formal 24h soak not started
-last_updated: "2026-07-20T20:27:33+08:00"
+stopped_at: Resume restored; production prerequisite green and formal 24h soak still not started
+last_updated: "2026-07-20T20:36:25+08:00"
 last_activity: 2026-07-20
 progress:
   total_phases: 12
@@ -173,9 +173,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-20 20:27 (Asia/Shanghai)
-- **Stopped at:** Handoff committed before the formal 24-hour soak; production prerequisite remains green.
-- **Proceeding to:** Start and monitor the separate 24-hour Phase 05 Plan 06 soak when explicitly continued.
+- **Last session:** 2026-07-20 20:36 (Asia/Shanghai)
+- **Stopped at:** Structured handoff restored and consumed; production prerequisite remains green and the formal 24-hour soak remains unstarted.
+- **Proceeding to:** Start Phase 05 Plan 06 only after explicitly acknowledging the three checkpoint constraints, then create a fresh T+0 and monitor the separate 24-hour soak.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/.continue-here.md`
 
 ## Accumulated Context
