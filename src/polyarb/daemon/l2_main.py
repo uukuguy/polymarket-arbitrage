@@ -134,20 +134,19 @@ def _isoformat_ts(ts: int | float | str | None) -> str | None:
     return None
 
 
-def _sum_depth_usd(levels: list, top_n: int = 10) -> float | None:
-    """Sum (price * size) over top-N orderbook levels; return None if no valid levels.
+def _ranked_book_levels(
+    levels: list,
+    *,
+    bids: bool,
+) -> list[tuple[float, float]]:
+    """Return valid ``(price, size)`` levels ranked nearest to the spread.
 
-    Quick task 260601: each level in the WS `book` event is `{"price": str, "size": str}`.
-    Skip non-dict entries, non-numeric price/size, or size <= 0.
-
-    Used by `_tob_row_from_frame` to populate `depth_yes_usd` (bids) and
-    `depth_no_usd` (asks). Phase 05 L3 promoter D-13 threshold needs this.
+    Polymarket ``book`` frames have been observed in production with the
+    farthest price first (bids ascending, asks descending).  Consumers must
+    therefore rank by price instead of trusting array position.
     """
-    if not levels:
-        return None
-    total = 0.0
-    n_valid = 0
-    for entry in levels[:top_n]:
+    ranked: list[tuple[float, float]] = []
+    for entry in levels:
         if not isinstance(entry, dict):
             continue
         raw_price = entry.get("price")
@@ -161,9 +160,29 @@ def _sum_depth_usd(levels: list, top_n: int = 10) -> float | None:
             continue
         if size <= 0:
             continue
-        total += price * size
-        n_valid += 1
-    return total if n_valid > 0 else None
+        ranked.append((price, size))
+    ranked.sort(key=lambda level: level[0], reverse=bids)
+    return ranked
+
+
+def _sum_depth_usd(
+    levels: list,
+    top_n: int = 10,
+    *,
+    bids: bool = True,
+) -> float | None:
+    """Sum (price * size) over price-ranked top-N orderbook levels.
+
+    Quick task 260601: each level in the WS `book` event is `{"price": str, "size": str}`.
+    Skip non-dict entries, non-numeric price/size, or size <= 0.
+
+    Used by `_tob_row_from_frame` to populate `depth_yes_usd` (bids) and
+    `depth_no_usd` (asks). Phase 05 L3 promoter D-13 threshold needs this.
+    """
+    ranked = _ranked_book_levels(levels, bids=bids)
+    if not ranked:
+        return None
+    return sum(price * size for price, size in ranked[:top_n])
 
 
 def _tob_row_from_frame(frame: dict) -> dict | None:
@@ -186,19 +205,22 @@ def _tob_row_from_frame(frame: dict) -> dict | None:
             best_bid = price
         elif side == "SELL":
             best_ask = price
-    # `book` frames carry bids/asks arrays — take top entry of each
+    # `book` frames carry bids/asks arrays. Production arrays can be ordered
+    # farthest-first, so rank by price before selecting best/top-10 levels.
     # Quick 260601: also compute depth_yes_usd / depth_no_usd from top-10 levels.
     depth_yes_usd_v: float | None = None
     depth_no_usd_v: float | None = None
     if et == "book":
         bids = frame.get("bids") or []
         asks = frame.get("asks") or []
-        if bids and isinstance(bids[0], dict):
-            best_bid = bids[0].get("price", best_bid)
-        if asks and isinstance(asks[0], dict):
-            best_ask = asks[0].get("price", best_ask)
-        depth_yes_usd_v = _sum_depth_usd(bids, top_n=10)
-        depth_no_usd_v = _sum_depth_usd(asks, top_n=10)
+        ranked_bids = _ranked_book_levels(bids, bids=True)
+        ranked_asks = _ranked_book_levels(asks, bids=False)
+        if ranked_bids:
+            best_bid = ranked_bids[0][0]
+        if ranked_asks:
+            best_ask = ranked_asks[0][0]
+        depth_yes_usd_v = _sum_depth_usd(bids, top_n=10, bids=True)
+        depth_no_usd_v = _sum_depth_usd(asks, top_n=10, bids=False)
 
     try:
         bb_f = float(best_bid) if best_bid is not None else None
@@ -266,10 +288,9 @@ def _book_levels_rows_from_frame(frame: dict, max_levels: int = 10) -> list[dict
     Side normalization: bids → ``"BUY"``, asks → ``"SELL"`` (uppercase,
     consistent with ``l2_trades.side`` from :func:`_trade_row_from_frame`).
 
-    Level numbering: 1-indexed AFTER filtering invalid entries. The first
-    valid bid is level=1 even if earlier dict entries had size=0 — this
-    keeps the (asset_id, ts, side, level) UNIQUE constraint stable across
-    snapshots where the worst level happens to be temporarily zeroed.
+    Level numbering: 1-indexed AFTER filtering invalid entries and ranking by
+    price (BUY descending, SELL ascending). This keeps level 1 equal to the
+    executable best price regardless of the upstream array order.
 
     ``max_levels=10`` (D-07) caps each side at top-10 → up to 20 rows per
     book event per asset. Bounded by design — bigger payloads from the
@@ -287,24 +308,8 @@ def _book_levels_rows_from_frame(frame: dict, max_levels: int = 10) -> list[dict
     rows: list[dict] = []
     for side_key, side_norm in (("bids", "BUY"), ("asks", "SELL")):
         levels = frame.get(side_key) or []
-        valid_idx = 0
-        for entry in levels:
-            if valid_idx >= max_levels:
-                break
-            if not isinstance(entry, dict):
-                continue
-            raw_price = entry.get("price")
-            raw_size = entry.get("size", 0)
-            if raw_price is None:
-                continue
-            try:
-                price = float(raw_price)
-                size = float(raw_size) if raw_size is not None else 0.0
-            except (TypeError, ValueError):
-                continue
-            if size <= 0:
-                continue
-            valid_idx += 1
+        ranked = _ranked_book_levels(levels, bids=side_key == "bids")
+        for valid_idx, (price, size) in enumerate(ranked[:max_levels], start=1):
             rows.append(
                 {
                     "asset_id": asset_id,

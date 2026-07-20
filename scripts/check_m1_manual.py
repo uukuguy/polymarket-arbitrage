@@ -18,6 +18,7 @@ M1_MAKE_TARGETS = {
     "snapshot-status",
     "overview",
     "list-recipes",
+    "scan-l3-seed",
     "daemon-run-local",
     "daemon-l2-run-local",
     "smoke-health-prod",

@@ -80,6 +80,35 @@ def test_book_levels_rows_top10_per_side() -> None:
     assert [r["level"] for r in asks_out] == list(range(1, 11))
 
 
+def test_book_levels_normalizes_polymarket_worst_first_order() -> None:
+    """Persist the nearest levels even when the WS sends the farthest first.
+
+    Production evidence on 2026-07-20 showed bids ascending and asks
+    descending.  The projector must rank levels by price instead of trusting
+    their input position.
+    """
+    from polyarb.daemon.l2_main import _book_levels_rows_from_frame
+
+    rows = _book_levels_rows_from_frame(
+        _make_book_frame(
+            bids=[_lvl(0.001, 10), _lvl(0.20, 20), _lvl(0.369, 30)],
+            asks=[_lvl(0.999, 40), _lvl(0.60, 50), _lvl(0.377, 60)],
+        ),
+        max_levels=2,
+    )
+
+    bids_out = [row for row in rows if row["side"] == "BUY"]
+    asks_out = [row for row in rows if row["side"] == "SELL"]
+    assert [(row["level"], row["price"]) for row in bids_out] == [
+        (1, 0.369),
+        (2, 0.20),
+    ]
+    assert [(row["level"], row["price"]) for row in asks_out] == [
+        (1, 0.377),
+        (2, 0.60),
+    ]
+
+
 def test_book_levels_skips_zero_or_negative_size() -> None:
     """size<=0 entries are skipped; level=enumeration index after filter."""
     from polyarb.daemon.l2_main import _book_levels_rows_from_frame
@@ -288,6 +317,7 @@ def test_tob_row_book_event_fills_depth_yes_usd_from_top_10_bids():
     rows: 0 with depth populated). This RED test asserts the fill works.
     """
     import pytest
+
     from polyarb.daemon.l2_main import _tob_row_from_frame
     frame = _make_book_frame(
         asset_id="AID-1",
@@ -302,9 +332,46 @@ def test_tob_row_book_event_fills_depth_yes_usd_from_top_10_bids():
     assert row["depth_no_usd"] == pytest.approx(0.46 * 800 + 0.47 * 200)
 
 
+def test_tob_row_normalizes_polymarket_worst_first_order():
+    """Best prices and depth come from price-ranked levels, not array order."""
+    import pytest
+
+    from polyarb.daemon.l2_main import _tob_row_from_frame
+
+    frame = _make_book_frame(
+        asset_id="AID-1",
+        bids=[
+            _lvl(0.001, 1000),
+            _lvl(0.20, 20),
+            _lvl(0.30, 30),
+            _lvl(0.369, 40),
+        ],
+        asks=[
+            _lvl(0.999, 1000),
+            _lvl(0.60, 60),
+            _lvl(0.50, 50),
+            _lvl(0.377, 40),
+        ],
+    )
+
+    row = _tob_row_from_frame(frame)
+    assert row is not None
+    assert row["best_bid"] == pytest.approx(0.369)
+    assert row["best_ask"] == pytest.approx(0.377)
+    assert row["spread"] == pytest.approx(0.008)
+    assert row["mid_price"] == pytest.approx(0.373)
+    assert row["depth_yes_usd"] == pytest.approx(
+        0.369 * 40 + 0.30 * 30 + 0.20 * 20 + 0.001 * 1000
+    )
+    assert row["depth_no_usd"] == pytest.approx(
+        0.377 * 40 + 0.50 * 50 + 0.60 * 60 + 0.999 * 1000
+    )
+
+
 def test_tob_row_book_event_caps_at_top_10_levels():
     """Quick 260601: if bids has 15 levels, only top-10 contribute to depth_yes_usd."""
     import pytest
+
     from polyarb.daemon.l2_main import _tob_row_from_frame
     frame = _make_book_frame(
         asset_id="AID-1",
@@ -322,6 +389,7 @@ def test_tob_row_book_event_caps_at_top_10_levels():
 def test_tob_row_book_event_skips_zero_size_levels():
     """Quick 260601: levels with size<=0 are excluded from depth sum."""
     import pytest
+
     from polyarb.daemon.l2_main import _tob_row_from_frame
     frame = _make_book_frame(
         asset_id="AID-1",
