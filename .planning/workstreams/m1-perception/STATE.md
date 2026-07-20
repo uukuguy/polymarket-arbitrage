@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
-status: awaiting_production_authorization
-stopped_at: Phase 05.3 local complete; Alembic 006 and L1/L2 deploy require separate authorization
-last_updated: "2026-07-20T17:53:35+08:00"
+status: production_rollout_authorized
+stopped_at: Production rollout preflight before Alembic 006
+last_updated: "2026-07-20T18:07:35+08:00"
 last_activity: 2026-07-20
 progress:
   total_phases: 12
@@ -21,7 +21,7 @@ progress:
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Phase 05.3 is locally complete and fully green. Production remains unchanged at the last observed `0/10`; Alembic 006 and deployment require separate authorization.
+- **Status:** User authorized production Alembic 006 and L1/L2 deployment, excluding real trading. Preflight is in progress; production remains unchanged until each step is verified.
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -168,9 +168,9 @@ quality gates pass. None of these changes has been migrated or deployed.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-20 17:53 (Asia/Shanghai)
-- **Stopped at:** Phase 05.3 local closure; production Alembic 006/deploy not authorized.
-- **Proceeding to:** With explicit authorization, migrate then deploy and prove `10/10` plus a real book-level write before starting the 24-hour soak.
+- **Last session:** 2026-07-20 18:07 (Asia/Shanghai)
+- **Stopped at:** Production rollout preflight before Alembic 006.
+- **Proceeding to:** Apply and verify Alembic 006, deploy L1/L2, then prove `10/10` plus a real book-level write; do not start the 24-hour soak implicitly.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-06-PLAN.md`
 
 ## Accumulated Context
