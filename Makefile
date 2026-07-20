@@ -1162,15 +1162,14 @@ sentry-alert-audit:
 # Phase 05 Plan 05-05 — L3 promoter + OHLC + dashboard smoke ops
 # ============================================================================
 
-## l3-promote-dry-run: Run l3_promote.promote_run once locally without WS mutation (prints candidate set)
+## l3-promote-dry-run: Plan one tick with WS, Supabase, and module-state mutations disabled
 ##
 ## Loads .env (if present) so POLYARB_SUPABASE_URL + service-role key reach
-## the helper. Swaps WsConsumer for a no-op shim — `WOULD add` / `WOULD remove`
-## lines show what real subscribe calls WOULD have been issued. Use this to
-## sanity-check the L3 candidate selection logic against prod Supabase
-## without touching real WS state.
+## the helper. The promoter runs with apply_mutations=False: production-backed
+## reads are possible, but candidate updates, subscriptions, and freshness/global
+## active state cannot change.
 l3-promote-dry-run:
-	@echo ">> l3-promote-dry-run — single tick, no real WS mutation"
+	@echo ">> l3-promote-dry-run — single tick, all mutations disabled"
 	@if [ -f .env ]; then set -a && . ./.env && set +a; fi; \
 	uv run python scripts/l3_promote_dry_run.py
 .PHONY: l3-promote-dry-run

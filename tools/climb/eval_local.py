@@ -156,6 +156,44 @@ OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS = {
     ],
     "scan-dry-run": ["make", "-n", "scan-arb-quotes"],
 }
+L3_PREREQUISITE_CHAIN_TRUTH_GATE_COMMANDS = {
+    "planning": ["make", "planning-status"],
+    "unit": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/alembic/test_006.py",
+        "tests/storage/test_supabase_mirror.py",
+        "tests/observation/test_l2_temp_db.py",
+        "-q",
+    ],
+    "integration": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/observation/test_l2_candidate_refresh.py",
+        "tests/m1-perception/test_l3_promoter.py",
+        "tests/m1-perception/test_l2_health_l3_subchecks.py",
+        "-q",
+    ],
+    "cli": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_l3_promote_dry_run.py",
+        "tests/test_makefile.py",
+        "-k",
+        "dry_run or l3_seed",
+        "-q",
+    ],
+    "restart": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_candidate_refresh_l3_protection.py",
+        "-q",
+    ],
+}
 
 
 def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]:
@@ -165,6 +203,8 @@ def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]
         commands = OPPORTUNITY_FEED_CHAIN_TRUTH_GATE_COMMANDS
     elif manifest.get("paradigm") == "opportunity-feed-cadence-sla":
         commands = OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS
+    elif manifest.get("paradigm") == "l3-prerequisite-chain-truth":
+        commands = L3_PREREQUISITE_CHAIN_TRUTH_GATE_COMMANDS
     else:
         commands = GATE_COMMANDS
     return {name: list(command) for name, command in commands.items()}

@@ -1082,3 +1082,8 @@ transport activity and an orderbook resnapshot:
 - The seed is an observation-coverage mechanism, not a promotion shortcut. It
   must remain under the existing candidate cap and the promoter must fail closed
   on incomplete Yes/No identity; only ten distinct tokens may satisfy N=5.
+- Phase 05.3 implemented this contract locally under TDD. Its dry-run now guards
+  every WS, Supabase, LKG, active-set, and freshness mutation; a proposal is not
+  post-run state. Full local gates passing does not update the production chain:
+  Alembic 006, deployment, `10/10`, real book-level writes, and soak evidence are
+  still distinct authorization/evidence steps.

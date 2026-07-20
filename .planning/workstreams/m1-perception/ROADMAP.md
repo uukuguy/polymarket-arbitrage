@@ -305,6 +305,7 @@ Makefile targets to deliver (per Plan 05-01 + 05-05):
 **Depends on:** Phase 05 Plans 01-05; blocks Phase 05 Plan 06 soak
 **Design:** `docs/superpowers/specs/2026-07-18-m1-durable-data-chain-design.md`
 **Plans:** 4 plans across 4 sequential waves
+**Status:** ✅ LOCAL COMPLETE 2026-07-20 — production migration/deploy and Phase 05 soak remain gated
 
 Plans:
 - [x] 05.1-01-PLAN.md — Wave 1: termination-aware asyncpg LISTEN + serialized NOTIFY/poll reconciliation pump + success-only cursor commit
@@ -340,10 +341,10 @@ pairs by Yes asset, and making the diagnostic dry-run genuinely mutation-free.
 **Plans:** 4 plans across 4 sequential waves
 
 Plans:
-- [ ] 05.3-01-PLAN.md — Wave 1: Alembic 006 + 12-column token-pair mirror/temp projection
-- [ ] 05.3-02-PLAN.md — Wave 2: deterministic 100-row liquid mid-market L3 seed + Make target
-- [ ] 05.3-03-PLAN.md — Wave 3: Yes-keyed complete-pair promotion with fail-closed under-fill
-- [ ] 05.3-04-PLAN.md — Wave 4: mutation-free dry-run + full local gates + teaching/closure
+- [x] 05.3-01-PLAN.md — Wave 1: Alembic 006 + 12-column token-pair mirror/temp projection
+- [x] 05.3-02-PLAN.md — Wave 2: deterministic 100-row liquid mid-market L3 seed + Make target
+- [x] 05.3-03-PLAN.md — Wave 3: Yes-keyed complete-pair promotion with fail-closed under-fill
+- [x] 05.3-04-PLAN.md — Wave 4: mutation-free dry-run + full local gates + teaching/closure
 
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 

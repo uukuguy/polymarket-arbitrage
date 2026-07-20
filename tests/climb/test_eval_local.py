@@ -114,6 +114,30 @@ def test_opportunity_feed_cadence_sla_profile_is_fixture_only() -> None:
     }
 
 
+def test_l3_prerequisite_profile_uses_only_local_relevant_gates() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "l3-prerequisite-chain-truth"}
+    )
+
+    flattened = [argument for command in commands.values() for argument in command]
+    assert commands["planning"] == ["make", "planning-status"]
+    for required in (
+        "tests/alembic/test_006.py",
+        "tests/storage/test_supabase_mirror.py",
+        "tests/observation/test_l2_candidate_refresh.py",
+        "tests/m1-perception/test_l3_promoter.py",
+        "tests/m1-perception/test_l3_promote_dry_run.py",
+        "tests/m1-perception/test_candidate_refresh_l3_protection.py",
+    ):
+        assert required in flattened
+    assert not {
+        argument.lower()
+        for argument in flattened
+        if any(
+            forbidden in argument.lower()
+            for forbidden in ("http://", "https://", "flyctl", "deploy", "migrate")
+        )
+    }
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS

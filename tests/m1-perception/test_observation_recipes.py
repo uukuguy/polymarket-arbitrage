@@ -2,7 +2,7 @@
 
 Plan 03 Task 1 — covers:
 - Recipe dataclass _is_trusted invariant (from_builtin=True / from_yaml=False)
-- BUILTIN_RECIPES 6 entries, all _is_trusted=True
+- BUILTIN_RECIPES 7 entries, all _is_trusted=True
 - ghost-suspicious 笔误纠正（走 validation_issues, 不走 incomplete=1）
 - neg-risk-incomplete 0.02 容差体现在 group_by 字段
 - by-tag 替代 by-category（amendment 01）
@@ -12,7 +12,6 @@ from __future__ import annotations
 import pytest
 
 from polyarb.observation.recipes import BUILTIN_RECIPES, Recipe
-
 
 # =============================================================================
 # Recipe dataclass — trust split
@@ -71,16 +70,17 @@ def test_recipe_is_frozen() -> None:
 
 
 # =============================================================================
-# BUILTIN_RECIPES — 6 entries, all trusted
+# BUILTIN_RECIPES — 7 entries, all trusted
 # =============================================================================
 
 
-def test_builtin_recipes_count_is_6() -> None:
-    assert len(BUILTIN_RECIPES) == 6, list(BUILTIN_RECIPES)
+def test_builtin_recipes_count_is_7() -> None:
+    assert len(BUILTIN_RECIPES) == 7, list(BUILTIN_RECIPES)
 
 
 def test_builtin_recipes_names() -> None:
     expected = {
+        "l3-seed",
         "thick-but-slippery",
         "near-end",
         "ghost-suspicious",
@@ -100,6 +100,15 @@ def test_all_builtins_have_trusted_flag() -> None:
 # =============================================================================
 # Per-recipe content asserts
 # =============================================================================
+
+
+def test_l3_seed_recipe_contract() -> None:
+    recipe = BUILTIN_RECIPES["l3-seed"]
+    assert recipe.limit == 100
+    assert "yes_token_id IS NOT NULL" in recipe.where
+    assert "mid_price BETWEEN 0.1 AND 0.9" in recipe.where
+    assert "liquidity_usd >= 500" in recipe.where
+    assert recipe.order_by == "liquidity_usd DESC, market_id ASC"
 
 
 def test_thick_but_slippery_recipe_valid() -> None:

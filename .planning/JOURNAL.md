@@ -4091,3 +4091,33 @@ production Alembic 006 or deployment.
 
 Execute Phase 05.3 Plan 01 RED tests for Alembic 006, 12-column mirror, and
 L2 temp token-pair projection.
+
+## SESSION 71 — 2026-07-20 (Phase 05.3 locally complete)
+
+- [TDD] Completed all four plans: add-only Alembic 006 and 12-column token-pair
+  projection; deterministic `l3-seed` cap 100; Yes-keyed complete-pair promotion;
+  and a mutation-free `apply_mutations=False` dry-run boundary.
+- [FAIL CLOSED] Incomplete, self-paired, or cross-pair duplicate token identity
+  under-fills strict health instead of synthesizing fallback assets. The locked
+  N=5, spread, depth, and recency thresholds did not change.
+- [DRY RUN] The operator path can compute `proposed_active` but cannot call WS
+  add/remove, update `l3_promoted_at_ts`, mutate LKG/active state, or advance
+  freshness anchors.
+- [VERIFY] Phase 05.3 focused suite passed 81 tests. Full repository pytest exited
+  0 with one expected xfail and one environment skip. Ruff, M1 docs, planning,
+  climb adapter, and diff checks passed.
+- [TEACH] Added chapter 21, Phase learnings, five adversarial self-checks, and a
+  signed-local validation artifact. H-010 received a dedicated local-only gate
+  profile so unrelated M2 evidence cannot score the L3 repair.
+- [BOUNDARY] No production Alembic, deploy, restart, config, secret, external
+  submission, real-money action, `10/10` proof, book-level proof, or soak ran.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+With separate production authorization, apply Alembic 006, deploy the Phase 05.3
+L1/L2 image, then prove ten distinct active tokens and a real book-level write
+before starting a fresh 24-hour Phase 05 Plan 06 soak.

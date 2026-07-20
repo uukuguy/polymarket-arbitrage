@@ -442,8 +442,13 @@ async def promote_run(
     settings: Any,
     ws_consumer: Any,
     recipe_yaml_path: Path,
+    apply_mutations: bool = True,
 ) -> dict:
-    """One promote tick. Fail-soft per D-12 envelope; freeze on outage.
+    """Plan and optionally apply one promote tick.
+
+    ``apply_mutations=False`` is the operator dry-run boundary: reads and
+    proposed diffs are allowed, while WS calls, Supabase updates, last-known
+    caches, active state, and freshness anchors remain untouched.
 
     Steps:
       1. Resolve Supabase creds; freeze on missing.
@@ -496,7 +501,8 @@ async def promote_run(
     # ── 3) Fetch tob ────────────────────────────────────────────────────
     try:
         tob_rows = _fetch_latest_tob_rows_from_supabase(client)
-        _last_known_tob_rows = tob_rows
+        if apply_mutations:
+            _last_known_tob_rows = tob_rows
     except Exception as e:  # noqa: BLE001
         logger.error(
             f"l3-promote: tob fetch failed: {e!r} — using last-known rows"
@@ -562,7 +568,8 @@ async def promote_run(
     # ── 5) Expand 5 markets → 10 tokens (Yes+No per D-05 / Warning #13) ─
     try:
         token_map = _fetch_market_token_map(client, new_yes_asset_ids)
-        _last_known_market_token_map = token_map
+        if apply_mutations:
+            _last_known_market_token_map = token_map
     except Exception as e:  # noqa: BLE001
         logger.error(
             f"l3-promote: market token map fetch failed: {e!r} — using last-known"
@@ -611,53 +618,64 @@ async def promote_run(
     added_markets = sorted(new_market_set - old_market_set)
     removed_markets = sorted(old_market_set - new_market_set)
 
-    # ── 7) Apply WS subscribe diff (fail-soft per D-12) ─────────────────
-    try:
-        if added:
-            await ws_consumer.add_subscriptions(added)
-        if removed:
-            await ws_consumer.remove_subscriptions(removed)
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"l3-promote: ws_consumer mutation failed: {e!r}")
+    if apply_mutations:
+        # ── 7) Apply WS subscribe diff (fail-soft per D-12) ─────────────
+        try:
+            if added:
+                await ws_consumer.add_subscriptions(added)
+            if removed:
+                await ws_consumer.remove_subscriptions(removed)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"l3-promote: ws_consumer mutation failed: {e!r}")
+            sentry_sdk.add_breadcrumb(
+                category="l3-promote",
+                level="warning",
+                message="ws mutation failed",
+                data={"error": str(e)[:200]},
+            )
+            # Fall through: health should reflect intended membership.
+
+        # ── 8) Write-through l2_candidates.l3_promoted_at_ts ────────────
+        _mirror_l3_promoted_at_ts(client, added_markets, removed_markets)
+
+        # ── 9) Mutate state + chain-truth anchor ────────────────────────
+        _l3_active_set = new_token_set
+        _last_promote_at_s = time.time()
+
         sentry_sdk.add_breadcrumb(
             category="l3-promote",
-            level="warning",
-            message="ws mutation failed",
-            data={"error": str(e)[:200]},
+            level="info",
+            message=(
+                f"promote_run ok +{len(added)} -{len(removed)} "
+                f"markets={len(accepted_yes_asset_ids)} "
+                f"tokens={len(new_token_set)}"
+            ),
+            data={
+                "added": len(added),
+                "removed": len(removed),
+                "markets": len(accepted_yes_asset_ids),
+                "tokens": len(new_token_set),
+            },
         )
-        # Fall through — still mutate state + mirror so /health reflects intent.
-
-    # ── 8) Write-through l2_candidates.l3_promoted_at_ts (Blocker #1) ───
-    _mirror_l3_promoted_at_ts(client, added_markets, removed_markets)
-
-    # ── 9) Mutate state + chain-truth anchor ────────────────────────────
-    _l3_active_set = new_token_set
-    _last_promote_at_s = time.time()
-
-    sentry_sdk.add_breadcrumb(
-        category="l3-promote",
-        level="info",
-        message=(
-            f"promote_run ok +{len(added)} -{len(removed)} "
+        logger.info(
+            f"l3-promote: +{len(added)} -{len(removed)} "
+            f"markets={len(accepted_yes_asset_ids)} tokens={len(new_token_set)} "
+            f"(chain-truth: _last_promote_at_s={_last_promote_at_s:.0f})"
+        )
+    else:
+        logger.info(
+            f"l3-promote dry-run: WOULD +{len(added)} -{len(removed)} "
             f"markets={len(accepted_yes_asset_ids)} tokens={len(new_token_set)}"
-        ),
-        data={
-            "added": len(added),
-            "removed": len(removed),
-            "markets": len(accepted_yes_asset_ids),
-            "tokens": len(new_token_set),
-        },
-    )
-    logger.info(
-        f"l3-promote: +{len(added)} -{len(removed)} "
-        f"markets={len(accepted_yes_asset_ids)} tokens={len(new_token_set)} "
-        f"(chain-truth: _last_promote_at_s={_last_promote_at_s:.0f})"
-    )
+        )
+
     return {
         "added": added,
         "removed": removed,
         "added_markets": added_markets,
         "removed_markets": removed_markets,
+        "active": sorted(_l3_active_set) if apply_mutations else sorted(new_token_set),
+        "proposed_active": sorted(new_token_set),
+        "dry_run": not apply_mutations,
     }
 
 

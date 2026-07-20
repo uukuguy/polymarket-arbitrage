@@ -526,6 +526,66 @@ async def test_promote_run_rejects_incomplete_or_duplicate_token_pairs() -> None
     assert "yes_4" not in l3_promote._l3_active_set
 
 
+@pytest.mark.asyncio
+async def test_promote_run_dry_run_has_zero_mutations() -> None:
+    from polyarb.observation import l3_promote
+
+    now_ms = int(time.time() * 1000)
+    tob_rows = [
+        {
+            "asset_id": f"yes_dry_{i}",
+            "ts": now_ms - 60_000,
+            "best_bid": 0.50,
+            "best_ask": 0.51,
+            "spread": 0.01,
+            "mid_price": 0.505,
+            "depth_yes_usd": 5_000.0 - i,
+            "depth_no_usd": 5_000.0,
+        }
+        for i in range(5)
+    ]
+    token_rows = [
+        {"yes_token_id": f"yes_dry_{i}", "no_token_id": f"no_dry_{i}"}
+        for i in range(5)
+    ]
+    capture_updates: list[dict] = []
+    consumer = MagicMock()
+    consumer.add_subscriptions = AsyncMock(return_value=True)
+    consumer.remove_subscriptions = AsyncMock(return_value=True)
+
+    before_active = {"old-active"}
+    before_tob = [{"sentinel": "tob"}]
+    before_map = {"old-yes": ("old-yes", "old-no")}
+    before_promote = 123.0
+    l3_promote._l3_active_set = before_active
+    l3_promote._last_known_tob_rows = before_tob
+    l3_promote._last_known_market_token_map = before_map
+    l3_promote._last_promote_at_s = before_promote
+
+    with patch(
+        "polyarb.observation.l3_promote.create_client",
+        return_value=_make_supabase_client_mock(
+            tob_rows, token_rows, capture_updates
+        ),
+    ):
+        result = await l3_promote.promote_run(
+            settings=_make_settings(),
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            apply_mutations=False,
+        )
+
+    consumer.add_subscriptions.assert_not_awaited()
+    consumer.remove_subscriptions.assert_not_awaited()
+    assert capture_updates == []
+    assert l3_promote._l3_active_set is before_active
+    assert l3_promote._last_known_tob_rows is before_tob
+    assert l3_promote._last_known_market_token_map is before_map
+    assert l3_promote._last_promote_at_s == before_promote
+    assert result["dry_run"] is True
+    assert len(result["proposed_active"]) == 10
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Test 7 — diff calls add AND remove with Yes/No expansion
 # ────────────────────────────────────────────────────────────────────────

@@ -1,13 +1,11 @@
-"""L3 promote dry-run — single tick, no real WS subscribe mutation.
+"""L3 promote dry-run — single tick with every mutation disabled.
 
 Used by `make l3-promote-dry-run` (Phase 05 Plan 05-05 Task 4).
 
 Runs `polyarb.observation.l3_promote.promote_run` once against the prod
-Supabase candidate set, but swaps in a no-op consumer so no real
-add_subscriptions / remove_subscriptions call leaves the box. Prints
-WOULD-add / WOULD-remove + the resulting sorted active set so the
-operator can sanity-check the L3 selection logic without touching prod
-WS state.
+Supabase candidate set with ``apply_mutations=False``. The promoter may read
+TOB and market identity, but cannot call WS methods, update candidates, or
+mutate its module state/freshness anchors.
 
 Prerequisites:
 - `.env` (or environment) provides POLYARB_SUPABASE_URL + service-role key
@@ -54,13 +52,10 @@ async def _main() -> int:
         settings=settings,
         ws_consumer=consumer,
         recipe_yaml_path=recipe,
+        apply_mutations=False,
     )
     print(f"\npromote_run result: {result}")
-    print(
-        "_l3_active_set after dry-run: "
-        f"{sorted(l3_promote.get_l3_active_set())}"
-    )
-    print(f"_l3_active_count: {l3_promote.get_l3_active_count()}")
+    print(f"proposed_active: {result.get('proposed_active', [])}")
     return 0
 
 

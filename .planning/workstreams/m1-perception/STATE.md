@@ -2,26 +2,26 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
-current_phase: 05.3
-status: executing
-stopped_at: Phase 05.3 Plan 01 ready for local RED tests
-last_updated: "2026-07-20T16:54:25+08:00"
+current_phase: 05
+status: awaiting_production_authorization
+stopped_at: Phase 05.3 local complete; Alembic 006 and L1/L2 deploy require separate authorization
+last_updated: "2026-07-20T17:53:35+08:00"
 last_activity: 2026-07-20
 progress:
   total_phases: 12
-  completed_phases: 9
+  completed_phases: 10
   total_plans: 61
-  completed_plans: 56
-  percent: 92
+  completed_plans: 60
+  percent: 98
 ---
 
 # M1 Perception — Current State
 
 ## Current Position
 
-- **Phase:** 05.3 — L3 prerequisite repair
-- **Plan:** 05.3-01 — durable Yes/No token projection
-- **Status:** Written design approved; four-plan local TDD execution registered. Phase 05 soak remains blocked at production `0/10`.
+- **Phase:** 05 — WS book prices
+- **Plan:** 05-06 — production L3 proof and 24-hour soak
+- **Status:** Phase 05.3 is locally complete and fully green. Production remains unchanged at the last observed `0/10`; Alembic 006 and deployment require separate authorization.
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -135,17 +135,17 @@ The next first broken link is L3 promotion. Read-only evidence shows:
 - production schema contains `market_id` and `yes_token_id` but not `asset_id`
   or `no_token_id`; `_fetch_market_token_map` queries both missing columns.
 
-Therefore the current 10-token contract is structurally unreachable even after
-candidate diversity improves. A read-only 100-market feasibility sample then
-returned 100 complete books and 86 matches under the unchanged L3 recipe. Two
-smaller follow-up probes timed out at TLS handshake and were not retried. The
-approved design therefore uses a bounded 100-market seed; no threshold change is
-needed. Its written spec is awaiting user review before implementation planning.
+Phase 05.3 repaired both structural prerequisites locally: add-only Alembic 006
+projects `no_token_id`, the built-in bounded `l3-seed` supplies representative
+Yes-side books, the promoter resolves complete pairs by `yes_token_id`, and the
+dry-run is mutation-free. A read-only 100-market feasibility sample returned 100
+complete books and 86 unchanged-recipe matches. Full repository tests and local
+quality gates pass. None of these changes has been migrated or deployed.
 
 ## Remaining Work
 
-- Review the written design for two prerequisites: durable Yes/No token mapping
-  and a bounded 100-row mid-market L2 seed recipe that supplies L3-observable books.
+- Obtain explicit authorization before running production Alembic 006 or
+  deploying the L1/L2 image containing the Phase 05.3 repair.
 - Do not start the 24-hour soak until active count is exactly 10 tokens and the
   other Plan 06 prerequisites are present.
 - Production deploy remains outside the climb adapter's authorization boundary;
@@ -163,14 +163,14 @@ needed. Its written spec is awaiting user review before implementation planning.
 ## Resume
 
 ```bash
-$gsd-execute-phase 05 --ws m1-perception
+/gsd-resume-work --ws m1-perception
 ```
 
 ## Session Continuity
 
-- **Last session:** 2026-07-20 15:10 (Asia/Shanghai)
-- **Stopped at:** Approved L3 prerequisite design written; written-spec review required.
-- **Proceeding to:** After spec review, write the implementation plan and TDD the local repair; stop again before production migration/deploy.
+- **Last session:** 2026-07-20 17:53 (Asia/Shanghai)
+- **Stopped at:** Phase 05.3 local closure; production Alembic 006/deploy not authorized.
+- **Proceeding to:** With explicit authorization, migrate then deploy and prove `10/10` plus a real book-level write before starting the 24-hour soak.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-06-PLAN.md`
 
 ## Accumulated Context

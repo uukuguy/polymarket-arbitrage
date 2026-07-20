@@ -1,6 +1,6 @@
 # 当前项目状态
 
-> 唯一当前状态入口。最后核验：2026-07-20（Phase 05.1 当前链恢复并关闭）。
+> 唯一当前状态入口。最后核验：2026-07-20（Phase 05.3 本地闭环）。
 > `JOURNAL.md` 是追加式历史；其中旧 `[NEXT]` 均不代表当前任务。
 
 稳定的使用流程、健康语义和命令安全分级见
@@ -9,8 +9,8 @@
 ## 一句话结论
 
 这是一个 L1 快照新鲜、L2 durable chain 当前严格健康、paper 账本可用的研发系统。
-Phase 05.1 已用自然 quiet-refresh、空投影根因修复、自然恢复和 258 秒重验关闭；当前
-snapshot 574 有 1942 个市场，L2 有 3 个候选且 strict `/health` 为 HTTP 200。但 L3 仍为
+Phase 05.1 已关闭，Phase 05.3 的 token-pair、代表性 seed、Yes-keyed promotion 与无副作用
+dry-run 已在本地通过全仓质量门。但这些变更尚未迁移/部署，线上 L3 的最后证据仍为
 `0/10`，机会 feed 生产仍为 HTTP 503，所以**感知底座部分可用，L3/机会生产未 ready，
 还不是可以投入真实资金运行的套利产品**。
 
@@ -20,7 +20,7 @@ snapshot 574 有 1942 个市场，L2 有 3 个候选且 strict `/health` 为 HTT
 |---|---|---|
 | 主分支 `main` | M2 Phase 2–9 已集成并部署 | 当前交付主线 |
 | M1 L1 Fly 服务 | 39 天 stale 根因已修复；snapshot 恢复到分钟级，Supabase pass | 可作为 M2 机会发现输入 |
-| M1 L2 Fly 服务 | snapshot 574 后自然恢复 3 个候选；258s 窗口 10/10 HTTP 200，游标 0、listener listening，同实例未变 | L2 durable chain 当前可用；L3 `0/10` 已定位为 candidate seed + token-map schema 双断点 |
+| M1 L2 Fly 服务 | durable chain 已重验；Phase 05.3 本地修复候选 seed + token-map 双断点，尚未部署 | L2 当前基线可用；线上 L3 最后证据仍为 `0/10` |
 | M2 paper execution/accounting | Phase 2–8、H-001～H-006 已通过本地质量门 | 可用于本地模拟、账本和恢复测试 |
 | M2 真实组合套利 | 本地已实现 known-universe quote complete-run collector/scanner；最近生产请求 HTTP 503 | 生产当前有条件/未 ready；H-009 仍 pending，需单独授权部署/调度和时间戳化只读容量观察 |
 | M3 | 未开始 | 不可用 |
@@ -75,7 +75,7 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 按依赖顺序：
 
-1. 审阅并实施已批准的 L3 prerequisite 设计：补齐 `markets_latest.no_token_id` / 正确 yes-token lookup，并给 L2 增加上限 100 的中间价 seed 候选。只读 CLOB 样本中 100/100 book 完整、86/100 在原阈值下合格；无需放宽 L3 recipe。只有达到锁定的 5 市场/10 token 后才能开始 24h soak。生产迁移/部署仍需单独授权。
+1. Phase 05.3 本地实现已完成。下一步需单独授权生产 Alembic 006 与 L1/L2 部署，然后证明锁定的 5 市场/10 token 和真实 book-level 写入；只有这些成立后才能开始 24h soak。只读样本为 100/100 book 完整、86/100 在原阈值下合格，无需放宽 recipe。
 2. H-009 本地实现保持 pending：先取得**生产部署/调度的单独授权**，再进行**时间戳化只读容量观察**；之后仍须积累重复 complete run、可解析 exit=0 契约和不可变证据，才可评估 producer cadence/SLA。没有这些证据，HTTP 503 绝不等于零机会。
 3. 实现经过明确授权的 Polymarket order/fill adapter、认证、allowance、限额与 kill switch。
 4. 通过 paper→小额 live 质量门后，才讨论真实资金运行。
@@ -89,13 +89,12 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 ## 当前下一步
 
-Phase 05 Plan 06 的只读诊断已完成：最近 1h 只有 3 个 near-end TOB asset，两个
-spread≈0.998、一个不完整，L3 recipe 命中 0；同时 production `markets_latest` 只有
-`yes_token_id`，而 promoter 错查不存在的 `asset_id/no_token_id`。推荐设计已获继续执行授权并写入
-`docs/superpowers/specs/2026-07-20-m1-l3-prerequisite-repair-design.md`，且书面规格已获批准。
-Phase 05.3 四个本地 TDD plan 已注册，当前从 05.3-01 token projection 开始。24h soak 必须从
-`l3:active_count=10` 开始，未经单独授权不迁移/部署，不改变 N=5 阈值。
+Phase 05.3 四个本地 TDD plan 已全部完成：Alembic 006/12 列投影、`l3-seed`、
+Yes-keyed 双 token fail-closed promotion、mutation-free dry-run 均落地；focused 81 tests 和
+全仓 pytest 通过。下一步是明确授权后的生产迁移与部署，再现场证明
+`l3:active_count=10` 和真实 book-level 写入。当前没有执行迁移、部署或 24h soak，N=5
+与 spread/depth/recency 阈值均未改变。
 
 ```bash
-/gsd-execute-phase 05.3 --ws m1-perception
+/gsd-resume-work --ws m1-perception
 ```

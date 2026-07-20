@@ -36,7 +36,7 @@
 - Modify `tests/m1-perception/test_l3_promoter.py`: production-shaped token lookup, 5→10 proof, and incomplete/duplicate fail-closed cases.
 - Modify `scripts/l3_promote_dry_run.py`: invoke `promote_run(..., apply_mutations=False)` and print proposed rather than applied state.
 - Create `tests/m1-perception/test_l3_promote_dry_run.py`: process-level dry-run contract.
-- Create `docs/learning/12-L3-候选与双Token.md` and modify `docs/learning/00-INDEX.md`: explain observation coverage vs promotion and the Yes/No identity chain.
+- Create `docs/learning/21-L3-候选与双Token.md` and modify `docs/learning/00-INDEX.md`: explain observation coverage vs promotion and the Yes/No identity chain. Sequence 21 is required because 12–20 already exist.
 
 ## Execution registration
 
@@ -60,7 +60,7 @@ The four GSD plan pointers map one-to-one to Tasks 1–4 below. Run
 - Produces: nullable `markets_latest.no_token_id`, 12-column `_NARROW_MARKET_COLUMNS`, and a temp `markets.no_token_id` populated from the narrow row.
 - Consumes: existing normalizer-shaped `dict` rows containing `yes_token_id` and `no_token_id`.
 
-- [ ] **Step 1: Write failing schema and projection tests**
+- [x] **Step 1: Write failing schema and projection tests**
 
 Create `tests/alembic/test_006.py` with static assertions for `revision = "006"`,
 `down_revision = "005"`, `op.add_column("markets_latest", ...)`, nullable
@@ -94,7 +94,7 @@ def test_build_temp_db_preserves_token_pair() -> None:
         os.unlink(tmp)
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -105,7 +105,7 @@ uv run pytest tests/alembic/test_006.py tests/storage/test_supabase_mirror.py te
 Expected: failures because revision 006 is absent, the projection has 11 keys,
 and the temp DB currently NULL-fills `no_token_id`.
 
-- [ ] **Step 3: Implement the minimal durable projection**
+- [x] **Step 3: Implement the minimal durable projection**
 
 Create the migration with:
 
@@ -129,7 +129,7 @@ Append `"no_token_id"` to `_NARROW_MARKET_COLUMNS`. Add
 `"no_token_id": "no_token_id"` to `_NARROW_TO_MARKETS` and remove it from
 `_NULL_FILLED_COLS`.
 
-- [ ] **Step 4: Run GREEN and regression tests**
+- [x] **Step 4: Run GREEN and regression tests**
 
 Run:
 
@@ -140,7 +140,7 @@ uv run pytest tests/alembic/test_006.py tests/storage/test_supabase_mirror.py te
 Expected: all static/projection tests pass; Docker-dependent replay either passes
 or reports its existing explicit skip when Docker is unavailable.
 
-- [ ] **Step 5: Create `05.3-01-SUMMARY.md` and commit**
+- [x] **Step 5: Create `05.3-01-SUMMARY.md` and commit**
 
 Commit migration, projection, tests, and SUMMARY as:
 
@@ -160,7 +160,7 @@ git commit -m "feat(05.3-01): persist L3 token pairs"
 - Produces: `BUILTIN_RECIPES["l3-seed"]` and user entry `make scan-l3-seed`.
 - Consumes: the 12-column temp `markets` projection from Task 1.
 
-- [ ] **Step 1: Write failing seed and Make-contract tests**
+- [x] **Step 1: Write failing seed and Make-contract tests**
 
 Add a test that creates 105 qualifying rows with descending liquidity, plus rows
 at `0.099`, `0.901`, liquidity `499.99`, and missing Yes ID. Assert:
@@ -179,7 +179,7 @@ Add an overlap case where one qualifying row also matches `near-end`; assert its
 final `recipe_name == "near-end"`. Add a Makefile contract assertion that the
 `scan-l3-seed` recipe invokes `cli_observation scan --name l3-seed --verbose`.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -189,7 +189,7 @@ uv run pytest tests/observation/test_l2_candidate_refresh.py tests/test_makefile
 
 Expected: failures because the recipe and Make target do not exist.
 
-- [ ] **Step 3: Implement the built-in recipe and Make target**
+- [x] **Step 3: Implement the built-in recipe and Make target**
 
 Insert `l3-seed` before specialized built-ins:
 
@@ -217,7 +217,7 @@ scan-l3-seed:
 
 Add it to the relevant `.PHONY` declaration and `make help` discovery path.
 
-- [ ] **Step 4: Run GREEN and candidate regressions**
+- [x] **Step 4: Run GREEN and candidate regressions**
 
 Run:
 
@@ -227,7 +227,7 @@ uv run pytest tests/observation/test_l2_candidate_refresh.py tests/m1-perception
 
 Expected: all candidate, scanner, and Make contract tests pass.
 
-- [ ] **Step 5: Create `05.3-02-SUMMARY.md` and commit**
+- [x] **Step 5: Create `05.3-02-SUMMARY.md` and commit**
 
 ```bash
 git commit -m "feat(05.3-02): seed representative L3 books"
@@ -243,7 +243,7 @@ git commit -m "feat(05.3-02): seed representative L3 books"
 - Produces: `_fetch_market_token_map(client, yes_asset_ids) -> dict[str, tuple[str, str]]` keyed by the Yes token ID.
 - Consumes: selected `l2_top_of_book.asset_id` values, which are Yes token IDs, and the Task 1 production projection.
 
-- [ ] **Step 1: Write failing PostgREST and fail-closed tests**
+- [x] **Step 1: Write failing PostgREST and fail-closed tests**
 
 Update fixtures so TOB `asset_id` values equal their `yes_token_id`. Assert the
 query builder receives:
@@ -258,7 +258,7 @@ pairs. For each, assert the result has fewer than ten tokens, contains no
 synthesized fallback, and the warning names the rejected Yes asset. Retain the
 positive proof that five complete distinct pairs subscribe exactly ten tokens.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -269,7 +269,7 @@ uv run pytest tests/m1-perception/test_l3_promoter.py -k "token_map or yes_no or
 Expected: failures show the old query selects nonexistent `asset_id`, filters on
 the wrong column, and falls back to the TOB asset.
 
-- [ ] **Step 3: Implement Yes-keyed lookup and complete-pair validation**
+- [x] **Step 3: Implement Yes-keyed lookup and complete-pair validation**
 
 Replace the helper query with:
 
@@ -288,7 +288,7 @@ another selected pair. Log and skip invalid pairs; delete the old asset fallback
 Keep the existing outage freeze behavior and use Yes asset IDs for
 `l2_candidates.l3_promoted_at_ts` updates.
 
-- [ ] **Step 4: Run GREEN and health regressions**
+- [x] **Step 4: Run GREEN and health regressions**
 
 Run:
 
@@ -298,7 +298,7 @@ uv run pytest tests/m1-perception/test_l3_promoter.py tests/m1-perception/test_l
 
 Expected: all existing promoter, health, and WS-set protection tests pass.
 
-- [ ] **Step 5: Create `05.3-03-SUMMARY.md` and commit**
+- [x] **Step 5: Create `05.3-03-SUMMARY.md` and commit**
 
 ```bash
 git commit -m "fix(05.3-03): resolve L3 pairs by Yes token"
@@ -311,7 +311,7 @@ git commit -m "fix(05.3-03): resolve L3 pairs by Yes token"
 - Modify: `scripts/l3_promote_dry_run.py`
 - Create: `tests/m1-perception/test_l3_promote_dry_run.py`
 - Modify: `tests/m1-perception/test_l3_promoter.py`
-- Create: `docs/learning/12-L3-候选与双Token.md`
+- Create: `docs/learning/21-L3-候选与双Token.md`
 - Modify: `docs/learning/00-INDEX.md`
 - Modify: `.planning/JOURNAL.md`
 - Modify: `.planning/CURRENT.md`
@@ -321,7 +321,7 @@ git commit -m "fix(05.3-03): resolve L3 pairs by Yes token"
 - Produces: `promote_run(..., apply_mutations: bool = True) -> dict` and a truthful `make l3-promote-dry-run`.
 - Consumes: Task 3's proposed `added`, `removed`, and complete-pair map.
 
-- [ ] **Step 1: Write failing zero-mutation tests**
+- [x] **Step 1: Write failing zero-mutation tests**
 
 Seed every module-level field with a sentinel, invoke
 `promote_run(..., apply_mutations=False)`, and assert:
@@ -341,7 +341,7 @@ assert len(result["proposed_active"]) == 10
 Add a script test that patches `promote_run` and asserts `_main()` passes
 `apply_mutations=False` and does not report an “active set after dry-run”.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -352,7 +352,7 @@ uv run pytest tests/m1-perception/test_l3_promoter.py tests/m1-perception/test_l
 Expected: failure because `promote_run` has no apply boundary and currently
 mutates the mirror/global anchors.
 
-- [ ] **Step 3: Implement the explicit apply boundary**
+- [x] **Step 3: Implement the explicit apply boundary**
 
 Add the keyword-only parameter with default `True`. Compute reads, recipe output,
 pair validation, and proposed diffs in both modes. Guard all assignments to
@@ -373,7 +373,7 @@ Update the script to pass `apply_mutations=False` and label the output
 `proposed_active`; retain the Make target name and clarify that both WS and
 Supabase mutations are disabled.
 
-- [ ] **Step 4: Run focused GREEN, lint, and full repository gates**
+- [x] **Step 4: Run focused GREEN, lint, and full repository gates**
 
 Run in order:
 
@@ -388,7 +388,7 @@ git diff --check
 
 Expected: zero failures/errors, with only environment-declared skips/xfails.
 
-- [ ] **Step 5: Write the teaching document and close local planning artifacts**
+- [x] **Step 5: Write the teaching document and close local planning artifacts**
 
 The teaching document must contain: a 30-second model, the full L1→L2→L3 token
 flow with current file/line references, why observation seed is not promotion,
@@ -399,7 +399,7 @@ Create `05.3-04-SUMMARY.md`, `05.3-LEARNINGS.md`, and a local validation artifac
 Mark H-010 confirmed only after the fresh full gates above produce a score of 100;
 do not attach production evidence or claim the Phase 05 soak passed.
 
-- [ ] **Step 6: Commit local closure**
+- [x] **Step 6: Commit local closure**
 
 ```bash
 git commit -m "fix(05.3-04): make L3 dry-run mutation-free"
