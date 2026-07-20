@@ -4017,3 +4017,34 @@ deploy or promote H-009 from local evidence.
 Diagnose the L3 promoter chain read-only: TOB input, recipe predicates, selected
 tokens, WS projection, and book-level anchor. Stop at a deployment/24-hour time
 gate; do not lower N=5 and do not fold H-009 into this work.
+
+## SESSION 68 — 2026-07-20 (Phase 05 L3 prerequisite diagnosis)
+
+- [READ ONLY] `ohlc-spot-check` showed active `0`, promote age `219s`, and
+  book-level anchor cold-start. The promoter runs; scheduling is not the first
+  broken link.
+- [INPUT] Recent one-hour TOB had 6 rows / 3 assets. Two assets had non-null
+  yes depth and exceeded $500, but their spread was `0.998`; the third lacked a
+  valid spread/depth pair. The unchanged L3 recipe therefore matched zero rows.
+- [SEED STARVATION] All three active candidates are `near-end` markets from the
+  same Arizona primary event with mid prices `0.9935/0.0005/0.0015`. In contrast,
+  the 1942-row current universe contains 598 mid-band markets and 583 with both
+  mid-band price and liquidity >=500. L2 selection, not universe availability,
+  starves the L3 recipe.
+- [SCHEMA BUG] Production `markets_latest` has 11 columns including
+  `market_id`/`yes_token_id`, but no `asset_id` or `no_token_id`.
+  `_fetch_market_token_map` selects the two missing columns and filters by
+  `asset_id`, so five-market→ten-token expansion is structurally unreachable
+  even after recipe candidates exist.
+- [BOUNDARY] No dry-run helper was executed because its implementation calls the
+  promotion write-through despite being documented as no-op. No production
+  write, deploy, restart, secret, schema, config, or threshold change occurred.
+- [DESIGN GATE] Recommended repair combines a migration/mirror contract for
+  `no_token_id` with lookup keyed by `yes_token_id`, and a bounded mid-market
+  candidate seed. Brainstorming approval is required before behavior changes.
+
+### [NEXT — CURRENT]
+
+Approve the L3 prerequisite design, then write/commit its spec and implementation
+plan. TDD local changes may follow; production migration/deploy and 24h soak stay
+separate hard gates.

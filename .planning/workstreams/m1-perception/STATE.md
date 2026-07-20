@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: executing
-stopped_at: Phase 05 Plan 06; Phase 05.1 closed and L3 0/10 is the first strict soak blocker
-last_updated: "2026-07-20T14:50:05+08:00"
+stopped_at: Phase 05 Plan 06; L3 0/10 root-caused to candidate seed starvation plus invalid token-map schema assumptions
+last_updated: "2026-07-20T15:10:00+08:00"
 last_activity: 2026-07-20
 progress:
   total_phases: 11
@@ -125,14 +125,24 @@ The local empty-projection guards remain undeployed defense-in-depth; the actual
 production mutation source was the local test suite, which is now isolated from
 all external adapters by default.
 
-The next first broken link is L3 promotion: `l3:active_count=0/10`, no book-level
-write has ever been observed, and Phase 05 Plan 06 requires a strict five-market,
-ten-token start followed by 24 hours of evidence.
+The next first broken link is L3 promotion. Read-only evidence shows:
+
+- only three active L2 candidates, all `near-end` markets from one event;
+- recent TOB spread is about `0.998` for two and incomplete for one, so the
+  locked L3 recipe matches zero rows despite two `depth_yes_usd > 500` rows;
+- `markets_latest` has 1942 rows, including 598 mid-band and 583 mid-band plus
+  liquidity>=500 rows, so the source universe is not intrinsically starved;
+- production schema contains `market_id` and `yes_token_id` but not `asset_id`
+  or `no_token_id`; `_fetch_market_token_map` queries both missing columns.
+
+Therefore the current 10-token contract is structurally unreachable even after
+candidate diversity improves. A design approval is required before changing
+the schema contract and candidate seed behavior.
 
 ## Remaining Work
 
-- Diagnose the L3 promoter chain read-only: input TOB rows, recipe predicates,
-  candidate count, promoter logs, and health write anchors.
+- Approve a narrow design for two prerequisites: durable Yes/No token mapping
+  and a bounded mid-market L2 seed recipe that supplies L3-observable books.
 - Do not start the 24-hour soak until active count is exactly 10 tokens and the
   other Plan 06 prerequisites are present.
 - Production deploy remains outside the climb adapter's authorization boundary;
@@ -155,9 +165,9 @@ $gsd-execute-phase 05 --ws m1-perception
 
 ## Session Continuity
 
-- **Last session:** 2026-07-20 14:50 (Asia/Shanghai)
-- **Stopped at:** Phase 05.1 closed; L2 strict health restored, L3 remains `0/10`.
-- **Proceeding to:** Read-only L3 promoter chain diagnosis before any 24-hour soak or deployment request.
+- **Last session:** 2026-07-20 15:10 (Asia/Shanghai)
+- **Stopped at:** L3 prerequisite diagnosis complete; schema and candidate-seed design approval required.
+- **Proceeding to:** Write the approved design/spec, then TDD the local repair; stop again before production migration/deploy.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-06-PLAN.md`
 
 ## Accumulated Context

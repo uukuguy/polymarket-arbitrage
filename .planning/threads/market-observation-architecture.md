@@ -1055,3 +1055,21 @@ transport activity and an orderbook resnapshot:
   mutation source was the local test process, now contained, and the unchanged
   deployed chain naturally re-proved recovery. The guard remains explicitly
   "locally verified, undeployed defense-in-depth," not production evidence.
+
+### §2.9 L3 prerequisite contract: seed coverage before strict promotion (2026-07-20)
+
+- A strict L3 recipe cannot create its own observation input. If L2 candidate
+  recipes select only near-expiry extreme-price markets, L3 sees only those
+  books and `spread < 0.02` can remain unreachable even when the global market
+  universe contains hundreds of mid-band liquid markets.
+- Current evidence: three active L2 candidates all came from `near-end` in one
+  event; recent spreads were about `0.998` or incomplete. The current universe
+  had 598 mid-band rows and 583 mid-band rows with liquidity >=500. This is seed
+  starvation, not a zero-opportunity universe.
+- The five-market→ten-token contract also requires both outcome token IDs in the
+  durable projection. Production `markets_latest` exposes `market_id` and
+  `yes_token_id` only; querying `asset_id/no_token_id` is a schema-contract bug.
+- Repair ordering: first make token-pair identity durable and testable; then add
+  a bounded L2 seed selected from snapshot facts; only then calibrate/validate
+  the unchanged L3 spread/depth recipe on observed TOB data. Lowering L3
+  thresholds before supplying representative input confounds two variables.
