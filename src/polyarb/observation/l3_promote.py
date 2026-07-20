@@ -52,7 +52,7 @@ import os
 import sqlite3
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -141,7 +141,7 @@ def _fetch_latest_tob_rows_from_supabase(client: Any) -> list[dict]:
     """
     cutoff_ms = int(time.time() * 1000) - 3600 * 1000
     cutoff_iso = (
-        datetime.fromtimestamp(cutoff_ms / 1000, tz=timezone.utc)
+        datetime.fromtimestamp(cutoff_ms / 1000, tz=UTC)
         .isoformat()
         .replace("+00:00", "Z")
     )
@@ -160,29 +160,30 @@ def _fetch_latest_tob_rows_from_supabase(client: Any) -> list[dict]:
 
 
 def _fetch_market_token_map(
-    client: Any, asset_ids: list[str]
+    client: Any, yes_asset_ids: list[str]
 ) -> dict[str, tuple[str | None, str | None]]:
-    """For each L3-promoted market asset_id, fetch ``(yes_token_id, no_token_id)``
-    from ``markets_latest``.
+    """Fetch complete outcome identity for selected Yes-side TOB assets.
 
-    Phase 04 D-07 ensured ``no_token_id`` column exists (alembic 004).
-    Returns mapping ``{asset_id: (yes_token_id, no_token_id)}``; either
-    side may be ``None`` if the markets_latest row is incomplete
-    (rare; defensive).
+    ``l2_top_of_book.asset_id`` is the Yes token ID. Alembic 006 makes the
+    paired No token durable in ``markets_latest``. The returned mapping is
+    therefore keyed by the selected Yes token, not by a nonexistent market
+    ``asset_id`` column.
     """
-    if not asset_ids:
+    if not yes_asset_ids:
         return {}
     resp = (
         client.table("markets_latest")
-        .select("asset_id, yes_token_id, no_token_id")
-        .in_("asset_id", asset_ids)
+        .select("yes_token_id, no_token_id")
+        .in_("yes_token_id", yes_asset_ids)
         .execute()
     )
     out: dict[str, tuple[str | None, str | None]] = {}
     for row in resp.data or []:
-        aid = row.get("asset_id")
-        if aid:
-            out[str(aid)] = (row.get("yes_token_id"), row.get("no_token_id"))
+        yes_token_id = row.get("yes_token_id")
+        if yes_token_id:
+            key = str(yes_token_id).strip()
+            if key:
+                out[key] = (yes_token_id, row.get("no_token_id"))
     return out
 
 
@@ -205,7 +206,7 @@ def _iso_to_epoch_ms(ts_val: Any) -> int | None:
             s = ts_val.replace("Z", "+00:00")
             dt = datetime.fromisoformat(s)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return int(dt.timestamp() * 1000)
         except (ValueError, TypeError):
             return None
@@ -364,8 +365,8 @@ def _load_recipe(recipe_yaml_path: Path) -> Any:
 
 def _mirror_l3_promoted_at_ts(
     client: Any,
-    added_market_asset_ids: list[str],
-    removed_market_asset_ids: list[str],
+    added_yes_asset_ids: list[str],
+    removed_yes_asset_ids: list[str],
 ) -> None:
     """Write-through ``l2_candidates.l3_promoted_at_ts`` (Blocker #1).
 
@@ -374,27 +375,28 @@ def _mirror_l3_promoted_at_ts(
     ``_l3_active_set`` is the source of truth — this mirror only feeds the
     dashboard L3 badge (``/candidates``).
 
-    Called with MARKET asset_ids (NOT token ids). The Yes/No expansion
-    happens at WS-subscribe time; the dashboard surface is per-market.
+    Called with the Yes token IDs stored as ``l2_candidates.asset_id``. The
+    Yes/No expansion happens at WS-subscribe time; the dashboard candidate
+    surface remains keyed by the L2 Yes asset.
     """
-    if not added_market_asset_ids and not removed_market_asset_ids:
+    if not added_yes_asset_ids and not removed_yes_asset_ids:
         return
     now_iso = (
-        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        datetime.now(UTC).isoformat().replace("+00:00", "Z")
     )
     try:
-        if added_market_asset_ids:
+        if added_yes_asset_ids:
             (
                 client.table("l2_candidates")
                 .update({"l3_promoted_at_ts": now_iso})
-                .in_("asset_id", list(added_market_asset_ids))
+                .in_("asset_id", list(added_yes_asset_ids))
                 .execute()
             )
-        if removed_market_asset_ids:
+        if removed_yes_asset_ids:
             (
                 client.table("l2_candidates")
                 .update({"l3_promoted_at_ts": None})
-                .in_("asset_id", list(removed_market_asset_ids))
+                .in_("asset_id", list(removed_yes_asset_ids))
                 .execute()
             )
         sentry_sdk.add_breadcrumb(
@@ -402,12 +404,12 @@ def _mirror_l3_promoted_at_ts(
             level="info",
             message=(
                 f"l3_promoted_at_ts mirror "
-                f"+{len(added_market_asset_ids)} "
-                f"-{len(removed_market_asset_ids)}"
+                f"+{len(added_yes_asset_ids)} "
+                f"-{len(removed_yes_asset_ids)}"
             ),
             data={
-                "added": len(added_market_asset_ids),
-                "removed": len(removed_market_asset_ids),
+                "added": len(added_yes_asset_ids),
+                "removed": len(removed_yes_asset_ids),
                 "table": "l2_candidates",
             },
         )
@@ -422,8 +424,8 @@ def _mirror_l3_promoted_at_ts(
             message="l3_promoted_at_ts mirror failed",
             data={
                 "error": str(e)[:200],
-                "added": len(added_market_asset_ids),
-                "removed": len(removed_market_asset_ids),
+                "added": len(added_yes_asset_ids),
+                "removed": len(removed_yes_asset_ids),
                 "table": "l2_candidates",
             },
         )
@@ -543,8 +545,8 @@ async def promote_run(
         )
         return {"added": [], "removed": [], "skipped": "scanner-failed"}
 
-    # df row count == N=5 markets (or fewer if not enough qualify).
-    new_market_asset_ids = sorted(
+    # df row count == N=5 Yes-side TOB assets (or fewer if not enough qualify).
+    new_yes_asset_ids = sorted(
         str(aid) for aid in df["asset_id"].tolist() if aid
     )
 
@@ -559,7 +561,7 @@ async def promote_run(
 
     # ── 5) Expand 5 markets → 10 tokens (Yes+No per D-05 / Warning #13) ─
     try:
-        token_map = _fetch_market_token_map(client, new_market_asset_ids)
+        token_map = _fetch_market_token_map(client, new_yes_asset_ids)
         _last_known_market_token_map = token_map
     except Exception as e:  # noqa: BLE001
         logger.error(
@@ -574,21 +576,26 @@ async def promote_run(
         token_map = _last_known_market_token_map or {}
 
     new_token_set: set[str] = set()
-    for aid in new_market_asset_ids:
-        yes_tok, no_tok = token_map.get(aid, (None, None))
-        if yes_tok:
-            new_token_set.add(str(yes_tok))
-        if no_tok:
-            new_token_set.add(str(no_tok))
-        if aid not in token_map:
-            # Market row absent from markets_latest — use the market asset_id
-            # itself as a defensive fallback token (keeps subscribe path
-            # working; logs WARNING so the operator sees the gap).
+    accepted_yes_asset_ids: set[str] = set()
+    for yes_asset_id in new_yes_asset_ids:
+        raw_yes, raw_no = token_map.get(yes_asset_id, (None, None))
+        yes_token = str(raw_yes).strip() if raw_yes is not None else ""
+        no_token = str(raw_no).strip() if raw_no is not None else ""
+        pair = {yes_token, no_token}
+        if (
+            not yes_token
+            or not no_token
+            or yes_token != yes_asset_id
+            or len(pair) != 2
+            or bool(pair & new_token_set)
+        ):
             logger.warning(
-                f"l3-promote: market {aid} missing from markets_latest — "
-                f"using asset_id as fallback token"
+                f"l3-promote: rejecting incomplete or duplicate token pair "
+                f"for yes_asset_id={yes_asset_id}"
             )
-            new_token_set.add(aid)
+            continue
+        new_token_set.update(pair)
+        accepted_yes_asset_ids.add(yes_asset_id)
 
     # ── 6) Diff token sets + MARKET-level diff for the mirror ───────────
     added = sorted(new_token_set - _l3_active_set)
@@ -600,7 +607,7 @@ async def promote_run(
             no_tok and no_tok in _l3_active_set
         ):
             old_market_set.add(aid)
-    new_market_set: set[str] = set(new_market_asset_ids)
+    new_market_set: set[str] = accepted_yes_asset_ids
     added_markets = sorted(new_market_set - old_market_set)
     removed_markets = sorted(old_market_set - new_market_set)
 
@@ -632,18 +639,18 @@ async def promote_run(
         level="info",
         message=(
             f"promote_run ok +{len(added)} -{len(removed)} "
-            f"markets={len(new_market_asset_ids)} tokens={len(new_token_set)}"
+            f"markets={len(accepted_yes_asset_ids)} tokens={len(new_token_set)}"
         ),
         data={
             "added": len(added),
             "removed": len(removed),
-            "markets": len(new_market_asset_ids),
+            "markets": len(accepted_yes_asset_ids),
             "tokens": len(new_token_set),
         },
     )
     logger.info(
         f"l3-promote: +{len(added)} -{len(removed)} "
-        f"markets={len(new_market_asset_ids)} tokens={len(new_token_set)} "
+        f"markets={len(accepted_yes_asset_ids)} tokens={len(new_token_set)} "
         f"(chain-truth: _last_promote_at_s={_last_promote_at_s:.0f})"
     )
     return {
@@ -686,7 +693,7 @@ async def run_periodic(
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
             # stop_event signalled — exit cleanly.
             break
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass  # interval elapsed — run another tick
         try:
             await promote_run(

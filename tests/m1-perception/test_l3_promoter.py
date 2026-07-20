@@ -21,9 +21,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
-import sqlite3
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -68,6 +66,7 @@ def _make_settings(
 ) -> Any:
     """Settings with auto-detected Supabase enabled (matches conftest pattern)."""
     from pydantic import SecretStr
+
     from polyarb.config import Settings
 
     return Settings(
@@ -325,7 +324,7 @@ def _make_supabase_client_mock(
                 def __init__(self, payload: dict) -> None:
                     self._payload = payload
 
-                def in_(self, col: str, ids: list[str]) -> "_UpdateChain":
+                def in_(self, col: str, ids: list[str]) -> _UpdateChain:
                     capture.append(
                         {"payload": self._payload, "col": col, "ids": list(ids)}
                     )
@@ -344,6 +343,26 @@ def _make_supabase_client_mock(
     return client
 
 
+def test_fetch_market_token_map_queries_real_production_columns() -> None:
+    from polyarb.observation import l3_promote
+
+    table = MagicMock()
+    table.select.return_value = table
+    table.in_.return_value = table
+    table.execute.return_value = MagicMock(
+        data=[{"yes_token_id": "yes-1", "no_token_id": "no-1"}]
+    )
+    client = MagicMock()
+    client.table.return_value = table
+
+    result = l3_promote._fetch_market_token_map(client, ["yes-1"])
+
+    client.table.assert_called_once_with("markets_latest")
+    table.select.assert_called_once_with("yes_token_id, no_token_id")
+    table.in_.assert_called_once_with("yes_token_id", ["yes-1"])
+    assert result == {"yes-1": ("yes-1", "no-1")}
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Test 6 — happy path: 5 markets → 10 tokens, l2_candidates write-through
 # ────────────────────────────────────────────────────────────────────────
@@ -359,7 +378,7 @@ async def test_promote_run_happy_path_top_5_markets_expanded_to_10_tokens_yes_no
     # 5 markets passing thresholds, varying depths so ORDER BY DESC is deterministic.
     tob_rows = [
         {
-            "asset_id": f"m{i}",
+            "asset_id": f"yes_m{i}",
             "ts": now_ms - 5 * 60 * 1000,
             "best_bid": 0.50,
             "best_ask": 0.51,
@@ -407,7 +426,7 @@ async def test_promote_run_happy_path_top_5_markets_expanded_to_10_tokens_yes_no
     )
 
     token_map_rows = [
-        {"asset_id": f"m{i}", "yes_token_id": f"yes_m{i}", "no_token_id": f"no_m{i}"}
+        {"yes_token_id": f"yes_m{i}", "no_token_id": f"no_m{i}"}
         for i in range(5)
     ]
     capture_updates: list[dict] = []
@@ -451,12 +470,60 @@ async def test_promote_run_happy_path_top_5_markets_expanded_to_10_tokens_yes_no
     add_updates = [
         u for u in capture_updates if u["payload"].get("l3_promoted_at_ts") is not None
     ]
-    assert len(add_updates) == 1, f"expected 1 add-update, got {len(add_updates)}: {capture_updates}"
-    assert sorted(add_updates[0]["ids"]) == sorted(f"m{i}" for i in range(5))
+    assert len(add_updates) == 1, (
+        f"expected 1 add-update, got {len(add_updates)}: {capture_updates}"
+    )
+    assert sorted(add_updates[0]["ids"]) == sorted(f"yes_m{i}" for i in range(5))
     assert add_updates[0]["col"] == "asset_id"
     # iso string check
     iso_val = add_updates[0]["payload"]["l3_promoted_at_ts"]
     assert isinstance(iso_val, str) and "T" in iso_val and iso_val.endswith("Z")
+
+
+@pytest.mark.asyncio
+async def test_promote_run_rejects_incomplete_or_duplicate_token_pairs() -> None:
+    from polyarb.observation import l3_promote
+
+    now_ms = int(time.time() * 1000)
+    tob_rows = [
+        {
+            "asset_id": f"yes_{i}",
+            "ts": now_ms - 60_000,
+            "best_bid": 0.50,
+            "best_ask": 0.51,
+            "spread": 0.01,
+            "mid_price": 0.505,
+            "depth_yes_usd": 5_000.0 - i,
+            "depth_no_usd": 5_000.0,
+        }
+        for i in range(5)
+    ]
+    token_rows = [
+        {"yes_token_id": "yes_0", "no_token_id": "no_0"},
+        {"yes_token_id": "yes_1", "no_token_id": "no_0"},
+        {"yes_token_id": "yes_2", "no_token_id": None},
+        {"yes_token_id": "yes_3", "no_token_id": "yes_3"},
+        # yes_4 is intentionally missing.
+    ]
+    consumer = MagicMock()
+    consumer.add_subscriptions = AsyncMock(return_value=True)
+    consumer.remove_subscriptions = AsyncMock(return_value=True)
+
+    with patch(
+        "polyarb.observation.l3_promote.create_client",
+        return_value=_make_supabase_client_mock(tob_rows, token_rows),
+    ):
+        await l3_promote.promote_run(
+            settings=_make_settings(),
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+        )
+
+    assert l3_promote._l3_active_set == {"yes_0", "no_0"}
+    assert "yes_1" not in l3_promote._l3_active_set
+    assert "yes_2" not in l3_promote._l3_active_set
+    assert "yes_3" not in l3_promote._l3_active_set
+    assert "yes_4" not in l3_promote._l3_active_set
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -475,8 +542,8 @@ async def test_promote_run_diff_calls_add_AND_remove_with_yes_no_expansion() -> 
     # so the promoter knows the old token→market mapping for the diff.
     l3_promote._l3_active_set = {"yes_old1", "no_old1", "yes_old2", "no_old2"}
     l3_promote._last_known_market_token_map = {
-        "old1": ("yes_old1", "no_old1"),
-        "old2": ("yes_old2", "no_old2"),
+        "yes_old1": ("yes_old1", "no_old1"),
+        "yes_old2": ("yes_old2", "no_old2"),
     }
 
     # New top-5: old1 + 4 new markets.
@@ -491,14 +558,20 @@ async def test_promote_run_diff_calls_add_AND_remove_with_yes_no_expansion() -> 
             "depth_yes_usd": d,
             "depth_no_usd": 5000.0,
         }
-        for aid, d in [("old1", 5000), ("new1", 4900), ("new2", 4800), ("new3", 4700), ("new4", 4600)]
+        for aid, d in [
+            ("yes_old1", 5000),
+            ("yes_new1", 4900),
+            ("yes_new2", 4800),
+            ("yes_new3", 4700),
+            ("yes_new4", 4600),
+        ]
     ]
     token_map_rows = [
-        {"asset_id": "old1", "yes_token_id": "yes_old1", "no_token_id": "no_old1"},
-        {"asset_id": "new1", "yes_token_id": "yes_new1", "no_token_id": "no_new1"},
-        {"asset_id": "new2", "yes_token_id": "yes_new2", "no_token_id": "no_new2"},
-        {"asset_id": "new3", "yes_token_id": "yes_new3", "no_token_id": "no_new3"},
-        {"asset_id": "new4", "yes_token_id": "yes_new4", "no_token_id": "no_new4"},
+        {"yes_token_id": "yes_old1", "no_token_id": "no_old1"},
+        {"yes_token_id": "yes_new1", "no_token_id": "no_new1"},
+        {"yes_token_id": "yes_new2", "no_token_id": "no_new2"},
+        {"yes_token_id": "yes_new3", "no_token_id": "no_new3"},
+        {"yes_token_id": "yes_new4", "no_token_id": "no_new4"},
     ]
     capture_updates: list[dict] = []
     client = _make_supabase_client_mock(tob_rows, token_map_rows, capture_updates)
@@ -542,12 +615,12 @@ async def test_promote_run_writes_l3_promoted_at_ts_on_add_and_clears_on_remove(
 
     # Seed: market m1 active.
     l3_promote._l3_active_set = {"yes_m1", "no_m1"}
-    l3_promote._last_known_market_token_map = {"m1": ("yes_m1", "no_m1")}
+    l3_promote._last_known_market_token_map = {"yes_m1": ("yes_m1", "no_m1")}
 
     # New top: just m2. m1 removed.
     tob_rows = [
         {
-            "asset_id": "m2",
+            "asset_id": "yes_m2",
             "ts": now_ms - 5 * 60 * 1000,
             "best_bid": 0.50,
             "best_ask": 0.51,
@@ -558,7 +631,7 @@ async def test_promote_run_writes_l3_promoted_at_ts_on_add_and_clears_on_remove(
         }
     ]
     token_map_rows = [
-        {"asset_id": "m2", "yes_token_id": "yes_m2", "no_token_id": "no_m2"}
+        {"yes_token_id": "yes_m2", "no_token_id": "no_m2"}
     ]
     capture_updates: list[dict] = []
     client = _make_supabase_client_mock(tob_rows, token_map_rows, capture_updates)
@@ -584,9 +657,9 @@ async def test_promote_run_writes_l3_promoted_at_ts_on_add_and_clears_on_remove(
         u for u in capture_updates if u["payload"].get("l3_promoted_at_ts") is None
     ]
     assert len(add_ups) == 1
-    assert add_ups[0]["ids"] == ["m2"]
+    assert add_ups[0]["ids"] == ["yes_m2"]
     assert len(rm_ups) == 1
-    assert rm_ups[0]["ids"] == ["m1"]
+    assert rm_ups[0]["ids"] == ["yes_m1"]
 
     # Lint: helper contains `category="l2-mirror"` (chain-truth breadcrumb).
     src = inspect.getsource(l3_promote._mirror_l3_promoted_at_ts)
@@ -606,11 +679,11 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
     now_ms = int(time.time() * 1000)
 
     l3_promote._l3_active_set = {"yes_m1", "no_m1"}
-    l3_promote._last_known_market_token_map = {"m1": ("yes_m1", "no_m1")}
+    l3_promote._last_known_market_token_map = {"yes_m1": ("yes_m1", "no_m1")}
 
     tob_rows = [
         {
-            "asset_id": "m2",
+            "asset_id": "yes_m2",
             "ts": now_ms - 5 * 60 * 1000,
             "best_bid": 0.50,
             "best_ask": 0.51,
@@ -621,7 +694,7 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
         }
     ]
     token_map_rows = [
-        {"asset_id": "m2", "yes_token_id": "yes_m2", "no_token_id": "no_m2"}
+        {"yes_token_id": "yes_m2", "no_token_id": "no_m2"}
     ]
 
     # Build a client where l2_candidates update.in_().execute() raises.
@@ -642,7 +715,7 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
                 def __init__(self, _payload: dict) -> None:
                     pass
 
-                def in_(self, _col: str, _ids: list[str]) -> "_UpdateChainFails":
+                def in_(self, _col: str, _ids: list[str]) -> _UpdateChainFails:
                     return self
 
                 def execute(self) -> Any:
