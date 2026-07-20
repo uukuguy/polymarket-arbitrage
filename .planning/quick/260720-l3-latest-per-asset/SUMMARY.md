@@ -55,12 +55,18 @@ five-row recipe limit maps to five distinct markets.
 - Focused L3 promoter/dry-run tests: 20 passed.
 - Ruff and `git diff --check`: passed.
 - Full repository: 1432 passed, 1 skipped, 1 xfailed.
-- Production proof is completed after deployment before operational closure.
+- L2 release 36: exact `10/10`, promote age 18.0s, book-write age 1.3s.
+- Database after release: five promoted Yes markets, ten token identities, 200
+  book-level rows over eight active tokens at the immediate read.
+- That startup proof was later bounded: release 36's second tick fell to 8/10
+  because a newly subscribed No row entered the Yes-market recipe. Quick task
+  `260720-l3-yes-side-filter` repaired and re-verified the feedback loop.
 
 ## Production Boundary
 
-No recipe threshold, trade path, funds, or exchange order changed. The 24-hour
-soak remains separate from this immediate rollout proof.
+No recipe threshold, trade path, funds, or exchange order changed. Production
+image digest is `sha256:708d327fd0069e77b0aa32834fde0657ea3e1208b7e6a6b372101316453e926e`;
+the 24-hour soak remains separate from this immediate rollout proof.
 
 ---
 *Quick task: 260720-l3-latest-per-asset*

@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
-status: production_rollout_authorized
-stopped_at: Production rollout preflight before Alembic 006
-last_updated: "2026-07-20T18:07:35+08:00"
+status: production_rollout_verified_awaiting_soak
+stopped_at: Alembic 006 and L1/L2 rollout verified; 10/10 plus real book writes proven
+last_updated: "2026-07-20T19:02:00+08:00"
 last_activity: 2026-07-20
 progress:
   total_phases: 12
@@ -21,7 +21,7 @@ progress:
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** User authorized production Alembic 006 and L1/L2 deployment, excluding real trading. Preflight is in progress; production remains unchanged until each step is verified.
+- **Status:** Production Alembic 006 and L1/L2 rollout are verified. L3 is exactly 10/10 with fresh real book-level writes; the separate 24-hour soak has not started.
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -115,41 +115,39 @@ progress:
   `613.5s`, mirror age `834.3s`, candidate set `0`, cursor lag `0`. L2 logs show
   a successful empty `markets_latest` fetch immediately before candidate `3→0`.
 
-## CURRENT-CALL — Phase 05 strict L3 gate
+## CURRENT-CALL — Phase 05 production prerequisite passed
 
-Phase 05.1 is closed. Snapshot 574 naturally restored 1942 `markets_latest`
-rows; the unchanged L2 instance restored three candidates, cursor lag zero, and
-strict HTTP 200. The final current-chain window ran for 258 seconds with 10/10
-HTTP 200 responses, and a real TOB write reset mirror freshness after the window.
-The local empty-projection guards remain undeployed defense-in-depth; the actual
-production mutation source was the local test suite, which is now isolated from
-all external adapters by default.
+Production Alembic is revision `006 (head)`. L1 release 127 produced snapshot
+578 with 1946 mirrored markets and `no_token_id` populated for 1946/1946 rows.
+L2 release 37 runs image `deployment-01KXZJHS9QT8T6X0J33KVPTB5V`, digest
+`sha256:5da8e954897f60cf05f9d6664e99a15247d46a2bd4fd0edbb433c200af8b412c`,
+on machine `85e647c4eed598`, instance `01KXZJKY9SKEJAY2DD8MMPNB2E`.
 
-The next first broken link is L3 promotion. Read-only evidence shows:
+The rollout exposed and repaired three production-only observation bugs without
+changing locked thresholds:
 
-- only three active L2 candidates, all `near-end` markets from one event;
-- recent TOB spread is about `0.998` for two and incomplete for one, so the
-  locked L3 recipe matches zero rows despite two `depth_yes_usd > 500` rows;
-- `markets_latest` has 1942 rows, including 598 mid-band and 583 mid-band plus
-  liquidity>=500 rows, so the source universe is not intrinsically starved;
-- production schema contains `market_id` and `yes_token_id` but not `asset_id`
-  or `no_token_id`; `_fetch_market_token_map` queries both missing columns.
+- Polymarket book arrays were farthest-first; index zero produced false spreads
+  near 0.998. BUY/SELL levels are now price-ranked before TOB, depth, and full
+  book projection (`7ccd2da`).
+- The promoter handed repeated time-series rows to a five-row recipe limit. It
+  now retains the newest row per asset before selection (`57d3fc0`).
+- After release 36 subscribed both outcomes, a high-depth No row consumed a
+  Yes-market recipe slot and the second tick fell `10→8`. The recipe input now
+  resolves authoritative `yes_token_id` identity before LIMIT (`9451b4b`).
 
-Phase 05.3 repaired both structural prerequisites locally: add-only Alembic 006
-projects `no_token_id`, the built-in bounded `l3-seed` supplies representative
-Yes-side books, the promoter resolves complete pairs by `yes_token_id`, and the
-dry-run is mutation-free. A read-only 100-market feasibility sample returned 100
-complete books and 86 unchanged-recipe matches. Full repository tests and local
-quality gates pass. None of these changes has been migrated or deployed.
+Release 37 started at 10/10, then its `11:00:20Z` second real promoter tick logged
+`+0 -0 markets=5 tokens=10`. The `11:00:50Z` health read remained 10/10 with
+promote age `30.0s`, book-level write age `59.3s`, cursor lag `0`, and 108 total
+subscriptions. Production DB proof after the release showed five promoted Yes
+markets, ten complete Yes/No tokens, and 280 real `l2_book_levels` rows over
+eight immediately active tokens. The prerequisite is passed across the feedback
+tick; this is not yet the 24-hour stability verdict.
 
 ## Remaining Work
 
-- Obtain explicit authorization before running production Alembic 006 or
-  deploying the L1/L2 image containing the Phase 05.3 repair.
-- Do not start the 24-hour soak until active count is exactly 10 tokens and the
-  other Plan 06 prerequisites are present.
-- Production deploy remains outside the climb adapter's authorization boundary;
-  preserve strict N=5 rather than changing thresholds to manufacture readiness.
+- Start a fresh Phase 05 Plan 06 24-hour soak only as an explicit next operation;
+  sample strict 10-token health and per-market book/OHLC coverage every ~6 hours.
+- Preserve strict N=5 and the unchanged spread/depth/recency thresholds.
 - Keep H-009 pending until separately authorized production deployment/scheduling
   and timestamped capacity evidence; Phase 05.1 completion does not promote it.
 
@@ -168,9 +166,9 @@ quality gates pass. None of these changes has been migrated or deployed.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-20 18:07 (Asia/Shanghai)
-- **Stopped at:** Production rollout preflight before Alembic 006.
-- **Proceeding to:** Apply and verify Alembic 006, deploy L1/L2, then prove `10/10` plus a real book-level write; do not start the 24-hour soak implicitly.
+- **Last session:** 2026-07-20 19:02 (Asia/Shanghai)
+- **Stopped at:** Production rollout prerequisite verified (`10/10` + real book-level write).
+- **Proceeding to:** Start and monitor the separate 24-hour Phase 05 Plan 06 soak when explicitly continued.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-06-PLAN.md`
 
 ## Accumulated Context

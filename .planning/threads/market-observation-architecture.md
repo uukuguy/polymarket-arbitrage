@@ -1087,3 +1087,15 @@ transport activity and an orderbook resnapshot:
   post-run state. Full local gates passing does not update the production chain:
   Alembic 006, deployment, `10/10`, real book-level writes, and soak evidence are
   still distinct authorization/evidence steps.
+- The 2026-07-20 rollout supplied those first four production steps and exposed
+  two further ingestion truths. Polymarket book arrays can be farthest-first, so
+  TOB/depth/full levels must rank BUY descending and SELL ascending rather than
+  trust index zero. Recent TOB is a time series, so a recipe `limit: 5` must run
+  after newest-row-per-asset collapse or duplicate snapshots under-fill distinct
+  markets. Release 36 reached five markets/ten tokens at startup but fell to
+  four/eight on its next tick because its newly subscribed No-side TOB row fed
+  back into the Yes-market recipe limit. The third boundary is therefore outcome
+  identity: resolve `markets_latest.yes_token_id` before LIMIT, not after. Exact
+  release 37 then stayed five/ten across the second real tick and wrote 280
+  release-local depth rows. This proves feedback-loop reachability, not 24-hour
+  stability.

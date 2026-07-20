@@ -4125,3 +4125,58 @@ L2 temp token-pair projection.
 With separate production authorization, apply Alembic 006, deploy the Phase 05.3
 L1/L2 image, then prove ten distinct active tokens and a real book-level write
 before starting a fresh 24-hour Phase 05 Plan 06 soak.
+
+## SESSION 72 — 2026-07-20 (Alembic 006 + L1/L2 rollout; L3 prerequisite green)
+
+- [AUTHORIZED] User explicitly authorized production Alembic 006 and L1/L2
+  deployment, excluding real trading. The 24-hour soak remained a separate gate.
+- [MIGRATION] `make supabase-migrate` advanced production `005 → 006`; Alembic
+  reports `006 (head)`, and PostgREST exposes `markets_latest.no_token_id`.
+- [L1] Release 127 deployed. Snapshot 578 mirrored 1946 rows, all 1946 with a
+  non-null No token projection.
+- [L2 DISCOVERY 1] The first rollout subscribed 103 assets but still promoted
+  0/10. Direct comparison of one stored row with the same live CLOB book proved
+  upstream arrays were farthest-first: stored 0.001/0.999 versus executable
+  0.369/0.377. TDD repair `7ccd2da` now ranks BUY descending and SELL ascending
+  for TOB, top-10 depth, and `l2_book_levels`.
+- [L2 DISCOVERY 2] Production-backed dry-run then reached only three markets/six
+  tokens because duplicate snapshots of one asset consumed a five-row recipe
+  limit. TDD repair `57d3fc0` retains the newest row per asset before scanning;
+  mutation-free dry-run became exactly five markets/ten tokens without threshold
+  changes.
+- [VERIFY LOCAL] Final full repository result: 1433 passed, 1 skipped, 1 xfailed.
+  Ruff, M1 manual, climb, planning-status, and diff checks passed.
+- [INTERMEDIATE] L2 release 36 ran image
+  `deployment-01KXZHNYNB0PPP156KAHHM59XA`, digest
+  `sha256:708d327fd0069e77b0aa32834fde0657ea3e1208b7e6a6b372101316453e926e`,
+  machine `85e647c4eed598`, instance `01KXZHQX8HDHC7H6HY6KY78WTN`.
+  At `10:40:22Z`, `/health` was HTTP 200 with active 10/10, promote age 18.0s,
+  book-write age 1.3s, cursor lag 0, 103 candidates, and 108 subscriptions; its
+  next real tick fell to 8/10, so the startup reading was not accepted alone.
+- [L2 DISCOVERY 3] Once both outcomes were subscribed, a high-depth No token
+  fed back into TOB and consumed one of the five Yes-market recipe slots. TDD
+  repair `9451b4b` resolves recent assets through authoritative
+  `markets_latest.yes_token_id` before LIMIT; mutation-free dry-run returned 10.
+- [VERIFY PROD] L2 release 37 runs image
+  `deployment-01KXZJHS9QT8T6X0J33KVPTB5V`, digest
+  `sha256:5da8e954897f60cf05f9d6664e99a15247d46a2bd4fd0edbb433c200af8b412c`,
+  machine `85e647c4eed598`, instance `01KXZJKY9SKEJAY2DD8MMPNB2E`. Its
+  `11:00:20Z` second real tick logged `+0 -0 markets=5 tokens=10`; at
+  `11:00:50Z` health remained 10/10 with promote age 30.0s, book-write age
+  59.3s, cursor lag 0, and 108 subscriptions.
+- [CHAIN TRUTH] Production DB showed five promoted Yes markets, ten complete
+  token identities, 280 release-local real book rows over eight immediately
+  active tokens, and executable level-one prices. The feedback-loop prerequisite
+  is green across two ticks; the 24-hour stability claim remains unmade.
+- [BOUNDARY] No real trade, order, fund, secret/config change, external
+  submission, or 24-hour soak occurred. Immediate reachability is green; Phase
+  05 remains open until the strict 24-hour stability verdict.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05 --ws m1-perception
+```
+
+Start the explicit Phase 05 Plan 06 24-hour soak, recording exact-instance
+health, five-market book/OHLC coverage, and watchdog evidence every ~6 hours.

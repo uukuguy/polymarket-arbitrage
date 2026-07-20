@@ -78,9 +78,10 @@ annotation. Pyright is not a repository gate for this task.
 
 ## Production Boundary
 
-This summary covers the local repair. The authorized L2 redeploy and immediate
-production proof are recorded in Phase 05 operational state after they run.
-No trading path, funds, exchange order, or 24-hour soak was started here.
+The repair shipped in L2 releases 35 and 36. Release 36 production TOB showed
+all five promoted Yes markets at spread 0.01, and real level-one rows included
+adjacent BUY 0.75 / SELL 0.76. No trading path, funds, exchange order, or
+24-hour soak was started here.
 
 ---
 *Quick task: 260720-book-order-normalization*

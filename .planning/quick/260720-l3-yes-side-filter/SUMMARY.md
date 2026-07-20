@@ -56,12 +56,15 @@ into market selection.
 - Focused promoter/dry-run suite: 21 passed.
 - Ruff: passed.
 - Full repository: 1433 passed, 1 skipped, 1 xfailed.
-- Two-tick production proof runs after deployment before final closure.
+- Release 37 startup 10/10 and second tick `+0 -0 markets=5 tokens=10`.
+- At the post-tick read: promote age 30.0s, book-write age 59.3s, cursor lag 0;
+  280 release-local book rows existed over eight active tokens.
 
 ## Production Boundary
 
-No trading, funds, recipe threshold, secret, or config changed. The 24-hour soak
-remains separate from the two-tick rollout prerequisite.
+No trading, funds, recipe threshold, secret, or config changed. Production image
+digest is `sha256:5da8e954897f60cf05f9d6664e99a15247d46a2bd4fd0edbb433c200af8b412c`;
+the 24-hour soak remains separate from the two-tick rollout prerequisite.
 
 ---
 *Quick task: 260720-l3-yes-side-filter*
