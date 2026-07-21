@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
-status: executing
-stopped_at: Phase 05 Plan 06 Task 2 resumed; elapsed soak remains NOT-CLOSED pending late diagnostic and a new 24-hour window
-last_updated: "2026-07-21T22:16:00+08:00"
+status: paused_at_re_soak_t0_gate
+stopped_at: Late diagnostic complete; new T+0 candidate rejected because book freshness was 253.8s against the strict 120s gate
+last_updated: "2026-07-21T22:22:38+08:00"
 last_activity: 2026-07-21
 progress:
   total_phases: 12
@@ -19,15 +19,14 @@ progress:
 
 ## Current Position
 
-Phase: 05 (ws-book-prices) — EXECUTING
+Phase: 05 (ws-book-prices) — PAUSED
 Plan: 6 of 6
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Plan 05-06 Task 2 is executing. The elapsed window remains
-  NOT-CLOSED because T+6/T+12/T+18 were missed and T+24 was unobserved at the
-  `2026-07-21T14:01:34Z` handoff. A late diagnostic cannot backfill those
-  minimum-throughout-window samples; a new re-soak is required.
+- **Status:** Plan 05-06 Task 2 is paused at the strict re-soak T+0 gate. The
+  late diagnostic is complete, but the `2026-07-21T14:16:50Z` candidate had
+  book freshness `253.8s`, so no new 24-hour clock started.
 
 - **Active workstream:** `m1-perception`
 
@@ -193,14 +192,14 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-21 22:08 (Asia/Shanghai)
-- **Stopped at:** Session resumed from the structured handoff; the elapsed formal
-  window remains NOT-CLOSED because T+6/T+12/T+18 were missed and T+24 was not
-  observed at handoff.
+- **Last session:** 2026-07-21 22:22 (Asia/Shanghai)
+- **Stopped at:** Late diagnostic completed. The first new T+0 candidate was
+  rejected because `l3:last_book_levels_write_at_s=253.8s` exceeded the strict
+  `<120s` gate; no re-soak window started.
 
-- **Proceeding to:** Execute Phase 05 Plan 06 Task 2: capture a labelled late
-  read-only exact-instance/SQL/watchdog diagnostic, preserve NOT-CLOSED, and
-  begin a new 24-hour re-soak without backfilling missing checkpoints.
+- **Proceeding to:** Wait for a natural fresh book-level write, then take a new
+  exact-identity same-response probe. Start the re-soak only if every locked
+  gate passes together.
 
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/.continue-here.md`
 
