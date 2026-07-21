@@ -254,7 +254,7 @@ external submission, or H-009 action was performed to establish this soak.
 
 ---
 
-## Strict re-soak window 2 — immutable T+0 accepted
+## Diagnostic re-soak window 2 — T+0 accepted before observation-contract review
 
 **Re-soak start (T+0):** `2026-07-21T14:29:47.941Z`
 **Re-soak end target (T+24):** `2026-07-22T14:29:47.941Z`
@@ -269,15 +269,28 @@ This is a separate re-soak. It does not repair or replace the permanently
 `NOT-CLOSED` first window. Its clock starts only from the one fully green
 forced-machine response below.
 
+### Reclassification — 2026-07-22
+
+Code/evidence review after T+0 showed that six-hour spot checks cannot establish
+the plan's interval-wide claim. They omit roughly 72 promoter runs per interval,
+do not retain WS add/remove outcomes, expose only latest process-local active
+state, and use a global book-write clock that one hot market can refresh for the
+other four. With the user's approval, this window is retained as
+**diagnostic-only / not eligible for PASS**. Its remaining six-hour checkpoints
+are cancelled as strict checkpoints, not missed or backfilled. Strict validation
+will restart from a new T+0 only after continuous evidence instrumentation is
+implemented, separately authorized for production, and readiness-proven. See
+`docs/superpowers/specs/2026-07-22-m1-continuous-l3-soak-evidence-design.md`.
+
 ### Scheduled checkpoints
 
 | Checkpoint | Exact UTC target | Exact Asia/Shanghai target | Status |
 |---|---|---|---|
 | T+0 | `2026-07-21T14:29:47.941Z` | `2026-07-21T22:29:47.941+08:00` | captured |
-| T+6 | `2026-07-21T20:29:47.941Z` | `2026-07-22T04:29:47.941+08:00` | awaiting wall clock |
-| T+12 | `2026-07-22T02:29:47.941Z` | `2026-07-22T10:29:47.941+08:00` | pending |
-| T+18 | `2026-07-22T08:29:47.941Z` | `2026-07-22T16:29:47.941+08:00` | pending |
-| T+24 | `2026-07-22T14:29:47.941Z` | `2026-07-22T22:29:47.941+08:00` | pending |
+| T+6 | `2026-07-21T20:29:47.941Z` | `2026-07-22T04:29:47.941+08:00` | cancelled as strict evidence — observation contract insufficient |
+| T+12 | `2026-07-22T02:29:47.941Z` | `2026-07-22T10:29:47.941+08:00` | cancelled as strict evidence — observation contract insufficient |
+| T+18 | `2026-07-22T08:29:47.941Z` | `2026-07-22T16:29:47.941+08:00` | cancelled as strict evidence — observation contract insufficient |
+| T+24 | `2026-07-22T14:29:47.941Z` | `2026-07-22T22:29:47.941+08:00` | cancelled as strict evidence — observation contract insufficient |
 
 Sampling may occur a few minutes after each target, but SQL must retain the
 literal formal-window boundary. A missed checkpoint remains missed; it is not
@@ -393,12 +406,12 @@ historical buffer is never inferred as zero.
 
 | Sub-indicator | Strict threshold | Current result | Status |
 |---|---|---|---|
-| (a) active markets throughout | every sample `10` tokens = `5` markets | T+0 `10/10` | pending T+6/T+12/T+18/T+24 |
-| (b) mapped book coverage | five markets over exact window | boundary 1/5 | accumulating |
-| (c) Yes-side OHLC coverage | five markets over exact window | boundary 1/5 | accumulating |
-| GAP-401 watchdog | zero stale matches with retained evidence | T+0 zero | accumulating |
+| (a) active markets throughout | every sample `10` tokens = `5` markets | T+0 `10/10`; no interval ledger | NOT-CLOSED |
+| (b) mapped book coverage | five markets over exact window | boundary 1/5 | diagnostic only |
+| (c) Yes-side OHLC coverage | five markets over exact window | boundary 1/5 | diagnostic only |
+| GAP-401 watchdog | zero stale matches with retained evidence | T+0 zero; rolling history insufficient | NOT-CLOSED |
 
-**Current verdict:** IN PROGRESS. The next observation must not occur before
-T+6 `2026-07-21T20:29:47.941Z` (Asia/Shanghai
-`2026-07-22T04:29:47.941+08:00`). Do not sign validation, create
-`05-06-SUMMARY.md`, or close Phase 05 before the T+24 strict verdict.
+**Current verdict:** DIAGNOSTIC-ONLY / NOT ELIGIBLE FOR PASS. Do not continue
+this window's six-hour samples as strict evidence, sign validation, create
+`05-06-SUMMARY.md`, or close Phase 05. The next strict clock starts only after
+the continuous-observability gap phase and a new production readiness proof.

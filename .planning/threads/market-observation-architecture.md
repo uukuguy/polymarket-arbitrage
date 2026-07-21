@@ -1141,3 +1141,14 @@ transport activity and an orderbook resnapshot:
   a natural book write, the corrected request passed every locked gate in one
   body and established a separate immutable T+0; the old incomplete window was
   not merged into it.
+- That second T+0 exposed a deeper acceptance-contract flaw before T+6:
+  **review cadence is not observation cadence**. Six-hour spot checks cannot
+  prove roughly 72 intervening promoter ticks, WS add/remove outcomes,
+  watchdog/reconnect decisions, or five independent market freshness chains.
+  Latest-state process anchors and a global book clock are diagnostic surfaces,
+  not interval history. With user approval, the release-37 window is therefore
+  diagnostic-only. Strict Phase 05 validation must first add durable per-tick
+  promoter/runtime ledgers, truthful desired/control-committed/business-evidenced
+  membership, 30-second process/per-market samples, and exact-window aggregate
+  verdicts. Six-hour checkpoints remain human summaries. Design contract:
+  `docs/superpowers/specs/2026-07-22-m1-continuous-l3-soak-evidence-design.md`.

@@ -4436,3 +4436,34 @@ Run no earlier than T+6 `2026-07-21T20:29:47.941Z` (Asia/Shanghai
 `2026-07-22T04:29:47.941+08:00`). Preserve the new immutable mapping and append
 same-response strict health, direct SQL coverage from the literal T+0, and
 retained watchdog evidence. Do not mix evidence from the first window.
+
+## SESSION 81 — 2026-07-22 (continuous L3 evidence direction approved)
+
+- [CHALLENGE] The user correctly challenged whether five six-hour samples could
+  establish that every intervening promoter, WS membership, watchdog, and
+  per-market data action was reliable throughout the interval.
+- [CODE EVIDENCE] The promoter runs every 300 seconds; current active/promote/book
+  anchors retain latest process state only; WS add/remove Boolean failures are
+  not consumed before intended active state is committed; one global book clock
+  can be refreshed by one hot market; and rolling Fly logs cannot support a
+  24-hour absence claim.
+- [DECISION] With user approval, the release-37 window beginning
+  `2026-07-21T14:29:47.941Z` is reclassified as diagnostic-only and ineligible
+  for PASS. Its remaining T+6/T+12/T+18/T+24 spot checks are cancelled as strict
+  evidence rather than missed or backfilled.
+- [DESIGN] Wrote the continuous-evidence contract: five append-oriented tables,
+  one ledger row per promoter tick, truthful desired/control-committed/business-
+  evidenced membership, 30-second process/per-market samples, durable runtime
+  events, six-hour aggregate reports, and an exact-window 24-hour verifier.
+- [TEACHING] Added an FAQ increment to `docs/learning/11-L3-K线.md` explaining
+  why observation cadence and review cadence must be separate.
+- [BOUNDARY] No production probe, deploy, restart, migration, config/secret/
+  threshold change, trade, H-009 action, external submission, or push occurred.
+
+### [NEXT — CURRENT]
+
+Review
+`docs/superpowers/specs/2026-07-22-m1-continuous-l3-soak-evidence-design.md`.
+After written approval, register and plan `05.4-continuous-l3-soak-evidence`.
+Production Alembic 007 and daemon deployment require a separate explicit gate;
+do not resume the release-37 six-hour samples as strict acceptance evidence.

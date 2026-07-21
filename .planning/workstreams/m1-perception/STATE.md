@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
-status: paused_awaiting_re_soak_t6
-stopped_at: New strict re-soak T+0 captured at 2026-07-21T14:29:47.941Z; awaiting T+6 at 2026-07-21T20:29:47.941Z
-last_updated: "2026-07-21T22:40:22+08:00"
-last_activity: 2026-07-21
+status: paused_for_continuous_observability_design_review
+stopped_at: User approved observability-first direction; release-37 re-soak is diagnostic-only and the written 05.4 design awaits review
+last_updated: "2026-07-22T02:08:58+08:00"
+last_activity: 2026-07-22
 progress:
   total_phases: 12
   completed_phases: 11
@@ -24,9 +24,11 @@ Plan: 6 of 6
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Plan 05-06 Task 2 has a valid new strict re-soak T+0 at
-  `2026-07-21T14:29:47.941Z`. It is paused at the wall-clock gate until T+6
-  `2026-07-21T20:29:47.941Z` (Asia/Shanghai `2026-07-22T04:29:47.941+08:00`).
+- **Status:** Plan 05-06 Task 2 has a valid diagnostic T+0 at
+  `2026-07-21T14:29:47.941Z`, but the window is no longer eligible for a strict
+  verdict. Six-hour spot checks cannot prove interval-wide promoter, WS control,
+  or per-market freshness. Phase 05 is paused for written review of the proposed
+  `05.4-continuous-l3-soak-evidence` gap phase.
 
 - **Active workstream:** `m1-perception`
 
@@ -169,11 +171,14 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Preserve the completed formal window as NOT-CLOSED evidence. First capture a
-  labelled late read-only exact-instance/SQL/watchdog diagnostic, then start a
-  new 24-hour re-soak with retained T+0/T+6/T+12/T+18/T+24 checkpoints.
-
-- Preserve strict N=5 and the unchanged spread/depth/recency thresholds.
+- Review and approve the written continuous-observability design. Do not resume
+  the release-37 T+6/T+12/T+18/T+24 sequence as strict evidence.
+- Register and plan `05.4-continuous-l3-soak-evidence`: append-only promoter and
+  runtime ledgers, 30-second process/per-market samples, truthful WS membership,
+  interval aggregators, chaos tests, and teaching documentation.
+- Preserve strict N=5 and the unchanged spread/depth/recency thresholds. Start a
+  fresh exact-identity 24-hour soak only after separately authorized production
+  migration/deployment and readiness proof.
 - Keep H-009 pending until separately authorized production deployment/scheduling
   and timestamped capacity evidence; Phase 05.1 completion does not promote it.
 
@@ -192,14 +197,16 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-21 22:40 (Asia/Shanghai)
-- **Stopped at:** A natural book-level write enabled a new same-response strict
-  baseline. T+0 is immutable at `2026-07-21T14:29:47.941Z`; all locked health
-  gates passed and the exact release 37 identity remained unchanged.
+- **Last session:** 2026-07-22 02:08 (Asia/Shanghai)
+- **Stopped at:** The user approved the observability-first direction. The
+  release-37 T+0 remains immutable diagnostic evidence, while its window is
+  explicitly ineligible for strict closure. A written design now specifies
+  durable promoter/runtime evidence, 30-second sampling, and aggregate verdicts.
 
-- **Proceeding to:** Run no earlier than T+6 `2026-07-21T20:29:47.941Z`; append
-  exact identity, same-response health, mapped direct-SQL coverage, and retained
-  watchdog evidence without mixing the first failed window.
+- **Proceeding to:** Obtain review of
+  `docs/superpowers/specs/2026-07-22-m1-continuous-l3-soak-evidence-design.md`,
+  then invoke the phase-planning workflow for 05.4. No production migration or
+  deploy is authorized by design approval alone.
 
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/.continue-here.md`
 
