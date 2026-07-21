@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
-status: soak_in_progress
-stopped_at: Formal Phase 05 T+0 established at 2026-07-20T13:30:55Z; next checkpoint is T+6 at 2026-07-20T19:30:55Z
-last_updated: "2026-07-20T21:33:22+08:00"
-last_activity: 2026-07-20
+status: paused_after_soak_window_evidence_incomplete
+stopped_at: Formal window elapsed; T+6/T+12/T+18 were missed and T+24 was unobserved at handoff, so this run cannot PASS
+last_updated: "2026-07-21T22:01:34+08:00"
+last_activity: 2026-07-21
 progress:
   total_phases: 12
   completed_phases: 10
@@ -19,15 +19,15 @@ progress:
 
 ## Current Position
 
-Phase: 05 (ws-book-prices) — EXECUTING
+Phase: 05 (ws-book-prices) — PAUSED
 Plan: 6 of 6
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Plan 05-06 Task 2 is in progress. A new exact-instance sample at
-  `2026-07-20T13:30:55Z` returned HTTP 200 with active 10/10, promoter age
-  20.0s, and book-write age 19.9s; the formal 24-hour soak ends at
-  `2026-07-21T13:30:55Z`.
+- **Status:** Plan 05-06 Task 2 is NOT-CLOSED due to incomplete observation
+  evidence. T+0 was valid, but T+6/T+12/T+18 were missed and T+24 remained
+  unobserved at the `2026-07-21T14:01:34Z` handoff. A late diagnostic cannot
+  backfill the missing minimum-throughout-window samples; a new re-soak is needed.
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -167,9 +167,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Continue the formal Phase 05 Plan 06 window from immutable T+0
-  `2026-07-20T13:30:55Z`; sample strict 10-token health, mapped book/OHLC
-  coverage, and watchdog evidence at T+6/T+12/T+18/T+24.
+- Preserve the completed formal window as NOT-CLOSED evidence. First capture a
+  labelled late read-only exact-instance/SQL/watchdog diagnostic, then start a
+  new 24-hour re-soak with retained T+0/T+6/T+12/T+18/T+24 checkpoints.
 - Preserve strict N=5 and the unchanged spread/depth/recency thresholds.
 - Keep H-009 pending until separately authorized production deployment/scheduling
   and timestamped capacity evidence; Phase 05.1 completion does not promote it.
@@ -189,12 +189,13 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-20 21:33 (Asia/Shanghai)
-- **Stopped at:** Formal T+0 `2026-07-20T13:30:55Z` was accepted from one
-  exact-instance HTTP-200 sample with active `10/10`, promote age `20.0s`, and
-  book-write age `19.9s`; all named main-chain gates passed.
-- **Proceeding to:** At or after `2026-07-20T19:30:55Z`, append T+6 exact
-  identity, one-sample strict health, mapped interval SQL, and watchdog evidence.
+- **Last session:** 2026-07-21 22:01 (Asia/Shanghai)
+- **Stopped at:** Formal window ended at `2026-07-21T13:30:55Z`; T+6/T+12/T+18
+  were missed and T+24 was unobserved at handoff, so the run cannot satisfy the
+  strict minimum-throughout-window gate.
+- **Proceeding to:** Capture a labelled late read-only snapshot plus exact-window
+  SQL/watchdog evidence, render NOT-CLOSED, and begin a new re-soak without
+  backfilling missing checkpoints.
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/.continue-here.md`
 
 ## Accumulated Context

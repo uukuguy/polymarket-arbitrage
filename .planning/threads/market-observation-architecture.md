@@ -1119,3 +1119,9 @@ transport activity and an orderbook resnapshot:
   The formal soak therefore binds its T+0 health and SQL coverage to that
   post-tick mapping. Initial one-market coverage is retained as an honest
   boundary reading, not treated as an early D-12 failure or backfilled to 5/5.
+- The first formal soak then exposed an operational evidence failure rather than
+  a proven daemon failure: T+0 was valid, but T+6/T+12/T+18 were never captured
+  and T+24 was overdue at handoff. Raw SQL can reconstruct interval coverage,
+  but a later health probe cannot reconstruct `min(observed active_count)` at
+  missing times. Chain-truth therefore includes observation scheduling itself;
+  this run is NOT-CLOSED and must be re-soaked after a labelled late diagnostic.

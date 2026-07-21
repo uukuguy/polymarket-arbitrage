@@ -4302,3 +4302,34 @@ are green in the same sample; never splice in the rejected attempt.
 Run no earlier than T+6 `2026-07-20T19:30:55Z` (Asia/Shanghai
 `2026-07-21 03:30:55`). Preserve the immutable T+0 and append exact identity,
 one-sample strict health, mapped interval SQL coverage, and watchdog evidence.
+
+## SESSION 77 — 2026-07-21 (handoff after incomplete soak evidence)
+
+- [TIME] Handoff began at `2026-07-21T14:01:34Z`, about 30 minutes after the
+  formal T+24 target `13:30:55Z`.
+- [EVIDENCE GAP] T+0 remains valid, but T+6/T+12/T+18 were not captured and no
+  T+24 observation existed at handoff. Missing health samples were explicitly
+  marked missed and were not backfilled.
+- [VERDICT BOUNDARY] This run is NOT-CLOSED due to evidence incompleteness. A
+  late exact-instance/SQL/watchdog read can diagnose current and interval truth,
+  but cannot prove `min(observed active_count)==5` throughout the missed window.
+- [PROCESS] No local pytest, deploy, uvicorn, polyarb, or soak monitor process is
+  running. The shared `flyctl agent` helper is alive but is not a monitor and
+  recorded no checkpoints.
+- [VERIFY] `make planning-status` was zero drift; `.githooks` remained active;
+  the working tree was clean before handoff. Local `main` was 22 commits ahead
+  of `origin/main`, with no remote commits ahead and no push performed.
+- [BOUNDARY] No production probe, deploy, restart, config/secret/threshold
+  change, trade, H-009 action, or external submission was performed during this
+  handoff.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+After restoration, capture a clearly labelled late read-only exact-instance
+snapshot plus mapped SQL/watchdog evidence for the completed literal window,
+record NOT-CLOSED, and start a new 24-hour re-soak. Never invent or backdate the
+missing T+6/T+12/T+18 checkpoints.

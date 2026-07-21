@@ -82,7 +82,7 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 ## Workstream 摘要
 
-- **M1：L1 fresh；L2 durable chain HTTP 200；L3 `10/10`；严格 24h soak 已于 `2026-07-20T13:30:55Z` 启动，等待 T+6/T+12/T+18/T+24 证据。**
+- **M1：L1/L2/L3 的 T+0 生产链为绿；首个正式 24h 窗口已结束，但 T+6/T+12/T+18 缺失且 T+24 未采，证据门 NOT-CLOSED，必须 late-diagnose 后重跑 soak。**
 - **M2：execution/accounting + neg-risk buy-all discovery 可用于真实数据监控/paper。**
 - **M3/M4：未开始。**
 - **M5：计划存在，但当前不应先于 M1 恢复。**
@@ -99,9 +99,10 @@ No-side 反馈污染已在 `7ccd2da` / `57d3fc0` / `9451b4b` 修复，recipe 阈
 随后在 promoter `+2/-2` churn 后重新解析权威五市场/十 token 映射，并于
 `2026-07-20T13:30:55Z` 从同一 exact instance 的新样本建立正式 T+0：HTTP 200，
 active `10/10`、promote age `20.0s`、book-write age `19.9s`，其余主链检查全绿。
-T+24 为 `2026-07-21T13:30:55Z`；下一步不早于 T+6
-`2026-07-20T19:30:55Z` 追加 identity、strict health、mapped SQL coverage 与 watchdog。
-本次没有真实交易或生产变更。
+T+24 `2026-07-21T13:30:55Z` 已过去，但 T+6/T+12/T+18 均未采集，handoff 时
+T+24 也尚未观测。缺失点不允许回填，因此本窗口不能 PASS。下一步先采一份明确标为
+late 的 exact-instance/完整区间 SQL/watchdog 诊断，随后建立新的 24h re-soak；本次没有
+真实交易或生产变更。
 
 ```bash
 /gsd-execute-phase 05 --ws m1-perception

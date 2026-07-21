@@ -18,10 +18,10 @@ the formal interval.
 | Checkpoint | UTC target | Asia/Shanghai | Status |
 |---|---|---|---|
 | T+0 | 2026-07-20 13:30:55 | 2026-07-20 21:30:55 | captured |
-| T+6 | 2026-07-20 19:30:55 | 2026-07-21 03:30:55 | pending |
-| T+12 | 2026-07-21 01:30:55 | 2026-07-21 09:30:55 | pending |
-| T+18 | 2026-07-21 07:30:55 | 2026-07-21 15:30:55 | pending |
-| T+24 | 2026-07-21 13:30:55 | 2026-07-21 21:30:55 | pending |
+| T+6 | 2026-07-20 19:30:55 | 2026-07-21 03:30:55 | missed — not backfilled |
+| T+12 | 2026-07-21 01:30:55 | 2026-07-21 09:30:55 | missed — not backfilled |
+| T+18 | 2026-07-21 07:30:55 | 2026-07-21 15:30:55 | missed — not backfilled |
+| T+24 | 2026-07-21 13:30:55 | 2026-07-21 21:30:55 | overdue/unobserved at handoff 14:01Z |
 
 Sampling may occur a few minutes after a target, but every SQL query must retain
 the exact formal T+0 boundary above. Missing scheduled evidence is not backfilled.
@@ -47,12 +47,17 @@ with the strict 13:30:55 health baseline.
 
 | Sub-indicator | Threshold (D-12 strict) | Result at T+24h | Status |
 |---|---|---|---|
-| (a) `_l3_active_set` markets throughout 24h | every sample token count `10`, hence market count `5` | TBD | pending |
-| (b) `l2_book_levels` mapped market coverage | `count(DISTINCT market_id) == 5` over exact window | TBD | pending |
-| (c) `l2_ohlc_1m` Yes-side market coverage | `count(DISTINCT market_id) == 5` over exact window | TBD | pending |
+| (a) `_l3_active_set` markets throughout 24h | every sample token count `10`, hence market count `5` | T+0 only; T+6/T+12/T+18/T+24 missing | NOT MET — insufficient samples |
+| (b) `l2_book_levels` mapped market coverage | `count(DISTINCT market_id) == 5` over exact window | late exact-window query not yet run | diagnostic pending |
+| (c) `l2_ohlc_1m` Yes-side market coverage | `count(DISTINCT market_id) == 5` over exact window | late exact-window query not yet run | diagnostic pending |
 
-**Overall verdict:** TBD. Phase 05 closes only if all three sub-indicators pass.
-There is no YELLOW fallback and no threshold reduction.
+**Overall verdict:** NOT-CLOSED (evidence incomplete). The formal wall-clock
+window elapsed, but T+6/T+12/T+18 were not captured and T+24 was still
+unobserved at the `2026-07-21T14:01:34Z` handoff. Missing scheduled health
+samples are not backfilled, so the strict minimum-throughout-window claim cannot
+pass from this run. A late read may preserve diagnostic SQL/watchdog evidence,
+but cannot turn this window into PASS. There is no YELLOW fallback and no
+threshold reduction.
 
 ## Timeline
 
@@ -134,20 +139,25 @@ triggered. This is only the initial watchdog sample, not the 24-hour verdict.
 
 ### T+6 — target 2026-07-20 19:30:55 UTC
 
-Pending: exact identity, one forced-machine health sample, ten-token active
-count, exact-window mapped book/OHLC coverage, and watchdog stale count.
+Missed. No timestamped sample was captured near this checkpoint. Do not
+backfill it from a later reading.
 
 ### T+12 — target 2026-07-21 01:30:55 UTC
 
-Pending: same evidence fields.
+Missed. No timestamped sample was captured near this checkpoint. Do not
+backfill it from a later reading.
 
 ### T+18 — target 2026-07-21 07:30:55 UTC
 
-Pending: same evidence fields.
+Missed. No timestamped sample was captured near this checkpoint. Do not
+backfill it from a later reading.
 
 ### T+24 — target 2026-07-21 13:30:55 UTC
 
-Pending: same evidence fields plus strict three-sub-indicator verdict.
+Overdue and unobserved at handoff `2026-07-21T14:01:34Z`. The next session may
+capture a clearly labelled late read-only snapshot and exact-window SQL for
+diagnosis, but the missing intermediate health samples already prevent a strict
+PASS for this run.
 
 ## GAP-401 carry-over observation
 
