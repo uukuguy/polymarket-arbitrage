@@ -1125,3 +1125,12 @@ transport activity and an orderbook resnapshot:
   but a later health probe cannot reconstruct `min(observed active_count)` at
   missing times. Chain-truth therefore includes observation scheduling itself;
   this run is NOT-CLOSED and must be re-soaked after a labelled late diagnostic.
+- The late diagnostic showed a second retention boundary. Direct SQL could
+  reconstruct 48,940 book rows across all ten tokens/five markets and 732
+  Yes-side OHLC rows across all five markets, but Fly's 100-row rolling log
+  buffer began after the formal window. A missing historical watchdog interval
+  is `unavailable`, never an inferred zero. The first re-soak candidate then
+  returned 10/10 and fresh WS/mirror/candidate/cursor links in one body while
+  dedicated book freshness was 253.8s. It was rejected without stitching an
+  earlier green book sample. Observation retention and same-response conjunction
+  are both parts of the production truth contract.

@@ -4364,3 +4364,34 @@ Resume Plan 05-06 Task 2: capture a labelled late exact-instance health plus
 mapped exact-window SQL/watchdog diagnostic, preserve the elapsed run as
 NOT-CLOSED, and start a new 24-hour re-soak with retained T+0/T+6/T+12/T+18/T+24
 checkpoints. Do not lower N=5, alter recipe thresholds, or backfill observations.
+
+## SESSION 79 — 2026-07-21 (late diagnostic; re-soak T+0 rejected)
+
+- [OLD WINDOW] Preserved `[2026-07-20T13:30:55Z,
+  2026-07-21T13:30:55Z)` as permanently NOT-CLOSED. T+6/T+12/T+18 remain
+  missed and were not backfilled.
+- [DIRECT SQL] A read-only transaction over that literal interval mapped the
+  fixed five T+0 Yes/No pairs and found 48,940 `l2_book_levels` rows across ten
+  token assets/five markets plus 732 Yes-side OHLC rows across five assets/five
+  markets. No capped REST page was used.
+- [WATCHDOG RETENTION] Fly's 100-row rolling buffer covered only
+  `14:12:01Z–14:17:17Z`, entirely after the old window. The old-window stale
+  count is unavailable, not zero; GAP-401 remains unverified for that interval.
+- [REJECTED RE-SOAK] Exact release 37 identity was unchanged around one
+  `14:16:50Z` forced-machine response. Active 10/10, promoter, WS, mirror,
+  candidate, listener, reconciliation, and cursor checks passed, but dedicated
+  book freshness was `253.8s` warn against strict `<120s`. No new T+0 started.
+- [BOUNDARY] No deploy, restart, production write, config/secret/threshold
+  change, trade, H-009 action, external submission, validation signature,
+  plan SUMMARY, STATE/ROADMAP update, or push occurred.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05 --ws m1-perception
+```
+
+Take a genuinely new exact-identity same-response health sample. Start a new
+24-hour re-soak only if active 10/10, promoter `<600s`, book freshness `<120s`,
+and WS/mirror/candidate/listener/reconciliation/cursor gates all pass together;
+then retain T+0/T+6/T+12/T+18/T+24 evidence.

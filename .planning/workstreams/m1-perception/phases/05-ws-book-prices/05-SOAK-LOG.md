@@ -48,8 +48,8 @@ with the strict 13:30:55 health baseline.
 | Sub-indicator | Threshold (D-12 strict) | Result at T+24h | Status |
 |---|---|---|---|
 | (a) `_l3_active_set` markets throughout 24h | every sample token count `10`, hence market count `5` | T+0 only; T+6/T+12/T+18/T+24 missing | NOT MET — insufficient samples |
-| (b) `l2_book_levels` mapped market coverage | `count(DISTINCT market_id) == 5` over exact window | late exact-window query not yet run | diagnostic pending |
-| (c) `l2_ohlc_1m` Yes-side market coverage | `count(DISTINCT market_id) == 5` over exact window | late exact-window query not yet run | diagnostic pending |
+| (b) `l2_book_levels` mapped market coverage | `count(DISTINCT market_id) == 5` over exact window | 48,940 rows / 10 token assets / 5 mapped markets | diagnostic PASS |
+| (c) `l2_ohlc_1m` Yes-side market coverage | `count(DISTINCT market_id) == 5` over exact window | 732 rows / 5 Yes assets / 5 mapped markets | diagnostic PASS |
 
 **Overall verdict:** NOT-CLOSED (evidence incomplete). The formal wall-clock
 window elapsed, but T+6/T+12/T+18 were not captured and T+24 was still
@@ -159,11 +159,85 @@ capture a clearly labelled late read-only snapshot and exact-window SQL for
 diagnosis, but the missing intermediate health samples already prevent a strict
 PASS for this run.
 
+### Late diagnostic — 2026-07-21 14:16–14:18 UTC (not T+24)
+
+This observation was deliberately taken after the formal interval and is not a
+replacement for T+6/T+12/T+18/T+24. It preserves current and reconstructable
+database truth while leaving the elapsed run `NOT-CLOSED`.
+
+#### Exact identity and one-response health
+
+Read-only Fly status before and after the health request agreed on release `37`,
+machine `85e647c4eed598`, instance `01KXZJKY9SKEJAY2DD8MMPNB2E`, image
+`deployment-01KXZJHS9QT8T6X0J33KVPTB5V`, digest
+`sha256:5da8e954897f60cf05f9d6664e99a15247d46a2bd4fd0edbb433c200af8b412c`,
+state `started`, and deployment anchor `2026-07-20T10:55:01Z`.
+
+The forced-machine request interval was
+`[2026-07-21T14:16:50.094Z, 2026-07-21T14:16:50.916Z]`; HTTP was `200`.
+All values below came from the same response body:
+
+| Check | Observed | Status |
+|---|---:|---|
+| `ws:connection_state` | `WAITING_FOR_EVENT` | warn (informational quiet state) |
+| `ws:last_event_age_seconds` | `0.0s` | pass |
+| `ws:subscribed_count` | `105` assets | pass |
+| `event_bus:listener_state` | `listening` | pass |
+| `event_bus:last_reconciliation_age_seconds` | `47.3s` | pass |
+| `event_bus:cursor_lag` | `0` | pass |
+| `mirror:l2_tob_age_seconds` | `30.7s` | pass |
+| `candidates:supabase_fetch_age_seconds` | `47.4s` | pass |
+| `l3:active_count` | `10/10` tokens | pass |
+| `l3:last_promote_at_s` | `160.0s` | pass |
+| `l3:last_book_levels_write_at_s` | `253.8s` | **warn — strict `<120s` gate failed** |
+
+Therefore this sample is a rejected re-soak candidate, not a new T+0. No
+earlier book-fresh sample was stitched into it and no new 24-hour clock began.
+
+#### Direct SQL over the immutable completed interval
+
+At `2026-07-21T14:18:29.783016Z`, one read-only PostgreSQL transaction queried
+the literal interval `[2026-07-20T13:30:55Z, 2026-07-21T13:30:55Z)`. The query
+used the five T+0 authoritative Yes identities and their paired No tokens,
+joined both tokens to `l2_book_levels`, joined only the Yes identity to
+`l2_ohlc_1m`, and applied no REST page cap.
+
+| Market | Book rows | Book token assets | Yes OHLC rows | First book | Last book | First OHLC | Last OHLC |
+|---|---:|---:|---:|---|---|---|---|
+| `540819` | 3,020 | 2 | 87 | `2026-07-20T13:40:32.998Z` | `2026-07-21T12:43:43.748Z` | `2026-07-20T13:40:00Z` | `2026-07-21T13:06:00Z` |
+| `562802` | 4,400 | 2 | 91 | `2026-07-20T13:39:21.348Z` | `2026-07-21T13:01:58.849Z` | `2026-07-20T13:39:00Z` | `2026-07-21T13:01:00Z` |
+| `565064` | 1,460 | 2 | 51 | `2026-07-20T13:40:26.802Z` | `2026-07-21T11:33:08.487Z` | `2026-07-20T13:40:00Z` | `2026-07-21T12:53:00Z` |
+| `601819` | 6,060 | 2 | 110 | `2026-07-20T13:40:34.000Z` | `2026-07-21T13:16:21.996Z` | `2026-07-20T13:40:00Z` | `2026-07-21T13:16:00Z` |
+| `665374` | 34,000 | 2 | 393 | `2026-07-20T13:32:09.746Z` | `2026-07-21T13:29:09.565Z` | `2026-07-20T13:32:00Z` | `2026-07-21T13:29:00Z` |
+| **Total / coverage** | **48,940** | **10** | **732** | — | — | — | — |
+
+Both reconstructable coverage indicators are 5/5 mapped markets. They do not
+repair indicator (a), whose missing scheduled health samples remain
+non-reconstructable.
+
+For the next candidate identity, SQL first collapsed `l2_candidates` to the
+newest row per asset, then joined authoritative
+`markets_latest.yes_token_id/no_token_id` before considering cardinality. The
+diagnostic mapping contained five markets (`562802`, `565064`, `601819`,
+`665374`, `679021`) and ten complete tokens. This mapping was read after the
+failed health sample and is diagnostic only; it is not bound to a new T+0.
+
+#### Watchdog diagnostic and retention boundary
+
+The read-only Fly rolling buffer query at `2026-07-21T14:17Z` returned exactly
+100 rows covering only
+`[2026-07-21T14:12:01.049911606Z, 2026-07-21T14:17:17.497469453Z]`.
+It contained **zero rows from the formal soak interval**, so the formal-window
+`ws_watchdog: stale` count is **unavailable**, not zero. The 100-row current
+buffer contained no stale match, but that cannot establish the 24-hour
+GAP-401 verdict.
+
 ## GAP-401 carry-over observation
 
 - Exact T+0 `ws_watchdog: stale` count: `0`
-- 24h count: TBD
-- Final verdict: TBD
+- 24h count: unavailable — Fly rolling buffer no longer covered the interval
+- Late current-buffer count: `0` over 100 rows from `14:12:01Z–14:17:17Z`
+- Final verdict: NOT VERIFIED for the elapsed window
 
 ## Decisions / Follow-up
 
