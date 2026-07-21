@@ -1,12 +1,14 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-milestone_name: milestone
+milestone_name: market-perception
+current_phase: 05
 status: executing
-stopped_at: Session resumed from the structured handoff; the elapsed formal
-last_updated: "2026-07-21T14:11:40.260Z"
+stopped_at: Phase 05 Plan 06 Task 2 resumed; elapsed soak remains NOT-CLOSED pending late diagnostic and a new 24-hour window
+last_updated: "2026-07-21T22:16:00+08:00"
+last_activity: 2026-07-21
 progress:
-  total_phases: 13
+  total_phases: 12
   completed_phases: 11
   total_plans: 66
   completed_plans: 65
@@ -18,14 +20,14 @@ progress:
 ## Current Position
 
 Phase: 05 (ws-book-prices) — EXECUTING
-Plan: 1 of 6
+Plan: 6 of 6
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Executing Phase 05
-  evidence. T+0 was valid, but T+6/T+12/T+18 were missed and T+24 remained
-  unobserved at the `2026-07-21T14:01:34Z` handoff. A late diagnostic cannot
-  backfill the missing minimum-throughout-window samples; a new re-soak is needed.
+- **Status:** Plan 05-06 Task 2 is executing. The elapsed window remains
+  NOT-CLOSED because T+6/T+12/T+18 were missed and T+24 was unobserved at the
+  `2026-07-21T14:01:34Z` handoff. A late diagnostic cannot backfill those
+  minimum-throughout-window samples; a new re-soak is required.
 
 - **Active workstream:** `m1-perception`
 
