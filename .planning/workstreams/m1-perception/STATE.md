@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
-status: paused_at_re_soak_t0_gate
-stopped_at: Late diagnostic complete; new T+0 candidate rejected because book freshness was 253.8s against the strict 120s gate
-last_updated: "2026-07-21T22:22:38+08:00"
+status: paused_awaiting_re_soak_t6
+stopped_at: New strict re-soak T+0 captured at 2026-07-21T14:29:47.941Z; awaiting T+6 at 2026-07-21T20:29:47.941Z
+last_updated: "2026-07-21T22:40:22+08:00"
 last_activity: 2026-07-21
 progress:
   total_phases: 12
@@ -24,9 +24,9 @@ Plan: 6 of 6
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Plan 05-06 Task 2 is paused at the strict re-soak T+0 gate. The
-  late diagnostic is complete, but the `2026-07-21T14:16:50Z` candidate had
-  book freshness `253.8s`, so no new 24-hour clock started.
+- **Status:** Plan 05-06 Task 2 has a valid new strict re-soak T+0 at
+  `2026-07-21T14:29:47.941Z`. It is paused at the wall-clock gate until T+6
+  `2026-07-21T20:29:47.941Z` (Asia/Shanghai `2026-07-22T04:29:47.941+08:00`).
 
 - **Active workstream:** `m1-perception`
 
@@ -192,14 +192,14 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-21 22:22 (Asia/Shanghai)
-- **Stopped at:** Late diagnostic completed. The first new T+0 candidate was
-  rejected because `l3:last_book_levels_write_at_s=253.8s` exceeded the strict
-  `<120s` gate; no re-soak window started.
+- **Last session:** 2026-07-21 22:40 (Asia/Shanghai)
+- **Stopped at:** A natural book-level write enabled a new same-response strict
+  baseline. T+0 is immutable at `2026-07-21T14:29:47.941Z`; all locked health
+  gates passed and the exact release 37 identity remained unchanged.
 
-- **Proceeding to:** Wait for a natural fresh book-level write, then take a new
-  exact-identity same-response probe. Start the re-soak only if every locked
-  gate passes together.
+- **Proceeding to:** Run no earlier than T+6 `2026-07-21T20:29:47.941Z`; append
+  exact identity, same-response health, mapped direct-SQL coverage, and retained
+  watchdog evidence without mixing the first failed window.
 
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/.continue-here.md`
 
