@@ -4333,3 +4333,34 @@ After restoration, capture a clearly labelled late read-only exact-instance
 snapshot plus mapped SQL/watchdog evidence for the completed literal window,
 record NOT-CLOSED, and start a new 24-hour re-soak. Never invent or backdate the
 missing T+6/T+12/T+18 checkpoints.
+
+## SESSION 78 — 2026-07-21 (m1-perception restored after incomplete soak)
+
+- [RESTORED] Activated `m1-perception`, loaded PROJECT/STATE/ROADMAP/CURRENT,
+  the structured handoff, Phase 05 Plan 06 checkpoint, recovery learnings, and
+  the chain-truth/§2.9 observation-scheduling context.
+- [VERIFY] `make planning-status` reports zero drift; `core.hooksPath` is
+  `.githooks`; no interrupted agent exists. Plan 05-06 correctly remains open
+  without a SUMMARY because Task 2 has not passed its strict acceptance gate.
+- [TRUTH] The elapsed `2026-07-20T13:30:55Z` formal window remains NOT-CLOSED:
+  T+0 is valid, T+6/T+12/T+18 were missed, and T+24 was not observed at handoff.
+  A late diagnostic can establish current/interval truth but cannot backfill the
+  missing minimum-throughout-window samples.
+- [CONTINUITY] Consumed the one-shot `HANDOFF.json`, retained Phase 05's
+  `.continue-here.md`, refreshed STATE continuity, and corrected stale wording
+  in CURRENT that still said the first soak had not started.
+- [BOUNDARY] No production probe, deploy, restart, config/secret/threshold
+  change, trade, H-009 action, external submission, or push occurred during
+  resume. Local `main` remains 23 commits ahead of `origin/main` before these
+  uncommitted planning-document changes.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05 --ws m1-perception
+```
+
+Resume Plan 05-06 Task 2: capture a labelled late exact-instance health plus
+mapped exact-window SQL/watchdog diagnostic, preserve the elapsed run as
+NOT-CLOSED, and start a new 24-hour re-soak with retained T+0/T+6/T+12/T+18/T+24
+checkpoints. Do not lower N=5, alter recipe thresholds, or backfill observations.

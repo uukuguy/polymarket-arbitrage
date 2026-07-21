@@ -1,17 +1,15 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-milestone_name: market-perception
-current_phase: 05
-status: paused_after_soak_window_evidence_incomplete
-stopped_at: Formal window elapsed; T+6/T+12/T+18 were missed and T+24 was unobserved at handoff, so this run cannot PASS
-last_updated: "2026-07-21T22:01:34+08:00"
-last_activity: 2026-07-21
+milestone_name: milestone
+status: executing
+stopped_at: Session resumed from the structured handoff; the elapsed formal
+last_updated: "2026-07-21T14:11:40.260Z"
 progress:
-  total_phases: 12
-  completed_phases: 10
-  total_plans: 61
-  completed_plans: 60
+  total_phases: 13
+  completed_phases: 11
+  total_plans: 66
+  completed_plans: 65
   percent: 98
 ---
 
@@ -19,15 +17,16 @@ progress:
 
 ## Current Position
 
-Phase: 05 (ws-book-prices) — PAUSED
-Plan: 6 of 6
+Phase: 05 (ws-book-prices) — EXECUTING
+Plan: 1 of 6
 
 - **Phase:** 05 — WS book prices
 - **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Plan 05-06 Task 2 is NOT-CLOSED due to incomplete observation
+- **Status:** Executing Phase 05
   evidence. T+0 was valid, but T+6/T+12/T+18 were missed and T+24 remained
   unobserved at the `2026-07-21T14:01:34Z` handoff. A late diagnostic cannot
   backfill the missing minimum-throughout-window samples; a new re-soak is needed.
+
 - **Active workstream:** `m1-perception`
 
 ## VERIFIED — 2026-07-18 production facts
@@ -135,8 +134,10 @@ changing locked thresholds:
 - Polymarket book arrays were farthest-first; index zero produced false spreads
   near 0.998. BUY/SELL levels are now price-ranked before TOB, depth, and full
   book projection (`7ccd2da`).
+
 - The promoter handed repeated time-series rows to a five-row recipe limit. It
   now retains the newest row per asset before selection (`57d3fc0`).
+
 - After release 36 subscribed both outcomes, a high-depth No row consumed a
   Yes-market recipe slot and the second tick fell `10→8`. The recipe input now
   resolves authoritative `yes_token_id` identity before LIMIT (`9451b4b`).
@@ -170,6 +171,7 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 - Preserve the completed formal window as NOT-CLOSED evidence. First capture a
   labelled late read-only exact-instance/SQL/watchdog diagnostic, then start a
   new 24-hour re-soak with retained T+0/T+6/T+12/T+18/T+24 checkpoints.
+
 - Preserve strict N=5 and the unchanged spread/depth/recency thresholds.
 - Keep H-009 pending until separately authorized production deployment/scheduling
   and timestamped capacity evidence; Phase 05.1 completion does not promote it.
@@ -189,13 +191,15 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-21 22:01 (Asia/Shanghai)
-- **Stopped at:** Formal window ended at `2026-07-21T13:30:55Z`; T+6/T+12/T+18
-  were missed and T+24 was unobserved at handoff, so the run cannot satisfy the
-  strict minimum-throughout-window gate.
-- **Proceeding to:** Capture a labelled late read-only snapshot plus exact-window
-  SQL/watchdog evidence, render NOT-CLOSED, and begin a new re-soak without
-  backfilling missing checkpoints.
+- **Last session:** 2026-07-21 22:08 (Asia/Shanghai)
+- **Stopped at:** Session resumed from the structured handoff; the elapsed formal
+  window remains NOT-CLOSED because T+6/T+12/T+18 were missed and T+24 was not
+  observed at handoff.
+
+- **Proceeding to:** Execute Phase 05 Plan 06 Task 2: capture a labelled late
+  read-only exact-instance/SQL/watchdog diagnostic, preserve NOT-CLOSED, and
+  begin a new 24-hour re-soak without backfilling missing checkpoints.
+
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/.continue-here.md`
 
 ## Accumulated Context
