@@ -2,33 +2,33 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
-current_phase: 05
-status: paused_for_continuous_observability_design_review
-stopped_at: User approved observability-first direction; release-37 re-soak is diagnostic-only and the written 05.4 design awaits review
-last_updated: "2026-07-22T02:08:58+08:00"
+current_phase: 05.4
+status: ready_to_execute
+stopped_at: Phase 05.4 planned as 5 sequential plans and 24 tasks; independent checker passed after three revision rounds
+last_updated: "2026-07-22T03:38:32+08:00"
 last_activity: 2026-07-22
 progress:
-  total_phases: 12
+  total_phases: 13
   completed_phases: 11
-  total_plans: 66
+  total_plans: 71
   completed_plans: 65
-  percent: 98
+  percent: 92
 ---
 
 # M1 Perception — Current State
 
 ## Current Position
 
-Phase: 05 (ws-book-prices) — PAUSED
-Plan: 6 of 6
+Phase: 05.4 (continuous-l3-soak-evidence) — READY TO EXECUTE
+Plan: 0 of 5
 
-- **Phase:** 05 — WS book prices
-- **Plan:** 05-06 — production L3 proof and 24-hour soak
-- **Status:** Plan 05-06 Task 2 has a valid diagnostic T+0 at
-  `2026-07-21T14:29:47.941Z`, but the window is no longer eligible for a strict
-  verdict. Six-hour spot checks cannot prove interval-wide promoter, WS control,
-  or per-market freshness. Phase 05 is paused for written review of the proposed
-  `05.4-continuous-l3-soak-evidence` gap phase.
+- **Phase:** 05.4 — Continuous L3 soak evidence
+- **Plan:** next is 05.4-01 — append-only evidence schema and storage boundary
+- **Status:** Design approved; CONTEXT/RESEARCH/VALIDATION and five sequential
+  PLAN files are complete. All five plan structures pass, all 24 tasks map to 24
+  validation rows, and the final independent checker returned
+  `VERIFICATION PASSED`. Plans 01–04 are local implementation; Plan 05 remains
+  `autonomous: false` with separate production and wall-clock gates.
 
 - **Active workstream:** `m1-perception`
 
@@ -171,11 +171,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Review and approve the written continuous-observability design. Do not resume
-  the release-37 T+6/T+12/T+18/T+24 sequence as strict evidence.
-- Register and plan `05.4-continuous-l3-soak-evidence`: append-only promoter and
-  runtime ledgers, 30-second process/per-market samples, truthful WS membership,
-  interval aggregators, chaos tests, and teaching documentation.
+- Execute Phase 05.4 Plans 01–04 under TDD: schema/storage, truthful WS/promoter
+  transaction, sampler/events/health, then verdict/Make/chaos/teaching surfaces.
+- Do not resume the release-37 T+6/T+12/T+18/T+24 sequence as strict evidence.
 - Preserve strict N=5 and the unchanged spread/depth/recency thresholds. Start a
   fresh exact-identity 24-hour soak only after separately authorized production
   migration/deployment and readiness proof.
@@ -185,9 +183,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 ## Required Reading
 
 1. `.planning/CURRENT.md` — cross-workstream operational truth.
-2. `.planning/workstreams/m1-perception/phases/05-ws-book-prices/05-06-PLAN.md` — current acceptance gate.
-3. `.planning/workstreams/m1-perception/phases/05.1-durable-l2-data-chain-recovery/05.1-LEARNINGS.md` — closed gap-phase lessons.
-4. `.planning/threads/market-observation-architecture.md` §1.6 — chain-truth discipline.
+2. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-CONTEXT.md` — locked decisions.
+3. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-01-PLAN.md` — next executable plan.
+4. `.planning/threads/market-observation-architecture.md` §1.6 and §2.9 — chain-truth and observation cadence.
 
 ## Resume
 
@@ -197,21 +195,21 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-22 02:08 (Asia/Shanghai)
-- **Stopped at:** The user approved the observability-first direction. The
-  release-37 T+0 remains immutable diagnostic evidence, while its window is
-  explicitly ineligible for strict closure. A written design now specifies
-  durable promoter/runtime evidence, 30-second sampling, and aggregate verdicts.
+- **Last session:** 2026-07-22 03:38 (Asia/Shanghai)
+- **Stopped at:** Phase 05.4 planning complete: five sequential plans, 24 tasks,
+  one-to-one validation, all structure checks green, final independent checker
+  passed. Release-37 remains immutable diagnostic-only evidence.
 
-- **Proceeding to:** Obtain review of
-  `docs/superpowers/specs/2026-07-22-m1-continuous-l3-soak-evidence-design.md`,
-  then invoke the phase-planning workflow for 05.4. No production migration or
-  deploy is authorized by design approval alone.
+- **Proceeding to:** Execute 05.4 Plan 01 under TDD. Plans 01–04 authorize local
+  implementation only. Plan 05 separately gates production migration, retention
+  credential, deployment, manifest/T0, and T+6/T+12/T+18/T+24.
 
-- **Resume file:** `.planning/workstreams/m1-perception/phases/05-ws-book-prices/.continue-here.md`
+- **Resume file:** `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-01-PLAN.md`
 
 ## Accumulated Context
 
 ### Roadmap Evolution
 
 - Phase 05.1 inserted after Phase 05: Durable L2 data-chain recovery (URGENT).
+- Phase 05.4 inserted after completed Phase 05.3: Continuous L3 soak evidence
+  (URGENT; blocks Phase 05 Plan 06 strict closure).

@@ -48,6 +48,9 @@
 |-------|------------|
 | Existing strict soak has a valid T+0 but insufficient observation semantics | Retain as diagnostic evidence; do not use it for Phase 05 closure |
 | A telemetry deploy changes exact instance/image identity | Restart the formal 24-hour soak after deployment and readiness proof |
+| Self-hashes alone cannot prevent a privileged writer from backfilling or rewriting evidence | Add server `recorded_at`, bounded late-write checks, database append-only triggers/privileges, a dedicated retention role, and raw-row re-query digests |
+| A manifest created after selecting T0 cannot prove its policy was fixed before the interval | Bind an immutable attempt-unique manifest to the database before a future T0; reject the whole attempt if that exact T0 sample fails |
+| Fixed checkpoint filenames can accidentally join different soak attempts | Every manifest declares attempt-unique report paths; all later checkpoints and final verification consume that exact manifest |
 
 ## Resources
 

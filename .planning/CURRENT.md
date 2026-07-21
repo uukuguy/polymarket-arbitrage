@@ -1,6 +1,6 @@
 # 当前项目状态
 
-> 唯一当前状态入口。最后核验：2026-07-22（L3 连续观测设计待书面确认）。
+> 唯一当前状态入口。最后核验：2026-07-22（Phase 05.4 已规划并通过 checker）。
 > `JOURNAL.md` 是追加式历史；其中旧 `[NEXT]` 均不代表当前任务。
 
 稳定的使用流程、健康语义和命令安全分级见
@@ -14,7 +14,8 @@ release 37 已上线；启动与下一次 5 分钟 tick 均为 10/10。Phase 05 
 soak 因缺失 checkpoint 永久 `NOT-CLOSED`。第二个窗口虽有全绿 T+0，但代码审计确认
 每六小时一次的瞬时样本无法证明区间内约 72 次 promoter tick、WS 控制和逐市场
 freshness 始终可靠，因此已降级为 diagnostic-only，不再继续把 T+6/T+12/T+18/T+24
-当作严格验收。下一步是审阅连续证据设计并建立 05.4 gap phase；机会 feed 生产最近
+当作严格验收。连续证据设计已获批，Phase 05.4 已注册为 5 个顺序计划并通过独立
+checker；下一步从 Plan 01 的本地 schema/证据边界开始 TDD。机会 feed 生产最近
 仍为 HTTP 503。因此**市场感知平台已达到 soak-ready，而不是完整
 production-qualified；整套系统还不是可以投入真实资金运行的套利产品**。
 
@@ -79,14 +80,14 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 按依赖顺序：
 
-1. Phase 05 的生产 prerequisite 已通过：Alembic 006、L1/L2 deploy、严格 5 市场/10 token 和真实 book-level 写入均有 exact-instance 证据。首个 24h soak 因缺少中间 checkpoint 而永久 NOT-CLOSED；第二个窗口的全绿 T+0 保留为诊断证据，但因现有观测合同无法证明两次样本之间的控制与逐市场状态，已停止作为严格 re-soak。先审阅并实现 `05.4-continuous-l3-soak-evidence`，部署连续证据面后再从新 T+0 开始 24h 验收；不放宽 recipe。
+1. Phase 05 的生产 prerequisite 已通过：Alembic 006、L1/L2 deploy、严格 5 市场/10 token 和真实 book-level 写入均有 exact-instance 证据。首个 24h soak 因缺少中间 checkpoint 而永久 NOT-CLOSED；第二个窗口的全绿 T+0 保留为诊断证据，但因现有观测合同无法证明两次样本之间的控制与逐市场状态，已停止作为严格 re-soak。`05.4-continuous-l3-soak-evidence` 已完成 5-plan/24-task 规划并通过 checker；先执行本地 Plans 01–04，Plan 05 的生产 migration、retention credential、deploy 和墙钟 gate 均需独立授权。不放宽 recipe。
 2. H-009 本地实现保持 pending：先取得**生产部署/调度的单独授权**，再进行**时间戳化只读容量观察**；之后仍须积累重复 complete run、可解析 exit=0 契约和不可变证据，才可评估 producer cadence/SLA。没有这些证据，HTTP 503 绝不等于零机会。
 3. 实现经过明确授权的 Polymarket order/fill adapter、认证、allowance、限额与 kill switch。
 4. 通过 paper→小额 live 质量门后，才讨论真实资金运行。
 
 ## Workstream 摘要
 
-- **M1：L1/L2/L3 的 T+0 生产链为绿；首个 24h 窗口永久 NOT-CLOSED，第二个窗口降级为 diagnostic-only；连续证据 gap phase 的书面设计待确认。**
+- **M1：L1/L2/L3 的 T+0 生产链为绿；首个 24h 窗口永久 NOT-CLOSED，第二个窗口降级为 diagnostic-only；连续证据 Phase 05.4 已规划并 ready to execute。**
 - **M2：execution/accounting + neg-risk buy-all discovery 可用于真实数据监控/paper。**
 - **M3/M4：未开始。**
 - **M5：计划存在，但当前不应先于 M1 恢复。**
@@ -110,9 +111,12 @@ T+24 `2026-07-21T13:30:55Z` 已过去，但 T+6/T+12/T+18 均未采集，因此�
 人工 spot check 只能证明采样时刻，不能证明区间内 promoter、WS membership、
 watchdog/reconnect 和五个市场各自 freshness 均无故障。该窗口因此改为
 diagnostic-only，不再执行其余 checkpoint。连续证据设计已写入
-`docs/superpowers/specs/2026-07-22-m1-continuous-l3-soak-evidence-design.md`；下一步是
-完成书面设计审阅，然后规划 05.4。当前没有真实交易或生产变更。
+`docs/superpowers/specs/2026-07-22-m1-continuous-l3-soak-evidence-design.md`。该设计已获批，
+05.4 已拆为 5 个顺序 wave、24 个 task，并经过三轮 checker 修订：补齐数据库级
+append-only/server timestamp、AcceptanceConfig、WS→runtime→health chain、pre-T0
+manifest、五报告 raw-row hash、独立 migration/deploy/retention 授权与四个 not-before
+checkpoint。下一步执行 Plan 01；当前没有真实交易或生产变更。
 
 ```bash
-/gsd-plan-phase 05.4 --ws m1-perception
+/gsd-execute-phase 05.4 --ws m1-perception
 ```

@@ -9,7 +9,7 @@ the strict 24-hour Phase 05 soak.
 
 ## Current Phase
 
-Phase 3 — User review gate
+Phase 5 — Implementation and verification
 
 ## Phases
 
@@ -32,16 +32,17 @@ Phase 3 — User review gate
 ### Phase 3: User review gate
 
 - [x] Ask the user to review the committed design spec
-- [ ] Apply requested corrections, if any
-- [ ] Obtain explicit approval for implementation planning
-- **Status:** in_progress
+- [x] Apply requested corrections, if any
+- [x] Obtain explicit approval for implementation planning
+- **Status:** complete
 
 ### Phase 4: Implementation planning
 
-- [ ] Invoke writing-plans
-- [ ] Register a focused M1 gap phase in ROADMAP/STATE
-- [ ] Include Makefile targets and deployment/soak gates
-- **Status:** pending
+- [x] Invoke writing-plans
+- [x] Register a focused M1 gap phase in ROADMAP/STATE
+- [x] Include Makefile targets and deployment/soak gates
+- [x] Pass GSD plan structure, Nyquist coverage, and independent checker gates
+- **Status:** complete
 
 ### Phase 5: Implementation and verification
 
@@ -49,7 +50,7 @@ Phase 3 — User review gate
 - [ ] Verify durable event history and continuous health sampling
 - [ ] Deploy only with separate production authorization
 - [ ] Restart a strict 24-hour soak with continuous evidence
-- **Status:** pending
+- **Status:** pending — ready to start Plan 01
 
 ## Key Questions
 

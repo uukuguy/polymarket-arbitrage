@@ -3,7 +3,7 @@
 **Date:** 2026-07-22  
 **Workstream:** `m1-perception`  
 **Target:** replace Phase 05 six-hour spot-check claims with durable interval evidence  
-**Status:** direction approved in conversation; written-spec review pending
+**Status:** approved 2026-07-22; ready for Phase 05.4 planning
 
 ## 1. Outcome
 
@@ -64,12 +64,13 @@ the implementation plan, but the fields and semantics below are locked.
 One row per daemon process incarnation:
 
 - `boot_id` — UUID generated once at process start;
-- `started_at`, optional `stopped_at`;
+- `started_at`, nullable `stopped_at` reserved for compatibility but never
+  updated under this append-only contract;
 - Fly machine/instance identity available to the process;
 - code/version identifier and recipe/config digest;
-- termination classification when graceful shutdown is observed.
+- graceful shutdown is represented by an appended `shutdown_signal` event.
 
-Missing `stopped_at` is not rewritten after a crash. A new `boot_id` inside a
+`stopped_at` remains NULL; no boot-finalization API or boot-row update exists. A new `boot_id` inside a
 strict soak invalidates the exact-incarnation gate rather than being silently
 joined to the previous process.
 
@@ -121,7 +122,7 @@ anchors remain for compatibility but no longer satisfy the strict gate alone.
 
 ### 3.4 `l3_runtime_events`
 
-Append low-volume operator-critical events:
+Append low-volume operator-relevant events:
 
 - watchdog stale decision;
 - reconnect reserved, deferred, started, succeeded, or failed;
@@ -135,6 +136,23 @@ copy, not acceptance evidence.
 
 All five tables retain at least 30 days. Expected volume is small: about 1,440
 process samples, 7,200 five-market samples, and 288 promoter rows per day.
+
+### 3.5 Integrity and acceptance-config refinement
+
+Every table adds database-generated `recorded_at`. Occurrence timestamps are
+bounded against it (no more than 30 seconds in the future or 24 hours late).
+Database triggers deny direct UPDATE/DELETE for every normal role. A narrowly
+granted SECURITY DEFINER retention function is the only deletion path; it
+rejects cutoffs newer than 30 days and excludes the active formal window.
+Daemon `service_role` has SELECT/INSERT only and no function EXECUTE. Only a
+dedicated `l3_retention_operator` role/credential may execute cleanup; that
+credential is never installed in the daemon or persisted in evidence/docs.
+
+One canonical `AcceptanceConfig` digest binds recipe bytes, sampler cadence
+30s, max sample gap 75s, promoter cadence 300s, max scheduled-to-start gap
+360s, book/OHLC freshness 120s, N=5/10, retention days >=30, schema revision
+007, and code version. Boots, promoter rows, samples, manifests, and reports
+persist that same digest.
 
 ## 4. Membership truth and promoter transaction
 
@@ -237,6 +255,31 @@ Outputs must include UTC boundaries, boot ID, release/machine anchors, evidence
 row counts, maximum gaps, and explicit `PASS`/`NOT-CLOSED`. Commands are
 read-only except the daemon's normal append-only evidence writer.
 
+A canonical local `SoakManifest` is created at a unique path for a future
+eligible T0 after readiness, then append-bound before T0 through one
+`soak_manifest_bound` runtime event whose server `recorded_at < T0`. It fixes identity, AcceptanceConfig,
+mapping, T0/T24, five report paths/bounds, and any event-kind exception (default
+none). Checkpoints write non-overwritable canonical JSON reports with a raw-row
+set digest. Final verify requires `manifest=<path>` plus `start`/`end`, loads all
+five reports, re-queries their exact raw rows, and validates manifest/soak/
+interval/report hashes.
+
+The sample at exactly manifest T0 must be complete and passing. If it is absent
+or fails, that manifest/binding/report set is permanently NOT-CLOSED and never
+mutated, rebound, or reused; a retry selects a later future T0 and creates a new
+unique manifest. Verdict construction is explicitly
+`build_soak_report(evidence, manifest, start, end, require_24h)`.
+
+The four required status/checkpoint/verify/retention-check targets remain
+database-read-only. Two separately named mutation surfaces are explicit:
+`l3-soak-manifest-bind` appends the formal manifest event, and
+`l3-evidence-retention-cleanup` invokes only the protected retention function
+with an exact approval argument and dedicated masked `L3_RETENTION_DSN`; it
+refuses missing credentials and never falls back to daemon DSN. A read-only
+`l3-retention-operator-check` proves role/target without cleanup, while
+`supabase-prod-revision` proves the allowlisted production ref/database/revision
+before mutation.
+
 ## 7. Failure and chain-truth contract
 
 - A failed evidence write leaves its success anchor unchanged; health ages into
@@ -251,6 +294,9 @@ read-only except the daemon's normal append-only evidence writer.
 - Unavailable historical logs are reported as unavailable, never zero.
 - Evidence schema/config/version changes alter the bound digest and require a
   new T+0.
+- Disallowed runtime events fail by event kind, independent of mutable severity.
+  An exception is valid only if its exact kind was immutable manifest input
+  before T0, thereby changing the manifest and soak hashes.
 
 Add `/health` subchecks for evidence sample freshness, promoter-ledger freshness,
 desired-versus-committed membership equality, and per-market worst freshness.
@@ -294,6 +340,9 @@ Create a focused M1 gap phase, recommended identifier
    soak.
 
 Local implementation and verification do not authorize production mutation.
-Production Alembic 007 and deployment require a separate explicit gate. The
-current release-37 re-soak is archived as diagnostic-only; no T+6 observation
-can upgrade it back into a strict PASS.
+Production Alembic 007 and deployment require two separate explicit approvals,
+and dedicated retention credential provisioning requires another exact approval
+after migration, with production-ref/revision proof before mutation. T+6/T+12/T+18/T+24 are separate
+blocking checkpoints with manifest-derived not-before UTC guards. The current
+release-37 re-soak is archived as diagnostic-only; no later observation can
+upgrade it back into a strict PASS.

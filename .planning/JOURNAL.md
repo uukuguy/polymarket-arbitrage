@@ -4467,3 +4467,41 @@ Review
 After written approval, register and plan `05.4-continuous-l3-soak-evidence`.
 Production Alembic 007 and daemon deployment require a separate explicit gate;
 do not resume the release-37 six-hour samples as strict acceptance evidence.
+
+## SESSION 82 — 2026-07-22 (Phase 05.4 planned and checker-verified)
+
+- [APPROVAL] The user explicitly approved the written continuous-evidence design
+  and authorized implementation planning.
+- [REGISTERED] Inserted `05.4-continuous-l3-soak-evidence` after completed 05.3;
+  it blocks Phase 05 Plan 06 strict closure. The approved contract is expressed
+  as PHASE05.4-R01 through R08 in CONTEXT/ROADMAP.
+- [RESEARCH] Mapped four concrete truth gaps: ignored WS Boolean results,
+  desired state overloaded as committed state, quiet refresh completing on the
+  first asset, and TOB success hiding book-level write failure.
+- [PLANNED] Created five sequential plans / 24 tasks: schema+store; truthful
+  membership+promoter; sampler+events+health; verdict+Make+chaos+teaching; and
+  non-autonomous production/strict-soak gates. Added a 24/24 Nyquist validation
+  map and cross-plan implementation overview.
+- [CHECKER] Three checker rounds forced substantive hardening: GSD executor
+  structure; database server timestamps and append-only privileges; dedicated
+  retention operator; complete AcceptanceConfig; synchronous
+  WS→runtime→health chain; disallowed-kind verdicts; pre-T0 attempt-unique
+  manifest; five canonical report/raw-row digests; separate migration/deploy/
+  retention approvals; and separate not-before T+6/T+12/T+18/T+24 checkpoints.
+  Final targeted independent check returned `VERIFICATION PASSED`.
+- [VERIFY] All five `verify plan-structure` calls pass with zero warnings/errors;
+  task/validation coverage is 24/24; PHASE05.4-R01..R08 appear in plans;
+  placeholder scan and `git diff --check` pass.
+- [BOUNDARY] No implementation code, production probe, migration, credential,
+  deploy, restart, config/secret/threshold change, trade, H-009 action, or push
+  occurred. Planning approval does not authorize Plan 05 production actions.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05.4 --ws m1-perception
+```
+
+Start with Plan 05.4-01 under TDD. Execute Plans 01–04 locally; stop again for
+the distinct Plan 05 production migration, retention credential, and deployment
+authorization gates before any fresh manifest/T0.
