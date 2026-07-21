@@ -251,3 +251,154 @@ external submission, or H-009 action was performed to establish this soak.
 - If identity changes, a daemon fails, or watchdog stale becomes sustained: do
   not mix observations across identities; record the break and make an explicit
   rollback/re-soak decision.
+
+---
+
+## Strict re-soak window 2 — immutable T+0 accepted
+
+**Re-soak start (T+0):** `2026-07-21T14:29:47.941Z`
+**Re-soak end target (T+24):** `2026-07-22T14:29:47.941Z`
+**Formal window:** `[2026-07-21T14:29:47.941Z, 2026-07-22T14:29:47.941Z)`
+**Release:** `37`
+**Machine:** `85e647c4eed598`
+**Instance:** `01KXZJKY9SKEJAY2DD8MMPNB2E`
+**Image:** `deployment-01KXZJHS9QT8T6X0J33KVPTB5V`
+**Digest:** `sha256:5da8e954897f60cf05f9d6664e99a15247d46a2bd4fd0edbb433c200af8b412c`
+
+This is a separate re-soak. It does not repair or replace the permanently
+`NOT-CLOSED` first window. Its clock starts only from the one fully green
+forced-machine response below.
+
+### Scheduled checkpoints
+
+| Checkpoint | Exact UTC target | Exact Asia/Shanghai target | Status |
+|---|---|---|---|
+| T+0 | `2026-07-21T14:29:47.941Z` | `2026-07-21T22:29:47.941+08:00` | captured |
+| T+6 | `2026-07-21T20:29:47.941Z` | `2026-07-22T04:29:47.941+08:00` | awaiting wall clock |
+| T+12 | `2026-07-22T02:29:47.941Z` | `2026-07-22T10:29:47.941+08:00` | pending |
+| T+18 | `2026-07-22T08:29:47.941Z` | `2026-07-22T16:29:47.941+08:00` | pending |
+| T+24 | `2026-07-22T14:29:47.941Z` | `2026-07-22T22:29:47.941+08:00` | pending |
+
+Sampling may occur a few minutes after each target, but SQL must retain the
+literal formal-window boundary. A missed checkpoint remains missed; it is not
+reconstructed from a later health response.
+
+### Natural-write readiness before the candidate
+
+A read-only SQL baseline saw `max(l2_book_levels.ts) =
+2026-07-21T14:23:04.567Z` with 74,620 total rows. The bounded waiter then saw
+80 genuinely newer level rows through `2026-07-21T14:28:09.474Z`. Only after
+that natural write did the executor request a new strict health response.
+
+An earlier routing diagnostic at
+`[2026-07-21T14:28:57.190Z, 2026-07-21T14:28:58.172Z]` returned HTTP 400 because
+the Fly force header was given the incarnation ID rather than the machine ID.
+It returned no health JSON, no gate was interpreted, and it is neither a
+candidate start nor T+0. The accepted request used machine ID
+`85e647c4eed598`; the incarnation remained a separate identity anchor checked
+before and after.
+
+### T+0 — one-response strict health conjunction
+
+Request interval:
+`[2026-07-21T14:29:47.941Z, 2026-07-21T14:29:48.675Z]`; Fly request ID
+`01KY2HAEAJSEHN01ZF4EXQ39CM-arn`; HTTP `200`.
+
+Read-only Fly status immediately before and machine inventory immediately after
+agreed on release, machine, instance, state `started`, image, digest, and
+deployment anchor `2026-07-20T10:55:01Z` exactly as listed above.
+
+| Locked gate | Observed | Status |
+|---|---:|---|
+| `ws:connection_state` | `WAITING_FOR_EVENT` | warn — informational quiet state |
+| `ws:last_event_age_seconds` | `0.0s` | pass |
+| `ws:subscribed_count` | `105` assets | pass |
+| `event_bus:listener_state` | `listening` | pass |
+| `event_bus:last_reconciliation_age_seconds` | `7.8s` | pass |
+| `event_bus:cursor_lag` | `0` | pass |
+| `mirror:l2_tob_age_seconds` | `5.5s` | pass |
+| `candidates:supabase_fetch_age_seconds` | `7.9s` | pass |
+| `l3:active_count` | `10/10` tokens | pass |
+| `l3:last_promote_at_s` | `36.7s` | pass (`<600s`) |
+| `l3:last_book_levels_write_at_s` | `23.1s` | pass (`<120s`) |
+
+The root body was `warn` only because `WAITING_FOR_EVENT` is informational.
+HTTP contract, membership, dedicated L3 clocks, WS/mirror/candidate freshness,
+listener, reconciliation, and cursor all passed together in this one body. No
+earlier sample was stitched into T+0.
+
+The latest exact-machine promoter line before the request was timestamped
+`2026-07-21T14:29:11.807427013Z`:
+
+```text
+l3-promote: +0 -0 markets=5 tokens=10 (chain-truth: _last_promote_at_s=1784644152)
+```
+
+### T+0 post-tick authoritative identity
+
+A read-only repeatable-read transaction at
+`2026-07-21T14:31:19.795864Z` collapsed `l2_candidates` to the newest row per
+asset, retained current non-removed rows with non-null `l3_promoted_at_ts`, and
+then joined `markets_latest.yes_token_id/no_token_id`. It applied no recipe or
+coverage `LIMIT`. The result was five distinct markets, five complete pairs,
+and ten distinct tokens:
+
+| Market | Yes token | No token | `l3_promoted_at_ts` |
+|---|---|---|---|
+| `562802` | `83247781037352156539108067944461291821683755894607244160607042790356561625563` | `33156410999665902694791064431724433042010245771106314074312009703157423879038` | `2026-07-21T12:43:54.658264Z` |
+| `565064` | `67109747366255871599717338045111308888043498275177238365560740200996017915657` | `103845791232328975452762372781150730610824357544180691092497335946993481308222` | `2026-07-21T13:49:03.427030Z` |
+| `601819` | `30630994248667897740988010928640156931882346081873066002335460180076741328029` | `79191939610100241429039499950443680906623179487184628479206155805558220344190` | `2026-07-20T14:50:50.521370Z` |
+| `665374` | `55115078421062885512539156303747803058407616201213034911037320915726138659123` | `1910830010387565971650098373488592514702818137344973088263643820608151819241` | `2026-07-20T16:31:19.735539Z` |
+| `679021` | `84846382165343032223975853870946110241285484772019446686866815597350660955868` | `80456575204440643570499123641511043765364487572502085512858581574010154701650` | `2026-07-21T12:23:48.467942Z` |
+
+Release 37 preserves shared positional normalization before all derived data:
+BUY levels are ranked descending and SELL levels ascending. Neither array index
+zero nor token cardinality was used as a market-identity shortcut.
+
+### T+0 direct SQL boundary evidence
+
+One read-only transaction queried the fixed mapping above over the literal
+interval
+`[2026-07-21T14:29:47.941Z, 2026-07-21T14:33:20.581467Z)`. No PostgREST page or
+row cap was used.
+
+| Market | Book rows | Book token assets | First book | Last book | Yes OHLC rows | First OHLC | Last OHLC |
+|---|---:|---:|---|---|---:|---|---|
+| `562802` | 0 | 0 | — | — | 0 | — | — |
+| `565064` | 0 | 0 | — | — | 0 | — | — |
+| `601819` | 0 | 0 | — | — | 0 | — | — |
+| `665374` | 160 | 2 | `2026-07-21T14:31:31.820Z` | `2026-07-21T14:32:04.666Z` | 2 | `2026-07-21T14:31:00Z` | `2026-07-21T14:32:00Z` |
+| `679021` | 0 | 0 | — | — | 0 | — | — |
+| **Boundary total / coverage** | **160** | **2** | — | — | **2** | — | — |
+
+Initial mapped coverage is one of five markets for both depth and Yes-side
+OHLC. This is an honest boundary reading, not the T+24 verdict and not an early
+failure; the full window still requires all five markets.
+
+### T+0 GAP-401 watchdog boundary
+
+The exact-machine rolling buffer query covered 100 rows from
+`2026-07-21T14:23:04.952612885Z` through
+`2026-07-21T14:32:43.663119572Z`. Within the re-soak interval through the
+read-only query end `2026-07-21T14:33:32.328051Z`, 34 retained entries ranged
+from `14:29:49.402903319Z` to `14:32:43.663119572Z` and contained zero
+`ws_watchdog: stale` matches. Two successful 20-row book-level write log lines
+appeared at `14:31:33.500868706Z` and `14:32:02.898212933Z`.
+
+This is only the T+0 watchdog boundary. The strict 24-hour watchdog verdict
+must be based on retained evidence at every scheduled checkpoint; an unavailable
+historical buffer is never inferred as zero.
+
+### Re-soak verdict status
+
+| Sub-indicator | Strict threshold | Current result | Status |
+|---|---|---|---|
+| (a) active markets throughout | every sample `10` tokens = `5` markets | T+0 `10/10` | pending T+6/T+12/T+18/T+24 |
+| (b) mapped book coverage | five markets over exact window | boundary 1/5 | accumulating |
+| (c) Yes-side OHLC coverage | five markets over exact window | boundary 1/5 | accumulating |
+| GAP-401 watchdog | zero stale matches with retained evidence | T+0 zero | accumulating |
+
+**Current verdict:** IN PROGRESS. The next observation must not occur before
+T+6 `2026-07-21T20:29:47.941Z` (Asia/Shanghai
+`2026-07-22T04:29:47.941+08:00`). Do not sign validation, create
+`05-06-SUMMARY.md`, or close Phase 05 before the T+24 strict verdict.

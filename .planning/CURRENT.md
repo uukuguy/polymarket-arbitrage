@@ -12,7 +12,8 @@
 并产生真实深度行、paper 账本可用的研发系统。Alembic 006、L1 release 127 和 L2
 release 37 已上线；启动与下一次 5 分钟 tick 均为 10/10。Phase 05 的首个 24 小时
 soak 已结束，但 T+6/T+12/T+18 缺失且 T+24 未观测，因此证据门 NOT-CLOSED，必须
-late-diagnose 后重跑。机会 feed 生产最近仍为 HTTP 503。因此**市场感知平台已达到
+保留为失败证据。新的 strict re-soak 已从 `2026-07-21T14:29:47.941Z` 全绿 T+0
+启动，下一门是 T+6 `2026-07-21T20:29:47.941Z`。机会 feed 生产最近仍为 HTTP 503。因此**市场感知平台已达到
 soak-ready，而不是完整 production-qualified；整套系统还不是可以投入真实资金运行的套利产品**。
 
 ## 交付状态
@@ -76,14 +77,14 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 按依赖顺序：
 
-1. Phase 05 的生产 prerequisite 已通过：Alembic 006、L1/L2 deploy、严格 5 市场/10 token 和真实 book-level 写入均有 exact-instance 证据。首个 24h soak 因缺少中间 checkpoint 而 NOT-CLOSED；下一步先做 labelled late diagnostic，再启动新窗口，并每约 6 小时验证 active count、五市场 book/OHLC coverage 与 watchdog；无需放宽 recipe。
+1. Phase 05 的生产 prerequisite 已通过：Alembic 006、L1/L2 deploy、严格 5 市场/10 token 和真实 book-level 写入均有 exact-instance 证据。首个 24h soak 因缺少中间 checkpoint 而永久 NOT-CLOSED；labelled late diagnostic 已完成，独立 re-soak 已从 `2026-07-21T14:29:47.941Z` 启动。下一步在 T+6 验证 active count、五市场 book/OHLC coverage 与 watchdog；无需放宽 recipe。
 2. H-009 本地实现保持 pending：先取得**生产部署/调度的单独授权**，再进行**时间戳化只读容量观察**；之后仍须积累重复 complete run、可解析 exit=0 契约和不可变证据，才可评估 producer cadence/SLA。没有这些证据，HTTP 503 绝不等于零机会。
 3. 实现经过明确授权的 Polymarket order/fill adapter、认证、allowance、限额与 kill switch。
 4. 通过 paper→小额 live 质量门后，才讨论真实资金运行。
 
 ## Workstream 摘要
 
-- **M1：L1/L2/L3 的 T+0 生产链为绿；首个正式 24h 窗口已结束，但 T+6/T+12/T+18 缺失且 T+24 未采，证据门 NOT-CLOSED，必须 late-diagnose 后重跑 soak。**
+- **M1：L1/L2/L3 的 T+0 生产链为绿；首个 24h 窗口永久 NOT-CLOSED，独立 strict re-soak 已从 `2026-07-21T14:29:47.941Z` 启动并等待 T+6。**
 - **M2：execution/accounting + neg-risk buy-all discovery 可用于真实数据监控/paper。**
 - **M3/M4：未开始。**
 - **M5：计划存在，但当前不应先于 M1 恢复。**
@@ -100,10 +101,11 @@ No-side 反馈污染已在 `7ccd2da` / `57d3fc0` / `9451b4b` 修复，recipe 阈
 随后在 promoter `+2/-2` churn 后重新解析权威五市场/十 token 映射，并于
 `2026-07-20T13:30:55Z` 从同一 exact instance 的新样本建立正式 T+0：HTTP 200，
 active `10/10`、promote age `20.0s`、book-write age `19.9s`，其余主链检查全绿。
-T+24 `2026-07-21T13:30:55Z` 已过去，但 T+6/T+12/T+18 均未采集，handoff 时
-T+24 也尚未观测。缺失点不允许回填，因此本窗口不能 PASS。下一步先采一份明确标为
-late 的 exact-instance/完整区间 SQL/watchdog 诊断，随后建立新的 24h re-soak；本次没有
-真实交易或生产变更。
+T+24 `2026-07-21T13:30:55Z` 已过去，但 T+6/T+12/T+18 均未采集，因此首个窗口
+永久 NOT-CLOSED。late diagnostic 已完成；随后自然 book write 后的新同响应 probe
+在 `2026-07-21T14:29:47.941Z` 以 HTTP 200、10/10、promoter 36.7s、book 23.1s
+及其余主链全绿建立独立 re-soak T+0。下一步不早于 T+6
+`2026-07-21T20:29:47.941Z` 采样；本次没有真实交易或生产变更。
 
 ```bash
 /gsd-execute-phase 05 --ws m1-perception

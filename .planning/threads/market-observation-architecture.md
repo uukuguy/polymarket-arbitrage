@@ -1134,3 +1134,10 @@ transport activity and an orderbook resnapshot:
   dedicated book freshness was 253.8s. It was rejected without stitching an
   earlier green book sample. Observation retention and same-response conjunction
   are both parts of the production truth contract.
+- The accepted re-soak added an operator-level identity distinction: Fly's
+  `Fly-Force-Instance-Id` routing header takes the hexadecimal machine ID, while
+  the ULID incarnation remains an independent before/after identity anchor. An
+  HTTP 400 with no health JSON is transport rejection, not a gate sample. After
+  a natural book write, the corrected request passed every locked gate in one
+  body and established a separate immutable T+0; the old incomplete window was
+  not merged into it.

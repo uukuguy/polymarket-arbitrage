@@ -4395,3 +4395,44 @@ Take a genuinely new exact-identity same-response health sample. Start a new
 24-hour re-soak only if active 10/10, promoter `<600s`, book freshness `<120s`,
 and WS/mirror/candidate/listener/reconciliation/cursor gates all pass together;
 then retain T+0/T+6/T+12/T+18/T+24 evidence.
+
+## SESSION 80 — 2026-07-21 (strict re-soak T+0 accepted)
+
+- [NATURAL WRITE] A bounded read-only waiter observed 80 new
+  `l2_book_levels` rows after the `14:23:04.567Z` baseline, through
+  `14:28:09.474Z`; no production mutation was used to manufacture freshness.
+- [FORMAL RE-SOAK T+0] Started a separate immutable window at
+  `2026-07-21T14:29:47.941Z`; T+24 is `2026-07-22T14:29:47.941Z`. One
+  forced-machine response returned HTTP 200 with active `10/10`, promoter
+  `36.7s`, book `23.1s`, WS `0.0s`, mirror `5.5s`, candidate `7.9s`, listener
+  `listening`, reconciliation `7.8s`, and cursor lag `0`.
+- [EXACT IDENTITY] Release 37, machine `85e647c4eed598`, instance
+  `01KXZJKY9SKEJAY2DD8MMPNB2E`, image
+  `deployment-01KXZJHS9QT8T6X0J33KVPTB5V`, and digest
+  `sha256:5da8e954897f60cf05f9d6664e99a15247d46a2bd4fd0edbb433c200af8b412c`
+  were unchanged before and after.
+- [POST-TICK IDENTITY] Newest-row-per-asset collapse plus authoritative Yes/No
+  join resolved markets `562802`, `565064`, `601819`, `665374`, and `679021`:
+  five complete pairs / ten distinct tokens, with no coverage LIMIT.
+- [BOUNDARY EVIDENCE] Literal-window direct SQL through
+  `14:33:20.581467Z` found 160 book rows across two tokens / one mapped market
+  and two Yes-side OHLC rows / one market. The retained exact-machine T+0 log
+  slice contained 34 rows and zero `ws_watchdog: stale` matches.
+- [ROUTING NOTE] A prior HTTP 400 diagnostic used the incarnation ID in Fly's
+  force header; it returned no health JSON and was not treated as a candidate.
+  The accepted request correctly used the machine ID while independently
+  pinning the incarnation before/after.
+- [BOUNDARY] No deploy, restart, config/secret/threshold change, trade, H-009
+  action, external submission, validation signature, SUMMARY, STATE/ROADMAP
+  update, or push occurred.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05 --ws m1-perception
+```
+
+Run no earlier than T+6 `2026-07-21T20:29:47.941Z` (Asia/Shanghai
+`2026-07-22T04:29:47.941+08:00`). Preserve the new immutable mapping and append
+same-response strict health, direct SQL coverage from the literal T+0, and
+retained watchdog evidence. Do not mix evidence from the first window.
