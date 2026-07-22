@@ -331,3 +331,42 @@ async def test_listener_cancellation_clears_state_and_closes_connection():
 
     assert state.is_connected is False
     conn.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_listener_close_hang_is_bounded_and_preserves_cancellation():
+    """A transport close that never ACKs cannot consume daemon shutdown."""
+    from polyarb.events import listener
+
+    state = _LifecycleState()
+    conn = _make_fake_conn()
+    conn.add_termination_listener = MagicMock()
+    close_started = asyncio.Event()
+    close_blocker = asyncio.Event()
+
+    async def _hanging_close():
+        close_started.set()
+        await close_blocker.wait()
+
+    conn.close = AsyncMock(side_effect=_hanging_close)
+    stop_event = asyncio.Event()
+    with patch.object(listener.asyncpg, "connect", AsyncMock(return_value=conn)):
+        task = asyncio.create_task(
+            listener.listen_snapshot_complete(
+                dsn="postgresql://test",
+                on_event=lambda payload: None,
+                stop_event=stop_event,
+                state=state,
+            )
+        )
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if state.is_connected:
+                break
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.75)
+
+    assert close_started.is_set()
+    assert state.is_connected is False
+    conn.close.assert_awaited_once()

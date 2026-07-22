@@ -230,7 +230,8 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
         lifecycle.append("http_bind")
 
         async def _bound_server():
-            await asyncio.sleep(0)
+            while not server.should_exit:
+                await asyncio.sleep(0)
 
         return _bound_server()
 
@@ -336,6 +337,8 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
     assert lifecycle == ["http_bind", "boot", "event_writer", "promoter", "sampler"]
     assert task_names == [
         "l2-http-server",
+        "l2-stop-wait",
+        "l3-boot-append",
         "ws-watchdog",
         "ws-consumer",
         "ws-quiet-refresh",
@@ -576,6 +579,236 @@ async def test_shutdown_deadline_force_cancels_and_reaps_writer_once():
 
 
 @pytest.mark.asyncio
+async def test_shutdown_force_cancel_interrupts_stuck_cancellation_cleanup():
+    """Force phase sends a second cancel to a task stuck after graceful cancel."""
+    from polyarb.daemon import l2_main
+
+    entered_cleanup = asyncio.Event()
+    cleanup_blocker = asyncio.Event()
+
+    async def _server():
+        await asyncio.sleep(0)
+
+    async def _stuck_peer():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            entered_cleanup.set()
+            await cleanup_blocker.wait()
+            raise
+
+    server_task = asyncio.create_task(_server(), name="l2-http-server")
+    peer_task = asyncio.create_task(_stuck_peer(), name="stuck-peer")
+    await asyncio.sleep(0)
+    try:
+        await l2_main._drain_daemon_tasks(
+            server_task=server_task,
+            event_writer_task=None,
+            peer_tasks=(peer_task,),
+            normal_shutdown=True,
+            timeout_s=0.05,
+        )
+
+        assert entered_cleanup.is_set()
+        assert peer_task.done()
+        assert peer_task.cancelling() == 2
+    finally:
+        if not peer_task.done():
+            peer_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await peer_task
+
+
+@pytest.mark.asyncio
+async def test_shutdown_never_returns_clean_with_pathological_pending_task():
+    """A task ignoring both cancel phases makes shutdown fail closed."""
+    from polyarb.daemon import l2_main
+
+    release = asyncio.Event()
+
+    async def _server():
+        await asyncio.sleep(0)
+
+    async def _pathological_peer():
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                continue
+
+    server_task = asyncio.create_task(_server(), name="l2-http-server")
+    peer_task = asyncio.create_task(_pathological_peer(), name="pathological-peer")
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(RuntimeError, match="pathological-peer"):
+            await l2_main._drain_daemon_tasks(
+                server_task=server_task,
+                event_writer_task=None,
+                peer_tasks=(peer_task,),
+                normal_shutdown=True,
+                timeout_s=0.05,
+            )
+    finally:
+        release.set()
+        await asyncio.wait_for(peer_task, timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_bound_server_failure_during_boot_cancels_and_reaps_boot_task():
+    """A bound HTTP server dying during boot preflight aborts startup."""
+    from polyarb.daemon import l2_main
+
+    settings = _make_fake_settings()
+    settings.l2_runtime_db_dsn.get_secret_value = MagicMock(return_value="runtime-dsn")
+    store = MagicMock()
+    boot_started = asyncio.Event()
+    boot_reaped = asyncio.Event()
+    boot_blocker = asyncio.Event()
+    server_exit = asyncio.Event()
+
+    async def _append_boot(_record):
+        boot_started.set()
+        try:
+            await boot_blocker.wait()
+        finally:
+            boot_reaped.set()
+
+    store.append_boot = AsyncMock(side_effect=_append_boot)
+    server = MagicMock(started=True, should_exit=False)
+
+    async def _serve():
+        await server_exit.wait()
+        raise RuntimeError("serve failed after bind")
+
+    server.serve = _serve
+    consumer = MagicMock()
+    consumer.run = AsyncMock()
+    consumer.run_quiet_refresh = AsyncMock()
+    watchdog = MagicMock()
+    watchdog.watch = AsyncMock()
+    tracked: list[asyncio.Task[object]] = []
+    real_create = l2_main._create_daemon_task
+
+    def _track(awaitable, *, name):
+        task = real_create(awaitable, name=name)
+        tracked.append(task)
+        return task
+
+    with (
+        patch("polyarb.daemon.l2_main.init_logging"),
+        patch("polyarb.daemon.l2_main.load_settings", return_value=settings),
+        patch("polyarb.daemon.l2_main.init_sentry"),
+        patch("polyarb.daemon.l2_main.sentry_sdk.set_tag"),
+        patch("polyarb.daemon.l2_main.L3EvidenceStore", return_value=store),
+        patch("polyarb.daemon.l2_main.SQLiteStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.WsConsumer", return_value=consumer),
+        patch("polyarb.daemon.l2_main.WsWatchdog", return_value=watchdog),
+        patch("polyarb.daemon.l2_main.uvicorn.Server", return_value=server),
+        patch("polyarb.daemon.l2_main.create_l2_app", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main._create_daemon_task", side_effect=_track),
+    ):
+        main_task = asyncio.create_task(l2_main.main())
+        await asyncio.wait_for(boot_started.wait(), timeout=0.5)
+        server_exit.set()
+        with pytest.raises(RuntimeError, match="serve failed after bind"):
+            await asyncio.wait_for(main_task, timeout=0.5)
+
+    assert boot_reaped.is_set()
+    assert consumer.run.await_count == 0
+    assert consumer.run_quiet_refresh.await_count == 0
+    assert watchdog.watch.await_count == 0
+    assert tracked and all(task.done() for task in tracked)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_outcome", ["clean", "exception"])
+async def test_bound_server_steady_exit_aborts_and_reaps_all_tasks(server_outcome):
+    """A server exit before stop supervises every WS/PG/evidence peer."""
+    from polyarb.daemon import l2_main
+
+    settings = _make_fake_settings()
+    settings.l2_runtime_db_dsn.get_secret_value = MagicMock(return_value="runtime-dsn")
+    store = MagicMock()
+    store.append_boot = AsyncMock(return_value=True)
+    dependencies = l2_main._build_l3_evidence_dependencies(
+        settings=settings,
+        recipe_yaml_path=l2_main._L3_RECIPE_PATH,
+    )
+    object.__setattr__(dependencies, "store", store)
+    server_exit = asyncio.Event()
+    all_started = asyncio.Event()
+    started: set[str] = set()
+    reaped: set[str] = set()
+
+    async def _owned(name: str):
+        started.add(name)
+        if len(started) == 8:
+            all_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            reaped.add(name)
+
+    server = MagicMock(started=True, should_exit=False)
+
+    async def _serve():
+        await server_exit.wait()
+        if server_outcome == "exception":
+            raise RuntimeError("steady server failure")
+
+    server.serve = _serve
+    consumer = MagicMock()
+    consumer.run = lambda _stop: _owned("ws-consumer")
+    consumer.run_quiet_refresh = lambda _stop: _owned("ws-quiet-refresh")
+    watchdog = MagicMock()
+    watchdog.watch = lambda _stop: _owned("ws-watchdog")
+    pump = MagicMock()
+    pump.run = lambda _stop: _owned("reconciliation-pump")
+
+    async def _listener(**_kwargs):
+        await _owned("snapshot-listener")
+
+    async def _writer(_stop, **_kwargs):
+        await _owned("l3-event-writer")
+
+    async def _promoter(**_kwargs):
+        await _owned("l3-promoter")
+
+    async def _sampler(_stop, **_kwargs):
+        await _owned("l3-evidence-sampler")
+
+    with (
+        patch("polyarb.daemon.l2_main.init_logging"),
+        patch("polyarb.daemon.l2_main.load_settings", return_value=settings),
+        patch("polyarb.daemon.l2_main.init_sentry"),
+        patch("polyarb.daemon.l2_main.sentry_sdk.set_tag"),
+        patch(
+            "polyarb.daemon.l2_main._build_l3_evidence_dependencies",
+            return_value=dependencies,
+        ),
+        patch("polyarb.daemon.l2_main.SQLiteStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.WsConsumer", return_value=consumer),
+        patch("polyarb.daemon.l2_main.WsWatchdog", return_value=watchdog),
+        patch("polyarb.daemon.l2_main.AsyncpgCursorStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.ReconciliationPump", return_value=pump),
+        patch("polyarb.daemon.l2_main.listen_snapshot_complete", new=_listener),
+        patch("polyarb.daemon.l2_main.uvicorn.Server", return_value=server),
+        patch("polyarb.daemon.l2_main.create_l2_app", return_value=MagicMock()),
+        patch("polyarb.observation.l3_promote.run_periodic", new=_promoter),
+        patch("polyarb.observation.l3_sampler.run_event_writer", new=_writer),
+        patch("polyarb.observation.l3_sampler.run_sampler", new=_sampler),
+    ):
+        main_task = asyncio.create_task(l2_main.main())
+        await asyncio.wait_for(all_started.wait(), timeout=0.5)
+        server_exit.set()
+        expected = "steady server failure" if server_outcome == "exception" else "exited"
+        with pytest.raises(RuntimeError, match=expected):
+            await asyncio.wait_for(main_task, timeout=0.5)
+
+    assert started == reaped
+
+
+@pytest.mark.asyncio
 async def test_cancellation_during_steady_state_reaps_every_named_task_once():
     """Steady-state cancellation owns server, WS, PG, and evidence tasks."""
     from polyarb.daemon import l2_main
@@ -672,7 +905,10 @@ async def test_cancellation_during_steady_state_reaps_every_named_task_once():
     }
     assert started == reaped == expected
     assert all(task.done() for task in tracked)
-    assert all(task.cancelling() == 1 for task in tracked)
+    assert all(
+        task.cancelling() == (0 if task.get_name() == "l3-boot-append" else 1)
+        for task in tracked
+    )
 
 
 def _patch_minimal_l2_main(l2_main, *, settings, server, store):
@@ -910,8 +1146,8 @@ async def test_failed_runtime_authorization_gates_all_direct_postgres_tasks(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: build a mocked uvicorn.Server that "starts" immediately so the P9
-# polling loop exits on the first iteration. .serve() returns an already-done
-# coroutine so the server_task completes promptly.
+# polling loop exits on the first iteration. .serve() remains alive until
+# main sets should_exit, matching uvicorn's supervised lifetime contract.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_mock_server():
@@ -920,8 +1156,8 @@ def _make_mock_server():
     instance.should_exit = False
 
     async def _serve():
-        # Sleep briefly so the started polling loop sees a coroutine on the loop
-        await asyncio.sleep(0)
+        while not instance.should_exit:
+            await asyncio.sleep(0)
 
     instance.serve = _serve
     return instance

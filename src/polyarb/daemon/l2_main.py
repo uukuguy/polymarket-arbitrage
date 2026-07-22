@@ -201,6 +201,64 @@ def _cancel_once(task: asyncio.Task[Any]) -> None:
         task.cancel()
 
 
+def _force_cancel(task: asyncio.Task[Any]) -> None:
+    """Interrupt a task stuck in its first cancellation cleanup await."""
+    if not task.done():
+        task.cancel()
+
+
+def _raise_unexpected_task_exit(task: asyncio.Task[Any]) -> None:
+    """Propagate a supervised task failure or reject an early clean return."""
+    if task.cancelled():
+        raise RuntimeError(f"{task.get_name()} cancelled before stop_event")
+    error = task.exception()
+    if error is not None:
+        raise error
+    raise RuntimeError(f"{task.get_name()} exited before stop_event")
+
+
+async def _await_boot_or_daemon_exit(
+    *,
+    boot_task: asyncio.Task[bool],
+    server_task: asyncio.Task[Any],
+    stop_wait_task: asyncio.Task[Any],
+    stop_event: asyncio.Event,
+) -> tuple[bool, bool]:
+    """Race boot authorization against bound-server death and shutdown."""
+    done, _ = await asyncio.wait(
+        {boot_task, server_task, stop_wait_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if stop_event.is_set():
+        return (boot_task.result() if boot_task in done else False), True
+    if boot_task in done:
+        persisted = boot_task.result()
+        if server_task.done():
+            _raise_unexpected_task_exit(server_task)
+        return persisted, False
+    _raise_unexpected_task_exit(server_task)
+
+
+async def _await_stop_or_daemon_exit(
+    *,
+    stop_wait_task: asyncio.Task[Any],
+    stop_event: asyncio.Event,
+    supervised_tasks: Iterable[asyncio.Task[Any]],
+) -> None:
+    """Fail fast when any bound daemon task exits before process stop."""
+    supervised = set(supervised_tasks)
+    done, _ = await asyncio.wait(
+        {stop_wait_task, *supervised},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if stop_event.is_set():
+        return
+    for task in done:
+        if task is not stop_wait_task:
+            _raise_unexpected_task_exit(task)
+    raise RuntimeError("stop waiter exited without stop_event")
+
+
 def _report_task_result(task: asyncio.Task[Any]) -> None:
     """Log a completed task failure without awaiting the task a second time."""
     if task.cancelled():
@@ -215,6 +273,25 @@ def _report_task_result(task: asyncio.Task[Any]) -> None:
             task.get_name(),
             type(error).__name__,
         )
+
+
+async def _force_reap_tasks(
+    tasks: set[asyncio.Task[Any]],
+    *,
+    deadline: float,
+) -> None:
+    """Send the explicit force cancel and fail if any task survives deadline."""
+    if not tasks:
+        return
+    for task in tasks:
+        _force_cancel(task)
+    remaining_s = max(0.0, deadline - asyncio.get_running_loop().time())
+    done, still_pending = await asyncio.wait(tasks, timeout=remaining_s)
+    for task in done:
+        _report_task_result(task)
+    if still_pending:
+        names = ",".join(sorted(task.get_name() for task in still_pending))
+        raise RuntimeError(f"daemon shutdown deadline exceeded pending_tasks={names}")
 
 
 async def _drain_daemon_tasks(
@@ -249,32 +326,35 @@ async def _drain_daemon_tasks(
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
-    force_cancel_grace_s = min(0.1, max(0.0, timeout_s / 10))
+    force_cancel_grace_s = min(0.25, max(0.0, timeout_s / 2))
     drain_timeout_s = max(0.0, timeout_s - force_cancel_grace_s)
     try:
         done, pending = await asyncio.wait(owned, timeout=drain_timeout_s)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancellation:
         for task in owned:
             _cancel_once(task)
         remaining_s = max(0.0, deadline - loop.time())
-        if remaining_s:
-            await asyncio.wait(owned, timeout=remaining_s)
+        cancellation_grace_s = min(
+            force_cancel_grace_s,
+            max(0.0, remaining_s / 2),
+        )
+        graceful_done, pending = await asyncio.wait(
+            owned,
+            timeout=max(0.0, remaining_s - cancellation_grace_s),
+        )
+        for task in graceful_done:
+            _report_task_result(task)
+        try:
+            await _force_reap_tasks(pending, deadline=deadline)
+        except RuntimeError as cleanup_error:
+            raise cleanup_error from cancellation
         raise
 
     for task in done:
         _report_task_result(task)
     for task in pending:
         logger.warning("{} task did not stop within {}s — forcing", task.get_name(), timeout_s)
-        _cancel_once(task)
-    if pending:
-        final_done, still_pending = await asyncio.wait(
-            pending,
-            timeout=max(0.0, deadline - loop.time()),
-        )
-        for task in final_done:
-            _report_task_result(task)
-        for task in still_pending:
-            logger.error("{} task ignored bounded cancellation", task.get_name())
+    await _force_reap_tasks(pending, deadline=deadline)
 
 # ── Plan 06 D-07: WS frame → l2_* row builders ───────────────────────────
 # Polymarket WS market-channel event shapes (empirical):
@@ -747,6 +827,8 @@ async def main() -> int:
     l3_promoter_task: asyncio.Task[None] | None = None
     l3_sampler_task: asyncio.Task[None] | None = None
     l3_event_writer_task: asyncio.Task[None] | None = None
+    l3_boot_task: asyncio.Task[bool] | None = None
+    stop_wait_task: asyncio.Task[bool] | None = None
     normal_shutdown = False
     try:
         # P9 server-started gate — MANDATORY per Phase 02 L5.  The task is
@@ -770,72 +852,106 @@ async def main() -> int:
         # HTTP is reachable before boot role preflight touches PostgreSQL.
         # The successful boot append is the authorization capability for every
         # daemon-owned direct PostgreSQL task, not merely the promoter.
-        l3_boot_persisted = await _append_l3_boot(l3_evidence)
+        stop_wait_task = _create_daemon_task(
+            stop_event.wait(), name="l2-stop-wait"
+        )
+        l3_boot_task = _create_daemon_task(
+            _append_l3_boot(l3_evidence), name="l3-boot-append"
+        )
+        l3_boot_persisted, stopped_during_boot = await _await_boot_or_daemon_exit(
+            boot_task=l3_boot_task,
+            server_task=server_task,
+            stop_wait_task=stop_wait_task,
+            stop_event=stop_event,
+        )
 
         # WS + REST remain fail-soft when the dedicated runtime credential is
         # absent or rejected; neither path requires direct PostgreSQL access.
-        watchdog_task = _create_daemon_task(
-            watchdog.watch(stop_event), name="ws-watchdog"
-        )
-        consumer_task = _create_daemon_task(
-            ws_consumer.run(stop_event), name="ws-consumer"
-        )
-        quiet_refresh_task = _create_daemon_task(
-            ws_consumer.run_quiet_refresh(stop_event), name="ws-quiet-refresh"
-        )
-
-        if l3_boot_persisted:
-            pump_task = _create_daemon_task(
-                reconciliation_pump.run(stop_event), name="reconciliation-pump"
+        if stopped_during_boot:
+            normal_shutdown = True
+        else:
+            watchdog_task = _create_daemon_task(
+                watchdog.watch(stop_event), name="ws-watchdog"
             )
-            listener_task = _create_daemon_task(
-                listen_snapshot_complete(
-                    dsn=dsn,
-                    on_event=_on_snapshot_notification,
-                    stop_event=stop_event,
-                    state=reconciliation_state,
+            consumer_task = _create_daemon_task(
+                ws_consumer.run(stop_event), name="ws-consumer"
+            )
+            quiet_refresh_task = _create_daemon_task(
+                ws_consumer.run_quiet_refresh(stop_event), name="ws-quiet-refresh"
+            )
+
+            if l3_boot_persisted:
+                pump_task = _create_daemon_task(
+                    reconciliation_pump.run(stop_event), name="reconciliation-pump"
+                )
+                listener_task = _create_daemon_task(
+                    listen_snapshot_complete(
+                        dsn=dsn,
+                        on_event=_on_snapshot_notification,
+                        stop_event=stop_event,
+                        state=reconciliation_state,
+                    ),
+                    name="snapshot-listener",
+                )
+
+                from polyarb.observation import l3_promote as l3_promote_module
+                from polyarb.observation import l3_sampler as l3_sampler_module
+
+                l3_event_writer_task = _create_daemon_task(
+                    l3_sampler_module.run_event_writer(
+                        stop_event,
+                        runtime=l3_evidence.runtime,
+                        store=l3_evidence.store,
+                    ),
+                    name="l3-event-writer",
+                )
+
+                l3_promoter_task = _create_daemon_task(
+                    l3_promote_module.run_periodic(
+                        stop_event=stop_event,
+                        settings=settings,
+                        ws_consumer=ws_consumer,
+                        recipe_yaml_path=_L3_RECIPE_PATH,
+                        evidence_store=l3_evidence.store,
+                        evidence_runtime=l3_evidence.runtime,
+                        acceptance_config=l3_evidence.acceptance_config,
+                    ),
+                    name="l3-promoter",
+                )
+                l3_sampler_task = _create_daemon_task(
+                    l3_sampler_module.run_sampler(
+                        stop_event,
+                        settings=settings,
+                        ws_consumer=ws_consumer,
+                        reconciliation_state=reconciliation_state,
+                        runtime=l3_evidence.runtime,
+                        store=l3_evidence.store,
+                    ),
+                    name="l3-evidence-sampler",
+                )
+
+            await _await_stop_or_daemon_exit(
+                stop_wait_task=stop_wait_task,
+                stop_event=stop_event,
+                supervised_tasks=(
+                    server_task,
+                    watchdog_task,
+                    consumer_task,
+                    quiet_refresh_task,
+                    *(
+                        task
+                        for task in (
+                            listener_task,
+                            pump_task,
+                            l3_event_writer_task,
+                            l3_promoter_task,
+                            l3_sampler_task,
+                        )
+                        if task is not None
+                    ),
                 ),
-                name="snapshot-listener",
             )
-
-            from polyarb.observation import l3_promote as l3_promote_module
-            from polyarb.observation import l3_sampler as l3_sampler_module
-
-            l3_event_writer_task = _create_daemon_task(
-                l3_sampler_module.run_event_writer(
-                    stop_event,
-                    runtime=l3_evidence.runtime,
-                    store=l3_evidence.store,
-                ),
-                name="l3-event-writer",
-            )
-
-            l3_promoter_task = _create_daemon_task(
-                l3_promote_module.run_periodic(
-                    stop_event=stop_event,
-                    settings=settings,
-                    ws_consumer=ws_consumer,
-                    recipe_yaml_path=_L3_RECIPE_PATH,
-                    evidence_store=l3_evidence.store,
-                    evidence_runtime=l3_evidence.runtime,
-                    acceptance_config=l3_evidence.acceptance_config,
-                ),
-                name="l3-promoter",
-            )
-            l3_sampler_task = _create_daemon_task(
-                l3_sampler_module.run_sampler(
-                    stop_event,
-                    settings=settings,
-                    ws_consumer=ws_consumer,
-                    reconciliation_state=reconciliation_state,
-                    runtime=l3_evidence.runtime,
-                    store=l3_evidence.store,
-                ),
-                name="l3-evidence-sampler",
-            )
-
-        await stop_event.wait()
-        normal_shutdown = True
+            normal_shutdown = True
     except asyncio.CancelledError:
         # F-04 contract — MUST propagate, not swallow.
         logger.info("polyarb-l2 daemon shutdown via CancelledError")
@@ -854,6 +970,8 @@ async def main() -> int:
                 pump_task,
                 l3_promoter_task,
                 l3_sampler_task,
+                l3_boot_task,
+                stop_wait_task,
             ),
             normal_shutdown=normal_shutdown,
         )

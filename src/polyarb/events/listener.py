@@ -29,6 +29,18 @@ import asyncpg
 import asyncpg.exceptions
 from loguru import logger
 
+_CONNECTION_CLOSE_TIMEOUT_S = 0.5
+
+
+async def _close_connection(conn: object) -> None:
+    """Bound transport cleanup without swallowing caller cancellation."""
+    try:
+        await asyncio.wait_for(conn.close(), timeout=_CONNECTION_CLOSE_TIMEOUT_S)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - cleanup is fail-soft and bounded
+        pass
+
 
 def _make_callback(on_event: Callable[[dict], None]) -> Callable:
     """Build the sync callback asyncpg.add_listener will invoke.
@@ -109,10 +121,7 @@ async def listen_snapshot_complete(
                         pass
                 if terminated is not None and not terminated.done():
                     terminated.cancel()
-                try:
-                    await conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                await _close_connection(conn)
         except asyncio.CancelledError:
             # F-04: MUST propagate.
             logger.info("event listener cancelled, propagating CancelledError")
@@ -179,7 +188,4 @@ async def catchup_from_cursor(
             return []
         return [dict(r) for r in missed]
     finally:
-        try:
-            await conn.close()
-        except Exception:  # noqa: BLE001
-            pass
+        await _close_connection(conn)
