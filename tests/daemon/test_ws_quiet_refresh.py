@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -26,7 +27,8 @@ def _make_consumer() -> tuple[WsConsumer, WsWatchdog, MagicMock]:
         initial_assets=None,
     )
     consumer._candidate_set = {"candidate-b", "candidate-a"}
-    consumer._l3_active_set = {"candidate-b", "l3-c"}
+    consumer.set_l3_desired(["candidate-b", "l3-c"])
+    consumer._l3_committed_set = {"candidate-b", "l3-c"}
     consumer._last_event_at_s = BASE_S
     ws = MagicMock()
     ws.send = AsyncMock(return_value=None)
@@ -38,7 +40,8 @@ def _make_consumer() -> tuple[WsConsumer, WsWatchdog, MagicMock]:
             consumer.record_book_evidence(
                 asset_id="candidate-a",
                 generation=consumer._connection_generation,
-                mirror_succeeded=True,
+                book_levels_succeeded=True,
+                observed_at=datetime(2026, 7, 23, tzinfo=UTC),
             )
 
     ws.send.side_effect = _send_with_evidence
@@ -49,7 +52,7 @@ def _make_consumer() -> tuple[WsConsumer, WsWatchdog, MagicMock]:
 async def test_request_book_refresh_sends_sorted_union_without_mutating_truth() -> None:
     consumer, watchdog, ws = _make_consumer()
     candidates_before = set(consumer._candidate_set)
-    l3_before = set(consumer._l3_active_set)
+    l3_before = consumer.l3_membership_snapshot().desired
     event_before = consumer.last_event_at_s
     watchdog_before = watchdog.last_event_at_s
 
@@ -65,7 +68,7 @@ async def test_request_book_refresh_sends_sorted_union_without_mutating_truth() 
         },
     ]
     assert consumer._candidate_set == candidates_before
-    assert consumer._l3_active_set == l3_before
+    assert consumer.l3_membership_snapshot().desired == l3_before
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before
 
@@ -106,7 +109,8 @@ async def test_due_refresh_failures_do_not_forge_freshness(failure: str) -> None
     consumer, watchdog, ws = _make_consumer()
     if failure == "empty":
         consumer._candidate_set.clear()
-        consumer._l3_active_set.clear()
+        consumer.set_l3_desired([])
+        consumer._l3_committed_set.clear()
     elif failure == "no-ws":
         consumer._current_ws = None
     else:
@@ -130,11 +134,12 @@ async def test_due_refresh_failures_do_not_forge_freshness(failure: str) -> None
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before
 
-    # The exact cooldown boundary permits another attempt. Empty/no-WS paths
-    # remain transport-free; a closed live transport observes the retry.
+    # The exact cooldown boundary permits another attempt. Compensation has
+    # already unpublished the failed socket, so no path retries that same
+    # ambiguous generation.
     assert await consumer.refresh_if_quiet(now_s=BASE_S + 90) is False
     assert consumer._last_quiet_refresh_attempt_at_s == BASE_S + 90
-    assert ws.send.await_count == (2 if failure == "closed" else 0)
+    assert ws.send.await_count == (1 if failure == "closed" else 0)
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before
 
@@ -151,7 +156,8 @@ async def test_run_quiet_refresh_sends_once_then_stops_cleanly() -> None:
             consumer.record_book_evidence(
                 asset_id="candidate-a",
                 generation=consumer._connection_generation,
-                mirror_succeeded=True,
+                book_levels_succeeded=True,
+                observed_at=datetime(2026, 7, 23, tzinfo=UTC),
             )
             stop_event.set()
 

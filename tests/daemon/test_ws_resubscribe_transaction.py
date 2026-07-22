@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -52,12 +53,28 @@ async def test_quiet_refresh_requires_exact_pair_and_matching_mirror_evidence() 
     ]
     assert task.done() is False
 
-    consumer.record_book_evidence(asset_id="a", generation=6, mirror_succeeded=True)
-    consumer.record_book_evidence(asset_id="a", generation=7, mirror_succeeded=False)
+    observed_at = datetime(2026, 7, 23, tzinfo=UTC)
+    consumer.record_book_evidence(
+        asset_id="a",
+        generation=6,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    consumer.record_book_evidence(
+        asset_id="a",
+        generation=7,
+        book_levels_succeeded=False,
+        observed_at=observed_at,
+    )
     await asyncio.sleep(0)
     assert task.done() is False
 
-    consumer.record_book_evidence(asset_id="a", generation=7, mirror_succeeded=True)
+    consumer.record_book_evidence(
+        asset_id="a",
+        generation=7,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
     assert await task is True
 
 
@@ -139,7 +156,10 @@ async def test_control_lock_prevents_candidate_pair_interleaving_with_refresh() 
     release_first_send.set()
     await _wait_until(lambda: ws.send.await_count >= 2)
     consumer.record_book_evidence(
-        asset_id="a", generation=consumer._connection_generation, mirror_succeeded=True
+        asset_id="a",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=True,
+        observed_at=datetime(2026, 7, 23, tzinfo=UTC),
     )
     assert await asyncio.wait_for(quiet, timeout=0.2) is True
     assert await asyncio.wait_for(candidate, timeout=0.2) is True

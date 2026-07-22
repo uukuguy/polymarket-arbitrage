@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -50,6 +51,43 @@ def test_consumer_initial_state_disconnected() -> None:
     assert consumer.current_state == "DISCONNECTED", (
         f"expected DISCONNECTED before run(), got {consumer.current_state!r}"
     )
+
+
+def test_membership_mutation_synchronously_updates_runtime_snapshot() -> None:
+    """Mutation -> callback -> runtime snapshot is one synchronous chain."""
+    from polyarb.daemon.ws_consumer import WsConsumer
+    from polyarb.daemon.ws_watchdog import WsWatchdog
+    from polyarb.observation.l3_evidence import L3EvidenceRuntime, RuntimeIdentity
+
+    identity = RuntimeIdentity(
+        machine_id="machine",
+        machine_version="version",
+        image_ref="image",
+        release_id="release",
+        code_version="code",
+        recipe_sha256="a" * 64,
+        acceptance_config_hash="b" * 64,
+    )
+    runtime = L3EvidenceRuntime(
+        identity,
+        started_at=datetime(2026, 7, 23, tzinfo=UTC),
+    )
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=WsWatchdog(stale_s=30.0),
+        on_event=lambda ev: None,
+        initial_assets=[],
+        membership_observer=runtime.update_membership,
+        event_recorder=lambda *args, **kwargs: None,
+    )
+
+    consumer.set_l3_desired(["yes", "no"])
+
+    status = runtime.snapshot()
+    assert status.ws_generation == 0
+    assert status.desired == frozenset({"yes", "no"})
+    assert status.committed == frozenset()
+    assert status.evidenced == frozenset()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

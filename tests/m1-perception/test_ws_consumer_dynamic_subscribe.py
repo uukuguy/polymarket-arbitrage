@@ -1,26 +1,14 @@
-"""RED → GREEN tests for WsConsumer.add_subscriptions / remove_subscriptions.
+"""Truthful desired/committed/evidenced WebSocket membership contracts."""
 
-Phase 05 Plan 02 Task 1 (revision 1). 9 tests covering:
-
-1. add_subscriptions: no live ws → returns False, mutates _l3_active_set
-2. add_subscriptions: live ws → sends payload, returns True
-3. add_subscriptions: empty list → noop, returns True
-4. add_subscriptions: send failure → returns False, _l3_active_set NOT mutated
-   (Warning #12 deterministic spec)
-5. remove_subscriptions: live ws → sends unsubscribe, _l3_active_set updated
-6. remove_subscriptions: no live ws → returns False, fallback mutation
-7. Lint: add_subscriptions does NOT acquire a Lock (websockets 15+ safe)
-8. _compute_active_assets returns union of _candidate_set and _l3_active_set
-9. add_subscriptions accepts a 10-token Yes+No payload (D-05 N=5)
-
-The 9 tests are RED until Task 2 refactors WsConsumer.
-"""
 from __future__ import annotations
 
 import inspect
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 # Allow tests to use POLYARB_ALLOW_EXTERNAL_PATHS for fixtures that touch
 # tmp_path (matches conftest.py convention).
@@ -28,216 +16,336 @@ os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 
 
-def _make_consumer(initial_assets: list[str] | None = None):
-    """Construct a WsConsumer with mock settings + watchdog for unit tests."""
+def _make_consumer(
+    initial_assets: list[str] | None = None,
+    *,
+    membership_observer=None,
+):
     from polyarb.daemon.ws_consumer import WsConsumer
     from polyarb.daemon.ws_watchdog import WsWatchdog
 
-    wd = WsWatchdog(stale_s=30.0)
-    consumer = WsConsumer(
+    return WsConsumer(
         settings=MagicMock(),
-        watchdog=wd,
+        watchdog=WsWatchdog(stale_s=30.0),
         on_event=lambda ev: None,
         initial_assets=initial_assets,
-    )
-    return consumer
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 1 — add_subscriptions: no live ws → returns False, but mutates pending
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-async def test_add_subscriptions_no_live_ws_returns_false_but_mutates_pending() -> None:
-    """No live ws → return False; new tokens land in _l3_active_set fallback."""
-    consumer = _make_consumer(initial_assets=["a"])
-    assert consumer._current_ws is None
-
-    result = await consumer.add_subscriptions(["b", "c"])
-
-    assert result is False, "add_subscriptions must return False when ws is None"
-    assert set(consumer.subscribed_assets) == {"a", "b", "c"}, (
-        f"subscribed_assets must reflect fallback mutation; got {consumer.subscribed_assets}"
+        membership_observer=membership_observer,
+        event_recorder=lambda *args, **kwargs: None,
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 2 — add_subscriptions: live ws → sends payload, returns True
-# ─────────────────────────────────────────────────────────────────────────────
+def _live_ws() -> MagicMock:
+    ws = MagicMock()
+    ws.send = AsyncMock(return_value=None)
+    ws.close = AsyncMock(return_value=None)
+    return ws
 
 
-async def test_add_subscriptions_with_live_ws_sends_payload_and_returns_true() -> None:
-    """Live ws → send subscribe payload + return True; subscribed_assets is union."""
-    consumer = _make_consumer(initial_assets=["a"])
-    mock_ws = MagicMock()
-    mock_ws.send = AsyncMock()
-    consumer._current_ws = mock_ws
+def test_setting_desired_does_not_imply_committed() -> None:
+    consumer = _make_consumer(initial_assets=["candidate"])
 
-    result = await consumer.add_subscriptions(["b", "c"])
+    consumer.set_l3_desired(["yes", "no"])
 
-    assert result is True, "add_subscriptions must return True on successful send"
-    assert mock_ws.send.call_count == 1, (
-        f"send must be called exactly once; got {mock_ws.send.call_count}"
-    )
-    sent_arg = mock_ws.send.call_args[0][0]
-    payload = json.loads(sent_arg)
-    assert payload == {
+    snapshot = consumer.l3_membership_snapshot()
+    assert snapshot.desired == frozenset({"yes", "no"})
+    assert snapshot.committed == frozenset()
+    assert snapshot.evidenced == frozenset()
+    assert consumer.subscribed_assets == ["candidate", "no", "yes"]
+
+
+async def test_offline_add_and_remove_return_false_without_changing_committed() -> None:
+    consumer = _make_consumer(initial_assets=["candidate"])
+    consumer.set_l3_desired(["a", "b"])
+    before = consumer.l3_membership_snapshot().committed
+
+    assert await consumer.add_subscriptions(["a", "b"]) is False
+    assert consumer.l3_membership_snapshot().committed == before
+    assert await consumer.remove_subscriptions(["a"]) is False
+    assert consumer.l3_membership_snapshot().committed == before
+    assert consumer.l3_membership_snapshot().desired == frozenset({"a", "b"})
+
+
+async def test_failed_control_resolution_still_publishes_truthful_snapshot() -> None:
+    snapshots = []
+    consumer = _make_consumer(membership_observer=snapshots.append)
+    consumer.set_l3_desired(["token"])
+    ws = _live_ws()
+    consumer._current_ws = ws
+    consumer._connection_generation = 3
+    before = len(snapshots)
+    consumer._send_control = AsyncMock(return_value=False)
+
+    assert await consumer.add_subscriptions(["token"]) is False
+
+    assert len(snapshots) >= before + 2  # failed resolution, then compensation
+    assert all(snapshot.committed == frozenset() for snapshot in snapshots[before:])
+    assert snapshots[-1].generation == 3
+
+
+async def test_live_add_commits_only_after_current_generation_send() -> None:
+    consumer = _make_consumer()
+    consumer.set_l3_desired(["a", "b"])
+    ws = _live_ws()
+    consumer._current_ws = ws
+    consumer._connection_generation = 4
+
+    assert await consumer.add_subscriptions(["a", "b"]) is True
+
+    assert json.loads(ws.send.await_args.args[0]) == {
         "operation": "subscribe",
-        "assets_ids": ["b", "c"],
+        "assets_ids": ["a", "b"],
         "initial_dump": True,
-    }, f"payload schema mismatch; got {payload}"
-    assert set(consumer.subscribed_assets) == {"a", "b", "c"}
+    }
+    snapshot = consumer.l3_membership_snapshot()
+    assert snapshot.generation == 4
+    assert snapshot.desired == frozenset({"a", "b"})
+    assert snapshot.committed == frozenset({"a", "b"})
+    assert snapshot.evidenced == frozenset()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 3 — add_subscriptions: empty list → noop
-# ─────────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("failure", ["false", "exception"])
+async def test_failed_add_never_commits(failure: str) -> None:
+    consumer = _make_consumer()
+    consumer.set_l3_desired(["a"])
+    ws = _live_ws()
+    if failure == "false":
+        consumer._send_control = AsyncMock(return_value=False)
+    else:
+        ws.send.side_effect = RuntimeError("connection closed")
+    consumer._current_ws = ws
+    consumer._connection_generation = 2
+
+    assert await consumer.add_subscriptions(["a"]) is False
+    assert consumer.l3_membership_snapshot().committed == frozenset()
+    ws.close.assert_awaited_once()
 
 
-async def test_add_subscriptions_empty_list_is_noop() -> None:
-    """Empty asset_ids → True, no send, no mutation."""
-    consumer = _make_consumer(initial_assets=["a"])
-    mock_ws = MagicMock()
-    mock_ws.send = AsyncMock()
-    consumer._current_ws = mock_ws
+async def test_connection_identity_change_during_send_cannot_commit() -> None:
+    consumer = _make_consumer()
+    consumer.set_l3_desired(["latest"])
+    old_ws = _live_ws()
+    replacement = _live_ws()
 
-    initial_assets = set(consumer.subscribed_assets)
+    async def _replace_connection(_raw: str) -> None:
+        consumer._current_ws = replacement
+        consumer._connection_generation = 8
 
-    result = await consumer.add_subscriptions([])
+    old_ws.send.side_effect = _replace_connection
+    consumer._current_ws = old_ws
+    consumer._connection_generation = 7
 
-    assert result is True, "empty add_subscriptions must return True"
-    assert mock_ws.send.call_count == 0, "empty add must not call send"
-    assert set(consumer.subscribed_assets) == initial_assets, "no mutation on empty"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 4 — add_subscriptions: send failure → returns False, NO mutation
-#          (Warning #12 deterministic spec)
-# ─────────────────────────────────────────────────────────────────────────────
+    assert await consumer.add_subscriptions(["latest"]) is False
+    assert consumer.l3_membership_snapshot().committed == frozenset()
+    old_ws.close.assert_awaited_once()
+    replacement.close.assert_not_awaited()
 
 
-async def test_add_subscriptions_send_failure_returns_false_and_does_not_pollute_active_sets() -> None:
-    """On send failure: return False; _l3_active_set unchanged; "b" not in subscribed_assets."""
-    consumer = _make_consumer(initial_assets=["a"])
-    mock_ws = MagicMock()
-    mock_ws.send = AsyncMock(side_effect=RuntimeError("connection closed"))
-    consumer._current_ws = mock_ws
-    pre_l3 = set(consumer._l3_active_set)
-
-    result = await consumer.add_subscriptions(["b"])
-
-    assert result is False, "send failure must return False"
-    assert "b" not in consumer._l3_active_set, "_l3_active_set must NOT be polluted on send failure"
-    assert "b" not in consumer.subscribed_assets, (
-        "subscribed_assets must NOT contain failed token (Warning #12 deterministic spec)"
+async def test_reconnect_commits_latest_desired_only_after_initial_subscribe() -> None:
+    snapshots = []
+    consumer = _make_consumer(
+        initial_assets=["candidate"], membership_observer=snapshots.append
     )
-    assert consumer._l3_active_set == pre_l3, (
-        f"_l3_active_set must be unchanged; pre={pre_l3} post={consumer._l3_active_set}"
+    consumer.set_l3_desired(["yes", "no"])
+    ws = _live_ws()
+
+    await consumer._initialize_connection(ws)
+
+    assert json.loads(ws.send.await_args.args[0]) == {
+        "type": "market",
+        "assets_ids": ["candidate", "no", "yes"],
+        "initial_dump": True,
+    }
+    assert snapshots[-2].generation == 1
+    assert snapshots[-2].committed == frozenset()
+    assert snapshots[-1].committed == frozenset({"yes", "no"})
+    assert consumer._current_ws is ws
+
+
+async def test_failed_reconnect_does_not_commit_desired() -> None:
+    consumer = _make_consumer(initial_assets=["candidate"])
+    consumer.set_l3_desired(["yes", "no"])
+    ws = _live_ws()
+    ws.send.side_effect = RuntimeError("initial subscribe failed")
+
+    with pytest.raises(RuntimeError, match="initial WS subscription failed"):
+        await consumer._initialize_connection(ws)
+
+    snapshot = consumer.l3_membership_snapshot()
+    assert snapshot.generation == 1
+    assert snapshot.desired == frozenset({"yes", "no"})
+    assert snapshot.committed == frozenset()
+    ws.close.assert_awaited_once()
+
+
+async def test_disconnect_clears_committed_and_evidenced_but_retains_desired() -> None:
+    consumer = _make_consumer()
+    consumer.set_l3_desired(["token"])
+    ws = _live_ws()
+    await consumer._initialize_connection(ws)
+    observed_at = datetime(2026, 7, 23, tzinfo=UTC)
+    consumer.record_book_evidence(
+        asset_id="token",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    assert consumer.l3_membership_snapshot().evidenced == frozenset({"token"})
+
+    await consumer._release_connection(ws)
+
+    snapshot = consumer.l3_membership_snapshot()
+    assert snapshot.desired == frozenset({"token"})
+    assert snapshot.committed == frozenset()
+    assert snapshot.evidenced == frozenset()
+    assert snapshot.evidenced_at == {}
+
+
+async def test_old_generation_and_failed_book_writes_never_become_evidence() -> None:
+    consumer = _make_consumer()
+    consumer.set_l3_desired(["token"])
+    ws = _live_ws()
+    await consumer._initialize_connection(ws)
+    observed_at = datetime(2026, 7, 23, tzinfo=UTC)
+
+    consumer.record_book_evidence(
+        asset_id="token",
+        generation=consumer._connection_generation - 1,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    consumer.record_book_evidence(
+        asset_id="token",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=False,
+        observed_at=observed_at,
+    )
+    assert consumer.l3_membership_snapshot().evidenced == frozenset()
+
+    consumer.record_book_evidence(
+        asset_id="token",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    snapshot = consumer.l3_membership_snapshot()
+    assert snapshot.evidenced == frozenset({"token"})
+    assert snapshot.evidenced_at == {"token": observed_at}
+
+
+async def test_new_generation_invalidates_previous_business_evidence() -> None:
+    consumer = _make_consumer()
+    consumer.set_l3_desired(["token"])
+    first_ws = _live_ws()
+    await consumer._initialize_connection(first_ws)
+    consumer.record_book_evidence(
+        asset_id="token",
+        generation=1,
+        book_levels_succeeded=True,
+        observed_at=datetime(2026, 7, 23, tzinfo=UTC),
     )
 
+    second_ws = _live_ws()
+    await consumer._initialize_connection(second_ws)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 5 — remove_subscriptions: live ws → sends unsubscribe
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-async def test_remove_subscriptions_with_live_ws_sends_unsubscribe() -> None:
-    """Live ws + "b" in _l3_active_set → unsubscribe payload + remove from set."""
-    consumer = _make_consumer(initial_assets=["a", "c"])
-    consumer._l3_active_set = {"b"}
-    mock_ws = MagicMock()
-    mock_ws.send = AsyncMock()
-    consumer._current_ws = mock_ws
-
-    result = await consumer.remove_subscriptions(["b"])
-
-    assert result is True
-    assert mock_ws.send.call_count == 1
-    sent_arg = mock_ws.send.call_args[0][0]
-    payload = json.loads(sent_arg)
-    assert payload == {"operation": "unsubscribe", "assets_ids": ["b"]}, (
-        f"unsubscribe payload schema mismatch; got {payload}"
-    )
-    assert "b" not in consumer._l3_active_set
-    assert "b" not in consumer.subscribed_assets
+    snapshot = consumer.l3_membership_snapshot()
+    assert snapshot.generation == 2
+    assert snapshot.committed == frozenset({"token"})
+    assert snapshot.evidenced == frozenset()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 6 — remove_subscriptions: no live ws → fallback mutation only
-# ─────────────────────────────────────────────────────────────────────────────
+async def test_live_remove_changes_committed_without_rewriting_desired() -> None:
+    consumer = _make_consumer()
+    consumer.set_l3_desired(["a", "b"])
+    ws = _live_ws()
+    await consumer._initialize_connection(ws)
+    ws.send.reset_mock()
+    consumer.set_l3_desired(["b"])
+
+    assert await consumer.remove_subscriptions(["a"]) is True
+
+    assert json.loads(ws.send.await_args.args[0]) == {
+        "operation": "unsubscribe",
+        "assets_ids": ["a"],
+    }
+    snapshot = consumer.l3_membership_snapshot()
+    assert snapshot.desired == frozenset({"b"})
+    assert snapshot.committed == frozenset({"b"})
 
 
-async def test_remove_subscriptions_no_live_ws_mutates_pending_only() -> None:
-    """No live ws → return False; remove from _l3_active_set (fallback)."""
-    consumer = _make_consumer(initial_assets=["a"])
-    consumer._l3_active_set = {"b"}
-    assert consumer._current_ws is None
+def test_membership_snapshots_are_immutable_defensive_copies() -> None:
+    consumer = _make_consumer()
+    consumer.set_l3_desired(["a"])
+    first = consumer.l3_membership_snapshot()
 
-    result = await consumer.remove_subscriptions(["b"])
+    with pytest.raises(AttributeError):
+        first.desired.add("forged")  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        first.evidenced_at["forged"] = datetime.now(UTC)  # type: ignore[index]
 
-    assert result is False, "no live ws → return False"
-    assert "b" not in consumer.subscribed_assets, "fallback must drop b from union"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 7 — add_subscriptions does NOT acquire a Lock (websockets 15+ contract)
-# ─────────────────────────────────────────────────────────────────────────────
+    consumer.set_l3_desired(["b"])
+    assert first.desired == frozenset({"a"})
+    assert consumer.l3_membership_snapshot().desired == frozenset({"b"})
 
 
-def test_add_subscriptions_concurrent_with_recv_loop_safe() -> None:
-    """Lint: source of add_subscriptions does NOT acquire a Lock.
-
-    websockets 15+ supports concurrent send + recv from different tasks; a Lock
-    would be both unnecessary and a deadlock risk (recv loop already holds the
-    library-internal recv lock).
-    """
-    from polyarb.daemon.ws_consumer import WsConsumer
-
-    src = inspect.getsource(WsConsumer.add_subscriptions)
-    assert "Lock" not in src, (
-        "add_subscriptions must NOT acquire any Lock (asyncio.Lock / threading.Lock); "
-        "websockets 15+ supports concurrent send + recv"
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 8 — _compute_active_assets returns union
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def test_compute_active_assets_returns_union_of_candidate_and_l3_sets() -> None:
-    """_candidate_set ∪ _l3_active_set is exposed via subscribed_assets."""
+def test_compute_active_assets_uses_candidate_and_desired_not_committed() -> None:
     consumer = _make_consumer()
     consumer._candidate_set = {"a", "b"}
-    consumer._l3_active_set = {"b", "c"}
+    consumer.set_l3_desired(["b", "c"])
 
-    assert set(consumer.subscribed_assets) == {"a", "b", "c"}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 9 — Yes+No double token: 10-token payload (Warning #13, D-05)
-# ─────────────────────────────────────────────────────────────────────────────
+    assert consumer._compute_active_assets() == ["a", "b", "c"]
+    assert consumer.l3_membership_snapshot().committed == frozenset()
 
 
-async def test_add_subscriptions_with_yes_no_double_token() -> None:
-    """Plan 04 promoter expands 5 markets × Yes+No = 10 tokens. API must accept all 10."""
+def test_add_subscriptions_keeps_control_serialization_out_of_call_site() -> None:
+    """The helper owns serialization; callers do not create a second lock."""
+    from polyarb.daemon.ws_consumer import WsConsumer
+
+    assert "Lock" not in inspect.getsource(WsConsumer.add_subscriptions)
+
+
+async def test_add_subscriptions_accepts_ten_yes_no_tokens() -> None:
     consumer = _make_consumer()
-    mock_ws = MagicMock()
-    mock_ws.send = AsyncMock()
-    consumer._current_ws = mock_ws
-
     ten_tokens = [
-        "yes1", "no1", "yes2", "no2", "yes3",
-        "no3", "yes4", "no4", "yes5", "no5",
+        "yes1",
+        "no1",
+        "yes2",
+        "no2",
+        "yes3",
+        "no3",
+        "yes4",
+        "no4",
+        "yes5",
+        "no5",
     ]
-    result = await consumer.add_subscriptions(ten_tokens)
+    consumer.set_l3_desired(ten_tokens)
+    ws = _live_ws()
+    consumer._current_ws = ws
+    consumer._connection_generation = 1
 
-    assert result is True
-    assert mock_ws.send.call_count == 1
-    sent_arg = mock_ws.send.call_args[0][0]
-    payload = json.loads(sent_arg)
-    assert len(payload["assets_ids"]) == 10, (
-        f"expected 10 tokens in payload; got {len(payload['assets_ids'])}"
+    assert await consumer.add_subscriptions(ten_tokens) is True
+    assert consumer.l3_membership_snapshot().committed == frozenset(ten_tokens)
+    assert set(json.loads(ws.send.await_args.args[0])["assets_ids"]) == set(ten_tokens)
+
+
+async def test_stale_timestamp_cannot_overwrite_newer_evidence() -> None:
+    consumer = _make_consumer()
+    consumer.set_l3_desired(["token"])
+    ws = _live_ws()
+    await consumer._initialize_connection(ws)
+    newer = datetime(2026, 7, 23, 2, tzinfo=UTC)
+    older = newer - timedelta(minutes=1)
+
+    consumer.record_book_evidence(
+        asset_id="token",
+        generation=1,
+        book_levels_succeeded=True,
+        observed_at=newer,
     )
-    # No de-dup / no truncation
-    assert set(payload["assets_ids"]) == set(ten_tokens)
+    consumer.record_book_evidence(
+        asset_id="token",
+        generation=1,
+        book_levels_succeeded=True,
+        observed_at=older,
+    )
+
+    assert consumer.l3_membership_snapshot().evidenced_at == {"token": newer}

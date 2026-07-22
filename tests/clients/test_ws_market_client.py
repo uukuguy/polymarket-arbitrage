@@ -648,6 +648,7 @@ async def test_dynamic_control_close_uses_shared_gate_then_latest_union(
     monkeypatch.setattr("polyarb.clients.ws_market_client.websockets.connect", _connect)
     task = asyncio.create_task(consumer.run(stop))
     await asyncio.wait_for(first.receive_entered.wait(), timeout=0.2)
+    consumer.set_l3_desired(["latest"])
     assert await consumer.add_subscriptions(["latest"]) is False
 
     async with asyncio.timeout(0.2):
@@ -717,6 +718,7 @@ async def test_dynamic_control_shared_gate_is_cancellable(
     monkeypatch.setattr("polyarb.clients.ws_market_client.websockets.connect", _connect)
     task = asyncio.create_task(consumer.run(asyncio.Event()))
     await asyncio.wait_for(first.receive_entered.wait(), timeout=0.2)
+    consumer.set_l3_desired(["latest"])
     assert await consumer.add_subscriptions(["latest"]) is False
     async with asyncio.timeout(0.2):
         while consumer._current_ws is not None:

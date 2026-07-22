@@ -24,6 +24,7 @@ import time
 import warnings
 from collections import deque
 from collections.abc import Callable, Iterable
+from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
@@ -38,6 +39,7 @@ from polyarb.clients.ws_market_client import (
     stream_market_events,
 )
 from polyarb.daemon.ws_watchdog import WsWatchdog
+from polyarb.observation.l3_evidence import WsMembershipSnapshot
 
 _QUIET_REFRESH_SEND_TIMEOUT_S: float = 5.0
 _BOOK_EVIDENCE_TIMEOUT_S: float = 5.0
@@ -132,6 +134,8 @@ class WsConsumer:
         watchdog: WsWatchdog,
         on_event: Callable[[dict], None],
         initial_assets: list[str] | None = None,
+        membership_observer: Callable[[WsMembershipSnapshot], None] | None = None,
+        event_recorder: Callable[..., None] | None = None,
     ) -> None:
         self._settings = settings
         self._watchdog = watchdog
@@ -139,11 +143,19 @@ class WsConsumer:
         # Phase 05 Plan 02 — D-11 refactor (Pitfall 5 fix):
         # _subscribed_assets is no longer a single list. Two disjoint roles:
         # - _candidate_set: tokens chosen by L2 candidate refresh (5-min cron-ish)
-        # - _l3_active_set: tokens promoted to L3 (5-min L3 promoter task)
+        # - _l3_desired_set: reconnect intent chosen by the L3 promoter
+        # - _l3_committed_set: successful controls on the current generation
+        # - _l3_business_evidence: current-generation depth-write evidence
         # The public subscribed_assets property + the legacy _subscribed_assets
         # property+setter both expose the union via _compute_active_assets().
         self._candidate_set: set[str] = set(initial_assets or [])
-        self._l3_active_set: set[str] = set()
+        self._l3_desired_set: set[str] = set()
+        self._l3_committed_set: set[str] = set()
+        self._l3_business_evidence: dict[str, tuple[int, datetime]] = {}
+        self._membership_observer = membership_observer
+        # Plan 03 wires immutable runtime events. Accept the dependency now so
+        # Watchdog/Consumer construction does not need another signature break.
+        self._event_recorder = event_recorder
         self._state: str = "DISCONNECTED"
         self._last_event_at_s: float = time.time()
         self._last_quiet_refresh_attempt_at_s: float = 0.0
@@ -166,6 +178,52 @@ class WsConsumer:
         self._compensated_generation_order: deque[int] = deque()
         # Wire the liveness closure into the watchdog so it uses it for the gate.
         self._watchdog._liveness_check = self._liveness_check
+        self._publish_l3_membership_locked()
+
+    def l3_membership_snapshot(self) -> WsMembershipSnapshot:
+        """Return an immutable copy of current L3 membership truth."""
+        evidence_times = {
+            asset_id: observed_at
+            for asset_id, (generation, observed_at) in self._l3_business_evidence.items()
+            if generation == self._connection_generation
+            and asset_id in self._l3_committed_set
+        }
+        return WsMembershipSnapshot(
+            generation=self._connection_generation,
+            desired=frozenset(self._l3_desired_set),
+            committed=frozenset(self._l3_committed_set),
+            evidenced=frozenset(evidence_times),
+            evidenced_at=evidence_times,
+        )
+
+    def _publish_l3_membership_locked(self) -> None:
+        """Synchronously publish one immutable snapshot at a mutation boundary."""
+        if self._membership_observer is not None:
+            self._membership_observer(self.l3_membership_snapshot())
+
+    def _clear_l3_connection_state_locked(self) -> None:
+        self._l3_committed_set.clear()
+        self._l3_business_evidence.clear()
+
+    def set_l3_desired(self, asset_ids: Iterable[str]) -> None:
+        """Replace reconnect intent without claiming current control success."""
+        self._l3_desired_set = set(asset_ids)
+        self._publish_l3_membership_locked()
+
+    @property
+    def _l3_active_set(self) -> set[str]:
+        """Deprecated defensive read of L3 desired state.
+
+        Production candidate refresh still reads this legacy name for bounded
+        logging. Returning a copy prevents old callers from bypassing the
+        synchronous membership publisher.
+        """
+        return set(self._l3_desired_set)
+
+    @_l3_active_set.setter
+    def _l3_active_set(self, asset_ids: Iterable[str]) -> None:
+        """Route legacy assignments through the truthful desired-state API."""
+        self.set_l3_desired(asset_ids)
 
     # ── GAP-401: liveness probe ────────────────────────────────────────────
 
@@ -197,6 +255,8 @@ class WsConsumer:
             async with self._subscription_control_lock:
                 generation = self._connection_generation + 1
                 self._connection_generation = generation
+                self._clear_l3_connection_state_locked()
+                self._publish_l3_membership_locked()
                 active_assets = self._compute_active_assets()
                 ok = await self._send_control(
                     ws,
@@ -208,7 +268,10 @@ class WsConsumer:
                 )
                 if ok:
                     self._current_ws = ws
+                    self._l3_committed_set = set(self._l3_desired_set)
+                    self._publish_l3_membership_locked()
                     return
+                self._publish_l3_membership_locked()
         except asyncio.CancelledError:
             await self._compensate_generation(ws, generation)
             raise
@@ -222,18 +285,26 @@ class WsConsumer:
         async with self._subscription_control_lock:
             if self._current_ws is ws:
                 self._current_ws = None
+                self._clear_l3_connection_state_locked()
+            self._publish_l3_membership_locked()
 
     async def _compensate_generation(self, ws: Any, generation: int) -> float:
         """Close exactly one ambiguous socket per generation, preserving cancel."""
         retry_after_s = 0.0
         async with self._subscription_control_lock:
             if generation in self._compensated_generations:
+                self._publish_l3_membership_locked()
                 return self._watchdog.reconnect_retry_after_s()
             if len(self._compensated_generation_order) >= _COMPENSATED_GENERATIONS_MAX:
                 expired = self._compensated_generation_order.popleft()
                 self._compensated_generations.discard(expired)
             self._compensated_generations.add(generation)
             self._compensated_generation_order.append(generation)
+            if generation == self._connection_generation:
+                if self._current_ws is ws:
+                    self._current_ws = None
+                self._clear_l3_connection_state_locked()
+            self._publish_l3_membership_locked()
             if not self._watchdog.reserve_reconnect():
                 retry_after_s = self._watchdog.reconnect_retry_after_s()
                 logger.warning(
@@ -253,11 +324,22 @@ class WsConsumer:
         return retry_after_s
 
     def record_book_evidence(
-        self, *, asset_id: str, generation: int, mirror_succeeded: bool
+        self,
+        *,
+        asset_id: str,
+        generation: int,
+        book_levels_succeeded: bool,
+        observed_at: datetime,
     ) -> None:
-        """Resolve only same-generation book waiters after production mirror success."""
-        if not mirror_succeeded:
+        """Accept only current-generation depth evidence for committed tokens."""
+        if not book_levels_succeeded or generation != self._connection_generation:
             return
+        if asset_id in self._l3_committed_set:
+            previous = self._l3_business_evidence.get(asset_id)
+            if previous is not None and observed_at < previous[1]:
+                return
+            self._l3_business_evidence[asset_id] = (generation, observed_at)
+            self._publish_l3_membership_locked()
         for future in tuple(self._book_evidence_waiters.get((generation, asset_id), set())):
             if not future.done():
                 future.set_result(True)
@@ -267,7 +349,6 @@ class WsConsumer:
         payload: dict[str, Any],
         *,
         commit: Callable[[], None] | None = None,
-        offline_commit: Callable[[], None] | None = None,
     ) -> bool:
         """Fence one control send, identity check, and optional state commit."""
         ws: Any = None
@@ -277,8 +358,7 @@ class WsConsumer:
                 ws = self._current_ws
                 generation = self._connection_generation
                 if ws is None:
-                    if offline_commit is not None:
-                        offline_commit()
+                    self._publish_l3_membership_locked()
                     return False
                 succeeded = await self._send_control(ws, payload)
                 identity_matches = (
@@ -288,7 +368,9 @@ class WsConsumer:
                 if succeeded and identity_matches:
                     if commit is not None:
                         commit()
+                    self._publish_l3_membership_locked()
                     return True
+                self._publish_l3_membership_locked()
         except asyncio.CancelledError:
             if ws is not None:
                 await self._compensate_generation(ws, generation)
@@ -341,14 +423,14 @@ class WsConsumer:
     # ── Phase 05 Plan 02 — D-11 helpers (Pitfall 5 fix) ────────────────────
 
     def _compute_active_assets(self) -> list[str]:
-        """Return sorted union of _candidate_set and _l3_active_set.
+        """Return sorted union of candidate and L3 reconnect intent.
 
         Called by:
           - subscribed_assets property (public)
           - run() loop (replaces direct self._subscribed_assets read)
           - _subscribed_assets backward-compat property getter
         """
-        return sorted(self._candidate_set | self._l3_active_set)
+        return sorted(self._candidate_set | self._l3_desired_set)
 
     async def request_book_refresh(self) -> bool:
         """Request an initial book dump for the current active asset union.
@@ -464,18 +546,18 @@ class WsConsumer:
         migration) used to do ``ws_consumer._subscribed_assets = list(...)``
         as a full-list overwrite. Plan 02 splits the set in two — this setter
         interprets the incoming list as the NEW candidate set ONLY, leaving
-        _l3_active_set untouched. Emits DeprecationWarning so any remaining
+        L3 desired state untouched. Emits DeprecationWarning so any remaining
         callers are visible in test output.
         """
         warnings.warn(
             "Direct assignment to WsConsumer._subscribed_assets is deprecated; "
             "use update_candidate_set(asset_ids) instead. The legacy setter "
-            "interprets the new list as the candidate set only — _l3_active_set "
+            "interprets the new list as the candidate set only — L3 desired state "
             "is preserved (Phase 05 Pitfall 5 fix).",
             DeprecationWarning,
             stacklevel=2,
         )
-        # NOTE: We do NOT subtract _l3_active_set from the new candidate set.
+        # NOTE: We do NOT subtract L3 desired tokens from the new candidate set.
         # Rationale: a token can legitimately be in BOTH sets simultaneously
         # (e.g. a high-liquidity candidate that ALSO got promoted to L3); the
         # union semantics in _compute_active_assets handle the overlap.
@@ -486,7 +568,7 @@ class WsConsumer:
 
         Phase 05 Plan 02 Task 3 — `l2_candidate_refresh.on_snapshot_complete`
         migrates from the legacy `_subscribed_assets = list(...)` overwrite to
-        this dedicated helper, which leaves `_l3_active_set` untouched (Pitfall 5).
+        this dedicated helper, which leaves L3 desired state untouched (Pitfall 5).
         """
         self._candidate_set = set(asset_ids)
 
@@ -543,25 +625,7 @@ class WsConsumer:
         return False
 
     async def add_subscriptions(self, asset_ids: list[str]) -> bool:
-        """Add asset_ids to L3 subscriptions; send subscribe payload if ws is live.
-
-        Phase 05 Plan 02 D-11 contract (revision 1 — Warning #12 deterministic):
-
-          1. Empty asset_ids → return True (noop).
-          2. _current_ws is None → mutate _l3_active_set fallback, return False.
-             The next reconnect will pick them up via _compute_active_assets().
-          3. Else attempt `await self._current_ws.send(json.dumps(payload))`
-             with payload = {"operation": "subscribe", "assets_ids": [...],
-             "initial_dump": True}. (See ws_market_client docstring + thread
-             §2.2 Q1 — `operation` key not `type` key for mid-conn payloads.)
-          4. Send raises → log warning, do NOT mutate _l3_active_set, return
-             False. Caller can safely retry. (Warning #12: subscribed_assets
-             must not include the failed token after this path runs.)
-          5. Send succeeds → mutate _l3_active_set, return True.
-
-        Subscription control is serialized with candidate refresh, reconnect
-        initialization, and every desired-state commit.
-        """
+        """Commit L3 additions only after a current-generation control succeeds."""
         if not asset_ids:
             return True
         return await self._send_single_control_transaction(
@@ -570,26 +634,22 @@ class WsConsumer:
                 "assets_ids": list(asset_ids),
                 "initial_dump": True,
             },
-            commit=lambda: self._l3_active_set.update(asset_ids),
-            offline_commit=lambda: self._l3_active_set.update(asset_ids),
+            commit=lambda: self._l3_committed_set.update(asset_ids),
         )
 
     async def remove_subscriptions(self, asset_ids: list[str]) -> bool:
-        """Remove asset_ids from L3 subscriptions; send unsubscribe payload if live.
-
-        Symmetric to add_subscriptions. Payload schema (thread §2.2 Q1):
-          {"operation": "unsubscribe", "assets_ids": [...]}  — no initial_dump.
-
-        On send failure: log warning, do NOT mutate _l3_active_set, return False.
-        On no live ws: mutate _l3_active_set (fallback) and return False.
-        On send success: mutate _l3_active_set (discard tokens) and return True.
-        """
+        """Commit L3 removals only after a current-generation control succeeds."""
         if not asset_ids:
             return True
+
+        def _commit_remove() -> None:
+            self._l3_committed_set.difference_update(asset_ids)
+            for asset_id in asset_ids:
+                self._l3_business_evidence.pop(asset_id, None)
+
         return await self._send_single_control_transaction(
             {"operation": "unsubscribe", "assets_ids": list(asset_ids)},
-            commit=lambda: self._l3_active_set.difference_update(asset_ids),
-            offline_commit=lambda: self._l3_active_set.difference_update(asset_ids),
+            commit=_commit_remove,
         )
 
     # ── Quick task 260602-ws-dynamic-subscribe ──────────────────────────────
@@ -600,7 +660,7 @@ class WsConsumer:
     # helpers ONLY push the mid-connection WS payload so the live socket
     # actually starts/stops receiving frames for the new asset_ids.
     #
-    # Why a separate method: `add_subscriptions` mutates `_l3_active_set` —
+    # Why a separate method: `add_subscriptions` mutates L3 committed state —
     # using it for L2 candidates would clobber the L3 set (Pitfall 5
     # regression — verified by test_candidate_refresh_l3_protection).
     #
@@ -672,7 +732,7 @@ class WsConsumer:
             logger.info(
                 f"ws_consumer: starting consume loop with "
                 f"{len(self._compute_active_assets())} subscribed assets "
-                f"(candidate={len(self._candidate_set)} l3={len(self._l3_active_set)})"
+                f"(candidate={len(self._candidate_set)} l3={len(self._l3_desired_set)})"
             )
 
             async for event in stream_market_events(
@@ -700,7 +760,8 @@ class WsConsumer:
                         self.record_book_evidence(
                             asset_id=str(event.get("asset_id") or ""),
                             generation=self._connection_generation,
-                            mirror_succeeded=mirror_succeeded is True,
+                            book_levels_succeeded=mirror_succeeded is True,
+                            observed_at=datetime.now(UTC),
                         )
                 except Exception as e:  # noqa: BLE001
                     # Phase 04 Plan 04 D-06 indicator 1: count the drop so the
@@ -715,6 +776,8 @@ class WsConsumer:
             )
             self._state = "DISCONNECTED"
             self._current_ws = None  # GAP-401: clear stash on disconnect
+            self._clear_l3_connection_state_locked()
+            self._publish_l3_membership_locked()
             # Do NOT re-raise: returning lets the supervisor (l2_main) decide
             # whether to relaunch the consumer. Watchdog will mark RECONNECTING
             # via its stale_s timeout if no fresh touch arrives.
@@ -724,4 +787,6 @@ class WsConsumer:
             logger.info("ws_consumer: cancelled, propagating CancelledError")
             self._state = "DISCONNECTED"
             self._current_ws = None  # GAP-401: clear stash on disconnect
+            self._clear_l3_connection_state_locked()
+            self._publish_l3_membership_locked()
             raise
