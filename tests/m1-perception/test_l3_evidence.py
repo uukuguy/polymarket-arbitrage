@@ -628,6 +628,22 @@ def test_membership_events_windows_and_retention_are_defensively_immutable() -> 
         window.start = NOW  # type: ignore[misc]
 
 
+def test_frame_dispatch_result_requires_exact_utc_datetime_or_none() -> None:
+    evidence = importlib.import_module("polyarb.observation.l3_evidence")
+
+    assert evidence.FrameDispatchResult(False, False, None).observed_at is None
+    with pytest.raises(TypeError, match="observed_at must be a datetime or None"):
+        evidence.FrameDispatchResult(False, False, "2026-07-23T06:00:00Z")
+    with pytest.raises(ValueError, match="UTC"):
+        evidence.FrameDispatchResult(False, False, NOW.replace(tzinfo=None))
+    with pytest.raises(ValueError, match="UTC"):
+        evidence.FrameDispatchResult(
+            False,
+            False,
+            NOW.astimezone(timezone(timedelta(hours=1))),
+        )
+
+
 def test_stable_hash_normalizes_supported_values_and_rejects_credentials() -> None:
     evidence = importlib.import_module("polyarb.observation.l3_evidence")
     identifier = UUID("12345678-1234-5678-1234-567812345678")

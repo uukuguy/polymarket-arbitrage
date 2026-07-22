@@ -584,6 +584,8 @@ class FrameDispatchResult:
     def __post_init__(self) -> None:
         _require_bool("tob_written", self.tob_written)
         _require_bool("book_levels_written", self.book_levels_written)
+        if self.observed_at is not None and type(self.observed_at) is not datetime:
+            raise TypeError("observed_at must be a datetime or None")
         _require_utc("observed_at", self.observed_at)
 
 
