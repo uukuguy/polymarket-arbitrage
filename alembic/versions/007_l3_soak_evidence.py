@@ -333,9 +333,13 @@ def upgrade() -> None:
             name="ck_l3_runtime_events_nonnegative",
         ),
         sa.CheckConstraint(
-            "kind IN ('startup', 'shutdown_signal', 'promote_failure', "
-            "'mirror_failure', 'health_transition', 'ws_reconnect', "
-            "'watchdog_restart', 'config_change')",
+            "kind IN ('watchdog_stale', 'reconnect_reserved', "
+            "'reconnect_deferred', 'reconnect_started', 'reconnect_succeeded', "
+            "'reconnect_failed', 'ws_generation_changed', "
+            "'subscription_control_failed', 'subscription_compensated', "
+            "'evidence_writer_failed', 'evidence_writer_recovered', "
+            "'shutdown_signal', 'soak_manifest_bound', "
+            "'checkpoint_report_bound')",
             name="ck_l3_runtime_events_kind",
         ),
         sa.CheckConstraint(

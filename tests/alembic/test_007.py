@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,22 @@ EVIDENCE_TABLES = {
     "l3_health_samples",
     "l3_market_samples",
     "l3_runtime_events",
+}
+RUNTIME_EVENT_KINDS = {
+    "watchdog_stale",
+    "reconnect_reserved",
+    "reconnect_deferred",
+    "reconnect_started",
+    "reconnect_succeeded",
+    "reconnect_failed",
+    "ws_generation_changed",
+    "subscription_control_failed",
+    "subscription_compensated",
+    "evidence_writer_failed",
+    "evidence_writer_recovered",
+    "shutdown_signal",
+    "soak_manifest_bound",
+    "checkpoint_report_bound",
 }
 
 
@@ -346,6 +363,10 @@ def _assert_catalog_contract(dsn: str) -> None:
     assert all(
         status in promote_status for status in ("success", "frozen", "underfilled", "failed")
     )
+    runtime_event_kind = next(
+        row for row in constraints if row["conname"] == "ck_l3_runtime_events_kind"
+    )["definition"]
+    assert set(re.findall(r"'([^']+)'", runtime_event_kind)) == RUNTIME_EVENT_KINDS
     market_fk = next(row for row in constraints if row["conname"] == "fk_l3_market_samples_health")
     assert "ON DELETE CASCADE" in market_fk["definition"]
 
