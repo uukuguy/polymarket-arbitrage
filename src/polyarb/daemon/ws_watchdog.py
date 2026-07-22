@@ -316,12 +316,8 @@ class WsWatchdog:
             ),
         )
 
-        # Invoke caller's reconnect hook (suppress to keep loop alive)
-        self._record_event(
-            RuntimeEventKind.RECONNECT_STARTED,
-            reason_code="watchdog_reconnecting",
-            detail={"source": "watchdog"},
-        )
+        # Invoke caller's reconnect hook. The consumer connection initializer
+        # owns the reconnect started/succeeded/failed lifecycle records.
         try:
             self._on_reconnect()
         except Exception as e:  # noqa: BLE001

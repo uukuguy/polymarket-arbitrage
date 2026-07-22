@@ -17,7 +17,11 @@ from polyarb.observation.l3_evidence import (
     SampleBatch,
     stable_sha256,
 )
-from polyarb.storage.l3_evidence_store import L3EvidenceStore, SamplingMarketState
+from polyarb.storage.l3_evidence_store import (
+    L3EvidenceStore,
+    RuntimeEventIntegrityConflict,
+    SamplingMarketState,
+)
 
 
 def _utc_now() -> datetime:
@@ -381,6 +385,18 @@ async def run_event_writer(
             persisted = await store.append_event(event)
         except asyncio.CancelledError:
             raise
+        except RuntimeEventIntegrityConflict:
+            result_at = _utc_now()
+            runtime.quarantine_conflicting_event(
+                event,
+                at=result_at,
+                reason_code="event_replay_conflict",
+            )
+            logger.error(
+                "l3 event writer quarantined integrity conflict event_seq={}",
+                event.event_seq,
+            )
+            continue
         except Exception as exc:  # noqa: BLE001 - retain the queue head
             logger.warning(
                 "l3 event writer append raised event_seq={} error_type={}",

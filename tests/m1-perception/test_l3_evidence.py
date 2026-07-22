@@ -385,6 +385,8 @@ def test_public_dataclass_field_contract_is_exact() -> None:
             "writer_reason_code",
             "pending_event_count",
             "event_queue_overflowed",
+            "event_integrity_failed",
+            "event_integrity_reason_code",
             "status",
             "reason_code",
         ),

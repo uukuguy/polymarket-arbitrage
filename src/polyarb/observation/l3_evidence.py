@@ -835,6 +835,8 @@ class EvidenceStatus:
     writer_reason_code: str
     pending_event_count: int
     event_queue_overflowed: bool
+    event_integrity_failed: bool
+    event_integrity_reason_code: str
     status: HealthStatus
     reason_code: str
 
@@ -850,6 +852,16 @@ class EvidenceStatus:
         _require_nonnegative("ws_generation", self.ws_generation)
         _require_nonnegative("pending_event_count", self.pending_event_count)
         _require_reason("writer_reason_code", self.writer_reason_code, required=False)
+        _require_bool("event_integrity_failed", self.event_integrity_failed)
+        _require_reason(
+            "event_integrity_reason_code",
+            self.event_integrity_reason_code,
+            required=self.event_integrity_failed,
+        )
+        if not self.event_integrity_failed and self.event_integrity_reason_code:
+            raise ValueError(
+                "event_integrity_reason_code requires event_integrity_failed"
+            )
         _require_reason("reason_code", self.reason_code)
         membership = WsMembershipSnapshot(
             self.ws_generation,
@@ -955,6 +967,8 @@ class L3EvidenceRuntime:
         self._event_seq = 0
         self._pending_events: deque[RuntimeEventRecord] = deque()
         self._event_queue_overflowed = False
+        self._event_integrity_failed = False
+        self._event_integrity_reason_code = ""
         self._ws_generation = 0
         self._desired: frozenset[str] = frozenset()
         self._committed: frozenset[str] = frozenset()
@@ -1027,8 +1041,33 @@ class L3EvidenceRuntime:
             raise ValueError("only the current pending event may be acknowledged")
         self._pending_events.popleft()
 
+    def quarantine_conflicting_event(
+        self,
+        event: RuntimeEventRecord,
+        *,
+        at: datetime,
+        reason_code: str,
+    ) -> None:
+        """Isolate one poison head while preserving sticky integrity-fail truth."""
+        _require_utc("event integrity failure at", at)
+        _require_reason("event integrity reason_code", reason_code)
+        if self._last_writer_result_at is not None and at < self._last_writer_result_at:
+            raise ValueError("writer result timestamp cannot move backward")
+        if not isinstance(event, RuntimeEventRecord):
+            raise TypeError("quarantined event must be a RuntimeEventRecord")
+        if not self._pending_events or self._pending_events[0].event_id != event.event_id:
+            raise ValueError("only the current pending event may be quarantined")
+        self._pending_events.popleft()
+        if not self._event_integrity_failed:
+            self._event_integrity_failed = True
+            self._event_integrity_reason_code = reason_code
+        self.note_writer_result(False, at, reason_code)
+
     def snapshot(self) -> EvidenceStatus:
-        if self._event_queue_overflowed:
+        if self._event_integrity_failed:
+            status = HealthStatus.FAIL
+            reason_code = "event_integrity_failed"
+        elif self._event_queue_overflowed:
             status = HealthStatus.FAIL
             reason_code = "event_queue_overflow"
         elif self._writer_ok is False:
@@ -1058,6 +1097,8 @@ class L3EvidenceRuntime:
             writer_reason_code=self._writer_reason_code,
             pending_event_count=len(self._pending_events),
             event_queue_overflowed=self._event_queue_overflowed,
+            event_integrity_failed=self._event_integrity_failed,
+            event_integrity_reason_code=self._event_integrity_reason_code,
             status=status,
             reason_code=reason_code,
         )

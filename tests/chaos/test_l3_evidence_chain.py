@@ -19,6 +19,7 @@ from polyarb.observation.l3_evidence import (
     RuntimeEventRecord,
     RuntimeIdentity,
 )
+from polyarb.storage import l3_evidence_store as store_module
 
 START = datetime(2026, 7, 23, 6, 0, tzinfo=UTC)
 
@@ -166,9 +167,72 @@ async def test_event_writer_late_event_failure_stays_visible_and_never_retimesta
     assert all(event.occurred_at == occurred_at for event in store.attempts)
     status = runtime.snapshot()
     assert status.writer_ok is False
+    assert status.event_integrity_failed is False
     assert status.pending_event_count == 2
     assert status.last_promote_persisted_at is None
     assert status.last_sample_persisted_at is None
+
+
+async def test_event_writer_quarantines_permanent_conflict_and_persists_tail():
+    assert hasattr(store_module, "RuntimeEventIntegrityConflict"), (
+        "store must distinguish permanent identity/payload conflicts from transient false"
+    )
+    runtime = _runtime()
+    runtime.note_writer_result(True, START - timedelta(days=1), "ok")
+    poison = runtime.record_event(
+        RuntimeEventKind.WATCHDOG_STALE,
+        occurred_at=START,
+        reason_code="data_silence",
+        detail={"stale_seconds": 30},
+    )
+    shutdown = runtime.record_event(
+        RuntimeEventKind.SHUTDOWN_SIGNAL,
+        occurred_at=START + timedelta(seconds=1),
+        reason_code="signal",
+        detail={"signal": "SIGTERM"},
+    )
+
+    class _PermanentConflictThenPersistStore:
+        def __init__(self) -> None:
+            self.attempts = []
+            self.durable = []
+
+        async def append_event(self, event):
+            self.attempts.append(event)
+            if event.event_id == poison.event_id:
+                raise store_module.RuntimeEventIntegrityConflict()
+            self.durable.append(event)
+            return True
+
+    store = _PermanentConflictThenPersistStore()
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    await asyncio.wait_for(
+        l3_sampler.run_event_writer(
+            stop_event,
+            runtime=runtime,
+            store=store,
+            flush_interval_s=0,
+        ),
+        timeout=1,
+    )
+
+    assert [event.event_seq for event in store.attempts] == [0, 1, 2, 3]
+    assert poison not in store.durable
+    assert [event.kind for event in store.durable] == [
+        RuntimeEventKind.SHUTDOWN_SIGNAL,
+        RuntimeEventKind.EVIDENCE_WRITER_FAILED,
+        RuntimeEventKind.EVIDENCE_WRITER_RECOVERED,
+    ]
+    assert store.durable[0] is shutdown
+    status = runtime.snapshot()
+    assert status.pending_event_count == 0
+    assert status.writer_ok is True
+    assert status.event_integrity_failed is True
+    assert status.event_integrity_reason_code == "event_replay_conflict"
+    assert status.status is l3_evidence.HealthStatus.FAIL
+    assert status.reason_code == "event_integrity_failed"
 
 
 def test_event_queue_overflow_is_bounded_and_fail_closed():
@@ -301,10 +365,51 @@ async def test_watchdog_records_reconnect_hook_failure_at_the_real_transition(
     assert [event.kind for event in events] == [
         RuntimeEventKind.WATCHDOG_STALE,
         RuntimeEventKind.RECONNECT_RESERVED,
-        RuntimeEventKind.RECONNECT_STARTED,
         RuntimeEventKind.RECONNECT_FAILED,
     ]
     assert "credential" not in json.dumps([dict(event.detail) for event in events])
+
+
+async def test_watchdog_and_consumer_emit_one_owned_reconnect_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runtime = _runtime()
+    monkeypatch.setattr(ws_watchdog.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(ws_watchdog.asyncio, "sleep", AsyncMock())
+    watchdog = ws_watchdog.WsWatchdog(
+        stale_s=30.0,
+        liveness_check=lambda: False,
+        event_recorder=runtime.record_event,
+    )
+    consumer = WsConsumer(
+        settings=SimpleNamespace(),
+        watchdog=watchdog,
+        on_event=lambda _event: None,
+        initial_assets=[],
+        membership_observer=runtime.update_membership,
+        event_recorder=runtime.record_event,
+    )
+    consumer._connection_generation = 1
+    ws = SimpleNamespace(send=AsyncMock(return_value=None), close=AsyncMock(return_value=None))
+    reconnect_tasks: list[asyncio.Task[None]] = []
+
+    def _start_consumer_reconnect() -> None:
+        reconnect_tasks.append(asyncio.create_task(consumer._initialize_connection(ws)))
+
+    watchdog._on_reconnect = _start_consumer_reconnect
+
+    await watchdog._on_stale()
+    await reconnect_tasks[0]
+
+    kinds = [event.kind for event in runtime.drain_pending_events()]
+    assert kinds == [
+        RuntimeEventKind.WATCHDOG_STALE,
+        RuntimeEventKind.RECONNECT_RESERVED,
+        RuntimeEventKind.RECONNECT_STARTED,
+        RuntimeEventKind.WS_GENERATION_CHANGED,
+        RuntimeEventKind.RECONNECT_SUCCEEDED,
+    ]
+    assert kinds.count(RuntimeEventKind.RECONNECT_STARTED) == 1
 
 
 def _consumer(runtime: L3EvidenceRuntime) -> WsConsumer:
@@ -331,8 +436,8 @@ async def test_consumer_records_generation_success_control_failure_and_compensat
     events = runtime.drain_pending_events()
     kinds = [event.kind for event in events]
     assert kinds[:3] == [
-        RuntimeEventKind.WS_GENERATION_CHANGED,
         RuntimeEventKind.RECONNECT_STARTED,
+        RuntimeEventKind.WS_GENERATION_CHANGED,
         RuntimeEventKind.RECONNECT_SUCCEEDED,
     ]
     assert RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED in kinds

@@ -41,6 +41,13 @@ class L3RetentionError(RuntimeError):
     """A bounded retention failure that never exposes connection credentials."""
 
 
+class RuntimeEventIntegrityConflict(RuntimeError):
+    """A permanent runtime-event identity or payload replay conflict."""
+
+    def __init__(self) -> None:
+        super().__init__("runtime event replay payload conflict")
+
+
 @dataclass(frozen=True, slots=True)
 class SamplingMarketState:
     """One complete Yes/No mapping with its latest durable market timestamps."""
@@ -720,16 +727,20 @@ class L3EvidenceStore:
                 if len(rows) == 1 and _event_row_matches(rows[0], record):
                     succeeded = True
                 else:
+                    conflict = RuntimeEventIntegrityConflict()
                     _report_failure(
                         "append_event_conflict",
-                        ValueError("runtime event replay payload conflict"),
+                        conflict,
                     )
+                    raise conflict
             else:
                 _report_failure(
                     "append_event_command",
                     ValueError("unexpected runtime event insert command tag"),
                 )
         except asyncio.CancelledError:
+            raise
+        except RuntimeEventIntegrityConflict:
             raise
         except Exception as error:  # noqa: BLE001 - fail-soft replay boundary
             _report_failure("append_event", error)

@@ -336,6 +336,14 @@ class WsConsumer:
             async with self._subscription_control_lock:
                 previous_generation = self._connection_generation
                 generation = self._connection_generation + 1
+                is_reconnect = previous_generation > 0
+                if is_reconnect:
+                    self._record_runtime_event(
+                        RuntimeEventKind.RECONNECT_STARTED,
+                        reason_code="connection_initializing",
+                        detail={"source": "connection_initializer"},
+                        generation=generation,
+                    )
                 self._fail_book_evidence_waiters_locked(self._connection_generation)
                 self._connection_generation = generation
                 self._clear_l3_connection_state_locked()
@@ -349,13 +357,6 @@ class WsConsumer:
                     },
                     generation=generation,
                 )
-                if is_reconnect:
-                    self._record_runtime_event(
-                        RuntimeEventKind.RECONNECT_STARTED,
-                        reason_code="connection_initializing",
-                        detail={"source": "connection_initializer"},
-                        generation=generation,
-                    )
                 previous_ws = self._current_ws
                 desired_snapshot = frozenset(self._l3_desired_set)
                 active_assets = self._compute_active_assets()

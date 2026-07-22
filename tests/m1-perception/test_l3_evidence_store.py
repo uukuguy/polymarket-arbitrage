@@ -39,6 +39,7 @@ from polyarb.storage.l3_evidence_store import (
     L3EvidenceStore,
     L3RetentionError,
     L3RetentionOperator,
+    RuntimeEventIntegrityConflict,
     SamplingMarketState,
 )
 
@@ -570,9 +571,14 @@ async def test_event_append_conflicting_replay_fails_visibly(
         AsyncMock(return_value=connection),
     )
 
-    assert not await L3EvidenceStore("postgresql://secret").append_event(
-        replace(original, reason_code="payload_changed")
-    )
+    assert hasattr(store_module, "RuntimeEventIntegrityConflict")
+    with pytest.raises(
+        store_module.RuntimeEventIntegrityConflict,
+        match="runtime event replay payload conflict",
+    ):
+        await L3EvidenceStore("postgresql://secret").append_event(
+            replace(original, reason_code="payload_changed")
+        )
     assert connection.closed
 
 
@@ -815,7 +821,8 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     assert len(evidence_module._postgres_jsonb_text(boundary_detail).encode("utf-8")) <= 2048
     assert await store.append_event(boundary_event)
     assert await store.append_event(_event(boot.boot_id, end, seq=1))
-    assert not await store.append_event(_event(boot.boot_id, start, seq=0))
+    with pytest.raises(RuntimeEventIntegrityConflict):
+        await store.append_event(_event(boot.boot_id, start, seq=0))
 
     await _admin_execute(
         postgres_dsns["admin"],
