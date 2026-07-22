@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import subprocess
 from collections.abc import Iterator
@@ -381,6 +382,29 @@ def test_store_surface_is_append_only_without_generic_mutators() -> None:
     ]
     assert " UPDATE " not in store_source.upper()
     assert " DELETE " not in store_source.upper()
+
+
+def test_store_has_no_method_that_accepts_caller_supplied_sql() -> None:
+    sql_parameter_names = {"sql", "query", "statement", "command"}
+    for name, method in inspect.getmembers(L3EvidenceStore, inspect.iscoroutinefunction):
+        parameters = set(inspect.signature(method).parameters)
+        assert parameters.isdisjoint(sql_parameter_names), (
+            f"{name} accepts caller-provided SQL through {parameters & sql_parameter_names}"
+        )
+
+    source = inspect.getsource(L3EvidenceStore)
+    assert "connection.execute(sql" not in source
+
+
+async def test_closed_append_helper_rejects_unknown_operation_without_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect = AsyncMock()
+    monkeypatch.setattr(store_module.asyncpg, "connect", connect)
+    store = L3EvidenceStore("postgresql://secret")
+
+    assert not await store._append_one("DELETE FROM l3_runtime_boots", lambda: ())  # type: ignore[arg-type]
+    connect.assert_not_awaited()
 
 
 def _credential_dsn(admin_dsn: str, username: str, password: str) -> str:

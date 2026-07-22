@@ -7,6 +7,7 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID
@@ -98,6 +99,21 @@ INSERT INTO l3_runtime_events (
     reason_code, detail
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
 """
+
+
+class _AppendOperation(StrEnum):
+    BOOT = "append_boot"
+    PROMOTE_RUN = "append_promote_run"
+    EVENT = "append_event"
+
+
+_APPEND_STATEMENTS: Mapping[_AppendOperation, str] = MappingProxyType(
+    {
+        _AppendOperation.BOOT: _BOOT_INSERT,
+        _AppendOperation.PROMOTE_RUN: _PROMOTE_INSERT,
+        _AppendOperation.EVENT: _EVENT_INSERT,
+    }
+)
 
 _PROMOTE_WINDOW = """
 SELECT * FROM l3_promote_runs
@@ -472,21 +488,26 @@ class L3EvidenceStore:
 
     async def _append_one(
         self,
-        operation: str,
-        sql: str,
+        operation: _AppendOperation,
         args_factory: Callable[[], tuple[object, ...]],
     ) -> bool:
         connection: asyncpg.Connection | None = None
         succeeded = False
+        operation_name = (
+            operation.value
+            if isinstance(operation, _AppendOperation)
+            else "invalid_append_operation"
+        )
         try:
+            statement = _APPEND_STATEMENTS[operation]
             args = args_factory()
             connection = await asyncpg.connect(dsn=self._dsn)
-            await connection.execute(sql, *args)
+            await connection.execute(statement, *args)
             succeeded = True
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - fail-soft evidence writer boundary
-            _report_failure(operation, error)
+            _report_failure(operation_name, error)
         finally:
             if connection is not None:
                 try:
@@ -494,16 +515,16 @@ class L3EvidenceStore:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:  # noqa: BLE001 - close remains fail-soft
-                    _report_failure(f"{operation}_close", error)
+                    _report_failure(f"{operation_name}_close", error)
                     succeeded = False
         return succeeded
 
     async def append_boot(self, record: RuntimeBootRecord) -> bool:
-        return await self._append_one("append_boot", _BOOT_INSERT, lambda: _boot_args(record))
+        return await self._append_one(_AppendOperation.BOOT, lambda: _boot_args(record))
 
     async def append_promote_run(self, record: PromoteRunRecord) -> bool:
         return await self._append_one(
-            "append_promote_run", _PROMOTE_INSERT, lambda: _promote_args(record)
+            _AppendOperation.PROMOTE_RUN, lambda: _promote_args(record)
         )
 
     async def append_sample(self, batch: SampleBatch) -> bool:
@@ -549,7 +570,7 @@ class L3EvidenceStore:
         return succeeded
 
     async def append_event(self, record: RuntimeEventRecord) -> bool:
-        return await self._append_one("append_event", _EVENT_INSERT, lambda: _event_args(record))
+        return await self._append_one(_AppendOperation.EVENT, lambda: _event_args(record))
 
     async def fetch_status(self, *, boot_id: UUID) -> Mapping[str, object] | None:
         connection: asyncpg.Connection | None = None
