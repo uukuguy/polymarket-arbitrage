@@ -208,7 +208,7 @@ async def test_main_binds_http_before_rejected_boot_and_never_starts_promoter():
 
 @pytest.mark.asyncio
 async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
-    """Boot, WS observer, cursor, promoter, and sampler share one graph."""
+    """HTTP, boot, and every named evidence task share one dependency graph."""
     from polyarb.daemon import l2_main
 
     settings = _make_fake_settings()
@@ -216,9 +216,25 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
     settings.supabase_db_dsn.get_secret_value = MagicMock(
         side_effect=AssertionError("owner DSN must never be read")
     )
+    lifecycle: list[str] = []
     store = MagicMock()
-    store.append_boot = AsyncMock(return_value=True)
+
+    async def _append_boot(_record):
+        lifecycle.append("boot")
+        return True
+
+    store.append_boot = AsyncMock(side_effect=_append_boot)
     server = _make_mock_server()
+
+    def _serve():
+        lifecycle.append("http_bind")
+
+        async def _bound_server():
+            await asyncio.sleep(0)
+
+        return _bound_server()
+
+    server.serve = _serve
     stop_event = asyncio.Event()
     consumer = MagicMock()
 
@@ -227,10 +243,30 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
 
     consumer.run = _idle
     consumer.run_quiet_refresh = _idle
+    event_writer_kwargs: dict[str, object] = {}
     promoter_kwargs: dict[str, object] = {}
     sampler_kwargs: dict[str, object] = {}
+    task_names: list[str | None] = []
+    real_create_task = asyncio.create_task
+
+    def _create_task(coro, *, name=None, context=None):
+        task_names.append(name)
+        kwargs = {"name": name}
+        if context is not None:
+            kwargs["context"] = context
+        return real_create_task(coro, **kwargs)
+
+    def _run_event_writer(_stop_event, **kwargs):
+        lifecycle.append("event_writer")
+        event_writer_kwargs.update(kwargs)
+
+        async def _idle_writer():
+            await asyncio.sleep(0)
+
+        return _idle_writer()
 
     def _run_periodic(**kwargs):
+        lifecycle.append("promoter")
         promoter_kwargs.update(kwargs)
 
         async def _idle_promoter():
@@ -239,6 +275,7 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
         return _idle_promoter()
 
     def _run_sampler(_stop_event, **kwargs):
+        lifecycle.append("sampler")
         sampler_kwargs.update(kwargs)
         stop_event.set()
 
@@ -266,8 +303,10 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
         patch("polyarb.daemon.l2_main.WsConsumer", return_value=consumer) as consumer_type,
         patch("polyarb.daemon.l2_main.AsyncpgCursorStore", return_value=MagicMock()) as cursor,
         patch("polyarb.daemon.l2_main.uvicorn.Server", return_value=server),
-        patch("polyarb.daemon.l2_main.create_l2_app", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.create_l2_app", return_value=MagicMock()) as create_app,
         patch("polyarb.daemon.l2_main.asyncio.Event", return_value=stop_event),
+        patch("polyarb.daemon.l2_main.asyncio.create_task", side_effect=_create_task),
+        patch("polyarb.observation.l3_sampler.run_event_writer", new=_run_event_writer),
         patch("polyarb.observation.l3_promote.run_periodic", new=_run_periodic),
         patch("polyarb.observation.l3_sampler.run_sampler", new=_run_sampler),
     ):
@@ -279,8 +318,12 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
     observer = consumer_type.call_args.kwargs["membership_observer"]
     runtime = promoter_kwargs["evidence_runtime"]
     assert observer.__self__ is runtime
+    assert create_app.call_args.kwargs["evidence_runtime"] is runtime
+    assert event_writer_kwargs["runtime"] is runtime
+    assert event_writer_kwargs["store"] is store
     assert promoter_kwargs["evidence_store"] is store
     assert promoter_kwargs["acceptance_config"] is dependencies.acceptance_config
+    assert promoter_kwargs["settings"] is settings
     assert sampler_kwargs["runtime"] is runtime
     assert sampler_kwargs["store"] is store
     assert sampler_kwargs["settings"] is settings
@@ -290,6 +333,18 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
         == dependencies.boot.acceptance_config_hash
     )
     assert store.append_boot.await_args.args[0].boot_id == runtime.snapshot().boot_id
+    assert lifecycle == ["http_bind", "boot", "event_writer", "promoter", "sampler"]
+    assert task_names == [
+        "l2-http-server",
+        "ws-watchdog",
+        "ws-consumer",
+        "ws-quiet-refresh",
+        "reconciliation-pump",
+        "snapshot-listener",
+        "l3-event-writer",
+        "l3-promoter",
+        "l3-evidence-sampler",
+    ]
     assert runtime.snapshot().writer_ok is True
     assert runtime.snapshot().status.value == "warn"
     assert runtime.snapshot().reason_code == "cold_start"
@@ -390,6 +445,234 @@ async def test_main_signal_durably_drains_shutdown_event_within_five_seconds():
     assert durable_events[0].detail == {"signal": "SIGTERM"}
     source = Path(l2_main.__file__).read_text()
     assert "UPDATE l3_runtime_boots" not in source
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_shutdown_propagates_after_reaping_writer():
+    """Cancellation while the durable writer drains must not be swallowed."""
+    from polyarb.daemon import l2_main
+
+    settings = _make_fake_settings()
+    settings.l2_runtime_db_dsn.get_secret_value = MagicMock(return_value="runtime-dsn")
+    store = MagicMock()
+    store.append_boot = AsyncMock(return_value=True)
+    dependencies = l2_main._build_l3_evidence_dependencies(
+        settings=settings,
+        recipe_yaml_path=l2_main._L3_RECIPE_PATH,
+    )
+    object.__setattr__(dependencies, "store", store)
+    stop_event = asyncio.Event()
+    writer_draining = asyncio.Event()
+    writer_reaped = asyncio.Event()
+    writer_blocker = asyncio.Event()
+    handlers: dict[object, tuple[object, tuple[object, ...]]] = {}
+    loop = asyncio.get_running_loop()
+
+    def _capture_handler(sig, callback, *args):
+        handlers[sig] = (callback, args)
+
+    async def _idle(local_stop_event):
+        await local_stop_event.wait()
+
+    async def _listener(**kwargs):
+        await kwargs["stop_event"].wait()
+
+    async def _promoter(**kwargs):
+        await kwargs["stop_event"].wait()
+
+    async def _writer(local_stop_event, **_kwargs):
+        try:
+            await local_stop_event.wait()
+            writer_draining.set()
+            await writer_blocker.wait()
+        finally:
+            writer_reaped.set()
+
+    async def _sampler(local_stop_event, **_kwargs):
+        while signal.SIGTERM not in handlers:
+            await asyncio.sleep(0)
+        callback, args = handlers[signal.SIGTERM]
+        callback(*args)
+        await local_stop_event.wait()
+
+    consumer = MagicMock()
+    consumer.run = _idle
+    consumer.run_quiet_refresh = _idle
+    watchdog = MagicMock()
+    watchdog.watch = _idle
+    pump = MagicMock()
+    pump.run = _idle
+
+    with (
+        patch("polyarb.daemon.l2_main.init_logging"),
+        patch("polyarb.daemon.l2_main.load_settings", return_value=settings),
+        patch("polyarb.daemon.l2_main.init_sentry"),
+        patch("polyarb.daemon.l2_main.sentry_sdk.set_tag"),
+        patch(
+            "polyarb.daemon.l2_main._build_l3_evidence_dependencies",
+            return_value=dependencies,
+        ),
+        patch("polyarb.daemon.l2_main.SQLiteStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.WsConsumer", return_value=consumer),
+        patch("polyarb.daemon.l2_main.WsWatchdog", return_value=watchdog),
+        patch("polyarb.daemon.l2_main.AsyncpgCursorStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.ReconciliationPump", return_value=pump),
+        patch("polyarb.daemon.l2_main.listen_snapshot_complete", new=_listener),
+        patch("polyarb.daemon.l2_main.uvicorn.Server", return_value=_make_mock_server()),
+        patch("polyarb.daemon.l2_main.create_l2_app", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.asyncio.Event", return_value=stop_event),
+        patch.object(loop, "add_signal_handler", side_effect=_capture_handler),
+        patch("polyarb.observation.l3_promote.run_periodic", new=_promoter),
+        patch("polyarb.observation.l3_sampler.run_event_writer", new=_writer),
+        patch("polyarb.observation.l3_sampler.run_sampler", new=_sampler),
+    ):
+        main_task = asyncio.create_task(l2_main.main())
+        await asyncio.wait_for(writer_draining.wait(), timeout=1.0)
+        main_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(main_task, timeout=1.0)
+
+    assert writer_reaped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_deadline_force_cancels_and_reaps_writer_once():
+    """A stuck writer consumes one shared bound and is not left pending."""
+    from polyarb.daemon import l2_main
+
+    writer_started = asyncio.Event()
+    writer_reaped = asyncio.Event()
+
+    async def _server():
+        await asyncio.sleep(0)
+
+    async def _writer():
+        writer_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # Model bounded async cleanup that needs more than one loop turn.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            writer_reaped.set()
+
+    server_task = asyncio.create_task(_server(), name="l2-http-server")
+    writer_task = asyncio.create_task(_writer(), name="l3-event-writer")
+    await writer_started.wait()
+    started = asyncio.get_running_loop().time()
+
+    await l2_main._drain_daemon_tasks(
+        server_task=server_task,
+        event_writer_task=writer_task,
+        peer_tasks=(),
+        normal_shutdown=True,
+        timeout_s=0.05,
+    )
+
+    assert asyncio.get_running_loop().time() - started < 0.075
+    assert writer_task.done()
+    assert writer_task.cancelling() == 1
+    assert writer_reaped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_steady_state_reaps_every_named_task_once():
+    """Steady-state cancellation owns server, WS, PG, and evidence tasks."""
+    from polyarb.daemon import l2_main
+
+    settings = _make_fake_settings()
+    settings.l2_runtime_db_dsn.get_secret_value = MagicMock(return_value="runtime-dsn")
+    store = MagicMock()
+    store.append_boot = AsyncMock(return_value=True)
+    dependencies = l2_main._build_l3_evidence_dependencies(
+        settings=settings,
+        recipe_yaml_path=l2_main._L3_RECIPE_PATH,
+    )
+    object.__setattr__(dependencies, "store", store)
+    started: set[str] = set()
+    reaped: set[str] = set()
+    all_started = asyncio.Event()
+    tracked: list[asyncio.Task[object]] = []
+    real_create_daemon_task = l2_main._create_daemon_task
+
+    async def _owned(name: str, _stop_event=None):
+        started.add(name)
+        if len(started) == 9:
+            all_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            reaped.add(name)
+
+    def _track(awaitable, *, name):
+        task = real_create_daemon_task(awaitable, name=name)
+        tracked.append(task)
+        return task
+
+    server = MagicMock(started=True, should_exit=False)
+    server.serve = lambda: _owned("l2-http-server")
+    consumer = MagicMock()
+    consumer.run = lambda stop: _owned("ws-consumer", stop)
+    consumer.run_quiet_refresh = lambda stop: _owned("ws-quiet-refresh", stop)
+    watchdog = MagicMock()
+    watchdog.watch = lambda stop: _owned("ws-watchdog", stop)
+    pump = MagicMock()
+    pump.run = lambda stop: _owned("reconciliation-pump", stop)
+
+    async def _listener(**kwargs):
+        await _owned("snapshot-listener", kwargs["stop_event"])
+
+    async def _event_writer(stop, **_kwargs):
+        await _owned("l3-event-writer", stop)
+
+    async def _promoter(**kwargs):
+        await _owned("l3-promoter", kwargs["stop_event"])
+
+    async def _sampler(stop, **_kwargs):
+        await _owned("l3-evidence-sampler", stop)
+
+    with (
+        patch("polyarb.daemon.l2_main.init_logging"),
+        patch("polyarb.daemon.l2_main.load_settings", return_value=settings),
+        patch("polyarb.daemon.l2_main.init_sentry"),
+        patch("polyarb.daemon.l2_main.sentry_sdk.set_tag"),
+        patch(
+            "polyarb.daemon.l2_main._build_l3_evidence_dependencies",
+            return_value=dependencies,
+        ),
+        patch("polyarb.daemon.l2_main.SQLiteStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.WsConsumer", return_value=consumer),
+        patch("polyarb.daemon.l2_main.WsWatchdog", return_value=watchdog),
+        patch("polyarb.daemon.l2_main.AsyncpgCursorStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.ReconciliationPump", return_value=pump),
+        patch("polyarb.daemon.l2_main.listen_snapshot_complete", new=_listener),
+        patch("polyarb.daemon.l2_main.uvicorn.Server", return_value=server),
+        patch("polyarb.daemon.l2_main.create_l2_app", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main._create_daemon_task", side_effect=_track),
+        patch("polyarb.observation.l3_promote.run_periodic", new=_promoter),
+        patch("polyarb.observation.l3_sampler.run_event_writer", new=_event_writer),
+        patch("polyarb.observation.l3_sampler.run_sampler", new=_sampler),
+    ):
+        main_task = asyncio.create_task(l2_main.main())
+        await asyncio.wait_for(all_started.wait(), timeout=1.0)
+        main_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(main_task, timeout=1.0)
+
+    expected = {
+        "l2-http-server",
+        "ws-watchdog",
+        "ws-consumer",
+        "ws-quiet-refresh",
+        "reconciliation-pump",
+        "snapshot-listener",
+        "l3-event-writer",
+        "l3-promoter",
+        "l3-evidence-sampler",
+    }
+    assert started == reaped == expected
+    assert all(task.done() for task in tracked)
+    assert all(task.cancelling() == 1 for task in tracked)
 
 
 def _patch_minimal_l2_main(l2_main, *, settings, server, store):
@@ -587,6 +870,8 @@ async def test_failed_runtime_authorization_gates_all_direct_postgres_tasks(
     server = _make_mock_server()
     create_app = MagicMock(return_value=MagicMock())
     promoter = MagicMock(name="run_periodic")
+    sampler = MagicMock(name="run_sampler")
+    event_writer = MagicMock(name="run_event_writer")
 
     with (
         patch("polyarb.daemon.l2_main.init_logging"),
@@ -604,6 +889,8 @@ async def test_failed_runtime_authorization_gates_all_direct_postgres_tasks(
         patch("polyarb.daemon.l2_main.create_l2_app", create_app),
         patch("polyarb.daemon.l2_main.asyncio.Event", return_value=stop_event),
         patch("polyarb.observation.l3_promote.run_periodic", promoter),
+        patch("polyarb.observation.l3_sampler.run_sampler", sampler),
+        patch("polyarb.observation.l3_sampler.run_event_writer", event_writer),
     ):
         assert await asyncio.wait_for(l2_main.main(), timeout=2.0) == 0
 
@@ -617,6 +904,8 @@ async def test_failed_runtime_authorization_gates_all_direct_postgres_tasks(
     pump.run.assert_not_awaited()
     listener.assert_not_awaited()
     promoter.assert_not_called()
+    sampler.assert_not_called()
+    event_writer.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -792,13 +1081,13 @@ async def test_logger_first_line_is_polyarb_l2(loguru_sink):
 # Test 6 — shutdown signal propagates (F-04 contract — CancelledError NOT swallowed)
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def test_shutdown_via_wait_for_timeout():
-    """main() must call asyncio.wait_for(server_task, timeout=5.0) on shutdown (F-04)."""
+async def test_shutdown_uses_one_five_second_drain_deadline():
+    """Server, writer, and peers share one bounded shutdown deadline (F-04)."""
     src_path = Path(__file__).resolve().parents[2] / "src" / "polyarb" / "daemon" / "l2_main.py"
     assert src_path.exists()
     text = src_path.read_text()
-    # F-04: bounded shutdown wait must exist
-    assert "asyncio.wait_for" in text, "F-04 missing: asyncio.wait_for bounded shutdown"
-    assert "timeout=5.0" in text or "timeout=5" in text, "F-04 missing: 5.0s shutdown timeout"
-    # F-04: CancelledError must propagate (the `raise` keyword present in handler)
-    assert "should_exit" in text, "graceful shutdown missing: server.should_exit"
+    assert "async def _drain_daemon_tasks(" in text
+    assert "timeout_s: float = 5.0" in text
+    assert "await asyncio.wait(owned, timeout=drain_timeout_s)" in text
+    assert "await _drain_daemon_tasks(" in text
+    assert "server.should_exit = True" in text

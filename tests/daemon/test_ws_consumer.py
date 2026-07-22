@@ -193,8 +193,8 @@ def test_l2_main_owns_quiet_refresh_task_lifecycle() -> None:
     root = Path(__file__).resolve().parents[2]
     source = (root / "src/polyarb/daemon/l2_main.py").read_text()
 
-    assert "quiet_refresh_task = asyncio.create_task(" in source
+    assert "quiet_refresh_task = _create_daemon_task(" in source
     assert "ws_consumer.run_quiet_refresh(stop_event)" in source
     assert 'name="ws-quiet-refresh"' in source
-    assert "quiet_refresh_task.cancel()" in source
-    assert '(quiet_refresh_task, "ws-quiet-refresh")' in source
+    assert "await _drain_daemon_tasks(" in source
+    assert "quiet_refresh_task," in source

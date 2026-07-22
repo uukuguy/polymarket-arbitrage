@@ -23,12 +23,12 @@ Architecture:
     4. SQLiteStore(settings.db_path).init_schema()
     5. create_l2_app(...) — Starlette factory
     6. uvicorn.Server(...) — bound but not yet listening
-    7. server_task = asyncio.create_task(server.serve())
+    7. server_task = _create_daemon_task(server.serve(), name="l2-http-server")
     8. P9 server-started gate: for _ in range(100): if server.started: break
                                        else: await asyncio.sleep(0.1)
     9. await stop_event.wait() — signal-driven shutdown
     10. server.should_exit = True
-    11. await asyncio.wait_for(server_task, timeout=5.0)  — F-04 bounded shutdown
+    11. drain writer/server/peers under one 5-second deadline — F-04 bounded shutdown
 
 Plan 05 placeholder: `event_listener` still starts as None; health check
 renders "warn" with output="not_configured" until Plan 05 wires it.
@@ -45,7 +45,7 @@ import asyncio
 import os
 import signal
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -188,6 +188,93 @@ def _request_shutdown(
             "shutdown event enqueue failed error_type={}", type(exc).__name__
         )
     stop_event.set()
+
+
+def _create_daemon_task(awaitable: Awaitable[Any], *, name: str) -> asyncio.Task[Any]:
+    """Create one daemon-owned task with a stable operator-visible name."""
+    return asyncio.create_task(awaitable, name=name)
+
+
+def _cancel_once(task: asyncio.Task[Any]) -> None:
+    """Request cancellation once; repeated shutdown paths remain idempotent."""
+    if not task.done() and task.cancelling() == 0:
+        task.cancel()
+
+
+def _report_task_result(task: asyncio.Task[Any]) -> None:
+    """Log a completed task failure without awaiting the task a second time."""
+    if task.cancelled():
+        return
+    try:
+        error = task.exception()
+    except asyncio.CancelledError:
+        return
+    if error is not None:
+        logger.warning(
+            "{} task stopped with error_type={}",
+            task.get_name(),
+            type(error).__name__,
+        )
+
+
+async def _drain_daemon_tasks(
+    *,
+    server_task: asyncio.Task[Any],
+    event_writer_task: asyncio.Task[Any] | None,
+    peer_tasks: Iterable[asyncio.Task[Any] | None],
+    normal_shutdown: bool,
+    timeout_s: float = 5.0,
+) -> None:
+    """Stop all daemon tasks under one deadline, preserving writer drain time.
+
+    On a real signal, ``stop_event`` is already set after ``shutdown_signal``
+    was enqueued. Peers are cancelled immediately, while the event writer and
+    HTTP server receive the same bounded window to drain/exit. Exceptional or
+    externally-cancelled shutdown cancels every task and propagates the primary
+    cancellation instead of converting it into a clean exit.
+    """
+    peers = tuple(task for task in peer_tasks if task is not None)
+    for task in peers:
+        _cancel_once(task)
+    if not normal_shutdown:
+        _cancel_once(server_task)
+        if event_writer_task is not None:
+            _cancel_once(event_writer_task)
+
+    owned = {server_task, *peers}
+    if event_writer_task is not None:
+        owned.add(event_writer_task)
+    if not owned:
+        return
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    force_cancel_grace_s = min(0.1, max(0.0, timeout_s / 10))
+    drain_timeout_s = max(0.0, timeout_s - force_cancel_grace_s)
+    try:
+        done, pending = await asyncio.wait(owned, timeout=drain_timeout_s)
+    except asyncio.CancelledError:
+        for task in owned:
+            _cancel_once(task)
+        remaining_s = max(0.0, deadline - loop.time())
+        if remaining_s:
+            await asyncio.wait(owned, timeout=remaining_s)
+        raise
+
+    for task in done:
+        _report_task_result(task)
+    for task in pending:
+        logger.warning("{} task did not stop within {}s — forcing", task.get_name(), timeout_s)
+        _cancel_once(task)
+    if pending:
+        final_done, still_pending = await asyncio.wait(
+            pending,
+            timeout=max(0.0, deadline - loop.time()),
+        )
+        for task in final_done:
+            _report_task_result(task)
+        for task in still_pending:
+            logger.error("{} task ignored bounded cancellation", task.get_name())
 
 # ── Plan 06 D-07: WS frame → l2_* row builders ───────────────────────────
 # Polymarket WS market-channel event shapes (empirical):
@@ -651,7 +738,7 @@ async def main() -> int:
             # Windows fallback — never hit on Fly Linux but keeps test-host portable
             pass
 
-    server_task = asyncio.create_task(server.serve())
+    server_task = _create_daemon_task(server.serve(), name="l2-http-server")
     watchdog_task: asyncio.Task[None] | None = None
     consumer_task: asyncio.Task[None] | None = None
     quiet_refresh_task: asyncio.Task[None] | None = None
@@ -687,17 +774,21 @@ async def main() -> int:
 
         # WS + REST remain fail-soft when the dedicated runtime credential is
         # absent or rejected; neither path requires direct PostgreSQL access.
-        watchdog_task = asyncio.create_task(watchdog.watch(stop_event))
-        consumer_task = asyncio.create_task(ws_consumer.run(stop_event))
-        quiet_refresh_task = asyncio.create_task(
+        watchdog_task = _create_daemon_task(
+            watchdog.watch(stop_event), name="ws-watchdog"
+        )
+        consumer_task = _create_daemon_task(
+            ws_consumer.run(stop_event), name="ws-consumer"
+        )
+        quiet_refresh_task = _create_daemon_task(
             ws_consumer.run_quiet_refresh(stop_event), name="ws-quiet-refresh"
         )
 
         if l3_boot_persisted:
-            pump_task = asyncio.create_task(
+            pump_task = _create_daemon_task(
                 reconciliation_pump.run(stop_event), name="reconciliation-pump"
             )
-            listener_task = asyncio.create_task(
+            listener_task = _create_daemon_task(
                 listen_snapshot_complete(
                     dsn=dsn,
                     on_event=_on_snapshot_notification,
@@ -710,7 +801,7 @@ async def main() -> int:
             from polyarb.observation import l3_promote as l3_promote_module
             from polyarb.observation import l3_sampler as l3_sampler_module
 
-            l3_event_writer_task = asyncio.create_task(
+            l3_event_writer_task = _create_daemon_task(
                 l3_sampler_module.run_event_writer(
                     stop_event,
                     runtime=l3_evidence.runtime,
@@ -719,7 +810,7 @@ async def main() -> int:
                 name="l3-event-writer",
             )
 
-            l3_promoter_task = asyncio.create_task(
+            l3_promoter_task = _create_daemon_task(
                 l3_promote_module.run_periodic(
                     stop_event=stop_event,
                     settings=settings,
@@ -731,7 +822,7 @@ async def main() -> int:
                 ),
                 name="l3-promoter",
             )
-            l3_sampler_task = asyncio.create_task(
+            l3_sampler_task = _create_daemon_task(
                 l3_sampler_module.run_sampler(
                     stop_event,
                     settings=settings,
@@ -752,65 +843,20 @@ async def main() -> int:
     finally:
         logger.info("polyarb-l2 daemon stopping")
         server.should_exit = True
-        runtime_tasks = [
-            (watchdog_task, "watchdog"),
-            (consumer_task, "consumer"),
-            (quiet_refresh_task, "ws-quiet-refresh"),
-            (listener_task, "listener"),
-            (pump_task, "reconciliation-pump"),
-            (l3_promoter_task, "l3-promoter"),
-            (l3_sampler_task, "l3-evidence-sampler"),
-        ]
-        if watchdog_task is not None:
-            watchdog_task.cancel()
-        if consumer_task is not None:
-            consumer_task.cancel()
-        if quiet_refresh_task is not None:
-            quiet_refresh_task.cancel()
-        if listener_task is not None:
-            listener_task.cancel()
-        if pump_task is not None:
-            pump_task.cancel()
-        if l3_promoter_task is not None:
-            l3_promoter_task.cancel()
-        if l3_sampler_task is not None:
-            l3_sampler_task.cancel()
-        if not normal_shutdown and l3_event_writer_task is not None:
-            l3_event_writer_task.cancel()
-        if not normal_shutdown:
-            server_task.cancel()
-
-        # A real shutdown signal is queued before stop_event. Give the event
-        # writer the full bounded window first so peer-task cleanup cannot
-        # consume its five-second durability budget.
-        if l3_event_writer_task is not None:
-            try:
-                await asyncio.wait_for(l3_event_writer_task, timeout=5.0)
-            except TimeoutError:
-                logger.warning("l3-event-writer did not drain within 5s — forcing")
-                l3_event_writer_task.cancel()
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:  # noqa: BLE001 - preserve primary failure
-                logger.warning(
-                    "l3-event-writer stopped with error_type={}", type(exc).__name__
-                )
-
-        # F-04 bounded shutdown — optional tasks remain optional because boot
-        # authorization may fail before they are ever constructed.
-        shutdown_tasks = [(server_task, "server")]
-        shutdown_tasks.extend((task, name) for task, name in runtime_tasks if task is not None)
-        for task, name in shutdown_tasks:
-            try:
-                await asyncio.wait_for(task, timeout=5.0)
-            except TimeoutError:
-                logger.warning(f"{name} task did not stop within 5s — forcing")
-            except asyncio.CancelledError:
-                # Expected for every explicitly-cancelled task.  Cancellation
-                # of main itself is re-raised by the outer handler above.
-                pass
-            except Exception as exc:  # noqa: BLE001 - preserve primary failure
-                logger.warning("{} task stopped with error_type={}", name, type(exc).__name__)
+        await _drain_daemon_tasks(
+            server_task=server_task,
+            event_writer_task=l3_event_writer_task,
+            peer_tasks=(
+                watchdog_task,
+                consumer_task,
+                quiet_refresh_task,
+                listener_task,
+                pump_task,
+                l3_promoter_task,
+                l3_sampler_task,
+            ),
+            normal_shutdown=normal_shutdown,
+        )
 
     logger.info("polyarb-l2 daemon stopped cleanly")
     return 0

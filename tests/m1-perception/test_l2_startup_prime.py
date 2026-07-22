@@ -37,8 +37,9 @@ def test_l2_main_uses_one_reconciliation_pump_as_cursor_owner():
     src = _source()
     assert "ReconciliationPump(" in src
     assert "AsyncpgCursorStore(" in src
-    assert "pump_task = asyncio.create_task" in src
+    assert "pump_task = _create_daemon_task" in src
     assert "pump.run(stop_event)" in src
+    assert 'name="reconciliation-pump"' in src
 
 
 def test_notify_callback_only_wakes_pump_without_task_fanout():
@@ -60,5 +61,5 @@ def test_listener_and_pump_share_runtime_state_and_stop_independently():
     src = _source()
     assert "ReconciliationState()" in src
     assert "state=reconciliation_state" in src
-    assert '(pump_task, "reconciliation-pump")' in src
-    assert "pump_task.cancel()" in src
+    assert "await _drain_daemon_tasks(" in src
+    assert "pump_task," in src
