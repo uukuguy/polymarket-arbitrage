@@ -944,6 +944,7 @@ class RetentionBounds:
 
 
 _EVENT_QUEUE_CAPACITY = 128
+_WRITER_CHANNELS = frozenset({"boot", "promoter", "sample", "event"})
 
 
 class L3EvidenceRuntime:
@@ -980,6 +981,9 @@ class L3EvidenceRuntime:
         self._writer_ok: bool | None = None
         self._last_writer_result_at: datetime | None = None
         self._writer_reason_code = ""
+        self._writer_ok_by_channel: dict[str, bool] = {}
+        self._writer_result_at_by_channel: dict[str, datetime] = {}
+        self._writer_reason_by_channel: dict[str, str] = {}
 
     def next_run_seq(self) -> int:
         sequence = self._run_seq
@@ -1061,7 +1065,7 @@ class L3EvidenceRuntime:
         if not self._event_integrity_failed:
             self._event_integrity_failed = True
             self._event_integrity_reason_code = reason_code
-        self.note_writer_result(False, at, reason_code)
+        self.note_writer_result(False, at, reason_code, channel="event")
 
     def snapshot(self) -> EvidenceStatus:
         if self._event_integrity_failed:
@@ -1144,27 +1148,68 @@ class L3EvidenceRuntime:
         self._last_sample_persisted_at = at
         self._last_market_samples = copied
 
-    def note_writer_result(self, ok: bool, at: datetime, reason_code: str) -> None:
+    def note_writer_result(
+        self,
+        ok: bool,
+        at: datetime,
+        reason_code: str,
+        *,
+        channel: str = "event",
+    ) -> None:
         _require_utc("writer result at", at)
         _require_reason("reason_code", reason_code)
-        if self._last_writer_result_at is not None and at < self._last_writer_result_at:
-            raise ValueError("writer result timestamp cannot move backward")
+        if channel not in _WRITER_CHANNELS:
+            raise ValueError(f"unknown writer channel: {channel}")
+        previous_channel_at = self._writer_result_at_by_channel.get(channel)
+        if previous_channel_at is not None and at < previous_channel_at:
+            raise ValueError(f"{channel} writer result timestamp cannot move backward")
+
         prior = self._writer_ok
-        if not ok and prior is not False:
+        next_channel_results = dict(self._writer_ok_by_channel)
+        next_channel_results[channel] = ok
+        aggregate_ok = all(next_channel_results.values())
+        transition_at = (
+            at
+            if self._last_writer_result_at is None
+            else max(at, self._last_writer_result_at)
+        )
+        if not aggregate_ok and prior is not False:
             self.record_event(
                 RuntimeEventKind.EVIDENCE_WRITER_FAILED,
-                occurred_at=at,
+                occurred_at=transition_at,
                 severity=RuntimeEventSeverity.WARNING,
                 generation=self._ws_generation,
                 reason_code=reason_code,
             )
-        elif ok and prior is False:
+        elif aggregate_ok and prior is False:
             self.record_event(
                 RuntimeEventKind.EVIDENCE_WRITER_RECOVERED,
-                occurred_at=at,
+                occurred_at=transition_at,
                 generation=self._ws_generation,
                 reason_code=reason_code,
             )
-        self._writer_ok = ok
-        self._last_writer_result_at = at
-        self._writer_reason_code = reason_code
+
+        self._writer_ok_by_channel = next_channel_results
+        self._writer_result_at_by_channel[channel] = at
+        self._writer_reason_by_channel[channel] = reason_code
+        self._writer_ok = aggregate_ok
+        self._last_writer_result_at = transition_at
+        if aggregate_ok:
+            self._writer_reason_code = reason_code
+        else:
+            failed_channels = (
+                failed_channel
+                for failed_channel, channel_ok in next_channel_results.items()
+                if not channel_ok
+            )
+            latest_failed_channel = max(
+                failed_channels,
+                key=lambda failed_channel: (
+                    self._writer_result_at_by_channel.get(failed_channel, at),
+                    failed_channel,
+                ),
+            )
+            self._writer_reason_code = self._writer_reason_by_channel.get(
+                latest_failed_channel,
+                reason_code,
+            )

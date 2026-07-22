@@ -160,6 +160,7 @@ async def _append_l3_boot(dependencies: _L3EvidenceDependencies) -> bool:
         persisted,
         at,
         "ok" if persisted else "boot_append_failed",
+        channel="boot",
     )
     if not persisted:
         logger.warning("l3 evidence boot not persisted; promoter remains disabled")
@@ -300,6 +301,7 @@ async def _drain_daemon_tasks(
     event_writer_task: asyncio.Task[Any] | None,
     peer_tasks: Iterable[asyncio.Task[Any] | None],
     normal_shutdown: bool,
+    producers_done: asyncio.Event | None = None,
     timeout_s: float = 5.0,
 ) -> None:
     """Stop all daemon tasks under one deadline, preserving writer drain time.
@@ -329,7 +331,36 @@ async def _drain_daemon_tasks(
     force_cancel_grace_s = min(0.25, max(0.0, timeout_s / 2))
     drain_timeout_s = max(0.0, timeout_s - force_cancel_grace_s)
     try:
-        done, pending = await asyncio.wait(owned, timeout=drain_timeout_s)
+        if normal_shutdown and event_writer_task is not None and producers_done is not None:
+            producer_tasks = set(peers)
+            if producer_tasks:
+                producer_done, producer_pending = await asyncio.wait(
+                    producer_tasks,
+                    timeout=drain_timeout_s,
+                )
+                for task in producer_done:
+                    _report_task_result(task)
+                for task in producer_pending:
+                    logger.warning(
+                        "{} producer did not stop within {}s — forcing",
+                        task.get_name(),
+                        timeout_s,
+                    )
+                await _force_reap_tasks(producer_pending, deadline=deadline)
+            producers_done.set()
+            drain_owned = {server_task, event_writer_task}
+            remaining_drain_s = max(
+                0.0,
+                deadline - loop.time() - force_cancel_grace_s,
+            )
+        else:
+            drain_owned = owned
+            remaining_drain_s = drain_timeout_s
+
+        done, pending = await asyncio.wait(
+            drain_owned,
+            timeout=remaining_drain_s,
+        )
     except asyncio.CancelledError as cancellation:
         for task in owned:
             _cancel_once(task)
@@ -354,7 +385,15 @@ async def _drain_daemon_tasks(
         _report_task_result(task)
     for task in pending:
         logger.warning("{} task did not stop within {}s — forcing", task.get_name(), timeout_s)
+    writer_missed_drain_deadline = (
+        normal_shutdown
+        and producers_done is not None
+        and event_writer_task is not None
+        and event_writer_task in pending
+    )
     await _force_reap_tasks(pending, deadline=deadline)
+    if writer_missed_drain_deadline:
+        raise RuntimeError("event writer drain deadline exceeded")
 
 # ── Plan 06 D-07: WS frame → l2_* row builders ───────────────────────────
 # Polymarket WS market-channel event shapes (empirical):
@@ -805,6 +844,7 @@ async def main() -> int:
     server = uvicorn.Server(config)
 
     stop_event = asyncio.Event()
+    l3_producers_done = asyncio.Event()
 
     def _shutdown(sig: signal.Signals) -> None:
         logger.info(f"polyarb-l2 received {sig.name}, initiating graceful shutdown")
@@ -902,6 +942,7 @@ async def main() -> int:
                         stop_event,
                         runtime=l3_evidence.runtime,
                         store=l3_evidence.store,
+                        producers_done=l3_producers_done,
                     ),
                     name="l3-event-writer",
                 )
@@ -974,6 +1015,7 @@ async def main() -> int:
                 stop_wait_task,
             ),
             normal_shutdown=normal_shutdown,
+            producers_done=l3_producers_done,
         )
 
     logger.info("polyarb-l2 daemon stopped cleanly")

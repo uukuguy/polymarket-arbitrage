@@ -94,13 +94,21 @@ def _publish_membership(
     at: datetime,
 ) -> None:
     tokens = _tokens(states)
+    evidence_times = {
+        token_id: book_at or at
+        for state in states
+        for token_id, book_at in (
+            (state.yes_token_id, state.yes_book_at),
+            (state.no_token_id, state.no_book_at),
+        )
+    }
     runtime.update_membership(
         WsMembershipSnapshot(
             generation=1,
             desired=tokens,
             committed=tokens,
             evidenced=tokens,
-            evidenced_at={token: at for token in tokens},
+            evidenced_at=evidence_times,
         )
     )
 
@@ -350,6 +358,181 @@ async def test_event_writer_quarantines_permanent_conflict_and_persists_tail():
     assert status.event_integrity_reason_code == "event_replay_conflict"
     assert status.status is l3_evidence.HealthStatus.FAIL
     assert status.reason_code == "event_integrity_failed"
+
+
+async def test_shutdown_waits_for_late_producer_cleanup_event_before_writer_exit():
+    runtime = _runtime()
+    runtime.record_event(
+        RuntimeEventKind.SHUTDOWN_SIGNAL,
+        occurred_at=START,
+        reason_code="signal",
+        detail={"signal": "SIGTERM"},
+    )
+    durable = []
+
+    class _Store:
+        async def append_event(self, event):
+            durable.append(event)
+            return True
+
+    stop_event = asyncio.Event()
+    stop_event.set()
+    producers_done = asyncio.Event()
+    writer_task = asyncio.create_task(
+        l3_sampler.run_event_writer(
+            stop_event,
+            runtime=runtime,
+            store=_Store(),
+            flush_interval_s=0,
+            producers_done=producers_done,
+        ),
+        name="l3-event-writer",
+    )
+
+    async def _late_producer():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            runtime.record_event(
+                RuntimeEventKind.SUBSCRIPTION_COMPENSATED,
+                occurred_at=START + timedelta(seconds=1),
+                reason_code="shutdown_cleanup",
+                detail={"operation": "connection_close", "close_succeeded": True},
+            )
+
+    async def _server():
+        await asyncio.sleep(0)
+
+    peer_task = asyncio.create_task(_late_producer(), name="ws-consumer")
+    server_task = asyncio.create_task(_server(), name="l2-http-server")
+    await asyncio.sleep(0)
+
+    await l2_main._drain_daemon_tasks(
+        server_task=server_task,
+        event_writer_task=writer_task,
+        peer_tasks=(peer_task,),
+        normal_shutdown=True,
+        producers_done=producers_done,
+        timeout_s=0.2,
+    )
+
+    assert producers_done.is_set()
+    assert writer_task.done()
+    assert [event.kind for event in durable] == [
+        RuntimeEventKind.SHUTDOWN_SIGNAL,
+        RuntimeEventKind.SUBSCRIPTION_COMPENSATED,
+    ]
+    assert runtime.snapshot().pending_event_count == 0
+
+
+async def test_shutdown_never_reports_clean_when_late_event_writer_hits_deadline():
+    runtime = _runtime()
+    runtime.record_event(
+        RuntimeEventKind.SHUTDOWN_SIGNAL,
+        occurred_at=START,
+        reason_code="signal",
+        detail={"signal": "SIGTERM"},
+    )
+
+    class _Store:
+        def __init__(self):
+            self.calls = 0
+
+        async def append_event(self, _event):
+            self.calls += 1
+            if self.calls == 1:
+                return True
+            await asyncio.Event().wait()
+
+    stop_event = asyncio.Event()
+    stop_event.set()
+    producers_done = asyncio.Event()
+    writer_task = asyncio.create_task(
+        l3_sampler.run_event_writer(
+            stop_event,
+            runtime=runtime,
+            store=_Store(),
+            flush_interval_s=0,
+            producers_done=producers_done,
+        ),
+        name="l3-event-writer",
+    )
+
+    async def _late_producer():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.02)
+            runtime.record_event(
+                RuntimeEventKind.SUBSCRIPTION_COMPENSATED,
+                occurred_at=START + timedelta(seconds=1),
+                reason_code="shutdown_cleanup",
+                detail={"operation": "connection_close", "close_succeeded": True},
+            )
+
+    async def _server():
+        await asyncio.sleep(0)
+
+    peer_task = asyncio.create_task(_late_producer(), name="ws-consumer")
+    server_task = asyncio.create_task(_server(), name="l2-http-server")
+    await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="event writer drain deadline"):
+        await l2_main._drain_daemon_tasks(
+            server_task=server_task,
+            event_writer_task=writer_task,
+            peer_tasks=(peer_task,),
+            normal_shutdown=True,
+            producers_done=producers_done,
+            timeout_s=0.05,
+        )
+
+    assert writer_task.done()
+    assert runtime.snapshot().pending_event_count == 1
+
+
+async def test_cancellation_during_producer_wait_reaps_owned_tasks_and_propagates():
+    stop_event = asyncio.Event()
+    stop_event.set()
+    producers_done = asyncio.Event()
+    cleanup_started = asyncio.Event()
+
+    async def _writer():
+        await producers_done.wait()
+
+    async def _producer():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await asyncio.sleep(0)
+
+    async def _server():
+        await asyncio.Event().wait()
+
+    writer_task = asyncio.create_task(_writer(), name="l3-event-writer")
+    peer_task = asyncio.create_task(_producer(), name="ws-consumer")
+    server_task = asyncio.create_task(_server(), name="l2-http-server")
+    drain_task = asyncio.create_task(
+        l2_main._drain_daemon_tasks(
+            server_task=server_task,
+            event_writer_task=writer_task,
+            peer_tasks=(peer_task,),
+            normal_shutdown=True,
+            producers_done=producers_done,
+            timeout_s=0.2,
+        )
+    )
+    await asyncio.wait_for(cleanup_started.wait(), timeout=0.1)
+    drain_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await drain_task
+
+    assert server_task.done()
+    assert writer_task.done()
+    assert peer_task.done()
 
 
 def test_event_queue_overflow_is_bounded_and_fail_closed():
@@ -863,12 +1046,20 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
     ws_v1 = SimpleNamespace(send=AsyncMock(return_value=None), close=AsyncMock(return_value=None))
     await consumer._initialize_connection(ws_v1)
     generation_one = runtime.snapshot().ws_generation
+    book_at_v1 = {
+        token_id: book_at
+        for state in states_v1
+        for token_id, book_at in (
+            (state.yes_token_id, state.yes_book_at),
+            (state.no_token_id, state.no_book_at),
+        )
+    }
     for token in tokens:
         consumer.record_book_evidence(
             asset_id=token,
             generation=generation_one,
             book_levels_succeeded=True,
-            observed_at=base,
+            observed_at=book_at_v1[token],
         )
     assert await l3_sampler.sample_once(
         sampled_at=base,
@@ -884,7 +1075,16 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
         generation_one
     }
 
-    reconnected_at = base + timedelta(seconds=1)
+    sampled_v2_at = base + timedelta(seconds=2)
+    states_v2 = _market_states(sampled_v2_at)
+    book_at_v2 = {
+        token_id: book_at
+        for state in states_v2
+        for token_id, book_at in (
+            (state.yes_token_id, state.yes_book_at),
+            (state.no_token_id, state.no_book_at),
+        )
+    }
     ws_v2 = SimpleNamespace(send=AsyncMock(return_value=None), close=AsyncMock(return_value=None))
     await consumer._initialize_connection(ws_v2)
     generation_two = runtime.snapshot().ws_generation
@@ -894,7 +1094,7 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
             asset_id=token,
             generation=generation_two,
             book_levels_succeeded=True,
-            observed_at=reconnected_at,
+            observed_at=book_at_v2[token],
         )
     current = runtime.snapshot()
     assert current.desired == current.committed == current.evidenced
@@ -918,8 +1118,6 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
     assert before_probe.status_code == 200
     assert before_strict.json()["checks"]["l3:membership_convergence"][0]["status"] == "fail"
 
-    sampled_v2_at = base + timedelta(seconds=2)
-    states_v2 = _market_states(sampled_v2_at)
     assert await l3_sampler.sample_once(
         sampled_at=sampled_v2_at,
         sample_seq=1,

@@ -72,13 +72,23 @@ def _market_reason(
     book_fresh_ms: int,
     ohlc_fresh_ms: int,
 ) -> tuple[HealthStatus, str]:
-    for token_id in (market.yes_token_id, market.no_token_id):
+    token_evidence: dict[str, datetime] = {}
+    for side, token_id in (
+        ("yes", market.yes_token_id),
+        ("no", market.no_token_id),
+    ):
         if token_id not in runtime.desired:
             return HealthStatus.FAIL, "not_desired"
         if token_id not in runtime.committed:
             return HealthStatus.FAIL, "not_committed"
         if token_id not in runtime.evidenced:
             return HealthStatus.FAIL, "not_evidenced"
+        evidenced_at = runtime.evidenced_at.get(token_id)
+        if evidenced_at is None:
+            return HealthStatus.FAIL, f"{side}_evidence_missing"
+        if evidenced_at > sampled_at:
+            return HealthStatus.FAIL, f"{side}_evidence_in_future"
+        token_evidence[side] = evidenced_at
 
     checks = (
         ("yes_book", market.yes_book_at, book_fresh_ms),
@@ -93,6 +103,14 @@ def _market_reason(
         age_ms = _age_ms(sampled_at, observed_at)
         if age_ms is None or age_ms >= threshold_ms:
             return HealthStatus.FAIL, f"{name}_stale"
+        if name.endswith("_book"):
+            side = name.removesuffix("_book")
+            evidenced_at = token_evidence[side]
+            evidence_age_ms = _age_ms(sampled_at, evidenced_at)
+            if evidence_age_ms is None or evidence_age_ms >= book_fresh_ms:
+                return HealthStatus.FAIL, f"{side}_evidence_stale"
+            if observed_at < evidenced_at:
+                return HealthStatus.FAIL, f"{side}_book_before_evidence"
     return HealthStatus.PASS, "ok"
 
 
@@ -294,10 +312,12 @@ async def sample_once(
         store=store,
     )
     persisted = await store.append_sample(batch)
+    result_at = _utc_now()
     runtime.note_writer_result(
         persisted,
-        sampled_at,
+        result_at,
         "ok" if persisted else "sample_append_failed",
+        channel="sample",
     )
     if persisted:
         runtime.mark_sample_persisted(sampled_at, batch.markets)
@@ -343,7 +363,12 @@ async def run_sampler(
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - missing row remains the truth
-            runtime.note_writer_result(False, sampled_at, "sample_collection_failed")
+            runtime.note_writer_result(
+                False,
+                _utc_now(),
+                "sample_collection_failed",
+                channel="sample",
+            )
             logger.warning(
                 "l3 sampler failed sample_seq={} error_type={}",
                 sample_seq,
@@ -362,6 +387,7 @@ async def run_event_writer(
     runtime: Any,
     store: L3EvidenceStore,
     flush_interval_s: float = 1.0,
+    producers_done: asyncio.Event | None = None,
 ) -> None:
     """Append queued events in sequence order without losing failed records."""
     if isinstance(flush_interval_s, bool) or not isinstance(
@@ -374,8 +400,21 @@ async def run_event_writer(
     while True:
         event = runtime.peek_pending_event()
         if event is None:
-            if stop_event.is_set():
+            if stop_event.is_set() and (
+                producers_done is None or producers_done.is_set()
+            ):
                 return
+            if stop_event.is_set() and producers_done is not None:
+                if flush_interval_s == 0:
+                    await asyncio.sleep(0)
+                else:
+                    try:
+                        await asyncio.wait_for(
+                            producers_done.wait(), timeout=flush_interval_s
+                        )
+                    except TimeoutError:
+                        pass
+                continue
             if await _wait_for_stop(stop_event, flush_interval_s):
                 continue
             continue
@@ -407,11 +446,18 @@ async def run_event_writer(
         result_at = _utc_now()
         if persisted:
             runtime.acknowledge_pending_event(event)
-            runtime.note_writer_result(True, result_at, "writer_ok")
+            runtime.note_writer_result(
+                True, result_at, "writer_ok", channel="event"
+            )
             continue
 
         try:
-            runtime.note_writer_result(False, result_at, "event_append_failed")
+            runtime.note_writer_result(
+                False,
+                result_at,
+                "event_append_failed",
+                channel="event",
+            )
         except OverflowError:
             # The queue's own overflow bit is already durable process-local fail
             # truth. The unacknowledged event remains at the head for retry.

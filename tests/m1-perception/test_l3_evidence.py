@@ -755,6 +755,54 @@ def test_writer_outage_transitions_queue_one_failure_and_one_recovery() -> None:
     assert runtime.drain_pending_events() == ()
 
 
+@pytest.mark.parametrize(
+    ("failed_channel", "unrelated_success_channel"),
+    [("event", "sample"), ("sample", "event")],
+)
+def test_writer_recovery_requires_the_failed_channel_to_recover(
+    failed_channel: str,
+    unrelated_success_channel: str,
+) -> None:
+    evidence = importlib.import_module("polyarb.observation.l3_evidence")
+    runtime = evidence.L3EvidenceRuntime(_identity(evidence), started_at=NOW)
+
+    runtime.note_writer_result(
+        False,
+        NOW + timedelta(seconds=2),
+        f"{failed_channel}_append_failed",
+        channel=failed_channel,
+    )
+    # This result completed earlier on another channel but was reported later.
+    # It must neither roll back global time nor forge a global recovery.
+    runtime.note_writer_result(
+        True,
+        NOW + timedelta(seconds=1),
+        "ok",
+        channel=unrelated_success_channel,
+    )
+
+    still_failed = runtime.snapshot()
+    assert still_failed.writer_ok is False
+    assert still_failed.last_writer_result_at == NOW + timedelta(seconds=2)
+    assert still_failed.writer_reason_code == f"{failed_channel}_append_failed"
+    assert [event.kind for event in runtime.drain_pending_events()] == [
+        evidence.RuntimeEventKind.EVIDENCE_WRITER_FAILED,
+    ]
+
+    runtime.note_writer_result(
+        True,
+        NOW + timedelta(seconds=3),
+        "writer_ok",
+        channel=failed_channel,
+    )
+    recovered = runtime.snapshot()
+    assert recovered.writer_ok is True
+    assert recovered.last_writer_result_at == NOW + timedelta(seconds=3)
+    assert [event.kind for event in runtime.drain_pending_events()] == [
+        evidence.RuntimeEventKind.EVIDENCE_WRITER_RECOVERED,
+    ]
+
+
 def test_event_queue_preserves_first_128_and_surfaces_overflow_failure() -> None:
     evidence = importlib.import_module("polyarb.observation.l3_evidence")
     runtime = evidence.L3EvidenceRuntime(_identity(evidence), started_at=NOW)

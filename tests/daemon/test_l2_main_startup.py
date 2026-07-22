@@ -1381,6 +1381,7 @@ async def test_shutdown_uses_one_five_second_drain_deadline():
     text = src_path.read_text()
     assert "async def _drain_daemon_tasks(" in text
     assert "timeout_s: float = 5.0" in text
-    assert "await asyncio.wait(owned, timeout=drain_timeout_s)" in text
+    assert "producers_done.set()" in text
+    assert "deadline - loop.time()" in text
     assert "await _drain_daemon_tasks(" in text
     assert "server.should_exit = True" in text

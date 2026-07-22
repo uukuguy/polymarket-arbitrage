@@ -632,11 +632,13 @@ async def _finalize_promote_run(
     # manufacture a second row.
     append_attempt.started = True
     persisted = await evidence_store.append_promote_run(record)
+    writer_result_at = datetime.now(UTC)
 
     evidence_runtime.note_writer_result(
         persisted,
-        finished_at,
+        writer_result_at,
         "ok" if persisted else "promote_append_failed",
+        channel="promoter",
     )
     if persisted:
         evidence_runtime.mark_promote_persisted(finished_at)
@@ -1245,6 +1247,7 @@ async def run_periodic(
                 False,
                 datetime.now(UTC),
                 "promote_run_unexpected_exception",
+                channel="promoter",
             )
             logger.error(
                 "l3-promote tick raised run_seq={} error_type={}",

@@ -77,16 +77,29 @@ def _publish_current_membership(
     desired: frozenset[str] | None = None,
     committed: frozenset[str] | None = None,
     evidenced: frozenset[str] | None = None,
+    evidenced_at: datetime | None = None,
 ) -> None:
     all_tokens = _tokens(pairs)
     current_evidenced = all_tokens if evidenced is None else evidenced
+    evidence_times = {}
+    for pair in pairs:
+        for token_id, book_at in (
+            (pair.yes_token_id, pair.yes_book_at),
+            (pair.no_token_id, pair.no_book_at),
+        ):
+            if token_id in current_evidenced:
+                evidence_times[token_id] = (
+                    evidenced_at
+                    if evidenced_at is not None
+                    else (book_at or START - timedelta(seconds=1))
+                )
     runtime.update_membership(
         WsMembershipSnapshot(
             generation=generation,
             desired=all_tokens if desired is None else desired,
             committed=all_tokens if committed is None else committed,
             evidenced=current_evidenced,
-            evidenced_at={token: START for token in current_evidenced},
+            evidenced_at=evidence_times,
         )
     )
 
@@ -239,6 +252,42 @@ async def test_market_status_fails_closed_on_freshness_and_membership_faults(
         )
     else:
         _publish_current_membership(runtime, frozen_pairs)
+    store = SimpleNamespace(fetch_sampling_market_state=AsyncMock(return_value=frozen_pairs))
+
+    batch = await l3_sampler.collect_sample(
+        sampled_at=START,
+        sample_seq=0,
+        settings=_settings(),
+        ws_consumer=_ConsumerWithoutMembershipReads(),
+        reconciliation_state=_reconciliation(),
+        runtime=runtime,
+        store=store,
+    )
+
+    market = next(row for row in batch.markets if row.market_id == "market-2")
+    assert market.status is HealthStatus.FAIL
+    assert market.reason_code == expected_reason
+    assert batch.health.status is HealthStatus.FAIL
+
+
+@pytest.mark.parametrize(
+    ("evidenced_at", "book_at", "expected_reason"),
+    [
+        (START - timedelta(seconds=130), START - timedelta(seconds=1), "yes_evidence_stale"),
+        (START + timedelta(seconds=1), START - timedelta(seconds=1), "yes_evidence_in_future"),
+        (START - timedelta(seconds=5), START - timedelta(seconds=6), "yes_book_before_evidence"),
+    ],
+)
+async def test_market_status_requires_fresh_books_from_current_generation_evidence(
+    evidenced_at: datetime,
+    book_at: datetime,
+    expected_reason: str,
+):
+    pairs = list(_pairs())
+    pairs[2] = replace(pairs[2], yes_book_at=book_at)
+    frozen_pairs = tuple(pairs)
+    runtime = _runtime()
+    _publish_current_membership(runtime, frozen_pairs, evidenced_at=evidenced_at)
     store = SimpleNamespace(fetch_sampling_market_state=AsyncMock(return_value=frozen_pairs))
 
     batch = await l3_sampler.collect_sample(
