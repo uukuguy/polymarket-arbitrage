@@ -91,6 +91,17 @@ async def _fetch(dsn: str, query: str, *args: object) -> list[dict]:
         await conn.close()
 
 
+async def _execute(dsn: str, *statements: str) -> None:
+    import asyncpg
+
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        for statement in statements:
+            await conn.execute(statement)
+    finally:
+        await conn.close()
+
+
 def _q(dsn: str, query: str, *args: object) -> list[dict]:
     return asyncio.run(_fetch(dsn, query, *args))
 
@@ -260,20 +271,33 @@ def _assert_catalog_contract(dsn: str) -> None:
     )
     indexes = {row["indexname"]: row for row in index_rows}
     expected_indexes = {
-        "idx_l3_runtime_boots_started_boot",
-        "idx_l3_runtime_boots_machine_version",
-        "idx_l3_promote_runs_scheduled_boot",
-        "idx_l3_promote_runs_boot_started",
-        "idx_l3_promote_runs_status",
-        "idx_l3_health_samples_sampled_boot",
-        "idx_l3_health_samples_boot_seq",
-        "idx_l3_market_samples_sampled_market",
-        "idx_l3_market_samples_yes_sampled",
-        "idx_l3_market_samples_no_sampled",
-        "idx_l3_runtime_events_occurred_kind",
-        "idx_l3_runtime_events_boot_seq",
+        "idx_l3_runtime_boots_started_boot": ("started_at", "boot_id"),
+        "idx_l3_runtime_boots_machine_version": ("machine_id", "machine_version"),
+        "idx_l3_promote_runs_scheduled_boot": ("scheduled_at", "boot_id"),
+        "idx_l3_promote_runs_boot_started": ("boot_id", "started_at"),
+        "idx_l3_promote_runs_status": ("status",),
+        "idx_l3_health_samples_sampled_boot": ("sampled_at", "boot_id"),
+        "idx_l3_health_samples_boot_seq": ("boot_id", "sample_seq"),
+        "idx_l3_market_samples_sampled_market": ("sampled_at", "market_id"),
+        "idx_l3_market_samples_yes_sampled": ("yes_token_id", "sampled_at"),
+        "idx_l3_market_samples_no_sampled": ("no_token_id", "sampled_at"),
+        "idx_l3_runtime_events_occurred_kind": ("occurred_at", "kind"),
+        "idx_l3_runtime_events_boot_seq": ("boot_id", "event_seq"),
     }
-    assert expected_indexes <= set(indexes)
+    constraint_indexes = {
+        "pk_l3_runtime_boots",
+        "pk_l3_promote_runs",
+        "uq_l3_promote_runs_boot_seq",
+        "pk_l3_health_samples",
+        "pk_l3_market_samples",
+        "uq_l3_market_samples_yes_token",
+        "uq_l3_market_samples_no_token",
+        "pk_l3_runtime_events",
+        "uq_l3_runtime_events_boot_seq",
+    }
+    assert set(indexes) == set(expected_indexes) | constraint_indexes
+    for name, columns in expected_indexes.items():
+        assert f"({', '.join(columns)})" in indexes[name]["indexdef"]
 
     constraints = _q(
         dsn,
@@ -343,6 +367,7 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
     conn = await asyncpg.connect(dsn=dsn)
     boot_id = "11111111-1111-4111-8111-111111111111"
     protected_boot_id = "22222222-2222-4222-8222-222222222222"
+    eligible_boot_id = "33333333-3333-4333-8333-333333333333"
     try:
         await conn.execute(
             "INSERT INTO l3_runtime_boots "
@@ -416,6 +441,56 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
             "'shutdown_signal', 'info', '{}'::jsonb)",
             protected_boot_id,
         )
+        await conn.execute(
+            "INSERT INTO l3_runtime_boots "
+            "(boot_id, started_at, machine_id, machine_version, image_ref, "
+            " release_id, code_version, acceptance_config_hash) "
+            "VALUES ($1, clock_timestamp(), 'machine-3', 'v1', 'image@sha256:test', "
+            "'release-1', 'code-1', $2)",
+            eligible_boot_id,
+            "e" * 64,
+        )
+        await conn.execute(
+            "INSERT INTO l3_promote_runs "
+            "(boot_id, run_seq, scheduled_at, started_at, finished_at, status, "
+            " reason_code, selected_count, desired_count, committed_count, "
+            " evidenced_count, add_count, remove_count, mapping_hash, desired_hash, "
+            " committed_hash, acceptance_config_hash, ws_generation, add_succeeded, "
+            " remove_succeeded, mirror_succeeded, duration_ms) VALUES "
+            "($1, 0, clock_timestamp(), clock_timestamp(), clock_timestamp(), "
+            " 'success', 'cleanup', 1, 2, 2, 2, 2, 0, $2, $2, $2, $2, 0, "
+            " true, true, true, 1)",
+            eligible_boot_id,
+            "f" * 64,
+        )
+        await conn.execute(
+            "INSERT INTO l3_health_samples "
+            "(boot_id, sample_seq, sampled_at, desired_count, committed_count, "
+            " evidenced_count, listener_state, cursor_lag, watchdog_count, "
+            " reconnect_count, ws_generation, mapping_hash, acceptance_config_hash, "
+            " status, reason_code) VALUES "
+            "($1, 0, clock_timestamp(), 2, 2, 2, 'connected', 0, 0, 0, 0, "
+            " $2, $2, 'pass', 'cleanup')",
+            eligible_boot_id,
+            "1" * 64,
+        )
+        await conn.execute(
+            "INSERT INTO l3_market_samples "
+            "(boot_id, sample_seq, sampled_at, market_id, yes_token_id, no_token_id, "
+            " yes_desired, no_desired, yes_committed, no_committed, yes_evidenced, "
+            " no_evidenced, evidence_generation, yes_book_age_ms, no_book_age_ms, "
+            " worst_book_age_ms, yes_ohlc_age_ms, status, reason_code) VALUES "
+            "($1, 0, clock_timestamp(), 'market-cleanup', 'yes-cleanup', 'no-cleanup', "
+            " true, true, true, true, true, true, 0, 0, 0, 0, 0, 'pass', 'cleanup')",
+            eligible_boot_id,
+        )
+        await conn.execute(
+            "INSERT INTO l3_runtime_events "
+            "(event_id, boot_id, event_seq, occurred_at, kind, severity, detail) "
+            "VALUES (gen_random_uuid(), $1, 0, clock_timestamp(), "
+            "'shutdown_signal', 'info', '{}'::jsonb)",
+            eligible_boot_id,
+        )
 
         with pytest.raises(asyncpg.exceptions.CheckViolationError):
             await conn.execute(
@@ -425,11 +500,32 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
                 "'shutdown_signal', 'info', '{}'::jsonb)",
                 boot_id,
             )
-        with pytest.raises(asyncpg.exceptions.RaiseError):
+        server_owned = await conn.fetchval(
+            "WITH inserted AS ("
+            "  INSERT INTO l3_runtime_events "
+            "  (event_id, boot_id, event_seq, occurred_at, kind, severity, detail, "
+            "   recorded_at) VALUES (gen_random_uuid(), $1, 12, clock_timestamp(), "
+            "   'shutdown_signal', 'info', '{}'::jsonb, "
+            "   clock_timestamp()+interval '25 seconds') RETURNING recorded_at"
+            ") SELECT recorded_at <= clock_timestamp()+interval '2 seconds' "
+            "FROM inserted",
+            boot_id,
+        )
+        assert server_owned, "recorded_at must be overwritten by the database"
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO l3_runtime_events "
+                "(event_id, boot_id, event_seq, occurred_at, kind, severity, detail, "
+                " recorded_at) VALUES (gen_random_uuid(), $1, 13, "
+                "clock_timestamp()+interval '55 seconds', 'shutdown_signal', "
+                "'info', '{}'::jsonb, clock_timestamp()+interval '29 seconds')",
+                boot_id,
+            )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
             await conn.execute(
                 "INSERT INTO l3_runtime_events "
                 "(event_id, boot_id, event_seq, occurred_at, kind, severity, detail, recorded_at) "
-                "VALUES (gen_random_uuid(), $1, 12, clock_timestamp()-interval '25 hours', "
+                "VALUES (gen_random_uuid(), $1, 14, clock_timestamp()-interval '25 hours', "
                 "'shutdown_signal', 'info', '{}'::jsonb, "
                 "clock_timestamp()-interval '25 hours')",
                 boot_id,
@@ -485,6 +581,33 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
             "occurred_at=clock_timestamp()-interval '35 days' WHERE boot_id=$1",
             protected_boot_id,
         )
+        await conn.execute(
+            "UPDATE l3_runtime_boots SET recorded_at=clock_timestamp()-interval '40 days', "
+            "started_at=clock_timestamp()-interval '40 days' WHERE boot_id=$1",
+            eligible_boot_id,
+        )
+        await conn.execute(
+            "UPDATE l3_promote_runs SET recorded_at=clock_timestamp()-interval '40 days', "
+            "scheduled_at=clock_timestamp()-interval '40 days', "
+            "started_at=clock_timestamp()-interval '40 days', "
+            "finished_at=clock_timestamp()-interval '40 days' WHERE boot_id=$1",
+            eligible_boot_id,
+        )
+        await conn.execute(
+            "UPDATE l3_health_samples SET recorded_at=clock_timestamp()-interval '40 days', "
+            "sampled_at=clock_timestamp()-interval '40 days' WHERE boot_id=$1",
+            eligible_boot_id,
+        )
+        await conn.execute(
+            "UPDATE l3_market_samples SET recorded_at=clock_timestamp()-interval '40 days', "
+            "sampled_at=clock_timestamp()-interval '40 days' WHERE boot_id=$1",
+            eligible_boot_id,
+        )
+        await conn.execute(
+            "UPDATE l3_runtime_events SET recorded_at=clock_timestamp()-interval '40 days', "
+            "occurred_at=clock_timestamp()-interval '40 days' WHERE boot_id=$1",
+            eligible_boot_id,
+        )
         await conn.execute("COMMIT")
 
         assert not await conn.fetchval(
@@ -534,23 +657,27 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
         )
         await conn.execute("RESET ROLE")
         assert counts == {
-            "runtime_boots_deleted": 0,
-            "promote_runs_deleted": 0,
-            "health_samples_deleted": 0,
-            "market_samples_deleted": 0,
-            "runtime_events_deleted": 1,
+            "runtime_boots_deleted": 1,
+            "promote_runs_deleted": 1,
+            "health_samples_deleted": 1,
+            "market_samples_deleted": 1,
+            "runtime_events_deleted": 2,
         }
         remaining = await conn.fetch(
             "SELECT event_seq FROM l3_runtime_events WHERE boot_id=$1 ORDER BY event_seq",
             boot_id,
         )
-        assert [row["event_seq"] for row in remaining] == [1]
+        assert [row["event_seq"] for row in remaining] == [1, 12]
         assert (
             await conn.fetchval(
                 "SELECT count(*) FROM l3_runtime_events WHERE boot_id=$1",
                 protected_boot_id,
             )
             == 1
+        )
+        assert not await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM l3_runtime_boots WHERE boot_id=$1)",
+            eligible_boot_id,
         )
 
         privileges = await conn.fetch(
@@ -582,8 +709,49 @@ def test_007_upgrade_downgrade_upgrade_roundtrip(pg_dsn: str) -> None:
     assert to_006.returncode == 0, to_006.stderr
     before = _schema_signature(pg_dsn)
 
+    asyncio.run(
+        _execute(
+            pg_dsn,
+            "CREATE ROLE l3_retention_operator LOGIN SUPERUSER",
+            "GRANT l3_retention_operator TO service_role",
+        )
+    )
+    collision = _run_alembic(pg_dsn, "upgrade", "007")
+    assert collision.returncode != 0
+    assert "already exists" in collision.stderr
+    assert _q(pg_dsn, "SELECT version_num FROM alembic_version") == [{"version_num": "006"}]
+    assert _q(
+        pg_dsn,
+        "SELECT rolcanlogin, rolsuper FROM pg_roles WHERE rolname='l3_retention_operator'",
+    ) == [{"rolcanlogin": True, "rolsuper": True}]
+    assert _q(
+        pg_dsn,
+        "SELECT pg_has_role('service_role', 'l3_retention_operator', 'MEMBER') AS member",
+    ) == [{"member": True}]
+    asyncio.run(
+        _execute(
+            pg_dsn,
+            "REVOKE l3_retention_operator FROM service_role",
+            "DROP ROLE l3_retention_operator",
+        )
+    )
+
     first = _run_alembic(pg_dsn, "upgrade", "007")
     assert first.returncode == 0, first.stderr
+    assert _q(
+        pg_dsn,
+        "SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit, "
+        "rolreplication FROM pg_roles WHERE rolname='l3_retention_operator'",
+    ) == [
+        {
+            "rolcanlogin": False,
+            "rolsuper": False,
+            "rolcreatedb": False,
+            "rolcreaterole": False,
+            "rolinherit": False,
+            "rolreplication": False,
+        }
+    ]
     after_tables = {
         row["tablename"]
         for row in _q(

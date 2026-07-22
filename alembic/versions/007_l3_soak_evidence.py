@@ -373,11 +373,7 @@ def upgrade() -> None:
             table_owner name;
         BEGIN
             IF TG_OP = 'INSERT' THEN
-                IF NEW.recorded_at < clock_timestamp() - interval '30 seconds'
-                   OR NEW.recorded_at > clock_timestamp() + interval '30 seconds'
-                THEN
-                    RAISE EXCEPTION 'recorded_at must be assigned at append time';
-                END IF;
+                NEW.recorded_at := clock_timestamp();
                 RETURN NEW;
             END IF;
 
@@ -478,16 +474,8 @@ def upgrade() -> None:
     )
 
     op.execute(
-        """
-        DO $role$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'l3_retention_operator') THEN
-                CREATE ROLE l3_retention_operator NOLOGIN NOSUPERUSER NOCREATEDB
-                    NOCREATEROLE NOINHERIT NOREPLICATION;
-            END IF;
-        END
-        $role$;
-        """
+        "CREATE ROLE l3_retention_operator NOLOGIN NOSUPERUSER NOCREATEDB "
+        "NOCREATEROLE NOINHERIT NOREPLICATION"
     )
     tables = ", ".join(EVIDENCE_TABLES)
     op.execute(
