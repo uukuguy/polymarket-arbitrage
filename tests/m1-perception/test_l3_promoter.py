@@ -22,6 +22,7 @@ import asyncio
 import inspect
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -72,6 +73,93 @@ def _make_settings(
     return Settings(
         supabase_url=supabase_url,
         supabase_service_key=SecretStr(service_key) if service_key else "",
+    )
+
+
+def _make_runtime(settings: Any):
+    from polyarb.observation.l3_evidence import (
+        AcceptanceConfig,
+        L3EvidenceRuntime,
+        RuntimeIdentity,
+    )
+
+    acceptance = AcceptanceConfig.from_settings(settings, RECIPE_PATH, "test-code")
+    return L3EvidenceRuntime(
+        RuntimeIdentity(
+            machine_id="test-machine",
+            machine_version="v1",
+            image_ref="test-image",
+            release_id="test-release",
+            code_version="test-code",
+            recipe_sha256=acceptance.recipe_sha256,
+            acceptance_config_hash=acceptance.digest(),
+        ),
+        started_at=datetime(2026, 7, 23, tzinfo=UTC),
+    )
+
+
+class _RecordingEvidenceStore:
+    def __init__(self, *, succeeds: bool = True) -> None:
+        self.succeeds = succeeds
+        self.records: list[Any] = []
+
+    async def append_promote_run(self, record: Any) -> bool:
+        self.records.append(record)
+        return self.succeeds
+
+
+def _truthful_consumer(
+    *,
+    initial_committed: set[str] | None = None,
+    add_succeeds: bool = True,
+    remove_succeeds: bool = True,
+) -> MagicMock:
+    from polyarb.observation.l3_evidence import WsMembershipSnapshot
+
+    state: dict[str, Any] = {
+        "generation": 7,
+        "desired": set(initial_committed or ()),
+        "committed": set(initial_committed or ()),
+        "evidenced": set(),
+    }
+    consumer = MagicMock()
+
+    def _set_desired(asset_ids: Any) -> None:
+        state["desired"] = set(asset_ids)
+
+    async def _add(asset_ids: list[str]) -> bool:
+        if add_succeeds:
+            state["committed"].update(asset_ids)
+        return add_succeeds
+
+    async def _remove(asset_ids: list[str]) -> bool:
+        if remove_succeeds:
+            state["committed"].difference_update(asset_ids)
+        return remove_succeeds
+
+    def _snapshot() -> Any:
+        return WsMembershipSnapshot(
+            generation=state["generation"],
+            desired=frozenset(state["desired"]),
+            committed=frozenset(state["committed"]),
+            evidenced=frozenset(state["evidenced"]),
+            evidenced_at={},
+        )
+
+    consumer._test_state = state
+    consumer.set_l3_desired = MagicMock(side_effect=_set_desired)
+    consumer.add_subscriptions = AsyncMock(side_effect=_add)
+    consumer.remove_subscriptions = AsyncMock(side_effect=_remove)
+    consumer.l3_membership_snapshot = MagicMock(side_effect=_snapshot)
+    return consumer
+
+
+async def _promote_mutating(module: Any, *, settings: Any, **kwargs: Any) -> Any:
+    return await module.promote_run(
+        settings=settings,
+        evidence_store=_RecordingEvidenceStore(),
+        evidence_runtime=_make_runtime(settings),
+        **kwargs,
     )
 
 
@@ -261,16 +349,15 @@ async def test_promote_run_no_supabase_keeps_l3_active_set() -> None:
     l3_promote._last_promote_at_s = 1000.0
 
     settings = _make_settings(supabase_url="", service_key="")
-    mock_consumer = MagicMock()
-    mock_consumer.add_subscriptions = AsyncMock(return_value=True)
-    mock_consumer.remove_subscriptions = AsyncMock(return_value=True)
+    mock_consumer = _truthful_consumer(initial_committed={"x", "y"})
 
-    result = await l3_promote.promote_run(
+    result = await _promote_mutating(
+        l3_promote,
         settings=settings, ws_consumer=mock_consumer, recipe_yaml_path=RECIPE_PATH
     )
 
     assert l3_promote._l3_active_set == {"x", "y"}, "set must freeze"
-    assert l3_promote._last_promote_at_s == 1000.0, "timestamp must not advance"
+    assert l3_promote._last_promote_at_s > 1000.0, "durable frozen terminal advances anchor"
     mock_consumer.add_subscriptions.assert_not_called()
     mock_consumer.remove_subscriptions.assert_not_called()
     assert result.get("skipped"), f"result should indicate skip: {result}"
@@ -288,9 +375,7 @@ async def test_promote_run_supabase_outage_freezes_set() -> None:
     l3_promote._l3_active_set = {"a"}
     settings = _make_settings()
 
-    mock_consumer = MagicMock()
-    mock_consumer.add_subscriptions = AsyncMock(return_value=True)
-    mock_consumer.remove_subscriptions = AsyncMock(return_value=True)
+    mock_consumer = _truthful_consumer(initial_committed={"a"})
 
     # create_client raises — simulates Supabase outage at client init.
     with patch(
@@ -298,7 +383,8 @@ async def test_promote_run_supabase_outage_freezes_set() -> None:
         side_effect=RuntimeError("503 Service Unavailable"),
     ):
         # No crash; _l3_active_set frozen.
-        await l3_promote.promote_run(
+        await _promote_mutating(
+            l3_promote,
             settings=settings,
             ws_consumer=mock_consumer,
             recipe_yaml_path=RECIPE_PATH,
@@ -448,15 +534,14 @@ async def test_promote_run_happy_path_top_5_markets_expanded_to_10_tokens_yes_no
     capture_updates: list[dict] = []
     client = _make_supabase_client_mock(tob_rows, token_map_rows, capture_updates)
 
-    mock_consumer = MagicMock()
-    mock_consumer.add_subscriptions = AsyncMock(return_value=True)
-    mock_consumer.remove_subscriptions = AsyncMock(return_value=True)
+    mock_consumer = _truthful_consumer()
 
     with patch(
         "polyarb.observation.l3_promote.create_client", return_value=client
     ):
         before = time.time()
-        await l3_promote.promote_run(
+        await _promote_mutating(
+            l3_promote,
             settings=settings,
             ws_consumer=mock_consumer,
             recipe_yaml_path=RECIPE_PATH,
@@ -531,16 +616,16 @@ async def test_promote_run_filters_no_side_tob_before_recipe_limit() -> None:
         {"yes_token_id": f"yes_{i}", "no_token_id": f"no_{i}"}
         for i in range(5)
     ]
-    consumer = MagicMock()
-    consumer.add_subscriptions = AsyncMock(return_value=True)
-    consumer.remove_subscriptions = AsyncMock(return_value=True)
+    consumer = _truthful_consumer()
 
     with patch(
         "polyarb.observation.l3_promote.create_client",
         return_value=_make_supabase_client_mock(tob_rows, token_rows),
     ):
-        result = await l3_promote.promote_run(
-            settings=_make_settings(),
+        settings = _make_settings()
+        result = await _promote_mutating(
+            l3_promote,
+            settings=settings,
             ws_consumer=consumer,
             recipe_yaml_path=RECIPE_PATH,
         )
@@ -576,21 +661,21 @@ async def test_promote_run_rejects_incomplete_or_duplicate_token_pairs() -> None
         {"yes_token_id": "yes_3", "no_token_id": "yes_3"},
         # yes_4 is intentionally missing.
     ]
-    consumer = MagicMock()
-    consumer.add_subscriptions = AsyncMock(return_value=True)
-    consumer.remove_subscriptions = AsyncMock(return_value=True)
+    consumer = _truthful_consumer()
 
     with patch(
         "polyarb.observation.l3_promote.create_client",
         return_value=_make_supabase_client_mock(tob_rows, token_rows),
     ):
-        await l3_promote.promote_run(
-            settings=_make_settings(),
+        settings = _make_settings()
+        await _promote_mutating(
+            l3_promote,
+            settings=settings,
             ws_consumer=consumer,
             recipe_yaml_path=RECIPE_PATH,
         )
 
-    assert l3_promote._l3_active_set == {"yes_0", "no_0"}
+    assert l3_promote._l3_active_set == set(), "underfilled proposal must not mutate membership"
     assert "yes_1" not in l3_promote._l3_active_set
     assert "yes_2" not in l3_promote._l3_active_set
     assert "yes_3" not in l3_promote._l3_active_set
@@ -620,9 +705,7 @@ async def test_promote_run_dry_run_has_zero_mutations() -> None:
         for i in range(5)
     ]
     capture_updates: list[dict] = []
-    consumer = MagicMock()
-    consumer.add_subscriptions = AsyncMock(return_value=True)
-    consumer.remove_subscriptions = AsyncMock(return_value=True)
+    consumer = _truthful_consumer(initial_committed={"old-active"})
 
     before_active = {"old-active"}
     before_tob = [{"sentinel": "tob"}]
@@ -707,14 +790,15 @@ async def test_promote_run_diff_calls_add_AND_remove_with_yes_no_expansion() -> 
     capture_updates: list[dict] = []
     client = _make_supabase_client_mock(tob_rows, token_map_rows, capture_updates)
 
-    mock_consumer = MagicMock()
-    mock_consumer.add_subscriptions = AsyncMock(return_value=True)
-    mock_consumer.remove_subscriptions = AsyncMock(return_value=True)
+    mock_consumer = _truthful_consumer(
+        initial_committed={"yes_old1", "no_old1", "yes_old2", "no_old2"}
+    )
 
     with patch(
         "polyarb.observation.l3_promote.create_client", return_value=client
     ):
-        await l3_promote.promote_run(
+        await _promote_mutating(
+            l3_promote,
             settings=settings,
             ws_consumer=mock_consumer,
             recipe_yaml_path=RECIPE_PATH,
@@ -748,33 +832,34 @@ async def test_promote_run_writes_l3_promoted_at_ts_on_add_and_clears_on_remove(
     l3_promote._l3_active_set = {"yes_m1", "no_m1"}
     l3_promote._last_known_market_token_map = {"yes_m1": ("yes_m1", "no_m1")}
 
-    # New top: just m2. m1 removed.
+    # New top: five complete markets. m1 is removed.
     tob_rows = [
         {
-            "asset_id": "yes_m2",
+            "asset_id": f"yes_m{i}",
             "ts": now_ms - 5 * 60 * 1000,
             "best_bid": 0.50,
             "best_ask": 0.51,
             "spread": 0.01,
             "mid_price": 0.505,
-            "depth_yes_usd": 1000.0,
+            "depth_yes_usd": 1000.0 - i,
             "depth_no_usd": 1000.0,
         }
+        for i in range(2, 7)
     ]
     token_map_rows = [
-        {"yes_token_id": "yes_m2", "no_token_id": "no_m2"}
+        {"yes_token_id": f"yes_m{i}", "no_token_id": f"no_m{i}"}
+        for i in range(2, 7)
     ]
     capture_updates: list[dict] = []
     client = _make_supabase_client_mock(tob_rows, token_map_rows, capture_updates)
 
-    mock_consumer = MagicMock()
-    mock_consumer.add_subscriptions = AsyncMock(return_value=True)
-    mock_consumer.remove_subscriptions = AsyncMock(return_value=True)
+    mock_consumer = _truthful_consumer(initial_committed={"yes_m1", "no_m1"})
 
     with patch(
         "polyarb.observation.l3_promote.create_client", return_value=client
     ):
-        await l3_promote.promote_run(
+        await _promote_mutating(
+            l3_promote,
             settings=settings,
             ws_consumer=mock_consumer,
             recipe_yaml_path=RECIPE_PATH,
@@ -788,7 +873,7 @@ async def test_promote_run_writes_l3_promoted_at_ts_on_add_and_clears_on_remove(
         u for u in capture_updates if u["payload"].get("l3_promoted_at_ts") is None
     ]
     assert len(add_ups) == 1
-    assert add_ups[0]["ids"] == ["yes_m2"]
+    assert add_ups[0]["ids"] == [f"yes_m{i}" for i in range(2, 7)]
     assert len(rm_ups) == 1
     assert rm_ups[0]["ids"] == ["yes_m1"]
 
@@ -814,18 +899,20 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
 
     tob_rows = [
         {
-            "asset_id": "yes_m2",
+            "asset_id": f"yes_m{i}",
             "ts": now_ms - 5 * 60 * 1000,
             "best_bid": 0.50,
             "best_ask": 0.51,
             "spread": 0.01,
             "mid_price": 0.505,
-            "depth_yes_usd": 1000.0,
+            "depth_yes_usd": 1000.0 - i,
             "depth_no_usd": 1000.0,
         }
+        for i in range(2, 7)
     ]
     token_map_rows = [
-        {"yes_token_id": "yes_m2", "no_token_id": "no_m2"}
+        {"yes_token_id": f"yes_m{i}", "no_token_id": f"no_m{i}"}
+        for i in range(2, 7)
     ]
 
     # Build a client where l2_candidates update.in_().execute() raises.
@@ -858,9 +945,7 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
     client = MagicMock()
     client.table.side_effect = _table_side_effect
 
-    mock_consumer = MagicMock()
-    mock_consumer.add_subscriptions = AsyncMock(return_value=True)
-    mock_consumer.remove_subscriptions = AsyncMock(return_value=True)
+    mock_consumer = _truthful_consumer(initial_committed={"yes_m1", "no_m1"})
 
     sentry_calls: list[dict] = []
 
@@ -874,14 +959,17 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
         side_effect=_capture_breadcrumb,
     ):
         # MUST not raise.
-        await l3_promote.promote_run(
+        await _promote_mutating(
+            l3_promote,
             settings=settings,
             ws_consumer=mock_consumer,
             recipe_yaml_path=RECIPE_PATH,
         )
 
     # In-memory state advanced anyway (chain-truth: mirror is a surface, not source of truth).
-    assert l3_promote._l3_active_set == {"yes_m2", "no_m2"}
+    assert l3_promote._l3_active_set == {
+        token for i in range(2, 7) for token in (f"yes_m{i}", f"no_m{i}")
+    }
 
     # At least one warning-level breadcrumb with category=l2-mirror.
     mirror_warn = [
@@ -905,9 +993,7 @@ async def test_promote_run_fail_soft_on_scanner_exception() -> None:
 
     client = _make_supabase_client_mock([], [])
 
-    mock_consumer = MagicMock()
-    mock_consumer.add_subscriptions = AsyncMock(return_value=True)
-    mock_consumer.remove_subscriptions = AsyncMock(return_value=True)
+    mock_consumer = _truthful_consumer(initial_committed={"a"})
 
     with patch(
         "polyarb.observation.l3_promote.create_client", return_value=client
@@ -916,7 +1002,8 @@ async def test_promote_run_fail_soft_on_scanner_exception() -> None:
         side_effect=ValueError("recipe invalid"),
     ):
         # No raise.
-        await l3_promote.promote_run(
+        await _promote_mutating(
+            l3_promote,
             settings=settings,
             ws_consumer=mock_consumer,
             recipe_yaml_path=RECIPE_PATH,
@@ -924,6 +1011,279 @@ async def test_promote_run_fail_soft_on_scanner_exception() -> None:
 
     # _l3_active_set frozen.
     assert l3_promote._l3_active_set == {"a"}
+
+
+def _five_market_inputs(prefix: str = "terminal") -> tuple[list[dict], list[dict]]:
+    now_ms = int(time.time() * 1000)
+    tob_rows = [
+        {
+            "asset_id": f"yes_{prefix}_{i}",
+            "ts": now_ms - 60_000,
+            "best_bid": 0.50,
+            "best_ask": 0.51,
+            "spread": 0.01,
+            "mid_price": 0.505,
+            "depth_yes_usd": 5_000.0 - i,
+            "depth_no_usd": 5_000.0,
+        }
+        for i in range(5)
+    ]
+    token_rows = [
+        {
+            "yes_token_id": f"yes_{prefix}_{i}",
+            "no_token_id": f"no_{prefix}_{i}",
+        }
+        for i in range(5)
+    ]
+    return tob_rows, token_rows
+
+
+@pytest.mark.asyncio
+async def test_terminal_promote_success_appends_one_truthful_record() -> None:
+    from polyarb.observation import l3_promote
+    from polyarb.observation.l3_evidence import PromoteStatus, stable_sha256
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    consumer = _truthful_consumer()
+    tob_rows, token_rows = _five_market_inputs()
+    scheduled_at = datetime(2026, 7, 23, 1, 0, tzinfo=UTC)
+
+    with patch(
+        "polyarb.observation.l3_promote.create_client",
+        return_value=_make_supabase_client_mock(tob_rows, token_rows),
+    ):
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            scheduled_at=scheduled_at,
+            run_seq=19,
+        )
+
+    expected = frozenset(
+        token
+        for i in range(5)
+        for token in (f"yes_terminal_{i}", f"no_terminal_{i}")
+    )
+    assert result.status is PromoteStatus.SUCCESS
+    assert result.desired == result.committed == expected
+    assert result.run_seq == 19
+    assert result.scheduled_at == scheduled_at
+    assert len(store.records) == 1
+    record = store.records[0]
+    assert record.status is PromoteStatus.SUCCESS
+    assert record.selected_count == 5
+    assert record.desired_count == record.committed_count == 10
+    assert record.desired_hash == stable_sha256(sorted(expected))
+    assert record.committed_hash == stable_sha256(sorted(expected))
+    assert record.acceptance_config_hash == runtime.snapshot().acceptance_config_hash
+    assert runtime.snapshot().last_promote_persisted_at == record.finished_at
+    assert l3_promote.get_last_promote_at_s() == record.finished_at.timestamp()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "expected_status", "expected_reason"),
+    [
+        ("frozen", "frozen", "no_supabase_creds"),
+        ("underfilled", "underfilled", "underfilled"),
+        ("selection_exception", "failed", "selection_failed"),
+        ("add_false", "failed", "add_failed"),
+        ("remove_false", "failed", "remove_failed"),
+        ("mirror_false", "failed", "mirror_failed"),
+    ],
+)
+async def test_terminal_promote_outcomes_append_exactly_once(
+    case: str,
+    expected_status: str,
+    expected_reason: str,
+) -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings(
+        supabase_url="" if case == "frozen" else "https://x.supabase.co",
+        service_key="" if case == "frozen" else "test-service-key",
+    )
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    old_tokens = {"yes_old", "no_old"} if case == "remove_false" else set()
+    consumer = _truthful_consumer(
+        initial_committed=old_tokens,
+        add_succeeds=case != "add_false",
+        remove_succeeds=case != "remove_false",
+    )
+    l3_promote._l3_active_set = set(old_tokens)
+    l3_promote._last_known_market_token_map = (
+        {"yes_old": ("yes_old", "no_old")} if old_tokens else None
+    )
+    tob_rows, token_rows = _five_market_inputs(case)
+    if case == "underfilled":
+        tob_rows = tob_rows[:4]
+        token_rows = token_rows[:4]
+
+    patches = [
+        patch(
+            "polyarb.observation.l3_promote.create_client",
+            return_value=_make_supabase_client_mock(tob_rows, token_rows),
+        )
+    ]
+    if case == "selection_exception":
+        patches.append(
+            patch(
+                "polyarb.observation.scanner.run_recipe",
+                side_effect=RuntimeError("selection exploded"),
+            )
+        )
+    if case == "mirror_false":
+        patches.append(
+            patch(
+                "polyarb.observation.l3_promote._mirror_l3_promoted_at_ts",
+                return_value=False,
+            )
+        )
+
+    with patches[0]:
+        if len(patches) == 2:
+            with patches[1]:
+                result = await l3_promote.promote_run(
+                    settings=settings,
+                    ws_consumer=consumer,
+                    recipe_yaml_path=RECIPE_PATH,
+                    evidence_store=store,
+                    evidence_runtime=runtime,
+                    run_seq=23,
+                )
+        else:
+            result = await l3_promote.promote_run(
+                settings=settings,
+                ws_consumer=consumer,
+                recipe_yaml_path=RECIPE_PATH,
+                evidence_store=store,
+                evidence_runtime=runtime,
+                run_seq=23,
+            )
+
+    assert result.status.value == expected_status
+    assert result.reason_code == expected_reason
+    assert len(store.records) == 1
+    assert store.records[0].run_seq == 23
+    assert store.records[0].status.value == expected_status
+    if case in {"add_false", "remove_false"}:
+        assert result.desired != result.committed
+
+
+@pytest.mark.asyncio
+async def test_terminal_promote_writer_false_leaves_persisted_anchors_stale() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore(succeeds=False)
+    consumer = _truthful_consumer()
+    tob_rows, token_rows = _five_market_inputs("writer")
+    l3_promote._last_promote_at_s = 123.0
+
+    with patch(
+        "polyarb.observation.l3_promote.create_client",
+        return_value=_make_supabase_client_mock(tob_rows, token_rows),
+    ):
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            run_seq=29,
+        )
+
+    assert result.status.value == "success"
+    assert len(store.records) == 1, "a failed writer is not retried as a duplicate"
+    assert runtime.snapshot().writer_ok is False
+    assert runtime.snapshot().last_promote_persisted_at is None
+    assert l3_promote.get_last_promote_at_s() == 123.0
+
+
+@pytest.mark.asyncio
+async def test_terminal_promote_generation_change_cannot_succeed() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    consumer = _truthful_consumer()
+    normal_add = consumer.add_subscriptions.side_effect
+
+    async def _add_then_reconnect(asset_ids: list[str]) -> bool:
+        succeeded = await normal_add(asset_ids)
+        consumer._test_state["generation"] += 1
+        return succeeded
+
+    consumer.add_subscriptions.side_effect = _add_then_reconnect
+    tob_rows, token_rows = _five_market_inputs("generation")
+    with patch(
+        "polyarb.observation.l3_promote.create_client",
+        return_value=_make_supabase_client_mock(tob_rows, token_rows),
+    ):
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+        )
+
+    assert result.status.value == "failed"
+    assert result.reason_code == "generation_changed"
+    assert len(store.records) == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_promote_acceptance_mismatch_fails_before_remote_effects() -> None:
+    from polyarb.observation import l3_promote
+
+    runtime_settings = _make_settings()
+    changed_settings = _make_settings()
+    changed_settings.l3_promote_interval_s = 301
+    runtime = _make_runtime(runtime_settings)
+    store = _RecordingEvidenceStore()
+    consumer = _truthful_consumer()
+
+    with patch("polyarb.observation.l3_promote.create_client") as create:
+        result = await l3_promote.promote_run(
+            settings=changed_settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+        )
+
+    assert result.status.value == "failed"
+    assert result.reason_code == "acceptance_config_mismatch"
+    assert len(store.records) == 1
+    assert store.records[0].acceptance_config_hash == runtime.snapshot().acceptance_config_hash
+    create.assert_not_called()
+    consumer.set_l3_desired.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mutation_mode_requires_runtime_and_store_before_remote_effects() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    consumer = _truthful_consumer()
+    with patch("polyarb.observation.l3_promote.create_client") as create:
+        with pytest.raises(ValueError, match="evidence_store.*evidence_runtime"):
+            await l3_promote.promote_run(
+                settings=settings,
+                ws_consumer=consumer,
+                recipe_yaml_path=RECIPE_PATH,
+            )
+    create.assert_not_called()
+    consumer.set_l3_desired.assert_not_called()
 
 
 # ────────────────────────────────────────────────────────────────────────

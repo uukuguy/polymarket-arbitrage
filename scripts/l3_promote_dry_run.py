@@ -25,15 +25,17 @@ from pathlib import Path
 class _NoopConsumer:
     """Stand-in for WsConsumer — logs intent, performs no real subscribe."""
 
+    def set_l3_desired(self, _asset_ids):
+        raise AssertionError("dry-run must not mutate desired membership")
+
+    def l3_membership_snapshot(self):
+        raise AssertionError("dry-run must not inspect mutable consumer state")
+
     async def add_subscriptions(self, asset_ids):
-        print(f"WOULD add_subscriptions({len(asset_ids)}): {sorted(asset_ids)}")
-        return True
+        raise AssertionError(f"dry-run attempted add_subscriptions({len(asset_ids)})")
 
     async def remove_subscriptions(self, asset_ids):
-        print(
-            f"WOULD remove_subscriptions({len(asset_ids)}): {sorted(asset_ids)}"
-        )
-        return True
+        raise AssertionError(f"dry-run attempted remove_subscriptions({len(asset_ids)})")
 
 
 async def _main() -> int:

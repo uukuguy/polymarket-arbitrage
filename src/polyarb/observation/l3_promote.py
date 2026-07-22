@@ -16,9 +16,9 @@ Phase 05 D-02 / D-05 / D-09 / D-13 / D-14. Two-plan delivery:
 ═══ Chain-truth contract ════════════════════════════════════════════════
 Every getter here reads a field that the write side really mutates:
 
-- ``_last_promote_at_s``            ← ``promote_run`` success path
+- ``_last_promote_at_s``            ← durable terminal promote-row append
 - ``_last_book_levels_write_at_s``  ← ``L2SupabaseMirror.push_book_levels`` (Plan 03)
-- ``_l3_active_set``                ← ``promote_run`` success path
+- ``_l3_active_set``                ← control-committed WS membership snapshot
 
 There is **no config-flag gate** between the write-side mutation and the
 getter — surfacing through getters is the chain. /health policy converts
@@ -42,8 +42,8 @@ file lives in the repo and is modified via PR + review.
 On Supabase outage (create_client raises, tob fetch raises, scanner
 raises, markets_latest fetch raises), the promoter FREEZES
 ``_l3_active_set`` — last-known-good — rather than clearing. This lets
-the live websocket keep streaming the existing tokens; /health surfaces
-the staleness via ``l3:last_promote_at_s`` age.
+the live websocket keep streaming the existing tokens; the append-only
+terminal row surfaces the frozen reason without pretending control changed.
 """
 from __future__ import annotations
 
@@ -52,6 +52,7 @@ import os
 import sqlite3
 import tempfile
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,17 @@ from typing import Any
 import sentry_sdk
 from loguru import logger
 from supabase import create_client
+
+from polyarb.observation.l3_evidence import (
+    AcceptanceConfig,
+    L3EvidenceRuntime,
+    PromoteRunRecord,
+    PromoteRunResult,
+    PromoteStatus,
+    WsMembershipSnapshot,
+    stable_sha256,
+)
+from polyarb.storage.l3_evidence_store import L3EvidenceStore
 
 # ─────────────────────────────────────────────────────────────────────────
 # Module-level state — DURABLE (Plan 03 scaffold; Plan 04 augments BODIES
@@ -97,10 +109,11 @@ def get_l3_active_count() -> int:
 
 
 def get_last_promote_at_s() -> float | None:
-    """Wall-clock seconds since epoch of the last successful ``promote_run``.
+    """Epoch seconds of the last durably persisted terminal promote run.
 
-    Returns ``None`` if the promoter has never run (cold-start). The /health
-    sub-check maps this to pass/warn/fail by age.
+    Frozen, underfilled, and failed terminal rows also advance this persistence
+    anchor. Their status remains explicit in the append-only ledger. A failed
+    ledger write never advances it.
     """
     return _last_promote_at_s
 
@@ -375,20 +388,20 @@ def _mirror_l3_promoted_at_ts(
     client: Any,
     added_yes_asset_ids: list[str],
     removed_yes_asset_ids: list[str],
-) -> None:
+) -> bool:
     """Write-through ``l2_candidates.l3_promoted_at_ts`` (Blocker #1).
 
     Fail-soft per D-12 envelope: failure logs + Sentry breadcrumb
     ``category="l2-mirror"`` and returns; never raises. The in-memory
-    ``_l3_active_set`` is the source of truth — this mirror only feeds the
-    dashboard L3 badge (``/candidates``).
+    The post-control committed snapshot is the source of truth — this mirror
+    only feeds the dashboard L3 badge (``/candidates``).
 
     Called with the Yes token IDs stored as ``l2_candidates.asset_id``. The
     Yes/No expansion happens at WS-subscribe time; the dashboard candidate
     surface remains keyed by the L2 Yes asset.
     """
     if not added_yes_asset_ids and not removed_yes_asset_ids:
-        return
+        return True
     now_iso = (
         datetime.now(UTC).isoformat().replace("+00:00", "Z")
     )
@@ -421,6 +434,7 @@ def _mirror_l3_promoted_at_ts(
                 "table": "l2_candidates",
             },
         )
+        return True
     except Exception as e:  # noqa: BLE001 — fail-soft per D-12
         logger.warning(
             f"l3-promote: l2_candidates write-through failed "
@@ -437,6 +451,7 @@ def _mirror_l3_promoted_at_ts(
                 "table": "l2_candidates",
             },
         )
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -445,105 +460,236 @@ def _mirror_l3_promoted_at_ts(
 # ─────────────────────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class _PromoteTerminalDraft:
+    status: PromoteStatus
+    reason_code: str
+    selected_count: int
+    desired: frozenset[str]
+    committed: frozenset[str]
+    evidenced: frozenset[str]
+    mapping: tuple[dict[str, str], ...]
+    ws_generation: int
+    added: frozenset[str] = frozenset()
+    removed: frozenset[str] = frozenset()
+    added_markets: frozenset[str] = frozenset()
+    removed_markets: frozenset[str] = frozenset()
+    add_succeeded: bool | None = None
+    remove_succeeded: bool | None = None
+    mirror_succeeded: bool = False
+
+
+async def _finalize_promote_run(
+    *,
+    draft: _PromoteTerminalDraft,
+    started_at: datetime,
+    scheduled_at: datetime,
+    run_seq: int,
+    acceptance_config_hash: str,
+    evidence_store: L3EvidenceStore | None,
+    evidence_runtime: L3EvidenceRuntime | None,
+    apply_mutations: bool,
+) -> PromoteRunResult:
+    """Build and append one terminal row; never manufacture a retry."""
+    global _last_promote_at_s
+
+    result = PromoteRunResult(
+        status=draft.status,
+        reason_code=draft.reason_code,
+        desired=draft.desired,
+        committed=draft.committed,
+        evidenced=draft.evidenced,
+        run_seq=run_seq,
+        scheduled_at=scheduled_at,
+        added=draft.added,
+        removed=draft.removed,
+        added_markets=draft.added_markets,
+        removed_markets=draft.removed_markets,
+        dry_run=not apply_mutations,
+    )
+    if not apply_mutations:
+        return result
+    if evidence_store is None or evidence_runtime is None:  # pragma: no cover - guard
+        raise ValueError("evidence_store and evidence_runtime are required")
+
+    finished_at = datetime.now(UTC)
+    record = PromoteRunRecord(
+        boot_id=evidence_runtime.snapshot().boot_id,
+        run_seq=run_seq,
+        scheduled_at=scheduled_at,
+        started_at=started_at,
+        finished_at=finished_at,
+        status=draft.status,
+        reason_code=draft.reason_code,
+        selected_count=draft.selected_count,
+        desired_count=len(draft.desired),
+        committed_count=len(draft.committed),
+        evidenced_count=len(draft.evidenced),
+        add_count=len(draft.added),
+        remove_count=len(draft.removed),
+        mapping_hash=stable_sha256(list(draft.mapping)),
+        desired_hash=stable_sha256(sorted(draft.desired)),
+        committed_hash=stable_sha256(sorted(draft.committed)),
+        acceptance_config_hash=acceptance_config_hash,
+        ws_generation=draft.ws_generation,
+        add_succeeded=draft.add_succeeded,
+        remove_succeeded=draft.remove_succeeded,
+        mirror_succeeded=draft.mirror_succeeded,
+        duration_ms=max(0, int((finished_at - started_at).total_seconds() * 1000)),
+    )
+    try:
+        persisted = await evidence_store.append_promote_run(record)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - custom stores may raise
+        logger.warning("l3-promote: terminal evidence append raised type={}", type(exc).__name__)
+        persisted = False
+
+    evidence_runtime.note_writer_result(
+        persisted,
+        finished_at,
+        "ok" if persisted else "promote_append_failed",
+    )
+    if persisted:
+        evidence_runtime.mark_promote_persisted(finished_at)
+        _last_promote_at_s = finished_at.timestamp()
+    return result
+
+
+def _mapping_rows(
+    market_ids: set[str], token_map: dict[str, tuple[str | None, str | None]]
+) -> tuple[dict[str, str], ...]:
+    rows: list[dict[str, str]] = []
+    for market_id in sorted(market_ids):
+        yes_token, no_token = token_map[market_id]
+        rows.append(
+            {
+                "market_id": market_id,
+                "yes_token_id": str(yes_token),
+                "no_token_id": str(no_token),
+            }
+        )
+    return tuple(rows)
+
+
 async def promote_run(
     *,
     settings: Any,
     ws_consumer: Any,
     recipe_yaml_path: Path,
+    evidence_store: L3EvidenceStore | None = None,
+    evidence_runtime: L3EvidenceRuntime | None = None,
+    scheduled_at: datetime | None = None,
+    run_seq: int | None = None,
     apply_mutations: bool = True,
-) -> dict:
-    """Plan and optionally apply one promote tick.
+) -> PromoteRunResult:
+    """Execute one proposal/control/mirror transaction and finalize it once."""
+    global _l3_active_set, _last_known_tob_rows, _last_known_market_token_map
 
-    ``apply_mutations=False`` is the operator dry-run boundary: reads and
-    proposed diffs are allowed, while WS calls, Supabase updates, last-known
-    caches, active state, and freshness anchors remain untouched.
+    started_at = datetime.now(UTC)
+    if apply_mutations and (evidence_store is None or evidence_runtime is None):
+        raise ValueError(
+            "evidence_store and evidence_runtime are required when apply_mutations=True"
+        )
 
-    Steps:
-      1. Resolve Supabase creds; freeze on missing.
-      2. Build supabase client; freeze on create_client error.
-      3. Fetch latest tob rows (last 1h) — on outage, use last-known-good.
-      4. Resolve recent assets against ``markets_latest.yes_token_id`` and
-         remove No-side TOB rows before the recipe limit.
-      5. Apply recipe (yaml → trusted Recipe) via scanner+temp-DB
-         (Blocker #2 epoch-ms predicate).
-      6. Expand the 5 selected markets to 10 tokens (D-05 N=5).
-      7. Diff new token set vs ``_l3_active_set``; map to MARKET-level
-         diff for the l2_candidates write-through.
-      8. Apply ws_consumer.add_subscriptions / remove_subscriptions.
-      9. Write-through l2_candidates.l3_promoted_at_ts (Blocker #1,
-         fail-soft).
-      10. Mutate state + chain-truth anchor.
+    runtime_status = evidence_runtime.snapshot() if evidence_runtime is not None else None
+    effective_run_seq = (
+        evidence_runtime.next_run_seq()
+        if run_seq is None and evidence_runtime is not None
+        else (0 if run_seq is None else run_seq)
+    )
+    effective_scheduled_at = started_at if scheduled_at is None else scheduled_at
+    if effective_scheduled_at.tzinfo is None or effective_scheduled_at.utcoffset() != UTC.utcoffset(
+        effective_scheduled_at
+    ):
+        raise ValueError("scheduled_at must be timezone-aware UTC")
 
-    Returns ``{"added": [...], "removed": [...], ...}`` for logging.
-    """
-    global _l3_active_set, _last_promote_at_s
-    global _last_known_tob_rows, _last_known_market_token_map
+    if runtime_status is not None:
+        initial = WsMembershipSnapshot(
+            generation=runtime_status.ws_generation,
+            desired=runtime_status.desired,
+            committed=runtime_status.committed,
+            evidenced=runtime_status.evidenced,
+            evidenced_at=runtime_status.evidenced_at,
+        )
+        try:
+            candidate = ws_consumer.l3_membership_snapshot()
+            if not isinstance(candidate, WsMembershipSnapshot):
+                raise TypeError("consumer returned an invalid membership snapshot")
+            initial = candidate
+        except Exception as exc:  # noqa: BLE001 - still terminalize dependency failure
+            logger.warning("l3-promote: membership snapshot failed type={}", type(exc).__name__)
+    else:
+        initial = WsMembershipSnapshot(
+            desired=frozenset(_l3_active_set), committed=frozenset(_l3_active_set)
+        )
 
-    # ── 1) Resolve creds ────────────────────────────────────────────────
+    runtime_hash = runtime_status.acceptance_config_hash if runtime_status is not None else "0" * 64
+    try:
+        code_version = (
+            runtime_status.identity.code_version
+            if runtime_status is not None
+            else "dry-run"
+        )
+        calculated_hash = AcceptanceConfig.from_settings(
+            settings, recipe_yaml_path, code_version
+        ).digest()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("l3-promote: acceptance config invalid type={}", type(exc).__name__)
+        calculated_hash = runtime_hash
+
+    async def finish(draft: _PromoteTerminalDraft) -> PromoteRunResult:
+        return await _finalize_promote_run(
+            draft=draft,
+            started_at=started_at,
+            scheduled_at=effective_scheduled_at,
+            run_seq=effective_run_seq,
+            acceptance_config_hash=runtime_hash if runtime_status is not None else calculated_hash,
+            evidence_store=evidence_store,
+            evidence_runtime=evidence_runtime,
+            apply_mutations=apply_mutations,
+        )
+
+    def early(status: PromoteStatus, reason: str) -> _PromoteTerminalDraft:
+        return _PromoteTerminalDraft(
+            status=status,
+            reason_code=reason,
+            selected_count=0,
+            desired=initial.desired,
+            committed=initial.committed,
+            evidenced=initial.evidenced,
+            mapping=(),
+            ws_generation=initial.generation,
+        )
+
+    if runtime_status is not None and calculated_hash != runtime_hash:
+        return await finish(early(PromoteStatus.FAILED, "acceptance_config_mismatch"))
+
     supabase_url = getattr(settings, "supabase_url", "")
-    service_key = ""
     try:
         service_key = settings.supabase_service_key.get_secret_value()
     except AttributeError:
-        # Defensive — service_key may not be a SecretStr under test mocks.
         service_key = ""
-
     if not (supabase_url and service_key):
-        logger.warning(
-            "l3-promote: supabase creds missing — freezing _l3_active_set"
-        )
-        return {"added": [], "removed": [], "skipped": "no-supabase-creds"}
+        return await finish(early(PromoteStatus.FROZEN, "no_supabase_creds"))
 
-    # ── 2) Build client ─────────────────────────────────────────────────
     try:
         client = create_client(supabase_url, service_key)
-    except Exception as e:  # noqa: BLE001 — fail-soft envelope
-        logger.error(f"l3-promote: create_client failed: {e!r}")
-        sentry_sdk.add_breadcrumb(
-            category="l3-promote",
-            level="warning",
-            message="create_client failed",
-            data={"error": str(e)[:200]},
-        )
-        return {"added": [], "removed": [], "skipped": "create-client-failed"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("l3-promote: create client failed type={}", type(exc).__name__)
+        return await finish(early(PromoteStatus.FROZEN, "create_client_failed"))
 
-    # ── 3) Fetch tob ────────────────────────────────────────────────────
     try:
         tob_rows = _fetch_latest_tob_rows_from_supabase(client)
         if apply_mutations:
             _last_known_tob_rows = tob_rows
-    except Exception as e:  # noqa: BLE001
-        logger.error(
-            f"l3-promote: tob fetch failed: {e!r} — using last-known rows"
-        )
-        sentry_sdk.add_breadcrumb(
-            category="l3-promote",
-            level="warning",
-            message="tob fetch failed",
-            data={"error": str(e)[:200]},
-        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("l3-promote: tob fetch failed type={}", type(exc).__name__)
         if _last_known_tob_rows is None:
-            logger.warning(
-                "l3-promote: no last-known tob rows either — freezing"
-            )
-            return {
-                "added": [],
-                "removed": [],
-                "skipped": "fetch-failed-no-fallback",
-            }
+            return await finish(early(PromoteStatus.FROZEN, "tob_fetch_failed"))
         tob_rows = _last_known_tob_rows
 
-    # Snapshot the prior MARKET→TOKEN map before refreshing identity so the
-    # later diff can still resolve removed markets.
-    prior_market_token_map: dict[str, tuple[str | None, str | None]] = dict(
-        _last_known_market_token_map or {}
-    )
-
-    # ── 4) Restrict recipe input to authoritative Yes-side assets ───────
-    # Once L3 subscribes both outcomes, l2_top_of_book contains both Yes and
-    # No rows. A high-depth No row must not consume one of recipe.limit's five
-    # market slots, so resolve identity before scanning rather than rejecting
-    # the row only after LIMIT has already run.
+    prior_market_token_map = dict(_last_known_market_token_map or {})
     recent_asset_ids = sorted(
         {
             str(row.get("asset_id") or "").strip()
@@ -554,168 +700,181 @@ async def promote_run(
     try:
         token_map = _fetch_market_token_map(client, recent_asset_ids)
         if not token_map:
-            logger.warning(
-                "l3-promote: recent TOB resolved zero Yes-side identities — freezing"
-            )
-            return {
-                "added": [],
-                "removed": [],
-                "skipped": "empty-yes-token-map",
-            }
+            return await finish(early(PromoteStatus.FROZEN, "empty_token_map"))
         if apply_mutations:
             _last_known_market_token_map = token_map
-    except Exception as e:  # noqa: BLE001
-        logger.error(
-            f"l3-promote: market token map fetch failed: {e!r} — using last-known"
-        )
-        sentry_sdk.add_breadcrumb(
-            category="l3-promote",
-            level="warning",
-            message="market token map fetch failed",
-            data={"error": str(e)[:200]},
-        )
-        token_map = _last_known_market_token_map or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("l3-promote: token map failed type={}", type(exc).__name__)
+        token_map = dict(_last_known_market_token_map or {})
         if not token_map:
-            return {
-                "added": [],
-                "removed": [],
-                "skipped": "token-map-failed-no-fallback",
-            }
+            return await finish(early(PromoteStatus.FROZEN, "token_map_failed"))
 
     yes_tob_rows = [
-        row
-        for row in tob_rows
-        if str(row.get("asset_id") or "").strip() in token_map
+        row for row in tob_rows if str(row.get("asset_id") or "").strip() in token_map
     ]
-
-    # ── 5) Apply recipe via scanner + temp DB ───────────────────────────
     try:
         from polyarb.observation.scanner import run_recipe
 
         recipe = _load_recipe(recipe_yaml_path)
         db_path = _build_tob_temp_db(yes_tob_rows)
         try:
-            df = run_recipe(db_path, recipe)
+            frame = run_recipe(db_path, recipe)
         finally:
             try:
                 os.unlink(db_path)
             except OSError:
-                logger.warning(
-                    f"l3-promote: temp DB cleanup failed: {db_path}"
-                )
-    except Exception as e:  # noqa: BLE001
-        logger.error(
-            f"l3-promote: scanner failed: {e!r} — freezing _l3_active_set"
-        )
-        sentry_sdk.add_breadcrumb(
-            category="l3-promote",
-            level="warning",
-            message="scanner failed",
-            data={"error": str(e)[:200]},
-        )
-        return {"added": [], "removed": [], "skipped": "scanner-failed"}
+                logger.warning("l3-promote: temp DB cleanup failed path={}", db_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("l3-promote: selection failed type={}", type(exc).__name__)
+        return await finish(early(PromoteStatus.FAILED, "selection_failed"))
 
-    # df row count == N=5 Yes-side TOB assets (or fewer if not enough qualify).
-    new_yes_asset_ids = sorted(
-        str(aid) for aid in df["asset_id"].tolist() if aid
-    )
-
-    # ── 6) Expand 5 markets → 10 tokens (Yes+No per D-05 / Warning #13) ─
-    new_token_set: set[str] = set()
-    accepted_yes_asset_ids: set[str] = set()
-    for yes_asset_id in new_yes_asset_ids:
-        raw_yes, raw_no = token_map.get(yes_asset_id, (None, None))
+    proposed_tokens: set[str] = set()
+    accepted_markets: set[str] = set()
+    for market_id in sorted(str(value) for value in frame["asset_id"].tolist() if value):
+        raw_yes, raw_no = token_map.get(market_id, (None, None))
         yes_token = str(raw_yes).strip() if raw_yes is not None else ""
         no_token = str(raw_no).strip() if raw_no is not None else ""
         pair = {yes_token, no_token}
         if (
             not yes_token
             or not no_token
-            or yes_token != yes_asset_id
+            or yes_token != market_id
             or len(pair) != 2
-            or bool(pair & new_token_set)
+            or bool(pair & proposed_tokens)
         ):
-            logger.warning(
-                f"l3-promote: rejecting incomplete or duplicate token pair "
-                f"for yes_asset_id={yes_asset_id}"
-            )
             continue
-        new_token_set.update(pair)
-        accepted_yes_asset_ids.add(yes_asset_id)
+        proposed_tokens.update(pair)
+        accepted_markets.add(market_id)
 
-    # ── 7) Diff token sets + MARKET-level diff for the mirror ───────────
-    added = sorted(new_token_set - _l3_active_set)
-    removed = sorted(_l3_active_set - new_token_set)
-
-    old_market_set: set[str] = set()
-    for aid, (yes_tok, no_tok) in prior_market_token_map.items():
-        if (yes_tok and yes_tok in _l3_active_set) or (
-            no_tok and no_tok in _l3_active_set
-        ):
-            old_market_set.add(aid)
-    new_market_set: set[str] = accepted_yes_asset_ids
-    added_markets = sorted(new_market_set - old_market_set)
-    removed_markets = sorted(old_market_set - new_market_set)
-
-    if apply_mutations:
-        # ── 8) Apply WS subscribe diff (fail-soft per D-12) ─────────────
-        try:
-            if added:
-                await ws_consumer.add_subscriptions(added)
-            if removed:
-                await ws_consumer.remove_subscriptions(removed)
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"l3-promote: ws_consumer mutation failed: {e!r}")
-            sentry_sdk.add_breadcrumb(
-                category="l3-promote",
-                level="warning",
-                message="ws mutation failed",
-                data={"error": str(e)[:200]},
+    mapping = _mapping_rows(accepted_markets, token_map)
+    desired = frozenset(proposed_tokens)
+    if len(accepted_markets) != 5 or len(desired) != 10:
+        return await finish(
+            _PromoteTerminalDraft(
+                status=PromoteStatus.UNDERFILLED,
+                reason_code="underfilled",
+                selected_count=len(accepted_markets),
+                desired=desired,
+                committed=initial.committed,
+                evidenced=initial.evidenced,
+                mapping=mapping,
+                ws_generation=initial.generation,
             )
-            # Fall through: health should reflect intended membership.
-
-        # ── 9) Write-through l2_candidates.l3_promoted_at_ts ────────────
-        _mirror_l3_promoted_at_ts(client, added_markets, removed_markets)
-
-        # ── 10) Mutate state + chain-truth anchor ───────────────────────
-        _l3_active_set = new_token_set
-        _last_promote_at_s = time.time()
-
-        sentry_sdk.add_breadcrumb(
-            category="l3-promote",
-            level="info",
-            message=(
-                f"promote_run ok +{len(added)} -{len(removed)} "
-                f"markets={len(accepted_yes_asset_ids)} "
-                f"tokens={len(new_token_set)}"
-            ),
-            data={
-                "added": len(added),
-                "removed": len(removed),
-                "markets": len(accepted_yes_asset_ids),
-                "tokens": len(new_token_set),
-            },
         )
-        logger.info(
-            f"l3-promote: +{len(added)} -{len(removed)} "
-            f"markets={len(accepted_yes_asset_ids)} tokens={len(new_token_set)} "
-            f"(chain-truth: _last_promote_at_s={_last_promote_at_s:.0f})"
+
+    added = frozenset(desired - initial.committed)
+    removed = frozenset(initial.committed - desired)
+    if not apply_mutations:
+        return await finish(
+            _PromoteTerminalDraft(
+                status=PromoteStatus.SUCCESS,
+                reason_code="dry_run",
+                selected_count=5,
+                desired=desired,
+                committed=initial.committed,
+                evidenced=initial.evidenced,
+                mapping=mapping,
+                ws_generation=initial.generation,
+                added=added,
+                removed=removed,
+            )
         )
+
+    desired_set_succeeded = True
+    try:
+        ws_consumer.set_l3_desired(desired)
+    except Exception as exc:  # noqa: BLE001 - terminal row still required
+        logger.warning("l3-promote: desired update failed type={}", type(exc).__name__)
+        desired_set_succeeded = False
+    add_succeeded: bool | None = None
+    remove_succeeded: bool | None = None
+    if added and desired_set_succeeded:
+        try:
+            add_succeeded = bool(await ws_consumer.add_subscriptions(sorted(added)))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("l3-promote: add failed type={}", type(exc).__name__)
+            add_succeeded = False
+    if removed and desired_set_succeeded:
+        try:
+            remove_succeeded = bool(await ws_consumer.remove_subscriptions(sorted(removed)))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("l3-promote: remove failed type={}", type(exc).__name__)
+            remove_succeeded = False
+
+    try:
+        current = ws_consumer.l3_membership_snapshot()
+    except Exception as exc:  # noqa: BLE001 - terminal row still required
+        logger.warning("l3-promote: terminal snapshot failed type={}", type(exc).__name__)
+        current = initial
+        desired_set_succeeded = False
+    if not isinstance(current, WsMembershipSnapshot):
+        current = initial
+        desired_set_succeeded = False
+    if not desired_set_succeeded:
+        add_succeeded = False if added else add_succeeded
+        remove_succeeded = False if removed else remove_succeeded
+
+    all_maps = {**prior_market_token_map, **token_map}
+
+    def committed_markets(tokens: frozenset[str]) -> set[str]:
+        return {
+            market_id
+            for market_id, (yes_token, no_token) in all_maps.items()
+            if yes_token and no_token and {str(yes_token), str(no_token)} <= tokens
+        }
+
+    prior_markets = committed_markets(initial.committed)
+    current_markets = committed_markets(current.committed)
+    added_markets = frozenset(current_markets - prior_markets)
+    removed_markets = frozenset(prior_markets - current_markets)
+    mirror_succeeded = _mirror_l3_promoted_at_ts(
+        client, sorted(added_markets), sorted(removed_markets)
+    )
+
+    _l3_active_set = set(current.committed)
+    controls_ok = (not added or add_succeeded is True) and (
+        not removed or remove_succeeded is True
+    )
+    if not desired_set_succeeded:
+        status, reason = PromoteStatus.FAILED, "desired_update_failed"
+    elif current.generation != initial.generation:
+        status, reason = PromoteStatus.FAILED, "generation_changed"
+    elif added and add_succeeded is not True:
+        status, reason = PromoteStatus.FAILED, "add_failed"
+    elif removed and remove_succeeded is not True:
+        status, reason = PromoteStatus.FAILED, "remove_failed"
+    elif current.desired != desired or current.committed != desired:
+        status, reason = PromoteStatus.FAILED, "membership_mismatch"
+    elif not mirror_succeeded:
+        status, reason = PromoteStatus.FAILED, "mirror_failed"
+    elif not controls_ok:
+        status, reason = PromoteStatus.FAILED, "control_failed"
     else:
-        logger.info(
-            f"l3-promote dry-run: WOULD +{len(added)} -{len(removed)} "
-            f"markets={len(accepted_yes_asset_ids)} tokens={len(new_token_set)}"
-        )
+        status, reason = PromoteStatus.SUCCESS, "ok"
 
-    return {
-        "added": added,
-        "removed": removed,
-        "added_markets": added_markets,
-        "removed_markets": removed_markets,
-        "active": sorted(_l3_active_set) if apply_mutations else sorted(new_token_set),
-        "proposed_active": sorted(new_token_set),
-        "dry_run": not apply_mutations,
-    }
+    return await finish(
+        _PromoteTerminalDraft(
+            status=status,
+            reason_code=reason,
+            selected_count=len(accepted_markets),
+            desired=current.desired,
+            committed=current.committed,
+            evidenced=current.evidenced,
+            mapping=mapping,
+            ws_generation=current.generation,
+            added=added,
+            removed=removed,
+            added_markets=added_markets,
+            removed_markets=removed_markets,
+            add_succeeded=add_succeeded,
+            remove_succeeded=remove_succeeded,
+            mirror_succeeded=mirror_succeeded,
+        )
+    )
 
 
 async def run_periodic(

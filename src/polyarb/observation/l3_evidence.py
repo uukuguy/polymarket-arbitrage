@@ -366,6 +366,71 @@ class PromoteRunRecord:
 
 
 @dataclass(frozen=True)
+class PromoteRunResult:
+    """Typed terminal outcome of one promoter schedule.
+
+    The small mapping compatibility surface is intentionally limited to the
+    legacy dry-run/operator keys while production callers consume attributes.
+    """
+
+    status: PromoteStatus
+    reason_code: str
+    desired: frozenset[str]
+    committed: frozenset[str]
+    evidenced: frozenset[str]
+    run_seq: int
+    scheduled_at: datetime
+    added: frozenset[str] = frozenset()
+    removed: frozenset[str] = frozenset()
+    added_markets: frozenset[str] = frozenset()
+    removed_markets: frozenset[str] = frozenset()
+    dry_run: bool = False
+
+    def __post_init__(self) -> None:
+        _require_enum("status", self.status, PromoteStatus)
+        _require_reason("reason_code", self.reason_code)
+        _require_nonnegative("run_seq", self.run_seq)
+        _require_utc("scheduled_at", self.scheduled_at)
+        for name in (
+            "desired",
+            "committed",
+            "evidenced",
+            "added",
+            "removed",
+            "added_markets",
+            "removed_markets",
+        ):
+            values = frozenset(getattr(self, name))
+            for value in values:
+                _require_nonempty(f"{name} identity", value)
+            object.__setattr__(self, name, values)
+        _require_bool("dry_run", self.dry_run)
+
+    def __getitem__(self, key: str) -> object:
+        legacy = {
+            "added": sorted(self.added),
+            "removed": sorted(self.removed),
+            "added_markets": sorted(self.added_markets),
+            "removed_markets": sorted(self.removed_markets),
+            "active": sorted(self.committed),
+            "proposed_active": sorted(self.desired),
+            "dry_run": self.dry_run,
+            "skipped": None if self.status is PromoteStatus.SUCCESS else self.reason_code,
+            "status": self.status.value,
+            "reason_code": self.reason_code,
+        }
+        if key not in legacy:
+            raise KeyError(key)
+        return legacy[key]
+
+    def get(self, key: str, default: object = None) -> object:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+@dataclass(frozen=True)
 class HealthSampleRecord:
     boot_id: UUID
     sample_seq: int
