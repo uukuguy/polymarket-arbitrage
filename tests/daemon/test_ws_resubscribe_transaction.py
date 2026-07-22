@@ -254,6 +254,103 @@ async def test_initializer_cancellation_compensates_then_propagates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_initial_subscription_desired_change_never_commits_unsent_tokens() -> None:
+    """A desired mutation during the send makes the candidate generation ambiguous."""
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=WsWatchdog(stale_s=30),
+        on_event=lambda event: True,
+        initial_assets=["candidate"],
+    )
+    consumer.set_l3_desired(["sent-l3"])
+    consumer._l3_committed_set = {"stale-l3"}
+    consumer._l3_business_evidence = {
+        "stale-l3": (0, datetime(2026, 7, 23, tzinfo=UTC))
+    }
+    candidate = MagicMock()
+    send_entered = asyncio.Event()
+    release_send = asyncio.Event()
+    sent_payloads: list[dict[str, object]] = []
+
+    async def _blocked_send(raw: str) -> None:
+        sent_payloads.append(json.loads(raw))
+        send_entered.set()
+        await release_send.wait()
+
+    candidate.send = AsyncMock(side_effect=_blocked_send)
+    candidate.close = AsyncMock(return_value=None)
+    task = asyncio.create_task(consumer._initialize_connection(candidate))
+    await asyncio.wait_for(send_entered.wait(), timeout=0.2)
+
+    consumer.set_l3_desired(["sent-l3", "unsent-l3"])
+    release_send.set()
+
+    with pytest.raises(RuntimeError, match="initial WS subscription failed"):
+        await asyncio.wait_for(task, timeout=0.2)
+
+    assert sent_payloads == [
+        {
+            "type": "market",
+            "assets_ids": ["candidate", "sent-l3"],
+            "initial_dump": True,
+        }
+    ]
+    candidate.close.assert_awaited_once()
+    status = consumer.l3_membership_snapshot()
+    assert status.desired == frozenset({"sent-l3", "unsent-l3"})
+    assert status.committed == frozenset()
+    assert status.evidenced == frozenset()
+    assert consumer._current_ws is None
+
+
+@pytest.mark.asyncio
+async def test_empty_add_is_true_no_send_no_publish_no_mutation() -> None:
+    publications = []
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=WsWatchdog(stale_s=30),
+        on_event=lambda event: True,
+        initial_assets=["candidate"],
+        membership_observer=publications.append,
+    )
+    ws = MagicMock()
+    ws.send = AsyncMock(return_value=None)
+    consumer._current_ws = ws
+    before = consumer.l3_membership_snapshot()
+    publication_count = len(publications)
+
+    assert await consumer.add_subscriptions([]) is True
+
+    ws.send.assert_not_awaited()
+    assert consumer.l3_membership_snapshot() == before
+    assert len(publications) == publication_count
+
+
+@pytest.mark.asyncio
+async def test_empty_remove_is_true_no_send_no_publish_no_mutation() -> None:
+    publications = []
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=WsWatchdog(stale_s=30),
+        on_event=lambda event: True,
+        initial_assets=["candidate"],
+        membership_observer=publications.append,
+    )
+    ws = MagicMock()
+    ws.send = AsyncMock(return_value=None)
+    consumer._current_ws = ws
+    consumer._l3_committed_set = {"kept"}
+    before = consumer.l3_membership_snapshot()
+    publication_count = len(publications)
+
+    assert await consumer.remove_subscriptions([]) is True
+
+    ws.send.assert_not_awaited()
+    assert consumer.l3_membership_snapshot() == before
+    assert len(publications) == publication_count
+
+
+@pytest.mark.asyncio
 async def test_compensated_generation_history_is_bounded() -> None:
     consumer, _ws = _consumer()
 

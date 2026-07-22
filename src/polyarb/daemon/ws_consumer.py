@@ -257,6 +257,8 @@ class WsConsumer:
                 self._connection_generation = generation
                 self._clear_l3_connection_state_locked()
                 self._publish_l3_membership_locked()
+                previous_ws = self._current_ws
+                desired_snapshot = frozenset(self._l3_desired_set)
                 active_assets = self._compute_active_assets()
                 ok = await self._send_control(
                     ws,
@@ -266,9 +268,20 @@ class WsConsumer:
                         "initial_dump": True,
                     },
                 )
-                if ok:
+                identity_matches = (
+                    self._connection_generation == generation
+                    and self._current_ws is previous_ws
+                )
+                snapshot_matches = (
+                    frozenset(self._l3_desired_set) == desired_snapshot
+                    and self._compute_active_assets() == active_assets
+                )
+                if ok and identity_matches and snapshot_matches:
                     self._current_ws = ws
-                    self._l3_committed_set = set(self._l3_desired_set)
+                    # Commit exactly the desired membership represented in the
+                    # payload above. A mutation while send() was suspended is
+                    # unsent truth and must force compensation/reconnect.
+                    self._l3_committed_set = set(desired_snapshot)
                     self._publish_l3_membership_locked()
                     return
                 self._publish_l3_membership_locked()
@@ -774,10 +787,6 @@ class WsConsumer:
             logger.warning(
                 f"ws_consumer: {e} — closing WS for chaos test (this MUST NOT appear in production)"
             )
-            self._state = "DISCONNECTED"
-            self._current_ws = None  # GAP-401: clear stash on disconnect
-            self._clear_l3_connection_state_locked()
-            self._publish_l3_membership_locked()
             # Do NOT re-raise: returning lets the supervisor (l2_main) decide
             # whether to relaunch the consumer. Watchdog will mark RECONNECTING
             # via its stale_s timeout if no fresh touch arrives.
@@ -785,8 +794,14 @@ class WsConsumer:
         except asyncio.CancelledError:
             # F-04: must propagate.
             logger.info("ws_consumer: cancelled, propagating CancelledError")
+            raise
+        finally:
+            # Every exit path publishes the same terminal truth. This is
+            # intentionally idempotent with stream_market_events' on_disconnect
+            # callback: normal exhaustion, stop/break, chaos, cancellation, and
+            # unexpected exceptions must never leave a stale live socket or
+            # current-generation membership behind.
             self._state = "DISCONNECTED"
             self._current_ws = None  # GAP-401: clear stash on disconnect
             self._clear_l3_connection_state_locked()
             self._publish_l3_membership_locked()
-            raise
