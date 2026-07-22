@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 execution started; next is Plan 05.4-01
-last_updated: "2026-07-22T15:30:14.459Z"
+stopped_at: Phase 05.4 Plan 01 complete and verified; next is Plan 05.4-02
+last_updated: "2026-07-22T18:09:57Z"
 progress:
   total_phases: 13
   completed_phases: 11
   total_plans: 71
-  completed_plans: 65
-  percent: 92
+  completed_plans: 66
+  percent: 93
 ---
 
 # M1 Perception — Current State
@@ -19,15 +19,16 @@ progress:
 ## Current Position
 
 Phase: 05.4 (continuous-l3-soak-evidence) — EXECUTING
-Plan: 1 of 5
+Plan: 2 of 5
 
 - **Phase:** 05.4 — Continuous L3 soak evidence
-- **Plan:** next is 05.4-01 — append-only evidence schema and storage boundary
-- **Status:** Executing Phase 05.4. All five PLAN files are complete. All five
-  plan structures pass, all 24 tasks map to 24
-  validation rows, and the final independent checker returned
-  `VERIFICATION PASSED`. Plans 01–04 are local implementation; Plan 05 remains
-  `autonomous: false` with separate production and wall-clock gates.
+- **Plan:** next is 05.4-02 — truthful WS membership and terminal promoter transaction
+- **Status:** Wave 1 is complete on main. Alembic 007, immutable evidence records,
+  and the append/query store passed focused and full-suite verification. Wave 2
+  now uses the dedicated `POLYARB_L2_RUNTIME_DB_DSN`; the owner/migration DSN
+  remains Alembic-only. Plans 01–04 are local implementation; Plan 05 remains
+  `autonomous: false` with separate migration, runtime credential, retention
+  credential, deployment, and wall-clock gates.
 
 - **Active workstream:** `m1-perception`
 
@@ -170,8 +171,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Execute Phase 05.4 Plans 01–04 under TDD: schema/storage, truthful WS/promoter
-  transaction, sampler/events/health, then verdict/Make/chaos/teaching surfaces.
+- Execute Phase 05.4 Plans 02–04 under TDD: truthful WS/promoter transaction,
+  sampler/events/health, then verdict/Make/chaos/teaching surfaces. Plan 01's
+  schema/storage boundary is complete and verified.
 
 - Do not resume the release-37 T+6/T+12/T+18/T+24 sequence as strict evidence.
 - Preserve strict N=5 and the unchanged spread/depth/recency thresholds. Start a
@@ -185,7 +187,7 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 1. `.planning/CURRENT.md` — cross-workstream operational truth.
 2. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-CONTEXT.md` — locked decisions.
-3. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-01-PLAN.md` — next executable plan.
+3. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-02-PLAN.md` — next executable plan.
 4. `.planning/threads/market-observation-architecture.md` §1.6 and §2.9 — chain-truth and observation cadence.
 
 ## Resume
@@ -196,16 +198,17 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-22 03:38 (Asia/Shanghai)
-- **Stopped at:** Phase 05.4 planning complete: five sequential plans, 24 tasks,
-  one-to-one validation, all structure checks green, final independent checker
-  passed. Release-37 remains immutable diagnostic-only evidence.
+- **Last session:** 2026-07-23 02:09 (Asia/Shanghai)
+- **Stopped at:** Phase 05.4 Plan 01 complete and merged. Post-merge focused/full
+  pytest, Ruff, and compile verification passed; planning-status reports no drift.
+  Release-37 remains immutable diagnostic-only evidence.
 
-- **Proceeding to:** Execute 05.4 Plan 01 under TDD. Plans 01–04 authorize local
-  implementation only. Plan 05 separately gates production migration, retention
-  credential, deployment, manifest/T0, and T+6/T+12/T+18/T+24.
+- **Proceeding to:** Execute 05.4 Plan 02 under TDD. Plans 02–04 authorize local
+  implementation only. Plan 05 separately gates production migration, L2 runtime
+  credential, retention credential, deployment, manifest/T0, and
+  T+6/T+12/T+18/T+24.
 
-- **Resume file:** `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-01-PLAN.md`
+- **Resume file:** `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-02-PLAN.md`
 
 ## Accumulated Context
 
