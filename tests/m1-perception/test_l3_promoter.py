@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -442,6 +442,112 @@ def _make_supabase_client_mock(
         else:
             tbl.execute.return_value = MagicMock(data=[])
         return tbl
+
+    client = MagicMock()
+    client.table.side_effect = _table_side_effect
+    return client
+
+
+def _make_bounded_reconciliation_client(
+    tob_rows: list[dict],
+    token_map_rows: list[dict],
+    promoted_rows: list[str],
+    capture_updates: list[dict],
+    capture_queries: list[dict],
+    *,
+    fail_query_once: bool = False,
+) -> MagicMock:
+    """Stateful candidate-table double for bounded badge reconciliation.
+
+    ``promoted_rows`` deliberately remains a list so tests can model multiple
+    historical ``l2_candidates`` rows for one asset identity.
+    """
+    remaining_query_failures = 1 if fail_query_once else 0
+
+    class _CandidateUpdate:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self._ids: list[str] = []
+
+        def in_(self, column: str, ids: list[str]) -> _CandidateUpdate:
+            assert column == "asset_id"
+            self._ids = list(ids)
+            capture_updates.append(
+                {"payload": self._payload, "col": column, "ids": list(ids)}
+            )
+            return self
+
+        def execute(self) -> MagicMock:
+            value = self._payload.get("l3_promoted_at_ts")
+            if value is None:
+                stale = set(self._ids)
+                promoted_rows[:] = [row for row in promoted_rows if row not in stale]
+            else:
+                existing = set(promoted_rows)
+                promoted_rows.extend(row for row in self._ids if row not in existing)
+            return MagicMock(data=[])
+
+    class _CandidateSelect:
+        def __init__(self) -> None:
+            self._exclude: set[str] = set()
+            self._limit: int | None = None
+            self._ordered_by: str | None = None
+            self._negate_next = False
+
+        def select(self, columns: str) -> _CandidateSelect:
+            assert columns == "asset_id"
+            return self
+
+        @property
+        def not_(self) -> _CandidateSelect:
+            self._negate_next = True
+            return self
+
+        def is_(self, column: str, value: Any) -> _CandidateSelect:
+            assert self._negate_next
+            assert (column, value) == ("l3_promoted_at_ts", "null")
+            self._negate_next = False
+            return self
+
+        def in_(self, column: str, ids: list[str]) -> _CandidateSelect:
+            assert self._negate_next
+            assert column == "asset_id"
+            self._exclude = set(ids)
+            self._negate_next = False
+            return self
+
+        def order(self, column: str) -> _CandidateSelect:
+            self._ordered_by = column
+            return self
+
+        def limit(self, size: int) -> _CandidateSelect:
+            self._limit = size
+            return self
+
+        def execute(self) -> MagicMock:
+            nonlocal remaining_query_failures
+            if remaining_query_failures:
+                remaining_query_failures -= 1
+                raise RuntimeError("candidate badge query failed")
+            assert self._ordered_by == "id"
+            assert self._limit is not None
+            rows = [row for row in promoted_rows if row not in self._exclude]
+            returned = rows[: self._limit]
+            capture_queries.append(
+                {
+                    "limit": self._limit,
+                    "excluded": set(self._exclude),
+                    "returned": list(returned),
+                }
+            )
+            return MagicMock(data=[{"asset_id": row} for row in returned])
+
+    def _table_side_effect(name: str) -> Any:
+        if name == "l2_candidates":
+            table = _CandidateSelect()
+            table.update = lambda payload: _CandidateUpdate(payload)  # type: ignore[attr-defined]
+            return table
+        return _make_supabase_client_mock(tob_rows, token_map_rows).table(name)
 
     client = MagicMock()
     client.table.side_effect = _table_side_effect
@@ -871,7 +977,15 @@ async def test_promote_run_writes_l3_promoted_at_ts_on_add_and_clears_on_remove(
         for i in range(2, 7)
     ]
     capture_updates: list[dict] = []
-    client = _make_supabase_client_mock(tob_rows, token_map_rows, capture_updates)
+    capture_queries: list[dict] = []
+    promoted_rows = ["yes_m1"]
+    client = _make_bounded_reconciliation_client(
+        tob_rows,
+        token_map_rows,
+        promoted_rows,
+        capture_updates,
+        capture_queries,
+    )
 
     mock_consumer = _truthful_consumer(initial_committed={"yes_m1", "no_m1"})
 
@@ -896,6 +1010,7 @@ async def test_promote_run_writes_l3_promoted_at_ts_on_add_and_clears_on_remove(
     assert add_ups[0]["ids"] == [f"yes_m{i}" for i in range(2, 7)]
     assert len(rm_ups) == 1
     assert rm_ups[0]["ids"] == ["yes_m1"]
+    assert capture_queries[0]["returned"] == ["yes_m1"]
 
     # Lint: helper contains `category="l2-mirror"` (chain-truth breadcrumb).
     src = inspect.getsource(l3_promote._mirror_l3_promoted_at_ts)
@@ -1383,10 +1498,10 @@ async def test_mirror_false_retries_complete_committed_target_and_pending_cleanu
     old_map = {"yes_old": ("yes_old", "no_old")}
     l3_promote._last_known_market_token_map = old_map
     l3_promote._last_mirrored_market_ids = frozenset({"yes_old"})
-    mirror_calls: list[tuple[list[str], list[str]]] = []
+    mirror_calls: list[list[str]] = []
 
-    def _mirror(_client: Any, target: list[str], cleanup: list[str]) -> bool:
-        mirror_calls.append((list(target), list(cleanup)))
+    def _mirror(_client: Any, target: list[str]) -> bool:
+        mirror_calls.append(list(target))
         if len(mirror_calls) == 2:
             assert "yes_old" in (l3_promote._last_known_market_token_map or {}), (
                 "a fresh token-map fetch must not discard pending cleanup identity"
@@ -1423,8 +1538,8 @@ async def test_mirror_false_retries_complete_committed_target_and_pending_cleanu
     assert second.status.value == "success"
     assert second.persisted is True
     assert mirror_calls == [
-        (expected_current, ["yes_old"]),
-        (expected_current, ["yes_old"]),
+        expected_current,
+        expected_current,
     ]
     assert l3_promote._last_mirrored_market_ids == frozenset(expected_current)
     assert "yes_old" not in (l3_promote._last_known_market_token_map or {})
@@ -1462,10 +1577,10 @@ async def test_remove_false_keeps_committed_mirror_then_recovery_clears_old() ->
         "yes_old": ("yes_old", "no_old")
     }
     l3_promote._last_mirrored_market_ids = frozenset({"yes_old"})
-    mirror_calls: list[tuple[list[str], list[str]]] = []
+    mirror_calls: list[list[str]] = []
 
-    def _mirror(_client: Any, target: list[str], cleanup: list[str]) -> bool:
-        mirror_calls.append((list(target), list(cleanup)))
+    def _mirror(_client: Any, target: list[str]) -> bool:
+        mirror_calls.append(list(target))
         return True
 
     with patch.object(
@@ -1497,12 +1612,12 @@ async def test_remove_false_keeps_committed_mirror_then_recovery_clears_old() ->
     assert first_store.records[0].committed_count == 2
     assert first_store.records[0].add_succeeded is None
     assert first_store.records[0].remove_succeeded is False
-    assert mirror_calls[0] == (["yes_old"], [])
+    assert mirror_calls[0] == ["yes_old"]
     assert second.status.value == "success"
     assert second_store.records[0].committed_count == 10
     assert second_store.records[0].add_succeeded is True
     assert second_store.records[0].remove_succeeded is True
-    assert mirror_calls[1] == (current, ["yes_old"])
+    assert mirror_calls[1] == current
     assert control_calls == ["remove", "remove", "add"]
 
 
@@ -1532,7 +1647,7 @@ async def test_repeated_rotations_with_remove_false_never_add_or_grow_state() ->
     l3_promote._last_mirrored_market_ids = frozenset(original_map)
 
     records: list[Any] = []
-    mirror_targets: list[tuple[list[str], list[str]]] = []
+    mirror_targets: list[list[str]] = []
     for tick in range(6):
         tob_rows, token_rows = _five_market_inputs(f"rotation_{tick}")
         store = _RecordingEvidenceStore()
@@ -1543,8 +1658,8 @@ async def test_repeated_rotations_with_remove_false_never_add_or_grow_state() ->
         ), patch.object(
             l3_promote,
             "_mirror_l3_promoted_at_ts",
-            side_effect=lambda _client, target, cleanup: (
-                mirror_targets.append((list(target), list(cleanup))) or True
+            side_effect=lambda _client, target: (
+                mirror_targets.append(list(target)) or True
             ),
         ):
             result = await l3_promote.promote_run(
@@ -1569,11 +1684,11 @@ async def test_repeated_rotations_with_remove_false_never_add_or_grow_state() ->
     consumer.remove_subscriptions.assert_awaited()
     consumer.add_subscriptions.assert_not_awaited()
     assert len(records) == 6
-    assert mirror_targets == [(sorted(original_map), [])] * 6
+    assert mirror_targets == [sorted(original_map)] * 6
 
 
 @pytest.mark.asyncio
-async def test_oversized_essential_identity_set_fails_before_mirror_then_recovers() -> None:
+async def test_oversized_precontrol_identity_state_is_removed_before_bounded_mirror() -> None:
     from polyarb.observation import l3_promote
 
     settings = _make_settings()
@@ -1593,8 +1708,6 @@ async def test_oversized_essential_identity_set_fails_before_mirror_then_recover
     }
     consumer = _truthful_consumer(initial_committed=oversized_tokens)
     l3_promote._last_known_market_token_map = oversized_map
-    before_cache = l3_promote._last_known_market_token_map
-    before_mirror = l3_promote._last_mirrored_market_ids
     tob_rows, token_rows = _five_market_inputs("bounded_recovery")
 
     with patch.object(
@@ -1612,13 +1725,16 @@ async def test_oversized_essential_identity_set_fails_before_mirror_then_recover
             run_seq=70,
         )
 
-    assert first.status.value == "failed"
-    assert first.reason_code == "identity_limit_exceeded"
+    assert first.status.value == "success"
+    assert first.reason_code == "ok"
     assert len(first.committed) == 10, "successful remove-first control is bounded"
     assert len(first_store.records) == 1
-    mirror.assert_not_called(), "an oversized PostgREST payload must never be issued"
-    assert l3_promote._last_known_market_token_map is before_cache
-    assert l3_promote._last_mirrored_market_ids is before_mirror
+    expected_current = sorted(f"yes_bounded_recovery_{index}" for index in range(5))
+    mirror.assert_called_once_with(ANY, expected_current)
+    assert len(l3_promote._last_known_market_token_map or {}) <= (
+        l3_promote._MAX_TOKEN_MAP_CACHE
+    )
+    assert l3_promote._last_mirrored_market_ids == frozenset(expected_current)
 
     capture_updates: list[dict] = []
     with patch.object(
@@ -1707,6 +1823,211 @@ async def test_oversized_preexisting_state_with_failed_remove_never_grows() -> N
     mirror.assert_not_called()
     assert l3_promote._last_known_market_token_map is before_cache
     assert l3_promote._last_mirrored_market_ids is before_mirror
+
+
+@pytest.mark.asyncio
+async def test_db_driven_badge_cleanup_converges_over_more_than_two_bounded_batches() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    consumer = _truthful_consumer()
+    tob_rows, token_rows = _five_market_inputs("paged_cleanup")
+    current = {f"yes_paged_cleanup_{index}" for index in range(5)}
+    stale = {
+        f"yes_stale_{index:04d}"
+        for index in range(l3_promote._MIRROR_RECONCILE_BATCH_SIZE * 2 + 7)
+    }
+    promoted_rows = sorted(current | stale)
+    updates: list[dict] = []
+    queries: list[dict] = []
+    client = _make_bounded_reconciliation_client(
+        tob_rows,
+        token_rows,
+        promoted_rows,
+        updates,
+        queries,
+    )
+    # Deliberately unrelated memory proves the database, not the cache, owns
+    # stale cleanup recovery.
+    l3_promote._last_mirrored_market_ids = frozenset(
+        f"legacy_only_{index}"
+        for index in range(l3_promote._MIRROR_RECONCILE_BATCH_SIZE * 4)
+    )
+
+    results = []
+    stores = []
+    cache_sizes: list[tuple[int, int]] = []
+    with patch.object(l3_promote, "create_client", return_value=client):
+        for run_seq in range(80, 83):
+            store = _RecordingEvidenceStore()
+            stores.append(store)
+            results.append(
+                await l3_promote.promote_run(
+                    settings=settings,
+                    ws_consumer=consumer,
+                    recipe_yaml_path=RECIPE_PATH,
+                    evidence_store=store,
+                    evidence_runtime=runtime,
+                    run_seq=run_seq,
+                )
+            )
+            cache_sizes.append(
+                (
+                    len(l3_promote._last_mirrored_market_ids),
+                    len(l3_promote._last_known_market_token_map or {}),
+                )
+            )
+
+    assert [result.reason_code for result in results] == [
+        "mirror_cleanup_pending",
+        "mirror_cleanup_pending",
+        "ok",
+    ]
+    assert [result.status.value for result in results] == ["failed", "failed", "success"]
+    assert all(len(store.records) == 1 for store in stores), "exactly one append per tick"
+    assert len(queries) == 3
+    assert all(
+        query["limit"] == l3_promote._MIRROR_RECONCILE_BATCH_SIZE
+        and len(query["returned"]) <= l3_promote._MIRROR_RECONCILE_BATCH_SIZE
+        for query in queries
+    )
+
+    current_updates = [
+        update
+        for update in updates
+        if update["payload"].get("l3_promoted_at_ts") is not None
+    ]
+    stale_updates = [
+        update
+        for update in updates
+        if update["payload"].get("l3_promoted_at_ts") is None
+    ]
+    assert len(current_updates) == 3
+    assert all(set(update["ids"]) == current for update in current_updates)
+    assert all(
+        len(update["ids"]) <= l3_promote._MIRROR_RECONCILE_BATCH_SIZE
+        for update in updates
+    )
+    assert set().union(*(set(update["ids"]) for update in stale_updates)) == stale
+    assert all(current.isdisjoint(update["ids"]) for update in stale_updates)
+    assert all(query["excluded"] == current for query in queries)
+    assert not (set(promoted_rows) - current)
+    assert all(
+        mirror_size == 5 and token_map_size <= l3_promote._MAX_TOKEN_MAP_CACHE
+        for mirror_size, token_map_size in cache_sizes
+    )
+
+
+@pytest.mark.asyncio
+async def test_oversized_legacy_mirror_cache_converges_from_empty_stale_db_page() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    tob_rows, token_rows = _five_market_inputs("legacy_recovery")
+    current_tokens = {
+        token
+        for index in range(5)
+        for token in (
+            f"yes_legacy_recovery_{index}",
+            f"no_legacy_recovery_{index}",
+        )
+    }
+    current_yes = {f"yes_legacy_recovery_{index}" for index in range(5)}
+    consumer = _truthful_consumer(initial_committed=current_tokens)
+    oversized_map = {
+        f"yes_legacy_{index}": (f"yes_legacy_{index}", f"no_legacy_{index}")
+        for index in range(l3_promote._MAX_TOKEN_MAP_CACHE + 17)
+    }
+    l3_promote._last_known_market_token_map = oversized_map
+    l3_promote._last_mirrored_market_ids = frozenset(oversized_map)
+    promoted_rows = sorted(current_yes)
+    updates: list[dict] = []
+    queries: list[dict] = []
+    client = _make_bounded_reconciliation_client(
+        tob_rows,
+        token_rows,
+        promoted_rows,
+        updates,
+        queries,
+    )
+    store = _RecordingEvidenceStore()
+
+    with patch.object(l3_promote, "create_client", return_value=client):
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            run_seq=90,
+        )
+
+    assert result.status.value == "success"
+    assert result.reason_code == "ok"
+    assert len(store.records) == 1
+    assert queries == [
+        {
+            "limit": l3_promote._MIRROR_RECONCILE_BATCH_SIZE,
+            "excluded": current_yes,
+            "returned": [],
+        }
+    ]
+    assert len(updates) == 1
+    assert set(updates[0]["ids"]) == current_yes
+    assert len(updates[0]["ids"]) <= l3_promote._MIRROR_RECONCILE_BATCH_SIZE
+    assert l3_promote._last_mirrored_market_ids == frozenset(current_yes)
+    assert len(l3_promote._last_known_market_token_map or {}) <= (
+        l3_promote._MAX_TOKEN_MAP_CACHE
+    )
+
+
+@pytest.mark.asyncio
+async def test_badge_reconciliation_query_failure_is_durable_and_retryable() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    consumer = _truthful_consumer()
+    tob_rows, token_rows = _five_market_inputs("query_retry")
+    stale = {"yes_stale_query"}
+    promoted_rows = sorted(stale)
+    updates: list[dict] = []
+    queries: list[dict] = []
+    client = _make_bounded_reconciliation_client(
+        tob_rows,
+        token_rows,
+        promoted_rows,
+        updates,
+        queries,
+        fail_query_once=True,
+    )
+
+    with patch.object(l3_promote, "create_client", return_value=client):
+        first_store = _RecordingEvidenceStore()
+        first = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=first_store,
+            evidence_runtime=runtime,
+            run_seq=91,
+        )
+        second_store = _RecordingEvidenceStore()
+        second = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=second_store,
+            evidence_runtime=runtime,
+            run_seq=92,
+        )
+
+    assert (first.status.value, first.reason_code) == ("failed", "mirror_failed")
+    assert (second.status.value, second.reason_code) == ("success", "ok")
+    assert len(first_store.records) == len(second_store.records) == 1
+    assert not (set(promoted_rows) - {f"yes_query_retry_{index}" for index in range(5)})
 
 
 @pytest.mark.asyncio

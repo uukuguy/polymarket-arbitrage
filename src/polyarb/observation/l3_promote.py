@@ -85,11 +85,11 @@ _last_book_levels_write_at_s: float | None = None
 # TOKEN-level _l3_active_set on subsequent ticks.
 _last_known_tob_rows: list[dict] | None = None
 _last_known_market_token_map: dict[str, tuple[str | None, str | None]] | None = None
-# Last complete dashboard reconciliation target.  A failed/partial mirror keeps
-# this target unchanged so the next tick retries both idempotent sets and stale
-# cleanup instead of trusting instantaneous WS diffs.
+# Last durably recorded current dashboard target.  This is a bounded diagnostic
+# cache only; stale recovery always reads l2_candidates in bounded DB pages.
 _last_mirrored_market_ids: frozenset[str] = frozenset()
-_MAX_TOKEN_MAP_CACHE = 1010  # 1000 fetched rows + exact current/pending L3 identities
+_MAX_TOKEN_MAP_CACHE = 1010  # 1000 fetched rows + exact current L3 identities
+_MIRROR_RECONCILE_BATCH_SIZE = 100
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -389,11 +389,16 @@ def _load_recipe(recipe_yaml_path: Path) -> Any:
     )
 
 
+@dataclass(frozen=True)
+class _MirrorReconcileResult:
+    succeeded: bool
+    cleanup_pending: bool = False
+
+
 def _mirror_l3_promoted_at_ts(
     client: Any,
     committed_yes_asset_ids: list[str],
-    stale_yes_asset_ids: list[str],
-) -> bool:
+) -> _MirrorReconcileResult:
     """Write-through ``l2_candidates.l3_promoted_at_ts`` (Blocker #1).
 
     Fail-soft per D-12 envelope: failure logs + Sentry breadcrumb
@@ -401,45 +406,93 @@ def _mirror_l3_promoted_at_ts(
     The post-control committed snapshot is the source of truth — this mirror
     only feeds the dashboard L3 badge (``/candidates``).
 
-    Called with the Yes token IDs stored as ``l2_candidates.asset_id``. The
-    Yes/No expansion happens at WS-subscribe time; the dashboard candidate
-    surface remains keyed by the L2 Yes asset.
+    Called with the complete committed Yes-token target stored as
+    ``l2_candidates.asset_id``.  The Yes/No expansion happens at WS-subscribe
+    time; the dashboard candidate surface remains keyed by the L2 Yes asset.
+
+    Stale recovery is intentionally database-driven.  Each tick reads at most
+    ``_MIRROR_RECONCILE_BATCH_SIZE`` non-null, non-current rows and clears only
+    those returned identities.  A full page is a conservative indication that
+    more rows may remain, so the durable terminal outcome stays non-success and
+    the next tick continues.
     """
-    if not committed_yes_asset_ids and not stale_yes_asset_ids:
-        return True
+    committed = sorted(set(committed_yes_asset_ids))
+    if len(committed) > _MIRROR_RECONCILE_BATCH_SIZE:
+        logger.warning(
+            "l3-promote: committed mirror target exceeds bounded payload "
+            "rows={}",
+            len(committed),
+        )
+        return _MirrorReconcileResult(succeeded=False)
     now_iso = (
         datetime.now(UTC).isoformat().replace("+00:00", "Z")
     )
     try:
-        if committed_yes_asset_ids:
+        if committed:
             (
                 client.table("l2_candidates")
                 .update({"l3_promoted_at_ts": now_iso})
-                .in_("asset_id", list(committed_yes_asset_ids))
+                .in_("asset_id", committed)
                 .execute()
             )
-        if stale_yes_asset_ids:
+
+        query = (
+            client.table("l2_candidates")
+            .select("asset_id")
+            .not_.is_("l3_promoted_at_ts", "null")
+        )
+        if committed:
+            query = query.not_.in_("asset_id", committed)
+        response = (
+            query.order("id")
+            .limit(_MIRROR_RECONCILE_BATCH_SIZE)
+            .execute()
+        )
+        rows = list(response.data or [])
+        if len(rows) > _MIRROR_RECONCILE_BATCH_SIZE:
+            raise ValueError("candidate badge query exceeded reconciliation cap")
+        stale: set[str] = set()
+        committed_set = set(committed)
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("candidate badge query returned a non-object row")
+            asset_id = str(row.get("asset_id") or "").strip()
+            if not asset_id:
+                raise ValueError("candidate badge query returned an empty asset_id")
+            if asset_id not in committed_set:
+                stale.add(asset_id)
+        stale_batch = sorted(stale)
+        if len(stale_batch) > _MIRROR_RECONCILE_BATCH_SIZE:  # pragma: no cover - invariant
+            raise ValueError("candidate badge cleanup exceeded reconciliation cap")
+        if stale_batch:
             (
                 client.table("l2_candidates")
                 .update({"l3_promoted_at_ts": None})
-                .in_("asset_id", list(stale_yes_asset_ids))
+                .in_("asset_id", stale_batch)
                 .execute()
             )
+        cleanup_pending = len(rows) == _MIRROR_RECONCILE_BATCH_SIZE
         sentry_sdk.add_breadcrumb(
             category="l2-mirror",
             level="info",
             message=(
                 f"l3_promoted_at_ts mirror "
-                f"committed={len(committed_yes_asset_ids)} "
-                f"stale={len(stale_yes_asset_ids)}"
+                f"committed={len(committed)} "
+                f"stale={len(stale_batch)} "
+                f"pending={cleanup_pending}"
             ),
             data={
-                "committed": len(committed_yes_asset_ids),
-                "stale": len(stale_yes_asset_ids),
+                "committed": len(committed),
+                "stale": len(stale_batch),
+                "pending": cleanup_pending,
+                "batch_cap": _MIRROR_RECONCILE_BATCH_SIZE,
                 "table": "l2_candidates",
             },
         )
-        return True
+        return _MirrorReconcileResult(
+            succeeded=True,
+            cleanup_pending=cleanup_pending,
+        )
     except Exception as e:  # noqa: BLE001 — fail-soft per D-12
         logger.warning(
             f"l3-promote: l2_candidates write-through failed "
@@ -451,12 +504,12 @@ def _mirror_l3_promoted_at_ts(
             message="l3_promoted_at_ts mirror failed",
             data={
                 "error": str(e)[:200],
-                "committed": len(committed_yes_asset_ids),
-                "stale": len(stale_yes_asset_ids),
+                "committed": len(committed),
+                "batch_cap": _MIRROR_RECONCILE_BATCH_SIZE,
                 "table": "l2_candidates",
             },
         )
-        return False
+        return _MirrorReconcileResult(succeeded=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -917,40 +970,37 @@ async def promote_run(
     added_markets = frozenset(current_markets - prior_markets)
     removed_markets = frozenset(prior_markets - current_markets)
 
-    # At process upgrade the persisted target may not exist yet, so the
-    # initial committed membership is the conservative cleanup baseline.
-    prior_mirror_target = (
-        set(_last_mirrored_market_ids)
-        if _last_mirrored_market_ids
-        else set(prior_markets)
-    )
-    pending_identity_ids = current_markets | prior_mirror_target
-    identity_limit_exceeded = len(pending_identity_ids) > _MAX_TOKEN_MAP_CACHE
+    # The complete post-control committed target is mirrored every tick.  Stale
+    # badges are discovered from bounded database pages inside the mirror
+    # helper; process memory is never a cleanup source of truth.
+    identity_limit_exceeded = len(current_markets) > _MIRROR_RECONCILE_BATCH_SIZE
     mirror_succeeded = False
+    mirror_cleanup_pending = False
     if not identity_limit_exceeded:
-        stale_mirror_markets = prior_mirror_target - current_markets
-        mirror_succeeded = _mirror_l3_promoted_at_ts(
-            client, sorted(current_markets), sorted(stale_mirror_markets)
-        )
+        raw_mirror_result = _mirror_l3_promoted_at_ts(client, sorted(current_markets))
+        if isinstance(raw_mirror_result, _MirrorReconcileResult):
+            mirror_succeeded = raw_mirror_result.succeeded
+            mirror_cleanup_pending = raw_mirror_result.cleanup_pending
+        else:
+            # Preserve compatibility with focused tests and injected fail-soft
+            # mirrors that predate the richer bounded-reconciliation result.
+            mirror_succeeded = bool(raw_mirror_result)
 
-        # Preserve the full current fetch plus identities still needed for the
-        # committed set or a pending cleanup.  The fetch is capped at 1000
-        # rows; exact L3 current+pending identities reserve ten extra slots.
-        essential_market_ids = (
-            set(current_markets)
-            if mirror_succeeded
-            else pending_identity_ids
-        )
+        # A successful bounded DB reconciliation (complete or pending) makes
+        # legacy cleanup memory disposable.  Publish the pruned cache only
+        # after this tick's terminal evidence row is durable.
+        essential_market_ids = set(current_markets)
         cache_market_ids = set(token_map) | essential_market_ids
         if len(cache_market_ids) > _MAX_TOKEN_MAP_CACHE:
             optional = sorted(set(token_map) - essential_market_ids)
             available = _MAX_TOKEN_MAP_CACHE - len(essential_market_ids)
             cache_market_ids = essential_market_ids | set(optional[:available])
-        staged_market_token_map = {
-            market_id: pair
-            for market_id in sorted(cache_market_ids)
-            if (pair := token_pair(market_id)) is not None
-        }
+        if mirror_succeeded:
+            staged_market_token_map = {
+                market_id: pair
+                for market_id in sorted(cache_market_ids)
+                if (pair := token_pair(market_id)) is not None
+            }
     staged_active_set = current.committed
     if mirror_succeeded and not identity_limit_exceeded:
         staged_mirrored_market_ids = frozenset(current_markets)
@@ -971,6 +1021,8 @@ async def promote_run(
         status, reason = PromoteStatus.FAILED, "identity_limit_exceeded"
     elif not mirror_succeeded:
         status, reason = PromoteStatus.FAILED, "mirror_failed"
+    elif mirror_cleanup_pending:
+        status, reason = PromoteStatus.FAILED, "mirror_cleanup_pending"
     elif not controls_ok:
         status, reason = PromoteStatus.FAILED, "control_failed"
     else:
