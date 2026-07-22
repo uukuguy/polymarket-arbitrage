@@ -3,10 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
-status: ready_to_execute
-stopped_at: Phase 05.4 planned as 5 sequential plans and 24 tasks; independent checker passed after three revision rounds
-last_updated: "2026-07-22T03:38:32+08:00"
-last_activity: 2026-07-22
+status: executing
+stopped_at: Phase 05.4 execution started; next is Plan 05.4-01
+last_updated: "2026-07-22T15:30:14.459Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -19,13 +18,13 @@ progress:
 
 ## Current Position
 
-Phase: 05.4 (continuous-l3-soak-evidence) — READY TO EXECUTE
-Plan: 0 of 5
+Phase: 05.4 (continuous-l3-soak-evidence) — EXECUTING
+Plan: 1 of 5
 
 - **Phase:** 05.4 — Continuous L3 soak evidence
 - **Plan:** next is 05.4-01 — append-only evidence schema and storage boundary
-- **Status:** Design approved; CONTEXT/RESEARCH/VALIDATION and five sequential
-  PLAN files are complete. All five plan structures pass, all 24 tasks map to 24
+- **Status:** Executing Phase 05.4. All five PLAN files are complete. All five
+  plan structures pass, all 24 tasks map to 24
   validation rows, and the final independent checker returned
   `VERIFICATION PASSED`. Plans 01–04 are local implementation; Plan 05 remains
   `autonomous: false` with separate production and wall-clock gates.
@@ -173,10 +172,12 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 - Execute Phase 05.4 Plans 01–04 under TDD: schema/storage, truthful WS/promoter
   transaction, sampler/events/health, then verdict/Make/chaos/teaching surfaces.
+
 - Do not resume the release-37 T+6/T+12/T+18/T+24 sequence as strict evidence.
 - Preserve strict N=5 and the unchanged spread/depth/recency thresholds. Start a
   fresh exact-identity 24-hour soak only after separately authorized production
   migration/deployment and readiness proof.
+
 - Keep H-009 pending until separately authorized production deployment/scheduling
   and timestamped capacity evidence; Phase 05.1 completion does not promote it.
 
