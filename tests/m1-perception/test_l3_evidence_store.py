@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import subprocess
 from collections.abc import Iterator
@@ -188,6 +189,7 @@ class _FakeConnection:
             {
                 "is_superuser": False,
                 "can_login": True,
+                "service_member": False,
                 "daemon_member": True,
                 "retention_member": False,
             }
@@ -255,6 +257,10 @@ async def test_one_shot_appends_are_parameterized_and_close(
     assert connection.closed
     assert [call[0] for call in connection.calls] == ["fetchrow", "execute"]
     assert "pg_has_role" in connection.calls[0][1]
+    assert all(
+        role_name in connection.calls[0][1]
+        for role_name in ("service_role", "l3_evidence_daemon", "l3_retention_operator")
+    )
     _, sql, args = connection.calls[1]
     assert f"INSERT INTO {table}" in sql
     assert "$1" in sql
@@ -321,26 +327,37 @@ async def test_durable_append_ack_survives_connection_close_failure(
         {
             "is_superuser": True,
             "can_login": True,
+            "service_member": False,
             "daemon_member": True,
             "retention_member": False,
         },
         {
             "is_superuser": False,
             "can_login": False,
+            "service_member": False,
             "daemon_member": True,
             "retention_member": False,
         },
         {
             "is_superuser": False,
             "can_login": True,
+            "service_member": False,
             "daemon_member": False,
             "retention_member": False,
         },
         {
             "is_superuser": False,
             "can_login": True,
+            "service_member": False,
             "daemon_member": True,
             "retention_member": True,
+        },
+        {
+            "is_superuser": False,
+            "can_login": True,
+            "service_member": True,
+            "daemon_member": True,
+            "retention_member": False,
         },
     ],
 )
@@ -573,6 +590,14 @@ def postgres_dsns() -> Iterator[dict[str, str]]:
                 "IN ROLE service_role",
                 "CREATE ROLE retention_login LOGIN PASSWORD 'retention-test-secret'",
                 "GRANT l3_retention_operator TO retention_login",
+                "CREATE ROLE daemon_service_login LOGIN PASSWORD 'daemon-service-secret' "
+                "IN ROLE l3_evidence_daemon, service_role",
+                "CREATE ROLE daemon_retention_login LOGIN PASSWORD 'daemon-retention-secret' "
+                "IN ROLE l3_evidence_daemon, l3_retention_operator",
+                "CREATE ROLE service_retention_login LOGIN PASSWORD 'service-retention-secret' "
+                "IN ROLE service_role, l3_retention_operator",
+                "CREATE ROLE super_operator_login LOGIN SUPERUSER "
+                "PASSWORD 'super-operator-secret' IN ROLE l3_retention_operator",
             )
         )
         yield {
@@ -581,6 +606,18 @@ def postgres_dsns() -> Iterator[dict[str, str]]:
             "service": _credential_dsn(admin_dsn, "service_login", "service-test-secret"),
             "retention": _credential_dsn(
                 admin_dsn, "retention_login", "retention-test-secret"
+            ),
+            "daemon_service": _credential_dsn(
+                admin_dsn, "daemon_service_login", "daemon-service-secret"
+            ),
+            "daemon_retention": _credential_dsn(
+                admin_dsn, "daemon_retention_login", "daemon-retention-secret"
+            ),
+            "service_retention": _credential_dsn(
+                admin_dsn, "service_retention_login", "service-retention-secret"
+            ),
+            "super_operator": _credential_dsn(
+                admin_dsn, "super_operator_login", "super-operator-secret"
             ),
         }
 
@@ -654,6 +691,24 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
             "SELECT count(*) FROM l3_market_samples WHERE boot_id=$1 AND sample_seq=9",
             boot.boot_id,
         ) == 0
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await admin.execute(
+                "INSERT INTO l3_runtime_events "
+                "(event_id, boot_id, event_seq, occurred_at, kind, severity, detail) "
+                "VALUES (gen_random_uuid(), $1, 90, $2, 'shutdown_signal', 'info', "
+                "jsonb_build_object('payload', repeat('x', 1800), 'value', 1e300::numeric))",
+                boot.boot_id,
+                start,
+            )
+        with pytest.raises(asyncpg.PostgresError):
+            await admin.execute(
+                "INSERT INTO l3_runtime_events "
+                "(event_id, boot_id, event_seq, occurred_at, kind, severity, detail) "
+                "VALUES (gen_random_uuid(), $1, 91, $2, 'shutdown_signal', 'info', $3::jsonb)",
+                boot.boot_id,
+                start,
+                json.dumps({"nested": {"value": "before\x00after"}}),
+            )
         await admin.executemany(
             "INSERT INTO l2_book_levels (asset_id, ts, side, level, price, size) "
             "VALUES ($1,$2,'BUY',1,0.5,1)",
@@ -734,6 +789,36 @@ async def test_real_postgres_store_rejects_non_daemon_credentials(
     assert not await L3EvidenceStore(postgres_dsns[credential]).append_boot(
         _boot(datetime.now(UTC))
     )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("credential", "boundary"),
+    [
+        ("daemon_service", "evidence"),
+        ("daemon_retention", "retention"),
+        ("service_retention", "retention"),
+        ("super_operator", "retention"),
+    ],
+)
+async def test_real_postgres_rejects_nonexclusive_role_combinations(
+    postgres_dsns: dict[str, str],
+    credential: str,
+    boundary: str,
+) -> None:
+    if boundary == "evidence":
+        assert not await L3EvidenceStore(postgres_dsns[credential]).append_boot(
+            _boot(datetime.now(UTC))
+        )
+        return
+
+    now = datetime.now(UTC)
+    with pytest.raises(L3RetentionError, match="credential is not authorized"):
+        await L3RetentionOperator(postgres_dsns[credential]).run_retention_cleanup(
+            cutoff=now - timedelta(days=31),
+            protected_start=now - timedelta(days=36),
+            protected_end=now - timedelta(days=34),
+        )
 
 
 @pytest.mark.slow

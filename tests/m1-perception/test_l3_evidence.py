@@ -644,6 +644,9 @@ def test_stable_hash_normalizes_supported_values_and_rejects_credentials() -> No
         "tokens": ["a", "b"],
     }
     assert evidence.stable_sha256(rich) == evidence.stable_sha256(primitive)
+    assert evidence.stable_sha256({"ratio": 1.25}) == hashlib.sha256(
+        b'{"ratio":1.25}'
+    ).hexdigest()
     with pytest.raises(TypeError, match="unsupported"):
         evidence.stable_sha256({"secret": SecretStr("do-not-hash")})
     with pytest.raises(TypeError, match="unsupported"):
@@ -996,3 +999,30 @@ def test_runtime_event_detail_uses_postgres_jsonb_text_size_boundary() -> None:
     assert event.detail["payload"] == accepted["payload"]
     with pytest.raises(ValueError, match="PostgreSQL jsonb::text"):
         replace(event, detail=rejected)
+
+
+@pytest.mark.parametrize(
+    ("detail", "message"),
+    [
+        ({"nested": [{"value": 1e20}]}, "float"),
+        ({"nested": {"value": 1.25}}, "float"),
+        ({"nested": {"value": "before\x00after"}}, "NUL"),
+        ({"nested": {"before\x00after": "value"}}, "NUL"),
+        ({"nested": ["ok", {"key": "\x00"}]}, "NUL"),
+    ],
+)
+def test_runtime_event_detail_rejects_nested_floats_and_nul(
+    detail: dict[str, object],
+    message: str,
+) -> None:
+    evidence = importlib.import_module("polyarb.observation.l3_evidence")
+
+    with pytest.raises(ValueError, match=message):
+        evidence.RuntimeEventRecord(
+            event_id=uuid4(),
+            boot_id=uuid4(),
+            event_seq=0,
+            occurred_at=NOW,
+            kind=evidence.RuntimeEventKind.SHUTDOWN_SIGNAL,
+            detail=detail,
+        )

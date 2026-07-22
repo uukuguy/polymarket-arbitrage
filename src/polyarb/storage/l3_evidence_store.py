@@ -212,25 +212,17 @@ SELECT 'l3_runtime_events', min(recorded_at), max(recorded_at), count(*)::bigint
 FROM l3_runtime_events
 """
 
-_RETENTION_AUTHORIZATION = """
-SELECT
-    role.rolcanlogin AS can_login,
-    pg_has_role(current_user, $1::name, 'MEMBER') AS operator_member,
-    pg_has_role(current_user, $2::name, 'MEMBER') AS daemon_member
-FROM pg_roles AS role WHERE role.rolname=current_user
-"""
-
-_RETENTION_CALL = "SELECT * FROM l3_retention_cleanup($1,$2,$3)"
-
-_EVIDENCE_AUTHORIZATION = """
+_ROLE_AUTHORIZATION = """
 SELECT
     role.rolsuper AS is_superuser,
     role.rolcanlogin AS can_login,
+    pg_has_role(current_user, 'service_role', 'MEMBER') AS service_member,
     pg_has_role(current_user, 'l3_evidence_daemon', 'MEMBER') AS daemon_member,
     pg_has_role(current_user, 'l3_retention_operator', 'MEMBER') AS retention_member
 FROM pg_roles AS role WHERE role.rolname=current_user
 """
 
+_RETENTION_CALL = "SELECT * FROM l3_retention_cleanup($1,$2,$3)"
 
 def _require_utc_interval(start: datetime, end: datetime) -> None:
     for name, value in (("start", start), ("end", end)):
@@ -254,14 +246,40 @@ def _report_failure(operation: str, error: BaseException) -> None:
         logger.warning("l3 evidence operation={} breadcrumb_failed", operation)
 
 
+
+@dataclass(frozen=True, slots=True)
+class _RoleAuthorization:
+    is_superuser: bool
+    can_login: bool
+    service_member: bool
+    daemon_member: bool
+    retention_member: bool
+
+
+async def _read_role_authorization(
+    connection: asyncpg.Connection,
+) -> _RoleAuthorization | None:
+    row = await connection.fetchrow(_ROLE_AUTHORIZATION)
+    if row is None:
+        return None
+    return _RoleAuthorization(
+        is_superuser=row["is_superuser"],
+        can_login=row["can_login"],
+        service_member=row["service_member"],
+        daemon_member=row["daemon_member"],
+        retention_member=row["retention_member"],
+    )
+
+
 async def _require_evidence_daemon(connection: asyncpg.Connection) -> None:
-    authorization = await connection.fetchrow(_EVIDENCE_AUTHORIZATION)
+    authorization = await _read_role_authorization(connection)
     if (
         authorization is None
-        or authorization["is_superuser"]
-        or not authorization["can_login"]
-        or not authorization["daemon_member"]
-        or authorization["retention_member"]
+        or authorization.is_superuser
+        or not authorization.can_login
+        or authorization.service_member
+        or not authorization.daemon_member
+        or authorization.retention_member
     ):
         raise PermissionError("evidence credential is not authorized")
 
@@ -751,16 +769,14 @@ class L3RetentionOperator:
         connection: asyncpg.Connection | None = None
         try:
             connection = await asyncpg.connect(dsn=self._dsn)
-            authorization = await connection.fetchrow(
-                _RETENTION_AUTHORIZATION,
-                "l3_retention_operator",
-                "service_role",
-            )
+            authorization = await _read_role_authorization(connection)
             if (
                 authorization is None
-                or not authorization["can_login"]
-                or not authorization["operator_member"]
-                or authorization["daemon_member"]
+                or authorization.is_superuser
+                or not authorization.can_login
+                or authorization.service_member
+                or authorization.daemon_member
+                or not authorization.retention_member
             ):
                 raise L3RetentionError("retention credential is not authorized")
             row = await connection.fetchrow(

@@ -79,6 +79,23 @@ def _normalize_json(value: Any) -> Any:
     raise TypeError(f"unsupported canonical JSON value: {type(value).__name__}")
 
 
+def _validate_event_detail(value: Any) -> None:
+    if isinstance(value, float):
+        raise ValueError("detail must not contain float values")
+    if isinstance(value, str):
+        if "\x00" in value:
+            raise ValueError("detail strings and mapping keys must not contain NUL")
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _validate_event_detail(key)
+            _validate_event_detail(item)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            _validate_event_detail(item)
+
+
 def _canonical_json(value: Mapping[str, object] | Sequence[object]) -> bytes:
     if not isinstance(value, (Mapping, Sequence)) or isinstance(
         value, (str, bytes, bytearray)
@@ -517,6 +534,7 @@ class RuntimeEventRecord:
         _require_reason("reason_code", self.reason_code, required=False)
         if not isinstance(self.detail, Mapping):
             raise TypeError("detail root must be a Mapping")
+        _validate_event_detail(self.detail)
         try:
             normalized_detail = _normalize_json(self.detail)
             encoded_size = len(_postgres_jsonb_text(normalized_detail).encode("utf-8"))
