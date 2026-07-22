@@ -46,7 +46,7 @@ import os
 import signal
 import sys
 from collections.abc import Callable
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 import sentry_sdk
@@ -68,6 +68,7 @@ from polyarb.http.l2_app import create_l2_app
 from polyarb.observability.logging import init_logging
 from polyarb.observability.sentry import init_sentry
 from polyarb.observation.l2_candidate_refresh import on_snapshot_complete
+from polyarb.observation.l3_evidence import FrameDispatchResult
 from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -325,34 +326,41 @@ def _book_levels_rows_from_frame(frame: dict, max_levels: int = 10) -> list[dict
 
 def make_l2_event_handler(
     l2_mirror: L2SupabaseMirror | None,
-) -> Callable[[dict], bool]:
+) -> Callable[[dict], FrameDispatchResult]:
     """Build the production WS-frame dispatcher and expose mirror truth."""
 
-    def _on_event(frame: dict) -> bool:
+    def _on_event(frame: dict) -> FrameDispatchResult:
         event_type = frame.get("event_type", "unknown")
         asset_id_raw = frame.get("asset_id") or ""
+        observed_at_raw = _isoformat_ts(frame.get("timestamp") or frame.get("ts"))
+        observed_at = (
+            datetime.fromisoformat(observed_at_raw).astimezone(UTC)
+            if observed_at_raw is not None
+            else None
+        )
         logger.debug(f"ws frame type={event_type} asset={asset_id_raw[:16]}")
         if l2_mirror is None:
-            return False
+            return FrameDispatchResult(False, False, observed_at)
 
         if event_type in ("price_change", "best_bid_ask", "book"):
             row = _tob_row_from_frame(frame)
-            mirror_succeeded = False
+            tob_written = False
+            book_levels_written = False
             if row is not None:
-                mirror_succeeded = l2_mirror.push_top_of_book([row]) is True
+                tob_written = l2_mirror.push_top_of_book([row]) is True
             if event_type == "book":
                 from polyarb.observation import l3_promote
 
                 if asset_id_raw and asset_id_raw in l3_promote.get_l3_active_set():
                     book_rows = _book_levels_rows_from_frame(frame, max_levels=10)
                     if book_rows:
-                        l2_mirror.push_book_levels(book_rows)
-            return mirror_succeeded
+                        book_levels_written = l2_mirror.push_book_levels(book_rows) is True
+            return FrameDispatchResult(tob_written, book_levels_written, observed_at)
         if event_type == "last_trade_price":
             row = _trade_row_from_frame(frame)
             if row is not None:
                 l2_mirror.push_trades([row])
-        return False
+        return FrameDispatchResult(False, False, observed_at)
 
     return _on_event
 

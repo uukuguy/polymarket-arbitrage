@@ -22,6 +22,10 @@ Contract (mirrored from `_trade_row_from_frame`):
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
+
+from polyarb.observation.l3_evidence import FrameDispatchResult
 
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
@@ -304,6 +308,61 @@ def test_on_event_book_with_non_l3_asset_does_not_call_push_book_levels() -> Non
         assert l2_mirror.push_book_levels.call_count == 0
     finally:
         l3_promote._l3_active_set = prior
+
+
+def test_production_dispatch_reports_tob_and_depth_outcomes_separately() -> None:
+    from polyarb.daemon.l2_main import make_l2_event_handler
+    from polyarb.observation import l3_promote
+
+    prior = set(l3_promote._l3_active_set)
+    try:
+        l3_promote._l3_active_set = {"0xasset-1"}
+        mirror = MagicMock()
+        mirror.push_top_of_book.return_value = True
+        mirror.push_book_levels.return_value = False
+
+        result = make_l2_event_handler(mirror)(
+            _make_book_frame(
+                asset_id="0xasset-1",
+                bids=[_lvl(0.5, 100)],
+                asks=[_lvl(0.51, 200)],
+                timestamp="2026-07-23T01:02:03Z",
+            )
+        )
+
+        assert result == FrameDispatchResult(
+            tob_written=True,
+            book_levels_written=False,
+            observed_at=datetime(2026, 7, 23, 1, 2, 3, tzinfo=UTC),
+        )
+        assert mirror.push_top_of_book.call_count == 1
+        assert mirror.push_book_levels.call_count == 1
+    finally:
+        l3_promote._l3_active_set = prior
+
+
+def test_non_book_dispatch_has_explicit_false_depth_outcome() -> None:
+    from polyarb.daemon.l2_main import make_l2_event_handler
+
+    mirror = MagicMock()
+    mirror.push_top_of_book.return_value = True
+    result = make_l2_event_handler(mirror)(
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "asset-a",
+            "best_bid": "0.4",
+            "best_ask": "0.6",
+            "timestamp": "2026-07-23T01:02:03+00:00",
+        }
+    )
+
+    assert result == FrameDispatchResult(
+        tob_written=True,
+        book_levels_written=False,
+        observed_at=datetime(2026, 7, 23, 1, 2, 3, tzinfo=UTC),
+    )
+    mirror.push_top_of_book.assert_called_once()
+    mirror.push_book_levels.assert_not_called()
 
 
 # ── Quick task 260601-depth-yes-usd: _tob_row_from_frame depth fill ────────

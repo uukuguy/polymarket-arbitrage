@@ -17,6 +17,12 @@ from polyarb.daemon.ws_watchdog import WsWatchdog
 BASE_S = 1_000.0
 
 
+async def _wait_until(predicate, *, timeout: float = 0.2) -> None:
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0)
+
+
 def _make_consumer() -> tuple[WsConsumer, WsWatchdog, MagicMock]:
     """Build real consumer/watchdog state and mock only the live transport."""
     watchdog = WsWatchdog(stale_s=30.0)
@@ -37,12 +43,13 @@ def _make_consumer() -> tuple[WsConsumer, WsWatchdog, MagicMock]:
 
     async def _send_with_evidence(payload: str) -> None:
         if json.loads(payload).get("operation") == "subscribe":
-            consumer.record_book_evidence(
-                asset_id="candidate-a",
-                generation=consumer._connection_generation,
-                book_levels_succeeded=True,
-                observed_at=datetime(2026, 7, 23, tzinfo=UTC),
-            )
+            for asset_id in ("candidate-b", "l3-c"):
+                consumer.record_book_evidence(
+                    asset_id=asset_id,
+                    generation=consumer._connection_generation,
+                    book_levels_succeeded=True,
+                    observed_at=datetime(2026, 7, 23, tzinfo=UTC),
+                )
 
     ws.send.side_effect = _send_with_evidence
     return consumer, watchdog, ws
@@ -71,6 +78,149 @@ async def test_request_book_refresh_sends_sorted_union_without_mutating_truth() 
     assert consumer.l3_membership_snapshot().desired == l3_before
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before
+
+
+@pytest.mark.asyncio
+async def test_refresh_waits_for_every_required_l3_token_in_same_generation() -> None:
+    consumer, _watchdog, ws = _make_consumer()
+    required = frozenset(f"l3-{index}" for index in range(10))
+    consumer.set_l3_desired(required)
+    consumer._l3_committed_set = set(required)
+    ws.send.side_effect = None
+
+    task = asyncio.create_task(consumer.request_book_refresh())
+    await _wait_until(lambda: ws.send.await_count == 2)
+
+    observed_at = datetime(2026, 7, 23, tzinfo=UTC)
+    for asset_id in sorted(required)[:9]:
+        consumer.record_book_evidence(
+            asset_id=asset_id,
+            generation=consumer._connection_generation,
+            book_levels_succeeded=True,
+            observed_at=observed_at,
+        )
+    await asyncio.sleep(0.01)
+    assert task.done() is False
+
+    consumer.record_book_evidence(
+        asset_id=sorted(required)[9],
+        generation=consumer._connection_generation,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    assert await asyncio.wait_for(task, timeout=0.2) is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_rejects_failed_depth_and_old_generation_evidence() -> None:
+    consumer, _watchdog, ws = _make_consumer()
+    consumer.set_l3_desired(["l3-required"])
+    consumer._l3_committed_set = {"l3-required"}
+    ws.send.side_effect = None
+
+    task = asyncio.create_task(consumer.request_book_refresh())
+    await _wait_until(lambda: ws.send.await_count == 2)
+    observed_at = datetime(2026, 7, 23, tzinfo=UTC)
+    consumer.record_book_evidence(
+        asset_id="l3-required",
+        generation=consumer._connection_generation - 1,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    consumer.record_book_evidence(
+        asset_id="l3-required",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=False,
+        observed_at=observed_at,
+    )
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    consumer.record_book_evidence(
+        asset_id="l3-required",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    assert await asyncio.wait_for(task, timeout=0.2) is True
+
+
+@pytest.mark.asyncio
+async def test_explicit_required_set_sends_union_but_waits_only_for_required() -> None:
+    consumer, _watchdog, ws = _make_consumer()
+    ws.send.side_effect = None
+
+    task = asyncio.create_task(
+        consumer.request_book_refresh(required_asset_ids=frozenset({"l3-c"}))
+    )
+    await _wait_until(lambda: ws.send.await_count == 2)
+    payloads = [json.loads(call.args[0]) for call in ws.send.await_args_list]
+    assert payloads[0]["assets_ids"] == ["candidate-a", "candidate-b", "l3-c"]
+
+    consumer.record_book_evidence(
+        asset_id="l3-c",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=True,
+        observed_at=datetime(2026, 7, 23, tzinfo=UTC),
+    )
+    assert await asyncio.wait_for(task, timeout=0.2) is True
+
+
+@pytest.mark.asyncio
+async def test_no_l3_desired_falls_back_to_every_active_candidate() -> None:
+    consumer, _watchdog, ws = _make_consumer()
+    consumer.set_l3_desired([])
+    consumer._l3_committed_set.clear()
+    consumer._candidate_set = {"candidate-a", "candidate-b"}
+    ws.send.side_effect = None
+
+    task = asyncio.create_task(consumer.request_book_refresh())
+    await _wait_until(lambda: ws.send.await_count == 2)
+    observed_at = datetime(2026, 7, 23, tzinfo=UTC)
+    consumer.record_book_evidence(
+        asset_id="candidate-a",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    await asyncio.sleep(0)
+    assert task.done() is False
+    consumer.record_book_evidence(
+        asset_id="candidate-b",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    assert await asyncio.wait_for(task, timeout=0.2) is True
+
+
+@pytest.mark.asyncio
+async def test_evidence_timeout_logs_missing_identities_and_compensates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    consumer, _watchdog, ws = _make_consumer()
+    consumer.set_l3_desired(["l3-a", "l3-b"])
+    consumer._l3_committed_set = {"l3-a", "l3-b"}
+    ws.send.side_effect = None
+    monkeypatch.setattr(ws_consumer_module, "_BOOK_EVIDENCE_TIMEOUT_S", 0.01)
+    messages: list[str] = []
+    sink_id = logger.add(lambda message: messages.append(str(message)), level="WARNING")
+    try:
+        task = asyncio.create_task(consumer.request_book_refresh())
+        await _wait_until(lambda: ws.send.await_count == 2)
+        consumer.record_book_evidence(
+            asset_id="l3-a",
+            generation=consumer._connection_generation,
+            book_levels_succeeded=True,
+            observed_at=datetime(2026, 7, 23, tzinfo=UTC),
+        )
+        assert await asyncio.wait_for(task, timeout=0.2) is False
+    finally:
+        logger.remove(sink_id)
+
+    ws.close.assert_awaited_once()
+    assert consumer._book_evidence_waiters == {}
+    assert any("missing_assets=['l3-b']" in message for message in messages)
 
 
 @pytest.mark.asyncio
@@ -153,12 +303,13 @@ async def test_run_quiet_refresh_sends_once_then_stops_cleanly() -> None:
 
     async def _send_then_stop(_payload: str) -> None:
         if json.loads(_payload).get("operation") == "subscribe":
-            consumer.record_book_evidence(
-                asset_id="candidate-a",
-                generation=consumer._connection_generation,
-                book_levels_succeeded=True,
-                observed_at=datetime(2026, 7, 23, tzinfo=UTC),
-            )
+            for asset_id in ("candidate-b", "l3-c"):
+                consumer.record_book_evidence(
+                    asset_id=asset_id,
+                    generation=consumer._connection_generation,
+                    book_levels_succeeded=True,
+                    observed_at=datetime(2026, 7, 23, tzinfo=UTC),
+                )
             stop_event.set()
 
     ws.send.side_effect = _send_then_stop

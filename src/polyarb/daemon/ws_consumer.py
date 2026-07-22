@@ -24,7 +24,8 @@ import time
 import warnings
 from collections import deque
 from collections.abc import Callable, Iterable
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from loguru import logger
@@ -39,11 +40,19 @@ from polyarb.clients.ws_market_client import (
     stream_market_events,
 )
 from polyarb.daemon.ws_watchdog import WsWatchdog
-from polyarb.observation.l3_evidence import WsMembershipSnapshot
+from polyarb.observation.l3_evidence import FrameDispatchResult, WsMembershipSnapshot
 
 _QUIET_REFRESH_SEND_TIMEOUT_S: float = 5.0
 _BOOK_EVIDENCE_TIMEOUT_S: float = 5.0
 _COMPENSATED_GENERATIONS_MAX: int = 128
+
+
+@dataclass(eq=False)
+class _BookEvidenceWaiter:
+    """One refresh barrier isolated to a captured connection generation."""
+
+    future: asyncio.Future[bool]
+    missing: set[str] = field(default_factory=set)
 
 # ── Phase 03.1-06 D-04 / Phase 04.1 G-03: POLYARB_WS_TEST_KILL chaos primitive ─
 #
@@ -132,7 +141,7 @@ class WsConsumer:
         *,
         settings: Any,
         watchdog: WsWatchdog,
-        on_event: Callable[[dict], None],
+        on_event: Callable[[dict], FrameDispatchResult],
         initial_assets: list[str] | None = None,
         membership_observer: Callable[[WsMembershipSnapshot], None] | None = None,
         event_recorder: Callable[..., None] | None = None,
@@ -173,7 +182,7 @@ class WsConsumer:
         self._current_ws: Any = None
         self._subscription_control_lock = asyncio.Lock()
         self._connection_generation = 0
-        self._book_evidence_waiters: dict[tuple[int, str], set[asyncio.Future[bool]]] = {}
+        self._book_evidence_waiters: dict[int, list[_BookEvidenceWaiter]] = {}
         self._compensated_generations: set[int] = set()
         self._compensated_generation_order: deque[int] = deque()
         # Wire the liveness closure into the watchdog so it uses it for the gate.
@@ -204,6 +213,28 @@ class WsConsumer:
     def _clear_l3_connection_state_locked(self) -> None:
         self._l3_committed_set.clear()
         self._l3_business_evidence.clear()
+
+    def _fail_book_evidence_waiters_locked(self, generation: int) -> None:
+        """Fail every barrier captured from one invalidated generation."""
+        for waiter in tuple(self._book_evidence_waiters.get(generation, ())):
+            if not waiter.future.done():
+                waiter.future.set_result(False)
+
+    def _discard_book_evidence_waiter(
+        self,
+        generation: int,
+        waiter: _BookEvidenceWaiter,
+    ) -> None:
+        """Remove one waiter without touching barriers from other generations."""
+        waiters = self._book_evidence_waiters.get(generation)
+        if waiters is None:
+            return
+        try:
+            waiters.remove(waiter)
+        except ValueError:
+            return
+        if not waiters:
+            self._book_evidence_waiters.pop(generation, None)
 
     def set_l3_desired(self, asset_ids: Iterable[str]) -> None:
         """Replace reconnect intent without claiming current control success."""
@@ -254,6 +285,7 @@ class WsConsumer:
         try:
             async with self._subscription_control_lock:
                 generation = self._connection_generation + 1
+                self._fail_book_evidence_waiters_locked(self._connection_generation)
                 self._connection_generation = generation
                 self._clear_l3_connection_state_locked()
                 self._publish_l3_membership_locked()
@@ -297,6 +329,7 @@ class WsConsumer:
         """Clear only the disconnected generation's published socket."""
         async with self._subscription_control_lock:
             if self._current_ws is ws:
+                self._fail_book_evidence_waiters_locked(self._connection_generation)
                 self._current_ws = None
                 self._clear_l3_connection_state_locked()
             self._publish_l3_membership_locked()
@@ -314,6 +347,7 @@ class WsConsumer:
             self._compensated_generations.add(generation)
             self._compensated_generation_order.append(generation)
             if generation == self._connection_generation:
+                self._fail_book_evidence_waiters_locked(generation)
                 if self._current_ws is ws:
                     self._current_ws = None
                 self._clear_l3_connection_state_locked()
@@ -347,15 +381,20 @@ class WsConsumer:
         """Accept only current-generation depth evidence for committed tokens."""
         if not book_levels_succeeded or generation != self._connection_generation:
             return
+        accepted = True
         if asset_id in self._l3_committed_set:
             previous = self._l3_business_evidence.get(asset_id)
             if previous is not None and observed_at < previous[1]:
-                return
-            self._l3_business_evidence[asset_id] = (generation, observed_at)
-            self._publish_l3_membership_locked()
-        for future in tuple(self._book_evidence_waiters.get((generation, asset_id), set())):
-            if not future.done():
-                future.set_result(True)
+                accepted = False
+            else:
+                self._l3_business_evidence[asset_id] = (generation, observed_at)
+                self._publish_l3_membership_locked()
+        if not accepted:
+            return
+        for waiter in tuple(self._book_evidence_waiters.get(generation, ())):
+            waiter.missing.discard(asset_id)
+            if not waiter.missing and not waiter.future.done():
+                waiter.future.set_result(True)
 
     async def _send_single_control_transaction(
         self,
@@ -445,29 +484,40 @@ class WsConsumer:
         """
         return sorted(self._candidate_set | self._l3_desired_set)
 
-    async def request_book_refresh(self) -> bool:
+    async def request_book_refresh(
+        self,
+        *,
+        required_asset_ids: frozenset[str] | None = None,
+    ) -> bool:
         """Request an initial book dump for the current active asset union.
 
         Sending a request is transport activity, not business-data freshness:
         this method intentionally leaves candidate/L3 state, event timestamps,
         and the watchdog untouched. Only the receive path may advance them.
         """
-        waiter: asyncio.Future[bool] | None = None
+        waiter: _BookEvidenceWaiter | None = None
         ws: Any = None
         generation = 0
         active_assets: list[str] = []
+        required_assets: frozenset[str] = frozenset()
         try:
             async with self._subscription_control_lock:
                 active_assets = self._compute_active_assets()
+                if required_asset_ids is not None:
+                    required_assets = frozenset(required_asset_ids)
+                elif self._l3_desired_set:
+                    required_assets = frozenset(self._l3_desired_set)
+                else:
+                    required_assets = frozenset(active_assets)
                 ws = self._current_ws
                 generation = self._connection_generation
-                if not active_assets or ws is None:
+                if not active_assets or not required_assets or ws is None:
                     return False
-                waiter = asyncio.get_running_loop().create_future()
-                for asset_id in active_assets:
-                    self._book_evidence_waiters.setdefault((generation, asset_id), set()).add(
-                        waiter
-                    )
+                waiter = _BookEvidenceWaiter(
+                    future=asyncio.get_running_loop().create_future(),
+                    missing=set(required_assets),
+                )
+                self._book_evidence_waiters.setdefault(generation, []).append(waiter)
                 logger.info(f"ws quiet refresh: sending assets={len(active_assets)}")
                 if not await self._send_control(
                     ws,
@@ -485,27 +535,34 @@ class WsConsumer:
                     },
                 ):
                     raise RuntimeError("quiet subscribe failed")
+                if self._current_ws is not ws or self._connection_generation != generation:
+                    raise RuntimeError("connection identity changed during refresh")
             assert waiter is not None
-            await asyncio.wait_for(asyncio.shield(waiter), timeout=_BOOK_EVIDENCE_TIMEOUT_S)
-            logger.info(f"ws quiet refresh: evidenced assets={len(active_assets)}")
+            completed = await asyncio.wait_for(
+                asyncio.shield(waiter.future), timeout=_BOOK_EVIDENCE_TIMEOUT_S
+            )
+            if not completed:
+                raise RuntimeError("refresh generation invalidated")
+            logger.info(f"ws quiet refresh: evidenced assets={len(required_assets)}")
             return True
         except asyncio.CancelledError:
             if ws is not None:
                 await self._compensate_generation(ws, generation)
             raise
         except Exception as e:  # noqa: BLE001 — ambiguity requires reconnect
-            logger.warning(f"ws quiet refresh failed assets={len(active_assets)} error={e!r}")
+            missing_assets = (
+                sorted(waiter.missing) if waiter is not None else sorted(required_assets)
+            )
+            logger.warning(
+                "ws quiet refresh failed "
+                f"assets={len(active_assets)} missing_assets={missing_assets} error={e!r}"
+            )
             if ws is not None:
                 await self._compensate_generation(ws, generation)
             return False
         finally:
             if waiter is not None:
-                for asset_id in active_assets:
-                    waiters = self._book_evidence_waiters.get((generation, asset_id))
-                    if waiters is not None:
-                        waiters.discard(waiter)
-                        if not waiters:
-                            self._book_evidence_waiters.pop((generation, asset_id), None)
+                self._discard_book_evidence_waiter(generation, waiter)
 
     async def refresh_if_quiet(
         self,
@@ -768,13 +825,17 @@ class WsConsumer:
                 self._watchdog.touch()
                 # Dispatch to placeholder/mirror; isolated failure must NOT crash loop
                 try:
-                    mirror_succeeded = self._on_event(event)
-                    if event.get("event_type") == "book":
+                    dispatch_result = self._on_event(event)
+                    if (
+                        event.get("event_type") == "book"
+                        and isinstance(dispatch_result, FrameDispatchResult)
+                        and dispatch_result.observed_at is not None
+                    ):
                         self.record_book_evidence(
                             asset_id=str(event.get("asset_id") or ""),
                             generation=self._connection_generation,
-                            book_levels_succeeded=mirror_succeeded is True,
-                            observed_at=datetime.now(UTC),
+                            book_levels_succeeded=dispatch_result.book_levels_written,
+                            observed_at=dispatch_result.observed_at,
                         )
                 except Exception as e:  # noqa: BLE001
                     # Phase 04 Plan 04 D-06 indicator 1: count the drop so the
@@ -802,6 +863,7 @@ class WsConsumer:
             # unexpected exceptions must never leave a stale live socket or
             # current-generation membership behind.
             self._state = "DISCONNECTED"
+            self._fail_book_evidence_waiters_locked(self._connection_generation)
             self._current_ws = None  # GAP-401: clear stash on disconnect
             self._clear_l3_connection_state_locked()
             self._publish_l3_membership_locked()

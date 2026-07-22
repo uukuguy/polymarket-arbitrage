@@ -574,6 +574,20 @@ class WsMembershipSnapshot:
 
 
 @dataclass(frozen=True)
+class FrameDispatchResult:
+    """Durable write outcomes for one production WebSocket frame."""
+
+    tob_written: bool
+    book_levels_written: bool
+    observed_at: datetime | None
+
+    def __post_init__(self) -> None:
+        _require_bool("tob_written", self.tob_written)
+        _require_bool("book_levels_written", self.book_levels_written)
+        _require_utc("observed_at", self.observed_at)
+
+
+@dataclass(frozen=True)
 class EvidenceStatus:
     identity: RuntimeIdentity
     boot_id: UUID

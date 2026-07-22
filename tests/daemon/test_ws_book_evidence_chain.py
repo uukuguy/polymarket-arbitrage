@@ -13,22 +13,40 @@ from polyarb.daemon.ws_consumer import WsConsumer
 from polyarb.daemon.ws_watchdog import WsWatchdog
 
 
+@pytest.fixture(autouse=True)
+def _l3_active_asset() -> None:
+    from polyarb.observation import l3_promote
+
+    prior = set(l3_promote._l3_active_set)
+    l3_promote._l3_active_set = {"asset-a"}
+    try:
+        yield
+    finally:
+        l3_promote._l3_active_set = prior
+
+
 async def _wait_until(predicate, *, timeout: float = 0.2) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():
             await asyncio.sleep(0)
 
 
-def _consumer(mirror_succeeded: bool) -> tuple[WsConsumer, MagicMock, MagicMock]:
+def _consumer(
+    *,
+    tob_written: bool,
+    book_levels_written: bool,
+) -> tuple[WsConsumer, MagicMock, MagicMock]:
     mirror = MagicMock()
-    mirror.push_top_of_book.return_value = mirror_succeeded
-    mirror.push_book_levels.return_value = True
+    mirror.push_top_of_book.return_value = tob_written
+    mirror.push_book_levels.return_value = book_levels_written
     consumer = WsConsumer(
         settings=MagicMock(),
         watchdog=WsWatchdog(stale_s=30),
         on_event=make_l2_event_handler(mirror),
         initial_assets=["asset-a"],
     )
+    consumer.set_l3_desired(["asset-a"])
+    consumer._l3_committed_set = {"asset-a"}
     ws = MagicMock()
     ws.send = AsyncMock(return_value=None)
     ws.close = AsyncMock(return_value=None)
@@ -41,7 +59,7 @@ def _consumer(mirror_succeeded: bool) -> tuple[WsConsumer, MagicMock, MagicMock]
 async def test_real_production_mirror_success_resolves_receive_path_waiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    consumer, mirror, ws = _consumer(True)
+    consumer, mirror, ws = _consumer(tob_written=True, book_levels_written=True)
 
     async def _stream(*args, **kwargs):
         yield {
@@ -63,10 +81,10 @@ async def test_real_production_mirror_success_resolves_receive_path_waiter(
 
 
 @pytest.mark.asyncio
-async def test_real_production_mirror_false_does_not_resolve_and_cleans_waiter(
+async def test_tob_true_depth_false_does_not_resolve_and_cleans_waiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    consumer, mirror, ws = _consumer(False)
+    consumer, mirror, ws = _consumer(tob_written=True, book_levels_written=False)
     monkeypatch.setattr(ws_consumer_module, "_BOOK_EVIDENCE_TIMEOUT_S", 0.01)
 
     async def _stream(*args, **kwargs):
@@ -85,5 +103,6 @@ async def test_real_production_mirror_false_does_not_resolve_and_cleans_waiter(
 
     assert await asyncio.wait_for(quiet, timeout=0.2) is False
     mirror.push_top_of_book.assert_called_once()
+    mirror.push_book_levels.assert_called_once()
     ws.close.assert_awaited_once()
     assert consumer._book_evidence_waiters == {}

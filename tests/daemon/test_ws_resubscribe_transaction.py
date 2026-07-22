@@ -75,6 +75,14 @@ async def test_quiet_refresh_requires_exact_pair_and_matching_mirror_evidence() 
         book_levels_succeeded=True,
         observed_at=observed_at,
     )
+    await asyncio.sleep(0)
+    assert task.done() is False
+    consumer.record_book_evidence(
+        asset_id="b",
+        generation=7,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
     assert await task is True
 
 
@@ -157,6 +165,12 @@ async def test_control_lock_prevents_candidate_pair_interleaving_with_refresh() 
     await _wait_until(lambda: ws.send.await_count >= 2)
     consumer.record_book_evidence(
         asset_id="a",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=True,
+        observed_at=datetime(2026, 7, 23, tzinfo=UTC),
+    )
+    consumer.record_book_evidence(
+        asset_id="b",
         generation=consumer._connection_generation,
         book_levels_succeeded=True,
         observed_at=datetime(2026, 7, 23, tzinfo=UTC),
