@@ -230,7 +230,7 @@ async def _await_boot_or_daemon_exit(
         return_when=asyncio.FIRST_COMPLETED,
     )
     if stop_event.is_set():
-        return (boot_task.result() if boot_task in done else False), True
+        return False, True
     if boot_task in done:
         persisted = boot_task.result()
         if server_task.done():

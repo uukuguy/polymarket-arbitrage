@@ -721,6 +721,63 @@ async def test_bound_server_failure_during_boot_cancels_and_reaps_boot_task():
 
 
 @pytest.mark.asyncio
+async def test_boot_failure_same_tick_as_signal_prefers_clean_stop_and_reaps_warning():
+    """Signal wins a same-tick boot failure; drain still retrieves the error."""
+    from polyarb.daemon import l2_main
+
+    release = asyncio.Event()
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    exception_contexts: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: exception_contexts.append(context))
+
+    async def _boot():
+        await release.wait()
+        raise RuntimeError("boot failed at signal boundary")
+
+    async def _signal():
+        await release.wait()
+        stop_event.set()
+
+    async def _server():
+        await stop_event.wait()
+
+    boot_task = asyncio.create_task(_boot(), name="l3-boot-append")
+    stop_wait_task = asyncio.create_task(stop_event.wait(), name="l2-stop-wait")
+    server_task = asyncio.create_task(_server(), name="l2-http-server")
+    signal_task = asyncio.create_task(_signal())
+    release.set()
+    await signal_task
+    while not (boot_task.done() and stop_wait_task.done() and server_task.done()):
+        await asyncio.sleep(0)
+
+    try:
+        assert await l2_main._await_boot_or_daemon_exit(
+            boot_task=boot_task,
+            server_task=server_task,
+            stop_wait_task=stop_wait_task,
+            stop_event=stop_event,
+        ) == (False, True)
+    finally:
+        await l2_main._drain_daemon_tasks(
+            server_task=server_task,
+            event_writer_task=None,
+            peer_tasks=(boot_task, stop_wait_task),
+            normal_shutdown=True,
+            timeout_s=0.05,
+        )
+        await asyncio.sleep(0)
+        loop.set_exception_handler(previous_handler)
+
+    assert not [
+        context
+        for context in exception_contexts
+        if "exception was never retrieved" in str(context.get("message", "")).lower()
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("server_outcome", ["clean", "exception"])
 async def test_bound_server_steady_exit_aborts_and_reaps_all_tasks(server_outcome):
     """A server exit before stop supervises every WS/PG/evidence peer."""
