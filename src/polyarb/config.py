@@ -114,8 +114,8 @@ class Settings(BaseSettings):
     l2_runtime_db_dsn: SecretStr = Field(
         default=SecretStr(""),
         description=(
-            "Future least-privileged L2 evidence daemon LOGIN DSN; provisioning "
-            "and runtime wiring are deferred to separately gated Phase 05.4 Plans 02/05"
+            "Least-privileged L2 daemon LOGIN DSN for direct PostgreSQL access; "
+            "production provisioning remains gated by Phase 05.4 Plan 05"
         ),
     )
     supabase_service_key: SecretStr = Field(default=SecretStr(""))

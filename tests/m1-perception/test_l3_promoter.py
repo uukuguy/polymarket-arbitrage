@@ -23,7 +23,7 @@ import inspect
 import os
 import time
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -2115,37 +2115,107 @@ async def test_mutation_mode_requires_runtime_and_store_before_remote_effects() 
 
 
 @pytest.mark.asyncio
-async def test_run_periodic_calls_promote_run_until_stop_event() -> None:
+async def test_run_periodic_uses_boot_grid_and_contiguous_sequences_when_late() -> None:
     from polyarb.observation import l3_promote
 
     settings = _make_settings()
+    settings.l3_promote_interval_s = 300
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
     stop_event = asyncio.Event()
     mock_consumer = MagicMock()
-    mock_consumer.add_subscriptions = AsyncMock(return_value=True)
-    mock_consumer.remove_subscriptions = AsyncMock(return_value=True)
+    calls: list[dict[str, Any]] = []
 
-    call_count = {"n": 0}
-
-    async def _fake_promote(**_kw: Any) -> dict:
-        call_count["n"] += 1
+    async def _fake_promote(**kwargs: Any) -> dict:
+        calls.append(kwargs)
+        if len(calls) == 3:
+            stop_event.set()
         return {"added": [], "removed": []}
 
-    with patch.object(l3_promote, "promote_run", side_effect=_fake_promote):
-        task = asyncio.create_task(
+    boot_started_at = runtime.snapshot().started_at
+    with (
+        patch.object(l3_promote, "promote_run", side_effect=_fake_promote),
+        patch.object(
+            l3_promote,
+            "_utc_now",
+            return_value=boot_started_at + timedelta(seconds=1_000),
+        ),
+    ):
+        await asyncio.wait_for(
             l3_promote.run_periodic(
                 stop_event=stop_event,
                 settings=settings,
                 ws_consumer=mock_consumer,
                 recipe_yaml_path=RECIPE_PATH,
-                interval_s=0.05,
+                evidence_store=store,
+                evidence_runtime=runtime,
+            ),
+            timeout=2.0,
+        )
+
+    assert [call["run_seq"] for call in calls] == [0, 1, 2]
+    assert [call["scheduled_at"] for call in calls] == [
+        boot_started_at,
+        boot_started_at + timedelta(seconds=300),
+        boot_started_at + timedelta(seconds=600),
+    ]
+    assert all(call["evidence_store"] is store for call in calls)
+    assert all(call["evidence_runtime"] is runtime for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_run_periodic_cancellation_during_future_grid_wait_is_prompt() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    stop_event = asyncio.Event()
+    boot_started_at = runtime.snapshot().started_at
+
+    with patch.object(
+        l3_promote,
+        "_utc_now",
+        return_value=boot_started_at - timedelta(hours=1),
+    ):
+        task = asyncio.create_task(
+            l3_promote.run_periodic(
+                stop_event=stop_event,
+                settings=settings,
+                ws_consumer=MagicMock(),
+                recipe_yaml_path=RECIPE_PATH,
+                evidence_store=store,
+                evidence_runtime=runtime,
             )
         )
-        # Let the loop run ~3 cycles.
-        await asyncio.sleep(0.17)
-        stop_event.set()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.2)
 
-    assert call_count["n"] >= 2, f"expected ≥2 promote_run invocations, got {call_count['n']}"
+
+@pytest.mark.asyncio
+async def test_promote_record_preserves_scheduled_to_start_delay() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings(supabase_url="", service_key="")
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    scheduled_at = datetime.now(UTC) - timedelta(seconds=7)
+
+    await l3_promote.promote_run(
+        settings=settings,
+        ws_consumer=_truthful_consumer(),
+        recipe_yaml_path=RECIPE_PATH,
+        evidence_store=store,
+        evidence_runtime=runtime,
+        run_seq=0,
+        scheduled_at=scheduled_at,
+    )
+
+    assert len(store.records) == 1
+    assert store.records[0].scheduled_at == scheduled_at
+    assert store.records[0].started_at >= scheduled_at + timedelta(seconds=7)
 
 
 # ────────────────────────────────────────────────────────────────────────

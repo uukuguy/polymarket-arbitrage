@@ -46,7 +46,9 @@ import os
 import signal
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import sentry_sdk
@@ -68,9 +70,98 @@ from polyarb.http.l2_app import create_l2_app
 from polyarb.observability.logging import init_logging
 from polyarb.observability.sentry import init_sentry
 from polyarb.observation.l2_candidate_refresh import on_snapshot_complete
-from polyarb.observation.l3_evidence import FrameDispatchResult
+from polyarb.observation.l3_evidence import (
+    AcceptanceConfig,
+    FrameDispatchResult,
+    L3EvidenceRuntime,
+    RuntimeBootRecord,
+    RuntimeIdentity,
+)
 from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
+from polyarb.storage.l3_evidence_store import L3EvidenceStore
 from polyarb.storage.sqlite_store import SQLiteStore
+
+_L3_RECIPE_PATH = Path(__file__).resolve().parents[1] / "scan_recipes" / "l3-promote.yaml"
+
+
+@dataclass(frozen=True, slots=True)
+class _L3EvidenceDependencies:
+    """One immutable dependency graph shared by boot, WS, and promoter."""
+
+    acceptance_config: AcceptanceConfig
+    identity: RuntimeIdentity
+    runtime: L3EvidenceRuntime
+    boot: RuntimeBootRecord
+    store: L3EvidenceStore
+    runtime_dsn: str = field(repr=False)
+
+
+def _build_l3_evidence_dependencies(
+    *,
+    settings: Any,
+    recipe_yaml_path: Path,
+    started_at: datetime | None = None,
+) -> _L3EvidenceDependencies:
+    """Construct L3 evidence dependencies without network or database I/O."""
+    import polyarb
+
+    effective_started_at = datetime.now(UTC) if started_at is None else started_at
+    acceptance = AcceptanceConfig.from_settings(
+        settings,
+        recipe_yaml_path,
+        code_version=polyarb.__version__,
+    )
+    identity = RuntimeIdentity(
+        machine_id=os.environ.get("FLY_MACHINE_ID", "local"),
+        machine_version=os.environ.get("FLY_MACHINE_VERSION", "local"),
+        image_ref=os.environ.get("FLY_IMAGE_REF", "local"),
+        release_id=settings.release_id,
+        code_version=polyarb.__version__,
+        recipe_sha256=acceptance.recipe_sha256,
+        acceptance_config_hash=acceptance.digest(),
+    )
+    runtime = L3EvidenceRuntime(identity, started_at=effective_started_at)
+    status = runtime.snapshot()
+    boot = RuntimeBootRecord(
+        boot_id=status.boot_id,
+        started_at=status.started_at,
+        machine_id=identity.machine_id,
+        machine_version=identity.machine_version,
+        image_ref=identity.image_ref,
+        release_id=identity.release_id,
+        code_version=identity.code_version,
+        acceptance_config_hash=identity.acceptance_config_hash,
+    )
+    runtime_dsn = settings.l2_runtime_db_dsn.get_secret_value()
+    return _L3EvidenceDependencies(
+        acceptance_config=acceptance,
+        identity=identity,
+        runtime=runtime,
+        boot=boot,
+        store=L3EvidenceStore(runtime_dsn),
+        runtime_dsn=runtime_dsn,
+    )
+
+
+async def _append_l3_boot(dependencies: _L3EvidenceDependencies) -> bool:
+    """Append boot once and expose failure in runtime without blocking HTTP."""
+    persisted = False
+    if dependencies.runtime_dsn:
+        try:
+            persisted = await dependencies.store.append_boot(dependencies.boot)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - custom stores may raise
+            logger.warning("l3 evidence boot append raised error_type={}", type(exc).__name__)
+    at = datetime.now(UTC)
+    dependencies.runtime.note_writer_result(
+        persisted,
+        at,
+        "ok" if persisted else "boot_append_failed",
+    )
+    if not persisted:
+        logger.warning("l3 evidence boot not persisted; promoter remains disabled")
+    return persisted
 
 # ── Plan 06 D-07: WS frame → l2_* row builders ───────────────────────────
 # Polymarket WS market-channel event shapes (empirical):
@@ -385,6 +476,14 @@ async def main() -> int:
 
     logger.info("polyarb-l2 daemon starting up")
 
+    # Construct one immutable evidence identity before any daemon-owned task.
+    # This is deliberately side-effect-free: the HTTP server binds before the
+    # role-preflighted boot append can touch PostgreSQL.
+    l3_evidence = _build_l3_evidence_dependencies(
+        settings=settings,
+        recipe_yaml_path=_L3_RECIPE_PATH,
+    )
+
     # Phase 03.1-06 D-04: loud warning if chaos kill flag is set at startup.
     # Makes accidental prod-set immediately visible in flyctl logs. Paired with
     # the chaos:ws_test_kill_flag sub-check in /health (l2_health.py) for
@@ -449,13 +548,14 @@ async def main() -> int:
         watchdog=watchdog,
         on_event=_on_event,
         initial_assets=_bootstrap_ids,
+        membership_observer=l3_evidence.runtime.update_membership,
     )
 
     # Phase 05.1: NOTIFY is only a doorbell. One durable pump owns refresh and
     # cursor advancement; its initial wake replaces catch-up fan-out + sentinel
     # prime, and its timer keeps working while LISTEN is disconnected.
     reconciliation_state = ReconciliationState()
-    dsn = settings.supabase_db_dsn.get_secret_value()
+    dsn = l3_evidence.runtime_dsn
 
     async def _refresh_latest(payload: dict) -> bool:
         return await on_snapshot_complete(
@@ -481,6 +581,10 @@ async def main() -> int:
         ws_consumer=ws_consumer,
         event_listener=reconciliation_state,
     )
+    # Plan 03 will render strict public evidence checks.  Stashing the exact
+    # runtime now makes failed/cold-start truth available without inventing a
+    # second health identity in that later plan.
+    app.state.l3_evidence_runtime = l3_evidence.runtime
 
     config = uvicorn.Config(
         app,
@@ -521,6 +625,10 @@ async def main() -> int:
         f"variant={getattr(settings, 'daemon_variant', 'unknown')}"
     )
 
+    # HTTP is now reachable.  The role-preflighted boot append may fail soft,
+    # but a failed boot can never launch a counterfeit evidence scheduler.
+    l3_boot_persisted = await _append_l3_boot(l3_evidence)
+
     # Plan 04 wiring — watchdog + consumer tasks alongside server_task.
     # Phase 05.1 — event listener and durable reconciliation remain independent.
     watchdog_task = asyncio.create_task(watchdog.watch(stop_event))
@@ -534,7 +642,7 @@ async def main() -> int:
     async def _listener_runner() -> None:
         """Run LISTEN independently; termination state is updated by listener."""
         if not dsn:
-            logger.warning("event listener: supabase_db_dsn not set; idling until shutdown")
+            logger.warning("event listener: l2_runtime_db_dsn not set; idling until shutdown")
             await stop_event.wait()
             return
         await listen_snapshot_complete(
@@ -556,23 +664,21 @@ async def main() -> int:
     #
     # Raw asyncio.wait_for(stop_event.wait()) loop — no scheduler dep added
     # (cross-pattern decision #4; matches ws_consumer.run idle-wait pattern).
-    from pathlib import Path as _Path
-
     from polyarb.observation import l3_promote as l3_promote_module
 
-    # Recipe path: src/polyarb/scan_recipes/l3-promote.yaml (source-controlled
-    # yaml, 3rd recipe trust tier — see scanner.py docstring).
-    _l3_recipe_path = _Path(__file__).resolve().parents[1] / "scan_recipes" / "l3-promote.yaml"
-    l3_promoter_task = asyncio.create_task(
-        l3_promote_module.run_periodic(
-            stop_event=stop_event,
-            settings=settings,
-            ws_consumer=ws_consumer,
-            recipe_yaml_path=_l3_recipe_path,
-            interval_s=300.0,
-        ),
-        name="l3-promoter",
-    )
+    l3_promoter_task: asyncio.Task[None] | None = None
+    if l3_boot_persisted:
+        l3_promoter_task = asyncio.create_task(
+            l3_promote_module.run_periodic(
+                stop_event=stop_event,
+                settings=settings,
+                ws_consumer=ws_consumer,
+                recipe_yaml_path=_L3_RECIPE_PATH,
+                evidence_store=l3_evidence.store,
+                evidence_runtime=l3_evidence.runtime,
+            ),
+            name="l3-promoter",
+        )
 
     try:
         await stop_event.wait()
@@ -591,17 +697,20 @@ async def main() -> int:
         quiet_refresh_task.cancel()
         listener_task.cancel()
         pump_task.cancel()
-        l3_promoter_task.cancel()
+        if l3_promoter_task is not None:
+            l3_promoter_task.cancel()
         # F-04 bounded shutdown — even if any task ignores cancel, exit within 5s each
-        for task, name in (
+        shutdown_tasks = [
             (server_task, "server"),
             (watchdog_task, "watchdog"),
             (consumer_task, "consumer"),
             (quiet_refresh_task, "ws-quiet-refresh"),
             (listener_task, "listener"),
             (pump_task, "reconciliation-pump"),
-            (l3_promoter_task, "l3-promoter"),
-        ):
+        ]
+        if l3_promoter_task is not None:
+            shutdown_tasks.append((l3_promoter_task, "l3-promoter"))
+        for task, name in shutdown_tasks:
             try:
                 await asyncio.wait_for(task, timeout=5.0)
             except TimeoutError:

@@ -53,7 +53,7 @@ import sqlite3
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +90,11 @@ _last_known_market_token_map: dict[str, tuple[str | None, str | None]] | None = 
 _last_mirrored_market_ids: frozenset[str] = frozenset()
 _MAX_TOKEN_MAP_CACHE = 1010  # 1000 fetched rows + exact current L3 identities
 _MIRROR_RECONCILE_BATCH_SIZE = 100
+
+
+def _utc_now() -> datetime:
+    """Return the scheduler clock in UTC through one testable boundary."""
+    return datetime.now(UTC)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -1055,40 +1060,50 @@ async def run_periodic(
     settings: Any,
     ws_consumer: Any,
     recipe_yaml_path: Path,
-    interval_s: float = 300.0,
+    evidence_store: L3EvidenceStore,
+    evidence_runtime: L3EvidenceRuntime,
 ) -> None:
-    """5-min cron loop matching ws_consumer.run wait_for pattern.
+    """Run one promoter tick per boot-anchored schedule sequence.
 
-    Per orchestrator cross-pattern decision #4: no scheduler dep is added
-    here (not in pyproject); use raw
-    ``asyncio.wait_for(stop_event.wait(), timeout=...)`` instead — same
-    pattern as ws_consumer.run's idle-wait loop.
+    The grid is derived from immutable boot truth, never from the prior run's
+    finish time.  A late/slow run therefore makes the next contiguous sequence
+    immediately eligible instead of silently skipping it or accumulating drift.
     """
-    logger.info(f"l3-promote: run_periodic started (interval={interval_s}s)")
-    # Run once immediately so /health gets a fresh anchor without waiting
-    # the full cron interval.
-    try:
-        await promote_run(
-            settings=settings,
-            ws_consumer=ws_consumer,
-            recipe_yaml_path=recipe_yaml_path,
-        )
-    except Exception as e:  # noqa: BLE001 — defense-in-depth
-        logger.error(f"l3-promote initial run failed: {e!r}")
-
+    interval_s = settings.l3_promote_interval_s
+    if isinstance(interval_s, bool) or not isinstance(interval_s, (int, float)):
+        raise TypeError("l3_promote_interval_s must be numeric")
+    if interval_s <= 0:
+        raise ValueError("l3_promote_interval_s must be positive")
+    boot_started_at = evidence_runtime.snapshot().started_at
+    logger.info("l3-promote: run_periodic started interval_s={}", interval_s)
     while not stop_event.is_set():
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
-            # stop_event signalled — exit cleanly.
+        run_seq = evidence_runtime.next_run_seq()
+        scheduled_at = boot_started_at + timedelta(seconds=run_seq * interval_s)
+        delay_s = max(0.0, (scheduled_at - _utc_now()).total_seconds())
+        if delay_s > 0:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay_s)
+                break
+            except TimeoutError:
+                pass
+        if stop_event.is_set():
             break
-        except TimeoutError:
-            pass  # interval elapsed — run another tick
         try:
             await promote_run(
                 settings=settings,
                 ws_consumer=ws_consumer,
                 recipe_yaml_path=recipe_yaml_path,
+                evidence_store=evidence_store,
+                evidence_runtime=evidence_runtime,
+                scheduled_at=scheduled_at,
+                run_seq=run_seq,
             )
-        except Exception as e:  # noqa: BLE001 — defense-in-depth
-            logger.error(f"l3-promote tick failed: {e!r}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — terminalizer is defense-in-depth
+            logger.error(
+                "l3-promote tick raised run_seq={} error_type={}",
+                run_seq,
+                type(exc).__name__,
+            )
     logger.info("l3-promote: run_periodic stopped")
