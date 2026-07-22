@@ -52,6 +52,219 @@ _MIRROR_FAIL_S_DEFAULT = 600   # default fail threshold (override via settings.l
 _CANDIDATES_FETCH_WARN_S = 120
 _CANDIDATES_FETCH_FAIL_S = 600
 
+# Phase 05.4 strict persisted-evidence thresholds.  These are acceptance
+# constants, not operator knobs: a configuration flag must never hide one of
+# the four chain-truth checks.
+_L3_EVIDENCE_SAMPLE_FAIL_S = 75
+_L3_PROMOTER_LEDGER_FAIL_S = 360
+_L3_WORST_MARKET_FAIL_S = 120
+
+
+def _runtime_age_seconds(now: datetime, observed_at: datetime | None) -> float | None:
+    if observed_at is None:
+        return None
+    return (now - observed_at).total_seconds()
+
+
+def _l3_check_entry(
+    *,
+    component_id: str,
+    component_type: str,
+    observed_value: Any,
+    status: str,
+    output: str,
+    observed_unit: str | None = None,
+) -> list[dict[str, Any]]:
+    entry: dict[str, Any] = {
+        "componentId": component_id,
+        "componentType": component_type,
+        "observedValue": observed_value,
+        "status": status,
+        "output": output,
+        "time": _utc_now_iso(),
+    }
+    if observed_unit is not None:
+        entry["observedUnit"] = observed_unit
+    return [entry]
+
+
+def _missing_l3_evidence_checks(*, required: bool, output: str) -> dict[str, list[dict[str, Any]]]:
+    status = "fail" if required else "warn"
+    return {
+        "l3:evidence_sample_age_seconds": _l3_check_entry(
+            component_id="l3-evidence-sampler",
+            component_type="datastore",
+            observed_value=None,
+            observed_unit="s",
+            status=status,
+            output=output,
+        ),
+        "l3:promoter_ledger_age_seconds": _l3_check_entry(
+            component_id="l3-promoter-ledger",
+            component_type="datastore",
+            observed_value=None,
+            observed_unit="s",
+            status=status,
+            output=output,
+        ),
+        "l3:membership_convergence": _l3_check_entry(
+            component_id="l3-ws-membership",
+            component_type="websocket",
+            observed_value="unavailable",
+            status=status,
+            output=output,
+        ),
+        "l3:worst_market_freshness": _l3_check_entry(
+            component_id="l3-market-evidence",
+            component_type="datastore",
+            observed_value=None,
+            observed_unit="s",
+            status=status,
+            output=output,
+        ),
+    }
+
+
+def _build_l3_evidence_checks(
+    runtime_status: Any,
+    *,
+    now_s: float,
+) -> tuple[dict[str, list[dict[str, Any]]], str]:
+    """Render four strict checks from one already-immutable runtime view."""
+    now = datetime.fromtimestamp(now_s, tz=UTC)
+
+    sample_age = _runtime_age_seconds(now, runtime_status.last_sample_persisted_at)
+    sticky_fault = bool(
+        runtime_status.event_integrity_failed
+        or runtime_status.event_queue_overflowed
+    )
+    sample_fresh = (
+        sample_age is not None
+        and 0 <= sample_age < _L3_EVIDENCE_SAMPLE_FAIL_S
+    )
+    sample_status = "pass" if sample_fresh and not sticky_fault else "fail"
+    if sticky_fault:
+        sample_output = runtime_status.reason_code
+    elif sample_age is None:
+        sample_output = "cold-start: no durable evidence sample"
+    elif sample_age < 0:
+        sample_output = "durable evidence sample timestamp is in the future"
+    else:
+        sample_output = (
+            f"last durable sample {sample_age:.1f}s ago "
+            f"(strict <{_L3_EVIDENCE_SAMPLE_FAIL_S}s)"
+        )
+
+    promote_age = _runtime_age_seconds(now, runtime_status.last_promote_persisted_at)
+    promote_fresh = (
+        promote_age is not None
+        and 0 <= promote_age < _L3_PROMOTER_LEDGER_FAIL_S
+    )
+    promote_status = "pass" if promote_fresh else "fail"
+    if promote_age is None:
+        promote_output = "cold-start: no durable promoter ledger row"
+    elif promote_age < 0:
+        promote_output = "durable promoter ledger timestamp is in the future"
+    else:
+        promote_output = (
+            f"last durable promoter row {promote_age:.1f}s ago "
+            f"(strict <{_L3_PROMOTER_LEDGER_FAIL_S}s)"
+        )
+
+    market_samples = tuple(runtime_status.last_market_samples)
+    market_ids = {sample.market_id for sample in market_samples}
+    yes_tokens = {sample.yes_token_id for sample in market_samples}
+    no_tokens = {sample.no_token_id for sample in market_samples}
+    mapping_tokens = frozenset(yes_tokens | no_tokens)
+    mapping_complete = (
+        len(market_samples) == 5
+        and len(market_ids) == 5
+        and len(yes_tokens) == 5
+        and len(no_tokens) == 5
+        and len(mapping_tokens) == 10
+    )
+    membership_converged = (
+        mapping_complete
+        and len(runtime_status.desired) == 10
+        and runtime_status.desired == runtime_status.committed == mapping_tokens
+    )
+    membership_status = "pass" if membership_converged else "fail"
+    membership_value = "converged" if membership_converged else "mismatch"
+    membership_output = (
+        f"markets={len(market_ids)}/5 mapping_tokens={len(mapping_tokens)}/10 "
+        f"desired={len(runtime_status.desired)}/10 "
+        f"committed={len(runtime_status.committed)}/10"
+    )
+
+    freshness_ages: list[float] = []
+    freshness_complete = mapping_complete
+    for sample in market_samples:
+        for observed_at in (
+            sample.yes_book_at,
+            sample.no_book_at,
+            sample.yes_ohlc_at,
+        ):
+            age = _runtime_age_seconds(now, observed_at)
+            if age is None or age < 0:
+                freshness_complete = False
+            else:
+                freshness_ages.append(age)
+    worst_freshness = max(freshness_ages) if freshness_ages else None
+    freshness_passed = (
+        freshness_complete
+        and len(freshness_ages) == 15
+        and worst_freshness is not None
+        and worst_freshness < _L3_WORST_MARKET_FAIL_S
+    )
+    freshness_status = "pass" if freshness_passed else "fail"
+    if worst_freshness is None:
+        freshness_output = "no complete persisted five-market freshness sample"
+    else:
+        freshness_output = (
+            f"worst persisted market input {worst_freshness:.1f}s ago "
+            f"across {len(market_ids)}/5 markets (strict <{_L3_WORST_MARKET_FAIL_S}s)"
+        )
+
+    checks = {
+        "l3:evidence_sample_age_seconds": _l3_check_entry(
+            component_id="l3-evidence-sampler",
+            component_type="datastore",
+            observed_value=round(sample_age, 1) if sample_age is not None else None,
+            observed_unit="s",
+            status=sample_status,
+            output=sample_output,
+        ),
+        "l3:promoter_ledger_age_seconds": _l3_check_entry(
+            component_id="l3-promoter-ledger",
+            component_type="datastore",
+            observed_value=round(promote_age, 1) if promote_age is not None else None,
+            observed_unit="s",
+            status=promote_status,
+            output=promote_output,
+        ),
+        "l3:membership_convergence": _l3_check_entry(
+            component_id="l3-ws-membership",
+            component_type="websocket",
+            observed_value=membership_value,
+            status=membership_status,
+            output=membership_output,
+        ),
+        "l3:worst_market_freshness": _l3_check_entry(
+            component_id="l3-market-evidence",
+            component_type="datastore",
+            observed_value=(
+                round(worst_freshness, 1) if worst_freshness is not None else None
+            ),
+            observed_unit="s",
+            status=freshness_status,
+            output=freshness_output,
+        ),
+    }
+    overall = "pass"
+    for entries in checks.values():
+        overall = _severity(overall, entries[0]["status"])
+    return checks, overall
+
 
 def _utc_now_iso() -> str:
     """Current UTC timestamp in ISO 8601 format with Z suffix."""
@@ -70,6 +283,9 @@ def _build_l2_health_checks(
     ws_consumer: Any | None,
     event_listener: Any | None,
     now_s: float,
+    *,
+    evidence_runtime: Any | None = None,
+    evidence_runtime_required: bool = False,
 ) -> tuple[dict[str, list[dict[str, Any]]], str]:
     """Compute all L2 sub-checks and the overall status.
 
@@ -636,6 +852,47 @@ def _build_l2_health_checks(
     }]
     overall = _severity(overall, l3_book_status)
 
+    # ── Phase 05.4: strict persisted-success evidence checks ──────────────
+    # A request consumes exactly one immutable runtime snapshot.  The sampler
+    # and this health path never read WsConsumer membership directly.
+    if evidence_runtime is None:
+        l3_evidence_checks = _missing_l3_evidence_checks(
+            required=evidence_runtime_required,
+            output=(
+                "configured L2 evidence runtime is missing"
+                if evidence_runtime_required
+                else "local boundary fixture has no evidence runtime"
+            ),
+        )
+        evidence_overall = "fail" if evidence_runtime_required else "warn"
+    else:
+        try:
+            runtime_status = evidence_runtime.snapshot()
+        except Exception as exc:  # noqa: BLE001 — public health must fail closed
+            logger.warning(
+                "/health: l3 evidence runtime snapshot failed error_type={}",
+                type(exc).__name__,
+            )
+            l3_evidence_checks = _missing_l3_evidence_checks(
+                required=evidence_runtime_required,
+                output="evidence runtime snapshot unavailable",
+            )
+            evidence_overall = "fail" if evidence_runtime_required else "warn"
+        else:
+            l3_evidence_checks, evidence_overall = _build_l3_evidence_checks(
+                runtime_status,
+                now_s=now_s,
+            )
+    # Preserve every legacy key: a future collision fails visibly in logs and
+    # leaves the established contract untouched.
+    for key, value in l3_evidence_checks.items():
+        if key in checks:  # pragma: no cover - defensive contract guard
+            logger.error("/health: refusing to override legacy check key={}", key)
+            overall = _severity(overall, "fail")
+            continue
+        checks[key] = value
+    overall = _severity(overall, evidence_overall)
+
     return checks, overall
 
 
@@ -670,9 +927,19 @@ async def health(request: Request) -> JSONResponse:
     settings = request.app.state.settings
     ws_consumer = getattr(request.app.state, "ws_consumer", None)
     event_listener = getattr(request.app.state, "event_listener", None)
+    evidence_runtime = getattr(request.app.state, "l3_evidence_runtime", None)
+    evidence_runtime_required = bool(
+        getattr(request.app.state, "l3_evidence_runtime_required", False)
+    )
 
     checks, overall = _build_l2_health_checks(
-        store, settings, ws_consumer, event_listener, time.time()
+        store,
+        settings,
+        ws_consumer,
+        event_listener,
+        time.time(),
+        evidence_runtime=evidence_runtime,
+        evidence_runtime_required=evidence_runtime_required,
     )
     body = _build_l2_health_body(overall, checks, settings)
     http_status = 503 if overall == "fail" else 200
@@ -690,9 +957,19 @@ async def healthz(request: Request) -> JSONResponse:
     settings = request.app.state.settings
     ws_consumer = getattr(request.app.state, "ws_consumer", None)
     event_listener = getattr(request.app.state, "event_listener", None)
+    evidence_runtime = getattr(request.app.state, "l3_evidence_runtime", None)
+    evidence_runtime_required = bool(
+        getattr(request.app.state, "l3_evidence_runtime_required", False)
+    )
 
     checks, overall = _build_l2_health_checks(
-        store, settings, ws_consumer, event_listener, time.time()
+        store,
+        settings,
+        ws_consumer,
+        event_listener,
+        time.time(),
+        evidence_runtime=evidence_runtime,
+        evidence_runtime_required=evidence_runtime_required,
     )
     body = _build_l2_health_body(overall, checks, settings)
     # KEY: ignore overall when deciding HTTP code — always 200 (BUG-6).

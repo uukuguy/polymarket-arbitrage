@@ -624,11 +624,8 @@ async def main() -> int:
         settings=settings,
         ws_consumer=ws_consumer,
         event_listener=reconciliation_state,
+        evidence_runtime=l3_evidence.runtime,
     )
-    # Plan 03 will render strict public evidence checks.  Stashing the exact
-    # runtime now makes failed/cold-start truth available without inventing a
-    # second health identity in that later plan.
-    app.state.l3_evidence_runtime = l3_evidence.runtime
 
     config = uvicorn.Config(
         app,

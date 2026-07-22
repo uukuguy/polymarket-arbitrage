@@ -26,6 +26,8 @@ from polyarb.http.control import ControlAuthMiddleware
 from polyarb.http.l2_control import ws_test_kill_handler
 from polyarb.http.l2_health import health, healthz
 
+_LOCAL_BOUNDARY_RUNTIME = object()
+
 
 def create_l2_app(
     *,
@@ -33,6 +35,7 @@ def create_l2_app(
     settings: Any,
     ws_consumer: Any | None = None,
     event_listener: Any | None = None,
+    evidence_runtime: Any = _LOCAL_BOUNDARY_RUNTIME,
 ) -> Starlette:
     """Build L2 Starlette app — /health + /healthz + /control/chaos/ws-test-kill.
 
@@ -79,4 +82,13 @@ def create_l2_app(
     app.state.settings = settings
     app.state.ws_consumer = ws_consumer
     app.state.event_listener = event_listener
+    # Omission is reserved for explicit local/legacy fixtures and warns.  A
+    # configured L2 caller passes its exact runtime; explicitly passing None is
+    # therefore a fail-closed wiring error rather than an implicit opt-out.
+    app.state.l3_evidence_runtime_required = (
+        evidence_runtime is not _LOCAL_BOUNDARY_RUNTIME
+    )
+    app.state.l3_evidence_runtime = (
+        None if evidence_runtime is _LOCAL_BOUNDARY_RUNTIME else evidence_runtime
+    )
     return app

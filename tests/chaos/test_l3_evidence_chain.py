@@ -14,12 +14,16 @@ from polyarb.daemon import l2_main, ws_watchdog
 from polyarb.daemon.ws_consumer import WsConsumer
 from polyarb.observation import l3_evidence, l3_sampler
 from polyarb.observation.l3_evidence import (
+    HealthStatus,
     L3EvidenceRuntime,
+    PromoteStatus,
     RuntimeEventKind,
     RuntimeEventRecord,
     RuntimeIdentity,
+    WsMembershipSnapshot,
 )
 from polyarb.storage import l3_evidence_store as store_module
+from polyarb.storage.l3_evidence_store import SamplingMarketState
 
 START = datetime(2026, 7, 23, 6, 0, tzinfo=UTC)
 
@@ -44,6 +48,118 @@ def _runtime() -> L3EvidenceRuntime:
         ),
         started_at=START,
     )
+
+
+def _runtime_at(now: datetime) -> L3EvidenceRuntime:
+    runtime = _runtime()
+    return L3EvidenceRuntime(runtime.snapshot().identity, started_at=now - timedelta(minutes=5))
+
+
+def _market_states(
+    sampled_at: datetime,
+    *,
+    stale_markets: frozenset[int] = frozenset(),
+) -> tuple[SamplingMarketState, ...]:
+    return tuple(
+        SamplingMarketState(
+            market_id=f"market-{index}",
+            yes_token_id=f"yes-{index}",
+            no_token_id=f"no-{index}",
+            yes_book_at=sampled_at - timedelta(
+                seconds=121 if index in stale_markets else 5
+            ),
+            no_book_at=sampled_at - timedelta(
+                seconds=122 if index in stale_markets else 6
+            ),
+            yes_ohlc_at=sampled_at - timedelta(
+                seconds=123 if index in stale_markets else 7
+            ),
+        )
+        for index in range(5)
+    )
+
+
+def _tokens(states: tuple[SamplingMarketState, ...]) -> frozenset[str]:
+    return frozenset(
+        token
+        for state in states
+        for token in (state.yes_token_id, state.no_token_id)
+    )
+
+
+def _publish_membership(
+    runtime: L3EvidenceRuntime,
+    states: tuple[SamplingMarketState, ...],
+    *,
+    at: datetime,
+) -> None:
+    tokens = _tokens(states)
+    runtime.update_membership(
+        WsMembershipSnapshot(
+            generation=1,
+            desired=tokens,
+            committed=tokens,
+            evidenced=tokens,
+            evidenced_at={token: at for token in tokens},
+        )
+    )
+
+
+def _sampler_settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        l3_evidence_sample_interval_s=30,
+        l3_market_book_fresh_s=120,
+        l3_market_ohlc_fresh_s=120,
+    )
+
+
+def _reconciliation_state(now: datetime) -> SimpleNamespace:
+    return SimpleNamespace(
+        is_connected=True,
+        reconnect_count=0,
+        cursor_lag=0,
+        last_reconciliation_success_s=now.timestamp(),
+    )
+
+
+class _SampleStore:
+    def __init__(
+        self,
+        states: tuple[SamplingMarketState, ...],
+        *,
+        append_results: list[bool] | None = None,
+    ) -> None:
+        self.states = states
+        self.append_results = list(append_results or [True])
+        self.batches = []
+
+    async def fetch_sampling_market_state(self, _token_ids):
+        return self.states
+
+    async def append_sample(self, batch):
+        self.batches.append(batch)
+        return self.append_results.pop(0)
+
+
+def _assert_strict_failure(runtime: L3EvidenceRuntime, failed_key: str, ws_consumer=None):
+    from starlette.testclient import TestClient
+
+    from polyarb.config import Settings
+    from polyarb.http.l2_app import create_l2_app
+
+    app = create_l2_app(
+        sqlite_store=SimpleNamespace(),
+        settings=Settings(),
+        ws_consumer=ws_consumer,
+        evidence_runtime=runtime,
+    )
+    with TestClient(app) as client:
+        strict = client.get("/health")
+        fly_probe = client.get("/healthz")
+    assert strict.status_code == 503
+    assert fly_probe.status_code == 200
+    assert strict.json()["checks"][failed_key][0]["status"] == "fail"
+    return strict.json()
 
 
 class _CommitThenClientErrorStore:
@@ -513,3 +629,210 @@ def test_shutdown_signal_is_enqueued_before_stop_for_both_signals():
         assert len(events) == 1
         assert events[0].kind is RuntimeEventKind.SHUTDOWN_SIGNAL
         assert events[0].detail == {"signal": sig.name}
+
+
+async def test_sampler_writer_failure_ages_health_to_503():
+    """append false -> anchor unchanged -> strict public sample-age failure."""
+    now = datetime.now(UTC)
+    old_sample_at = now - timedelta(seconds=76)
+    old_states = _market_states(old_sample_at)
+    runtime = _runtime_at(now)
+    _publish_membership(runtime, old_states, at=old_sample_at)
+    runtime.mark_promote_persisted(now - timedelta(seconds=10))
+    old_store = _SampleStore(old_states)
+    common = dict(
+        settings=_sampler_settings(),
+        ws_consumer=SimpleNamespace(last_event_at_s=now.timestamp()),
+        reconciliation_state=_reconciliation_state(now),
+        runtime=runtime,
+    )
+    assert await l3_sampler.sample_once(
+        sampled_at=old_sample_at,
+        sample_seq=0,
+        store=old_store,
+        **common,
+    )
+
+    fresh_states = _market_states(now)
+    failed_store = _SampleStore(fresh_states, append_results=[False])
+    assert not await l3_sampler.sample_once(
+        sampled_at=now,
+        sample_seq=1,
+        store=failed_store,
+        **common,
+    )
+    assert runtime.snapshot().last_sample_persisted_at == old_sample_at
+
+    _assert_strict_failure(runtime, "l3:evidence_sample_age_seconds")
+
+
+async def test_promoter_ledger_failure_ages_health_to_503():
+    """terminal append false -> promoter anchor unchanged -> public failure."""
+    from polyarb.observation import l3_promote
+
+    now = datetime.now(UTC)
+    states = _market_states(now)
+    runtime = _runtime_at(now)
+    _publish_membership(runtime, states, at=now)
+    runtime.mark_sample_persisted(
+        now,
+        tuple(
+            l3_evidence.MarketSampleRecord(
+                boot_id=runtime.snapshot().boot_id,
+                sample_seq=0,
+                sampled_at=now,
+                market_id=state.market_id,
+                yes_token_id=state.yes_token_id,
+                no_token_id=state.no_token_id,
+                yes_desired=True,
+                no_desired=True,
+                yes_committed=True,
+                no_committed=True,
+                yes_evidenced=True,
+                no_evidenced=True,
+                evidence_generation=1,
+                yes_book_at=state.yes_book_at,
+                no_book_at=state.no_book_at,
+                yes_book_age_ms=5000,
+                no_book_age_ms=6000,
+                worst_book_age_ms=6000,
+                yes_ohlc_at=state.yes_ohlc_at,
+                yes_ohlc_age_ms=7000,
+                status=HealthStatus.PASS,
+                reason_code="ok",
+            )
+            for state in states
+        ),
+    )
+    old_anchor = now - timedelta(seconds=361)
+    runtime.mark_promote_persisted(old_anchor)
+
+    class _RejectPromoteStore:
+        calls = 0
+
+        async def append_promote_run(self, _record):
+            self.calls += 1
+            return False
+
+    store = _RejectPromoteStore()
+    tokens = _tokens(states)
+    mapping = tuple(
+        {
+            "market_id": state.market_id,
+            "yes_token_id": state.yes_token_id,
+            "no_token_id": state.no_token_id,
+        }
+        for state in states
+    )
+    result = await l3_promote._finalize_promote_run(
+        draft=l3_promote._PromoteTerminalDraft(
+            status=PromoteStatus.SUCCESS,
+            reason_code="ok",
+            selected_count=5,
+            desired=tokens,
+            committed=tokens,
+            evidenced=tokens,
+            mapping=mapping,
+            ws_generation=1,
+            mirror_succeeded=True,
+        ),
+        started_at=now,
+        scheduled_at=now,
+        run_seq=1,
+        acceptance_config_hash=runtime.snapshot().acceptance_config_hash,
+        evidence_store=store,
+        evidence_runtime=runtime,
+        apply_mutations=True,
+        staged_state=l3_promote._PromoteStagedState(
+            tob_rows=[],
+            market_token_map={
+                state.market_id: (state.yes_token_id, state.no_token_id)
+                for state in states
+            },
+            active_set=tokens,
+            mirrored_market_ids=frozenset(state.market_id for state in states),
+        ),
+        append_attempt=l3_promote._PromoteAppendAttempt(),
+    )
+    assert result.persisted is False
+    assert store.calls == 1
+    assert runtime.snapshot().last_promote_persisted_at == old_anchor
+
+    _assert_strict_failure(runtime, "l3:promoter_ledger_age_seconds")
+
+
+async def test_ws_control_false_surfaces_membership_503():
+    """real control false publishes desired/committed mismatch to runtime."""
+    now = datetime.now(UTC)
+    states = _market_states(now)
+    tokens = _tokens(states)
+    runtime = _runtime_at(now)
+    consumer = WsConsumer(
+        settings=SimpleNamespace(),
+        watchdog=ws_watchdog.WsWatchdog(stale_s=30.0),
+        on_event=lambda _event: None,
+        initial_assets=[],
+        membership_observer=runtime.update_membership,
+        event_recorder=runtime.record_event,
+    )
+    consumer.set_l3_desired(tokens)
+    ws = SimpleNamespace(send=AsyncMock(return_value=None), close=AsyncMock(return_value=None))
+    await consumer._initialize_connection(ws)
+    for token in tokens:
+        consumer.record_book_evidence(
+            asset_id=token,
+            generation=consumer.l3_membership_snapshot().generation,
+            book_levels_succeeded=True,
+            observed_at=now,
+        )
+    store = _SampleStore(states)
+    assert await l3_sampler.sample_once(
+        sampled_at=now,
+        sample_seq=0,
+        settings=_sampler_settings(),
+        ws_consumer=consumer,
+        reconciliation_state=_reconciliation_state(now),
+        runtime=runtime,
+        store=store,
+    )
+    runtime.mark_promote_persisted(now)
+
+    removed = sorted(tokens)[0]
+    consumer.set_l3_desired(tokens - {removed})
+    ws.send.side_effect = RuntimeError("control rejected")
+    assert await consumer.remove_subscriptions([removed]) is False
+    status = runtime.snapshot()
+    assert status.desired != status.committed
+
+    body = _assert_strict_failure(
+        runtime,
+        "l3:membership_convergence",
+        ws_consumer=consumer,
+    )
+    assert body["checks"]["l3:membership_convergence"][0]["observedValue"] == "mismatch"
+
+
+async def test_one_hot_four_silent_surfaces_worst_market_503():
+    """real atomic sample keeps per-market clocks; global heat cannot mask four."""
+    now = datetime.now(UTC)
+    states = _market_states(now, stale_markets=frozenset({1, 2, 3, 4}))
+    runtime = _runtime_at(now)
+    _publish_membership(runtime, states, at=now)
+    runtime.mark_promote_persisted(now)
+    store = _SampleStore(states)
+
+    assert await l3_sampler.sample_once(
+        sampled_at=now,
+        sample_seq=0,
+        settings=_sampler_settings(),
+        ws_consumer=SimpleNamespace(last_event_at_s=now.timestamp()),
+        reconciliation_state=_reconciliation_state(now),
+        runtime=runtime,
+        store=store,
+    )
+    persisted = runtime.snapshot().last_market_samples
+    assert persisted[0].status is HealthStatus.PASS
+    assert all(sample.status is HealthStatus.FAIL for sample in persisted[1:])
+
+    body = _assert_strict_failure(runtime, "l3:worst_market_freshness")
+    assert body["checks"]["l3:worst_market_freshness"][0]["observedValue"] >= 123
