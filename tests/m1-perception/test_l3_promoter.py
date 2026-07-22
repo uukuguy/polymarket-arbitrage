@@ -1085,23 +1085,30 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
     mock_consumer = _truthful_consumer(initial_committed={"yes_m1", "no_m1"})
 
     sentry_calls: list[dict] = []
+    log_messages: list[str] = []
 
     def _capture_breadcrumb(**kw: Any) -> None:
         sentry_calls.append(kw)
 
-    with patch(
-        "polyarb.observation.l3_promote.create_client", return_value=client
-    ), patch(
-        "polyarb.observation.l3_promote.sentry_sdk.add_breadcrumb",
-        side_effect=_capture_breadcrumb,
-    ):
-        # MUST not raise.
-        await _promote_mutating(
-            l3_promote,
-            settings=settings,
-            ws_consumer=mock_consumer,
-            recipe_yaml_path=RECIPE_PATH,
-        )
+    sink_id = l3_promote.logger.add(
+        lambda message: log_messages.append(str(message)), level="WARNING"
+    )
+    try:
+        with patch(
+            "polyarb.observation.l3_promote.create_client", return_value=client
+        ), patch(
+            "polyarb.observation.l3_promote.sentry_sdk.add_breadcrumb",
+            side_effect=_capture_breadcrumb,
+        ):
+            # MUST not raise.
+            await _promote_mutating(
+                l3_promote,
+                settings=settings,
+                ws_consumer=mock_consumer,
+                recipe_yaml_path=RECIPE_PATH,
+            )
+    finally:
+        l3_promote.logger.remove(sink_id)
 
     # In-memory state advanced anyway (chain-truth: mirror is a surface, not source of truth).
     assert l3_promote._l3_active_set == {
@@ -1114,6 +1121,16 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
         if b.get("category") == "l2-mirror" and b.get("level") == "warning"
     ]
     assert len(mirror_warn) >= 1, f"expected mirror-warning breadcrumb, got: {sentry_calls}"
+    warning = next(message for message in log_messages if "mirror failed" in message)
+    assert "reason=write_through_failed" in warning
+    assert "error_type=RuntimeError" in warning
+    assert "committed_count=5" in warning
+    assert "PostgREST 503" not in warning
+    breadcrumb_data = mirror_warn[-1]["data"]
+    assert breadcrumb_data["reason_code"] == "write_through_failed"
+    assert breadcrumb_data["error_type"] == "RuntimeError"
+    assert breadcrumb_data["committed_count"] == 5
+    assert "error" not in breadcrumb_data
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -2197,23 +2214,79 @@ async def test_promote_run_uses_supplied_canonical_acceptance_without_rebuilding
 
 
 @pytest.mark.asyncio
-async def test_run_periodic_stops_at_unexpected_missing_tick_and_marks_writer_failed() -> None:
+async def test_unexpected_dependency_exception_before_append_terminalizes_once() -> None:
     from polyarb.observation import l3_promote
+    from polyarb.observation.l3_evidence import WsMembershipSnapshot, stable_sha256
 
     settings = _make_settings()
     runtime = _make_runtime(settings)
+    acceptance_config = AcceptanceConfig.from_settings(settings, RECIPE_PATH, "test-code")
     store = _RecordingEvidenceStore()
+    scheduled_at = runtime.snapshot().started_at + timedelta(seconds=300)
+    runtime_membership = WsMembershipSnapshot(
+        generation=19,
+        desired=frozenset({"runtime-desired"}),
+        committed=frozenset({"runtime-committed"}),
+        evidenced=frozenset({"runtime-committed"}),
+        evidenced_at={"runtime-committed": datetime(2026, 7, 23, tzinfo=UTC)},
+    )
+    runtime.update_membership(runtime_membership)
+    settings.supabase_service_key = MagicMock()
+    settings.supabase_service_key.get_secret_value.side_effect = RuntimeError(
+        "private dependency payload"
+    )
+
+    result = await l3_promote.promote_run(
+        settings=settings,
+        ws_consumer=_truthful_consumer(initial_committed={"consumer-only"}),
+        recipe_yaml_path=RECIPE_PATH,
+        evidence_store=store,
+        evidence_runtime=runtime,
+        acceptance_config=acceptance_config,
+        scheduled_at=scheduled_at,
+        run_seq=101,
+    )
+
+    assert (result.status.value, result.reason_code) == (
+        "failed",
+        "unexpected_exception",
+    )
+    assert result.persisted is True
+    assert len(store.records) == 1
+    record = store.records[0]
+    assert (record.run_seq, record.scheduled_at, record.ws_generation) == (
+        101,
+        scheduled_at,
+        19,
+    )
+    assert record.acceptance_config_hash == acceptance_config.digest()
+    assert record.desired_hash == stable_sha256(["runtime-desired"])
+    assert record.committed_hash == stable_sha256(["runtime-committed"])
+
+
+@pytest.mark.asyncio
+async def test_run_periodic_stops_after_first_append_attempt_exception() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    settings.supabase_url = ""
+    settings.supabase_service_key = ""
+    runtime = _make_runtime(settings)
     acceptance_config = AcceptanceConfig.from_settings(settings, RECIPE_PATH, "test-code")
     stop_event = asyncio.Event()
-    calls: list[int] = []
 
-    async def _unexpected(**kwargs: Any) -> None:
-        calls.append(kwargs["run_seq"])
-        raise RuntimeError("terminal append outcome is ambiguous")
+    class _AppendRaises:
+        def __init__(self) -> None:
+            self.attempted_run_seqs: list[int] = []
 
-    with (
-        patch.object(l3_promote, "promote_run", side_effect=_unexpected),
-        patch.object(l3_promote, "_utc_now", return_value=runtime.snapshot().started_at),
+        async def append_promote_run(self, record: Any) -> bool:
+            self.attempted_run_seqs.append(record.run_seq)
+            raise RuntimeError("ambiguous writer payload must not be retried")
+
+    store = _AppendRaises()
+
+    with patch.object(
+        l3_promote, "_utc_now", return_value=runtime.snapshot().started_at
     ):
         await asyncio.wait_for(
             l3_promote.run_periodic(
@@ -2228,8 +2301,7 @@ async def test_run_periodic_stops_at_unexpected_missing_tick_and_marks_writer_fa
             timeout=1.0,
         )
 
-    assert calls == [0]
-    assert store.records == []
+    assert store.attempted_run_seqs == [0]
     status = runtime.snapshot()
     assert status.writer_ok is False
     assert status.status.value == "fail"

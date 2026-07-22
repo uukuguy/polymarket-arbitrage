@@ -417,6 +417,8 @@ def _book_levels_rows_from_frame(frame: dict, max_levels: int = 10) -> list[dict
 
 def make_l2_event_handler(
     l2_mirror: L2SupabaseMirror | None,
+    *,
+    book_levels_required: Callable[[str], bool] | None = None,
 ) -> Callable[[dict], FrameDispatchResult]:
     """Build the production WS-frame dispatcher and expose mirror truth."""
 
@@ -440,9 +442,11 @@ def make_l2_event_handler(
             if row is not None:
                 tob_written = l2_mirror.push_top_of_book([row]) is True
             if event_type == "book":
-                from polyarb.observation import l3_promote
-
-                if asset_id_raw and asset_id_raw in l3_promote.get_l3_active_set():
+                if (
+                    asset_id_raw
+                    and book_levels_required is not None
+                    and book_levels_required(str(asset_id_raw))
+                ):
                     book_rows = _book_levels_rows_from_frame(frame, max_levels=10)
                     if book_rows:
                         book_levels_written = l2_mirror.push_book_levels(book_rows) is True
@@ -527,7 +531,17 @@ async def main() -> int:
             message="l2-mirror disabled (config); no l2_* writes will occur",
         )
 
-    _on_event = make_l2_event_handler(l2_mirror)
+    # The dispatcher is constructed before the consumer, but events cannot be
+    # delivered until ``consumer.run`` starts.  Late binding therefore lets the
+    # handler query the exact consumer instance without a global membership
+    # surrogate or an initialization race.
+    ws_consumer: Any = None
+    _on_event = make_l2_event_handler(
+        l2_mirror,
+        book_levels_required=lambda asset_id: (
+            ws_consumer is not None and ws_consumer.requires_book_levels(asset_id)
+        ),
+    )
 
     # Bootstrap asset_ids from env (Phase 03 Wave 5 deploy aid 2026-05-25):
     # without this, L2 cold-starts with empty subscribed_assets and idles
@@ -543,7 +557,7 @@ async def main() -> int:
             f"from POLYARB_BOOTSTRAP_ASSET_IDS"
         )
 
-    ws_consumer: Any = WsConsumer(
+    ws_consumer = WsConsumer(
         settings=settings,
         watchdog=watchdog,
         on_event=_on_event,

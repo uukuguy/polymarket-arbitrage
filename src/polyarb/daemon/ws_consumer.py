@@ -183,6 +183,7 @@ class WsConsumer:
         self._subscription_control_lock = asyncio.Lock()
         self._connection_generation = 0
         self._book_evidence_waiters: dict[int, list[_BookEvidenceWaiter]] = {}
+        self._last_quiet_refresh_missing_assets: frozenset[str] = frozenset()
         self._compensated_generations: set[int] = set()
         self._compensated_generation_order: deque[int] = deque()
         # Wire the liveness closure into the watchdog so it uses it for the gate.
@@ -276,7 +277,10 @@ class WsConsumer:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"ws subscription control send failed: {exc!r}")
+            logger.warning(
+                "ws subscription control send failed error_type={}",
+                type(exc).__name__,
+            )
             return False
 
     async def _initialize_connection(self, ws: Any) -> None:
@@ -367,8 +371,32 @@ class WsConsumer:
             await asyncio.shield(close_task)
             raise
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"ws compensation close failed: {exc!r}")
+            logger.warning(
+                "ws compensation close failed error_type={}", type(exc).__name__
+            )
         return retry_after_s
+
+    def requires_book_levels(self, asset_id: str) -> bool:
+        """Return current-generation depth-write eligibility for one token.
+
+        Durable L3 membership and temporary quiet-refresh barriers are the two
+        canonical consumers of depth.  Candidate tokens become eligible only
+        while they are still missing from a registered current-generation
+        barrier; unrelated frames never inherit a global depth-write gate.
+        """
+        if asset_id in self._l3_committed_set:
+            return True
+        return any(
+            asset_id in waiter.missing
+            for waiter in self._book_evidence_waiters.get(
+                self._connection_generation, ()
+            )
+        )
+
+    @property
+    def last_quiet_refresh_missing_assets(self) -> frozenset[str]:
+        """Exact last failed barrier identities, exposed without log leakage."""
+        return frozenset(self._last_quiet_refresh_missing_assets)
 
     def record_book_evidence(
         self,
@@ -500,6 +528,7 @@ class WsConsumer:
         generation = 0
         active_assets: list[str] = []
         required_assets: frozenset[str] = frozenset()
+        failure_reason = "unexpected_exception"
         try:
             async with self._subscription_control_lock:
                 active_assets = self._compute_active_assets()
@@ -511,21 +540,31 @@ class WsConsumer:
                     required_assets = frozenset(active_assets)
                 ws = self._current_ws
                 generation = self._connection_generation
-                if not active_assets or not required_assets or ws is None:
-                    return False
+                if not active_assets:
+                    failure_reason = "no_active_assets"
+                    raise RuntimeError("quiet refresh has no active assets")
+                if not required_assets:
+                    failure_reason = "no_required_assets"
+                    raise RuntimeError("quiet refresh has no required assets")
+                if ws is None:
+                    failure_reason = "no_connection"
+                    raise RuntimeError("quiet refresh has no connection")
                 waiter = _BookEvidenceWaiter(
                     future=asyncio.get_running_loop().create_future(),
                     missing=set(required_assets),
                 )
                 self._book_evidence_waiters.setdefault(generation, []).append(waiter)
                 logger.info(f"ws quiet refresh: sending assets={len(active_assets)}")
+                failure_reason = "unsubscribe_failed"
                 if not await self._send_control(
                     ws,
                     {"operation": "unsubscribe", "assets_ids": active_assets},
                 ):
                     raise RuntimeError("quiet unsubscribe failed")
+                failure_reason = "generation_changed"
                 if self._current_ws is not ws or self._connection_generation != generation:
                     raise RuntimeError("connection identity changed during refresh")
+                failure_reason = "subscribe_failed"
                 if not await self._send_control(
                     ws,
                     {
@@ -535,27 +574,38 @@ class WsConsumer:
                     },
                 ):
                     raise RuntimeError("quiet subscribe failed")
+                failure_reason = "generation_changed"
                 if self._current_ws is not ws or self._connection_generation != generation:
                     raise RuntimeError("connection identity changed during refresh")
             assert waiter is not None
+            failure_reason = "evidence_timeout"
             completed = await asyncio.wait_for(
                 asyncio.shield(waiter.future), timeout=_BOOK_EVIDENCE_TIMEOUT_S
             )
             if not completed:
+                failure_reason = "generation_invalidated"
                 raise RuntimeError("refresh generation invalidated")
             logger.info(f"ws quiet refresh: evidenced assets={len(required_assets)}")
+            self._last_quiet_refresh_missing_assets = frozenset()
             return True
         except asyncio.CancelledError:
             if ws is not None:
                 await self._compensate_generation(ws, generation)
             raise
-        except Exception as e:  # noqa: BLE001 — ambiguity requires reconnect
-            missing_assets = (
-                sorted(waiter.missing) if waiter is not None else sorted(required_assets)
+        except Exception as exc:  # noqa: BLE001 — ambiguity requires reconnect
+            missing_assets = frozenset(
+                waiter.missing if waiter is not None else required_assets
             )
+            self._last_quiet_refresh_missing_assets = missing_assets
             logger.warning(
-                "ws quiet refresh failed "
-                f"assets={len(active_assets)} missing_assets={missing_assets} error={e!r}"
+                "ws quiet refresh failed reason={} error_type={} generation={} "
+                "total_count={} required_count={} missing_count={}",
+                failure_reason,
+                type(exc).__name__,
+                generation,
+                len(active_assets),
+                len(required_assets),
+                len(missing_assets),
             )
             if ws is not None:
                 await self._compensate_generation(ws, generation)

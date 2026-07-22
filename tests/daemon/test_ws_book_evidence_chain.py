@@ -13,18 +13,6 @@ from polyarb.daemon.ws_consumer import WsConsumer
 from polyarb.daemon.ws_watchdog import WsWatchdog
 
 
-@pytest.fixture(autouse=True)
-def _l3_active_asset() -> None:
-    from polyarb.observation import l3_promote
-
-    prior = set(l3_promote._l3_active_set)
-    l3_promote._l3_active_set = {"asset-a"}
-    try:
-        yield
-    finally:
-        l3_promote._l3_active_set = prior
-
-
 async def _wait_until(predicate, *, timeout: float = 0.2) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():
@@ -39,12 +27,19 @@ def _consumer(
     mirror = MagicMock()
     mirror.push_top_of_book.return_value = tob_written
     mirror.push_book_levels.return_value = book_levels_written
+    holder: dict[str, WsConsumer] = {}
     consumer = WsConsumer(
         settings=MagicMock(),
         watchdog=WsWatchdog(stale_s=30),
-        on_event=make_l2_event_handler(mirror),
+        on_event=make_l2_event_handler(
+            mirror,
+            book_levels_required=lambda asset_id: holder[
+                "consumer"
+            ].requires_book_levels(asset_id),
+        ),
         initial_assets=["asset-a"],
     )
+    holder["consumer"] = consumer
     consumer.set_l3_desired(["asset-a"])
     consumer._l3_committed_set = {"asset-a"}
     ws = MagicMock()
@@ -77,6 +72,74 @@ async def test_real_production_mirror_success_resolves_receive_path_waiter(
 
     assert await asyncio.wait_for(quiet, timeout=0.2) is True
     mirror.push_top_of_book.assert_called_once()
+    assert consumer._book_evidence_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_no_l3_candidate_refresh_uses_real_handler_consumer_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_ids = [f"candidate-{index}" for index in range(10)]
+    outsider = "unsubscribed-private-token"
+    mirror = MagicMock()
+    mirror.push_top_of_book.return_value = True
+    mirror.push_book_levels.return_value = True
+    holder: dict[str, WsConsumer] = {}
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=WsWatchdog(stale_s=30),
+        on_event=make_l2_event_handler(
+            mirror,
+            book_levels_required=lambda asset_id: holder[
+                "consumer"
+            ].requires_book_levels(asset_id),
+        ),
+        initial_assets=candidate_ids,
+    )
+    holder["consumer"] = consumer
+    ws = MagicMock()
+    ws.send = AsyncMock(return_value=None)
+    ws.close = AsyncMock(return_value=None)
+    consumer._current_ws = ws
+    consumer._connection_generation = 8
+    release_last = asyncio.Event()
+
+    def _book(asset_id: str) -> dict:
+        return {
+            "event_type": "book",
+            "asset_id": asset_id,
+            "bids": [{"price": "0.4", "size": "10"}],
+            "asks": [{"price": "0.6", "size": "10"}],
+            "timestamp": "1",
+        }
+
+    async def _stream(*args, **kwargs):
+        yield _book(outsider)
+        for asset_id in candidate_ids[:9]:
+            yield _book(asset_id)
+        await release_last.wait()
+        yield _book(candidate_ids[9])
+
+    monkeypatch.setattr(ws_consumer_module, "stream_market_events", _stream)
+    quiet = asyncio.create_task(consumer.request_book_refresh())
+    await _wait_until(lambda: ws.send.await_count >= 2)
+    run = asyncio.create_task(consumer.run(asyncio.Event()))
+    await _wait_until(lambda: mirror.push_book_levels.call_count == 9)
+
+    assert quiet.done() is False
+    assert consumer.requires_book_levels(outsider) is False
+    assert consumer.requires_book_levels(candidate_ids[9]) is True
+    assert consumer.last_quiet_refresh_missing_assets == frozenset()
+
+    release_last.set()
+    await asyncio.wait_for(run, timeout=0.2)
+    assert await asyncio.wait_for(quiet, timeout=0.2) is True
+    written_assets = [
+        call.args[0][0]["asset_id"] for call in mirror.push_book_levels.call_args_list
+    ]
+    assert written_assets == candidate_ids
+    assert outsider not in written_assets
+    assert all(consumer.requires_book_levels(asset_id) is False for asset_id in candidate_ids)
     assert consumer._book_evidence_waiters == {}
 
 

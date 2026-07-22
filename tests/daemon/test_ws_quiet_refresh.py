@@ -195,7 +195,7 @@ async def test_no_l3_desired_falls_back_to_every_active_candidate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evidence_timeout_logs_missing_identities_and_compensates(
+async def test_evidence_timeout_keeps_missing_identities_in_state_not_logs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     consumer, _watchdog, ws = _make_consumer()
@@ -220,7 +220,16 @@ async def test_evidence_timeout_logs_missing_identities_and_compensates(
 
     ws.close.assert_awaited_once()
     assert consumer._book_evidence_waiters == {}
-    assert any("missing_assets=['l3-b']" in message for message in messages)
+    assert consumer.last_quiet_refresh_missing_assets == frozenset({"l3-b"})
+    warning = next(message for message in messages if "ws quiet refresh failed" in message)
+    assert "reason=evidence_timeout" in warning
+    assert "error_type=TimeoutError" in warning
+    assert "generation=0" in warning
+    assert "total_count=4" in warning
+    assert "required_count=2" in warning
+    assert "missing_count=1" in warning
+    assert "l3-a" not in warning
+    assert "l3-b" not in warning
 
 
 @pytest.mark.asyncio
@@ -372,6 +381,14 @@ async def test_request_book_refresh_bounds_hung_send_without_forging_freshness(
 
     assert result is False
     assert any("ws quiet refresh: sending assets=3" in msg for msg in messages)
-    assert any("ws quiet refresh failed assets=3" in msg for msg in messages)
+    warning = next(msg for msg in messages if "ws quiet refresh failed" in msg)
+    assert "reason=unsubscribe_failed" in warning
+    assert "error_type=RuntimeError" in warning
+    assert "total_count=3" in warning
+    assert "required_count=2" in warning
+    assert "missing_count=2" in warning
+    assert "candidate-a" not in warning
+    assert "candidate-b" not in warning
+    assert "l3-c" not in warning
     assert consumer.last_event_at_s == event_before
     assert watchdog.last_event_at_s == watchdog_before

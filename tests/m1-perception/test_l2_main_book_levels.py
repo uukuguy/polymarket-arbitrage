@@ -321,7 +321,9 @@ def test_production_dispatch_reports_tob_and_depth_outcomes_separately() -> None
         mirror.push_top_of_book.return_value = True
         mirror.push_book_levels.return_value = False
 
-        result = make_l2_event_handler(mirror)(
+        result = make_l2_event_handler(
+            mirror, book_levels_required=lambda asset_id: asset_id == "0xasset-1"
+        )(
             _make_book_frame(
                 asset_id="0xasset-1",
                 bids=[_lvl(0.5, 100)],

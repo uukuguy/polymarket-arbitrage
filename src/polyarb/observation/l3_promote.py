@@ -498,18 +498,22 @@ def _mirror_l3_promoted_at_ts(
             succeeded=True,
             cleanup_pending=cleanup_pending,
         )
-    except Exception as e:  # noqa: BLE001 — fail-soft per D-12
+    except Exception as exc:  # noqa: BLE001 — fail-soft per D-12
         logger.warning(
-            f"l3-promote: l2_candidates write-through failed "
-            f"(mirror only, in-memory state intact): {e!r}"
+            "l3-promote: mirror failed reason=write_through_failed "
+            "error_type={} committed_count={} batch_cap={}",
+            type(exc).__name__,
+            len(committed),
+            _MIRROR_RECONCILE_BATCH_SIZE,
         )
         sentry_sdk.add_breadcrumb(
             category="l2-mirror",
             level="warning",
             message="l3_promoted_at_ts mirror failed",
             data={
-                "error": str(e)[:200],
-                "committed": len(committed),
+                "reason_code": "write_through_failed",
+                "error_type": type(exc).__name__,
+                "committed_count": len(committed),
                 "batch_cap": _MIRROR_RECONCILE_BATCH_SIZE,
                 "table": "l2_candidates",
             },
@@ -552,6 +556,13 @@ class _PromoteStagedState:
     mirrored_market_ids: frozenset[str]
 
 
+@dataclass
+class _PromoteAppendAttempt:
+    """Per-call fence proving whether the one durable append has begun."""
+
+    started: bool = False
+
+
 async def _finalize_promote_run(
     *,
     draft: _PromoteTerminalDraft,
@@ -563,6 +574,7 @@ async def _finalize_promote_run(
     evidence_runtime: L3EvidenceRuntime | None,
     apply_mutations: bool,
     staged_state: _PromoteStagedState,
+    append_attempt: _PromoteAppendAttempt,
 ) -> PromoteRunResult:
     """Build and append one terminal row; never manufacture a retry."""
     global _l3_active_set, _last_known_market_token_map, _last_known_tob_rows
@@ -612,13 +624,14 @@ async def _finalize_promote_run(
         mirror_succeeded=draft.mirror_succeeded,
         duration_ms=max(0, int((finished_at - started_at).total_seconds() * 1000)),
     )
-    try:
-        persisted = await evidence_store.append_promote_run(record)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - custom stores may raise
-        logger.warning("l3-promote: terminal evidence append raised type={}", type(exc).__name__)
-        persisted = False
+    if append_attempt.started:  # pragma: no cover - internal invariant
+        raise RuntimeError("terminal evidence append already attempted")
+    # Set the fence before entering the writer.  An exception after this point
+    # is ambiguous: the database may have committed even if the caller did not
+    # receive an acknowledgement, so neither this call nor its scheduler may
+    # manufacture a second row.
+    append_attempt.started = True
+    persisted = await evidence_store.append_promote_run(record)
 
     evidence_runtime.note_writer_result(
         persisted,
@@ -665,7 +678,7 @@ def _mapping_rows(
     return tuple(rows)
 
 
-async def promote_run(
+async def _promote_run_impl(
     *,
     settings: Any,
     ws_consumer: Any,
@@ -676,9 +689,11 @@ async def promote_run(
     scheduled_at: datetime | None = None,
     run_seq: int | None = None,
     apply_mutations: bool = True,
+    _append_attempt: _PromoteAppendAttempt,
+    _started_at: datetime,
 ) -> PromoteRunResult:
     """Execute one proposal/control/mirror transaction and finalize it once."""
-    started_at = datetime.now(UTC)
+    started_at = _started_at
     if apply_mutations and (evidence_store is None or evidence_runtime is None):
         raise ValueError(
             "evidence_store and evidence_runtime are required when apply_mutations=True"
@@ -760,6 +775,7 @@ async def promote_run(
             evidence_runtime=evidence_runtime,
             apply_mutations=apply_mutations,
             staged_state=staged_state,
+            append_attempt=_append_attempt,
         )
 
     def early(status: PromoteStatus, reason: str) -> _PromoteTerminalDraft:
@@ -1056,6 +1072,115 @@ async def promote_run(
             mirror_succeeded=mirror_succeeded,
         )
     )
+
+
+async def promote_run(
+    *,
+    settings: Any,
+    ws_consumer: Any,
+    recipe_yaml_path: Path,
+    evidence_store: L3EvidenceStore | None = None,
+    evidence_runtime: L3EvidenceRuntime | None = None,
+    acceptance_config: AcceptanceConfig | None = None,
+    scheduled_at: datetime | None = None,
+    run_seq: int | None = None,
+    apply_mutations: bool = True,
+) -> PromoteRunResult:
+    """Run one promoter transaction with a total exactly-once terminal boundary.
+
+    Any unexpected dependency exception before the durable append begins is
+    converted into one canonical ``FAILED/unexpected_exception`` row.  Once
+    the append starts, ambiguity is preserved by re-raising; the scheduler then
+    marks the writer failed and stops without advancing the sequence.
+    """
+    if apply_mutations and (evidence_store is None or evidence_runtime is None):
+        raise ValueError(
+            "evidence_store and evidence_runtime are required when apply_mutations=True"
+        )
+
+    started_at = datetime.now(UTC)
+    runtime_status = evidence_runtime.snapshot() if evidence_runtime is not None else None
+    effective_run_seq = (
+        evidence_runtime.next_run_seq()
+        if run_seq is None and evidence_runtime is not None
+        else (0 if run_seq is None else run_seq)
+    )
+    effective_scheduled_at = started_at if scheduled_at is None else scheduled_at
+    if (
+        effective_scheduled_at.tzinfo is None
+        or effective_scheduled_at.utcoffset()
+        != UTC.utcoffset(effective_scheduled_at)
+    ):
+        raise ValueError("scheduled_at must be timezone-aware UTC")
+
+    if runtime_status is not None:
+        initial = WsMembershipSnapshot(
+            generation=runtime_status.ws_generation,
+            desired=runtime_status.desired,
+            committed=runtime_status.committed,
+            evidenced=runtime_status.evidenced,
+            evidenced_at=runtime_status.evidenced_at,
+        )
+        canonical_hash = runtime_status.acceptance_config_hash
+    else:
+        initial = WsMembershipSnapshot(
+            desired=frozenset(_l3_active_set),
+            committed=frozenset(_l3_active_set),
+        )
+        canonical_hash = (
+            acceptance_config.digest() if acceptance_config is not None else "0" * 64
+        )
+    append_attempt = _PromoteAppendAttempt()
+
+    try:
+        return await _promote_run_impl(
+            settings=settings,
+            ws_consumer=ws_consumer,
+            recipe_yaml_path=recipe_yaml_path,
+            evidence_store=evidence_store,
+            evidence_runtime=evidence_runtime,
+            acceptance_config=acceptance_config,
+            scheduled_at=effective_scheduled_at,
+            run_seq=effective_run_seq,
+            apply_mutations=apply_mutations,
+            _append_attempt=append_attempt,
+            _started_at=started_at,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - total pre-append terminal boundary
+        if append_attempt.started:
+            raise
+        logger.warning(
+            "l3-promote: unexpected pre-append failure error_type={}",
+            type(exc).__name__,
+        )
+        return await _finalize_promote_run(
+            draft=_PromoteTerminalDraft(
+                status=PromoteStatus.FAILED,
+                reason_code="unexpected_exception",
+                selected_count=0,
+                desired=initial.desired,
+                committed=initial.committed,
+                evidenced=initial.evidenced,
+                mapping=(),
+                ws_generation=initial.generation,
+            ),
+            started_at=started_at,
+            scheduled_at=effective_scheduled_at,
+            run_seq=effective_run_seq,
+            acceptance_config_hash=canonical_hash,
+            evidence_store=evidence_store,
+            evidence_runtime=evidence_runtime,
+            apply_mutations=apply_mutations,
+            staged_state=_PromoteStagedState(
+                tob_rows=_last_known_tob_rows,
+                market_token_map=_last_known_market_token_map,
+                active_set=frozenset(_l3_active_set),
+                mirrored_market_ids=_last_mirrored_market_ids,
+            ),
+            append_attempt=append_attempt,
+        )
 
 
 async def run_periodic(
