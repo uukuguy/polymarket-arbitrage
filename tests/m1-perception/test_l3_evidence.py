@@ -588,18 +588,18 @@ def test_membership_events_windows_and_retention_are_defensively_immutable() -> 
     with pytest.raises(ValueError, match="subset"):
         evidence.WsMembershipSnapshot(0, frozenset(), frozenset(), frozenset({"x"}), {"x": NOW})
 
-    mutable_detail = {"nested": {"items": ["a", "b"]}}
+    mutable_detail = {"signal": "SIGTERM"}
     event = evidence.RuntimeEventRecord(
         uuid4(),
         boot_id,
         0,
         NOW,
-        evidence.RuntimeEventKind.WATCHDOG_STALE,
+        evidence.RuntimeEventKind.SHUTDOWN_SIGNAL,
         detail=mutable_detail,
     )
-    mutable_detail["nested"]["items"].append("mutated")
-    assert event.detail["nested"]["items"] == ("a", "b")
-    with pytest.raises(ValueError, match="2048"):
+    mutable_detail["signal"] = "SIGINT"
+    assert event.detail["signal"] == "SIGTERM"
+    with pytest.raises(ValueError, match="not allowed"):
         replace(event, detail={"payload": "x" * 2048})
     with pytest.raises(ValueError, match="reason_code"):
         replace(event, reason_code="x" * 65)
@@ -995,7 +995,7 @@ def test_runtime_event_detail_requires_mapping_root(detail: object) -> None:
         )
 
 
-def test_runtime_event_detail_uses_postgres_jsonb_text_size_boundary() -> None:
+def test_runtime_event_detail_schema_is_stricter_than_jsonb_size_boundary() -> None:
     evidence = importlib.import_module("polyarb.observation.l3_evidence")
     empty_size = len(evidence._postgres_jsonb_text({"payload": ""}).encode("utf-8"))
     accepted_count = (2048 - empty_size) // len("界".encode())
@@ -1004,30 +1004,27 @@ def test_runtime_event_detail_uses_postgres_jsonb_text_size_boundary() -> None:
 
     assert len(evidence._postgres_jsonb_text(accepted).encode("utf-8")) <= 2048
     assert len(evidence._postgres_jsonb_text(rejected).encode("utf-8")) > 2048
-    event = evidence.RuntimeEventRecord(
-        uuid4(),
-        uuid4(),
-        0,
-        NOW,
-        evidence.RuntimeEventKind.SHUTDOWN_SIGNAL,
-        detail=accepted,
-    )
-    assert event.detail["payload"] == accepted["payload"]
-    with pytest.raises(ValueError, match="PostgreSQL jsonb::text"):
-        replace(event, detail=rejected)
+    for detail in (accepted, rejected):
+        with pytest.raises(ValueError, match="not allowed"):
+            evidence.RuntimeEventRecord(
+                uuid4(),
+                uuid4(),
+                0,
+                NOW,
+                evidence.RuntimeEventKind.SHUTDOWN_SIGNAL,
+                detail=detail,
+            )
 
 
 @pytest.mark.parametrize(
     ("detail", "message"),
     [
-        ({"nested": [{"value": 1e20}]}, "float"),
-        ({"nested": {"value": 1.25}}, "float"),
-        ({"nested": {"value": "before\x00after"}}, "NUL"),
-        ({"nested": {"before\x00after": "value"}}, "NUL"),
-        ({"nested": ["ok", {"key": "\x00"}]}, "NUL"),
+        ({"signal": "SIGTERM\x00secret"}, "invalid"),
+        ({"signal": 1.25}, "invalid"),
+        ({"signal": ["SIGTERM"]}, "invalid"),
     ],
 )
-def test_runtime_event_detail_rejects_nested_floats_and_nul(
+def test_runtime_event_detail_rejects_unsafe_allowed_values(
     detail: dict[str, object],
     message: str,
 ) -> None:

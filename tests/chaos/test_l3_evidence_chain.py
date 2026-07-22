@@ -16,6 +16,7 @@ from polyarb.observation import l3_evidence, l3_sampler
 from polyarb.observation.l3_evidence import (
     L3EvidenceRuntime,
     RuntimeEventKind,
+    RuntimeEventRecord,
     RuntimeIdentity,
 )
 
@@ -44,14 +45,23 @@ def _runtime() -> L3EvidenceRuntime:
     )
 
 
-class _EventStore:
-    def __init__(self, outcomes: list[bool]) -> None:
-        self._outcomes = iter(outcomes)
+class _CommitThenClientErrorStore:
+    def __init__(self) -> None:
         self.attempts = []
+        self.durable = {}
+        self._lost_first_ack = False
 
     async def append_event(self, event):
         self.attempts.append(event)
-        return next(self._outcomes)
+        existing = self.durable.get(event.event_id)
+        if existing is not None:
+            assert existing == event
+            return True
+        self.durable[event.event_id] = event
+        if not self._lost_first_ack:
+            self._lost_first_ack = True
+            return False
+        return True
 
 
 async def test_event_writer_retries_original_event_then_persists_failure_and_recovery():
@@ -76,7 +86,7 @@ async def test_event_writer_retries_original_event_then_persists_failure_and_rec
             {"signal": "SIGTERM"},
         ),
     )
-    store = _EventStore([False, True, True, True, True])
+    store = _CommitThenClientErrorStore()
     stop_event = asyncio.Event()
     stop_event.set()
 
@@ -94,6 +104,12 @@ async def test_event_writer_retries_original_event_then_persists_failure_and_rec
     assert store.attempts[0] is store.attempts[1]
     assert store.attempts[1].occurred_at == original_at
     assert [event.kind for event in store.attempts[1:]] == [
+        RuntimeEventKind.WATCHDOG_STALE,
+        RuntimeEventKind.SHUTDOWN_SIGNAL,
+        RuntimeEventKind.EVIDENCE_WRITER_FAILED,
+        RuntimeEventKind.EVIDENCE_WRITER_RECOVERED,
+    ]
+    assert [event.kind for event in store.durable.values()] == [
         RuntimeEventKind.WATCHDOG_STALE,
         RuntimeEventKind.SHUTDOWN_SIGNAL,
         RuntimeEventKind.EVIDENCE_WRITER_FAILED,
@@ -199,6 +215,43 @@ def test_runtime_event_detail_rejects_payload_secret_and_identity_keys(forbidden
             occurred_at=START,
             detail={"stale_seconds": 30, forbidden: "do-not-store"},
         )
+    with pytest.raises(ValueError, match="not allowed"):
+        RuntimeEventRecord(
+            event_id=_runtime().snapshot().boot_id,
+            boot_id=_runtime().snapshot().boot_id,
+            event_seq=0,
+            occurred_at=START,
+            kind=RuntimeEventKind.WATCHDOG_STALE,
+            detail={"stale_seconds": 30, forbidden: "do-not-store"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "detail"),
+    [
+        (RuntimeEventKind.RECONNECT_STARTED, {"source": "secret-source"}),
+        (
+            RuntimeEventKind.RECONNECT_FAILED,
+            {"operation": "on_reconnect", "error_type": "CredentialSecret"},
+        ),
+        (RuntimeEventKind.SHUTDOWN_SIGNAL, {"signal": "TERM"}),
+        (RuntimeEventKind.SOAK_MANIFEST_BOUND, {"manifest_sha256": "not-a-hash"}),
+        (RuntimeEventKind.WATCHDOG_STALE, {"stale_seconds": True}),
+    ],
+)
+def test_runtime_event_detail_rejects_unsafe_allowed_key_values(
+    kind: RuntimeEventKind,
+    detail: dict[str, object],
+):
+    with pytest.raises(ValueError, match="invalid"):
+        RuntimeEventRecord(
+            event_id=_runtime().snapshot().boot_id,
+            boot_id=_runtime().snapshot().boot_id,
+            event_seq=0,
+            occurred_at=START,
+            kind=kind,
+            detail=detail,
+        )
 
 
 async def test_watchdog_records_only_real_stale_budget_transitions(
@@ -214,19 +267,14 @@ async def test_watchdog_records_only_real_stale_budget_transitions(
     )
 
     await watchdog._on_stale()
-    watchdog._reconnect_timestamps.extend(
-        [1000.0] * (ws_watchdog.MAX_RECONNECTS_PER_HOUR - 1)
-    )
-    await watchdog._on_stale()
 
     events = runtime.drain_pending_events()
     assert [event.kind for event in events] == [
         RuntimeEventKind.WATCHDOG_STALE,
-        RuntimeEventKind.RECONNECT_RESERVED,
-        RuntimeEventKind.RECONNECT_STARTED,
-        RuntimeEventKind.WATCHDOG_STALE,
         RuntimeEventKind.RECONNECT_DEFERRED,
     ]
+    assert events[-1].reason_code == "reconnect_hook_missing"
+    assert len(watchdog._reconnect_timestamps) == 0
     assert all(len(json.dumps(dict(event.detail)).encode()) <= 2048 for event in events)
 
 
@@ -273,6 +321,7 @@ def _consumer(runtime: L3EvidenceRuntime) -> WsConsumer:
 async def test_consumer_records_generation_success_control_failure_and_compensation():
     runtime = _runtime()
     consumer = _consumer(runtime)
+    consumer._connection_generation = 1
     ws = SimpleNamespace(send=AsyncMock(return_value=None), close=AsyncMock(return_value=None))
 
     await consumer._initialize_connection(ws)
@@ -296,6 +345,7 @@ async def test_consumer_records_generation_success_control_failure_and_compensat
 async def test_consumer_records_failed_initial_reconnect_without_claiming_success():
     runtime = _runtime()
     consumer = _consumer(runtime)
+    consumer._connection_generation = 1
     ws = SimpleNamespace(
         send=AsyncMock(side_effect=ConnectionError("secret raw frame")),
         close=AsyncMock(return_value=None),
@@ -310,6 +360,40 @@ async def test_consumer_records_failed_initial_reconnect_without_claiming_succes
     assert RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED in kinds
     assert RuntimeEventKind.SUBSCRIPTION_COMPENSATED in kinds
     assert RuntimeEventKind.RECONNECT_SUCCEEDED not in kinds
+
+
+async def test_consumer_initial_connection_does_not_fake_reconnect_lifecycle():
+    runtime = _runtime()
+    consumer = _consumer(runtime)
+    ws = SimpleNamespace(send=AsyncMock(return_value=None), close=AsyncMock(return_value=None))
+
+    await consumer._initialize_connection(ws)
+
+    assert [event.kind for event in runtime.drain_pending_events()] == [
+        RuntimeEventKind.WS_GENERATION_CHANGED
+    ]
+
+
+async def test_consumer_no_connection_control_fails_without_fake_compensation():
+    runtime = _runtime()
+    consumer = _consumer(runtime)
+
+    assert await consumer.add_subscriptions(["token-a"]) is False
+    assert await consumer.remove_subscriptions(["token-a"]) is False
+
+    events = runtime.drain_pending_events()
+    assert [event.kind for event in events] == [
+        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
+        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
+    ]
+    assert [event.reason_code for event in events] == [
+        "no_active_connection",
+        "no_active_connection",
+    ]
+    assert [event.detail["operation"] for event in events] == [
+        "subscribe",
+        "unsubscribe",
+    ]
 
 
 def test_shutdown_signal_is_enqueued_before_stop_for_both_signals():

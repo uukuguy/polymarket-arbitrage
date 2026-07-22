@@ -8,9 +8,10 @@ import json
 import os
 import subprocess
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import UUID, uuid4
@@ -158,7 +159,7 @@ def _event(boot_id: UUID, at: datetime, *, seq: int = 0) -> RuntimeEventRecord:
         severity=RuntimeEventSeverity.INFO,
         generation=seq,
         reason_code="test",
-        detail={"signal": "TERM"},
+        detail={"signal": "SIGTERM"},
     )
 
 
@@ -474,7 +475,7 @@ async def test_connect_failure_is_secret_free_and_cancelled_error_is_reraised(
         await store.append_boot(_boot(datetime.now(UTC)))
 
 
-async def test_event_append_serializes_nested_immutable_detail(
+async def test_event_append_serializes_whitelisted_immutable_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection = _FakeConnection()
@@ -485,11 +486,94 @@ async def test_event_append_serializes_nested_immutable_detail(
         event_seq=0,
         occurred_at=datetime.now(UTC),
         kind=RuntimeEventKind.SHUTDOWN_SIGNAL,
-        detail={"nested": {"signal": "TERM"}, "attempts": [1, 2]},
+        detail={"signal": "SIGTERM"},
     )
 
     assert await L3EvidenceStore("postgresql://secret").append_event(event)
-    assert connection.calls[1][2][-1] == '{"attempts":[1,2],"nested":{"signal":"TERM"}}'
+    assert connection.calls[1][2][-1] == '{"signal":"SIGTERM"}'
+
+
+def _row_from_event_args(args: tuple[object, ...]) -> dict[str, object]:
+    return {
+        "event_id": args[0],
+        "boot_id": args[1],
+        "event_seq": args[2],
+        "occurred_at": args[3],
+        "kind": args[4],
+        "severity": args[5],
+        "generation": args[6],
+        "reason_code": args[7],
+        "detail": json.loads(str(args[8])),
+    }
+
+
+class _ReplayEventConnection(_FakeConnection):
+    def __init__(
+        self,
+        shared: dict[str, object],
+        *,
+        commit_then_raise: bool = False,
+    ) -> None:
+        super().__init__()
+        self.shared = shared
+        self.commit_then_raise = commit_then_raise
+
+    async def execute(self, sql: str, *args: object) -> str:
+        self.calls.append(("execute", sql, args))
+        if "INSERT INTO l3_runtime_events" not in sql:
+            return "INSERT 0 1"
+        if "row" not in self.shared:
+            self.shared["row"] = _row_from_event_args(args)
+            if self.commit_then_raise:
+                raise ConnectionError("commit response lost")
+            return "INSERT 0 1"
+        return "INSERT 0 0"
+
+    async def fetch(self, sql: str, *args: object) -> list[dict[str, object]]:
+        self.calls.append(("fetch", sql, args))
+        if "FROM l3_runtime_events" in sql:
+            return [dict(self.shared["row"])]  # type: ignore[arg-type]
+        return []
+
+
+async def test_event_append_commit_then_client_error_replays_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared: dict[str, object] = {}
+    first = _ReplayEventConnection(shared, commit_then_raise=True)
+    second = _ReplayEventConnection(shared)
+    monkeypatch.setattr(
+        store_module.asyncpg,
+        "connect",
+        AsyncMock(side_effect=[first, second]),
+    )
+    record = _event(uuid4(), datetime.now(UTC))
+    store = L3EvidenceStore("postgresql://secret")
+
+    assert await store.append_event(record) is False
+    assert await store.append_event(record) is True
+
+    assert first.closed and second.closed
+    assert "ON CONFLICT DO NOTHING" in first.calls[1][1]
+    assert [call[0] for call in second.calls] == ["fetchrow", "execute", "fetch"]
+
+
+async def test_event_append_conflicting_replay_fails_visibly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _event(uuid4(), datetime.now(UTC))
+    shared: dict[str, object] = {"row": _row_from_event_args(store_module._event_args(original))}
+    connection = _ReplayEventConnection(shared)
+    monkeypatch.setattr(
+        store_module.asyncpg,
+        "connect",
+        AsyncMock(return_value=connection),
+    )
+
+    assert not await L3EvidenceStore("postgresql://secret").append_event(
+        replace(original, reason_code="payload_changed")
+    )
+    assert connection.closed
 
 
 async def test_oversize_postgres_jsonb_detail_is_rejected_before_connect(
@@ -500,7 +584,7 @@ async def test_oversize_postgres_jsonb_detail_is_rejected_before_connect(
     empty_size = len(evidence_module._postgres_jsonb_text({"payload": ""}).encode("utf-8"))
     accepted_count = (2048 - empty_size) // len("界".encode())
 
-    with pytest.raises(ValueError, match="PostgreSQL jsonb::text"):
+    with pytest.raises(ValueError, match="not allowed"):
         RuntimeEventRecord(
             event_id=uuid4(),
             boot_id=uuid4(),
@@ -510,6 +594,27 @@ async def test_oversize_postgres_jsonb_detail_is_rejected_before_connect(
             detail={"payload": "界" * (accepted_count + 1)},
         )
 
+    connect.assert_not_awaited()
+
+
+async def test_event_store_rejects_record_impostor_before_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect = AsyncMock()
+    monkeypatch.setattr(store_module.asyncpg, "connect", connect)
+    forged = SimpleNamespace(
+        event_id=uuid4(),
+        boot_id=uuid4(),
+        event_seq=0,
+        occurred_at=datetime.now(UTC),
+        kind=RuntimeEventKind.SHUTDOWN_SIGNAL,
+        severity=RuntimeEventSeverity.INFO,
+        generation=0,
+        reason_code="signal",
+        detail={"dsn": "postgresql://secret"},
+    )
+
+    assert not await L3EvidenceStore("postgresql://secret").append_event(forged)
     connect.assert_not_awaited()
 
 
@@ -695,8 +800,10 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     batch = _batch(boot.boot_id, start)
     assert await store.append_sample(batch)
     assert not await store.append_sample(batch)
-    assert await store.append_event(_event(boot.boot_id, start))
-    boundary_detail = {"payload": "界" * 677}
+    first_event = _event(boot.boot_id, start)
+    assert await store.append_event(first_event)
+    assert await store.append_event(first_event)
+    boundary_detail = {"signal": "SIGTERM"}
     boundary_event = RuntimeEventRecord(
         event_id=uuid4(),
         boot_id=boot.boot_id,
@@ -826,7 +933,7 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     assert {event.event_seq for event in window.runtime_events} == {0, 8}
     assert all(event.occurred_at == start for event in window.runtime_events)
     assert next(event for event in window.runtime_events if event.event_seq == 8).detail == {
-        "payload": "界" * 677
+        "signal": "SIGTERM"
     }
     assert set(window.book_coverage_counts) == {
         *(f"yes-{index}" for index in range(5)),

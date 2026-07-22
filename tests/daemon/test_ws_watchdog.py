@@ -18,11 +18,8 @@ Monkeypatch strategy:
 from __future__ import annotations
 
 import asyncio
-from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 1 — 30s timeout triggers RECONNECTING + on_reconnect fires
@@ -85,7 +82,7 @@ async def test_backoff_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(wd_mod.asyncio, "sleep", _fake_sleep)
 
-    wd = wd_mod.WsWatchdog(stale_s=30.0, on_reconnect=None)
+    wd = wd_mod.WsWatchdog(stale_s=30.0, on_reconnect=lambda: None)
     wd.touch()  # prime
 
     # Drive 6 consecutive stalls — _on_stale advances reconnect_attempt each call
@@ -162,7 +159,7 @@ async def test_reconnect_storm_cap(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(wd_mod.asyncio, "sleep", _fake_sleep)
 
-    wd = wd_mod.WsWatchdog(stale_s=30.0)
+    wd = wd_mod.WsWatchdog(stale_s=30.0, on_reconnect=lambda: None)
     wd.touch()
     # Pre-populate 11 recent timestamps within the storm window (cutoff = 1000 - 3600 = -2600)
     for _ in range(11):
@@ -239,6 +236,7 @@ async def test_low_traffic_asset_no_false_positive() -> None:
     would break asyncio's internal loop.time() which is also time.monotonic.
     """
     import time as _time
+
     from polyarb.daemon.ws_watchdog import WsWatchdog
 
     callback_fires: list[int] = []
@@ -260,7 +258,7 @@ async def test_low_traffic_asset_no_false_positive() -> None:
     async def _bounded():
         try:
             await asyncio.wait_for(wd.watch(stop_event), timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     await asyncio.gather(_bounded(), _setter())

@@ -46,6 +46,7 @@ from polyarb.observation.l3_evidence import (
     RuntimeEventSeverity,
     WsMembershipSnapshot,
     build_runtime_event_detail,
+    safe_runtime_error_type,
 )
 
 _QUIET_REFRESH_SEND_TIMEOUT_S: float = 5.0
@@ -315,7 +316,10 @@ class WsConsumer:
             self._record_runtime_event(
                 RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
                 reason_code="control_send_failed",
-                detail={"operation": operation, "error_type": type(exc).__name__},
+                detail={
+                    "operation": operation,
+                    "error_type": safe_runtime_error_type(exc),
+                },
                 severity=RuntimeEventSeverity.WARNING,
             )
             logger.warning(
@@ -327,6 +331,7 @@ class WsConsumer:
     async def _initialize_connection(self, ws: Any) -> None:
         """Fence generation, initial subscribe, and publication atomically."""
         generation = self._connection_generation + 1
+        is_reconnect = self._connection_generation > 0
         try:
             async with self._subscription_control_lock:
                 previous_generation = self._connection_generation
@@ -344,12 +349,13 @@ class WsConsumer:
                     },
                     generation=generation,
                 )
-                self._record_runtime_event(
-                    RuntimeEventKind.RECONNECT_STARTED,
-                    reason_code="connection_initializing",
-                    detail={"source": "connection_initializer"},
-                    generation=generation,
-                )
+                if is_reconnect:
+                    self._record_runtime_event(
+                        RuntimeEventKind.RECONNECT_STARTED,
+                        reason_code="connection_initializing",
+                        detail={"source": "connection_initializer"},
+                        generation=generation,
+                    )
                 previous_ws = self._current_ws
                 desired_snapshot = frozenset(self._l3_desired_set)
                 active_assets = self._compute_active_assets()
@@ -376,12 +382,13 @@ class WsConsumer:
                     # unsent truth and must force compensation/reconnect.
                     self._l3_committed_set = set(desired_snapshot)
                     self._publish_l3_membership_locked()
-                    self._record_runtime_event(
-                        RuntimeEventKind.RECONNECT_SUCCEEDED,
-                        reason_code="initial_control_committed",
-                        detail={"source": "connection_initializer"},
-                        generation=generation,
-                    )
+                    if is_reconnect:
+                        self._record_runtime_event(
+                            RuntimeEventKind.RECONNECT_SUCCEEDED,
+                            reason_code="initial_control_committed",
+                            detail={"source": "connection_initializer"},
+                            generation=generation,
+                        )
                     return
                 if ok:
                     self._record_runtime_event(
@@ -399,16 +406,17 @@ class WsConsumer:
             await self._compensate_generation(ws, generation)
             raise
         retry_after_s = await self._compensate_generation(ws, generation)
-        self._record_runtime_event(
-            RuntimeEventKind.RECONNECT_FAILED,
-            reason_code="initial_control_failed",
-            detail={
-                "operation": "initial_subscribe",
-                "error_type": "ControlRejected",
-            },
-            severity=RuntimeEventSeverity.WARNING,
-            generation=generation,
-        )
+        if is_reconnect:
+            self._record_runtime_event(
+                RuntimeEventKind.RECONNECT_FAILED,
+                reason_code="initial_control_failed",
+                detail={
+                    "operation": "initial_subscribe",
+                    "error_type": "ControlRejected",
+                },
+                severity=RuntimeEventSeverity.WARNING,
+                generation=generation,
+            )
         raise WsConnectionInitializationFailed(
             "initial WS subscription failed", retry_after_s=retry_after_s
         )
@@ -558,6 +566,17 @@ class WsConsumer:
                 ws = self._current_ws
                 generation = self._connection_generation
                 if ws is None:
+                    operation = str(payload.get("operation") or "initial_subscribe")
+                    self._record_runtime_event(
+                        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
+                        reason_code="no_active_connection",
+                        detail={
+                            "operation": operation,
+                            "error_type": "NoActiveConnection",
+                        },
+                        severity=RuntimeEventSeverity.WARNING,
+                        generation=generation,
+                    )
                     self._publish_l3_membership_locked()
                     return False
                 succeeded = await self._send_control(ws, payload)
@@ -680,6 +699,16 @@ class WsConsumer:
                     raise RuntimeError("quiet refresh has no required assets")
                 if ws is None:
                     failure_reason = "no_connection"
+                    self._record_runtime_event(
+                        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
+                        reason_code="no_active_connection",
+                        detail={
+                            "operation": "book_refresh",
+                            "error_type": "NoActiveConnection",
+                        },
+                        severity=RuntimeEventSeverity.WARNING,
+                        generation=generation,
+                    )
                     raise RuntimeError("quiet refresh has no connection")
                 waiter = _BookEvidenceWaiter(
                     future=asyncio.get_running_loop().create_future(),
@@ -842,6 +871,16 @@ class WsConsumer:
                     # the newest candidates. False keeps the durable cursor
                     # retryable until live convergence is proven.
                     self._candidate_set = desired
+                    self._record_runtime_event(
+                        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
+                        reason_code="no_active_connection",
+                        detail={
+                            "operation": "candidate_replace",
+                            "error_type": "NoActiveConnection",
+                        },
+                        severity=RuntimeEventSeverity.WARNING,
+                        generation=generation,
+                    )
                     return False
                 if added and not await self._send_control(
                     ws,

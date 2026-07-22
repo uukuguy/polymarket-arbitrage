@@ -41,6 +41,7 @@ from polyarb.observation.l3_evidence import (
     RuntimeEventKind,
     RuntimeEventSeverity,
     build_runtime_event_detail,
+    safe_runtime_error_type,
 )
 
 # D-03 LOCKED + R5: backoff sequence in seconds. Final value caps further
@@ -239,6 +240,20 @@ class WsWatchdog:
             severity=RuntimeEventSeverity.WARNING,
         )
 
+        if self._on_reconnect is None:
+            self._state.state = "DEGRADED_REST_POLLING"
+            self._record_event(
+                RuntimeEventKind.RECONNECT_DEFERRED,
+                reason_code="reconnect_hook_missing",
+                detail={
+                    "retry_after_ms": int(_DEGRADED_SLEEP_S * 1000),
+                    "budget_count": len(self._reconnect_timestamps),
+                },
+                severity=RuntimeEventSeverity.WARNING,
+            )
+            await asyncio.sleep(_DEGRADED_SLEEP_S)
+            return
+
         # R5 storm cap — switch to DEGRADED_REST_POLLING (no more reconnects
         # for _DEGRADED_SLEEP_S; emit Sentry warning so the operator sees it).
         if not self.reserve_reconnect():
@@ -287,11 +302,6 @@ class WsWatchdog:
 
         self._state.state = "RECONNECTING"
         self._state.reconnect_attempt += 1
-        self._record_event(
-            RuntimeEventKind.RECONNECT_STARTED,
-            reason_code="watchdog_reconnecting",
-            detail={"source": "watchdog"},
-        )
 
         logger.info(
             f"ws_watchdog: stale ({self.stale_s}s silence) → "
@@ -307,23 +317,27 @@ class WsWatchdog:
         )
 
         # Invoke caller's reconnect hook (suppress to keep loop alive)
-        if self._on_reconnect is not None:
-            try:
-                self._on_reconnect()
-            except Exception as e:  # noqa: BLE001
-                self._record_event(
-                    RuntimeEventKind.RECONNECT_FAILED,
-                    reason_code="reconnect_hook_failed",
-                    detail={
-                        "operation": "on_reconnect",
-                        "error_type": type(e).__name__,
-                    },
-                    severity=RuntimeEventSeverity.WARNING,
-                )
-                logger.warning(
-                    "ws_watchdog: on_reconnect hook raised error_type={}",
-                    type(e).__name__,
-                )
+        self._record_event(
+            RuntimeEventKind.RECONNECT_STARTED,
+            reason_code="watchdog_reconnecting",
+            detail={"source": "watchdog"},
+        )
+        try:
+            self._on_reconnect()
+        except Exception as e:  # noqa: BLE001
+            self._record_event(
+                RuntimeEventKind.RECONNECT_FAILED,
+                reason_code="reconnect_hook_failed",
+                detail={
+                    "operation": "on_reconnect",
+                    "error_type": safe_runtime_error_type(e),
+                },
+                severity=RuntimeEventSeverity.WARNING,
+            )
+            logger.warning(
+                "ws_watchdog: on_reconnect hook raised error_type={}",
+                type(e).__name__,
+            )
 
         await asyncio.sleep(wait_s)
         # Reset the silence clock so next iteration measures fresh elapsed

@@ -14,9 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import io
-
-# F-3 SECURITY ESCAPE HATCH: pytest tmp_path lives outside project root by design
 import os
+import signal
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from loguru import logger
 
+# F-3 SECURITY ESCAPE HATCH: pytest tmp_path lives outside project root by design
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 
@@ -293,6 +293,103 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
     assert runtime.snapshot().writer_ok is True
     assert runtime.snapshot().status.value == "warn"
     assert runtime.snapshot().reason_code == "cold_start"
+
+
+@pytest.mark.asyncio
+async def test_main_signal_durably_drains_shutdown_event_within_five_seconds():
+    """The real signal callback feeds the real writer before stop becomes visible."""
+    from polyarb.daemon import l2_main
+    from polyarb.observation.l3_evidence import RuntimeEventKind
+
+    settings = _make_fake_settings()
+    settings.l2_runtime_db_dsn.get_secret_value = MagicMock(return_value="runtime-dsn")
+    store = MagicMock()
+    store.append_boot = AsyncMock(return_value=True)
+    durable_events = []
+
+    async def _append_event(event):
+        durable_events.append(event)
+        return True
+
+    store.append_event = AsyncMock(side_effect=_append_event)
+    dependencies = l2_main._build_l3_evidence_dependencies(
+        settings=settings,
+        recipe_yaml_path=l2_main._L3_RECIPE_PATH,
+    )
+    object.__setattr__(dependencies, "store", store)
+    stop_event = asyncio.Event()
+    stop_states_at_record: list[bool] = []
+    original_record_event = dependencies.runtime.record_event
+
+    def _record_before_stop(*args, **kwargs):
+        stop_states_at_record.append(stop_event.is_set())
+        return original_record_event(*args, **kwargs)
+
+    dependencies.runtime.record_event = _record_before_stop  # type: ignore[method-assign]
+    server = _make_mock_server()
+    handlers: dict[object, tuple[object, tuple[object, ...]]] = {}
+    loop = asyncio.get_running_loop()
+
+    def _capture_handler(sig, callback, *args):
+        handlers[sig] = (callback, args)
+
+    async def _idle(local_stop_event):
+        await local_stop_event.wait()
+
+    consumer = MagicMock()
+    consumer.run = _idle
+    consumer.run_quiet_refresh = _idle
+    watchdog = MagicMock()
+    watchdog.watch = _idle
+    pump = MagicMock()
+    pump.run = _idle
+
+    async def _listener(**kwargs):
+        await kwargs["stop_event"].wait()
+
+    async def _promoter(**kwargs):
+        await kwargs["stop_event"].wait()
+
+    async def _sampler(local_stop_event, **_kwargs):
+        while signal.SIGTERM not in handlers:
+            await asyncio.sleep(0)
+        callback, args = handlers[signal.SIGTERM]
+        callback(*args)
+        await local_stop_event.wait()
+
+    started = loop.time()
+    with (
+        patch("polyarb.daemon.l2_main.init_logging"),
+        patch("polyarb.daemon.l2_main.load_settings", return_value=settings),
+        patch("polyarb.daemon.l2_main.init_sentry"),
+        patch("polyarb.daemon.l2_main.sentry_sdk.set_tag"),
+        patch(
+            "polyarb.daemon.l2_main._build_l3_evidence_dependencies",
+            return_value=dependencies,
+        ),
+        patch("polyarb.daemon.l2_main.SQLiteStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.WsConsumer", return_value=consumer),
+        patch("polyarb.daemon.l2_main.WsWatchdog", return_value=watchdog),
+        patch("polyarb.daemon.l2_main.AsyncpgCursorStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.ReconciliationPump", return_value=pump),
+        patch("polyarb.daemon.l2_main.listen_snapshot_complete", new=_listener),
+        patch("polyarb.daemon.l2_main.uvicorn.Server", return_value=server),
+        patch("polyarb.daemon.l2_main.create_l2_app", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.asyncio.Event", return_value=stop_event),
+        patch.object(loop, "add_signal_handler", side_effect=_capture_handler),
+        patch("polyarb.observation.l3_promote.run_periodic", new=_promoter),
+        patch("polyarb.observation.l3_sampler.run_sampler", new=_sampler),
+    ):
+        assert await asyncio.wait_for(l2_main.main(), timeout=5.0) == 0
+
+    assert loop.time() - started < 5.0
+    assert [event.kind for event in durable_events] == [
+        RuntimeEventKind.SHUTDOWN_SIGNAL
+    ]
+    assert stop_states_at_record == [False]
+    assert durable_events[0].detail == {"signal": "SIGTERM"}
+    source = Path(l2_main.__file__).read_text()
+    assert "UPDATE l3_runtime_boots" not in source
 
 
 def _patch_minimal_l2_main(l2_main, *, settings, server, store):

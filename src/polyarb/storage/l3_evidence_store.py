@@ -124,6 +124,15 @@ INSERT INTO l3_runtime_events (
     event_id, boot_id, event_seq, occurred_at, kind, severity, generation,
     reason_code, detail
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+ON CONFLICT DO NOTHING
+"""
+
+_EVENT_REPLAY_SELECT = """
+SELECT event_id, boot_id, event_seq, occurred_at, kind, severity, generation,
+       reason_code, detail
+FROM l3_runtime_events
+WHERE event_id=$1 OR (boot_id=$2 AND event_seq=$3)
+ORDER BY event_id
 """
 
 _SAMPLING_MARKET_STATE = """
@@ -444,6 +453,8 @@ def _thaw_json(value: Any) -> Any:
 
 
 def _event_args(record: RuntimeEventRecord) -> tuple[object, ...]:
+    if type(record) is not RuntimeEventRecord:
+        raise TypeError("event append requires an exact RuntimeEventRecord")
     return (
         record.event_id,
         record.boot_id,
@@ -454,6 +465,29 @@ def _event_args(record: RuntimeEventRecord) -> tuple[object, ...]:
         record.generation,
         record.reason_code,
         json.dumps(_thaw_json(record.detail), sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _event_row_matches(
+    row: Mapping[str, Any],
+    record: RuntimeEventRecord,
+) -> bool:
+    detail = row["detail"]
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except (TypeError, ValueError):
+            return False
+    return (
+        row["event_id"] == record.event_id
+        and row["boot_id"] == record.boot_id
+        and row["event_seq"] == record.event_seq
+        and row["occurred_at"] == record.occurred_at
+        and row["kind"] == record.kind.value
+        and row["severity"] == record.severity.value
+        and row["generation"] == record.generation
+        and (row["reason_code"] or "") == record.reason_code
+        and detail == _thaw_json(record.detail)
     )
 
 
@@ -667,7 +701,47 @@ class L3EvidenceStore:
         return succeeded
 
     async def append_event(self, record: RuntimeEventRecord) -> bool:
-        return await self._append_one(_AppendOperation.EVENT, lambda: _event_args(record))
+        connection: asyncpg.Connection | None = None
+        succeeded = False
+        try:
+            args = _event_args(record)
+            connection = await asyncpg.connect(dsn=self._dsn)
+            await _require_evidence_daemon(connection)
+            command = await connection.execute(_EVENT_INSERT, *args)
+            if command == "INSERT 0 1":
+                succeeded = True
+            elif command == "INSERT 0 0":
+                rows = await connection.fetch(
+                    _EVENT_REPLAY_SELECT,
+                    record.event_id,
+                    record.boot_id,
+                    record.event_seq,
+                )
+                if len(rows) == 1 and _event_row_matches(rows[0], record):
+                    succeeded = True
+                else:
+                    _report_failure(
+                        "append_event_conflict",
+                        ValueError("runtime event replay payload conflict"),
+                    )
+            else:
+                _report_failure(
+                    "append_event_command",
+                    ValueError("unexpected runtime event insert command tag"),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - fail-soft replay boundary
+            _report_failure("append_event", error)
+        finally:
+            if connection is not None:
+                try:
+                    await connection.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001 - close remains fail-soft
+                    _report_failure("append_event_close", error)
+        return succeeded
 
     async def fetch_sampling_market_state(
         self,

@@ -86,6 +86,112 @@ _RUNTIME_EVENT_DETAIL_KEYS: Mapping[RuntimeEventKind, frozenset[str]] = MappingP
     }
 )
 
+_RUNTIME_EVENT_SOURCES = frozenset({"watchdog", "connection_initializer"})
+_RUNTIME_EVENT_OPERATIONS = frozenset(
+    {
+        "on_reconnect",
+        "initial_subscribe",
+        "subscribe",
+        "unsubscribe",
+        "connection_close",
+        "candidate_replace",
+        "book_refresh",
+    }
+)
+_RUNTIME_EVENT_ERROR_TYPES = frozenset(
+    {
+        "Exception",
+        "RuntimeError",
+        "ConnectionError",
+        "TimeoutError",
+        "OSError",
+        "StateMismatch",
+        "ControlRejected",
+        "MissingHook",
+        "NoActiveConnection",
+    }
+)
+_RUNTIME_EVENT_SIGNALS = frozenset({"SIGINT", "SIGTERM"})
+_RUNTIME_EVENT_CHECKPOINTS = frozenset({"T+0", "T+6", "T+12", "T+18", "T+24"})
+
+
+def _invalid_event_detail(kind: RuntimeEventKind, key: str) -> ValueError:
+    return ValueError(f"invalid {kind.value} runtime event detail value for {key}")
+
+
+def _bounded_detail_int(
+    kind: RuntimeEventKind,
+    key: str,
+    value: object,
+    *,
+    maximum: int,
+) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+        raise _invalid_event_detail(kind, key)
+
+
+def _validate_runtime_event_detail_values(
+    kind: RuntimeEventKind,
+    detail: Mapping[str, object],
+) -> None:
+    for key, value in detail.items():
+        if key in {
+            "stale_seconds",
+            "reconnect_attempt",
+            "budget_count",
+            "retry_after_ms",
+            "previous_generation",
+            "new_generation",
+            "failed_event_seq",
+            "recovered_event_seq",
+        }:
+            maximum = {
+                "stale_seconds": 3_600,
+                "reconnect_attempt": 1_000_000,
+                "budget_count": 128,
+                "retry_after_ms": 3_600_000,
+            }.get(key, 2**63 - 1)
+            _bounded_detail_int(kind, key, value, maximum=maximum)
+        elif key == "source" and (
+            not isinstance(value, str) or value not in _RUNTIME_EVENT_SOURCES
+        ):
+            raise _invalid_event_detail(kind, key)
+        elif key == "operation" and (
+            not isinstance(value, str) or value not in _RUNTIME_EVENT_OPERATIONS
+        ):
+            raise _invalid_event_detail(kind, key)
+        elif key == "error_type" and (
+            not isinstance(value, str) or value not in _RUNTIME_EVENT_ERROR_TYPES
+        ):
+            raise _invalid_event_detail(kind, key)
+        elif key == "close_succeeded" and type(value) is not bool:
+            raise _invalid_event_detail(kind, key)
+        elif key == "signal" and (
+            not isinstance(value, str) or value not in _RUNTIME_EVENT_SIGNALS
+        ):
+            raise _invalid_event_detail(kind, key)
+        elif key in {"manifest_sha256", "report_sha256"} and (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(char not in "0123456789abcdef" for char in value)
+        ):
+            raise _invalid_event_detail(kind, key)
+        elif key == "checkpoint" and (
+            not isinstance(value, str) or value not in _RUNTIME_EVENT_CHECKPOINTS
+        ):
+            raise _invalid_event_detail(kind, key)
+
+    previous = detail.get("previous_generation")
+    current = detail.get("new_generation")
+    if previous is not None and current is not None and current <= previous:  # type: ignore[operator]
+        raise _invalid_event_detail(kind, "new_generation")
+
+
+def safe_runtime_error_type(error: BaseException) -> str:
+    """Map arbitrary exception classes to a non-secret bounded taxonomy."""
+    name = type(error).__name__
+    return name if name in _RUNTIME_EVENT_ERROR_TYPES else "Exception"
+
 
 def build_runtime_event_detail(
     kind: RuntimeEventKind,
@@ -101,7 +207,9 @@ def build_runtime_event_detail(
             f"runtime event detail keys are not allowed for {kind.value}: "
             f"{sorted(unknown)!r}"
         )
-    return _frozen_mapping(_normalize_json(dict(values)))
+    normalized = _normalize_json(dict(values))
+    _validate_runtime_event_detail_values(kind, normalized)
+    return _frozen_mapping(normalized)
 
 
 def _normalize_json(value: Any) -> Any:
@@ -652,9 +760,10 @@ class RuntimeEventRecord:
         _require_reason("reason_code", self.reason_code, required=False)
         if not isinstance(self.detail, Mapping):
             raise TypeError("detail root must be a Mapping")
-        _validate_event_detail(self.detail)
+        safe_detail = build_runtime_event_detail(self.kind, self.detail)
+        _validate_event_detail(safe_detail)
         try:
-            normalized_detail = _normalize_json(self.detail)
+            normalized_detail = _normalize_json(safe_detail)
             encoded_size = len(_postgres_jsonb_text(normalized_detail).encode("utf-8"))
         except (TypeError, ValueError) as exc:
             raise ValueError("detail must contain canonical JSON values") from exc
