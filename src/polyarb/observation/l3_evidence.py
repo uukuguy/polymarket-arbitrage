@@ -105,6 +105,24 @@ def _require_nonempty(name: str, value: str) -> None:
         raise ValueError(f"{name} must not be empty")
 
 
+def _require_uuid(name: str, value: object) -> None:
+    if not isinstance(value, UUID):
+        raise TypeError(f"{name} must be a UUID")
+
+
+def _require_enum(name: str, value: object, enum_type: type[StrEnum]) -> None:
+    if type(value) is not enum_type:
+        raise TypeError(f"{name} must be the exact {enum_type.__name__} enum type")
+
+
+def _require_bool(name: str, value: object, *, optional: bool = False) -> None:
+    if optional and value is None:
+        return
+    if type(value) is not bool:
+        qualifier = "bool or None" if optional else "bool"
+        raise TypeError(f"{name} must be a {qualifier}")
+
+
 def _require_sha256(name: str, value: str) -> None:
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a str")
@@ -146,6 +164,16 @@ def _freeze(value: Any) -> Any:
 
 def _frozen_mapping[ValueT](value: Mapping[str, ValueT]) -> Mapping[str, ValueT]:
     return _freeze(value)
+
+
+def _postgres_jsonb_text(value: Mapping[str, object]) -> str:
+    """Render the byte-count contract used by PostgreSQL ``jsonb::text``."""
+    return json.dumps(
+        _normalize_json(value),
+        sort_keys=True,
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
 def _empty_mapping() -> Mapping[str, Any]:
@@ -263,6 +291,7 @@ class RuntimeBootRecord:
     acceptance_config_hash: str
 
     def __post_init__(self) -> None:
+        _require_uuid("boot_id", self.boot_id)
         _require_utc("started_at", self.started_at)
         for name in ("machine_id", "machine_version", "image_ref", "release_id", "code_version"):
             _require_nonempty(name, getattr(self, name))
@@ -295,6 +324,8 @@ class PromoteRunRecord:
     duration_ms: int
 
     def __post_init__(self) -> None:
+        _require_uuid("boot_id", self.boot_id)
+        _require_enum("status", self.status, PromoteStatus)
         for name in ("scheduled_at", "started_at", "finished_at"):
             _require_utc(name, getattr(self, name))
         for name in (
@@ -311,6 +342,9 @@ class PromoteRunRecord:
             _require_nonnegative(name, getattr(self, name))
         for name in ("mapping_hash", "desired_hash", "committed_hash", "acceptance_config_hash"):
             _require_sha256(name, getattr(self, name))
+        _require_bool("add_succeeded", self.add_succeeded, optional=True)
+        _require_bool("remove_succeeded", self.remove_succeeded, optional=True)
+        _require_bool("mirror_succeeded", self.mirror_succeeded)
         _require_reason("reason_code", self.reason_code)
 
 
@@ -339,6 +373,8 @@ class HealthSampleRecord:
     reason_code: str
 
     def __post_init__(self) -> None:
+        _require_uuid("boot_id", self.boot_id)
+        _require_enum("status", self.status, HealthStatus)
         _require_utc("sampled_at", self.sampled_at)
         for name in (
             "sample_seq",
@@ -389,6 +425,8 @@ class MarketSampleRecord:
     reason_code: str
 
     def __post_init__(self) -> None:
+        _require_uuid("boot_id", self.boot_id)
+        _require_enum("status", self.status, HealthStatus)
         for name in ("sampled_at", "yes_book_at", "no_book_at", "yes_ohlc_at"):
             _require_utc(name, getattr(self, name))
         for name in (
@@ -400,6 +438,15 @@ class MarketSampleRecord:
             "yes_ohlc_age_ms",
         ):
             _require_nonnegative(name, getattr(self, name))
+        for name in (
+            "yes_desired",
+            "no_desired",
+            "yes_committed",
+            "no_committed",
+            "yes_evidenced",
+            "no_evidenced",
+        ):
+            _require_bool(name, getattr(self, name))
         MarketPair(self.market_id, self.yes_token_id, self.no_token_id)
         _require_reason("reason_code", self.reason_code)
 
@@ -460,17 +507,23 @@ class RuntimeEventRecord:
     detail: Mapping[str, object] = field(default_factory=_empty_mapping)
 
     def __post_init__(self) -> None:
+        _require_uuid("event_id", self.event_id)
+        _require_uuid("boot_id", self.boot_id)
+        _require_enum("kind", self.kind, RuntimeEventKind)
+        _require_enum("severity", self.severity, RuntimeEventSeverity)
         _require_nonnegative("event_seq", self.event_seq)
         _require_nonnegative("generation", self.generation)
         _require_utc("occurred_at", self.occurred_at)
         _require_reason("reason_code", self.reason_code, required=False)
+        if not isinstance(self.detail, Mapping):
+            raise TypeError("detail root must be a Mapping")
         try:
             normalized_detail = _normalize_json(self.detail)
-            encoded = _canonical_json(normalized_detail)
+            encoded_size = len(_postgres_jsonb_text(normalized_detail).encode("utf-8"))
         except (TypeError, ValueError) as exc:
             raise ValueError("detail must contain canonical JSON values") from exc
-        if len(encoded) > 2048:
-            raise ValueError("detail canonical JSON must be at most 2048 bytes")
+        if encoded_size > 2048:
+            raise ValueError("detail PostgreSQL jsonb::text must be at most 2048 bytes")
         object.__setattr__(self, "detail", _frozen_mapping(normalized_detail))
 
 

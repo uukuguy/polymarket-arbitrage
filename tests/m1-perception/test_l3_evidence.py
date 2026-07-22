@@ -184,6 +184,17 @@ def test_settings_lock_evidence_defaults_and_strict_boundaries(
         Settings(**{field_name: invalid})
 
 
+def test_l2_runtime_database_credential_is_distinct_and_masked() -> None:
+    dsn = "postgresql://daemon:daemon-password-9351@db/evidence"
+    settings = Settings(l2_runtime_db_dsn=dsn)
+
+    assert isinstance(settings.l2_runtime_db_dsn, SecretStr)
+    assert settings.l2_runtime_db_dsn.get_secret_value().endswith("/evidence")
+    assert dsn not in repr(settings)
+    assert "daemon-password-9351" not in repr(settings)
+    assert settings.supabase_db_dsn.get_secret_value() == ""
+
+
 def test_runtime_identity_uses_fly_environment_and_exact_recipe_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -840,3 +851,148 @@ def test_shared_validators_reject_runtime_type_impostors() -> None:
         replace(acceptance, sample_interval_s=0.5)
     with pytest.raises(TypeError, match="int"):
         replace(acceptance, retention_days=True)
+
+
+def test_every_public_append_record_rejects_uuid_enum_and_bool_impostors() -> None:
+    evidence = importlib.import_module("polyarb.observation.l3_evidence")
+    boot_id = uuid4()
+    boot = evidence.RuntimeBootRecord(
+        boot_id,
+        NOW,
+        "machine",
+        "version",
+        "image",
+        "release",
+        "code",
+        HASH_A,
+    )
+    promote = evidence.PromoteRunRecord(
+        boot_id,
+        0,
+        NOW,
+        NOW,
+        NOW,
+        evidence.PromoteStatus.SUCCESS,
+        "ok",
+        5,
+        10,
+        10,
+        10,
+        1,
+        2,
+        HASH_A,
+        HASH_A,
+        HASH_A,
+        HASH_B,
+        3,
+        True,
+        None,
+        False,
+        12,
+    )
+    health = evidence.HealthSampleRecord(
+        boot_id,
+        7,
+        NOW,
+        10,
+        10,
+        10,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        "LISTENING",
+        0,
+        1,
+        2,
+        3,
+        HASH_A,
+        HASH_B,
+        evidence.HealthStatus.PASS,
+        "ok",
+    )
+    market = _market_sample(evidence, boot_id, 0)
+    event = evidence.RuntimeEventRecord(
+        uuid4(),
+        boot_id,
+        0,
+        NOW,
+        evidence.RuntimeEventKind.SHUTDOWN_SIGNAL,
+        evidence.RuntimeEventSeverity.INFO,
+    )
+
+    for record, field_name in (
+        (boot, "boot_id"),
+        (promote, "boot_id"),
+        (health, "boot_id"),
+        (market, "boot_id"),
+        (event, "event_id"),
+        (event, "boot_id"),
+    ):
+        with pytest.raises(TypeError, match="UUID"):
+            replace(record, **{field_name: str(getattr(record, field_name))})
+
+    for record, field_name in (
+        (promote, "status"),
+        (health, "status"),
+        (market, "status"),
+        (event, "kind"),
+        (event, "severity"),
+    ):
+        with pytest.raises(TypeError, match="enum"):
+            replace(record, **{field_name: getattr(record, field_name).value})
+
+    for field_name in ("add_succeeded", "remove_succeeded", "mirror_succeeded"):
+        with pytest.raises(TypeError, match="bool"):
+            replace(promote, **{field_name: 1})
+    for field_name in (
+        "yes_desired",
+        "no_desired",
+        "yes_committed",
+        "no_committed",
+        "yes_evidenced",
+        "no_evidenced",
+    ):
+        with pytest.raises(TypeError, match="bool"):
+            replace(market, **{field_name: 1})
+
+    assert replace(promote, add_succeeded=None, remove_succeeded=None)
+
+
+@pytest.mark.parametrize("detail", [[], (), ["root"], ("root",)])
+def test_runtime_event_detail_requires_mapping_root(detail: object) -> None:
+    evidence = importlib.import_module("polyarb.observation.l3_evidence")
+
+    with pytest.raises(TypeError, match="Mapping"):
+        evidence.RuntimeEventRecord(
+            uuid4(),
+            uuid4(),
+            0,
+            NOW,
+            evidence.RuntimeEventKind.SHUTDOWN_SIGNAL,
+            detail=detail,
+        )
+
+
+def test_runtime_event_detail_uses_postgres_jsonb_text_size_boundary() -> None:
+    evidence = importlib.import_module("polyarb.observation.l3_evidence")
+    empty_size = len(evidence._postgres_jsonb_text({"payload": ""}).encode("utf-8"))
+    accepted_count = (2048 - empty_size) // len("界".encode())
+    accepted = {"payload": "界" * accepted_count}
+    rejected = {"payload": "界" * (accepted_count + 1)}
+
+    assert len(evidence._postgres_jsonb_text(accepted).encode("utf-8")) <= 2048
+    assert len(evidence._postgres_jsonb_text(rejected).encode("utf-8")) > 2048
+    event = evidence.RuntimeEventRecord(
+        uuid4(),
+        uuid4(),
+        0,
+        NOW,
+        evidence.RuntimeEventKind.SHUTDOWN_SIGNAL,
+        detail=accepted,
+    )
+    assert event.detail["payload"] == accepted["payload"]
+    with pytest.raises(ValueError, match="PostgreSQL jsonb::text"):
+        replace(event, detail=rejected)

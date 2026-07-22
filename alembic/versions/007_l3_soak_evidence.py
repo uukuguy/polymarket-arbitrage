@@ -74,7 +74,7 @@ def upgrade() -> None:
             name="ck_l3_runtime_boots_occurrence_window",
         ),
         sa.CheckConstraint(
-            "length(acceptance_config_hash) = 64",
+            "acceptance_config_hash ~ '^[0-9a-f]{64}$'",
             name="ck_l3_runtime_boots_hash_len",
         ),
     )
@@ -147,9 +147,10 @@ def upgrade() -> None:
             name="ck_l3_promote_runs_occurrence_window",
         ),
         sa.CheckConstraint(
-            "length(mapping_hash) = 64 AND length(desired_hash) = 64 "
-            "AND length(committed_hash) = 64 "
-            "AND length(acceptance_config_hash) = 64",
+            "mapping_hash ~ '^[0-9a-f]{64}$' "
+            "AND desired_hash ~ '^[0-9a-f]{64}$' "
+            "AND committed_hash ~ '^[0-9a-f]{64}$' "
+            "AND acceptance_config_hash ~ '^[0-9a-f]{64}$'",
             name="ck_l3_promote_runs_hash_lengths",
         ),
     )
@@ -217,7 +218,8 @@ def upgrade() -> None:
             name="ck_l3_health_samples_occurrence_window",
         ),
         sa.CheckConstraint(
-            "length(mapping_hash) = 64 AND length(acceptance_config_hash) = 64",
+            "mapping_hash ~ '^[0-9a-f]{64}$' "
+            "AND acceptance_config_hash ~ '^[0-9a-f]{64}$'",
             name="ck_l3_health_samples_hash_lengths",
         ),
     )
@@ -347,7 +349,8 @@ def upgrade() -> None:
             name="ck_l3_runtime_events_severity",
         ),
         sa.CheckConstraint(
-            "detail IS NULL OR octet_length(detail::text) <= 2048",
+            "detail IS NULL OR (jsonb_typeof(detail) = 'object' "
+            "AND octet_length(detail::text) <= 2048)",
             name="ck_l3_runtime_events_detail_size",
         ),
         sa.CheckConstraint(
@@ -477,20 +480,31 @@ def upgrade() -> None:
         """
     )
 
-    op.execute(
-        "CREATE ROLE l3_retention_operator NOLOGIN NOSUPERUSER NOCREATEDB "
-        "NOCREATEROLE NOINHERIT NOREPLICATION"
+    capability_attributes = (
+        "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+        "NOINHERIT NOREPLICATION NOBYPASSRLS"
     )
+    op.execute(f"CREATE ROLE l3_evidence_daemon {capability_attributes}")
+    op.execute(f"CREATE ROLE l3_retention_operator {capability_attributes}")
     tables = ", ".join(EVIDENCE_TABLES)
     op.execute(
-        f"REVOKE ALL PRIVILEGES ON TABLE {tables} FROM PUBLIC, anon, authenticated, service_role"
+        f"REVOKE ALL PRIVILEGES ON TABLE {tables} "
+        "FROM PUBLIC, anon, authenticated, service_role, l3_evidence_daemon"
     )
     op.execute(f"GRANT SELECT, INSERT ON TABLE {tables} TO service_role")
+    op.execute(f"GRANT SELECT, INSERT ON TABLE {tables} TO l3_evidence_daemon")
     op.execute("GRANT USAGE, SELECT ON SEQUENCE l3_promote_runs_id_seq TO service_role")
+    op.execute(
+        "GRANT USAGE, SELECT ON SEQUENCE l3_promote_runs_id_seq TO l3_evidence_daemon"
+    )
+    op.execute(
+        "GRANT SELECT ON TABLE l2_book_levels, l2_top_of_book, l2_ohlc_1m "
+        "TO l3_evidence_daemon"
+    )
     op.execute(
         "REVOKE ALL ON FUNCTION "
         "l3_retention_cleanup(timestamptz,timestamptz,timestamptz) "
-        "FROM PUBLIC, anon, authenticated, service_role"
+        "FROM PUBLIC, anon, authenticated, service_role, l3_evidence_daemon"
     )
     op.execute(
         "GRANT EXECUTE ON FUNCTION "
@@ -500,6 +514,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(
+        "REVOKE SELECT ON TABLE l2_book_levels, l2_top_of_book, l2_ohlc_1m "
+        "FROM l3_evidence_daemon"
+    )
     for table in reversed(EVIDENCE_TABLES):
         op.execute(f"DROP TRIGGER trg_l3_evidence_append_only ON {table}")
     op.execute("DROP FUNCTION l3_retention_cleanup(timestamptz,timestamptz,timestamptz)")
@@ -510,3 +528,4 @@ def downgrade() -> None:
     op.drop_table("l3_promote_runs")
     op.drop_table("l3_runtime_boots")
     op.execute("DROP ROLE l3_retention_operator")
+    op.execute("DROP ROLE l3_evidence_daemon")

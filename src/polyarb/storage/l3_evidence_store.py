@@ -222,6 +222,15 @@ FROM pg_roles AS role WHERE role.rolname=current_user
 
 _RETENTION_CALL = "SELECT * FROM l3_retention_cleanup($1,$2,$3)"
 
+_EVIDENCE_AUTHORIZATION = """
+SELECT
+    role.rolsuper AS is_superuser,
+    role.rolcanlogin AS can_login,
+    pg_has_role(current_user, 'l3_evidence_daemon', 'MEMBER') AS daemon_member,
+    pg_has_role(current_user, 'l3_retention_operator', 'MEMBER') AS retention_member
+FROM pg_roles AS role WHERE role.rolname=current_user
+"""
+
 
 def _require_utc_interval(start: datetime, end: datetime) -> None:
     for name, value in (("start", start), ("end", end)):
@@ -243,6 +252,18 @@ def _report_failure(operation: str, error: BaseException) -> None:
         )
     except Exception:  # noqa: BLE001 - observability cannot break the storage envelope
         logger.warning("l3 evidence operation={} breadcrumb_failed", operation)
+
+
+async def _require_evidence_daemon(connection: asyncpg.Connection) -> None:
+    authorization = await connection.fetchrow(_EVIDENCE_AUTHORIZATION)
+    if (
+        authorization is None
+        or authorization["is_superuser"]
+        or not authorization["can_login"]
+        or not authorization["daemon_member"]
+        or authorization["retention_member"]
+    ):
+        raise PermissionError("evidence credential is not authorized")
 
 
 def _boot_args(record: RuntimeBootRecord) -> tuple[object, ...]:
@@ -502,6 +523,7 @@ class L3EvidenceStore:
             statement = _APPEND_STATEMENTS[operation]
             args = args_factory()
             connection = await asyncpg.connect(dsn=self._dsn)
+            await _require_evidence_daemon(connection)
             await connection.execute(statement, *args)
             succeeded = True
         except asyncio.CancelledError:
@@ -516,7 +538,6 @@ class L3EvidenceStore:
                     raise
                 except Exception as error:  # noqa: BLE001 - close remains fail-soft
                     _report_failure(f"{operation_name}_close", error)
-                    succeeded = False
         return succeeded
 
     async def append_boot(self, record: RuntimeBootRecord) -> bool:
@@ -548,6 +569,7 @@ class L3EvidenceStore:
             ):
                 raise ValueError("sample batch rows must share identity and occurrence time")
             connection = await asyncpg.connect(dsn=self._dsn)
+            await _require_evidence_daemon(connection)
             async with connection.transaction():
                 await connection.execute(_HEALTH_INSERT, *_health_args(batch.health))
                 await connection.executemany(
@@ -566,7 +588,6 @@ class L3EvidenceStore:
                     raise
                 except Exception as error:  # noqa: BLE001 - close remains fail-soft
                     _report_failure("append_sample_close", error)
-                    succeeded = False
         return succeeded
 
     async def append_event(self, record: RuntimeEventRecord) -> bool:
@@ -576,6 +597,7 @@ class L3EvidenceStore:
         connection: asyncpg.Connection | None = None
         try:
             connection = await asyncpg.connect(dsn=self._dsn)
+            await _require_evidence_daemon(connection)
             row = await connection.fetchrow(_STATUS, boot_id)
             if row is None:
                 return None
@@ -600,6 +622,7 @@ class L3EvidenceStore:
         connection: asyncpg.Connection | None = None
         try:
             connection = await asyncpg.connect(dsn=self._dsn)
+            await _require_evidence_daemon(connection)
             async with connection.transaction(isolation="repeatable_read", readonly=True):
                 promote_rows = await connection.fetch(_PROMOTE_WINDOW, start, end)
                 health_rows = await connection.fetch(_HEALTH_WINDOW, start, end)
@@ -672,6 +695,7 @@ class L3EvidenceStore:
         connection: asyncpg.Connection | None = None
         try:
             connection = await asyncpg.connect(dsn=self._dsn)
+            await _require_evidence_daemon(connection)
             rows = await connection.fetch(_RETENTION_BOUNDS)
             by_table = {row["table_name"]: row for row in rows}
             if set(by_table) != EVIDENCE_TABLES:

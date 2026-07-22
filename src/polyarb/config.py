@@ -111,6 +111,13 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="Supabase Postgres DSN — used ONLY by alembic (not supabase-py)",
     )
+    l2_runtime_db_dsn: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Future least-privileged L2 evidence daemon LOGIN DSN; provisioning "
+            "and runtime wiring are deferred to separately gated Phase 05.4 Plans 02/05"
+        ),
+    )
     supabase_service_key: SecretStr = Field(default=SecretStr(""))
     supabase_mirror_enabled: bool = Field(default=False)  # auto-set by model_validator
 

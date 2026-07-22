@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import subprocess
 from pathlib import Path
 
@@ -21,7 +20,7 @@ EVIDENCE_TABLES = {
     "l3_market_samples",
     "l3_runtime_events",
 }
-RUNTIME_EVENT_KINDS = {
+RUNTIME_EVENT_KINDS = (
     "watchdog_stale",
     "reconnect_reserved",
     "reconnect_deferred",
@@ -36,7 +35,7 @@ RUNTIME_EVENT_KINDS = {
     "shutdown_signal",
     "soak_manifest_bound",
     "checkpoint_report_bound",
-}
+)
 
 
 def test_007_revision_chains_directly_to_006() -> None:
@@ -318,57 +317,217 @@ def _assert_catalog_contract(dsn: str) -> None:
 
     constraints = _q(
         dsn,
-        "SELECT conname, contype, pg_get_constraintdef(oid) AS definition "
+        "SELECT conrelid::regclass::text AS table_name, conname, contype, "
+        "pg_get_constraintdef(oid) AS definition, "
+        "ARRAY(SELECT att.attname FROM unnest(conkey) WITH ORDINALITY key(attnum, ord) "
+        "JOIN pg_attribute att ON att.attrelid=conrelid AND att.attnum=key.attnum "
+        "ORDER BY key.ord) AS columns "
         "FROM pg_constraint WHERE conrelid::regclass::text = ANY($1::text[])",
         sorted(EVIDENCE_TABLES),
     )
-    names = {row["conname"] for row in constraints}
-    expected_named = {
-        "pk_l3_runtime_boots",
-        "ck_l3_runtime_boots_occurrence_window",
-        "ck_l3_runtime_boots_hash_len",
-        "pk_l3_promote_runs",
-        "fk_l3_promote_runs_boot",
-        "uq_l3_promote_runs_boot_seq",
-        "ck_l3_promote_runs_nonnegative",
-        "ck_l3_promote_runs_status",
-        "ck_l3_promote_runs_occurrence_window",
-        "ck_l3_promote_runs_hash_lengths",
-        "pk_l3_health_samples",
-        "fk_l3_health_samples_boot",
-        "ck_l3_health_samples_nonnegative",
-        "ck_l3_health_samples_status",
-        "ck_l3_health_samples_occurrence_window",
-        "ck_l3_health_samples_hash_lengths",
-        "pk_l3_market_samples",
-        "fk_l3_market_samples_health",
-        "uq_l3_market_samples_yes_token",
-        "uq_l3_market_samples_no_token",
-        "ck_l3_market_samples_nonnegative",
-        "ck_l3_market_samples_status",
-        "ck_l3_market_samples_occurrence_window",
-        "pk_l3_runtime_events",
-        "fk_l3_runtime_events_boot",
-        "uq_l3_runtime_events_boot_seq",
-        "ck_l3_runtime_events_nonnegative",
-        "ck_l3_runtime_events_kind",
-        "ck_l3_runtime_events_severity",
-        "ck_l3_runtime_events_detail_size",
-        "ck_l3_runtime_events_occurrence_window",
+    expected_names = {
+        "l3_runtime_boots": {
+            "pk_l3_runtime_boots",
+            "ck_l3_runtime_boots_occurrence_window",
+            "ck_l3_runtime_boots_hash_len",
+        },
+        "l3_promote_runs": {
+            "pk_l3_promote_runs",
+            "fk_l3_promote_runs_boot",
+            "uq_l3_promote_runs_boot_seq",
+            "ck_l3_promote_runs_nonnegative",
+            "ck_l3_promote_runs_status",
+            "ck_l3_promote_runs_occurrence_window",
+            "ck_l3_promote_runs_hash_lengths",
+        },
+        "l3_health_samples": {
+            "pk_l3_health_samples",
+            "fk_l3_health_samples_boot",
+            "ck_l3_health_samples_nonnegative",
+            "ck_l3_health_samples_status",
+            "ck_l3_health_samples_occurrence_window",
+            "ck_l3_health_samples_hash_lengths",
+        },
+        "l3_market_samples": {
+            "pk_l3_market_samples",
+            "fk_l3_market_samples_health",
+            "uq_l3_market_samples_yes_token",
+            "uq_l3_market_samples_no_token",
+            "ck_l3_market_samples_nonnegative",
+            "ck_l3_market_samples_status",
+            "ck_l3_market_samples_occurrence_window",
+        },
+        "l3_runtime_events": {
+            "pk_l3_runtime_events",
+            "fk_l3_runtime_events_boot",
+            "uq_l3_runtime_events_boot_seq",
+            "ck_l3_runtime_events_nonnegative",
+            "ck_l3_runtime_events_kind",
+            "ck_l3_runtime_events_severity",
+            "ck_l3_runtime_events_detail_size",
+            "ck_l3_runtime_events_occurrence_window",
+        },
     }
-    assert expected_named <= names
-    promote_status = next(
-        row for row in constraints if row["conname"] == "ck_l3_promote_runs_status"
-    )["definition"]
-    assert all(
-        status in promote_status for status in ("success", "frozen", "underfilled", "failed")
-    )
-    runtime_event_kind = next(
-        row for row in constraints if row["conname"] == "ck_l3_runtime_events_kind"
-    )["definition"]
-    assert set(re.findall(r"'([^']+)'", runtime_event_kind)) == RUNTIME_EVENT_KINDS
-    market_fk = next(row for row in constraints if row["conname"] == "fk_l3_market_samples_health")
-    assert "ON DELETE CASCADE" in market_fk["definition"]
+    actual_names = {
+        table: {row["conname"] for row in constraints if row["table_name"] == table}
+        for table in EVIDENCE_TABLES
+    }
+    assert actual_names == expected_names
+    expected_key_columns = {
+        "pk_l3_runtime_boots": ["boot_id"],
+        "pk_l3_promote_runs": ["id"],
+        "fk_l3_promote_runs_boot": ["boot_id"],
+        "uq_l3_promote_runs_boot_seq": ["boot_id", "run_seq"],
+        "pk_l3_health_samples": ["boot_id", "sample_seq"],
+        "fk_l3_health_samples_boot": ["boot_id"],
+        "pk_l3_market_samples": ["boot_id", "sample_seq", "market_id"],
+        "fk_l3_market_samples_health": ["boot_id", "sample_seq"],
+        "uq_l3_market_samples_yes_token": ["boot_id", "sample_seq", "yes_token_id"],
+        "uq_l3_market_samples_no_token": ["boot_id", "sample_seq", "no_token_id"],
+        "pk_l3_runtime_events": ["event_id"],
+        "fk_l3_runtime_events_boot": ["boot_id"],
+        "uq_l3_runtime_events_boot_seq": ["boot_id", "event_seq"],
+    }
+    keyed = {
+        row["conname"]: row["columns"]
+        for row in constraints
+        if row["contype"] in (b"p", b"u", b"f")
+    }
+    assert keyed == expected_key_columns
+    definitions = {row["conname"]: row["definition"] for row in constraints}
+    expected_key_definitions = {
+        "pk_l3_runtime_boots": "PRIMARY KEY (boot_id)",
+        "pk_l3_promote_runs": "PRIMARY KEY (id)",
+        "fk_l3_promote_runs_boot": (
+            "FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"
+        ),
+        "uq_l3_promote_runs_boot_seq": "UNIQUE (boot_id, run_seq)",
+        "pk_l3_health_samples": "PRIMARY KEY (boot_id, sample_seq)",
+        "fk_l3_health_samples_boot": (
+            "FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"
+        ),
+        "pk_l3_market_samples": "PRIMARY KEY (boot_id, sample_seq, market_id)",
+        "fk_l3_market_samples_health": (
+            "FOREIGN KEY (boot_id, sample_seq) REFERENCES "
+            "l3_health_samples(boot_id, sample_seq) ON DELETE CASCADE"
+        ),
+        "uq_l3_market_samples_yes_token": (
+            "UNIQUE (boot_id, sample_seq, yes_token_id)"
+        ),
+        "uq_l3_market_samples_no_token": (
+            "UNIQUE (boot_id, sample_seq, no_token_id)"
+        ),
+        "pk_l3_runtime_events": "PRIMARY KEY (event_id)",
+        "fk_l3_runtime_events_boot": (
+            "FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"
+        ),
+        "uq_l3_runtime_events_boot_seq": "UNIQUE (boot_id, event_seq)",
+    }
+    assert {
+        name: definitions[name] for name in expected_key_definitions
+    } == expected_key_definitions
+    expected_check_definitions = {
+        "ck_l3_runtime_boots_occurrence_window": (
+            "CHECK (((started_at >= (recorded_at - '24:00:00'::interval)) AND "
+            "(started_at <= (recorded_at + '00:00:30'::interval)) AND "
+            "(stopped_at IS NULL)))"
+        ),
+        "ck_l3_runtime_boots_hash_len": (
+            "CHECK (((acceptance_config_hash)::text ~ '^[0-9a-f]{64}$'::text))"
+        ),
+        "ck_l3_promote_runs_nonnegative": (
+            "CHECK (((run_seq >= 0) AND (selected_count >= 0) AND "
+            "(desired_count >= 0) AND (committed_count >= 0) AND "
+            "(evidenced_count >= 0) AND (add_count >= 0) AND "
+            "(remove_count >= 0) AND (ws_generation >= 0) AND (duration_ms >= 0)))"
+        ),
+        "ck_l3_promote_runs_status": (
+            "CHECK (((status)::text = ANY ((ARRAY['success'::character varying, "
+            "'frozen'::character varying, 'underfilled'::character varying, "
+            "'failed'::character varying])::text[])))"
+        ),
+        "ck_l3_promote_runs_occurrence_window": (
+            "CHECK (((scheduled_at >= (recorded_at - '24:00:00'::interval)) AND "
+            "(scheduled_at <= (recorded_at + '00:00:30'::interval)) AND "
+            "(started_at >= (recorded_at - '24:00:00'::interval)) AND "
+            "(started_at <= (recorded_at + '00:00:30'::interval)) AND "
+            "(finished_at >= (recorded_at - '24:00:00'::interval)) AND "
+            "(finished_at <= (recorded_at + '00:00:30'::interval))))"
+        ),
+        "ck_l3_promote_runs_hash_lengths": (
+            "CHECK ((((mapping_hash)::text ~ '^[0-9a-f]{64}$'::text) AND "
+            "((desired_hash)::text ~ '^[0-9a-f]{64}$'::text) AND "
+            "((committed_hash)::text ~ '^[0-9a-f]{64}$'::text) AND "
+            "((acceptance_config_hash)::text ~ '^[0-9a-f]{64}$'::text)))"
+        ),
+        "ck_l3_health_samples_nonnegative": (
+            "CHECK (((sample_seq >= 0) AND (desired_count >= 0) AND "
+            "(committed_count >= 0) AND (evidenced_count >= 0) AND "
+            "((promote_age_ms IS NULL) OR (promote_age_ms >= 0)) AND "
+            "((global_book_age_ms IS NULL) OR (global_book_age_ms >= 0)) AND "
+            "((ws_age_ms IS NULL) OR (ws_age_ms >= 0)) AND "
+            "((mirror_age_ms IS NULL) OR (mirror_age_ms >= 0)) AND "
+            "((candidate_age_ms IS NULL) OR (candidate_age_ms >= 0)) AND "
+            "((reconciliation_age_ms IS NULL) OR (reconciliation_age_ms >= 0)) "
+            "AND (cursor_lag >= 0) AND (watchdog_count >= 0) AND "
+            "(reconnect_count >= 0) AND (ws_generation >= 0)))"
+        ),
+        "ck_l3_health_samples_status": (
+            "CHECK (((status)::text = ANY ((ARRAY['pass'::character varying, "
+            "'warn'::character varying, 'fail'::character varying])::text[])))"
+        ),
+        "ck_l3_health_samples_occurrence_window": (
+            "CHECK (((sampled_at >= (recorded_at - '24:00:00'::interval)) AND "
+            "(sampled_at <= (recorded_at + '00:00:30'::interval))))"
+        ),
+        "ck_l3_health_samples_hash_lengths": (
+            "CHECK ((((mapping_hash)::text ~ '^[0-9a-f]{64}$'::text) AND "
+            "((acceptance_config_hash)::text ~ '^[0-9a-f]{64}$'::text)))"
+        ),
+        "ck_l3_market_samples_nonnegative": (
+            "CHECK (((sample_seq >= 0) AND (evidence_generation >= 0) AND "
+            "((yes_book_age_ms IS NULL) OR (yes_book_age_ms >= 0)) AND "
+            "((no_book_age_ms IS NULL) OR (no_book_age_ms >= 0)) AND "
+            "((worst_book_age_ms IS NULL) OR (worst_book_age_ms >= 0)) AND "
+            "((yes_ohlc_age_ms IS NULL) OR (yes_ohlc_age_ms >= 0))))"
+        ),
+        "ck_l3_market_samples_status": (
+            "CHECK (((status)::text = ANY ((ARRAY['pass'::character varying, "
+            "'warn'::character varying, 'fail'::character varying])::text[])))"
+        ),
+        "ck_l3_market_samples_occurrence_window": (
+            "CHECK (((sampled_at >= (recorded_at - '24:00:00'::interval)) AND "
+            "(sampled_at <= (recorded_at + '00:00:30'::interval))))"
+        ),
+        "ck_l3_runtime_events_nonnegative": (
+            "CHECK (((event_seq >= 0) AND ((generation IS NULL) OR (generation >= 0))))"
+        ),
+        "ck_l3_runtime_events_kind": (
+            "CHECK (((kind)::text = ANY ((ARRAY["
+            + ", ".join(
+                f"'{kind}'::character varying" for kind in RUNTIME_EVENT_KINDS
+            )
+            + "])::text[])))"
+        ),
+        "ck_l3_runtime_events_severity": (
+            "CHECK (((severity)::text = ANY ((ARRAY['info'::character varying, "
+            "'warning'::character varying, 'critical'::character varying])::text[])))"
+        ),
+        "ck_l3_runtime_events_detail_size": (
+            "CHECK (((detail IS NULL) OR ((jsonb_typeof(detail) = 'object'::text) AND "
+            "(octet_length((detail)::text) <= 2048))))"
+        ),
+        "ck_l3_runtime_events_occurrence_window": (
+            "CHECK (((occurred_at >= (recorded_at - '24:00:00'::interval)) AND "
+            "(occurred_at <= (recorded_at + '00:00:30'::interval))))"
+        ),
+    }
+    actual_check_definitions = {
+        row["conname"]: row["definition"]
+        for row in constraints
+        if row["contype"] == b"c"
+    }
+    assert actual_check_definitions == expected_check_definitions
 
     trigger_rows = _q(
         dsn,
@@ -521,6 +680,76 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
                 "'shutdown_signal', 'info', '{}'::jsonb)",
                 boot_id,
             )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO l3_runtime_boots "
+                "(boot_id, started_at, machine_id, machine_version, image_ref, "
+                " release_id, code_version, acceptance_config_hash) VALUES "
+                "(gen_random_uuid(), clock_timestamp(), 'bad-hash', 'v1', 'image', "
+                " 'release', 'code', $1)",
+                "A" * 64,
+            )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO l3_runtime_boots "
+                "(boot_id, started_at, machine_id, machine_version, image_ref, "
+                " release_id, code_version, acceptance_config_hash) VALUES "
+                "(gen_random_uuid(), clock_timestamp(), 'bad-hash', 'v1', 'image', "
+                " 'release', 'code', $1)",
+                "g" * 64,
+            )
+        for index, hash_column in enumerate(
+            ("mapping_hash", "desired_hash", "committed_hash", "acceptance_config_hash")
+        ):
+            for bad_hash in ("A" * 64, "g" * 64):
+                hashes = {name: "a" * 64 for name in (
+                    "mapping_hash", "desired_hash", "committed_hash", "acceptance_config_hash"
+                )}
+                hashes[hash_column] = bad_hash
+                with pytest.raises(asyncpg.exceptions.CheckViolationError):
+                    await conn.execute(
+                        "INSERT INTO l3_promote_runs "
+                        "(boot_id, run_seq, scheduled_at, started_at, finished_at, status, "
+                        " reason_code, selected_count, desired_count, committed_count, "
+                        " evidenced_count, add_count, remove_count, mapping_hash, desired_hash, "
+                        " committed_hash, acceptance_config_hash, ws_generation, add_succeeded, "
+                        " remove_succeeded, mirror_succeeded, duration_ms) VALUES "
+                        "($1, $2, clock_timestamp(), clock_timestamp(), clock_timestamp(), "
+                        " 'success', 'bad-hash', 1, 2, 2, 2, 2, 0, $3, $4, $5, $6, 0, "
+                        " true, true, true, 1)",
+                        boot_id,
+                        100 + index,
+                        hashes["mapping_hash"],
+                        hashes["desired_hash"],
+                        hashes["committed_hash"],
+                        hashes["acceptance_config_hash"],
+                    )
+        for index, hash_column in enumerate(("mapping_hash", "acceptance_config_hash")):
+            for bad_hash in ("A" * 64, "g" * 64):
+                hashes = {"mapping_hash": "a" * 64, "acceptance_config_hash": "b" * 64}
+                hashes[hash_column] = bad_hash
+                with pytest.raises(asyncpg.exceptions.CheckViolationError):
+                    await conn.execute(
+                        "INSERT INTO l3_health_samples "
+                        "(boot_id, sample_seq, sampled_at, desired_count, committed_count, "
+                        " evidenced_count, listener_state, cursor_lag, watchdog_count, "
+                        " reconnect_count, ws_generation, mapping_hash, acceptance_config_hash, "
+                        " status, reason_code) VALUES "
+                        "($1, $2, clock_timestamp(), 2, 2, 2, 'connected', 0, 0, 0, 0, "
+                        " $3, $4, 'pass', 'bad-hash')",
+                        boot_id,
+                        200 + index,
+                        hashes["mapping_hash"],
+                        hashes["acceptance_config_hash"],
+                    )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO l3_runtime_events "
+                "(event_id, boot_id, event_seq, occurred_at, kind, severity, detail) "
+                "VALUES (gen_random_uuid(), $1, 15, clock_timestamp(), "
+                "'shutdown_signal', 'info', '[1,2]'::jsonb)",
+                boot_id,
+            )
         server_owned = await conn.fetchval(
             "WITH inserted AS ("
             "  INSERT INTO l3_runtime_events "
@@ -642,6 +871,50 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
         assert not await conn.fetchval(
             "SELECT pg_has_role('service_role', 'l3_retention_operator', 'MEMBER')"
         )
+        assert not await conn.fetchval(
+            "SELECT has_function_privilege('l3_evidence_daemon', "
+            "'l3_retention_cleanup(timestamptz,timestamptz,timestamptz)', 'EXECUTE')"
+        )
+        daemon_table_privileges = await conn.fetch(
+            "SELECT table_name, privilege_type, "
+            "has_table_privilege('l3_evidence_daemon', table_name, privilege_type) allowed "
+            "FROM unnest($1::text[]) table_name "
+            "CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) privilege_type",
+            sorted(EVIDENCE_TABLES),
+        )
+        assert {
+            (row["table_name"], row["privilege_type"])
+            for row in daemon_table_privileges
+            if row["allowed"]
+        } == {
+            (table, privilege)
+            for table in EVIDENCE_TABLES
+            for privilege in ("SELECT", "INSERT")
+        }
+        coverage_privileges = await conn.fetch(
+            "SELECT table_name, privilege_type, "
+            "has_table_privilege('l3_evidence_daemon', table_name, privilege_type) allowed "
+            "FROM unnest(ARRAY['l2_book_levels','l2_top_of_book','l2_ohlc_1m']) table_name "
+            "CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) privilege_type"
+        )
+        assert {
+            (row["table_name"], row["privilege_type"])
+            for row in coverage_privileges
+            if row["allowed"]
+        } == {
+            (table, "SELECT")
+            for table in ("l2_book_levels", "l2_top_of_book", "l2_ohlc_1m")
+        }
+        daemon_sequence_privileges = await conn.fetch(
+            "SELECT privilege_type, has_sequence_privilege("
+            "'l3_evidence_daemon', 'l3_promote_runs_id_seq', privilege_type) allowed "
+            "FROM unnest(ARRAY['USAGE','SELECT','UPDATE']) privilege_type"
+        )
+        assert {
+            row["privilege_type"]
+            for row in daemon_sequence_privileges
+            if row["allowed"]
+        } == {"USAGE", "SELECT"}
 
         await conn.execute("SET ROLE service_role")
         with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
@@ -733,6 +1006,22 @@ def test_007_upgrade_downgrade_upgrade_roundtrip(pg_dsn: str) -> None:
     asyncio.run(
         _execute(
             pg_dsn,
+            "CREATE ROLE l3_evidence_daemon LOGIN SUPERUSER",
+        )
+    )
+    daemon_collision = _run_alembic(pg_dsn, "upgrade", "007")
+    assert daemon_collision.returncode != 0
+    assert "already exists" in daemon_collision.stderr
+    assert _q(pg_dsn, "SELECT version_num FROM alembic_version") == [{"version_num": "006"}]
+    assert _q(
+        pg_dsn,
+        "SELECT 1 FROM pg_roles WHERE rolname='l3_retention_operator'",
+    ) == []
+    asyncio.run(_execute(pg_dsn, "DROP ROLE l3_evidence_daemon"))
+
+    asyncio.run(
+        _execute(
+            pg_dsn,
             "CREATE ROLE l3_retention_operator LOGIN SUPERUSER",
             "GRANT l3_retention_operator TO service_role",
         )
@@ -762,7 +1051,9 @@ def test_007_upgrade_downgrade_upgrade_roundtrip(pg_dsn: str) -> None:
     assert _q(
         pg_dsn,
         "SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit, "
-        "rolreplication FROM pg_roles WHERE rolname='l3_retention_operator'",
+        "rolreplication, rolbypassrls FROM pg_roles "
+        "WHERE rolname IN ('l3_evidence_daemon','l3_retention_operator') "
+        "ORDER BY rolname",
     ) == [
         {
             "rolcanlogin": False,
@@ -771,8 +1062,27 @@ def test_007_upgrade_downgrade_upgrade_roundtrip(pg_dsn: str) -> None:
             "rolcreaterole": False,
             "rolinherit": False,
             "rolreplication": False,
-        }
+            "rolbypassrls": False,
+        },
+        {
+            "rolcanlogin": False,
+            "rolsuper": False,
+            "rolcreatedb": False,
+            "rolcreaterole": False,
+            "rolinherit": False,
+            "rolreplication": False,
+            "rolbypassrls": False,
+        },
     ]
+    assert _q(
+        pg_dsn,
+        "SELECT granted.rolname AS granted_role, member.rolname AS member_role "
+        "FROM pg_auth_members membership "
+        "JOIN pg_roles granted ON granted.oid=membership.roleid "
+        "JOIN pg_roles member ON member.oid=membership.member "
+        "WHERE granted.rolname IN ('l3_evidence_daemon','l3_retention_operator') "
+        "OR member.rolname IN ('l3_evidence_daemon','l3_retention_operator')",
+    ) == []
     after_tables = {
         row["tablename"]
         for row in _q(
@@ -799,7 +1109,8 @@ def test_007_upgrade_downgrade_upgrade_roundtrip(pg_dsn: str) -> None:
     assert (
         _q(
             pg_dsn,
-            "SELECT 1 FROM pg_roles WHERE rolname='l3_retention_operator'",
+            "SELECT 1 FROM pg_roles WHERE rolname IN "
+            "('l3_evidence_daemon','l3_retention_operator')",
         )
         == []
     )

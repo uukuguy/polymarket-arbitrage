@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 import asyncpg
 import pytest
 
+from polyarb.observation import l3_evidence as evidence_module
 from polyarb.observation.l3_evidence import (
     HealthSampleRecord,
     HealthStatus,
@@ -174,8 +175,23 @@ class _FakeTransaction:
 
 
 class _FakeConnection:
-    def __init__(self, *, execute_error: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        execute_error: BaseException | None = None,
+        close_error: BaseException | None = None,
+        authorization: MappingProxyType[str, object] | None = None,
+    ) -> None:
         self.execute_error = execute_error
+        self.close_error = close_error
+        self.authorization = authorization or MappingProxyType(
+            {
+                "is_superuser": False,
+                "can_login": True,
+                "daemon_member": True,
+                "retention_member": False,
+            }
+        )
         self.calls: list[tuple[str, str, tuple[object, ...]]] = []
         self.transaction_options: list[dict[str, object]] = []
         self.transaction_entries = 0
@@ -199,6 +215,8 @@ class _FakeConnection:
 
     async def fetchrow(self, sql: str, *args: object) -> dict[str, object] | None:
         self.calls.append(("fetchrow", sql, args))
+        if "FROM pg_roles" in sql:
+            return dict(self.authorization)
         return None
 
     async def fetch(self, sql: str, *args: object) -> list[dict[str, object]]:
@@ -207,6 +225,8 @@ class _FakeConnection:
 
     async def close(self) -> None:
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 @pytest.mark.parametrize(
@@ -233,7 +253,9 @@ async def test_one_shot_appends_are_parameterized_and_close(
 
     connect.assert_awaited_once_with(dsn="postgresql://secret")
     assert connection.closed
-    _, sql, args = connection.calls[0]
+    assert [call[0] for call in connection.calls] == ["fetchrow", "execute"]
+    assert "pg_has_role" in connection.calls[0][1]
+    _, sql, args = connection.calls[1]
     assert f"INSERT INTO {table}" in sql
     assert "$1" in sql
     assert str(boot_id) not in sql
@@ -252,10 +274,89 @@ async def test_sample_append_uses_one_transaction_and_exactly_five_market_rows(
 
     assert connection.transaction_entries == 1
     assert connection.transaction_exits == [None]
-    assert [call[0] for call in connection.calls] == ["execute", "executemany"]
-    assert "l3_health_samples" in connection.calls[0][1]
-    assert "l3_market_samples" in connection.calls[1][1]
-    assert len(connection.calls[1][2]) == 5
+    assert [call[0] for call in connection.calls] == ["fetchrow", "execute", "executemany"]
+    assert "l3_health_samples" in connection.calls[1][1]
+    assert "l3_market_samples" in connection.calls[2][1]
+    assert len(connection.calls[2][2]) == 5
+
+
+@pytest.mark.parametrize("append_kind", ["one", "sample"])
+async def test_durable_append_ack_survives_connection_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    append_kind: str,
+) -> None:
+    connection = _FakeConnection(close_error=RuntimeError("close credential=never-log"))
+    logs: list[str] = []
+    breadcrumbs: list[dict[str, object]] = []
+    monkeypatch.setattr(store_module.asyncpg, "connect", AsyncMock(return_value=connection))
+    monkeypatch.setattr(
+        store_module.logger,
+        "warning",
+        lambda message, *args: logs.append(message.format(*args)),
+    )
+    monkeypatch.setattr(
+        store_module.sentry_sdk,
+        "add_breadcrumb",
+        lambda **data: breadcrumbs.append(data),
+    )
+    boot_id = uuid4()
+    store = L3EvidenceStore("postgresql://secret")
+
+    result = (
+        await store.append_boot(_boot(datetime.now(UTC), boot_id=boot_id))
+        if append_kind == "one"
+        else await store.append_sample(_batch(boot_id, datetime.now(UTC)))
+    )
+
+    assert result is True
+    assert connection.closed
+    rendered = repr((logs, breadcrumbs))
+    assert "credential" not in rendered
+    assert "RuntimeError" in rendered
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        {
+            "is_superuser": True,
+            "can_login": True,
+            "daemon_member": True,
+            "retention_member": False,
+        },
+        {
+            "is_superuser": False,
+            "can_login": False,
+            "daemon_member": True,
+            "retention_member": False,
+        },
+        {
+            "is_superuser": False,
+            "can_login": True,
+            "daemon_member": False,
+            "retention_member": False,
+        },
+        {
+            "is_superuser": False,
+            "can_login": True,
+            "daemon_member": True,
+            "retention_member": True,
+        },
+    ],
+)
+async def test_evidence_store_rejects_wrong_credential_topology_before_operation(
+    monkeypatch: pytest.MonkeyPatch,
+    authorization: dict[str, bool],
+) -> None:
+    connection = _FakeConnection(authorization=MappingProxyType(authorization))
+    monkeypatch.setattr(store_module.asyncpg, "connect", AsyncMock(return_value=connection))
+
+    assert not await L3EvidenceStore("postgresql://masked").append_boot(
+        _boot(datetime.now(UTC))
+    )
+
+    assert [call[0] for call in connection.calls] == ["fetchrow"]
+    assert connection.closed
 
 
 @pytest.mark.parametrize("error", [RuntimeError("credential=never-log"), ValueError("bad")])
@@ -327,7 +428,28 @@ async def test_event_append_serializes_nested_immutable_detail(
     )
 
     assert await L3EvidenceStore("postgresql://secret").append_event(event)
-    assert connection.calls[0][2][-1] == '{"attempts":[1,2],"nested":{"signal":"TERM"}}'
+    assert connection.calls[1][2][-1] == '{"attempts":[1,2],"nested":{"signal":"TERM"}}'
+
+
+async def test_oversize_postgres_jsonb_detail_is_rejected_before_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect = AsyncMock()
+    monkeypatch.setattr(store_module.asyncpg, "connect", connect)
+    empty_size = len(evidence_module._postgres_jsonb_text({"payload": ""}).encode("utf-8"))
+    accepted_count = (2048 - empty_size) // len("界".encode())
+
+    with pytest.raises(ValueError, match="PostgreSQL jsonb::text"):
+        RuntimeEventRecord(
+            event_id=uuid4(),
+            boot_id=uuid4(),
+            event_seq=0,
+            occurred_at=datetime.now(UTC),
+            kind=RuntimeEventKind.SHUTDOWN_SIGNAL,
+            detail={"payload": "界" * (accepted_count + 1)},
+        )
+
+    connect.assert_not_awaited()
 
 
 @pytest.mark.parametrize("method_name", ["append_boot", "append_promote_run", "append_event"])
@@ -445,15 +567,18 @@ def postgres_dsns() -> Iterator[dict[str, str]]:
         asyncio.run(
             _admin_execute(
                 admin_dsn,
-                "CREATE ROLE daemon_login LOGIN PASSWORD 'daemon-test-secret' IN ROLE service_role",
+                "CREATE ROLE daemon_login LOGIN PASSWORD 'daemon-test-secret' "
+                "IN ROLE l3_evidence_daemon",
+                "CREATE ROLE service_login LOGIN PASSWORD 'service-test-secret' "
+                "IN ROLE service_role",
                 "CREATE ROLE retention_login LOGIN PASSWORD 'retention-test-secret'",
                 "GRANT l3_retention_operator TO retention_login",
-                "GRANT SELECT ON l2_book_levels, l2_top_of_book, l2_ohlc_1m TO service_role",
             )
         )
         yield {
             "admin": admin_dsn,
             "daemon": _credential_dsn(admin_dsn, "daemon_login", "daemon-test-secret"),
+            "service": _credential_dsn(admin_dsn, "service_login", "service-test-secret"),
             "retention": _credential_dsn(
                 admin_dsn, "retention_login", "retention-test-secret"
             ),
@@ -490,6 +615,17 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     assert await store.append_sample(batch)
     assert not await store.append_sample(batch)
     assert await store.append_event(_event(boot.boot_id, start))
+    boundary_detail = {"payload": "界" * 677}
+    boundary_event = RuntimeEventRecord(
+        event_id=uuid4(),
+        boot_id=boot.boot_id,
+        event_seq=8,
+        occurred_at=start,
+        kind=RuntimeEventKind.SHUTDOWN_SIGNAL,
+        detail=boundary_detail,
+    )
+    assert len(evidence_module._postgres_jsonb_text(boundary_detail).encode("utf-8")) <= 2048
+    assert await store.append_event(boundary_event)
     assert await store.append_event(_event(boot.boot_id, end, seq=1))
     assert not await store.append_event(_event(boot.boot_id, start, seq=0))
 
@@ -554,8 +690,12 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     assert [row.status for row in window.promote_runs] == list(PromoteStatus)
     assert len(window.health_samples) == 1
     assert len(window.market_samples) == 5
-    assert len(window.runtime_events) == 1
-    assert window.runtime_events[0].occurred_at == start
+    assert len(window.runtime_events) == 2
+    assert {event.event_seq for event in window.runtime_events} == {0, 8}
+    assert all(event.occurred_at == start for event in window.runtime_events)
+    assert next(event for event in window.runtime_events if event.event_seq == 8).detail == {
+        "payload": "界" * 677
+    }
     assert set(window.book_coverage_counts) == {
         *(f"yes-{index}" for index in range(5)),
         *(f"no-{index}" for index in range(5)),
@@ -583,6 +723,17 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
         "l3_runtime_events",
     }
     assert bounds.row_count_by_table["l3_runtime_boots"] == 1
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("credential", ["admin", "service", "retention"])
+async def test_real_postgres_store_rejects_non_daemon_credentials(
+    postgres_dsns: dict[str, str],
+    credential: str,
+) -> None:
+    assert not await L3EvidenceStore(postgres_dsns[credential]).append_boot(
+        _boot(datetime.now(UTC))
+    )
 
 
 @pytest.mark.slow
