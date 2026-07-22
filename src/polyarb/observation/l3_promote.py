@@ -658,11 +658,10 @@ async def promote_run(
         )
 
     staged_tob_rows = _last_known_tob_rows
-    staged_market_token_map = (
-        None
-        if _last_known_market_token_map is None
-        else dict(_last_known_market_token_map)
-    )
+    # Keep the durable cache by reference until a bounded replacement is
+    # ready.  In particular, do not copy an oversized legacy cache merely to
+    # terminalize a fail-closed cleanup tick.
+    staged_market_token_map = _last_known_market_token_map
     staged_active_set = frozenset(_l3_active_set)
     staged_mirrored_market_ids = _last_mirrored_market_ids
 
@@ -741,7 +740,11 @@ async def promote_run(
             return await finish(early(PromoteStatus.FROZEN, "tob_fetch_failed"))
         tob_rows = _last_known_tob_rows
 
-    prior_market_token_map = dict(staged_market_token_map or {})
+    # Read the durable mapping without copying it.  A deployment upgraded
+    # from an older build may already hold an oversized cache; the hard-limit
+    # path must not construct another oversized mapping before it can cleanly
+    # fail closed.
+    prior_market_token_map = staged_market_token_map or {}
     recent_asset_ids = sorted(
         {
             str(row.get("asset_id") or "").strip()
@@ -755,7 +758,7 @@ async def promote_run(
             return await finish(early(PromoteStatus.FROZEN, "empty_token_map"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("l3-promote: token map failed type={}", type(exc).__name__)
-        token_map = dict(staged_market_token_map or {})
+        token_map = staged_market_token_map or {}
         if not token_map:
             return await finish(early(PromoteStatus.FROZEN, "token_map_failed"))
 
@@ -846,14 +849,7 @@ async def promote_run(
         desired_set_succeeded = False
     add_succeeded: bool | None = None
     remove_succeeded: bool | None = None
-    if added and desired_set_succeeded:
-        try:
-            add_succeeded = bool(await ws_consumer.add_subscriptions(sorted(added)))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("l3-promote: add failed type={}", type(exc).__name__)
-            add_succeeded = False
+    control_identity_ok = desired_set_succeeded
     if removed and desired_set_succeeded:
         try:
             remove_succeeded = bool(await ws_consumer.remove_subscriptions(sorted(removed)))
@@ -862,6 +858,35 @@ async def promote_run(
         except Exception as exc:  # noqa: BLE001
             logger.warning("l3-promote: remove failed type={}", type(exc).__name__)
             remove_succeeded = False
+
+    # Removal is the capacity gate.  Publish desired truth immediately, but
+    # never grow committed membership until every required removal succeeds
+    # and the consumer generation still matches the transaction snapshot.
+    if desired_set_succeeded:
+        try:
+            control_snapshot = ws_consumer.l3_membership_snapshot()
+            control_identity_ok = (
+                isinstance(control_snapshot, WsMembershipSnapshot)
+                and control_snapshot.generation == initial.generation
+            )
+        except Exception as exc:  # noqa: BLE001 - terminal row still required
+            logger.warning(
+                "l3-promote: control snapshot failed type={}", type(exc).__name__
+            )
+            control_identity_ok = False
+    if (
+        added
+        and desired_set_succeeded
+        and control_identity_ok
+        and (not removed or remove_succeeded is True)
+    ):
+        try:
+            add_succeeded = bool(await ws_consumer.add_subscriptions(sorted(added)))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("l3-promote: add failed type={}", type(exc).__name__)
+            add_succeeded = False
 
     try:
         current = ws_consumer.l3_membership_snapshot()
@@ -876,14 +901,16 @@ async def promote_run(
         add_succeeded = False if added else add_succeeded
         remove_succeeded = False if removed else remove_succeeded
 
-    all_maps = {**prior_market_token_map, **token_map}
+    def token_pair(market_id: str) -> tuple[str | None, str | None] | None:
+        return token_map.get(market_id) or prior_market_token_map.get(market_id)
 
     def committed_markets(tokens: frozenset[str]) -> set[str]:
-        return {
-            market_id
-            for market_id, (yes_token, no_token) in all_maps.items()
-            if yes_token and no_token and {str(yes_token), str(no_token)} <= tokens
-        }
+        markets: set[str] = set()
+        for source in (prior_market_token_map, token_map):
+            for market_id, (yes_token, no_token) in source.items():
+                if yes_token and no_token and {str(yes_token), str(no_token)} <= tokens:
+                    markets.add(market_id)
+        return markets
 
     prior_markets = committed_markets(initial.committed)
     current_markets = committed_markets(current.committed)
@@ -897,45 +924,51 @@ async def promote_run(
         if _last_mirrored_market_ids
         else set(prior_markets)
     )
-    stale_mirror_markets = prior_mirror_target - current_markets
-    mirror_succeeded = _mirror_l3_promoted_at_ts(
-        client, sorted(current_markets), sorted(stale_mirror_markets)
-    )
+    pending_identity_ids = current_markets | prior_mirror_target
+    identity_limit_exceeded = len(pending_identity_ids) > _MAX_TOKEN_MAP_CACHE
+    mirror_succeeded = False
+    if not identity_limit_exceeded:
+        stale_mirror_markets = prior_mirror_target - current_markets
+        mirror_succeeded = _mirror_l3_promoted_at_ts(
+            client, sorted(current_markets), sorted(stale_mirror_markets)
+        )
 
-    # Preserve the full current fetch plus identities still needed for the
-    # committed set or a pending cleanup.  The fetch is capped at 1000 rows;
-    # exact L3 current+pending identities reserve ten additional slots.
-    essential_market_ids = (
-        set(current_markets)
-        if mirror_succeeded
-        else current_markets | prior_mirror_target
-    )
-    cache_market_ids = set(token_map) | essential_market_ids
-    if len(cache_market_ids) > _MAX_TOKEN_MAP_CACHE:
-        optional = sorted(set(token_map) - essential_market_ids)
-        available = max(0, _MAX_TOKEN_MAP_CACHE - len(essential_market_ids))
-        cache_market_ids = essential_market_ids | set(optional[:available])
-    staged_market_token_map = {
-        market_id: all_maps[market_id]
-        for market_id in sorted(cache_market_ids)
-        if market_id in all_maps
-    }
+        # Preserve the full current fetch plus identities still needed for the
+        # committed set or a pending cleanup.  The fetch is capped at 1000
+        # rows; exact L3 current+pending identities reserve ten extra slots.
+        essential_market_ids = (
+            set(current_markets)
+            if mirror_succeeded
+            else pending_identity_ids
+        )
+        cache_market_ids = set(token_map) | essential_market_ids
+        if len(cache_market_ids) > _MAX_TOKEN_MAP_CACHE:
+            optional = sorted(set(token_map) - essential_market_ids)
+            available = _MAX_TOKEN_MAP_CACHE - len(essential_market_ids)
+            cache_market_ids = essential_market_ids | set(optional[:available])
+        staged_market_token_map = {
+            market_id: pair
+            for market_id in sorted(cache_market_ids)
+            if (pair := token_pair(market_id)) is not None
+        }
     staged_active_set = current.committed
-    if mirror_succeeded:
+    if mirror_succeeded and not identity_limit_exceeded:
         staged_mirrored_market_ids = frozenset(current_markets)
     controls_ok = (not added or add_succeeded is True) and (
         not removed or remove_succeeded is True
     )
     if not desired_set_succeeded:
         status, reason = PromoteStatus.FAILED, "desired_update_failed"
-    elif current.generation != initial.generation:
+    elif not control_identity_ok or current.generation != initial.generation:
         status, reason = PromoteStatus.FAILED, "generation_changed"
-    elif added and add_succeeded is not True:
-        status, reason = PromoteStatus.FAILED, "add_failed"
     elif removed and remove_succeeded is not True:
         status, reason = PromoteStatus.FAILED, "remove_failed"
+    elif added and add_succeeded is not True:
+        status, reason = PromoteStatus.FAILED, "add_failed"
     elif current.desired != desired or current.committed != desired:
         status, reason = PromoteStatus.FAILED, "membership_mismatch"
+    elif identity_limit_exceeded:
+        status, reason = PromoteStatus.FAILED, "identity_limit_exceeded"
     elif not mirror_succeeded:
         status, reason = PromoteStatus.FAILED, "mirror_failed"
     elif not controls_ok:

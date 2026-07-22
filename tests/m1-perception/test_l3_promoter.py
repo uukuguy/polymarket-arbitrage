@@ -740,6 +740,7 @@ async def test_promote_run_dry_run_has_zero_mutations() -> None:
 
     consumer.add_subscriptions.assert_not_awaited()
     consumer.remove_subscriptions.assert_not_awaited()
+    consumer.set_l3_desired.assert_not_called()
     assert capture_updates == []
     assert l3_promote._l3_active_set is before_active
     assert l3_promote._last_known_tob_rows is before_tob
@@ -1213,7 +1214,7 @@ async def test_terminal_promote_outcomes_append_exactly_once(
         "underfilled": (8, 0, 0, 0),
         "selection_exception": (0, 0, 0, 0),
         "add_false": (10, 0, 10, 0),
-        "remove_false": (10, 12, 10, 2),
+        "remove_false": (10, 2, 10, 2),
         "mirror_false": (10, 10, 10, 0),
     }
     assert (
@@ -1227,7 +1228,7 @@ async def test_terminal_promote_outcomes_append_exactly_once(
         "underfilled": (None, None, False),
         "selection_exception": (None, None, False),
         "add_false": (False, None, True),
-        "remove_false": (True, False, True),
+        "remove_false": (None, False, True),
         "mirror_false": (True, None, False),
     }
     assert (
@@ -1438,16 +1439,24 @@ async def test_remove_false_keeps_committed_mirror_then_recovery_clears_old() ->
     runtime = _make_runtime(settings)
     consumer = _truthful_consumer(initial_committed={"yes_old", "no_old"})
     remove_attempts = 0
+    control_calls: list[str] = []
+    normal_add = consumer.add_subscriptions.side_effect
 
     async def _remove_then_recover(asset_ids: list[str]) -> bool:
         nonlocal remove_attempts
+        control_calls.append("remove")
         remove_attempts += 1
         if remove_attempts == 1:
             return False
         consumer._test_state["committed"].difference_update(asset_ids)
         return True
 
+    async def _record_add(asset_ids: list[str]) -> bool:
+        control_calls.append("add")
+        return await normal_add(asset_ids)
+
     consumer.remove_subscriptions.side_effect = _remove_then_recover
+    consumer.add_subscriptions.side_effect = _record_add
     tob_rows, token_rows = _five_market_inputs("remove-retry")
     l3_promote._last_known_market_token_map = {
         "yes_old": ("yes_old", "no_old")
@@ -1485,13 +1494,219 @@ async def test_remove_false_keeps_committed_mirror_then_recovery_clears_old() ->
 
     current = sorted(f"yes_remove-retry_{i}" for i in range(5))
     assert first.reason_code == "remove_failed"
-    assert first_store.records[0].committed_count == 12
+    assert first_store.records[0].committed_count == 2
+    assert first_store.records[0].add_succeeded is None
     assert first_store.records[0].remove_succeeded is False
-    assert mirror_calls[0] == (sorted([*current, "yes_old"]), [])
+    assert mirror_calls[0] == (["yes_old"], [])
     assert second.status.value == "success"
     assert second_store.records[0].committed_count == 10
+    assert second_store.records[0].add_succeeded is True
     assert second_store.records[0].remove_succeeded is True
     assert mirror_calls[1] == (current, ["yes_old"])
+    assert control_calls == ["remove", "remove", "add"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_rotations_with_remove_false_never_add_or_grow_state() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    original_tokens = {
+        token
+        for index in range(5)
+        for token in (f"yes_original_{index}", f"no_original_{index}")
+    }
+    original_map = {
+        f"yes_original_{index}": (
+            f"yes_original_{index}",
+            f"no_original_{index}",
+        )
+        for index in range(5)
+    }
+    consumer = _truthful_consumer(
+        initial_committed=original_tokens,
+        remove_succeeds=False,
+    )
+    l3_promote._last_known_market_token_map = original_map
+    l3_promote._last_mirrored_market_ids = frozenset(original_map)
+
+    records: list[Any] = []
+    mirror_targets: list[tuple[list[str], list[str]]] = []
+    for tick in range(6):
+        tob_rows, token_rows = _five_market_inputs(f"rotation_{tick}")
+        store = _RecordingEvidenceStore()
+        with patch.object(
+            l3_promote,
+            "create_client",
+            return_value=_make_supabase_client_mock(tob_rows, token_rows),
+        ), patch.object(
+            l3_promote,
+            "_mirror_l3_promoted_at_ts",
+            side_effect=lambda _client, target, cleanup: (
+                mirror_targets.append((list(target), list(cleanup))) or True
+            ),
+        ):
+            result = await l3_promote.promote_run(
+                settings=settings,
+                ws_consumer=consumer,
+                recipe_yaml_path=RECIPE_PATH,
+                evidence_store=store,
+                evidence_runtime=runtime,
+                run_seq=60 + tick,
+            )
+
+        assert result.status.value == "failed"
+        assert result.reason_code == "remove_failed"
+        assert result.committed == frozenset(original_tokens)
+        assert len(store.records) == 1
+        assert store.records[0].status.value == "failed"
+        records.extend(store.records)
+        assert len(l3_promote._l3_active_set) == 10
+        assert len(l3_promote._last_known_market_token_map or {}) <= 10
+        assert len(l3_promote._last_mirrored_market_ids) == 5
+
+    consumer.remove_subscriptions.assert_awaited()
+    consumer.add_subscriptions.assert_not_awaited()
+    assert len(records) == 6
+    assert mirror_targets == [(sorted(original_map), [])] * 6
+
+
+@pytest.mark.asyncio
+async def test_oversized_essential_identity_set_fails_before_mirror_then_recovers() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    oversized_map = {
+        f"yes_oversized_{index}": (
+            f"yes_oversized_{index}",
+            f"no_oversized_{index}",
+        )
+        for index in range(l3_promote._MAX_TOKEN_MAP_CACHE + 1)
+    }
+    oversized_tokens = {
+        token
+        for pair in oversized_map.values()
+        for token in pair
+        if token is not None
+    }
+    consumer = _truthful_consumer(initial_committed=oversized_tokens)
+    l3_promote._last_known_market_token_map = oversized_map
+    before_cache = l3_promote._last_known_market_token_map
+    before_mirror = l3_promote._last_mirrored_market_ids
+    tob_rows, token_rows = _five_market_inputs("bounded_recovery")
+
+    with patch.object(
+        l3_promote,
+        "create_client",
+        return_value=_make_supabase_client_mock(tob_rows, token_rows),
+    ), patch.object(l3_promote, "_mirror_l3_promoted_at_ts") as mirror:
+        first_store = _RecordingEvidenceStore()
+        first = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=first_store,
+            evidence_runtime=runtime,
+            run_seq=70,
+        )
+
+    assert first.status.value == "failed"
+    assert first.reason_code == "identity_limit_exceeded"
+    assert len(first.committed) == 10, "successful remove-first control is bounded"
+    assert len(first_store.records) == 1
+    mirror.assert_not_called(), "an oversized PostgREST payload must never be issued"
+    assert l3_promote._last_known_market_token_map is before_cache
+    assert l3_promote._last_mirrored_market_ids is before_mirror
+
+    capture_updates: list[dict] = []
+    with patch.object(
+        l3_promote,
+        "create_client",
+        return_value=_make_supabase_client_mock(
+            tob_rows,
+            token_rows,
+            capture_updates,
+        ),
+    ):
+        second_store = _RecordingEvidenceStore()
+        second = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=second_store,
+            evidence_runtime=runtime,
+            run_seq=71,
+        )
+
+    assert second.status.value == "success"
+    assert len(second_store.records) == 1
+    assert len(l3_promote._last_known_market_token_map or {}) <= (
+        l3_promote._MAX_TOKEN_MAP_CACHE
+    )
+    assert len(l3_promote._last_mirrored_market_ids) == 5
+    assert capture_updates
+    assert max(len(update["ids"]) for update in capture_updates) <= (
+        l3_promote._MAX_TOKEN_MAP_CACHE
+    )
+
+
+@pytest.mark.asyncio
+async def test_oversized_preexisting_state_with_failed_remove_never_grows() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    oversized_map = {
+        f"yes_stuck_{index}": (
+            f"yes_stuck_{index}",
+            f"no_stuck_{index}",
+        )
+        for index in range(l3_promote._MAX_TOKEN_MAP_CACHE + 1)
+    }
+    oversized_tokens = {
+        token
+        for pair in oversized_map.values()
+        for token in pair
+        if token is not None
+    }
+    consumer = _truthful_consumer(
+        initial_committed=oversized_tokens,
+        remove_succeeds=False,
+    )
+    l3_promote._last_known_market_token_map = oversized_map
+    l3_promote._last_mirrored_market_ids = frozenset(oversized_map)
+    before_cache = l3_promote._last_known_market_token_map
+    before_mirror = l3_promote._last_mirrored_market_ids
+    tob_rows, token_rows = _five_market_inputs("stuck_bounded")
+
+    with patch.object(
+        l3_promote,
+        "create_client",
+        return_value=_make_supabase_client_mock(tob_rows, token_rows),
+    ), patch.object(l3_promote, "_mirror_l3_promoted_at_ts") as mirror:
+        store = _RecordingEvidenceStore()
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            run_seq=72,
+        )
+
+    assert result.status.value == "failed"
+    assert result.reason_code == "remove_failed"
+    assert result.committed == frozenset(oversized_tokens)
+    assert len(store.records) == 1
+    assert store.records[0].committed_count == len(oversized_tokens)
+    assert store.records[0].add_succeeded is None
+    assert store.records[0].remove_succeeded is False
+    consumer.add_subscriptions.assert_not_awaited()
+    mirror.assert_not_called()
+    assert l3_promote._last_known_market_token_map is before_cache
+    assert l3_promote._last_mirrored_market_ids is before_mirror
 
 
 @pytest.mark.asyncio
