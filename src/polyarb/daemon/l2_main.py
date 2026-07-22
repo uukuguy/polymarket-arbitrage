@@ -391,7 +391,15 @@ async def _drain_daemon_tasks(
         and event_writer_task is not None
         and event_writer_task in pending
     )
-    await _force_reap_tasks(pending, deadline=deadline)
+    try:
+        await _force_reap_tasks(pending, deadline=deadline)
+    except asyncio.CancelledError as cancellation:
+        still_owned = {task for task in owned if not task.done()}
+        try:
+            await _force_reap_tasks(still_owned, deadline=deadline)
+        except RuntimeError as cleanup_error:
+            raise cleanup_error from cancellation
+        raise
     if writer_missed_drain_deadline:
         raise RuntimeError("event writer drain deadline exceeded")
 

@@ -620,6 +620,62 @@ async def test_shutdown_force_cancel_interrupts_stuck_cancellation_cleanup():
 
 
 @pytest.mark.asyncio
+async def test_cancellation_during_final_force_reap_still_reaps_owned_tasks():
+    """Caller cancellation cannot escape while the final force-reap owns tasks."""
+    from polyarb.daemon import l2_main
+
+    peer_started = asyncio.Event()
+    final_cleanup_started = asyncio.Event()
+
+    async def _server():
+        await asyncio.sleep(0)
+
+    async def _stubborn_peer():
+        peer_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                final_cleanup_started.set()
+                await asyncio.Event().wait()
+                raise
+            raise
+
+    server_task = asyncio.create_task(_server(), name="l2-http-server")
+    peer_task = asyncio.create_task(_stubborn_peer(), name="stubborn-peer")
+    await peer_started.wait()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    drain_task = asyncio.create_task(
+        l2_main._drain_daemon_tasks(
+            server_task=server_task,
+            event_writer_task=None,
+            peer_tasks=(peer_task,),
+            normal_shutdown=True,
+            timeout_s=0.2,
+        )
+    )
+    try:
+        await asyncio.wait_for(final_cleanup_started.wait(), timeout=0.15)
+        drain_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await drain_task
+
+        assert loop.time() - started < 0.23
+        assert server_task.done()
+        assert peer_task.done()
+    finally:
+        if not drain_task.done():
+            drain_task.cancel()
+        if not peer_task.done():
+            peer_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await peer_task
+
+
+@pytest.mark.asyncio
 async def test_shutdown_never_returns_clean_with_pathological_pending_task():
     """A task ignoring both cancel phases makes shutdown fail closed."""
     from polyarb.daemon import l2_main
