@@ -22,6 +22,7 @@ import asyncio
 import inspect
 import os
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,8 @@ def _reset_l3_promote_state() -> Any:
         l3_promote._last_known_tob_rows = None
     if hasattr(l3_promote, "_last_known_market_token_map"):
         l3_promote._last_known_market_token_map = None
+    if hasattr(l3_promote, "_last_mirrored_market_ids"):
+        l3_promote._last_mirrored_market_ids = frozenset()
     yield
 
 
@@ -711,10 +714,14 @@ async def test_promote_run_dry_run_has_zero_mutations() -> None:
     before_tob = [{"sentinel": "tob"}]
     before_map = {"old-yes": ("old-yes", "old-no")}
     before_promote = 123.0
+    before_mirrored = frozenset({"old-yes"})
     l3_promote._l3_active_set = before_active
     l3_promote._last_known_tob_rows = before_tob
     l3_promote._last_known_market_token_map = before_map
     l3_promote._last_promote_at_s = before_promote
+    l3_promote._last_mirrored_market_ids = before_mirrored
+
+    trap_store = _RecordingEvidenceStore()
 
     with patch(
         "polyarb.observation.l3_promote.create_client",
@@ -726,6 +733,8 @@ async def test_promote_run_dry_run_has_zero_mutations() -> None:
             settings=_make_settings(),
             ws_consumer=consumer,
             recipe_yaml_path=RECIPE_PATH,
+            evidence_store=trap_store,
+            evidence_runtime=_make_runtime(_make_settings()),
             apply_mutations=False,
         )
 
@@ -735,9 +744,19 @@ async def test_promote_run_dry_run_has_zero_mutations() -> None:
     assert l3_promote._l3_active_set is before_active
     assert l3_promote._last_known_tob_rows is before_tob
     assert l3_promote._last_known_market_token_map is before_map
+    assert l3_promote._last_mirrored_market_ids is before_mirrored
     assert l3_promote._last_promote_at_s == before_promote
+    assert trap_store.records == []
+    assert isinstance(result, Mapping)
+    assert len(result) == len(tuple(result))
+    assert tuple(result) == tuple(dict(result))
     assert result["dry_run"] is True
+    assert result["persisted"] is False
+    assert result.persisted is False
     assert len(result["proposed_active"]) == 10
+    assert result["active"] == result["proposed_active"], (
+        "legacy dry-run active must remain the proposed desired membership"
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1070,6 +1089,8 @@ async def test_terminal_promote_success_appends_one_truthful_record() -> None:
         for token in (f"yes_terminal_{i}", f"no_terminal_{i}")
     )
     assert result.status is PromoteStatus.SUCCESS
+    assert result.persisted is True
+    assert result["persisted"] is True
     assert result.desired == result.committed == expected
     assert result.run_seq == 19
     assert result.scheduled_at == scheduled_at
@@ -1078,6 +1099,12 @@ async def test_terminal_promote_success_appends_one_truthful_record() -> None:
     assert record.status is PromoteStatus.SUCCESS
     assert record.selected_count == 5
     assert record.desired_count == record.committed_count == 10
+    assert record.evidenced_count == 0
+    assert record.add_count == 10
+    assert record.remove_count == 0
+    assert record.add_succeeded is True
+    assert record.remove_succeeded is None
+    assert record.mirror_succeeded is True
     assert record.desired_hash == stable_sha256(sorted(expected))
     assert record.committed_hash == stable_sha256(sorted(expected))
     assert record.acceptance_config_hash == runtime.snapshot().acceptance_config_hash
@@ -1103,6 +1130,7 @@ async def test_terminal_promote_outcomes_append_exactly_once(
     expected_reason: str,
 ) -> None:
     from polyarb.observation import l3_promote
+    from polyarb.observation.l3_evidence import stable_sha256
 
     settings = _make_settings(
         supabase_url="" if case == "frozen" else "https://x.supabase.co",
@@ -1169,9 +1197,44 @@ async def test_terminal_promote_outcomes_append_exactly_once(
 
     assert result.status.value == expected_status
     assert result.reason_code == expected_reason
+    assert result.persisted is True
     assert len(store.records) == 1
-    assert store.records[0].run_seq == 23
-    assert store.records[0].status.value == expected_status
+    record = store.records[0]
+    assert record.run_seq == 23
+    assert record.status.value == expected_status
+    assert record.desired_count == len(result.desired)
+    assert record.committed_count == len(result.committed)
+    assert record.evidenced_count == len(result.evidenced) == 0
+    assert record.desired_hash == stable_sha256(sorted(result.desired))
+    assert record.committed_hash == stable_sha256(sorted(result.committed))
+    assert record.acceptance_config_hash == runtime.snapshot().acceptance_config_hash
+    expected_counts = {
+        "frozen": (0, 0, 0, 0),
+        "underfilled": (8, 0, 0, 0),
+        "selection_exception": (0, 0, 0, 0),
+        "add_false": (10, 0, 10, 0),
+        "remove_false": (10, 12, 10, 2),
+        "mirror_false": (10, 10, 10, 0),
+    }
+    assert (
+        record.desired_count,
+        record.committed_count,
+        record.add_count,
+        record.remove_count,
+    ) == expected_counts[case]
+    expected_control = {
+        "frozen": (None, None, False),
+        "underfilled": (None, None, False),
+        "selection_exception": (None, None, False),
+        "add_false": (False, None, True),
+        "remove_false": (True, False, True),
+        "mirror_false": (True, None, False),
+    }
+    assert (
+        record.add_succeeded,
+        record.remove_succeeded,
+        record.mirror_succeeded,
+    ) == expected_control[case]
     if case in {"add_false", "remove_false"}:
         assert result.desired != result.committed
 
@@ -1186,6 +1249,14 @@ async def test_terminal_promote_writer_false_leaves_persisted_anchors_stale() ->
     consumer = _truthful_consumer()
     tob_rows, token_rows = _five_market_inputs("writer")
     l3_promote._last_promote_at_s = 123.0
+    before_active = {"persisted-active"}
+    before_tob = [{"sentinel": "persisted-tob"}]
+    before_map = {"persisted-yes": ("persisted-yes", "persisted-no")}
+    before_mirrored = frozenset({"persisted-yes"})
+    l3_promote._l3_active_set = before_active
+    l3_promote._last_known_tob_rows = before_tob
+    l3_promote._last_known_market_token_map = before_map
+    l3_promote._last_mirrored_market_ids = before_mirrored
 
     with patch(
         "polyarb.observation.l3_promote.create_client",
@@ -1201,10 +1272,226 @@ async def test_terminal_promote_writer_false_leaves_persisted_anchors_stale() ->
         )
 
     assert result.status.value == "success"
+    assert result.persisted is False
     assert len(store.records) == 1, "a failed writer is not retried as a duplicate"
     assert runtime.snapshot().writer_ok is False
     assert runtime.snapshot().last_promote_persisted_at is None
     assert l3_promote.get_last_promote_at_s() == 123.0
+    assert l3_promote._l3_active_set is before_active
+    assert l3_promote._last_known_tob_rows is before_tob
+    assert l3_promote._last_known_market_token_map is before_map
+    assert l3_promote._last_mirrored_market_ids is before_mirrored
+
+
+@pytest.mark.asyncio
+async def test_acceptance_config_construction_failure_terminalizes_before_effects() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    consumer = _truthful_consumer(initial_committed={"old-yes", "old-no"})
+
+    with patch.object(
+        l3_promote.AcceptanceConfig,
+        "from_settings",
+        side_effect=ValueError("malformed acceptance input"),
+    ), patch.object(l3_promote, "create_client") as create, patch.object(
+        l3_promote, "_mirror_l3_promoted_at_ts"
+    ) as mirror:
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            run_seq=31,
+        )
+
+    assert result.status.value == "failed"
+    assert result.reason_code == "acceptance_config_invalid"
+    assert result.persisted is True
+    assert len(store.records) == 1
+    assert store.records[0].acceptance_config_hash == runtime.snapshot().acceptance_config_hash
+    create.assert_not_called()
+    mirror.assert_not_called()
+    consumer.set_l3_desired.assert_not_called()
+    consumer.add_subscriptions.assert_not_awaited()
+    consumer.remove_subscriptions.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_selection_malformed_frame_terminalizes_once_without_mutation() -> None:
+    import pandas as pd
+
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    consumer = _truthful_consumer(initial_committed={"old-yes", "old-no"})
+    tob_rows, token_rows = _five_market_inputs("malformed")
+    before_active = {"old-yes", "old-no"}
+    before_tob = [{"sentinel": "old"}]
+    before_map = {"old-yes": ("old-yes", "old-no")}
+    l3_promote._l3_active_set = before_active
+    l3_promote._last_known_tob_rows = before_tob
+    l3_promote._last_known_market_token_map = before_map
+
+    with patch.object(
+        l3_promote,
+        "create_client",
+        return_value=_make_supabase_client_mock(tob_rows, token_rows),
+    ), patch(
+        "polyarb.observation.scanner.run_recipe",
+        return_value=pd.DataFrame({"wrong_column": ["malformed"]}),
+    ), patch.object(l3_promote, "_mirror_l3_promoted_at_ts") as mirror:
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            run_seq=32,
+        )
+
+    assert result.status.value == "failed"
+    assert result.reason_code == "selection_failed"
+    assert result.persisted is True
+    assert len(store.records) == 1
+    record = store.records[0]
+    assert record.desired_count == record.committed_count == 2
+    assert record.add_succeeded is None
+    assert record.remove_succeeded is None
+    assert record.mirror_succeeded is False
+    consumer.set_l3_desired.assert_not_called()
+    consumer.add_subscriptions.assert_not_awaited()
+    consumer.remove_subscriptions.assert_not_awaited()
+    mirror.assert_not_called()
+    assert l3_promote._l3_active_set == before_active
+
+
+@pytest.mark.asyncio
+async def test_mirror_false_retries_complete_committed_target_and_pending_cleanup() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    consumer = _truthful_consumer(initial_committed={"yes_old", "no_old"})
+    tob_rows, token_rows = _five_market_inputs("retry")
+    old_map = {"yes_old": ("yes_old", "no_old")}
+    l3_promote._last_known_market_token_map = old_map
+    l3_promote._last_mirrored_market_ids = frozenset({"yes_old"})
+    mirror_calls: list[tuple[list[str], list[str]]] = []
+
+    def _mirror(_client: Any, target: list[str], cleanup: list[str]) -> bool:
+        mirror_calls.append((list(target), list(cleanup)))
+        if len(mirror_calls) == 2:
+            assert "yes_old" in (l3_promote._last_known_market_token_map or {}), (
+                "a fresh token-map fetch must not discard pending cleanup identity"
+            )
+        return len(mirror_calls) > 1
+
+    with patch.object(
+        l3_promote,
+        "create_client",
+        return_value=_make_supabase_client_mock(tob_rows, token_rows),
+    ), patch.object(l3_promote, "_mirror_l3_promoted_at_ts", side_effect=_mirror):
+        first_store = _RecordingEvidenceStore()
+        first = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=first_store,
+            evidence_runtime=runtime,
+            run_seq=40,
+        )
+        second_store = _RecordingEvidenceStore()
+        second = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=second_store,
+            evidence_runtime=runtime,
+            run_seq=41,
+        )
+
+    expected_current = sorted(f"yes_retry_{i}" for i in range(5))
+    assert first.reason_code == "mirror_failed"
+    assert first.persisted is True
+    assert second.status.value == "success"
+    assert second.persisted is True
+    assert mirror_calls == [
+        (expected_current, ["yes_old"]),
+        (expected_current, ["yes_old"]),
+    ]
+    assert l3_promote._last_mirrored_market_ids == frozenset(expected_current)
+    assert "yes_old" not in (l3_promote._last_known_market_token_map or {})
+    assert len(first_store.records) == len(second_store.records) == 1
+
+
+@pytest.mark.asyncio
+async def test_remove_false_keeps_committed_mirror_then_recovery_clears_old() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    consumer = _truthful_consumer(initial_committed={"yes_old", "no_old"})
+    remove_attempts = 0
+
+    async def _remove_then_recover(asset_ids: list[str]) -> bool:
+        nonlocal remove_attempts
+        remove_attempts += 1
+        if remove_attempts == 1:
+            return False
+        consumer._test_state["committed"].difference_update(asset_ids)
+        return True
+
+    consumer.remove_subscriptions.side_effect = _remove_then_recover
+    tob_rows, token_rows = _five_market_inputs("remove-retry")
+    l3_promote._last_known_market_token_map = {
+        "yes_old": ("yes_old", "no_old")
+    }
+    l3_promote._last_mirrored_market_ids = frozenset({"yes_old"})
+    mirror_calls: list[tuple[list[str], list[str]]] = []
+
+    def _mirror(_client: Any, target: list[str], cleanup: list[str]) -> bool:
+        mirror_calls.append((list(target), list(cleanup)))
+        return True
+
+    with patch.object(
+        l3_promote,
+        "create_client",
+        return_value=_make_supabase_client_mock(tob_rows, token_rows),
+    ), patch.object(l3_promote, "_mirror_l3_promoted_at_ts", side_effect=_mirror):
+        first_store = _RecordingEvidenceStore()
+        first = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=first_store,
+            evidence_runtime=runtime,
+            run_seq=50,
+        )
+        second_store = _RecordingEvidenceStore()
+        second = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=second_store,
+            evidence_runtime=runtime,
+            run_seq=51,
+        )
+
+    current = sorted(f"yes_remove-retry_{i}" for i in range(5))
+    assert first.reason_code == "remove_failed"
+    assert first_store.records[0].committed_count == 12
+    assert first_store.records[0].remove_succeeded is False
+    assert mirror_calls[0] == (sorted([*current, "yes_old"]), [])
+    assert second.status.value == "success"
+    assert second_store.records[0].committed_count == 10
+    assert second_store.records[0].remove_succeeded is True
+    assert mirror_calls[1] == (current, ["yes_old"])
 
 
 @pytest.mark.asyncio

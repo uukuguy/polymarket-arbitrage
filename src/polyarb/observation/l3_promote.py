@@ -85,6 +85,11 @@ _last_book_levels_write_at_s: float | None = None
 # TOKEN-level _l3_active_set on subsequent ticks.
 _last_known_tob_rows: list[dict] | None = None
 _last_known_market_token_map: dict[str, tuple[str | None, str | None]] | None = None
+# Last complete dashboard reconciliation target.  A failed/partial mirror keeps
+# this target unchanged so the next tick retries both idempotent sets and stale
+# cleanup instead of trusting instantaneous WS diffs.
+_last_mirrored_market_ids: frozenset[str] = frozenset()
+_MAX_TOKEN_MAP_CACHE = 1010  # 1000 fetched rows + exact current/pending L3 identities
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -386,8 +391,8 @@ def _load_recipe(recipe_yaml_path: Path) -> Any:
 
 def _mirror_l3_promoted_at_ts(
     client: Any,
-    added_yes_asset_ids: list[str],
-    removed_yes_asset_ids: list[str],
+    committed_yes_asset_ids: list[str],
+    stale_yes_asset_ids: list[str],
 ) -> bool:
     """Write-through ``l2_candidates.l3_promoted_at_ts`` (Blocker #1).
 
@@ -400,24 +405,24 @@ def _mirror_l3_promoted_at_ts(
     Yes/No expansion happens at WS-subscribe time; the dashboard candidate
     surface remains keyed by the L2 Yes asset.
     """
-    if not added_yes_asset_ids and not removed_yes_asset_ids:
+    if not committed_yes_asset_ids and not stale_yes_asset_ids:
         return True
     now_iso = (
         datetime.now(UTC).isoformat().replace("+00:00", "Z")
     )
     try:
-        if added_yes_asset_ids:
+        if committed_yes_asset_ids:
             (
                 client.table("l2_candidates")
                 .update({"l3_promoted_at_ts": now_iso})
-                .in_("asset_id", list(added_yes_asset_ids))
+                .in_("asset_id", list(committed_yes_asset_ids))
                 .execute()
             )
-        if removed_yes_asset_ids:
+        if stale_yes_asset_ids:
             (
                 client.table("l2_candidates")
                 .update({"l3_promoted_at_ts": None})
-                .in_("asset_id", list(removed_yes_asset_ids))
+                .in_("asset_id", list(stale_yes_asset_ids))
                 .execute()
             )
         sentry_sdk.add_breadcrumb(
@@ -425,12 +430,12 @@ def _mirror_l3_promoted_at_ts(
             level="info",
             message=(
                 f"l3_promoted_at_ts mirror "
-                f"+{len(added_yes_asset_ids)} "
-                f"-{len(removed_yes_asset_ids)}"
+                f"committed={len(committed_yes_asset_ids)} "
+                f"stale={len(stale_yes_asset_ids)}"
             ),
             data={
-                "added": len(added_yes_asset_ids),
-                "removed": len(removed_yes_asset_ids),
+                "committed": len(committed_yes_asset_ids),
+                "stale": len(stale_yes_asset_ids),
                 "table": "l2_candidates",
             },
         )
@@ -446,8 +451,8 @@ def _mirror_l3_promoted_at_ts(
             message="l3_promoted_at_ts mirror failed",
             data={
                 "error": str(e)[:200],
-                "added": len(added_yes_asset_ids),
-                "removed": len(removed_yes_asset_ids),
+                "committed": len(committed_yes_asset_ids),
+                "stale": len(stale_yes_asset_ids),
                 "table": "l2_candidates",
             },
         )
@@ -479,6 +484,16 @@ class _PromoteTerminalDraft:
     mirror_succeeded: bool = False
 
 
+@dataclass(frozen=True)
+class _PromoteStagedState:
+    """Module state published only after the terminal ledger row is durable."""
+
+    tob_rows: list[dict] | None
+    market_token_map: dict[str, tuple[str | None, str | None]] | None
+    active_set: frozenset[str]
+    mirrored_market_ids: frozenset[str]
+
+
 async def _finalize_promote_run(
     *,
     draft: _PromoteTerminalDraft,
@@ -489,26 +504,28 @@ async def _finalize_promote_run(
     evidence_store: L3EvidenceStore | None,
     evidence_runtime: L3EvidenceRuntime | None,
     apply_mutations: bool,
+    staged_state: _PromoteStagedState,
 ) -> PromoteRunResult:
     """Build and append one terminal row; never manufacture a retry."""
-    global _last_promote_at_s
+    global _l3_active_set, _last_known_market_token_map, _last_known_tob_rows
+    global _last_mirrored_market_ids, _last_promote_at_s
 
-    result = PromoteRunResult(
-        status=draft.status,
-        reason_code=draft.reason_code,
-        desired=draft.desired,
-        committed=draft.committed,
-        evidenced=draft.evidenced,
-        run_seq=run_seq,
-        scheduled_at=scheduled_at,
-        added=draft.added,
-        removed=draft.removed,
-        added_markets=draft.added_markets,
-        removed_markets=draft.removed_markets,
-        dry_run=not apply_mutations,
-    )
     if not apply_mutations:
-        return result
+        return PromoteRunResult(
+            status=draft.status,
+            reason_code=draft.reason_code,
+            desired=draft.desired,
+            committed=draft.committed,
+            evidenced=draft.evidenced,
+            run_seq=run_seq,
+            scheduled_at=scheduled_at,
+            added=draft.added,
+            removed=draft.removed,
+            added_markets=draft.added_markets,
+            removed_markets=draft.removed_markets,
+            dry_run=True,
+            persisted=False,
+        )
     if evidence_store is None or evidence_runtime is None:  # pragma: no cover - guard
         raise ValueError("evidence_store and evidence_runtime are required")
 
@@ -552,8 +569,26 @@ async def _finalize_promote_run(
     )
     if persisted:
         evidence_runtime.mark_promote_persisted(finished_at)
+        _last_known_tob_rows = staged_state.tob_rows
+        _last_known_market_token_map = staged_state.market_token_map
+        _l3_active_set = set(staged_state.active_set)
+        _last_mirrored_market_ids = staged_state.mirrored_market_ids
         _last_promote_at_s = finished_at.timestamp()
-    return result
+    return PromoteRunResult(
+        status=draft.status,
+        reason_code=draft.reason_code,
+        desired=draft.desired,
+        committed=draft.committed,
+        evidenced=draft.evidenced,
+        run_seq=run_seq,
+        scheduled_at=scheduled_at,
+        added=draft.added,
+        removed=draft.removed,
+        added_markets=draft.added_markets,
+        removed_markets=draft.removed_markets,
+        dry_run=False,
+        persisted=persisted,
+    )
 
 
 def _mapping_rows(
@@ -584,8 +619,6 @@ async def promote_run(
     apply_mutations: bool = True,
 ) -> PromoteRunResult:
     """Execute one proposal/control/mirror transaction and finalize it once."""
-    global _l3_active_set, _last_known_tob_rows, _last_known_market_token_map
-
     started_at = datetime.now(UTC)
     if apply_mutations and (evidence_store is None or evidence_runtime is None):
         raise ValueError(
@@ -624,7 +657,17 @@ async def promote_run(
             desired=frozenset(_l3_active_set), committed=frozenset(_l3_active_set)
         )
 
+    staged_tob_rows = _last_known_tob_rows
+    staged_market_token_map = (
+        None
+        if _last_known_market_token_map is None
+        else dict(_last_known_market_token_map)
+    )
+    staged_active_set = frozenset(_l3_active_set)
+    staged_mirrored_market_ids = _last_mirrored_market_ids
+
     runtime_hash = runtime_status.acceptance_config_hash if runtime_status is not None else "0" * 64
+    acceptance_config_invalid = False
     try:
         code_version = (
             runtime_status.identity.code_version
@@ -637,8 +680,15 @@ async def promote_run(
     except Exception as exc:  # noqa: BLE001
         logger.warning("l3-promote: acceptance config invalid type={}", type(exc).__name__)
         calculated_hash = runtime_hash
+        acceptance_config_invalid = True
 
     async def finish(draft: _PromoteTerminalDraft) -> PromoteRunResult:
+        staged_state = _PromoteStagedState(
+            tob_rows=staged_tob_rows,
+            market_token_map=staged_market_token_map,
+            active_set=staged_active_set,
+            mirrored_market_ids=staged_mirrored_market_ids,
+        )
         return await _finalize_promote_run(
             draft=draft,
             started_at=started_at,
@@ -648,6 +698,7 @@ async def promote_run(
             evidence_store=evidence_store,
             evidence_runtime=evidence_runtime,
             apply_mutations=apply_mutations,
+            staged_state=staged_state,
         )
 
     def early(status: PromoteStatus, reason: str) -> _PromoteTerminalDraft:
@@ -662,6 +713,8 @@ async def promote_run(
             ws_generation=initial.generation,
         )
 
+    if acceptance_config_invalid:
+        return await finish(early(PromoteStatus.FAILED, "acceptance_config_invalid"))
     if runtime_status is not None and calculated_hash != runtime_hash:
         return await finish(early(PromoteStatus.FAILED, "acceptance_config_mismatch"))
 
@@ -681,15 +734,14 @@ async def promote_run(
 
     try:
         tob_rows = _fetch_latest_tob_rows_from_supabase(client)
-        if apply_mutations:
-            _last_known_tob_rows = tob_rows
+        staged_tob_rows = tob_rows
     except Exception as exc:  # noqa: BLE001
         logger.warning("l3-promote: tob fetch failed type={}", type(exc).__name__)
         if _last_known_tob_rows is None:
             return await finish(early(PromoteStatus.FROZEN, "tob_fetch_failed"))
         tob_rows = _last_known_tob_rows
 
-    prior_market_token_map = dict(_last_known_market_token_map or {})
+    prior_market_token_map = dict(staged_market_token_map or {})
     recent_asset_ids = sorted(
         {
             str(row.get("asset_id") or "").strip()
@@ -701,11 +753,9 @@ async def promote_run(
         token_map = _fetch_market_token_map(client, recent_asset_ids)
         if not token_map:
             return await finish(early(PromoteStatus.FROZEN, "empty_token_map"))
-        if apply_mutations:
-            _last_known_market_token_map = token_map
     except Exception as exc:  # noqa: BLE001
         logger.warning("l3-promote: token map failed type={}", type(exc).__name__)
-        token_map = dict(_last_known_market_token_map or {})
+        token_map = dict(staged_market_token_map or {})
         if not token_map:
             return await finish(early(PromoteStatus.FROZEN, "token_map_failed"))
 
@@ -724,30 +774,38 @@ async def promote_run(
                 os.unlink(db_path)
             except OSError:
                 logger.warning("l3-promote: temp DB cleanup failed path={}", db_path)
+
+        # DataFrame access and all post-selection normalization belong to the
+        # same terminal boundary as scanner execution.  Malformed frames,
+        # token values, or mapping construction must still append exactly one
+        # bounded failed outcome.
+        proposed_tokens: set[str] = set()
+        accepted_markets: set[str] = set()
+        for market_id in sorted(
+            str(value) for value in frame["asset_id"].tolist() if value
+        ):
+            raw_yes, raw_no = token_map.get(market_id, (None, None))
+            yes_token = str(raw_yes).strip() if raw_yes is not None else ""
+            no_token = str(raw_no).strip() if raw_no is not None else ""
+            pair = {yes_token, no_token}
+            if (
+                not yes_token
+                or not no_token
+                or yes_token != market_id
+                or len(pair) != 2
+                or bool(pair & proposed_tokens)
+            ):
+                continue
+            proposed_tokens.update(pair)
+            accepted_markets.add(market_id)
+
+        mapping = _mapping_rows(accepted_markets, token_map)
+        desired = frozenset(proposed_tokens)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning("l3-promote: selection failed type={}", type(exc).__name__)
         return await finish(early(PromoteStatus.FAILED, "selection_failed"))
-
-    proposed_tokens: set[str] = set()
-    accepted_markets: set[str] = set()
-    for market_id in sorted(str(value) for value in frame["asset_id"].tolist() if value):
-        raw_yes, raw_no = token_map.get(market_id, (None, None))
-        yes_token = str(raw_yes).strip() if raw_yes is not None else ""
-        no_token = str(raw_no).strip() if raw_no is not None else ""
-        pair = {yes_token, no_token}
-        if (
-            not yes_token
-            or not no_token
-            or yes_token != market_id
-            or len(pair) != 2
-            or bool(pair & proposed_tokens)
-        ):
-            continue
-        proposed_tokens.update(pair)
-        accepted_markets.add(market_id)
-
-    mapping = _mapping_rows(accepted_markets, token_map)
-    desired = frozenset(proposed_tokens)
     if len(accepted_markets) != 5 or len(desired) != 10:
         return await finish(
             _PromoteTerminalDraft(
@@ -831,11 +889,40 @@ async def promote_run(
     current_markets = committed_markets(current.committed)
     added_markets = frozenset(current_markets - prior_markets)
     removed_markets = frozenset(prior_markets - current_markets)
+
+    # At process upgrade the persisted target may not exist yet, so the
+    # initial committed membership is the conservative cleanup baseline.
+    prior_mirror_target = (
+        set(_last_mirrored_market_ids)
+        if _last_mirrored_market_ids
+        else set(prior_markets)
+    )
+    stale_mirror_markets = prior_mirror_target - current_markets
     mirror_succeeded = _mirror_l3_promoted_at_ts(
-        client, sorted(added_markets), sorted(removed_markets)
+        client, sorted(current_markets), sorted(stale_mirror_markets)
     )
 
-    _l3_active_set = set(current.committed)
+    # Preserve the full current fetch plus identities still needed for the
+    # committed set or a pending cleanup.  The fetch is capped at 1000 rows;
+    # exact L3 current+pending identities reserve ten additional slots.
+    essential_market_ids = (
+        set(current_markets)
+        if mirror_succeeded
+        else current_markets | prior_mirror_target
+    )
+    cache_market_ids = set(token_map) | essential_market_ids
+    if len(cache_market_ids) > _MAX_TOKEN_MAP_CACHE:
+        optional = sorted(set(token_map) - essential_market_ids)
+        available = max(0, _MAX_TOKEN_MAP_CACHE - len(essential_market_ids))
+        cache_market_ids = essential_market_ids | set(optional[:available])
+    staged_market_token_map = {
+        market_id: all_maps[market_id]
+        for market_id in sorted(cache_market_ids)
+        if market_id in all_maps
+    }
+    staged_active_set = current.committed
+    if mirror_succeeded:
+        staged_mirrored_market_ids = frozenset(current_markets)
     controls_ok = (not added or add_succeeded is True) and (
         not removed or remove_succeeded is True
     )

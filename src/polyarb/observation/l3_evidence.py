@@ -7,7 +7,7 @@ import json
 import math
 import os
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -366,12 +366,8 @@ class PromoteRunRecord:
 
 
 @dataclass(frozen=True)
-class PromoteRunResult:
-    """Typed terminal outcome of one promoter schedule.
-
-    The small mapping compatibility surface is intentionally limited to the
-    legacy dry-run/operator keys while production callers consume attributes.
-    """
+class PromoteRunResult(Mapping[str, object]):
+    """Typed terminal outcome with a complete immutable legacy mapping view."""
 
     status: PromoteStatus
     reason_code: str
@@ -385,6 +381,7 @@ class PromoteRunResult:
     added_markets: frozenset[str] = frozenset()
     removed_markets: frozenset[str] = frozenset()
     dry_run: bool = False
+    persisted: bool = False
 
     def __post_init__(self) -> None:
         _require_enum("status", self.status, PromoteStatus)
@@ -405,29 +402,34 @@ class PromoteRunResult:
                 _require_nonempty(f"{name} identity", value)
             object.__setattr__(self, name, values)
         _require_bool("dry_run", self.dry_run)
+        _require_bool("persisted", self.persisted)
+
+    def _mapping(self) -> Mapping[str, object]:
+        return MappingProxyType(
+            {
+                "added": sorted(self.added),
+                "removed": sorted(self.removed),
+                "added_markets": sorted(self.added_markets),
+                "removed_markets": sorted(self.removed_markets),
+                # Historical dry-run callers treated active as the proposal.
+                "active": sorted(self.desired if self.dry_run else self.committed),
+                "proposed_active": sorted(self.desired),
+                "dry_run": self.dry_run,
+                "persisted": self.persisted,
+                "skipped": None if self.status is PromoteStatus.SUCCESS else self.reason_code,
+                "status": self.status.value,
+                "reason_code": self.reason_code,
+            }
+        )
 
     def __getitem__(self, key: str) -> object:
-        legacy = {
-            "added": sorted(self.added),
-            "removed": sorted(self.removed),
-            "added_markets": sorted(self.added_markets),
-            "removed_markets": sorted(self.removed_markets),
-            "active": sorted(self.committed),
-            "proposed_active": sorted(self.desired),
-            "dry_run": self.dry_run,
-            "skipped": None if self.status is PromoteStatus.SUCCESS else self.reason_code,
-            "status": self.status.value,
-            "reason_code": self.reason_code,
-        }
-        if key not in legacy:
-            raise KeyError(key)
-        return legacy[key]
+        return self._mapping()[key]
 
-    def get(self, key: str, default: object = None) -> object:
-        try:
-            return self[key]
-        except KeyError:
-            return default
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._mapping())
+
+    def __len__(self) -> int:
+        return len(self._mapping())
 
 
 @dataclass(frozen=True)
