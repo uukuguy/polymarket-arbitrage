@@ -672,6 +672,7 @@ async def promote_run(
     recipe_yaml_path: Path,
     evidence_store: L3EvidenceStore | None = None,
     evidence_runtime: L3EvidenceRuntime | None = None,
+    acceptance_config: AcceptanceConfig | None = None,
     scheduled_at: datetime | None = None,
     run_seq: int | None = None,
     apply_mutations: bool = True,
@@ -726,14 +727,17 @@ async def promote_run(
     runtime_hash = runtime_status.acceptance_config_hash if runtime_status is not None else "0" * 64
     acceptance_config_invalid = False
     try:
-        code_version = (
-            runtime_status.identity.code_version
-            if runtime_status is not None
-            else "dry-run"
-        )
-        calculated_hash = AcceptanceConfig.from_settings(
-            settings, recipe_yaml_path, code_version
-        ).digest()
+        effective_acceptance = acceptance_config
+        if effective_acceptance is None:
+            code_version = (
+                runtime_status.identity.code_version
+                if runtime_status is not None
+                else "dry-run"
+            )
+            effective_acceptance = AcceptanceConfig.from_settings(
+                settings, recipe_yaml_path, code_version
+            )
+        calculated_hash = effective_acceptance.digest()
     except Exception as exc:  # noqa: BLE001
         logger.warning("l3-promote: acceptance config invalid type={}", type(exc).__name__)
         calculated_hash = runtime_hash
@@ -1062,12 +1066,15 @@ async def run_periodic(
     recipe_yaml_path: Path,
     evidence_store: L3EvidenceStore,
     evidence_runtime: L3EvidenceRuntime,
+    acceptance_config: AcceptanceConfig | None = None,
 ) -> None:
     """Run one promoter tick per boot-anchored schedule sequence.
 
     The grid is derived from immutable boot truth, never from the prior run's
     finish time.  A late/slow run therefore makes the next contiguous sequence
     immediately eligible instead of silently skipping it or accumulating drift.
+    If a tick escapes without a terminal append, the scheduler stops at that
+    sequence: strict gap detection must reject the resulting missing tick.
     """
     interval_s = settings.l3_promote_interval_s
     if isinstance(interval_s, bool) or not isinstance(interval_s, (int, float)):
@@ -1075,6 +1082,13 @@ async def run_periodic(
     if interval_s <= 0:
         raise ValueError("l3_promote_interval_s must be positive")
     boot_started_at = evidence_runtime.snapshot().started_at
+    effective_acceptance = acceptance_config
+    if effective_acceptance is None:
+        effective_acceptance = AcceptanceConfig.from_settings(
+            settings,
+            recipe_yaml_path,
+            evidence_runtime.snapshot().identity.code_version,
+        )
     logger.info("l3-promote: run_periodic started interval_s={}", interval_s)
     while not stop_event.is_set():
         run_seq = evidence_runtime.next_run_seq()
@@ -1095,15 +1109,22 @@ async def run_periodic(
                 recipe_yaml_path=recipe_yaml_path,
                 evidence_store=evidence_store,
                 evidence_runtime=evidence_runtime,
+                acceptance_config=effective_acceptance,
                 scheduled_at=scheduled_at,
                 run_seq=run_seq,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — terminalizer is defense-in-depth
+            evidence_runtime.note_writer_result(
+                False,
+                datetime.now(UTC),
+                "promote_run_unexpected_exception",
+            )
             logger.error(
                 "l3-promote tick raised run_seq={} error_type={}",
                 run_seq,
                 type(exc).__name__,
             )
+            return
     logger.info("l3-promote: run_periodic stopped")

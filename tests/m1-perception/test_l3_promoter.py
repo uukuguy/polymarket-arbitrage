@@ -31,6 +31,8 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from polyarb.observation.l3_evidence import AcceptanceConfig
+
 # Test-mode env hatches (matches conftest.py module-top setdefault).
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
@@ -2122,6 +2124,7 @@ async def test_run_periodic_uses_boot_grid_and_contiguous_sequences_when_late() 
     settings.l3_promote_interval_s = 300
     runtime = _make_runtime(settings)
     store = _RecordingEvidenceStore()
+    acceptance_config = AcceptanceConfig.from_settings(settings, RECIPE_PATH, "test-code")
     stop_event = asyncio.Event()
     mock_consumer = MagicMock()
     calls: list[dict[str, Any]] = []
@@ -2149,6 +2152,7 @@ async def test_run_periodic_uses_boot_grid_and_contiguous_sequences_when_late() 
                 recipe_yaml_path=RECIPE_PATH,
                 evidence_store=store,
                 evidence_runtime=runtime,
+                acceptance_config=acceptance_config,
             ),
             timeout=2.0,
         )
@@ -2161,6 +2165,105 @@ async def test_run_periodic_uses_boot_grid_and_contiguous_sequences_when_late() 
     ]
     assert all(call["evidence_store"] is store for call in calls)
     assert all(call["evidence_runtime"] is runtime for call in calls)
+    assert all(call["acceptance_config"] is acceptance_config for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_promote_run_uses_supplied_canonical_acceptance_without_rebuilding() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings(supabase_url="", service_key="")
+    acceptance_config = AcceptanceConfig.from_settings(settings, RECIPE_PATH, "test-code")
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+
+    with patch.object(
+        l3_promote.AcceptanceConfig,
+        "from_settings",
+        side_effect=AssertionError("production tick must not rebuild acceptance config"),
+    ):
+        await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=_truthful_consumer(),
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            acceptance_config=acceptance_config,
+            run_seq=0,
+        )
+
+    assert len(store.records) == 1
+    assert store.records[0].acceptance_config_hash == acceptance_config.digest()
+
+
+@pytest.mark.asyncio
+async def test_run_periodic_stops_at_unexpected_missing_tick_and_marks_writer_failed() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    acceptance_config = AcceptanceConfig.from_settings(settings, RECIPE_PATH, "test-code")
+    stop_event = asyncio.Event()
+    calls: list[int] = []
+
+    async def _unexpected(**kwargs: Any) -> None:
+        calls.append(kwargs["run_seq"])
+        raise RuntimeError("terminal append outcome is ambiguous")
+
+    with (
+        patch.object(l3_promote, "promote_run", side_effect=_unexpected),
+        patch.object(l3_promote, "_utc_now", return_value=runtime.snapshot().started_at),
+    ):
+        await asyncio.wait_for(
+            l3_promote.run_periodic(
+                stop_event=stop_event,
+                settings=settings,
+                ws_consumer=MagicMock(),
+                recipe_yaml_path=RECIPE_PATH,
+                evidence_store=store,
+                evidence_runtime=runtime,
+                acceptance_config=acceptance_config,
+            ),
+            timeout=1.0,
+        )
+
+    assert calls == [0]
+    assert store.records == []
+    status = runtime.snapshot()
+    assert status.writer_ok is False
+    assert status.status.value == "fail"
+    assert status.writer_reason_code == "promote_run_unexpected_exception"
+
+
+@pytest.mark.asyncio
+async def test_run_periodic_propagates_tick_cancellation_without_writer_failure() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    acceptance_config = AcceptanceConfig.from_settings(settings, RECIPE_PATH, "test-code")
+
+    with (
+        patch.object(l3_promote, "promote_run", side_effect=asyncio.CancelledError),
+        patch.object(l3_promote, "_utc_now", return_value=runtime.snapshot().started_at),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(
+                l3_promote.run_periodic(
+                    stop_event=asyncio.Event(),
+                    settings=settings,
+                    ws_consumer=MagicMock(),
+                    recipe_yaml_path=RECIPE_PATH,
+                    evidence_store=store,
+                    evidence_runtime=runtime,
+                    acceptance_config=acceptance_config,
+                ),
+                timeout=1.0,
+            )
+
+    assert runtime.snapshot().writer_ok is None
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ import io
 
 # F-3 SECURITY ESCAPE HATCH: pytest tmp_path lives outside project root by design
 import os
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -237,12 +238,21 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
 
         return _idle_promoter()
 
+    with patch("polyarb.daemon.l2_main.L3EvidenceStore", return_value=store):
+        dependencies = l2_main._build_l3_evidence_dependencies(
+            settings=settings,
+            recipe_yaml_path=l2_main._L3_RECIPE_PATH,
+        )
+
     with (
         patch("polyarb.daemon.l2_main.init_logging"),
         patch("polyarb.daemon.l2_main.load_settings", return_value=settings),
         patch("polyarb.daemon.l2_main.init_sentry"),
         patch("polyarb.daemon.l2_main.sentry_sdk.set_tag"),
-        patch("polyarb.daemon.l2_main.L3EvidenceStore", return_value=store),
+        patch(
+            "polyarb.daemon.l2_main._build_l3_evidence_dependencies",
+            return_value=dependencies,
+        ),
         patch("polyarb.daemon.l2_main.SQLiteStore", return_value=MagicMock()),
         patch("polyarb.daemon.l2_main.WsConsumer", return_value=consumer) as consumer_type,
         patch("polyarb.daemon.l2_main.AsyncpgCursorStore", return_value=MagicMock()) as cursor,
@@ -260,10 +270,242 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
     runtime = promoter_kwargs["evidence_runtime"]
     assert observer.__self__ is runtime
     assert promoter_kwargs["evidence_store"] is store
+    assert promoter_kwargs["acceptance_config"] is dependencies.acceptance_config
+    assert (
+        promoter_kwargs["acceptance_config"].digest()
+        == dependencies.boot.acceptance_config_hash
+    )
     assert store.append_boot.await_args.args[0].boot_id == runtime.snapshot().boot_id
     assert runtime.snapshot().writer_ok is True
     assert runtime.snapshot().status.value == "warn"
     assert runtime.snapshot().reason_code == "cold_start"
+
+
+def _patch_minimal_l2_main(l2_main, *, settings, server, store):
+    """Return the common side-effect-free daemon patch stack inputs."""
+    return (
+        patch("polyarb.daemon.l2_main.init_logging"),
+        patch("polyarb.daemon.l2_main.load_settings", return_value=settings),
+        patch("polyarb.daemon.l2_main.init_sentry"),
+        patch("polyarb.daemon.l2_main.sentry_sdk.set_tag"),
+        patch("polyarb.daemon.l2_main.L3EvidenceStore", return_value=store),
+        patch("polyarb.daemon.l2_main.SQLiteStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.WsConsumer", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.uvicorn.Server", return_value=server),
+        patch("polyarb.daemon.l2_main.create_l2_app", return_value=MagicMock()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_server_gate_timeout_cleans_server_and_never_starts_boot_or_runtime_tasks():
+    from polyarb.daemon import l2_main
+
+    settings = _make_fake_settings()
+    settings.l2_runtime_db_dsn.get_secret_value = MagicMock(return_value="runtime-dsn")
+    store = MagicMock()
+    server = MagicMock(started=False, should_exit=False)
+    serve_stopped = asyncio.Event()
+    serve_blocker = asyncio.Event()
+
+    async def _serve():
+        try:
+            await serve_blocker.wait()
+        finally:
+            serve_stopped.set()
+
+    server.serve = _serve
+    append_boot = AsyncMock(return_value=True)
+    real_sleep = asyncio.sleep
+
+    async def _yield_only(_delay):
+        await real_sleep(0)
+
+    common = _patch_minimal_l2_main(
+        l2_main, settings=settings, server=server, store=store
+    )
+    with ExitStack() as stack:
+        for context in common:
+            stack.enter_context(context)
+        stack.enter_context(patch("polyarb.daemon.l2_main._append_l3_boot", append_boot))
+        stack.enter_context(
+            patch("polyarb.daemon.l2_main.asyncio.sleep", side_effect=_yield_only)
+        )
+        with pytest.raises(TimeoutError, match="server.*start"):
+            await asyncio.wait_for(l2_main.main(), timeout=1.0)
+
+    append_boot.assert_not_awaited()
+    assert serve_stopped.is_set()
+    assert server.should_exit is True
+
+
+@pytest.mark.asyncio
+async def test_server_gate_propagates_serve_failure_before_boot_or_runtime_tasks():
+    from polyarb.daemon import l2_main
+
+    settings = _make_fake_settings()
+    settings.l2_runtime_db_dsn.get_secret_value = MagicMock(return_value="runtime-dsn")
+    store = MagicMock()
+    server = MagicMock(started=False, should_exit=False)
+
+    async def _serve():
+        raise RuntimeError("bind failed")
+
+    server.serve = _serve
+    append_boot = AsyncMock(return_value=True)
+    common = _patch_minimal_l2_main(
+        l2_main, settings=settings, server=server, store=store
+    )
+    with ExitStack() as stack:
+        for context in common:
+            stack.enter_context(context)
+        stack.enter_context(patch("polyarb.daemon.l2_main._append_l3_boot", append_boot))
+        with pytest.raises(RuntimeError, match="bind failed"):
+            await asyncio.wait_for(l2_main.main(), timeout=1.0)
+
+    append_boot.assert_not_awaited()
+    assert server.should_exit is True
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_boot_cleans_server_without_starting_runtime_tasks():
+    from polyarb.daemon import l2_main
+
+    settings = _make_fake_settings()
+    settings.l2_runtime_db_dsn.get_secret_value = MagicMock(return_value="runtime-dsn")
+    store = MagicMock()
+    server = MagicMock(started=True, should_exit=False)
+    serve_stopped = asyncio.Event()
+    serve_blocker = asyncio.Event()
+    boot_entered = asyncio.Event()
+    boot_blocker = asyncio.Event()
+
+    async def _serve():
+        try:
+            await serve_blocker.wait()
+        finally:
+            serve_stopped.set()
+
+    async def _append_boot(_dependencies):
+        boot_entered.set()
+        await boot_blocker.wait()
+        return True
+
+    server.serve = _serve
+    consumer = MagicMock()
+    consumer.run = AsyncMock()
+    consumer.run_quiet_refresh = AsyncMock()
+    watchdog = MagicMock()
+    watchdog.watch = AsyncMock()
+    listener = AsyncMock()
+    pump = MagicMock()
+    pump.run = AsyncMock()
+    common = _patch_minimal_l2_main(
+        l2_main, settings=settings, server=server, store=store
+    )
+    with ExitStack() as stack:
+        for context in common:
+            stack.enter_context(context)
+        stack.enter_context(
+            patch("polyarb.daemon.l2_main._append_l3_boot", side_effect=_append_boot)
+        )
+        stack.enter_context(patch("polyarb.daemon.l2_main.WsConsumer", return_value=consumer))
+        stack.enter_context(patch("polyarb.daemon.l2_main.WsWatchdog", return_value=watchdog))
+        stack.enter_context(
+            patch("polyarb.daemon.l2_main.ReconciliationPump", return_value=pump)
+        )
+        stack.enter_context(patch("polyarb.daemon.l2_main.listen_snapshot_complete", listener))
+        main_task = asyncio.create_task(l2_main.main())
+        await asyncio.wait_for(boot_entered.wait(), timeout=1.0)
+        main_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(main_task, timeout=1.0)
+
+    assert serve_stopped.is_set()
+    assert server.should_exit is True
+    consumer.run.assert_not_awaited()
+    consumer.run_quiet_refresh.assert_not_awaited()
+    watchdog.watch.assert_not_awaited()
+    pump.run.assert_not_awaited()
+    listener.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authorization_case", "runtime_dsn"),
+    [
+        ("missing", ""),
+        ("rejected", "runtime-dsn"),
+        ("service", "runtime-dsn"),
+        ("superuser", "runtime-dsn"),
+        ("retention", "runtime-dsn"),
+    ],
+)
+async def test_failed_runtime_authorization_gates_all_direct_postgres_tasks(
+    authorization_case, runtime_dsn
+):
+    """Every role-preflight failure keeps HTTP/WS fail-soft but starts no direct PG I/O."""
+    from polyarb.daemon import l2_main
+
+    settings = _make_fake_settings()
+    settings.l2_runtime_db_dsn.get_secret_value = MagicMock(return_value=runtime_dsn)
+    settings.supabase_db_dsn.get_secret_value = MagicMock(
+        side_effect=AssertionError("owner fallback is forbidden")
+    )
+    stop_event = asyncio.Event()
+    store = MagicMock()
+    store.append_boot = AsyncMock(return_value=False)
+    cursor_store = MagicMock()
+    cursor_store.read_position = AsyncMock()
+    cursor_store.commit = AsyncMock()
+    pump = MagicMock()
+    pump.run = AsyncMock()
+    listener = AsyncMock()
+    consumer = MagicMock()
+
+    async def _ws_run(_stop_event):
+        await asyncio.sleep(0)
+        stop_event.set()
+
+    async def _idle(_stop_event):
+        await asyncio.sleep(0)
+
+    consumer.run = AsyncMock(side_effect=_ws_run)
+    consumer.run_quiet_refresh = AsyncMock(side_effect=_idle)
+    watchdog = MagicMock()
+    watchdog.watch = AsyncMock(side_effect=_idle)
+    server = _make_mock_server()
+    create_app = MagicMock(return_value=MagicMock())
+    promoter = MagicMock(name="run_periodic")
+
+    with (
+        patch("polyarb.daemon.l2_main.init_logging"),
+        patch("polyarb.daemon.l2_main.load_settings", return_value=settings),
+        patch("polyarb.daemon.l2_main.init_sentry"),
+        patch("polyarb.daemon.l2_main.sentry_sdk.set_tag"),
+        patch("polyarb.daemon.l2_main.L3EvidenceStore", return_value=store),
+        patch("polyarb.daemon.l2_main.SQLiteStore", return_value=MagicMock()),
+        patch("polyarb.daemon.l2_main.WsConsumer", return_value=consumer),
+        patch("polyarb.daemon.l2_main.WsWatchdog", return_value=watchdog),
+        patch("polyarb.daemon.l2_main.AsyncpgCursorStore", return_value=cursor_store),
+        patch("polyarb.daemon.l2_main.ReconciliationPump", return_value=pump),
+        patch("polyarb.daemon.l2_main.listen_snapshot_complete", listener),
+        patch("polyarb.daemon.l2_main.uvicorn.Server", return_value=server),
+        patch("polyarb.daemon.l2_main.create_l2_app", create_app),
+        patch("polyarb.daemon.l2_main.asyncio.Event", return_value=stop_event),
+        patch("polyarb.observation.l3_promote.run_periodic", promoter),
+    ):
+        assert await asyncio.wait_for(l2_main.main(), timeout=2.0) == 0
+
+    assert authorization_case
+    create_app.assert_called_once()
+    consumer.run.assert_awaited_once()
+    consumer.run_quiet_refresh.assert_awaited_once()
+    settings.supabase_db_dsn.get_secret_value.assert_not_called()
+    cursor_store.read_position.assert_not_awaited()
+    cursor_store.commit.assert_not_awaited()
+    pump.run.assert_not_awaited()
+    listener.assert_not_awaited()
+    promoter.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

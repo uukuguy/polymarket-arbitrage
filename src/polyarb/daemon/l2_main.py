@@ -611,77 +611,76 @@ async def main() -> int:
             pass
 
     server_task = asyncio.create_task(server.serve())
-
-    # P9 server-started gate — MANDATORY per Phase 02 L5.
-    # uvicorn must bind the socket BEFORE any long-running task (WS / event
-    # listener) starts, else Fly's 120s grace period times out and the
-    # machine never gets to handle a real request.
-    for _ in range(100):
-        if server.started:
-            break
-        await asyncio.sleep(0.1)
-    logger.info(
-        f"polyarb-l2 daemon running: http on :{settings.http_port}, "
-        f"variant={getattr(settings, 'daemon_variant', 'unknown')}"
-    )
-
-    # HTTP is now reachable.  The role-preflighted boot append may fail soft,
-    # but a failed boot can never launch a counterfeit evidence scheduler.
-    l3_boot_persisted = await _append_l3_boot(l3_evidence)
-
-    # Plan 04 wiring — watchdog + consumer tasks alongside server_task.
-    # Phase 05.1 — event listener and durable reconciliation remain independent.
-    watchdog_task = asyncio.create_task(watchdog.watch(stop_event))
-    consumer_task = asyncio.create_task(ws_consumer.run(stop_event))
-    quiet_refresh_task = asyncio.create_task(
-        ws_consumer.run_quiet_refresh(stop_event), name="ws-quiet-refresh"
-    )
-    pump_task = asyncio.create_task(reconciliation_pump.run(stop_event), name="reconciliation-pump")
-
-    # ── Plan 05: long-running listener task ─────────────────────────────────
-    async def _listener_runner() -> None:
-        """Run LISTEN independently; termination state is updated by listener."""
-        if not dsn:
-            logger.warning("event listener: l2_runtime_db_dsn not set; idling until shutdown")
-            await stop_event.wait()
-            return
-        await listen_snapshot_complete(
-            dsn=dsn,
-            on_event=_on_snapshot_notification,
-            stop_event=stop_event,
-            state=reconciliation_state,
-        )
-
-    listener_task = asyncio.create_task(_listener_runner())
-
-    # ── Phase 05 Plan 04: L3 promoter task (5-min cron, D-14) ──────────────
-    # Real Recipe over the latest tob snapshot from Supabase. Selects top-5
-    # markets (D-13 thresholds) then expands to 10 token ids via
-    # markets_latest yes/no columns (D-05 N=5 × 2). Diffs vs
-    # _l3_active_set and calls ws_consumer.add_subscriptions /
-    # remove_subscriptions; write-through l2_candidates.l3_promoted_at_ts
-    # for the /candidates dashboard surface (Blocker #1).
-    #
-    # Raw asyncio.wait_for(stop_event.wait()) loop — no scheduler dep added
-    # (cross-pattern decision #4; matches ws_consumer.run idle-wait pattern).
-    from polyarb.observation import l3_promote as l3_promote_module
-
+    watchdog_task: asyncio.Task[None] | None = None
+    consumer_task: asyncio.Task[None] | None = None
+    quiet_refresh_task: asyncio.Task[None] | None = None
+    pump_task: asyncio.Task[None] | None = None
+    listener_task: asyncio.Task[None] | None = None
     l3_promoter_task: asyncio.Task[None] | None = None
-    if l3_boot_persisted:
-        l3_promoter_task = asyncio.create_task(
-            l3_promote_module.run_periodic(
-                stop_event=stop_event,
-                settings=settings,
-                ws_consumer=ws_consumer,
-                recipe_yaml_path=_L3_RECIPE_PATH,
-                evidence_store=l3_evidence.store,
-                evidence_runtime=l3_evidence.runtime,
-            ),
-            name="l3-promoter",
+    normal_shutdown = False
+    try:
+        # P9 server-started gate — MANDATORY per Phase 02 L5.  The task is
+        # already inside this cleanup scope, so every timeout, serve failure,
+        # and cancellation path observes it before returning.
+        for _ in range(100):
+            if server.started is True:
+                break
+            if server_task.done():
+                await server_task
+                raise RuntimeError("HTTP server exited before reporting started")
+            await asyncio.sleep(0.1)
+        else:
+            raise TimeoutError("HTTP server did not start within the P9 gate")
+
+        logger.info(
+            f"polyarb-l2 daemon running: http on :{settings.http_port}, "
+            f"variant={getattr(settings, 'daemon_variant', 'unknown')}"
         )
 
-    try:
+        # HTTP is reachable before boot role preflight touches PostgreSQL.
+        # The successful boot append is the authorization capability for every
+        # daemon-owned direct PostgreSQL task, not merely the promoter.
+        l3_boot_persisted = await _append_l3_boot(l3_evidence)
+
+        # WS + REST remain fail-soft when the dedicated runtime credential is
+        # absent or rejected; neither path requires direct PostgreSQL access.
+        watchdog_task = asyncio.create_task(watchdog.watch(stop_event))
+        consumer_task = asyncio.create_task(ws_consumer.run(stop_event))
+        quiet_refresh_task = asyncio.create_task(
+            ws_consumer.run_quiet_refresh(stop_event), name="ws-quiet-refresh"
+        )
+
+        if l3_boot_persisted:
+            pump_task = asyncio.create_task(
+                reconciliation_pump.run(stop_event), name="reconciliation-pump"
+            )
+            listener_task = asyncio.create_task(
+                listen_snapshot_complete(
+                    dsn=dsn,
+                    on_event=_on_snapshot_notification,
+                    stop_event=stop_event,
+                    state=reconciliation_state,
+                ),
+                name="snapshot-listener",
+            )
+
+            from polyarb.observation import l3_promote as l3_promote_module
+
+            l3_promoter_task = asyncio.create_task(
+                l3_promote_module.run_periodic(
+                    stop_event=stop_event,
+                    settings=settings,
+                    ws_consumer=ws_consumer,
+                    recipe_yaml_path=_L3_RECIPE_PATH,
+                    evidence_store=l3_evidence.store,
+                    evidence_runtime=l3_evidence.runtime,
+                    acceptance_config=l3_evidence.acceptance_config,
+                ),
+                name="l3-promoter",
+            )
+
         await stop_event.wait()
+        normal_shutdown = True
     except asyncio.CancelledError:
         # F-04 contract — MUST propagate, not swallow.
         logger.info("polyarb-l2 daemon shutdown via CancelledError")
@@ -689,37 +688,44 @@ async def main() -> int:
     finally:
         logger.info("polyarb-l2 daemon stopping")
         server.should_exit = True
-        # Signal watchdog + consumer + listener to exit by cancelling explicitly
-        # (stop_event is already set, but cancel is the belt-and-suspenders for
-        # any blocking await).
-        watchdog_task.cancel()
-        consumer_task.cancel()
-        quiet_refresh_task.cancel()
-        listener_task.cancel()
-        pump_task.cancel()
-        if l3_promoter_task is not None:
-            l3_promoter_task.cancel()
-        # F-04 bounded shutdown — even if any task ignores cancel, exit within 5s each
-        shutdown_tasks = [
-            (server_task, "server"),
+        runtime_tasks = [
             (watchdog_task, "watchdog"),
             (consumer_task, "consumer"),
             (quiet_refresh_task, "ws-quiet-refresh"),
             (listener_task, "listener"),
             (pump_task, "reconciliation-pump"),
+            (l3_promoter_task, "l3-promoter"),
         ]
+        if watchdog_task is not None:
+            watchdog_task.cancel()
+        if consumer_task is not None:
+            consumer_task.cancel()
+        if quiet_refresh_task is not None:
+            quiet_refresh_task.cancel()
+        if listener_task is not None:
+            listener_task.cancel()
+        if pump_task is not None:
+            pump_task.cancel()
         if l3_promoter_task is not None:
-            shutdown_tasks.append((l3_promoter_task, "l3-promoter"))
+            l3_promoter_task.cancel()
+        if not normal_shutdown:
+            server_task.cancel()
+
+        # F-04 bounded shutdown — optional tasks remain optional because boot
+        # authorization may fail before they are ever constructed.
+        shutdown_tasks = [(server_task, "server")]
+        shutdown_tasks.extend((task, name) for task, name in runtime_tasks if task is not None)
         for task, name in shutdown_tasks:
             try:
                 await asyncio.wait_for(task, timeout=5.0)
             except TimeoutError:
                 logger.warning(f"{name} task did not stop within 5s — forcing")
             except asyncio.CancelledError:
-                # Expected for watchdog_task / consumer_task because we cancelled them.
-                # Re-raise only if it's the server (graceful exit signal).
-                if name == "server":
-                    raise
+                # Expected for every explicitly-cancelled task.  Cancellation
+                # of main itself is re-raised by the outer handler above.
+                pass
+            except Exception as exc:  # noqa: BLE001 - preserve primary failure
+                logger.warning("{} task stopped with error_type={}", name, type(exc).__name__)
 
     logger.info("polyarb-l2 daemon stopped cleanly")
     return 0
