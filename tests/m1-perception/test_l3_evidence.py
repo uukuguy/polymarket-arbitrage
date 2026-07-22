@@ -221,6 +221,28 @@ def test_runtime_identity_uses_fly_environment_and_exact_recipe_bytes(
     )
 
 
+@pytest.mark.parametrize(
+    ("environment_name", "identity_field"),
+    [
+        ("FLY_MACHINE_ID", "machine_id"),
+        ("FLY_MACHINE_VERSION", "machine_version"),
+        ("FLY_IMAGE_REF", "image_ref"),
+    ],
+)
+def test_runtime_identity_rejects_present_but_empty_fly_values(
+    monkeypatch: pytest.MonkeyPatch,
+    environment_name: str,
+    identity_field: str,
+) -> None:
+    evidence = importlib.import_module("polyarb.observation.l3_evidence")
+    for name in ("FLY_MACHINE_ID", "FLY_MACHINE_VERSION", "FLY_IMAGE_REF"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(environment_name, "")
+
+    with pytest.raises(ValueError, match=identity_field):
+        evidence.RuntimeIdentity.from_environment(Settings())
+
+
 def test_public_dataclass_field_contract_is_exact() -> None:
     evidence = importlib.import_module("polyarb.observation.l3_evidence")
     expected = {
@@ -728,3 +750,93 @@ def test_event_queue_preserves_first_128_and_surfaces_overflow_failure() -> None
         evidence.RuntimeEventKind.RECONNECT_STARTED,
         occurred_at=NOW + timedelta(seconds=2),
     ).event_seq == 129
+
+
+def test_full_event_queue_does_not_commit_unrecorded_writer_transition() -> None:
+    evidence = importlib.import_module("polyarb.observation.l3_evidence")
+    runtime = evidence.L3EvidenceRuntime(_identity(evidence), started_at=NOW)
+    for index in range(128):
+        runtime.record_event(
+            evidence.RuntimeEventKind.WATCHDOG_STALE,
+            occurred_at=NOW + timedelta(milliseconds=index),
+        )
+
+    before = runtime.snapshot()
+    with pytest.raises(OverflowError, match="128"):
+        runtime.note_writer_result(False, NOW + timedelta(seconds=1), "db_unavailable")
+    overflowed = runtime.snapshot()
+    assert overflowed.writer_ok is before.writer_ok is None
+    assert overflowed.last_writer_result_at is before.last_writer_result_at is None
+    assert overflowed.writer_reason_code == before.writer_reason_code == ""
+
+    runtime.drain_pending_events()
+    runtime.note_writer_result(False, NOW + timedelta(seconds=2), "db_unavailable")
+    runtime.note_writer_result(True, NOW + timedelta(seconds=3), "writer_ok")
+    transitions = runtime.drain_pending_events()
+    assert [event.kind for event in transitions] == [
+        evidence.RuntimeEventKind.EVIDENCE_WRITER_FAILED,
+        evidence.RuntimeEventKind.EVIDENCE_WRITER_RECOVERED,
+    ]
+
+
+def test_shared_validators_reject_runtime_type_impostors() -> None:
+    evidence = importlib.import_module("polyarb.observation.l3_evidence")
+    boot_id = uuid4()
+    market = _market_sample(evidence, boot_id, 0)
+    health = evidence.HealthSampleRecord(
+        boot_id,
+        7,
+        NOW,
+        10,
+        10,
+        10,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        "LISTENING",
+        0,
+        1,
+        2,
+        3,
+        HASH_A,
+        HASH_B,
+        evidence.HealthStatus.PASS,
+        "ok",
+    )
+    identity = _identity(evidence)
+    acceptance = evidence.AcceptanceConfig(
+        HASH_A,
+        30,
+        75,
+        300,
+        360,
+        120,
+        120,
+        5,
+        10,
+        30,
+        "007",
+        "code",
+    )
+
+    with pytest.raises(TypeError, match="int"):
+        replace(market, sample_seq=0.5)
+    with pytest.raises(TypeError, match="int"):
+        evidence.WsMembershipSnapshot(generation=True)
+    with pytest.raises(TypeError, match="str"):
+        replace(market, reason_code=b"ok")
+    with pytest.raises(TypeError, match="str"):
+        replace(health, listener_state=b"LISTENING")
+    with pytest.raises(TypeError, match="str"):
+        replace(identity, recipe_sha256=b"a" * 64)
+    with pytest.raises(TypeError, match="str"):
+        replace(identity, machine_id=b"machine")
+    with pytest.raises(ValueError, match="empty"):
+        replace(identity, machine_id="")
+    with pytest.raises(TypeError, match="int"):
+        replace(acceptance, sample_interval_s=0.5)
+    with pytest.raises(TypeError, match="int"):
+        replace(acceptance, retention_days=True)

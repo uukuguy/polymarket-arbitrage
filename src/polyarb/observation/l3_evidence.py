@@ -99,11 +99,15 @@ def stable_sha256(value: Mapping[str, object] | Sequence[object]) -> str:
 
 
 def _require_nonempty(name: str, value: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str")
     if not value:
         raise ValueError(f"{name} must not be empty")
 
 
 def _require_sha256(name: str, value: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str")
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
         raise ValueError(f"{name} must be a lowercase SHA-256 hex digest")
 
@@ -114,11 +118,17 @@ def _require_utc(name: str, value: datetime | None) -> None:
 
 
 def _require_nonnegative(name: str, value: int | None) -> None:
-    if value is not None and value < 0:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int")
+    if value < 0:
         raise ValueError(f"{name} must be non-negative")
 
 
 def _require_reason(name: str, value: str, *, required: bool = True) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str")
     if (required and not value) or len(value) > 64:
         qualifier = "non-empty and " if required else ""
         raise ValueError(f"{name} must be {qualifier}at most 64 characters")
@@ -173,9 +183,8 @@ class AcceptanceConfig:
     def __post_init__(self) -> None:
         _require_sha256("recipe_sha256", self.recipe_sha256)
         for config_field in fields(self):
-            value = getattr(self, config_field.name)
-            if isinstance(value, int) and value < 0:
-                raise ValueError(f"{config_field.name} must be non-negative")
+            if config_field.name not in {"recipe_sha256", "schema_revision", "code_version"}:
+                _require_nonnegative(config_field.name, getattr(self, config_field.name))
         _require_nonempty("schema_revision", self.schema_revision)
         _require_nonempty("code_version", self.code_version)
 
@@ -232,9 +241,9 @@ class RuntimeIdentity:
             code_version=polyarb.__version__,
         )
         return cls(
-            machine_id=os.environ.get("FLY_MACHINE_ID") or "local",
-            machine_version=os.environ.get("FLY_MACHINE_VERSION") or "local",
-            image_ref=os.environ.get("FLY_IMAGE_REF") or "local",
+            machine_id=os.environ.get("FLY_MACHINE_ID", "local"),
+            machine_version=os.environ.get("FLY_MACHINE_VERSION", "local"),
+            image_ref=os.environ.get("FLY_IMAGE_REF", "local"),
             release_id=settings.release_id,
             code_version=polyarb.__version__,
             recipe_sha256=acceptance.recipe_sha256,
@@ -770,9 +779,6 @@ class L3EvidenceRuntime:
         if self._last_writer_result_at is not None and at < self._last_writer_result_at:
             raise ValueError("writer result timestamp cannot move backward")
         prior = self._writer_ok
-        self._writer_ok = ok
-        self._last_writer_result_at = at
-        self._writer_reason_code = reason_code
         if not ok and prior is not False:
             self.record_event(
                 RuntimeEventKind.EVIDENCE_WRITER_FAILED,
@@ -788,3 +794,6 @@ class L3EvidenceRuntime:
                 generation=self._ws_generation,
                 reason_code=reason_code,
             )
+        self._writer_ok = ok
+        self._last_writer_result_at = at
+        self._writer_reason_code = reason_code
