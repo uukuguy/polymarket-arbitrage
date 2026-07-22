@@ -208,7 +208,7 @@ async def test_main_binds_http_before_rejected_boot_and_never_starts_promoter():
 
 @pytest.mark.asyncio
 async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
-    """Boot, WS observer, cursor, and promoter share one dependency graph."""
+    """Boot, WS observer, cursor, promoter, and sampler share one graph."""
     from polyarb.daemon import l2_main
 
     settings = _make_fake_settings()
@@ -228,15 +228,24 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
     consumer.run = _idle
     consumer.run_quiet_refresh = _idle
     promoter_kwargs: dict[str, object] = {}
+    sampler_kwargs: dict[str, object] = {}
 
     def _run_periodic(**kwargs):
         promoter_kwargs.update(kwargs)
-        stop_event.set()
 
         async def _idle_promoter():
             await asyncio.sleep(0)
 
         return _idle_promoter()
+
+    def _run_sampler(_stop_event, **kwargs):
+        sampler_kwargs.update(kwargs)
+        stop_event.set()
+
+        async def _idle_sampler():
+            await asyncio.sleep(0)
+
+        return _idle_sampler()
 
     with patch("polyarb.daemon.l2_main.L3EvidenceStore", return_value=store):
         dependencies = l2_main._build_l3_evidence_dependencies(
@@ -260,6 +269,7 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
         patch("polyarb.daemon.l2_main.create_l2_app", return_value=MagicMock()),
         patch("polyarb.daemon.l2_main.asyncio.Event", return_value=stop_event),
         patch("polyarb.observation.l3_promote.run_periodic", new=_run_periodic),
+        patch("polyarb.observation.l3_sampler.run_sampler", new=_run_sampler),
     ):
         assert await asyncio.wait_for(l2_main.main(), timeout=3.0) == 0
 
@@ -271,6 +281,10 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
     assert observer.__self__ is runtime
     assert promoter_kwargs["evidence_store"] is store
     assert promoter_kwargs["acceptance_config"] is dependencies.acceptance_config
+    assert sampler_kwargs["runtime"] is runtime
+    assert sampler_kwargs["store"] is store
+    assert sampler_kwargs["settings"] is settings
+    assert sampler_kwargs["ws_consumer"] is consumer
     assert (
         promoter_kwargs["acceptance_config"].digest()
         == dependencies.boot.acceptance_config_hash

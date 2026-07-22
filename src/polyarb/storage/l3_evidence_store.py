@@ -42,6 +42,32 @@ class L3RetentionError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class SamplingMarketState:
+    """One complete Yes/No mapping with its latest durable market timestamps."""
+
+    market_id: str
+    yes_token_id: str
+    no_token_id: str
+    yes_book_at: datetime | None
+    no_book_at: datetime | None
+    yes_ohlc_at: datetime | None
+
+    def __post_init__(self) -> None:
+        for name in ("market_id", "yes_token_id", "no_token_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        if self.yes_token_id == self.no_token_id:
+            raise ValueError("sampling market Yes/No token IDs must be distinct")
+        for name in ("yes_book_at", "no_book_at", "yes_ohlc_at"):
+            value = getattr(self, name)
+            if value is not None and (
+                value.tzinfo is None or value.utcoffset() != timedelta(0)
+            ):
+                raise ValueError(f"{name} must be timezone-aware UTC")
+
+
+@dataclass(frozen=True, slots=True)
 class RetentionCleanupResult:
     runtime_boots_deleted: int
     promote_runs_deleted: int
@@ -98,6 +124,38 @@ INSERT INTO l3_runtime_events (
     event_id, boot_id, event_seq, occurred_at, kind, severity, generation,
     reason_code, detail
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+"""
+
+_SAMPLING_MARKET_STATE = """
+WITH requested AS (
+    SELECT unnest($1::text[]) AS token_id
+), mapping AS (
+    SELECT market_id, yes_token_id, no_token_id
+    FROM markets_latest
+    WHERE yes_token_id = ANY($1::text[])
+      AND no_token_id = ANY($1::text[])
+), latest_books AS (
+    SELECT asset_id, max(ts) AS book_at
+    FROM l2_book_levels
+    WHERE asset_id = ANY($1::text[])
+    GROUP BY asset_id
+), latest_yes_ohlc AS (
+    SELECT asset_id, max(bucket_ts) AS ohlc_at
+    FROM l2_ohlc_1m
+    WHERE asset_id = ANY($1::text[])
+    GROUP BY asset_id
+)
+SELECT mapping.market_id, mapping.yes_token_id, mapping.no_token_id,
+       yes_book.book_at AS yes_book_at,
+       no_book.book_at AS no_book_at,
+       yes_ohlc.ohlc_at AS yes_ohlc_at
+FROM mapping
+JOIN requested AS requested_yes ON requested_yes.token_id=mapping.yes_token_id
+JOIN requested AS requested_no ON requested_no.token_id=mapping.no_token_id
+LEFT JOIN latest_books AS yes_book ON yes_book.asset_id=mapping.yes_token_id
+LEFT JOIN latest_books AS no_book ON no_book.asset_id=mapping.no_token_id
+LEFT JOIN latest_yes_ohlc AS yes_ohlc ON yes_ohlc.asset_id=mapping.yes_token_id
+ORDER BY mapping.market_id, mapping.yes_token_id, mapping.no_token_id
 """
 
 
@@ -610,6 +668,49 @@ class L3EvidenceStore:
 
     async def append_event(self, record: RuntimeEventRecord) -> bool:
         return await self._append_one(_AppendOperation.EVENT, lambda: _event_args(record))
+
+    async def fetch_sampling_market_state(
+        self,
+        token_ids: list[str],
+    ) -> tuple[SamplingMarketState, ...]:
+        """Read mapping, ten book anchors, and five Yes OHLC anchors once."""
+        normalized = sorted(set(token_ids))
+        if any(not isinstance(token_id, str) or not token_id for token_id in normalized):
+            raise ValueError("sampling token IDs must be non-empty strings")
+        if not normalized:
+            return ()
+        connection: asyncpg.Connection | None = None
+        try:
+            connection = await asyncpg.connect(dsn=self._dsn)
+            await _require_evidence_daemon(connection)
+            rows = await connection.fetch(_SAMPLING_MARKET_STATE, normalized)
+            return tuple(
+                SamplingMarketState(
+                    market_id=row["market_id"],
+                    yes_token_id=row["yes_token_id"],
+                    no_token_id=row["no_token_id"],
+                    yes_book_at=row["yes_book_at"],
+                    no_book_at=row["no_book_at"],
+                    yes_ohlc_at=row["yes_ohlc_at"],
+                )
+                for row in rows
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - typed, bounded read boundary
+            _report_failure("fetch_sampling_market_state", error)
+            raise L3EvidenceReadError("l3 sampling market state read failed") from None
+        finally:
+            if connection is not None:
+                try:
+                    await connection.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001
+                    _report_failure("fetch_sampling_market_state_close", error)
+                    raise L3EvidenceReadError(
+                        "l3 sampling market state read failed"
+                    ) from None
 
     async def fetch_status(self, *, boot_id: UUID) -> Mapping[str, object] | None:
         connection: asyncpg.Connection | None = None

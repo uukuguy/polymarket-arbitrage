@@ -501,6 +501,7 @@ def upgrade() -> None:
         "GRANT SELECT ON TABLE l2_book_levels, l2_top_of_book, l2_ohlc_1m "
         "TO l3_evidence_daemon"
     )
+    op.execute("GRANT SELECT ON TABLE markets_latest TO l3_evidence_daemon")
     op.execute(
         "REVOKE ALL ON FUNCTION "
         "l3_retention_cleanup(timestamptz,timestamptz,timestamptz) "
@@ -518,6 +519,7 @@ def downgrade() -> None:
         "REVOKE SELECT ON TABLE l2_book_levels, l2_top_of_book, l2_ohlc_1m "
         "FROM l3_evidence_daemon"
     )
+    op.execute("REVOKE SELECT ON TABLE markets_latest FROM l3_evidence_daemon")
     for table in reversed(EVIDENCE_TABLES):
         op.execute(f"DROP TRIGGER trg_l3_evidence_append_only ON {table}")
     op.execute("DROP FUNCTION l3_retention_cleanup(timestamptz,timestamptz,timestamptz)")

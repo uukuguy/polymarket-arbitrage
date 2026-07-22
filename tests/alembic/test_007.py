@@ -52,6 +52,20 @@ def test_007_upgrade_source_is_add_only() -> None:
     assert "ALTER COLUMN" not in upgrade.upper()
 
 
+def test_007_daemon_can_only_read_sampling_source_mapping() -> None:
+    text = MIGRATION_PATH.read_text(encoding="utf-8")
+    upgrade = text[text.index("def upgrade(") : text.index("def downgrade(")]
+    assert (
+        '"GRANT SELECT ON TABLE markets_latest TO l3_evidence_daemon"'
+        in upgrade
+    )
+    for privilege in ("INSERT", "UPDATE", "DELETE"):
+        assert (
+            f"GRANT {privilege} ON TABLE markets_latest TO l3_evidence_daemon"
+            not in upgrade
+        )
+
+
 def _docker_available() -> bool:
     try:
         result = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=5)
@@ -894,7 +908,8 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
         coverage_privileges = await conn.fetch(
             "SELECT table_name, privilege_type, "
             "has_table_privilege('l3_evidence_daemon', table_name, privilege_type) allowed "
-            "FROM unnest(ARRAY['l2_book_levels','l2_top_of_book','l2_ohlc_1m']) table_name "
+            "FROM unnest(ARRAY['l2_book_levels','l2_top_of_book','l2_ohlc_1m',"
+            "'markets_latest']) table_name "
             "CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) privilege_type"
         )
         assert {
@@ -903,7 +918,12 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
             if row["allowed"]
         } == {
             (table, "SELECT")
-            for table in ("l2_book_levels", "l2_top_of_book", "l2_ohlc_1m")
+            for table in (
+                "l2_book_levels",
+                "l2_top_of_book",
+                "l2_ohlc_1m",
+                "markets_latest",
+            )
         }
         daemon_sequence_privileges = await conn.fetch(
             "SELECT privilege_type, has_sequence_privilege("

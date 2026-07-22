@@ -631,6 +631,7 @@ async def main() -> int:
     pump_task: asyncio.Task[None] | None = None
     listener_task: asyncio.Task[None] | None = None
     l3_promoter_task: asyncio.Task[None] | None = None
+    l3_sampler_task: asyncio.Task[None] | None = None
     normal_shutdown = False
     try:
         # P9 server-started gate — MANDATORY per Phase 02 L5.  The task is
@@ -679,6 +680,7 @@ async def main() -> int:
             )
 
             from polyarb.observation import l3_promote as l3_promote_module
+            from polyarb.observation import l3_sampler as l3_sampler_module
 
             l3_promoter_task = asyncio.create_task(
                 l3_promote_module.run_periodic(
@@ -691,6 +693,17 @@ async def main() -> int:
                     acceptance_config=l3_evidence.acceptance_config,
                 ),
                 name="l3-promoter",
+            )
+            l3_sampler_task = asyncio.create_task(
+                l3_sampler_module.run_sampler(
+                    stop_event,
+                    settings=settings,
+                    ws_consumer=ws_consumer,
+                    reconciliation_state=reconciliation_state,
+                    runtime=l3_evidence.runtime,
+                    store=l3_evidence.store,
+                ),
+                name="l3-evidence-sampler",
             )
 
         await stop_event.wait()
@@ -709,6 +722,7 @@ async def main() -> int:
             (listener_task, "listener"),
             (pump_task, "reconciliation-pump"),
             (l3_promoter_task, "l3-promoter"),
+            (l3_sampler_task, "l3-evidence-sampler"),
         ]
         if watchdog_task is not None:
             watchdog_task.cancel()
@@ -722,6 +736,8 @@ async def main() -> int:
             pump_task.cancel()
         if l3_promoter_task is not None:
             l3_promoter_task.cancel()
+        if l3_sampler_task is not None:
+            l3_sampler_task.cancel()
         if not normal_shutdown:
             server_task.cancel()
 

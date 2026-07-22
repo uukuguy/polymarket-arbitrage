@@ -38,6 +38,7 @@ from polyarb.storage.l3_evidence_store import (
     L3EvidenceStore,
     L3RetentionError,
     L3RetentionOperator,
+    SamplingMarketState,
 )
 
 HASH = "a" * 64
@@ -284,6 +285,49 @@ async def test_sample_append_uses_one_transaction_and_exactly_five_market_rows(
     assert "l3_health_samples" in connection.calls[1][1]
     assert "l3_market_samples" in connection.calls[2][1]
     assert len(connection.calls[2][2]) == 5
+
+
+async def test_sampling_market_state_uses_one_aggregate_query_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    at = datetime.now(UTC)
+    connection = _FakeConnection()
+    rows = [
+        {
+            "market_id": f"market-{index}",
+            "yes_token_id": f"yes-{index}",
+            "no_token_id": f"no-{index}",
+            "yes_book_at": at,
+            "no_book_at": at - timedelta(seconds=1),
+            "yes_ohlc_at": at.replace(second=0, microsecond=0),
+        }
+        for index in range(5)
+    ]
+    connection.fetch = AsyncMock(return_value=rows)
+    connect = AsyncMock(return_value=connection)
+    monkeypatch.setattr(store_module.asyncpg, "connect", connect)
+    token_ids = sorted(
+        {
+            token
+            for index in range(5)
+            for token in (f"yes-{index}", f"no-{index}")
+        }
+    )
+
+    result = await L3EvidenceStore(
+        "postgresql://secret"
+    ).fetch_sampling_market_state(token_ids)
+
+    assert result == tuple(SamplingMarketState(**row) for row in rows)
+    fetch_calls = [call for call in connection.calls if call[0] == "fetch"]
+    assert len(fetch_calls) == 0  # AsyncMock owns the one aggregate call.
+    connection.fetch.assert_awaited_once()
+    sql, supplied_tokens = connection.fetch.await_args.args
+    assert "l2_book_levels" in sql
+    assert "l2_ohlc_1m" in sql
+    assert "markets_latest" in sql
+    assert supplied_tokens == token_ids
+    assert connection.closed
 
 
 @pytest.mark.parametrize("append_kind", ["one", "sample"])
@@ -718,8 +762,41 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
             "INSERT INTO l2_top_of_book (asset_id, ts, mid_price) VALUES ($1,$2,0.5)",
             [("yes-0", start), ("yes-0", end)],
         )
+        await admin.executemany(
+            "INSERT INTO markets_latest (market_id, yes_token_id, no_token_id) "
+            "VALUES ($1,$2,$3)",
+            [
+                (f"market-{index}", f"yes-{index}", f"no-{index}")
+                for index in range(5)
+            ],
+        )
     finally:
         await admin.close()
+
+    sampling_state = await store.fetch_sampling_market_state(
+        sorted(
+            {
+                token
+                for index in range(5)
+                for token in (f"yes-{index}", f"no-{index}")
+            }
+        )
+    )
+    assert len(sampling_state) == 5
+    assert sampling_state[0] == SamplingMarketState(
+        market_id="market-0",
+        yes_token_id="yes-0",
+        no_token_id="no-0",
+        yes_book_at=end,
+        no_book_at=start,
+        yes_ohlc_at=end,
+    )
+    assert all(
+        market.yes_book_at is None
+        and market.no_book_at is None
+        and market.yes_ohlc_at is None
+        for market in sampling_state[1:]
+    )
 
     status = await store.fetch_status(boot_id=boot.boot_id)
     assert status is not None

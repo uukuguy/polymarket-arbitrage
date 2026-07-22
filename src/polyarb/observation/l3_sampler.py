@@ -1,0 +1,352 @@
+"""Boot-anchored, atomic L3 process and five-market evidence sampling."""
+
+from __future__ import annotations
+
+import asyncio
+import math
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from loguru import logger
+
+from polyarb.observation.l3_evidence import (
+    EvidenceStatus,
+    HealthSampleRecord,
+    HealthStatus,
+    MarketSampleRecord,
+    SampleBatch,
+    stable_sha256,
+)
+from polyarb.storage.l3_evidence_store import L3EvidenceStore, SamplingMarketState
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+async def _wait_for_stop(stop_event: asyncio.Event, delay_s: float) -> bool:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=delay_s)
+        return True
+    except TimeoutError:
+        return False
+
+
+def _age_ms(sampled_at: datetime, observed_at: datetime | None) -> int | None:
+    if observed_at is None:
+        return None
+    return max(0, int((sampled_at - observed_at).total_seconds() * 1000))
+
+
+def _epoch_age_ms(sampled_at: datetime, observed_at_s: object) -> int | None:
+    try:
+        observed = datetime.fromtimestamp(float(observed_at_s), tz=UTC)
+    except (TypeError, ValueError, OSError):
+        return None
+    return _age_ms(sampled_at, observed)
+
+
+def _validate_mapping(
+    markets: tuple[SamplingMarketState, ...],
+) -> frozenset[str]:
+    if len(markets) != 5:
+        raise ValueError("sampling requires exactly five complete market pairs")
+    if len({market.market_id for market in markets}) != 5:
+        raise ValueError("sampling requires exactly five complete market pairs")
+    yes_tokens = {market.yes_token_id for market in markets}
+    no_tokens = {market.no_token_id for market in markets}
+    if len(yes_tokens) != 5 or len(no_tokens) != 5 or len(yes_tokens | no_tokens) != 10:
+        raise ValueError("sampling requires exactly five complete market pairs")
+    return frozenset(yes_tokens | no_tokens)
+
+
+def _market_reason(
+    market: SamplingMarketState,
+    *,
+    sampled_at: datetime,
+    runtime: EvidenceStatus,
+    book_fresh_ms: int,
+    ohlc_fresh_ms: int,
+) -> tuple[HealthStatus, str]:
+    for token_id in (market.yes_token_id, market.no_token_id):
+        if token_id not in runtime.desired:
+            return HealthStatus.FAIL, "not_desired"
+        if token_id not in runtime.committed:
+            return HealthStatus.FAIL, "not_committed"
+        if token_id not in runtime.evidenced:
+            return HealthStatus.FAIL, "not_evidenced"
+
+    checks = (
+        ("yes_book", market.yes_book_at, book_fresh_ms),
+        ("no_book", market.no_book_at, book_fresh_ms),
+        ("yes_ohlc", market.yes_ohlc_at, ohlc_fresh_ms),
+    )
+    for name, observed_at, threshold_ms in checks:
+        if observed_at is None:
+            return HealthStatus.FAIL, f"{name}_missing"
+        if observed_at > sampled_at:
+            return HealthStatus.FAIL, f"{name}_in_future"
+        age_ms = _age_ms(sampled_at, observed_at)
+        if age_ms is None or age_ms >= threshold_ms:
+            return HealthStatus.FAIL, f"{name}_stale"
+    return HealthStatus.PASS, "ok"
+
+
+def _build_market_record(
+    market: SamplingMarketState,
+    *,
+    sampled_at: datetime,
+    sample_seq: int,
+    runtime: EvidenceStatus,
+    book_fresh_ms: int,
+    ohlc_fresh_ms: int,
+) -> MarketSampleRecord:
+    status, reason_code = _market_reason(
+        market,
+        sampled_at=sampled_at,
+        runtime=runtime,
+        book_fresh_ms=book_fresh_ms,
+        ohlc_fresh_ms=ohlc_fresh_ms,
+    )
+    yes_age = _age_ms(sampled_at, market.yes_book_at)
+    no_age = _age_ms(sampled_at, market.no_book_at)
+    known_book_ages = [age for age in (yes_age, no_age) if age is not None]
+    return MarketSampleRecord(
+        boot_id=runtime.boot_id,
+        sample_seq=sample_seq,
+        sampled_at=sampled_at,
+        market_id=market.market_id,
+        yes_token_id=market.yes_token_id,
+        no_token_id=market.no_token_id,
+        yes_desired=market.yes_token_id in runtime.desired,
+        no_desired=market.no_token_id in runtime.desired,
+        yes_committed=market.yes_token_id in runtime.committed,
+        no_committed=market.no_token_id in runtime.committed,
+        yes_evidenced=market.yes_token_id in runtime.evidenced,
+        no_evidenced=market.no_token_id in runtime.evidenced,
+        evidence_generation=runtime.ws_generation,
+        yes_book_at=market.yes_book_at,
+        no_book_at=market.no_book_at,
+        yes_book_age_ms=yes_age,
+        no_book_age_ms=no_age,
+        worst_book_age_ms=max(known_book_ages) if known_book_ages else None,
+        yes_ohlc_at=market.yes_ohlc_at,
+        yes_ohlc_age_ms=_age_ms(sampled_at, market.yes_ohlc_at),
+        status=status,
+        reason_code=reason_code,
+    )
+
+
+def _build_health_record(
+    *,
+    sampled_at: datetime,
+    sample_seq: int,
+    runtime: EvidenceStatus,
+    markets: tuple[MarketSampleRecord, ...],
+    mapping_hash: str,
+    ws_consumer: Any,
+    reconciliation_state: Any,
+    mapped_tokens: frozenset[str],
+) -> HealthSampleRecord:
+    exact_membership = (
+        len(mapped_tokens) == 10
+        and runtime.desired == mapped_tokens
+        and runtime.committed == mapped_tokens
+        and runtime.evidenced == mapped_tokens
+    )
+    markets_ok = all(market.status is HealthStatus.PASS for market in markets)
+    if not exact_membership:
+        status, reason_code = HealthStatus.FAIL, "membership_convergence_failed"
+    elif not markets_ok:
+        status, reason_code = HealthStatus.FAIL, "market_freshness_failed"
+    else:
+        status, reason_code = HealthStatus.PASS, "ok"
+
+    book_ages = [
+        age
+        for market in markets
+        for age in (market.yes_book_age_ms, market.no_book_age_ms)
+        if age is not None
+    ]
+    watchdog = getattr(ws_consumer, "_watchdog", None)
+    try:
+        watchdog_count = max(0, int(getattr(watchdog, "reconnect_attempt", 0)))
+    except (TypeError, ValueError):
+        watchdog_count = 0
+    try:
+        reconnect_count = max(0, int(getattr(reconciliation_state, "reconnect_count", 0)))
+    except (TypeError, ValueError):
+        reconnect_count = 0
+    try:
+        cursor_lag = max(0, int(getattr(reconciliation_state, "cursor_lag", 0)))
+    except (TypeError, ValueError):
+        cursor_lag = 0
+    listener_state = (
+        "connected"
+        if bool(getattr(reconciliation_state, "is_connected", False))
+        else "disconnected"
+    )
+
+    from polyarb.observation.l2_candidate_refresh import get_last_fetch_success_at_s
+    from polyarb.observation.l3_promote import get_last_book_levels_write_at_s
+
+    return HealthSampleRecord(
+        boot_id=runtime.boot_id,
+        sample_seq=sample_seq,
+        sampled_at=sampled_at,
+        desired_count=len(runtime.desired),
+        committed_count=len(runtime.committed),
+        evidenced_count=len(runtime.evidenced),
+        promote_age_ms=_age_ms(sampled_at, runtime.last_promote_persisted_at),
+        global_book_age_ms=min(book_ages) if book_ages else None,
+        ws_age_ms=_epoch_age_ms(sampled_at, getattr(ws_consumer, "last_event_at_s", None)),
+        mirror_age_ms=_epoch_age_ms(sampled_at, get_last_book_levels_write_at_s()),
+        candidate_age_ms=_epoch_age_ms(sampled_at, get_last_fetch_success_at_s()),
+        reconciliation_age_ms=_epoch_age_ms(
+            sampled_at,
+            getattr(reconciliation_state, "last_reconciliation_success_s", None),
+        ),
+        listener_state=listener_state,
+        cursor_lag=cursor_lag,
+        watchdog_count=watchdog_count,
+        reconnect_count=reconnect_count,
+        ws_generation=runtime.ws_generation,
+        mapping_hash=mapping_hash,
+        acceptance_config_hash=runtime.acceptance_config_hash,
+        status=status,
+        reason_code=reason_code,
+    )
+
+
+async def collect_sample(
+    *,
+    sampled_at: datetime,
+    sample_seq: int,
+    settings: Any,
+    ws_consumer: Any,
+    reconciliation_state: Any,
+    runtime: Any,
+    store: L3EvidenceStore,
+) -> SampleBatch:
+    """Collect one immutable membership view and one aggregate DB observation."""
+    runtime_status = runtime.snapshot()
+    token_ids = sorted(runtime_status.desired)
+    market_states = tuple(await store.fetch_sampling_market_state(token_ids))
+    mapped_tokens = _validate_mapping(market_states)
+    book_fresh_ms = int(settings.l3_market_book_fresh_s * 1000)
+    ohlc_fresh_ms = int(settings.l3_market_ohlc_fresh_s * 1000)
+    markets = tuple(
+        _build_market_record(
+            market,
+            sampled_at=sampled_at,
+            sample_seq=sample_seq,
+            runtime=runtime_status,
+            book_fresh_ms=book_fresh_ms,
+            ohlc_fresh_ms=ohlc_fresh_ms,
+        )
+        for market in market_states
+    )
+    mapping_hash = stable_sha256(
+        [
+            {
+                "market_id": market.market_id,
+                "yes_token_id": market.yes_token_id,
+                "no_token_id": market.no_token_id,
+            }
+            for market in market_states
+        ]
+    )
+    health = _build_health_record(
+        sampled_at=sampled_at,
+        sample_seq=sample_seq,
+        runtime=runtime_status,
+        markets=markets,
+        mapping_hash=mapping_hash,
+        ws_consumer=ws_consumer,
+        reconciliation_state=reconciliation_state,
+        mapped_tokens=mapped_tokens,
+    )
+    return SampleBatch(health=health, markets=markets)
+
+
+async def sample_once(
+    *,
+    sampled_at: datetime,
+    sample_seq: int,
+    settings: Any,
+    ws_consumer: Any,
+    reconciliation_state: Any,
+    runtime: Any,
+    store: L3EvidenceStore,
+) -> bool:
+    """Append one atomic batch and publish success truth only after its ACK."""
+    batch = await collect_sample(
+        sampled_at=sampled_at,
+        sample_seq=sample_seq,
+        settings=settings,
+        ws_consumer=ws_consumer,
+        reconciliation_state=reconciliation_state,
+        runtime=runtime,
+        store=store,
+    )
+    persisted = await store.append_sample(batch)
+    runtime.note_writer_result(
+        persisted,
+        sampled_at,
+        "ok" if persisted else "sample_append_failed",
+    )
+    if persisted:
+        runtime.mark_sample_persisted(sampled_at, batch.markets)
+    return persisted
+
+
+async def run_sampler(
+    stop_event: asyncio.Event,
+    *,
+    settings: Any,
+    ws_consumer: Any,
+    reconciliation_state: Any,
+    runtime: Any,
+    store: L3EvidenceStore,
+) -> None:
+    """Sample on a boot grid while skipping every elapsed boundary."""
+    interval_s = settings.l3_evidence_sample_interval_s
+    if isinstance(interval_s, bool) or not isinstance(interval_s, (int, float)):
+        raise TypeError("l3_evidence_sample_interval_s must be numeric")
+    if interval_s <= 0:
+        raise ValueError("l3_evidence_sample_interval_s must be positive")
+    boot_started_at = runtime.snapshot().started_at
+    boundary_index = 0
+    while not stop_event.is_set():
+        boundary = boot_started_at + timedelta(seconds=boundary_index * interval_s)
+        delay_s = max(0.0, (boundary - _utc_now()).total_seconds())
+        if delay_s > 0 and await _wait_for_stop(stop_event, delay_s):
+            break
+        if stop_event.is_set():
+            break
+        sampled_at = _utc_now()
+        sample_seq = runtime.next_sample_seq()
+        try:
+            await sample_once(
+                sampled_at=sampled_at,
+                sample_seq=sample_seq,
+                settings=settings,
+                ws_consumer=ws_consumer,
+                reconciliation_state=reconciliation_state,
+                runtime=runtime,
+                store=store,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - missing row remains the truth
+            runtime.note_writer_result(False, sampled_at, "sample_collection_failed")
+            logger.warning(
+                "l3 sampler failed sample_seq={} error_type={}",
+                sample_seq,
+                type(exc).__name__,
+            )
+        elapsed_s = max(0.0, (_utc_now() - boot_started_at).total_seconds())
+        boundary_index = max(
+            boundary_index + 1,
+            math.floor(elapsed_s / interval_s) + 1,
+        )
