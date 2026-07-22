@@ -84,7 +84,10 @@ class Settings(BaseSettings):
     # check selection. Env var: POLYARB_DAEMON_VARIANT.
     daemon_variant: Literal["l1", "l2"] = Field(
         default="l1",
-        description="Daemon variant identifier — 'l1' for snapshot daemon, 'l2' for orderbook daemon",
+        description=(
+            "Daemon variant identifier — 'l1' for snapshot daemon, "
+            "'l2' for orderbook daemon"
+        ),
     )
 
     # ── Plan 03 Wave 5 deploy-bootstrap (2026-05-25) ─────────────────────
@@ -128,11 +131,17 @@ class Settings(BaseSettings):
     #     fly secrets unset POLYARB_L2_TOB_AGE_FAIL_S POLYARB_L2_TOB_AGE_WARN_S -a polyarb-l2
     l2_tob_age_warn_s: int = Field(
         default=300,
-        description="WARN threshold for /health mirror:l2_tob_age_seconds (env POLYARB_L2_TOB_AGE_WARN_S)",
+        description=(
+            "WARN threshold for /health mirror:l2_tob_age_seconds "
+            "(env POLYARB_L2_TOB_AGE_WARN_S)"
+        ),
     )
     l2_tob_age_fail_s: int = Field(
         default=600,
-        description="FAIL threshold for /health mirror:l2_tob_age_seconds (env POLYARB_L2_TOB_AGE_FAIL_S)",
+        description=(
+            "FAIL threshold for /health mirror:l2_tob_age_seconds "
+            "(env POLYARB_L2_TOB_AGE_FAIL_S)"
+        ),
     )
 
     # ── Cloudflare R2 (D-03) — Plan 03 additions ─────────────────────────────
@@ -233,10 +242,20 @@ class Settings(BaseSettings):
         description="YAML path for watchlist entries unioned into candidate set (D-04)",
     )
 
+    # Phase 05.4 — locked continuous-soak acceptance boundaries. Evidence
+    # health is unconditional; these values deliberately are not feature gates.
+    l3_evidence_sample_interval_s: int = Field(default=30, gt=0)
+    l3_evidence_max_sample_gap_s: int = Field(default=75, gt=30)
+    l3_promote_interval_s: int = Field(default=300, gt=0)
+    l3_promote_max_start_gap_s: int = Field(default=360, gt=300)
+    l3_evidence_retention_days: int = Field(default=30, ge=30)
+    l3_market_book_fresh_s: int = Field(default=120, gt=0)
+    l3_market_ohlc_fresh_s: int = Field(default=120, gt=0)
+
     model_config = SettingsConfigDict(env_prefix="POLYARB_", env_file=".env", extra="ignore")
 
     @model_validator(mode="after")
-    def _require_secret_in_prod(self) -> "Settings":
+    def _require_secret_in_prod(self) -> Settings:
         """Raise if scan_shared_secret is empty and not running in test mode.
 
         Also auto-sets supabase_mirror_enabled and r2_enabled based on whether
