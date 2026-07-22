@@ -142,6 +142,7 @@ class _SampleStore:
 
 
 def _assert_strict_failure(runtime: L3EvidenceRuntime, failed_key: str, ws_consumer=None):
+    from pydantic import SecretStr
     from starlette.testclient import TestClient
 
     from polyarb.config import Settings
@@ -149,7 +150,7 @@ def _assert_strict_failure(runtime: L3EvidenceRuntime, failed_key: str, ws_consu
 
     app = create_l2_app(
         sqlite_store=SimpleNamespace(),
-        settings=Settings(),
+        settings=Settings(scan_shared_secret=SecretStr("test-secret")),
         ws_consumer=ws_consumer,
         evidence_runtime=runtime,
     )
@@ -836,3 +837,110 @@ async def test_one_hot_four_silent_surfaces_worst_market_503():
 
     body = _assert_strict_failure(runtime, "l3:worst_market_freshness")
     assert body["checks"]["l3:worst_market_freshness"][0]["observedValue"] >= 123
+
+
+async def test_reconnect_requires_current_generation_sample_before_health_recovers():
+    """Current membership cannot bless a previous-generation persisted sample."""
+    from pydantic import SecretStr
+    from starlette.testclient import TestClient
+
+    from polyarb.config import Settings
+    from polyarb.http.l2_app import create_l2_app
+
+    base = datetime.now(UTC) - timedelta(seconds=5)
+    states_v1 = _market_states(base)
+    tokens = _tokens(states_v1)
+    runtime = _runtime_at(base)
+    consumer = WsConsumer(
+        settings=SimpleNamespace(),
+        watchdog=ws_watchdog.WsWatchdog(stale_s=30.0),
+        on_event=lambda _event: None,
+        initial_assets=[],
+        membership_observer=runtime.update_membership,
+        event_recorder=runtime.record_event,
+    )
+    consumer.set_l3_desired(tokens)
+    ws_v1 = SimpleNamespace(send=AsyncMock(return_value=None), close=AsyncMock(return_value=None))
+    await consumer._initialize_connection(ws_v1)
+    generation_one = runtime.snapshot().ws_generation
+    for token in tokens:
+        consumer.record_book_evidence(
+            asset_id=token,
+            generation=generation_one,
+            book_levels_succeeded=True,
+            observed_at=base,
+        )
+    assert await l3_sampler.sample_once(
+        sampled_at=base,
+        sample_seq=0,
+        settings=_sampler_settings(),
+        ws_consumer=consumer,
+        reconciliation_state=_reconciliation_state(base),
+        runtime=runtime,
+        store=_SampleStore(states_v1),
+    )
+    runtime.mark_promote_persisted(base)
+    assert {row.evidence_generation for row in runtime.snapshot().last_market_samples} == {
+        generation_one
+    }
+
+    reconnected_at = base + timedelta(seconds=1)
+    ws_v2 = SimpleNamespace(send=AsyncMock(return_value=None), close=AsyncMock(return_value=None))
+    await consumer._initialize_connection(ws_v2)
+    generation_two = runtime.snapshot().ws_generation
+    assert generation_two > generation_one
+    for token in tokens:
+        consumer.record_book_evidence(
+            asset_id=token,
+            generation=generation_two,
+            book_levels_succeeded=True,
+            observed_at=reconnected_at,
+        )
+    current = runtime.snapshot()
+    assert current.desired == current.committed == current.evidenced
+
+    app = create_l2_app(
+        sqlite_store=SimpleNamespace(),
+        settings=Settings(scan_shared_secret=SecretStr("test-secret")),
+        # Isolate legacy WS status: this test's strict verdict is owned by the
+        # evidence runtime, while the real consumer above drives its mutations.
+        ws_consumer=SimpleNamespace(
+            current_state="CONNECTED",
+            last_event_at_s=datetime.now(UTC).timestamp(),
+            subscribed_assets=list(tokens),
+        ),
+        evidence_runtime=runtime,
+    )
+    with TestClient(app) as client:
+        before_strict = client.get("/health")
+        before_probe = client.get("/healthz")
+    assert before_strict.status_code == 503
+    assert before_probe.status_code == 200
+    assert before_strict.json()["checks"]["l3:membership_convergence"][0]["status"] == "fail"
+
+    sampled_v2_at = base + timedelta(seconds=2)
+    states_v2 = _market_states(sampled_v2_at)
+    assert await l3_sampler.sample_once(
+        sampled_at=sampled_v2_at,
+        sample_seq=1,
+        settings=_sampler_settings(),
+        ws_consumer=consumer,
+        reconciliation_state=_reconciliation_state(sampled_v2_at),
+        runtime=runtime,
+        store=_SampleStore(states_v2),
+    )
+
+    with TestClient(app) as client:
+        after_strict = client.get("/health")
+        after_probe = client.get("/healthz")
+    strict_names = (
+        "l3:evidence_sample_age_seconds",
+        "l3:promoter_ledger_age_seconds",
+        "l3:membership_convergence",
+        "l3:worst_market_freshness",
+    )
+    assert after_strict.status_code == 200, after_strict.json()
+    assert after_probe.status_code == 200
+    assert {
+        after_strict.json()["checks"][name][0]["status"] for name in strict_names
+    } == {"pass"}

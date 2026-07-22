@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -632,3 +633,37 @@ def test_health_and_sampler_never_read_consumer_membership_directly() -> None:
 
     assert ".l3_membership_snapshot" not in health_source
     assert ".l3_membership_snapshot" not in sampler_source
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        {"status": "fail"},
+        {"yes_evidenced": False},
+    ],
+)
+def test_persisted_market_row_integrity_must_be_strictly_passing(
+    corrupt: dict[str, Any],
+) -> None:
+    from polyarb.observation.l3_evidence import HealthStatus
+
+    now = datetime.now(UTC)
+    runtime = _seed_runtime(now)
+    status = runtime.snapshot()
+    rows = list(status.last_market_samples)
+    changes: dict[str, Any]
+    if corrupt == {"status": "fail"}:
+        changes = {"status": HealthStatus.FAIL, "reason_code": "not_evidenced"}
+    else:
+        changes = corrupt
+    rows[0] = replace(rows[0], **changes)
+    runtime.mark_sample_persisted(status.last_sample_persisted_at, tuple(rows))
+
+    checks, overall = _call_build_checks(
+        now.timestamp(),
+        evidence_runtime=runtime,
+        evidence_runtime_required=True,
+    )
+
+    assert checks["l3:membership_convergence"][0]["status"] == "fail"
+    assert overall == "fail"

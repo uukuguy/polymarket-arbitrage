@@ -26,6 +26,8 @@ from loguru import logger
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from polyarb.observation.l3_evidence import HealthStatus
+
 HEALTH_CONTENT_TYPE = "application/health+json"
 
 # WS age thresholds (seconds)
@@ -183,17 +185,43 @@ def _build_l3_evidence_checks(
         and len(no_tokens) == 5
         and len(mapping_tokens) == 10
     )
-    membership_converged = (
+    sample_sequences = {sample.sample_seq for sample in market_samples}
+    rows_current_and_passing = sum(
+        1
+        for sample in market_samples
+        if sample.boot_id == runtime_status.boot_id
+        and sample.sampled_at == runtime_status.last_sample_persisted_at
+        and sample.evidence_generation == runtime_status.ws_generation
+        and sample.status is HealthStatus.PASS
+        and sample.reason_code == "ok"
+        and sample.yes_desired
+        and sample.no_desired
+        and sample.yes_committed
+        and sample.no_committed
+        and sample.yes_evidenced
+        and sample.no_evidenced
+    )
+    persisted_batch_valid = (
         mapping_complete
+        and len(sample_sequences) == 1
+        and rows_current_and_passing == 5
+    )
+    membership_converged = (
+        persisted_batch_valid
         and len(runtime_status.desired) == 10
-        and runtime_status.desired == runtime_status.committed == mapping_tokens
+        and runtime_status.desired
+        == runtime_status.committed
+        == runtime_status.evidenced
+        == mapping_tokens
     )
     membership_status = "pass" if membership_converged else "fail"
     membership_value = "converged" if membership_converged else "mismatch"
     membership_output = (
         f"markets={len(market_ids)}/5 mapping_tokens={len(mapping_tokens)}/10 "
         f"desired={len(runtime_status.desired)}/10 "
-        f"committed={len(runtime_status.committed)}/10"
+        f"committed={len(runtime_status.committed)}/10 "
+        f"evidenced={len(runtime_status.evidenced)}/10 "
+        f"current_passing_rows={rows_current_and_passing}/5"
     )
 
     freshness_ages: list[float] = []
