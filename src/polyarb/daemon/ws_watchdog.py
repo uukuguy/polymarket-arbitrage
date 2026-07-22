@@ -32,9 +32,16 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import sentry_sdk
 from loguru import logger
+
+from polyarb.observation.l3_evidence import (
+    RuntimeEventKind,
+    RuntimeEventSeverity,
+    build_runtime_event_detail,
+)
 
 # D-03 LOCKED + R5: backoff sequence in seconds. Final value caps further
 # attempts at 30s.
@@ -75,6 +82,7 @@ class WsWatchdog:
         stale_s: float = 30.0,  # D-03 LOCKED — DO NOT make user-configurable
         on_reconnect: Callable[[], None] | None = None,
         liveness_check: Callable[[], bool] | None = None,
+        event_recorder: Callable[..., object] | None = None,
     ) -> None:
         self.stale_s = stale_s
         self._state = WatchdogState()
@@ -86,9 +94,36 @@ class WsWatchdog:
         # The silence baseline resets and NO reconnect is attempted.
         # When None or returning False the existing _on_stale() reconnect path runs.
         self._liveness_check = liveness_check
+        self._event_recorder = event_recorder
         # Sliding-window deque of recent reconnect monotonic timestamps.
         # maxlen 2x threshold so window pruning has room to operate.
         self._reconnect_timestamps: deque[float] = deque(maxlen=_STORM_THRESHOLD * 2)
+
+    def _record_event(
+        self,
+        kind: RuntimeEventKind,
+        *,
+        reason_code: str,
+        detail: dict[str, object],
+        severity: RuntimeEventSeverity = RuntimeEventSeverity.INFO,
+    ) -> None:
+        """Synchronously enqueue bounded evidence without breaking watchdog work."""
+        if self._event_recorder is None:
+            return
+        try:
+            self._event_recorder(
+                kind,
+                occurred_at=datetime.now(UTC),
+                severity=severity,
+                reason_code=reason_code,
+                detail=build_runtime_event_detail(kind, detail),
+            )
+        except Exception as exc:  # noqa: BLE001 - overflow already marks runtime fail
+            logger.warning(
+                "ws_watchdog event enqueue failed kind={} error_type={}",
+                kind.value,
+                type(exc).__name__,
+            )
 
     # ── Properties ─────────────────────────────────────────────────────────
 
@@ -197,10 +232,27 @@ class WsWatchdog:
             self._state.state = "WAITING_FOR_EVENT"
             return
 
+        self._record_event(
+            RuntimeEventKind.WATCHDOG_STALE,
+            reason_code="data_silence",
+            detail={"stale_seconds": int(self.stale_s)},
+            severity=RuntimeEventSeverity.WARNING,
+        )
+
         # R5 storm cap — switch to DEGRADED_REST_POLLING (no more reconnects
         # for _DEGRADED_SLEEP_S; emit Sentry warning so the operator sees it).
         if not self.reserve_reconnect():
             recent = len(self._reconnect_timestamps)
+            retry_after_s = self.reconnect_retry_after_s()
+            self._record_event(
+                RuntimeEventKind.RECONNECT_DEFERRED,
+                reason_code="storm_budget_exhausted",
+                detail={
+                    "retry_after_ms": max(0, int(retry_after_s * 1000)),
+                    "budget_count": recent,
+                },
+                severity=RuntimeEventSeverity.WARNING,
+            )
             if self._state.state != "DEGRADED_REST_POLLING":
                 self._state.state = "DEGRADED_REST_POLLING"
                 logger.warning(
@@ -220,12 +272,26 @@ class WsWatchdog:
             await asyncio.sleep(_DEGRADED_SLEEP_S)
             return
 
+        self._record_event(
+            RuntimeEventKind.RECONNECT_RESERVED,
+            reason_code="storm_budget_reserved",
+            detail={
+                "reconnect_attempt": self._state.reconnect_attempt + 1,
+                "budget_count": len(self._reconnect_timestamps),
+            },
+        )
+
         # Normal reconnect path — exponential backoff
         attempt_idx = min(self._state.reconnect_attempt, len(_BACKOFF_S) - 1)
         wait_s = _BACKOFF_S[attempt_idx]
 
         self._state.state = "RECONNECTING"
         self._state.reconnect_attempt += 1
+        self._record_event(
+            RuntimeEventKind.RECONNECT_STARTED,
+            reason_code="watchdog_reconnecting",
+            detail={"source": "watchdog"},
+        )
 
         logger.info(
             f"ws_watchdog: stale ({self.stale_s}s silence) → "
@@ -245,7 +311,19 @@ class WsWatchdog:
             try:
                 self._on_reconnect()
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"ws_watchdog: on_reconnect hook raised: {e!r}")
+                self._record_event(
+                    RuntimeEventKind.RECONNECT_FAILED,
+                    reason_code="reconnect_hook_failed",
+                    detail={
+                        "operation": "on_reconnect",
+                        "error_type": type(e).__name__,
+                    },
+                    severity=RuntimeEventSeverity.WARNING,
+                )
+                logger.warning(
+                    "ws_watchdog: on_reconnect hook raised error_type={}",
+                    type(e).__name__,
+                )
 
         await asyncio.sleep(wait_s)
         # Reset the silence clock so next iteration measures fresh elapsed

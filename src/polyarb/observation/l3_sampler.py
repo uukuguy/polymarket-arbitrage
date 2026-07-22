@@ -350,3 +350,54 @@ async def run_sampler(
             boundary_index + 1,
             math.floor(elapsed_s / interval_s) + 1,
         )
+
+
+async def run_event_writer(
+    stop_event: asyncio.Event,
+    *,
+    runtime: Any,
+    store: L3EvidenceStore,
+    flush_interval_s: float = 1.0,
+) -> None:
+    """Append queued events in sequence order without losing failed records."""
+    if isinstance(flush_interval_s, bool) or not isinstance(
+        flush_interval_s, (int, float)
+    ):
+        raise TypeError("flush_interval_s must be numeric")
+    if flush_interval_s < 0:
+        raise ValueError("flush_interval_s must be non-negative")
+
+    while True:
+        event = runtime.peek_pending_event()
+        if event is None:
+            if stop_event.is_set():
+                return
+            if await _wait_for_stop(stop_event, flush_interval_s):
+                continue
+            continue
+
+        persisted = False
+        try:
+            persisted = await store.append_event(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - retain the queue head
+            logger.warning(
+                "l3 event writer append raised event_seq={} error_type={}",
+                event.event_seq,
+                type(exc).__name__,
+            )
+
+        result_at = _utc_now()
+        if persisted:
+            runtime.acknowledge_pending_event(event)
+            runtime.note_writer_result(True, result_at, "writer_ok")
+            continue
+
+        try:
+            runtime.note_writer_result(False, result_at, "event_append_failed")
+        except OverflowError:
+            # The queue's own overflow bit is already durable process-local fail
+            # truth. The unacknowledged event remains at the head for retry.
+            pass
+        await asyncio.sleep(flush_interval_s)

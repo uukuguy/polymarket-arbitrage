@@ -762,7 +762,7 @@ def test_event_queue_preserves_first_128_and_surfaces_overflow_failure() -> None
             occurred_at=NOW + timedelta(milliseconds=index),
             generation=index,
             reason_code="stale",
-            detail={"index": index},
+            detail={"stale_seconds": 30},
         )
         assert event.event_seq == index
 

@@ -75,7 +75,9 @@ from polyarb.observation.l3_evidence import (
     FrameDispatchResult,
     L3EvidenceRuntime,
     RuntimeBootRecord,
+    RuntimeEventKind,
     RuntimeIdentity,
+    build_runtime_event_detail,
 )
 from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 from polyarb.storage.l3_evidence_store import L3EvidenceStore
@@ -162,6 +164,30 @@ async def _append_l3_boot(dependencies: _L3EvidenceDependencies) -> bool:
     if not persisted:
         logger.warning("l3 evidence boot not persisted; promoter remains disabled")
     return persisted
+
+
+def _request_shutdown(
+    sig: signal.Signals,
+    *,
+    stop_event: asyncio.Event,
+    runtime: L3EvidenceRuntime,
+) -> None:
+    """Record the real signal transition before exposing process stop."""
+    try:
+        runtime.record_event(
+            RuntimeEventKind.SHUTDOWN_SIGNAL,
+            occurred_at=datetime.now(UTC),
+            reason_code="signal",
+            detail=build_runtime_event_detail(
+                RuntimeEventKind.SHUTDOWN_SIGNAL,
+                {"signal": sig.name},
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - overflow already fails runtime truth
+        logger.warning(
+            "shutdown event enqueue failed error_type={}", type(exc).__name__
+        )
+    stop_event.set()
 
 # ── Plan 06 D-07: WS frame → l2_* row builders ───────────────────────────
 # Polymarket WS market-channel event shapes (empirical):
@@ -505,7 +531,10 @@ async def main() -> int:
     # ── Plan 04 wiring (real WsWatchdog + WsConsumer) ────────────────────────
     # Plan 05 wired event_listener; Plan 06 replaces placeholder on_event with
     # real L2SupabaseMirror dispatch by event_type.
-    watchdog = WsWatchdog(stale_s=30.0)
+    watchdog = WsWatchdog(
+        stale_s=30.0,
+        event_recorder=l3_evidence.runtime.record_event,
+    )
 
     # ── Plan 06: L2SupabaseMirror init (D-07) — fail-soft if creds missing ──
     # Phase 03.1 Plan 02 (B-2 chain-truth): pass store=sqlite_store so the
@@ -563,6 +592,7 @@ async def main() -> int:
         on_event=_on_event,
         initial_assets=_bootstrap_ids,
         membership_observer=l3_evidence.runtime.update_membership,
+        event_recorder=l3_evidence.runtime.record_event,
     )
 
     # Phase 05.1: NOTIFY is only a doorbell. One durable pump owns refresh and
@@ -614,7 +644,7 @@ async def main() -> int:
 
     def _shutdown(sig: signal.Signals) -> None:
         logger.info(f"polyarb-l2 received {sig.name}, initiating graceful shutdown")
-        stop_event.set()
+        _request_shutdown(sig, stop_event=stop_event, runtime=l3_evidence.runtime)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -632,6 +662,7 @@ async def main() -> int:
     listener_task: asyncio.Task[None] | None = None
     l3_promoter_task: asyncio.Task[None] | None = None
     l3_sampler_task: asyncio.Task[None] | None = None
+    l3_event_writer_task: asyncio.Task[None] | None = None
     normal_shutdown = False
     try:
         # P9 server-started gate — MANDATORY per Phase 02 L5.  The task is
@@ -681,6 +712,15 @@ async def main() -> int:
 
             from polyarb.observation import l3_promote as l3_promote_module
             from polyarb.observation import l3_sampler as l3_sampler_module
+
+            l3_event_writer_task = asyncio.create_task(
+                l3_sampler_module.run_event_writer(
+                    stop_event,
+                    runtime=l3_evidence.runtime,
+                    store=l3_evidence.store,
+                ),
+                name="l3-event-writer",
+            )
 
             l3_promoter_task = asyncio.create_task(
                 l3_promote_module.run_periodic(
@@ -738,8 +778,26 @@ async def main() -> int:
             l3_promoter_task.cancel()
         if l3_sampler_task is not None:
             l3_sampler_task.cancel()
+        if not normal_shutdown and l3_event_writer_task is not None:
+            l3_event_writer_task.cancel()
         if not normal_shutdown:
             server_task.cancel()
+
+        # A real shutdown signal is queued before stop_event. Give the event
+        # writer the full bounded window first so peer-task cleanup cannot
+        # consume its five-second durability budget.
+        if l3_event_writer_task is not None:
+            try:
+                await asyncio.wait_for(l3_event_writer_task, timeout=5.0)
+            except TimeoutError:
+                logger.warning("l3-event-writer did not drain within 5s — forcing")
+                l3_event_writer_task.cancel()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001 - preserve primary failure
+                logger.warning(
+                    "l3-event-writer stopped with error_type={}", type(exc).__name__
+                )
 
         # F-04 bounded shutdown — optional tasks remain optional because boot
         # authorization may fail before they are ever constructed.

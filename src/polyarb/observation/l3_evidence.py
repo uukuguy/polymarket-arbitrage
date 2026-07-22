@@ -53,6 +53,57 @@ class RuntimeEventKind(StrEnum):
     CHECKPOINT_REPORT_BOUND = "checkpoint_report_bound"
 
 
+_RUNTIME_EVENT_DETAIL_KEYS: Mapping[RuntimeEventKind, frozenset[str]] = MappingProxyType(
+    {
+        RuntimeEventKind.WATCHDOG_STALE: frozenset({"stale_seconds"}),
+        RuntimeEventKind.RECONNECT_RESERVED: frozenset(
+            {"reconnect_attempt", "budget_count"}
+        ),
+        RuntimeEventKind.RECONNECT_DEFERRED: frozenset(
+            {"retry_after_ms", "budget_count"}
+        ),
+        RuntimeEventKind.RECONNECT_STARTED: frozenset({"source"}),
+        RuntimeEventKind.RECONNECT_SUCCEEDED: frozenset({"source"}),
+        RuntimeEventKind.RECONNECT_FAILED: frozenset({"operation", "error_type"}),
+        RuntimeEventKind.WS_GENERATION_CHANGED: frozenset(
+            {"previous_generation", "new_generation"}
+        ),
+        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED: frozenset(
+            {"operation", "error_type"}
+        ),
+        RuntimeEventKind.SUBSCRIPTION_COMPENSATED: frozenset(
+            {"operation", "close_succeeded"}
+        ),
+        RuntimeEventKind.EVIDENCE_WRITER_FAILED: frozenset({"failed_event_seq"}),
+        RuntimeEventKind.EVIDENCE_WRITER_RECOVERED: frozenset(
+            {"recovered_event_seq"}
+        ),
+        RuntimeEventKind.SHUTDOWN_SIGNAL: frozenset({"signal"}),
+        RuntimeEventKind.SOAK_MANIFEST_BOUND: frozenset({"manifest_sha256"}),
+        RuntimeEventKind.CHECKPOINT_REPORT_BOUND: frozenset(
+            {"checkpoint", "report_sha256"}
+        ),
+    }
+)
+
+
+def build_runtime_event_detail(
+    kind: RuntimeEventKind,
+    values: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Build one bounded event detail from a kind-specific safe-key contract."""
+    _require_enum("kind", kind, RuntimeEventKind)
+    if not isinstance(values, Mapping):
+        raise TypeError("runtime event detail values must be a Mapping")
+    unknown = set(values) - _RUNTIME_EVENT_DETAIL_KEYS[kind]
+    if unknown:
+        raise ValueError(
+            f"runtime event detail keys are not allowed for {kind.value}: "
+            f"{sorted(unknown)!r}"
+        )
+    return _frozen_mapping(_normalize_json(dict(values)))
+
+
 def _normalize_json(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, str)):
         return value
@@ -829,6 +880,10 @@ class L3EvidenceRuntime:
     ) -> RuntimeEventRecord:
         sequence = self._event_seq
         self._event_seq += 1
+        safe_detail = build_runtime_event_detail(
+            kind,
+            {} if detail is None else detail,
+        )
         event = RuntimeEventRecord(
             event_id=uuid4(),
             boot_id=self._boot_id,
@@ -838,7 +893,7 @@ class L3EvidenceRuntime:
             severity=severity,
             generation=generation,
             reason_code=reason_code,
-            detail={} if detail is None else detail,
+            detail=safe_detail,
         )
         if len(self._pending_events) >= _EVENT_QUEUE_CAPACITY:
             self._event_queue_overflowed = True
@@ -850,6 +905,18 @@ class L3EvidenceRuntime:
         events = tuple(self._pending_events)
         self._pending_events.clear()
         return events
+
+    def peek_pending_event(self) -> RuntimeEventRecord | None:
+        """Return the queue head without transferring ownership to the writer."""
+        return self._pending_events[0] if self._pending_events else None
+
+    def acknowledge_pending_event(self, event: RuntimeEventRecord) -> None:
+        """Remove exactly the durably appended queue head, preserving order."""
+        if not isinstance(event, RuntimeEventRecord):
+            raise TypeError("acknowledged event must be a RuntimeEventRecord")
+        if not self._pending_events or self._pending_events[0].event_id != event.event_id:
+            raise ValueError("only the current pending event may be acknowledged")
+        self._pending_events.popleft()
 
     def snapshot(self) -> EvidenceStatus:
         if self._event_queue_overflowed:

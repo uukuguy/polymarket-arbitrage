@@ -25,7 +25,7 @@ import warnings
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
@@ -40,7 +40,13 @@ from polyarb.clients.ws_market_client import (
     stream_market_events,
 )
 from polyarb.daemon.ws_watchdog import WsWatchdog
-from polyarb.observation.l3_evidence import FrameDispatchResult, WsMembershipSnapshot
+from polyarb.observation.l3_evidence import (
+    FrameDispatchResult,
+    RuntimeEventKind,
+    RuntimeEventSeverity,
+    WsMembershipSnapshot,
+    build_runtime_event_detail,
+)
 
 _QUIET_REFRESH_SEND_TIMEOUT_S: float = 5.0
 _BOOK_EVIDENCE_TIMEOUT_S: float = 5.0
@@ -190,6 +196,34 @@ class WsConsumer:
         self._watchdog._liveness_check = self._liveness_check
         self._publish_l3_membership_locked()
 
+    def _record_runtime_event(
+        self,
+        kind: RuntimeEventKind,
+        *,
+        reason_code: str,
+        detail: dict[str, object],
+        severity: RuntimeEventSeverity = RuntimeEventSeverity.INFO,
+        generation: int | None = None,
+    ) -> None:
+        """Enqueue one immutable bounded record without blocking the data plane."""
+        if self._event_recorder is None:
+            return
+        try:
+            self._event_recorder(
+                kind,
+                occurred_at=datetime.now(UTC),
+                severity=severity,
+                generation=self._connection_generation if generation is None else generation,
+                reason_code=reason_code,
+                detail=build_runtime_event_detail(kind, detail),
+            )
+        except Exception as exc:  # noqa: BLE001 - queue overflow is runtime fail truth
+            logger.warning(
+                "ws runtime event enqueue failed kind={} error_type={}",
+                kind.value,
+                type(exc).__name__,
+            )
+
     def l3_membership_snapshot(self) -> WsMembershipSnapshot:
         """Return an immutable copy of current L3 membership truth."""
         evidence_times = {
@@ -269,6 +303,7 @@ class WsConsumer:
 
     async def _send_control(self, ws: Any, payload: dict[str, Any]) -> bool:
         """Bound every subscription-control write by one production timeout."""
+        operation = str(payload.get("operation") or "initial_subscribe")
         try:
             await asyncio.wait_for(
                 ws.send(json.dumps(payload)), timeout=_QUIET_REFRESH_SEND_TIMEOUT_S
@@ -277,6 +312,12 @@ class WsConsumer:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
+            self._record_runtime_event(
+                RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
+                reason_code="control_send_failed",
+                detail={"operation": operation, "error_type": type(exc).__name__},
+                severity=RuntimeEventSeverity.WARNING,
+            )
             logger.warning(
                 "ws subscription control send failed error_type={}",
                 type(exc).__name__,
@@ -288,11 +329,27 @@ class WsConsumer:
         generation = self._connection_generation + 1
         try:
             async with self._subscription_control_lock:
+                previous_generation = self._connection_generation
                 generation = self._connection_generation + 1
                 self._fail_book_evidence_waiters_locked(self._connection_generation)
                 self._connection_generation = generation
                 self._clear_l3_connection_state_locked()
                 self._publish_l3_membership_locked()
+                self._record_runtime_event(
+                    RuntimeEventKind.WS_GENERATION_CHANGED,
+                    reason_code="connection_initialized",
+                    detail={
+                        "previous_generation": previous_generation,
+                        "new_generation": generation,
+                    },
+                    generation=generation,
+                )
+                self._record_runtime_event(
+                    RuntimeEventKind.RECONNECT_STARTED,
+                    reason_code="connection_initializing",
+                    detail={"source": "connection_initializer"},
+                    generation=generation,
+                )
                 previous_ws = self._current_ws
                 desired_snapshot = frozenset(self._l3_desired_set)
                 active_assets = self._compute_active_assets()
@@ -319,12 +376,39 @@ class WsConsumer:
                     # unsent truth and must force compensation/reconnect.
                     self._l3_committed_set = set(desired_snapshot)
                     self._publish_l3_membership_locked()
+                    self._record_runtime_event(
+                        RuntimeEventKind.RECONNECT_SUCCEEDED,
+                        reason_code="initial_control_committed",
+                        detail={"source": "connection_initializer"},
+                        generation=generation,
+                    )
                     return
+                if ok:
+                    self._record_runtime_event(
+                        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
+                        reason_code="control_state_changed",
+                        detail={
+                            "operation": "initial_subscribe",
+                            "error_type": "StateMismatch",
+                        },
+                        severity=RuntimeEventSeverity.WARNING,
+                        generation=generation,
+                    )
                 self._publish_l3_membership_locked()
         except asyncio.CancelledError:
             await self._compensate_generation(ws, generation)
             raise
         retry_after_s = await self._compensate_generation(ws, generation)
+        self._record_runtime_event(
+            RuntimeEventKind.RECONNECT_FAILED,
+            reason_code="initial_control_failed",
+            detail={
+                "operation": "initial_subscribe",
+                "error_type": "ControlRejected",
+            },
+            severity=RuntimeEventSeverity.WARNING,
+            generation=generation,
+        )
         raise WsConnectionInitializationFailed(
             "initial WS subscription failed", retry_after_s=retry_after_s
         )
@@ -358,10 +442,31 @@ class WsConsumer:
             self._publish_l3_membership_locked()
             if not self._watchdog.reserve_reconnect():
                 retry_after_s = self._watchdog.reconnect_retry_after_s()
+                self._record_runtime_event(
+                    RuntimeEventKind.RECONNECT_DEFERRED,
+                    reason_code="storm_budget_exhausted",
+                    detail={
+                        "retry_after_ms": max(0, int(retry_after_s * 1000)),
+                        "budget_count": len(self._watchdog._reconnect_timestamps),
+                    },
+                    severity=RuntimeEventSeverity.WARNING,
+                    generation=generation,
+                )
                 logger.warning(
                     "ws reconnect deferred: reconnect budget exhausted "
                     f"retry_after_s={retry_after_s:.3f}"
                 )
+            else:
+                self._record_runtime_event(
+                    RuntimeEventKind.RECONNECT_RESERVED,
+                    reason_code="compensation_reserved",
+                    detail={
+                        "reconnect_attempt": self._watchdog.reconnect_attempt + 1,
+                        "budget_count": len(self._watchdog._reconnect_timestamps),
+                    },
+                    generation=generation,
+                )
+        close_succeeded = True
         close_task = asyncio.create_task(
             asyncio.wait_for(ws.close(), timeout=_QUIET_REFRESH_SEND_TIMEOUT_S)
         )
@@ -371,9 +476,24 @@ class WsConsumer:
             await asyncio.shield(close_task)
             raise
         except Exception as exc:  # noqa: BLE001
+            close_succeeded = False
             logger.warning(
                 "ws compensation close failed error_type={}", type(exc).__name__
             )
+        self._record_runtime_event(
+            RuntimeEventKind.SUBSCRIPTION_COMPENSATED,
+            reason_code="ambiguous_generation_closed",
+            detail={
+                "operation": "connection_close",
+                "close_succeeded": close_succeeded,
+            },
+            severity=(
+                RuntimeEventSeverity.INFO
+                if close_succeeded
+                else RuntimeEventSeverity.WARNING
+            ),
+            generation=generation,
+        )
         return retry_after_s
 
     def requires_book_levels(self, asset_id: str) -> bool:
@@ -450,6 +570,18 @@ class WsConsumer:
                         commit()
                     self._publish_l3_membership_locked()
                     return True
+                if succeeded:
+                    operation = str(payload.get("operation") or "initial_subscribe")
+                    self._record_runtime_event(
+                        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
+                        reason_code="control_state_changed",
+                        detail={
+                            "operation": operation,
+                            "error_type": "StateMismatch",
+                        },
+                        severity=RuntimeEventSeverity.WARNING,
+                        generation=generation,
+                    )
                 self._publish_l3_membership_locked()
         except asyncio.CancelledError:
             if ws is not None:
