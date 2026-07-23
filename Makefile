@@ -877,7 +877,7 @@ chaos-l2-cleanup:
 	@echo "→ done. Verify with: make chaos-l2-baseline"
 .PHONY: chaos-l2-cleanup
 
-## chaos-l2-fly-image-check: Verify chaos primitives available in current polyarb-l2 fly image
+## chaos-l2-fly-image-check: Print the current L2 image tool matrix and require Python by default; use required="python curl" to tighten
 ##
 ## Phase 03.1 Plan 03 / PROCESS-2 (image-aware chaos design). Auto-resolves
 ## the currently deployed image and runs `docker run --rm IMAGE which TOOL`
@@ -895,20 +895,38 @@ chaos-l2-fly-image-check:
 		echo "ERROR: cannot resolve current polyarb-l2 image (flyctl auth?)"; exit 1; \
 	fi; \
 	echo "Checking primitives in $$IMAGE…"; \
-	rc=0; \
-	for tool in pkill ps kill which dig ping curl python; do \
+	OBSERVED_TOOLS="pkill ps kill which dig ping curl python"; \
+	REQUIRED_TOOLS="$(if $(strip $(required)),$(strip $(required)),python)"; \
+	for tool in $$REQUIRED_TOOLS; do \
+		case " $$OBSERVED_TOOLS " in *" $$tool "*) ;; \
+			*) echo "ERROR: unknown required primitive: $$tool"; exit 2 ;; \
+		esac; \
+	done; \
+	MISSING_TOOLS=""; \
+	for tool in $$OBSERVED_TOOLS; do \
 		if docker run --rm --entrypoint /bin/sh "$$IMAGE" -c "command -v $$tool >/dev/null 2>&1"; then \
 			echo "  OK    $$tool"; \
 		else \
 			echo "  MISS  $$tool"; \
-			rc=1; \
+			MISSING_TOOLS="$$MISSING_TOOLS $$tool"; \
 		fi; \
 	done; \
-	if [ $$rc -ne 0 ]; then \
+	REQUIRED_MISSING=""; OPTIONAL_MISSING=""; \
+	for tool in $$MISSING_TOOLS; do \
+		case " $$REQUIRED_TOOLS " in \
+			*" $$tool "*) REQUIRED_MISSING="$$REQUIRED_MISSING $$tool" ;; \
+			*) OPTIONAL_MISSING="$$OPTIONAL_MISSING $$tool" ;; \
+		esac; \
+	done; \
+	if [ -n "$$OPTIONAL_MISSING" ]; then \
 		echo ""; \
-		echo "→ Missing tools detected. See docs/dev/chaos-toolkit.md for substitute patterns."; \
+		echo "→ Missing optional primitives:$$OPTIONAL_MISSING"; \
+		echo "  See docs/dev/chaos-toolkit.md for substitute patterns."; \
 	fi; \
-	exit $$rc
+	if [ -n "$$REQUIRED_MISSING" ]; then \
+		echo "ERROR: Missing required primitives:$$REQUIRED_MISSING"; exit 1; \
+	fi; \
+	echo "PASS: Required primitives present: $$REQUIRED_TOOLS"
 .PHONY: chaos-l2-fly-image-check
 
 ## chaos-l3-evidence-chain: Run one disposable local/Testcontainer L3 evidence failure proof; usage: make chaos-l3-evidence-chain mode=sampler|writer|ws-false|one-hot|restart

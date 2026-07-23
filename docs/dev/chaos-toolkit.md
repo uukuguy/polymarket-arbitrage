@@ -21,11 +21,17 @@ make chaos-l2-fly-image-check
 该 target 自动从 `flyctl status -a polyarb-l2 --json` 解析当前部署 image 的
 完整 ref（`registry/repo:tag`），然后对 8 个 chaos 常用 primitive 跑
 `docker run --rm IMAGE /bin/sh -c "command -v TOOL"`，逐项打印 `OK` / `MISS`。
+这 8 项是始终完整打印的 **observed tools**，不等于每个 chaos plan 都要求
+它们存在。默认的 **required tools** 只有 `python`；如某个 plan 还依赖 curl：
+
+```bash
+make chaos-l2-fly-image-check required="python curl"
+```
 
 退出码语义:
-- `0`: 全部 primitive 可用
-- `1`: 至少一个 MISS（target 会引导你看本文档的替代 pattern）
-- `2`: 本地 docker daemon 不可用（developer-local-only 限制）
+- `0`: 全部 required tools 可用；optional MISS 仍会打印，但不误伤验收
+- `1`: 至少一个 required tool MISS，或无法解析当前 image
+- `2`: 本地 docker daemon 不可用，或 `required=` 包含未知工具
 
 ## 2. 当前 production image 工具矩阵
 

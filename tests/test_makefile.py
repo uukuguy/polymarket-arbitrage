@@ -138,6 +138,18 @@ def test_chaos_image_check_accepts_current_and_legacy_fly_status_shapes() -> Non
     assert "docker run --rm --entrypoint /bin/sh" in recipe
 
 
+def test_chaos_image_check_separates_observed_from_required_tools() -> None:
+    """Known optional MISS results must not fail the default Python gate."""
+    recipe = _make_recipe("chaos-l2-fly-image-check")
+
+    assert 'OBSERVED_TOOLS="pkill ps kill which dig ping curl python"' in recipe
+    assert 'REQUIRED_TOOLS="$(if $(strip $(required)),$(strip $(required)),python)"' in recipe
+    assert "Missing optional primitives:" in recipe
+    assert "Missing required primitives:" in recipe
+    assert "Required primitives present:" in recipe
+    assert "exit $$rc" not in recipe
+
+
 def test_status_uses_the_canonical_current_state() -> None:
     result = _make("status")
 
