@@ -25,6 +25,7 @@ from polyarb.observation.l3_evidence import (
 )
 from polyarb.storage import l3_evidence_store as store_module
 from polyarb.storage.l3_evidence_store import SamplingMarketState
+from scripts import chaos_l3_evidence
 
 START = datetime(2026, 7, 23, 6, 0, tzinfo=UTC)
 ROOT = Path(__file__).resolve().parents[2]
@@ -1188,3 +1189,90 @@ def test_l3_evidence_chaos_harness_uses_real_local_chain_for_all_modes() -> None
         'subprocess.run(["docker"',
     ):
         assert forbidden not in lowered
+
+
+def test_partial_container_start_is_removed_without_masking_start_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A readiness failure after Docker creation must still remove the container."""
+
+    class StartFailure(RuntimeError):
+        pass
+
+    class CleanupFailure(RuntimeError):
+        pass
+
+    class Handle:
+        removed = False
+
+        def remove(self, *, force: bool, v: bool) -> None:
+            assert force is True
+            assert v is True
+            self.removed = True
+
+    class PartialStartContainer:
+        def __init__(self) -> None:
+            self._container: Handle | None = None
+            self.stop_called = False
+
+        def start(self) -> None:
+            self._container = Handle()
+            raise StartFailure("readiness failed after create")
+
+        def stop(self) -> None:
+            self.stop_called = True
+            assert self._container is not None
+            self._container.remove(force=True, v=True)
+            raise CleanupFailure("client close failed after remove")
+
+    container = PartialStartContainer()
+    harness = chaos_l3_evidence.LocalEvidenceHarness.__new__(
+        chaos_l3_evidence.LocalEvidenceHarness
+    )
+    harness._postgres = container
+    harness._admin_dsn = ""
+    harness._daemon_dsn = ""
+
+    assert chaos_l3_evidence._run_harness("sampler", harness) == 1
+
+    stderr = capsys.readouterr().err
+    assert "FAIL sampler: StartFailure" in stderr
+    assert "cleanup_error_type=CleanupFailure" in stderr
+    assert container.stop_called is True
+    assert container._container is not None
+    assert container._container.removed is True
+
+
+def test_pre_creation_start_failure_is_not_masked_by_cleanup_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Even a no-handle cleanup error remains secondary to the start error."""
+
+    class StartFailure(RuntimeError):
+        pass
+
+    class BeforeCreateContainer:
+        _container = None
+        stop_called = False
+
+        def start(self) -> None:
+            raise StartFailure("failed before Docker create")
+
+        def stop(self) -> None:
+            self.stop_called = True
+            raise AttributeError("no container handle")
+
+    container = BeforeCreateContainer()
+    harness = chaos_l3_evidence.LocalEvidenceHarness.__new__(
+        chaos_l3_evidence.LocalEvidenceHarness
+    )
+    harness._postgres = container
+    harness._admin_dsn = ""
+    harness._daemon_dsn = ""
+
+    assert chaos_l3_evidence._run_harness("sampler", harness) == 1
+
+    stderr = capsys.readouterr().err
+    assert "FAIL sampler: StartFailure" in stderr
+    assert "cleanup_error_type=AttributeError" in stderr
+    assert container.stop_called is True

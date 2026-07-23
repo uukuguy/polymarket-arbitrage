@@ -186,11 +186,9 @@ class LocalEvidenceHarness:
         self._postgres = PostgresContainer("postgres:16-alpine")
         self._admin_dsn = ""
         self._daemon_dsn = ""
-        self._started = False
 
     def start(self) -> None:
         self._postgres.start()
-        self._started = True
         self._admin_dsn = _normalize_dsn(self._postgres.get_connection_url())
         asyncio.run(self._prepare_database())
         result = subprocess.run(
@@ -209,10 +207,13 @@ class LocalEvidenceHarness:
             raise ProofFailure("local migration to revision 007 failed")
         asyncio.run(self._create_daemon_login())
 
-    def stop(self) -> None:
-        if self._started:
+    def stop(self) -> Exception | None:
+        """Attempt cleanup for no-handle, partial-start, and ready containers."""
+        try:
             self._postgres.stop()
-            self._started = False
+        except Exception as error:  # cleanup failure is secondary to any run failure
+            return error
+        return None
 
     async def _prepare_database(self) -> None:
         connection = await asyncpg.connect(dsn=self._admin_dsn)
@@ -600,20 +601,39 @@ class LocalEvidenceHarness:
         await runners[mode]()
 
 
+def _run_harness(mode: str, harness: LocalEvidenceHarness) -> int:
+    primary_error: Exception | None = None
+    cleanup_error: Exception | None = None
+    try:
+        harness.start()
+        asyncio.run(harness.run(mode))
+    except Exception as error:  # bounded CLI: never print external exception messages
+        primary_error = error
+    finally:
+        cleanup_error = harness.stop()
+
+    if primary_error is not None:
+        print(f"FAIL {mode}: {type(primary_error).__name__}", file=sys.stderr)
+        if cleanup_error is not None:
+            print(
+                f"cleanup_error_type={type(cleanup_error).__name__}",
+                file=sys.stderr,
+            )
+        return 1
+    if cleanup_error is not None:
+        print(
+            f"FAIL {mode}: cleanup_error_type={type(cleanup_error).__name__}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", required=True, choices=MODES)
     args = parser.parse_args()
-    harness = LocalEvidenceHarness()
-    try:
-        harness.start()
-        asyncio.run(harness.run(args.mode))
-    except (ProofFailure, asyncpg.PostgresError, OSError, RuntimeError) as exc:
-        print(f"FAIL {args.mode}: {type(exc).__name__}", file=sys.stderr)
-        return 1
-    finally:
-        harness.stop()
-    return 0
+    return _run_harness(args.mode, LocalEvidenceHarness())
 
 
 if __name__ == "__main__":
