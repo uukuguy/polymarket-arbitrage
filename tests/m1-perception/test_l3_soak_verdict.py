@@ -687,6 +687,31 @@ def test_invalid_raw_event_detail_json_is_not_closed() -> None:
     assert "raw_event_detail_invalid" in _codes(report)
 
 
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_non_finite_raw_event_json_is_not_closed_without_raising(number: str) -> None:
+    kind = RuntimeEventKind.WATCHDOG_STALE
+    event = RuntimeEventRecord(
+        event_id=uuid5(BOOT_ID, number),
+        boot_id=BOOT_ID,
+        event_seq=1,
+        occurred_at=T0 + timedelta(minutes=1),
+        kind=kind,
+        reason_code="test",
+        detail={"stale_seconds": 1},
+    )
+    window = _golden_window(events=(event,))
+    raw = {key: tuple(rows) for key, rows in window.raw_rows_by_table.items()}
+    raw_event = dict(raw["l3_runtime_events"][0])
+    raw_event["detail"] = f'{{"stale_seconds": {number}}}'
+    raw["l3_runtime_events"] = (raw_event,)
+    report = _report(
+        replace(window, raw_rows_by_table=raw),
+        _manifest(exceptions=frozenset({kind})),
+    )
+    assert report.status is VerdictStatus.NOT_CLOSED
+    assert "raw_event_detail_invalid" in _codes(report)
+
+
 def test_exact_10_book_and_5_yes_ohlc_coverage_is_required(
     golden: EvidenceWindow, manifest: SoakManifest
 ) -> None:

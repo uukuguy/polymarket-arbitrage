@@ -95,6 +95,20 @@ def _canonical_json_bytes(value: Mapping[str, object] | Sequence[object]) -> byt
     ).encode("utf-8")
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _contains_non_finite_float(value: object) -> bool:
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, Mapping):
+        return any(_contains_non_finite_float(item) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_contains_non_finite_float(item) for item in value)
+    return False
+
+
 def _sha256(value: Mapping[str, object] | Sequence[object]) -> str:
     return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
 
@@ -621,7 +635,10 @@ def _raw_row_set(
                 raw_detail = comparison_values["detail"]
                 if isinstance(raw_detail, str):
                     try:
-                        raw_detail = json.loads(raw_detail)
+                        parsed_detail = json.loads(
+                            raw_detail,
+                            parse_constant=_reject_json_constant,
+                        )
                     except (TypeError, ValueError):
                         reasons.append(
                             VerdictReason(
@@ -629,6 +646,16 @@ def _raw_row_set(
                                 "runtime event raw detail is not valid JSON",
                             )
                         )
+                    else:
+                        if _contains_non_finite_float(parsed_detail):
+                            reasons.append(
+                                VerdictReason(
+                                    "raw_event_detail_invalid",
+                                    "runtime event raw detail contains a non-finite number",
+                                )
+                            )
+                        else:
+                            raw_detail = parsed_detail
                 if raw_detail is None:
                     raw_detail = {}
                 if not isinstance(raw_detail, Mapping):
