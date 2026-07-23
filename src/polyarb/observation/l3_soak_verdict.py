@@ -616,7 +616,31 @@ def _raw_row_set(
             if any(name not in raw_row for name in names):
                 raw_payloads = []
                 break
-            raw_payloads.append(_canonical_json_bytes({name: raw_row[name] for name in names}))
+            comparison_values = {name: raw_row[name] for name in names}
+            if table == "l3_runtime_events":
+                raw_detail = comparison_values["detail"]
+                if isinstance(raw_detail, str):
+                    try:
+                        raw_detail = json.loads(raw_detail)
+                    except (TypeError, ValueError):
+                        reasons.append(
+                            VerdictReason(
+                                "raw_event_detail_invalid",
+                                "runtime event raw detail is not valid JSON",
+                            )
+                        )
+                if raw_detail is None:
+                    raw_detail = {}
+                if not isinstance(raw_detail, Mapping):
+                    reasons.append(
+                        VerdictReason(
+                            "raw_event_detail_invalid",
+                            "runtime event raw detail must decode to an object",
+                        )
+                    )
+                comparison_values["detail"] = raw_detail
+                comparison_values["reason_code"] = comparison_values["reason_code"] or ""
+            raw_payloads.append(_canonical_json_bytes(comparison_values))
         if sorted(raw_payloads) != decoded_payloads:
             reasons.append(
                 VerdictReason(
