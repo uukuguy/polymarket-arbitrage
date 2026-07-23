@@ -911,6 +911,17 @@ chaos-l2-fly-image-check:
 	exit $$rc
 .PHONY: chaos-l2-fly-image-check
 
+## chaos-l3-evidence-chain: Run one disposable local/Testcontainer L3 evidence failure proof; usage: make chaos-l3-evidence-chain mode=sampler|writer|ws-false|one-hot|restart
+##
+## Phase 05.4 Plan 04 Task 3. Uses Python on the operator host and a disposable
+## postgres:16-alpine Testcontainer only; never contacts or mutates production.
+chaos-l3-evidence-chain:
+	@if [ "$(mode)" != "sampler" ] && [ "$(mode)" != "writer" ] && [ "$(mode)" != "ws-false" ] && [ "$(mode)" != "one-hot" ] && [ "$(mode)" != "restart" ]; then \
+		echo "usage: make chaos-l3-evidence-chain mode=sampler|writer|ws-false|one-hot|restart"; exit 2; \
+	fi
+	@uv run python scripts/chaos_l3_evidence.py --mode $(mode)
+.PHONY: chaos-l3-evidence-chain
+
 ## chaos-l2-listener-recovery: Prove L2 LISTEN reconnect or timer-only cursor recovery; usage: make chaos-l2-listener-recovery mode=listener|poll
 ##
 ## Phase 05.1. Runs on the operator host with Python/asyncpg, Fly APIs, and

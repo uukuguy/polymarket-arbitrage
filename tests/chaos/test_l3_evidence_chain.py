@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -26,6 +27,7 @@ from polyarb.storage import l3_evidence_store as store_module
 from polyarb.storage.l3_evidence_store import SamplingMarketState
 
 START = datetime(2026, 7, 23, 6, 0, tzinfo=UTC)
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _detail(kind: RuntimeEventKind, values: dict[str, object]):
@@ -1146,3 +1148,43 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
     assert {
         after_strict.json()["checks"][name][0]["status"] for name in strict_names
     } == {"pass"}
+
+
+def test_l3_evidence_chaos_harness_uses_real_local_chain_for_all_modes() -> None:
+    """Task 3: the executable proof must compose real boundaries, not test doubles."""
+    script_path = ROOT / "scripts/chaos_l3_evidence.py"
+    assert script_path.exists(), "local L3 evidence chaos harness is missing"
+    script = script_path.read_text()
+
+    for mode in ("sampler", "writer", "ws-false", "one-hot", "restart"):
+        assert f'"{mode}"' in script
+    for boundary in (
+        "PostgresContainer",
+        "L3EvidenceStore",
+        "l3_sampler.sample_once",
+        "create_l2_app",
+        "build_soak_report",
+    ):
+        assert boundary in script
+
+    assert "NOT-CLOSED gap_seconds>75" in script
+    assert "sample_gap" in script
+    assert "evidence_writer_failed" in script
+    assert "l3:membership_convergence" in script
+    assert "l3:worst_market_freshness" in script
+    assert "second_boot" in script
+    assert "finally:" in script and ".stop()" in script
+
+    # The command is local/Testcontainer-only. Production control planes,
+    # public endpoints, and container-only process tools are forbidden.
+    lowered = script.lower()
+    for forbidden in (
+        "flyctl",
+        "polyarb-l2.fly.dev",
+        "secrets set",
+        "machine restart",
+        "pkill",
+        "subprocess.run(['docker'",
+        'subprocess.run(["docker"',
+    ):
+        assert forbidden not in lowered

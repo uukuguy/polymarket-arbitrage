@@ -342,3 +342,18 @@ def test_poll_recovery_contract_uses_an_exact_notification_anchor_and_restores_l
     assert "MAX_RECOVERY_SECONDS = 180" in script
     assert "POLL_PROOF_SECONDS = 60" in script
     assert "no L2 restart" in script
+
+
+def test_l3_evidence_chain_make_target_is_local_and_image_aware() -> None:
+    """Task 3 exposes all local modes and documents the only required primitive."""
+    makefile = (ROOT / "Makefile").read_text()
+    toolkit = (ROOT / "docs/dev/chaos-toolkit.md").read_text()
+
+    assert "## chaos-l3-evidence-chain:" in makefile
+    assert "chaos-l3-evidence-chain:" in makefile
+    assert "mode=sampler|writer|ws-false|one-hot|restart" in makefile
+    assert "scripts/chaos_l3_evidence.py --mode $(mode)" in makefile
+    assert "make chaos-l2-fly-image-check" in toolkit
+    assert "`python` | ✓" in toolkit
+    assert "chaos-l3-evidence-chain" in toolkit
+    assert "Testcontainer" in toolkit

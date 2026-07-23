@@ -37,7 +37,7 @@ make chaos-l2-fly-image-check
 | `pkill` | ✗ | `apt-get install procps`（约 +3MB image bloat）；或用 `flyctl machine restart` 替代 |
 | `ps` | ✗ | 同上；只读进程信息可 `cat /proc/1/status` |
 | `kill` | ✓ | shell builtin，PID 用 PID 1（daemon entrypoint） |
-| `which` | ✗ | 用 POSIX `command -v TOOL` 替代（更可移植，slim image 也有） |
+| `which` | ✓ | 当前部署 image 已有；脚本仍用 POSIX `command -v TOOL` 以兼容纯 slim base |
 | `dig` | ✗ | `apt-get install dnsutils`；或用 `python -c "import socket; print(socket.gethostbyname(...))"` |
 | `ping` | ✗ | `apt-get install iputils-ping`；或 `python -c "import socket; socket.create_connection(('host', 443), 2)"` |
 | `curl` | ✓ | 已在我们的 Dockerfile 里（healthcheck 用） |
@@ -68,6 +68,14 @@ make chaos-l2-fly-image-check
 2. 工具缺失 → 优先选 §3 的 substitute pattern；substitute 不可行 → 不要硬塞，
    把"需要新工具"作为 deferred item，单开一个 Dockerfile-change plan。
 3. plan-checker 在 review 时**必须**核查这条证据存在。
+
+### Phase 05.4 L3 local evidence harness
+
+`make chaos-l3-evidence-chain mode=sampler|writer|ws-false|one-hot|restart`
+只在开发机启动一次性的 `postgres:16-alpine` Testcontainer，并通过项目的
+真实 Python sampler、evidence store、Starlette health 与 verdict 链验证故障。
+它依赖上表已确认存在的 `python`，不假设 slim image 内有 `pkill`、`ps`、
+`dig`、`ping` 或 `which`，也没有 production route。
 
 ## 5. 历史代价（为什么有这份文档）
 
