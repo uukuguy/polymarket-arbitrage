@@ -194,6 +194,35 @@ def test_dsn_validation_is_allowlisted_and_redacted() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql://runtime:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+        "postgresql://runtime.wrongprojectrefxxxxx:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+        "postgresql://runtime.abcdefghijklmnopqrst.evil:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+        "postgresql://runtime.abcdefghijklmnopqrst:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres",
+        "postgresql://runtime.abcdefghijklmnopqrst:secret@aws-0-us-east-1.pooler.supabase.com/postgres",
+    ],
+)
+def test_pooler_target_rejects_naked_wrong_or_fake_project_suffix(dsn: str) -> None:
+    from scripts.l3_evidence import validate_supabase_target
+
+    with pytest.raises(ValueError, match="target"):
+        validate_supabase_target(dsn, expected_ref="abcdefghijklmnopqrst")
+
+
+def test_pooler_target_accepts_custom_role_with_exact_project_suffix() -> None:
+    from scripts.l3_evidence import validate_supabase_target
+
+    target = validate_supabase_target(
+        "postgresql://runtime.abcdefghijklmnopqrst:secret@"
+        "aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+        expected_ref="abcdefghijklmnopqrst",
+    )
+    assert target.user == "runtime.abcdefghijklmnopqrst"
+    assert target.host == "aws-0-us-east-1.pooler.supabase.com"
+
+
 class _Transaction:
     async def __aenter__(self) -> None:
         return None
@@ -219,15 +248,19 @@ class _BindingConnection:
         if "SELECT event_id FROM l3_runtime_events" in sql:
             return None  # type: ignore[return-value]
         assert "INSERT INTO l3_runtime_events" in sql
-        assert args[4] == self.manifest.soak_hash
-        assert json.loads(args[5])["manifest_sha256"] == self.manifest.manifest_hash
+        assert "clock_timestamp()" in sql
+        assert "recorded_at" in sql
+        assert args[3] == self.manifest.soak_hash
+        assert json.loads(args[4])["manifest_sha256"] == self.manifest.manifest_hash
+        assert args[5] == self.manifest.t0
+        server_time = self.manifest.t0 - timedelta(microseconds=1)
         self.inserted = True
         return {
             "event_id": args[0],
             "boot_id": self.manifest.boot_id,
             "event_seq": args[2],
-            "occurred_at": args[3],
-            "recorded_at": args[3],
+            "occurred_at": server_time,
+            "recorded_at": server_time,
             "reason_code": self.manifest.soak_hash,
             "manifest_sha256": self.manifest.manifest_hash,
         }
@@ -297,12 +330,13 @@ async def test_concurrent_manifest_bind_serializes_to_exactly_one_row(
             if "SELECT event_id FROM l3_runtime_events" in sql:
                 return None
             if "INSERT INTO l3_runtime_events" in sql:
+                server_time = manifest.t0 - timedelta(microseconds=1)
                 shared.update(
                     event_id=args[0],
                     boot_id=manifest.boot_id,
                     event_seq=args[2],
-                    occurred_at=args[3],
-                    recorded_at=args[3],
+                    occurred_at=server_time,
+                    recorded_at=server_time,
                     reason_code=manifest.soak_hash,
                     manifest_sha256=manifest.manifest_hash,
                 )
@@ -326,9 +360,102 @@ async def test_concurrent_manifest_bind_serializes_to_exactly_one_row(
         l3_evidence._bind_manifest("runtime", manifest, now=manifest.t0 - timedelta(seconds=1)),
         return_exceptions=True,
     )
-    assert sum(not isinstance(result, BaseException) for result in results) == 1
-    assert sum(isinstance(result, l3_evidence.OperatorError) for result in results) == 1
+    assert all(not isinstance(result, BaseException) for result in results)
+    assert results[0]["event_id"] == results[1]["event_id"]  # type: ignore[index]
     assert shared["event_seq"] == l3_evidence._manifest_event_seq(manifest)
+
+
+@pytest.mark.asyncio
+async def test_manifest_bind_lost_ack_retry_returns_existing_exact_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import l3_evidence
+
+    manifest = _manifest(tmp_path)
+    existing = {
+        "event_id": UUID("00000000-0000-0000-0000-000000000099"),
+        "boot_id": manifest.boot_id,
+        "event_seq": l3_evidence._manifest_event_seq(manifest),
+        "occurred_at": manifest.t0 - timedelta(seconds=1),
+        "recorded_at": manifest.t0 - timedelta(seconds=1),
+        "reason_code": manifest.soak_hash,
+        "manifest_sha256": manifest.manifest_hash,
+    }
+
+    class Connection:
+        def transaction(self) -> _Transaction:
+            return _Transaction()
+
+        async def fetch(self, *_args: object) -> list[object]:
+            return [existing]
+
+        async def fetchrow(self, sql: str, *_args: object) -> object:
+            if "FROM l3_runtime_boots" in sql:
+                return {"boot_id": manifest.boot_id}
+            raise AssertionError("lost-ACK retry must not insert another binding")
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(*, dsn: str) -> Connection:
+        assert dsn == "runtime"
+        return Connection()
+
+    async def preflight(_dsn: str) -> None:
+        return None
+
+    monkeypatch.setattr(l3_evidence.asyncpg, "connect", connect)
+    monkeypatch.setattr(l3_evidence, "_runtime_preflight", preflight)
+    assert (
+        await l3_evidence._bind_manifest("runtime", manifest, now=manifest.t0 + timedelta(hours=1))
+        == existing
+    )
+
+
+@pytest.mark.asyncio
+async def test_manifest_bind_database_clock_crossing_t0_commits_no_late_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import l3_evidence
+
+    manifest = _manifest(tmp_path)
+    insert_sql: list[str] = []
+
+    class Connection:
+        def transaction(self) -> _Transaction:
+            return _Transaction()
+
+        async def fetch(self, *_args: object) -> list[object]:
+            return []
+
+        async def fetchrow(self, sql: str, *_args: object) -> object:
+            if "FROM l3_runtime_boots" in sql:
+                return {"boot_id": manifest.boot_id}
+            if "SELECT event_id FROM l3_runtime_events" in sql:
+                return None
+            if "INSERT INTO l3_runtime_events" in sql:
+                insert_sql.append(sql)
+                return None
+            raise AssertionError(sql)
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(*, dsn: str) -> Connection:
+        assert dsn == "runtime"
+        return Connection()
+
+    async def preflight(_dsn: str) -> None:
+        return None
+
+    monkeypatch.setattr(l3_evidence.asyncpg, "connect", connect)
+    monkeypatch.setattr(l3_evidence, "_runtime_preflight", preflight)
+    with pytest.raises(l3_evidence.OperatorError, match="database clock reached T0"):
+        await l3_evidence._bind_manifest(
+            "runtime", manifest, now=manifest.t0 - timedelta(microseconds=1)
+        )
+    assert len(insert_sql) == 1
+    assert "WHERE bound_at < $6" in insert_sql[0]
 
 
 def test_binding_validation_requires_one_pre_t0_exact_soak_hash(tmp_path: Path) -> None:
@@ -591,9 +718,22 @@ def test_cleanup_missing_dedicated_dsn_never_falls_back_to_runtime(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing_grant", [None, ("markets_latest", "SELECT")])
+@pytest.mark.parametrize(
+    ("missing_grant", "extra_grant"),
+    [
+        (None, None),
+        (("markets_latest", "SELECT"), None),
+        (("snapshots", "SELECT"), None),
+        (("l2_event_cursor", "SELECT"), None),
+        (("l2_event_cursor", "INSERT"), None),
+        (("l2_event_cursor", "UPDATE"), None),
+        (None, ("snapshots", "UPDATE")),
+    ],
+)
 async def test_runtime_credential_checks_inherited_effective_grants_and_store_preflight(
-    monkeypatch: pytest.MonkeyPatch, missing_grant: tuple[str, str] | None
+    monkeypatch: pytest.MonkeyPatch,
+    missing_grant: tuple[str, str] | None,
+    extra_grant: tuple[str, str] | None,
 ) -> None:
     from scripts import l3_evidence
 
@@ -604,7 +744,14 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
         "l3_market_samples",
         "l3_runtime_events",
     }
-    read_tables = {"markets_latest", "l2_book_levels", "l2_top_of_book", "l2_ohlc_1m"}
+    read_tables = {
+        "markets_latest",
+        "l2_book_levels",
+        "l2_top_of_book",
+        "l2_ohlc_1m",
+        "snapshots",
+    }
+    cursor_grants = {("l2_event_cursor", privilege) for privilege in ("SELECT", "INSERT", "UPDATE")}
 
     class Connection:
         async def fetchrow(self, _sql: str) -> dict[str, object]:
@@ -623,13 +770,17 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
 
         async def fetch(self, _sql: str) -> list[dict[str, object]]:
             rows = []
-            for table in evidence_tables | read_tables:
+            for table in evidence_tables | read_tables | {"l2_event_cursor"}:
                 for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
-                    allowed = (table in evidence_tables and privilege in {"SELECT", "INSERT"}) or (
-                        table in read_tables and privilege == "SELECT"
+                    allowed = (
+                        (table in evidence_tables and privilege in {"SELECT", "INSERT"})
+                        or (table in read_tables and privilege == "SELECT")
+                        or (table, privilege) in cursor_grants
                     )
                     if (table, privilege) == missing_grant:
                         allowed = False
+                    if (table, privilege) == extra_grant:
+                        allowed = True
                     rows.append(
                         {"table_name": table, "privilege_type": privilege, "allowed": allowed}
                     )
@@ -653,7 +804,7 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
     monkeypatch.setattr(l3_evidence.asyncpg, "connect", connect)
     monkeypatch.setattr(l3_evidence, "_runtime_preflight", preflight)
     dsn = "postgresql://runtime:secret@db.abcdefghijklmnopqrst.supabase.co/postgres"
-    if missing_grant is None:
+    if missing_grant is None and extra_grant is None:
         result = await l3_evidence._credential_check(
             dsn, expected_ref="abcdefghijklmnopqrst", capability="runtime"
         )
@@ -666,6 +817,78 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
                 dsn, expected_ref="abcdefghijklmnopqrst", capability="runtime"
             )
         assert preflights == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_credential_pooler_identity_strips_only_exact_project_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import l3_evidence
+
+    required = {
+        *(
+            (table, privilege)
+            for table in l3_evidence.EVIDENCE_TABLES
+            for privilege in ("SELECT", "INSERT")
+        ),
+        *(
+            (table, "SELECT")
+            for table in (
+                "markets_latest",
+                "l2_book_levels",
+                "l2_top_of_book",
+                "l2_ohlc_1m",
+                "snapshots",
+            )
+        ),
+        ("l2_event_cursor", "SELECT"),
+        ("l2_event_cursor", "INSERT"),
+        ("l2_event_cursor", "UPDATE"),
+    }
+
+    class Connection:
+        async def fetchrow(self, _sql: str) -> dict[str, object]:
+            return {
+                "database_name": "postgres",
+                "current_user": "runtime",
+                "server_address": "10.0.0.4",
+                "can_login": True,
+                "is_superuser": False,
+                "is_database_owner": False,
+                "is_evidence_owner": False,
+                "service_member": False,
+                "daemon_member": True,
+                "retention_member": False,
+            }
+
+        async def fetch(self, _sql: str) -> list[dict[str, object]]:
+            return [
+                {"table_name": table, "privilege_type": privilege, "allowed": True}
+                for table, privilege in required
+            ]
+
+        async def fetchval(self, sql: str) -> bool:
+            return "has_sequence_privilege" in sql
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(*, dsn: str) -> Connection:
+        assert dsn.startswith("postgresql://runtime.")
+        return Connection()
+
+    async def preflight(_dsn: str) -> None:
+        return None
+
+    monkeypatch.setattr(l3_evidence.asyncpg, "connect", connect)
+    monkeypatch.setattr(l3_evidence, "_runtime_preflight", preflight)
+    proof = await l3_evidence._credential_check(
+        "postgresql://runtime.abcdefghijklmnopqrst:secret@"
+        "aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+        expected_ref="abcdefghijklmnopqrst",
+        capability="runtime",
+    )
+    assert proof["current_user"] == "runtime"
 
 
 @pytest.mark.asyncio

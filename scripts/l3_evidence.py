@@ -111,10 +111,29 @@ def validate_supabase_target(dsn: str, *, expected_ref: str) -> DatabaseTarget:
     direct_host = f"db.{expected_ref}.supabase.co"
     pooler_host = host.endswith(".pooler.supabase.com")
     direct = host == direct_host
-    pooled = pooler_host and user == f"postgres.{expected_ref}"
+    pooler_suffix = f".{expected_ref}"
+    pooled = (
+        pooler_host
+        and parsed.port == 5432
+        and user.endswith(pooler_suffix)
+        and bool(user[: -len(pooler_suffix)])
+    )
     if not (direct or pooled) or database != "postgres":
         raise ValueError("database target does not match the allowlisted project")
     return DatabaseTarget(host=host, database=database, user=user, project_ref=expected_ref)
+
+
+def _database_role(target: DatabaseTarget) -> str:
+    """Return the database role encoded by a direct or shared-pooler login."""
+    if ".pooler.supabase.com" not in target.host:
+        return target.user
+    suffix = f".{target.project_ref}"
+    if not target.user.endswith(suffix):
+        raise ValueError("pooler user does not contain the exact project suffix")
+    role = target.user[: -len(suffix)]
+    if not role:
+        raise ValueError("pooler database role is empty")
+    return role
 
 
 def _read_manifest(path: Path) -> SoakManifest:
@@ -270,10 +289,9 @@ async def _runtime_preflight(dsn: str) -> None:
 
 
 async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> Any:
-    if now >= manifest.t0:
-        raise OperatorError("manifest binding must complete before T0")
     await _runtime_preflight(dsn)
     connection = await asyncpg.connect(dsn=dsn)
+    bound_row: Any = None
     try:
         async with connection.transaction():
             boot = await connection.fetchrow(
@@ -286,36 +304,49 @@ async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> 
                 await connection.fetch(_BINDING_SELECT, manifest.boot_id, manifest.manifest_hash)
             )
             if existing:
-                raise OperatorError("manifest binding already exists")
-            event_seq = _manifest_event_seq(manifest)
-            collision = await connection.fetchrow(
-                "SELECT event_id FROM l3_runtime_events WHERE boot_id=$1 AND event_seq=$2",
-                manifest.boot_id,
-                event_seq,
-            )
-            if collision is not None:
-                raise OperatorError("reserved manifest event identity is unavailable")
-            row = await connection.fetchrow(
-                """
-                INSERT INTO l3_runtime_events (
-                    event_id, boot_id, event_seq, occurred_at, kind, severity,
-                    generation, reason_code, detail
-                ) VALUES ($1,$2,$3,$4,'soak_manifest_bound','info',NULL,$5,$6::jsonb)
-                RETURNING event_id, boot_id, event_seq, occurred_at, recorded_at,
-                          reason_code, detail->>'manifest_sha256' AS manifest_sha256
-                """,
-                uuid5(NAMESPACE_URL, f"polyarb:l3-soak-manifest:{manifest.manifest_hash}"),
-                manifest.boot_id,
-                event_seq,
-                now,
-                manifest.soak_hash,
-                json.dumps({"manifest_sha256": manifest.manifest_hash}),
-            )
+                bound_row = _validate_exact_binding(existing, manifest)
+            else:
+                if now >= manifest.t0:
+                    raise OperatorError("manifest binding must complete before T0")
+                event_seq = _manifest_event_seq(manifest)
+                collision = await connection.fetchrow(
+                    "SELECT event_id FROM l3_runtime_events WHERE boot_id=$1 AND event_seq=$2",
+                    manifest.boot_id,
+                    event_seq,
+                )
+                if collision is not None:
+                    raise OperatorError("reserved manifest event identity is unavailable")
+                row = await connection.fetchrow(
+                    """
+                    WITH server_clock AS (
+                        SELECT clock_timestamp() AS bound_at
+                    )
+                    INSERT INTO l3_runtime_events (
+                        event_id, boot_id, event_seq, occurred_at, kind, severity,
+                        generation, reason_code, detail, recorded_at
+                    )
+                    SELECT $1,$2,$3,bound_at,'soak_manifest_bound','info',NULL,
+                           $4,$5::jsonb,bound_at
+                    FROM server_clock WHERE bound_at < $6
+                    RETURNING event_id, boot_id, event_seq, occurred_at, recorded_at,
+                              reason_code, detail->>'manifest_sha256' AS manifest_sha256
+                    """,
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"polyarb:l3-soak-manifest:{manifest.manifest_hash}",
+                    ),
+                    manifest.boot_id,
+                    event_seq,
+                    manifest.soak_hash,
+                    json.dumps({"manifest_sha256": manifest.manifest_hash}),
+                    manifest.t0,
+                )
+                if row is None:
+                    raise OperatorError("database clock reached T0 before manifest binding")
+                bound_row = _validate_exact_binding([row], manifest)
     finally:
         await connection.close()
-    if row is None:
-        raise OperatorError("manifest binding insert returned no evidence")
-    return _validate_exact_binding([row], manifest)
+    return bound_row
 
 
 def _checkpoint_spec(manifest: SoakManifest, start: datetime, end: datetime) -> ManifestReport:
@@ -566,7 +597,8 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
             FROM unnest(ARRAY[
                 'l3_runtime_boots','l3_promote_runs','l3_health_samples',
                 'l3_market_samples','l3_runtime_events','markets_latest',
-                'l2_book_levels','l2_top_of_book','l2_ohlc_1m'
+                'l2_book_levels','l2_top_of_book','l2_ohlc_1m','snapshots',
+                'l2_event_cursor'
             ]) AS table_name
             CROSS JOIN unnest(
                 ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE']
@@ -586,8 +618,7 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
         await connection.close()
     common_ok = (
         row["database_name"] == target.database
-        and row["current_user"]
-        == (target.user.split(".", 1)[0] if ".pooler.supabase.com" in target.host else target.user)
+        and row["current_user"] == _database_role(target)
         and row["can_login"]
         and not row["is_superuser"]
         and not row["is_database_owner"]
@@ -602,8 +633,16 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
     }
     read_grants = {
         (table, "SELECT")
-        for table in ("markets_latest", "l2_book_levels", "l2_top_of_book", "l2_ohlc_1m")
+        for table in (
+            "markets_latest",
+            "l2_book_levels",
+            "l2_top_of_book",
+            "l2_ohlc_1m",
+            "snapshots",
+        )
     }
+    cursor_grants = {("l2_event_cursor", privilege) for privilege in ("SELECT", "INSERT", "UPDATE")}
+    required_runtime_grants = evidence_grants | read_grants | cursor_grants
     if capability == "runtime":
         ok = (
             common_ok
@@ -611,10 +650,7 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
             and not row["retention_member"]
             and not routine
             and sequence_ok
-            and evidence_grants | read_grants <= direct_grants
-            and not any(
-                privilege in {"UPDATE", "DELETE", "TRUNCATE"} for _, privilege in direct_grants
-            )
+            and direct_grants == required_runtime_grants
         )
         expected_role = "l3_evidence_daemon"
     else:
@@ -646,9 +682,9 @@ async def _prod_revision(
     dsn: str, *, expected_ref: str, expected_revision: str
 ) -> dict[str, object]:
     target = validate_supabase_target(dsn, expected_ref=expected_ref)
-    expected_user = (
-        target.user.split(".", 1)[0] if ".pooler.supabase.com" in target.host else target.user
-    )
+    if ".pooler.supabase.com" in target.host:
+        raise OperatorError("production revision proof requires a direct database target")
+    expected_user = _database_role(target)
     if expected_user != "postgres":
         raise OperatorError("production revision proof requires the migration user")
     connection = await asyncpg.connect(dsn=dsn)
