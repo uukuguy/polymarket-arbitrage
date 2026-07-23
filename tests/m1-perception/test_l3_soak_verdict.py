@@ -36,6 +36,15 @@ BOOT_ID = UUID("00000000-0000-0000-0000-000000000054")
 T0 = datetime(2026, 8, 1, tzinfo=UTC)
 T24 = T0 + timedelta(hours=24)
 T6 = T0 + timedelta(hours=6)
+MAPPING_ROWS = tuple(
+    {
+        "market_id": f"market-{index}",
+        "yes_token_id": f"yes-{index}",
+        "no_token_id": f"no-{index}",
+    }
+    for index in range(5)
+)
+MAPPING_HASH = stable_sha256(MAPPING_ROWS)
 
 
 def _acceptance() -> AcceptanceConfig:
@@ -58,7 +67,7 @@ def _acceptance() -> AcceptanceConfig:
 def _manifest(
     *,
     boot_id: UUID = BOOT_ID,
-    mapping_hash: str = SHA_B,
+    mapping_hash: str = MAPPING_HASH,
     acceptance: AcceptanceConfig | None = None,
     exceptions: frozenset[RuntimeEventKind] = frozenset(),
 ) -> SoakManifest:
@@ -67,7 +76,11 @@ def _manifest(
         ManifestReport(
             checkpoint=label,
             start=T0,
-            end=T0 + timedelta(hours=hours),
+            end=(
+                T0 + timedelta(seconds=config.sample_interval_s)
+                if hours == 0
+                else T0 + timedelta(hours=hours)
+            ),
             path=f"reports/{label.lower().replace('+', '')}.json",
         )
         for label, hours in (("T+0", 0), ("T+6", 6), ("T+12", 12), ("T+18", 18), ("T+24", 24))
@@ -131,7 +144,7 @@ def _golden_window(*, events: tuple[RuntimeEventRecord, ...] = ()) -> EvidenceWi
                 evidenced_count=10,
                 add_count=0,
                 remove_count=0,
-                mapping_hash=SHA_B,
+                mapping_hash=MAPPING_HASH,
                 desired_hash=SHA_A,
                 committed_hash=SHA_A,
                 acceptance_config_hash=config_hash,
@@ -167,7 +180,7 @@ def _golden_window(*, events: tuple[RuntimeEventRecord, ...] = ()) -> EvidenceWi
                 watchdog_count=0,
                 reconnect_count=0,
                 ws_generation=1,
-                mapping_hash=SHA_B,
+                mapping_hash=MAPPING_HASH,
                 acceptance_config_hash=config_hash,
                 status=HealthStatus.PASS,
                 reason_code="ok",
@@ -227,6 +240,30 @@ def _golden_window(*, events: tuple[RuntimeEventRecord, ...] = ()) -> EvidenceWi
     )
 
 
+def _t0_window() -> EvidenceWindow:
+    golden = _golden_window()
+    end = T0 + timedelta(seconds=30)
+    raw = {
+        "l3_runtime_boots": golden.raw_rows_by_table["l3_runtime_boots"],
+        "l3_promote_runs": golden.raw_rows_by_table["l3_promote_runs"][:1],
+        "l3_health_samples": golden.raw_rows_by_table["l3_health_samples"][:1],
+        "l3_market_samples": golden.raw_rows_by_table["l3_market_samples"][:5],
+        "l3_runtime_events": (),
+    }
+    return EvidenceWindow(
+        start=T0,
+        end=end,
+        boots=golden.boots,
+        promote_runs=golden.promote_runs[:1],
+        health_samples=golden.health_samples[:1],
+        market_samples=golden.market_samples[:5],
+        runtime_events=(),
+        book_coverage_counts=golden.book_coverage_counts,
+        yes_ohlc_coverage_counts=golden.yes_ohlc_coverage_counts,
+        raw_rows_by_table=raw,
+    )
+
+
 @pytest.fixture(scope="module")
 def manifest() -> SoakManifest:
     return _manifest()
@@ -256,6 +293,41 @@ def test_golden_exact_checkpoint_passes_and_renders_deterministically(
     assert "PASS" in render_report(report)
 
 
+def test_real_t0_sample_interval_artifact_passes(manifest: SoakManifest) -> None:
+    window = _t0_window()
+    report = build_soak_report(window, manifest, T0, T0 + timedelta(seconds=30), False)
+    assert report.status is VerdictStatus.PASS
+
+
+def test_report_hashes_and_renders_complete_r06_operator_evidence(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    report = _report(golden, manifest)
+    assert set(report.per_market_freshness_ms) == {f"market-{index}" for index in range(5)}
+    assert report.per_market_freshness_ms["market-0"] == {
+        "yes_book": 1_000,
+        "no_book": 1_000,
+        "worst_book": 1_000,
+        "yes_ohlc": 1_000,
+    }
+    rendered = render_report(report)
+    for expected in (
+        "Require 24h",
+        "Image ref",
+        "Image digest",
+        "Acceptance config hash",
+        "Mapping hash",
+        "Minimum cardinality",
+        "Maximum freshness",
+        "Per-market freshness",
+        "Event counts",
+        "Book coverage",
+        "Yes OHLC coverage",
+    ):
+        assert expected in rendered
+    assert "market-0" in rendered
+
+
 def test_manifest_is_required_and_window_against_different_manifest_is_not_closed(
     golden: EvidenceWindow, manifest: SoakManifest
 ) -> None:
@@ -278,6 +350,24 @@ def test_second_boot_is_not_closed(golden: EvidenceWindow, manifest: SoakManifes
     other = replace(golden.boots[0], boot_id=UUID(int=55), started_at=T0 + timedelta(hours=1))
     report = _report(replace(golden, boots=golden.boots + (other,)), manifest)
     assert "boot_cardinality" in _codes(report)
+
+
+def test_boot_must_start_no_later_than_t0(golden: EvidenceWindow, manifest: SoakManifest) -> None:
+    boot = replace(golden.boots[0], started_at=T0 + timedelta(seconds=1))
+    report = _report(replace(golden, boots=(boot,)), manifest)
+    assert "boot_after_window_start" in _codes(report)
+
+
+def test_no_decoded_occurrence_may_precede_boot(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    boot = replace(golden.boots[0], started_at=T0 - timedelta(microseconds=500))
+    changed = replace(golden.health_samples[0], sampled_at=T0 - timedelta(milliseconds=1))
+    report = _report(
+        replace(golden, boots=(boot,), health_samples=(changed,) + golden.health_samples[1:]),
+        manifest,
+    )
+    assert "occurrence_before_boot" in _codes(report)
 
 
 @pytest.mark.parametrize(
@@ -310,6 +400,32 @@ def test_health_mapping_or_config_change_is_not_closed(
         manifest,
     )
     assert "mapping_hash_mismatch" in _codes(report)
+
+
+def test_replacing_all_pairs_and_coverage_cannot_reuse_manifest_mapping_hash(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    changed_markets = tuple(
+        replace(
+            row,
+            market_id=f"other-{row.market_id}",
+            yes_token_id=f"other-{row.yes_token_id}",
+            no_token_id=f"other-{row.no_token_id}",
+        )
+        for row in golden.market_samples
+    )
+    raw = dict(golden.raw_rows_by_table)
+    raw["l3_market_samples"] = tuple(_raw(row, recorded_at=T6) for row in changed_markets)
+    window = replace(
+        golden,
+        market_samples=changed_markets,
+        book_coverage_counts={
+            token: 1 for index in range(5) for token in (f"other-yes-{index}", f"other-no-{index}")
+        },
+        yes_ohlc_coverage_counts={f"other-yes-{index}": 1 for index in range(5)},
+        raw_rows_by_table=raw,
+    )
+    assert "mapping_identity_hash_mismatch" in _codes(_report(window, manifest))
 
 
 def test_76_second_sample_gap_is_not_closed(golden: EvidenceWindow, manifest: SoakManifest) -> None:
@@ -353,6 +469,41 @@ def test_non_success_promoter_is_not_closed(golden: EvidenceWindow, manifest: So
     assert "promoter_non_success" in _codes(report)
 
 
+def test_successful_promoter_requires_equal_desired_and_committed_hashes(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    changed = replace(golden.promote_runs[2], desired_hash=SHA_C)
+    report = _report(
+        replace(
+            golden,
+            promote_runs=golden.promote_runs[:2] + (changed,) + golden.promote_runs[3:],
+        ),
+        manifest,
+    )
+    assert "promoter_membership_hash" in _codes(report)
+
+
+@pytest.mark.parametrize(
+    ("count_field", "result_field"),
+    [("add_count", "add_succeeded"), ("remove_count", "remove_succeeded")],
+)
+def test_positive_promoter_operation_count_requires_true_result(
+    golden: EvidenceWindow,
+    manifest: SoakManifest,
+    count_field: str,
+    result_field: str,
+) -> None:
+    changed = replace(golden.promote_runs[2], **{count_field: 1, result_field: None})
+    report = _report(
+        replace(
+            golden,
+            promote_runs=golden.promote_runs[:2] + (changed,) + golden.promote_runs[3:],
+        ),
+        manifest,
+    )
+    assert "promoter_operation_result" in _codes(report)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [("selected_count", 4), ("desired_count", 9), ("committed_count", 9), ("evidenced_count", 9)],
@@ -394,6 +545,58 @@ def test_120_second_book_or_ohlc_age_is_stale(
         replace(golden, market_samples=(changed,) + golden.market_samples[1:]), manifest
     )
     assert "market_freshness" in _codes(report)
+
+
+@pytest.mark.parametrize("field", ["yes_book_age_ms", "no_book_age_ms"])
+def test_each_side_book_age_is_independently_strict(
+    golden: EvidenceWindow, manifest: SoakManifest, field: str
+) -> None:
+    changed = replace(golden.market_samples[0], **{field: 120_000})
+    report = _report(
+        replace(golden, market_samples=(changed,) + golden.market_samples[1:]),
+        manifest,
+    )
+    assert "market_age_contract" in _codes(report)
+
+
+def test_forged_low_worst_book_age_is_not_closed(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    changed = replace(
+        golden.market_samples[0],
+        yes_book_at=T0 - timedelta(seconds=120),
+        yes_book_age_ms=120_000,
+        worst_book_age_ms=1_000,
+    )
+    assert "market_age_contract" in _codes(
+        _report(replace(golden, market_samples=(changed,) + golden.market_samples[1:]), manifest)
+    )
+
+
+@pytest.mark.parametrize(
+    ("timestamp_field", "age_field"),
+    [
+        ("yes_book_at", "yes_book_age_ms"),
+        ("no_book_at", "no_book_age_ms"),
+        ("yes_ohlc_at", "yes_ohlc_age_ms"),
+    ],
+)
+def test_source_timestamp_and_persisted_age_must_match_sampler_rounding(
+    golden: EvidenceWindow,
+    manifest: SoakManifest,
+    timestamp_field: str,
+    age_field: str,
+) -> None:
+    changed = replace(
+        golden.market_samples[0],
+        **{
+            timestamp_field: golden.market_samples[0].sampled_at - timedelta(milliseconds=1_100),
+            age_field: 1_000,
+        },
+    )
+    assert "market_age_contract" in _codes(
+        _report(replace(golden, market_samples=(changed,) + golden.market_samples[1:]), manifest)
+    )
 
 
 @pytest.mark.parametrize(
@@ -490,6 +693,98 @@ def test_raw_rows_require_all_tables_and_server_recorded_at(
     assert "raw_recorded_at_missing" in _codes(
         _report(replace(golden, raw_rows_by_table=raw), manifest)
     )
+
+
+@pytest.mark.parametrize("defect", ["missing", "extra"])
+def test_raw_rows_require_exact_migration_007_columns(
+    golden: EvidenceWindow, manifest: SoakManifest, defect: str
+) -> None:
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    boot = dict(raw["l3_runtime_boots"][0])
+    if defect == "missing":
+        boot.pop("stopped_at")
+    else:
+        boot["invented"] = "not-in-007"
+    raw["l3_runtime_boots"] = (boot,)
+    assert "raw_schema_mismatch" in _codes(
+        _report(replace(golden, raw_rows_by_table=raw), manifest)
+    )
+
+
+def test_duplicate_raw_physical_primary_key_is_not_closed(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    raw["l3_runtime_boots"] += (dict(raw["l3_runtime_boots"][0]),)
+    assert "raw_duplicate_key" in _codes(_report(replace(golden, raw_rows_by_table=raw), manifest))
+
+
+def test_duplicate_promoter_logical_key_is_not_closed(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    duplicate = golden.promote_runs[0]
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    raw["l3_promote_runs"] += (_raw(duplicate, recorded_at=T6, id=999_999),)
+    window = replace(
+        golden,
+        promote_runs=golden.promote_runs + (duplicate,),
+        raw_rows_by_table=raw,
+    )
+    assert "decoded_duplicate_key" in _codes(_report(window, manifest))
+    assert "raw_duplicate_key" in _codes(_report(window, manifest))
+
+
+def test_duplicate_event_physical_and_logical_keys_are_not_closed(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    event = RuntimeEventRecord(
+        event_id=UUID(int=59),
+        boot_id=BOOT_ID,
+        event_seq=1,
+        occurred_at=T0 + timedelta(seconds=1),
+        kind=RuntimeEventKind.RECONNECT_SUCCEEDED,
+        reason_code="ok",
+        detail={},
+    )
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    raw_event = _raw(event, recorded_at=T6)
+    raw["l3_runtime_events"] = (raw_event, dict(raw_event))
+    window = replace(
+        golden,
+        runtime_events=(event, event),
+        raw_rows_by_table=raw,
+    )
+    assert "decoded_duplicate_key" in _codes(_report(window, manifest))
+    assert "raw_duplicate_key" in _codes(_report(window, manifest))
+
+
+def test_duplicate_health_and_market_unique_keys_are_not_closed(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    health_duplicate = golden.health_samples[0]
+    market_duplicate = replace(golden.market_samples[0], market_id="another-market")
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    raw["l3_health_samples"] += (_raw(health_duplicate, recorded_at=T6),)
+    raw["l3_market_samples"] += (_raw(market_duplicate, recorded_at=T6),)
+    window = replace(
+        golden,
+        health_samples=golden.health_samples + (health_duplicate,),
+        market_samples=golden.market_samples + (market_duplicate,),
+        raw_rows_by_table=raw,
+    )
+    assert "decoded_duplicate_key" in _codes(_report(window, manifest))
+    assert "raw_duplicate_key" in _codes(_report(window, manifest))
+
+
+def test_market_child_timestamp_must_equal_health_parent(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    changed = replace(golden.market_samples[0], sampled_at=T0 + timedelta(milliseconds=1))
+    report = _report(
+        replace(golden, market_samples=(changed,) + golden.market_samples[1:]),
+        manifest,
+    )
+    assert "market_parent_timestamp" in _codes(report)
 
 
 def test_input_order_does_not_change_raw_or_report_hashes(

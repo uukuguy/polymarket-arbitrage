@@ -182,10 +182,16 @@ class SoakManifest:
         expected = ("T+0", "T+6", "T+12", "T+18", "T+24")
         if tuple(report.checkpoint for report in reports) != expected:
             raise ValueError("manifest must contain ordered T+0/T+6/T+12/T+18/T+24 reports")
-        expected_hours = (0, 6, 12, 18, 24)
+        expected_ends = (
+            self.t0 + timedelta(seconds=self.acceptance_config.sample_interval_s),
+            self.t0 + timedelta(hours=6),
+            self.t0 + timedelta(hours=12),
+            self.t0 + timedelta(hours=18),
+            self.t24,
+        )
         if any(
-            report.start != self.t0 or report.end != self.t0 + timedelta(hours=hours)
-            for report, hours in zip(reports, expected_hours, strict=True)
+            report.start != self.t0 or report.end != expected_end
+            for report, expected_end in zip(reports, expected_ends, strict=True)
         ):
             raise ValueError("manifest report bounds must be exact cumulative checkpoints")
         if len({report.path for report in reports}) != 5:
@@ -296,6 +302,8 @@ class L3SoakReport:
     max_promoter_start_gap_seconds: float | None
     minimum_cardinality: Mapping[str, int | None]
     maximum_freshness_ms: Mapping[str, int | None]
+    per_market_freshness_ms: Mapping[str, Mapping[str, int | None]]
+    per_market_coverage_counts: Mapping[str, Mapping[str, int]]
     event_counts: Mapping[str, int]
     book_coverage_counts: Mapping[str, int]
     yes_ohlc_coverage_counts: Mapping[str, int]
@@ -314,6 +322,16 @@ class L3SoakReport:
         )
         object.__setattr__(
             self, "maximum_freshness_ms", _freeze_mapping(dict(self.maximum_freshness_ms))
+        )
+        object.__setattr__(
+            self,
+            "per_market_freshness_ms",
+            _freeze_mapping(dict(self.per_market_freshness_ms)),
+        )
+        object.__setattr__(
+            self,
+            "per_market_coverage_counts",
+            _freeze_mapping(dict(self.per_market_coverage_counts)),
         )
         object.__setattr__(self, "event_counts", _freeze_mapping(dict(self.event_counts)))
         object.__setattr__(
@@ -355,6 +373,8 @@ class L3SoakReport:
             "max_promoter_start_gap_seconds": self.max_promoter_start_gap_seconds,
             "minimum_cardinality": self.minimum_cardinality,
             "maximum_freshness_ms": self.maximum_freshness_ms,
+            "per_market_freshness_ms": self.per_market_freshness_ms,
+            "per_market_coverage_counts": self.per_market_coverage_counts,
             "event_counts": self.event_counts,
             "book_coverage_counts": self.book_coverage_counts,
             "yes_ohlc_coverage_counts": self.yes_ohlc_coverage_counts,
@@ -378,6 +398,139 @@ _TABLE_PRIMARY_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     }
 )
 
+_TABLE_COLUMNS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "l3_runtime_boots": frozenset(
+            {
+                "boot_id",
+                "started_at",
+                "stopped_at",
+                "machine_id",
+                "machine_version",
+                "image_ref",
+                "release_id",
+                "code_version",
+                "acceptance_config_hash",
+                "recorded_at",
+            }
+        ),
+        "l3_promote_runs": frozenset(
+            {
+                "id",
+                "boot_id",
+                "run_seq",
+                "scheduled_at",
+                "started_at",
+                "finished_at",
+                "status",
+                "reason_code",
+                "selected_count",
+                "desired_count",
+                "committed_count",
+                "evidenced_count",
+                "add_count",
+                "remove_count",
+                "mapping_hash",
+                "desired_hash",
+                "committed_hash",
+                "acceptance_config_hash",
+                "ws_generation",
+                "add_succeeded",
+                "remove_succeeded",
+                "mirror_succeeded",
+                "duration_ms",
+                "recorded_at",
+            }
+        ),
+        "l3_health_samples": frozenset(
+            {
+                "boot_id",
+                "sample_seq",
+                "sampled_at",
+                "desired_count",
+                "committed_count",
+                "evidenced_count",
+                "promote_age_ms",
+                "global_book_age_ms",
+                "ws_age_ms",
+                "mirror_age_ms",
+                "candidate_age_ms",
+                "reconciliation_age_ms",
+                "listener_state",
+                "cursor_lag",
+                "watchdog_count",
+                "reconnect_count",
+                "ws_generation",
+                "mapping_hash",
+                "acceptance_config_hash",
+                "status",
+                "reason_code",
+                "recorded_at",
+            }
+        ),
+        "l3_market_samples": frozenset(
+            {
+                "boot_id",
+                "sample_seq",
+                "sampled_at",
+                "market_id",
+                "yes_token_id",
+                "no_token_id",
+                "yes_desired",
+                "no_desired",
+                "yes_committed",
+                "no_committed",
+                "yes_evidenced",
+                "no_evidenced",
+                "evidence_generation",
+                "yes_book_at",
+                "no_book_at",
+                "yes_book_age_ms",
+                "no_book_age_ms",
+                "worst_book_age_ms",
+                "yes_ohlc_at",
+                "yes_ohlc_age_ms",
+                "status",
+                "reason_code",
+                "recorded_at",
+            }
+        ),
+        "l3_runtime_events": frozenset(
+            {
+                "event_id",
+                "boot_id",
+                "event_seq",
+                "occurred_at",
+                "kind",
+                "severity",
+                "generation",
+                "reason_code",
+                "detail",
+                "recorded_at",
+            }
+        ),
+    }
+)
+
+_TABLE_UNIQUE_KEYS: Mapping[str, tuple[tuple[str, ...], ...]] = MappingProxyType(
+    {
+        "l3_runtime_boots": (("boot_id",),),
+        "l3_promote_runs": (("id",), ("boot_id", "run_seq")),
+        "l3_health_samples": (("boot_id", "sample_seq"),),
+        "l3_market_samples": (
+            ("boot_id", "sample_seq", "market_id"),
+            ("boot_id", "sample_seq", "yes_token_id"),
+            ("boot_id", "sample_seq", "no_token_id"),
+        ),
+        "l3_runtime_events": (("event_id",), ("boot_id", "event_seq")),
+    }
+)
+
+
+def _has_duplicate_key(rows: Sequence[Mapping[str, object]], key_fields: tuple[str, ...]) -> bool:
+    keys = [_canonical_json_bytes({field: row.get(field) for field in key_fields}) for row in rows]
+    return len(keys) != len(set(keys))
+
 
 def _raw_row_set(
     evidence: EvidenceWindow,
@@ -396,6 +549,13 @@ def _raw_row_set(
     for table in sorted(EVIDENCE_TABLES):
         rows = tuple(evidence.raw_rows_by_table.get(table, ()))
         primary_key = _TABLE_PRIMARY_KEYS[table]
+        if any(set(row) != _TABLE_COLUMNS[table] for row in rows):
+            reasons.append(
+                VerdictReason(
+                    "raw_schema_mismatch",
+                    f"{table} raw rows must exactly match migration 007 columns",
+                )
+            )
         if any(any(key not in row for key in primary_key) for row in rows):
             reasons.append(
                 VerdictReason("raw_primary_key_missing", f"{table} row lacks its primary key")
@@ -403,6 +563,13 @@ def _raw_row_set(
         if any("recorded_at" not in row for row in rows):
             reasons.append(
                 VerdictReason("raw_recorded_at_missing", f"{table} row lacks server recorded_at")
+            )
+        if any(_has_duplicate_key(rows, key) for key in _TABLE_UNIQUE_KEYS[table]):
+            reasons.append(
+                VerdictReason(
+                    "raw_duplicate_key",
+                    f"{table} contains a duplicate physical or logical key",
+                )
             )
 
         def row_key(row: Mapping[str, object]) -> tuple[bytes, bytes]:
@@ -485,6 +652,12 @@ def _add(reasons: list[VerdictReason], code: str, message: str) -> None:
         reasons.append(reason)
 
 
+def _sampler_age_ms(sampled_at: datetime, observed_at: datetime | None) -> int | None:
+    if observed_at is None:
+        return None
+    return max(0, int((sampled_at - observed_at).total_seconds() * 1_000))
+
+
 def build_soak_report(
     evidence: EvidenceWindow,
     manifest: SoakManifest,
@@ -546,6 +719,12 @@ def build_soak_report(
     if len(evidence.boots) != 1:
         _add(reasons, "boot_cardinality", "exactly one runtime boot is required")
     if boot is not None:
+        if boot.started_at > start:
+            _add(
+                reasons,
+                "boot_after_window_start",
+                "accepted boot must start no later than formal T0",
+            )
         if boot.boot_id != manifest.boot_id:
             _add(reasons, "identity_mismatch", "runtime boot ID differs from manifest")
         boot_identity = (
@@ -583,6 +762,33 @@ def build_soak_report(
             "row_boot_mismatch",
             "every decoded evidence row must share the manifest boot",
         )
+    decoded_unique_specs = (
+        (evidence.boots, (("boot_id",),)),
+        (evidence.promote_runs, (("boot_id", "run_seq"),)),
+        (evidence.health_samples, (("boot_id", "sample_seq"),)),
+        (
+            evidence.market_samples,
+            (
+                ("boot_id", "sample_seq", "market_id"),
+                ("boot_id", "sample_seq", "yes_token_id"),
+                ("boot_id", "sample_seq", "no_token_id"),
+            ),
+        ),
+        (evidence.runtime_events, (("event_id",), ("boot_id", "event_seq"))),
+    )
+    if any(
+        _has_duplicate_key(
+            tuple({name: getattr(row, name) for name in key_fields} for row in decoded_table),
+            key_fields,
+        )
+        for decoded_table, unique_keys in decoded_unique_specs
+        for key_fields in unique_keys
+    ):
+        _add(
+            reasons,
+            "decoded_duplicate_key",
+            "decoded evidence contains a duplicate physical or logical key",
+        )
     if (
         any(not start <= row.scheduled_at < end for row in evidence.promote_runs)
         or any(not start <= row.sampled_at < end for row in evidence.health_samples)
@@ -593,6 +799,20 @@ def build_soak_report(
             reasons,
             "occurrence_outside_window",
             "decoded occurrence timestamps must be inside exact [start,end)",
+        )
+    if boot is not None and (
+        any(
+            min(row.scheduled_at, row.started_at, row.finished_at) < boot.started_at
+            for row in evidence.promote_runs
+        )
+        or any(row.sampled_at < boot.started_at for row in evidence.health_samples)
+        or any(row.sampled_at < boot.started_at for row in evidence.market_samples)
+        or any(row.occurred_at < boot.started_at for row in evidence.runtime_events)
+    ):
+        _add(
+            reasons,
+            "occurrence_before_boot",
+            "decoded occurrence timestamps cannot precede the accepted boot",
         )
 
     promotes = tuple(sorted(evidence.promote_runs, key=lambda row: (row.scheduled_at, row.run_seq)))
@@ -630,6 +850,22 @@ def build_soak_report(
         for row in promotes
     ):
         _add(reasons, "promoter_cardinality", "promoter rows must preserve 5/10/10 truth")
+    if any(row.desired_hash != row.committed_hash for row in promotes):
+        _add(
+            reasons,
+            "promoter_membership_hash",
+            "successful promoter desired and committed hashes must match",
+        )
+    if any(
+        (row.add_count > 0 and row.add_succeeded is not True)
+        or (row.remove_count > 0 and row.remove_succeeded is not True)
+        for row in promotes
+    ):
+        _add(
+            reasons,
+            "promoter_operation_result",
+            "positive add/remove counts require a true operation result",
+        )
     if any(row.mapping_hash != manifest.mapping_hash for row in promotes):
         _add(reasons, "mapping_hash_mismatch", "promoter mapping differs from manifest")
     if any(row.acceptance_config_hash != manifest.acceptance_config_hash for row in promotes):
@@ -703,6 +939,12 @@ def build_soak_report(
             bound_pairs = pairs
         elif pairs != bound_pairs:
             _add(reasons, "mapping_hash_mismatch", "market identities changed within window")
+        if any(row.sampled_at != sample.sampled_at for row in rows):
+            _add(
+                reasons,
+                "market_parent_timestamp",
+                "market sampled_at must equal its health parent sampled_at",
+            )
         if any(
             row.status is not HealthStatus.PASS
             or not all(
@@ -720,18 +962,54 @@ def build_soak_report(
         ):
             _add(reasons, "market_sample_non_pass", "every market membership row must pass")
 
+    canonical_mapping = [
+        {
+            "market_id": market_id,
+            "yes_token_id": yes_token_id,
+            "no_token_id": no_token_id,
+        }
+        for market_id, yes_token_id, no_token_id in sorted(bound_pairs or set())
+    ]
+    if (
+        len(canonical_mapping) != config.expected_market_count
+        or _sha256(canonical_mapping) != manifest.mapping_hash
+    ):
+        _add(
+            reasons,
+            "mapping_identity_hash_mismatch",
+            "canonical five-pair identity does not match the manifest mapping hash",
+        )
+
+    yes_book_ages = [row.yes_book_age_ms for row in evidence.market_samples]
+    no_book_ages = [row.no_book_age_ms for row in evidence.market_samples]
     book_ages = [row.worst_book_age_ms for row in evidence.market_samples]
     ohlc_ages = [row.yes_ohlc_age_ms for row in evidence.market_samples]
-    if any(
+    age_contract_invalid = any(
         row.yes_book_at is None
         or row.no_book_at is None
         or row.yes_ohlc_at is None
+        or row.yes_book_age_ms is None
+        or row.no_book_age_ms is None
         or row.worst_book_age_ms is None
         or row.yes_ohlc_age_ms is None
-        or row.worst_book_age_ms >= config.market_book_fresh_s * 1_000
+        or row.yes_book_at > row.sampled_at
+        or row.no_book_at > row.sampled_at
+        or row.yes_ohlc_at > row.sampled_at
+        or row.yes_book_age_ms != _sampler_age_ms(row.sampled_at, row.yes_book_at)
+        or row.no_book_age_ms != _sampler_age_ms(row.sampled_at, row.no_book_at)
+        or row.yes_ohlc_age_ms != _sampler_age_ms(row.sampled_at, row.yes_ohlc_at)
+        or row.worst_book_age_ms != max(row.yes_book_age_ms, row.no_book_age_ms)
+        or row.yes_book_age_ms >= config.market_book_fresh_s * 1_000
+        or row.no_book_age_ms >= config.market_book_fresh_s * 1_000
         or row.yes_ohlc_age_ms >= config.market_ohlc_fresh_s * 1_000
         for row in evidence.market_samples
-    ):
+    )
+    if age_contract_invalid:
+        _add(
+            reasons,
+            "market_age_contract",
+            "per-source ages must match timestamps, worst age, and strict thresholds",
+        )
         _add(reasons, "market_freshness", "book and OHLC ages must remain strictly below 120s")
 
     pairs_for_coverage = bound_pairs or set()
@@ -784,9 +1062,31 @@ def build_soak_report(
         "evidenced_tokens": min((row.evidenced_count for row in samples), default=None),
     }
     maximum_freshness_ms = {
-        "book": max((age for age in book_ages if age is not None), default=None),
+        "yes_book": max((age for age in yes_book_ages if age is not None), default=None),
+        "no_book": max((age for age in no_book_ages if age is not None), default=None),
+        "worst_book": max((age for age in book_ages if age is not None), default=None),
         "yes_ohlc": max((age for age in ohlc_ages if age is not None), default=None),
     }
+    per_market_freshness_ms: dict[str, dict[str, int | None]] = {}
+    per_market_coverage_counts: dict[str, dict[str, int]] = {}
+    for market_id, yes_token_id, no_token_id in sorted(bound_pairs or set()):
+        market_rows = [row for row in evidence.market_samples if row.market_id == market_id]
+
+        def maximum(field_name: str) -> int | None:
+            values = [getattr(row, field_name) for row in market_rows]
+            return max((value for value in values if value is not None), default=None)
+
+        per_market_freshness_ms[market_id] = {
+            "yes_book": maximum("yes_book_age_ms"),
+            "no_book": maximum("no_book_age_ms"),
+            "worst_book": maximum("worst_book_age_ms"),
+            "yes_ohlc": maximum("yes_ohlc_age_ms"),
+        }
+        per_market_coverage_counts[market_id] = {
+            "yes_book": evidence.book_coverage_counts.get(yes_token_id, 0),
+            "no_book": evidence.book_coverage_counts.get(no_token_id, 0),
+            "yes_ohlc": evidence.yes_ohlc_coverage_counts.get(yes_token_id, 0),
+        }
     ordered_reasons = tuple(sorted(set(reasons)))
     status = VerdictStatus.PASS if not ordered_reasons else VerdictStatus.NOT_CLOSED
     return L3SoakReport(
@@ -813,6 +1113,8 @@ def build_soak_report(
         max_promoter_start_gap_seconds=max_promoter_start_gap,
         minimum_cardinality=minimum_cardinality,
         maximum_freshness_ms=maximum_freshness_ms,
+        per_market_freshness_ms=per_market_freshness_ms,
+        per_market_coverage_counts=per_market_coverage_counts,
         event_counts=dict(sorted(event_counts.items())),
         book_coverage_counts=dict(evidence.book_coverage_counts),
         yes_ohlc_coverage_counts=dict(evidence.yes_ohlc_coverage_counts),
@@ -825,16 +1127,26 @@ def render_report(report: L3SoakReport) -> str:
     """Render deterministic operator Markdown from one canonical report."""
     if type(report) is not L3SoakReport:
         raise TypeError("report must be an exact L3SoakReport")
+
+    def compact(value: Mapping[str, object]) -> str:
+        return _canonical_json_bytes(value).decode("utf-8")
+
     lines = [
         "# L3 Soak Evidence Report",
         "",
         f"- Verdict: **{report.status.value}**",
         f"- Window: `{_utc_text(report.start)}` to `{_utc_text(report.end)}`",
         f"- Boot: `{report.boot_id}`",
+        f"- Require 24h: `{str(report.require_24h).lower()}`",
         (
             f"- Release: `{report.release_id}` / machine "
             f"`{report.machine_id}` `{report.machine_version}`"
         ),
+        f"- Code version: `{report.code_version}`",
+        f"- Image ref: `{report.image_ref}`",
+        f"- Image digest: `{report.image_digest}`",
+        f"- Acceptance config hash: `{report.acceptance_config_hash}`",
+        f"- Mapping hash: `{report.mapping_hash}`",
         f"- Manifest hash: `{report.manifest_hash}`",
         f"- Soak hash: `{report.soak_hash}`",
         f"- Interval hash: `{report.interval_hash}`",
@@ -846,8 +1158,23 @@ def render_report(report: L3SoakReport) -> str:
         f"- Promoter ticks: {report.recorded_promoter_ticks}/{report.expected_promoter_ticks}",
         f"- Maximum sample gap: {report.max_sample_gap_seconds}",
         f"- Maximum promoter start gap: {report.max_promoter_start_gap_seconds}",
+        f"- Minimum cardinality: `{compact(report.minimum_cardinality)}`",
+        f"- Maximum freshness: `{compact(report.maximum_freshness_ms)}`",
+        f"- Event counts: `{compact(report.event_counts)}`",
+        f"- Book coverage: `{compact(report.book_coverage_counts)}`",
+        f"- Yes OHLC coverage: `{compact(report.yes_ohlc_coverage_counts)}`",
     ]
     lines.extend(f"- {table}: {count}" for table, count in sorted(report.row_counts.items()))
+    lines.extend(["", "## Per-market freshness and coverage", ""])
+    for market_id in sorted(report.per_market_freshness_ms):
+        lines.append(
+            f"- Per-market freshness `{market_id}`: "
+            f"`{compact(report.per_market_freshness_ms[market_id])}`"
+        )
+        lines.append(
+            f"- Per-market coverage `{market_id}`: "
+            f"`{compact(report.per_market_coverage_counts[market_id])}`"
+        )
     lines.extend(["", "## Reasons", ""])
     if report.reasons:
         lines.extend(f"- `{reason.code}`: {reason.message}" for reason in report.reasons)
