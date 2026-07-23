@@ -311,7 +311,7 @@ def _assert_catalog_contract(dsn: str) -> None:
 
     cursor_policies = _q(
         dsn,
-        "SELECT policyname, cmd, roles, qual, with_check FROM pg_policies "
+        "SELECT policyname, permissive, cmd, roles, qual, with_check FROM pg_policies "
         "WHERE schemaname='public' AND tablename='l2_event_cursor' "
         "ORDER BY policyname",
     )
@@ -321,6 +321,13 @@ def _assert_catalog_contract(dsn: str) -> None:
         ("l3_candidate_cursor_select", "SELECT", ["l3_evidence_daemon"]),
         ("l3_candidate_cursor_update", "UPDATE", ["l3_evidence_daemon"]),
     ]
+    assert {row["permissive"] for row in cursor_policies} == {"PERMISSIVE"}
+    assert _q(
+        dsn,
+        "SELECT relrowsecurity FROM pg_class class "
+        "JOIN pg_namespace namespace ON namespace.oid=class.relnamespace "
+        "WHERE namespace.nspname='public' AND class.relname='l2_event_cursor'",
+    ) == [{"relrowsecurity": True}]
     predicate = "consumer = 'l2-candidate-refresh'::text"
     assert cursor_policies[0]["qual"] == "true"
     assert cursor_policies[0]["with_check"] is None
@@ -908,6 +915,16 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
             boot_id,
         )
         assert server_owned, "recorded_at must be overwritten by the database"
+        manifest_times = await conn.fetchrow(
+            "INSERT INTO l3_runtime_events "
+            "(event_id, boot_id, event_seq, occurred_at, kind, severity, detail, recorded_at) "
+            "VALUES (gen_random_uuid(), $1, 16, clock_timestamp()-interval '10 seconds', "
+            "'soak_manifest_bound', 'info', jsonb_build_object('manifest_sha256', repeat('a',64)), "
+            "clock_timestamp()+interval '25 seconds') "
+            "RETURNING occurred_at, recorded_at",
+            boot_id,
+        )
+        assert manifest_times["occurred_at"] == manifest_times["recorded_at"]
         with pytest.raises(asyncpg.exceptions.CheckViolationError):
             await conn.execute(
                 "INSERT INTO l3_runtime_events "
@@ -1109,7 +1126,7 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
             "SELECT event_seq FROM l3_runtime_events WHERE boot_id=$1 ORDER BY event_seq",
             boot_id,
         )
-        assert [row["event_seq"] for row in remaining] == [1, 12]
+        assert [row["event_seq"] for row in remaining] == [1, 12, 16]
         assert (
             await conn.fetchval(
                 "SELECT count(*) FROM l3_runtime_events WHERE boot_id=$1",

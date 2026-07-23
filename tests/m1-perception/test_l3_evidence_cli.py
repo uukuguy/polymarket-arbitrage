@@ -9,7 +9,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
 
@@ -32,6 +32,7 @@ def _cursor_policy_rows() -> list[dict[str, object]]:
     return [
         {
             "policyname": "anon_read",
+            "permissive": "PERMISSIVE",
             "cmd": "SELECT",
             "roles": ["anon"],
             "qual": "true",
@@ -39,6 +40,7 @@ def _cursor_policy_rows() -> list[dict[str, object]]:
         },
         {
             "policyname": "l3_candidate_cursor_insert",
+            "permissive": "PERMISSIVE",
             "cmd": "INSERT",
             "roles": ["l3_evidence_daemon"],
             "qual": None,
@@ -46,6 +48,7 @@ def _cursor_policy_rows() -> list[dict[str, object]]:
         },
         {
             "policyname": "l3_candidate_cursor_select",
+            "permissive": "PERMISSIVE",
             "cmd": "SELECT",
             "roles": ["l3_evidence_daemon"],
             "qual": predicate,
@@ -53,6 +56,7 @@ def _cursor_policy_rows() -> list[dict[str, object]]:
         },
         {
             "policyname": "l3_candidate_cursor_update",
+            "permissive": "PERMISSIVE",
             "cmd": "UPDATE",
             "roles": ["l3_evidence_daemon"],
             "qual": predicate,
@@ -258,7 +262,8 @@ def test_dsn_validation_is_allowlisted_and_redacted() -> None:
     from scripts.l3_evidence import validate_supabase_target
 
     target = validate_supabase_target(
-        "postgresql://runtime:top-secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres",
+        "postgresql://runtime:top-secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres"
+        "?sslmode=require",
         expected_ref="abcdefghijklmnopqrst",
     )
     assert target.host == "db.abcdefghijklmnopqrst.supabase.co"
@@ -283,12 +288,20 @@ def test_dsn_validation_is_allowlisted_and_redacted() -> None:
         "service=attacker",
         "sslmode=require&sslmode=disable",
         "unknown=value",
+        "sslmode=disable",
+        "sslmode=allow",
+        "sslmode=prefer",
     ):
         with pytest.raises(ValueError, match="target"):
             validate_supabase_target(
                 "postgresql://runtime:secret@db.abcdefghijklmnopqrst.supabase.co/postgres?" + query,
                 expected_ref="abcdefghijklmnopqrst",
             )
+    with pytest.raises(ValueError, match="target"):
+        validate_supabase_target(
+            "postgresql://runtime:secret@db.abcdefghijklmnopqrst.supabase.co/postgres",
+            expected_ref="abcdefghijklmnopqrst",
+        )
     with pytest.raises(ValueError, match="target"):
         validate_supabase_target(
             "postgresql://runtime:secret@db.abcdefghijklmnopqrst.supabase.co:6543/postgres",
@@ -318,7 +331,7 @@ def test_pooler_target_accepts_custom_role_with_exact_project_suffix() -> None:
 
     target = validate_supabase_target(
         "postgresql://runtime.abcdefghijklmnopqrst:secret@"
-        "aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+        "aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require",
         expected_ref="abcdefghijklmnopqrst",
     )
     assert target.user == "runtime.abcdefghijklmnopqrst"
@@ -329,13 +342,14 @@ def test_cursor_policy_catalog_proof_is_exact_and_fail_closed() -> None:
     from scripts import l3_evidence
 
     rows = _cursor_policy_rows()
-    assert l3_evidence._cursor_policy_catalog_is_exact(rows)
+    assert l3_evidence._cursor_policy_catalog_is_exact(rows, rls_enabled=True)
     mutations = [
         rows[:-1],
         [{**rows[0], "roles": ["PUBLIC"]}, *rows[1:]],
         [rows[0], {**rows[1], "with_check": "true"}, *rows[2:]],
         [rows[0], rows[1], {**rows[2], "qual": "(consumer = 'other'::text)"}, rows[3]],
         [*rows[:3], {**rows[3], "cmd": "ALL"}],
+        [{**rows[0], "permissive": "RESTRICTIVE"}, *rows[1:]],
         [
             *rows,
             {
@@ -347,7 +361,33 @@ def test_cursor_policy_catalog_proof_is_exact_and_fail_closed() -> None:
             },
         ],
     ]
-    assert all(not l3_evidence._cursor_policy_catalog_is_exact(value) for value in mutations)
+    assert not l3_evidence._cursor_policy_catalog_is_exact(rows, rls_enabled=False)
+    assert all(
+        not l3_evidence._cursor_policy_catalog_is_exact(value, rls_enabled=True)
+        for value in mutations
+    )
+
+
+def _binding_row(manifest: SoakManifest, **overrides: object) -> dict[str, object]:
+    bound_at = manifest.t0 - timedelta(microseconds=1)
+    row: dict[str, object] = {
+        "event_id": uuid5(
+            NAMESPACE_URL,
+            f"polyarb:l3-soak-manifest:{manifest.manifest_hash}",
+        ),
+        "boot_id": manifest.boot_id,
+        "event_seq": 8_000_000_000_000_000_000
+        + int(manifest.manifest_hash[:16], 16) % 1_000_000_000_000_000,
+        "occurred_at": bound_at,
+        "recorded_at": bound_at,
+        "kind": "soak_manifest_bound",
+        "severity": "info",
+        "generation": None,
+        "reason_code": manifest.soak_hash,
+        "detail": {"manifest_sha256": manifest.manifest_hash},
+    }
+    row.update(overrides)
+    return row
 
 
 class _Transaction:
@@ -382,15 +422,14 @@ class _BindingConnection:
         assert args[5] == self.manifest.t0
         server_time = self.manifest.t0 - timedelta(microseconds=1)
         self.inserted = True
-        return {
-            "event_id": args[0],
-            "boot_id": self.manifest.boot_id,
-            "event_seq": args[2],
-            "occurred_at": server_time,
-            "recorded_at": server_time,
-            "reason_code": self.manifest.soak_hash,
-            "manifest_sha256": self.manifest.manifest_hash,
-        }
+        return _binding_row(
+            self.manifest,
+            event_id=args[0],
+            event_seq=args[2],
+            occurred_at=server_time,
+            recorded_at=server_time,
+            detail=json.dumps({"manifest_sha256": self.manifest.manifest_hash}),
+        )
 
     async def close(self) -> None:
         return None
@@ -459,13 +498,14 @@ async def test_concurrent_manifest_bind_serializes_to_exactly_one_row(
             if "INSERT INTO public.l3_runtime_events" in sql:
                 server_time = manifest.t0 - timedelta(microseconds=1)
                 shared.update(
-                    event_id=args[0],
-                    boot_id=manifest.boot_id,
-                    event_seq=args[2],
-                    occurred_at=server_time,
-                    recorded_at=server_time,
-                    reason_code=manifest.soak_hash,
-                    manifest_sha256=manifest.manifest_hash,
+                    _binding_row(
+                        manifest,
+                        event_id=args[0],
+                        event_seq=args[2],
+                        occurred_at=server_time,
+                        recorded_at=server_time,
+                        detail=json.dumps({"manifest_sha256": manifest.manifest_hash}),
+                    )
                 )
                 return dict(shared)
             raise AssertionError(sql)
@@ -493,21 +533,41 @@ async def test_concurrent_manifest_bind_serializes_to_exactly_one_row(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "forgery",
+    (
+        None,
+        "event_id",
+        "event_seq",
+        "detail",
+        "kind",
+        "severity",
+        "generation",
+        "reason_code",
+        "occurred_at",
+        "recorded_at",
+    ),
+)
 async def test_manifest_bind_lost_ack_retry_returns_existing_exact_binding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, forgery: str | None
 ) -> None:
     from scripts import l3_evidence
 
     manifest = _manifest(tmp_path)
-    existing = {
+    existing = _binding_row(manifest)
+    forged_values: dict[str, object] = {
         "event_id": UUID("00000000-0000-0000-0000-000000000099"),
-        "boot_id": manifest.boot_id,
-        "event_seq": l3_evidence._manifest_event_seq(manifest),
+        "event_seq": existing["event_seq"] + 1,  # type: ignore[operator]
+        "detail": {"manifest_sha256": manifest.manifest_hash, "extra": True},
+        "kind": "shutdown_signal",
+        "severity": "warn",
+        "generation": 0,
+        "reason_code": "forged",
         "occurred_at": manifest.t0 - timedelta(seconds=1),
-        "recorded_at": manifest.t0 - timedelta(seconds=1),
-        "reason_code": manifest.soak_hash,
-        "manifest_sha256": manifest.manifest_hash,
+        "recorded_at": manifest.t0,
     }
+    if forgery is not None:
+        existing[forgery] = forged_values[forgery]
 
     class Connection:
         def transaction(self) -> _Transaction:
@@ -533,10 +593,14 @@ async def test_manifest_bind_lost_ack_retry_returns_existing_exact_binding(
 
     monkeypatch.setattr(l3_evidence.asyncpg, "connect", connect)
     monkeypatch.setattr(l3_evidence, "_runtime_preflight", preflight)
-    assert (
-        await l3_evidence._bind_manifest("runtime", manifest, now=manifest.t0 + timedelta(hours=1))
-        == existing
+    operation = l3_evidence._bind_manifest(
+        "runtime", manifest, now=manifest.t0 + timedelta(hours=1)
     )
+    if forgery is None:
+        assert await operation == existing
+    else:
+        with pytest.raises(l3_evidence.OperatorError, match="binding is invalid"):
+            await operation
 
 
 @pytest.mark.asyncio
@@ -589,14 +653,24 @@ def test_binding_validation_requires_one_pre_t0_exact_soak_hash(tmp_path: Path) 
     from scripts import l3_evidence
 
     manifest = _manifest(tmp_path)
-    valid = {
-        "boot_id": manifest.boot_id,
-        "manifest_sha256": manifest.manifest_hash,
-        "reason_code": manifest.soak_hash,
-        "recorded_at": manifest.t0 - timedelta(microseconds=1),
-    }
+    valid = _binding_row(manifest)
     assert l3_evidence._validate_exact_binding([valid], manifest) is valid
-    for rows in ([], [valid, valid], [{**valid, "recorded_at": manifest.t0}]):
+    forged_rows = (
+        [],
+        [valid, valid],
+        [{**valid, "event_id": UUID("00000000-0000-0000-0000-000000000099")}],
+        [{**valid, "event_seq": valid["event_seq"] + 1}],  # type: ignore[operator]
+        [{**valid, "kind": "shutdown_signal"}],
+        [{**valid, "severity": "warn"}],
+        [{**valid, "generation": 0}],
+        [{**valid, "reason_code": "forged"}],
+        [{**valid, "detail": {"manifest_sha256": manifest.manifest_hash, "extra": True}}],
+        [{**valid, "detail": json.dumps({"manifest_sha256": "0" * 64})}],
+        [{**valid, "detail": {"manifest_sha256": manifest.manifest_hash, "x": float("nan")}}],
+        [{**valid, "occurred_at": manifest.t0 - timedelta(seconds=1)}],
+        [{**valid, "recorded_at": manifest.t0}],
+    )
+    for rows in forged_rows:
         with pytest.raises(l3_evidence.OperatorError):
             l3_evidence._validate_exact_binding(rows, manifest)
 
@@ -738,14 +812,7 @@ async def test_verify_loads_five_manifest_paths_and_requeries_each_interval(
             raise AssertionError("read-only verify called a writer")
 
     async def binding(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
-        return [
-            {
-                "boot_id": manifest.boot_id,
-                "manifest_sha256": manifest.manifest_hash,
-                "reason_code": manifest.soak_hash,
-                "recorded_at": manifest.t0 - timedelta(seconds=1),
-            }
-        ]
+        return [_binding_row(manifest)]
 
     def build(
         _evidence: object,
@@ -803,14 +870,7 @@ async def test_verify_rejects_requeried_raw_digest_mismatch(
             return SimpleNamespace(start=start, end=end)
 
     async def binding(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
-        return [
-            {
-                "boot_id": manifest.boot_id,
-                "manifest_sha256": manifest.manifest_hash,
-                "reason_code": manifest.soak_hash,
-                "recorded_at": manifest.t0 - timedelta(seconds=1),
-            }
-        ]
+        return [_binding_row(manifest)]
 
     monkeypatch.setattr(l3_evidence, "L3EvidenceStore", Store)
     monkeypatch.setattr(l3_evidence, "_binding_rows", binding)
@@ -867,22 +927,156 @@ def test_cleanup_missing_dedicated_dsn_never_falls_back_to_runtime(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("missing_grant", "extra_grant", "sequence_grants", "elevated_field"),
+    (
+        "missing_grant",
+        "extra_grant",
+        "sequence_grants",
+        "elevated_field",
+        "memberships",
+        "rls_enabled",
+        "ssl_encrypted",
+    ),
     [
-        (None, None, frozenset({"USAGE", "SELECT"}), None),
-        (("markets_latest", "SELECT"), None, frozenset({"USAGE", "SELECT"}), None),
-        (("snapshots", "SELECT"), None, frozenset({"USAGE", "SELECT"}), None),
-        (("l2_event_cursor", "SELECT"), None, frozenset({"USAGE", "SELECT"}), None),
-        (("l2_event_cursor", "INSERT"), None, frozenset({"USAGE", "SELECT"}), None),
-        (("l2_event_cursor", "UPDATE"), None, frozenset({"USAGE", "SELECT"}), None),
-        (None, ("snapshots", "UPDATE"), frozenset({"USAGE", "SELECT"}), None),
-        (None, None, frozenset({"SELECT"}), None),
-        (None, None, frozenset({"USAGE"}), None),
-        (None, None, frozenset({"USAGE", "SELECT", "UPDATE"}), None),
-        (None, None, frozenset({"USAGE", "SELECT"}), "bypass_rls"),
-        (None, None, frozenset({"USAGE", "SELECT"}), "can_create_db"),
-        (None, None, frozenset({"USAGE", "SELECT"}), "can_create_role"),
-        (None, None, frozenset({"USAGE", "SELECT"}), "can_replicate"),
+        (None, None, frozenset({"USAGE", "SELECT"}), None, {"l3_evidence_daemon"}, True, True),
+        (
+            ("markets_latest", "SELECT"),
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            None,
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            ("snapshots", "SELECT"),
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            None,
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            ("l2_event_cursor", "SELECT"),
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            None,
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            ("l2_event_cursor", "INSERT"),
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            None,
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            ("l2_event_cursor", "UPDATE"),
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            None,
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            None,
+            ("snapshots", "UPDATE"),
+            frozenset({"USAGE", "SELECT"}),
+            None,
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            None,
+            ("unexpected_table", "SELECT"),
+            frozenset({"USAGE", "SELECT"}),
+            None,
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (None, None, frozenset({"SELECT"}), None, {"l3_evidence_daemon"}, True, True),
+        (None, None, frozenset({"USAGE"}), None, {"l3_evidence_daemon"}, True, True),
+        (
+            None,
+            None,
+            frozenset({"USAGE", "SELECT", "UPDATE"}),
+            None,
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            None,
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            "bypass_rls",
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            None,
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            "can_create_db",
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            None,
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            "can_create_role",
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            None,
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            "can_replicate",
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            None,
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            "extra_function_acl",
+            {"l3_evidence_daemon"},
+            True,
+            True,
+        ),
+        (
+            None,
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            None,
+            {"l3_evidence_daemon", "pg_read_all_data"},
+            True,
+            True,
+        ),
+        (
+            None,
+            None,
+            frozenset({"USAGE", "SELECT"}),
+            None,
+            {"l3_evidence_daemon", "custom_role"},
+            True,
+            True,
+        ),
+        (None, None, frozenset({"USAGE", "SELECT"}), None, {"l3_evidence_daemon"}, False, True),
+        (None, None, frozenset({"USAGE", "SELECT"}), None, {"l3_evidence_daemon"}, True, False),
     ],
 )
 async def test_runtime_credential_checks_inherited_effective_grants_and_store_preflight(
@@ -891,6 +1085,9 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
     extra_grant: tuple[str, str] | None,
     sequence_grants: frozenset[str],
     elevated_field: str | None,
+    memberships: set[str],
+    rls_enabled: bool,
+    ssl_encrypted: bool,
 ) -> None:
     from scripts import l3_evidence
 
@@ -927,16 +1124,37 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
                 "service_member": False,
                 "daemon_member": True,
                 "retention_member": False,
+                "ssl_encrypted": ssl_encrypted,
             }
             if elevated_field is not None:
                 row[elevated_field] = True
             return row
 
         async def fetch(self, _sql: str, *_args: object) -> list[dict[str, object]]:
+            if "WITH RECURSIVE inherited_roles" in _sql:
+                return [{"role_name": role} for role in sorted(memberships)]
+            if "aclexplode" in _sql:
+                return (
+                    [{"is_retention_cleanup": False, "privilege_type": "EXECUTE"}]
+                    if elevated_field == "extra_function_acl"
+                    else []
+                )
             if "pg_policies" in _sql:
                 return _cursor_policy_rows()
+            if "has_sequence_privilege" in _sql:
+                return [
+                    {
+                        "object_name": "l3_promote_runs_id_seq",
+                        "privilege_type": privilege,
+                        "allowed": privilege in sequence_grants,
+                    }
+                    for privilege in ("USAGE", "SELECT", "UPDATE")
+                ]
             rows = []
-            for table in evidence_tables | read_tables | {"l2_event_cursor"}:
+            tables = evidence_tables | read_tables | {"l2_event_cursor"}
+            if extra_grant is not None:
+                tables.add(extra_grant[0])
+            for table in tables:
                 for privilege in (
                     "SELECT",
                     "INSERT",
@@ -956,11 +1174,18 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
                     if (table, privilege) == extra_grant:
                         allowed = True
                     rows.append(
-                        {"table_name": table, "privilege_type": privilege, "allowed": allowed}
+                        {
+                            "object_name": table,
+                            "table_name": table,
+                            "privilege_type": privilege,
+                            "allowed": allowed,
+                        }
                     )
             return rows
 
         async def fetchval(self, sql: str) -> bool:
+            if "relrowsecurity" in sql:
+                return rls_enabled
             if "has_sequence_privilege" in sql:
                 return any(f"'{privilege}')" in sql for privilege in sequence_grants)
             return False
@@ -979,12 +1204,15 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
 
     monkeypatch.setattr(l3_evidence.asyncpg, "connect", connect)
     monkeypatch.setattr(l3_evidence, "_runtime_preflight", preflight)
-    dsn = "postgresql://runtime:secret@db.abcdefghijklmnopqrst.supabase.co/postgres"
+    dsn = "postgresql://runtime:secret@db.abcdefghijklmnopqrst.supabase.co/postgres?sslmode=require"
     valid = (
         missing_grant is None
         and extra_grant is None
         and sequence_grants == frozenset({"USAGE", "SELECT"})
         and elevated_field is None
+        and memberships == {"l3_evidence_daemon"}
+        and rls_enabled
+        and ssl_encrypted
     )
     if valid:
         result = await l3_evidence._credential_check(
@@ -1045,18 +1273,32 @@ async def test_runtime_credential_pooler_identity_strips_only_exact_project_suff
                 "service_member": False,
                 "daemon_member": True,
                 "retention_member": False,
+                "ssl_encrypted": True,
             }
 
         async def fetch(self, _sql: str, *_args: object) -> list[dict[str, object]]:
+            if "WITH RECURSIVE inherited_roles" in _sql:
+                return [{"role_name": "l3_evidence_daemon"}]
+            if "aclexplode" in _sql:
+                return []
             if "pg_policies" in _sql:
                 return _cursor_policy_rows()
+            if "has_sequence_privilege" in _sql:
+                return [
+                    {
+                        "object_name": "l3_promote_runs_id_seq",
+                        "privilege_type": privilege,
+                        "allowed": True,
+                    }
+                    for privilege in ("USAGE", "SELECT")
+                ]
             return [
-                {"table_name": table, "privilege_type": privilege, "allowed": True}
+                {"object_name": table, "privilege_type": privilege, "allowed": True}
                 for table, privilege in required
             ]
 
         async def fetchval(self, sql: str) -> bool:
-            return "has_sequence_privilege" in sql and ("'USAGE')" in sql or "'SELECT')" in sql)
+            return "relrowsecurity" in sql
 
         async def close(self) -> None:
             return None
@@ -1072,7 +1314,7 @@ async def test_runtime_credential_pooler_identity_strips_only_exact_project_suff
     monkeypatch.setattr(l3_evidence, "_runtime_preflight", preflight)
     proof = await l3_evidence._credential_check(
         "postgresql://runtime.abcdefghijklmnopqrst:secret@"
-        "aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+        "aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require",
         expected_ref="abcdefghijklmnopqrst",
         capability="runtime",
     )
@@ -1102,11 +1344,22 @@ async def test_retention_operator_check_requires_exclusive_rpc_capability(
                 "service_member": False,
                 "daemon_member": False,
                 "retention_member": True,
+                "ssl_encrypted": True,
             }
 
-        async def fetch(self, _sql: str) -> list[dict[str, object]]:
+        async def fetch(self, _sql: str, *_args: object) -> list[dict[str, object]]:
+            if "WITH RECURSIVE inherited_roles" in _sql:
+                return [{"role_name": "l3_retention_operator"}]
+            if "aclexplode" in _sql:
+                return [{"is_retention_cleanup": True, "privilege_type": "EXECUTE"}]
+            if "has_sequence_privilege" in _sql:
+                return []
             return [
-                {"table_name": "l3_runtime_boots", "privilege_type": "SELECT", "allowed": False}
+                {
+                    "object_name": "l3_runtime_boots",
+                    "privilege_type": "SELECT",
+                    "allowed": False,
+                }
             ]
 
         async def fetchval(self, sql: str) -> bool:
@@ -1121,7 +1374,8 @@ async def test_retention_operator_check_requires_exclusive_rpc_capability(
 
     monkeypatch.setattr(l3_evidence.asyncpg, "connect", connect)
     result = await l3_evidence._credential_check(
-        "postgresql://retention:secret@db.abcdefghijklmnopqrst.supabase.co/postgres",
+        "postgresql://retention:secret@db.abcdefghijklmnopqrst.supabase.co/postgres"
+        "?sslmode=require",
         expected_ref="abcdefghijklmnopqrst",
         capability="retention",
     )
@@ -1244,6 +1498,7 @@ async def test_prod_revision_proves_exact_ref_user_server_and_revision(
     from scripts import l3_evidence
 
     revision = "007"
+    ssl_encrypted = True
 
     class Connection:
         async def fetchrow(self, _sql: str) -> dict[str, object]:
@@ -1252,6 +1507,7 @@ async def test_prod_revision_proves_exact_ref_user_server_and_revision(
                 "current_user": "postgres",
                 "server_address": "10.0.0.3",
                 "revision": revision,
+                "ssl_encrypted": ssl_encrypted,
             }
 
         async def close(self) -> None:
@@ -1262,14 +1518,24 @@ async def test_prod_revision_proves_exact_ref_user_server_and_revision(
         return Connection()
 
     monkeypatch.setattr(l3_evidence.asyncpg, "connect", connect)
-    dsn = "postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co/postgres"
+    dsn = (
+        "postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co/postgres?sslmode=require"
+    )
     proof = await l3_evidence._prod_revision(
         dsn, expected_ref="abcdefghijklmnopqrst", expected_revision="007"
     )
     assert proof["revision"] == "007"
     assert proof["server_address"] == "10.0.0.3"
+    assert proof["encrypted_session"] is True
+    assert proof["ssl_mode"] == "require"
     assert "secret" not in json.dumps(proof)
     revision = "006"
+    with pytest.raises(l3_evidence.OperatorError, match="NOT-CLOSED"):
+        await l3_evidence._prod_revision(
+            dsn, expected_ref="abcdefghijklmnopqrst", expected_revision="007"
+        )
+    revision = "007"
+    ssl_encrypted = False
     with pytest.raises(l3_evidence.OperatorError, match="NOT-CLOSED"):
         await l3_evidence._prod_revision(
             dsn, expected_ref="abcdefghijklmnopqrst", expected_revision="007"

@@ -793,7 +793,7 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
 ) -> None:
     now = datetime.now(UTC)
     start = now.replace(second=0, microsecond=0)
-    end = now + timedelta(seconds=20)
+    end = start + timedelta(seconds=20)
     boot = _boot(start - timedelta(minutes=2))
     store = L3EvidenceStore(postgres_dsns["daemon"])
 

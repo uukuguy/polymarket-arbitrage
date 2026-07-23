@@ -398,6 +398,14 @@ def upgrade() -> None:
         BEGIN
             IF TG_OP = 'INSERT' THEN
                 NEW.recorded_at := clock_timestamp();
+                IF TG_TABLE_NAME = 'l3_runtime_events'
+                   AND to_jsonb(NEW)->>'kind' = 'soak_manifest_bound'
+                THEN
+                    NEW := jsonb_populate_record(
+                        NEW,
+                        jsonb_build_object('occurred_at', NEW.recorded_at)
+                    );
+                END IF;
                 RETURN NEW;
             END IF;
 

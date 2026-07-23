@@ -282,7 +282,11 @@ with an exact approval argument and dedicated masked `L3_RETENTION_DSN`; it
 refuses missing credentials and never falls back to daemon DSN. A read-only
 `l3-retention-operator-check` proves role/target without cleanup, while
 `supabase-prod-revision` proves the allowlisted production ref/database/revision
-before mutation.
+before mutation. All hosted credential/revision proof DSNs explicitly select
+`sslmode=require`, `verify-ca`, or `verify-full`, and the query proves its own
+session is encrypted through `pg_stat_ssl`. Capability proof recursively closes
+role memberships and enumerates all effective public table/view/sequence grants
+plus explicit relevant function ACLs; unexpected access is NOT-CLOSED.
 
 ## 7. Failure and chain-truth contract
 

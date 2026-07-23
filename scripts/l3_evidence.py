@@ -62,6 +62,7 @@ class DatabaseTarget:
     database: str
     user: str
     project_ref: str
+    ssl_mode: str
 
 
 def parse_rfc3339(value: str) -> datetime:
@@ -109,8 +110,12 @@ def validate_supabase_target(dsn: str, *, expected_ref: str) -> DatabaseTarget:
         raise ValueError("database target is invalid") from error
     if len(query_items) != len({key for key, _value in query_items}):
         raise ValueError("database target has duplicate connection parameters")
-    allowed_sslmode = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
-    if any(key != "sslmode" or value not in allowed_sslmode for key, value in query_items):
+    strong_sslmodes = {"require", "verify-ca", "verify-full"}
+    if (
+        len(query_items) != 1
+        or query_items[0][0] != "sslmode"
+        or query_items[0][1] not in strong_sslmodes
+    ):
         raise ValueError("database target has disallowed connection parameters")
     if parsed.scheme not in {"postgres", "postgresql"} or not host or not user:
         raise ValueError("database target is invalid")
@@ -127,7 +132,13 @@ def validate_supabase_target(dsn: str, *, expected_ref: str) -> DatabaseTarget:
     )
     if not (direct or pooled) or database != "postgres":
         raise ValueError("database target does not match the allowlisted project")
-    return DatabaseTarget(host=host, database=database, user=user, project_ref=expected_ref)
+    return DatabaseTarget(
+        host=host,
+        database=database,
+        user=user,
+        project_ref=expected_ref,
+        ssl_mode=query_items[0][1],
+    )
 
 
 def _database_role(target: DatabaseTarget) -> str:
@@ -143,7 +154,9 @@ def _database_role(target: DatabaseTarget) -> str:
     return role
 
 
-def _cursor_policy_catalog_is_exact(rows: list[Any]) -> bool:
+def _cursor_policy_catalog_is_exact(rows: list[Any], *, rls_enabled: bool) -> bool:
+    if not rls_enabled:
+        return False
     expected = {
         "anon_read": ("SELECT", ("anon",), "true", None),
         "l3_candidate_cursor_select": (
@@ -201,7 +214,8 @@ def _cursor_policy_catalog_is_exact(rows: list[Any]) -> bool:
             "true": exact_true(row["with_check"]),
         }[check_kind]
         if (
-            row["cmd"] != command
+            row["permissive"] != "PERMISSIVE"
+            or row["cmd"] != command
             or isinstance(roles, str)
             or tuple(roles) != expected_roles
             or not using_ok
@@ -382,21 +396,38 @@ async def _create_manifest_from_runtime(
 
 
 _BINDING_SELECT = """
-SELECT event_id, boot_id, event_seq, occurred_at, recorded_at, reason_code,
-       detail->>'manifest_sha256' AS manifest_sha256
+SELECT event_id, boot_id, event_seq, occurred_at, recorded_at, kind, severity,
+       generation, reason_code, detail
 FROM public.l3_runtime_events
-WHERE kind='soak_manifest_bound' AND boot_id=$1
-  AND detail->>'manifest_sha256'=$2
+WHERE event_id=$2
+   OR detail->>'manifest_sha256'=$5
+   OR (boot_id=$1 AND (event_seq=$3 OR reason_code=$4))
 ORDER BY recorded_at, event_id
 """
+
+
+def _manifest_event_id(manifest: SoakManifest) -> UUID:
+    return uuid5(NAMESPACE_URL, f"polyarb:l3-soak-manifest:{manifest.manifest_hash}")
+
+
+def _binding_query_args(manifest: SoakManifest) -> tuple[object, ...]:
+    return (
+        manifest.boot_id,
+        _manifest_event_id(manifest),
+        _manifest_event_seq(manifest),
+        manifest.soak_hash,
+        manifest.manifest_hash,
+    )
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 async def _binding_rows(dsn: str, manifest: SoakManifest) -> list[Any]:
     connection = await asyncpg.connect(dsn=dsn)
     try:
-        return list(
-            await connection.fetch(_BINDING_SELECT, manifest.boot_id, manifest.manifest_hash)
-        )
+        return list(await connection.fetch(_BINDING_SELECT, *_binding_query_args(manifest)))
     finally:
         await connection.close()
 
@@ -405,12 +436,26 @@ def _validate_exact_binding(rows: list[Any], manifest: SoakManifest) -> Any:
     if len(rows) != 1:
         raise OperatorError("manifest requires exactly one database binding")
     row = rows[0]
-    if (
-        row["boot_id"] != manifest.boot_id
-        or row["manifest_sha256"] != manifest.manifest_hash
-        or row["reason_code"] != manifest.soak_hash
-        or row["recorded_at"] >= manifest.t0
-    ):
+    try:
+        detail = row["detail"]
+        if isinstance(detail, str):
+            detail = json.loads(detail, parse_constant=_reject_json_constant)
+        exact = (
+            row["event_id"] == _manifest_event_id(manifest)
+            and row["boot_id"] == manifest.boot_id
+            and row["event_seq"] == _manifest_event_seq(manifest)
+            and row["kind"] == "soak_manifest_bound"
+            and row["severity"] == "info"
+            and row["generation"] is None
+            and row["reason_code"] == manifest.soak_hash
+            and isinstance(detail, dict)
+            and detail == {"manifest_sha256": manifest.manifest_hash}
+            and row["occurred_at"] == row["recorded_at"]
+            and row["recorded_at"] < manifest.t0
+        )
+    except (KeyError, TypeError, ValueError):
+        exact = False
+    if not exact:
         raise OperatorError("manifest database binding is invalid")
     return row
 
@@ -446,9 +491,7 @@ async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> 
             if boot is None:
                 raise OperatorError("manifest boot identity is unavailable")
             _validate_manifest_boot(manifest, boot)
-            existing = list(
-                await connection.fetch(_BINDING_SELECT, manifest.boot_id, manifest.manifest_hash)
-            )
+            existing = list(await connection.fetch(_BINDING_SELECT, *_binding_query_args(manifest)))
             if existing:
                 bound_row = _validate_exact_binding(existing, manifest)
             else:
@@ -476,12 +519,9 @@ async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> 
                            $4,$5::jsonb,bound_at
                     FROM server_clock WHERE bound_at < $6
                     RETURNING event_id, boot_id, event_seq, occurred_at, recorded_at,
-                              reason_code, detail->>'manifest_sha256' AS manifest_sha256
+                              kind, severity, generation, reason_code, detail
                     """,
-                    uuid5(
-                        NAMESPACE_URL,
-                        f"polyarb:l3-soak-manifest:{manifest.manifest_hash}",
-                    ),
+                    _manifest_event_id(manifest),
                     manifest.boot_id,
                     event_seq,
                     manifest.soak_hash,
@@ -730,7 +770,10 @@ SELECT current_database() AS database_name, current_user AS current_user,
        ) AS is_evidence_owner,
        pg_has_role(current_user,'service_role','MEMBER') AS service_member,
        pg_has_role(current_user,'l3_evidence_daemon','MEMBER') AS daemon_member,
-       pg_has_role(current_user,'l3_retention_operator','MEMBER') AS retention_member
+       pg_has_role(current_user,'l3_retention_operator','MEMBER') AS retention_member,
+       COALESCE((
+           SELECT ssl FROM pg_catalog.pg_stat_ssl WHERE pid=pg_catalog.pg_backend_pid()
+       ), false) AS ssl_encrypted
 FROM pg_catalog.pg_roles role
 JOIN pg_catalog.pg_database database ON database.datname=current_database()
 WHERE role.rolname=current_user
@@ -744,35 +787,79 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
         row = await connection.fetchrow(_TARGET_ROLE_SQL)
         if row is None:
             raise OperatorError("database identity proof returned no role")
+        memberships = await connection.fetch(
+            """
+            WITH RECURSIVE inherited_roles(roleid) AS (
+                SELECT membership.roleid
+                FROM pg_catalog.pg_auth_members AS membership
+                JOIN pg_catalog.pg_roles AS member ON member.oid=membership.member
+                WHERE member.rolname=current_user
+                UNION
+                SELECT membership.roleid
+                FROM pg_catalog.pg_auth_members AS membership
+                JOIN inherited_roles ON inherited_roles.roleid=membership.member
+            )
+            SELECT role.rolname AS role_name
+            FROM inherited_roles
+            JOIN pg_catalog.pg_roles AS role ON role.oid=inherited_roles.roleid
+            ORDER BY role.rolname
+            """
+        )
         direct = await connection.fetch(
             """
-            SELECT table_name, privilege_type,
+            SELECT class.relname AS object_name, privilege_type,
                    has_table_privilege(
-                       current_user, 'public.' || table_name, privilege_type
+                       current_user, class.oid, privilege_type
                    ) AS allowed
-            FROM unnest(ARRAY[
-                'l3_runtime_boots','l3_promote_runs','l3_health_samples',
-                'l3_market_samples','l3_runtime_events','markets_latest',
-                'l2_book_levels','l2_top_of_book','l2_ohlc_1m','snapshots',
-                'l2_event_cursor'
-            ]) AS table_name
+            FROM pg_catalog.pg_class AS class
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid=class.relnamespace
             CROSS JOIN unnest(
                 ARRAY[
                     'SELECT','INSERT','UPDATE','DELETE','TRUNCATE',
                     'REFERENCES','TRIGGER'
                 ]
             ) AS privilege_type
-            ORDER BY table_name, privilege_type
+            WHERE namespace.nspname='public'
+              AND class.relkind = ANY(ARRAY['r','p','v','m','f']::"char"[])
+            ORDER BY class.relname, privilege_type
             """
         )
-        sequence_usage = await connection.fetchval(
-            "SELECT has_sequence_privilege(current_user, 'public.l3_promote_runs_id_seq', 'USAGE')"
+        sequences = await connection.fetch(
+            """
+            SELECT class.relname AS object_name, privilege_type,
+                   has_sequence_privilege(
+                       current_user, class.oid, privilege_type
+                   ) AS allowed
+            FROM pg_catalog.pg_class AS class
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid=class.relnamespace
+            CROSS JOIN unnest(ARRAY['USAGE','SELECT','UPDATE']) AS privilege_type
+            WHERE namespace.nspname='public' AND class.relkind='S'
+            ORDER BY class.relname, privilege_type
+            """
         )
-        sequence_select = await connection.fetchval(
-            "SELECT has_sequence_privilege(current_user, 'public.l3_promote_runs_id_seq', 'SELECT')"
-        )
-        sequence_update = await connection.fetchval(
-            "SELECT has_sequence_privilege(current_user, 'public.l3_promote_runs_id_seq', 'UPDATE')"
+        explicit_routine_grants = await connection.fetch(
+            """
+            SELECT (
+                       procedure.oid=pg_catalog.to_regprocedure(
+                           'public.l3_retention_cleanup(timestamptz,timestamptz,timestamptz)'
+                       )
+                   ) AS is_retention_cleanup,
+                   acl.privilege_type
+            FROM pg_catalog.pg_proc AS procedure
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid=procedure.pronamespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(procedure.proacl) AS acl
+            JOIN pg_catalog.pg_roles AS grantee ON grantee.oid=acl.grantee
+            WHERE namespace.nspname='public'
+              AND (
+                  grantee.rolname=current_user
+                  OR grantee.rolname=ANY($1::name[])
+              )
+            ORDER BY procedure.oid, acl.privilege_type
+            """,
+            sorted(item["role_name"] for item in memberships),
         )
         routine = await connection.fetchval(
             "SELECT has_function_privilege(current_user, "
@@ -783,7 +870,7 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
             list(
                 await connection.fetch(
                     """
-                    SELECT policyname, cmd, roles, qual, with_check
+                    SELECT policyname, permissive, cmd, roles, qual, with_check
                     FROM pg_catalog.pg_policies
                     WHERE schemaname='public' AND tablename='l2_event_cursor'
                     ORDER BY policyname
@@ -792,6 +879,22 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
             )
             if capability == "runtime"
             else []
+        )
+        cursor_rls_enabled = (
+            bool(
+                await connection.fetchval(
+                    """
+                    SELECT class.relrowsecurity
+                    FROM pg_catalog.pg_class AS class
+                    JOIN pg_catalog.pg_namespace AS namespace
+                      ON namespace.oid=class.relnamespace
+                    WHERE namespace.nspname='public'
+                      AND class.relname='l2_event_cursor'
+                    """
+                )
+            )
+            if capability == "runtime"
+            else False
         )
     finally:
         await connection.close()
@@ -807,9 +910,17 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
         and not row["is_database_owner"]
         and not row["is_evidence_owner"]
         and not row["service_member"]
+        and row["ssl_encrypted"] is True
     )
+    inherited_roles = {item["role_name"] for item in memberships}
     direct_grants = {
-        (item["table_name"], item["privilege_type"]) for item in direct if item["allowed"]
+        (item["object_name"], item["privilege_type"]) for item in direct if item["allowed"]
+    }
+    sequence_grants = {
+        (item["object_name"], item["privilege_type"]) for item in sequences if item["allowed"]
+    }
+    routine_grants = {
+        (item["is_retention_cleanup"], item["privilege_type"]) for item in explicit_routine_grants
     }
     evidence_grants = {
         (table, privilege) for table in EVIDENCE_TABLES for privilege in ("SELECT", "INSERT")
@@ -826,17 +937,21 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
     }
     cursor_grants = {("l2_event_cursor", privilege) for privilege in ("SELECT", "INSERT", "UPDATE")}
     required_runtime_grants = evidence_grants | read_grants | cursor_grants
+    required_runtime_sequences = {
+        ("l3_promote_runs_id_seq", "USAGE"),
+        ("l3_promote_runs_id_seq", "SELECT"),
+    }
     if capability == "runtime":
         ok = (
             common_ok
             and row["daemon_member"]
             and not row["retention_member"]
+            and inherited_roles == {"l3_evidence_daemon"}
             and not routine
-            and sequence_usage
-            and sequence_select
-            and not sequence_update
+            and not routine_grants
+            and sequence_grants == required_runtime_sequences
             and direct_grants == required_runtime_grants
-            and _cursor_policy_catalog_is_exact(cursor_policies)
+            and _cursor_policy_catalog_is_exact(cursor_policies, rls_enabled=cursor_rls_enabled)
         )
         expected_role = "l3_evidence_daemon"
     else:
@@ -844,10 +959,10 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
             common_ok
             and not row["daemon_member"]
             and row["retention_member"]
+            and inherited_roles == {"l3_retention_operator"}
             and routine
-            and not sequence_usage
-            and not sequence_select
-            and not sequence_update
+            and routine_grants == {(True, "EXECUTE")}
+            and not sequence_grants
             and not direct_grants
         )
         expected_role = "l3_retention_operator"
@@ -863,6 +978,8 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
         "current_user": row["current_user"],
         "server_address": row["server_address"],
         "capability_role": expected_role,
+        "encrypted_session": True,
+        "ssl_mode": target.ssl_mode,
     }
 
 
@@ -881,7 +998,11 @@ async def _prod_revision(
             """
             SELECT current_database() AS database_name, current_user AS current_user,
                    inet_server_addr()::text AS server_address,
-                   (SELECT version_num FROM public.alembic_version) AS revision
+                   (SELECT version_num FROM public.alembic_version) AS revision,
+                   COALESCE((
+                       SELECT ssl FROM pg_catalog.pg_stat_ssl
+                       WHERE pid=pg_catalog.pg_backend_pid()
+                   ), false) AS ssl_encrypted
             """
         )
     finally:
@@ -892,6 +1013,7 @@ async def _prod_revision(
         or row["current_user"] != expected_user
         or row["revision"] != expected_revision
         or not row["server_address"]
+        or row["ssl_encrypted"] is not True
     ):
         raise OperatorError("production target/revision proof is NOT-CLOSED")
     return {
@@ -902,6 +1024,8 @@ async def _prod_revision(
         "current_user": row["current_user"],
         "server_address": row["server_address"],
         "revision": row["revision"],
+        "encrypted_session": True,
+        "ssl_mode": target.ssl_mode,
     }
 
 
