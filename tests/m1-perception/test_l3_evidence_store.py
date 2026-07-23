@@ -100,6 +100,7 @@ def _batch(boot_id: UUID, at: datetime, *, seq: int = 0) -> SampleBatch:
     health = HealthSampleRecord(
         boot_id=boot_id,
         sample_seq=seq,
+        scheduled_at=at,
         sampled_at=at,
         desired_count=10,
         committed_count=10,
@@ -791,8 +792,8 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     postgres_dsns: dict[str, str],
 ) -> None:
     now = datetime.now(UTC)
-    end = now.replace(second=0, microsecond=0)
-    start = end - timedelta(minutes=1)
+    start = now.replace(second=0, microsecond=0)
+    end = now + timedelta(seconds=20)
     boot = _boot(start - timedelta(minutes=2))
     store = L3EvidenceStore(postgres_dsns["daemon"])
 
@@ -803,7 +804,7 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
             _promote(boot.boot_id, start + timedelta(seconds=seq), seq=seq, status=status)
         )
     assert not await store.append_promote_run(_promote(boot.boot_id, start, seq=0))
-    batch = _batch(boot.boot_id, start)
+    batch = _batch(boot.boot_id, now)
     assert await store.append_sample(batch)
     assert not await store.append_sample(batch)
     first_event = _event(boot.boot_id, start)
@@ -832,7 +833,7 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
         "CREATE TRIGGER reject_market_three BEFORE INSERT ON l3_market_samples "
         "FOR EACH ROW EXECUTE FUNCTION reject_market_three()",
     )
-    failed_batch = _batch(boot.boot_id, start + timedelta(seconds=10), seq=9)
+    failed_batch = _batch(boot.boot_id, now + timedelta(seconds=10), seq=9)
     assert not await store.append_sample(failed_batch)
     await _admin_execute(
         postgres_dsns["admin"],
@@ -903,7 +904,7 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
         no_token_id="no-0",
         yes_book_at=end,
         no_book_at=start,
-        yes_ohlc_at=end,
+        yes_ohlc_at=start,
     )
     assert all(
         market.yes_book_at is None
@@ -1033,7 +1034,6 @@ async def test_real_postgres_retention_requires_separate_login_and_protected_fun
             await admin.execute("SET LOCAL polyarb.retention_cleanup = 'on'")
             for table, occurrence in (
                 ("l3_runtime_boots", "started_at"),
-                ("l3_health_samples", "sampled_at"),
                 ("l3_market_samples", "sampled_at"),
                 ("l3_runtime_events", "occurred_at"),
             ):
@@ -1042,6 +1042,12 @@ async def test_real_postgres_retention_requires_separate_login_and_protected_fun
                     now - timedelta(days=40),
                     eligible.boot_id,
                 )
+            await admin.execute(
+                "UPDATE l3_health_samples SET recorded_at=$1, sampled_at=$1, "
+                "scheduled_at=$1 WHERE boot_id=$2",
+                now - timedelta(days=40),
+                eligible.boot_id,
+            )
             await admin.execute(
                 "UPDATE l3_promote_runs SET recorded_at=$1, scheduled_at=$1, "
                 "started_at=$1, finished_at=$1 WHERE boot_id=$2",

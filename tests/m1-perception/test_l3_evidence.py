@@ -304,6 +304,7 @@ def test_public_dataclass_field_contract_is_exact() -> None:
         "HealthSampleRecord": (
             "boot_id",
             "sample_seq",
+            "scheduled_at",
             "sampled_at",
             "desired_count",
             "committed_count",
@@ -443,6 +444,7 @@ def test_append_records_validate_utc_nonnegative_hash_and_reason_boundaries() ->
         boot_id,
         7,
         NOW,
+        NOW,
         10,
         10,
         10,
@@ -534,6 +536,7 @@ def test_sample_batch_requires_five_complete_distinct_market_pairs() -> None:
         boot_id,
         7,
         NOW,
+        NOW,
         10,
         10,
         10,
@@ -568,6 +571,45 @@ def test_sample_batch_requires_five_complete_distinct_market_pairs() -> None:
         )
     with pytest.raises(ValueError, match="share"):
         evidence.SampleBatch(health, (*markets[:4], replace(markets[4], sample_seq=8)))
+
+
+def test_health_sample_keeps_grid_schedule_separate_from_real_collection_time() -> None:
+    evidence = importlib.import_module("polyarb.observation.l3_evidence")
+    boot_id = uuid4()
+    scheduled_at = NOW
+    sampled_at = NOW + timedelta(seconds=5)
+
+    health = evidence.HealthSampleRecord(
+        boot_id=boot_id,
+        sample_seq=7,
+        scheduled_at=scheduled_at,
+        sampled_at=sampled_at,
+        desired_count=10,
+        committed_count=10,
+        evidenced_count=10,
+        promote_age_ms=1,
+        global_book_age_ms=2,
+        ws_age_ms=3,
+        mirror_age_ms=4,
+        candidate_age_ms=5,
+        reconciliation_age_ms=6,
+        listener_state="LISTENING",
+        cursor_lag=0,
+        watchdog_count=1,
+        reconnect_count=2,
+        ws_generation=3,
+        mapping_hash=HASH_A,
+        acceptance_config_hash=HASH_B,
+        status=evidence.HealthStatus.PASS,
+        reason_code="ok",
+    )
+
+    assert health.scheduled_at == scheduled_at
+    assert health.sampled_at == sampled_at
+    with pytest.raises(ValueError, match="scheduled_at"):
+        replace(health, scheduled_at=sampled_at + timedelta(microseconds=1))
+    with pytest.raises(ValueError, match="30-second slot"):
+        replace(health, sampled_at=scheduled_at + timedelta(seconds=30))
 
 
 def test_membership_events_windows_and_retention_are_defensively_immutable() -> None:
@@ -867,6 +909,7 @@ def test_shared_validators_reject_runtime_type_impostors() -> None:
         boot_id,
         7,
         NOW,
+        NOW,
         10,
         10,
         10,
@@ -962,6 +1005,7 @@ def test_every_public_append_record_rejects_uuid_enum_and_bool_impostors() -> No
     health = evidence.HealthSampleRecord(
         boot_id,
         7,
+        NOW,
         NOW,
         10,
         10,

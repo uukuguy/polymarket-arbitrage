@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,6 +25,12 @@ from polyarb.storage.l3_evidence_store import (
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _grid_index(boot_started_at: datetime, at: datetime, interval: timedelta) -> int:
+    if at <= boot_started_at:
+        return 0
+    return (at - boot_started_at) // interval
 
 
 async def _wait_for_stop(stop_event: asyncio.Event, delay_s: float) -> bool:
@@ -161,6 +166,7 @@ def _build_market_record(
 
 def _build_health_record(
     *,
+    scheduled_at: datetime,
     sampled_at: datetime,
     sample_seq: int,
     runtime: EvidenceStatus,
@@ -215,6 +221,7 @@ def _build_health_record(
     return HealthSampleRecord(
         boot_id=runtime.boot_id,
         sample_seq=sample_seq,
+        scheduled_at=scheduled_at,
         sampled_at=sampled_at,
         desired_count=len(runtime.desired),
         committed_count=len(runtime.committed),
@@ -242,7 +249,7 @@ def _build_health_record(
 
 async def collect_sample(
     *,
-    sampled_at: datetime,
+    scheduled_at: datetime,
     sample_seq: int,
     settings: Any,
     ws_consumer: Any,
@@ -251,9 +258,28 @@ async def collect_sample(
     store: L3EvidenceStore,
 ) -> SampleBatch:
     """Collect one immutable membership view and one aggregate DB observation."""
-    runtime_status = runtime.snapshot()
-    token_ids = sorted(runtime_status.desired)
+    initial_status = runtime.snapshot()
+    token_ids = sorted(initial_status.desired)
     market_states = tuple(await store.fetch_sampling_market_state(token_ids))
+    runtime_status = runtime.snapshot()
+    membership_fields = (
+        "boot_id",
+        "acceptance_config_hash",
+        "ws_generation",
+        "desired",
+        "committed",
+        "evidenced",
+        "evidenced_at",
+    )
+    if any(
+        getattr(initial_status, field) != getattr(runtime_status, field)
+        for field in membership_fields
+    ):
+        raise ValueError("membership changed during aggregate fetch")
+    sampled_at = _utc_now()
+    interval_s = settings.l3_evidence_sample_interval_s
+    if not scheduled_at <= sampled_at < scheduled_at + timedelta(seconds=interval_s):
+        raise ValueError("sampling slot expired during aggregate fetch")
     mapped_tokens = _validate_mapping(market_states)
     book_fresh_ms = int(settings.l3_market_book_fresh_s * 1000)
     ohlc_fresh_ms = int(settings.l3_market_ohlc_fresh_s * 1000)
@@ -279,6 +305,7 @@ async def collect_sample(
         ]
     )
     health = _build_health_record(
+        scheduled_at=scheduled_at,
         sampled_at=sampled_at,
         sample_seq=sample_seq,
         runtime=runtime_status,
@@ -293,7 +320,7 @@ async def collect_sample(
 
 async def sample_once(
     *,
-    sampled_at: datetime,
+    scheduled_at: datetime,
     sample_seq: int,
     settings: Any,
     ws_consumer: Any,
@@ -303,7 +330,7 @@ async def sample_once(
 ) -> bool:
     """Append one atomic batch and publish success truth only after its ACK."""
     batch = await collect_sample(
-        sampled_at=sampled_at,
+        scheduled_at=scheduled_at,
         sample_seq=sample_seq,
         settings=settings,
         ws_consumer=ws_consumer,
@@ -320,7 +347,7 @@ async def sample_once(
         channel="sample",
     )
     if persisted:
-        runtime.mark_sample_persisted(sampled_at, batch.markets)
+        runtime.mark_sample_persisted(batch.health.sampled_at, batch.markets)
     return persisted
 
 
@@ -340,19 +367,30 @@ async def run_sampler(
     if interval_s <= 0:
         raise ValueError("l3_evidence_sample_interval_s must be positive")
     boot_started_at = runtime.snapshot().started_at
-    boundary_index = 0
+    interval = timedelta(seconds=interval_s)
+    next_boundary_index = 0
     while not stop_event.is_set():
-        boundary = boot_started_at + timedelta(seconds=boundary_index * interval_s)
+        now = _utc_now()
+        current_boundary_index = _grid_index(boot_started_at, now, interval)
+        boundary_index = max(next_boundary_index, current_boundary_index)
+        boundary = boot_started_at + boundary_index * interval
         delay_s = max(0.0, (boundary - _utc_now()).total_seconds())
         if delay_s > 0 and await _wait_for_stop(stop_event, delay_s):
             break
         if stop_event.is_set():
             break
         sampled_at = _utc_now()
+        sampled_boundary_index = _grid_index(boot_started_at, sampled_at, interval)
+        if sampled_boundary_index > boundary_index:
+            boundary_index = sampled_boundary_index
+            boundary = boot_started_at + boundary_index * interval
+        if not boundary <= sampled_at < boundary + interval:
+            next_boundary_index = boundary_index + 1
+            continue
         sample_seq = runtime.next_sample_seq()
         try:
             await sample_once(
-                sampled_at=sampled_at,
+                scheduled_at=boundary,
                 sample_seq=sample_seq,
                 settings=settings,
                 ws_consumer=ws_consumer,
@@ -374,11 +412,7 @@ async def run_sampler(
                 sample_seq,
                 type(exc).__name__,
             )
-        elapsed_s = max(0.0, (_utc_now() - boot_started_at).total_seconds())
-        boundary_index = max(
-            boundary_index + 1,
-            math.floor(elapsed_s / interval_s) + 1,
-        )
+        next_boundary_index = boundary_index + 1
 
 
 async def run_event_writer(

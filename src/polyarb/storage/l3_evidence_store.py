@@ -104,13 +104,14 @@ INSERT INTO l3_promote_runs (
 
 _HEALTH_INSERT = """
 INSERT INTO l3_health_samples (
-    boot_id, sample_seq, sampled_at, desired_count, committed_count, evidenced_count,
+    boot_id, sample_seq, scheduled_at, sampled_at, desired_count, committed_count,
+    evidenced_count,
     promote_age_ms, global_book_age_ms, ws_age_ms, mirror_age_ms, candidate_age_ms,
     reconciliation_age_ms, listener_state, cursor_lag, watchdog_count,
     reconnect_count, ws_generation, mapping_hash, acceptance_config_hash, status,
     reason_code
 ) VALUES (
-    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
+    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22
 )
 """
 
@@ -402,6 +403,7 @@ def _health_args(record: HealthSampleRecord) -> tuple[object, ...]:
     return (
         record.boot_id,
         record.sample_seq,
+        record.scheduled_at,
         record.sampled_at,
         record.desired_count,
         record.committed_count,
@@ -545,6 +547,7 @@ def _decode_health(row: Mapping[str, Any]) -> HealthSampleRecord:
             for key in (
                 "boot_id",
                 "sample_seq",
+                "scheduled_at",
                 "sampled_at",
                 "desired_count",
                 "committed_count",

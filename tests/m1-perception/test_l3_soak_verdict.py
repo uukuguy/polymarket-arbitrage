@@ -160,11 +160,13 @@ def _golden_window(*, events: tuple[RuntimeEventRecord, ...] = ()) -> EvidenceWi
     markets: list[MarketSampleRecord] = []
     # Sixty seconds is deliberately below the locked 75-second maximum gap.
     for sample_seq in range(360):
-        sampled = T0 + timedelta(seconds=sample_seq * 60)
+        scheduled = T0 + timedelta(seconds=sample_seq * 60)
+        sampled = scheduled + timedelta(seconds=5)
         health.append(
             HealthSampleRecord(
                 boot_id=BOOT_ID,
                 sample_seq=sample_seq,
+                scheduled_at=scheduled,
                 sampled_at=sampled,
                 desired_count=10,
                 committed_count=10,
@@ -220,8 +222,12 @@ def _golden_window(*, events: tuple[RuntimeEventRecord, ...] = ()) -> EvidenceWi
         "l3_promote_runs": tuple(
             _raw(row, recorded_at=recorded, id=index + 1) for index, row in enumerate(promotes)
         ),
-        "l3_health_samples": tuple(_raw(row, recorded_at=recorded) for row in health),
-        "l3_market_samples": tuple(_raw(row, recorded_at=recorded) for row in markets),
+        "l3_health_samples": tuple(
+            _raw(row, recorded_at=row.sampled_at + timedelta(seconds=1)) for row in health
+        ),
+        "l3_market_samples": tuple(
+            _raw(row, recorded_at=row.sampled_at + timedelta(seconds=1)) for row in markets
+        ),
         "l3_runtime_events": tuple(_raw(row, recorded_at=recorded) for row in events),
     }
     return EvidenceWindow(
@@ -289,6 +295,7 @@ def test_golden_exact_checkpoint_passes_and_renders_deterministically(
     assert report.status is VerdictStatus.PASS
     assert report.reasons == ()
     assert report.manifest_hash == manifest.manifest_hash
+    assert report.max_schedule_lag_seconds == 5.0
     assert render_report(report) == render_report(report)
     assert "PASS" in render_report(report)
 
@@ -297,6 +304,46 @@ def test_real_t0_sample_interval_artifact_passes(manifest: SoakManifest) -> None
     window = _t0_window()
     report = build_soak_report(window, manifest, T0, T0 + timedelta(seconds=30), False)
     assert report.status is VerdictStatus.PASS
+
+
+def test_health_schedule_must_remain_on_exact_boot_grid(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    changed = replace(
+        golden.health_samples[3],
+        scheduled_at=golden.health_samples[3].scheduled_at + timedelta(microseconds=1),
+    )
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    raw_health = list(raw["l3_health_samples"])
+    raw_health[3] = _raw(changed, recorded_at=T6)
+    raw["l3_health_samples"] = tuple(raw_health)
+    report = _report(
+        replace(
+            golden,
+            health_samples=golden.health_samples[:3]
+            + (changed,)
+            + golden.health_samples[4:],
+            raw_rows_by_table=raw,
+        ),
+        manifest,
+    )
+    assert "sample_schedule_grid" in _codes(report)
+
+
+@pytest.mark.parametrize("offset_seconds", [-1, 30])
+def test_raw_sample_recording_window_is_fail_closed(
+    golden: EvidenceWindow,
+    manifest: SoakManifest,
+    offset_seconds: int,
+) -> None:
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    health = list(raw["l3_health_samples"])
+    first = dict(health[0])
+    first["recorded_at"] = first["sampled_at"] + timedelta(seconds=offset_seconds)
+    health[0] = first
+    raw["l3_health_samples"] = tuple(health)
+    report = _report(replace(golden, raw_rows_by_table=raw), manifest)
+    assert "sample_recording_window" in _codes(report)
 
 
 def test_report_hashes_and_renders_complete_r06_operator_evidence(
@@ -362,7 +409,11 @@ def test_no_decoded_occurrence_may_precede_boot(
     golden: EvidenceWindow, manifest: SoakManifest
 ) -> None:
     boot = replace(golden.boots[0], started_at=T0 - timedelta(microseconds=500))
-    changed = replace(golden.health_samples[0], sampled_at=T0 - timedelta(milliseconds=1))
+    changed = replace(
+        golden.health_samples[0],
+        scheduled_at=T0 - timedelta(milliseconds=1),
+        sampled_at=T0 - timedelta(milliseconds=1),
+    )
     report = _report(
         replace(golden, boots=(boot,), health_samples=(changed,) + golden.health_samples[1:]),
         manifest,
@@ -967,7 +1018,7 @@ def test_every_occurrence_timestamp_must_be_inside_exact_window(
         )
         window = replace(golden, promote_runs=golden.promote_runs[:-1] + (changed,))
     elif table == "health":
-        changed = replace(golden.health_samples[-1], sampled_at=T6)
+        changed = replace(golden.health_samples[-1], scheduled_at=T6, sampled_at=T6)
         window = replace(golden, health_samples=golden.health_samples[:-1] + (changed,))
     elif table == "market":
         changed = replace(golden.market_samples[-1], sampled_at=T6)

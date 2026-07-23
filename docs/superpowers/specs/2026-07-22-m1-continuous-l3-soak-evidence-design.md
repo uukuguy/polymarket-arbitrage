@@ -252,8 +252,9 @@ Every new executable path has a Makefile entry:
   the configured minimum.
 
 Outputs must include UTC boundaries, boot ID, release/machine anchors, evidence
-row counts, maximum gaps, and explicit `PASS`/`NOT-CLOSED`. Commands are
-read-only except the daemon's normal append-only evidence writer.
+row counts, maximum actual-sample gaps, maximum schedule lag, and explicit
+`PASS`/`NOT-CLOSED`. Commands are read-only except the daemon's normal
+append-only evidence writer.
 
 A canonical local `SoakManifest` is created at a unique path for a future
 eligible T0 after readiness, then append-bound before T0 through one
@@ -264,10 +265,13 @@ set digest. Final verify requires `manifest=<path>` plus `start`/`end`, loads al
 five reports, re-queries their exact raw rows, and validates manifest/soak/
 interval/report hashes.
 
-The sample at exactly manifest T0 must be complete and passing. If it is absent
-or fails, that manifest/binding/report set is permanently NOT-CLOSED and never
-mutated, rebound, or reused; a retry selects a later future T0 and creates a new
-unique manifest. Verdict construction is explicitly
+The health sample whose `scheduled_at` is exactly manifest T0 must be complete
+and passing. `scheduled_at` is the exact `boot.started_at+n*30s` grid slot;
+`sampled_at` is captured after the aggregate fetch, must fall inside that slot,
+and supplies actual gap/freshness and schedule-lag evidence. If the scheduled-T0
+sample is absent or fails, that manifest/binding/report set is permanently
+NOT-CLOSED and never mutated, rebound, or reused; a retry selects a later future
+T0 and creates a new unique manifest. Verdict construction is explicitly
 `build_soak_report(evidence, manifest, start, end, require_24h)`.
 
 The four required status/checkpoint/verify/retention-check targets remain

@@ -102,6 +102,21 @@ def _manifest(tmp_path: Path, *, t0: datetime = T0) -> SoakManifest:
     )
 
 
+def _manifest_boot_row(manifest: SoakManifest) -> dict[str, object]:
+    return {
+        "boot_id": manifest.boot_id,
+        "started_at": manifest.t0 - timedelta(seconds=60),
+        "stopped_at": None,
+        "machine_id": manifest.machine_id,
+        "machine_version": manifest.machine_version,
+        "image_ref": manifest.image_ref,
+        "release_id": manifest.release_id,
+        "code_version": manifest.code_version,
+        "acceptance_config_hash": manifest.acceptance_config_hash,
+        "mapping_hash": manifest.mapping_hash,
+    }
+
+
 def _report(manifest: SoakManifest) -> L3SoakReport:
     return L3SoakReport(
         manifest_hash=manifest.manifest_hash,
@@ -133,6 +148,7 @@ def _report(manifest: SoakManifest) -> L3SoakReport:
         expected_promoter_ticks=1,
         recorded_promoter_ticks=1,
         max_sample_gap_seconds=30.0,
+        max_schedule_lag_seconds=0.0,
         max_promoter_start_gap_seconds=0.0,
         minimum_cardinality={
             "selected_markets": 5,
@@ -191,6 +207,33 @@ def test_manifest_create_is_future_only_and_exclusive(tmp_path: Path) -> None:
             _manifest(tmp_path / "old", t0=T0 - timedelta(days=1)),
             output=tmp_path / "past.json",
             now=T0,
+        )
+
+
+def test_manifest_t0_must_be_an_eligible_grid_slot_with_binding_lead() -> None:
+    from scripts import l3_evidence
+
+    assert (
+        l3_evidence._require_eligible_sampler_t0(
+            t0=T0,
+            boot_started_at=T0 - timedelta(seconds=60),
+            sample_interval_s=30,
+        )
+        == 2
+    )
+    with pytest.raises(l3_evidence.OperatorError, match="sampler boundary"):
+        l3_evidence._require_eligible_sampler_t0(
+            t0=T0,
+            boot_started_at=T0 - timedelta(seconds=60, microseconds=1),
+            sample_interval_s=30,
+        )
+    with pytest.raises(l3_evidence.OperatorError, match="binding lead"):
+        l3_evidence._require_eligible_sampler_t0(
+            t0=T0,
+            boot_started_at=T0 - timedelta(seconds=60),
+            sample_interval_s=30,
+            now=T0 - timedelta(seconds=59),
+            minimum_lead_intervals=2,
         )
 
 
@@ -328,7 +371,7 @@ class _BindingConnection:
 
     async def fetchrow(self, sql: str, *args: object) -> dict[str, object]:
         if "l3_runtime_boots" in sql:
-            return {"boot_id": self.manifest.boot_id}
+            return _manifest_boot_row(self.manifest)
         if "SELECT event_id FROM public.l3_runtime_events" in sql:
             return None  # type: ignore[return-value]
         assert "INSERT INTO public.l3_runtime_events" in sql
@@ -410,7 +453,7 @@ async def test_concurrent_manifest_bind_serializes_to_exactly_one_row(
 
         async def fetchrow(self, sql: str, *args: object) -> object:
             if "l3_runtime_boots" in sql:
-                return {"boot_id": manifest.boot_id}
+                return _manifest_boot_row(manifest)
             if "SELECT event_id FROM public.l3_runtime_events" in sql:
                 return None
             if "INSERT INTO public.l3_runtime_events" in sql:
@@ -475,7 +518,7 @@ async def test_manifest_bind_lost_ack_retry_returns_existing_exact_binding(
 
         async def fetchrow(self, sql: str, *_args: object) -> object:
             if "l3_runtime_boots" in sql:
-                return {"boot_id": manifest.boot_id}
+                return _manifest_boot_row(manifest)
             raise AssertionError("lost-ACK retry must not insert another binding")
 
         async def close(self) -> None:
@@ -514,7 +557,7 @@ async def test_manifest_bind_database_clock_crossing_t0_commits_no_late_row(
 
         async def fetchrow(self, sql: str, *_args: object) -> object:
             if "l3_runtime_boots" in sql:
-                return {"boot_id": manifest.boot_id}
+                return _manifest_boot_row(manifest)
             if "SELECT event_id FROM public.l3_runtime_events" in sql:
                 return None
             if "INSERT INTO public.l3_runtime_events" in sql:
@@ -618,10 +661,16 @@ def test_exact_t0_sample_requires_one_pass_and_five_distinct_pairs(tmp_path: Pat
     from scripts import l3_evidence
 
     manifest = _manifest(tmp_path)
-    health = SimpleNamespace(sampled_at=manifest.t0, sample_seq=3, status=HealthStatus.PASS)
+    actual = manifest.t0 + timedelta(seconds=5)
+    health = SimpleNamespace(
+        scheduled_at=manifest.t0,
+        sampled_at=actual,
+        sample_seq=3,
+        status=HealthStatus.PASS,
+    )
     markets = tuple(
         SimpleNamespace(
-            sampled_at=manifest.t0,
+            sampled_at=actual,
             sample_seq=3,
             status=HealthStatus.PASS,
             market_id=f"m{i}",
@@ -632,6 +681,21 @@ def test_exact_t0_sample_requires_one_pass_and_five_distinct_pairs(tmp_path: Pat
     )
     evidence = SimpleNamespace(health_samples=(health,), market_samples=markets)
     l3_evidence._require_exact_t0_sample(evidence, manifest)
+    with pytest.raises(l3_evidence.OperatorError, match="exact scheduled T0"):
+        l3_evidence._require_exact_t0_sample(
+            SimpleNamespace(
+                health_samples=(
+                    SimpleNamespace(
+                        scheduled_at=manifest.t0 + timedelta(seconds=30),
+                        sampled_at=manifest.t0,
+                        sample_seq=3,
+                        status=HealthStatus.PASS,
+                    ),
+                ),
+                market_samples=markets,
+            ),
+            manifest,
+        )
     with pytest.raises(l3_evidence.OperatorError, match="incomplete"):
         l3_evidence._require_exact_t0_sample(
             SimpleNamespace(health_samples=(health,), market_samples=markets[:-1]), manifest

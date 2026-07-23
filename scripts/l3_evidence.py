@@ -261,6 +261,61 @@ def _manifest_reports(
     )
 
 
+def _require_eligible_sampler_t0(
+    *,
+    t0: datetime,
+    boot_started_at: datetime,
+    sample_interval_s: int,
+    now: datetime | None = None,
+    minimum_lead_intervals: int = 0,
+) -> int:
+    interval = timedelta(seconds=sample_interval_s)
+    delta = t0 - boot_started_at
+    if delta < timedelta(0):
+        raise OperatorError("manifest T0 precedes the runtime boot")
+    slot, remainder = divmod(delta, interval)
+    if remainder != timedelta(0):
+        raise OperatorError("manifest T0 is not an eligible boot-grid sampler boundary")
+    if now is not None and t0 - now < minimum_lead_intervals * interval:
+        raise OperatorError("manifest T0 does not leave the required binding lead")
+    return slot
+
+
+def _validate_manifest_boot(manifest: SoakManifest, row: Any) -> None:
+    try:
+        boot_identity = (
+            row["boot_id"],
+            row["machine_id"],
+            row["machine_version"],
+            row["image_ref"],
+            row["release_id"],
+            row["code_version"],
+            row["acceptance_config_hash"],
+            row["mapping_hash"],
+        )
+        stopped_at = row["stopped_at"]
+        boot_started_at = row["started_at"]
+    except (KeyError, TypeError) as error:
+        raise OperatorError("manifest boot identity is incomplete") from error
+    manifest_identity = (
+        manifest.boot_id,
+        manifest.machine_id,
+        manifest.machine_version,
+        manifest.image_ref,
+        manifest.release_id,
+        manifest.code_version,
+        manifest.acceptance_config_hash,
+        manifest.mapping_hash,
+    )
+    if stopped_at is not None or boot_identity != manifest_identity:
+        raise OperatorError("manifest boot identity is not active or exact")
+    _require_eligible_sampler_t0(
+        t0=manifest.t0,
+        boot_started_at=boot_started_at,
+        sample_interval_s=manifest.acceptance_config.sample_interval_s,
+    )
+
+
 async def _create_manifest_from_runtime(
     *, dsn: str, start: datetime, end: datetime, output: Path
 ) -> SoakManifest:
@@ -271,13 +326,14 @@ async def _create_manifest_from_runtime(
     try:
         row = await connection.fetchrow(
             """
-            SELECT boot.*, promote.mapping_hash
+            SELECT boot.*, promote.mapping_hash, clock_timestamp() AS database_now
             FROM public.l3_runtime_boots AS boot
             JOIN LATERAL (
                 SELECT mapping_hash FROM public.l3_promote_runs
                 WHERE boot_id=boot.boot_id AND status='success'
                 ORDER BY scheduled_at DESC, run_seq DESC LIMIT 1
             ) AS promote ON TRUE
+            WHERE boot.stopped_at IS NULL
             ORDER BY boot.started_at DESC LIMIT 1
             """
         )
@@ -295,6 +351,13 @@ async def _create_manifest_from_runtime(
     )
     if config.digest() != row["acceptance_config_hash"]:
         raise OperatorError("runtime acceptance config does not match local configuration")
+    _require_eligible_sampler_t0(
+        t0=start,
+        boot_started_at=row["started_at"],
+        sample_interval_s=config.sample_interval_s,
+        now=row["database_now"],
+        minimum_lead_intervals=2,
+    )
     image_ref = row["image_ref"]
     marker = "@sha256:"
     if marker not in image_ref:
@@ -370,11 +433,19 @@ async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> 
     try:
         async with connection.transaction():
             boot = await connection.fetchrow(
-                "SELECT boot_id FROM public.l3_runtime_boots WHERE boot_id=$1 FOR UPDATE",
+                """
+                SELECT boot.*,
+                       (SELECT mapping_hash FROM public.l3_promote_runs
+                        WHERE boot_id=boot.boot_id AND status='success'
+                        ORDER BY scheduled_at DESC, run_seq DESC LIMIT 1) AS mapping_hash
+                FROM public.l3_runtime_boots AS boot
+                WHERE boot_id=$1 FOR UPDATE
+                """,
                 manifest.boot_id,
             )
             if boot is None:
                 raise OperatorError("manifest boot identity is unavailable")
+            _validate_manifest_boot(manifest, boot)
             existing = list(
                 await connection.fetch(_BINDING_SELECT, manifest.boot_id, manifest.manifest_hash)
             )
@@ -433,13 +504,14 @@ def _checkpoint_spec(manifest: SoakManifest, start: datetime, end: datetime) -> 
 
 
 def _require_exact_t0_sample(evidence: Any, manifest: SoakManifest) -> None:
-    health = [row for row in evidence.health_samples if row.sampled_at == manifest.t0]
+    health = [row for row in evidence.health_samples if row.scheduled_at == manifest.t0]
     if len(health) != 1 or health[0].status is not HealthStatus.PASS:
-        raise OperatorError("manifest has no complete passing sample at exact T0")
+        raise OperatorError("manifest has no complete passing sample at exact scheduled T0")
     markets = [
         row
         for row in evidence.market_samples
-        if row.sampled_at == manifest.t0 and row.sample_seq == health[0].sample_seq
+        if row.sample_seq == health[0].sample_seq
+        and row.sampled_at == health[0].sampled_at
     ]
     if (
         len(markets) != 5
@@ -904,7 +976,7 @@ async def _run(args: argparse.Namespace) -> int:
             end=end,
             output=args.output,
         )
-        write_new_manifest(manifest, output=args.output, now=now)
+        write_new_manifest(manifest, output=args.output, now=datetime.now(UTC))
         _print_json(
             {
                 "status": "PASS",

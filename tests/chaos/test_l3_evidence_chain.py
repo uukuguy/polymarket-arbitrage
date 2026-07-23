@@ -815,7 +815,9 @@ def test_shutdown_signal_is_enqueued_before_stop_for_both_signals():
         assert events[0].detail == {"signal": sig.name}
 
 
-async def test_sampler_writer_failure_ages_health_to_503():
+async def test_sampler_writer_failure_ages_health_to_503(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """append false -> anchor unchanged -> strict public sample-age failure."""
     now = datetime.now(UTC)
     old_sample_at = now - timedelta(seconds=76)
@@ -824,6 +826,8 @@ async def test_sampler_writer_failure_ages_health_to_503():
     _publish_membership(runtime, old_states, at=old_sample_at)
     runtime.mark_promote_persisted(now - timedelta(seconds=10))
     old_store = _SampleStore(old_states)
+    sample_times = iter((old_sample_at, old_sample_at, now, now))
+    monkeypatch.setattr(l3_sampler, "_utc_now", lambda: next(sample_times))
     common = dict(
         settings=_sampler_settings(),
         ws_consumer=SimpleNamespace(last_event_at_s=now.timestamp()),
@@ -831,7 +835,7 @@ async def test_sampler_writer_failure_ages_health_to_503():
         runtime=runtime,
     )
     assert await l3_sampler.sample_once(
-        sampled_at=old_sample_at,
+        scheduled_at=old_sample_at,
         sample_seq=0,
         store=old_store,
         **common,
@@ -840,7 +844,7 @@ async def test_sampler_writer_failure_ages_health_to_503():
     fresh_states = _market_states(now)
     failed_store = _SampleStore(fresh_states, append_results=[False])
     assert not await l3_sampler.sample_once(
-        sampled_at=now,
+        scheduled_at=now,
         sample_seq=1,
         store=failed_store,
         **common,
@@ -971,7 +975,7 @@ async def test_ws_control_false_surfaces_membership_503():
         )
     store = _SampleStore(states)
     assert await l3_sampler.sample_once(
-        sampled_at=now,
+        scheduled_at=now,
         sample_seq=0,
         settings=_sampler_settings(),
         ws_consumer=consumer,
@@ -1006,7 +1010,7 @@ async def test_one_hot_four_silent_surfaces_worst_market_503():
     store = _SampleStore(states)
 
     assert await l3_sampler.sample_once(
-        sampled_at=now,
+        scheduled_at=now,
         sample_seq=0,
         settings=_sampler_settings(),
         ws_consumer=SimpleNamespace(last_event_at_s=now.timestamp()),
@@ -1062,7 +1066,7 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
             observed_at=book_at_v1[token],
         )
     assert await l3_sampler.sample_once(
-        sampled_at=base,
+        scheduled_at=base,
         sample_seq=0,
         settings=_sampler_settings(),
         ws_consumer=consumer,
@@ -1119,7 +1123,7 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
     assert before_strict.json()["checks"]["l3:membership_convergence"][0]["status"] == "fail"
 
     assert await l3_sampler.sample_once(
-        sampled_at=sampled_v2_at,
+        scheduled_at=sampled_v2_at,
         sample_seq=1,
         settings=_sampler_settings(),
         ws_consumer=consumer,

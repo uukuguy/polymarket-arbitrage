@@ -440,6 +440,7 @@ class L3SoakReport:
     expected_promoter_ticks: int
     recorded_promoter_ticks: int
     max_sample_gap_seconds: float | None
+    max_schedule_lag_seconds: float | None
     max_promoter_start_gap_seconds: float | None
     minimum_cardinality: Mapping[str, int | None]
     maximum_freshness_ms: Mapping[str, int | None]
@@ -511,6 +512,7 @@ class L3SoakReport:
             "expected_promoter_ticks": self.expected_promoter_ticks,
             "recorded_promoter_ticks": self.recorded_promoter_ticks,
             "max_sample_gap_seconds": self.max_sample_gap_seconds,
+            "max_schedule_lag_seconds": self.max_schedule_lag_seconds,
             "max_promoter_start_gap_seconds": self.max_promoter_start_gap_seconds,
             "minimum_cardinality": self.minimum_cardinality,
             "maximum_freshness_ms": self.maximum_freshness_ms,
@@ -572,6 +574,7 @@ def parse_report_bytes(data: bytes) -> L3SoakReport:
             expected_promoter_ticks=payload["expected_promoter_ticks"],  # type: ignore[arg-type]
             recorded_promoter_ticks=payload["recorded_promoter_ticks"],  # type: ignore[arg-type]
             max_sample_gap_seconds=payload["max_sample_gap_seconds"],  # type: ignore[arg-type]
+            max_schedule_lag_seconds=payload["max_schedule_lag_seconds"],  # type: ignore[arg-type]
             max_promoter_start_gap_seconds=payload["max_promoter_start_gap_seconds"],  # type: ignore[arg-type]
             minimum_cardinality=payload["minimum_cardinality"],  # type: ignore[arg-type]
             maximum_freshness_ms=payload["maximum_freshness_ms"],  # type: ignore[arg-type]
@@ -649,6 +652,7 @@ _TABLE_COLUMNS: Mapping[str, frozenset[str]] = MappingProxyType(
             {
                 "boot_id",
                 "sample_seq",
+                "scheduled_at",
                 "sampled_at",
                 "desired_count",
                 "committed_count",
@@ -719,7 +723,10 @@ _TABLE_UNIQUE_KEYS: Mapping[str, tuple[tuple[str, ...], ...]] = MappingProxyType
     {
         "l3_runtime_boots": (("boot_id",),),
         "l3_promote_runs": (("id",), ("boot_id", "run_seq")),
-        "l3_health_samples": (("boot_id", "sample_seq"),),
+        "l3_health_samples": (
+            ("boot_id", "sample_seq"),
+            ("boot_id", "scheduled_at"),
+        ),
         "l3_market_samples": (
             ("boot_id", "sample_seq", "market_id"),
             ("boot_id", "sample_seq", "yes_token_id"),
@@ -772,6 +779,22 @@ def _raw_row_set(
                 VerdictReason(
                     "raw_duplicate_key",
                     f"{table} contains a duplicate physical or logical key",
+                )
+            )
+        if table in {"l3_health_samples", "l3_market_samples"} and any(
+            not isinstance(row.get("sampled_at"), datetime)
+            or not isinstance(row.get("recorded_at"), datetime)
+            or not (
+                row["sampled_at"]
+                <= row["recorded_at"]
+                < row["sampled_at"] + timedelta(seconds=30)
+            )
+            for row in rows
+        ):
+            reasons.append(
+                VerdictReason(
+                    "sample_recording_window",
+                    f"{table} server recorded_at must follow sampled_at by less than 30s",
                 )
             )
 
@@ -1005,7 +1028,10 @@ def build_soak_report(
     decoded_unique_specs = (
         (evidence.boots, (("boot_id",),)),
         (evidence.promote_runs, (("boot_id", "run_seq"),)),
-        (evidence.health_samples, (("boot_id", "sample_seq"),)),
+        (
+            evidence.health_samples,
+            (("boot_id", "sample_seq"), ("boot_id", "scheduled_at")),
+        ),
         (
             evidence.market_samples,
             (
@@ -1031,6 +1057,7 @@ def build_soak_report(
         )
     if (
         any(not start <= row.scheduled_at < end for row in evidence.promote_runs)
+        or any(not start <= row.scheduled_at < end for row in evidence.health_samples)
         or any(not start <= row.sampled_at < end for row in evidence.health_samples)
         or any(not start <= row.sampled_at < end for row in evidence.market_samples)
         or any(not start <= row.occurred_at < end for row in evidence.runtime_events)
@@ -1045,6 +1072,7 @@ def build_soak_report(
             min(row.scheduled_at, row.started_at, row.finished_at) < boot.started_at
             for row in evidence.promote_runs
         )
+        or any(row.scheduled_at < boot.started_at for row in evidence.health_samples)
         or any(row.sampled_at < boot.started_at for row in evidence.health_samples)
         or any(row.sampled_at < boot.started_at for row in evidence.market_samples)
         or any(row.occurred_at < boot.started_at for row in evidence.runtime_events)
@@ -1116,9 +1144,44 @@ def build_soak_report(
         )
 
     samples = tuple(
-        sorted(evidence.health_samples, key=lambda row: (row.sampled_at, row.sample_seq))
+        sorted(evidence.health_samples, key=lambda row: (row.scheduled_at, row.sample_seq))
     )
+    schedule_times = [row.scheduled_at for row in samples]
     sample_times = [row.sampled_at for row in samples]
+    schedule_lags = [
+        (row.sampled_at - row.scheduled_at).total_seconds() for row in samples
+    ]
+    max_schedule_lag = max(schedule_lags, default=None)
+    if boot is not None:
+        interval = timedelta(seconds=config.sample_interval_s)
+        schedule_invalid = False
+        for row in samples:
+            delta = row.scheduled_at - boot.started_at
+            if delta < timedelta(0):
+                schedule_invalid = True
+                break
+            _slot, remainder = divmod(delta, interval)
+            if (
+                remainder != timedelta(0)
+                or not row.scheduled_at <= row.sampled_at < row.scheduled_at + interval
+            ):
+                schedule_invalid = True
+                break
+        if (
+            schedule_invalid
+            or not schedule_times
+            or schedule_times[0] != start
+            or len(set(schedule_times)) != len(schedule_times)
+            or any(
+                later <= earlier
+                for earlier, later in zip(schedule_times, schedule_times[1:])
+            )
+        ):
+            _add(
+                reasons,
+                "sample_schedule_grid",
+                "health schedule must be unique, increasing, boot-grid aligned, and start at T0",
+            )
     boundary_times = [start, *sample_times, end]
     sample_gaps = [
         (later - earlier).total_seconds()
@@ -1126,9 +1189,7 @@ def build_soak_report(
     ]
     max_sample_gap = max(sample_gaps, default=None)
     if (
-        not samples
-        or sample_times[0] != start
-        or any(gap < 0 or gap > config.max_sample_gap_s for gap in sample_gaps)
+        not samples or any(gap < 0 or gap > config.max_sample_gap_s for gap in sample_gaps)
     ):
         _add(reasons, "sample_gap", "health sample boundary/consecutive gap exceeds 75s")
     if samples and any(
@@ -1350,6 +1411,7 @@ def build_soak_report(
         expected_promoter_ticks=len(expected_schedule),
         recorded_promoter_ticks=len(promotes),
         max_sample_gap_seconds=max_sample_gap,
+        max_schedule_lag_seconds=max_schedule_lag,
         max_promoter_start_gap_seconds=max_promoter_start_gap,
         minimum_cardinality=minimum_cardinality,
         maximum_freshness_ms=maximum_freshness_ms,
@@ -1397,6 +1459,7 @@ def render_report(report: L3SoakReport) -> str:
         "",
         f"- Promoter ticks: {report.recorded_promoter_ticks}/{report.expected_promoter_ticks}",
         f"- Maximum sample gap: {report.max_sample_gap_seconds}",
+        f"- Maximum schedule lag: {report.max_schedule_lag_seconds}",
         f"- Maximum promoter start gap: {report.max_promoter_start_gap_seconds}",
         f"- Minimum cardinality: `{compact(report.minimum_cardinality)}`",
         f"- Maximum freshness: `{compact(report.maximum_freshness_ms)}`",

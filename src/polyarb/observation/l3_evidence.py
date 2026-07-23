@@ -9,7 +9,7 @@ import os
 from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, fields
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -595,6 +595,7 @@ class PromoteRunResult(Mapping[str, object]):
 class HealthSampleRecord:
     boot_id: UUID
     sample_seq: int
+    scheduled_at: datetime
     sampled_at: datetime
     desired_count: int
     committed_count: int
@@ -618,7 +619,12 @@ class HealthSampleRecord:
     def __post_init__(self) -> None:
         _require_uuid("boot_id", self.boot_id)
         _require_enum("status", self.status, HealthStatus)
+        _require_utc("scheduled_at", self.scheduled_at)
         _require_utc("sampled_at", self.sampled_at)
+        if self.scheduled_at > self.sampled_at:
+            raise ValueError("scheduled_at must not follow sampled_at")
+        if self.sampled_at >= self.scheduled_at + timedelta(seconds=30):
+            raise ValueError("sampled_at must remain inside the scheduled_at 30-second slot")
         for name in (
             "sample_seq",
             "desired_count",

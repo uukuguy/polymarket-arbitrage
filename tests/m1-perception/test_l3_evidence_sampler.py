@@ -24,6 +24,11 @@ HASH = "a" * 64
 START = datetime(2026, 7, 23, 5, 0, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _fixed_sampler_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(l3_sampler, "_utc_now", lambda: START)
+
+
 def _settings() -> SimpleNamespace:
     return SimpleNamespace(
         l3_evidence_sample_interval_s=30,
@@ -142,7 +147,7 @@ async def test_collect_sample_uses_one_runtime_snapshot_and_builds_atomic_five_p
     store = SimpleNamespace(fetch_sampling_market_state=AsyncMock(return_value=pairs))
 
     batch = await l3_sampler.collect_sample(
-        sampled_at=START,
+        scheduled_at=START,
         sample_seq=7,
         settings=_settings(),
         ws_consumer=_ConsumerWithoutMembershipReads(),
@@ -151,7 +156,7 @@ async def test_collect_sample_uses_one_runtime_snapshot_and_builds_atomic_five_p
         store=store,
     )
 
-    assert counting_runtime.snapshot_calls == 1
+    assert counting_runtime.snapshot_calls == 2
     store.fetch_sampling_market_state.assert_awaited_once_with(sorted(_tokens(pairs)))
     assert batch.health.boot_id == runtime.snapshot().boot_id
     assert batch.health.sample_seq == 7
@@ -177,7 +182,7 @@ async def test_collect_sample_rejects_zero_or_fewer_than_five_complete_pairs(cou
 
     with pytest.raises(ValueError, match="exactly five complete market pairs"):
         await l3_sampler.collect_sample(
-            sampled_at=START,
+            scheduled_at=START,
             sample_seq=0,
             settings=_settings(),
             ws_consumer=_ConsumerWithoutMembershipReads(),
@@ -194,7 +199,7 @@ async def test_one_hot_market_does_not_make_four_silent_markets_fresh():
     store = SimpleNamespace(fetch_sampling_market_state=AsyncMock(return_value=pairs))
 
     batch = await l3_sampler.collect_sample(
-        sampled_at=START,
+        scheduled_at=START,
         sample_seq=0,
         settings=_settings(),
         ws_consumer=_ConsumerWithoutMembershipReads(),
@@ -255,7 +260,7 @@ async def test_market_status_fails_closed_on_freshness_and_membership_faults(
     store = SimpleNamespace(fetch_sampling_market_state=AsyncMock(return_value=frozen_pairs))
 
     batch = await l3_sampler.collect_sample(
-        sampled_at=START,
+        scheduled_at=START,
         sample_seq=0,
         settings=_settings(),
         ws_consumer=_ConsumerWithoutMembershipReads(),
@@ -291,7 +296,7 @@ async def test_market_status_requires_fresh_books_from_current_generation_eviden
     store = SimpleNamespace(fetch_sampling_market_state=AsyncMock(return_value=frozen_pairs))
 
     batch = await l3_sampler.collect_sample(
-        sampled_at=START,
+        scheduled_at=START,
         sample_seq=0,
         settings=_settings(),
         ws_consumer=_ConsumerWithoutMembershipReads(),
@@ -306,7 +311,9 @@ async def test_market_status_requires_fresh_books_from_current_generation_eviden
     assert batch.health.status is HealthStatus.FAIL
 
 
-async def test_sample_once_advances_runtime_only_after_true_append():
+async def test_sample_once_advances_runtime_only_after_true_append(
+    monkeypatch: pytest.MonkeyPatch,
+):
     pairs = _pairs()
     runtime = _runtime()
     _publish_current_membership(runtime, pairs)
@@ -322,8 +329,10 @@ async def test_sample_once_advances_runtime_only_after_true_append():
         store=store,
     )
 
+    clock = {"now": START}
+    monkeypatch.setattr(l3_sampler, "_utc_now", lambda: clock["now"])
     assert not await l3_sampler.sample_once(
-        sampled_at=START,
+        scheduled_at=START,
         sample_seq=0,
         **kwargs,
     )
@@ -332,8 +341,9 @@ async def test_sample_once_advances_runtime_only_after_true_append():
     assert failed.writer_ok is False
 
     persisted_at = START + timedelta(seconds=30)
+    clock["now"] = persisted_at
     assert await l3_sampler.sample_once(
-        sampled_at=persisted_at,
+        scheduled_at=persisted_at,
         sample_seq=1,
         **kwargs,
     )
@@ -357,7 +367,7 @@ async def test_sample_once_propagates_cancellation_without_advancing_anchor():
 
     with pytest.raises(asyncio.CancelledError):
         await l3_sampler.sample_once(
-            sampled_at=START,
+            scheduled_at=START,
             sample_seq=0,
             settings=_settings(),
             ws_consumer=_ConsumerWithoutMembershipReads(),
@@ -374,11 +384,13 @@ async def test_run_sampler_emits_real_76_second_gap_and_skips_missed_boundaries(
 ):
     runtime = _runtime()
     clock = {"now": START}
-    calls: list[tuple[int, datetime]] = []
+    calls: list[tuple[int, datetime, datetime]] = []
     stop_event = asyncio.Event()
 
     async def _sample_once(**kwargs):
-        calls.append((kwargs["sample_seq"], kwargs["sampled_at"]))
+        calls.append(
+            (kwargs["sample_seq"], kwargs["scheduled_at"], l3_sampler._utc_now())
+        )
         if len(calls) == 2:
             stop_event.set()
         return True
@@ -401,10 +413,70 @@ async def test_run_sampler_emits_real_76_second_gap_and_skips_missed_boundaries(
         store=SimpleNamespace(),
     )
 
-    assert calls == [(0, START), (1, START + timedelta(seconds=76))]
+    assert calls == [
+        (0, START, START),
+        (1, START + timedelta(seconds=60), START + timedelta(seconds=76)),
+    ]
 
 
-async def test_writer_gap_and_restart_keep_sequences_and_boot_ids_queryable():
+async def test_collect_sample_captures_actual_time_after_aggregate_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pairs = _pairs(START + timedelta(seconds=5))
+    runtime = _runtime()
+    _publish_current_membership(runtime, pairs)
+    clock = {"now": START}
+
+    async def _fetch(_token_ids):
+        clock["now"] = START + timedelta(seconds=5)
+        return pairs
+
+    monkeypatch.setattr(l3_sampler, "_utc_now", lambda: clock["now"])
+    batch = await l3_sampler.collect_sample(
+        scheduled_at=START,
+        sample_seq=0,
+        settings=_settings(),
+        ws_consumer=_ConsumerWithoutMembershipReads(),
+        reconciliation_state=_reconciliation(),
+        runtime=runtime,
+        store=SimpleNamespace(fetch_sampling_market_state=_fetch),
+    )
+
+    assert batch.health.scheduled_at == START
+    assert batch.health.sampled_at == START + timedelta(seconds=5)
+    assert all(row.sampled_at == batch.health.sampled_at for row in batch.markets)
+
+
+async def test_collect_sample_discards_slot_when_membership_changes_during_fetch():
+    pairs = _pairs()
+    runtime = _runtime()
+    _publish_current_membership(runtime, pairs, generation=4)
+
+    async def _fetch(_token_ids):
+        runtime.update_membership(
+            WsMembershipSnapshot(
+                generation=5,
+                desired=_tokens(pairs),
+                committed=_tokens(pairs),
+            )
+        )
+        return pairs
+
+    with pytest.raises(ValueError, match="membership changed during aggregate fetch"):
+        await l3_sampler.collect_sample(
+            scheduled_at=START,
+            sample_seq=0,
+            settings=_settings(),
+            ws_consumer=_ConsumerWithoutMembershipReads(),
+            reconciliation_state=_reconciliation(),
+            runtime=runtime,
+            store=SimpleNamespace(fetch_sampling_market_state=_fetch),
+        )
+
+
+async def test_writer_gap_and_restart_keep_sequences_and_boot_ids_queryable(
+    monkeypatch: pytest.MonkeyPatch,
+):
     pairs = _pairs()
     store = SimpleNamespace(
         fetch_sampling_market_state=AsyncMock(return_value=pairs),
@@ -419,9 +491,12 @@ async def test_writer_gap_and_restart_keep_sequences_and_boot_ids_queryable():
         store=store,
     )
 
-    for seq, offset in ((0, 0), (1, 30), (2, 76)):
+    clock = {"now": START}
+    monkeypatch.setattr(l3_sampler, "_utc_now", lambda: clock["now"])
+    for seq, scheduled_offset, actual_offset in ((0, 0, 0), (1, 30, 30), (2, 60, 76)):
+        clock["now"] = START + timedelta(seconds=actual_offset)
         await l3_sampler.sample_once(
-            sampled_at=START + timedelta(seconds=offset),
+            scheduled_at=START + timedelta(seconds=scheduled_offset),
             sample_seq=seq,
             runtime=runtime_one,
             **kwargs,
@@ -429,8 +504,9 @@ async def test_writer_gap_and_restart_keep_sequences_and_boot_ids_queryable():
 
     runtime_two = _runtime(started_at=START + timedelta(seconds=100))
     _publish_current_membership(runtime_two, pairs)
+    clock["now"] = START + timedelta(seconds=100)
     await l3_sampler.sample_once(
-        sampled_at=START + timedelta(seconds=100),
+        scheduled_at=START + timedelta(seconds=100),
         sample_seq=0,
         runtime=runtime_two,
         **kwargs,

@@ -47,6 +47,13 @@ def _occurrence_window(column: str, *, nullable: bool = False) -> str:
     return f"({column} IS NULL OR ({window}))" if nullable else window
 
 
+def _fresh_sample_window(column: str) -> str:
+    return (
+        f"{column} <= recorded_at "
+        f"AND recorded_at < {column} + interval '30 seconds'"
+    )
+
+
 def _create_append_only_trigger(table: str) -> None:
     op.execute(
         f"CREATE TRIGGER trg_l3_evidence_append_only "
@@ -170,6 +177,7 @@ def upgrade() -> None:
         "l3_health_samples",
         sa.Column("boot_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("sample_seq", sa.BigInteger, nullable=False),
+        sa.Column("scheduled_at", sa.TIMESTAMP(timezone=True), nullable=False),
         sa.Column("sampled_at", sa.TIMESTAMP(timezone=True), nullable=False),
         sa.Column("desired_count", sa.Integer, nullable=False),
         sa.Column("committed_count", sa.Integer, nullable=False),
@@ -196,6 +204,11 @@ def upgrade() -> None:
             ["l3_runtime_boots.boot_id"],
             name="fk_l3_health_samples_boot",
         ),
+        sa.UniqueConstraint(
+            "boot_id",
+            "scheduled_at",
+            name="uq_l3_health_samples_boot_scheduled",
+        ),
         sa.CheckConstraint(
             "sample_seq >= 0 AND desired_count >= 0 AND committed_count >= 0 "
             "AND evidenced_count >= 0 "
@@ -214,8 +227,13 @@ def upgrade() -> None:
             name="ck_l3_health_samples_status",
         ),
         sa.CheckConstraint(
-            _occurrence_window("sampled_at"),
+            _fresh_sample_window("sampled_at"),
             name="ck_l3_health_samples_occurrence_window",
+        ),
+        sa.CheckConstraint(
+            "scheduled_at <= sampled_at "
+            "AND sampled_at < scheduled_at + interval '30 seconds'",
+            name="ck_l3_health_samples_schedule_window",
         ),
         sa.CheckConstraint(
             "mapping_hash ~ '^[0-9a-f]{64}$' AND acceptance_config_hash ~ '^[0-9a-f]{64}$'",
@@ -290,7 +308,7 @@ def upgrade() -> None:
             name="ck_l3_market_samples_status",
         ),
         sa.CheckConstraint(
-            _occurrence_window("sampled_at"),
+            _fresh_sample_window("sampled_at"),
             name="ck_l3_market_samples_occurrence_window",
         ),
     )

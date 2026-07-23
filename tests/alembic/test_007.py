@@ -232,6 +232,7 @@ def _assert_catalog_contract(dsn: str) -> None:
         "l3_health_samples": {
             "boot_id",
             "sample_seq",
+            "scheduled_at",
             "sampled_at",
             "desired_count",
             "committed_count",
@@ -373,6 +374,7 @@ def _assert_catalog_contract(dsn: str) -> None:
         "pk_l3_promote_runs",
         "uq_l3_promote_runs_boot_seq",
         "pk_l3_health_samples",
+        "uq_l3_health_samples_boot_scheduled",
         "pk_l3_market_samples",
         "uq_l3_market_samples_yes_token",
         "uq_l3_market_samples_no_token",
@@ -414,7 +416,9 @@ def _assert_catalog_contract(dsn: str) -> None:
             "ck_l3_health_samples_nonnegative",
             "ck_l3_health_samples_status",
             "ck_l3_health_samples_occurrence_window",
+            "ck_l3_health_samples_schedule_window",
             "ck_l3_health_samples_hash_lengths",
+            "uq_l3_health_samples_boot_scheduled",
         },
         "l3_market_samples": {
             "pk_l3_market_samples",
@@ -447,6 +451,7 @@ def _assert_catalog_contract(dsn: str) -> None:
         "fk_l3_promote_runs_boot": ["boot_id"],
         "uq_l3_promote_runs_boot_seq": ["boot_id", "run_seq"],
         "pk_l3_health_samples": ["boot_id", "sample_seq"],
+        "uq_l3_health_samples_boot_scheduled": ["boot_id", "scheduled_at"],
         "fk_l3_health_samples_boot": ["boot_id"],
         "pk_l3_market_samples": ["boot_id", "sample_seq", "market_id"],
         "fk_l3_market_samples_health": ["boot_id", "sample_seq"],
@@ -467,8 +472,11 @@ def _assert_catalog_contract(dsn: str) -> None:
         "pk_l3_runtime_boots": "PRIMARY KEY (boot_id)",
         "pk_l3_promote_runs": "PRIMARY KEY (id)",
         "fk_l3_promote_runs_boot": ("FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"),
-        "uq_l3_promote_runs_boot_seq": "UNIQUE (boot_id, run_seq)",
-        "pk_l3_health_samples": "PRIMARY KEY (boot_id, sample_seq)",
+            "uq_l3_promote_runs_boot_seq": "UNIQUE (boot_id, run_seq)",
+            "pk_l3_health_samples": "PRIMARY KEY (boot_id, sample_seq)",
+            "uq_l3_health_samples_boot_scheduled": (
+                "UNIQUE (boot_id, scheduled_at)"
+            ),
         "fk_l3_health_samples_boot": ("FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"),
         "pk_l3_market_samples": "PRIMARY KEY (boot_id, sample_seq, market_id)",
         "fk_l3_market_samples_health": (
@@ -535,8 +543,12 @@ def _assert_catalog_contract(dsn: str) -> None:
             "'warn'::character varying, 'fail'::character varying])::text[])))"
         ),
         "ck_l3_health_samples_occurrence_window": (
-            "CHECK (((sampled_at >= (recorded_at - '24:00:00'::interval)) AND "
-            "(sampled_at <= (recorded_at + '00:00:30'::interval))))"
+            "CHECK (((sampled_at <= recorded_at) AND "
+            "(recorded_at < (sampled_at + '00:00:30'::interval))))"
+        ),
+        "ck_l3_health_samples_schedule_window": (
+            "CHECK (((scheduled_at <= sampled_at) AND "
+            "(sampled_at < (scheduled_at + '00:00:30'::interval))))"
         ),
         "ck_l3_health_samples_hash_lengths": (
             "CHECK ((((mapping_hash)::text ~ '^[0-9a-f]{64}$'::text) AND "
@@ -554,8 +566,8 @@ def _assert_catalog_contract(dsn: str) -> None:
             "'warn'::character varying, 'fail'::character varying])::text[])))"
         ),
         "ck_l3_market_samples_occurrence_window": (
-            "CHECK (((sampled_at >= (recorded_at - '24:00:00'::interval)) AND "
-            "(sampled_at <= (recorded_at + '00:00:30'::interval))))"
+            "CHECK (((sampled_at <= recorded_at) AND "
+            "(recorded_at < (sampled_at + '00:00:30'::interval))))"
         ),
         "ck_l3_runtime_events_nonnegative": (
             "CHECK (((event_seq >= 0) AND ((generation IS NULL) OR (generation >= 0))))"
@@ -699,11 +711,11 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
         )
         await conn.execute(
             "INSERT INTO l3_health_samples "
-            "(boot_id, sample_seq, sampled_at, desired_count, committed_count, "
+            "(boot_id, sample_seq, scheduled_at, sampled_at, desired_count, committed_count, "
             " evidenced_count, listener_state, cursor_lag, watchdog_count, "
             " reconnect_count, ws_generation, mapping_hash, acceptance_config_hash, "
             " status, reason_code) VALUES "
-            "($1, 0, clock_timestamp(), 2, 2, 2, 'connected', 0, 0, 0, 0, "
+            "($1, 0, clock_timestamp(), clock_timestamp(), 2, 2, 2, 'connected', 0, 0, 0, 0, "
             " $2, $2, 'pass', 'healthy')",
             boot_id,
             "c" * 64,
@@ -771,11 +783,11 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
         )
         await conn.execute(
             "INSERT INTO l3_health_samples "
-            "(boot_id, sample_seq, sampled_at, desired_count, committed_count, "
+            "(boot_id, sample_seq, scheduled_at, sampled_at, desired_count, committed_count, "
             " evidenced_count, listener_state, cursor_lag, watchdog_count, "
             " reconnect_count, ws_generation, mapping_hash, acceptance_config_hash, "
             " status, reason_code) VALUES "
-            "($1, 0, clock_timestamp(), 2, 2, 2, 'connected', 0, 0, 0, 0, "
+            "($1, 0, clock_timestamp(), clock_timestamp(), 2, 2, 2, 'connected', 0, 0, 0, 0, "
             " $2, $2, 'pass', 'cleanup')",
             eligible_boot_id,
             "1" * 64,
@@ -863,11 +875,13 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
                 with pytest.raises(asyncpg.exceptions.CheckViolationError):
                     await conn.execute(
                         "INSERT INTO l3_health_samples "
-                        "(boot_id, sample_seq, sampled_at, desired_count, committed_count, "
+                        "(boot_id, sample_seq, scheduled_at, sampled_at, "
+                        " desired_count, committed_count, "
                         " evidenced_count, listener_state, cursor_lag, watchdog_count, "
                         " reconnect_count, ws_generation, mapping_hash, acceptance_config_hash, "
                         " status, reason_code) VALUES "
-                        "($1, $2, clock_timestamp(), 2, 2, 2, 'connected', 0, 0, 0, 0, "
+                        "($1, $2, clock_timestamp(), clock_timestamp(), "
+                        " 2, 2, 2, 'connected', 0, 0, 0, 0, "
                         " $3, $4, 'pass', 'bad-hash')",
                         boot_id,
                         200 + index,
@@ -977,6 +991,7 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
         )
         await conn.execute(
             "UPDATE l3_health_samples SET recorded_at=clock_timestamp()-interval '40 days', "
+            "scheduled_at=clock_timestamp()-interval '40 days', "
             "sampled_at=clock_timestamp()-interval '40 days' WHERE boot_id=$1",
             eligible_boot_id,
         )
