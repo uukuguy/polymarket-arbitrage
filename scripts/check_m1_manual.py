@@ -13,6 +13,22 @@ CAPABILITY_HEADER = ("能力", "状态", "用途", "数据源", "验证方法", 
 MARKER_RE = re.compile(r"<!-- m1-contract: (health|route)=([^ ]+) file=([^ ]+) -->")
 MAKE_RE = re.compile(r"`make ([a-z0-9][a-z0-9-]*)")
 LINK_RE = re.compile(r"\[[^]]+\]\(([^)]+)\)")
+L3_READ_ONLY_MAKE_TARGETS = (
+    "l3-evidence-status",
+    "l3-soak-checkpoint",
+    "l3-soak-verify",
+    "l3-evidence-retention-check",
+)
+L3_LOCAL_MUTATION_MAKE_TARGETS = ("l3-soak-manifest",)
+L3_MUTATION_MAKE_TARGETS = (
+    "l3-soak-manifest-bind",
+    "l3-evidence-retention-cleanup",
+)
+L3_CREDENTIAL_PROOF_TARGETS = (
+    "l3-runtime-credential-check",
+    "l3-retention-operator-check",
+    "supabase-prod-revision",
+)
 M1_MAKE_TARGETS = {
     "snapshot-markets-v",
     "snapshot-status",
@@ -46,6 +62,10 @@ M1_MAKE_TARGETS = {
     "chaos-l2-fly-image-check",
     "chaos-l2-inj1",
     "chaos-l2-cleanup",
+    *L3_READ_ONLY_MAKE_TARGETS,
+    *L3_LOCAL_MUTATION_MAKE_TARGETS,
+    *L3_MUTATION_MAKE_TARGETS,
+    *L3_CREDENTIAL_PROOF_TARGETS,
 }
 HEALTH_RE = re.compile(r'^[+-](?![+-])[ \t]*checks\["[a-z0-9_:-]+"\][ \t]*=', re.MULTILINE)
 CLI_RE = re.compile(

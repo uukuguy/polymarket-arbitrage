@@ -20,19 +20,21 @@ on:
   push:
     branches: [main]
     paths:
-      - 'src/polyarb/daemon/l2_main.py'
+      - 'src/polyarb/daemon/**'
       - 'src/polyarb/clients/ws_market_client.py'
-      - 'src/polyarb/daemon/ws_watchdog.py'
       - 'src/polyarb/observation/l2_candidate_refresh.py'
+      - 'src/polyarb/observation/l3_*.py'
       - 'src/polyarb/events/**'
-      - 'src/polyarb/http/l2_health.py'
+      - 'src/polyarb/http/l2_*.py'
+      - 'src/polyarb/storage/l3_evidence_store.py'
       - 'src/polyarb/storage/l2_supabase_mirror.py'
       - 'src/polyarb/clients/data_api_client.py'
+      - 'scripts/l3_evidence.py'
       - 'fly-l2.toml'
       - 'Dockerfile'
       - 'pyproject.toml'
       - 'uv.lock'
-      - 'alembic/versions/003_*.py'
+      - 'alembic/versions/**'
   workflow_dispatch: {}
 
 concurrency:

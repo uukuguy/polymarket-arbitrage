@@ -14,6 +14,10 @@ sys.path.insert(0, str(ROOT))
 
 import scripts.check_m1_manual as manual_checker  # noqa: E402
 from scripts.check_m1_manual import (  # noqa: E402
+    L3_CREDENTIAL_PROOF_TARGETS,
+    L3_LOCAL_MUTATION_MAKE_TARGETS,
+    L3_MUTATION_MAKE_TARGETS,
+    L3_READ_ONLY_MAKE_TARGETS,
     M1_MAKE_TARGETS,
     MANUAL,
     _decode_nul_paths,
@@ -35,6 +39,15 @@ def test_canonical_entry_points_link_the_manual() -> None:
 
 def _valid_manual() -> str:
     sections = "\n".join(f"## {n}. section-{n}\nbody" for n in range(1, 11))
+    l3_targets = "\n".join(
+        f"`make {target}`"
+        for target in (
+            *L3_READ_ONLY_MAKE_TARGETS,
+            *L3_LOCAL_MUTATION_MAKE_TARGETS,
+            *L3_MUTATION_MAKE_TARGETS,
+            *L3_CREDENTIAL_PROOF_TARGETS,
+        )
+    )
     return f"""# M1 市场感知平台使用手册
 
 > 最后核验：2026-07-18
@@ -47,6 +60,7 @@ def _valid_manual() -> str:
 | L1 | 已验证可用 | snapshot | Gamma+CLOB | `make snapshot-status` | local only | live order |
 
 [CURRENT](../.planning/CURRENT.md)
+{l3_targets}
 <!-- m1-contract: health=snapshot:last_success_age_seconds file=src/polyarb/http/health.py -->
 <!-- m1-contract: health=event_bus:cursor_lag file=src/polyarb/http/l2_health.py -->
 <!-- m1-contract: health=ws:last_event_age_seconds file=src/polyarb/http/l2_health.py -->
@@ -65,7 +79,16 @@ def _repo(tmp_path: Path) -> Path:
         (tmp_path / "dashboard/app" / path).mkdir(parents=True)
     (tmp_path / "docs").mkdir()
     (tmp_path / ".planning").mkdir()
-    (tmp_path / "Makefile").write_text("snapshot-status:\n\t@true\n")
+    make_targets = (
+        "snapshot-status",
+        *L3_READ_ONLY_MAKE_TARGETS,
+        *L3_LOCAL_MUTATION_MAKE_TARGETS,
+        *L3_MUTATION_MAKE_TARGETS,
+        *L3_CREDENTIAL_PROOF_TARGETS,
+    )
+    (tmp_path / "Makefile").write_text(
+        "".join(f"{target}:\n\t@true\n" for target in make_targets)
+    )
     (tmp_path / ".planning/CURRENT.md").write_text("current\n")
     (tmp_path / "src/polyarb/http/health.py").write_text(
         'checks["snapshot:last_success_age_seconds"] = []\n'
@@ -665,3 +688,125 @@ def test_manual_keeps_reviewed_operator_safety_facts() -> None:
     assert "candidates、asset TOB/trades 和 signals" in text
     assert "`make smoke-l3-dashboard asset_id=...`" in text
     assert "手工检查 `/status`" in text
+
+
+def test_phase_054_operator_commands_are_centralized_and_documented() -> None:
+    read_only = (
+        "l3-evidence-status",
+        "l3-soak-checkpoint",
+        "l3-soak-verify",
+        "l3-evidence-retention-check",
+    )
+    mutations = (
+        "l3-soak-manifest-bind",
+        "l3-evidence-retention-cleanup",
+    )
+    credential_proofs = (
+        "l3-runtime-credential-check",
+        "l3-retention-operator-check",
+        "supabase-prod-revision",
+    )
+    text = (ROOT / MANUAL).read_text()
+
+    assert L3_READ_ONLY_MAKE_TARGETS == read_only
+    assert L3_MUTATION_MAKE_TARGETS == mutations
+    assert L3_CREDENTIAL_PROOF_TARGETS == credential_proofs
+    for target in (*read_only, *mutations, *credential_proofs):
+        assert f"`make {target}" in text
+
+
+def test_phase_054_manual_has_exact_r08_and_release_37_boundaries() -> None:
+    text = (ROOT / MANUAL).read_text()
+    required = (
+        "sample interval = 30s",
+        "sample gap ≤ 75s",
+        "promoter interval = 300s",
+        "promoter start gap ≤ 360s",
+        "book / OHLC age < 120s",
+        "5 markets / 10 tokens",
+        "10/10/10 desired/committed/evidenced",
+        "all 10 book tokens",
+        "all 5 Yes OHLC",
+        "retention ≥ 30 days",
+        "schema revision 007",
+        "release 37",
+        "diagnostic-only",
+        "LOCAL PASS DOES NOT AUTHORIZE PRODUCTION",
+    )
+
+    for phrase in required:
+        assert phrase in text
+
+
+def test_phase_054_manual_separates_read_only_and_mutation_commands() -> None:
+    text = (ROOT / MANUAL).read_text()
+    read_only = text.split("### 日常只读", 1)[1].split("### 本地 mutation", 1)[0]
+    production_mutation = text.split("### 生产 mutation", 1)[1].split("### chaos", 1)[0]
+    assert L3_READ_ONLY_MAKE_TARGETS
+    assert L3_MUTATION_MAKE_TARGETS
+
+    for target in L3_READ_ONLY_MAKE_TARGETS:
+        assert f"`make {target}" in read_only
+        assert f"`make {target}" not in production_mutation
+    for target in L3_MUTATION_MAKE_TARGETS:
+        assert f"`make {target}" in production_mutation
+        assert f"`make {target}" not in read_only
+
+
+def test_phase_054_learning_chapter_has_complete_contract_and_live_line_references() -> None:
+    chapter = ROOT / "docs/learning/22-L3连续浸泡证据.md"
+    assert chapter.is_file()
+    text = chapter.read_text()
+    required = (
+        "## 30 秒心智模型",
+        "membership",
+        "recorded_at",
+        "append-only",
+        "AcceptanceConfig",
+        "T+0",
+        "T+6",
+        "T+12",
+        "T+18",
+        "T+24",
+        "soak_hash",
+        "interval_hash",
+        "report_hash",
+        "raw_row_set_hash",
+        "event kind",
+        "severity",
+        "l3_retention_operator",
+        "## 设计取舍",
+        "## 失败模式",
+        "## 对手测试",
+        "## FAQ 增量",
+    )
+    for phrase in required:
+        assert phrase in text
+
+    questions = re.findall(r"(?m)^[1-5]\. ", text.split("## 对手测试", 1)[1])
+    assert len(questions) == 5
+
+    references = re.findall(r"`([^`]+\.py):(\d+)(?:-(\d+))?`", text)
+    assert len(references) >= 8
+    for raw_path, raw_start, raw_end in references:
+        source = ROOT / raw_path
+        assert source.is_file(), f"learning reference does not resolve: {raw_path}"
+        line_count = len(source.read_text().splitlines())
+        start = int(raw_start)
+        end = int(raw_end or raw_start)
+        assert 1 <= start <= end <= line_count, (
+            f"learning reference is outside HEAD: {raw_path}:{start}-{end}"
+        )
+
+
+def test_phase_054_learning_index_links_new_chapter() -> None:
+    text = (ROOT / "docs/learning/00-INDEX.md").read_text()
+    assert "[L3 连续浸泡证据](22-L3连续浸泡证据.md)" in text
+
+
+def test_task3_image_gate_operator_truth_is_preserved() -> None:
+    text = (ROOT / MANUAL).read_text()
+    assert "完整打印当前 Fly image 的工具矩阵" in text
+    assert "默认只把 `python` 当作 required gate" in text
+    assert "optional MISS 是替代设计证据而非失败" in text
+    assert 'required="python curl"' in text

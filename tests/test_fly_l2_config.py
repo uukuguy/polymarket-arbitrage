@@ -106,3 +106,28 @@ def test_deploy_l2_workflow_uses_correct_config() -> None:
     ), "must pin @1.6 (Phase 02 L8)"
     assert "/healthz" in text, "smoke path must be /healthz (BUG-6)"
     assert "@v1.5" not in text, "@v1.5 is non-existent (Phase 02 L8)"
+
+
+def test_deploy_l2_workflow_covers_every_phase_054_runtime_and_migration_path() -> None:
+    text = DEPLOY_L2_YML.read_text()
+    required_paths = {
+        "src/polyarb/observation/l3_*.py",
+        "src/polyarb/storage/l3_evidence_store.py",
+        "scripts/l3_evidence.py",
+        "src/polyarb/daemon/**",
+        "src/polyarb/http/l2_*.py",
+        "alembic/versions/**",
+    }
+
+    for path in sorted(required_paths):
+        assert f"- '{path}'" in text, f"deploy-l2 workflow does not cover {path}"
+
+
+def test_deploy_l2_workflow_keeps_manual_dispatch_and_secret_boundary() -> None:
+    text = DEPLOY_L2_YML.read_text()
+
+    assert "workflow_dispatch: {}" in text
+    assert "actions/checkout@v4" in text
+    assert "superfly/flyctl-actions/setup-flyctl@1.6" in text
+    assert "APP: polyarb-l2" in text
+    assert "FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}" in text

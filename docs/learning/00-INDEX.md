@@ -33,6 +33,7 @@
 | 19 | [独立报价运行与已知市场覆盖](19-独立报价运行与已知市场覆盖.md) | known-universe snapshot / atomic quote run / dual freshness clocks / local-only operator boundary |
 | 20 | [NOTIFY 门铃与游标账本](20-NOTIFY门铃与游标账本.md) | NOTIFY wake hint / durable cursor / candidate→WS→mirror 收敛 / quiet refresh 为什么必须等 book→mirror evidence |
 | 21 | [L3 候选与双 Token](21-L3-候选与双Token.md) | observation seed vs promotion gate / L2 asset_id=Yes token / durable Yes+No identity / fail-closed 5→10 expansion / mutation-free dry-run |
+| 22 | [L3 连续浸泡证据](22-L3连续浸泡证据.md) | truthful membership / server append-only evidence / AcceptanceConfig / manifest+五报告+raw-row hashes / event-kind fail-closed / retention privilege boundary |
 
 ## Phase 02.1 教学增量（2026-05）
 
