@@ -17,7 +17,7 @@ from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import asyncpg
@@ -104,13 +104,20 @@ def validate_supabase_target(dsn: str, *, expected_ref: str) -> DatabaseTarget:
         host = (parsed.hostname or "").lower()
         database = unquote(parsed.path.lstrip("/"))
         user = unquote(parsed.username or "")
+        query_items = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
     except (TypeError, ValueError) as error:
         raise ValueError("database target is invalid") from error
+    if len(query_items) != len({key for key, _value in query_items}):
+        raise ValueError("database target has duplicate connection parameters")
+    allowed_sslmode = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+    if any(key != "sslmode" or value not in allowed_sslmode for key, value in query_items):
+        raise ValueError("database target has disallowed connection parameters")
     if parsed.scheme not in {"postgres", "postgresql"} or not host or not user:
         raise ValueError("database target is invalid")
     direct_host = f"db.{expected_ref}.supabase.co"
     pooler_host = host.endswith(".pooler.supabase.com")
-    direct = host == direct_host
+    effective_port = parsed.port or 5432
+    direct = host == direct_host and effective_port == 5432
     pooler_suffix = f".{expected_ref}"
     pooled = (
         pooler_host
@@ -134,6 +141,74 @@ def _database_role(target: DatabaseTarget) -> str:
     if not role:
         raise ValueError("pooler database role is empty")
     return role
+
+
+def _cursor_policy_catalog_is_exact(rows: list[Any]) -> bool:
+    expected = {
+        "anon_read": ("SELECT", ("anon",), "true", None),
+        "l3_candidate_cursor_select": (
+            "SELECT",
+            ("l3_evidence_daemon",),
+            "consumer",
+            None,
+        ),
+        "l3_candidate_cursor_insert": (
+            "INSERT",
+            ("l3_evidence_daemon",),
+            None,
+            "consumer",
+        ),
+        "l3_candidate_cursor_update": (
+            "UPDATE",
+            ("l3_evidence_daemon",),
+            "consumer",
+            "consumer",
+        ),
+    }
+    if len(rows) != len(expected):
+        return False
+
+    def exact_predicate(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        compact = "".join(value.split()).replace("::text", "")
+        while compact.startswith("(") and compact.endswith(")"):
+            compact = compact[1:-1]
+        return compact == "consumer='l2-candidate-refresh'"
+
+    def exact_true(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        compact = "".join(value.split())
+        while compact.startswith("(") and compact.endswith(")"):
+            compact = compact[1:-1]
+        return compact.lower() == "true"
+
+    by_name = {row["policyname"]: row for row in rows}
+    if set(by_name) != set(expected):
+        return False
+    for name, (command, expected_roles, using_kind, check_kind) in expected.items():
+        row = by_name[name]
+        roles = row["roles"]
+        using_ok = {
+            None: row["qual"] is None,
+            "consumer": exact_predicate(row["qual"]),
+            "true": exact_true(row["qual"]),
+        }[using_kind]
+        check_ok = {
+            None: row["with_check"] is None,
+            "consumer": exact_predicate(row["with_check"]),
+            "true": exact_true(row["with_check"]),
+        }[check_kind]
+        if (
+            row["cmd"] != command
+            or isinstance(roles, str)
+            or tuple(roles) != expected_roles
+            or not using_ok
+            or not check_ok
+        ):
+            return False
+    return True
 
 
 def _read_manifest(path: Path) -> SoakManifest:
@@ -197,9 +272,9 @@ async def _create_manifest_from_runtime(
         row = await connection.fetchrow(
             """
             SELECT boot.*, promote.mapping_hash
-            FROM l3_runtime_boots AS boot
+            FROM public.l3_runtime_boots AS boot
             JOIN LATERAL (
-                SELECT mapping_hash FROM l3_promote_runs
+                SELECT mapping_hash FROM public.l3_promote_runs
                 WHERE boot_id=boot.boot_id AND status='success'
                 ORDER BY scheduled_at DESC, run_seq DESC LIMIT 1
             ) AS promote ON TRUE
@@ -246,7 +321,7 @@ async def _create_manifest_from_runtime(
 _BINDING_SELECT = """
 SELECT event_id, boot_id, event_seq, occurred_at, recorded_at, reason_code,
        detail->>'manifest_sha256' AS manifest_sha256
-FROM l3_runtime_events
+FROM public.l3_runtime_events
 WHERE kind='soak_manifest_bound' AND boot_id=$1
   AND detail->>'manifest_sha256'=$2
 ORDER BY recorded_at, event_id
@@ -295,7 +370,7 @@ async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> 
     try:
         async with connection.transaction():
             boot = await connection.fetchrow(
-                "SELECT boot_id FROM l3_runtime_boots WHERE boot_id=$1 FOR UPDATE",
+                "SELECT boot_id FROM public.l3_runtime_boots WHERE boot_id=$1 FOR UPDATE",
                 manifest.boot_id,
             )
             if boot is None:
@@ -310,7 +385,8 @@ async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> 
                     raise OperatorError("manifest binding must complete before T0")
                 event_seq = _manifest_event_seq(manifest)
                 collision = await connection.fetchrow(
-                    "SELECT event_id FROM l3_runtime_events WHERE boot_id=$1 AND event_seq=$2",
+                    "SELECT event_id FROM public.l3_runtime_events "
+                    "WHERE boot_id=$1 AND event_seq=$2",
                     manifest.boot_id,
                     event_seq,
                 )
@@ -321,7 +397,7 @@ async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> 
                     WITH server_clock AS (
                         SELECT clock_timestamp() AS bound_at
                     )
-                    INSERT INTO l3_runtime_events (
+                    INSERT INTO public.l3_runtime_events (
                         event_id, boot_id, event_seq, occurred_at, kind, severity,
                         generation, reason_code, detail, recorded_at
                     )
@@ -480,24 +556,24 @@ async def _status(dsn: str) -> dict[str, object]:
             """
             SELECT boot_id, started_at, machine_id, machine_version, image_ref,
                    release_id, code_version, acceptance_config_hash,
-                   (SELECT max(recorded_at) FROM l3_promote_runs p
+                   (SELECT max(recorded_at) FROM public.l3_promote_runs p
                     WHERE p.boot_id=b.boot_id) latest_promote_recorded_at,
-                   (SELECT max(recorded_at) FROM l3_health_samples h
+                   (SELECT max(recorded_at) FROM public.l3_health_samples h
                     WHERE h.boot_id=b.boot_id) latest_sample_recorded_at,
-                   (SELECT count(*)::bigint FROM l3_health_samples h
+                   (SELECT count(*)::bigint FROM public.l3_health_samples h
                     WHERE h.boot_id=b.boot_id) health_sample_count,
-                   (SELECT count(*)::bigint FROM l3_market_samples m
+                   (SELECT count(*)::bigint FROM public.l3_market_samples m
                     WHERE m.boot_id=b.boot_id) market_sample_count,
                    latest.desired_count, latest.committed_count,
                    latest.evidenced_count, latest.ws_generation,
                    latest.mapping_hash, latest.status AS latest_sample_status,
                    latest.reason_code AS latest_sample_reason_code,
                    latest.sampled_at AS latest_sampled_at
-            FROM l3_runtime_boots b
+            FROM public.l3_runtime_boots b
             LEFT JOIN LATERAL (
                 SELECT desired_count, committed_count, evidenced_count,
                        ws_generation, mapping_hash, status, reason_code, sampled_at
-                FROM l3_health_samples h WHERE h.boot_id=b.boot_id
+                FROM public.l3_health_samples h WHERE h.boot_id=b.boot_id
                 ORDER BY sampled_at DESC, sample_seq DESC LIMIT 1
             ) latest ON TRUE
             ORDER BY started_at DESC LIMIT 1
@@ -519,7 +595,7 @@ async def _retention_policy_anchor(dsn: str) -> dict[str, object]:
                    (array_agg(acceptance_config_hash ORDER BY started_at DESC))[1]
                        AS acceptance_config_hash,
                    (array_agg(code_version ORDER BY started_at DESC))[1] AS code_version
-            FROM l3_runtime_boots
+            FROM public.l3_runtime_boots
             """
         )
     finally:
@@ -566,10 +642,15 @@ _TARGET_ROLE_SQL = """
 SELECT current_database() AS database_name, current_user AS current_user,
        inet_server_addr()::text AS server_address,
        role.rolcanlogin AS can_login, role.rolsuper AS is_superuser,
+       role.rolbypassrls AS bypass_rls, role.rolcreatedb AS can_create_db,
+       role.rolcreaterole AS can_create_role,
+       role.rolreplication AS can_replicate,
        (database.datdba=role.oid) AS is_database_owner,
        EXISTS (
-           SELECT 1 FROM pg_class class
-           WHERE class.relowner=role.oid
+           SELECT 1 FROM pg_catalog.pg_class class
+           JOIN pg_catalog.pg_namespace namespace
+             ON namespace.oid=class.relnamespace
+           WHERE class.relowner=role.oid AND namespace.nspname='public'
              AND class.relname = ANY(ARRAY[
                  'l3_runtime_boots','l3_promote_runs','l3_health_samples',
                  'l3_market_samples','l3_runtime_events'
@@ -578,7 +659,8 @@ SELECT current_database() AS database_name, current_user AS current_user,
        pg_has_role(current_user,'service_role','MEMBER') AS service_member,
        pg_has_role(current_user,'l3_evidence_daemon','MEMBER') AS daemon_member,
        pg_has_role(current_user,'l3_retention_operator','MEMBER') AS retention_member
-FROM pg_roles role JOIN pg_database database ON database.datname=current_database()
+FROM pg_catalog.pg_roles role
+JOIN pg_catalog.pg_database database ON database.datname=current_database()
 WHERE role.rolname=current_user
 """
 
@@ -593,7 +675,9 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
         direct = await connection.fetch(
             """
             SELECT table_name, privilege_type,
-                   has_table_privilege(current_user, table_name, privilege_type) AS allowed
+                   has_table_privilege(
+                       current_user, 'public.' || table_name, privilege_type
+                   ) AS allowed
             FROM unnest(ARRAY[
                 'l3_runtime_boots','l3_promote_runs','l3_health_samples',
                 'l3_market_samples','l3_runtime_events','markets_latest',
@@ -601,18 +685,41 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
                 'l2_event_cursor'
             ]) AS table_name
             CROSS JOIN unnest(
-                ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE']
+                ARRAY[
+                    'SELECT','INSERT','UPDATE','DELETE','TRUNCATE',
+                    'REFERENCES','TRIGGER'
+                ]
             ) AS privilege_type
             ORDER BY table_name, privilege_type
             """
         )
-        sequence_ok = await connection.fetchval(
-            "SELECT has_sequence_privilege(current_user, 'l3_promote_runs_id_seq', 'USAGE,SELECT')"
+        sequence_usage = await connection.fetchval(
+            "SELECT has_sequence_privilege(current_user, 'public.l3_promote_runs_id_seq', 'USAGE')"
+        )
+        sequence_select = await connection.fetchval(
+            "SELECT has_sequence_privilege(current_user, 'public.l3_promote_runs_id_seq', 'SELECT')"
+        )
+        sequence_update = await connection.fetchval(
+            "SELECT has_sequence_privilege(current_user, 'public.l3_promote_runs_id_seq', 'UPDATE')"
         )
         routine = await connection.fetchval(
             "SELECT has_function_privilege(current_user, "
-            "'l3_retention_cleanup(timestamptz,timestamptz,timestamptz)', "
+            "'public.l3_retention_cleanup(timestamptz,timestamptz,timestamptz)', "
             "'EXECUTE')"
+        )
+        cursor_policies = (
+            list(
+                await connection.fetch(
+                    """
+                    SELECT policyname, cmd, roles, qual, with_check
+                    FROM pg_catalog.pg_policies
+                    WHERE schemaname='public' AND tablename='l2_event_cursor'
+                    ORDER BY policyname
+                    """,
+                )
+            )
+            if capability == "runtime"
+            else []
         )
     finally:
         await connection.close()
@@ -621,6 +728,10 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
         and row["current_user"] == _database_role(target)
         and row["can_login"]
         and not row["is_superuser"]
+        and not row["bypass_rls"]
+        and not row["can_create_db"]
+        and not row["can_create_role"]
+        and not row["can_replicate"]
         and not row["is_database_owner"]
         and not row["is_evidence_owner"]
         and not row["service_member"]
@@ -649,8 +760,11 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
             and row["daemon_member"]
             and not row["retention_member"]
             and not routine
-            and sequence_ok
+            and sequence_usage
+            and sequence_select
+            and not sequence_update
             and direct_grants == required_runtime_grants
+            and _cursor_policy_catalog_is_exact(cursor_policies)
         )
         expected_role = "l3_evidence_daemon"
     else:
@@ -659,7 +773,9 @@ async def _credential_check(dsn: str, *, expected_ref: str, capability: str) -> 
             and not row["daemon_member"]
             and row["retention_member"]
             and routine
-            and not sequence_ok
+            and not sequence_usage
+            and not sequence_select
+            and not sequence_update
             and not direct_grants
         )
         expected_role = "l3_retention_operator"
@@ -693,7 +809,7 @@ async def _prod_revision(
             """
             SELECT current_database() AS database_name, current_user AS current_user,
                    inet_server_addr()::text AS server_address,
-                   (SELECT version_num FROM alembic_version) AS revision
+                   (SELECT version_num FROM public.alembic_version) AS revision
             """
         )
     finally:

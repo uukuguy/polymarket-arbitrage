@@ -55,15 +55,30 @@ def test_007_upgrade_source_is_add_only() -> None:
 def test_007_daemon_can_only_read_sampling_source_mapping() -> None:
     text = MIGRATION_PATH.read_text(encoding="utf-8")
     upgrade = text[text.index("def upgrade(") : text.index("def downgrade(")]
-    assert (
-        '"GRANT SELECT ON TABLE markets_latest TO l3_evidence_daemon"'
-        in upgrade
-    )
+    assert '"GRANT SELECT ON TABLE markets_latest TO l3_evidence_daemon"' in upgrade
     for privilege in ("INSERT", "UPDATE", "DELETE"):
-        assert (
-            f"GRANT {privilege} ON TABLE markets_latest TO l3_evidence_daemon"
-            not in upgrade
-        )
+        assert f"GRANT {privilege} ON TABLE markets_latest TO l3_evidence_daemon" not in upgrade
+
+
+def test_007_cursor_capability_is_consumer_scoped_and_downgrade_symmetric() -> None:
+    text = MIGRATION_PATH.read_text(encoding="utf-8")
+    upgrade = text[text.index("def upgrade(") : text.index("def downgrade(")]
+    downgrade = text[text.index("def downgrade(") :]
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE l2_event_cursor" in upgrade
+    assert '"ALTER POLICY anon_read ON l2_event_cursor TO anon"' in upgrade
+    for command in ("SELECT", "INSERT", "UPDATE"):
+        assert f'"FOR {command} TO l3_evidence_daemon "' in upgrade
+    assert upgrade.count("consumer = 'l2-candidate-refresh'") == 4
+    assert "BYPASSRLS" not in upgrade.replace("NOBYPASSRLS", "")
+    assert "TO PUBLIC" not in upgrade
+    for name in (
+        "l3_candidate_cursor_select",
+        "l3_candidate_cursor_insert",
+        "l3_candidate_cursor_update",
+    ):
+        assert f'"DROP POLICY {name} ON l2_event_cursor"' in downgrade
+    assert '"ALTER POLICY anon_read ON l2_event_cursor TO PUBLIC"' in downgrade
+    assert "REVOKE SELECT, INSERT, UPDATE ON TABLE l2_event_cursor" in downgrade
 
 
 def _docker_available() -> bool:
@@ -293,6 +308,45 @@ def _assert_catalog_contract(dsn: str) -> None:
         for column in ("scheduled_at", "started_at", "finished_at")
     } == {"NO"}
 
+    cursor_policies = _q(
+        dsn,
+        "SELECT policyname, cmd, roles, qual, with_check FROM pg_policies "
+        "WHERE schemaname='public' AND tablename='l2_event_cursor' "
+        "ORDER BY policyname",
+    )
+    assert [(row["policyname"], row["cmd"], row["roles"]) for row in cursor_policies] == [
+        ("anon_read", "SELECT", ["anon"]),
+        ("l3_candidate_cursor_insert", "INSERT", ["l3_evidence_daemon"]),
+        ("l3_candidate_cursor_select", "SELECT", ["l3_evidence_daemon"]),
+        ("l3_candidate_cursor_update", "UPDATE", ["l3_evidence_daemon"]),
+    ]
+    predicate = "consumer = 'l2-candidate-refresh'::text"
+    assert cursor_policies[0]["qual"] == "true"
+    assert cursor_policies[0]["with_check"] is None
+    assert cursor_policies[1]["qual"] is None
+    assert predicate in cursor_policies[1]["with_check"]
+    assert predicate in cursor_policies[2]["qual"]
+    assert cursor_policies[2]["with_check"] is None
+    assert predicate in cursor_policies[3]["qual"]
+    assert predicate in cursor_policies[3]["with_check"]
+    cursor_privileges = _q(
+        dsn,
+        "SELECT privilege_type, "
+        "has_table_privilege('l3_evidence_daemon','l2_event_cursor',privilege_type) allowed "
+        "FROM unnest(ARRAY["
+        "'SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'"
+        "]) privilege_type",
+    )
+    assert {row["privilege_type"] for row in cursor_privileges if row["allowed"]} == {
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+    }
+    assert _q(
+        dsn,
+        "SELECT has_table_privilege('l3_evidence_daemon','snapshots','SELECT') allowed",
+    ) == [{"allowed": True}]
+
     index_rows = _q(
         dsn,
         "SELECT tablename, indexname, indexdef FROM pg_indexes "
@@ -412,29 +466,19 @@ def _assert_catalog_contract(dsn: str) -> None:
     expected_key_definitions = {
         "pk_l3_runtime_boots": "PRIMARY KEY (boot_id)",
         "pk_l3_promote_runs": "PRIMARY KEY (id)",
-        "fk_l3_promote_runs_boot": (
-            "FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"
-        ),
+        "fk_l3_promote_runs_boot": ("FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"),
         "uq_l3_promote_runs_boot_seq": "UNIQUE (boot_id, run_seq)",
         "pk_l3_health_samples": "PRIMARY KEY (boot_id, sample_seq)",
-        "fk_l3_health_samples_boot": (
-            "FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"
-        ),
+        "fk_l3_health_samples_boot": ("FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"),
         "pk_l3_market_samples": "PRIMARY KEY (boot_id, sample_seq, market_id)",
         "fk_l3_market_samples_health": (
             "FOREIGN KEY (boot_id, sample_seq) REFERENCES "
             "l3_health_samples(boot_id, sample_seq) ON DELETE CASCADE"
         ),
-        "uq_l3_market_samples_yes_token": (
-            "UNIQUE (boot_id, sample_seq, yes_token_id)"
-        ),
-        "uq_l3_market_samples_no_token": (
-            "UNIQUE (boot_id, sample_seq, no_token_id)"
-        ),
+        "uq_l3_market_samples_yes_token": ("UNIQUE (boot_id, sample_seq, yes_token_id)"),
+        "uq_l3_market_samples_no_token": ("UNIQUE (boot_id, sample_seq, no_token_id)"),
         "pk_l3_runtime_events": "PRIMARY KEY (event_id)",
-        "fk_l3_runtime_events_boot": (
-            "FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"
-        ),
+        "fk_l3_runtime_events_boot": ("FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"),
         "uq_l3_runtime_events_boot_seq": "UNIQUE (boot_id, event_seq)",
     }
     assert {
@@ -518,9 +562,7 @@ def _assert_catalog_contract(dsn: str) -> None:
         ),
         "ck_l3_runtime_events_kind": (
             "CHECK (((kind)::text = ANY ((ARRAY["
-            + ", ".join(
-                f"'{kind}'::character varying" for kind in RUNTIME_EVENT_KINDS
-            )
+            + ", ".join(f"'{kind}'::character varying" for kind in RUNTIME_EVENT_KINDS)
             + "])::text[])))"
         ),
         "ck_l3_runtime_events_severity": (
@@ -537,9 +579,7 @@ def _assert_catalog_contract(dsn: str) -> None:
         ),
     }
     actual_check_definitions = {
-        row["conname"]: row["definition"]
-        for row in constraints
-        if row["contype"] == b"c"
+        row["conname"]: row["definition"] for row in constraints if row["contype"] == b"c"
     }
     assert actual_check_definitions == expected_check_definitions
 
@@ -553,6 +593,78 @@ def _assert_catalog_contract(dsn: str) -> None:
     assert {row["event_object_table"] for row in trigger_rows} == EVIDENCE_TABLES
     assert {row["trigger_name"] for row in trigger_rows} == {"trg_l3_evidence_append_only"}
     assert all("l3_evidence_append_only_guard" in row["action_statement"] for row in trigger_rows)
+
+
+async def _assert_cursor_member_rls_contract(dsn: str) -> None:
+    import asyncpg
+
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        await conn.execute("CREATE ROLE l3_runtime_test LOGIN INHERIT NOBYPASSRLS")
+        await conn.execute("GRANT l3_evidence_daemon TO l3_runtime_test")
+        await conn.execute(
+            "INSERT INTO l2_event_cursor (consumer,last_snapshot_id) VALUES ('other-consumer', 1)"
+        )
+        await conn.execute("SET ROLE l3_runtime_test")
+        assert await conn.fetch("SELECT consumer FROM l2_event_cursor ORDER BY consumer") == []
+        await conn.execute(
+            "INSERT INTO l2_event_cursor (consumer,last_snapshot_id) "
+            "VALUES ('l2-candidate-refresh', 10)"
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT last_snapshot_id FROM l2_event_cursor WHERE consumer='l2-candidate-refresh'"
+            )
+            == 10
+        )
+        await conn.execute(
+            "INSERT INTO l2_event_cursor (consumer,last_snapshot_id) "
+            "VALUES ('l2-candidate-refresh', 11) "
+            "ON CONFLICT (consumer) DO UPDATE "
+            "SET last_snapshot_id=EXCLUDED.last_snapshot_id, updated_at=clock_timestamp()"
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT last_snapshot_id FROM l2_event_cursor WHERE consumer='l2-candidate-refresh'"
+            )
+            == 11
+        )
+        with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
+            await conn.execute(
+                "INSERT INTO l2_event_cursor (consumer,last_snapshot_id) "
+                "VALUES ('forbidden-consumer', 2)"
+            )
+        with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
+            await conn.execute(
+                "UPDATE l2_event_cursor SET consumer='forbidden-consumer' "
+                "WHERE consumer='l2-candidate-refresh'"
+            )
+        assert (
+            await conn.execute(
+                "UPDATE l2_event_cursor SET last_snapshot_id=9 WHERE consumer='other-consumer'"
+            )
+            == "UPDATE 0"
+        )
+        with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
+            await conn.execute("DELETE FROM l2_event_cursor WHERE consumer='l2-candidate-refresh'")
+        await conn.execute("RESET ROLE")
+        assert not await conn.fetchval(
+            "SELECT has_table_privilege('l3_retention_operator',"
+            "'l2_event_cursor','SELECT,INSERT,UPDATE,DELETE')"
+        )
+        assert not await conn.fetchval(
+            "SELECT pg_has_role('service_role','l3_evidence_daemon','MEMBER')"
+        )
+    finally:
+        try:
+            await conn.execute("RESET ROLE")
+            await conn.execute(
+                "DELETE FROM l2_event_cursor WHERE consumer IN "
+                "('l2-candidate-refresh','other-consumer','forbidden-consumer')"
+            )
+            await conn.execute("DROP ROLE IF EXISTS l3_runtime_test")
+        finally:
+            await conn.close()
 
 
 async def _assert_write_and_retention_contract(dsn: str) -> None:
@@ -716,9 +828,15 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
             ("mapping_hash", "desired_hash", "committed_hash", "acceptance_config_hash")
         ):
             for bad_hash in ("A" * 64, "g" * 64):
-                hashes = {name: "a" * 64 for name in (
-                    "mapping_hash", "desired_hash", "committed_hash", "acceptance_config_hash"
-                )}
+                hashes = {
+                    name: "a" * 64
+                    for name in (
+                        "mapping_hash",
+                        "desired_hash",
+                        "committed_hash",
+                        "acceptance_config_hash",
+                    )
+                }
                 hashes[hash_column] = bad_hash
                 with pytest.raises(asyncpg.exceptions.CheckViolationError):
                     await conn.execute(
@@ -900,11 +1018,7 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
             (row["table_name"], row["privilege_type"])
             for row in daemon_table_privileges
             if row["allowed"]
-        } == {
-            (table, privilege)
-            for table in EVIDENCE_TABLES
-            for privilege in ("SELECT", "INSERT")
-        }
+        } == {(table, privilege) for table in EVIDENCE_TABLES for privilege in ("SELECT", "INSERT")}
         coverage_privileges = await conn.fetch(
             "SELECT table_name, privilege_type, "
             "has_table_privilege('l3_evidence_daemon', table_name, privilege_type) allowed "
@@ -930,11 +1044,10 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
             "'l3_evidence_daemon', 'l3_promote_runs_id_seq', privilege_type) allowed "
             "FROM unnest(ARRAY['USAGE','SELECT','UPDATE']) privilege_type"
         )
-        assert {
-            row["privilege_type"]
-            for row in daemon_sequence_privileges
-            if row["allowed"]
-        } == {"USAGE", "SELECT"}
+        assert {row["privilege_type"] for row in daemon_sequence_privileges if row["allowed"]} == {
+            "USAGE",
+            "SELECT",
+        }
 
         await conn.execute("SET ROLE service_role")
         with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
@@ -1033,10 +1146,13 @@ def test_007_upgrade_downgrade_upgrade_roundtrip(pg_dsn: str) -> None:
     assert daemon_collision.returncode != 0
     assert "already exists" in daemon_collision.stderr
     assert _q(pg_dsn, "SELECT version_num FROM alembic_version") == [{"version_num": "006"}]
-    assert _q(
-        pg_dsn,
-        "SELECT 1 FROM pg_roles WHERE rolname='l3_retention_operator'",
-    ) == []
+    assert (
+        _q(
+            pg_dsn,
+            "SELECT 1 FROM pg_roles WHERE rolname='l3_retention_operator'",
+        )
+        == []
+    )
     asyncio.run(_execute(pg_dsn, "DROP ROLE l3_evidence_daemon"))
 
     asyncio.run(
@@ -1094,15 +1210,18 @@ def test_007_upgrade_downgrade_upgrade_roundtrip(pg_dsn: str) -> None:
             "rolbypassrls": False,
         },
     ]
-    assert _q(
-        pg_dsn,
-        "SELECT granted.rolname AS granted_role, member.rolname AS member_role "
-        "FROM pg_auth_members membership "
-        "JOIN pg_roles granted ON granted.oid=membership.roleid "
-        "JOIN pg_roles member ON member.oid=membership.member "
-        "WHERE granted.rolname IN ('l3_evidence_daemon','l3_retention_operator') "
-        "OR member.rolname IN ('l3_evidence_daemon','l3_retention_operator')",
-    ) == []
+    assert (
+        _q(
+            pg_dsn,
+            "SELECT granted.rolname AS granted_role, member.rolname AS member_role "
+            "FROM pg_auth_members membership "
+            "JOIN pg_roles granted ON granted.oid=membership.roleid "
+            "JOIN pg_roles member ON member.oid=membership.member "
+            "WHERE granted.rolname IN ('l3_evidence_daemon','l3_retention_operator') "
+            "OR member.rolname IN ('l3_evidence_daemon','l3_retention_operator')",
+        )
+        == []
+    )
     after_tables = {
         row["tablename"]
         for row in _q(
@@ -1113,6 +1232,7 @@ def test_007_upgrade_downgrade_upgrade_roundtrip(pg_dsn: str) -> None:
     before_tables = {row["tablename"] for row in before["tables"]}
     assert after_tables - before_tables == EVIDENCE_TABLES
     _assert_catalog_contract(pg_dsn)
+    asyncio.run(_assert_cursor_member_rls_contract(pg_dsn))
     asyncio.run(_assert_write_and_retention_contract(pg_dsn))
 
     down = _run_alembic(pg_dsn, "downgrade", "006")

@@ -27,6 +27,40 @@ from polyarb.storage.l3_evidence_store import RetentionCleanupResult
 T0 = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
+def _cursor_policy_rows() -> list[dict[str, object]]:
+    predicate = "(consumer = 'l2-candidate-refresh'::text)"
+    return [
+        {
+            "policyname": "anon_read",
+            "cmd": "SELECT",
+            "roles": ["anon"],
+            "qual": "true",
+            "with_check": None,
+        },
+        {
+            "policyname": "l3_candidate_cursor_insert",
+            "cmd": "INSERT",
+            "roles": ["l3_evidence_daemon"],
+            "qual": None,
+            "with_check": predicate,
+        },
+        {
+            "policyname": "l3_candidate_cursor_select",
+            "cmd": "SELECT",
+            "roles": ["l3_evidence_daemon"],
+            "qual": predicate,
+            "with_check": None,
+        },
+        {
+            "policyname": "l3_candidate_cursor_update",
+            "cmd": "UPDATE",
+            "roles": ["l3_evidence_daemon"],
+            "qual": predicate,
+            "with_check": predicate,
+        },
+    ]
+
+
 def _manifest(tmp_path: Path, *, t0: datetime = T0) -> SoakManifest:
     config = AcceptanceConfig(
         recipe_sha256="1" * 64,
@@ -192,6 +226,31 @@ def test_dsn_validation_is_allowlisted_and_redacted() -> None:
             "postgresql://runtime:secret@evil.example/postgres",
             expected_ref="abcdefghijklmnopqrst",
         )
+    assert (
+        validate_supabase_target(
+            "postgresql://runtime:secret@db.abcdefghijklmnopqrst.supabase.co/postgres"
+            "?sslmode=require",
+            expected_ref="abcdefghijklmnopqrst",
+        ).user
+        == "runtime"
+    )
+    for query in (
+        "search_path=attacker",
+        "options=-csearch_path%3Dattacker",
+        "service=attacker",
+        "sslmode=require&sslmode=disable",
+        "unknown=value",
+    ):
+        with pytest.raises(ValueError, match="target"):
+            validate_supabase_target(
+                "postgresql://runtime:secret@db.abcdefghijklmnopqrst.supabase.co/postgres?" + query,
+                expected_ref="abcdefghijklmnopqrst",
+            )
+    with pytest.raises(ValueError, match="target"):
+        validate_supabase_target(
+            "postgresql://runtime:secret@db.abcdefghijklmnopqrst.supabase.co:6543/postgres",
+            expected_ref="abcdefghijklmnopqrst",
+        )
 
 
 @pytest.mark.parametrize(
@@ -223,6 +282,31 @@ def test_pooler_target_accepts_custom_role_with_exact_project_suffix() -> None:
     assert target.host == "aws-0-us-east-1.pooler.supabase.com"
 
 
+def test_cursor_policy_catalog_proof_is_exact_and_fail_closed() -> None:
+    from scripts import l3_evidence
+
+    rows = _cursor_policy_rows()
+    assert l3_evidence._cursor_policy_catalog_is_exact(rows)
+    mutations = [
+        rows[:-1],
+        [{**rows[0], "roles": ["PUBLIC"]}, *rows[1:]],
+        [rows[0], {**rows[1], "with_check": "true"}, *rows[2:]],
+        [rows[0], rows[1], {**rows[2], "qual": "(consumer = 'other'::text)"}, rows[3]],
+        [*rows[:3], {**rows[3], "cmd": "ALL"}],
+        [
+            *rows,
+            {
+                "policyname": "public_write",
+                "cmd": "ALL",
+                "roles": ["PUBLIC"],
+                "qual": "true",
+                "with_check": "true",
+            },
+        ],
+    ]
+    assert all(not l3_evidence._cursor_policy_catalog_is_exact(value) for value in mutations)
+
+
 class _Transaction:
     async def __aenter__(self) -> None:
         return None
@@ -243,11 +327,11 @@ class _BindingConnection:
         return []
 
     async def fetchrow(self, sql: str, *args: object) -> dict[str, object]:
-        if "FROM l3_runtime_boots" in sql:
+        if "l3_runtime_boots" in sql:
             return {"boot_id": self.manifest.boot_id}
-        if "SELECT event_id FROM l3_runtime_events" in sql:
+        if "SELECT event_id FROM public.l3_runtime_events" in sql:
             return None  # type: ignore[return-value]
-        assert "INSERT INTO l3_runtime_events" in sql
+        assert "INSERT INTO public.l3_runtime_events" in sql
         assert "clock_timestamp()" in sql
         assert "recorded_at" in sql
         assert args[3] == self.manifest.soak_hash
@@ -325,11 +409,11 @@ async def test_concurrent_manifest_bind_serializes_to_exactly_one_row(
             return []
 
         async def fetchrow(self, sql: str, *args: object) -> object:
-            if "FROM l3_runtime_boots" in sql:
+            if "l3_runtime_boots" in sql:
                 return {"boot_id": manifest.boot_id}
-            if "SELECT event_id FROM l3_runtime_events" in sql:
+            if "SELECT event_id FROM public.l3_runtime_events" in sql:
                 return None
-            if "INSERT INTO l3_runtime_events" in sql:
+            if "INSERT INTO public.l3_runtime_events" in sql:
                 server_time = manifest.t0 - timedelta(microseconds=1)
                 shared.update(
                     event_id=args[0],
@@ -390,7 +474,7 @@ async def test_manifest_bind_lost_ack_retry_returns_existing_exact_binding(
             return [existing]
 
         async def fetchrow(self, sql: str, *_args: object) -> object:
-            if "FROM l3_runtime_boots" in sql:
+            if "l3_runtime_boots" in sql:
                 return {"boot_id": manifest.boot_id}
             raise AssertionError("lost-ACK retry must not insert another binding")
 
@@ -429,11 +513,11 @@ async def test_manifest_bind_database_clock_crossing_t0_commits_no_late_row(
             return []
 
         async def fetchrow(self, sql: str, *_args: object) -> object:
-            if "FROM l3_runtime_boots" in sql:
+            if "l3_runtime_boots" in sql:
                 return {"boot_id": manifest.boot_id}
-            if "SELECT event_id FROM l3_runtime_events" in sql:
+            if "SELECT event_id FROM public.l3_runtime_events" in sql:
                 return None
-            if "INSERT INTO l3_runtime_events" in sql:
+            if "INSERT INTO public.l3_runtime_events" in sql:
                 insert_sql.append(sql)
                 return None
             raise AssertionError(sql)
@@ -719,21 +803,30 @@ def test_cleanup_missing_dedicated_dsn_never_falls_back_to_runtime(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("missing_grant", "extra_grant"),
+    ("missing_grant", "extra_grant", "sequence_grants", "elevated_field"),
     [
-        (None, None),
-        (("markets_latest", "SELECT"), None),
-        (("snapshots", "SELECT"), None),
-        (("l2_event_cursor", "SELECT"), None),
-        (("l2_event_cursor", "INSERT"), None),
-        (("l2_event_cursor", "UPDATE"), None),
-        (None, ("snapshots", "UPDATE")),
+        (None, None, frozenset({"USAGE", "SELECT"}), None),
+        (("markets_latest", "SELECT"), None, frozenset({"USAGE", "SELECT"}), None),
+        (("snapshots", "SELECT"), None, frozenset({"USAGE", "SELECT"}), None),
+        (("l2_event_cursor", "SELECT"), None, frozenset({"USAGE", "SELECT"}), None),
+        (("l2_event_cursor", "INSERT"), None, frozenset({"USAGE", "SELECT"}), None),
+        (("l2_event_cursor", "UPDATE"), None, frozenset({"USAGE", "SELECT"}), None),
+        (None, ("snapshots", "UPDATE"), frozenset({"USAGE", "SELECT"}), None),
+        (None, None, frozenset({"SELECT"}), None),
+        (None, None, frozenset({"USAGE"}), None),
+        (None, None, frozenset({"USAGE", "SELECT", "UPDATE"}), None),
+        (None, None, frozenset({"USAGE", "SELECT"}), "bypass_rls"),
+        (None, None, frozenset({"USAGE", "SELECT"}), "can_create_db"),
+        (None, None, frozenset({"USAGE", "SELECT"}), "can_create_role"),
+        (None, None, frozenset({"USAGE", "SELECT"}), "can_replicate"),
     ],
 )
 async def test_runtime_credential_checks_inherited_effective_grants_and_store_preflight(
     monkeypatch: pytest.MonkeyPatch,
     missing_grant: tuple[str, str] | None,
     extra_grant: tuple[str, str] | None,
+    sequence_grants: frozenset[str],
+    elevated_field: str | None,
 ) -> None:
     from scripts import l3_evidence
 
@@ -755,23 +848,40 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
 
     class Connection:
         async def fetchrow(self, _sql: str) -> dict[str, object]:
-            return {
+            row = {
                 "database_name": "postgres",
                 "current_user": "runtime",
                 "server_address": "10.0.0.1",
                 "can_login": True,
                 "is_superuser": False,
+                "bypass_rls": False,
+                "can_create_db": False,
+                "can_create_role": False,
+                "can_replicate": False,
                 "is_database_owner": False,
                 "is_evidence_owner": False,
                 "service_member": False,
                 "daemon_member": True,
                 "retention_member": False,
             }
+            if elevated_field is not None:
+                row[elevated_field] = True
+            return row
 
-        async def fetch(self, _sql: str) -> list[dict[str, object]]:
+        async def fetch(self, _sql: str, *_args: object) -> list[dict[str, object]]:
+            if "pg_policies" in _sql:
+                return _cursor_policy_rows()
             rows = []
             for table in evidence_tables | read_tables | {"l2_event_cursor"}:
-                for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+                for privilege in (
+                    "SELECT",
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "TRUNCATE",
+                    "REFERENCES",
+                    "TRIGGER",
+                ):
                     allowed = (
                         (table in evidence_tables and privilege in {"SELECT", "INSERT"})
                         or (table in read_tables and privilege == "SELECT")
@@ -787,7 +897,9 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
             return rows
 
         async def fetchval(self, sql: str) -> bool:
-            return "has_sequence_privilege" in sql
+            if "has_sequence_privilege" in sql:
+                return any(f"'{privilege}')" in sql for privilege in sequence_grants)
+            return False
 
         async def close(self) -> None:
             return None
@@ -804,7 +916,13 @@ async def test_runtime_credential_checks_inherited_effective_grants_and_store_pr
     monkeypatch.setattr(l3_evidence.asyncpg, "connect", connect)
     monkeypatch.setattr(l3_evidence, "_runtime_preflight", preflight)
     dsn = "postgresql://runtime:secret@db.abcdefghijklmnopqrst.supabase.co/postgres"
-    if missing_grant is None and extra_grant is None:
+    valid = (
+        missing_grant is None
+        and extra_grant is None
+        and sequence_grants == frozenset({"USAGE", "SELECT"})
+        and elevated_field is None
+    )
+    if valid:
         result = await l3_evidence._credential_check(
             dsn, expected_ref="abcdefghijklmnopqrst", capability="runtime"
         )
@@ -854,6 +972,10 @@ async def test_runtime_credential_pooler_identity_strips_only_exact_project_suff
                 "server_address": "10.0.0.4",
                 "can_login": True,
                 "is_superuser": False,
+                "bypass_rls": False,
+                "can_create_db": False,
+                "can_create_role": False,
+                "can_replicate": False,
                 "is_database_owner": False,
                 "is_evidence_owner": False,
                 "service_member": False,
@@ -861,14 +983,16 @@ async def test_runtime_credential_pooler_identity_strips_only_exact_project_suff
                 "retention_member": False,
             }
 
-        async def fetch(self, _sql: str) -> list[dict[str, object]]:
+        async def fetch(self, _sql: str, *_args: object) -> list[dict[str, object]]:
+            if "pg_policies" in _sql:
+                return _cursor_policy_rows()
             return [
                 {"table_name": table, "privilege_type": privilege, "allowed": True}
                 for table, privilege in required
             ]
 
         async def fetchval(self, sql: str) -> bool:
-            return "has_sequence_privilege" in sql
+            return "has_sequence_privilege" in sql and ("'USAGE')" in sql or "'SELECT')" in sql)
 
         async def close(self) -> None:
             return None
@@ -905,6 +1029,10 @@ async def test_retention_operator_check_requires_exclusive_rpc_capability(
                 "server_address": "10.0.0.2",
                 "can_login": True,
                 "is_superuser": False,
+                "bypass_rls": False,
+                "can_create_db": False,
+                "can_create_role": False,
+                "can_replicate": False,
                 "is_database_owner": False,
                 "is_evidence_owner": False,
                 "service_member": False,

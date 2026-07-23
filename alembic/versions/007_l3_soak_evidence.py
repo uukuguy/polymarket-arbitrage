@@ -218,8 +218,7 @@ def upgrade() -> None:
             name="ck_l3_health_samples_occurrence_window",
         ),
         sa.CheckConstraint(
-            "mapping_hash ~ '^[0-9a-f]{64}$' "
-            "AND acceptance_config_hash ~ '^[0-9a-f]{64}$'",
+            "mapping_hash ~ '^[0-9a-f]{64}$' AND acceptance_config_hash ~ '^[0-9a-f]{64}$'",
             name="ck_l3_health_samples_hash_lengths",
         ),
     )
@@ -481,8 +480,7 @@ def upgrade() -> None:
     )
 
     capability_attributes = (
-        "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-        "NOINHERIT NOREPLICATION NOBYPASSRLS"
+        "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
     )
     op.execute(f"CREATE ROLE l3_evidence_daemon {capability_attributes}")
     op.execute(f"CREATE ROLE l3_retention_operator {capability_attributes}")
@@ -494,14 +492,30 @@ def upgrade() -> None:
     op.execute(f"GRANT SELECT, INSERT ON TABLE {tables} TO service_role")
     op.execute(f"GRANT SELECT, INSERT ON TABLE {tables} TO l3_evidence_daemon")
     op.execute("GRANT USAGE, SELECT ON SEQUENCE l3_promote_runs_id_seq TO service_role")
+    op.execute("GRANT USAGE, SELECT ON SEQUENCE l3_promote_runs_id_seq TO l3_evidence_daemon")
     op.execute(
-        "GRANT USAGE, SELECT ON SEQUENCE l3_promote_runs_id_seq TO l3_evidence_daemon"
-    )
-    op.execute(
-        "GRANT SELECT ON TABLE l2_book_levels, l2_top_of_book, l2_ohlc_1m "
+        "GRANT SELECT ON TABLE l2_book_levels, l2_top_of_book, l2_ohlc_1m, snapshots "
         "TO l3_evidence_daemon"
     )
     op.execute("GRANT SELECT ON TABLE markets_latest TO l3_evidence_daemon")
+    op.execute("GRANT SELECT, INSERT, UPDATE ON TABLE l2_event_cursor TO l3_evidence_daemon")
+    op.execute("ALTER POLICY anon_read ON l2_event_cursor TO anon")
+    op.execute(
+        "CREATE POLICY l3_candidate_cursor_select ON l2_event_cursor "
+        "FOR SELECT TO l3_evidence_daemon "
+        "USING (consumer = 'l2-candidate-refresh')"
+    )
+    op.execute(
+        "CREATE POLICY l3_candidate_cursor_insert ON l2_event_cursor "
+        "FOR INSERT TO l3_evidence_daemon "
+        "WITH CHECK (consumer = 'l2-candidate-refresh')"
+    )
+    op.execute(
+        "CREATE POLICY l3_candidate_cursor_update ON l2_event_cursor "
+        "FOR UPDATE TO l3_evidence_daemon "
+        "USING (consumer = 'l2-candidate-refresh') "
+        "WITH CHECK (consumer = 'l2-candidate-refresh')"
+    )
     op.execute(
         "REVOKE ALL ON FUNCTION "
         "l3_retention_cleanup(timestamptz,timestamptz,timestamptz) "
@@ -515,8 +529,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("DROP POLICY l3_candidate_cursor_update ON l2_event_cursor")
+    op.execute("DROP POLICY l3_candidate_cursor_insert ON l2_event_cursor")
+    op.execute("DROP POLICY l3_candidate_cursor_select ON l2_event_cursor")
+    op.execute("ALTER POLICY anon_read ON l2_event_cursor TO PUBLIC")
+    op.execute("REVOKE SELECT, INSERT, UPDATE ON TABLE l2_event_cursor FROM l3_evidence_daemon")
     op.execute(
-        "REVOKE SELECT ON TABLE l2_book_levels, l2_top_of_book, l2_ohlc_1m "
+        "REVOKE SELECT ON TABLE l2_book_levels, l2_top_of_book, l2_ohlc_1m, snapshots "
         "FROM l3_evidence_daemon"
     )
     op.execute("REVOKE SELECT ON TABLE markets_latest FROM l3_evidence_daemon")
