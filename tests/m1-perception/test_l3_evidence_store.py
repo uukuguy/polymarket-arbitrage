@@ -787,13 +787,38 @@ async def _admin_execute(dsn: str, *sql: str, args: tuple[object, ...] = ()) -> 
         await connection.close()
 
 
+def _postgres_window_bounds(
+    now: datetime,
+) -> tuple[datetime, datetime, datetime, int]:
+    start = now.replace(second=0, microsecond=0)
+    end = now + timedelta(seconds=20)
+    ohlc_bucket = end.replace(second=0, microsecond=0)
+    ohlc_bucket_count = int((ohlc_bucket - start) / timedelta(minutes=1)) + 1
+    return start, end, ohlc_bucket, ohlc_bucket_count
+
+
+@pytest.mark.parametrize(
+    ("second", "expected_bucket_minute", "expected_bucket_count"),
+    ((5, 0, 1), (55, 1, 2)),
+)
+def test_real_postgres_window_bounds_follow_end_bucket_across_minute(
+    second: int, expected_bucket_minute: int, expected_bucket_count: int
+) -> None:
+    now = datetime(2030, 1, 1, 12, 0, second, tzinfo=UTC)
+    start, end, ohlc_bucket, ohlc_bucket_count = _postgres_window_bounds(now)
+
+    assert start <= now < end
+    assert end == now + timedelta(seconds=20)
+    assert ohlc_bucket == start + timedelta(minutes=expected_bucket_minute)
+    assert ohlc_bucket_count == expected_bucket_count
+
+
 @pytest.mark.slow
 async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     postgres_dsns: dict[str, str],
 ) -> None:
     now = datetime.now(UTC)
-    start = now.replace(second=0, microsecond=0)
-    end = start + timedelta(seconds=20)
+    start, end, expected_ohlc_at, expected_ohlc_count = _postgres_window_bounds(now)
     boot = _boot(start - timedelta(minutes=2))
     store = L3EvidenceStore(postgres_dsns["daemon"])
 
@@ -904,7 +929,7 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
         no_token_id="no-0",
         yes_book_at=end,
         no_book_at=start,
-        yes_ohlc_at=start,
+        yes_ohlc_at=expected_ohlc_at,
     )
     assert all(
         market.yes_book_at is None
@@ -949,7 +974,7 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     }
     assert window.book_coverage_counts["yes-0"] == 1
     assert window.book_coverage_counts["no-0"] == 1
-    assert window.yes_ohlc_coverage_counts["yes-0"] == 1
+    assert window.yes_ohlc_coverage_counts["yes-0"] == expected_ohlc_count
     assert all(
         count == 0
         for token, count in window.yes_ohlc_coverage_counts.items()
