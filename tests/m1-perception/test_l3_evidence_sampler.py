@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,10 +13,20 @@ import pytest
 from polyarb.events.reconciliation import ReconciliationState
 from polyarb.observation import l3_sampler
 from polyarb.observation.l3_evidence import (
+    AcceptanceConfig,
+    EvidenceWindow,
     HealthStatus,
     L3EvidenceRuntime,
+    RuntimeBootRecord,
     RuntimeIdentity,
     WsMembershipSnapshot,
+    stable_sha256,
+)
+from polyarb.observation.l3_soak_verdict import (
+    ManifestReport,
+    SoakManifest,
+    VerdictStatus,
+    build_soak_report,
 )
 from polyarb.storage.l3_evidence_store import SamplingMarketState
 
@@ -415,8 +425,185 @@ async def test_run_sampler_emits_real_76_second_gap_and_skips_missed_boundaries(
 
     assert calls == [
         (0, START, START),
-        (1, START + timedelta(seconds=60), START + timedelta(seconds=76)),
+        (2, START + timedelta(seconds=60), START + timedelta(seconds=76)),
     ]
+
+
+async def test_pre_t0_missed_boundary_does_not_poison_complete_later_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = AcceptanceConfig(
+        recipe_sha256="b" * 64,
+        sample_interval_s=30,
+        max_sample_gap_s=75,
+        promote_interval_s=300,
+        promote_max_start_gap_s=360,
+        market_book_fresh_s=120,
+        market_ohlc_fresh_s=120,
+        expected_market_count=5,
+        expected_token_count=10,
+        retention_days=30,
+        schema_revision="007",
+        code_version="code-1",
+    )
+    image_digest = "c" * 64
+    runtime = L3EvidenceRuntime(
+        RuntimeIdentity(
+            machine_id="machine-1",
+            machine_version="version-1",
+            image_ref=f"image@sha256:{image_digest}",
+            release_id="release-1",
+            code_version=config.code_version,
+            recipe_sha256=config.recipe_sha256,
+            acceptance_config_hash=config.digest(),
+        ),
+        started_at=START,
+    )
+    _publish_current_membership(runtime, _pairs(), evidenced_at=START)
+    clock = {"now": START}
+    batches = []
+    stop_event = asyncio.Event()
+
+    async def _fetch(_token_ids):
+        return _pairs(clock["now"])
+
+    async def _sample_once(**kwargs):
+        collect_kwargs = {
+            **kwargs,
+            "store": SimpleNamespace(fetch_sampling_market_state=_fetch),
+        }
+        batch = await l3_sampler.collect_sample(**collect_kwargs)
+        batches.append(batch)
+        if len(batches) == 2:
+            stop_event.set()
+        return True
+
+    async def _wait_for_stop(_stop_event, delay_s):
+        assert delay_s == pytest.approx(30.0)
+        clock["now"] = START + timedelta(seconds=76)
+        return False
+
+    monkeypatch.setattr(l3_sampler, "_utc_now", lambda: clock["now"])
+    monkeypatch.setattr(l3_sampler, "_wait_for_stop", _wait_for_stop)
+    monkeypatch.setattr(l3_sampler, "sample_once", _sample_once)
+
+    await l3_sampler.run_sampler(
+        stop_event,
+        settings=_settings(),
+        ws_consumer=_ConsumerWithoutMembershipReads(),
+        reconciliation_state=_reconciliation(),
+        runtime=runtime,
+        store=SimpleNamespace(),
+    )
+
+    later_batch = batches[1]
+    t0 = START + timedelta(seconds=60)
+    end = t0 + timedelta(seconds=30)
+    assert (later_batch.health.sample_seq, later_batch.health.scheduled_at) == (2, t0)
+
+    mapping_rows = tuple(
+        {
+            "market_id": row.market_id,
+            "yes_token_id": row.yes_token_id,
+            "no_token_id": row.no_token_id,
+        }
+        for row in later_batch.markets
+    )
+    mapping_hash = stable_sha256(mapping_rows)
+    reports = tuple(
+        ManifestReport(
+            checkpoint=label,
+            start=t0,
+            end=(
+                end
+                if hours == 0
+                else t0 + timedelta(hours=hours)
+            ),
+            path=f"reports/{label.lower().replace('+', '')}.json",
+        )
+        for label, hours in (
+            ("T+0", 0),
+            ("T+6", 6),
+            ("T+12", 12),
+            ("T+18", 18),
+            ("T+24", 24),
+        )
+    )
+    status = runtime.snapshot()
+    manifest = SoakManifest(
+        schema_version=1,
+        t0=t0,
+        t24=t0 + timedelta(hours=24),
+        reports=reports,
+        boot_id=status.boot_id,
+        machine_id="machine-1",
+        machine_version="version-1",
+        image_ref=f"image@sha256:{image_digest}",
+        image_digest=image_digest,
+        release_id="release-1",
+        code_version=config.code_version,
+        mapping_hash=mapping_hash,
+        acceptance_config=config,
+        acceptance_config_hash=config.digest(),
+    )
+    boot = RuntimeBootRecord(
+        boot_id=status.boot_id,
+        started_at=START,
+        machine_id=manifest.machine_id,
+        machine_version=manifest.machine_version,
+        image_ref=manifest.image_ref,
+        release_id=manifest.release_id,
+        code_version=manifest.code_version,
+        acceptance_config_hash=manifest.acceptance_config_hash,
+    )
+
+    def _raw(record: object, *, recorded_at: datetime, **extra: object):
+        row = {
+            field.name: getattr(record, field.name)
+            for field in fields(record)  # type: ignore[arg-type]
+        }
+        row.update(extra)
+        row["recorded_at"] = recorded_at
+        return row
+
+    evidence = EvidenceWindow(
+        start=t0,
+        end=end,
+        boots=(boot,),
+        promote_runs=(),
+        health_samples=(later_batch.health,),
+        market_samples=later_batch.markets,
+        runtime_events=(),
+        book_coverage_counts={
+            token_id: 1
+            for row in later_batch.markets
+            for token_id in (row.yes_token_id, row.no_token_id)
+        },
+        yes_ohlc_coverage_counts={
+            row.yes_token_id: 1 for row in later_batch.markets
+        },
+        raw_rows_by_table={
+            "l3_runtime_boots": (
+                _raw(boot, recorded_at=START + timedelta(seconds=1), stopped_at=None),
+            ),
+            "l3_promote_runs": (),
+            "l3_health_samples": (
+                _raw(
+                    later_batch.health,
+                    recorded_at=later_batch.health.sampled_at + timedelta(seconds=1),
+                ),
+            ),
+            "l3_market_samples": tuple(
+                _raw(row, recorded_at=row.sampled_at + timedelta(seconds=1))
+                for row in later_batch.markets
+            ),
+            "l3_runtime_events": (),
+        },
+    )
+
+    report = build_soak_report(evidence, manifest, t0, end, False)
+    assert report.status is VerdictStatus.PASS
+    assert report.reasons == ()
 
 
 async def test_collect_sample_captures_actual_time_after_aggregate_fetch(

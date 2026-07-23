@@ -387,7 +387,7 @@ async def run_sampler(
         if not boundary <= sampled_at < boundary + interval:
             next_boundary_index = boundary_index + 1
             continue
-        sample_seq = runtime.next_sample_seq()
+        sample_seq = boundary_index
         try:
             await sample_once(
                 scheduled_at=boundary,
