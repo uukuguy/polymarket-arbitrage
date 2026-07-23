@@ -1174,6 +1174,84 @@ l3-promote-dry-run:
 	uv run python scripts/l3_promote_dry_run.py
 .PHONY: l3-promote-dry-run
 
+# ─────────────────────────────────────────────────────────────────────────────
+# M1 Phase 05.4: immutable L3 continuous-soak evidence
+# ─────────────────────────────────────────────────────────────────────────────
+
+## l3-evidence-status: Read the latest durable L3 evidence identity and continuity anchors
+l3-evidence-status:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	test -n "$$POLYARB_L2_RUNTIME_DB_DSN" || { echo "ERROR: POLYARB_L2_RUNTIME_DB_DSN is required" >&2; exit 2; }; \
+	uv run python scripts/l3_evidence.py status
+
+## l3-soak-manifest: Create a future-T0 immutable local manifest at a new path (start= end= output= required)
+l3-soak-manifest:
+	@test -n "$(start)" -a -n "$(end)" -a -n "$(output)" || { echo "usage: make l3-soak-manifest start=<ISO> end=<ISO> output=<unique-path>" >&2; exit 2; }
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	test -n "$$POLYARB_L2_RUNTIME_DB_DSN" || { echo "ERROR: POLYARB_L2_RUNTIME_DB_DSN is required" >&2; exit 2; }; \
+	uv run python scripts/l3_evidence.py manifest-create --start "$(start)" --end "$(end)" --output "$(output)"
+
+## l3-soak-manifest-bind: Append one pre-T0 database binding for an immutable manifest (manifest= required)
+l3-soak-manifest-bind:
+	@test -n "$(manifest)" || { echo "usage: make l3-soak-manifest-bind manifest=<path>" >&2; exit 2; }
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	test -n "$$POLYARB_L2_RUNTIME_DB_DSN" || { echo "ERROR: POLYARB_L2_RUNTIME_DB_DSN is required" >&2; exit 2; }; \
+	uv run python scripts/l3_evidence.py manifest-bind --manifest "$(manifest)"
+
+## l3-soak-checkpoint: Read an exact manifest checkpoint and write a new canonical report (manifest= start= end= output= required)
+l3-soak-checkpoint:
+	@test -n "$(manifest)" -a -n "$(start)" -a -n "$(end)" -a -n "$(output)" || { echo "usage: make l3-soak-checkpoint manifest=<path> start=<ISO> end=<ISO> output=<unique-path>" >&2; exit 2; }
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	test -n "$$POLYARB_L2_RUNTIME_DB_DSN" || { echo "ERROR: POLYARB_L2_RUNTIME_DB_DSN is required" >&2; exit 2; }; \
+	uv run python scripts/l3_evidence.py checkpoint --manifest "$(manifest)" --start "$(start)" --end "$(end)" --output "$(output)"
+
+## l3-soak-verify: Re-query and verify the exact 24h window plus all five manifest reports (manifest= start= end= required)
+l3-soak-verify:
+	@test -n "$(manifest)" -a -n "$(start)" -a -n "$(end)" || { echo "usage: make l3-soak-verify manifest=<path> start=<ISO> end=<ISO>" >&2; exit 2; }
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	test -n "$$POLYARB_L2_RUNTIME_DB_DSN" || { echo "ERROR: POLYARB_L2_RUNTIME_DB_DSN is required" >&2; exit 2; }; \
+	uv run python scripts/l3_evidence.py verify --manifest "$(manifest)" --start "$(start)" --end "$(end)"
+
+## l3-evidence-retention-check: Read and prove at least 30 days of all five L3 evidence tables
+l3-evidence-retention-check:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	test -n "$$POLYARB_L2_RUNTIME_DB_DSN" || { echo "ERROR: POLYARB_L2_RUNTIME_DB_DSN is required" >&2; exit 2; }; \
+	uv run python scripts/l3_evidence.py retention-check
+
+## l3-runtime-credential-check: Read-only proof of the L2 runtime role, grants, and exact Supabase target (expected_ref= required)
+l3-runtime-credential-check:
+	@test -n "$(expected_ref)" || { echo "usage: make l3-runtime-credential-check expected_ref=<ref>" >&2; exit 2; }
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	test -n "$$POLYARB_L2_RUNTIME_DB_DSN" || { echo "ERROR: POLYARB_L2_RUNTIME_DB_DSN is required" >&2; exit 2; }; \
+	uv run python scripts/l3_evidence.py runtime-credential-check --expected-ref "$(expected_ref)"
+
+## l3-retention-operator-check: Read-only proof of the dedicated cleanup role and exact Supabase target (expected_ref= required)
+l3-retention-operator-check:
+	@test -n "$(expected_ref)" || { echo "usage: make l3-retention-operator-check expected_ref=<ref>" >&2; exit 2; }
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	test -n "$$L3_RETENTION_DSN" || { echo "ERROR: L3_RETENTION_DSN is required" >&2; exit 2; }; \
+	uv run python scripts/l3_evidence.py retention-operator-check --expected-ref "$(expected_ref)"
+
+## l3-evidence-retention-cleanup: Delete only expired L3 evidence via the protected RPC (cutoff= protected_start= protected_end= approve= required)
+l3-evidence-retention-cleanup:
+	@test -n "$(cutoff)" -a -n "$(protected_start)" -a -n "$(protected_end)" -a "$(approve)" = "DELETE_EXPIRED_L3_EVIDENCE" || { echo "usage: make l3-evidence-retention-cleanup cutoff=<ISO> protected_start=<ISO> protected_end=<ISO> approve=DELETE_EXPIRED_L3_EVIDENCE" >&2; exit 2; }
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	test -n "$$L3_RETENTION_DSN" || { echo "ERROR: L3_RETENTION_DSN is required (no daemon DSN fallback)" >&2; exit 2; }; \
+	test -n "$$SUPABASE_PROJECT_REF" || { echo "ERROR: SUPABASE_PROJECT_REF is required" >&2; exit 2; }; \
+	uv run python scripts/l3_evidence.py retention-cleanup --cutoff "$(cutoff)" --protected-start "$(protected_start)" --protected-end "$(protected_end)" --approval "$(approve)"
+
+## supabase-prod-revision: Read-only exact Supabase target/server/revision proof before or after a production gate (expected_ref= expected_revision= required)
+supabase-prod-revision:
+	@test -n "$(expected_ref)" -a -n "$(expected_revision)" || { echo "usage: make supabase-prod-revision expected_ref=<ref> expected_revision=<rev>" >&2; exit 2; }
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	test -n "$$POLYARB_SUPABASE_DB_DSN" || { echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; }; \
+	uv run python scripts/l3_evidence.py prod-revision --expected-ref "$(expected_ref)" --expected-revision "$(expected_revision)"
+
+.PHONY: l3-evidence-status l3-soak-manifest l3-soak-manifest-bind \
+	l3-soak-checkpoint l3-soak-verify l3-evidence-retention-check \
+	l3-runtime-credential-check l3-retention-operator-check \
+	l3-evidence-retention-cleanup supabase-prod-revision
+
 ## ohlc-spot-check: Query /health for L3 active set + book_levels freshness anchors
 ##
 ## Reads the local L2 daemon /health (or pass URL=https://polyarb-l2.fly.dev

@@ -99,6 +99,45 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-standard JSON constant: {value}")
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _parse_canonical_utc(name: str, value: object) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ValueError(f"{name} must be canonical RFC3339 UTC")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError(f"{name} must be canonical RFC3339 UTC") from error
+    if _utc_text(parsed) != value:
+        raise ValueError(f"{name} must be canonical RFC3339 UTC")
+    return parsed
+
+
+def _load_json_object(data: bytes) -> dict[str, object]:
+    if not isinstance(data, bytes):
+        raise TypeError("canonical JSON input must be bytes")
+    try:
+        value = json.loads(
+            data,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid canonical JSON") from error
+    if not isinstance(value, dict):
+        raise ValueError("canonical JSON root must be an object")
+    if _contains_non_finite_float(value):
+        raise ValueError("canonical JSON rejects non-finite floats")
+    return value
+
+
 def _contains_non_finite_float(value: object) -> bool:
     if isinstance(value, float):
         return not math.isfinite(value)
@@ -272,6 +311,94 @@ class SoakManifest:
         return {**self.hash_payload(), "manifest_hash": self.manifest_hash}
 
 
+def canonical_manifest_bytes(manifest: SoakManifest) -> bytes:
+    """Return the only accepted on-disk representation of a manifest."""
+    if type(manifest) is not SoakManifest:
+        raise TypeError("manifest must be an exact SoakManifest")
+    return _canonical_json_bytes(manifest.to_dict())
+
+
+def parse_manifest_bytes(data: bytes) -> SoakManifest:
+    """Parse and authenticate one canonical manifest without lossy normalization."""
+    payload = _load_json_object(data)
+    expected_keys = {
+        "schema_version",
+        "t0",
+        "t24",
+        "reports",
+        "boot_id",
+        "machine_id",
+        "machine_version",
+        "image_ref",
+        "image_digest",
+        "release_id",
+        "code_version",
+        "mapping_hash",
+        "acceptance_config",
+        "acceptance_config_hash",
+        "allowed_event_kind_exceptions",
+        "soak_hash",
+        "manifest_hash",
+    }
+    if set(payload) != expected_keys:
+        raise ValueError("manifest keys do not match the canonical schema")
+    config_payload = payload["acceptance_config"]
+    if not isinstance(config_payload, dict) or set(config_payload) != {
+        field.name for field in fields(AcceptanceConfig)
+    }:
+        raise ValueError("acceptance_config keys do not match the canonical schema")
+    reports_payload = payload["reports"]
+    if not isinstance(reports_payload, list):
+        raise ValueError("reports must be an array")
+    reports: list[ManifestReport] = []
+    for item in reports_payload:
+        if not isinstance(item, dict) or set(item) != {"checkpoint", "start", "end", "path"}:
+            raise ValueError("manifest report keys do not match the canonical schema")
+        reports.append(
+            ManifestReport(
+                checkpoint=item["checkpoint"],  # type: ignore[arg-type]
+                start=_parse_canonical_utc("report.start", item["start"]),
+                end=_parse_canonical_utc("report.end", item["end"]),
+                path=item["path"],  # type: ignore[arg-type]
+            )
+        )
+    exceptions_payload = payload["allowed_event_kind_exceptions"]
+    if not isinstance(exceptions_payload, list):
+        raise ValueError("allowed_event_kind_exceptions must be an array")
+    try:
+        config = AcceptanceConfig(**config_payload)
+        manifest = SoakManifest(
+            schema_version=payload["schema_version"],  # type: ignore[arg-type]
+            t0=_parse_canonical_utc("t0", payload["t0"]),
+            t24=_parse_canonical_utc("t24", payload["t24"]),
+            reports=tuple(reports),
+            boot_id=UUID(str(payload["boot_id"])),
+            machine_id=payload["machine_id"],  # type: ignore[arg-type]
+            machine_version=payload["machine_version"],  # type: ignore[arg-type]
+            image_ref=payload["image_ref"],  # type: ignore[arg-type]
+            image_digest=payload["image_digest"],  # type: ignore[arg-type]
+            release_id=payload["release_id"],  # type: ignore[arg-type]
+            code_version=payload["code_version"],  # type: ignore[arg-type]
+            mapping_hash=payload["mapping_hash"],  # type: ignore[arg-type]
+            acceptance_config=config,
+            acceptance_config_hash=payload["acceptance_config_hash"],  # type: ignore[arg-type]
+            allowed_event_kind_exceptions=frozenset(
+                RuntimeEventKind(str(kind)) for kind in exceptions_payload
+            ),
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid canonical manifest") from error
+    if manifest.acceptance_config_hash != config.digest():
+        raise ValueError("acceptance_config_hash does not match acceptance_config")
+    if payload["soak_hash"] != manifest.soak_hash:
+        raise ValueError("soak_hash does not match canonical manifest payload")
+    if payload["manifest_hash"] != manifest.manifest_hash:
+        raise ValueError("manifest_hash does not match canonical manifest payload")
+    if canonical_manifest_bytes(manifest) != data:
+        raise ValueError("manifest bytes are not canonical")
+    return manifest
+
+
 DISALLOWED_EVENT_KINDS = frozenset(
     {
         RuntimeEventKind.WATCHDOG_STALE,
@@ -400,6 +527,68 @@ class L3SoakReport:
 
     def to_dict(self) -> dict[str, object]:
         return {**self.hash_payload(), "report_hash": self.report_hash}
+
+
+def canonical_report_bytes(report: L3SoakReport) -> bytes:
+    """Return the only accepted on-disk representation of a report."""
+    if type(report) is not L3SoakReport:
+        raise TypeError("report must be an exact L3SoakReport")
+    return _canonical_json_bytes(report.to_dict())
+
+
+def parse_report_bytes(data: bytes) -> L3SoakReport:
+    """Parse and authenticate a canonical report, including its report hash."""
+    payload = _load_json_object(data)
+    expected_keys = set(L3SoakReport.__dataclass_fields__)
+    if set(payload) != expected_keys:
+        raise ValueError("report keys do not match the canonical schema")
+    reasons_payload = payload["reasons"]
+    if not isinstance(reasons_payload, list):
+        raise ValueError("report reasons must be an array")
+    reasons: list[VerdictReason] = []
+    for item in reasons_payload:
+        if not isinstance(item, dict) or set(item) != {"code", "message"}:
+            raise ValueError("report reason keys do not match the canonical schema")
+        reasons.append(VerdictReason(code=item["code"], message=item["message"]))  # type: ignore[arg-type]
+    try:
+        report = L3SoakReport(
+            manifest_hash=payload["manifest_hash"],  # type: ignore[arg-type]
+            soak_hash=payload["soak_hash"],  # type: ignore[arg-type]
+            interval_hash=payload["interval_hash"],  # type: ignore[arg-type]
+            raw_row_set_hash=payload["raw_row_set_hash"],  # type: ignore[arg-type]
+            start=_parse_canonical_utc("report.start", payload["start"]),
+            end=_parse_canonical_utc("report.end", payload["end"]),
+            require_24h=payload["require_24h"],  # type: ignore[arg-type]
+            boot_id=UUID(str(payload["boot_id"])),
+            machine_id=payload["machine_id"],  # type: ignore[arg-type]
+            machine_version=payload["machine_version"],  # type: ignore[arg-type]
+            image_ref=payload["image_ref"],  # type: ignore[arg-type]
+            image_digest=payload["image_digest"],  # type: ignore[arg-type]
+            release_id=payload["release_id"],  # type: ignore[arg-type]
+            code_version=payload["code_version"],  # type: ignore[arg-type]
+            mapping_hash=payload["mapping_hash"],  # type: ignore[arg-type]
+            acceptance_config_hash=payload["acceptance_config_hash"],  # type: ignore[arg-type]
+            row_counts=payload["row_counts"],  # type: ignore[arg-type]
+            expected_promoter_ticks=payload["expected_promoter_ticks"],  # type: ignore[arg-type]
+            recorded_promoter_ticks=payload["recorded_promoter_ticks"],  # type: ignore[arg-type]
+            max_sample_gap_seconds=payload["max_sample_gap_seconds"],  # type: ignore[arg-type]
+            max_promoter_start_gap_seconds=payload["max_promoter_start_gap_seconds"],  # type: ignore[arg-type]
+            minimum_cardinality=payload["minimum_cardinality"],  # type: ignore[arg-type]
+            maximum_freshness_ms=payload["maximum_freshness_ms"],  # type: ignore[arg-type]
+            per_market_freshness_ms=payload["per_market_freshness_ms"],  # type: ignore[arg-type]
+            per_market_coverage_counts=payload["per_market_coverage_counts"],  # type: ignore[arg-type]
+            event_counts=payload["event_counts"],  # type: ignore[arg-type]
+            book_coverage_counts=payload["book_coverage_counts"],  # type: ignore[arg-type]
+            yes_ohlc_coverage_counts=payload["yes_ohlc_coverage_counts"],  # type: ignore[arg-type]
+            status=VerdictStatus(str(payload["status"])),
+            reasons=tuple(reasons),
+            report_hash=payload["report_hash"],  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid canonical report") from error
+    if canonical_report_bytes(report) != data:
+        raise ValueError("report bytes are not canonical")
+    return report
 
 
 _TABLE_PRIMARY_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
@@ -1242,5 +1431,9 @@ __all__ = [
     "VerdictReason",
     "VerdictStatus",
     "build_soak_report",
+    "canonical_manifest_bytes",
+    "canonical_report_bytes",
+    "parse_manifest_bytes",
+    "parse_report_bytes",
     "render_report",
 ]
