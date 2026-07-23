@@ -113,6 +113,7 @@ def test_deploy_l2_workflow_covers_every_phase_054_runtime_and_migration_path() 
     required_paths = {
         "src/polyarb/observation/l3_*.py",
         "src/polyarb/storage/l3_evidence_store.py",
+        "src/polyarb/config.py",
         "scripts/l3_evidence.py",
         "src/polyarb/daemon/**",
         "src/polyarb/http/l2_*.py",

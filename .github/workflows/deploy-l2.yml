@@ -21,6 +21,7 @@ on:
     branches: [main]
     paths:
       - 'src/polyarb/daemon/**'
+      - 'src/polyarb/config.py'
       - 'src/polyarb/clients/ws_market_client.py'
       - 'src/polyarb/observation/l2_candidate_refresh.py'
       - 'src/polyarb/observation/l3_*.py'
