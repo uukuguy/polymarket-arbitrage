@@ -414,7 +414,7 @@ def _assert_catalog_contract(dsn: str) -> None:
             "uq_l3_promote_runs_boot_seq",
             "ck_l3_promote_runs_nonnegative",
             "ck_l3_promote_runs_status",
-            "ck_l3_promote_runs_occurrence_window",
+            "ck_l3_promote_runs_terminal_recording_window",
             "ck_l3_promote_runs_hash_lengths",
         },
         "l3_health_samples": {
@@ -519,13 +519,10 @@ def _assert_catalog_contract(dsn: str) -> None:
             "'frozen'::character varying, 'underfilled'::character varying, "
             "'failed'::character varying])::text[])))"
         ),
-        "ck_l3_promote_runs_occurrence_window": (
-            "CHECK (((scheduled_at >= (recorded_at - '24:00:00'::interval)) AND "
-            "(scheduled_at <= (recorded_at + '00:00:30'::interval)) AND "
-            "(started_at >= (recorded_at - '24:00:00'::interval)) AND "
-            "(started_at <= (recorded_at + '00:00:30'::interval)) AND "
-            "(finished_at >= (recorded_at - '24:00:00'::interval)) AND "
-            "(finished_at <= (recorded_at + '00:00:30'::interval))))"
+        "ck_l3_promote_runs_terminal_recording_window": (
+            "CHECK (((scheduled_at <= started_at) AND (started_at <= finished_at) "
+            "AND (finished_at <= recorded_at) AND "
+            "(recorded_at < (finished_at + '00:00:30'::interval))))"
         ),
         "ck_l3_promote_runs_hash_lengths": (
             "CHECK ((((mapping_hash)::text ~ '^[0-9a-f]{64}$'::text) AND "
@@ -824,6 +821,22 @@ async def _assert_write_and_retention_contract(dsn: str) -> None:
                 "VALUES (gen_random_uuid(), $1, 9, clock_timestamp() - interval '25 hours', "
                 "'shutdown_signal', 'info', '{}'::jsonb)",
                 boot_id,
+            )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO l3_promote_runs "
+                "(boot_id, run_seq, scheduled_at, started_at, finished_at, status, "
+                " reason_code, selected_count, desired_count, committed_count, "
+                " evidenced_count, add_count, remove_count, mapping_hash, desired_hash, "
+                " committed_hash, acceptance_config_hash, ws_generation, add_succeeded, "
+                " remove_succeeded, mirror_succeeded, duration_ms) VALUES "
+                "($1, 99, clock_timestamp()-interval '32 seconds', "
+                " clock_timestamp()-interval '31 seconds', "
+                " clock_timestamp()-interval '30 seconds', "
+                " 'success', 'delayed-terminal', 1, 2, 2, 2, 0, 0, "
+                " $2, $2, $2, $2, 0, NULL, NULL, true, 1000)",
+                boot_id,
+                "a" * 64,
             )
         with pytest.raises(asyncpg.exceptions.CheckViolationError):
             await conn.execute(

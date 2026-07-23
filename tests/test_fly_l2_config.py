@@ -132,3 +132,12 @@ def test_deploy_l2_workflow_keeps_manual_dispatch_and_secret_boundary() -> None:
     assert "superfly/flyctl-actions/setup-flyctl@1.6" in text
     assert "APP: polyarb-l2" in text
     assert "FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}" in text
+
+
+def test_deploy_l2_push_event_cannot_execute_deploy_job() -> None:
+    text = DEPLOY_L2_YML.read_text()
+
+    assert "push:" in text, "push path filters remain required as reachability proof"
+    assert (
+        "if: github.event_name == 'workflow_dispatch'" in text
+    ), "the production deploy job must be executable only by explicit manual dispatch"

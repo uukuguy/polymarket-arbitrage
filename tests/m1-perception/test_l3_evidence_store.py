@@ -826,9 +826,9 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     assert not await store.append_boot(boot)
     for seq, status in enumerate(PromoteStatus):
         assert await store.append_promote_run(
-            _promote(boot.boot_id, start + timedelta(seconds=seq), seq=seq, status=status)
+            _promote(boot.boot_id, now, seq=seq, status=status)
         )
-    assert not await store.append_promote_run(_promote(boot.boot_id, start, seq=0))
+    assert not await store.append_promote_run(_promote(boot.boot_id, now, seq=0))
     batch = _batch(boot.boot_id, now)
     assert await store.append_sample(batch)
     assert not await store.append_sample(batch)

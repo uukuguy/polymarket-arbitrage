@@ -146,12 +146,11 @@ def upgrade() -> None:
             name="ck_l3_promote_runs_status",
         ),
         sa.CheckConstraint(
-            _occurrence_window("scheduled_at")
-            + " AND "
-            + _occurrence_window("started_at")
-            + " AND "
-            + _occurrence_window("finished_at"),
-            name="ck_l3_promote_runs_occurrence_window",
+            "scheduled_at <= started_at "
+            "AND started_at <= finished_at "
+            "AND finished_at <= recorded_at "
+            "AND recorded_at < finished_at + interval '30 seconds'",
+            name="ck_l3_promote_runs_terminal_recording_window",
         ),
         sa.CheckConstraint(
             "mapping_hash ~ '^[0-9a-f]{64}$' "

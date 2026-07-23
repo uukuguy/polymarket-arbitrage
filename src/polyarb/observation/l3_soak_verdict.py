@@ -797,6 +797,26 @@ def _raw_row_set(
                     f"{table} server recorded_at must follow sampled_at by less than 30s",
                 )
             )
+        if table == "l3_promote_runs" and any(
+            not isinstance(row.get("scheduled_at"), datetime)
+            or not isinstance(row.get("started_at"), datetime)
+            or not isinstance(row.get("finished_at"), datetime)
+            or not isinstance(row.get("recorded_at"), datetime)
+            or not (
+                row["scheduled_at"]
+                <= row["started_at"]
+                <= row["finished_at"]
+                <= row["recorded_at"]
+                < row["finished_at"] + timedelta(seconds=30)
+            )
+            for row in rows
+        ):
+            reasons.append(
+                VerdictReason(
+                    "promoter_recording_window",
+                    "promoter terminal rows must be recorded within 30s of finishing",
+                )
+            )
 
         def row_key(row: Mapping[str, object]) -> tuple[bytes, bytes]:
             key_payload = {key: row.get(key) for key in primary_key}
@@ -892,7 +912,7 @@ def _raw_row_set(
     return sorted_tables, reasons
 
 
-def _expected_promoter_schedule(
+def _expected_boot_schedule(
     *, boot_started_at: datetime, start: datetime, end: datetime, interval_s: int
 ) -> tuple[tuple[int, datetime], ...]:
     elapsed = (start - boot_started_at).total_seconds()
@@ -1085,7 +1105,7 @@ def build_soak_report(
 
     promotes = tuple(sorted(evidence.promote_runs, key=lambda row: (row.scheduled_at, row.run_seq)))
     expected_schedule = (
-        _expected_promoter_schedule(
+        _expected_boot_schedule(
             boot_started_at=boot.started_at,
             start=start,
             end=end,
@@ -1146,7 +1166,6 @@ def build_soak_report(
     samples = tuple(
         sorted(evidence.health_samples, key=lambda row: (row.scheduled_at, row.sample_seq))
     )
-    schedule_times = [row.scheduled_at for row in samples]
     sample_times = [row.sampled_at for row in samples]
     schedule_lags = [
         (row.sampled_at - row.scheduled_at).total_seconds() for row in samples
@@ -1154,33 +1173,24 @@ def build_soak_report(
     max_schedule_lag = max(schedule_lags, default=None)
     if boot is not None:
         interval = timedelta(seconds=config.sample_interval_s)
-        schedule_invalid = False
-        for row in samples:
-            delta = row.scheduled_at - boot.started_at
-            if delta < timedelta(0):
-                schedule_invalid = True
-                break
-            _slot, remainder = divmod(delta, interval)
-            if (
-                remainder != timedelta(0)
-                or not row.scheduled_at <= row.sampled_at < row.scheduled_at + interval
-            ):
-                schedule_invalid = True
-                break
-        if (
-            schedule_invalid
-            or not schedule_times
-            or schedule_times[0] != start
-            or len(set(schedule_times)) != len(schedule_times)
-            or any(
-                later <= earlier
-                for earlier, later in zip(schedule_times, schedule_times[1:])
-            )
-        ):
+        expected_health_schedule = _expected_boot_schedule(
+            boot_started_at=boot.started_at,
+            start=start,
+            end=end,
+            interval_s=config.sample_interval_s,
+        )
+        actual_health_schedule = tuple(
+            (row.sample_seq, row.scheduled_at) for row in samples
+        )
+        slot_window_invalid = any(
+            not row.scheduled_at <= row.sampled_at < row.scheduled_at + interval
+            for row in samples
+        )
+        if actual_health_schedule != expected_health_schedule or slot_window_invalid:
             _add(
                 reasons,
                 "sample_schedule_grid",
-                "health schedule must be unique, increasing, boot-grid aligned, and start at T0",
+                "health rows must exactly match every boot-derived 30-second slot",
             )
     boundary_times = [start, *sample_times, end]
     sample_gaps = [

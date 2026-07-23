@@ -113,7 +113,12 @@ def _raw(record: object, *, recorded_at: datetime, **extra: object) -> dict[str,
     return row
 
 
-def _golden_window(*, events: tuple[RuntimeEventRecord, ...] = ()) -> EvidenceWindow:
+def _golden_window(
+    *,
+    events: tuple[RuntimeEventRecord, ...] = (),
+    sample_interval_s: int = 30,
+    sample_count: int = 720,
+) -> EvidenceWindow:
     manifest = _manifest()
     config_hash = manifest.acceptance_config_hash
     boot = RuntimeBootRecord(
@@ -158,9 +163,8 @@ def _golden_window(*, events: tuple[RuntimeEventRecord, ...] = ()) -> EvidenceWi
 
     health: list[HealthSampleRecord] = []
     markets: list[MarketSampleRecord] = []
-    # Sixty seconds is deliberately below the locked 75-second maximum gap.
-    for sample_seq in range(360):
-        scheduled = T0 + timedelta(seconds=sample_seq * 60)
+    for sample_seq in range(sample_count):
+        scheduled = T0 + timedelta(seconds=sample_seq * sample_interval_s)
         sampled = scheduled + timedelta(seconds=5)
         health.append(
             HealthSampleRecord(
@@ -220,7 +224,12 @@ def _golden_window(*, events: tuple[RuntimeEventRecord, ...] = ()) -> EvidenceWi
     raw_rows = {
         "l3_runtime_boots": (_raw(boot, recorded_at=recorded, stopped_at=None),),
         "l3_promote_runs": tuple(
-            _raw(row, recorded_at=recorded, id=index + 1) for index, row in enumerate(promotes)
+            _raw(
+                row,
+                recorded_at=row.finished_at + timedelta(seconds=1),
+                id=index + 1,
+            )
+            for index, row in enumerate(promotes)
         ),
         "l3_health_samples": tuple(
             _raw(row, recorded_at=row.sampled_at + timedelta(seconds=1)) for row in health
@@ -244,6 +253,10 @@ def _golden_window(*, events: tuple[RuntimeEventRecord, ...] = ()) -> EvidenceWi
         yes_ohlc_coverage_counts={f"yes-{index}": 1 for index in range(5)},
         raw_rows_by_table=raw_rows,
     )
+
+
+def _every_other_slot_window() -> EvidenceWindow:
+    return _golden_window(sample_interval_s=60, sample_count=360)
 
 
 def _t0_window() -> EvidenceWindow:
@@ -327,6 +340,78 @@ def test_health_schedule_must_remain_on_exact_boot_grid(
         ),
         manifest,
     )
+    assert "sample_schedule_grid" in _codes(report)
+
+
+def test_every_other_boot_grid_slot_is_not_closed(manifest: SoakManifest) -> None:
+    report = _report(_every_other_slot_window(), manifest)
+
+    assert report.status is VerdictStatus.NOT_CLOSED
+    assert "sample_schedule_grid" in _codes(report)
+
+
+def test_single_missing_30_second_slot_is_rejected_below_75_second_gap(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    missing_seq = 1
+    health = tuple(row for row in golden.health_samples if row.sample_seq != missing_seq)
+    markets = tuple(row for row in golden.market_samples if row.sample_seq != missing_seq)
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    raw["l3_health_samples"] = tuple(
+        row for row in raw["l3_health_samples"] if row["sample_seq"] != missing_seq
+    )
+    raw["l3_market_samples"] = tuple(
+        row for row in raw["l3_market_samples"] if row["sample_seq"] != missing_seq
+    )
+
+    report = _report(
+        replace(
+            golden,
+            health_samples=health,
+            market_samples=markets,
+            raw_rows_by_table=raw,
+        ),
+        manifest,
+    )
+
+    assert report.max_sample_gap_seconds == 60.0
+    assert "sample_gap" not in _codes(report)
+    assert "sample_schedule_grid" in _codes(report)
+
+
+def test_health_sample_seq_must_equal_boot_derived_slot(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    changed_seq = 10_003
+    health_row = replace(golden.health_samples[3], sample_seq=changed_seq)
+    market_rows = tuple(
+        replace(row, sample_seq=changed_seq) if row.sample_seq == 3 else row
+        for row in golden.market_samples
+    )
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    raw_health = list(raw["l3_health_samples"])
+    raw_health[3] = _raw(
+        health_row,
+        recorded_at=health_row.sampled_at + timedelta(seconds=1),
+    )
+    raw["l3_health_samples"] = tuple(raw_health)
+    raw["l3_market_samples"] = tuple(
+        _raw(row, recorded_at=row.sampled_at + timedelta(seconds=1))
+        for row in market_rows
+    )
+
+    report = _report(
+        replace(
+            golden,
+            health_samples=golden.health_samples[:3]
+            + (health_row,)
+            + golden.health_samples[4:],
+            market_samples=market_rows,
+            raw_rows_by_table=raw,
+        ),
+        manifest,
+    )
+
     assert "sample_schedule_grid" in _codes(report)
 
 
@@ -479,10 +564,30 @@ def test_replacing_all_pairs_and_coverage_cannot_reuse_manifest_mapping_hash(
     assert "mapping_identity_hash_mismatch" in _codes(_report(window, manifest))
 
 
-def test_76_second_sample_gap_is_not_closed(golden: EvidenceWindow, manifest: SoakManifest) -> None:
-    health = tuple(row for row in golden.health_samples if row.sample_seq != 1)
-    markets = tuple(row for row in golden.market_samples if row.sample_seq != 1)
-    report = _report(replace(golden, health_samples=health, market_samples=markets), manifest)
+def test_over_75_second_sample_gap_is_not_closed(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    # Removing the final two exact slots leaves an 85-second actual boundary gap.
+    removed = {718, 719}
+    health = tuple(row for row in golden.health_samples if row.sample_seq not in removed)
+    markets = tuple(row for row in golden.market_samples if row.sample_seq not in removed)
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    raw["l3_health_samples"] = tuple(
+        row for row in raw["l3_health_samples"] if row["sample_seq"] not in removed
+    )
+    raw["l3_market_samples"] = tuple(
+        row for row in raw["l3_market_samples"] if row["sample_seq"] not in removed
+    )
+    report = _report(
+        replace(
+            golden,
+            health_samples=health,
+            market_samples=markets,
+            raw_rows_by_table=raw,
+        ),
+        manifest,
+    )
+    assert report.max_sample_gap_seconds == 85.0
     assert "sample_gap" in _codes(report)
 
 
@@ -518,6 +623,20 @@ def test_non_success_promoter_is_not_closed(golden: EvidenceWindow, manifest: So
         manifest,
     )
     assert "promoter_non_success" in _codes(report)
+
+
+def test_delayed_successful_promoter_terminal_row_is_not_closed(
+    golden: EvidenceWindow, manifest: SoakManifest
+) -> None:
+    raw = {key: tuple(rows) for key, rows in golden.raw_rows_by_table.items()}
+    first = dict(raw["l3_promote_runs"][0])
+    first["recorded_at"] = first["finished_at"] + timedelta(seconds=30)
+    raw["l3_promote_runs"] = (first,) + raw["l3_promote_runs"][1:]
+
+    report = _report(replace(golden, raw_rows_by_table=raw), manifest)
+
+    assert report.status is VerdictStatus.NOT_CLOSED
+    assert "promoter_recording_window" in _codes(report)
 
 
 def test_successful_promoter_requires_equal_desired_and_committed_hashes(
