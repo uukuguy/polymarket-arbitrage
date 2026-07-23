@@ -1,6 +1,6 @@
 # 当前项目状态
 
-> 唯一当前状态入口。最后核验：2026-07-22（Phase 05.4 已规划并通过 checker）。
+> 唯一当前状态入口。最后核验：2026-07-23（Phase 05.4 Plans 01–04 已在 main 完成并复验）。
 > `JOURNAL.md` 是追加式历史；其中旧 `[NEXT]` 均不代表当前任务。
 
 稳定的使用流程、健康语义和命令安全分级见
@@ -14,8 +14,10 @@ release 37 已上线；启动与下一次 5 分钟 tick 均为 10/10。Phase 05 
 soak 因缺失 checkpoint 永久 `NOT-CLOSED`。第二个窗口虽有全绿 T+0，但代码审计确认
 每六小时一次的瞬时样本无法证明区间内约 72 次 promoter tick、WS 控制和逐市场
 freshness 始终可靠，因此已降级为 diagnostic-only，不再继续把 T+6/T+12/T+18/T+24
-当作严格验收。连续证据设计已获批，Phase 05.4 已注册为 5 个顺序计划并通过独立
-checker；下一步从 Plan 01 的本地 schema/证据边界开始 TDD。机会 feed 生产最近
+当作严格验收。连续证据的本地实现 Plans 01–04 已完成：五张 append-only 表、
+30 秒 boot-grid 样本、逐 tick promoter/runtime ledger、不可变 manifest/五报告/
+raw-row hash、credential/target proof 和本地 full-chain chaos 均已在 main 复验；
+deploy job 只允许手动 dispatch。下一步是非自动 Plan 05 的逐项生产授权。机会 feed 生产最近
 仍为 HTTP 503。因此**市场感知平台已达到 soak-ready，而不是完整
 production-qualified；整套系统还不是可以投入真实资金运行的套利产品**。
 
@@ -25,7 +27,7 @@ production-qualified；整套系统还不是可以投入真实资金运行的套
 |---|---|---|
 | 主分支 `main` | M2 Phase 2–9 已集成并部署 | 当前交付主线 |
 | M1 L1 Fly 服务 | 39 天 stale 根因已修复；snapshot 恢复到分钟级，Supabase pass | 可作为 M2 机会发现输入 |
-| M1 L2/L3 Fly 服务 | release 37 durable chain 健康，L3 连续两 tick `10/10`，真实 book depth 已写入 | soak-ready；先补连续证据面，再重启严格 24h soak |
+| M1 L2/L3 Fly 服务 | release 37 durable chain 健康，L3 连续两 tick `10/10`，本地连续证据面已完成但尚未部署 | local soak tooling ready；Plan 05 授权 migration/credentials/deploy 后才能启动严格 24h soak |
 | M2 paper execution/accounting | Phase 2–8、H-001～H-006 已通过本地质量门 | 可用于本地模拟、账本和恢复测试 |
 | M2 真实组合套利 | 本地已实现 known-universe quote complete-run collector/scanner；最近生产请求 HTTP 503 | 生产当前有条件/未 ready；H-009 仍 pending，需单独授权部署/调度和时间戳化只读容量观察 |
 | M3 | 未开始 | 不可用 |
@@ -71,7 +73,7 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 - L2 `889fab4` 的 quiet-refresh 机制产生了真实 book→mirror 证据；后来空 projection 回归已定位为本地测试继承生产 `.env`，当前链已自然恢复并重验。
 - WS age 和 mirror age 仍是两条独立 clock；一次 send 或任意 WS frame 不能替代真实 book→mirror 成功。
 - `markets_latest` 的 HTTP 200 空响应不能代表“真实市场为零”；L1 空 rows 必须拒绝远程覆盖，L2 空投影必须冻结 candidate/LKG/游标并重试。
-- 最终全仓 pytest 1433 passed、1 skipped、1 xfailed；touched-file Ruff 通过。没有据此声称所有外部 CI/job 均已运行。
+- Plan 04 合并后全仓 pytest 1811 passed、1 skipped、1 xfailed；Plan-scope Ruff 通过。没有据此声称所有外部 CI/job 均已运行。
 - Phase 2–8 complete 表示 foundation plans 完成，不表示 M2 产品使命完成。
 - `make diagnose-arb-feed-prod min_edge_bps=0` 最近对应 HTTP 503 的不可用语义；在 H-008 打通 chain-truth 前，不得把它说成“当前无正 edge”。只有 `available-zero`/exit=0 且 payload 可解析的 0 条才是合法零机会；诊断本身不修复 producer cadence/SLA mismatch。
 - `make collect-neg-risk-quotes` 只读 CLOB、但写本地 SQLite；`make scan-arb-quotes` 只读完整 quote run。它们未部署、未调度，且 local contract 通过不等于生产 capacity、freshness 或 readiness。
@@ -80,14 +82,14 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 按依赖顺序：
 
-1. Phase 05 的生产 prerequisite 已通过：Alembic 006、L1/L2 deploy、严格 5 市场/10 token 和真实 book-level 写入均有 exact-instance 证据。首个 24h soak 因缺少中间 checkpoint 而永久 NOT-CLOSED；第二个窗口的全绿 T+0 保留为诊断证据，但因现有观测合同无法证明两次样本之间的控制与逐市场状态，已停止作为严格 re-soak。`05.4-continuous-l3-soak-evidence` 已完成 5-plan/24-task 规划并通过 checker；先执行本地 Plans 01–04，Plan 05 的生产 migration、retention credential、deploy 和墙钟 gate 均需独立授权。不放宽 recipe。
+1. Phase 05 的生产 prerequisite 已通过：Alembic 006、L1/L2 deploy、严格 5 市场/10 token 和真实 book-level 写入均有 exact-instance 证据。首个 24h soak 因缺少中间 checkpoint 而永久 NOT-CLOSED；第二个窗口的全绿 T+0 保留为诊断证据。`05.4-continuous-l3-soak-evidence` 的本地 Plans 01–04 已完成并合并；Plan 05 的生产 migration、runtime/retention credentials、secrets、manual deploy、manifest/T0 和墙钟 checkpoint 均需各自明确授权。不放宽 recipe，也不复用旧窗口。
 2. H-009 本地实现保持 pending：先取得**生产部署/调度的单独授权**，再进行**时间戳化只读容量观察**；之后仍须积累重复 complete run、可解析 exit=0 契约和不可变证据，才可评估 producer cadence/SLA。没有这些证据，HTTP 503 绝不等于零机会。
 3. 实现经过明确授权的 Polymarket order/fill adapter、认证、allowance、限额与 kill switch。
 4. 通过 paper→小额 live 质量门后，才讨论真实资金运行。
 
 ## Workstream 摘要
 
-- **M1：L1/L2/L3 的 T+0 生产链为绿；首个 24h 窗口永久 NOT-CLOSED，第二个窗口降级为 diagnostic-only；连续证据 Phase 05.4 已规划并 ready to execute。**
+- **M1：L1/L2/L3 的 T+0 生产链为绿；旧窗口均非 strict evidence；连续证据 Plans 01–04 已在 main 完成，等待 Plan 05 独立生产授权。**
 - **M2：execution/accounting + neg-risk buy-all discovery 可用于真实数据监控/paper。**
 - **M3/M4：未开始。**
 - **M5：计划存在，但当前不应先于 M1 恢复。**
@@ -115,8 +117,10 @@ diagnostic-only，不再执行其余 checkpoint。连续证据设计已写入
 05.4 已拆为 5 个顺序 wave、24 个 task，并经过三轮 checker 修订：补齐数据库级
 append-only/server timestamp、AcceptanceConfig、WS→runtime→health chain、pre-T0
 manifest、五报告 raw-row hash、独立 migration/deploy/retention 授权与四个 not-before
-checkpoint。下一步执行 Plan 01；当前没有真实交易或生产变更。
+checkpoint。Plans 01–04 已完成并合并；下一步只审阅 Plan 05 的精确批准门，当前没有
+Alembic 007、credential、secret、deploy、restart、manifest bind、retention cleanup、
+新 soak 或真实交易变更。
 
 ```bash
-/gsd-execute-phase 05.4 --ws m1-perception
+/gsd-resume-work --ws m1-perception
 ```

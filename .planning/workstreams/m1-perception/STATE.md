@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 03 complete and verified; next is Plan 05.4-04
-last_updated: "2026-07-23T00:04:49Z"
+stopped_at: Phase 05.4 Plan 04 complete, reviewed, and merged; Plan 05 awaits exact production approvals
+last_updated: "2026-07-23T04:53:07Z"
 progress:
   total_phases: 13
   completed_phases: 11
   total_plans: 71
-  completed_plans: 68
-  percent: 96
+  completed_plans: 69
+  percent: 97
 ---
 
 # M1 Perception — Current State
@@ -19,20 +19,23 @@ progress:
 ## Current Position
 
 Phase: 05.4 (continuous-l3-soak-evidence) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 
 - **Phase:** 05.4 — Continuous L3 soak evidence
-- **Plan:** next is 05.4-04 — exact-window verdict, CLI/Make surfaces, local chaos, and teaching docs
-- **Status:** Waves 1–3 are complete on main. The runtime now separates desired,
+- **Plan:** next is 05.4-05 — non-autonomous production migration, credentials,
+  deploy, manifest/T0, and distinct checkpoint gates
+- **Status:** Waves 1–4 are complete on main. The runtime now separates desired,
   committed, and current-generation evidenced membership; depth refresh uses an
   all-token barrier; promoter outcomes are terminal, durable, and retry-safe; and
   all direct PostgreSQL runtime paths use `POLYARB_L2_RUNTIME_DB_DSN`. Plan 03
   adds atomic five-market samples, durable runtime events, four public strict
   health chains, generation-bound book freshness, causal writer recovery, and
-  cancellation-safe producer-before-writer shutdown. The owner/migration DSN
-  remains Alembic-only. Plan 04 is local implementation; Plan 05 remains
+  cancellation-safe producer-before-writer shutdown. Plan 04 adds exact
+  boot-grid verdicts, immutable manifest/five-report/raw-row hashes, credential
+  and revision proofs, local full-chain chaos, and manual-only deploy gating.
+  The owner/migration DSN remains Alembic-only. Plan 05 remains
   `autonomous: false` with separate migration, runtime credential, retention
-  credential, deployment, and wall-clock gates.
+  credential, deployment, manifest/T0, and wall-clock approvals.
 
 - **Active workstream:** `m1-perception`
 
@@ -175,9 +178,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Execute Phase 05.4 Plan 04 under TDD: DB-bound manifest, exact-window verdict,
-  CLI/Make surfaces, gated retention, local chaos, deploy docs, and teaching
-  surfaces. Plans 01–03 are complete and verified.
+- Do not start Phase 05.4 Plan 05 without its exact approval sequence. It is the
+  only remaining plan and contains production migration, runtime/retention
+  credentials, secrets, manual deployment, restart/readiness, manifest binding,
+  and T0/T+6/T+12/T+18/T+24 gates.
 
 - Do not resume the release-37 T+6/T+12/T+18/T+24 sequence as strict evidence.
 - Preserve strict N=5 and the unchanged spread/depth/recency thresholds. Start a
@@ -191,7 +195,7 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 1. `.planning/CURRENT.md` — cross-workstream operational truth.
 2. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-CONTEXT.md` — locked decisions.
-3. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-04-PLAN.md` — next executable plan.
+3. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-PLAN.md` — next gated production plan.
 4. `.planning/threads/market-observation-architecture.md` §1.6 and §2.9 — chain-truth and observation cadence.
 
 ## Resume
@@ -202,18 +206,18 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-23 08:04 (Asia/Shanghai)
-- **Stopped at:** Phase 05.4 Plan 03 complete and merged. Post-merge focused/full
-  pytest, scoped Ruff, compile, SUMMARY, independent review, and planning
-  verification passed.
+- **Last session:** 2026-07-23 12:53 (Asia/Shanghai)
+- **Stopped at:** Phase 05.4 Plan 04 complete, independently reviewed, merged to
+  local main, and reverified after merge. Exact 30-second boot slots, sub-30s
+  promoter recording, immutable five-report verification, credential proofs,
+  local chaos, and manual-only deploy gating are closed.
   Release-37 remains immutable diagnostic-only evidence.
 
-- **Proceeding to:** Execute 05.4 Plan 04 under TDD. Plan 04 authorizes local
-  implementation only. Plan 05 separately gates production migration, L2 runtime
-  credential, retention credential, deployment, manifest/T0, and
-  T+6/T+12/T+18/T+24.
+- **Proceeding to:** Review 05.4 Plan 05 approval gates. No production migration,
+  credential, secret, deploy, restart, manifest bind, retention cleanup, soak,
+  or trade is authorized by Plan 04 completion.
 
-- **Resume file:** `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-04-PLAN.md`
+- **Resume file:** `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-PLAN.md`
 
 ## Accumulated Context
 

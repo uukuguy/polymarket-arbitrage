@@ -1152,3 +1152,21 @@ transport activity and an orderbook resnapshot:
   membership, 30-second process/per-market samples, and exact-window aggregate
   verdicts. Six-hour checkpoints remain human summaries. Design contract:
   `docs/superpowers/specs/2026-07-22-m1-continuous-l3-soak-evidence-design.md`.
+
+### §2.10 Continuous-evidence implementation closure (2026-07-23)
+
+- A sample sequence is a **boot-grid slot identity**, not an attempt counter.
+  If `boot+30s` is skipped and the loop resumes at `boot+60s`, the persisted
+  identity is `(sample_seq=2, scheduled_at=boot+60s)`. This preserves the gap
+  without permanently offsetting a later formally chosen T0.
+- `max_sample_gap <=75s` does not imply 30-second completeness. Verdicts must
+  derive every expected `(sample_seq, scheduled_at)` in `[start,end)` from the
+  boot and compare exact schedule equality; actual `sampled_at` remains the
+  independent gap/freshness clock.
+- A promoter row is not trustworthy merely because its business timestamps look
+  historical. PostgreSQL and offline verdicts now require
+  `scheduled_at <= started_at <= finished_at <= recorded_at < finished_at+30s`,
+  so a missing tick cannot be healed hours later.
+- Deploy path coverage is reachability, not authorization. Eligible pushes may
+  expose a workflow, but the production deploy job itself is gated to explicit
+  `workflow_dispatch`; Plan 05 still owns migration/credentials/deploy approval.

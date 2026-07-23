@@ -4505,3 +4505,44 @@ do not resume the release-37 six-hour samples as strict acceptance evidence.
 Start with Plan 05.4-01 under TDD. Execute Plans 01–04 locally; stop again for
 the distinct Plan 05 production migration, retention credential, and deployment
 authorization gates before any fresh manifest/T0.
+
+## SESSION 83 — 2026-07-23 (Phase 05.4 Plan 04 exact evidence closure)
+
+- [DELIVERED] Added exact-window `SoakManifest`/`L3SoakReport`, five immutable
+  T+0/T+6/T+12/T+18/T+24 artifacts, raw-row/server-time/coverage hashes, and
+  final database re-query verification. Four daily operator commands are
+  read-only; manifest binding and retention cleanup remain separately gated.
+- [FALSE-PASS FIXES] Whole-branch review rejected a 60-second fixture under a
+  locked 30-second cadence, late promoter backfill, and attempt-count sample
+  numbering. Verdict now requires every boot-derived slot, migration/verdict
+  require promoter `recorded_at < finished_at+30s`, and the real sampler
+  persists absolute boot `boundary_index`.
+- [SECURITY] Runtime/retention credentials prove exact target/user, encrypted
+  session, recursive membership, grants, RLS/policies, and forbidden
+  capabilities without printing secrets. The Fly deploy job is now restricted
+  to explicit `workflow_dispatch`; a main push cannot deploy.
+- [CHAOS] Five disposable Testcontainer modes prove sampler pause, writer
+  rejection, WS-control failure, one-hot/four-silent freshness, and restart
+  cardinality through the real store/runtime/Starlette/verdict chain. Partial
+  container starts are cleaned without masking the primary error.
+- [VERIFY] Final independent branch review returned
+  `APPROVE — 0 remaining findings`. Main-session and post-merge full pytest each
+  exited 0 with 1,811 passed, one expected xfail, and one skip. Plan-scope Ruff,
+  compileall, docs, diff, image, and planning gates passed. Full Ruff remained
+  byte-identical to Plan 04 base at 250 findings/82 legacy files.
+- [MERGED] Fast-forwarded `gsd/05.4-04-soak-verdict` into local `main`, re-ran
+  full pytest, removed the owned worktree, and deleted the merged branch. No
+  push occurred.
+- [BOUNDARY] No Alembic 007 production migration, credential/secret change,
+  deploy, restart, manifest bind, retention cleanup, production chaos, fresh
+  soak, trade, H-009 action, or external submission occurred.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-resume-work --ws m1-perception
+```
+
+Review `05.4-05-PLAN.md` and stop at its exact approval gates. Plan 04 local
+PASS does not authorize production migration, runtime/retention credentials,
+secrets, manual deploy, restart, manifest/T0, or T+6/T+12/T+18/T+24 actions.
