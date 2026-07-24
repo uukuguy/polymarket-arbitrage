@@ -5057,3 +5057,32 @@ then deploy/prove a new boot before unique A7.
 Commit and push the qualification documents with candidate `3be6ef6…`, re-run
 production target/revision/credential/secret gates, deploy one clean exact SHA,
 then require a new boot plus repeated successful quiet cycles before unique A7.
+
+## SESSION 99 — 2026-07-25 (release72 ready; A7 T0 PASS)
+
+- [DEPLOY] Workflow `30109374982` deployed exact SHA `6471d415…` as Fly
+  release 72, instance `01KYAFJDM7N3PFBJ8RXWXE2AFJ`, digest `aac4e561…`,
+  and DB boot `9eeab4d5…`. Workflow/Fly label/env/image and DB identities match.
+- [QUIET PROOF] Stable generation 1 produced at least two ten-token quiet
+  refresh evidence endpoints and no failed endpoint. One complete observed
+  cycle took about 0.94 seconds.
+- [READINESS] Two promoter rows passed 5/10/10. Twelve of twelve health rows
+  and 60/60 market rows passed over 330 seconds; gap 30 seconds, max freshness
+  60.9 seconds, book 10/10, Yes OHLC source 5/5, disallowed events zero.
+- [A7 BINDING] O_EXCL manifest
+  `05.4-SOAK-MANIFEST-20260724T164301Z.json` has T0
+  `2026-07-24T16:43:01.704189Z`, hash `0f6e2ffe…`, soak hash `b4e00aeb…`,
+  empty exceptions, and one exact DB binding at `16:41:30.368906Z`.
+- [A7 T0] The manifest-declared T0 report was invoked once after its not-before
+  with a clean worktree, unchanged executable surface, and exact Fly identity.
+  PASS: 10/10/10, five markets, lag 0.291 seconds, gap 29.709 seconds, max
+  freshness 32.195 seconds, runtime events zero. Report hash `15a16e15…`,
+  raw-row hash `1096275e…`.
+- [BOUNDARY] No retention cleanup, production chaos, H-009, or trading action
+  ran. A7 is not final PASS until all four cumulative checkpoints and final
+  raw re-verification pass.
+
+### [NEXT — CURRENT]
+
+At/after A7 T+6 `2026-07-24T22:43:01.704189Z`, create the manifest-declared
+cumulative report exactly once. Preserve any NOT-CLOSED outcome permanently.

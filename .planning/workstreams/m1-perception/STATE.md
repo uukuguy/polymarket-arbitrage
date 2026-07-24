@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 A6 permanently NOT-CLOSED; A7 deployment candidate qualified
-last_updated: "2026-07-24T16:26:24Z"
+stopped_at: Phase 05.4 Plan 05 A7 T0 PASS; cumulative T+6 pending
+last_updated: "2026-07-24T16:44:00Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -62,8 +62,14 @@ Plan: 5 of 5
   compensation for genuine control ambiguity. Forty transaction tests, 209
   focused L2/L3 tests, the full repository suite, Ruff, compile, docs,
   planning, image, and diff gates passed. It is not production evidence until
-  pushed and deployed as one clean exact SHA, followed by new boot/readiness,
-  repeated quiet cycles, and unique A7 binding.
+  pushed and deployed as one clean exact SHA. Exact SHA `6471d41…` now runs as
+  release 72/instance `01KYAFJ…`/boot `9eeab4d5…`, with Fly/DB/GitHub identity
+  matched. Two successful quiet-cycle endpoints, generation 1, two successful
+  promoter rows, and 12/12 complete samples over 330 seconds passed readiness.
+  Unique A7 manifest `0f6e2ffe…` was bound once before exact T0
+  `2026-07-24T16:43:01.704189Z`; its declared T0 report passed with report hash
+  `15a16e15…`, raw-row hash `1096275e…`, 10/10/10, five markets, and zero
+  runtime events.
 
 - **Active workstream:** `m1-perception`
 
@@ -206,8 +212,6 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Push/deploy quiet-refresh candidate `3be6ef6…` as one clean exact SHA and
-  require stable repeated quiet cycles before unique A7.
 - At/after each A7 manifest-computed boundary, retain exactly one cumulative
   T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A6 reports.
 - After T+24 PASS, run `make l3-soak-verify` to re-query all raw rows and verify
@@ -237,11 +241,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-25 00:26 (Asia/Shanghai)
-- **Stopped at:** quiet-refresh candidate `3be6ef6…` passed all local gates.
-- **Proceeding to:** commit/push qualification docs, re-prove production
-  boundaries, exact-SHA deploy, new boot/readiness, repeated quiet cycles, and
-  a unique A7 manifest/T0.
+- **Last session:** 2026-07-25 00:44 (Asia/Shanghai)
+- **Stopped at:** release72 A7 exact T0 report PASS.
+- **Proceeding to:** immutable A7 T+6 at/after
+  `2026-07-24T22:43:01.704189Z`, then T+12/T+18/T+24 and final verify.
 - **Resume files:** `05.4-05-PLAN.md`,
   `05.4-SOAK-MANIFEST-20260724T155621Z.json`, and `05.4-SOAK-LOG.md`.
 
