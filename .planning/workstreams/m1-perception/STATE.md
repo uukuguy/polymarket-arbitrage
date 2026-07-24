@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 Task 1 complete; awaiting exact production migration approval
-last_updated: "2026-07-24T02:07:45Z"
+stopped_at: Phase 05.4 Plan 05 Task 2 preflight; autonomous production completion authorized
+last_updated: "2026-07-24T03:41:10Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -28,7 +28,8 @@ Plan: 5 of 5
 - **Status:** Waves 1–4 are complete on main. Plan 05 Task 1's local-only
   release-candidate gate is complete at `03313a9`; the verified source candidate
   is `95bf1bd`, bound to AcceptanceConfig digest `c9269392…`. Execution is
-  paused before Task 2 pending the exact migration approval. The runtime separates desired,
+  advancing through Task 2 under the user's explicit autonomous-completion
+  override, while preserving separate target/revision/capability proofs. The runtime separates desired,
   control-committed, and current-generation evidenced membership; depth refresh uses an
   all-token barrier; promoter outcomes are terminal, durable, and retry-safe; and
   all direct PostgreSQL runtime paths use `POLYARB_L2_RUNTIME_DB_DSN`. Plan 03
@@ -210,15 +211,15 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-24 10:07 (Asia/Shanghai)
+- **Last session:** 2026-07-24 11:41 (Asia/Shanghai)
 - **Stopped at:** Phase 05.4 Plan 05 Task 1 complete. Focused/full tests,
   plan-scope Ruff and byte-identical legacy baseline, compile, image, docs, and
   planning gates passed; `05.4-SOAK-LOG.md` is committed at `03313a9`.
 
-- **Proceeding to:** Wait for exactly
-  `APPROVE 05.4 PRODUCTION MIGRATION TO 007 ref=<PROD_REF>`. No production
-  migration, credential, secret, deploy, restart, manifest bind, retention
-  cleanup, soak, or trade is authorized by Task 1 completion.
+- **Proceeding to:** The user explicitly authorized automatic completion of the
+  remaining Plan 05 scope for ref `zoqsmjeejfkrokwttjbx`, including migration,
+  isolated credentials, exact-SHA deployment, and the strict soak. Each action
+  still requires its own immediately preceding target/identity/capability proof.
 
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-PLAN.md`
 

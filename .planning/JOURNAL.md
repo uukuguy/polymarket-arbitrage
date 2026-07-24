@@ -4606,3 +4606,29 @@ APPROVE 05.4 PRODUCTION MIGRATION TO 007 ref=<PROD_REF>
 Only after that approval may Task 2 prove the named target is production
 revision 006 and run the single 006→007 migration. Runtime credential,
 retention credential, and deployment remain separately unauthorized.
+
+## SESSION 86 — 2026-07-24 (autonomous Plan 05 completion authorized)
+
+- [USER OVERRIDE] After the production ref was derived safely from the existing
+  DSN, the user explicitly authorized automatic completion of the remaining
+  Phase 05.4 Plan 05 scope. The effective target is Supabase project
+  `zoqsmjeejfkrokwttjbx`; the verified deploy source remains `95bf1bd…`.
+- [SCOPE] Authorization covers migration 006→007, isolated L2 runtime and
+  retention credentials, exact-SHA L2 deployment, readiness, immutable
+  manifest/T0, four not-before checkpoints, and final mechanical closure.
+- [DISCIPLINE] The override removes repeated human-message ceremony only.
+  Migration, runtime credential, retention credential, and deployment remain
+  separately logged actions with immediately preceding target/revision/
+  capability/identity proof. Any mismatch fails closed.
+- [EXCLUDED] No trading, H-009, threshold relaxation, other workstream action,
+  or secret disclosure is authorized.
+- [PREFLIGHT] Fly and GitHub authentication, production pooler DSN, Supabase
+  service key, and `psql` are available. Supabase CLI/management token is not
+  present. A direct DSN will be derived only in process memory for target proof;
+  no credential value will be written or printed.
+
+### [NEXT — CURRENT]
+
+Prove the direct production target is revision 006, then execute and verify the
+single Alembic 007 migration. Continue automatically unless a target, identity,
+capability, or evidence invariant fails closed.
