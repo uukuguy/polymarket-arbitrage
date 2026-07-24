@@ -429,6 +429,52 @@ async def test_run_sampler_emits_real_76_second_gap_and_skips_missed_boundaries(
     ]
 
 
+async def test_run_sampler_rechecks_clock_after_early_timer_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runtime = _runtime()
+    clock = {"now": START}
+    calls: list[tuple[int, datetime, datetime]] = []
+    delays: list[float] = []
+    stop_event = asyncio.Event()
+
+    async def _sample_once(**kwargs):
+        calls.append(
+            (kwargs["sample_seq"], kwargs["scheduled_at"], l3_sampler._utc_now())
+        )
+        if len(calls) == 2:
+            stop_event.set()
+        return True
+
+    async def _wait_for_stop(_stop_event, delay_s):
+        delays.append(delay_s)
+        clock["now"] += timedelta(seconds=delay_s)
+        if len(delays) == 1:
+            clock["now"] -= timedelta(milliseconds=1)
+        else:
+            clock["now"] += timedelta(milliseconds=1)
+        return False
+
+    monkeypatch.setattr(l3_sampler, "_utc_now", lambda: clock["now"])
+    monkeypatch.setattr(l3_sampler, "_wait_for_stop", _wait_for_stop)
+    monkeypatch.setattr(l3_sampler, "sample_once", _sample_once)
+
+    await l3_sampler.run_sampler(
+        stop_event,
+        settings=_settings(),
+        ws_consumer=_ConsumerWithoutMembershipReads(),
+        reconciliation_state=_reconciliation(),
+        runtime=runtime,
+        store=SimpleNamespace(),
+    )
+
+    assert calls == [
+        (0, START, START),
+        (1, START + timedelta(seconds=30), START + timedelta(milliseconds=30_001)),
+    ]
+    assert delays == pytest.approx([30.0, 0.001])
+
+
 async def test_pre_t0_missed_boundary_does_not_poison_complete_later_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

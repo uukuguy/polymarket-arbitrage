@@ -396,6 +396,8 @@ async def run_sampler(
         if stop_event.is_set():
             break
         sampled_at = _utc_now()
+        if sampled_at < boundary:
+            continue
         sampled_boundary_index = _grid_index(boot_started_at, sampled_at, interval)
         if sampled_boundary_index > boundary_index:
             boundary_index = sampled_boundary_index
