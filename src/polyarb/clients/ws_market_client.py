@@ -8,9 +8,10 @@ Plan 03-04 D-02. Drives the L2 daemon's primary data plane:
   30s silence watchdog is in `polyarb.daemon.ws_watchdog` (Plan 03-04 D-03).
 
 Critical gotchas (do NOT relax):
-1. ``ping_interval=10`` — Polymarket WS server drops the connection at ~10s
-   silence. Using the websockets default 20s causes silent disconnects within
-   minutes (docs.polymarket.com).
+1. Polymarket requires the application text message ``PING`` every 10s and
+   replies with text ``PONG``. This is independent of websockets'
+   ``ping_interval=10`` protocol-control frames; both liveness layers remain
+   enabled.
 2. ``max_size=2**22`` (4 MiB) — `initial_dump=True` book snapshots can be large.
    Default 2**20 (1 MiB) throws ``PayloadTooBig`` on big orderbooks. Phase 02
    D-23 precedent: fat payloads bite.
@@ -35,9 +36,11 @@ from loguru import logger
 
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
-# Polymarket REQUIRES 10s ping (server drops at ~10s silence). NOT the
-# websockets default 20s.
-PING_INTERVAL_S = 10
+# Independent liveness layers:
+# - websockets protocol Ping/Pong control frames probe the transport;
+# - Polymarket CLOB requires the application text message PING every 10s.
+PROTOCOL_PING_INTERVAL_S = 10
+APPLICATION_HEARTBEAT_INTERVAL_S = 10.0
 
 # 4 MiB cap for fat initial_dump book snapshots. Default 2**20 (1 MiB) is
 # insufficient on large orderbooks. Phase 02 D-23 OOM precedent.
@@ -53,11 +56,22 @@ class WsConnectionInitializationFailed(RuntimeError):
         self.retry_after_s = max(0.0, float(retry_after_s))
 
 
+async def _send_application_heartbeats(ws: Any, interval_s: float) -> None:
+    """Send the Polymarket-required text heartbeat until this socket closes."""
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            await ws.send("PING")
+        except websockets.ConnectionClosed:
+            return
+
+
 async def stream_market_events(
     assets_ids: list[str] | Callable[[], list[str]],
     *,
     initial_dump: bool = True,
-    ping_interval_s: int = PING_INTERVAL_S,
+    ping_interval_s: int = PROTOCOL_PING_INTERVAL_S,
+    application_heartbeat_interval_s: float = APPLICATION_HEARTBEAT_INTERVAL_S,
     on_connect: Callable[[Any], None] | None = None,
     connection_initializer: Callable[[Any], Awaitable[None]] | None = None,
     on_disconnect: Callable[[Any], Awaitable[None]] | None = None,
@@ -70,8 +84,9 @@ async def stream_market_events(
         initial_dump: if True (default), subscribe payload requests a full
             book snapshot on connect/reconnect so the consumer always has a
             baseline after a reconnect (no held-state drift).
-        ping_interval_s: ping cadence (default 10s). DO NOT raise above 10
-            — Polymarket drops the socket at ~10s silence.
+        ping_interval_s: WebSocket protocol Ping cadence (default 10s).
+        application_heartbeat_interval_s: Polymarket text ``PING`` cadence
+            (default 10s). This is a separate venue protocol requirement.
         on_connect: optional callback called once per (re)connect with the
             live websockets.ClientConnection object as the sole argument.
             Used by WsConsumer (GAP-401) to stash the current ws for liveness
@@ -89,6 +104,8 @@ async def stream_market_events(
     if not initial_assets:
         logger.warning("ws_market_client: empty assets_ids list — nothing to subscribe")
         return
+    if application_heartbeat_interval_s <= 0:
+        raise ValueError("application_heartbeat_interval_s must be positive")
 
     async for ws in websockets.connect(
         WS_URL,
@@ -96,6 +113,7 @@ async def stream_market_events(
         ping_timeout=ping_interval_s,
         max_size=MAX_FRAME_SIZE,
     ):
+        heartbeat_task: asyncio.Task[None] | None = None
         try:
             current_assets = assets_ids() if callable(assets_ids) else assets_ids
             if connection_initializer is not None:
@@ -114,7 +132,15 @@ async def stream_market_events(
                     on_connect(ws)
                 except Exception as _e:  # noqa: BLE001
                     logger.warning(f"ws_market_client: on_connect hook raised: {_e!r}")
+            heartbeat_task = asyncio.create_task(
+                _send_application_heartbeats(
+                    ws,
+                    application_heartbeat_interval_s,
+                )
+            )
             async for raw in ws:
+                if raw == "PONG":
+                    continue
                 try:
                     data = json.loads(raw)
                 except json.JSONDecodeError as e:
@@ -172,3 +198,10 @@ async def stream_market_events(
             except Exception:  # noqa: BLE001
                 pass
             raise
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass

@@ -2,7 +2,8 @@
 
 Plan 04 Wave 0 (RED). Asserts:
 - Subscribe payload shape (type/assets_ids/initial_dump)
-- ping_interval=10 + ping_timeout=10 (Polymarket drops at 10s silence)
+- protocol ping_interval=10 + ping_timeout=10
+- Polymarket application text PING/PONG lifecycle
 - max_size=2**22 (4 MiB cap for fat initial_dump book snapshots)
 - initial_dump defaults to True
 - JSONDecodeError on a non-JSON frame does NOT crash iterator
@@ -124,12 +125,12 @@ async def test_subscribe_payload_shape(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 2 — ping_interval=10 (NOT 20 default)
+# Test 2 — protocol ping_interval=10 (independent of text PING)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def test_ping_interval_10s(monkeypatch: pytest.MonkeyPatch) -> None:
-    """websockets.connect must be called with ping_interval=10 + ping_timeout=10."""
+    """Keep the protocol-level transport probe alongside text heartbeats."""
     fake = FakeWs(frames=['{"event_type":"price_change"}'])
     kwargs_record: list[dict] = []
     monkeypatch.setattr(
@@ -730,3 +731,140 @@ async def test_dynamic_control_shared_gate_is_cancellable(
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=0.2)
     assert yielded_connections == 1
+
+
+async def test_application_heartbeat_sends_text_ping_and_filters_text_pong(
+    monkeypatch: pytest.MonkeyPatch,
+    loguru_sink,
+) -> None:
+    """CLOB keepalive is a text message, not websockets' protocol Ping frame."""
+
+    class HeartbeatWs(FakeWs):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ping_sent = asyncio.Event()
+            self.receive_count = 0
+
+        async def send(self, raw: str) -> None:
+            self.sent.append(raw)
+            if raw == "PING":
+                self.ping_sent.set()
+
+        async def __anext__(self):
+            self.receive_count += 1
+            if self.receive_count == 1:
+                await self.ping_sent.wait()
+                return "PONG"
+            if self.receive_count == 2:
+                return '{"event_type":"book","asset_id":"0xabc"}'
+            raise StopAsyncIteration
+
+    fake = HeartbeatWs()
+    monkeypatch.setattr(
+        "polyarb.clients.ws_market_client.websockets.connect",
+        _make_connect([fake], []),
+    )
+
+    from polyarb.clients.ws_market_client import stream_market_events
+
+    received = [
+        event
+        async for event in stream_market_events(
+            ["0xabc"],
+            application_heartbeat_interval_s=0.001,
+        )
+    ]
+
+    assert received == [{"event_type": "book", "asset_id": "0xabc"}]
+    assert "PING" in fake.sent
+    assert "non-JSON" not in loguru_sink.getvalue()
+    ping_count = fake.sent.count("PING")
+    await asyncio.sleep(0.01)
+    assert fake.sent.count("PING") == ping_count
+
+
+async def test_application_heartbeat_stops_after_abnormal_connection_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reconnect boundary must not leave the previous socket's sender alive."""
+    import websockets
+
+    class ClosingAfterPingWs(FakeWs):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ping_sent = asyncio.Event()
+
+        async def send(self, raw: str) -> None:
+            self.sent.append(raw)
+            if raw == "PING":
+                self.ping_sent.set()
+
+        async def __anext__(self):
+            await self.ping_sent.wait()
+            raise websockets.ConnectionClosed(rcvd=None, sent=None)
+
+    fake = ClosingAfterPingWs()
+    monkeypatch.setattr(
+        "polyarb.clients.ws_market_client.websockets.connect",
+        _make_connect([fake], []),
+    )
+
+    from polyarb.clients.ws_market_client import stream_market_events
+
+    received = [
+        event
+        async for event in stream_market_events(
+            ["0xabc"],
+            application_heartbeat_interval_s=0.001,
+        )
+    ]
+    assert received == []
+    ping_count = fake.sent.count("PING")
+    await asyncio.sleep(0.01)
+    assert fake.sent.count("PING") == ping_count
+
+
+async def test_application_heartbeat_stops_when_parent_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parent cancellation still propagates and cleans up the heartbeat task."""
+
+    class BlockingWs(FakeWs):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ping_sent = asyncio.Event()
+            self.never_returns = asyncio.Event()
+
+        async def send(self, raw: str) -> None:
+            self.sent.append(raw)
+            if raw == "PING":
+                self.ping_sent.set()
+
+        async def __anext__(self):
+            await self.never_returns.wait()
+            raise AssertionError("unreachable")
+
+    fake = BlockingWs()
+    monkeypatch.setattr(
+        "polyarb.clients.ws_market_client.websockets.connect",
+        _make_connect([fake], []),
+    )
+
+    from polyarb.clients.ws_market_client import stream_market_events
+
+    async def _drain() -> None:
+        async for _ in stream_market_events(
+            ["0xabc"],
+            application_heartbeat_interval_s=0.001,
+        ):
+            pass
+
+    task = asyncio.create_task(_drain())
+    await asyncio.wait_for(fake.ping_sent.wait(), timeout=0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
+
+    ping_count = fake.sent.count("PING")
+    await asyncio.sleep(0.01)
+    assert fake.sent.count("PING") == ping_count
