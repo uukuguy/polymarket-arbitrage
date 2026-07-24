@@ -1227,3 +1227,36 @@ transport activity and an orderbook resnapshot:
   relax any post-start generation-change failure. A failed release is never
   reinterpreted or restarted into eligibility; readiness begins again on a new
   exact release and boot.
+
+### §2.12 Control ambiguity is not business-evidence absence (2026-07-25)
+
+- A6 seq 35 durably failed at desired/committed/evidenced `10/10/8`; both
+  tokens for market `562802` lacked current-generation depth-write evidence.
+  Its T0 remains an immutable PASS, but the interval is permanently
+  NOT-CLOSED and no T6/T12/T18/T24 artifact may be created.
+- The old quiet-refresh exception path classified a final missing book exactly
+  like an unsubscribe/subscribe send or identity failure and compensated the
+  whole generation. The new generation then reached the quiet gate before
+  initial evidence convergence, creating self-sustaining refresh/reconnect
+  churn. This is a feedback-loop defect, not permission to ignore the failed
+  sample.
+- Chain-truth now distinguishes two failure domains. Control-send failure,
+  generation drift, and cancellation still make wire intent ambiguous and
+  force compensation. A same-generation successful final subscribe followed
+  by missing business evidence retains the socket, records the exact missing
+  identities in process state, and returns failure without advancing any
+  freshness clock.
+- Refresh uses one full first control cycle, an 8-second evidence interval,
+  then one missing-only control cycle inside the unchanged 25-second total
+  budget. A later organic successful depth write removes its identity from the
+  generation-scoped retry set; the next due attempt prefers only the remaining
+  set.
+- A newly initialized connection gets the existing 60-second quiet interval to
+  converge before this mechanism runs. The sampler, AcceptanceConfig, strict
+  `10/10/10`, and 30-second ledger cadence are unchanged.
+- Candidate `3be6ef6a8ceed8517020506291d474c13a6f6bc0` passed 40 focused
+  control/evidence tests, 209 full L2/L3 focused tests, and the full repository
+  suite. Changed-file Ruff, compileall, docs, planning, exact release-70 image
+  required-`python`, and diff gates passed. This is local qualification only;
+  A7 requires a clean exact-SHA deploy, a new boot, and repeated successful
+  quiet cycles before manifest binding.

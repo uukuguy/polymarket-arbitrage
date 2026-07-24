@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 A6 permanently NOT-CLOSED; quiet-refresh repair before A7
-last_updated: "2026-07-24T16:10:00Z"
+stopped_at: Phase 05.4 Plan 05 A6 permanently NOT-CLOSED; A7 deployment candidate qualified
+last_updated: "2026-07-24T16:26:24Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -28,12 +28,10 @@ Plan: 5 of 5
 - **Status:** Production project `zoqsmjeejfkrokwttjbx` is Alembic 007.
   Dedicated `polyarb_l2_runtime_054` and `polyarb_l3_retention_054` credentials
   pass disjoint least-privilege proofs; Fly contains only the runtime DSN and
-  the owner/retention credentials remain absent. Selected source
-  `9f2c935ab2fc893811005b0dc40f60725eaaef31` runs as Fly release 66, digest
-  `sha256:637cdc62d89183d1820e620242d020e6bfbbc0e894d368a6c4a449dd2d0ef82d`,
-  instance `01KYA1GSQWRCQ1QZJDH2ZAMW6S`, and DB boot
-  `be240060-6882-4403-bace-a6b3fd8a3fa6`; GitHub/Fly/DB identities match.
-  Readiness passed with the locked mapping/config and zero disallowed events.
+  the owner/retention credentials remain absent. Current production is exact
+  source `64df08e…`, Fly release 70, digest `sha256:81849c56…`, instance
+  `01KYACS3…`, and DB boot `cd04e515…`; it is diagnostic-only after A6
+  invalidation.
   A1–A4 are immutable rejected evidence. A5 manifest `95814bf1…` was
   O_EXCL-created and bound exactly once before T0. Its exact scheduled T0
   `2026-07-24T12:43:29.274117Z` and canonical report `adbbbc4f…` passed.
@@ -57,8 +55,15 @@ Plan: 5 of 5
   `7549fa06…`, but seq 35 later failed at 10/10/8. A6 is permanently
   NOT-CLOSED; its T+6 runner is cancelled and later files do not exist.
   Root cause is destructive quiet-refresh timeout compensation creating a
-  self-sustaining generation loop. A non-destructive, evidence-strict retry
-  repair is designed before a new exact deployment/readiness/A7.
+  self-sustaining generation loop. Candidate
+  `3be6ef6a8ceed8517020506291d474c13a6f6bc0` now gives new generations an
+  initial convergence interval, performs a two-stage missing-only retry, and
+  preserves a healthy socket on business-evidence timeout while retaining
+  compensation for genuine control ambiguity. Forty transaction tests, 209
+  focused L2/L3 tests, the full repository suite, Ruff, compile, docs,
+  planning, image, and diff gates passed. It is not production evidence until
+  pushed and deployed as one clean exact SHA, followed by new boot/readiness,
+  repeated quiet cycles, and unique A7 binding.
 
 - **Active workstream:** `m1-perception`
 
@@ -201,10 +206,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- TDD the quiet-refresh non-destructive evidence-timeout retry; deploy one new
-  exact SHA and require stable repeated quiet cycles before unique A7.
-- At/after each A6 manifest-computed boundary, retain exactly one cumulative
-  T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A5 reports.
+- Push/deploy quiet-refresh candidate `3be6ef6…` as one clean exact SHA and
+  require stable repeated quiet cycles before unique A7.
+- At/after each A7 manifest-computed boundary, retain exactly one cumulative
+  T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A6 reports.
 - After T+24 PASS, run `make l3-soak-verify` to re-query all raw rows and verify
   the binding plus all five files/hashes before changing ROADMAP/phase status.
 - On final PASS only, sign validation rows 05.4-05-05 through 05.4-05-09,
@@ -220,9 +225,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 1. `.planning/CURRENT.md` — cross-workstream operational truth.
 2. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-CONTEXT.md` — locked decisions.
 3. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-PLAN.md` — active production plan.
-4. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-MANIFEST-20260724T124329Z.json` — immutable A5 contract.
+4. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-MANIFEST-20260724T155621Z.json` — immutable rejected A6 contract.
 5. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-LOG.md` — authoritative execution timeline.
-6. `.planning/threads/market-observation-architecture.md` §1.6 and §2.9–2.11 — chain-truth and observation cadence.
+6. `.planning/threads/market-observation-architecture.md` §1.6 and §2.9–2.12 — chain-truth and observation cadence.
 
 ## Resume
 
@@ -232,12 +237,13 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-24 21:38 (Asia/Shanghai)
-- **Stopped at:** A6 seq 35 failed 10/10/8; T+6 runner cancelled before boundary.
-- **Proceeding to:** implement the approved quiet-refresh repair, exact-SHA
-  deploy, new boot/readiness, and a unique A7 manifest/T0.
+- **Last session:** 2026-07-25 00:26 (Asia/Shanghai)
+- **Stopped at:** quiet-refresh candidate `3be6ef6…` passed all local gates.
+- **Proceeding to:** commit/push qualification docs, re-prove production
+  boundaries, exact-SHA deploy, new boot/readiness, repeated quiet cycles, and
+  a unique A7 manifest/T0.
 - **Resume files:** `05.4-05-PLAN.md`,
-  `05.4-SOAK-MANIFEST-20260724T124329Z.json`, and `05.4-SOAK-LOG.md`.
+  `05.4-SOAK-MANIFEST-20260724T155621Z.json`, and `05.4-SOAK-LOG.md`.
 
 ## Accumulated Context
 

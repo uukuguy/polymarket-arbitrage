@@ -5026,3 +5026,34 @@ manifest-declared cumulative report once, preserving any NOT-CLOSED outcome.
 Execute the quiet-refresh repair from
 `docs/superpowers/specs/2026-07-25-l3-quiet-refresh-nondestructive-retry-design.md`,
 then deploy/prove a new boot before unique A7.
+
+## SESSION 98 — 2026-07-25 (quiet-refresh repair qualified)
+
+- [RED] The timeout contract proved that the old implementation closed a
+  healthy socket after missing business evidence. A second RED test proved
+  there was no missing-only second control cycle.
+- [GREEN] Candidate `3be6ef6a8ceed8517020506291d474c13a6f6bc0`
+  adds an initial generation convergence interval, an 8-second first barrier,
+  a missing-only second unsubscribe/subscribe inside the unchanged 25-second
+  total, and generation-scoped residual retry state.
+- [FAILURE BOUNDARY] A successful same-generation final subscribe followed by
+  evidence timeout now returns false without forging freshness or closing the
+  socket. Send failure, generation drift, and cancellation still compensate.
+  Organic successful depth writes clear matching retry identities.
+- [GATES] Forty transaction/evidence tests and 209 full L2/L3 focused tests
+  passed. Full repository pytest reached 100% with the existing one xfail and
+  one skip. Changed-file Ruff, compileall, docs contract, planning-status, and
+  diff checks passed.
+- [IMAGE] The first image invocation failed closed because Docker lacked
+  private Fly registry authentication. After `flyctl auth docker`, exact
+  release-70 digest `81849c56…` passed required `python`; optional
+  `pkill/ps/dig/ping` remain absent as documented.
+- [BOUNDARY] A6 remains permanently NOT-CLOSED and no later report exists. No
+  deployment, checkpoint mutation, retention cleanup, production chaos,
+  H-009, or trading action ran during qualification.
+
+### [NEXT — CURRENT]
+
+Commit and push the qualification documents with candidate `3be6ef6…`, re-run
+production target/revision/credential/secret gates, deploy one clean exact SHA,
+then require a new boot plus repeated successful quiet cycles before unique A7.
