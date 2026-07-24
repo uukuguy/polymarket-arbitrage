@@ -4759,8 +4759,32 @@ fail closed and repair the first broken chain.
 
 ### [NEXT — CURRENT]
 
-At or after `2026-07-24T17:21:46.353847Z`, run the manifest-declared T+6
-checkpoint once. The preflight not-before check already refused and created no
-file. Continue T+12 at `2026-07-24T23:21:46.353847Z`, T+18 at
-`2026-07-25T05:21:46.353847Z`, and T+24/final verify at
-`2026-07-25T11:21:46.353847Z`.
+Do not run A4 T+6 or later checkpoints. A4 is permanently NOT-CLOSED. Continue
+SESSION 91's verified OHLC source-freshness repair: commit and push it, deploy
+that exact SHA, prove the new GitHub/Fly/DB identity and readiness, then create
+and bind an attempt-unique A5 future-grid manifest/T0.
+
+## SESSION 91 — 2026-07-24 (A4 invalidated; OHLC freshness repaired)
+
+- [EARLY AUDIT] Before T+6, a read-only production audit found health seq 34
+  failed on market `565064`: latest book age was 91.641 seconds, but the
+  reported OHLC age was 136.796 seconds because it used minute-truncated
+  `l2_ohlc_1m.bucket_ts`.
+- [ROOT CAUSE] A minute bucket label is not the latest observation timestamp
+  inside that bucket. The sampler therefore added 0–60 seconds of artificial
+  age to the strict `<120s` freshness gate.
+- [REPAIR] Sampling now uses the latest non-null `l2_top_of_book.ts` for each
+  Yes token—the exact source observation contributing to the regular OHLC
+  view. Cumulative checkpoint/final coverage still queries `l2_ohlc_1m`.
+- [GATES] Focused real-PostgreSQL and phase suites, full pytest, changed-file
+  Ruff, compile, M1 docs, planning, and authenticated deployed-image checks
+  passed. A4 is permanently NOT-CLOSED; its immutable manifest and PASS T0
+  remain diagnostic evidence, and no T+6 file exists.
+- [BOUNDARY] No trading, H-009, retention cleanup, or production chaos action
+  occurred.
+
+### [NEXT — CURRENT]
+
+Commit and push the source-freshness repair, re-prove revision 007 and the
+credential boundary, deploy the exact new SHA, cross-check GitHub/Fly/DB
+identity, pass readiness, and start unique A5.

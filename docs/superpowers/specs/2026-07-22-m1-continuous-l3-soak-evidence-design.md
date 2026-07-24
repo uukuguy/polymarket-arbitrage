@@ -204,6 +204,11 @@ The discrete 30-second sampler does not claim mathematical continuity; it gives
 a bounded observation gap. Event-driven promoter and runtime rows cover the
 state transitions that matter between samples.
 
+OHLC freshness is measured from the latest non-null `l2_top_of_book.ts` for
+each Yes token—the latest source observation contributing to the regular
+minute OHLC view—not from `l2_ohlc_1m.bucket_ts`, which is only a truncated
+bucket label. Exact cumulative OHLC coverage still queries the OHLC view.
+
 ### 5.2 Six-hour checkpoint
 
 Keep T+6/T+12/T+18/T+24 as human-readable summaries generated from durable

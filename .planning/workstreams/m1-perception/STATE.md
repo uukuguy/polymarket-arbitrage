@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 A4 T0 PASS; waiting for immutable T+6 not-before
-last_updated: "2026-07-24T11:22:30Z"
+stopped_at: Phase 05.4 Plan 05 A4 permanently NOT-CLOSED; verified OHLC source-freshness repair awaiting exact-SHA deployment
+last_updated: "2026-07-24T11:35:55Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -29,7 +29,11 @@ Plan: 5 of 5
   release-candidate gate is complete at `03313a9`; production cross-checks then
   found and repaired runtime-health identity, release-ID, boot-grid timing,
   stable sampler cuts, manifest mapping enforcement, T0 coverage scope, and
-  per-L3 freshness chain defects. The selected exact deployed source is
+  per-L3 freshness chain defects. A read-only audit then invalidated A4 before
+  T+6: the sampler treated minute-truncated OHLC bucket labels as observation
+  timestamps, adding up to 60 seconds of artificial age. The verified repair
+  reads the latest non-null source observation from `l2_top_of_book` while
+  retaining `l2_ohlc_1m` for cumulative coverage. The last deployed source is
   `aaba91a`, bound to AcceptanceConfig digest `c9269392…`. The exposed owner
   password was rotated through the exact Supabase project and the replacement
   is direct-TLS verified. Production migrated exactly once from 006 to 007.
@@ -38,9 +42,10 @@ Plan: 5 of 5
   DSN is absent from the Fly inventory, and the retention DSN exists only in
   macOS Keychain. Workflow run `30088360806`, image digest `4ce6d293…`, Fly
   instance `01KY9WX11REQC6SDZ0YK94J8FR`, and DB boot `70ed099f…` have exact
-  SHA equality. Readiness passed and selected A4 manifest `2d29a839…` has an
-  immutable PASS T0 at `2026-07-24T11:21:46.353847Z`; T+6 is not available
-  before `2026-07-24T17:21:46.353847Z`.
+  SHA equality. Readiness passed and A4 manifest `2d29a839…` has an immutable
+  PASS T0 at `2026-07-24T11:21:46.353847Z`, but health seq 34 permanently
+  invalidated that window; no later A4 checkpoint may run. Next is exact-SHA
+  deployment/readiness and an attempt-unique A5 manifest/T0.
   The runtime separates desired,
   control-committed, and current-generation evidenced membership; depth refresh uses an
   all-token barrier; promoter outcomes are terminal, durable, and retry-safe; and

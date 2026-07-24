@@ -302,7 +302,7 @@ async def test_sampling_market_state_uses_one_aggregate_query_and_closes(
             "no_token_id": f"no-{index}",
             "yes_book_at": at,
             "no_book_at": at - timedelta(seconds=1),
-            "yes_ohlc_at": at.replace(second=0, microsecond=0),
+            "yes_ohlc_at": at,
         }
         for index in range(5)
     ]
@@ -327,7 +327,10 @@ async def test_sampling_market_state_uses_one_aggregate_query_and_closes(
     connection.fetch.assert_awaited_once()
     sql, supplied_tokens = connection.fetch.await_args.args
     assert "l2_book_levels" in sql
-    assert "l2_ohlc_1m" in sql
+    assert "l2_top_of_book" in sql
+    assert "mid_price IS NOT NULL" in sql
+    assert "max(ts) AS ohlc_at" in sql
+    assert "l2_ohlc_1m" not in sql
     assert "markets_latest" in sql
     assert supplied_tokens == token_ids
     assert connection.closed
@@ -1089,7 +1092,7 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
         no_token_id="no-0",
         yes_book_at=end,
         no_book_at=start,
-        yes_ohlc_at=expected_ohlc_at,
+        yes_ohlc_at=end,
     )
     assert all(
         market.yes_book_at is None

@@ -157,10 +157,11 @@ WITH requested AS (
     FROM l2_book_levels
     WHERE asset_id = ANY($1::text[])
     GROUP BY asset_id
-), latest_yes_ohlc AS (
-    SELECT asset_id, max(bucket_ts) AS ohlc_at
-    FROM l2_ohlc_1m
+), latest_yes_ohlc_source AS (
+    SELECT asset_id, max(ts) AS ohlc_at
+    FROM l2_top_of_book
     WHERE asset_id = ANY($1::text[])
+      AND mid_price IS NOT NULL
     GROUP BY asset_id
 )
 SELECT mapping.market_id, mapping.yes_token_id, mapping.no_token_id,
@@ -172,7 +173,8 @@ JOIN requested AS requested_yes ON requested_yes.token_id=mapping.yes_token_id
 JOIN requested AS requested_no ON requested_no.token_id=mapping.no_token_id
 LEFT JOIN latest_books AS yes_book ON yes_book.asset_id=mapping.yes_token_id
 LEFT JOIN latest_books AS no_book ON no_book.asset_id=mapping.no_token_id
-LEFT JOIN latest_yes_ohlc AS yes_ohlc ON yes_ohlc.asset_id=mapping.yes_token_id
+LEFT JOIN latest_yes_ohlc_source AS yes_ohlc
+  ON yes_ohlc.asset_id=mapping.yes_token_id
 ORDER BY mapping.market_id, mapping.yes_token_id, mapping.no_token_id
 """
 
@@ -841,7 +843,7 @@ class L3EvidenceStore:
         self,
         token_ids: list[str],
     ) -> tuple[SamplingMarketState, ...]:
-        """Read mapping, ten book anchors, and five Yes OHLC anchors once."""
+        """Read mapping, book anchors, and latest Yes OHLC source observations."""
         normalized = sorted(set(token_ids))
         if any(not isinstance(token_id, str) or not token_id for token_id in normalized):
             raise ValueError("sampling token IDs must be non-empty strings")
