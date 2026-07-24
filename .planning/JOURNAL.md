@@ -4844,6 +4844,10 @@ create the file early or reuse any rejected attempt.
   disjoint credentials, exact release-66/A5 identity, active T+6 boundary, and
   the remaining checkpoint/final-closure sequence. ROADMAP correctly remains
   4/5 with Plan 05 unchecked.
+- [CURRENT RECONCILIATION] Updated the repository's declared unique current
+  state entry from Alembic 006/release 37/waiting for authorization to
+  production 007/release 66/A5 T0 PASS and the exact four remaining checkpoint
+  times. M2/H-009/live-trading cautions remain unchanged.
 - [BOUNDARY] No trading, H-009, retention cleanup, production chaos, or
   evidence mutation occurred.
 
