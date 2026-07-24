@@ -150,7 +150,7 @@ async def test_refresh_rejects_failed_depth_and_old_generation_evidence() -> Non
 
 
 @pytest.mark.asyncio
-async def test_explicit_required_set_sends_union_but_waits_only_for_required() -> None:
+async def test_explicit_required_set_refreshes_and_waits_only_for_required() -> None:
     consumer, _watchdog, ws = _make_consumer()
     ws.send.side_effect = None
 
@@ -159,7 +159,8 @@ async def test_explicit_required_set_sends_union_but_waits_only_for_required() -
     )
     await _wait_until(lambda: ws.send.await_count == 2)
     payloads = [json.loads(call.args[0]) for call in ws.send.await_args_list]
-    assert payloads[0]["assets_ids"] == ["candidate-a", "candidate-b", "l3-c"]
+    assert payloads[0]["assets_ids"] == ["l3-c"]
+    assert payloads[1]["assets_ids"] == ["l3-c"]
 
     consumer.record_book_evidence(
         asset_id="l3-c",
@@ -289,6 +290,10 @@ async def test_unrelated_candidate_frame_does_not_mask_stale_l3_evidence() -> No
 
     assert await consumer.refresh_if_quiet(now_s=BASE_S + 100) is True
     assert ws.send.await_count == 2
+    assert [json.loads(call.args[0])["assets_ids"] for call in ws.send.await_args_list] == [
+        ["candidate-b", "l3-c"],
+        ["candidate-b", "l3-c"],
+    ]
 
 
 @pytest.mark.asyncio

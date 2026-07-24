@@ -672,16 +672,19 @@ class WsConsumer:
         *,
         required_asset_ids: frozenset[str] | None = None,
     ) -> bool:
-        """Request an initial book dump for the current active asset union.
+        """Request an initial book dump for the required asset scope.
 
         Sending a request is transport activity, not business-data freshness:
         this method intentionally leaves candidate/L3 state, event timestamps,
-        and the watchdog untouched. Only the receive path may advance them.
+        and the watchdog untouched. Only the receive path may advance them. A
+        direct call refreshes the full active union; the quiet-market path passes
+        the committed L3 set explicitly so unrelated candidates are not cycled.
         """
         waiter: _BookEvidenceWaiter | None = None
         ws: Any = None
         generation = 0
         active_assets: list[str] = []
+        refresh_assets: list[str] = []
         required_assets: frozenset[str] = frozenset()
         failure_reason = "unexpected_exception"
         try:
@@ -689,13 +692,16 @@ class WsConsumer:
                 active_assets = self._compute_active_assets()
                 if required_asset_ids is not None:
                     required_assets = frozenset(required_asset_ids)
+                    refresh_assets = sorted(required_assets)
                 elif self._l3_desired_set:
                     required_assets = frozenset(self._l3_desired_set)
+                    refresh_assets = active_assets
                 else:
                     required_assets = frozenset(active_assets)
+                    refresh_assets = active_assets
                 ws = self._current_ws
                 generation = self._connection_generation
-                if not active_assets:
+                if not refresh_assets:
                     failure_reason = "no_active_assets"
                     raise RuntimeError("quiet refresh has no active assets")
                 if not required_assets:
@@ -719,11 +725,11 @@ class WsConsumer:
                     missing=set(required_assets),
                 )
                 self._book_evidence_waiters.setdefault(generation, []).append(waiter)
-                logger.info(f"ws quiet refresh: sending assets={len(active_assets)}")
+                logger.info(f"ws quiet refresh: sending assets={len(refresh_assets)}")
                 failure_reason = "unsubscribe_failed"
                 if not await self._send_control(
                     ws,
-                    {"operation": "unsubscribe", "assets_ids": active_assets},
+                    {"operation": "unsubscribe", "assets_ids": refresh_assets},
                 ):
                     raise RuntimeError("quiet unsubscribe failed")
                 failure_reason = "generation_changed"
@@ -734,7 +740,7 @@ class WsConsumer:
                     ws,
                     {
                         "operation": "subscribe",
-                        "assets_ids": active_assets,
+                        "assets_ids": refresh_assets,
                         "initial_dump": True,
                     },
                 ):
@@ -768,7 +774,7 @@ class WsConsumer:
                 failure_reason,
                 type(exc).__name__,
                 generation,
-                len(active_assets),
+                len(refresh_assets),
                 len(required_assets),
                 len(missing_assets),
             )
