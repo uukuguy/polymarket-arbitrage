@@ -2186,6 +2186,61 @@ async def test_run_periodic_uses_boot_grid_and_contiguous_sequences_when_late() 
 
 
 @pytest.mark.asyncio
+async def test_run_periodic_rechecks_wall_clock_after_early_timer_timeout() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    settings.l3_promote_interval_s = 300
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    stop_event = asyncio.Event()
+    boot_started_at = runtime.snapshot().started_at
+    wall_clock = {"now": boot_started_at}
+    calls: list[tuple[datetime, datetime]] = []
+    wait_count = 0
+
+    async def _fake_promote(**kwargs: Any) -> dict:
+        calls.append((kwargs["scheduled_at"], wall_clock["now"]))
+        if len(calls) == 1:
+            wall_clock["now"] = boot_started_at + timedelta(seconds=299.999)
+        else:
+            stop_event.set()
+        return {"added": [], "removed": []}
+
+    async def _early_timer(awaitable: Any, *, timeout: float) -> None:
+        nonlocal wait_count
+        del timeout
+        awaitable.close()
+        wait_count += 1
+        if wait_count == 2:
+            wall_clock["now"] = boot_started_at + timedelta(seconds=300)
+        raise TimeoutError
+
+    with (
+        patch.object(l3_promote, "promote_run", side_effect=_fake_promote),
+        patch.object(l3_promote, "_utc_now", side_effect=lambda: wall_clock["now"]),
+        patch.object(l3_promote.asyncio, "wait_for", side_effect=_early_timer),
+    ):
+        await l3_promote.run_periodic(
+            stop_event=stop_event,
+            settings=settings,
+            ws_consumer=MagicMock(),
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+        )
+
+    assert wait_count == 2
+    assert calls == [
+        (boot_started_at, boot_started_at),
+        (
+            boot_started_at + timedelta(seconds=300),
+            boot_started_at + timedelta(seconds=300),
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_promote_run_uses_supplied_canonical_acceptance_without_rebuilding() -> None:
     from polyarb.observation import l3_promote
 

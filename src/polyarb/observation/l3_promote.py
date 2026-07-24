@@ -1220,13 +1220,18 @@ async def run_periodic(
     while not stop_event.is_set():
         run_seq = evidence_runtime.next_run_seq()
         scheduled_at = boot_started_at + timedelta(seconds=run_seq * interval_s)
-        delay_s = max(0.0, (scheduled_at - _utc_now()).total_seconds())
-        if delay_s > 0:
+        while not stop_event.is_set():
+            delay_s = (scheduled_at - _utc_now()).total_seconds()
+            if delay_s <= 0:
+                break
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=delay_s)
                 break
             except TimeoutError:
-                pass
+                # Event-loop timers may fire fractionally before the wall-clock
+                # boundary. Re-check instead of emitting a terminal row whose
+                # started_at precedes scheduled_at and violates durable truth.
+                continue
         if stop_event.is_set():
             break
         try:
