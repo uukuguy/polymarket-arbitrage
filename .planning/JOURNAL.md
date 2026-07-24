@@ -4811,3 +4811,29 @@ and bind an attempt-unique A5 future-grid manifest/T0.
 
 Run A5 T+6 exactly once at or after `2026-07-24T18:43:29.274117Z`; do not
 create the file early or reuse any rejected attempt.
+
+## SESSION 92 — 2026-07-24 (A5 T+6 runner preflight corrected)
+
+- [FAIL-CLOSED DIAGNOSTIC] A local read-only status probe used a Session
+  Pooler endpoint inferred from shell history. The store failed closed, and
+  three minimal reproductions returned SQLSTATE `XX000` /
+  `ENOTFOUND tenant/user`. No checkpoint file or database mutation occurred.
+- [ROOT CAUSE] The endpoint was not recovered from this exact project's
+  authoritative Connect string. A historical Pooler hostname is not production
+  target evidence, even when its region-shaped label looks plausible.
+- [DIRECT PROOF] Rebuilt the runtime DSN only in process memory against
+  `db.zoqsmjeejfkrokwttjbx.supabase.co`. The exact target/user/TLS/grant proof
+  passed, followed by a status PASS for A5 boot `be240060…`, source
+  `9f2c935…`, digest `637cdc62…`, config `c9269392…`, mapping `f10f19b7…`,
+  and latest `10/10/10 pass/ok`.
+- [RUNNER] Stopped the incorrect waiting process before T+6 and armed a new
+  fail-closed direct-DSN runner for `2026-07-24T18:43:29.274117Z`. Production
+  sampling remained uninterrupted and the T+6 artifact remains absent.
+- [BOUNDARY] No trading, H-009, retention cleanup, production chaos, or
+  evidence mutation occurred.
+
+### [NEXT — CURRENT]
+
+At/after `2026-07-24T18:43:29.274117Z`, inspect the direct-DSN runner result.
+Accept and retain T+6 only if the immutable report is PASS and all locked
+GitHub/Fly/DB identities remain exact; otherwise preserve NOT-CLOSED.

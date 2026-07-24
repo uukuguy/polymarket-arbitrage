@@ -1020,8 +1020,9 @@ Phase 01 LIVE-RUN-005（2026-05-01）时还能拉 20353 markets，**Polymarket �
 - Supabase Direct connection (`db.<ref>.supabase.co:5432`) **IPv6-only**，CN ISP 普遍不通
 - 必须用 **Session pooler** (`aws-?-<region>.pooler.supabase.com:5432`) 走 IPv4
 - pooler hostname **不能套模板猜** — Supabase region 代号跟 AWS region 不一一映射（London 区不是简单的 `aws-0-eu-west-2`，要去 dashboard "Connect" 按钮看真实字符串）
-- pooler username 格式必须是 `postgres.<project-ref>`（带 `.` + ref），不是裸 `postgres`
-- pooler "Tenant or user not found" 错误通常是 hostname 拼错（不是 username / 不是 region 名）
+- pooler username 是 `[USER].<project-ref>`（内置 owner 通常为 `postgres.<project-ref>`），不是 direct connection 使用的裸 role 名
+- pooler `Tenant or user not found` 同时可能表示 endpoint/tenant 或 user 不匹配，不能仅凭错误文字归因；必须回到**该项目当前 Dashboard Connect 原文**，再跑 target/user/TLS/capability proof
+- 自定义最小权限 LOGIN 若已有实测 PASS 的 direct IPv6 路径，生产证据命令优先复用该精确路径；不得从 shell history 或另一个项目恢复 Pooler hostname
 
 → 详见 `docs/setup/03-wave3-saas-prep.md`
 
