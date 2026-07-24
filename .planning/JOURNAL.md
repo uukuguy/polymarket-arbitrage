@@ -4833,6 +4833,12 @@ create the file early or reuse any rejected attempt.
   replacement derives path/start/end from the immutable manifest and asserts
   their exact values before running. Production sampling remained
   uninterrupted and every T+6-like artifact remains absent.
+- [COMPLETION PRE-AUDIT] Reconciled the soak-log header and selected-deployment
+  table from stale release-41/no-T0 wording to exact release 66/A5 truth.
+  Signed validation rows 05.4-01-01 through 05.4-05-04 from their existing
+  SUMMARY, gate, approval, identity, readiness, manifest, and T0 evidence.
+  Rows 05.4-05-05 through 05.4-05-09 remain explicitly pending until their
+  real not-before artifacts/final verifier exist.
 - [BOUNDARY] No trading, H-009, retention cleanup, production chaos, or
   evidence mutation occurred.
 
