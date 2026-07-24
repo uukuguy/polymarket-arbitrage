@@ -4827,8 +4827,12 @@ create the file early or reuse any rejected attempt.
   `9f2c935…`, digest `637cdc62…`, config `c9269392…`, mapping `f10f19b7…`,
   and latest `10/10/10 pass/ok`.
 - [RUNNER] Stopped the incorrect waiting process before T+6 and armed a new
-  fail-closed direct-DSN runner for `2026-07-24T18:43:29.274117Z`. Production
-  sampling remained uninterrupted and the T+6 artifact remains absent.
+  fail-closed direct-DSN runner for `2026-07-24T18:43:29.274117Z`. A subsequent
+  manifest audit caught its hand-written `...-T+6.json` output path versus the
+  declared `...-T6.json`; it too was stopped before invocation. The active
+  replacement derives path/start/end from the immutable manifest and asserts
+  their exact values before running. Production sampling remained
+  uninterrupted and every T+6-like artifact remains absent.
 - [BOUNDARY] No trading, H-009, retention cleanup, production chaos, or
   evidence mutation occurred.
 
