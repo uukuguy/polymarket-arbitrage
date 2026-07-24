@@ -207,6 +207,7 @@ async def test_evidence_timeout_keeps_missing_identities_in_state_not_logs(
     consumer.set_l3_desired(["l3-a", "l3-b"])
     consumer._l3_committed_set = {"l3-a", "l3-b"}
     ws.send.side_effect = None
+    monkeypatch.setattr(ws_consumer_module, "_BOOK_EVIDENCE_RETRY_AFTER_S", 0.005, raising=False)
     monkeypatch.setattr(ws_consumer_module, "_BOOK_EVIDENCE_TIMEOUT_S", 0.01)
     messages: list[str] = []
     sink_id = logger.add(lambda message: messages.append(str(message)), level="WARNING")
@@ -223,9 +224,11 @@ async def test_evidence_timeout_keeps_missing_identities_in_state_not_logs(
     finally:
         logger.remove(sink_id)
 
-    ws.close.assert_awaited_once()
+    ws.close.assert_not_awaited()
+    assert consumer._current_ws is ws
     assert consumer._book_evidence_waiters == {}
     assert consumer.last_quiet_refresh_missing_assets == frozenset({"l3-b"})
+    assert consumer._last_quiet_refresh_missing_generation == 0
     warning = next(message for message in messages if "ws quiet refresh failed" in message)
     assert "reason=evidence_timeout" in warning
     assert "error_type=TimeoutError" in warning
@@ -235,6 +238,82 @@ async def test_evidence_timeout_keeps_missing_identities_in_state_not_logs(
     assert "missing_count=1" in warning
     assert "l3-a" not in warning
     assert "l3-b" not in warning
+
+    consumer.record_book_evidence(
+        asset_id="l3-b",
+        generation=consumer._connection_generation,
+        book_levels_succeeded=True,
+        observed_at=datetime(2026, 7, 23, tzinfo=UTC),
+    )
+    assert consumer.last_quiet_refresh_missing_assets == frozenset()
+    assert consumer._last_quiet_refresh_missing_generation is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_retries_only_missing_assets_in_second_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    consumer, _watchdog, ws = _make_consumer()
+    consumer.set_l3_desired(["l3-a", "l3-b"])
+    consumer._l3_committed_set = {"l3-a", "l3-b"}
+    subscribe_count = 0
+
+    async def _send_with_staged_evidence(payload: str) -> None:
+        nonlocal subscribe_count
+        parsed = json.loads(payload)
+        if parsed.get("operation") != "subscribe":
+            return
+        subscribe_count += 1
+        asset_id = "l3-a" if subscribe_count == 1 else "l3-b"
+        consumer.record_book_evidence(
+            asset_id=asset_id,
+            generation=consumer._connection_generation,
+            book_levels_succeeded=True,
+            observed_at=datetime(2026, 7, 23, tzinfo=UTC),
+        )
+
+    ws.send.side_effect = _send_with_staged_evidence
+    monkeypatch.setattr(ws_consumer_module, "_BOOK_EVIDENCE_RETRY_AFTER_S", 0.01, raising=False)
+    monkeypatch.setattr(ws_consumer_module, "_BOOK_EVIDENCE_TIMEOUT_S", 0.05)
+
+    assert await consumer.request_book_refresh() is True
+
+    assert [json.loads(call.args[0]) for call in ws.send.await_args_list] == [
+        {"operation": "unsubscribe", "assets_ids": ["candidate-a", "candidate-b", "l3-a", "l3-b"]},
+        {
+            "operation": "subscribe",
+            "assets_ids": ["candidate-a", "candidate-b", "l3-a", "l3-b"],
+            "initial_dump": True,
+        },
+        {"operation": "unsubscribe", "assets_ids": ["l3-b"]},
+        {
+            "operation": "subscribe",
+            "assets_ids": ["l3-b"],
+            "initial_dump": True,
+        },
+    ]
+    ws.close.assert_not_awaited()
+    assert consumer.last_quiet_refresh_missing_assets == frozenset()
+    assert consumer._last_quiet_refresh_missing_generation is None
+
+
+@pytest.mark.asyncio
+async def test_next_due_refresh_prefers_generation_matching_missing_subset() -> None:
+    consumer, _watchdog, _ws = _make_consumer()
+    observed_at = datetime.fromtimestamp(BASE_S, tz=UTC)
+    for asset_id in ("candidate-b", "l3-c"):
+        consumer.record_book_evidence(
+            asset_id=asset_id,
+            generation=consumer._connection_generation,
+            book_levels_succeeded=True,
+            observed_at=observed_at,
+        )
+    consumer._last_quiet_refresh_missing_assets = frozenset({"l3-c"})
+    consumer._last_quiet_refresh_missing_generation = consumer._connection_generation
+    consumer.request_book_refresh = AsyncMock(return_value=True)
+
+    assert await consumer.refresh_if_quiet(now_s=BASE_S + 60) is True
+    consumer.request_book_refresh.assert_awaited_once_with(required_asset_ids=frozenset({"l3-c"}))
 
 
 @pytest.mark.asyncio

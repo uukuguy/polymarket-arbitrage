@@ -54,6 +54,7 @@ _QUIET_REFRESH_SEND_TIMEOUT_S: float = 5.0
 # Production showed that five seconds can close a healthy generation before
 # the last quiet books arrive, while the reconnect completes inside one slot.
 _BOOK_EVIDENCE_TIMEOUT_S: float = 25.0
+_BOOK_EVIDENCE_RETRY_AFTER_S: float = 8.0
 _COMPENSATED_GENERATIONS_MAX: int = 128
 
 
@@ -63,6 +64,7 @@ class _BookEvidenceWaiter:
 
     future: asyncio.Future[bool]
     missing: set[str] = field(default_factory=set)
+
 
 # ── Phase 03.1-06 D-04 / Phase 04.1 G-03: POLYARB_WS_TEST_KILL chaos primitive ─
 #
@@ -238,8 +240,7 @@ class WsConsumer:
         evidence_times = {
             asset_id: observed_at
             for asset_id, (generation, observed_at) in self._l3_business_evidence.items()
-            if generation == self._connection_generation
-            and asset_id in self._l3_committed_set
+            if generation == self._connection_generation and asset_id in self._l3_committed_set
         }
         return WsMembershipSnapshot(
             generation=self._connection_generation,
@@ -380,8 +381,7 @@ class WsConsumer:
                     },
                 )
                 identity_matches = (
-                    self._connection_generation == generation
-                    and self._current_ws is previous_ws
+                    self._connection_generation == generation and self._current_ws is previous_ws
                 )
                 snapshot_matches = (
                     frozenset(self._l3_desired_set) == desired_snapshot
@@ -498,9 +498,7 @@ class WsConsumer:
             raise
         except Exception as exc:  # noqa: BLE001
             close_succeeded = False
-            logger.warning(
-                "ws compensation close failed error_type={}", type(exc).__name__
-            )
+            logger.warning("ws compensation close failed error_type={}", type(exc).__name__)
         self._record_runtime_event(
             RuntimeEventKind.SUBSCRIPTION_COMPENSATED,
             reason_code="ambiguous_generation_closed",
@@ -509,9 +507,7 @@ class WsConsumer:
                 "close_succeeded": close_succeeded,
             },
             severity=(
-                RuntimeEventSeverity.INFO
-                if close_succeeded
-                else RuntimeEventSeverity.WARNING
+                RuntimeEventSeverity.INFO if close_succeeded else RuntimeEventSeverity.WARNING
             ),
             generation=generation,
         )
@@ -529,9 +525,7 @@ class WsConsumer:
             return True
         return any(
             asset_id in waiter.missing
-            for waiter in self._book_evidence_waiters.get(
-                self._connection_generation, ()
-            )
+            for waiter in self._book_evidence_waiters.get(self._connection_generation, ())
         )
 
     @property
@@ -560,6 +554,15 @@ class WsConsumer:
                 self._publish_l3_membership_locked()
         if not accepted:
             return
+        if (
+            generation == self._last_quiet_refresh_missing_generation
+            and asset_id in self._last_quiet_refresh_missing_assets
+        ):
+            self._last_quiet_refresh_missing_assets = self._last_quiet_refresh_missing_assets - {
+                asset_id
+            }
+            if not self._last_quiet_refresh_missing_assets:
+                self._last_quiet_refresh_missing_generation = None
         for waiter in tuple(self._book_evidence_waiters.get(generation, ())):
             waiter.missing.discard(asset_id)
             if not waiter.missing and not waiter.future.done():
@@ -594,8 +597,7 @@ class WsConsumer:
                     return False
                 succeeded = await self._send_control(ws, payload)
                 identity_matches = (
-                    self._current_ws is ws
-                    and self._connection_generation == generation
+                    self._current_ws is ws and self._connection_generation == generation
                 )
                 if succeeded and identity_matches:
                     if commit is not None:
@@ -701,6 +703,7 @@ class WsConsumer:
         refresh_assets: list[str] = []
         required_assets: frozenset[str] = frozenset()
         failure_reason = "unexpected_exception"
+        final_subscribe_confirmed = False
         try:
             async with self._subscription_control_lock:
                 active_assets = self._compute_active_assets()
@@ -762,26 +765,72 @@ class WsConsumer:
                 failure_reason = "generation_changed"
                 if self._current_ws is not ws or self._connection_generation != generation:
                     raise RuntimeError("connection identity changed during refresh")
+                final_subscribe_confirmed = True
             assert waiter is not None
             failure_reason = "evidence_timeout"
-            completed = await asyncio.wait_for(
-                asyncio.shield(waiter.future), timeout=_BOOK_EVIDENCE_TIMEOUT_S
+            first_wait_s = min(
+                _BOOK_EVIDENCE_RETRY_AFTER_S,
+                _BOOK_EVIDENCE_TIMEOUT_S / 2,
             )
+            try:
+                completed = await asyncio.wait_for(
+                    asyncio.shield(waiter.future),
+                    timeout=first_wait_s,
+                )
+            except TimeoutError:
+                completed = False
+            if not completed and not waiter.future.done():
+                retry_assets = sorted(waiter.missing)
+                async with self._subscription_control_lock:
+                    failure_reason = "generation_changed"
+                    if self._current_ws is not ws or self._connection_generation != generation:
+                        raise RuntimeError("connection identity changed before refresh retry")
+                    final_subscribe_confirmed = False
+                    failure_reason = "unsubscribe_failed"
+                    if not await self._send_control(
+                        ws,
+                        {"operation": "unsubscribe", "assets_ids": retry_assets},
+                    ):
+                        raise RuntimeError("quiet retry unsubscribe failed")
+                    failure_reason = "generation_changed"
+                    if self._current_ws is not ws or self._connection_generation != generation:
+                        raise RuntimeError("connection identity changed during refresh retry")
+                    failure_reason = "subscribe_failed"
+                    if not await self._send_control(
+                        ws,
+                        {
+                            "operation": "subscribe",
+                            "assets_ids": retry_assets,
+                            "initial_dump": True,
+                        },
+                    ):
+                        raise RuntimeError("quiet retry subscribe failed")
+                    failure_reason = "generation_changed"
+                    if self._current_ws is not ws or self._connection_generation != generation:
+                        raise RuntimeError("connection identity changed during refresh retry")
+                    final_subscribe_confirmed = True
+                failure_reason = "evidence_timeout"
+                completed = await asyncio.wait_for(
+                    asyncio.shield(waiter.future),
+                    timeout=_BOOK_EVIDENCE_TIMEOUT_S - first_wait_s,
+                )
+            elif waiter.future.done():
+                completed = waiter.future.result()
             if not completed:
                 failure_reason = "generation_invalidated"
                 raise RuntimeError("refresh generation invalidated")
             logger.info(f"ws quiet refresh: evidenced assets={len(required_assets)}")
             self._last_quiet_refresh_missing_assets = frozenset()
+            self._last_quiet_refresh_missing_generation = None
             return True
         except asyncio.CancelledError:
             if ws is not None:
                 await self._compensate_generation(ws, generation)
             raise
         except Exception as exc:  # noqa: BLE001 — ambiguity requires reconnect
-            missing_assets = frozenset(
-                waiter.missing if waiter is not None else required_assets
-            )
+            missing_assets = frozenset(waiter.missing if waiter is not None else required_assets)
             self._last_quiet_refresh_missing_assets = missing_assets
+            self._last_quiet_refresh_missing_generation = generation
             logger.warning(
                 "ws quiet refresh failed reason={} error_type={} generation={} "
                 "total_count={} required_count={} missing_count={}",
@@ -792,6 +841,8 @@ class WsConsumer:
                 len(required_assets),
                 len(missing_assets),
             )
+            if failure_reason == "evidence_timeout" and final_subscribe_confirmed:
+                return False
             if ws is not None:
                 await self._compensate_generation(ws, generation)
             return False
@@ -820,10 +871,7 @@ class WsConsumer:
                 evidence_times.append(evidence[1].timestamp())
             if missing_current_generation:
                 initialized_at_s = self._connection_initialized_at_s
-                if (
-                    initialized_at_s is not None
-                    and now - initialized_at_s < quiet_after_s
-                ):
+                if initialized_at_s is not None and now - initialized_at_s < quiet_after_s:
                     return None
             else:
                 if evidence_times and now - min(evidence_times) < quiet_after_s:
@@ -837,8 +885,14 @@ class WsConsumer:
             return None
         # Record before awaiting so a slow or failed send cannot create a storm.
         self._last_quiet_refresh_attempt_at_s = now
+        retry_missing = frozenset()
+        if self._last_quiet_refresh_missing_generation == self._connection_generation:
+            retry_missing = self._last_quiet_refresh_missing_assets
+        elif self._last_quiet_refresh_missing_generation is not None:
+            self._last_quiet_refresh_missing_assets = frozenset()
+            self._last_quiet_refresh_missing_generation = None
         return await self.request_book_refresh(
-            required_asset_ids=required_l3 or None,
+            required_asset_ids=retry_missing or required_l3 or None,
         )
 
     async def run_quiet_refresh(
@@ -946,8 +1000,7 @@ class WsConsumer:
                 ):
                     failed = True
                 if not failed and (
-                    self._current_ws is not ws
-                    or self._connection_generation != generation
+                    self._current_ws is not ws or self._connection_generation != generation
                 ):
                     failed = True
                 if not failed:
