@@ -174,6 +174,21 @@ async def test_active_connection_truth_tracks_successful_initialize_and_release(
     assert consumer.has_active_connection is False
 
 
+async def test_release_clears_quiet_refresh_retry_state() -> None:
+    consumer = _make_consumer(initial_assets=["candidate"])
+    ws = _live_ws()
+    await consumer._initialize_connection(ws)
+    consumer._connection_initialized_at_s = 123.0
+    consumer._last_quiet_refresh_missing_assets = frozenset({"candidate"})
+    consumer._last_quiet_refresh_missing_generation = consumer._connection_generation
+
+    await consumer._release_connection(ws)
+
+    assert consumer._connection_initialized_at_s is None
+    assert consumer.last_quiet_refresh_missing_assets == frozenset()
+    assert consumer._last_quiet_refresh_missing_generation is None
+
+
 async def test_failed_reconnect_does_not_commit_desired() -> None:
     consumer = _make_consumer(initial_assets=["candidate"])
     consumer.set_l3_desired(["yes", "no"])

@@ -314,6 +314,22 @@ async def test_fresh_l3_evidence_suppresses_refresh_when_global_stream_is_quiet(
 
 
 @pytest.mark.asyncio
+async def test_initial_connection_grace_defers_incomplete_l3_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    consumer, _watchdog, ws = _make_consumer()
+    consumer._current_ws = None
+    ws.send.side_effect = None
+    await consumer._initialize_connection(ws)
+    consumer._connection_initialized_at_s = BASE_S
+    monkeypatch.setattr(ws_consumer_module, "_BOOK_EVIDENCE_TIMEOUT_S", 0.01)
+
+    assert await consumer.refresh_if_quiet(now_s=BASE_S + 59) is None
+    assert ws.send.await_count == 1
+    assert consumer._last_quiet_refresh_attempt_at_s == 0.0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["empty", "no-ws", "closed"])
 async def test_due_refresh_failures_do_not_forge_freshness(failure: str) -> None:
     consumer, watchdog, ws = _make_consumer()

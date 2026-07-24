@@ -196,7 +196,9 @@ class WsConsumer:
         self._subscription_control_lock = asyncio.Lock()
         self._connection_generation = 0
         self._book_evidence_waiters: dict[int, list[_BookEvidenceWaiter]] = {}
+        self._connection_initialized_at_s: float | None = None
         self._last_quiet_refresh_missing_assets: frozenset[str] = frozenset()
+        self._last_quiet_refresh_missing_generation: int | None = None
         self._compensated_generations: set[int] = set()
         self._compensated_generation_order: deque[int] = deque()
         # Wire the liveness closure into the watchdog so it uses it for the gate.
@@ -255,6 +257,9 @@ class WsConsumer:
     def _clear_l3_connection_state_locked(self) -> None:
         self._l3_committed_set.clear()
         self._l3_business_evidence.clear()
+        self._connection_initialized_at_s = None
+        self._last_quiet_refresh_missing_assets = frozenset()
+        self._last_quiet_refresh_missing_generation = None
 
     def _fail_book_evidence_waiters_locked(self, generation: int) -> None:
         """Fail every barrier captured from one invalidated generation."""
@@ -384,6 +389,7 @@ class WsConsumer:
                 )
                 if ok and identity_matches and snapshot_matches:
                     self._current_ws = ws
+                    self._connection_initialized_at_s = time.time()
                     # Commit exactly the desired membership represented in the
                     # payload above. A mutation while send() was suspended is
                     # unsent truth and must force compensation/reconnect.
@@ -805,11 +811,20 @@ class WsConsumer:
         required_l3 = frozenset(self._l3_committed_set)
         if required_l3:
             evidence_times: list[float] = []
+            missing_current_generation = False
             for asset_id in required_l3:
                 evidence = self._l3_business_evidence.get(asset_id)
                 if evidence is None or evidence[0] != self._connection_generation:
+                    missing_current_generation = True
                     break
                 evidence_times.append(evidence[1].timestamp())
+            if missing_current_generation:
+                initialized_at_s = self._connection_initialized_at_s
+                if (
+                    initialized_at_s is not None
+                    and now - initialized_at_s < quiet_after_s
+                ):
+                    return None
             else:
                 if evidence_times and now - min(evidence_times) < quiet_after_s:
                     return None
