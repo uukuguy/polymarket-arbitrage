@@ -4657,3 +4657,34 @@ capability, or evidence invariant fails closed.
 User action: reset the Supabase project database password and store the new
 direct `POLYARB_SUPABASE_DB_DSN` in local `.env`; do not send it through chat.
 Then run `/gsd-resume-work --ws m1-perception`.
+
+## SESSION 88 — 2026-07-24 (production 007 and credential isolation complete)
+
+- [RECOVERY] Recovered the exact Supabase project through the existing
+  Edge/GitHub session, rotated the exposed owner password, captured the
+  authoritative generated value directly into macOS Keychain, cleared the
+  clipboard, and verified a direct TLS login. The compromised password is no
+  longer active; no owner DSN was restored to `.env`.
+- [MIGRATION] Proved project `zoqsmjeejfkrokwttjbx`, database/user
+  `postgres/postgres`, TLS, and Alembic 006 immediately before the mutation.
+  Ran the single 006→007 migration, then re-proved 007.
+- [SCHEMA] Verified five evidence tables, five server `recorded_at` defaults,
+  five append-only triggers, ten daemon SELECT/INSERT table grants, daemon
+  retention EXECUTE denial, operator-only retention EXECUTE, and SECURITY
+  DEFINER retention cleanup.
+- [RUNTIME] Created `polyarb_l2_runtime_054`, inheriting only
+  `l3_evidence_daemon`. The full target/identity/grant/RLS/sequence/function
+  capability check passed. Its DSN is staged in Fly; the legacy owner DSN is
+  absent from the Fly secret inventory.
+- [RETENTION] Created `polyarb_l3_retention_054`, inheriting only
+  `l3_retention_operator`. It has zero table/sequence access and only the
+  retention function EXECUTE capability. Its DSN is Keychain-only and absent
+  from `.env`, Fly, repository, and evidence.
+- [BOUNDARY] No trade or H-009 action occurred. Deployment/readiness/manifest
+  and the formal 24-hour clock have not started.
+
+### [NEXT — CURRENT]
+
+Re-prove production 007/runtime/Fly owner-DSN absence, then deploy exact SHA
+`95bf1bd8714b92056c1ca6cca2d13ac9bd3d06d5` and cross-check the resulting Fly
+identity before readiness.

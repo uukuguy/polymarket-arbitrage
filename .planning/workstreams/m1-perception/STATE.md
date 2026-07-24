@@ -27,11 +27,14 @@ Plan: 5 of 5
 
 - **Status:** Waves 1–4 are complete on main. Plan 05 Task 1's local-only
   release-candidate gate is complete at `03313a9`; the verified source candidate
-  is `95bf1bd`, bound to AcceptanceConfig digest `c9269392…`. Execution is
-  blocked before migration because the owner DSN was exposed by a local parser
-  exception and must be rotated in Supabase Dashboard. Production remains at
-  revision 006; the compromised DSN has been removed locally. The user's
-  autonomous-completion authorization remains active after recovery. The runtime separates desired,
+  is `95bf1bd`, bound to AcceptanceConfig digest `c9269392…`. The exposed owner
+  password was rotated through the exact Supabase project and the replacement
+  is direct-TLS verified. Production migrated exactly once from 006 to 007.
+  Dedicated `polyarb_l2_runtime_054` and `polyarb_l3_retention_054` logins pass
+  their disjoint capability proofs. The runtime DSN is staged in Fly, the owner
+  DSN is absent from the Fly inventory, and the retention DSN exists only in
+  macOS Keychain. Plan 05 now proceeds to the exact-SHA deployment and
+  readiness gate. The runtime separates desired,
   control-committed, and current-generation evidenced membership; depth refresh uses an
   all-token barrier; promoter outcomes are terminal, durable, and retry-safe; and
   all direct PostgreSQL runtime paths use `POLYARB_L2_RUNTIME_DB_DSN`. Plan 03
@@ -218,10 +221,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
   plan-scope Ruff and byte-identical legacy baseline, compile, image, docs, and
   planning gates passed; `05.4-SOAK-LOG.md` is committed at `03313a9`.
 
-- **Proceeding to:** Wait for the user to reset the Supabase project database
-  password in Dashboard and place the new direct, TLS-required migration DSN in
-  local `.env` without sending it through chat. Then resume the revision-006
-  proof and autonomous Plan 05 execution.
+- **Proceeding to:** Re-prove production 007/runtime/Fly secret boundaries,
+  dispatch `deploy-l2.yml` at exact source SHA `95bf1bd…`, and cross-check the
+  resulting Fly release/machine/image/boot identity before readiness.
 
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-PLAN.md`
 
