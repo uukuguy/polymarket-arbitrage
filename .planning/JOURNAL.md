@@ -4572,3 +4572,37 @@ secrets, manual deploy, restart, manifest/T0, or T+6/T+12/T+18/T+24 actions.
 
 Execute only Plan 05 Task 1's local release-candidate gate and soak-log
 scaffolding, then stop for the exact production-migration approval.
+
+## SESSION 85 — 2026-07-24 (Phase 05.4 Plan 05 Task 1 local gate)
+
+- [EXECUTED] Completed only 05.4-05 Task 1 and committed
+  `05.4-SOAK-LOG.md` at `03313a9`. The tested source candidate is
+  `95bf1bd8714b92056c1ca6cca2d13ac9bd3d06d5`; AcceptanceConfig digest is
+  `c9269392e044c633e4ecfa4879ba6a66da2811bfb0cf444df275c57fadd35d60`.
+- [VERIFY] Focused 007/evidence/promoter/sampler/health/verdict/CLI/chaos:
+  350 passed with no skipped 007 integration test. Full repository: 1,811
+  passed, one established xfail, one established skip.
+- [RUFF] Repository-wide Ruff remains the approved legacy baseline: 250
+  findings in 82 files. Plan-scope Ruff passed; normalized base `4c9c5e6` and
+  verified-candidate diagnostics are byte-identical at SHA-256
+  `2bf1014e3795d20a1559c20934e26c622c1c0244bc90f78db0523706bc6fc3ab`.
+- [OTHER GATES] Compile, image-aware required-primitive check, M1 docs contract,
+  and planning-status passed. Security disposition remains zero unresolved High
+  threats.
+- [CHECKPOINT] Plan 05 is paused before Task 2. No `05.4-05-SUMMARY.md` exists
+  because the plan is incomplete.
+- [BOUNDARY] No production target mutation, migration, credential/secret change,
+  deploy, restart, manifest bind, retention cleanup, production chaos, soak,
+  trade, external submission, or push occurred.
+
+### [NEXT — CURRENT]
+
+Provide exactly:
+
+```text
+APPROVE 05.4 PRODUCTION MIGRATION TO 007 ref=<PROD_REF>
+```
+
+Only after that approval may Task 2 prove the named target is production
+revision 006 and run the single 006→007 migration. Runtime credential,
+retention credential, and deployment remain separately unauthorized.

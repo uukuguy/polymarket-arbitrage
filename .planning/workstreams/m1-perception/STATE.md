@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 Task 1 in progress; local release-candidate gate only
-last_updated: "2026-07-24T01:54:28.902Z"
+stopped_at: Phase 05.4 Plan 05 Task 1 complete; awaiting exact production migration approval
+last_updated: "2026-07-24T02:07:45Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -25,8 +25,10 @@ Plan: 5 of 5
 - **Plan:** next is 05.4-05 — non-autonomous production migration, credentials,
   deploy, manifest/T0, and distinct checkpoint gates
 
-- **Status:** Waves 1–4 are complete on main. Plan 05 Task 1 is executing its
-  local-only release-candidate gate. The runtime separates desired,
+- **Status:** Waves 1–4 are complete on main. Plan 05 Task 1's local-only
+  release-candidate gate is complete at `03313a9`; the verified source candidate
+  is `95bf1bd`, bound to AcceptanceConfig digest `c9269392…`. Execution is
+  paused before Task 2 pending the exact migration approval. The runtime separates desired,
   control-committed, and current-generation evidenced membership; depth refresh uses an
   all-token barrier; promoter outcomes are terminal, durable, and retry-safe; and
   all direct PostgreSQL runtime paths use `POLYARB_L2_RUNTIME_DB_DSN`. Plan 03
@@ -208,15 +210,15 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-24 09:06 (Asia/Shanghai)
-- **Stopped at:** Session resumed with Phase 05.4 Plan 04 complete, independently
-  reviewed, merged to local main, and reverified after merge. Planning status is
-  drift-free, the worktree is clean, and `.githooks` remains active.
+- **Last session:** 2026-07-24 10:07 (Asia/Shanghai)
+- **Stopped at:** Phase 05.4 Plan 05 Task 1 complete. Focused/full tests,
+  plan-scope Ruff and byte-identical legacy baseline, compile, image, docs, and
+  planning gates passed; `05.4-SOAK-LOG.md` is committed at `03313a9`.
 
-- **Proceeding to:** Execute only Plan 05 Task 1's local release-candidate gate,
-  then stop for the exact production-migration approval. No production migration,
-  credential, secret, deploy, restart, manifest bind, retention cleanup, soak,
-  or trade is authorized by Plan 04 completion.
+- **Proceeding to:** Wait for exactly
+  `APPROVE 05.4 PRODUCTION MIGRATION TO 007 ref=<PROD_REF>`. No production
+  migration, credential, secret, deploy, restart, manifest bind, retention
+  cleanup, soak, or trade is authorized by Task 1 completion.
 
 - **Resume file:** `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-PLAN.md`
 
