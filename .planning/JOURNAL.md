@@ -4833,8 +4833,11 @@ create the file early or reuse any rejected attempt.
   replacement derives path/start/end from the immutable manifest and asserts
   their exact values before running. A final timing audit replaced a floored
   integer epoch with `ceil(manifest end)` so the microsecond not-before cannot
-  be crossed early. Production sampling remained uninterrupted and every
-  T+6-like artifact remains absent.
+  be crossed early. An executable-surface audit also proved `src/scripts`,
+  migrations, Makefile, dependency locks, and deploy workflow are unchanged
+  from manifest release `9f2c935…`; the runner repeats that guard at execution.
+  Production sampling remained uninterrupted and every T+6-like artifact
+  remains absent.
 - [COMPLETION PRE-AUDIT] Reconciled the soak-log header and selected-deployment
   table from stale release-41/no-T0 wording to exact release 66/A5 truth.
   Signed validation rows 05.4-01-01 through 05.4-05-04 from their existing
