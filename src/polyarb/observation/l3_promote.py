@@ -687,7 +687,16 @@ def _mapping_rows(
                 "no_token_id": str(no_token),
             }
         )
-    return tuple(rows)
+    return tuple(
+        sorted(
+            rows,
+            key=lambda row: (
+                row["market_id"],
+                row["yes_token_id"],
+                row["no_token_id"],
+            ),
+        )
+    )
 
 
 def _token_identity_parts(

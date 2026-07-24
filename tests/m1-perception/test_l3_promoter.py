@@ -598,6 +598,24 @@ def test_fetch_market_token_map_queries_real_production_columns() -> None:
             "no_token_id": "no-1",
         },
     )
+    assert l3_promote._mapping_rows(
+        {"yes-a", "yes-z"},
+        {
+            "yes-a": ("market-z", "yes-a", "no-a"),
+            "yes-z": ("market-a", "yes-z", "no-z"),
+        },
+    ) == (
+        {
+            "market_id": "market-a",
+            "yes_token_id": "yes-z",
+            "no_token_id": "no-z",
+        },
+        {
+            "market_id": "market-z",
+            "yes_token_id": "yes-a",
+            "no_token_id": "no-a",
+        },
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────
