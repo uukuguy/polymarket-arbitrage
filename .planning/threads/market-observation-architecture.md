@@ -1208,3 +1208,12 @@ transport activity and an orderbook resnapshot:
   sample and every collection/write exception remains a disallowed event.
   Readiness plus a future exact-grid T0 prevents skipped startup slots from
   weakening the soak.
+- WebSocket protocol Ping and venue application heartbeat are different chain
+  links. `websockets.connect(ping_interval=10)` emits RFC control frames, while
+  Polymarket CLOB requires text `PING` every ten seconds and returns text
+  `PONG`. A5's durable seq 201/216/217 captured only 7/2/7 current-generation
+  evidenced tokens during repeated 20–30-second generation churn, permanently
+  rejecting the interval before T+6. The repair belongs to the socket owner:
+  one cancellable text-heartbeat task per connection and PONG filtering before
+  JSON decode. Sampling thresholds and reconnect-adjacent failure semantics
+  stay unchanged; recovery requires a new exact deployment/boot/A6 clock.

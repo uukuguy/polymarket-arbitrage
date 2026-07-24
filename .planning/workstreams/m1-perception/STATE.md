@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 A5 T0 PASS; manifest-derived runner waiting for immutable T+6 not-before
-last_updated: "2026-07-24T13:38:00Z"
+stopped_at: Phase 05.4 Plan 05 A5 permanently NOT-CLOSED; application-heartbeat repair before unique A6
+last_updated: "2026-07-24T15:00:00Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -34,12 +34,15 @@ Plan: 5 of 5
   instance `01KYA1GSQWRCQ1QZJDH2ZAMW6S`, and DB boot
   `be240060-6882-4403-bace-a6b3fd8a3fa6`; GitHub/Fly/DB identities match.
   Readiness passed with the locked mapping/config and zero disallowed events.
-  A1–A4 are immutable rejected evidence. Selected A5 manifest `95814bf1…` was
+  A1–A4 are immutable rejected evidence. A5 manifest `95814bf1…` was
   O_EXCL-created and bound exactly once before T0. Its exact scheduled T0
   `2026-07-24T12:43:29.274117Z` and canonical report `adbbbc4f…` passed.
-  T+6 is unavailable before `2026-07-24T18:43:29.274117Z`; a persistent runner
-  derives the declared path/start/end from the manifest and will fail closed on
-  any file hash or Fly identity mismatch. No T+6 artifact exists yet.
+  A later read-only audit found seq 201/216/217 at only 7/2/7 evidenced tokens,
+  so A5 is permanently NOT-CLOSED. Its T+6 runner was cancelled and none of
+  T6/T12/T18/T24 exists. Root cause is the missing Polymarket-required text
+  `PING` heartbeat: protocol-level WebSocket Ping is not the application
+  heartbeat. Repair, exact-SHA deployment, new boot/readiness, and a unique A6
+  are required without changing strict thresholds.
 
 - **Active workstream:** `m1-perception`
 
@@ -182,8 +185,11 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- At/after each manifest-computed boundary, retain exactly one cumulative A5
-  T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A4 reports.
+- Implement/test the application-level `PING`/`PONG` heartbeat without changing
+  strict sampling criteria; deploy the exact approved repair SHA and establish
+  a new eligible boot/readiness/A6 manifest/T0.
+- At/after each A6 manifest-computed boundary, retain exactly one cumulative
+  T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A5 reports.
 - After T+24 PASS, run `make l3-soak-verify` to re-query all raw rows and verify
   the binding plus all five files/hashes before changing ROADMAP/phase status.
 - On final PASS only, sign validation rows 05.4-05-05 through 05.4-05-09,
@@ -212,10 +218,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 ## Session Continuity
 
 - **Last session:** 2026-07-24 21:38 (Asia/Shanghai)
-- **Stopped at:** A5 T0 and early audits PASS; manifest-derived T+6 runner is
-  waiting for `2026-07-24T18:43:29.274117Z`.
-- **Proceeding to:** Inspect the unique T6 artifact at/after not-before, prove
-  its hashes/counts/identity, then schedule the manifest-derived T+12 runner.
+- **Stopped at:** A5 permanently NOT-CLOSED; later checkpoints cancelled before
+  T+6 and absent.
+- **Proceeding to:** TDD the CLOB text-heartbeat repair, exact-SHA deploy it,
+  prove new readiness, and bind a unique A6 manifest/T0.
 - **Resume files:** `05.4-05-PLAN.md`,
   `05.4-SOAK-MANIFEST-20260724T124329Z.json`, and `05.4-SOAK-LOG.md`.
 

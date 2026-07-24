@@ -4872,3 +4872,40 @@ create the file early or reuse any rejected attempt.
 At/after `2026-07-24T18:43:29.274117Z`, inspect the direct-DSN runner result.
 Accept and retain T+6 only if the immutable report is PASS and all locked
 GitHub/Fly/DB identities remain exact; otherwise preserve NOT-CLOSED.
+
+## SESSION 93 — 2026-07-24 (A5 invalidated; CLOB heartbeat root cause)
+
+- [EARLY AUDIT] At DB server time `2026-07-24T14:52:23.484446Z`, A5 had
+  258 health rows: 255 pass and three immutable
+  `membership_convergence_failed` rows. Seq 201/216/217 captured
+  desired/committed/evidenced `10/10/7`, `10/10/2`, and `10/10/7`; ten market
+  rows failed `not_evidenced`. All 25 promoter rows passed, mapping/config
+  remained exact, and disallowed events were zero.
+- [RECONNECT TRUTH] The durable ledger showed generations 6/8/9 starting before
+  those failed cuts and generations 7/10 later recovering 10/10/10. Every
+  initial control commit succeeded; this was current-generation depth evidence
+  loss, not a database writer failure or verifier false positive.
+- [A5 REJECTED] A5 can never satisfy “every strict sample passes.” Its
+  manifest/binding/T0 remain immutable diagnostic evidence. The persistent T+6
+  runner was SIGINT-cancelled at `2026-07-24T14:57:59Z`, before not-before; no
+  T6/T12/T18/T24 artifact exists or may be created.
+- [ROOT CAUSE] Polymarket's CLOB contract requires the application text message
+  `PING` every ten seconds and returns text `PONG`. The client configured only
+  `websockets` protocol Ping frames and had no text heartbeat sender/PONG
+  filter. The observed 20–30-second generation churn matches that contract
+  violation.
+- [LOG GAP] Fly's rolling close warnings were already evicted. A read-only
+  Axiom APL query succeeded but the configured dataset had zero blocks/rows.
+  This does not weaken rejection because the durable 7/2/7 rows are sufficient.
+- [DESIGN] Selected the minimal connection-boundary repair: one cancellable
+  text-PING task per socket, PONG filtering, unchanged protocol Ping and strict
+  soak thresholds. Delaying/ignoring sampler failures and retrying without a
+  repair were rejected.
+- [BOUNDARY] No trading, H-009, retention cleanup, production chaos, checkpoint
+  mutation, or production deployment occurred.
+
+### [NEXT — CURRENT]
+
+TDD the text `PING`/`PONG` lifecycle repair, run full local gates, deploy the
+new exact approved SHA, prove new Fly/DB boot readiness, then bind a unique A6
+future-grid manifest/T0. Never create A5 later checkpoints.
