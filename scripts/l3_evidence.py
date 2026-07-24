@@ -466,6 +466,12 @@ def _manifest_event_seq(manifest: SoakManifest) -> int:
     return _MANIFEST_EVENT_SEQ_BASE + offset
 
 
+def _manifest_lock_key(manifest: SoakManifest) -> int:
+    """Return a deterministic signed BIGINT key for transaction serialization."""
+    value = int(manifest.manifest_hash[:16], 16)
+    return value if value < 2**63 else value - 2**64
+
+
 async def _runtime_preflight(dsn: str) -> None:
     """Exercise the real least-privileged store gate before any operator DB path."""
     await L3EvidenceStore(dsn).retention_bounds()
@@ -477,6 +483,10 @@ async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> 
     bound_row: Any = None
     try:
         async with connection.transaction():
+            await connection.fetch(
+                "SELECT pg_advisory_xact_lock($1::bigint)",
+                _manifest_lock_key(manifest),
+            )
             boot = await connection.fetchrow(
                 """
                 SELECT boot.*,
@@ -484,7 +494,7 @@ async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> 
                         WHERE boot_id=boot.boot_id AND status='success'
                         ORDER BY scheduled_at DESC, run_seq DESC LIMIT 1) AS mapping_hash
                 FROM public.l3_runtime_boots AS boot
-                WHERE boot_id=$1 FOR UPDATE
+                WHERE boot_id=$1
                 """,
                 manifest.boot_id,
             )

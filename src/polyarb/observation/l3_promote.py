@@ -83,8 +83,12 @@ _last_book_levels_write_at_s: float | None = None
 # Plan 04 additions — last-known-good fallbacks for Open Q #5 freeze policy
 # AND the reverse map needed to compute MARKET-level diffs from a
 # TOKEN-level _l3_active_set on subsequent ticks.
+_TokenIdentity = (
+    tuple[str | None, str | None]
+    | tuple[str | None, str | None, str | None]
+)
 _last_known_tob_rows: list[dict] | None = None
-_last_known_market_token_map: dict[str, tuple[str | None, str | None]] | None = None
+_last_known_market_token_map: dict[str, _TokenIdentity] | None = None
 # Last durably recorded current dashboard target.  This is a bounded diagnostic
 # cache only; stale recovery always reads l2_candidates in bounded DB pages.
 _last_mirrored_market_ids: frozenset[str] = frozenset()
@@ -193,7 +197,7 @@ def _fetch_latest_tob_rows_from_supabase(client: Any) -> list[dict]:
 
 def _fetch_market_token_map(
     client: Any, yes_asset_ids: list[str]
-) -> dict[str, tuple[str | None, str | None]]:
+) -> dict[str, _TokenIdentity]:
     """Fetch complete outcome identity for selected Yes-side TOB assets.
 
     ``l2_top_of_book.asset_id`` is the Yes token ID. Alembic 006 makes the
@@ -205,17 +209,19 @@ def _fetch_market_token_map(
         return {}
     resp = (
         client.table("markets_latest")
-        .select("yes_token_id, no_token_id")
+        .select("market_id, yes_token_id, no_token_id")
         .in_("yes_token_id", yes_asset_ids)
         .execute()
     )
-    out: dict[str, tuple[str | None, str | None]] = {}
+    out: dict[str, _TokenIdentity] = {}
     for row in resp.data or []:
+        market_id = row.get("market_id")
         yes_token_id = row.get("yes_token_id")
-        if yes_token_id:
+        no_token_id = row.get("no_token_id")
+        if market_id and yes_token_id and no_token_id:
             key = str(yes_token_id).strip()
             if key:
-                out[key] = (yes_token_id, row.get("no_token_id"))
+                out[key] = (market_id, yes_token_id, no_token_id)
     return out
 
 
@@ -552,7 +558,7 @@ class _PromoteStagedState:
     """Module state published only after the terminal ledger row is durable."""
 
     tob_rows: list[dict] | None
-    market_token_map: dict[str, tuple[str | None, str | None]] | None
+    market_token_map: dict[str, _TokenIdentity] | None
     active_set: frozenset[str]
     mirrored_market_ids: frozenset[str]
 
@@ -666,19 +672,32 @@ async def _finalize_promote_run(
 
 
 def _mapping_rows(
-    market_ids: set[str], token_map: dict[str, tuple[str | None, str | None]]
+    market_ids: set[str], token_map: dict[str, _TokenIdentity]
 ) -> tuple[dict[str, str], ...]:
     rows: list[dict[str, str]] = []
-    for market_id in sorted(market_ids):
-        yes_token, no_token = token_map[market_id]
+    for yes_asset_id in sorted(market_ids):
+        market_id, yes_token, no_token = _token_identity_parts(
+            yes_asset_id,
+            token_map[yes_asset_id],
+        )
         rows.append(
             {
-                "market_id": market_id,
+                "market_id": str(market_id),
                 "yes_token_id": str(yes_token),
                 "no_token_id": str(no_token),
             }
         )
     return tuple(rows)
+
+
+def _token_identity_parts(
+    yes_asset_id: str,
+    identity: _TokenIdentity,
+) -> tuple[str | None, str | None, str | None]:
+    if len(identity) == 3:
+        return identity
+    yes_token, no_token = identity
+    return yes_asset_id, yes_token, no_token
 
 
 async def _promote_run_impl(
@@ -879,7 +898,10 @@ async def _promote_run_impl(
         for market_id in sorted(
             str(value) for value in frame["asset_id"].tolist() if value
         ):
-            raw_yes, raw_no = token_map.get(market_id, (None, None))
+            _actual_market_id, raw_yes, raw_no = _token_identity_parts(
+                market_id,
+                token_map.get(market_id, (None, None)),
+            )
             yes_token = str(raw_yes).strip() if raw_yes is not None else ""
             no_token = str(raw_no).strip() if raw_no is not None else ""
             pair = {yes_token, no_token}
@@ -993,13 +1015,17 @@ async def _promote_run_impl(
         add_succeeded = False if added else add_succeeded
         remove_succeeded = False if removed else remove_succeeded
 
-    def token_pair(market_id: str) -> tuple[str | None, str | None] | None:
+    def token_pair(market_id: str) -> _TokenIdentity | None:
         return token_map.get(market_id) or prior_market_token_map.get(market_id)
 
     def committed_markets(tokens: frozenset[str]) -> set[str]:
         markets: set[str] = set()
         for source in (prior_market_token_map, token_map):
-            for market_id, (yes_token, no_token) in source.items():
+            for market_id, identity in source.items():
+                _actual_market_id, yes_token, no_token = _token_identity_parts(
+                    market_id,
+                    identity,
+                )
                 if yes_token and no_token and {str(yes_token), str(no_token)} <= tokens:
                     markets.add(market_id)
         return markets

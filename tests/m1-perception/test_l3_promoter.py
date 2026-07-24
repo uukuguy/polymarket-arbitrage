@@ -404,6 +404,16 @@ async def test_promote_run_supabase_outage_freezes_set() -> None:
 # ────────────────────────────────────────────────────────────────────────
 
 
+def _with_market_ids(rows: list[dict]) -> list[dict]:
+    return [
+        {
+            "market_id": row.get("market_id") or f"market:{row['yes_token_id']}",
+            **row,
+        }
+        for row in rows
+    ]
+
+
 def _make_supabase_client_mock(
     tob_rows: list[dict],
     token_map_rows: list[dict],
@@ -425,7 +435,7 @@ def _make_supabase_client_mock(
         elif name == "markets_latest":
             tbl.select.return_value = tbl
             tbl.in_.return_value = tbl
-            tbl.execute.return_value = MagicMock(data=list(token_map_rows))
+            tbl.execute.return_value = MagicMock(data=_with_market_ids(token_map_rows))
         elif name == "l2_candidates":
             # update(...).in_(...).execute() — capture the update dict + ids.
             class _UpdateChain:
@@ -564,7 +574,13 @@ def test_fetch_market_token_map_queries_real_production_columns() -> None:
     table.select.return_value = table
     table.in_.return_value = table
     table.execute.return_value = MagicMock(
-        data=[{"yes_token_id": "yes-1", "no_token_id": "no-1"}]
+        data=[
+            {
+                "market_id": "market-1",
+                "yes_token_id": "yes-1",
+                "no_token_id": "no-1",
+            }
+        ]
     )
     client = MagicMock()
     client.table.return_value = table
@@ -572,9 +588,16 @@ def test_fetch_market_token_map_queries_real_production_columns() -> None:
     result = l3_promote._fetch_market_token_map(client, ["yes-1"])
 
     client.table.assert_called_once_with("markets_latest")
-    table.select.assert_called_once_with("yes_token_id, no_token_id")
+    table.select.assert_called_once_with("market_id, yes_token_id, no_token_id")
     table.in_.assert_called_once_with("yes_token_id", ["yes-1"])
-    assert result == {"yes-1": ("yes-1", "no-1")}
+    assert result == {"yes-1": ("market-1", "yes-1", "no-1")}
+    assert l3_promote._mapping_rows({"yes-1"}, result) == (
+        {
+            "market_id": "market-1",
+            "yes_token_id": "yes-1",
+            "no_token_id": "no-1",
+        },
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1065,7 +1088,7 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
         elif name == "markets_latest":
             tbl.select.return_value = tbl
             tbl.in_.return_value = tbl
-            tbl.execute.return_value = MagicMock(data=list(token_map_rows))
+            tbl.execute.return_value = MagicMock(data=_with_market_ids(token_map_rows))
         elif name == "l2_candidates":
             class _UpdateChainFails:
                 def __init__(self, _payload: dict) -> None:

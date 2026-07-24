@@ -402,14 +402,18 @@ class _BindingConnection:
     def __init__(self, manifest: SoakManifest) -> None:
         self.manifest = manifest
         self.inserted = False
+        self.fetch_sql: list[str] = []
+        self.fetchrow_sql: list[str] = []
 
     def transaction(self) -> _Transaction:
         return _Transaction()
 
-    async def fetch(self, *_args: object) -> list[object]:
+    async def fetch(self, sql: str, *_args: object) -> list[object]:
+        self.fetch_sql.append(sql)
         return []
 
     async def fetchrow(self, sql: str, *args: object) -> dict[str, object]:
+        self.fetchrow_sql.append(sql)
         if "l3_runtime_boots" in sql:
             return _manifest_boot_row(self.manifest)
         if "SELECT event_id FROM public.l3_runtime_events" in sql:
@@ -460,6 +464,8 @@ async def test_manifest_bind_appends_exact_hashes_and_refuses_at_t0(
     assert connection.inserted
     assert row["recorded_at"] < manifest.t0
     assert row["event_seq"] >= l3_evidence._MANIFEST_EVENT_SEQ_BASE
+    assert any("pg_advisory_xact_lock" in sql for sql in connection.fetch_sql)
+    assert all("FOR UPDATE" not in sql for sql in connection.fetchrow_sql)
     with pytest.raises(l3_evidence.OperatorError, match="before T0"):
         await l3_evidence._bind_manifest("runtime-dsn", manifest, now=manifest.t0)
 
