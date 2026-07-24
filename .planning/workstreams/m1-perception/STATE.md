@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 startup-gate candidate qualified; exact deploy/readiness before unique A6
-last_updated: "2026-07-24T15:39:00Z"
+stopped_at: Phase 05.4 Plan 05 release 70 ready; A6 bound before exact T0
+last_updated: "2026-07-24T15:55:00Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -49,10 +49,11 @@ Plan: 5 of 5
   release 68/boot `e542fd4c…`, but that boot is permanently rejected: promoter
   run 0 began before WS generation 1 initialized and persisted
   `failed/generation_changed`, followed by 10/0/0 samples. A one-time promoter
-  startup-connection gate is now TDD-complete at executable commit `a9301f4`;
-  focused 91/91 and full pytest, changed-file Ruff, compile, authenticated
-  image, docs, planning, and diff gates passed. It must now be pushed and
-  deployed at one exact clean SHA before a new boot/readiness and A6.
+  startup-connection gate was deployed in exact SHA `64df08e…` as release 70,
+  boot `cd04e515…`. Run 0 and run 1 both passed 5/10/10; readiness then passed
+  on 12 complete samples over 330 seconds with max gap 30.1 seconds and zero
+  disallowed events. Unique A6 is bound for T0
+  `2026-07-24T15:56:21.369231Z`; its exact T0 report is pending.
 
 - **Active workstream:** `m1-perception`
 
@@ -195,10 +196,8 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Push and deploy the qualified heartbeat plus one-time promoter
-  startup-connection gate at one exact clean SHA; establish an eligible
-  boot/readiness/A6 manifest/T0 without changing runtime generation-failure
-  semantics.
+- At/after `2026-07-24T15:56:51.369231Z`, generate the A6 exact T0 report once
+  and accept only the scheduled seq-23 complete PASS sample.
 - At/after each A6 manifest-computed boundary, retain exactly one cumulative
   T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A5 reports.
 - After T+24 PASS, run `make l3-soak-verify` to re-query all raw rows and verify
@@ -229,10 +228,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 ## Session Continuity
 
 - **Last session:** 2026-07-24 21:38 (Asia/Shanghai)
-- **Stopped at:** executable startup-gate candidate `a9301f4` fully qualified;
-  release 68/boot `e542fd4c…` remains permanently rejected.
-- **Proceeding to:** push/deploy one exact clean SHA, prove the new Fly/DB boot
-  readiness, and bind a unique A6 manifest/T0.
+- **Stopped at:** release 70/boot `cd04e515…` readiness PASS; A6 uniquely bound
+  before exact T0 `2026-07-24T15:56:21.369231Z`.
+- **Proceeding to:** generate the immutable A6 T0 report at not-before
+  `2026-07-24T15:56:51.369231Z`, then schedule T+6/T+12/T+18/T+24.
 - **Resume files:** `05.4-05-PLAN.md`,
   `05.4-SOAK-MANIFEST-20260724T124329Z.json`, and `05.4-SOAK-LOG.md`.
 

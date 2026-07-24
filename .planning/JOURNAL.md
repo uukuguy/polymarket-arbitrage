@@ -4962,3 +4962,24 @@ Never create A5 later checkpoints or reuse release-68 boot.
 Push one clean exact SHA, deploy it through `make deploy-l2-prod`, cross-check
 GitHub/Fly/DB identities and the new boot, then require two successful promoter
 rows plus at least 12 passing health samples before binding unique A6.
+
+## SESSION 95 — 2026-07-24 (release 70 ready; A6 bound)
+
+- [DEPLOY] Workflow `30106432620` deployed exact SHA `64df08e…` as Fly release
+  70, instance `01KYACS3…`, image digest `81849c56…`, DB boot `cd04e515…`.
+  GitHub/Fly/DB identity and revision 007 matched.
+- [STARTUP GATE] Promoter run 0 waited for WS generation 1 and passed 5/10/10.
+  Pre-readiness health seq 1–3 recorded bounded generation convergence; no
+  failed promoter row or disallowed event occurred.
+- [READINESS] Promoter runs 0–1 both passed. Health seq 4–15 provided 12
+  consecutive complete PASS samples over 330 seconds, max gap 30.1 seconds,
+  five markets/ten tokens, and disallowed event count zero.
+- [A6] O_EXCL-created and inspected
+  `05.4-SOAK-MANIFEST-20260724T155621Z.json`, exact T0
+  `2026-07-24T15:56:21.369231Z`. One manifest-bound event was durably recorded
+  at `15:54:13.058977Z`, before T0, with exact boot/mapping/hash.
+
+### [NEXT — CURRENT]
+
+At/after `2026-07-24T15:56:51.369231Z`, run the manifest-declared T0 report
+once. PASS schedules A6 T+6/T+12/T+18/T+24; failure permanently rejects A6.
