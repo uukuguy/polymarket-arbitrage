@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 A6 T0 PASS; T+6 not-before pending
-last_updated: "2026-07-24T15:57:00Z"
+stopped_at: Phase 05.4 Plan 05 A6 permanently NOT-CLOSED; quiet-refresh repair before A7
+last_updated: "2026-07-24T16:10:00Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -54,7 +54,11 @@ Plan: 5 of 5
   on 12 complete samples over 330 seconds with max gap 30.1 seconds and zero
   disallowed events. Unique A6 is bound for T0
   `2026-07-24T15:56:21.369231Z`; its exact T0 report passed with report hash
-  `7549fa06…`. T+6 is pending at `2026-07-24T21:56:21.369231Z`.
+  `7549fa06…`, but seq 35 later failed at 10/10/8. A6 is permanently
+  NOT-CLOSED; its T+6 runner is cancelled and later files do not exist.
+  Root cause is destructive quiet-refresh timeout compensation creating a
+  self-sustaining generation loop. A non-destructive, evidence-strict retry
+  repair is designed before a new exact deployment/readiness/A7.
 
 - **Active workstream:** `m1-perception`
 
@@ -197,8 +201,8 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- At/after `2026-07-24T21:56:21.369231Z`, generate the cumulative A6 T+6
-  report once; then repeat only at the manifest-declared later boundaries.
+- TDD the quiet-refresh non-destructive evidence-timeout retry; deploy one new
+  exact SHA and require stable repeated quiet cycles before unique A7.
 - At/after each A6 manifest-computed boundary, retain exactly one cumulative
   T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A5 reports.
 - After T+24 PASS, run `make l3-soak-verify` to re-query all raw rows and verify
@@ -229,9 +233,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 ## Session Continuity
 
 - **Last session:** 2026-07-24 21:38 (Asia/Shanghai)
-- **Stopped at:** A6 exact T0 PASS, report hash `7549fa06…`.
-- **Proceeding to:** wait for T+6 not-before
-  `2026-07-24T21:56:21.369231Z`, then generate its immutable cumulative report.
+- **Stopped at:** A6 seq 35 failed 10/10/8; T+6 runner cancelled before boundary.
+- **Proceeding to:** implement the approved quiet-refresh repair, exact-SHA
+  deploy, new boot/readiness, and a unique A7 manifest/T0.
 - **Resume files:** `05.4-05-PLAN.md`,
   `05.4-SOAK-MANIFEST-20260724T124329Z.json`, and `05.4-SOAK-LOG.md`.
 

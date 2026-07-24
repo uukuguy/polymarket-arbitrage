@@ -1,6 +1,6 @@
 # 当前项目状态
 
-> 唯一当前状态入口。最后核验：2026-07-24（Phase 05.4 Plan 05 A6 T0 PASS，待 T+6）。
+> 唯一当前状态入口。最后核验：2026-07-25（Phase 05.4 Plan 05 A6 永久 NOT-CLOSED，修复 quiet refresh 后进入 A7）。
 > `JOURNAL.md` 是追加式历史；其中旧 `[NEXT]` 均不代表当前任务。
 
 稳定的使用流程、健康语义和命令安全分级见
@@ -17,7 +17,8 @@ manifest/T0 虽通过，但随后三个样本只取得 7/2/7 个 current-generat
 token，因此永久 NOT-CLOSED，四个后续 checkpoint 已取消且文件不存在。文本 `PING`
 修复部署后又暴露 promoter/WS sibling-task 启动竞态，release 68 同样永久拒绝。两项
 修复已随 exact SHA `64df08e…` 部署，release 70 readiness 通过，唯一 A6 已绑定
-未来 T0 `2026-07-24T15:56:21.369231Z`，其 exact T0 report 已 PASS。机会 feed 生产最近仍为 HTTP
+未来 T0 `2026-07-24T15:56:21.369231Z`，其 exact T0 report 虽 PASS，但 seq 35
+随后只有 10/10/8，A6 已永久 NOT-CLOSED。机会 feed 生产最近仍为 HTTP
 503。因此**市场感知平台尚未完成严格 24 小时 soak，也不是完整 production-qualified；
 整套系统还不是可以投入真实资金运行的套利产品**。
 
@@ -112,9 +113,10 @@ generation change 仍严格失败，focused 91/91、全量 pytest、lint/compile
 与 planning 门均通过。现在 push/deploy 一个 exact clean SHA、核对新 Fly/DB
 boot readiness 已通过：两个 promoter success、12 个完整样本/330 秒、gap 30.1 秒、
 disallowed 0。A6 manifest `05.4-SOAK-MANIFEST-20260724T155621Z.json` 已在 T0 前
-唯一绑定，T0 report hash `7549fa06…` 已 PASS；下一步只在
-`2026-07-24T21:56:21.369231Z` 到点生成累计 T+6。不执行 retention cleanup、
-production chaos、H-009 或真实交易。
+唯一绑定，T0 report hash `7549fa06…` 已 PASS；但 destructive quiet-refresh
+timeout 导致 generation churn 和 seq 35 失败，T+6 runner 已在边界前取消。下一步
+TDD 非破坏式 retry、exact-SHA 部署、新 boot/readiness，再创建唯一 A7。不执行
+retention cleanup、production chaos、H-009 或真实交易。
 
 ```bash
 /gsd-resume-work --ws m1-perception

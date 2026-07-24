@@ -4999,3 +4999,30 @@ once. PASS schedules A6 T+6/T+12/T+18/T+24; failure permanently rejects A6.
 
 Wait for A6 T+6 not-before `2026-07-24T21:56:21.369231Z`; generate the
 manifest-declared cumulative report once, preserving any NOT-CLOSED outcome.
+
+## SESSION 97 — 2026-07-25 (A6 invalidated by destructive quiet refresh)
+
+- [EARLY AUDIT] A6 seq 35 at `16:02:21.369231Z` durably failed
+  `membership_convergence_failed` with 10 desired, 10 committed, 8 evidenced;
+  both sides of market `562802` lacked current-generation evidence.
+- [A6 REJECTED] The T+6 runner was SIGINT-cancelled before not-before. No
+  A6 T6/T12/T18/T24 artifact exists or may be created. Manifest and T0 PASS
+  remain immutable diagnostic evidence.
+- [ROOT CAUSE] Quiet refresh treated a missing post-refresh book as ambiguous
+  control state and closed the whole socket. The new generation was refreshed
+  before normal evidence convergence, producing repeated 30-second
+  compensation/reconnect cycles and membership gaps.
+- [PROBE] Official docs confirm book-on-subscribe and optional
+  `initial_dump=true`. An isolated exact-ten-token probe passed initial plus
+  five dynamic resubscriptions in at most 0.46 seconds; production successful
+  cycles also completed book-level writes in about one second. The response is
+  intermittent; destructive timeout handling amplifies it.
+- [DESIGN] Selected generation-stable, two-stage missing-token retry with
+  initial convergence grace. No evidence/freshness threshold changes and
+  genuine control failures still compensate.
+
+### [NEXT — CURRENT]
+
+Execute the quiet-refresh repair from
+`docs/superpowers/specs/2026-07-25-l3-quiet-refresh-nondestructive-retry-design.md`,
+then deploy/prove a new boot before unique A7.
