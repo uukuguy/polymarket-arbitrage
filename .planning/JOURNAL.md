@@ -4914,9 +4914,21 @@ GitHub/Fly/DB identities remain exact; otherwise preserve NOT-CLOSED.
 - [BOUNDARY] No trading, H-009, retention cleanup, production chaos, checkpoint
   mutation, or production deployment occurred. The repair is not production
   evidence until an exact-SHA rollout creates a new boot.
+- [DEPLOY] Workflow `30104796778` deployed exact SHA `9ce640e…` as Fly release
+  68, instance `01KYABFM…`, digest `6a1bc579…`, and DB boot `e542fd4c…`.
+  GitHub/Fly/DB identity and production revision 007 matched.
+- [BOOT REJECTED] Promoter run 0 started at `15:22:06.290326Z`, before WS
+  generation 1 initialized at `15:22:07.450650Z`, and durably ended
+  `failed/generation_changed`. Health seq 1–6 remained 10/0/0
+  `membership_convergence_failed`; this boot is permanently ineligible before
+  readiness or manifest.
+- [ROOT CAUSE] `ws-consumer` and `l3-promoter` are sibling tasks; creation order
+  does not guarantee execution order. Restarting is probabilistic. The repair
+  must gate only run 0 on an active socket while retaining boot-grid schedule
+  lag and all later generation-change failures.
 
 ### [NEXT — CURRENT]
 
-Push and deploy the final exact heartbeat-repair SHA, prove new Fly/DB boot
-readiness, then bind a unique A6 future-grid manifest/T0. Never create A5 later
-checkpoints.
+TDD the promoter first-run active-connection gate, deploy a new exact SHA,
+prove new Fly/DB boot readiness, then bind a unique A6 future-grid manifest/T0.
+Never create A5 later checkpoints or reuse release-68 boot.

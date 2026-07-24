@@ -45,8 +45,11 @@ Plan: 5 of 5
   are required without changing strict thresholds. The RED/GREEN repair is
   committed at executable candidate `91359610242a52e62b336be41a4540a441cf7191`;
   focused/full tests, live text-PONG probe, changed-file lint, compile, image,
-  docs, and planning gates passed. It is not production evidence until an exact
-  SHA deploy creates a new cross-checked Fly/DB boot.
+  docs, and planning gates passed. Exact SHA `9ce640e…` then deployed as Fly
+  release 68/boot `e542fd4c…`, but that boot is permanently rejected: promoter
+  run 0 began before WS generation 1 initialized and persisted
+  `failed/generation_changed`, followed by 10/0/0 samples. A one-time promoter
+  startup-connection gate must be repaired and redeployed before A6.
 
 - **Active workstream:** `m1-perception`
 
@@ -189,9 +192,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Push and deploy the exact application-heartbeat repair SHA without changing
-  strict sampling criteria; establish a new eligible boot/readiness/A6
-  manifest/T0.
+- TDD the one-time promoter startup-connection gate without changing runtime
+  generation-failure semantics; deploy a new exact SHA and establish an
+  eligible boot/readiness/A6 manifest/T0.
 - At/after each A6 manifest-computed boundary, retain exactly one cumulative
   T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A5 reports.
 - After T+24 PASS, run `make l3-soak-verify` to re-query all raw rows and verify
@@ -222,10 +225,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 ## Session Continuity
 
 - **Last session:** 2026-07-24 21:38 (Asia/Shanghai)
-- **Stopped at:** A5 permanently NOT-CLOSED; heartbeat repair candidate
-  `9135961…` locally verified and committed.
-- **Proceeding to:** Push/deploy the final exact SHA, prove new Fly/DB boot
-  readiness, and bind a unique A6 manifest/T0.
+- **Stopped at:** release 68/boot `e542fd4c…` permanently rejected before
+  readiness due promoter run-0/WS-initialization race.
+- **Proceeding to:** TDD the first-run connection gate, deploy a new exact SHA,
+  prove new Fly/DB boot readiness, and bind a unique A6 manifest/T0.
 - **Resume files:** `05.4-05-PLAN.md`,
   `05.4-SOAK-MANIFEST-20260724T124329Z.json`, and `05.4-SOAK-LOG.md`.
 

@@ -103,12 +103,13 @@ A5 manifest
 `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-MANIFEST-20260724T124329Z.json`
 及 T0 保留为 rejected diagnostic evidence；T6/T12/T18/T24 均已取消且不存在。
 
-RED→GREEN 修复已提交为 executable candidate `91359610242a52e62b336be41a4540a441cf7191`：
-每个连接发送文本 `PING`、过滤文本 `PONG`、严格清理 heartbeat task；sampler 阈值
-未改。focused/full pytest、真实 CLOB PONG 探针、changed-file Ruff、compile、
-release-66 image、docs/planning 门通过。现在只部署最终 approved exact SHA，核对
-新 Fly/DB boot 和 readiness，再创建唯一 A6 future-grid manifest/T0。不执行
-retention cleanup、production chaos、H-009 或真实交易。
+文本 heartbeat 修复已随 exact SHA `9ce640e…` 部署为 release 68，但新 boot
+`e542fd4c…` 在 readiness 前永久失败：promoter run 0 比 WS generation 1 早约 1 秒
+启动，写入 `failed/generation_changed`，随后样本为 10/0/0。现在 TDD 一个仅作用于
+boot 首次 promoter transaction 的 active-connection gate；运行期 generation change
+仍严格失败。修复后重新 exact-SHA 部署、核对新 Fly/DB boot/readiness，再创建唯一
+A6 future-grid manifest/T0。不执行 retention cleanup、production chaos、H-009 或
+真实交易。
 
 ```bash
 /gsd-resume-work --ws m1-perception
