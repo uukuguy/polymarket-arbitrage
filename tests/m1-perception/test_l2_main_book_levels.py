@@ -25,6 +25,8 @@ import os
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
+import pytest
+
 from polyarb.observation.l3_evidence import FrameDispatchResult
 
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
@@ -310,7 +312,8 @@ def test_on_event_book_with_non_l3_asset_does_not_call_push_book_levels() -> Non
         l3_promote._l3_active_set = prior
 
 
-def test_production_dispatch_reports_tob_and_depth_outcomes_separately() -> None:
+@pytest.mark.asyncio
+async def test_production_dispatch_reports_tob_and_depth_outcomes_separately() -> None:
     from polyarb.daemon.l2_main import make_l2_event_handler
     from polyarb.observation import l3_promote
 
@@ -321,7 +324,7 @@ def test_production_dispatch_reports_tob_and_depth_outcomes_separately() -> None
         mirror.push_top_of_book.return_value = True
         mirror.push_book_levels.return_value = False
 
-        result = make_l2_event_handler(
+        result = await make_l2_event_handler(
             mirror, book_levels_required=lambda asset_id: asset_id == "0xasset-1"
         )(
             _make_book_frame(
@@ -343,12 +346,13 @@ def test_production_dispatch_reports_tob_and_depth_outcomes_separately() -> None
         l3_promote._l3_active_set = prior
 
 
-def test_non_book_dispatch_has_explicit_false_depth_outcome() -> None:
+@pytest.mark.asyncio
+async def test_non_book_dispatch_has_explicit_false_depth_outcome() -> None:
     from polyarb.daemon.l2_main import make_l2_event_handler
 
     mirror = MagicMock()
     mirror.push_top_of_book.return_value = True
-    result = make_l2_event_handler(mirror)(
+    result = await make_l2_event_handler(mirror)(
         {
             "event_type": "best_bid_ask",
             "asset_id": "asset-a",

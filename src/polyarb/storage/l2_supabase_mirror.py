@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 
 import sentry_sdk
 from loguru import logger
-from supabase import Client, create_client
+from supabase import Client, ClientOptions, create_client
 
 if TYPE_CHECKING:
     # Forward-reference only — avoid runtime circular import in the
@@ -102,6 +102,7 @@ _NARROW_BOOK_LEVELS_COLUMNS: tuple[str, ...] = (
 
 # Chunk size — postgrest body-size headroom; matches Phase 02 supabase_mirror.
 _CHUNK_SIZE: int = 1000
+_POSTGREST_TIMEOUT_S: float = 5.0
 
 
 def _chunk(items: list, size: int) -> Iterator[list]:
@@ -122,11 +123,11 @@ def _project(rows: list[dict], columns: tuple[str, ...]) -> list[dict]:
 class L2SupabaseMirror:
     """Fail-soft write client for the L2 dashboard mirror tables.
 
-    Constructed once per L2 daemon. Thread-safety: not thread-safe by design;
-    the L2 daemon runs single-event-loop. All methods are synchronous and
-    BLOCK on the supabase-py REST call (acceptable because Plan 04 batches
-    WS frames at ≤5s debounce — well outside the asyncio loop's tight inner
-    iteration budget).
+    Constructed once per L2 daemon. All public methods are synchronous and
+    block on supabase-py REST calls, so the production dispatcher runs them
+    through ``asyncio.to_thread`` and awaits them sequentially. The five-second
+    PostgREST timeout bounds one off-loop write without allowing concurrent
+    access to this client.
     """
 
     def __init__(
@@ -149,7 +150,11 @@ class L2SupabaseMirror:
 
         DO NOT pass the Postgres DSN — that's reserved for alembic + asyncpg.
         """
-        self._client: Client = create_client(url, service_key)
+        self._client: Client = create_client(
+            url,
+            service_key,
+            ClientOptions(postgrest_client_timeout=_POSTGREST_TIMEOUT_S),
+        )
         # Phase 03.1 Plan 01: optional freshness-cache writer. Daemon wires this
         # in Plan 02; legacy / direct callers may pass None.
         self._store: SQLiteStore | None = store

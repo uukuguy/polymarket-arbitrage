@@ -103,6 +103,7 @@ def test_init_creates_single_client() -> None:
         assert args[0].startswith("https://"), (
             f"L2SupabaseMirror constructor expects REST URL, got {args[0]!r}"
         )
+        assert args[2].postgrest_client_timeout == 5.0
 
 
 def test_push_top_of_book_chunks_at_1000() -> None:

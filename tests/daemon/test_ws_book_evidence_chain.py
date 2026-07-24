@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,6 +18,40 @@ async def _wait_until(predicate, *, timeout: float = 0.2) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():
             await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_production_mirror_call_does_not_block_event_loop() -> None:
+    mirror = MagicMock()
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking_write(_rows) -> bool:
+        started.set()
+        release.wait(timeout=1)
+        return True
+
+    mirror.push_top_of_book.side_effect = _blocking_write
+    handler = make_l2_event_handler(mirror)
+    dispatch = asyncio.create_task(
+        handler(
+            {
+                "event_type": "best_bid_ask",
+                "asset_id": "asset-a",
+                "best_bid": "0.4",
+                "best_ask": "0.6",
+                "timestamp": "2026-07-24T06:00:00Z",
+            }
+        )
+    )
+    try:
+        await asyncio.wait_for(asyncio.to_thread(started.wait, 0.2), timeout=0.3)
+        await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
+        assert dispatch.done() is False
+    finally:
+        release.set()
+
+    assert (await asyncio.wait_for(dispatch, timeout=0.2)).tob_written is True
 
 
 def _consumer(

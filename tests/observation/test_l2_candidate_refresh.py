@@ -6,8 +6,10 @@ on_snapshot_complete (debounce + cap + ws_consumer mutation).
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
+import threading
 import time
 from datetime import UTC
 from pathlib import Path
@@ -1252,3 +1254,41 @@ async def test_on_snapshot_complete_records_fetch_success_on_supabase_call(tmp_p
     assert mod._last_fetch_success_at_s is not None, "fetch success timestamp not recorded"
     assert len(mod._last_known_markets_rows or []) == 1
     assert (mod._last_known_markets_rows or [{}])[0]["market_id"] == "m1"
+
+
+@pytest.mark.asyncio
+async def test_supabase_fetch_does_not_block_event_loop(tmp_path):
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings = _supabase_settings(tmp_path / "state.db")
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking_fetch(_client):
+        started.set()
+        release.wait(timeout=1)
+        return []
+
+    safety = threading.Timer(0.2, release.set)
+    safety.start()
+    try:
+        with patch.object(mod, "create_client", return_value=MagicMock()), patch.object(
+            mod,
+            "_fetch_all_markets_latest",
+            side_effect=_blocking_fetch,
+        ):
+            task = asyncio.create_task(
+                mod.on_snapshot_complete(
+                    {"snapshot_id": 1, "taken_at_ms": 1},
+                    ws_consumer=MagicMock(),
+                    settings=settings,
+                )
+            )
+            await asyncio.wait_for(asyncio.to_thread(started.wait, 0.3), timeout=0.4)
+            await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
+            assert task.done() is False
+            release.set()
+            assert await asyncio.wait_for(task, timeout=0.2) is False
+    finally:
+        release.set()
+        safety.cancel()

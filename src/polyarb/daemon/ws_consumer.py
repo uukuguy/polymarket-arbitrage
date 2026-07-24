@@ -23,7 +23,7 @@ import os
 import time
 import warnings
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -151,7 +151,10 @@ class WsConsumer:
         *,
         settings: Any,
         watchdog: WsWatchdog,
-        on_event: Callable[[dict], FrameDispatchResult],
+        on_event: Callable[
+            [dict],
+            FrameDispatchResult | Awaitable[FrameDispatchResult],
+        ],
         initial_assets: list[str] | None = None,
         membership_observer: Callable[[WsMembershipSnapshot], None] | None = None,
         event_recorder: Callable[..., None] | None = None,
@@ -1070,6 +1073,8 @@ class WsConsumer:
                 # Dispatch to placeholder/mirror; isolated failure must NOT crash loop
                 try:
                     dispatch_result = self._on_event(event)
+                    if isinstance(dispatch_result, Awaitable):
+                        dispatch_result = await dispatch_result
                     if (
                         event.get("event_type") == "book"
                         and isinstance(dispatch_result, FrameDispatchResult)

@@ -59,7 +59,7 @@ from typing import Any
 
 import sentry_sdk
 from loguru import logger
-from supabase import create_client
+from supabase import ClientOptions, create_client
 
 from polyarb.observation.l3_evidence import (
     AcceptanceConfig,
@@ -88,6 +88,7 @@ _last_known_market_token_map: dict[str, tuple[str | None, str | None]] | None = 
 # Last durably recorded current dashboard target.  This is a bounded diagnostic
 # cache only; stale recovery always reads l2_candidates in bounded DB pages.
 _last_mirrored_market_ids: frozenset[str] = frozenset()
+_POSTGREST_TIMEOUT_S: float = 5.0
 _MAX_TOKEN_MAP_CACHE = 1010  # 1000 fetched rows + exact current L3 identities
 _MIRROR_RECONCILE_BATCH_SIZE = 100
 
@@ -806,13 +807,20 @@ async def _promote_run_impl(
         return await finish(early(PromoteStatus.FROZEN, "no_supabase_creds"))
 
     try:
-        client = create_client(supabase_url, service_key)
+        client = create_client(
+            supabase_url,
+            service_key,
+            ClientOptions(postgrest_client_timeout=_POSTGREST_TIMEOUT_S),
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("l3-promote: create client failed type={}", type(exc).__name__)
         return await finish(early(PromoteStatus.FROZEN, "create_client_failed"))
 
     try:
-        tob_rows = _fetch_latest_tob_rows_from_supabase(client)
+        tob_rows = await asyncio.to_thread(
+            _fetch_latest_tob_rows_from_supabase,
+            client,
+        )
         staged_tob_rows = tob_rows
     except Exception as exc:  # noqa: BLE001
         logger.warning("l3-promote: tob fetch failed type={}", type(exc).__name__)
@@ -833,7 +841,11 @@ async def _promote_run_impl(
         }
     )
     try:
-        token_map = _fetch_market_token_map(client, recent_asset_ids)
+        token_map = await asyncio.to_thread(
+            _fetch_market_token_map,
+            client,
+            recent_asset_ids,
+        )
         if not token_map:
             return await finish(early(PromoteStatus.FROZEN, "empty_token_map"))
     except Exception as exc:  # noqa: BLE001
@@ -1004,7 +1016,11 @@ async def _promote_run_impl(
     mirror_succeeded = False
     mirror_cleanup_pending = False
     if not identity_limit_exceeded:
-        raw_mirror_result = _mirror_l3_promoted_at_ts(client, sorted(current_markets))
+        raw_mirror_result = await asyncio.to_thread(
+            _mirror_l3_promoted_at_ts,
+            client,
+            sorted(current_markets),
+        )
         if isinstance(raw_mirror_result, _MirrorReconcileResult):
             mirror_succeeded = raw_mirror_result.succeeded
             mirror_cleanup_pending = raw_mirror_result.cleanup_pending

@@ -31,6 +31,7 @@ path would clobber L3 tokens (race condition documented in 05-PATTERNS.md /
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 import sqlite3
@@ -41,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
-from supabase import create_client
+from supabase import ClientOptions, create_client
 
 # REUSE Phase 01.1 scanner verbatim (D-04)
 from polyarb.observation.l2_temp_db import build_temp_db, warn_null_filled_recipe_columns
@@ -51,6 +52,7 @@ from polyarb.observation.watchlist import load_watchlist
 # ── Module constants (locked) ─────────────────────────────────────────────
 MAX_CANDIDATES: int = 500  # R9 hard cap
 REFRESH_DEBOUNCE_S: float = 60.0  # SP8 cross-bug check #1
+_POSTGREST_TIMEOUT_S: float = 5.0
 
 # Module-level debounce state. Acceptable for Phase 03 (single-process L2
 # daemon). If a future phase introduces multi-instance L2, move this into
@@ -393,8 +395,15 @@ async def on_snapshot_complete(
         service_key = ""
     if supabase_url and service_key:
         try:
-            client = create_client(supabase_url, service_key)
-            markets_rows = _fetch_all_markets_latest(client)
+            client = create_client(
+                supabase_url,
+                service_key,
+                ClientOptions(postgrest_client_timeout=_POSTGREST_TIMEOUT_S),
+            )
+            markets_rows = await asyncio.to_thread(
+                _fetch_all_markets_latest,
+                client,
+            )
             if not markets_rows:
                 # HTTP 200 + [] can be a transient DELETE→INSERT mirror window
                 # or a failed DELETE-only projection. Neither is evidence that
@@ -508,7 +517,10 @@ async def on_snapshot_complete(
             for row in new_rows
         ]
         try:
-            if not mirror.reconcile_candidates(desired_rows):
+            if not await asyncio.to_thread(
+                mirror.reconcile_candidates,
+                desired_rows,
+            ):
                 logger.warning("candidate refresh: mirror reconciliation returned false")
                 return False
         except Exception as e:  # noqa: BLE001 — explicit failure boundary

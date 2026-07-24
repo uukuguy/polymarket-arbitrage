@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import threading
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -1245,6 +1246,54 @@ async def test_terminal_promote_success_appends_one_truthful_record() -> None:
     assert record.acceptance_config_hash == runtime.snapshot().acceptance_config_hash
     assert runtime.snapshot().last_promote_persisted_at == record.finished_at
     assert l3_promote.get_last_promote_at_s() == record.finished_at.timestamp()
+
+
+@pytest.mark.asyncio
+async def test_promoter_supabase_fetch_does_not_block_event_loop() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    consumer = _truthful_consumer()
+    tob_rows, token_rows = _five_market_inputs("offloop")
+    client = _make_supabase_client_mock(tob_rows, token_rows)
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking_fetch(_client):
+        started.set()
+        release.wait(timeout=1)
+        return tob_rows
+
+    safety = threading.Timer(0.2, release.set)
+    safety.start()
+    try:
+        with patch.object(l3_promote, "create_client", return_value=client), patch.object(
+            l3_promote,
+            "_fetch_latest_tob_rows_from_supabase",
+            side_effect=_blocking_fetch,
+        ):
+            task = asyncio.create_task(
+                l3_promote.promote_run(
+                    settings=settings,
+                    ws_consumer=consumer,
+                    recipe_yaml_path=RECIPE_PATH,
+                    evidence_store=store,
+                    evidence_runtime=runtime,
+                    run_seq=20,
+                )
+            )
+            await asyncio.wait_for(asyncio.to_thread(started.wait, 0.3), timeout=0.4)
+            await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
+            assert task.done() is False
+            release.set()
+            result = await asyncio.wait_for(task, timeout=0.5)
+    finally:
+        release.set()
+        safety.cancel()
+
+    assert result.status.value == "success"
 
 
 @pytest.mark.asyncio
