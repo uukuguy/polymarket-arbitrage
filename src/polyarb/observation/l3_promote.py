@@ -67,6 +67,7 @@ from polyarb.observation.l3_evidence import (
     PromoteRunRecord,
     PromoteRunResult,
     PromoteStatus,
+    SoakMappingLock,
     WsMembershipSnapshot,
     stable_sha256,
 )
@@ -709,6 +710,41 @@ def _token_identity_parts(
     return yes_asset_id, yes_token, no_token
 
 
+def _locked_proposal(
+    lock: SoakMappingLock,
+    membership: WsMembershipSnapshot,
+    token_map: dict[str, _TokenIdentity],
+) -> tuple[set[str], frozenset[str], tuple[dict[str, str], ...]] | None:
+    for tokens in (membership.desired, membership.committed):
+        if len(tokens) != 10:
+            continue
+        market_ids: set[str] = set()
+        mapped_tokens: set[str] = set()
+        for yes_asset_id, identity in token_map.items():
+            market_id, yes_token, no_token = _token_identity_parts(
+                yes_asset_id,
+                identity,
+            )
+            if not all(
+                isinstance(value, str) and value
+                for value in (market_id, yes_token, no_token)
+            ):
+                continue
+            pair = {yes_token, no_token}
+            if len(pair) == 2 and pair <= tokens:
+                market_ids.add(yes_asset_id)
+                mapped_tokens.update(pair)
+        if len(market_ids) != 5 or mapped_tokens != set(tokens):
+            continue
+        mapping = _mapping_rows(market_ids, token_map)
+        if (
+            len({row["market_id"] for row in mapping}) == 5
+            and stable_sha256(list(mapping)) == lock.mapping_hash
+        ):
+            return market_ids, frozenset(tokens), mapping
+    return None
+
+
 async def _promote_run_impl(
     *,
     settings: Any,
@@ -826,6 +862,33 @@ async def _promote_run_impl(
     if runtime_status is not None and calculated_hash != runtime_hash:
         return await finish(early(PromoteStatus.FAILED, "acceptance_config_mismatch"))
 
+    soak_lock: SoakMappingLock | None = None
+    if apply_mutations:
+        try:
+            soak_lock = await evidence_store.fetch_active_soak_mapping_lock(  # type: ignore[union-attr]
+                boot_id=runtime_status.boot_id,  # type: ignore[union-attr]
+                observed_at=started_at,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - terminalize a failed lock read
+            logger.warning(
+                "l3-promote: soak mapping lock read failed type={}",
+                type(exc).__name__,
+            )
+            return await finish(
+                early(PromoteStatus.FAILED, "soak_mapping_lock_read_failed")
+            )
+    locked_proposal = (
+        _locked_proposal(soak_lock, initial, staged_market_token_map or {})
+        if soak_lock is not None
+        else None
+    )
+    if soak_lock is not None and locked_proposal is None:
+        return await finish(
+            early(PromoteStatus.FAILED, "soak_mapping_lock_mismatch")
+        )
+
     supabase_url = getattr(settings, "supabase_url", "")
     try:
         service_key = settings.supabase_service_key.get_secret_value()
@@ -844,94 +907,90 @@ async def _promote_run_impl(
         logger.warning("l3-promote: create client failed type={}", type(exc).__name__)
         return await finish(early(PromoteStatus.FROZEN, "create_client_failed"))
 
-    try:
-        tob_rows = await asyncio.to_thread(
-            _fetch_latest_tob_rows_from_supabase,
-            client,
-        )
-        staged_tob_rows = tob_rows
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("l3-promote: tob fetch failed type={}", type(exc).__name__)
-        if _last_known_tob_rows is None:
-            return await finish(early(PromoteStatus.FROZEN, "tob_fetch_failed"))
-        tob_rows = _last_known_tob_rows
-
-    # Read the durable mapping without copying it.  A deployment upgraded
-    # from an older build may already hold an oversized cache; the hard-limit
-    # path must not construct another oversized mapping before it can cleanly
-    # fail closed.
     prior_market_token_map = staged_market_token_map or {}
-    recent_asset_ids = sorted(
-        {
-            str(row.get("asset_id") or "").strip()
-            for row in tob_rows
-            if str(row.get("asset_id") or "").strip()
-        }
-    )
-    try:
-        token_map = await asyncio.to_thread(
-            _fetch_market_token_map,
-            client,
-            recent_asset_ids,
-        )
-        if not token_map:
-            return await finish(early(PromoteStatus.FROZEN, "empty_token_map"))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("l3-promote: token map failed type={}", type(exc).__name__)
-        token_map = staged_market_token_map or {}
-        if not token_map:
-            return await finish(early(PromoteStatus.FROZEN, "token_map_failed"))
-
-    yes_tob_rows = [
-        row for row in tob_rows if str(row.get("asset_id") or "").strip() in token_map
-    ]
-    try:
-        from polyarb.observation.scanner import run_recipe
-
-        recipe = _load_recipe(recipe_yaml_path)
-        db_path = _build_tob_temp_db(yes_tob_rows)
+    if locked_proposal is not None:
+        accepted_markets, desired, mapping = locked_proposal
+        token_map = prior_market_token_map
+    else:
         try:
-            frame = run_recipe(db_path, recipe)
-        finally:
-            try:
-                os.unlink(db_path)
-            except OSError:
-                logger.warning("l3-promote: temp DB cleanup failed path={}", db_path)
-
-        # DataFrame access and all post-selection normalization belong to the
-        # same terminal boundary as scanner execution.  Malformed frames,
-        # token values, or mapping construction must still append exactly one
-        # bounded failed outcome.
-        proposed_tokens: set[str] = set()
-        accepted_markets: set[str] = set()
-        for market_id in sorted(
-            str(value) for value in frame["asset_id"].tolist() if value
-        ):
-            _actual_market_id, raw_yes, raw_no = _token_identity_parts(
-                market_id,
-                token_map.get(market_id, (None, None)),
+            tob_rows = await asyncio.to_thread(
+                _fetch_latest_tob_rows_from_supabase,
+                client,
             )
-            yes_token = str(raw_yes).strip() if raw_yes is not None else ""
-            no_token = str(raw_no).strip() if raw_no is not None else ""
-            pair = {yes_token, no_token}
-            if (
-                not yes_token
-                or not no_token
-                or yes_token != market_id
-                or len(pair) != 2
-                or bool(pair & proposed_tokens)
-            ):
-                continue
-            proposed_tokens.update(pair)
-            accepted_markets.add(market_id)
+            staged_tob_rows = tob_rows
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("l3-promote: tob fetch failed type={}", type(exc).__name__)
+            if _last_known_tob_rows is None:
+                return await finish(early(PromoteStatus.FROZEN, "tob_fetch_failed"))
+            tob_rows = _last_known_tob_rows
 
-        mapping = _mapping_rows(accepted_markets, token_map)
-        desired = frozenset(proposed_tokens)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("l3-promote: selection failed type={}", type(exc).__name__)
-        return await finish(early(PromoteStatus.FAILED, "selection_failed"))
+        recent_asset_ids = sorted(
+            {
+                str(row.get("asset_id") or "").strip()
+                for row in tob_rows
+                if str(row.get("asset_id") or "").strip()
+            }
+        )
+        try:
+            token_map = await asyncio.to_thread(
+                _fetch_market_token_map,
+                client,
+                recent_asset_ids,
+            )
+            if not token_map:
+                return await finish(early(PromoteStatus.FROZEN, "empty_token_map"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("l3-promote: token map failed type={}", type(exc).__name__)
+            token_map = staged_market_token_map or {}
+            if not token_map:
+                return await finish(early(PromoteStatus.FROZEN, "token_map_failed"))
+
+        yes_tob_rows = [
+            row for row in tob_rows if str(row.get("asset_id") or "").strip() in token_map
+        ]
+        try:
+            from polyarb.observation.scanner import run_recipe
+
+            recipe = _load_recipe(recipe_yaml_path)
+            db_path = _build_tob_temp_db(yes_tob_rows)
+            try:
+                frame = run_recipe(db_path, recipe)
+            finally:
+                try:
+                    os.unlink(db_path)
+                except OSError:
+                    logger.warning("l3-promote: temp DB cleanup failed path={}", db_path)
+
+            proposed_tokens: set[str] = set()
+            accepted_markets = set()
+            for market_id in sorted(
+                str(value) for value in frame["asset_id"].tolist() if value
+            ):
+                _actual_market_id, raw_yes, raw_no = _token_identity_parts(
+                    market_id,
+                    token_map.get(market_id, (None, None)),
+                )
+                yes_token = str(raw_yes).strip() if raw_yes is not None else ""
+                no_token = str(raw_no).strip() if raw_no is not None else ""
+                pair = {yes_token, no_token}
+                if (
+                    not yes_token
+                    or not no_token
+                    or yes_token != market_id
+                    or len(pair) != 2
+                    or bool(pair & proposed_tokens)
+                ):
+                    continue
+                proposed_tokens.update(pair)
+                accepted_markets.add(market_id)
+
+            mapping = _mapping_rows(accepted_markets, token_map)
+            desired = frozenset(proposed_tokens)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("l3-promote: selection failed type={}", type(exc).__name__)
+            return await finish(early(PromoteStatus.FAILED, "selection_failed"))
     if len(accepted_markets) != 5 or len(desired) != 10:
         return await finish(
             _PromoteTerminalDraft(

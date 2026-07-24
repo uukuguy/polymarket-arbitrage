@@ -105,13 +105,33 @@ def _make_runtime(settings: Any):
 
 
 class _RecordingEvidenceStore:
-    def __init__(self, *, succeeds: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        succeeds: bool = True,
+        mapping_lock: Any = None,
+        lock_error: BaseException | None = None,
+    ) -> None:
         self.succeeds = succeeds
+        self.mapping_lock = mapping_lock
+        self.lock_error = lock_error
         self.records: list[Any] = []
+        self.lock_reads: list[tuple[Any, datetime]] = []
 
     async def append_promote_run(self, record: Any) -> bool:
         self.records.append(record)
         return self.succeeds
+
+    async def fetch_active_soak_mapping_lock(
+        self,
+        *,
+        boot_id: Any,
+        observed_at: datetime,
+    ) -> Any:
+        self.lock_reads.append((boot_id, observed_at))
+        if self.lock_error is not None:
+            raise self.lock_error
+        return self.mapping_lock
 
 
 def _truthful_consumer(
@@ -127,6 +147,7 @@ def _truthful_consumer(
         "desired": set(initial_committed or ()),
         "committed": set(initial_committed or ()),
         "evidenced": set(),
+        "evidenced_at": {},
     }
     consumer = MagicMock()
 
@@ -149,7 +170,7 @@ def _truthful_consumer(
             desired=frozenset(state["desired"]),
             committed=frozenset(state["committed"]),
             evidenced=frozenset(state["evidenced"]),
-            evidenced_at={},
+            evidenced_at=state["evidenced_at"],
         )
 
     consumer._test_state = state
@@ -616,6 +637,121 @@ def test_fetch_market_token_map_queries_real_production_columns() -> None:
             "no_token_id": "no-a",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_soak_mapping_lock_keeps_bound_mapping_when_dynamic_top_five_changes() -> None:
+    from polyarb.observation import l3_promote
+    from polyarb.observation.l3_evidence import SoakMappingLock, stable_sha256
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    locked_tokens = {
+        token
+        for index in range(5)
+        for token in (f"yes_locked_{index}", f"no_locked_{index}")
+    }
+    locked_map = {
+        f"yes_locked_{index}": (
+            f"market-locked-{index}",
+            f"yes_locked_{index}",
+            f"no_locked_{index}",
+        )
+        for index in range(5)
+    }
+    locked_rows = l3_promote._mapping_rows(set(locked_map), locked_map)
+    mapping_hash = stable_sha256(list(locked_rows))
+    now = datetime.now(UTC)
+    store = _RecordingEvidenceStore(
+        mapping_lock=SoakMappingLock(
+            mapping_hash=mapping_hash,
+            t0=now - timedelta(minutes=1),
+            t24=now + timedelta(hours=24),
+        )
+    )
+    consumer = _truthful_consumer(initial_committed=locked_tokens)
+    consumer._test_state["evidenced"] = set(locked_tokens)
+    consumer._test_state["evidenced_at"] = {
+        token: now for token in locked_tokens
+    }
+    l3_promote._l3_active_set = set(locked_tokens)
+    l3_promote._last_known_market_token_map = locked_map
+    dynamic_tob, dynamic_mapping = _five_market_inputs("dynamic")
+
+    with patch.object(
+        l3_promote,
+        "create_client",
+        return_value=_make_supabase_client_mock(dynamic_tob, dynamic_mapping),
+    ):
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            run_seq=100,
+        )
+
+    assert (result.status.value, result.reason_code) == ("success", "ok")
+    assert result.desired == frozenset(locked_tokens)
+    assert result.committed == frozenset(locked_tokens)
+    assert result.evidenced == frozenset(locked_tokens)
+    assert store.records[0].mapping_hash == mapping_hash
+    assert store.records[0].selected_count == 5
+    assert store.lock_reads == [(runtime.snapshot().boot_id, store.lock_reads[0][1])]
+    consumer.add_subscriptions.assert_not_awaited()
+    consumer.remove_subscriptions.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["mismatch", "read_error"])
+async def test_soak_mapping_lock_failure_terminalizes_without_control_mutation(
+    failure: str,
+) -> None:
+    from polyarb.observation import l3_promote
+    from polyarb.observation.l3_evidence import SoakMappingLock
+    from polyarb.storage.l3_evidence_store import L3EvidenceReadError
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    tokens = {
+        token
+        for index in range(5)
+        for token in (f"yes_locked_{index}", f"no_locked_{index}")
+    }
+    consumer = _truthful_consumer(initial_committed=tokens)
+    now = datetime.now(UTC)
+    store = _RecordingEvidenceStore(
+        mapping_lock=SoakMappingLock(
+            mapping_hash="f" * 64,
+            t0=now - timedelta(minutes=1),
+            t24=now + timedelta(hours=24),
+        ),
+        lock_error=(
+            L3EvidenceReadError("redacted")
+            if failure == "read_error"
+            else None
+        ),
+    )
+
+    result = await l3_promote.promote_run(
+        settings=settings,
+        ws_consumer=consumer,
+        recipe_yaml_path=RECIPE_PATH,
+        evidence_store=store,
+        evidence_runtime=runtime,
+        run_seq=101,
+    )
+
+    assert result.status.value == "failed"
+    assert result.reason_code in {
+        "soak_mapping_lock_mismatch",
+        "soak_mapping_lock_read_failed",
+    }
+    assert len(store.records) == 1
+    consumer.set_l3_desired.assert_not_called()
+    consumer.add_subscriptions.assert_not_awaited()
+    consumer.remove_subscriptions.assert_not_awaited()
 
 
 # ────────────────────────────────────────────────────────────────────────
