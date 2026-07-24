@@ -1195,3 +1195,16 @@ transport activity and an orderbook resnapshot:
 - All three defects were discovered before manifest creation. Their production
   boots remain diagnostic-only; the immutable 24-hour clock starts only from a
   later boot that passes the two-promoter/12-sample readiness gate.
+- A view's grouping key is not automatically a freshness clock.
+  `l2_ohlc_1m.bucket_ts=date_trunc('minute', source.ts)` labels the bucket and
+  can be almost 60 seconds older than its latest member. Strict OHLC freshness
+  now reads the latest non-null base observation from `l2_top_of_book`; exact
+  interval coverage still reads the OHLC view. This separates “is the source
+  current?” from “did every required aggregate bucket exist?”
+- Startup absence is not writer failure. Promoter and sampler are sibling
+  tasks, so sampler seq 0 can run before the first ten-token desired mapping
+  exists. That precondition now skips the grid slot without evidence; after
+  desired reaches exactly ten, membership non-convergence remains a failed
+  sample and every collection/write exception remains a disallowed event.
+  Readiness plus a future exact-grid T0 prevents skipped startup slots from
+  weakening the soak.
