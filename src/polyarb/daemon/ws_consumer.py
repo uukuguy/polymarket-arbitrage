@@ -653,6 +653,11 @@ class WsConsumer:
         return self._last_event_at_s
 
     @property
+    def has_active_connection(self) -> bool:
+        """Return whether a successfully initialized socket is published."""
+        return self._current_ws is not None
+
+    @property
     def subscribed_assets(self) -> list[str]:
         # Defensive copy of the candidate ∪ L3 union — Plan 05 candidate refresh
         # MUST NOT mutate via this property (returns a fresh list each call).

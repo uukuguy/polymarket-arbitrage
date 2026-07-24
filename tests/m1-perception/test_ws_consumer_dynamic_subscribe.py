@@ -161,6 +161,19 @@ async def test_reconnect_commits_latest_desired_only_after_initial_subscribe() -
     assert consumer._current_ws is ws
 
 
+async def test_active_connection_truth_tracks_successful_initialize_and_release() -> None:
+    consumer = _make_consumer(initial_assets=["candidate"])
+    ws = _live_ws()
+
+    assert consumer.has_active_connection is False
+
+    await consumer._initialize_connection(ws)
+    assert consumer.has_active_connection is True
+
+    await consumer._release_connection(ws)
+    assert consumer.has_active_connection is False
+
+
 async def test_failed_reconnect_does_not_commit_desired() -> None:
     consumer = _make_consumer(initial_assets=["candidate"])
     consumer.set_l3_desired(["yes", "no"])

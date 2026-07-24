@@ -96,6 +96,7 @@ _last_mirrored_market_ids: frozenset[str] = frozenset()
 _POSTGREST_TIMEOUT_S: float = 5.0
 _MAX_TOKEN_MAP_CACHE = 1010  # 1000 fetched rows + exact current L3 identities
 _MIRROR_RECONCILE_BATCH_SIZE = 100
+_STARTUP_CONNECTION_POLL_S = 0.1
 
 
 def _utc_now() -> datetime:
@@ -1327,6 +1328,20 @@ async def run_periodic(
             evidence_runtime.snapshot().identity.code_version,
         )
     logger.info("l3-promote: run_periodic started interval_s={}", interval_s)
+    while (
+        not stop_event.is_set()
+        and not bool(getattr(ws_consumer, "has_active_connection", False))
+    ):
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=_STARTUP_CONNECTION_POLL_S,
+            )
+        except TimeoutError:
+            continue
+    if stop_event.is_set():
+        logger.info("l3-promote: stopped before initial websocket connection")
+        return
     while not stop_event.is_set():
         run_seq = evidence_runtime.next_run_seq()
         scheduled_at = boot_started_at + timedelta(seconds=run_seq * interval_s)

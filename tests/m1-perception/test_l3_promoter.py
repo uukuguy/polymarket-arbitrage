@@ -2360,6 +2360,77 @@ async def test_mutation_mode_requires_runtime_and_store_before_remote_effects() 
 
 
 @pytest.mark.asyncio
+async def test_run_periodic_waits_for_active_connection_before_run_zero() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    stop_event = asyncio.Event()
+    consumer = MagicMock()
+    consumer.has_active_connection = False
+    boot_started_at = runtime.snapshot().started_at
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_promote(**kwargs: Any) -> dict:
+        calls.append(kwargs)
+        stop_event.set()
+        return {"added": [], "removed": []}
+
+    with (
+        patch.object(l3_promote, "promote_run", side_effect=_fake_promote),
+        patch.object(l3_promote, "_utc_now", return_value=boot_started_at),
+    ):
+        task = asyncio.create_task(
+            l3_promote.run_periodic(
+                stop_event=stop_event,
+                settings=settings,
+                ws_consumer=consumer,
+                recipe_yaml_path=RECIPE_PATH,
+                evidence_store=store,
+                evidence_runtime=runtime,
+            )
+        )
+        await asyncio.sleep(0)
+        assert calls == []
+        consumer.has_active_connection = True
+        await asyncio.wait_for(task, timeout=0.2)
+
+    assert len(calls) == 1
+    assert calls[0]["run_seq"] == 0
+    assert calls[0]["scheduled_at"] == boot_started_at
+
+
+@pytest.mark.asyncio
+async def test_run_periodic_stop_while_waiting_for_connection_emits_no_run() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    stop_event = asyncio.Event()
+    consumer = MagicMock()
+    consumer.has_active_connection = False
+
+    with patch.object(l3_promote, "promote_run", new_callable=AsyncMock) as promote:
+        task = asyncio.create_task(
+            l3_promote.run_periodic(
+                stop_event=stop_event,
+                settings=settings,
+                ws_consumer=consumer,
+                recipe_yaml_path=RECIPE_PATH,
+                evidence_store=store,
+                evidence_runtime=runtime,
+            )
+        )
+        await asyncio.sleep(0)
+        stop_event.set()
+        await asyncio.wait_for(task, timeout=0.2)
+
+    promote.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_run_periodic_uses_boot_grid_and_contiguous_sequences_when_late() -> None:
     from polyarb.observation import l3_promote
 
