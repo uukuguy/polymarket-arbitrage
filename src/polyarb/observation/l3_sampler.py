@@ -379,7 +379,7 @@ async def run_sampler(
     runtime: Any,
     store: L3EvidenceStore,
 ) -> None:
-    """Sample on a boot grid while skipping every elapsed boundary."""
+    """Sample on a boot grid while skipping elapsed and pre-mapping boundaries."""
     interval_s = settings.l3_evidence_sample_interval_s
     if isinstance(interval_s, bool) or not isinstance(interval_s, (int, float)):
         raise TypeError("l3_evidence_sample_interval_s must be numeric")
@@ -406,6 +406,9 @@ async def run_sampler(
             boundary_index = sampled_boundary_index
             boundary = boot_started_at + boundary_index * interval
         if not boundary <= sampled_at < boundary + interval:
+            next_boundary_index = boundary_index + 1
+            continue
+        if len(runtime.snapshot().desired) != 10:
             next_boundary_index = boundary_index + 1
             continue
         sample_seq = boundary_index

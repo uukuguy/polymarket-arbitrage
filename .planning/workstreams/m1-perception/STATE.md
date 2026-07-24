@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 A4 permanently NOT-CLOSED; verified OHLC source-freshness repair awaiting exact-SHA deployment
-last_updated: "2026-07-24T11:35:55Z"
+stopped_at: Phase 05.4 Plan 05 A4 NOT-CLOSED and first repair boot rejected; verified sampler startup gate awaiting exact-SHA deployment
+last_updated: "2026-07-24T11:51:00Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -45,7 +45,12 @@ Plan: 5 of 5
   SHA equality. Readiness passed and A4 manifest `2d29a839…` has an immutable
   PASS T0 at `2026-07-24T11:21:46.353847Z`, but health seq 34 permanently
   invalidated that window; no later A4 checkpoint may run. Next is exact-SHA
-  deployment/readiness and an attempt-unique A5 manifest/T0.
+  deployment/readiness and an attempt-unique A5 manifest/T0. The first OHLC
+  repair deployment (`7c01461`, boot `ba6630c2…`) was also rejected before
+  readiness because sampler seq 0 raced ahead of the first promoter and emitted
+  `evidence_writer_failed`. A RED/GREEN startup gate now skips only slots before
+  desired membership reaches the exact ten-token input; all failures after that
+  point remain strict.
   The runtime separates desired,
   control-committed, and current-generation evidenced membership; depth refresh uses an
   all-token barrier; promoter outcomes are terminal, durable, and retry-safe; and

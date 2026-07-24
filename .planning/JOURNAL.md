@@ -4780,11 +4780,21 @@ and bind an attempt-unique A5 future-grid manifest/T0.
   Ruff, compile, M1 docs, planning, and authenticated deployed-image checks
   passed. A4 is permanently NOT-CLOSED; its immutable manifest and PASS T0
   remain diagnostic evidence, and no T+6 file exists.
+- [REJECTED BOOT] Workflow `30090267465` deployed exact OHLC repair SHA
+  `7c014613d9c27fe4b9eec2f672acde5e7046d24e`, but database boot
+  `ba6630c2-5ca9-49b2-a0c0-947bff9d1f03` emitted disallowed event seq 0
+  `evidence_writer_failed / sample_collection_failed` before its first
+  promoter had established desired membership. The boot is permanently
+  ineligible for readiness/A5.
+- [STARTUP REPAIR] A RED scheduler test reproduced the promoter/sampler sibling
+  race. Sampling now skips only boot-grid slots whose desired membership is not
+  exactly ten tokens. Once the input exists, all convergence, collection, and
+  write failures retain their strict evidence paths. Phase and full suites pass.
 - [BOUNDARY] No trading, H-009, retention cleanup, or production chaos action
   occurred.
 
 ### [NEXT — CURRENT]
 
-Commit and push the source-freshness repair, re-prove revision 007 and the
-credential boundary, deploy the exact new SHA, cross-check GitHub/Fly/DB
-identity, pass readiness, and start unique A5.
+Commit and push the verified sampler startup gate, re-prove revision 007 and
+the credential boundary, deploy the exact new SHA, cross-check GitHub/Fly/DB
+identity, pass readiness with zero disallowed events, and start unique A5.
