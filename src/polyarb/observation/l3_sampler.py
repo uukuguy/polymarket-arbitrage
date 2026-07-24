@@ -17,10 +17,14 @@ from polyarb.observation.l3_evidence import (
     stable_sha256,
 )
 from polyarb.storage.l3_evidence_store import (
+    L3EvidenceReadError,
     L3EvidenceStore,
     RuntimeEventIntegrityConflict,
     SamplingMarketState,
 )
+
+_AGGREGATE_READ_ATTEMPTS = 3
+_AGGREGATE_READ_TIMEOUT_S = 6.0
 
 
 def _utc_now() -> datetime:
@@ -257,10 +261,23 @@ async def collect_sample(
     runtime: Any,
     store: L3EvidenceStore,
 ) -> SampleBatch:
-    """Collect one immutable membership view and one aggregate DB observation."""
+    """Collect one immutable membership cut and one later aggregate DB read."""
     initial_status = runtime.snapshot()
     token_ids = sorted(initial_status.desired)
-    market_states = tuple(await store.fetch_sampling_market_state(token_ids))
+    for attempt in range(_AGGREGATE_READ_ATTEMPTS):
+        try:
+            market_states = tuple(
+                await asyncio.wait_for(
+                    store.fetch_sampling_market_state(token_ids),
+                    timeout=_AGGREGATE_READ_TIMEOUT_S,
+                )
+            )
+            break
+        except asyncio.CancelledError:
+            raise
+        except (L3EvidenceReadError, TimeoutError):
+            if attempt + 1 == _AGGREGATE_READ_ATTEMPTS:
+                raise
     runtime_status = runtime.snapshot()
     membership_fields = (
         "boot_id",
@@ -269,7 +286,6 @@ async def collect_sample(
         "desired",
         "committed",
         "evidenced",
-        "evidenced_at",
     )
     if any(
         getattr(initial_status, field) != getattr(runtime_status, field)
@@ -288,7 +304,7 @@ async def collect_sample(
             market,
             sampled_at=sampled_at,
             sample_seq=sample_seq,
-            runtime=runtime_status,
+            runtime=initial_status,
             book_fresh_ms=book_fresh_ms,
             ohlc_fresh_ms=ohlc_fresh_ms,
         )
@@ -308,7 +324,7 @@ async def collect_sample(
         scheduled_at=scheduled_at,
         sampled_at=sampled_at,
         sample_seq=sample_seq,
-        runtime=runtime_status,
+        runtime=initial_status,
         markets=markets,
         mapping_hash=mapping_hash,
         ws_consumer=ws_consumer,

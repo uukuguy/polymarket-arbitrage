@@ -28,7 +28,7 @@ from polyarb.observation.l3_soak_verdict import (
     VerdictStatus,
     build_soak_report,
 )
-from polyarb.storage.l3_evidence_store import SamplingMarketState
+from polyarb.storage.l3_evidence_store import L3EvidenceReadError, SamplingMarketState
 
 HASH = "a" * 64
 START = datetime(2026, 7, 23, 5, 0, tzinfo=UTC)
@@ -659,6 +659,101 @@ async def test_collect_sample_discards_slot_when_membership_changes_during_fetch
             runtime=runtime,
             store=SimpleNamespace(fetch_sampling_market_state=_fetch),
         )
+
+
+async def test_collect_sample_accepts_newer_evidence_times_in_same_generation():
+    pairs = _pairs()
+    runtime = _runtime()
+    _publish_current_membership(
+        runtime,
+        pairs,
+        generation=4,
+        evidenced_at=START - timedelta(seconds=20),
+    )
+
+    async def _fetch(_token_ids):
+        _publish_current_membership(
+            runtime,
+            pairs,
+            generation=4,
+            evidenced_at=START - timedelta(seconds=5),
+        )
+        return pairs
+
+    batch = await l3_sampler.collect_sample(
+        scheduled_at=START,
+        sample_seq=0,
+        settings=_settings(),
+        ws_consumer=_ConsumerWithoutMembershipReads(),
+        reconciliation_state=_reconciliation(),
+        runtime=runtime,
+        store=SimpleNamespace(fetch_sampling_market_state=_fetch),
+    )
+
+    assert batch.health.status is HealthStatus.PASS
+    assert all(row.status is HealthStatus.PASS for row in batch.markets)
+
+
+async def test_collect_sample_retries_transient_aggregate_read_within_slot():
+    pairs = _pairs()
+    runtime = _runtime()
+    _publish_current_membership(runtime, pairs)
+    store = SimpleNamespace(
+        fetch_sampling_market_state=AsyncMock(
+            side_effect=[
+                L3EvidenceReadError("transient"),
+                TimeoutError,
+                pairs,
+            ]
+        )
+    )
+
+    batch = await l3_sampler.collect_sample(
+        scheduled_at=START,
+        sample_seq=0,
+        settings=_settings(),
+        ws_consumer=_ConsumerWithoutMembershipReads(),
+        reconciliation_state=_reconciliation(),
+        runtime=runtime,
+        store=store,
+    )
+
+    assert store.fetch_sampling_market_state.await_count == 3
+    assert batch.health.status is HealthStatus.PASS
+
+
+async def test_collect_sample_bounds_hung_aggregate_read_then_retries(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pairs = _pairs()
+    runtime = _runtime()
+    _publish_current_membership(runtime, pairs)
+    never_returns = asyncio.Event()
+    attempts = 0
+
+    async def _fetch(_token_ids):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            await never_returns.wait()
+        return pairs
+
+    monkeypatch.setattr(l3_sampler, "_AGGREGATE_READ_TIMEOUT_S", 0.01)
+    batch = await asyncio.wait_for(
+        l3_sampler.collect_sample(
+            scheduled_at=START,
+            sample_seq=0,
+            settings=_settings(),
+            ws_consumer=_ConsumerWithoutMembershipReads(),
+            reconciliation_state=_reconciliation(),
+            runtime=runtime,
+            store=SimpleNamespace(fetch_sampling_market_state=_fetch),
+        ),
+        timeout=0.2,
+    )
+
+    assert attempts == 2
+    assert batch.health.status is HealthStatus.PASS
 
 
 async def test_writer_gap_and_restart_keep_sequences_and_boot_ids_queryable(
