@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 A5 T0 PASS; early audit then immutable T+6 not-before
-last_updated: "2026-07-24T12:44:30Z"
+stopped_at: Phase 05.4 Plan 05 A5 T0 and T0+546s early audit PASS; immutable T+6 not-before
+last_updated: "2026-07-24T12:54:00Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -56,7 +56,11 @@ Plan: 5 of 5
   source freshness age 64.165 seconds, and zero disallowed events. A5 manifest
   `95814bf1…` is bound exactly once; T0 `2026-07-24T12:43:29.274117Z` and
   report `adbbbc4f…` passed. T+6 is not available before
-  `2026-07-24T18:43:29.274117Z`.
+  `2026-07-24T18:43:29.274117Z`. The T0+546-second early audit stayed 19/19
+  health and 95/95 market pass with maximum gap 31.405 seconds, maximum
+  book/OHLC-source ages 70.783/61.664 seconds, zero minute-truncated OHLC
+  timestamps, and zero disallowed events. T+6 preflight refused and created no
+  artifact.
   The runtime separates desired,
   control-committed, and current-generation evidenced membership; depth refresh uses an
   all-token barrier; promoter outcomes are terminal, durable, and retry-safe; and

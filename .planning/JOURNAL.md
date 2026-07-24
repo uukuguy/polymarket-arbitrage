@@ -4799,11 +4799,15 @@ and bind an attempt-unique A5 future-grid manifest/T0.
   O_EXCL on the future boot grid and bound exactly once before T0. Exact seq 31
   passed with 0.599559-second lag; canonical T0 report `adbbbc4f…`, raw digest
   `29289377…`, and soak hash `f97197e7…` are PASS.
+- [EARLY AUDIT] At T0+546 seconds, A5 remained exact-identity and fully green:
+  health seq 31–49 were 19/19 pass, 95/95 market rows passed, maximum gap
+  31.405 seconds, maximum book/OHLC source ages 70.783/61.664 seconds, no
+  minute-truncated OHLC timestamps, and zero disallowed events. T+6 preflight
+  refused before its bound and created no file.
 - [BOUNDARY] No trading, H-009, retention cleanup, or production chaos action
   occurred.
 
 ### [NEXT — CURRENT]
 
-After at least five minutes from A5 T0, run an early read-only continuity and
-OHLC-source-freshness audit. If it passes, retain A5 and run T+6 exactly once
-at or after `2026-07-24T18:43:29.274117Z`.
+Run A5 T+6 exactly once at or after `2026-07-24T18:43:29.274117Z`; do not
+create the file early or reuse any rejected attempt.
