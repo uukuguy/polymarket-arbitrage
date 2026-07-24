@@ -1,6 +1,6 @@
 # 当前项目状态
 
-> 唯一当前状态入口。最后核验：2026-07-24（Phase 05.4 Plan 05 A5 永久 NOT-CLOSED，修复 heartbeat 后重启 A6）。
+> 唯一当前状态入口。最后核验：2026-07-24（Phase 05.4 Plan 05 新候选已通过本地资格门，待 exact-SHA 部署/readiness/A6）。
 > `JOURNAL.md` 是追加式历史；其中旧 `[NEXT]` 均不代表当前任务。
 
 稳定的使用流程、健康语义和命令安全分级见
@@ -14,9 +14,9 @@
 `9f2c935…` / release 66 / boot `be240060…`，GitHub、Fly、DB 身份一致。旧 release-37
 窗口和 A1–A5 均为 diagnostic/rejected evidence，不能升级为 PASS。A5 的不可变
 manifest/T0 虽通过，但随后三个样本只取得 7/2/7 个 current-generation evidenced
-token，因此永久 NOT-CLOSED，四个后续 checkpoint 已取消且文件不存在。根因是客户端
-只发 WebSocket protocol Ping，未按 CLOB 合同每 10 秒发送文本 `PING`。现在先修复、
-部署新 exact SHA、重做 readiness，再绑定唯一 A6。机会 feed 生产最近仍为 HTTP
+token，因此永久 NOT-CLOSED，四个后续 checkpoint 已取消且文件不存在。文本 `PING`
+修复部署后又暴露 promoter/WS sibling-task 启动竞态，release 68 同样永久拒绝。两项
+修复现在均已通过本地资格门；下一步部署一个新 exact SHA、重做 readiness，再绑定唯一 A6。机会 feed 生产最近仍为 HTTP
 503。因此**市场感知平台尚未完成严格 24 小时 soak，也不是完整 production-qualified；
 整套系统还不是可以投入真实资金运行的套利产品**。
 
@@ -26,7 +26,7 @@ token，因此永久 NOT-CLOSED，四个后续 checkpoint 已取消且文件不�
 |---|---|---|
 | 主分支 `main` | M2 Phase 2–9 已集成并部署 | 当前交付主线 |
 | M1 L1 Fly 服务 | 39 天 stale 根因已修复；snapshot 恢复到分钟级，Supabase pass | 可作为 M2 机会发现输入 |
-| M1 L2/L3 Fly 服务 | release 66/A5 已因 7/2/7 membership evidence 永久 NOT-CLOSED；文本 heartbeat 根因已定位 | 修复并 exact-SHA 重部署后才能从 A6 重新开始 24h soak |
+| M1 L2/L3 Fly 服务 | release 66/A5 与 release 68 启动竞态 boot 均永久拒绝；heartbeat + startup gate 新候选已通过本地资格门 | exact-SHA 重部署并通过 readiness 后才能从 A6 重新开始 24h soak |
 | M2 paper execution/accounting | Phase 2–8、H-001～H-006 已通过本地质量门 | 可用于本地模拟、账本和恢复测试 |
 | M2 真实组合套利 | 本地已实现 known-universe quote complete-run collector/scanner；最近生产请求 HTTP 503 | 生产当前有条件/未 ready；H-009 仍 pending，需单独授权部署/调度和时间戳化只读容量观察 |
 | M3 | 未开始 | 不可用 |
@@ -103,13 +103,14 @@ A5 manifest
 `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-MANIFEST-20260724T124329Z.json`
 及 T0 保留为 rejected diagnostic evidence；T6/T12/T18/T24 均已取消且不存在。
 
-文本 heartbeat 修复已随 exact SHA `9ce640e…` 部署为 release 68，但新 boot
+文本 heartbeat 修复已随 exact SHA `9ce640e…` 部署为 release 68，但该 boot
 `e542fd4c…` 在 readiness 前永久失败：promoter run 0 比 WS generation 1 早约 1 秒
-启动，写入 `failed/generation_changed`，随后样本为 10/0/0。现在 TDD 一个仅作用于
-boot 首次 promoter transaction 的 active-connection gate；运行期 generation change
-仍严格失败。修复后重新 exact-SHA 部署、核对新 Fly/DB boot/readiness，再创建唯一
-A6 future-grid manifest/T0。不执行 retention cleanup、production chaos、H-009 或
-真实交易。
+启动，写入 `failed/generation_changed`，随后样本为 10/0/0。仅作用于 boot 首次
+promoter transaction 的 active-connection gate 已在 `a9301f4` TDD 完成；运行期
+generation change 仍严格失败，focused 91/91、全量 pytest、lint/compile、镜像、docs
+与 planning 门均通过。现在 push/deploy 一个 exact clean SHA、核对新 Fly/DB
+boot/readiness，再创建唯一 A6 future-grid manifest/T0。不执行 retention cleanup、
+production chaos、H-009 或真实交易。
 
 ```bash
 /gsd-resume-work --ws m1-perception

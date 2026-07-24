@@ -4932,3 +4932,33 @@ GitHub/Fly/DB identities remain exact; otherwise preserve NOT-CLOSED.
 TDD the promoter first-run active-connection gate, deploy a new exact SHA,
 prove new Fly/DB boot readiness, then bind a unique A6 future-grid manifest/T0.
 Never create A5 later checkpoints or reuse release-68 boot.
+
+## SESSION 94 — 2026-07-24 (startup gate qualified for exact deployment)
+
+- [RED] Added two scheduler tests proving promoter run 0 must not execute before
+  an active WebSocket and stop-while-waiting must emit no terminal attempt.
+  Added a real-consumer lifecycle test proving the active connection truth
+  surface was absent before implementation.
+- [GREEN] Executable candidate `a9301f4` adds the read-only
+  `WsConsumer.has_active_connection` property and a one-time cancellable
+  startup gate in `run_periodic`. Run 0 retains its boot-grid `scheduled_at`;
+  later generation changes retain strict failure semantics.
+- [GATES] Promoter/dynamic-membership/heartbeat suites passed 91/91; full pytest
+  reached 100% with the existing one xfail/one skip. Changed-file Ruff,
+  compileall, docs contract, planning-status, and diff checks passed.
+- [IMAGE] The first exact-digest image check failed closed because Docker was
+  not authenticated to the private Fly registry. After `flyctl auth docker`,
+  the same digest passed required `python`; `kill/which/curl` were present and
+  documented optional `pkill/ps/dig/ping` remained absent.
+- [LEARNING] Added the startup-ordering FAQ and thread rule: sibling task
+  creation is not an ordering guarantee; wait on published chain truth rather
+  than sleeping or reinterpreting a terminal failure.
+- [BOUNDARY] Release 68 remains permanently rejected. No A5 checkpoint,
+  production deployment, retention cleanup, chaos, H-009, or trading action
+  occurred during candidate qualification.
+
+### [NEXT — CURRENT]
+
+Push one clean exact SHA, deploy it through `make deploy-l2-prod`, cross-check
+GitHub/Fly/DB identities and the new boot, then require two successful promoter
+rows plus at least 12 passing health samples before binding unique A6.

@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 A5 permanently NOT-CLOSED; application-heartbeat repair before unique A6
-last_updated: "2026-07-24T15:00:00Z"
+stopped_at: Phase 05.4 Plan 05 startup-gate candidate qualified; exact deploy/readiness before unique A6
+last_updated: "2026-07-24T15:39:00Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -49,7 +49,10 @@ Plan: 5 of 5
   release 68/boot `e542fd4c…`, but that boot is permanently rejected: promoter
   run 0 began before WS generation 1 initialized and persisted
   `failed/generation_changed`, followed by 10/0/0 samples. A one-time promoter
-  startup-connection gate must be repaired and redeployed before A6.
+  startup-connection gate is now TDD-complete at executable commit `a9301f4`;
+  focused 91/91 and full pytest, changed-file Ruff, compile, authenticated
+  image, docs, planning, and diff gates passed. It must now be pushed and
+  deployed at one exact clean SHA before a new boot/readiness and A6.
 
 - **Active workstream:** `m1-perception`
 
@@ -192,9 +195,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- TDD the one-time promoter startup-connection gate without changing runtime
-  generation-failure semantics; deploy a new exact SHA and establish an
-  eligible boot/readiness/A6 manifest/T0.
+- Push and deploy the qualified heartbeat plus one-time promoter
+  startup-connection gate at one exact clean SHA; establish an eligible
+  boot/readiness/A6 manifest/T0 without changing runtime generation-failure
+  semantics.
 - At/after each A6 manifest-computed boundary, retain exactly one cumulative
   T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A5 reports.
 - After T+24 PASS, run `make l3-soak-verify` to re-query all raw rows and verify
@@ -225,10 +229,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 ## Session Continuity
 
 - **Last session:** 2026-07-24 21:38 (Asia/Shanghai)
-- **Stopped at:** release 68/boot `e542fd4c…` permanently rejected before
-  readiness due promoter run-0/WS-initialization race.
-- **Proceeding to:** TDD the first-run connection gate, deploy a new exact SHA,
-  prove new Fly/DB boot readiness, and bind a unique A6 manifest/T0.
+- **Stopped at:** executable startup-gate candidate `a9301f4` fully qualified;
+  release 68/boot `e542fd4c…` remains permanently rejected.
+- **Proceeding to:** push/deploy one exact clean SHA, prove the new Fly/DB boot
+  readiness, and bind a unique A6 manifest/T0.
 - **Resume files:** `05.4-05-PLAN.md`,
   `05.4-SOAK-MANIFEST-20260724T124329Z.json`, and `05.4-SOAK-LOG.md`.
 
