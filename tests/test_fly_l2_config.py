@@ -140,6 +140,16 @@ def test_deploy_l2_workflow_binds_release_id_to_dispatched_sha() -> None:
     assert '--env POLYARB_RELEASE_ID="${GITHUB_SHA}"' in text
 
 
+def test_deploy_l2_workflow_redeploys_the_built_image_by_external_digest() -> None:
+    text = DEPLOY_L2_YML.read_text()
+
+    assert "flyctl image show" in text
+    assert "PINNED_IMAGE_REF" in text
+    assert '@sha256:' in text
+    assert '--image "${PINNED_IMAGE_REF}"' in text
+    assert '--env POLYARB_IMAGE_REF="${PINNED_IMAGE_REF}"' in text
+
+
 def test_deploy_l2_push_event_cannot_execute_deploy_job() -> None:
     text = DEPLOY_L2_YML.read_text()
 

@@ -48,6 +48,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      APP: polyarb-l2
     permissions:
       contents: read
     steps:
@@ -57,9 +59,34 @@ jobs:
         run: flyctl deploy --config fly-l2.toml --remote-only --wait-timeout 600 --env POLYARB_RELEASE_ID="${GITHUB_SHA}"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - name: Smoke test /healthz
+      - name: Resolve immutable deployed image
         env:
-          APP: polyarb-l2
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          image_json="$(flyctl image show -a "${APP}" --json)"
+          pinned_image_ref="$(
+            jq -er '
+              .[0]
+              | select(.Digest | startswith("sha256:"))
+              | "\(.Registry)/\(.Repository)@\(.Digest)"
+            ' <<<"${image_json}"
+          )"
+          case "${pinned_image_ref}" in
+            *@sha256:*) ;;
+            *) echo "Fly did not return a digest-pinned image" >&2; exit 1 ;;
+          esac
+          echo "PINNED_IMAGE_REF=${pinned_image_ref}" >> "${GITHUB_ENV}"
+      - name: Pin L2 boot identity to immutable image
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl deploy \
+            --config fly-l2.toml \
+            --image "${PINNED_IMAGE_REF}" \
+            --wait-timeout 600 \
+            --env POLYARB_RELEASE_ID="${GITHUB_SHA}" \
+            --env POLYARB_IMAGE_REF="${PINNED_IMAGE_REF}"
+      - name: Smoke test /healthz
         run: |
           for i in $(seq 1 10); do
             if curl -fsS "https://${APP}.fly.dev/healthz" >/dev/null; then

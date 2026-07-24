@@ -116,7 +116,10 @@ def _build_l3_evidence_dependencies(
     identity = RuntimeIdentity(
         machine_id=os.environ.get("FLY_MACHINE_ID", "local"),
         machine_version=os.environ.get("FLY_MACHINE_VERSION", "local"),
-        image_ref=os.environ.get("FLY_IMAGE_REF", "local"),
+        image_ref=os.environ.get(
+            "POLYARB_IMAGE_REF",
+            os.environ.get("FLY_IMAGE_REF", "local"),
+        ),
         release_id=settings.release_id,
         code_version=polyarb.__version__,
         recipe_sha256=acceptance.recipe_sha256,

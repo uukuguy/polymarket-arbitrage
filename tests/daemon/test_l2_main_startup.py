@@ -109,6 +109,26 @@ def test_l3_dependency_builder_uses_only_dedicated_runtime_dsn(monkeypatch):
     )
 
 
+def test_l3_boot_prefers_explicit_digest_pinned_image_identity(monkeypatch):
+    from polyarb.daemon import l2_main
+
+    settings = _make_fake_settings()
+    settings.l2_runtime_db_dsn.get_secret_value = MagicMock(return_value="runtime-dsn")
+    monkeypatch.setenv("FLY_IMAGE_REF", "registry.fly.io/polyarb-l2:deployment-tag")
+    monkeypatch.setenv(
+        "POLYARB_IMAGE_REF",
+        "registry.fly.io/polyarb-l2@sha256:" + "a" * 64,
+    )
+
+    dependencies = l2_main._build_l3_evidence_dependencies(
+        settings=settings,
+        recipe_yaml_path=l2_main._L3_RECIPE_PATH,
+    )
+
+    assert dependencies.identity.image_ref.endswith("@sha256:" + "a" * 64)
+    assert dependencies.boot.image_ref == dependencies.identity.image_ref
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", [False, RuntimeError("role rejected")])
 async def test_boot_append_failure_marks_runtime_failed_without_raising(outcome):
