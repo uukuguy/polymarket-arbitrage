@@ -134,6 +134,12 @@ def test_deploy_l2_workflow_keeps_manual_dispatch_and_secret_boundary() -> None:
     assert "FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}" in text
 
 
+def test_deploy_l2_workflow_binds_release_id_to_dispatched_sha() -> None:
+    text = DEPLOY_L2_YML.read_text()
+
+    assert '--env POLYARB_RELEASE_ID="${GITHUB_SHA}"' in text
+
+
 def test_deploy_l2_push_event_cannot_execute_deploy_job() -> None:
     text = DEPLOY_L2_YML.read_text()
 

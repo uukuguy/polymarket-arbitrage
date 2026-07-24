@@ -431,7 +431,7 @@ def _build_l2_health_checks(
     # ── Check 3: event-bus chain truth (Phase 05.1) ────────────────────────
     dsn_value = ""
     try:
-        dsn_value = settings.supabase_db_dsn.get_secret_value()
+        dsn_value = settings.l2_runtime_db_dsn.get_secret_value()
     except AttributeError:
         pass
     state_configured = event_listener is not None and bool(dsn_value)
@@ -439,7 +439,7 @@ def _build_l2_health_checks(
     if not state_configured:
         connection_value = "not_configured"
         connection_status = "warn"
-        connection_output = "supabase_db_dsn or event runtime state is missing"
+        connection_output = "runtime database credential or event runtime state is missing"
     else:
         connection_value = "listening" if is_connected else "reconnecting"
         connection_status = "pass" if is_connected else "warn"

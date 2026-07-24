@@ -11,7 +11,8 @@ def _settings(*, dsn: str = "postgresql://user:secret@db.example/prod"):
     from polyarb.config import Settings
 
     return Settings(
-        supabase_db_dsn=SecretStr(dsn),
+        supabase_db_dsn=SecretStr(""),
+        l2_runtime_db_dsn=SecretStr(dsn),
         event_reconcile_poll_seconds=60,
         event_reconcile_stale_seconds=180,
     )
@@ -52,6 +53,7 @@ def test_connected_caught_up_chain_exposes_live_facts() -> None:
     checks, _overall = _checks(_live_state())
 
     assert checks["event_bus:connection_state"][0]["status"] == "pass"
+    assert checks["event_bus:connection_state"][0]["observedValue"] == "listening"
     assert checks["event_bus:last_notification_age_seconds"][0]["status"] == "pass"
     assert checks["event_bus:last_reconciliation_age_seconds"][0]["status"] == "pass"
     assert checks["event_bus:cursor_lag"][0]["status"] == "pass"
@@ -105,3 +107,27 @@ def test_disconnected_and_missing_dsn_are_explicit_without_secret_leak() -> None
     body = json.dumps(checks)
     assert "postgresql://" not in body
     assert "secret" not in body
+
+
+def test_owner_migration_dsn_does_not_configure_runtime_listener() -> None:
+    from polyarb.config import Settings
+    from polyarb.http.l2_health import _build_l2_health_checks
+
+    settings = Settings(
+        supabase_db_dsn=SecretStr("postgresql://owner:secret@db.example/prod"),
+        l2_runtime_db_dsn=SecretStr(""),
+    )
+    store = MagicMock()
+    store.get_l2_tob_last_mirror_at_s.return_value = None
+
+    checks, _overall = _build_l2_health_checks(
+        store,
+        settings,
+        ws_consumer=None,
+        event_listener=_live_state(),
+        now_s=1_000.0,
+    )
+
+    connection = checks["event_bus:connection_state"][0]
+    assert connection["status"] == "warn"
+    assert connection["observedValue"] == "not_configured"
