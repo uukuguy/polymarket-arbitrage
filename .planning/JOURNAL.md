@@ -4546,3 +4546,29 @@ authorization gates before any fresh manifest/T0.
 Review `05.4-05-PLAN.md` and stop at its exact approval gates. Plan 04 local
 PASS does not authorize production migration, runtime/retention credentials,
 secrets, manual deploy, restart, manifest/T0, or T+6/T+12/T+18/T+24 actions.
+
+## SESSION 84 — 2026-07-24 (Phase 05.4 Plan 05 context restored)
+
+- [RESUMED] Restored `m1-perception` from the structured handoff, STATE,
+  CURRENT, ROADMAP, Plan 04 SUMMARY, Plan 05, the approved evidence design, and
+  the chain-truth/cadence thread sections. The one-shot `HANDOFF.json` was
+  consumed; the phase checkpoint remains as durable historical context.
+- [STATUS] Phase 05.4 is 4/5 plans complete; Plan 05 has nine untouched tasks
+  and resumes at Task 1. `make planning-status` reports no drift, `.githooks`
+  is active, and there are no pending todos.
+- [CONSTRAINTS ACKNOWLEDGED] Migration, runtime credential, retention
+  credential, and deployment require four distinct exact approvals. Release 37
+  and both earlier windows remain diagnostic-only. Six-hour review checkpoints
+  summarize the continuous ledger and cannot substitute for it.
+- [BOUNDARY] Resume performed no production migration, credential/secret
+  change, deploy, restart, manifest bind, retention cleanup, soak, trade,
+  H-009 action, external submission, or push.
+
+### [NEXT — CURRENT]
+
+```bash
+/gsd-execute-phase 05.4 --ws m1-perception
+```
+
+Execute only Plan 05 Task 1's local release-candidate gate and soak-log
+scaffolding, then stop for the exact production-migration approval.
