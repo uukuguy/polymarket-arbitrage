@@ -680,15 +680,44 @@ async def test_collect_sample_captures_actual_time_after_aggregate_fetch(
     assert all(row.sampled_at == batch.health.sampled_at for row in batch.markets)
 
 
-async def test_collect_sample_discards_slot_when_membership_changes_during_fetch():
+async def test_collect_sample_retries_cut_when_membership_changes_during_fetch():
+    pairs = _pairs()
+    runtime = _runtime()
+    _publish_current_membership(runtime, pairs, generation=4)
+    attempts = 0
+
+    async def _fetch(_token_ids):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            _publish_current_membership(runtime, pairs, generation=5)
+        return pairs
+
+    batch = await l3_sampler.collect_sample(
+        scheduled_at=START,
+        sample_seq=0,
+        settings=_settings(),
+        ws_consumer=_ConsumerWithoutMembershipReads(),
+        reconciliation_state=_reconciliation(),
+        runtime=runtime,
+        store=SimpleNamespace(fetch_sampling_market_state=_fetch),
+    )
+
+    assert attempts == 2
+    assert batch.health.ws_generation == 5
+    assert batch.health.status is HealthStatus.PASS
+
+
+async def test_collect_sample_discards_slot_when_every_cut_changes_membership():
     pairs = _pairs()
     runtime = _runtime()
     _publish_current_membership(runtime, pairs, generation=4)
 
     async def _fetch(_token_ids):
+        current = runtime.snapshot()
         runtime.update_membership(
             WsMembershipSnapshot(
-                generation=5,
+                generation=current.ws_generation + 1,
                 desired=_tokens(pairs),
                 committed=_tokens(pairs),
             )

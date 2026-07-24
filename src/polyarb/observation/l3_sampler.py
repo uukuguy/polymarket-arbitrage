@@ -262,23 +262,6 @@ async def collect_sample(
     store: L3EvidenceStore,
 ) -> SampleBatch:
     """Collect one immutable membership cut and one later aggregate DB read."""
-    initial_status = runtime.snapshot()
-    token_ids = sorted(initial_status.desired)
-    for attempt in range(_AGGREGATE_READ_ATTEMPTS):
-        try:
-            market_states = tuple(
-                await asyncio.wait_for(
-                    store.fetch_sampling_market_state(token_ids),
-                    timeout=_AGGREGATE_READ_TIMEOUT_S,
-                )
-            )
-            break
-        except asyncio.CancelledError:
-            raise
-        except (L3EvidenceReadError, TimeoutError):
-            if attempt + 1 == _AGGREGATE_READ_ATTEMPTS:
-                raise
-    runtime_status = runtime.snapshot()
     membership_fields = (
         "boot_id",
         "acceptance_config_hash",
@@ -287,11 +270,31 @@ async def collect_sample(
         "committed",
         "evidenced",
     )
-    if any(
-        getattr(initial_status, field) != getattr(runtime_status, field)
-        for field in membership_fields
-    ):
-        raise ValueError("membership changed during aggregate fetch")
+    for attempt in range(_AGGREGATE_READ_ATTEMPTS):
+        initial_status = runtime.snapshot()
+        token_ids = sorted(initial_status.desired)
+        try:
+            market_states = tuple(
+                await asyncio.wait_for(
+                    store.fetch_sampling_market_state(token_ids),
+                    timeout=_AGGREGATE_READ_TIMEOUT_S,
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except (L3EvidenceReadError, TimeoutError):
+            if attempt + 1 == _AGGREGATE_READ_ATTEMPTS:
+                raise
+            continue
+        runtime_status = runtime.snapshot()
+        if any(
+            getattr(initial_status, field) != getattr(runtime_status, field)
+            for field in membership_fields
+        ):
+            if attempt + 1 == _AGGREGATE_READ_ATTEMPTS:
+                raise ValueError("membership changed during aggregate fetch")
+            continue
+        break
     sampled_at = _utc_now()
     interval_s = settings.l3_evidence_sample_interval_s
     if not scheduled_at <= sampled_at < scheduled_at + timedelta(seconds=interval_s):
