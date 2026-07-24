@@ -268,11 +268,17 @@ interval/report hashes.
 The health sample whose `scheduled_at` is exactly manifest T0 must be complete
 and passing. `scheduled_at` is the exact `boot.started_at+n*30s` grid slot;
 `sampled_at` is captured after the aggregate fetch, must fall inside that slot,
-and supplies actual gap/freshness and schedule-lag evidence. If the scheduled-T0
-sample is absent or fails, that manifest/binding/report set is permanently
-NOT-CLOSED and never mutated, rebound, or reused; a retry selects a later future
-T0 and creates a new unique manifest. Verdict construction is explicitly
-`build_soak_report(evidence, manifest, start, end, require_24h)`.
+and supplies actual gap/freshness and schedule-lag evidence. The exact 30-second
+T0 report requires the SQL coverage result to enumerate the same ten book and
+five Yes-OHLC identities, records and hash-binds their counts, and uses the
+sample's non-null source timestamps plus strict ages as its source-coverage
+gate; it does not require every source to emit a new raw row during those first
+30 seconds. Every longer cumulative checkpoint and the final 24-hour verdict
+still require positive exact-window raw coverage for all identities. If the
+scheduled-T0 sample is absent or fails, that manifest/binding/report set is
+permanently NOT-CLOSED and never mutated, rebound, or reused; a retry selects a
+later future T0 and creates a new unique manifest. Verdict construction is
+explicitly `build_soak_report(evidence, manifest, start, end, require_24h)`.
 
 The four required status/checkpoint/verify/retention-check targets remain
 database-read-only. Two separately named mutation surfaces are explicit:

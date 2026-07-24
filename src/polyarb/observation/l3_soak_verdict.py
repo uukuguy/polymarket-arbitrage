@@ -1328,16 +1328,28 @@ def build_soak_report(
         token for _, yes_token, no_token in pairs_for_coverage for token in (yes_token, no_token)
     }
     expected_yes_tokens = {yes_token for _, yes_token, _ in pairs_for_coverage}
+    is_t0_sample_probe = (
+        not require_24h
+        and start == manifest.t0
+        and end
+        == manifest.t0 + timedelta(seconds=config.sample_interval_s)
+    )
     if (
         set(evidence.book_coverage_counts) != expected_book_tokens
         or len(expected_book_tokens) != config.expected_token_count
-        or any(count <= 0 for count in evidence.book_coverage_counts.values())
+        or (
+            not is_t0_sample_probe
+            and any(count <= 0 for count in evidence.book_coverage_counts.values())
+        )
     ):
         _add(reasons, "book_coverage", "exact-window book coverage requires all 10 tokens")
     if (
         set(evidence.yes_ohlc_coverage_counts) != expected_yes_tokens
         or len(expected_yes_tokens) != config.expected_market_count
-        or any(count <= 0 for count in evidence.yes_ohlc_coverage_counts.values())
+        or (
+            not is_t0_sample_probe
+            and any(count <= 0 for count in evidence.yes_ohlc_coverage_counts.values())
+        )
     ):
         _add(reasons, "ohlc_coverage", "exact-window OHLC coverage requires all 5 Yes tokens")
 

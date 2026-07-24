@@ -319,6 +319,51 @@ def test_real_t0_sample_interval_artifact_passes(manifest: SoakManifest) -> None
     assert report.status is VerdictStatus.PASS
 
 
+def test_t0_sample_gate_does_not_require_new_raw_source_rows(
+    manifest: SoakManifest,
+) -> None:
+    window = _t0_window()
+    report = build_soak_report(
+        replace(
+            window,
+            book_coverage_counts={
+                token: 0
+                for index in range(5)
+                for token in (f"yes-{index}", f"no-{index}")
+            },
+            yes_ohlc_coverage_counts={f"yes-{index}": 0 for index in range(5)},
+        ),
+        manifest,
+        T0,
+        T0 + timedelta(seconds=30),
+        False,
+    )
+
+    assert report.status is VerdictStatus.PASS
+    assert report.reasons == ()
+    assert set(report.book_coverage_counts.values()) == {0}
+    assert set(report.yes_ohlc_coverage_counts.values()) == {0}
+
+
+def test_t0_sample_gate_still_requires_exact_coverage_identity_sets(
+    manifest: SoakManifest,
+) -> None:
+    window = _t0_window()
+    report = build_soak_report(
+        replace(
+            window,
+            book_coverage_counts={"yes-0": 0},
+            yes_ohlc_coverage_counts={"yes-0": 0},
+        ),
+        manifest,
+        T0,
+        T0 + timedelta(seconds=30),
+        False,
+    )
+
+    assert {"book_coverage", "ohlc_coverage"} <= _codes(report)
+
+
 def test_health_schedule_must_remain_on_exact_boot_grid(
     golden: EvidenceWindow, manifest: SoakManifest
 ) -> None:
