@@ -134,7 +134,9 @@ def test_chaos_image_check_accepts_current_and_legacy_fly_status_shapes() -> Non
     recipe = _make_recipe("chaos-l2-fly-image-check")
 
     assert ".Machines[0].image_ref" in recipe
+    assert ".Machines[0].config.image" in recipe
     assert ".ImageRef" in recipe
+    assert "$$ref.Digest // $$ref.digest" in recipe
     assert "docker run --rm --entrypoint /bin/sh" in recipe
 
 

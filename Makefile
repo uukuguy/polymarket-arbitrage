@@ -890,7 +890,7 @@ chaos-l2-fly-image-check:
 		echo "Install docker desktop or run from a host with the daemon."; \
 		exit 2; \
 	fi
-	@IMAGE=$$(FLY_API_TOKEN= flyctl status -a polyarb-l2 --json 2>/dev/null | jq -r '(.ImageRef // .Machines[0].image_ref) as $$ref | (($$ref.Registry // $$ref.registry) + "/" + ($$ref.Repository // $$ref.repository) + ":" + ($$ref.Tag // $$ref.tag))' 2>/dev/null); \
+	@IMAGE=$$(FLY_API_TOKEN= flyctl status -a polyarb-l2 --json 2>/dev/null | jq -r '(.Machines[0].config.image // empty) as $$configured | if $$configured != "" then $$configured else (.ImageRef // .Machines[0].image_ref) as $$ref | (($$ref.Registry // $$ref.registry) + "/" + ($$ref.Repository // $$ref.repository) + (if ($$ref.Digest // $$ref.digest // "") != "" then "@" + ($$ref.Digest // $$ref.digest) else ":" + ($$ref.Tag // $$ref.tag) end)) end' 2>/dev/null); \
 	if [ -z "$$IMAGE" ] || [ "$$IMAGE" = "null/:null" ] || [ "$$IMAGE" = "/:" ]; then \
 		echo "ERROR: cannot resolve current polyarb-l2 image (flyctl auth?)"; exit 1; \
 	fi; \
