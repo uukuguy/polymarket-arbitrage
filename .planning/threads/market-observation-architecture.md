@@ -1170,3 +1170,28 @@ transport activity and an orderbook resnapshot:
 - Deploy path coverage is reachability, not authorization. Eligible pushes may
   expose a workflow, but the production deploy job itself is gated to explicit
   `workflow_dispatch`; Plan 05 still owns migration/credentials/deploy approval.
+
+### §2.11 Production continuous-evidence chain corrections (2026-07-24)
+
+- Configuration identity is part of chain truth. The L2 daemon's direct
+  PostgreSQL paths use `l2_runtime_db_dsn`; a health subcheck that instead reads
+  the migration-owner field can report `not_configured` while reconciliation
+  succeeds. Health now reads the same runtime credential source, and a poisoned
+  owner-only regression test preserves the boundary.
+- An image label does not prove the boot ledger. GitHub/Fly `GH_SHA` and the
+  database `release_id` are separate consumers; the workflow must inject the
+  dispatched SHA into `POLYARB_RELEASE_ID`, then production must compare all
+  three identities before readiness.
+- Event-loop timeout is not wall-clock authorization. A timer can wake
+  fractionally before an exact UTC boot-grid boundary; emitting immediately can
+  violate `scheduled_at <= started_at` and lose the append-only terminal row.
+  The scheduler now rechecks wall time after every timeout until the boundary is
+  actually reached.
+- Global activity cannot prove per-market freshness. With 100 candidate tokens,
+  unrelated frames kept the global WS clock hot while four committed L3 markets
+  aged beyond 120 seconds. Quiet refresh now keys off every current-generation
+  committed-L3 evidence timestamp; candidate traffic cannot mask a stale L3
+  member, and fresh L3 evidence avoids unnecessary refresh.
+- All three defects were discovered before manifest creation. Their production
+  boots remain diagnostic-only; the immutable 24-hour clock starts only from a
+  later boot that passes the two-promoter/12-sample readiness gate.

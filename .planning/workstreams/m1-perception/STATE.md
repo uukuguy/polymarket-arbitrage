@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 Task 2 blocked before migration; Supabase owner password rotation required
-last_updated: "2026-07-24T03:46:29Z"
+stopped_at: Phase 05.4 Plan 05 Task 4 release-41 readiness monitor; no manifest/T0 yet
+last_updated: "2026-07-24T05:14:00Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -26,15 +26,20 @@ Plan: 5 of 5
   deploy, manifest/T0, and distinct checkpoint gates
 
 - **Status:** Waves 1–4 are complete on main. Plan 05 Task 1's local-only
-  release-candidate gate is complete at `03313a9`; the verified source candidate
-  is `95bf1bd`, bound to AcceptanceConfig digest `c9269392…`. The exposed owner
+  release-candidate gate is complete at `03313a9`; production cross-checks then
+  found and repaired runtime-health identity, release-ID, boot-grid timing, and
+  per-L3 freshness chain defects. The current verified/deployed source is
+  `0d71355`, bound to AcceptanceConfig digest `c9269392…`. The exposed owner
   password was rotated through the exact Supabase project and the replacement
   is direct-TLS verified. Production migrated exactly once from 006 to 007.
   Dedicated `polyarb_l2_runtime_054` and `polyarb_l3_retention_054` logins pass
   their disjoint capability proofs. The runtime DSN is staged in Fly, the owner
   DSN is absent from the Fly inventory, and the retention DSN exists only in
-  macOS Keychain. Plan 05 now proceeds to the exact-SHA deployment and
-  readiness gate. The runtime separates desired,
+  macOS Keychain. Release 41 / workflow run `30068772176` has exact Fly image
+  and DB boot SHA equality; LISTEN, membership, and the initial five-market
+  sample passed. Plan 05 is collecting the required two successful promoter
+  rows and continuous 12-sample readiness window. No manifest or T0 exists.
+  The runtime separates desired,
   control-committed, and current-generation evidenced membership; depth refresh uses an
   all-token barrier; promoter outcomes are terminal, durable, and retry-safe; and
   all direct PostgreSQL runtime paths use `POLYARB_L2_RUNTIME_DB_DSN`. Plan 03

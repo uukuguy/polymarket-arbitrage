@@ -4688,3 +4688,40 @@ Then run `/gsd-resume-work --ws m1-perception`.
 Re-prove production 007/runtime/Fly owner-DSN absence, then deploy exact SHA
 `95bf1bd8714b92056c1ca6cca2d13ac9bd3d06d5` and cross-check the resulting Fly
 identity before readiness.
+
+## SESSION 89 — 2026-07-24 (exact-SHA production chain repaired)
+
+- [DEPLOY] The first exact-SHA deployment exposed two production chain-truth
+  mismatches before readiness: `/health` read the owner/migration DSN field
+  instead of `l2_runtime_db_dsn`, and boot evidence recorded `release_id=dev`.
+  RED/GREEN fixes now bind health to the actual runtime credential and inject
+  `GITHUB_SHA` into `POLYARB_RELEASE_ID`.
+- [SCHEDULER] A later boot produced `promote_append_failed` at the second
+  boot-grid tick. Production timestamps and a deterministic RED test proved an
+  event-loop timeout can fire fractionally before wall-clock `scheduled_at`,
+  violating the append-only row constraint. `run_periodic` now rechecks wall
+  time until the boundary is truly reached; the next production tick wrote
+  `success:ok`.
+- [FRESHNESS] Global candidate traffic suppressed quiet refresh while four of
+  five committed L3 markets aged past 120 seconds. Two opposite RED tests now
+  prove candidate activity cannot mask stale L3 evidence and fresh current-
+  generation L3 evidence suppresses unnecessary refresh. Production refresh
+  is keyed to every committed L3 token, with existing cooldown/timeouts/barrier
+  preserved.
+- [GATES] Each correction passed focused suites, full `pytest`, changed-file
+  Ruff, compile, docs, M1 manual, and planning gates. Repository-wide Ruff
+  remains the unchanged 250-finding legacy baseline.
+- [CURRENT DEPLOY] Release 41, workflow run `30068772176`, source
+  `0d71355ee9ac4017e0abb73f6fdc591f06b9f692`, image
+  `deployment-01KY98JWHDNRAE8MVR1VT3EDMY`, digest `sha256:b127898b…`, machine
+  `85e647c4eed598`, instance `01KY98MWQRDDJTXQK0MQ77SQDH`, and DB boot
+  `4b2a3b61-d0d0-472d-8bf2-4c69bd6f6a7a` cross-check exactly.
+- [BOUNDARY] No manifest/T0, retention cleanup, production chaos, trading, or
+  H-009 action occurred. Earlier boots remain rejected diagnostic evidence.
+
+### [NEXT — CURRENT]
+
+Continue the release-41 readiness SQL monitor. After two consecutive successful
+`5/10/10` promoter rows and 12 complete passing samples over at least 330
+seconds, create and bind an attempt-unique future boot-grid manifest; otherwise
+fail closed and repair the first broken chain.
