@@ -235,6 +235,14 @@ async def test_evidence_timeout_keeps_missing_identities_in_state_not_logs(
 @pytest.mark.asyncio
 async def test_refresh_if_quiet_obeys_quiet_boundary_and_retry_cooldown() -> None:
     consumer, _watchdog, ws = _make_consumer()
+    observed_at = datetime.fromtimestamp(BASE_S, tz=UTC)
+    for asset_id in ("candidate-b", "l3-c"):
+        consumer.record_book_evidence(
+            asset_id=asset_id,
+            generation=consumer._connection_generation,
+            book_levels_succeeded=True,
+            observed_at=observed_at,
+        )
 
     assert await consumer.refresh_if_quiet(now_s=BASE_S + 59) is None
     assert consumer._last_quiet_refresh_attempt_at_s == 0.0
@@ -246,9 +254,9 @@ async def test_refresh_if_quiet_obeys_quiet_boundary_and_retry_cooldown() -> Non
     assert await consumer.refresh_if_quiet(now_s=BASE_S + 89) is None
     assert ws.send.await_count == 2
 
-    assert await consumer.refresh_if_quiet(now_s=BASE_S + 90) is True
-    assert consumer._last_quiet_refresh_attempt_at_s == BASE_S + 90
-    assert ws.send.await_count == 4
+    assert await consumer.refresh_if_quiet(now_s=BASE_S + 90) is None
+    assert consumer._last_quiet_refresh_attempt_at_s == BASE_S + 60
+    assert ws.send.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -260,6 +268,40 @@ async def test_new_business_frame_suppresses_refresh_after_cooldown() -> None:
 
     assert await consumer.refresh_if_quiet(now_s=BASE_S + 100) is None
     assert ws.send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unrelated_candidate_frame_does_not_mask_stale_l3_evidence() -> None:
+    consumer, _watchdog, ws = _make_consumer()
+    stale_at = datetime.fromtimestamp(BASE_S, tz=UTC)
+    for asset_id in ("candidate-b", "l3-c"):
+        consumer.record_book_evidence(
+            asset_id=asset_id,
+            generation=consumer._connection_generation,
+            book_levels_succeeded=True,
+            observed_at=stale_at,
+        )
+    consumer._last_event_at_s = BASE_S + 85
+
+    assert await consumer.refresh_if_quiet(now_s=BASE_S + 100) is True
+    assert ws.send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fresh_l3_evidence_suppresses_refresh_when_global_stream_is_quiet() -> None:
+    consumer, _watchdog, ws = _make_consumer()
+    fresh_at = datetime.fromtimestamp(BASE_S + 85, tz=UTC)
+    for asset_id in ("candidate-b", "l3-c"):
+        consumer.record_book_evidence(
+            asset_id=asset_id,
+            generation=consumer._connection_generation,
+            book_levels_succeeded=True,
+            observed_at=fresh_at,
+        )
+    consumer._last_event_at_s = BASE_S
+
+    assert await consumer.refresh_if_quiet(now_s=BASE_S + 100) is None
+    assert ws.send.await_count == 0
 
 
 @pytest.mark.asyncio

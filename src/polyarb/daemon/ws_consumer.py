@@ -785,7 +785,18 @@ class WsConsumer:
     ) -> bool | None:
         """Request a book dump when business frames are quiet and retry is due."""
         now = time.time() if now_s is None else now_s
-        if now - self._last_event_at_s < quiet_after_s:
+        required_l3 = frozenset(self._l3_committed_set)
+        if required_l3:
+            evidence_times: list[float] = []
+            for asset_id in required_l3:
+                evidence = self._l3_business_evidence.get(asset_id)
+                if evidence is None or evidence[0] != self._connection_generation:
+                    break
+                evidence_times.append(evidence[1].timestamp())
+            else:
+                if evidence_times and now - min(evidence_times) < quiet_after_s:
+                    return None
+        elif now - self._last_event_at_s < quiet_after_s:
             return None
         if (
             self._last_quiet_refresh_attempt_at_s != 0.0
@@ -794,7 +805,9 @@ class WsConsumer:
             return None
         # Record before awaiting so a slow or failed send cannot create a storm.
         self._last_quiet_refresh_attempt_at_s = now
-        return await self.request_book_refresh()
+        return await self.request_book_refresh(
+            required_asset_ids=required_l3 or None,
+        )
 
     async def run_quiet_refresh(
         self,
