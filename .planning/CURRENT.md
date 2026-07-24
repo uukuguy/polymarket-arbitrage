@@ -103,10 +103,12 @@ A5 manifest
 `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-MANIFEST-20260724T124329Z.json`
 及 T0 保留为 rejected diagnostic evidence；T6/T12/T18/T24 均已取消且不存在。
 
-下一步按 RED→GREEN 修复 `ws_market_client`：每个连接发送文本 `PING`、过滤文本
-`PONG`、严格清理 heartbeat task；不改 sampler 阈值。完整本地门通过后只部署新
-approved exact SHA，核对新 Fly/DB boot 和 readiness，再创建唯一 A6 future-grid
-manifest/T0。不执行 retention cleanup、production chaos、H-009 或真实交易。
+RED→GREEN 修复已提交为 executable candidate `91359610242a52e62b336be41a4540a441cf7191`：
+每个连接发送文本 `PING`、过滤文本 `PONG`、严格清理 heartbeat task；sampler 阈值
+未改。focused/full pytest、真实 CLOB PONG 探针、changed-file Ruff、compile、
+release-66 image、docs/planning 门通过。现在只部署最终 approved exact SHA，核对
+新 Fly/DB boot 和 readiness，再创建唯一 A6 future-grid manifest/T0。不执行
+retention cleanup、production chaos、H-009 或真实交易。
 
 ```bash
 /gsd-resume-work --ws m1-perception

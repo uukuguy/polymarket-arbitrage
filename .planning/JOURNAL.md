@@ -4901,11 +4901,22 @@ GitHub/Fly/DB identities remain exact; otherwise preserve NOT-CLOSED.
   text-PING task per socket, PONG filtering, unchanged protocol Ping and strict
   soak thresholds. Delaying/ignoring sampler failures and retrying without a
   repair were rejected.
+- [RED/GREEN] Three new lifecycle tests first failed on the missing application
+  heartbeat surface. Candidate `91359610242a52e62b336be41a4540a441cf7191`
+  now sends text `PING`, consumes text `PONG`, and cleans its per-socket task on
+  normal/abnormal/cancel exits; focused client tests pass 18/18.
+- [LIVE PROTOCOL] A read-only one-token CLOB probe received exact text `PONG`
+  and a `book` event, confirming the venue protocol independently of mocks.
+- [GATES] Focused L2/L3 suites and full pytest exited zero; changed-file Ruff,
+  compile, authenticated release-66 image check, M1 docs, planning-status, and
+  diff checks passed. Full-repository Ruff still has 250 unrelated legacy
+  findings; both changed files are clean and no bulk lint rewrite was made.
 - [BOUNDARY] No trading, H-009, retention cleanup, production chaos, checkpoint
-  mutation, or production deployment occurred.
+  mutation, or production deployment occurred. The repair is not production
+  evidence until an exact-SHA rollout creates a new boot.
 
 ### [NEXT — CURRENT]
 
-TDD the text `PING`/`PONG` lifecycle repair, run full local gates, deploy the
-new exact approved SHA, prove new Fly/DB boot readiness, then bind a unique A6
-future-grid manifest/T0. Never create A5 later checkpoints.
+Push and deploy the final exact heartbeat-repair SHA, prove new Fly/DB boot
+readiness, then bind a unique A6 future-grid manifest/T0. Never create A5 later
+checkpoints.

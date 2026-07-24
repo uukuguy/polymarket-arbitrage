@@ -42,7 +42,11 @@ Plan: 5 of 5
   T6/T12/T18/T24 exists. Root cause is the missing Polymarket-required text
   `PING` heartbeat: protocol-level WebSocket Ping is not the application
   heartbeat. Repair, exact-SHA deployment, new boot/readiness, and a unique A6
-  are required without changing strict thresholds.
+  are required without changing strict thresholds. The RED/GREEN repair is
+  committed at executable candidate `91359610242a52e62b336be41a4540a441cf7191`;
+  focused/full tests, live text-PONG probe, changed-file lint, compile, image,
+  docs, and planning gates passed. It is not production evidence until an exact
+  SHA deploy creates a new cross-checked Fly/DB boot.
 
 - **Active workstream:** `m1-perception`
 
@@ -185,9 +189,9 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Implement/test the application-level `PING`/`PONG` heartbeat without changing
-  strict sampling criteria; deploy the exact approved repair SHA and establish
-  a new eligible boot/readiness/A6 manifest/T0.
+- Push and deploy the exact application-heartbeat repair SHA without changing
+  strict sampling criteria; establish a new eligible boot/readiness/A6
+  manifest/T0.
 - At/after each A6 manifest-computed boundary, retain exactly one cumulative
   T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A5 reports.
 - After T+24 PASS, run `make l3-soak-verify` to re-query all raw rows and verify
@@ -218,10 +222,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 ## Session Continuity
 
 - **Last session:** 2026-07-24 21:38 (Asia/Shanghai)
-- **Stopped at:** A5 permanently NOT-CLOSED; later checkpoints cancelled before
-  T+6 and absent.
-- **Proceeding to:** TDD the CLOB text-heartbeat repair, exact-SHA deploy it,
-  prove new readiness, and bind a unique A6 manifest/T0.
+- **Stopped at:** A5 permanently NOT-CLOSED; heartbeat repair candidate
+  `9135961…` locally verified and committed.
+- **Proceeding to:** Push/deploy the final exact SHA, prove new Fly/DB boot
+  readiness, and bind a unique A6 manifest/T0.
 - **Resume files:** `05.4-05-PLAN.md`,
   `05.4-SOAK-MANIFEST-20260724T124329Z.json`, and `05.4-SOAK-LOG.md`.
 
