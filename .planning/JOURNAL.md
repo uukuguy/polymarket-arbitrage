@@ -4839,6 +4839,11 @@ create the file early or reuse any rejected attempt.
   SUMMARY, gate, approval, identity, readiness, manifest, and T0 evidence.
   Rows 05.4-05-05 through 05.4-05-09 remain explicitly pending until their
   real not-before artifacts/final verifier exist.
+- [STATE RECONCILIATION] Replaced stale STATE body instructions that still said
+  “do not start Plan 05 / deploy 95bf1bd” with current production 007,
+  disjoint credentials, exact release-66/A5 identity, active T+6 boundary, and
+  the remaining checkpoint/final-closure sequence. ROADMAP correctly remains
+  4/5 with Plan 05 unchecked.
 - [BOUNDARY] No trading, H-009, retention cleanup, production chaos, or
   evidence mutation occurred.
 

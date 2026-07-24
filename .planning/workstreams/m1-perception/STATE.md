@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 A5 T0 and T0+546s early audit PASS; immutable T+6 not-before
-last_updated: "2026-07-24T12:54:00Z"
+stopped_at: Phase 05.4 Plan 05 A5 T0 PASS; manifest-derived runner waiting for immutable T+6 not-before
+last_updated: "2026-07-24T13:38:00Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -22,57 +22,24 @@ Phase: 05.4 (continuous-l3-soak-evidence) — EXECUTING
 Plan: 5 of 5
 
 - **Phase:** 05.4 — Continuous L3 soak evidence
-- **Plan:** next is 05.4-05 — non-autonomous production migration, credentials,
-  deploy, manifest/T0, and distinct checkpoint gates
+- **Plan:** 05.4-05 active — Tasks 1–4 complete; Tasks 5–9 are the immutable
+  T+6/T+12/T+18/T+24 checkpoints and final mechanical verifier.
 
-- **Status:** Waves 1–4 are complete on main. Plan 05 Task 1's local-only
-  release-candidate gate is complete at `03313a9`; production cross-checks then
-  found and repaired runtime-health identity, release-ID, boot-grid timing,
-  stable sampler cuts, manifest mapping enforcement, T0 coverage scope, and
-  per-L3 freshness chain defects. A read-only audit then invalidated A4 before
-  T+6: the sampler treated minute-truncated OHLC bucket labels as observation
-  timestamps, adding up to 60 seconds of artificial age. The verified repair
-  reads the latest non-null source observation from `l2_top_of_book` while
-  retaining `l2_ohlc_1m` for cumulative coverage. The last deployed source is
-  `aaba91a`, bound to AcceptanceConfig digest `c9269392…`. The exposed owner
-  password was rotated through the exact Supabase project and the replacement
-  is direct-TLS verified. Production migrated exactly once from 006 to 007.
-  Dedicated `polyarb_l2_runtime_054` and `polyarb_l3_retention_054` logins pass
-  their disjoint capability proofs. The runtime DSN is staged in Fly, the owner
-  DSN is absent from the Fly inventory, and the retention DSN exists only in
-  macOS Keychain. Workflow run `30088360806`, image digest `4ce6d293…`, Fly
-  instance `01KY9WX11REQC6SDZ0YK94J8FR`, and DB boot `70ed099f…` have exact
-  SHA equality. Readiness passed and A4 manifest `2d29a839…` has an immutable
-  PASS T0 at `2026-07-24T11:21:46.353847Z`, but health seq 34 permanently
-  invalidated that window; no later A4 checkpoint may run. Next is exact-SHA
-  deployment/readiness and an attempt-unique A5 manifest/T0. The first OHLC
-  repair deployment (`7c01461`, boot `ba6630c2…`) was also rejected before
-  readiness because sampler seq 0 raced ahead of the first promoter and emitted
-  `evidence_writer_failed`. A RED/GREEN startup gate now skips only slots before
-  desired membership reaches the exact ten-token input; all failures after that
-  point remain strict. Exact repair SHA `9f2c935…` is deployed as Fly release
-  66/digest `637cdc62…` and DB boot `be240060…`. Readiness passed with promoter
-  seq 1/2, health seq 16–27 over 330.621 seconds, 60/60 market rows, maximum
-  source freshness age 64.165 seconds, and zero disallowed events. A5 manifest
-  `95814bf1…` is bound exactly once; T0 `2026-07-24T12:43:29.274117Z` and
-  report `adbbbc4f…` passed. T+6 is not available before
-  `2026-07-24T18:43:29.274117Z`. The T0+546-second early audit stayed 19/19
-  health and 95/95 market pass with maximum gap 31.405 seconds, maximum
-  book/OHLC-source ages 70.783/61.664 seconds, zero minute-truncated OHLC
-  timestamps, and zero disallowed events. T+6 preflight refused and created no
-  artifact.
-  The runtime separates desired,
-  control-committed, and current-generation evidenced membership; depth refresh uses an
-  all-token barrier; promoter outcomes are terminal, durable, and retry-safe; and
-  all direct PostgreSQL runtime paths use `POLYARB_L2_RUNTIME_DB_DSN`. Plan 03
-  adds atomic five-market samples, durable runtime events, four public strict
-  health chains, generation-bound book freshness, causal writer recovery, and
-  cancellation-safe producer-before-writer shutdown. Plan 04 adds exact
-  boot-grid verdicts, immutable manifest/five-report/raw-row hashes, credential
-  and revision proofs, local full-chain chaos, and manual-only deploy gating.
-  The owner/migration DSN remains Alembic-only. Plan 05 remains
-  `autonomous: false` with separate migration, runtime credential, retention
-  credential, deployment, manifest/T0, and wall-clock approvals.
+- **Status:** Production project `zoqsmjeejfkrokwttjbx` is Alembic 007.
+  Dedicated `polyarb_l2_runtime_054` and `polyarb_l3_retention_054` credentials
+  pass disjoint least-privilege proofs; Fly contains only the runtime DSN and
+  the owner/retention credentials remain absent. Selected source
+  `9f2c935ab2fc893811005b0dc40f60725eaaef31` runs as Fly release 66, digest
+  `sha256:637cdc62d89183d1820e620242d020e6bfbbc0e894d368a6c4a449dd2d0ef82d`,
+  instance `01KYA1GSQWRCQ1QZJDH2ZAMW6S`, and DB boot
+  `be240060-6882-4403-bace-a6b3fd8a3fa6`; GitHub/Fly/DB identities match.
+  Readiness passed with the locked mapping/config and zero disallowed events.
+  A1–A4 are immutable rejected evidence. Selected A5 manifest `95814bf1…` was
+  O_EXCL-created and bound exactly once before T0. Its exact scheduled T0
+  `2026-07-24T12:43:29.274117Z` and canonical report `adbbbc4f…` passed.
+  T+6 is unavailable before `2026-07-24T18:43:29.274117Z`; a persistent runner
+  derives the declared path/start/end from the manifest and will fail closed on
+  any file hash or Fly identity mismatch. No T+6 artifact exists yet.
 
 - **Active workstream:** `m1-perception`
 
@@ -215,15 +182,14 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Do not start Phase 05.4 Plan 05 without its exact approval sequence. It is the
-  only remaining plan and contains production migration, runtime/retention
-  credentials, secrets, manual deployment, restart/readiness, manifest binding,
-  and T0/T+6/T+12/T+18/T+24 gates.
-
-- Do not resume the release-37 T+6/T+12/T+18/T+24 sequence as strict evidence.
-- Preserve strict N=5 and the unchanged spread/depth/recency thresholds. Start a
-  fresh exact-identity 24-hour soak only after separately authorized production
-  migration/deployment and readiness proof.
+- At/after each manifest-computed boundary, retain exactly one cumulative A5
+  T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A4 reports.
+- After T+24 PASS, run `make l3-soak-verify` to re-query all raw rows and verify
+  the binding plus all five files/hashes before changing ROADMAP/phase status.
+- On final PASS only, sign validation rows 05.4-05-05 through 05.4-05-09,
+  update ROADMAP/STATE, create `05.4-05-SUMMARY.md` immediately after the
+  evidence commit, run planning-status, extract learnings, and ask adversarial
+  questions.
 
 - Keep H-009 pending until separately authorized production deployment/scheduling
   and timestamped capacity evidence; Phase 05.1 completion does not promote it.
@@ -232,8 +198,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 1. `.planning/CURRENT.md` — cross-workstream operational truth.
 2. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-CONTEXT.md` — locked decisions.
-3. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-PLAN.md` — next gated production plan.
-4. `.planning/threads/market-observation-architecture.md` §1.6 and §2.9 — chain-truth and observation cadence.
+3. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-PLAN.md` — active production plan.
+4. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-MANIFEST-20260724T124329Z.json` — immutable A5 contract.
+5. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-LOG.md` — authoritative execution timeline.
+6. `.planning/threads/market-observation-architecture.md` §1.6 and §2.9–2.11 — chain-truth and observation cadence.
 
 ## Resume
 
@@ -243,16 +211,13 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-24 11:46 (Asia/Shanghai)
-- **Stopped at:** Phase 05.4 Plan 05 Task 1 complete. Focused/full tests,
-  plan-scope Ruff and byte-identical legacy baseline, compile, image, docs, and
-  planning gates passed; `05.4-SOAK-LOG.md` is committed at `03313a9`.
-
-- **Proceeding to:** Re-prove production 007/runtime/Fly secret boundaries,
-  dispatch `deploy-l2.yml` at exact source SHA `95bf1bd…`, and cross-check the
-  resulting Fly release/machine/image/boot identity before readiness.
-
-- **Resume file:** `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-PLAN.md`
+- **Last session:** 2026-07-24 21:38 (Asia/Shanghai)
+- **Stopped at:** A5 T0 and early audits PASS; manifest-derived T+6 runner is
+  waiting for `2026-07-24T18:43:29.274117Z`.
+- **Proceeding to:** Inspect the unique T6 artifact at/after not-before, prove
+  its hashes/counts/identity, then schedule the manifest-derived T+12 runner.
+- **Resume files:** `05.4-05-PLAN.md`,
+  `05.4-SOAK-MANIFEST-20260724T124329Z.json`, and `05.4-SOAK-LOG.md`.
 
 ## Accumulated Context
 
