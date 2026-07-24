@@ -4632,3 +4632,28 @@ retention credential, and deployment remain separately unauthorized.
 Prove the direct production target is revision 006, then execute and verify the
 single Alembic 007 migration. Continue automatically unless a target, identity,
 capability, or evidence invariant fails closed.
+
+## SESSION 87 — 2026-07-24 (owner credential exposure contained)
+
+- [INCIDENT] A local direct-DSN derivation passed the quoted `.env` value into
+  Node's URL parser; the exception echoed its raw input. The production owner
+  password is therefore compromised.
+- [NO MUTATION] Migration did not run and production remains Alembic 006.
+  Direct TLS proof reached the intended project/database/user. A SQL password
+  change was rejected because Supabase's managed `postgres` role cannot alter
+  the privileged role; no password changed.
+- [CONTAINMENT] Removed the compromised DSN from local `.env` and deleted the
+  unused generated replacement from Keychain. No secret value was copied into
+  tracked files.
+- [BLOCKER] Password reset requires Supabase Dashboard Database Settings.
+  Browser automation has no available backend; Supabase CLI/Management token
+  and saved login state are absent.
+- [AUTHORIZATION] The user's autonomous-completion authorization remains active.
+  Once the password is reset and the new direct TLS DSN is stored locally,
+  continue without re-requesting the four Plan 05 approvals.
+
+### [NEXT — CURRENT]
+
+User action: reset the Supabase project database password and store the new
+direct `POLYARB_SUPABASE_DB_DSN` in local `.env`; do not send it through chat.
+Then run `/gsd-resume-work --ws m1-perception`.
