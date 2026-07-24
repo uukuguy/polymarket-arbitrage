@@ -4860,6 +4860,10 @@ create the file early or reuse any rejected attempt.
   readable evidence tables. Fly inventory contains the runtime DSN and excludes
   owner/retention DSNs; local `.env` excludes all three. No cleanup or mutation
   ran.
+- [SCOPE AUDIT] Diffed executable paths/hunks from Plan 05 gate `03313a9`.
+  Changes are confined to L2/L3 observation/evidence/deploy-L2 surfaces and
+  tests; no trading, execution, arbitrage, neg-risk, opportunity, or H-009
+  surface changed or ran.
 - [BOUNDARY] No trading, H-009, retention cleanup, production chaos, or
   evidence mutation occurred.
 
