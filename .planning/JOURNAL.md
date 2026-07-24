@@ -4848,6 +4848,12 @@ create the file early or reuse any rejected attempt.
   state entry from Alembic 006/release 37/waiting for authorization to
   production 007/release 66/A5 T0 PASS and the exact four remaining checkpoint
   times. M2/H-009/live-trading cautions remain unchanged.
+- [BOUNDARY REPROOF] Fresh direct-TLS checks passed for production revision
+  007, runtime-only `l3_evidence_daemon`, retention-only
+  `l3_retention_operator`, and configured 30-day retention across all five
+  readable evidence tables. Fly inventory contains the runtime DSN and excludes
+  owner/retention DSNs; local `.env` excludes all three. No cleanup or mutation
+  ran.
 - [BOUNDARY] No trading, H-009, retention cleanup, production chaos, or
   evidence mutation occurred.
 
