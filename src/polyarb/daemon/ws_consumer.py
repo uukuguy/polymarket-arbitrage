@@ -50,7 +50,10 @@ from polyarb.observation.l3_evidence import (
 )
 
 _QUIET_REFRESH_SEND_TIMEOUT_S: float = 5.0
-_BOOK_EVIDENCE_TIMEOUT_S: float = 5.0
+# A full 10-token initial dump is bounded by one 30-second evidence slot.
+# Production showed that five seconds can close a healthy generation before
+# the last quiet books arrive, while the reconnect completes inside one slot.
+_BOOK_EVIDENCE_TIMEOUT_S: float = 25.0
 _COMPENSATED_GENERATIONS_MAX: int = 128
 
 

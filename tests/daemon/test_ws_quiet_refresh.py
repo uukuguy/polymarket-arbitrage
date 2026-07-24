@@ -17,6 +17,10 @@ from polyarb.daemon.ws_watchdog import WsWatchdog
 BASE_S = 1_000.0
 
 
+def test_full_l3_dump_barrier_fits_inside_one_sampling_slot() -> None:
+    assert 20.0 <= ws_consumer_module._BOOK_EVIDENCE_TIMEOUT_S < 30.0
+
+
 async def _wait_until(predicate, *, timeout: float = 0.2) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():
