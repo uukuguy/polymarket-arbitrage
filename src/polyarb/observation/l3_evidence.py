@@ -369,6 +369,20 @@ class MarketPair:
             raise ValueError("MarketPair must contain two distinct token IDs")
 
 
+@dataclass(frozen=True, slots=True)
+class SoakMappingLock:
+    mapping_hash: str
+    t0: datetime
+    t24: datetime
+
+    def __post_init__(self) -> None:
+        _require_sha256("mapping_hash", self.mapping_hash)
+        _require_utc("t0", self.t0)
+        _require_utc("t24", self.t24)
+        if self.t24 - self.t0 < timedelta(hours=24):
+            raise ValueError("soak mapping lock must cover at least 24 hours")
+
+
 @dataclass(frozen=True)
 class AcceptanceConfig:
     recipe_sha256: str

@@ -333,6 +333,166 @@ async def test_sampling_market_state_uses_one_aggregate_query_and_closes(
     assert connection.closed
 
 
+def _soak_lock_row(
+    boot_id: UUID,
+    *,
+    t0: datetime,
+    t24: datetime,
+    mapping_hash: str = "b" * 64,
+    recorded_at: datetime | None = None,
+    **detail_overrides: object,
+) -> dict[str, object]:
+    return {
+        "boot_id": boot_id,
+        "recorded_at": recorded_at or t0 - timedelta(seconds=1),
+        "detail": {
+            "manifest_sha256": "c" * 64,
+            "mapping_hash": mapping_hash,
+            "t0": t0.isoformat().replace("+00:00", "Z"),
+            "t24": t24.isoformat().replace("+00:00", "Z"),
+            **detail_overrides,
+        },
+    }
+
+
+def test_active_soak_mapping_lock_is_t0_inclusive_t24_exclusive() -> None:
+    boot_id = uuid4()
+    t0 = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
+    t24 = t0 + timedelta(hours=24)
+    rows = [_soak_lock_row(boot_id, t0=t0, t24=t24)]
+
+    assert (
+        store_module._active_soak_mapping_lock(
+            rows,
+            boot_id=boot_id,
+            observed_at=t0 - timedelta(microseconds=1),
+        )
+        is None
+    )
+    active = store_module._active_soak_mapping_lock(
+        rows,
+        boot_id=boot_id,
+        observed_at=t0,
+    )
+    assert active.mapping_hash == "b" * 64
+    assert (active.t0, active.t24) == (t0, t24)
+    assert (
+        store_module._active_soak_mapping_lock(
+            rows,
+            boot_id=boot_id,
+            observed_at=t24,
+        )
+        is None
+    )
+
+
+def test_active_soak_mapping_lock_accepts_same_hash_overlap_and_rejects_conflict() -> None:
+    boot_id = uuid4()
+    t0 = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
+    t24 = t0 + timedelta(hours=24)
+    rows = [
+        _soak_lock_row(boot_id, t0=t0, t24=t24),
+        _soak_lock_row(
+            boot_id,
+            t0=t0 + timedelta(minutes=5),
+            t24=t24 + timedelta(minutes=5),
+        ),
+    ]
+    active = store_module._active_soak_mapping_lock(
+        rows,
+        boot_id=boot_id,
+        observed_at=t0 + timedelta(minutes=6),
+    )
+    assert active.mapping_hash == "b" * 64
+
+    rows[1] = _soak_lock_row(
+        boot_id,
+        t0=t0 + timedelta(minutes=5),
+        t24=t24 + timedelta(minutes=5),
+        mapping_hash="d" * 64,
+    )
+    with pytest.raises(store_module.L3EvidenceReadError, match="conflicting"):
+        store_module._active_soak_mapping_lock(
+            rows,
+            boot_id=boot_id,
+            observed_at=t0 + timedelta(minutes=6),
+        )
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        lambda boot, t0, t24: _soak_lock_row(
+            uuid4(),
+            t0=t0,
+            t24=t24,
+        ),
+        lambda boot, t0, t24: _soak_lock_row(
+            boot,
+            t0=t0,
+            t24=t24,
+            recorded_at=t0,
+        ),
+        lambda boot, t0, t24: _soak_lock_row(
+            boot,
+            t0=t0,
+            t24=t24,
+            mapping_hash="wrong",
+        ),
+        lambda boot, t0, t24: (
+            lambda valid: {
+                **valid,
+                "detail": {**valid["detail"], "t0": "not-a-time"},
+            }
+        )(_soak_lock_row(boot, t0=t0, t24=t24)),
+    ],
+)
+def test_active_soak_mapping_lock_rejects_malformed_rows(row: object) -> None:
+    boot_id = uuid4()
+    t0 = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
+    t24 = t0 + timedelta(hours=24)
+    with pytest.raises(store_module.L3EvidenceReadError):
+        store_module._active_soak_mapping_lock(
+            [row(boot_id, t0, t24)],  # type: ignore[operator]
+            boot_id=boot_id,
+            observed_at=t0 + timedelta(minutes=1),
+        )
+
+
+async def test_store_reads_active_soak_mapping_lock_with_runtime_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boot_id = uuid4()
+    t0 = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
+    connection = _FakeConnection()
+    connection.fetch = AsyncMock(
+        return_value=[
+            _soak_lock_row(
+                boot_id,
+                t0=t0,
+                t24=t0 + timedelta(hours=24),
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        store_module.asyncpg,
+        "connect",
+        AsyncMock(return_value=connection),
+    )
+
+    lock = await L3EvidenceStore(
+        "postgresql://secret"
+    ).fetch_active_soak_mapping_lock(
+        boot_id=boot_id,
+        observed_at=t0,
+    )
+
+    assert lock.mapping_hash == "b" * 64
+    connection.fetch.assert_awaited_once()
+    assert "soak_manifest_bound" in connection.fetch.await_args.args[0]
+    assert connection.closed
+
+
 @pytest.mark.parametrize("append_kind", ["one", "sample"])
 async def test_durable_append_ack_survives_connection_close_failure(
     monkeypatch: pytest.MonkeyPatch,

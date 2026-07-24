@@ -30,6 +30,7 @@ from polyarb.observation.l3_evidence import (
     RuntimeEventRecord,
     RuntimeEventSeverity,
     SampleBatch,
+    SoakMappingLock,
 )
 
 
@@ -175,6 +176,13 @@ LEFT JOIN latest_yes_ohlc AS yes_ohlc ON yes_ohlc.asset_id=mapping.yes_token_id
 ORDER BY mapping.market_id, mapping.yes_token_id, mapping.no_token_id
 """
 
+_SOAK_MAPPING_LOCK_SELECT = """
+SELECT boot_id, recorded_at, detail
+FROM l3_runtime_events
+WHERE boot_id=$1 AND kind='soak_manifest_bound'
+ORDER BY recorded_at, event_id
+"""
+
 
 class _AppendOperation(StrEnum):
     BOOT = "append_boot"
@@ -305,6 +313,78 @@ def _require_utc_interval(start: datetime, end: datetime) -> None:
             raise ValueError(f"{name} must be timezone-aware UTC")
     if start >= end:
         raise ValueError("start must precede end")
+
+
+def _parse_lock_time(value: object) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise L3EvidenceReadError("soak mapping lock timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        raise L3EvidenceReadError("soak mapping lock timestamp is invalid") from None
+    if parsed.utcoffset() != timedelta(0):
+        raise L3EvidenceReadError("soak mapping lock timestamp is invalid")
+    if parsed.astimezone(UTC).isoformat().replace("+00:00", "Z") != value:
+        raise L3EvidenceReadError("soak mapping lock timestamp is invalid")
+    return parsed.astimezone(UTC)
+
+
+def _active_soak_mapping_lock(
+    rows: list[Mapping[str, object]],
+    *,
+    boot_id: UUID,
+    observed_at: datetime,
+) -> SoakMappingLock | None:
+    _require_utc_interval(observed_at, observed_at + timedelta(microseconds=1))
+    active: list[SoakMappingLock] = []
+    for row in rows:
+        try:
+            detail = row["detail"]
+            if isinstance(detail, str):
+                detail = json.loads(detail)
+            if (
+                row["boot_id"] != boot_id
+                or not isinstance(detail, dict)
+                or set(detail)
+                != {"manifest_sha256", "mapping_hash", "t0", "t24"}
+            ):
+                raise ValueError
+            manifest_hash = detail["manifest_sha256"]
+            mapping_hash = detail["mapping_hash"]
+            if (
+                not isinstance(manifest_hash, str)
+                or len(manifest_hash) != 64
+                or any(char not in "0123456789abcdef" for char in manifest_hash)
+                or not isinstance(mapping_hash, str)
+                or len(mapping_hash) != 64
+                or any(char not in "0123456789abcdef" for char in mapping_hash)
+            ):
+                raise ValueError
+            t0 = _parse_lock_time(detail["t0"])
+            t24 = _parse_lock_time(detail["t24"])
+            lock = SoakMappingLock(mapping_hash=mapping_hash, t0=t0, t24=t24)
+            recorded_at = row["recorded_at"]
+            if (
+                not isinstance(recorded_at, datetime)
+                or recorded_at.tzinfo is None
+                or recorded_at.utcoffset() != timedelta(0)
+                or recorded_at >= t0
+            ):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise L3EvidenceReadError("soak mapping lock row is invalid") from None
+        if lock.t0 <= observed_at < lock.t24:
+            active.append(lock)
+    if not active:
+        return None
+    mapping_hashes = {lock.mapping_hash for lock in active}
+    if len(mapping_hashes) != 1:
+        raise L3EvidenceReadError("conflicting active soak mapping locks")
+    return SoakMappingLock(
+        mapping_hash=mapping_hashes.pop(),
+        t0=min(lock.t0 for lock in active),
+        t24=max(lock.t24 for lock in active),
+    )
 
 
 def _report_failure(operation: str, error: BaseException) -> None:
@@ -798,6 +878,40 @@ class L3EvidenceStore:
                     _report_failure("fetch_sampling_market_state_close", error)
                     raise L3EvidenceReadError(
                         "l3 sampling market state read failed"
+                    ) from None
+
+    async def fetch_active_soak_mapping_lock(
+        self,
+        *,
+        boot_id: UUID,
+        observed_at: datetime,
+    ) -> SoakMappingLock | None:
+        """Read the exact database-bound mapping lock active at one instant."""
+        connection: asyncpg.Connection | None = None
+        try:
+            connection = await asyncpg.connect(dsn=self._dsn)
+            await _require_evidence_daemon(connection)
+            rows = await connection.fetch(_SOAK_MAPPING_LOCK_SELECT, boot_id)
+            return _active_soak_mapping_lock(
+                list(rows),
+                boot_id=boot_id,
+                observed_at=observed_at,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - typed, redacted read boundary
+            _report_failure("fetch_active_soak_mapping_lock", error)
+            raise L3EvidenceReadError("l3 soak mapping lock read failed") from None
+        finally:
+            if connection is not None:
+                try:
+                    await connection.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001
+                    _report_failure("fetch_active_soak_mapping_lock_close", error)
+                    raise L3EvidenceReadError(
+                        "l3 soak mapping lock read failed"
                     ) from None
 
     async def fetch_status(self, *, boot_id: UUID) -> Mapping[str, object] | None:

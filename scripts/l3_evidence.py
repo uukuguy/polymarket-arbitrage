@@ -420,6 +420,15 @@ def _binding_query_args(manifest: SoakManifest) -> tuple[object, ...]:
     )
 
 
+def _manifest_binding_detail(manifest: SoakManifest) -> dict[str, str]:
+    return {
+        "manifest_sha256": manifest.manifest_hash,
+        "mapping_hash": manifest.mapping_hash,
+        "t0": _utc_text(manifest.t0),
+        "t24": _utc_text(manifest.t24),
+    }
+
+
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"invalid JSON constant: {value}")
 
@@ -449,7 +458,7 @@ def _validate_exact_binding(rows: list[Any], manifest: SoakManifest) -> Any:
             and row["generation"] is None
             and row["reason_code"] == manifest.soak_hash
             and isinstance(detail, dict)
-            and detail == {"manifest_sha256": manifest.manifest_hash}
+            and detail == _manifest_binding_detail(manifest)
             and row["occurred_at"] == row["recorded_at"]
             and row["recorded_at"] < manifest.t0
         )
@@ -535,7 +544,7 @@ async def _bind_manifest(dsn: str, manifest: SoakManifest, *, now: datetime) -> 
                     manifest.boot_id,
                     event_seq,
                     manifest.soak_hash,
-                    json.dumps({"manifest_sha256": manifest.manifest_hash}),
+                    json.dumps(_manifest_binding_detail(manifest)),
                     manifest.t0,
                 )
                 if row is None:

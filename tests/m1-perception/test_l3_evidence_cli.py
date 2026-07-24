@@ -368,6 +368,15 @@ def test_cursor_policy_catalog_proof_is_exact_and_fail_closed() -> None:
     )
 
 
+def _binding_detail(manifest: SoakManifest) -> dict[str, str]:
+    return {
+        "manifest_sha256": manifest.manifest_hash,
+        "mapping_hash": manifest.mapping_hash,
+        "t0": manifest.t0.isoformat().replace("+00:00", "Z"),
+        "t24": manifest.t24.isoformat().replace("+00:00", "Z"),
+    }
+
+
 def _binding_row(manifest: SoakManifest, **overrides: object) -> dict[str, object]:
     bound_at = manifest.t0 - timedelta(microseconds=1)
     row: dict[str, object] = {
@@ -384,7 +393,7 @@ def _binding_row(manifest: SoakManifest, **overrides: object) -> dict[str, objec
         "severity": "info",
         "generation": None,
         "reason_code": manifest.soak_hash,
-        "detail": {"manifest_sha256": manifest.manifest_hash},
+        "detail": _binding_detail(manifest),
     }
     row.update(overrides)
     return row
@@ -422,7 +431,7 @@ class _BindingConnection:
         assert "clock_timestamp()" in sql
         assert "recorded_at" in sql
         assert args[3] == self.manifest.soak_hash
-        assert json.loads(args[4])["manifest_sha256"] == self.manifest.manifest_hash
+        assert json.loads(args[4]) == _binding_detail(self.manifest)
         assert args[5] == self.manifest.t0
         server_time = self.manifest.t0 - timedelta(microseconds=1)
         self.inserted = True
@@ -432,7 +441,7 @@ class _BindingConnection:
             event_seq=args[2],
             occurred_at=server_time,
             recorded_at=server_time,
-            detail=json.dumps({"manifest_sha256": self.manifest.manifest_hash}),
+            detail=json.dumps(_binding_detail(self.manifest)),
         )
 
     async def close(self) -> None:
@@ -510,7 +519,7 @@ async def test_concurrent_manifest_bind_serializes_to_exactly_one_row(
                         event_seq=args[2],
                         occurred_at=server_time,
                         recorded_at=server_time,
-                        detail=json.dumps({"manifest_sha256": manifest.manifest_hash}),
+                            detail=json.dumps(_binding_detail(manifest)),
                     )
                 )
                 return dict(shared)
@@ -564,7 +573,7 @@ async def test_manifest_bind_lost_ack_retry_returns_existing_exact_binding(
     forged_values: dict[str, object] = {
         "event_id": UUID("00000000-0000-0000-0000-000000000099"),
         "event_seq": existing["event_seq"] + 1,  # type: ignore[operator]
-        "detail": {"manifest_sha256": manifest.manifest_hash, "extra": True},
+        "detail": {**_binding_detail(manifest), "extra": True},
         "kind": "shutdown_signal",
         "severity": "warn",
         "generation": 0,
@@ -670,9 +679,9 @@ def test_binding_validation_requires_one_pre_t0_exact_soak_hash(tmp_path: Path) 
         [{**valid, "severity": "warn"}],
         [{**valid, "generation": 0}],
         [{**valid, "reason_code": "forged"}],
-        [{**valid, "detail": {"manifest_sha256": manifest.manifest_hash, "extra": True}}],
-        [{**valid, "detail": json.dumps({"manifest_sha256": "0" * 64})}],
-        [{**valid, "detail": {"manifest_sha256": manifest.manifest_hash, "x": float("nan")}}],
+        [{**valid, "detail": {**_binding_detail(manifest), "extra": True}}],
+        [{**valid, "detail": json.dumps({**_binding_detail(manifest), "mapping_hash": "0" * 64})}],
+        [{**valid, "detail": {**_binding_detail(manifest), "x": float("nan")}}],
         [{**valid, "occurred_at": manifest.t0 - timedelta(seconds=1)}],
         [{**valid, "recorded_at": manifest.t0}],
     )
