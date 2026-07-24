@@ -1217,3 +1217,13 @@ transport activity and an orderbook resnapshot:
   one cancellable text-heartbeat task per connection and PONG filtering before
   JSON decode. Sampling thresholds and reconnect-adjacent failure semantics
   stay unchanged; recovery requires a new exact deployment/boot/A6 clock.
+- Sibling task creation is not startup ordering. Release 68 started promoter
+  run 0 against generation 0 before the WS initializer durably published
+  generation 1, so the terminal `generation_changed` row correctly made that
+  boot ineligible. The structural repair is a one-time, cancellable promoter
+  gate over `WsConsumer.has_active_connection`, whose source of truth is the
+  successfully initialized `_current_ws`. The gate preserves run 0's
+  boot-anchored `scheduled_at`, emits no row if shutdown wins, and does not
+  relax any post-start generation-change failure. A failed release is never
+  reinterpreted or restarted into eligibility; readiness begins again on a new
+  exact release and boot.
