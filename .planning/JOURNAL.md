@@ -4835,7 +4835,8 @@ create the file early or reuse any rejected attempt.
   integer epoch with `ceil(manifest end)` so the microsecond not-before cannot
   be crossed early. An executable-surface audit also proved `src/scripts`,
   migrations, Makefile, dependency locks, and deploy workflow are unchanged
-  from manifest release `9f2c935…`; the runner repeats that guard at execution.
+  from manifest release `9f2c935…`; the runner repeats that guard at execution
+  and additionally requires zero staged, unstaged, or untracked files.
   Production sampling remained uninterrupted and every T+6-like artifact
   remains absent.
 - [COMPLETION PRE-AUDIT] Reconciled the soak-log header and selected-deployment
