@@ -4831,8 +4831,10 @@ create the file early or reuse any rejected attempt.
   manifest audit caught its hand-written `...-T+6.json` output path versus the
   declared `...-T6.json`; it too was stopped before invocation. The active
   replacement derives path/start/end from the immutable manifest and asserts
-  their exact values before running. Production sampling remained
-  uninterrupted and every T+6-like artifact remains absent.
+  their exact values before running. A final timing audit replaced a floored
+  integer epoch with `ceil(manifest end)` so the microsecond not-before cannot
+  be crossed early. Production sampling remained uninterrupted and every
+  T+6-like artifact remains absent.
 - [COMPLETION PRE-AUDIT] Reconciled the soak-log header and selected-deployment
   table from stale release-41/no-T0 wording to exact release 66/A5 truth.
   Signed validation rows 05.4-01-01 through 05.4-05-04 from their existing
