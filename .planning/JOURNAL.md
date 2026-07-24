@@ -4790,11 +4790,20 @@ and bind an attempt-unique A5 future-grid manifest/T0.
   race. Sampling now skips only boot-grid slots whose desired membership is not
   exactly ten tokens. Once the input exists, all convergence, collection, and
   write failures retain their strict evidence paths. Phase and full suites pass.
+- [SELECTED A5] Workflow `30093047954` deployed exact SHA `9f2c935…`, Fly
+  release 66/digest `637cdc62…` and database boot `be240060…` matched.
+  Readiness passed with promoter seq 1/2 success, health seq 16–27 all pass
+  over 330.621 seconds, 60/60 market rows, maximum book/OHLC source age
+  64.165 seconds, and zero disallowed events.
+- [A5 T0] Manifest `05.4-SOAK-MANIFEST-20260724T124329Z.json` was created
+  O_EXCL on the future boot grid and bound exactly once before T0. Exact seq 31
+  passed with 0.599559-second lag; canonical T0 report `adbbbc4f…`, raw digest
+  `29289377…`, and soak hash `f97197e7…` are PASS.
 - [BOUNDARY] No trading, H-009, retention cleanup, or production chaos action
   occurred.
 
 ### [NEXT — CURRENT]
 
-Commit and push the verified sampler startup gate, re-prove revision 007 and
-the credential boundary, deploy the exact new SHA, cross-check GitHub/Fly/DB
-identity, pass readiness with zero disallowed events, and start unique A5.
+After at least five minutes from A5 T0, run an early read-only continuity and
+OHLC-source-freshness audit. If it passes, retain A5 and run T+6 exactly once
+at or after `2026-07-24T18:43:29.274117Z`.

@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.4
 status: executing
-stopped_at: Phase 05.4 Plan 05 A4 NOT-CLOSED and first repair boot rejected; verified sampler startup gate awaiting exact-SHA deployment
-last_updated: "2026-07-24T11:51:00Z"
+stopped_at: Phase 05.4 Plan 05 A5 T0 PASS; early audit then immutable T+6 not-before
+last_updated: "2026-07-24T12:44:30Z"
 progress:
   total_phases: 13
   completed_phases: 11
@@ -50,7 +50,13 @@ Plan: 5 of 5
   readiness because sampler seq 0 raced ahead of the first promoter and emitted
   `evidence_writer_failed`. A RED/GREEN startup gate now skips only slots before
   desired membership reaches the exact ten-token input; all failures after that
-  point remain strict.
+  point remain strict. Exact repair SHA `9f2c935…` is deployed as Fly release
+  66/digest `637cdc62…` and DB boot `be240060…`. Readiness passed with promoter
+  seq 1/2, health seq 16–27 over 330.621 seconds, 60/60 market rows, maximum
+  source freshness age 64.165 seconds, and zero disallowed events. A5 manifest
+  `95814bf1…` is bound exactly once; T0 `2026-07-24T12:43:29.274117Z` and
+  report `adbbbc4f…` passed. T+6 is not available before
+  `2026-07-24T18:43:29.274117Z`.
   The runtime separates desired,
   control-committed, and current-generation evidenced membership; depth refresh uses an
   all-token barrier; promoter outcomes are terminal, durable, and retry-safe; and
