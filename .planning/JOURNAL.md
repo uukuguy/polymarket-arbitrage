@@ -4725,3 +4725,42 @@ Continue the release-41 readiness SQL monitor. After two consecutive successful
 `5/10/10` promoter rows and 12 complete passing samples over at least 330
 seconds, create and bind an attempt-unique future boot-grid manifest; otherwise
 fail closed and repair the first broken chain.
+
+## SESSION 90 — 2026-07-24 (Phase 05.4 selected T0 active)
+
+- [PRODUCTION] Production remains exact project `zoqsmjeejfkrokwttjbx`,
+  Alembic 007. Dedicated runtime and retention roles retain disjoint
+  capabilities; Fly contains only the runtime DSN.
+- [CHAIN REPAIRS] Production readiness exposed and RED/GREEN fixed stable-cut
+  sampler retry, manifest runtime mapping enforcement, canonical mapping
+  identity/order, digest-form Fly image resolution, and the T0-vs-cumulative
+  raw-coverage scope. Focused/phase/full tests, changed-file Ruff, compile,
+  docs, planning, and authenticated deployed-image Python checks passed.
+- [REJECTED] A1 remains unbound and rejected. A2/A3 were immutably bound and
+  produced permanent NOT-CLOSED reports under their exact deployed binaries;
+  their reports proved the 30-second T0 probe was incorrectly applying the
+  final cumulative positive raw-row coverage gate.
+- [DEPLOY] Workflow `30088360806` deployed exact source
+  `aaba91a788b58e1e7731b68d5a4c0f901efd1fed`, digest
+  `sha256:4ce6d2933c5ac35a1e5b8336ef4cb8f6d77b1b1d6b3ad54fc615f2aa787d9f1b`,
+  machine `85e647c4eed598`, instance `01KY9WX11REQC6SDZ0YK94J8FR`, boot
+  `70ed099f-d025-4e03-b196-ed1b4040381c`; GitHub/Fly/DB identity matched.
+- [READINESS] Two consecutive promoter rows passed, the latest 12 health
+  samples were contiguous/pass/10-10-10 with maximum 31.361s gap, all 60
+  market rows passed, worst book/OHLC ages were 63.472/106.647s, mapping/config
+  matched, and disallowed events were zero.
+- [SELECTED T0] A4 manifest
+  `05.4-SOAK-MANIFEST-20260724T112146Z.json` was bound exactly once with
+  60.066142s server lead. T0 `2026-07-24T11:21:46.353847Z` passed: report
+  `bf8e4964…`, raw digest `4bc0b052…`, soak hash `afcd8f54…`, schedule lag
+  2.149707s, 10/10/10, worst book/OHLC freshness 14.503/48.503s, no events.
+- [BOUNDARY] No trading, H-009, retention cleanup, or production chaos action
+  occurred. The formal 24-hour clock is active and immutable.
+
+### [NEXT — CURRENT]
+
+At or after `2026-07-24T17:21:46.353847Z`, run the manifest-declared T+6
+checkpoint once. The preflight not-before check already refused and created no
+file. Continue T+12 at `2026-07-24T23:21:46.353847Z`, T+18 at
+`2026-07-25T05:21:46.353847Z`, and T+24/final verify at
+`2026-07-25T11:21:46.353847Z`.
