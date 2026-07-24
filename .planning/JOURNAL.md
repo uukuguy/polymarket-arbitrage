@@ -4983,3 +4983,19 @@ rows plus at least 12 passing health samples before binding unique A6.
 
 At/after `2026-07-24T15:56:51.369231Z`, run the manifest-declared T0 report
 once. PASS schedules A6 T+6/T+12/T+18/T+24; failure permanently rejects A6.
+
+## SESSION 96 — 2026-07-24 (A6 exact T0 PASS)
+
+- [T0] At the manifest not-before, rechecked a clean worktree and zero
+  executable/verifier drift from deployed SHA `64df08e…`, then invoked the
+  manifest-declared T0 checkpoint exactly once.
+- [PASS] Exact window `[15:56:21.369231Z,15:56:51.369231Z)` contains one
+  complete 10/10/10 health sample and five passing market rows. Maximum
+  freshness was 34.176 seconds; schedule lag 0.291 seconds; window events zero.
+- [HASH] Report `7549fa06…`, interval `ee627f86…`, raw rows `bd84b70f…`;
+  boot/release/image/config/mapping and common soak hash remain exact.
+
+### [NEXT — CURRENT]
+
+Wait for A6 T+6 not-before `2026-07-24T21:56:21.369231Z`; generate the
+manifest-declared cumulative report once, preserving any NOT-CLOSED outcome.
