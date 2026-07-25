@@ -1260,3 +1260,19 @@ transport activity and an orderbook resnapshot:
   required-`python`, and diff gates passed. This is local qualification only;
   A7 requires a clean exact-SHA deploy, a new boot, and repeated successful
   quiet cycles before manifest binding.
+
+### §2.13 Evidence monitors must share the verifier's exact interval (2026-07-26)
+
+- A7's canonical scope is `[T0,T24)`. It passed with 2,880 health samples,
+  14,400 market samples, 288/288 promoter ticks, one mapping/config/boot, and
+  an independently reproduced raw-row hash.
+- A convenience monitor queried every row since T0 and saw a second mapping
+  after the formal boundary. Exact SQL placed the first different promoter
+  mapping at `T24+30s`; it was not part of the soak.
+- Operational monitors that judge an immutable interval must copy both bounds,
+  timestamp column, and inclusivity from the canonical verifier. A broader
+  live query may be useful for current health, but it cannot reject a sealed
+  historical interval.
+- Availability failures are separate from verdict failures. A timed-out
+  read that creates no O_EXCL report may be retried exactly; a persisted
+  canonical NOT-CLOSED artifact remains immutable.

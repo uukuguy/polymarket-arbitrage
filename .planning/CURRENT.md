@@ -1,6 +1,6 @@
 # 当前项目状态
 
-> 唯一当前状态入口。最后核验：2026-07-25（Phase 05.4 Plan 05 A7 T0 PASS，等待累计 T+6）。
+> 唯一当前状态入口。最后核验：2026-07-26（Phase 05.4 A7 strict 24h final PASS）。
 > `JOURNAL.md` 是追加式历史；其中旧 `[NEXT]` 均不代表当前任务。
 
 稳定的使用流程、健康语义和命令安全分级见
@@ -9,21 +9,15 @@
 ## 一句话结论
 
 这是一个 L1 快照新鲜、L2 durable chain 严格健康、L3 已在生产达到 5 市场/10 token
-并持续产生原始证据、paper 账本可用的研发系统。生产已从 Alembic 006 精确迁移到
-007；runtime 与 retention 使用两个隔离的最小权限 LOGIN。当前生产 L2 为 source
-`64df08e…` / release 70 / boot `cd04e515…`；A6 失败后它只保留诊断资格。旧 release-37
-窗口和 A1–A6 均为 diagnostic/rejected evidence，不能升级为 PASS。A5 的不可变
-manifest/T0 虽通过，但随后三个样本只取得 7/2/7 个 current-generation evidenced
-token，因此永久 NOT-CLOSED，四个后续 checkpoint 已取消且文件不存在。文本 `PING`
-修复部署后又暴露 promoter/WS sibling-task 启动竞态，release 68 同样永久拒绝。两项
-修复已随 exact SHA `64df08e…` 部署，release 70 readiness 通过，唯一 A6 已绑定
-未来 T0 `2026-07-24T15:56:21.369231Z`，其 exact T0 report 虽 PASS，但 seq 35
-随后只有 10/10/8，A6 已永久 NOT-CLOSED。非破坏式 missing-only quiet-refresh
-修复已随 exact SHA `6471d41…` 部署为 release 72；新 boot `9eeab4d5…`
-通过重复 quiet cycles、两轮 promoter 和 12 样本 readiness。唯一 A7 已绑定且
-exact T0 report PASS，下一边界为 T+6 `2026-07-24T22:43:01.704189Z`。机会 feed
-生产最近仍为 HTTP 503。因此**市场感知平台尚未完成严格 24 小时 soak，也不是完整 production-qualified；
-整套系统还不是可以投入真实资金运行的套利产品**。
+并完成连续 24 小时原始证据验证、paper 账本可用的研发系统。生产已从 Alembic 006
+精确迁移到 007；runtime 与 retention 使用两个隔离的最小权限 LOGIN。A1–A6 和旧
+release-37 均保留为 diagnostic/rejected evidence。最终 exact SHA `6471d41…`
+运行于 Fly release 72 / boot `9eeab4d5…`；A7 的 T0/T6/T12/T18/T24 五份累计报告
+全部 PASS。最终 `[T0,T24)` 有 2,880 个 health row、14,400 个 market row、
+288/288 promoter tick，minimum 5/10/10，最大 gap 38.653337 秒、最大 freshness
+111.039 秒；独立 verifier 重算出同一 raw/report hash。Phase 05.4 已完成。
+机会 feed 最近仍为 HTTP 503，H-009 与真实交易均未获授权；因此**M1 连续 L3
+证据已 production-qualified，但整套系统仍不是可以投入真实资金运行的套利产品**。
 
 ## 交付状态
 
@@ -31,7 +25,7 @@ exact T0 report PASS，下一边界为 T+6 `2026-07-24T22:43:01.704189Z`。机�
 |---|---|---|
 | 主分支 `main` | M2 Phase 2–9 已集成并部署 | 当前交付主线 |
 | M1 L1 Fly 服务 | 39 天 stale 根因已修复；snapshot 恢复到分钟级，Supabase pass | 可作为 M2 机会发现输入 |
-| M1 L2/L3 Fly 服务 | A1–A6 保留为拒绝证据；release 72/A7 identity、readiness 和 T0 已 PASS | 等待不可提前的 T+6/T+12/T+18/T+24 与 final verify |
+| M1 L2/L3 Fly 服务 | A1–A6 保留为拒绝证据；release 72/A7 strict 24h + final raw verify PASS | 可作为 Phase 05 Plan 06 closure 的严格证据输入 |
 | M2 paper execution/accounting | Phase 2–8、H-001～H-006 已通过本地质量门 | 可用于本地模拟、账本和恢复测试 |
 | M2 真实组合套利 | 本地已实现 known-universe quote complete-run collector/scanner；最近生产请求 HTTP 503 | 生产当前有条件/未 ready；H-009 仍 pending，需单独授权部署/调度和时间戳化只读容量观察 |
 | M3 | 未开始 | 不可用 |
@@ -86,42 +80,31 @@ realized PnL=5、最终 balance=1005。SQLite 状态和 structured receipt 均�
 
 按依赖顺序：
 
-1. Phase 05.4 Plan 05 的 migration 与隔离 credentials 已完成。A5、release 68 和
-   A6 均是永久拒绝证据。quiet-refresh repair 已随 exact SHA `6471d41…` 部署，
-   release72/A7 的 identity、readiness、binding 与 T0 已 PASS。只有 A7 的
-   T+6/T+12/T+18/T+24 与 final verifier 全部通过才闭环。
-   不能补写、覆盖或复用 A1–A6。
+1. Phase 05.4 已闭环：production 007、隔离 credentials、release72/A7 identity、
+   readiness、binding、五个 checkpoint 与 final verifier 全部 PASS。下一步把这组
+   更严格的连续证据映射到 legacy Phase 05 Plan 06，并完成 dashboard smoke 与
+   Phase 05 validation/summary。不能补写、覆盖或复用 A1–A6。
 2. H-009 本地实现保持 pending：先取得**生产部署/调度的单独授权**，再进行**时间戳化只读容量观察**；之后仍须积累重复 complete run、可解析 exit=0 契约和不可变证据，才可评估 producer cadence/SLA。没有这些证据，HTTP 503 绝不等于零机会。
 3. 实现经过明确授权的 Polymarket order/fill adapter、认证、allowance、限额与 kill switch。
 4. 通过 paper→小额 live 质量门后，才讨论真实资金运行。
 
 ## Workstream 摘要
 
-- **M1：生产 007；A1–A6 均不具备最终资格；release72/A7 T0 PASS，严格 24h 进行中。**
+- **M1：生产 007；A1–A6 均不具备最终资格；release72/A7 strict 24h 与 final verifier PASS。**
 - **M2：execution/accounting + neg-risk buy-all discovery 可用于真实数据监控/paper。**
 - **M3/M4：未开始。**
 - **M5：计划存在，但当前不应先于 M1 恢复。**
 
 ## 当前下一步
 
-A5 manifest
-`.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-MANIFEST-20260724T124329Z.json`
-及 T0 保留为 rejected diagnostic evidence；T6/T12/T18/T24 均已取消且不存在。
+Phase 05.4 的 selected A7 manifest 为
+`.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-MANIFEST-20260724T164301Z.json`。
+五个报告与 final raw verifier 已 PASS；A1–A6 继续保持不可变拒绝状态。
 
-文本 heartbeat 修复已随 exact SHA `9ce640e…` 部署为 release 68，但该 boot
-`e542fd4c…` 在 readiness 前永久失败：promoter run 0 比 WS generation 1 早约 1 秒
-启动，写入 `failed/generation_changed`，随后样本为 10/0/0。仅作用于 boot 首次
-promoter transaction 的 active-connection gate 已在 `a9301f4` TDD 完成；运行期
-generation change 仍严格失败。该 gate 随 exact SHA `64df08e…` 部署后，release 70
-boot readiness 通过：两个 promoter success、12 个完整样本/330 秒、gap 30.1 秒、
-disallowed 0。A6 manifest `05.4-SOAK-MANIFEST-20260724T155621Z.json` 已在 T0 前
-唯一绑定，T0 report hash `7549fa06…` 已 PASS；但 destructive quiet-refresh
-timeout 导致 generation churn 和 seq 35 失败，T+6 runner 已在边界前取消。
-非破坏式 retry 已随 clean exact SHA `6471d41…` 部署。release72 的新
-boot/readiness、重复 quiet-cycle、A7 唯一 binding 与 exact T0 report 均 PASS。
-下一步在 `2026-07-24T22:43:01.704189Z` 或之后生成一次累计 T+6；随后依次等待
-T+12/T+18/T+24 和 final verify。不执行
-retention cleanup、production chaos、H-009 或真实交易。
+下一步读取 legacy `05-ws-book-prices/05-06-PLAN.md`，将 Phase 05.4 的更严格连续
+证据映射到其 N=5 / book / OHLC / watchdog 条款，只补 dashboard smoke、validation、
+SUMMARY 与 Phase 05 状态收口。除非发现实际合同不一致，不重新跑 24 小时。
+不执行 retention cleanup、production chaos、H-009 或真实交易。
 
 ```bash
 /gsd-resume-work --ws m1-perception

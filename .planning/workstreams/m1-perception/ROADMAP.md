@@ -349,18 +349,19 @@ Plans:
 ### Phase 05.4: Continuous L3 soak evidence (INSERTED)
 
 **Goal:** Make the Phase 05 claim “five L3 markets remained healthy throughout 24 hours” mechanically provable using durable per-tick control outcomes, truthful WS membership, bounded-gap process/per-market samples, runtime events, and exact-window aggregate verdicts.
+**Status:** ✅ COMPLETE 2026-07-26 — A7 exact 24-hour window and five canonical checkpoints independently re-verified from raw rows
 **Requirements:** PHASE05.4-R01, PHASE05.4-R02, PHASE05.4-R03, PHASE05.4-R04, PHASE05.4-R05, PHASE05.4-R06, PHASE05.4-R07, PHASE05.4-R08
 **Depends on:** Completed Phase 05.3 and release-37 diagnostic evidence; blocks Phase 05 Plan 06 strict closure
 **Design:** `docs/superpowers/specs/2026-07-22-m1-continuous-l3-soak-evidence-design.md`
 **Implementation plan:** `docs/superpowers/plans/2026-07-22-m1-continuous-l3-soak-evidence.md`
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans executed
 
 Plans:
 - [x] 05.4-01-PLAN.md — Wave 1: Alembic 007 five-table evidence schema, typed boot/promoter records, append/query store, blocking local migration replay
 - [x] 05.4-02-PLAN.md — Wave 2 (depends 01): truthful desired/committed/evidenced WS membership, all-token barrier, terminal promoter transaction
 - [x] 05.4-03-PLAN.md — Wave 3 (depends 02): 30-second atomic process/five-market sampler, runtime events, four chain-truth health checks
 - [x] 05.4-04-PLAN.md — Wave 4 (depends 03): DB-bound manifest, raw-row exact-window verdict/CLI, four read-only Make targets, gated retention cleanup, local chaos, deploy/docs
-- [ ] 05.4-05-PLAN.md — Wave 5 (autonomous:false; depends 04): separate migration/deploy approvals, readiness/manifest, and distinct not-before T0/T6/T12/T18/T24 gates
+- [x] 05.4-05-PLAN.md — Wave 5: production 007 + isolated credentials + exact-SHA release 72 + immutable A7 T0/T6/T12/T18/T24 PASS and final raw-row verification
 
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 

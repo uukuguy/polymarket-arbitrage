@@ -2,30 +2,36 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
-current_phase: 05.4
-status: executing
-stopped_at: Phase 05.4 Plan 05 A7 T0 PASS; cumulative T+6 pending
-last_updated: "2026-07-24T16:44:00Z"
+current_phase: 05
+status: ready
+stopped_at: Phase 05.4 COMPLETE; Phase 05 Plan 06 reconciliation is next
+last_updated: "2026-07-25T23:35:16Z"
 progress:
   total_phases: 13
-  completed_phases: 11
+  completed_phases: 12
   total_plans: 71
-  completed_plans: 69
-  percent: 97
+  completed_plans: 70
+  percent: 99
 ---
 
 # M1 Perception — Current State
 
 ## Current Position
 
-Phase: 05.4 (continuous-l3-soak-evidence) — EXECUTING
-Plan: 5 of 5
+Phase: 05.4 (continuous-l3-soak-evidence) — COMPLETE
+Plan: 5 of 5 complete
 
-- **Phase:** 05.4 — Continuous L3 soak evidence
-- **Plan:** 05.4-05 active — Tasks 1–4 complete; Tasks 5–9 are the immutable
-  T+6/T+12/T+18/T+24 checkpoints and final mechanical verifier.
+- **Phase:** 05.4 — Continuous L3 soak evidence, completed 2026-07-26
+- **Plan:** 05.4-05 complete — all nine tasks and the final mechanical verifier passed.
 
-- **Status:** Production project `zoqsmjeejfkrokwttjbx` is Alembic 007.
+- **Final PASS:** A7 exact window
+  `[2026-07-24T16:43:01.704189Z,2026-07-25T16:43:01.704189Z)` contains one
+  boot, 2,880 passing health rows, 14,400 passing market rows, and 288/288
+  successful promoter ticks. All five immutable checkpoint reports share the
+  manifest/soak identity; the independent final re-query reproduced raw-row
+  hash `d4fc7567…` and report hash `dc2d4d7e…`.
+
+- **Historical execution notes:** Production project `zoqsmjeejfkrokwttjbx` is Alembic 007.
   Dedicated `polyarb_l2_runtime_054` and `polyarb_l3_retention_054` credentials
   pass disjoint least-privilege proofs; Fly contains only the runtime DSN and
   the owner/retention credentials remain absent. Current production is exact
@@ -212,24 +218,19 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- At/after each A7 manifest-computed boundary, retain exactly one cumulative
-  T+6, T+12, T+18, and T+24 report. Never synthesize cancelled A1–A6 reports.
-- After T+24 PASS, run `make l3-soak-verify` to re-query all raw rows and verify
-  the binding plus all five files/hashes before changing ROADMAP/phase status.
-- On final PASS only, sign validation rows 05.4-05-05 through 05.4-05-09,
-  update ROADMAP/STATE, create `05.4-05-SUMMARY.md` immediately after the
-  evidence commit, run planning-status, extract learnings, and ask adversarial
-  questions.
-
-- Keep H-009 pending until separately authorized production deployment/scheduling
-  and timestamped capacity evidence; Phase 05.1 completion does not promote it.
+- Reconcile the completed Phase 05.4 strict evidence into legacy Phase 05 Plan
+  06, including its dashboard smoke and final Phase 05 validation/closure.
+- Keep H-009 pending until separately authorized production
+  deployment/scheduling and timestamped capacity evidence.
+- Do not run retention cleanup, production chaos, or trading as part of Phase
+  05 closure.
 
 ## Required Reading
 
 1. `.planning/CURRENT.md` — cross-workstream operational truth.
 2. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-CONTEXT.md` — locked decisions.
-3. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-PLAN.md` — active production plan.
-4. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-MANIFEST-20260724T155621Z.json` — immutable rejected A6 contract.
+3. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-05-SUMMARY.md` — completed production qualification.
+4. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-MANIFEST-20260724T164301Z.json` — selected immutable A7 contract.
 5. `.planning/workstreams/m1-perception/phases/05.4-continuous-l3-soak-evidence/05.4-SOAK-LOG.md` — authoritative execution timeline.
 6. `.planning/threads/market-observation-architecture.md` §1.6 and §2.9–2.12 — chain-truth and observation cadence.
 
@@ -241,12 +242,12 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-25 00:44 (Asia/Shanghai)
-- **Stopped at:** release72 A7 exact T0 report PASS.
-- **Proceeding to:** immutable A7 T+6 at/after
-  `2026-07-24T22:43:01.704189Z`, then T+12/T+18/T+24 and final verify.
-- **Resume files:** `05.4-05-PLAN.md`,
-  `05.4-SOAK-MANIFEST-20260724T155621Z.json`, and `05.4-SOAK-LOG.md`.
+- **Last session:** 2026-07-26 07:35 (Asia/Shanghai)
+- **Stopped at:** Phase 05.4 A7 final PASS and planning closure.
+- **Proceeding to:** Phase 05 Plan 06 reconciliation and dashboard/Phase 05
+  closure, reusing—not re-running—the stricter continuous evidence.
+- **Resume files:** `05.4-05-SUMMARY.md`, `05.4-SOAK-LOG.md`, and
+  `../05-ws-book-prices/05-06-PLAN.md`.
 
 ## Accumulated Context
 

@@ -5086,3 +5086,33 @@ then require a new boot plus repeated successful quiet cycles before unique A7.
 
 At/after A7 T+6 `2026-07-24T22:43:01.704189Z`, create the manifest-declared
 cumulative report exactly once. Preserve any NOT-CLOSED outcome permanently.
+
+## SESSION 100 — 2026-07-26 (Phase 05.4 A7 final PASS)
+
+- [CHECKPOINTS] A7 T+6/T+12/T+18/T+24 all passed at their immutable
+  manifest-declared bounds. T24 contains 2,880 health rows, 14,400 market rows,
+  288/288 successful promoter ticks, one boot/mapping/config, minimum 5/10/10,
+  max gap 38.653337 seconds, max schedule lag 9.050592 seconds, and max
+  freshness 111.039 seconds.
+- [HASHES] T24 report `dc2d4d7e…`, raw-row set `d4fc7567…`; all five reports
+  share manifest `0f6e2ffe…` and soak `b4e00aeb…`.
+- [FINAL VERIFY] A fresh `make l3-soak-verify` reloaded all five artifacts and
+  independently re-queried PostgreSQL. It exited zero and reproduced the T24
+  canonical hashes.
+- [AVAILABILITY] T+12 and the first T+24 query hit the runtime role's two-minute
+  statement timeout before any report file was created. Exact retries after
+  cache warming passed; no evidence or production state was mutated.
+- [BOUNDARY] A monitor without `< T24` saw a post-window mapping change and
+  falsely classified A7 as invalid. Exact SQL proved the first different
+  promoter mapping occurred at `T24+30s`; `[T0,T24)` retained one mapping.
+- [CLOSURE] Signed Phase 05.4 validation, completed ROADMAP/STATE/CURRENT,
+  created `05.4-05-SUMMARY.md`, and added the end-exclusive interval lesson to
+  the learning doc and observation architecture thread.
+- [SCOPE] No retention cleanup, production chaos, H-009, or trading action ran.
+
+### [NEXT — CURRENT]
+
+Resume with `/gsd-resume-work --ws m1-perception`, then reconcile the stricter
+Phase 05.4 evidence into legacy Phase 05 Plan 06 and complete its dashboard /
+Phase 05 closure checks. Do not re-run the 24-hour clock unless that plan finds
+an actual contract mismatch.
