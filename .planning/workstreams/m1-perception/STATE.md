@@ -220,8 +220,10 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 - Reconcile the completed Phase 05.4 strict evidence into legacy Phase 05 Plan
   06, including its dashboard smoke and final Phase 05 validation/closure.
+
 - Keep H-009 pending until separately authorized production
   deployment/scheduling and timestamped capacity evidence.
+
 - Do not run retention cleanup, production chaos, or trading as part of Phase
   05 closure.
 
@@ -246,6 +248,7 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 - **Stopped at:** Phase 05.4 A7 final PASS and planning closure.
 - **Proceeding to:** Phase 05 Plan 06 reconciliation and dashboard/Phase 05
   closure, reusing—not re-running—the stricter continuous evidence.
+
 - **Resume files:** `05.4-05-SUMMARY.md`, `05.4-SOAK-LOG.md`, and
   `../05-ws-book-prices/05-06-PLAN.md`.
 
