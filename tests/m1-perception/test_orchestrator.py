@@ -1077,6 +1077,63 @@ async def test_missing_authoritative_event_member_blocks_publication(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_inactive_event_member_missing_from_active_stream_does_not_block_publication(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    all_markets = _load_gamma_fixture()[:2]
+    active_market = {
+        **all_markets[0],
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "negRiskMarketID": "group-neg-risk",
+    }
+    all_markets[0] = active_market
+    event = _standard_neg_risk_event(all_markets)
+    event["markets"][1]["active"] = False
+    fake_gamma = _make_fake_gamma([active_market], [event])
+    clob_data = _load_clob_fixture()
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed, failure_source, failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+        persisted_members = con.execute(
+            "SELECT market_id,member_kind,active,closed FROM event_market_memberships "
+            "WHERE snapshot_id=? ORDER BY market_id",
+            (result.snapshot_id,),
+        ).fetchall()
+
+    assert result.is_valid is True
+    assert coverage == (1, None, None)
+    assert persisted_members == [
+        (all_markets[0]["id"], "named", 1, 0),
+        (all_markets[1]["id"], "inactive-reserved", 0, 0),
+    ]
+    assert publish_mock.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_market_group_semantic_mismatch_blocks_publication(tmp_path: Path) -> None:
     settings = _make_settings(tmp_path)
     settings.event_bus_enabled = True

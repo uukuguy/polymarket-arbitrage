@@ -12,6 +12,7 @@ from polyarb.perception.market_truth import (
     EventMember,
     GroupTruth,
     SourceCoverage,
+    market_truth_mismatch_reason,
     membership_hash,
 )
 from polyarb.snapshot.normalizer import normalize_events
@@ -136,9 +137,7 @@ def test_standard_event_with_all_open_named_members_is_supported() -> None:
             neg_risk_type="standard",
             expected_member_count=2,
             active_named_count=2,
-            membership_hash=membership_hash(
-                "e-standard", "group-standard", members
-            ),
+            membership_hash=membership_hash("e-standard", "group-standard", members),
             quality="complete-supported",
             reason=None,
         )
@@ -326,8 +325,40 @@ def test_standard_group_hash_is_order_independent() -> None:
         EventMember("e1", "g1", "m1", "named", True, False),
         EventMember("e1", "g1", "m2", "named", True, False),
     ]
-    assert membership_hash("e1", "g1", left) == membership_hash(
-        "e1", "g1", list(reversed(left))
+    assert membership_hash("e1", "g1", left) == membership_hash("e1", "g1", list(reversed(left)))
+
+
+def test_publication_completeness_requires_only_active_open_event_members() -> None:
+    active = EventMember("e1", "g1", "m-active", "named", True, False)
+    inactive = EventMember("e1", "g1", "m-inactive", "inactive-reserved", False, False)
+    closed = EventMember("e1", "g1", "m-closed", "named", True, True)
+    truth = GroupTruth(
+        event_id="e1",
+        group_id="g1",
+        neg_risk_type="standard",
+        expected_member_count=3,
+        active_named_count=2,
+        membership_hash=membership_hash("e1", "g1", [active, inactive, closed]),
+        quality="complete-unsupported",
+        reason="standard-neg-risk-has-non-tradable-members",
+    )
+
+    assert (
+        market_truth_mismatch_reason(
+            [active, inactive, closed],
+            [truth],
+            [
+                {
+                    "market_id": "m-active",
+                    "event_id": "e1",
+                    "neg_risk_market_id": "g1",
+                    "neg_risk": True,
+                    "active": True,
+                    "closed": False,
+                }
+            ],
+        )
+        is None
     )
 
 

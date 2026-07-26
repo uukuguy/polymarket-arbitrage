@@ -232,20 +232,23 @@ def _reconcile_market_truth(
         group_ids.add(truth.group_id)
 
     seen_member_ids: set[str] = set()
+    required_member_ids: set[str] = set()
     for member in event_members:
         if member.market_id in seen_member_ids:
             return f"duplicate-member-identity:{member.market_id}"[:160]
         seen_member_ids.add(member.market_id)
         if (member.event_id, member.group_id) not in truth_keys:
             return f"member-without-group-truth:{member.market_id}"[:160]
-        mapped_event = market_to_event_map.get(member.market_id)
-        if mapped_event != member.event_id:
-            return (
-                f"event-member-identity-conflict:{member.market_id}:"
-                f"{member.event_id}!={mapped_event}"
-            )[:160]
+        if member.active and not member.closed:
+            required_member_ids.add(member.market_id)
+            mapped_event = market_to_event_map.get(member.market_id)
+            if mapped_event != member.event_id:
+                return (
+                    f"event-member-identity-conflict:{member.market_id}:"
+                    f"{member.event_id}!={mapped_event}"
+                )[:160]
 
-    missing_members = sorted(seen_member_ids - observed_market_ids)
+    missing_members = sorted(required_member_ids - observed_market_ids)
     if missing_members:
         return f"event-member-missing-market:{','.join(missing_members[:5])}"[:160]
 
@@ -370,7 +373,9 @@ async def run_snapshot(
         # below appends API_UNREACHABLE (chain-truth preserved).
         with _phase("2/7: Stream /markets — normalize + dedupe + filter"):
             first_frame_seen = False
-            authoritative_member_ids = {member.market_id for member in event_members}
+            authoritative_member_ids = {
+                member.market_id for member in event_members if member.active and not member.closed
+            }
             semantic_validator = MarketTruthSemanticValidator(
                 event_members,
                 group_truths,

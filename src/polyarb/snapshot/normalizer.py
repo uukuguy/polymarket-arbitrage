@@ -290,9 +290,7 @@ def normalize_events(
     for raw in raw_events:
         event_id = _strict_identity(raw.get("id"))
         if event_id is None:
-            logger.warning(
-                f"normalize_events: invalid 'id' (slug={raw.get('slug')}) — skipped"
-            )
+            logger.warning(f"normalize_events: invalid 'id' (slug={raw.get('slug')}) — skipped")
             continue
 
         # Validate structural equality before deduping pagination overlap.
@@ -397,9 +395,17 @@ def normalize_events(
                         membership_reason = INVALID_EVENT_MEMBER_REASON
                     continue
                 market_event_ids.setdefault(m_id_str, set()).add(event_id)
-                # Keep FIRST mapping if a market appears in multiple events
-                # (shouldn't normally happen, but be defensive).
-                if m_id_str not in market_to_event_map:
+                nested_active = m.get("active")
+                nested_closed = m.get("closed")
+                status_is_explicit = type(nested_active) is bool and type(nested_closed) is bool
+                belongs_in_active_stream = not status_is_explicit or (
+                    nested_active and not nested_closed
+                )
+                # /markets is active=true/closed=false. Preserve the legacy
+                # mapping for event payloads that omit nested status, but do
+                # not create a completeness obligation for explicitly
+                # inactive/closed structural members.
+                if belongs_in_active_stream and m_id_str not in market_to_event_map:
                     market_to_event_map[m_id_str] = event_id
 
                 if group_id is not None:
@@ -411,8 +417,7 @@ def normalize_events(
                     closed_raw = m.get("closed")
                     other_raw = m.get("negRiskOther")
                     if not all(
-                        type(value) is bool
-                        for value in (active_raw, closed_raw, other_raw)
+                        type(value) is bool for value in (active_raw, closed_raw, other_raw)
                     ):
                         membership_reason = INVALID_EVENT_MEMBER_REASON
                         continue
@@ -451,9 +456,7 @@ def normalize_events(
             )
 
     conflicting_market_ids = {
-        market_id
-        for market_id, event_ids in market_event_ids.items()
-        if len(event_ids) > 1
+        market_id for market_id, event_ids in market_event_ids.items() if len(event_ids) > 1
     }
     for (
         event_id,
@@ -494,8 +497,7 @@ def normalize_events(
                 neg_risk_type="augmented" if augmented else "standard",
                 expected_member_count=expected_member_count,
                 active_named_count=sum(
-                    member.member_kind == "named" and member.active
-                    for member in group_members
+                    member.member_kind == "named" and member.active for member in group_members
                 ),
                 membership_hash=membership_hash(event_id, group_id, group_members),
                 quality=quality,

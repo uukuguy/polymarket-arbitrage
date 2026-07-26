@@ -32,6 +32,7 @@ Empirical shapes (from fixtures/clob_sample.json, recorded T1 against live API):
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any, Literal
 
 from aiolimiter import AsyncLimiter
@@ -60,6 +61,30 @@ def _compact_level(level: Any) -> dict[str, Any]:
     }
 
 
+def _compact_best_level(levels: Any, *, ask: bool) -> list[dict[str, Any]]:
+    """Select the executable top level without trusting CLOB list order."""
+    if not isinstance(levels, (list, tuple)) or not levels:
+        return []
+
+    ranked: list[tuple[float, Any]] = []
+    for level in levels:
+        try:
+            price = float(_field(level, "price"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price):
+            ranked.append((price, level))
+
+    if not ranked:
+        # Preserve one malformed level so downstream validation records the
+        # external-input defect instead of silently treating the book as empty.
+        return [_compact_level(levels[0])]
+    _, best = (
+        min(ranked, key=lambda item: item[0]) if ask else max(ranked, key=lambda item: item[0])
+    )
+    return [_compact_level(best)]
+
+
 def _compact_book_top(book: Any) -> dict[str, Any]:
     """Drop full depth while retaining exactly what snapshot validation reads."""
     asks = _field(book, "asks")
@@ -67,8 +92,10 @@ def _compact_book_top(book: Any) -> dict[str, Any]:
     asset_id = _field(book, "asset_id") or _field(book, "market") or _field(book, "token_id")
     return {
         "asset_id": asset_id,
-        "asks": ([_compact_level(asks[0])] if isinstance(asks, (list, tuple)) and asks else []),
-        "bids": ([_compact_level(bids[0])] if isinstance(bids, (list, tuple)) and bids else []),
+        # Polymarket production books are commonly worst-first (asks
+        # descending, bids ascending). Rank prices before discarding depth.
+        "asks": _compact_best_level(asks, ask=True),
+        "bids": _compact_best_level(bids, ask=False),
     }
 
 
@@ -97,7 +124,7 @@ class ClobReaderClient:
 
         ``projection="full"`` returns raw ``OrderBookSummary`` objects.
         ``projection="top"`` projects every fetched/cache chunk immediately
-        to asset identity plus one ask and bid. This keeps snapshot RSS bounded
+        to asset identity plus the best ask and bid. This keeps snapshot RSS bounded
         when the verified universe contains tens of thousands of tokens.
 
         Empty input returns ``[]`` without making any network call.

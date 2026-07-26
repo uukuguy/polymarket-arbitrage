@@ -147,13 +147,14 @@ class MarketTruthSemanticValidator:
         event_members: Sequence[EventMember],
         group_truths: Sequence[GroupTruth],
     ) -> None:
-        self.member_ids = frozenset(member.market_id for member in event_members)
-        self._members_by_id = {
-            member.market_id: member for member in event_members
-        }
-        self._truth_keys = frozenset(
-            (truth.event_id, truth.group_id) for truth in group_truths
+        # Gamma's /markets active stream intentionally excludes inactive and
+        # closed nested event members. Keep those structural members in truth
+        # storage/hash, but do not require them in the published active view.
+        self.member_ids = frozenset(
+            member.market_id for member in event_members if member.active and not member.closed
         )
+        self._members_by_id = {member.market_id: member for member in event_members}
+        self._truth_keys = frozenset((truth.event_id, truth.group_id) for truth in group_truths)
 
     def row_mismatch_reason(self, row: Mapping[str, object]) -> str | None:
         """Return the first mismatch for one row without retaining that row."""
