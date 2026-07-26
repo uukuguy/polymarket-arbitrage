@@ -33,6 +33,7 @@ import pytest
 os.environ["POLYARB_ALLOW_EXTERNAL_PATHS"] = "1"
 
 from polyarb.config import Settings  # noqa: E402
+from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore  # noqa: E402
 from polyarb.snapshot.orchestrator import (  # noqa: E402
     _include_in_snapshot,
     run_snapshot,
@@ -1442,7 +1443,9 @@ async def test_incomplete_source_group_truth_blocks_publication(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_missing_authoritative_event_member_blocks_publication(tmp_path: Path) -> None:
+async def test_open_neg_risk_member_absent_from_keyset_quarantines_whole_group(
+    tmp_path: Path,
+) -> None:
     settings = _make_settings(tmp_path)
     settings.event_bus_enabled = True
     all_markets = _load_gamma_fixture()[:2]
@@ -1455,10 +1458,11 @@ async def test_missing_authoritative_event_member_blocks_publication(tmp_path: P
     }
     all_markets[0] = active_market
     observed_markets = [active_market]
+    event = _standard_neg_risk_event(all_markets)
     clob_data = _load_clob_fixture()
     fake_gamma = _make_fake_gamma(
         observed_markets,
-        [_standard_neg_risk_event(all_markets)],
+        [event],
     )
 
     with (
@@ -1484,13 +1488,54 @@ async def test_missing_authoritative_event_member_blocks_publication(tmp_path: P
             "FROM snapshot_source_coverage WHERE snapshot_id=?",
             (result.snapshot_id,),
         ).fetchone()
+        members = con.execute(
+            "SELECT market_id,active,closed FROM event_market_memberships "
+            "WHERE snapshot_id=? ORDER BY market_id",
+            (result.snapshot_id,),
+        ).fetchall()
+        truth = con.execute(
+            "SELECT quality,reason,length(membership_hash) FROM neg_risk_group_truth "
+            "WHERE snapshot_id=? AND neg_risk_market_id='group-neg-risk'",
+            (result.snapshot_id,),
+        ).fetchone()
+        layer1 = con.execute(
+            "SELECT category,detail FROM validation_issues "
+            "WHERE snapshot_id=? AND layer=1 ORDER BY id",
+            (result.snapshot_id,),
+        ).fetchall()
 
-    assert result.is_valid is False
-    assert coverage[:2] == (0, "events")
-    assert "missing-market" in coverage[2]
-    assert all_markets[1]["id"] in coverage[2]
-    assert len(coverage[2]) <= 200
-    assert publish_mock.await_count == 0
+    assert result.is_valid is True
+    assert coverage == (1, None, None)
+    assert members == sorted(
+        [(market["id"], 1, 0) for market in all_markets],
+        key=lambda row: row[0],
+    )
+    assert truth == (
+        "complete-unsupported",
+        "active-member-absent-from-market-keyset",
+        64,
+    )
+    assert layer1 == [
+        (
+            "api_jitter",
+            "Gamma active point market absent from active keyset quarantined: "
+            f"{all_markets[1]['id']}",
+        )
+    ]
+    universe = NegRiskQuoteStore(settings.db_path).latest_verified_universe()
+    assert universe.legs == ()
+    assert [
+        (rejection.group_id, rejection.quality, rejection.reason)
+        for rejection in universe.rejections
+    ] == [
+        (
+            "group-neg-risk",
+            "complete-unsupported",
+            "active-member-absent-from-market-keyset",
+        )
+    ]
+    assert fake_gamma.fetch_market_states.await_count == 2
+    assert publish_mock.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -1640,6 +1685,69 @@ async def test_ordinary_mapped_market_that_closes_during_snapshot_is_reconciled(
 
     assert result.is_valid is True
     assert coverage == (1, None, None)
+    assert fake_gamma.fetch_market_states.await_count == 2
+    assert publish_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_open_ordinary_market_absent_from_complete_keyset_is_quarantined(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    all_markets = _load_gamma_fixture()[:2]
+    observed_market = all_markets[0]
+    missing_market_id = all_markets[1]["id"]
+    fake_gamma = _make_fake_gamma(
+        [observed_market],
+        _events_for_markets(all_markets),
+    )
+    fake_gamma.fetch_market_states.side_effect = [
+        {missing_market_id: {"active": True, "closed": False}},
+        {missing_market_id: {"active": True, "closed": False}},
+    ]
+    clob_data = _load_clob_fixture()
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed,failure_source,failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+        persisted_ids = con.execute(
+            "SELECT market_id FROM markets WHERE snapshot_id=? ORDER BY market_id",
+            (result.snapshot_id,),
+        ).fetchall()
+        layer1 = con.execute(
+            "SELECT category,detail FROM validation_issues "
+            "WHERE snapshot_id=? AND layer=1 ORDER BY id",
+            (result.snapshot_id,),
+        ).fetchall()
+
+    assert result.is_valid is True
+    assert coverage == (1, None, None)
+    assert persisted_ids == [(observed_market["id"],)]
+    assert layer1 == [
+        (
+            "api_jitter",
+            f"Gamma active point market absent from active keyset quarantined: {missing_market_id}",
+        )
+    ]
     assert fake_gamma.fetch_market_states.await_count == 2
     assert publish_mock.await_count == 1
 

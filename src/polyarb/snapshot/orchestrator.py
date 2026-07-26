@@ -60,6 +60,7 @@ from polyarb.clients.gamma_client import GammaClient, PaginationCoverage
 from polyarb.config import Settings
 from polyarb.events.bus import publish_snapshot_complete
 from polyarb.perception.market_truth import (
+    ACTIVE_MEMBER_ABSENT_FROM_MARKET_KEYSET_REASON,
     EventMember,
     GroupTruth,
     MarketTruthSemanticValidator,
@@ -274,6 +275,47 @@ def _apply_point_member_states(
     return reconciled_members, reconciled_truths
 
 
+def _quarantine_open_keyset_absent_groups(
+    event_members: list[EventMember],
+    group_truths: list[GroupTruth],
+    trigger_market_ids: set[str],
+) -> tuple[list[GroupTruth], set[str]]:
+    """Reject complete groups whose point-open member is absent from the keyset.
+
+    Structural membership and its hash remain immutable evidence. The whole
+    affected group is removed from the market publication target and marked
+    complete-unsupported so M2 cannot construct a partial opportunity.
+    Ordinary event mappings have no GroupTruth and therefore return no group
+    market IDs; their missing row is already absent from the target.
+    """
+    rejected_keys = {
+        (member.event_id, member.group_id)
+        for member in event_members
+        if member.market_id in trigger_market_ids
+    }
+    if not rejected_keys:
+        return group_truths, set()
+
+    rejected_market_ids = {
+        member.market_id
+        for member in event_members
+        if (member.event_id, member.group_id) in rejected_keys
+    }
+    reconciled_truths = [
+        (
+            replace(
+                truth,
+                quality="complete-unsupported",
+                reason=ACTIVE_MEMBER_ABSENT_FROM_MARKET_KEYSET_REASON,
+            )
+            if (truth.event_id, truth.group_id) in rejected_keys
+            else truth
+        )
+        for truth in group_truths
+    ]
+    return reconciled_truths, rejected_market_ids
+
+
 def _reconcile_market_truth(
     *,
     observed_market_ids: set[str],
@@ -410,6 +452,7 @@ async def run_snapshot(
     pending_open_missing_member_ids: set[str] = set()
     verified_stale_orphan_ids: set[str] = set()
     source_group_less_neg_risk_ids: set[str] = set()
+    normalization_rejected_market_ids: set[str] = set()
     threshold = settings.liquidity_threshold_usd
     PROGRESS_EVERY = 5000  # log every N streamed markets so long fetches stay observable
 
@@ -514,8 +557,11 @@ async def run_snapshot(
                             if not first_frame_seen:
                                 first_frame_seen = True
                             raw_market_count += 1
+                            raw_market_id = raw.get("id")
                             normalized = normalize_market(raw, market_to_event_map)
                             if normalized is None:
+                                if type(raw_market_id) is str and raw_market_id.strip():
+                                    normalization_rejected_market_ids.add(raw_market_id.strip())
                                 continue
                             mid = normalized.get("market_id")
                             if mid is None:
@@ -941,8 +987,9 @@ async def run_snapshot(
     # Gamma event and market catalogues are sampled before a multi-minute CLOB
     # phase. A member can be open at the initial point lookup, close while CLOB
     # is running, and remain absent from the active market keyset. Recheck only
-    # that bounded unresolved set with a fresh, short-lived client. Any member
-    # still open, malformed response, or transport failure remains fail-closed.
+    # that bounded unresolved set with a fresh, short-lived client. A strictly
+    # verified point-open/keyset-absent row is quarantined as source-status
+    # inconsistency; malformed responses and transport failures remain fatal.
     if pending_open_missing_member_ids and reconciliation_reason is None:
         with _phase("5.5/7: Recheck pending event members"):
             final_lookup_reason: str | None = None
@@ -983,8 +1030,39 @@ async def run_snapshot(
                     )
                 still_open_ids = pending_open_missing_member_ids - final_non_open_ids
                 if still_open_ids:
-                    bounded_ids = ",".join(sorted(still_open_ids)[:5])
-                    final_lookup_reason = f"event-member-missing-market:{bounded_ids}"[:160]
+                    quarantinable_ids = still_open_ids - normalization_rejected_market_ids
+                    group_truths, rejected_group_market_ids = _quarantine_open_keyset_absent_groups(
+                        event_members,
+                        group_truths,
+                        quarantinable_ids,
+                    )
+                    if rejected_group_market_ids:
+                        target_markets = [
+                            market
+                            for market in target_markets
+                            if market.get("market_id") not in rejected_group_market_ids
+                        ]
+                    if quarantinable_ids:
+                        bounded_ids = ",".join(sorted(quarantinable_ids)[:10])
+                        remainder = len(quarantinable_ids) - min(len(quarantinable_ids), 10)
+                        suffix = f" (+{remainder} more)" if remainder else ""
+                        issues.append(
+                            Issue(
+                                layer=1,
+                                category=Category.API_JITTER,
+                                market_id=None,
+                                detail=(
+                                    "Gamma active point market absent from active keyset "
+                                    f"quarantined: {bounded_ids}{suffix}"
+                                )[:200],
+                            )
+                        )
+                    normalization_rejections = still_open_ids & normalization_rejected_market_ids
+                    if normalization_rejections:
+                        bounded_ids = ",".join(sorted(normalization_rejections)[:5])
+                        final_lookup_reason = (
+                            f"event-member-normalization-rejected:{bounded_ids}"
+                        )[:160]
 
             if final_lookup_reason is not None:
                 reconciliation_reason = final_lookup_reason

@@ -23,6 +23,7 @@ INVALID_EVENT_MEMBER_REASON = "event-membership-member-invalid"
 CONFLICTING_EVENT_MEMBERSHIP_REASON = "market-id-conflict-across-events"
 INVALID_NEG_RISK_FLAGS_REASON = "event-neg-risk-flags-invalid"
 NEG_RISK_ENABLEMENT_CONFLICT_REASON = "event-neg-risk-enablement-conflict"
+ACTIVE_MEMBER_ABSENT_FROM_MARKET_KEYSET_REASON = "active-member-absent-from-market-keyset"
 
 
 @dataclass(frozen=True)
@@ -148,10 +149,21 @@ class MarketTruthSemanticValidator:
         group_truths: Sequence[GroupTruth],
     ) -> None:
         # Gamma's /markets active stream intentionally excludes inactive and
-        # closed nested event members. Keep those structural members in truth
-        # storage/hash, but do not require them in the published active view.
+        # closed nested event members. A complete-unsupported group may also
+        # retain active structural members as immutable rejection evidence
+        # while the whole group is quarantined from the published market view.
+        # Only strategy-supported truth creates a publication obligation.
+        supported_truth_keys = frozenset(
+            (truth.event_id, truth.group_id)
+            for truth in group_truths
+            if truth.quality == "complete-supported"
+        )
         self.member_ids = frozenset(
-            member.market_id for member in event_members if member.active and not member.closed
+            member.market_id
+            for member in event_members
+            if member.active
+            and not member.closed
+            and (member.event_id, member.group_id) in supported_truth_keys
         )
         self._members_by_id = {member.market_id: member for member in event_members}
         self._truth_keys = frozenset((truth.event_id, truth.group_id) for truth in group_truths)

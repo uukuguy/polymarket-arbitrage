@@ -362,6 +362,22 @@ def test_publication_completeness_requires_only_active_open_event_members() -> N
     )
 
 
+def test_complete_unsupported_group_members_are_not_required_in_published_view() -> None:
+    member = EventMember("e1", "g1", "m-active", "named", True, False)
+    truth = GroupTruth(
+        event_id="e1",
+        group_id="g1",
+        neg_risk_type="standard",
+        expected_member_count=1,
+        active_named_count=1,
+        membership_hash=membership_hash("e1", "g1", [member]),
+        quality="complete-unsupported",
+        reason="active-member-absent-from-market-keyset",
+    )
+
+    assert market_truth_mismatch_reason([member], [truth], []) is None
+
+
 def test_truth_contracts_are_immutable() -> None:
     member = EventMember("e1", "g1", "m1", "named", True, False)
     with pytest.raises(FrozenInstanceError):
