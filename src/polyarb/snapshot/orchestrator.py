@@ -297,6 +297,7 @@ async def run_snapshot(
     issues: list[Issue] = []
     target_markets: list[dict] = []
     seen_ids: set[str] = set()
+    market_semantic_fingerprints: dict[str, tuple[object, ...]] = {}
     raw_market_count = 0
     normalized_count = 0
     dedup_count = 0
@@ -407,10 +408,26 @@ async def run_snapshot(
                                     semantic_validator.row_mismatch_reason(normalized)
                                 )
 
+                            semantic_fingerprint = (
+                                normalized.get("event_id"),
+                                normalized.get("neg_risk_market_id"),
+                                normalized.get("neg_risk"),
+                                normalized.get("active"),
+                                normalized.get("closed"),
+                            )
                             if mid in seen_ids:
+                                if (
+                                    market_semantic_reason is None
+                                    and market_semantic_fingerprints[mid]
+                                    != semantic_fingerprint
+                                ):
+                                    market_semantic_reason = (
+                                        f"duplicate-market-truth-conflict:{mid}"
+                                    )[:160]
                                 dedup_count += 1
                                 continue
                             seen_ids.add(mid)
+                            market_semantic_fingerprints[mid] = semantic_fingerprint
                             normalized_count += 1
 
                             # Mode filter (replaces the old phase-3 block).
