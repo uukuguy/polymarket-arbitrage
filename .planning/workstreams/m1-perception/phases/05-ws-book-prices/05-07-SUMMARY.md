@@ -20,6 +20,7 @@ tech-stack:
 key-files:
   created:
     - .planning/workstreams/m1-perception/phases/05-ws-book-prices/05-07-PLAN.md
+    - docs/learning/24-L3-连续性事务.md
   modified:
     - src/polyarb/daemon/ws_consumer.py
     - src/polyarb/observation/l3_evidence.py
@@ -64,6 +65,14 @@ promoter integration, deployment, and repaired-release evidence remain in progre
 - Added a chaos-chain regression proving a sample cannot persist a new mapping
   while only 9/10 target identities are evidenced.
 - Task 3 verification: 150 promoter/chaos/health/consumer tests passed; Ruff passed.
+- Full pytest exited 0 with the established one xfail and one skip. Changed
+  Python files pass Ruff, the M1 manual contract passes, and planning status
+  reports no drift.
+- Repository-wide Ruff still reports 36 inherited findings confined to
+  unrelated Alembic/legacy scripts/climb files; this is recorded as baseline
+  debt rather than falsely reported as green.
+- Merged the already-qualified resident two-minute Fly monitor and documented
+  the exact operator checks and failure meanings.
 
 ## RED Evidence
 
@@ -84,6 +93,10 @@ success regression showed the promoter never called either new transaction API.
 77 focused tests passed
 71 target transaction and sampler tests passed
 150 promoter, chaos-chain, health, and consumer tests passed
+Full pytest: exit 0 (one xfail, one skip)
+Changed-file Ruff: All checks passed
+M1 manual contract: OK
+Planning status: no drift
 Ruff: All checks passed
 ```
 

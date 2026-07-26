@@ -553,3 +553,32 @@ window.
 Verdict: **resident monitoring PASS.** The 24-hour interval is actively
 observed, not passively awaited. The exact T+24 database verdict remains
 time-gated until `2026-07-27T03:54:09.630Z`.
+
+### L3 continuity boundary repair — pre-deploy evidence
+
+The resident monitor exposed two short production failures on release
+`6471d415273748ce9480c9590d55ec09412db5c8`:
+
+- Promoter run 450 at `2026-07-26T06:03:31Z` rotated two token identities and
+  recorded success with only 8 evidenced tokens. Sample 4500 at `06:03:36Z`
+  persisted 10 desired / 10 committed / 9 evidenced and
+  `membership_convergence_failed`; sample 4501 at `06:04:02Z` recovered.
+- At `06:12:00Z`, only 2/5 persisted market rows remained below the strict
+  120-second freshness threshold. All 5/5 recovered at `06:13:02Z`.
+
+Telegram delivered both first-failure alerts and both recovery messages. The
+monitoring chain therefore worked; the old transition/refresh behavior did not
+meet continuous strict health.
+
+The isolated repair branch now has generation-scoped prepared target evidence,
+make-before-break atomic membership publication, exact promoter success only at
+10/10/10, a shared promoter/sampler transition lock, and captured-generation
+compensation on incomplete refresh. Full pytest exited 0 with the established
+one xfail and one skip. All Python files changed by Plans 05-06/05-07 pass
+Ruff, `make docs-m1-check` passes, and planning status has no drift. A
+repository-wide Ruff run still reports 36 inherited findings in unrelated
+Alembic/legacy scripts/climb files; none are in this change set.
+
+Production deployment and the repaired L3 T0 remain pending. The next deploy
+must target `polyarb-l2` only and prove that the L1 app identity plus quote run
+78 anchor are unchanged.

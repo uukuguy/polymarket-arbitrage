@@ -36,6 +36,7 @@
 | 21 | [L3 候选与双 Token](21-L3-候选与双Token.md) | observation seed vs promotion gate / L2 asset_id=Yes token / durable Yes+No identity / fail-closed 5→10 expansion / mutation-free dry-run |
 | 22 | [L3 连续浸泡证据](22-L3连续浸泡证据.md) | truthful membership / server append-only evidence / AcceptanceConfig / manifest+五报告+raw-row hashes / event-kind fail-closed / retention privilege boundary |
 | 23 | [生产机会流](23-生产机会流.md) | app 内 quote worker / 120-240-300 秒三层时钟 / durable success anchor / 503 为什么不是零机会 / 日常实战诊断 |
+| 24 | [L3 连续性事务](24-L3-连续性事务.md) | prepare evidence → atomic commit → strict sample / generation-scoped evidence / 10/10/10 成功门 / 超时补偿而非 grace period |
 
 ## Phase 02.1 教学增量（2026-05）
 

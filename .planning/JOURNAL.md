@@ -5281,3 +5281,40 @@ At/after `2026-07-27T03:54:09.630Z`, start with
 require every run complete and maximum gap `<=180s`, recheck resident state and
 immutable app identity, then create `05-06-SUMMARY.md`, sign Phase 05
 validation/ROADMAP/STATE, extract learnings, and run final verification.
+
+## SESSION 105 — 2026-07-26 (L3 continuity repair ready to deploy)
+
+- [ROOT CAUSE] Production run 450 published a rotated target before all ten
+  durable book identities converged; a separate quiet-refresh interval allowed
+  per-market evidence to cross 120 seconds without invalidating the socket.
+- [FIX] Book-evidence timeout now persists bounded failure truth and closes
+  only its captured generation. New L3 targets are generation-scoped,
+  evidence-complete before publication, and committed make-before-break in one
+  membership snapshot.
+- [ATOMICITY] Promoter success requires exact 5 markets / 10 tokens and
+  desired=committed=evidenced. Promoter publication and evidence sampling share
+  one transition lock, so no durable sample can observe an 8/10 or 9/10 new
+  mapping.
+- [FAIL-CLOSED] Mirror/control/ledger failures retain the previous durable
+  mapping. A post-commit ledger failure restores old reconnect intent,
+  compensates the current generation, and rolls back the mirror before the
+  sampler gate opens.
+- [MONITOR MERGE] Recovered and committed the already-tested resident
+  two-minute Fly monitor, Telegram dedup/recovery, and
+  `make polywatch-resident-status` work that had remained uncommitted in the
+  main worktree; merged it into the repair branch.
+- [QUALITY] Full pytest exited 0 with one xfail/one skip; all changed Python
+  files pass Ruff; M1 manual contract and planning status pass. Full-tree Ruff
+  still exposes 36 unrelated historical findings and is not misreported as
+  green.
+- [DOCS] Added `docs/learning/24-L3-连续性事务.md` and explicit manual meanings
+  for membership convergence and worst-market freshness failures.
+- [BOUNDARY] No production claim yet. The next mutation is an L2-only deploy;
+  L1 app/machine/image and quote run-78 interval must remain unchanged.
+
+### [NEXT — CURRENT]
+
+From the tested repair worktree, capture L1/L2 pre-deploy identities and the
+current quote anchor, deploy only `polyarb-l2`, verify the exact release and
+strict health, observe one promoter plus quiet-refresh boundary, then open a
+new immutable 24-hour L3 evidence interval without resetting L1.
