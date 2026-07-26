@@ -1,8 +1,9 @@
 """Async Polymarket Gamma metadata client.
 
 Pattern: long-lived ``httpx.AsyncClient`` + ``aiolimiter`` (token bucket) +
-``tenacity`` exponential backoff. Returns RAW dicts verbatim — normalization
-is owned by Plan 4 (orchestrator).
+``tenacity`` exponential backoff. Keyset pagination exposes an explicit
+completion result so callers cannot confuse a truncated fetch with complete
+market coverage.
 
 F-2 SECURITY:
 - ``follow_redirects=False`` is httpx's current default but pinned explicitly
@@ -10,7 +11,7 @@ F-2 SECURITY:
   Polymarket's CDN should never redirect us.
 - ``MAX_PAGES = 1000`` caps pagination at 100k markets (Polymarket has ~20k
   active markets); a buggy or hostile endpoint that returns full pages forever
-  will trigger a ``RuntimeError`` instead of OOMing.
+  will trigger a ``PaginationIntegrityError`` instead of OOMing.
 
 F-6 SECURITY (NON-RETRY POLICY):
 - ``json.JSONDecodeError`` raised at the httpx boundary is intentionally
@@ -34,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -54,6 +56,26 @@ class _NonRetryableHTTPError(Exception):
     The original ``httpx.HTTPStatusError`` is preserved on ``__cause__`` so
     callers can inspect ``.response.status_code`` after unwrapping.
     """
+
+
+@dataclass(frozen=True)
+class PaginationResult:
+    items_yielded: int
+    pages_fetched: int
+    completed: bool
+    final_cursor: str | None
+
+
+@dataclass
+class PaginationCoverage:
+    source: str
+    result: PaginationResult = field(
+        default_factory=lambda: PaginationResult(0, 0, False, None)
+    )
+
+
+class PaginationIntegrityError(RuntimeError):
+    """Raised when Gamma cannot prove that keyset pagination completed."""
 
 
 class GammaClient:
@@ -182,15 +204,16 @@ class GammaClient:
     # TODO(02-09 follow-up): once orchestrator confirmed stable on streaming,
     # remove fetch_all_active_markets (events stays a list — Decision A).
 
-    async def iter_active_markets(self) -> AsyncIterator[dict]:
-        """Stream ``/markets`` one stripped dict at a time. Memory invariant:
-        paginator internal state is bounded by one Gamma page (~100 dicts) plus
-        running counters — no accumulator."""
-        async for raw in self._paginate(
-            path="/markets",
+    async def iter_active_markets(
+        self, coverage: PaginationCoverage
+    ) -> AsyncIterator[dict]:
+        """Stream active markets and record whether keyset traversal completed."""
+        async for raw in self._paginate_keyset(
+            path="/markets/keyset",
+            array_key="markets",
             params={"active": "true", "closed": "false", "archived": "false"},
-            label="markets",
             keep_fields=self._MARKET_KEEP,
+            coverage=coverage,
         ):
             yield raw
 
@@ -200,16 +223,19 @@ class GammaClient:
         DEPRECATED for hot paths — prefer ``iter_active_markets`` to avoid the
         full in-memory list. Retained for tests and one-off scripts.
         """
-        return [m async for m in self.iter_active_markets()]
+        coverage = PaginationCoverage(source="markets")
+        return [m async for m in self.iter_active_markets(coverage)]
 
-    async def iter_active_events(self) -> AsyncIterator[dict]:
-        """Stream ``/events`` one stripped dict at a time. Markets nested-list
-        trimming is done eagerly here (per-event, not at end of stream)."""
-        async for raw in self._paginate(
-            path="/events",
+    async def iter_active_events(
+        self, coverage: PaginationCoverage
+    ) -> AsyncIterator[dict]:
+        """Stream active events and record whether keyset traversal completed."""
+        async for raw in self._paginate_keyset(
+            path="/events/keyset",
+            array_key="events",
             params={"active": "true", "closed": "false"},
-            label="events",
             keep_fields=self._EVENT_KEEP,
+            coverage=coverage,
         ):
             markets = raw.get("markets")
             if isinstance(markets, list):
@@ -223,86 +249,63 @@ class GammaClient:
         ``normalize_events`` builds a map the markets pass depends on. This
         wrapper preserves the existing orchestrator call site.
         """
-        return [e async for e in self.iter_active_events()]
+        coverage = PaginationCoverage(source="events")
+        return [e async for e in self.iter_active_events(coverage)]
 
-    async def _paginate(
+    async def _paginate_keyset(
         self,
         *,
         path: str,
-        params: dict,
-        label: str,
-        keep_fields: frozenset[str] | None = None,
+        array_key: str,
+        params: dict[str, str],
+        keep_fields: frozenset[str],
+        coverage: PaginationCoverage,
     ) -> AsyncIterator[dict]:
-        """Paginate ``path`` and YIELD individual dicts one at a time.
-
-        Memory-bounded: internal state is one page of ~100 dicts plus running
-        counters. No accumulator. Caller is responsible for buffering if a list
-        is needed.
-
-        Yields each filtered dict (with ``_page_fetched_at_ms`` stamped). Honors
-        ``MAX_PAGES``, 422-offset-cap graceful stop, and all retry semantics
-        from ``_get``.
-        """
-        offset = 0
-        pages_fetched = 0
-        items_yielded = 0
-        PROGRESS_EVERY = 50
-
-        logger.info(f"Gamma: starting streaming fetch of {label} (page_limit={self.PAGE_LIMIT})")
-
+        """Stream a Gamma keyset while maintaining explicit completion proof."""
+        cursor: str | None = None
+        seen: set[str] = set()
+        items = pages = 0
+        progress_every = 50
+        logger.info(
+            f"Gamma: starting streaming fetch of {coverage.source} "
+            f"(page_limit={self.PAGE_LIMIT})"
+        )
         while True:
-            page_params = {**params, "limit": self.PAGE_LIMIT, "offset": offset}
-            try:
-                page = await self._get(path, page_params)
-            except _NonRetryableHTTPError as exc:
-                # Polymarket 422 at offset>10000 (2026-05 cap). Stop cleanly
-                # instead of failing the entire snapshot.
-                if "422" in str(exc) and items_yielded > 0:
-                    logger.warning(
-                        f"Gamma {label}: 422 at offset={offset}, "
-                        f"stopping at {items_yielded} items yielded so far"
-                    )
-                    return
-                raise
-            if not isinstance(page, list):
-                raise RuntimeError(f"Gamma {path} returned {type(page).__name__}, expected list")
-
-            # Phase 02 Plan 01: stamp per-page fetch time on each raw dict.
+            request_params = {**params, "limit": str(self.PAGE_LIMIT)}
+            if cursor is not None:
+                request_params["after_cursor"] = cursor
+            payload = await self._get(path, request_params)
+            if not isinstance(payload, dict) or not isinstance(payload.get(array_key), list):
+                raise PaginationIntegrityError(f"{path} keyset response has invalid shape")
+            pages += 1
             page_fetched_at_ms = int(time.time() * 1000)
-            page_size = len(page)
-            for raw in page:
+            for raw in payload[array_key]:
                 if not isinstance(raw, dict):
                     continue
                 raw["_page_fetched_at_ms"] = page_fetched_at_ms
-                if keep_fields is not None:
-                    raw = {k: v for k, v in raw.items() if k in keep_fields}
-                yield raw
-                items_yielded += 1
-
-            pages_fetched += 1
-
-            # Yield to event loop every page so uvicorn and health checks can run.
+                projected = {key: value for key, value in raw.items() if key in keep_fields}
+                if projected.get("active") is True and projected.get("closed") is not True:
+                    items += 1
+                    yield projected
             await asyncio.sleep(0)
-
-            if pages_fetched == 1 or pages_fetched % PROGRESS_EVERY == 0:
+            if pages == 1 or pages % progress_every == 0:
                 logger.info(
-                    f"Gamma: {label} page {pages_fetched} fetched ({items_yielded} {label} so far)"
+                    f"Gamma: {coverage.source} page {pages} fetched "
+                    f"({items} {coverage.source} so far)"
                 )
-
-            # Short-page terminate check uses the raw response length, not
-            # `items_yielded` (page_size includes non-dict entries that get
-            # filtered above; pagination contract is length-based).
-            if page_size < self.PAGE_LIMIT:
-                break
-
-            if pages_fetched >= self.MAX_PAGES:
-                raise RuntimeError(
-                    f"Gamma {label} pagination exceeded {self.MAX_PAGES} pages "
-                    f"— possible runaway response"
+            next_cursor = payload.get("next_cursor")
+            if next_cursor in (None, ""):
+                coverage.result = PaginationResult(items, pages, True, None)
+                logger.info(
+                    f"Gamma streamed {items} active {coverage.source} "
+                    f"in {pages} pages (final)"
                 )
-
-            offset += self.PAGE_LIMIT
-
-        logger.info(
-            f"Gamma streamed {items_yielded} active {label} in {pages_fetched} pages (final)"
-        )
+                return
+            if not isinstance(next_cursor, str) or next_cursor in seen:
+                coverage.result = PaginationResult(items, pages, False, cursor)
+                raise PaginationIntegrityError(f"{path} repeated cursor")
+            seen.add(next_cursor)
+            cursor = next_cursor
+            if pages >= self.MAX_PAGES:
+                coverage.result = PaginationResult(items, pages, False, cursor)
+                raise PaginationIntegrityError(f"{path} exceeded {self.MAX_PAGES} pages")
