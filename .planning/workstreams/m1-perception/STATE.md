@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Plan 05-07 release 75 is live; corrected continuity T0 passed; automated T6/T12/T18/T24 collection is active
-last_updated: "2026-07-26T09:00:00Z"
+stopped_at: Release 75 continuity attempt rejected after three post-T0 subscription_control_failed events; duplicate depth replay is not idempotent
+last_updated: "2026-07-26T10:45:31Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -36,17 +36,27 @@ Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in p
   `d029c2ea-e357-4ce2-8f7c-6c4e11867254`, and digest
   `sha256:f0d39892207577bb024995d76e91f5c0b8c0a88fd8e2839e182d25125da16ad5`.
   Two real promoter ticks and a quiet refresh passed 10/10/10 on generation 1.
-- **Selected continuity attempt:** corrected manifest `3ad69a90…` is bound to
-  `[2026-07-26T08:51:13.206077Z,2026-07-27T08:51:13.206077Z)`. T0 is PASS
-  with five market rows, exact 10/10/10 membership, maximum freshness
-  36.893 seconds, and no runtime event.
-- **Checkpoint automation:** a user-domain macOS `launchd` job evaluates the
-  immutable manifest every five minutes and creates/commits only due PASS
-  reports. Boundaries are T+6 `14:51:13Z`, T+12 `20:51:13Z`, T+18
-  `02:51:13Z`, and T+24 `08:51:13Z`. Fly's resident two-minute watcher remains
-  the independent live detector and Telegram alert path. The installed job
-  passed repository/Fly/health/Keychain/upstream-auth preflight, exited 0, and
-  proved the T6 not-before guard without creating a file.
+- **Rejected continuity attempt:** manifest `3ad69a90…` remains immutably bound
+  to `[2026-07-26T08:51:13.206077Z,2026-07-27T08:51:13.206077Z)`, but its
+  first disallowed `subscription_control_failed` event occurred at
+  `09:28:32.793437Z`; two more occurred at `09:51:14.697072Z` and
+  `10:36:26.013847Z`. Its canonical T0 PASS remains true boundary evidence,
+  but this 24-hour attempt can no longer produce a strict PASS.
+- **Production condition:** release 75 is currently serving usable data and
+  recovers after each event. Since T0, 215/215 health samples and 1,075/1,075
+  market samples pass, membership stayed at least 10/10/10, and the largest
+  observed sample gap was 60.948 seconds. Current resident-monitor state is
+  empty and repeated exact probes are green.
+- **Root cause:** a quiet-refresh initial dump can replay a book with the same
+  venue timestamp. `l2_book_levels` correctly rejects the duplicate unique key,
+  but `push_book_levels` treats that durable replay as a failed write.
+  `record_book_evidence` consequently ignores the frame, the barrier times out,
+  and retrying obtains a later timestamp and recovers. This idempotency gap must
+  be repaired and deployed before binding a new continuity manifest.
+- **Checkpoint automation:** the macOS `launchd` job still evaluates the
+  immutable rejected manifest every five minutes. It must not be interpreted as
+  an active PASS candidate; after the idempotency repair, closure requires a
+  new release, boot, manifest, and T0.
 
 - **Implemented:** canonical production Dashboard URL, four-surface Polywatch
   monitoring, repaired R2 bucket configuration, and the M1 continuous-operation
@@ -297,8 +307,16 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Remaining Work
 
-- Reconcile the completed Phase 05.4 strict evidence into legacy Phase 05 Plan
-  06, including its dashboard smoke and final Phase 05 validation/closure.
+- Make exact `l2_book_levels` replay idempotent without hiding conflicting
+  payloads, add regression coverage, deploy a new L2 release, and bind a new
+  immutable 24-hour continuity attempt.
+
+- Persist Polywatch's last alert reason/timestamp so a Telegram
+  `unhealthy → recovered` pair remains diagnosable after Fly's short log
+  retention window.
+
+- Reconcile strict evidence into legacy Phase 05 Plan 06 only after the new
+  attempt and the independent quote continuity gate pass.
 
 - Phase 05.5/H-009 is complete; use its production feed only as
   known-universe gross-before-fees discovery input.
@@ -323,13 +341,15 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-26 09:34 (Asia/Shanghai)
-- **Stopped at:** Phase 05.5 release 131 and production opportunity-feed PASS.
-- **Proceeding to:** Phase 05 Plan 06 reconciliation and dashboard/Phase 05
-  closure, reusing—not re-running—the stricter continuous evidence.
+- **Last session:** 2026-07-26 18:45 (Asia/Shanghai)
+- **Stopped at:** release-75 alert/recovery diagnosis; the selected 24-hour
+  attempt is permanently rejected although current L2 health has recovered.
+- **Proceeding to:** TDD repair for replay-idempotent book-level persistence,
+  followed by an L2-only deploy and a fresh immutable continuity attempt.
 
-- **Resume files:** `05.4-05-SUMMARY.md`, `05.4-SOAK-LOG.md`, and
-  `../05-ws-book-prices/05-06-PLAN.md`.
+- **Resume files:** `05.4-SOAK-LOG.md`,
+  `src/polyarb/storage/l2_supabase_mirror.py`, and
+  `tests/m1-perception/test_l2_supabase_mirror_book_levels.py`.
 
 ## Accumulated Context
 

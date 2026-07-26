@@ -5385,3 +5385,36 @@ The scheduler creates T+6/T+12/T+18/T+24 reports at their immutable
 not-before boundaries and runs final verification at/after
 `2026-07-27T08:51:13.206077Z`. Do not restart L2, alter the manifest, or sign
 Plan 05 closure before the final verifier and the independent quote T+24 gate.
+
+## SESSION 108 — 2026-07-26 (Telegram alert/recovery diagnosed; attempt rejected)
+
+- [CURRENT HEALTH] Release 75 is not continuously down. The resident watcher
+  state is empty, its recent two-minute ticks are green, and 24 exact dry probes
+  over about two minutes all returned no L2 notification. A current
+  `WAITING_FOR_EVENT` warning with WS age zero is an intentional no-alert state.
+- [DURABLE EVIDENCE] Since T0, 215/215 health samples and 1,075/1,075 market
+  samples pass; desired/committed/evidenced membership stayed at least
+  10/10/10 and maximum health-sample gap was 60.948 seconds.
+- [REAL FAULT] Runtime evidence contains disallowed
+  `subscription_control_failed / evidence_timeout` events at
+  `09:28:32.793437Z`, `09:51:14.697072Z`, and `10:36:26.013847Z`. The last
+  missed two of ten quiet-refresh identities, then the retry recovered them.
+- [ROOT CAUSE] Fly logs show PostgreSQL `23505` on
+  `uq_l2_book_levels_asset_ts_side_level`. A quiet-refresh initial dump can
+  replay a depth snapshot already durably stored with the same venue timestamp;
+  plain insert reports failure, so the evidence chain discards a durable replay
+  and times out until a later-timestamp retry arrives.
+- [VERDICT] The bound release-75 interval is permanently NOT-CLOSED under its
+  zero-disallowed-event contract. T0 remains valid evidence, but waiting longer
+  cannot rehabilitate this attempt. The service is usable now; continuous
+  qualification is not.
+- [OBSERVABILITY GAP] The exact reason line of the user's older Telegram
+  messages is no longer reconstructible from the watcher state or retained Fly
+  logs. The watcher stores only `active_keys`, not the alert reason/timestamp.
+
+### [NEXT — CURRENT]
+
+Start with `/gsd-resume-work --ws m1-perception`; implement and test
+replay-idempotent `l2_book_levels` persistence while preserving fail-closed
+behavior for conflicting payloads. Then deploy only L2 and create a fresh boot,
+manifest, and 24-hour T0. Also persist Polywatch alert reason/timestamp.

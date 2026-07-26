@@ -1302,3 +1302,20 @@ transport activity and an orderbook resnapshot:
   exact source but left `/health.releaseId=dev`; release 131 now injects the
   workflow `GITHUB_SHA`, so the public health body can be matched to the
   deployed commit without relying only on external release history.
+
+### §2.15 Durable replay must count as evidence, not failure (2026-07-26)
+
+- A WebSocket initial dump is at-least-once input. Quiet refresh can replay the
+  same asset, venue timestamp, side, and level after that row is already
+  durable.
+- A uniqueness violation is therefore ambiguous: an exact same-key/same-value
+  replay is successful idempotence, while a same-key/different-value row is a
+  data-integrity conflict. Treating both as generic write failure converts
+  durable truth into a false missing-evidence timeout.
+- The evidence acknowledgement must describe the postcondition—this exact
+  observation is durably present—not merely whether the current INSERT created
+  a new row. Replay equivalence must be proven before advancing the chain-truth
+  anchor; conflicts remain fail-closed and observable.
+- Alert/recovery state also needs durable reason context. Persisting only an
+  active component key supports deduplication but cannot explain a recovered
+  incident after short runtime logs expire.
