@@ -529,6 +529,88 @@ def test_normalize_events_dedupe_event_id_across_batch() -> None:
     assert len(events) == 1
 
 
+def _structural_neg_risk_event() -> dict:
+    event = make_event(0, n_markets=0)
+    event.update(
+        {
+            "negRisk": True,
+            "enableNegRisk": True,
+            "negRiskAugmented": False,
+            "negRiskMarketID": "group-0",
+            "markets": [
+                {
+                    "id": "market-a",
+                    "active": True,
+                    "closed": False,
+                    "negRiskOther": False,
+                },
+                {
+                    "id": "market-b",
+                    "active": True,
+                    "closed": False,
+                    "negRiskOther": False,
+                },
+            ],
+        }
+    )
+    return event
+
+
+def test_normalize_events_dedupes_reordered_structural_members() -> None:
+    first = _structural_neg_risk_event()
+    reordered = {
+        **first,
+        "markets": list(reversed(first["markets"])),
+    }
+
+    events, _, _, members, groups = normalize_events([first, reordered])
+
+    assert len(events) == 1
+    assert len(members) == 2
+    assert len(groups) == 1
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "group-id",
+        "membership-add",
+        "membership-remove",
+        "member-active",
+        "member-closed",
+        "augmented",
+    ],
+)
+def test_normalize_events_rejects_structural_duplicate_drift(drift: str) -> None:
+    first = _structural_neg_risk_event()
+    second = {
+        **first,
+        "markets": [dict(member) for member in first["markets"]],
+    }
+    if drift == "group-id":
+        second["negRiskMarketID"] = "group-conflict"
+    elif drift == "membership-add":
+        second["markets"].append(
+            {
+                "id": "market-c",
+                "active": True,
+                "closed": False,
+                "negRiskOther": False,
+            }
+        )
+    elif drift == "membership-remove":
+        second["markets"].pop()
+    elif drift == "member-active":
+        second["markets"][0]["active"] = False
+    elif drift == "member-closed":
+        second["markets"][0]["closed"] = True
+    elif drift == "augmented":
+        second["negRiskAugmented"] = True
+
+    with pytest.raises(RuntimeError, match="duplicate-event-truth-conflict"):
+        normalize_events([first, second])
+
+
 def test_normalize_events_slug_fallback_to_id() -> None:
     """If event has no slug, use id (defensive — schema requires NOT NULL slug)."""
     raw = make_event(0)

@@ -1122,6 +1122,61 @@ async def test_market_group_semantic_mismatch_blocks_publication(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_duplicate_event_truth_drift_marks_event_coverage_incomplete(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    market = {
+        **_load_gamma_fixture()[0],
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "negRiskMarketID": "group-neg-risk",
+    }
+    first_event = _standard_neg_risk_event([market])
+    conflicting_event = {
+        **first_event,
+        "negRiskMarketID": "group-conflict",
+    }
+    fake_gamma = _make_fake_gamma(
+        [market],
+        [first_event, conflicting_event],
+    )
+    clob_data = _load_clob_fixture()
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM markets").fetchone() == (0,)
+        coverage = con.execute(
+            "SELECT completed, failure_source, failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+
+    assert result.is_valid is False
+    assert coverage[:2] == (0, "events")
+    assert "duplicate-event-truth-conflict" in coverage[2]
+    assert len(coverage[2]) <= 200
+    assert publish_mock.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_market_side_neg_risk_group_without_truth_blocks_publication(
     tmp_path: Path,
 ) -> None:

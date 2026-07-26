@@ -467,7 +467,11 @@ async def run_snapshot(
         f"{len(target_markets)} target after mode-filter (mode={mode})"
     )
     reconciliation_reason: str | None = None
-    if events_coverage.result.completed and markets_coverage.result.completed:
+    if (
+        events_coverage.result.completed
+        and markets_coverage.result.completed
+        and event_failure_reason is None
+    ):
         reconciliation_reason = _reconcile_market_truth(
             observed_market_ids=seen_ids,
             semantic_reason=market_semantic_reason,
@@ -645,6 +649,7 @@ async def run_snapshot(
         source_complete = (
             events_coverage.result.completed and markets_coverage.result.completed
             and reconciliation_reason is None
+            and event_failure_reason is None
         )
         publish_markets = source_complete and is_valid and not any(
             issue.category == Category.API_UNREACHABLE for issue in issues
@@ -701,7 +706,7 @@ async def run_snapshot(
                 events_coverage.result.items_yielded,
                 reconciliation_reason,
             )
-        elif not events_coverage.result.completed:
+        elif event_failure_reason is not None or not events_coverage.result.completed:
             source_coverage = SourceCoverage.incomplete(
                 "events",
                 markets_coverage.result.items_yielded,

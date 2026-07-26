@@ -30,6 +30,7 @@ Output contract (markets):
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -83,6 +84,57 @@ def _strict_identity(raw: Any) -> str | None:
         return None
     value = raw.strip()
     return value or None
+
+
+class EventTruthConflictError(RuntimeError):
+    """Raised when duplicate event IDs disagree on authoritative structure."""
+
+    def __init__(self, event_id: str) -> None:
+        super().__init__(f"duplicate-event-truth-conflict:{event_id}"[:200])
+
+
+def _typed_fingerprint_value(raw: object) -> tuple[str, str]:
+    """Preserve scalar type and value without retaining the source object."""
+    return type(raw).__name__, repr(raw)
+
+
+def _event_structural_fingerprint(raw: dict) -> str:
+    """Return order-independent event truth without retaining the raw payload."""
+    markets = raw.get("markets")
+    member_fingerprints: list[tuple[tuple[str, str], ...]] = []
+    if isinstance(markets, list):
+        for member in markets:
+            if not isinstance(member, dict):
+                member_fingerprints.append(
+                    (
+                        ("invalid-member", type(member).__name__),
+                        _typed_fingerprint_value(member),
+                    )
+                )
+                continue
+            member_fingerprints.append(
+                (
+                    _typed_fingerprint_value(member.get("id")),
+                    _typed_fingerprint_value(member.get("active")),
+                    _typed_fingerprint_value(member.get("closed")),
+                    _typed_fingerprint_value(member.get("negRiskOther")),
+                )
+            )
+    canonical_members = tuple(sorted(member_fingerprints))
+    canonical = (
+        _typed_fingerprint_value(raw.get("negRisk")),
+        _typed_fingerprint_value(raw.get("enableNegRisk")),
+        _typed_fingerprint_value(raw.get("negRiskAugmented")),
+        _typed_fingerprint_value(raw.get("negRiskMarketID")),
+        _typed_fingerprint_value(raw.get("active")),
+        _typed_fingerprint_value(raw.get("closed")),
+        ("markets-container", "list")
+        if isinstance(markets, list)
+        else _typed_fingerprint_value(markets),
+        canonical_members,
+    )
+    encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def _parse_end_time_ms(raw: Any) -> int | None:
@@ -233,7 +285,7 @@ def normalize_events(
         ]
     ] = []
     market_event_ids: dict[str, set[str]] = {}
-    seen_event_ids: set[str] = set()
+    event_fingerprints: dict[str, str] = {}
 
     for raw in raw_events:
         event_id = _strict_identity(raw.get("id"))
@@ -243,13 +295,14 @@ def normalize_events(
             )
             continue
 
-        # Dedupe by event_id — Gamma /events can return duplicates across pagination
-        # boundaries (similar to /markets ~4% dup rate observed in Phase 1).
-        # Without this, the events table PK (id, snapshot_id) rejects the insert
-        # and rolls back the whole snapshot.
-        if event_id in seen_event_ids:
+        # Validate structural equality before deduping pagination overlap.
+        # Member order is non-semantic; identity/state drift is authoritative.
+        fingerprint = _event_structural_fingerprint(raw)
+        if event_id in event_fingerprints:
+            if event_fingerprints[event_id] != fingerprint:
+                raise EventTruthConflictError(event_id)
             continue
-        seen_event_ids.add(event_id)
+        event_fingerprints[event_id] = fingerprint
 
         # Slug is required by the schema (NOT NULL); fall back to event_id if absent
         # (defensive — real events always have a slug).
