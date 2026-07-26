@@ -465,7 +465,7 @@ async def test_iter_active_markets_paginate_is_async_gen() -> None:
 
 
 async def test_iter_active_events_trims_nested_markets() -> None:
-    """iter_active_events yields events whose `markets` is trimmed to `[{"id": ...}]`."""
+    """Event projection preserves membership truth fields and strips unrelated data."""
     settings = _fast_settings()
     raw_events = [
         {
@@ -474,8 +474,21 @@ async def test_iter_active_events_trims_nested_markets() -> None:
             "title": f"Event {i}",
             "active": True,
             "closed": False,
+            "negRisk": True,
+            "enableNegRisk": True,
+            "negRiskAugmented": False,
+            "negRiskMarketID": f"group-{i}",
             "markets": [
-                {"id": str(540000 + i * 10 + k), "extra": "junk", "more": [1, 2]} for k in range(3)
+                {
+                    "id": str(540000 + i * 10 + k),
+                    "active": True,
+                    "closed": False,
+                    "negRiskOther": False,
+                    "groupItemTitle": f"Candidate {k}",
+                    "extra": "junk",
+                    "more": [1, 2],
+                }
+                for k in range(3)
             ],
         }
         for i in range(5)
@@ -496,9 +509,19 @@ async def test_iter_active_events_trims_nested_markets() -> None:
 
     assert len(collected) == 5
     for ev in collected:
+        assert ev["negRisk"] is True
+        assert ev["enableNegRisk"] is True
+        assert ev["negRiskAugmented"] is False
+        assert ev["negRiskMarketID"].startswith("group-")
         assert isinstance(ev["markets"], list)
         for m in ev["markets"]:
-            assert set(m.keys()) == {"id"}, f"nested markets not trimmed: {m}"
+            assert set(m.keys()) == {
+                "id",
+                "active",
+                "closed",
+                "negRiskOther",
+                "groupItemTitle",
+            }, f"nested markets not trimmed: {m}"
     assert coverage.result == PaginationResult(5, 1, True, None)
 
 

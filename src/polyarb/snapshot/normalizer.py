@@ -36,6 +36,12 @@ from typing import Any
 
 from loguru import logger
 
+from polyarb.perception.market_truth import (
+    EventMember,
+    GroupTruth,
+    membership_hash,
+)
+
 
 def _parse_json_list(raw: Any) -> list[Any]:
     """Best-effort decode of a JSON-string-encoded list. Empty list on any failure."""
@@ -165,7 +171,13 @@ def normalize_market(raw: dict, market_to_event_map: dict[str, str] | None = Non
 
 def normalize_events(
     raw_events: list[dict],
-) -> tuple[list[dict], list[dict], dict[str, str]]:
+) -> tuple[
+    list[dict],
+    list[dict],
+    dict[str, str],
+    list[EventMember],
+    list[GroupTruth],
+]:
     """Normalize Gamma /events raw response into storage rows + market→event map.
 
     Phase 1.1 Amendment 01.
@@ -178,6 +190,9 @@ def normalize_events(
         market_to_event_map: dict[market_id → event_id]. Used by normalize_market
             to populate the markets.event_id FK column. A market that appears
             multiple times across events keeps the FIRST event_id seen.
+        event_members: immutable structural members for neg-risk events.
+        group_truths: immutable completeness/support classification per neg-risk
+            group.
 
     Events with no ``id`` are skipped (unrecoverable — events PK requires it).
     Events whose ``markets`` list is missing/non-list contribute no map entries.
@@ -186,6 +201,8 @@ def normalize_events(
     events_rows: list[dict] = []
     event_tags_rows: list[dict] = []
     market_to_event_map: dict[str, str] = {}
+    event_members: list[EventMember] = []
+    group_truths: list[GroupTruth] = []
     seen_event_ids: set[str] = set()
 
     for raw in raw_events:
@@ -262,6 +279,10 @@ def normalize_events(
 
         # ── nested markets → market→event reverse lookup ──────────────────────
         markets = raw.get("markets")
+        group_id_raw = raw.get("negRiskMarketID")
+        is_neg_risk_group = bool(raw.get("negRisk")) and group_id_raw not in (None, "")
+        group_id = str(group_id_raw) if is_neg_risk_group else None
+        group_members: list[EventMember] = []
         if isinstance(markets, list):
             for m in markets:
                 if not isinstance(m, dict):
@@ -274,6 +295,58 @@ def normalize_events(
                 # (shouldn't normally happen, but be defensive).
                 if m_id_str not in market_to_event_map:
                     market_to_event_map[m_id_str] = event_id
+
+                if group_id is not None:
+                    active = bool(m.get("active", False))
+                    closed = bool(m.get("closed", False))
+                    if bool(m.get("negRiskOther", False)):
+                        member_kind = "other"
+                    elif not active:
+                        member_kind = "inactive-reserved"
+                    else:
+                        member_kind = "named"
+                    group_members.append(
+                        EventMember(
+                            event_id=event_id,
+                            group_id=group_id,
+                            market_id=m_id_str,
+                            member_kind=member_kind,
+                            active=active,
+                            closed=closed,
+                        )
+                    )
+
+        if group_id is not None and group_members:
+            event_members.extend(group_members)
+            augmented = bool(raw.get("negRiskAugmented", False))
+            supported = not augmented and all(
+                member.member_kind == "named" and member.active and not member.closed
+                for member in group_members
+            )
+            if augmented:
+                quality = "complete-unsupported"
+                reason = "augmented-neg-risk-not-supported"
+            elif supported:
+                quality = "complete-supported"
+                reason = None
+            else:
+                quality = "complete-unsupported"
+                reason = "standard-neg-risk-has-non-tradable-members"
+            group_truths.append(
+                GroupTruth(
+                    event_id=event_id,
+                    group_id=group_id,
+                    neg_risk_type="augmented" if augmented else "standard",
+                    expected_member_count=len(group_members),
+                    active_named_count=sum(
+                        member.member_kind == "named" and member.active
+                        for member in group_members
+                    ),
+                    membership_hash=membership_hash(event_id, group_id, group_members),
+                    quality=quality,
+                    reason=reason,
+                )
+            )
 
     # Dedupe event_tags within a single batch on (event_id, tag_id) — duplicate
     # tag_ids on one event can occur if the API returns the same tag twice
@@ -289,4 +362,10 @@ def normalize_events(
         seen.add(key)
         deduped_tags.append(et)
 
-    return events_rows, deduped_tags, market_to_event_map
+    return (
+        events_rows,
+        deduped_tags,
+        market_to_event_map,
+        event_members,
+        group_truths,
+    )

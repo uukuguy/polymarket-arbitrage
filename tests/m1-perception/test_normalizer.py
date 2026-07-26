@@ -302,11 +302,13 @@ def make_event(idx: int, n_markets: int = 2, n_tags: int = 3) -> dict:
 def test_normalize_events_happy_path() -> None:
     """3 events × 2 markets × 3 tags → 3 events_rows + 9 event_tags + 6-entry map."""
     raw_events = [make_event(i) for i in range(3)]
-    events, event_tags, m2e = normalize_events(raw_events)
+    events, event_tags, m2e, members, groups = normalize_events(raw_events)
 
     assert len(events) == 3
     assert len(event_tags) == 9  # 3 events × 3 tags each
     assert len(m2e) == 6  # 3 events × 2 markets each
+    assert members == []
+    assert groups == []
 
     # Spot-check event row shape
     ev = events[0]
@@ -339,19 +341,21 @@ def test_normalize_events_missing_id_skipped() -> None:
         make_event(1),
         {"slug": "no-id-key"},
     ]
-    events, event_tags, m2e = normalize_events(raw_events)
+    events, event_tags, m2e, members, groups = normalize_events(raw_events)
     assert len(events) == 1
     assert events[0]["id"] == "16001"
     # 3 tags from the one good event + 2 markets in map
     assert len(event_tags) == 3
     assert len(m2e) == 2
+    assert members == []
+    assert groups == []
 
 
 def test_normalize_events_no_tags_array() -> None:
     """Event with missing/non-list tags → no event_tags rows but event still recorded."""
     raw = make_event(0)
     raw["tags"] = None
-    events, event_tags, _ = normalize_events([raw])
+    events, event_tags, _, _, _ = normalize_events([raw])
     assert len(events) == 1
     assert len(event_tags) == 0
 
@@ -366,7 +370,7 @@ def test_normalize_events_skips_incomplete_tags() -> None:
         {"id": "4", "label": "Y", "slug": ""},  # incomplete (empty slug)
         "not-a-dict",  # garbage
     ]
-    _, event_tags, _ = normalize_events([raw])
+    _, event_tags, _, _, _ = normalize_events([raw])
     assert len(event_tags) == 1
     assert event_tags[0]["tag_id"] == "1"
 
@@ -375,9 +379,11 @@ def test_normalize_events_no_markets_array() -> None:
     """Event with missing markets array → no map entries, but event recorded."""
     raw = make_event(0)
     raw["markets"] = None
-    events, _, m2e = normalize_events([raw])
+    events, _, m2e, members, groups = normalize_events([raw])
     assert len(events) == 1
     assert len(m2e) == 0
+    assert members == []
+    assert groups == []
 
 
 def test_normalize_events_dedupe_tag_within_event() -> None:
@@ -387,7 +393,7 @@ def test_normalize_events_dedupe_tag_within_event() -> None:
         {"id": "120", "label": "Finance", "slug": "finance"},
         {"id": "120", "label": "Finance", "slug": "finance"},  # duplicate
     ]
-    _, event_tags, _ = normalize_events([raw])
+    _, event_tags, _, _, _ = normalize_events([raw])
     assert len(event_tags) == 1
 
 
@@ -401,16 +407,18 @@ def test_normalize_events_first_event_wins_for_market() -> None:
     raw1["id"] = "EV-B"
     raw1["markets"] = [{"id": "M-shared"}]
 
-    _, _, m2e = normalize_events([raw0, raw1])
+    _, _, m2e, _, _ = normalize_events([raw0, raw1])
     assert m2e["M-shared"] == "EV-A"
 
 
 def test_normalize_events_empty_input() -> None:
     """Empty input → all empty outputs."""
-    events, event_tags, m2e = normalize_events([])
+    events, event_tags, m2e, members, groups = normalize_events([])
     assert events == []
     assert event_tags == []
     assert m2e == {}
+    assert members == []
+    assert groups == []
 
 
 def test_normalize_events_dedupe_event_id_across_batch() -> None:
@@ -418,7 +426,7 @@ def test_normalize_events_dedupe_event_id_across_batch() -> None:
     against Gamma /events pagination duplicates, parallel to /markets ~4% dups).
     """
     raw_events = [make_event(0), make_event(0)]  # same id twice
-    events, _, _ = normalize_events(raw_events)
+    events, _, _, _, _ = normalize_events(raw_events)
     assert len(events) == 1
 
 
@@ -426,7 +434,7 @@ def test_normalize_events_slug_fallback_to_id() -> None:
     """If event has no slug, use id (defensive — schema requires NOT NULL slug)."""
     raw = make_event(0)
     raw["slug"] = None
-    events, _, _ = normalize_events([raw])
+    events, _, _, _, _ = normalize_events([raw])
     assert len(events) == 1
     assert events[0]["slug"] == "16000"
 
@@ -438,7 +446,7 @@ def test_normalize_events_liquidity_fallback() -> None:
     raw["liquidityNum"] = 9999.9
     raw["volume"] = None
     raw["volumeNum"] = 8888.8
-    events, _, _ = normalize_events([raw])
+    events, _, _, _, _ = normalize_events([raw])
     assert events[0]["liquidity_usd"] == 9999.9
     assert events[0]["volume_usd"] == 8888.8
 

@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+from dataclasses import FrozenInstanceError
+
+import pytest
+
+from polyarb.perception.market_truth import (
+    EventMember,
+    GroupTruth,
+    SourceCoverage,
+    membership_hash,
+)
+from polyarb.snapshot.normalizer import normalize_events
+
+
+def _michigan_event() -> dict:
+    active = [
+        {
+            "id": str(969760 + i),
+            "groupItemTitle": title,
+            "active": True,
+            "closed": False,
+            "negRiskOther": False,
+        }
+        for i, title in enumerate(
+            [
+                "Kent Benham",
+                "Fred Heurtebise",
+                "Mike Rogers",
+                "Genevieve Scott",
+                "Bernadette Smith",
+                "Andrew Kamal",
+            ]
+        )
+    ]
+    other = [
+        {
+            "id": "969766",
+            "groupItemTitle": "Other",
+            "active": False,
+            "closed": False,
+            "negRiskOther": True,
+        }
+    ]
+    reserved = [
+        {
+            "id": str(969767 + i),
+            "groupItemTitle": f"Candidate {chr(65 + i)}",
+            "active": False,
+            "closed": False,
+            "negRiskOther": False,
+        }
+        for i in range(26)
+    ]
+    return {
+        "id": "111080",
+        "slug": "michigan-republican-senate-primary-winner-954",
+        "title": "Michigan Republican Senate Primary Winner",
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "enableNegRisk": True,
+        "negRiskAugmented": True,
+        "negRiskMarketID": "group-mi",
+        "markets": active + other + reserved,
+        "tags": [],
+    }
+
+
+def _standard_event() -> dict:
+    return {
+        "id": "e-standard",
+        "slug": "standard-winner",
+        "title": "Standard Winner",
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "enableNegRisk": True,
+        "negRiskAugmented": False,
+        "negRiskMarketID": "group-standard",
+        "markets": [
+            {
+                "id": "market-a",
+                "groupItemTitle": "Candidate A",
+                "active": True,
+                "closed": False,
+                "negRiskOther": False,
+            },
+            {
+                "id": "market-b",
+                "groupItemTitle": "Candidate B",
+                "active": True,
+                "closed": False,
+                "negRiskOther": False,
+            },
+        ],
+        "tags": [],
+    }
+
+
+def test_augmented_event_is_complete_but_unsupported() -> None:
+    _, _, _, members, groups = normalize_events([_michigan_event()])
+    assert len(members) == 33
+    assert members[6].member_kind == "other"
+    assert all(member.member_kind == "inactive-reserved" for member in members[7:])
+    assert groups == [
+        GroupTruth(
+            event_id="111080",
+            group_id="group-mi",
+            neg_risk_type="augmented",
+            expected_member_count=33,
+            active_named_count=6,
+            membership_hash=membership_hash("111080", "group-mi", members),
+            quality="complete-unsupported",
+            reason="augmented-neg-risk-not-supported",
+        )
+    ]
+
+
+def test_standard_event_with_all_open_named_members_is_supported() -> None:
+    _, _, _, members, groups = normalize_events([_standard_event()])
+    assert members == [
+        EventMember("e-standard", "group-standard", "market-a", "named", True, False),
+        EventMember("e-standard", "group-standard", "market-b", "named", True, False),
+    ]
+    assert groups == [
+        GroupTruth(
+            event_id="e-standard",
+            group_id="group-standard",
+            neg_risk_type="standard",
+            expected_member_count=2,
+            active_named_count=2,
+            membership_hash=membership_hash(
+                "e-standard", "group-standard", members
+            ),
+            quality="complete-supported",
+            reason=None,
+        )
+    ]
+
+
+def test_closed_active_member_remains_named_but_blocks_standard_support() -> None:
+    event = _standard_event()
+    event["markets"][0]["closed"] = True
+    _, _, _, members, groups = normalize_events([event])
+    assert members[0].member_kind == "named"
+    assert groups[0].active_named_count == 2
+    assert groups[0].quality == "complete-unsupported"
+
+
+def test_standard_group_hash_is_order_independent() -> None:
+    left = [
+        EventMember("e1", "g1", "m1", "named", True, False),
+        EventMember("e1", "g1", "m2", "named", True, False),
+    ]
+    assert membership_hash("e1", "g1", left) == membership_hash(
+        "e1", "g1", list(reversed(left))
+    )
+
+
+def test_truth_contracts_are_immutable() -> None:
+    member = EventMember("e1", "g1", "m1", "named", True, False)
+    with pytest.raises(FrozenInstanceError):
+        member.active = False  # type: ignore[misc]
+
+
+def test_source_coverage_factories_build_consistent_states() -> None:
+    assert SourceCoverage.complete(10, 3) == SourceCoverage(
+        completed=True,
+        market_items=10,
+        event_items=3,
+        failure_source=None,
+        failure_reason=None,
+    )
+    assert SourceCoverage.incomplete("markets", 2, 100, "  http-422  ") == SourceCoverage(
+        completed=False,
+        market_items=2,
+        event_items=100,
+        failure_source="markets",
+        failure_reason="http-422",
+    )
+
+
+def test_source_coverage_rejects_invalid_counts() -> None:
+    for value in (True, 1.5, "1"):
+        with pytest.raises(TypeError):
+            SourceCoverage.complete(value, 0)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        SourceCoverage.complete(-1, 0)
+
+
+def test_source_coverage_rejects_inconsistent_direct_states() -> None:
+    with pytest.raises(ValueError):
+        SourceCoverage(True, 1, 1, "markets", "unexpected failure")
+    with pytest.raises(ValueError):
+        SourceCoverage(False, 1, 1, None, None)
+    with pytest.raises(ValueError):
+        SourceCoverage(False, 1, 1, "events", "   ")
+    with pytest.raises(ValueError):
+        SourceCoverage(False, 1, 1, "clob", "failed")  # type: ignore[arg-type]
+
+
+def test_source_coverage_caps_failure_reason_at_200_characters() -> None:
+    coverage = SourceCoverage.incomplete("events", 1, 2, f"  {'x' * 250}  ")
+    assert coverage.failure_reason == "x" * 200

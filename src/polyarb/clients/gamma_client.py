@@ -186,6 +186,10 @@ class GammaClient:
             "ticker",
             "active",
             "closed",
+            "negRisk",
+            "enableNegRisk",
+            "negRiskAugmented",
+            "negRiskMarketID",
             "liquidity",
             "liquidityNum",
             "volume",
@@ -239,7 +243,17 @@ class GammaClient:
         ):
             markets = raw.get("markets")
             if isinstance(markets, list):
-                raw["markets"] = [{"id": m.get("id")} for m in markets if isinstance(m, dict)]
+                raw["markets"] = [
+                    {
+                        "id": market.get("id"),
+                        "active": market.get("active"),
+                        "closed": market.get("closed"),
+                        "negRiskOther": market.get("negRiskOther"),
+                        "groupItemTitle": market.get("groupItemTitle"),
+                    }
+                    for market in markets
+                    if isinstance(market, dict)
+                ]
             yield raw
 
     async def fetch_all_active_events(self) -> list[dict]:

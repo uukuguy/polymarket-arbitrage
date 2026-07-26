@@ -263,7 +263,13 @@ async def run_snapshot(
                     event async for event in gamma.iter_active_events(events_coverage)
                 ]
                 logger.info(f"Gamma: fetched {len(raw_events)} active events")
-                event_rows, event_tag_rows, market_to_event_map = normalize_events(raw_events)
+                (
+                    event_rows,
+                    event_tag_rows,
+                    market_to_event_map,
+                    event_members,
+                    group_truths,
+                ) = normalize_events(raw_events)
                 del raw_events  # free 10k+ raw Gamma event dicts immediately
                 logger.info(
                     f"Events normalized: {len(event_rows)} events, "
