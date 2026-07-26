@@ -13,6 +13,8 @@ FAILURE_THRESHOLD 3 → 5 to absorb DNS jitter via tenacity retry):
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -60,6 +62,135 @@ class _FakeResult:
 
     def __init__(self, status: SnapshotStatus) -> None:
         self.status = status
+
+
+class _FakeProcess:
+    def __init__(
+        self,
+        payload: object,
+        *,
+        returncode: int,
+        block: bool = False,
+    ) -> None:
+        self.stdout = (
+            payload
+            if isinstance(payload, bytes)
+            else json.dumps(payload).encode()
+        )
+        self.returncode = returncode
+        self.block = block
+        self.terminated = False
+        self.killed = False
+
+    async def communicate(self):
+        if self.block and not self.killed:
+            await asyncio.Event().wait()
+        return self.stdout, b"bounded stderr"
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "is_valid", "returncode"),
+    (
+        ("ok", True, 0),
+        ("degraded", True, 0),
+        ("failed", False, 1),
+    ),
+)
+async def test_snapshot_pipeline_runs_in_isolated_subprocess(
+    status: str,
+    is_valid: bool,
+    returncode: int,
+) -> None:
+    from polyarb.daemon.scheduler import run_snapshot_in_subprocess
+
+    process = _FakeProcess(
+        {
+            "status": status,
+            "is_valid": is_valid,
+            "snapshot_id": 746,
+            "market_count": 81959,
+            "issue_count": 3,
+        },
+        returncode=returncode,
+    )
+    calls = []
+
+    async def spawn(*args, **kwargs):
+        calls.append((args, kwargs))
+        return process
+
+    result = await run_snapshot_in_subprocess(spawn=spawn)
+
+    assert result.status == SnapshotStatus(status)
+    assert result.snapshot_id == 746
+    assert result.market_count == 81959
+    assert result.issue_count == 3
+    args, kwargs = calls[0]
+    assert args[1:] == (
+        "-m",
+        "polyarb.snapshot",
+        "snapshot",
+        "--json",
+    )
+    assert kwargs["stdout"] == asyncio.subprocess.PIPE
+    assert kwargs["stderr"] == asyncio.subprocess.PIPE
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_rejects_mismatched_exit_contract() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return _FakeProcess(
+            {
+                "status": "ok",
+                "is_valid": True,
+                "snapshot_id": 746,
+                "market_count": 81959,
+                "issue_count": 3,
+            },
+            returncode=1,
+        )
+
+    with pytest.raises(
+        SnapshotSubprocessError,
+        match="snapshot-subprocess-invalid-json",
+    ):
+        await run_snapshot_in_subprocess(spawn=spawn)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_cancellation_terminates_then_kills() -> None:
+    from polyarb.daemon.scheduler import run_snapshot_in_subprocess
+
+    process = _FakeProcess({}, returncode=0, block=True)
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    task = asyncio.create_task(
+        run_snapshot_in_subprocess(
+            spawn=spawn,
+            terminate_timeout_s=0.01,
+        )
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.terminated is True
+    assert process.killed is True
 
 
 # ---------------------------------------------------------------------------

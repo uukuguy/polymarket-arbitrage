@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from loguru import logger
 
-from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.config import Settings
-from polyarb.routing.neg_risk_quote_collector import (
-    QuoteCollectionResult,
-    collect_neg_risk_quotes,
-)
+from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
 from polyarb.routing.neg_risk_quote_store import (
     CompleteQuoteProjection,
     NegRiskQuoteStore,
@@ -57,6 +55,13 @@ class QuoteWorkerSnapshot:
 class CertifiedQuoteFeed:
     projection: CompleteQuoteProjection
     opportunity_scan: OpportunityScanResult | None
+
+
+class QuoteCollectionSubprocessError(RuntimeError):
+    """The isolated quote collector did not return one valid complete result."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"quote-collection-subprocess-{reason}")
 
 
 class QuoteWorkerRuntime:
@@ -174,6 +179,119 @@ async def certify_latest_quote_projection(
     return projection
 
 
+def _required_json_int(payload: object, key: str) -> int:
+    if not isinstance(payload, dict):
+        raise QuoteCollectionSubprocessError("invalid-json")
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise QuoteCollectionSubprocessError("invalid-json")
+    return value
+
+
+async def collect_quotes_in_subprocess(
+    settings: Settings,
+    *,
+    spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (
+        asyncio.create_subprocess_exec
+    ),
+    terminate_timeout_s: float = 3.0,
+) -> QuoteCollectionResult:
+    """Run all SDK fetch/decode/SQLite collection work outside the HTTP process."""
+    process = await spawn(
+        sys.executable,
+        "-m",
+        "polyarb.cli_arbitrage",
+        "collect-neg-risk-quotes",
+        "--db-path",
+        str(settings.db_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    started = time.perf_counter()
+    logger.info(
+        "isolated quote collection started "
+        f"pid={getattr(process, 'pid', None)}"
+    )
+    try:
+        stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(
+                process.communicate(),
+                timeout=terminate_timeout_s,
+            )
+        except TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.communicate()
+        raise
+
+    if process.returncode != 0:
+        logger.warning(
+            "isolated quote collection failed "
+            f"returncode={process.returncode} "
+            f"stderr_bytes={len(stderr)}"
+        )
+        raise QuoteCollectionSubprocessError("failed")
+    try:
+        payload = json.loads(stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise QuoteCollectionSubprocessError("invalid-json") from error
+    if not isinstance(payload, dict) or payload.get("status") != "complete":
+        raise QuoteCollectionSubprocessError("invalid-json")
+    universe_hash = payload.get("universe_hash")
+    if not isinstance(universe_hash, str) or len(universe_hash) != 64:
+        raise QuoteCollectionSubprocessError("invalid-json")
+    result = QuoteCollectionResult(
+        run_id=_required_json_int(payload, "run_id"),
+        status="complete",
+        universe_snapshot_id=_required_json_int(
+            payload,
+            "universe_snapshot_id",
+        ),
+        requested_token_count=_required_json_int(
+            payload,
+            "requested_token_count",
+        ),
+        successful_response_count=_required_json_int(
+            payload,
+            "successful_response_count",
+        ),
+        quote_taken_at_ms=_required_json_int(
+            payload,
+            "quote_taken_at_ms",
+        ),
+        elapsed_ms=_required_json_int(payload, "elapsed_ms"),
+        universe_hash=universe_hash,
+    )
+    if (
+        result.run_id <= 0
+        or result.universe_snapshot_id <= 0
+        or result.requested_token_count < 0
+        or result.successful_response_count < 0
+        or result.successful_response_count > result.requested_token_count
+        or result.quote_taken_at_ms < 0
+        or result.elapsed_ms < 0
+    ):
+        raise QuoteCollectionSubprocessError("invalid-json")
+    logger.info(
+        "isolated quote collection complete "
+        f"pid={getattr(process, 'pid', None)} "
+        f"process_elapsed_ms={int((time.perf_counter() - started) * 1000)} "
+        f"run_id={result.run_id} "
+        f"collection_elapsed_ms={result.elapsed_ms} "
+        f"responses={result.successful_response_count}/"
+        f"{result.requested_token_count}"
+    )
+    return result
+
+
 class QuoteWorker:
     """Run one collection at a time and retry ordinary failures next interval."""
 
@@ -269,13 +387,9 @@ def build_production_quote_worker(settings: Settings) -> QuoteWorker | None:
     if not settings.neg_risk_quote_worker_enabled:
         return None
     quote_store = NegRiskQuoteStore(settings.db_path)
-    reader = ClobReaderClient(settings)
 
     async def collect_once() -> QuoteCollectionResult:
-        return await collect_neg_risk_quotes(
-            quote_store=quote_store,
-            reader=reader,
-        )
+        return await collect_quotes_in_subprocess(settings)
 
     async def certify_projection(
         result: QuoteCollectionResult,

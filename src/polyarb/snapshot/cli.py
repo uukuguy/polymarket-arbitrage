@@ -12,6 +12,7 @@ Output convention (cron-grep friendly):
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -47,6 +48,11 @@ def snapshot(
         "--config",
         help="Path to YAML config (overrides config/snapshot.yaml).",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit one machine-readable result object on stdout.",
+    ),
 ) -> None:
     """Capture a one-shot Polymarket market snapshot."""
     # Re-route loguru: default is INFO; --verbose drops to DEBUG.
@@ -72,7 +78,22 @@ def snapshot(
         f"{status} | {result.market_count} markets | mode={result.mode} | "
         f"{result.issue_count} issues | -> {result.parquet_path}"
     )
-    print(summary)
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "is_valid": result.is_valid,
+                    "issue_count": result.issue_count,
+                    "market_count": result.market_count,
+                    "mode": result.mode,
+                    "snapshot_id": result.snapshot_id,
+                    "status": result.status,
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        print(summary)
 
     # D-F3: stderr summary on FAILED + exit 1.
     if not result.is_valid:

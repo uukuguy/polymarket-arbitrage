@@ -30,6 +30,11 @@ Source: RESEARCH.md §Architecture Patterns §2.5, CONTEXT.md D-13
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from enum import StrEnum
 
 from loguru import logger
@@ -42,6 +47,114 @@ class SchedulerState(StrEnum):
 
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
+
+
+class SnapshotSubprocessError(RuntimeError):
+    """The isolated snapshot process did not return one bounded result."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"snapshot-subprocess-{reason}")
+
+
+@dataclass(frozen=True)
+class IsolatedSnapshotResult:
+    status: SnapshotStatus
+    snapshot_id: int
+    market_count: int
+    issue_count: int
+
+
+async def run_snapshot_in_subprocess(
+    *,
+    spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (
+        asyncio.create_subprocess_exec
+    ),
+    terminate_timeout_s: float = 3.0,
+) -> IsolatedSnapshotResult:
+    """Run the CPU/GIL-heavy snapshot pipeline outside the HTTP process."""
+    process = await spawn(
+        sys.executable,
+        "-m",
+        "polyarb.snapshot",
+        "snapshot",
+        "--json",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    started = time.perf_counter()
+    logger.info(
+        "isolated snapshot started "
+        f"pid={getattr(process, 'pid', None)}"
+    )
+    try:
+        stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(
+                process.communicate(),
+                timeout=terminate_timeout_s,
+            )
+        except TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.communicate()
+        raise
+
+    try:
+        payload = json.loads(stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        logger.warning(
+            "isolated snapshot returned invalid output "
+            f"returncode={process.returncode} stderr_bytes={len(stderr)}"
+        )
+        raise SnapshotSubprocessError("invalid-json") from error
+    if not isinstance(payload, dict):
+        raise SnapshotSubprocessError("invalid-json")
+    try:
+        status = SnapshotStatus(str(payload.get("status", "")).lower())
+    except ValueError as error:
+        raise SnapshotSubprocessError("invalid-json") from error
+    is_valid = payload.get("is_valid")
+    snapshot_id = payload.get("snapshot_id")
+    market_count = payload.get("market_count")
+    issue_count = payload.get("issue_count")
+    if (
+        not isinstance(is_valid, bool)
+        or isinstance(snapshot_id, bool)
+        or not isinstance(snapshot_id, int)
+        or snapshot_id <= 0
+        or isinstance(market_count, bool)
+        or not isinstance(market_count, int)
+        or market_count < 0
+        or isinstance(issue_count, bool)
+        or not isinstance(issue_count, int)
+        or issue_count < 0
+        or (status == SnapshotStatus.FAILED) == is_valid
+        or (process.returncode == 0) != is_valid
+    ):
+        raise SnapshotSubprocessError("invalid-json")
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "isolated snapshot complete "
+        f"pid={getattr(process, 'pid', None)} "
+        f"elapsed_ms={elapsed_ms} "
+        f"status={status.value} "
+        f"snapshot_id={snapshot_id} "
+        f"market_count={market_count} "
+        f"issue_count={issue_count}"
+    )
+    return IsolatedSnapshotResult(
+        status=status,
+        snapshot_id=snapshot_id,
+        market_count=market_count,
+        issue_count=issue_count,
+    )
 
 
 class SnapshotScheduler:
@@ -102,15 +215,7 @@ class SnapshotScheduler:
         This method is injectable — tests replace it with AsyncMock.
         Real prod wires it to the orchestrator in Plan 04.
         """
-        from polyarb.snapshot.orchestrator import run_snapshot
-
-        # Result object with status attribute (matches SnapshotResult interface)
-        class _Result:
-            def __init__(self, is_valid: bool) -> None:
-                self.status = SnapshotStatus.OK if is_valid else SnapshotStatus.FAILED
-
-        result = await run_snapshot(self._settings)
-        return _Result(is_valid=result.is_valid if hasattr(result, "is_valid") else True)
+        return await run_snapshot_in_subprocess()
 
     async def _on_paused(self) -> None:
         """Alert hook called when scheduler transitions to PAUSED state.

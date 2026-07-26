@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 from types import SimpleNamespace
 
@@ -369,3 +370,138 @@ def test_builder_is_disabled_by_default_and_honors_interval(tmp_path) -> None:
     worker = build_production_quote_worker(enabled)
     assert worker is not None
     assert worker.interval_s == 77
+
+
+class _FakeProcess:
+    def __init__(
+        self,
+        *,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        returncode: int = 0,
+        block: bool = False,
+    ) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+        self.block = block
+        self.terminated = False
+        self.killed = False
+
+    async def communicate(self):
+        if self.block and not self.killed:
+            await asyncio.Event().wait()
+        return self.stdout, self.stderr
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def _subprocess_payload(**overrides) -> bytes:
+    payload = {
+        "elapsed_ms": 25,
+        "quote_taken_at_ms": 1_700_000_000_000,
+        "requested_token_count": 12,
+        "run_id": 7,
+        "status": "complete",
+        "successful_response_count": 11,
+        "universe_snapshot_id": 70,
+        "universe_hash": "a" * 64,
+    }
+    payload.update(overrides)
+    return json.dumps(payload).encode()
+
+
+async def test_isolated_collection_parses_one_bounded_result(tmp_path) -> None:
+    from polyarb.daemon.quote_worker import collect_quotes_in_subprocess
+
+    process = _FakeProcess(stdout=_subprocess_payload())
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def spawn(*args, **kwargs):
+        calls.append((args, kwargs))
+        return process
+
+    settings = Settings(db_path=tmp_path / "state.db")
+    result = await collect_quotes_in_subprocess(settings, spawn=spawn)
+
+    assert result == _result(7).__class__(
+        run_id=7,
+        status="complete",
+        universe_snapshot_id=70,
+        requested_token_count=12,
+        successful_response_count=11,
+        quote_taken_at_ms=1_700_000_000_000,
+        elapsed_ms=25,
+        universe_hash="a" * 64,
+    )
+    args, kwargs = calls[0]
+    assert args[1:4] == ("-m", "polyarb.cli_arbitrage", "collect-neg-risk-quotes")
+    assert args[-2:] == ("--db-path", str(settings.db_path))
+    assert kwargs["stdout"] == asyncio.subprocess.PIPE
+    assert kwargs["stderr"] == asyncio.subprocess.PIPE
+
+
+@pytest.mark.parametrize(
+    ("process", "reason"),
+    (
+        (_FakeProcess(returncode=2, stderr=b"private detail"), "failed"),
+        (_FakeProcess(stdout=b"not-json"), "invalid-json"),
+        (
+            _FakeProcess(
+                stdout=_subprocess_payload(universe_snapshot_id=0),
+            ),
+            "invalid-json",
+        ),
+    ),
+)
+async def test_isolated_collection_fails_closed_on_invalid_child_result(
+    tmp_path,
+    process,
+    reason,
+) -> None:
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSubprocessError,
+        collect_quotes_in_subprocess,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(
+        QuoteCollectionSubprocessError,
+        match=f"quote-collection-subprocess-{reason}",
+    ):
+        await collect_quotes_in_subprocess(
+            Settings(db_path=tmp_path / "state.db"),
+            spawn=spawn,
+        )
+
+
+async def test_isolated_collection_cancellation_terminates_then_kills_child(
+    tmp_path,
+) -> None:
+    from polyarb.daemon.quote_worker import collect_quotes_in_subprocess
+
+    process = _FakeProcess(block=True)
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    task = asyncio.create_task(
+        collect_quotes_in_subprocess(
+            Settings(db_path=tmp_path / "state.db"),
+            spawn=spawn,
+            terminate_timeout_s=0.01,
+        )
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.terminated is True
+    assert process.killed is True

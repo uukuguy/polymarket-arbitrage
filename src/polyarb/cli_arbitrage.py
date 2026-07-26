@@ -126,6 +126,7 @@ def collect_neg_risk_quotes_command(
                 "status": result.status,
                 "successful_response_count": result.successful_response_count,
                 "universe_snapshot_id": result.universe_snapshot_id,
+                "universe_hash": result.universe_hash,
             },
             sort_keys=True,
         )
