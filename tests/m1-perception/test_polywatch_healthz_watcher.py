@@ -195,3 +195,106 @@ def test_dashboard_server_or_transport_failure_pushes(
 ) -> None:
     action, _ = _decision("decide_dashboard")(status, {}, error)
     assert action == "push"
+
+
+def test_resident_watcher_alerts_immediately_on_first_failure() -> None:
+    decision = _decision("notification_decision")
+
+    assert decision(("l1",), {}, now_s=1000.0, reminder_s=1800) == "alert"
+
+
+def test_resident_watcher_suppresses_duplicate_alert_until_reminder() -> None:
+    decision = _decision("notification_decision")
+    state = {"active_keys": ["l1"], "last_alert_at_s": 1000.0}
+
+    assert decision(("l1",), state, now_s=1100.0, reminder_s=1800) == "suppress"
+    assert decision(("l1",), state, now_s=2800.0, reminder_s=1800) == "alert"
+
+
+def test_resident_watcher_alerts_when_failure_set_changes() -> None:
+    decision = _decision("notification_decision")
+    state = {"active_keys": ["l1"], "last_alert_at_s": 1000.0}
+
+    assert (
+        decision(("l1", "dashboard"), state, now_s=1100.0, reminder_s=1800)
+        == "alert"
+    )
+
+
+def test_resident_watcher_sends_one_recovery_transition() -> None:
+    decision = _decision("notification_decision")
+
+    assert (
+        decision((), {"active_keys": ["l2"], "last_alert_at_s": 1000.0},
+                 now_s=1100.0, reminder_s=1800)
+        == "recovery"
+    )
+    assert decision((), {}, now_s=1100.0, reminder_s=1800) == "noop"
+
+
+def test_failed_recovery_delivery_preserves_state_for_retry() -> None:
+    update_state = getattr(WATCHER, "updated_notification_state", None)
+    assert callable(update_state)
+    state = {
+        "active_keys": ["l2"],
+        "last_alert_at_s": 1000.0,
+        "last_seen_at_s": 1050.0,
+    }
+
+    updated = update_state(
+        (),
+        state,
+        notification="recovery",
+        now_s=1100.0,
+        delivery_ok=False,
+    )
+
+    assert updated["active_keys"] == ["l2"]
+    assert updated["last_alert_at_s"] == 1000.0
+
+
+def test_successful_recovery_clears_resident_state() -> None:
+    update_state = getattr(WATCHER, "updated_notification_state", None)
+    assert callable(update_state)
+
+    updated = update_state(
+        (),
+        {"active_keys": ["dashboard"], "last_alert_at_s": 1000.0},
+        notification="recovery",
+        now_s=1100.0,
+        delivery_ok=True,
+    )
+
+    assert updated == {
+        "active_keys": [],
+        "last_seen_at_s": 1100.0,
+        "last_alert_at_s": 0.0,
+    }
+
+
+def test_cron_machine_runs_polywatch_every_two_minutes() -> None:
+    crontab = (PROJECT_ROOT / "crontab").read_text()
+
+    assert "*/2 * * * *" in crontab
+    assert "POLYWATCH_STATE_FILE=/tmp/polywatch-healthz-state.json" in crontab
+    assert "python /app/scripts/polywatch/healthz_watcher.py" in crontab
+
+
+def test_runtime_image_contains_polywatch_script() -> None:
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text()
+
+    assert (
+        "COPY --chown=polyarb:polyarb scripts/polywatch/healthz_watcher.py "
+        "/app/scripts/polywatch/healthz_watcher.py"
+    ) in dockerfile
+
+
+def test_makefile_exposes_resident_polywatch_status() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+
+    assert "polywatch-resident-status:" in makefile
+    assert "flyctl status -a polyarb-l1 --json" in makefile
+    assert "flyctl logs -a polyarb-l1 --machine" in makefile
+    assert "--no-tail --json" in makefile
+    assert 'contains("polywatch")' in makefile
+    assert "/tmp/polywatch-healthz-state.json" in makefile

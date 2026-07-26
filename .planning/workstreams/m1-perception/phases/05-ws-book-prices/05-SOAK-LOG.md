@@ -516,3 +516,40 @@ than the Vercel login page:
 Verdict: **authenticated Dashboard acceptance PASS.** The dedicated Edge
 profile remains available for later production UAT. The quote-feed exact
 24-hour interval remains the only unsigned Plan 05-06 gate.
+
+### Resident monitoring qualification
+
+GitHub Actions remains an independent fallback, but it is not the primary
+timing contract. Although the workflow declares `*/15`, scheduled run history
+showed successful run `30182381328` at `2026-07-26T01:08:21Z` followed by
+successful run `30188245896` only at `2026-07-26T04:43:55Z`: an actual gap of
+3 hours, 35 minutes, 34 seconds.
+
+The existing started Fly `cron` machine `8e2909a77ddd08` was therefore updated
+in isolation to image `deployment-01KYEEV529S3CP9TP742WV6WGQ`. Fly reported
+that the `--only-machines` / `--process-groups` filters deployed to one of three
+machines. Afterward:
+
+- L1 app machine `6830939c0070d8` remained on instance
+  `01KYE8X2AXK1PWN6VW1WVF2KRR`, image
+  `deployment-01KYE8VB7PT2XT0N1XDY09P0P7`, updated
+  `2026-07-26T03:53:52Z`.
+- Resident ticks at `05:40:00Z`, `05:42:00Z`, `05:44:00Z`, and `05:46:00Z`
+  each completed successfully. All four decisions—L1, opportunity, L2/L3, and
+  Dashboard—were `noop`; maximum observed tick gap was 120 seconds.
+- The resident state advanced through `last_seen_at_s=1785044760.8322427`
+  with `active_keys=[]` and `last_alert_at_s=0.0`, proving the state file is
+  writable and no duplicate notification was emitted while healthy.
+- State-transition tests cover immediate first failure, changed failure set,
+  duplicate suppression, 30-minute reminder, failed-recovery delivery retry,
+  successful recovery clearing, and one-shot recovery.
+
+The exact quote aggregate after those ticks covered runs 78–133: 56/56
+complete, zero failed, zero collecting, zero requested/successful mismatch,
+and maximum start gap 121.271 seconds. The first row remained run 78 at
+`2026-07-26T03:54:09.630Z`; the cron-only rollout did not reset the quote
+window.
+
+Verdict: **resident monitoring PASS.** The 24-hour interval is actively
+observed, not passively awaited. The exact T+24 database verdict remains
+time-gated until `2026-07-27T03:54:09.630Z`.

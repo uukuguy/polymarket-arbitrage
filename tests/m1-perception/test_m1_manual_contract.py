@@ -591,6 +591,17 @@ def test_manual_keeps_real_money_boundary_explicit() -> None:
     assert "本地数据不代表生产状态" in text
 
 
+def test_manual_exposes_polywatch_alert_destination_and_local_checks() -> None:
+    text = (ROOT / "docs/M1-市场感知平台使用手册.md").read_text()
+
+    assert "### 自动报警与本机临时检查" in text
+    assert "@polyarb_l1_bot" in text
+    assert "make polywatch-healthz-dry\nmake polywatch-resident-status" in text
+    assert "不会发送 Telegram" in text
+    assert "`active_keys`" in text
+    assert "每 2 分钟" in text
+
+
 def test_manual_explains_opportunity_feed_diagnosis_and_non_readiness() -> None:
     text = (ROOT / "docs/M1-市场感知平台使用手册.md").read_text()
 

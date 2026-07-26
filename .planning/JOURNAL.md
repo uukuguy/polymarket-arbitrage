@@ -5234,3 +5234,50 @@ At/after `2026-07-27T03:54:09.630Z`, resume with
 78, require every run complete and maximum start gap `<=180s`, then create
 05-06 SUMMARY, sign Phase 05 validation/ROADMAP/STATE, extract learnings, and
 run final verification.
+
+## SESSION 104 — 2026-07-26 (resident monitoring production PASS)
+
+- [SCHEDULER GAP] The GitHub workflow declares `*/15`, but real scheduled runs
+  `30182381328` and `30188245896` were separated by 3h35m34s
+  (`01:08:21Z → 04:43:55Z`). GitHub therefore remains an independent fallback,
+  not M1's primary detection clock.
+- [IMPLEMENTATION] The unified watcher now persists the active failure set:
+  first/new failures alert immediately, duplicates are suppressed, unresolved
+  failures remind after 30 minutes, failed recovery delivery is retried, and
+  successful recovery notifies once and clears state.
+- [IMAGE] Local candidate build included the watcher, exposed Python, and
+  passed `supercronic -test /app/crontab`. Focused watcher tests reached 30/30;
+  full pytest, repository Ruff, M1 docs, Dashboard typecheck, and Dashboard
+  production build passed.
+- [DEPLOY ISOLATION] Fly deployed only started cron machine
+  `8e2909a77ddd08` to image
+  `deployment-01KYEEV529S3CP9TP742WV6WGQ`. App machine
+  `6830939c0070d8`, instance `01KYE8X2AXK1PWN6VW1WVF2KRR`, and image
+  `deployment-01KYE8VB7PT2XT0N1XDY09P0P7` were unchanged.
+- [PRODUCTION TICKS] `05:40`, `05:42`, `05:44`, and `05:46` UTC all completed
+  L1/opportunity/L2-L3/Dashboard checks with `noop`, maximum gap 120 seconds.
+  State advanced with no active keys and no Telegram noise.
+- [QUOTE CONTINUITY] Runs 78–133 were 56/56 complete, zero
+  failed/collecting/mismatched, max start gap 121.271 seconds. Run 78 remains
+  the exact anchor; no L1 restart occurred.
+- [LEGACY CRON] The 02:00 weekly full-snapshot OOM is already documented as a
+  non-truth-path workload: the 256 MB cron machine has no `/data` volume,
+  whereas the app scheduler owns the durable snapshot path. It did not affect
+  L1/app/quote continuity and is not treated as a market-sensing failure.
+- [MANUAL GAP] The M1 manual previously scattered old single-surface commands,
+  mentioned resident status only in late troubleshooting/index sections, and
+  omitted both the Telegram destination and `polywatch-healthz-dry`. Added a
+  near-top copy-paste section covering `@polyarb_l1_bot`, dry-run versus live
+  behavior, resident state interpretation, and the two daily check commands;
+  the full 55-test manual contract and `make docs-m1-check` passed.
+- [BOUNDARY] The resident monitor makes the remaining 24-hour interval an
+  actively supervised evidence window. Final Summary/validation/roadmap
+  signing is still prohibited before exact T+24.
+
+### [NEXT — CURRENT]
+
+At/after `2026-07-27T03:54:09.630Z`, start with
+`/gsd-resume-work --ws m1-perception`; run the exact run-78 quote aggregate,
+require every run complete and maximum gap `<=180s`, recheck resident state and
+immutable app identity, then create `05-06-SUMMARY.md`, sign Phase 05
+validation/ROADMAP/STATE, extract learnings, and run final verification.

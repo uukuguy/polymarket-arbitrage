@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Plan 05-06 authenticated Dashboard PASS; waiting only for post-release quote T+24
-last_updated: "2026-07-26T05:02:19Z"
+stopped_at: Plan 05-06 resident monitoring PASS; exact quote T+24 remains the only hard gate
+last_updated: "2026-07-26T05:46:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -27,8 +27,24 @@ Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in p
   `21acea5c286c8b7a9599933674c1bf570316e1c2`, machine
   `6830939c0070d8`, with the first post-restart complete quote run 78 at
   `2026-07-26T03:54:09.630Z`.
-- **Interim quote evidence:** runs 78–84 are 7/7 complete, 1,278/1,278 each,
-  with zero failures/mismatches and maximum start gap 121.142 seconds.
+- **Interim quote evidence:** runs 78–133 are 56/56 complete, 1,278/1,278
+  each, with zero failed/collecting/mismatched runs and maximum start gap
+  121.271 seconds.
+- **Primary monitoring:** the existing Fly `cron` machine
+  `8e2909a77ddd08` now runs the unified watcher every two minutes. Production
+  ticks at `05:40`, `05:42`, `05:44`, and `05:46` UTC all checked L1,
+  opportunity feed, L2/L3, and Dashboard successfully; state advanced with an
+  empty failure set and no Telegram noise. First failure-set changes alert
+  immediately, duplicates are suppressed, unresolved failures remind after
+  30 minutes, and recovery is sent once.
+- **Fallback evidence:** GitHub's nominal `*/15` schedule had an actual
+  `01:08:21Z → 04:43:55Z` gap, so it remains an independent provider fallback
+  and is not treated as the timing SLA.
+- **Deploy isolation:** only the Fly `cron` machine changed to image
+  `deployment-01KYEEV529S3CP9TP742WV6WGQ`. The L1 app machine
+  `6830939c0070d8`, instance `01KYE8X2AXK1PWN6VW1WVF2KRR`, image
+  `deployment-01KYE8VB7PT2XT0N1XDY09P0P7`, and quote anchor remained
+  unchanged.
 - **Hard gate:** no final quote verdict before
   `2026-07-27T03:54:09.630Z`.
 - **Authenticated Dashboard:** PASS at `2026-07-26T05:02:19.364Z` in the
@@ -37,7 +53,7 @@ Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in p
   production data.
 - **Evidence discipline:** Phase 05.4 A7 is accepted for L3 continuity. No
   Plan 06 SUMMARY, Phase 05 validation signature, or roadmap completion may be
-  created before both remaining gates pass.
+  created before the remaining exact quote gate passes.
 - **Deploy guard:** L1 deploy now ignores docs/planning/Markdown-only pushes,
   preventing closure evidence commits from restarting the release-bound quote
   window.

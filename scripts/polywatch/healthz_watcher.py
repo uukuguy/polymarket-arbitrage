@@ -6,7 +6,9 @@ optional L1 snapshot auto-unpause.
 
 Run modes
 ---------
-- GHA cron (every 15 min): set POLYWATCH_DRY_RUN=0 (default)
+- Fly cron machine (every 2 min): primary production monitor with stateful
+  alert deduplication and recovery notifications
+- GHA cron (nominally every 15 min): provider-independent fallback
 - Local smoke: POLYWATCH_DRY_RUN=1 (prints decisions, no Telegram/unpause)
 
 Exit codes
@@ -70,6 +72,8 @@ L1_SNAPSHOT_FAIL_AGE_S = int(os.environ.get("POLYWATCH_L1_SNAPSHOT_FAIL_AGE_S", 
 L2_WS_SILENCE_S = int(os.environ.get("POLYWATCH_L2_WS_SILENCE_S", "600"))                  # 10 min
 
 DRY_RUN = os.environ.get("POLYWATCH_DRY_RUN", "0") == "1"
+STATE_FILE = os.environ.get("POLYWATCH_STATE_FILE", "")
+REMINDER_S = int(os.environ.get("POLYWATCH_REMINDER_S", "1800"))
 
 # Sentry issue link (well-known: SCHEDULER_PAUSED issue 121111789)
 SENTRY_PAUSED_LINK = (
@@ -185,6 +189,109 @@ def _send_telegram(text: str) -> bool:
     except Exception as e:
         print(f"[telegram] send failed: {e!r}", file=sys.stderr)
         return False
+
+
+def _load_notification_state(path: str) -> dict:
+    """Load resident-watcher state without making monitoring itself fragile."""
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as error:
+        print(f"[polywatch] state read failed: {error!r}", file=sys.stderr)
+        return {}
+
+
+def _save_notification_state(path: str, state: dict) -> bool:
+    """Atomically persist transition/reminder state on the resident cron VM."""
+    if not path:
+        return True
+    temporary = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, path)
+        return True
+    except Exception as error:
+        print(f"[polywatch] state write failed: {error!r}", file=sys.stderr)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        return False
+
+
+def notification_decision(
+    active_keys: tuple[str, ...],
+    state: Mapping[str, object],
+    *,
+    now_s: float,
+    reminder_s: int,
+) -> str:
+    """Return alert/suppress/recovery/noop for a resident watcher tick."""
+    current = tuple(sorted(set(active_keys)))
+    raw_previous = state.get("active_keys", [])
+    previous = (
+        tuple(sorted(str(value) for value in raw_previous))
+        if isinstance(raw_previous, list)
+        else ()
+    )
+
+    if current:
+        if current != previous:
+            return "alert"
+        raw_last_alert = state.get("last_alert_at_s", 0.0)
+        last_alert = (
+            float(raw_last_alert)
+            if isinstance(raw_last_alert, (int, float))
+            else 0.0
+        )
+        if now_s - last_alert >= reminder_s:
+            return "alert"
+        return "suppress"
+
+    return "recovery" if previous else "noop"
+
+
+def updated_notification_state(
+    active_keys: tuple[str, ...],
+    state: Mapping[str, object],
+    *,
+    notification: str,
+    now_s: float,
+    delivery_ok: bool,
+) -> dict:
+    """Return the next resident state without losing failed recovery retries."""
+    previous_keys = state.get("active_keys", [])
+    previous_last_alert = state.get("last_alert_at_s", 0.0)
+
+    if notification == "recovery":
+        if delivery_ok:
+            return {
+                "active_keys": [],
+                "last_seen_at_s": now_s,
+                "last_alert_at_s": 0.0,
+            }
+        return {
+            "active_keys": previous_keys if isinstance(previous_keys, list) else [],
+            "last_seen_at_s": now_s,
+            "last_alert_at_s": previous_last_alert,
+        }
+
+    return {
+        "active_keys": list(active_keys),
+        "last_seen_at_s": now_s,
+        "last_alert_at_s": (
+            now_s
+            if notification == "alert" and delivery_ok
+            else previous_last_alert
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -362,45 +469,93 @@ def main() -> int:
         f"[polywatch] Dashboard → {dashboard_action}: {dashboard_reason}"
     )
 
-    push_lines: list[str] = []
+    active_keys: list[str] = []
     escalation_ok = True
 
     if l1_action == "unpause+push":
-        unpause_ok, unpause_msg = _post_unpause()
-        print(f"[polywatch] unpause result: ok={unpause_ok} msg={unpause_msg}")
-        push_lines.append(
-            f"⚠️ <b>polyarb-l1 SCHEDULER_PAUSED</b>\n"
-            f"reason: {l1_reason}\n"
-            f"auto-unpause: {'sent ✓' if unpause_ok else 'FAILED ✗'}\n"
-            f"detail: {unpause_msg}\n"
-            f'<a href="{SENTRY_PAUSED_LINK}">Sentry issue</a>'
-        )
-        if not unpause_ok:
-            escalation_ok = False
+        active_keys.append("l1")
     elif l1_action == "push":
-        push_lines.append(f"⚠️ <b>polyarb-l1 unhealthy</b>\n{l1_reason}")
+        active_keys.append("l1")
 
     if l2_action == "push":
-        push_lines.append(f"⚠️ <b>polyarb-l2 unhealthy</b>\n{l2_reason}")
+        active_keys.append("l2")
 
     if opportunity_action == "push":
-        push_lines.append(
-            f"⚠️ <b>polyarb opportunity feed unhealthy</b>\n{opportunity_reason}"
-        )
+        active_keys.append("opportunity")
 
     if dashboard_action == "push":
-        push_lines.append(
-            f"⚠️ <b>polyarb Dashboard unhealthy</b>\n{dashboard_reason}"
-        )
+        active_keys.append("dashboard")
 
-    if push_lines:
+    now_s = time.time()
+    state = _load_notification_state(STATE_FILE)
+    if STATE_FILE:
+        notification = notification_decision(
+            tuple(active_keys),
+            state,
+            now_s=now_s,
+            reminder_s=REMINDER_S,
+        )
+    else:
+        notification = "alert" if active_keys else "noop"
+
+    if notification == "alert":
+        push_lines: list[str] = []
+        if l1_action == "unpause+push":
+            unpause_ok, unpause_msg = _post_unpause()
+            print(f"[polywatch] unpause result: ok={unpause_ok} msg={unpause_msg}")
+            push_lines.append(
+                f"⚠️ <b>polyarb-l1 SCHEDULER_PAUSED</b>\n"
+                f"reason: {l1_reason}\n"
+                f"auto-unpause: {'sent ✓' if unpause_ok else 'FAILED ✗'}\n"
+                f"detail: {unpause_msg}\n"
+                f'<a href="{SENTRY_PAUSED_LINK}">Sentry issue</a>'
+            )
+            if not unpause_ok:
+                escalation_ok = False
+        elif l1_action == "push":
+            push_lines.append(f"⚠️ <b>polyarb-l1 unhealthy</b>\n{l1_reason}")
+
+        if l2_action == "push":
+            push_lines.append(f"⚠️ <b>polyarb-l2 unhealthy</b>\n{l2_reason}")
+        if opportunity_action == "push":
+            push_lines.append(
+                f"⚠️ <b>polyarb opportunity feed unhealthy</b>\n{opportunity_reason}"
+            )
+        if dashboard_action == "push":
+            push_lines.append(
+                f"⚠️ <b>polyarb Dashboard unhealthy</b>\n{dashboard_reason}"
+            )
+
         msg = f"🔔 polywatch — {now_iso}\n\n" + "\n\n".join(push_lines)
-        tg_ok = _send_telegram(msg)
-        if not tg_ok:
-            escalation_ok = False
-        print(f"[polywatch] telegram push: ok={tg_ok}")
+        telegram_ok = _send_telegram(msg)
+        escalation_ok = escalation_ok and telegram_ok
+        print(f"[polywatch] telegram push: ok={telegram_ok}")
+    elif notification == "suppress":
+        print(
+            "[polywatch] duplicate alert suppressed "
+            f"(keys={','.join(active_keys)}, reminder_s={REMINDER_S})"
+        )
+    elif notification == "recovery":
+        previous = state.get("active_keys", [])
+        recovered = ", ".join(str(value) for value in previous)
+        telegram_ok = _send_telegram(
+            f"✅ polywatch recovered — {now_iso}\nresolved: {recovered}"
+        )
+        escalation_ok = escalation_ok and telegram_ok
+        print(f"[polywatch] recovery push: ok={telegram_ok}")
     else:
         print("[polywatch] all green — no push")
+
+    if STATE_FILE:
+        next_state = updated_notification_state(
+            tuple(active_keys),
+            state,
+            notification=notification,
+            now_s=now_s,
+            delivery_ok=escalation_ok,
+        )
+        state_ok = _save_notification_state(STATE_FILE, next_state)
+        escalation_ok = escalation_ok and state_ok
 
     return 0 if escalation_ok else 1
 

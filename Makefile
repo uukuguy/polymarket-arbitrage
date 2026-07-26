@@ -585,6 +585,21 @@ polywatch-healthz-dry:
 polywatch-healthz:
 	uv run python scripts/polywatch/healthz_watcher.py
 
+## polywatch-resident-status: Show the primary Fly cron watcher machine, recent logs, and dedup/recovery state
+## Usage: make polywatch-resident-status
+polywatch-resident-status:
+	@CRON_ID="$$(FLY_API_TOKEN= flyctl status -a polyarb-l1 --json | jq -r '.Machines[] | select(.state == "started" and .config.metadata.fly_process_group == "cron") | .id' | head -1)"; \
+	test -n "$$CRON_ID" || (echo "ERROR: no started polyarb-l1 cron machine" >&2; exit 1); \
+	echo ">> resident Polywatch cron machine: $$CRON_ID"; \
+	echo ">> recent machine logs"; \
+	FLY_API_TOKEN= flyctl logs -a polyarb-l1 --machine "$$CRON_ID" --no-tail --json 2>/dev/null | \
+	  jq -r 'select(.message | contains("polywatch") or contains("POLYWATCH_STATE_FILE")) | [.timestamp, .message] | @tsv' | tail -80; \
+	echo ">> resident alert state"; \
+	FLY_API_TOKEN= flyctl ssh console -a polyarb-l1 --machine "$$CRON_ID" \
+	  -C "python -c 'from pathlib import Path; p=Path(\"/tmp/polywatch-healthz-state.json\"); print(p.read_text() if p.exists() else \"state file not created yet\")'"
+
+.PHONY: polywatch-healthz-dry polywatch-healthz polywatch-resident-status
+
 ## logs-tail-axiom: Print the Axiom dataset URL + sample APL query (convenience; opens nothing local)
 logs-tail-axiom:
 	@echo ">> open https://app.axiom.co/datasets/polyarb-prod in browser"
