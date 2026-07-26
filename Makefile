@@ -630,7 +630,7 @@ dashboard-deploy:
 ## deploy has not yet reached prod (or the project URL has drifted — override
 ## with VERCEL_URL=...).
 smoke-l2-dashboard:
-	@VERCEL_URL="$${VERCEL_URL:-https://polymarket-arbitrage.vercel.app}"; \
+	@VERCEL_URL="$${VERCEL_URL:-https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app}"; \
 	echo ">> smoke-l2-dashboard — VERCEL_URL=$$VERCEL_URL"; \
 	rc=0; \
 	for path in candidates "asset/test-asset-id-12345/tob" "asset/test-asset-id-12345/trades" signals; do \
@@ -1300,7 +1300,7 @@ ohlc-spot-check:
 ##
 ## Usage:
 ##   make smoke-l3-dashboard asset_id=<asset_id>
-##   make smoke-l3-dashboard asset_id=<asset_id> URL=https://polymarket-arbitrage.vercel.app
+##   make smoke-l3-dashboard asset_id=<asset_id> URL=https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app
 ##
 ## Default URL is http://localhost:3000 (run `cd dashboard && pnpm dev` first).
 ## Returns HTTP status + payload size + grep for "asset_id" marker. Fail-soft:

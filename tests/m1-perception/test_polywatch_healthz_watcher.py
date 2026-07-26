@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 
-
 PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
 WATCHER_PATH = PROJECT_ROOT / "scripts" / "polywatch" / "healthz_watcher.py"
 

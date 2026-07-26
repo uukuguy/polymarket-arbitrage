@@ -1,8 +1,10 @@
 name: Polywatch — Healthz Watcher
-# Polywatch MVP, first trial. Every 15 minutes:
-#   - poll polyarb-l1 + polyarb-l2 /healthz
+# Unified M1 production watcher. Every 15 minutes:
+#   - poll L1 /healthz + /arbitrage/opportunities
+#   - poll L2 /healthz with explicit L3 evidence gates
+#   - probe the canonical Vercel Dashboard without following SSO redirects
 #   - if L1 snapshot stale (>30 min), POST /control/unpause (HMAC) + Telegram
-#   - if L2 fail or WS silent >10 min, Telegram
+#   - aggregate any alert into one Telegram message
 # See .planning/threads/polywatch-architecture.md for design context.
 #
 # Failure modes:
@@ -36,7 +38,7 @@ permissions:
 
 jobs:
   watch:
-    name: poll /healthz + escalate
+    name: poll M1 production + escalate
     runs-on: ubuntu-latest
     timeout-minutes: 3
     env:

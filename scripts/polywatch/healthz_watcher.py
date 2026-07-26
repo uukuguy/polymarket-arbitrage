@@ -1,7 +1,8 @@
-"""Polywatch — healthz-watcher MVP.
+"""Polywatch — unified M1 production watcher.
 
-Polls polyarb-l1 + polyarb-l2 /healthz, decides whether to escalate
-(Telegram push + optional L1 auto-unpause).
+Polls L1 health, the opportunity contract, L2/L3 health, and the canonical
+Dashboard deployment. Escalation remains one Telegram message per tick, with
+optional L1 snapshot auto-unpause.
 
 Run modes
 ---------
@@ -20,10 +21,11 @@ Decision rules
     → push Telegram with Sentry link
 - L1 /healthz status == "warn"
     → log only (do not push; warn is expected during snapshot in progress)
-- L2 /healthz status == "fail"
-    → push Telegram (no auto-action — L2 has no equivalent to unpause)
-- L2 /healthz status == "warn" AND ws:last_event_age_seconds > 600
-    → push Telegram (10 min WS silence is meaningful)
+- L1 quote feed fail/error/stopped OR invalid opportunity response → push
+- L2 strict L3 evidence/membership/freshness failure or under-fill → push
+- L2 WAITING_FOR_EVENT with fresh WS and strict L3 pass → no action
+- Dashboard 200 or Vercel SSO 302/307 → no action
+- Dashboard absent, 5xx, other HTTP, or transport failure → push
 - Otherwise → no action
 
 Safety
@@ -42,8 +44,10 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 
 # ---------------------------------------------------------------------------
 # Config
@@ -52,6 +56,14 @@ import urllib.request
 L1_HEALTHZ = os.environ.get("POLYWATCH_L1_HEALTHZ", "https://polyarb-l1.fly.dev/healthz")
 L2_HEALTHZ = os.environ.get("POLYWATCH_L2_HEALTHZ", "https://polyarb-l2.fly.dev/healthz")
 L1_UNPAUSE = os.environ.get("POLYWATCH_L1_UNPAUSE", "https://polyarb-l1.fly.dev/control/unpause")
+OPPORTUNITY_URL = os.environ.get(
+    "POLYWATCH_OPPORTUNITY_URL",
+    "https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=0",
+)
+DASHBOARD_URL = os.environ.get(
+    "POLYWATCH_DASHBOARD_URL",
+    "https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app",
+)
 
 # Thresholds (seconds)
 L1_SNAPSHOT_FAIL_AGE_S = int(os.environ.get("POLYWATCH_L1_SNAPSHOT_FAIL_AGE_S", "1800"))   # 30 min
@@ -80,6 +92,30 @@ def _fetch_json(url: str, *, timeout: float = 10.0) -> dict | None:
     except Exception as e:
         print(f"[fetch] {url} failed: {e!r}", file=sys.stderr)
         return None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Expose the first Dashboard response instead of following Vercel SSO."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def _probe_dashboard(
+    url: str, *, timeout: float = 10.0
+) -> tuple[int | None, dict[str, str], str | None]:
+    """Return the canonical deployment's first HTTP status, headers, and error."""
+    request = urllib.request.Request(url, method="GET")
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return response.status, dict(response.headers.items()), None
+    except urllib.error.HTTPError as error:
+        # Redirects deliberately arrive here because _NoRedirect returns None.
+        return error.code, dict(error.headers.items()), None
+    except Exception as error:
+        print(f"[fetch] {url} failed: {error!r}", file=sys.stderr)
+        return None, {}, repr(error)
 
 
 def _extract_check(healthz: dict, check_key: str, default=None):
@@ -173,12 +209,61 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
     age = snap.get("observedValue") if snap else None
 
     if snap_status == "fail" and isinstance(age, (int, float)) and age > L1_SNAPSHOT_FAIL_AGE_S:
-        return "unpause+push", f"L1 snapshot stale {int(age)}s > {L1_SNAPSHOT_FAIL_AGE_S}s (likely PAUSED)"
+        return (
+            "unpause+push",
+            f"L1 snapshot stale {int(age)}s > "
+            f"{L1_SNAPSHOT_FAIL_AGE_S}s (likely PAUSED)",
+        )
 
     if snap_status == "fail":
         return "push", f"L1 snapshot sub-check fail (age={age})"
 
-    return "noop", f"L1 ok (top={top_status}, snapshot_status={snap_status}, age={age})"
+    quote_age = _extract_check(
+        healthz, "quote_feed:last_complete_age_seconds", {}
+    )
+    quote_status = quote_age.get("status") if quote_age else None
+    quote_value = quote_age.get("observedValue") if quote_age else None
+    if quote_status != "pass":
+        return (
+            "push",
+            f"L1 quote age check {quote_status or 'missing'} (age={quote_value})",
+        )
+
+    collector = _extract_check(healthz, "quote_feed:collector_state", {})
+    collector_status = collector.get("status") if collector else None
+    collector_state = collector.get("observedValue") if collector else None
+    if collector_status != "pass" or collector_state in {"error", "stopped"}:
+        return (
+            "push",
+            "L1 quote collector "
+            f"{collector_state or 'missing'} (check={collector_status or 'missing'})",
+        )
+
+    return (
+        "noop",
+        "L1 ok "
+        f"(top={top_status}, snapshot_status={snap_status}, age={age}, "
+        f"quote_age={quote_value}, collector={collector_state})",
+    )
+
+
+def decide_opportunity(payload: dict | None) -> tuple[str, str]:
+    """Validate the read-only opportunity response contract, not signal count."""
+    if payload is None:
+        return "push", "Opportunity endpoint unreachable or returned invalid JSON"
+    if not isinstance(payload, dict):
+        return "push", "Opportunity response is not an object"
+    if payload.get("strategy") != "neg-risk-buy-all":
+        return "push", f"Opportunity strategy invalid: {payload.get('strategy')!r}"
+    if payload.get("profit_basis") != "gross-before-fees":
+        return (
+            "push",
+            f"Opportunity profit_basis invalid: {payload.get('profit_basis')!r}",
+        )
+    opportunities = payload.get("opportunities")
+    if not isinstance(opportunities, list):
+        return "push", "Opportunity response missing opportunities list"
+    return "noop", f"Opportunity feed ok (count={len(opportunities)})"
 
 
 def decide_l2(healthz: dict | None) -> tuple[str, str]:
@@ -187,15 +272,61 @@ def decide_l2(healthz: dict | None) -> tuple[str, str]:
         return "push", "L2 /healthz unreachable"
 
     status = healthz.get("status", "unknown")
-    if status == "fail":
-        return "push", "L2 /healthz status=fail"
+
+    active = _extract_check(healthz, "l3:active_count", {})
+    active_count = active.get("observedValue") if active else None
+    if active_count != 10 or active.get("status") != "pass":
+        return (
+            "push",
+            f"L2 l3:active_count invalid (value={active_count}, "
+            f"status={active.get('status') if active else 'missing'})",
+        )
+
+    strict_l3_keys = (
+        "l3:evidence_sample_age_seconds",
+        "l3:promoter_ledger_age_seconds",
+        "l3:membership_convergence",
+        "l3:worst_market_freshness",
+    )
+    for key in strict_l3_keys:
+        check = _extract_check(healthz, key, {})
+        check_status = check.get("status") if check else None
+        if check_status != "pass":
+            return "push", f"L2 {key} {check_status or 'missing'}"
 
     ws = _extract_check(healthz, "ws:last_event_age_seconds", {})
     ws_age = ws.get("observedValue") if ws else None
     if status == "warn" and isinstance(ws_age, (int, float)) and ws_age > L2_WS_SILENCE_S:
         return "push", f"L2 WS silent {int(ws_age)}s > {L2_WS_SILENCE_S}s"
 
+    if status == "fail":
+        return "push", "L2 /healthz status=fail"
+
     return "noop", f"L2 ok (status={status}, ws_age={ws_age})"
+
+
+def decide_dashboard(
+    status: int | None,
+    headers: Mapping[str, str],
+    transport_error: str | None,
+) -> tuple[str, str]:
+    """Interpret a non-following probe of the canonical Vercel deployment."""
+    if transport_error or status is None:
+        return "push", f"Dashboard transport failure: {transport_error or 'unknown'}"
+    if status in {200, 302, 307}:
+        return "noop", f"Dashboard deployment reachable (HTTP {status})"
+
+    vercel_error = next(
+        (
+            value
+            for key, value in headers.items()
+            if key.lower() == "x-vercel-error"
+        ),
+        None,
+    )
+    if status == 404 and vercel_error == "DEPLOYMENT_NOT_FOUND":
+        return "push", "Dashboard HTTP 404 DEPLOYMENT_NOT_FOUND"
+    return "push", f"Dashboard unhealthy (HTTP {status}, vercel_error={vercel_error})"
 
 
 # ---------------------------------------------------------------------------
@@ -208,13 +339,28 @@ def main() -> int:
     print(f"[polywatch] tick at {now_iso} (DRY_RUN={DRY_RUN})")
 
     l1 = _fetch_json(L1_HEALTHZ)
+    opportunity = _fetch_json(OPPORTUNITY_URL)
     l2 = _fetch_json(L2_HEALTHZ)
+    dashboard_status, dashboard_headers, dashboard_error = _probe_dashboard(
+        DASHBOARD_URL
+    )
 
     l1_action, l1_reason = decide_l1(l1)
+    opportunity_action, opportunity_reason = decide_opportunity(opportunity)
     l2_action, l2_reason = decide_l2(l2)
+    dashboard_action, dashboard_reason = decide_dashboard(
+        dashboard_status, dashboard_headers, dashboard_error
+    )
 
     print(f"[polywatch] L1 → {l1_action}: {l1_reason}")
+    print(
+        "[polywatch] opportunity → "
+        f"{opportunity_action}: {opportunity_reason}"
+    )
     print(f"[polywatch] L2 → {l2_action}: {l2_reason}")
+    print(
+        f"[polywatch] Dashboard → {dashboard_action}: {dashboard_reason}"
+    )
 
     push_lines: list[str] = []
     escalation_ok = True
@@ -236,6 +382,16 @@ def main() -> int:
 
     if l2_action == "push":
         push_lines.append(f"⚠️ <b>polyarb-l2 unhealthy</b>\n{l2_reason}")
+
+    if opportunity_action == "push":
+        push_lines.append(
+            f"⚠️ <b>polyarb opportunity feed unhealthy</b>\n{opportunity_reason}"
+        )
+
+    if dashboard_action == "push":
+        push_lines.append(
+            f"⚠️ <b>polyarb Dashboard unhealthy</b>\n{dashboard_reason}"
+        )
 
     if push_lines:
         msg = f"🔔 polywatch — {now_iso}\n\n" + "\n\n".join(push_lines)
