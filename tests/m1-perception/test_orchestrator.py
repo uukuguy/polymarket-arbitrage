@@ -1339,7 +1339,15 @@ async def test_missing_authoritative_event_member_blocks_publication(tmp_path: P
     settings = _make_settings(tmp_path)
     settings.event_bus_enabled = True
     all_markets = _load_gamma_fixture()[:2]
-    observed_markets = all_markets[:1]
+    active_market = {
+        **all_markets[0],
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "negRiskMarketID": "group-neg-risk",
+    }
+    all_markets[0] = active_market
+    observed_markets = [active_market]
     clob_data = _load_clob_fixture()
     fake_gamma = _make_fake_gamma(
         observed_markets,
@@ -1512,6 +1520,134 @@ async def test_closed_point_truth_reconciles_stale_open_event_member(
     )
     fake_gamma.fetch_market_states.assert_awaited_once_with([missing_market_id])
     assert publish_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_member_that_closes_during_long_snapshot_is_reconciled(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    all_markets = _load_gamma_fixture()[:2]
+    active_market = {
+        **all_markets[0],
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "negRiskMarketID": "group-neg-risk",
+    }
+    event = _standard_neg_risk_event([active_market, all_markets[1]])
+    missing_market_id = all_markets[1]["id"]
+    fake_gamma = _make_fake_gamma([active_market], [event])
+    fake_gamma.fetch_market_states.side_effect = [
+        {missing_market_id: {"active": True, "closed": False}},
+        {missing_market_id: {"active": True, "closed": True}},
+    ]
+    clob_data = _load_clob_fixture()
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed,failure_source,failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+        layer1 = con.execute(
+            "SELECT category,detail FROM validation_issues "
+            "WHERE snapshot_id=? AND layer=1 ORDER BY id",
+            (result.snapshot_id,),
+        ).fetchall()
+        reconciled_member = con.execute(
+            "SELECT active,closed FROM event_market_memberships "
+            "WHERE snapshot_id=? AND market_id=?",
+            (result.snapshot_id, missing_market_id),
+        ).fetchone()
+
+    assert result.is_valid is True
+    assert coverage == (1, None, None)
+    assert layer1 == [
+        (
+            "api_jitter",
+            f"Gamma event/member state changed during snapshot: non-open for {missing_market_id}",
+        )
+    ]
+    assert reconciled_member == (1, 1)
+    assert fake_gamma.fetch_market_states.await_args_list == [
+        (([missing_market_id],),),
+        (([missing_market_id],),),
+    ]
+    assert publish_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_member_final_state_lookup_failure_blocks_publication(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    all_markets = _load_gamma_fixture()[:2]
+    active_market = {
+        **all_markets[0],
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "negRiskMarketID": "group-neg-risk",
+    }
+    event = _standard_neg_risk_event([active_market, all_markets[1]])
+    missing_market_id = all_markets[1]["id"]
+    fake_gamma = _make_fake_gamma([active_market], [event])
+    fake_gamma.fetch_market_states.side_effect = [
+        {missing_market_id: {"active": True, "closed": False}},
+        RuntimeError("final lookup unavailable"),
+    ]
+    clob_data = _load_clob_fixture()
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed,failure_source,failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+
+    assert result.is_valid is False
+    assert coverage == (
+        0,
+        "events",
+        "event-member-final-state-lookup-failed:RuntimeError",
+    )
+    assert fake_gamma.fetch_market_states.await_count == 2
+    assert publish_mock.await_count == 0
 
 
 @pytest.mark.asyncio

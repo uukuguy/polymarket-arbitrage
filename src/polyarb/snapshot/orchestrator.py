@@ -405,6 +405,7 @@ async def run_snapshot(
     member_state_lookup_failure_reason: str | None = None
     orphan_parent_lookup_failure_reason: str | None = None
     verified_non_open_member_ids: set[str] = set()
+    pending_open_missing_member_ids: set[str] = set()
     verified_stale_orphan_ids: set[str] = set()
     threshold = settings.liquidity_threshold_usd
     PROGRESS_EVERY = 5000  # log every N streamed markets so long fetches stay observable
@@ -585,6 +586,9 @@ async def run_snapshot(
                             for market_id, state in point_states.items()
                             if not state["active"] or state["closed"]
                         }
+                        pending_open_missing_member_ids = (
+                            set(missing_event_members) - verified_non_open_member_ids
+                        )
                         if verified_non_open_member_ids:
                             event_members, group_truths = _apply_point_member_states(
                                 event_members,
@@ -694,7 +698,12 @@ async def run_snapshot(
             group_truths=group_truths,
             event_optional_market_ids=event_optional_market_ids,
             verified_stale_orphan_ids=verified_stale_orphan_ids,
-            verified_non_open_member_ids=verified_non_open_member_ids,
+            # A missing member that still looks open at the first point lookup
+            # is deferred, not trusted. Long CLOB runs can span the exact
+            # transition to closed, so Phase 5.5 rechecks it before publication.
+            verified_non_open_member_ids=(
+                verified_non_open_member_ids | pending_open_missing_member_ids
+            ),
         )
         if reconciliation_reason is not None:
             issues.append(
@@ -844,6 +853,67 @@ async def run_snapshot(
                             raw_payload=json.dumps(book, default=str)[:500],
                         )
                     )
+
+    # Gamma event and market catalogues are sampled before a multi-minute CLOB
+    # phase. A member can be open at the initial point lookup, close while CLOB
+    # is running, and remain absent from the active market keyset. Recheck only
+    # that bounded unresolved set with a fresh, short-lived client. Any member
+    # still open, malformed response, or transport failure remains fail-closed.
+    if pending_open_missing_member_ids and reconciliation_reason is None:
+        with _phase("5.5/7: Recheck pending event members"):
+            final_lookup_reason: str | None = None
+            try:
+                async with GammaClient(settings) as final_gamma:
+                    final_states = await final_gamma.fetch_market_states(
+                        sorted(pending_open_missing_member_ids)
+                    )
+            except Exception as e:  # noqa: BLE001 — fail closed at source boundary
+                final_lookup_reason = (
+                    f"event-member-final-state-lookup-failed:{type(e).__name__}"
+                )[:160]
+                logger.error(f"Gamma final event-member point lookup failed: {e!r}")
+            else:
+                final_non_open_ids = {
+                    market_id
+                    for market_id, state in final_states.items()
+                    if not state["active"] or state["closed"]
+                }
+                if final_non_open_ids:
+                    verified_non_open_member_ids.update(final_non_open_ids)
+                    event_members, group_truths = _apply_point_member_states(
+                        event_members,
+                        group_truths,
+                        final_states,
+                    )
+                    bounded_ids = ",".join(sorted(final_non_open_ids)[:10])
+                    issues.append(
+                        Issue(
+                            layer=1,
+                            category=Category.API_JITTER,
+                            market_id=None,
+                            detail=(
+                                "Gamma event/member state changed during snapshot: "
+                                f"non-open for {bounded_ids}"
+                            )[:200],
+                        )
+                    )
+                still_open_ids = pending_open_missing_member_ids - final_non_open_ids
+                if still_open_ids:
+                    bounded_ids = ",".join(sorted(still_open_ids)[:5])
+                    final_lookup_reason = f"event-member-missing-market:{bounded_ids}"[:160]
+
+            if final_lookup_reason is not None:
+                reconciliation_reason = final_lookup_reason
+                issues.append(
+                    Issue(
+                        layer=1,
+                        category=Category.API_UNREACHABLE,
+                        market_id=None,
+                        detail=(
+                            f"Gamma event/market reconciliation incomplete: {reconciliation_reason}"
+                        )[:200],
+                    )
+                )
 
     # ── 6. Validate (Layer 1 / 2 / 4) ─────────────────────────────────────────
     with _phase("6/7: Validate (Layer 1/2/4)"):
