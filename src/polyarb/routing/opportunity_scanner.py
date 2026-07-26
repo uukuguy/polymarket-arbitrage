@@ -13,6 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from polyarb.routing.neg_risk_quote_store import (
+    CompleteQuoteProjection,
     NegRiskQuoteStore,
 )
 
@@ -246,6 +247,32 @@ def scan_verified_neg_risk_quote_run(
     projection = store.latest_complete_projection()
     if projection is None:
         raise QuoteRunUnavailableError("quote run unavailable")
+    return scan_certified_neg_risk_quote_projection(
+        projection,
+        min_edge_bps=min_edge_bps,
+        max_quote_age_s=max_quote_age_s,
+        max_universe_age_s=max_universe_age_s,
+        limit=limit,
+        now_s=now_s,
+    )
+
+
+def scan_certified_neg_risk_quote_projection(
+    projection: CompleteQuoteProjection,
+    *,
+    min_edge_bps: float = 0,
+    max_quote_age_s: float = 300,
+    max_universe_age_s: float = 50_400,
+    limit: int = 50,
+    now_s: Callable[[], float] = time.time,
+) -> OpportunityScanResult:
+    """Scan one immutable projection already certified by the quote worker."""
+    _validate_non_negative_finite(min_edge_bps, "min_edge_bps")
+    _validate_non_negative_finite(max_quote_age_s, "max_quote_age_s")
+    _validate_non_negative_finite(max_universe_age_s, "max_universe_age_s")
+    if type(limit) is not int or limit < 0:
+        raise ValueError("limit must be a non-negative integer")
+
     source_universe = projection.source_universe
 
     now = now_s()

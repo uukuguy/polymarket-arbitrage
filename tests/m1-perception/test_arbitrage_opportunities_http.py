@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 
+from polyarb.daemon.quote_worker import QuoteWorkerRuntime
 from polyarb.routing.neg_risk_quote_store import (
     QuoteProjectionIntegrityError,
     QuoteUniverseUnavailableError,
@@ -23,8 +26,17 @@ class _Opportunity:
 
 
 def test_opportunity_endpoint_returns_explicit_gross_basis(http_test_client, monkeypatch) -> None:
+    runtime = QuoteWorkerRuntime()
+    runtime.publish_certified_projection(
+        SimpleNamespace(run_id=20, universe_snapshot_id=10)
+    )
+    http_test_client.app.state.quote_worker_runtime = runtime
     monkeypatch.setattr(
-        "polyarb.http.arbitrage.scan_verified_neg_risk_quote_run",
+        "polyarb.http.arbitrage._last_complete_snapshot_id",
+        lambda _path: 10,
+    )
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage.scan_certified_neg_risk_quote_projection",
         lambda *_args, **_kwargs: OpportunityScanResult(
             opportunities=(_Opportunity(),),
             rejections={"augmented-neg-risk-not-supported": 4},
@@ -70,6 +82,15 @@ def test_opportunity_endpoint_rejects_negative_threshold_as_caller_error(
 def test_opportunity_endpoint_returns_bounded_503_for_quote_run_preconditions(
     http_test_client, monkeypatch
 ) -> None:
+    runtime = QuoteWorkerRuntime()
+    runtime.publish_certified_projection(
+        SimpleNamespace(run_id=20, universe_snapshot_id=10)
+    )
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._last_complete_snapshot_id",
+        lambda _path: 10,
+    )
     cases = [
         (
             QuoteUniverseUnavailableError("source coverage incomplete"),
@@ -88,7 +109,7 @@ def test_opportunity_endpoint_returns_bounded_503_for_quote_run_preconditions(
     ]
     for error, expected in cases:
         monkeypatch.setattr(
-            "polyarb.http.arbitrage.scan_verified_neg_risk_quote_run",
+            "polyarb.http.arbitrage.scan_certified_neg_risk_quote_projection",
             lambda *_args, error=error, **_kwargs: (_ for _ in ()).throw(error),
         )
 
@@ -96,3 +117,75 @@ def test_opportunity_endpoint_returns_bounded_503_for_quote_run_preconditions(
 
         assert response.status_code == 503
         assert response.json() == {"error": expected}
+
+
+def test_opportunity_endpoint_cold_cache_fails_without_database_scan(
+    http_test_client, monkeypatch
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    http_test_client.app.state.quote_worker_runtime = runtime
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("endpoint must not rebuild a certified projection")
+
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage.scan_certified_neg_risk_quote_projection",
+        forbidden,
+        raising=False,
+    )
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "verified market universe unavailable"}
+
+
+def test_opportunity_endpoint_fails_closed_when_market_truth_advances(
+    http_test_client, monkeypatch
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    runtime.publish_certified_projection(
+        SimpleNamespace(run_id=20, universe_snapshot_id=10)
+    )
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._last_complete_snapshot_id",
+        lambda _path: 11,
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("stale projection must not be scanned")
+
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage.scan_certified_neg_risk_quote_projection",
+        forbidden,
+    )
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "verified market universe unavailable"}
+
+
+def test_opportunity_endpoint_bounds_source_truth_read_latency(
+    http_test_client, monkeypatch
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    runtime.publish_certified_projection(
+        SimpleNamespace(run_id=20, universe_snapshot_id=10)
+    )
+    http_test_client.app.state.quote_worker_runtime = runtime
+
+    async def never_finishes(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("polyarb.http.arbitrage.asyncio.to_thread", never_finishes)
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._SOURCE_TRUTH_READ_TIMEOUT_S",
+        0.01,
+    )
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "verified market universe unavailable"}

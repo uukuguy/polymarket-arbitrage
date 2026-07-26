@@ -92,7 +92,11 @@ def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
         last_complete_age_seconds=None,
     )
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con = sqlite3.connect(
+            f"file:{path}?mode=ro",
+            uri=True,
+            timeout=0.25,
+        )
     except sqlite3.Error:
         return empty
     try:
@@ -325,24 +329,25 @@ def _build_health_checks(
 
     # ── Check 5: production opportunity quote freshness ──────────────────
     if settings.neg_risk_quote_worker_enabled:
-        from polyarb.routing.neg_risk_quote_store import (
-            NegRiskQuoteStore,
-            QuoteUniverseUnavailableError,
-        )
         from polyarb.routing.opportunity_scanner import (
             QUOTE_SLA_SECONDS,
             QUOTE_WARN_SECONDS,
         )
 
-        quote_error_kind: str | None = None
-        try:
-            quote_run = NegRiskQuoteStore(store.db_path).latest_complete_projection()
-        except (sqlite3.Error, QuoteUniverseUnavailableError) as error:
-            quote_run = None
-            quote_error_kind = type(error).__name__
+        quote_run = (
+            quote_worker_runtime.certified_projection()
+            if quote_worker_runtime is not None
+            else None
+        )
+        quote_output: str | None = None
         if quote_run is None:
             quote_age_s: float | None = None
             quote_status = "fail"
+            quote_output = "certified-projection-unavailable"
+        elif quote_run.universe_snapshot_id != market_truth.last_complete_snapshot_id:
+            quote_age_s = None
+            quote_status = "fail"
+            quote_output = "source-snapshot-mismatch"
         else:
             quote_age_s = max(0.0, now_s - quote_run.quoted_at_ms / 1000.0)
             if quote_age_s < QUOTE_WARN_SECONDS:
@@ -359,11 +364,7 @@ def _build_health_checks(
                 "observedValue": (round(quote_age_s, 1) if quote_age_s is not None else None),
                 "observedUnit": "s",
                 "status": quote_status,
-                "output": (
-                    f"quote-store-unreadable:{quote_error_kind}"
-                    if quote_error_kind is not None
-                    else None
-                ),
+                "output": quote_output,
                 "time": _utc_now_iso(),
             }
         ]

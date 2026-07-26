@@ -15,6 +15,7 @@ from polyarb.routing.opportunity_scanner import (
     QuoteRunUnavailableError,
     StaleQuoteRunError,
     StaleUniverseError,
+    scan_certified_neg_risk_quote_projection,
     scan_neg_risk_buy_all,
     scan_neg_risk_quote_run,
     scan_verified_neg_risk_quote_run,
@@ -299,6 +300,25 @@ def test_verified_scan_exposes_exact_identity_and_bounded_rejections(quote_db) -
         "augmented-neg-risk-not-supported": 1,
         "incomplete-quotes": 1,
     }
+
+
+def test_cached_projection_scan_matches_database_verified_scan(quote_db) -> None:
+    _complete_quote_run(quote_db)
+    projection = NegRiskQuoteStore(quote_db).latest_complete_projection()
+    assert projection is not None
+
+    cached = scan_certified_neg_risk_quote_projection(
+        projection,
+        min_edge_bps=100,
+        now_s=lambda: QUOTE_NOW_S,
+    )
+    database = scan_verified_neg_risk_quote_run(
+        quote_db,
+        min_edge_bps=100,
+        now_s=lambda: QUOTE_NOW_S,
+    )
+
+    assert cached == database
 
 
 def test_verified_scan_recomputes_invalid_group_rejections_for_exact_source(

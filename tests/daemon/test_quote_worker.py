@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,7 +53,7 @@ async def test_worker_collects_immediately_then_waits_for_interval() -> None:
     await worker.run(asyncio.Event())
 
     assert calls == [1, 2]
-    assert delays == [120, 120]
+    assert delays == pytest.approx([120, 120], abs=0.05)
     snapshot = worker.runtime.snapshot()
     assert snapshot.state == "stopped"
     assert snapshot.attempt_count == 2
@@ -99,6 +100,39 @@ async def test_worker_never_overlaps_collections() -> None:
     assert maximum_active == 1
 
 
+@pytest.mark.parametrize(
+    ("finished_at", "expected_delay"),
+    ((175.0, 45.0), (250.0, 0.0)),
+)
+async def test_worker_interval_is_start_to_start_without_negative_wait(
+    finished_at: float,
+    expected_delay: float,
+) -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    clock = iter((100.0, finished_at))
+    delays: list[float] = []
+
+    async def collect_once() -> QuoteCollectionResult:
+        return _result(1)
+
+    async def wait_for_stop(_stop: asyncio.Event, delay_s: float) -> bool:
+        delays.append(delay_s)
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        interval_s=120,
+        wait_for_stop=wait_for_stop,
+        monotonic=lambda: next(clock),
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert delays == [expected_delay]
+    assert worker.runtime.snapshot().attempt_count == 1
+
+
 async def test_worker_failure_is_recorded_and_next_attempt_can_succeed() -> None:
     from polyarb.daemon.quote_worker import QuoteWorker
 
@@ -133,6 +167,68 @@ async def test_worker_failure_is_recorded_and_next_attempt_can_succeed() -> None
     assert snapshot.consecutive_failures == 0
     assert snapshot.last_error_kind is None
     assert snapshot.last_run_id == 9
+
+
+async def test_worker_publishes_projection_only_after_certification() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    projection = SimpleNamespace(run_id=7)
+    published_during_certification: list[object | None] = []
+
+    async def collect_once() -> QuoteCollectionResult:
+        return _result(7)
+
+    async def certify_projection(_result: QuoteCollectionResult):
+        published_during_certification.append(worker.runtime.certified_projection())
+        return projection
+
+    async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        certify_projection=certify_projection,
+        interval_s=120,
+        wait_for_stop=stop_after_once,
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert published_during_certification == [None]
+    assert worker.runtime.certified_projection() is projection
+    assert worker.runtime.snapshot().success_count == 1
+
+
+async def test_failed_certification_preserves_previous_projection() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    previous = SimpleNamespace(run_id=6)
+    wrong_run = SimpleNamespace(run_id=999)
+
+    async def collect_once() -> QuoteCollectionResult:
+        return _result(7)
+
+    async def certify_projection(_result: QuoteCollectionResult):
+        return wrong_run
+
+    async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        certify_projection=certify_projection,
+        interval_s=120,
+        wait_for_stop=stop_after_once,
+    )
+    worker.runtime.publish_certified_projection(previous)
+
+    await worker.run(asyncio.Event())
+
+    assert worker.runtime.certified_projection() is previous
+    snapshot = worker.runtime.snapshot()
+    assert snapshot.success_count == 0
+    assert snapshot.failure_count == 1
+    assert snapshot.last_error_kind == "QuoteProjectionIntegrityError"
 
 
 async def test_worker_cancellation_propagates_without_failure_count() -> None:
