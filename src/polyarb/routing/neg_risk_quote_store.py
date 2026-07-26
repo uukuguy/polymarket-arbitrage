@@ -53,8 +53,8 @@ class QuoteRunLeaseLostError(QuoteRunStateError):
 class QuoteUniverseUnavailableError(RuntimeError):
     """No completed source snapshot currently backs the published market view."""
 
-    def __init__(self) -> None:
-        super().__init__("quote-universe-unavailable")
+    def __init__(self, detail: str = "quote-universe-unavailable") -> None:
+        super().__init__(detail)
 
 
 @dataclass(frozen=True)
@@ -180,6 +180,31 @@ class NegRiskQuoteStore:
         try:
             con.execute("BEGIN")
             snapshot = _latest_completed_published_snapshot(con)
+            if snapshot is None:
+                raise QuoteUniverseUnavailableError()
+            return _verified_universe_for_snapshot(
+                con,
+                snapshot_id=int(snapshot[0]),
+                taken_at_ms=int(snapshot[1]),
+            )
+        finally:
+            con.close()
+
+    def verified_universe_for_snapshot(
+        self,
+        snapshot_id: int,
+    ) -> VerifiedQuoteUniverse:
+        """Rebuild verified truth for one exact complete published snapshot."""
+        con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        try:
+            con.execute("BEGIN")
+            snapshot = con.execute(
+                "SELECT s.id,s.taken_at_ms FROM snapshots s "
+                "JOIN snapshot_source_coverage c "
+                "ON c.snapshot_id=s.id AND c.completed=1 "
+                "WHERE s.id=? AND s.market_view_published=1",
+                (snapshot_id,),
+            ).fetchone()
             if snapshot is None:
                 raise QuoteUniverseUnavailableError()
             return _verified_universe_for_snapshot(

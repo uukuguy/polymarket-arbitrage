@@ -8,13 +8,14 @@ from math import isfinite
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from polyarb.routing.neg_risk_quote_store import QuoteUniverseUnavailableError
 from polyarb.routing.opportunity_scanner import (
     QUOTE_SLA_SECONDS,
     UNIVERSE_SLA_SECONDS,
     QuoteRunUnavailableError,
     StaleQuoteRunError,
     StaleUniverseError,
-    scan_neg_risk_quote_run,
+    scan_verified_neg_risk_quote_run,
 )
 
 
@@ -27,29 +28,38 @@ async def opportunities(request: Request) -> JSONResponse:
     except ValueError:
         return JSONResponse({"error": "invalid numeric query"}, status_code=400)
     try:
-        found = scan_neg_risk_quote_run(
+        result = scan_verified_neg_risk_quote_run(
             request.app.state.sqlite_store.db_path,
             min_edge_bps=min_edge_bps,
             max_quote_age_s=QUOTE_SLA_SECONDS,
             max_universe_age_s=UNIVERSE_SLA_SECONDS,
             limit=limit,
         )
-    except QuoteRunUnavailableError as error:
-        return JSONResponse({"error": str(error)}, status_code=503)
+    except (QuoteUniverseUnavailableError, QuoteRunUnavailableError):
+        return JSONResponse(
+            {"error": "verified market universe unavailable"},
+            status_code=503,
+        )
     except StaleQuoteRunError as error:
         return JSONResponse({"error": str(error)}, status_code=503)
     except StaleUniverseError as error:
         return JSONResponse({"error": str(error)}, status_code=503)
-    except (sqlite3.Error, ValueError) as error:
-        return JSONResponse({"error": f"snapshot database: {error}"}, status_code=503)
+    except (sqlite3.Error, ValueError):
+        return JSONResponse(
+            {"error": "verified market universe unavailable"},
+            status_code=503,
+        )
     return JSONResponse(
         {
             "strategy": "neg-risk-buy-all",
             "profit_basis": "gross-before-fees",
-            "coverage": "known-universe",
+            "coverage": "verified-standard-neg-risk",
+            "source_snapshot_id": result.source_snapshot_id,
+            "universe_hash": result.universe_hash,
+            "quote_run_id": result.quote_run_id,
             "quote_sla_seconds": QUOTE_SLA_SECONDS,
-            "universe_sla_seconds": UNIVERSE_SLA_SECONDS,
-            "count": len(found),
-            "opportunities": [item.to_dict() for item in found],
+            "count": len(result.opportunities),
+            "rejections": dict(result.rejections),
+            "opportunities": [item.to_dict() for item in result.opportunities],
         }
     )

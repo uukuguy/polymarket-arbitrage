@@ -66,8 +66,9 @@ def test_diagnose_feed_reports_zero_as_success(tmp_path) -> None:
     body = tmp_path / "zero.json"
     body.write_text(
         '{"strategy":"neg-risk-buy-all","profit_basis":"gross-before-fees",'
-        '"coverage":"known-universe","quote_sla_seconds":300,'
-        '"universe_sla_seconds":50400,"count":0,"opportunities":[]}'
+        '"coverage":"verified-standard-neg-risk","source_snapshot_id":10,'
+        '"universe_hash":"u1","quote_run_id":20,"quote_sla_seconds":300,'
+        '"count":0,"rejections":{},"opportunities":[]}'
     )
 
     result = _cli("diagnose-feed", "--http-status", "200", "--body-file", str(body))

@@ -4,17 +4,38 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from math import isfinite
 from pathlib import Path
+from types import MappingProxyType
 
-from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
+from polyarb.routing.neg_risk_quote_store import (
+    NegRiskQuoteStore,
+    QuoteUniverseUnavailableError,
+)
 
 QUOTE_SLA_SECONDS = 300
 QUOTE_WARN_SECONDS = 240
 UNIVERSE_SLA_SECONDS = 50_400
+BOUNDED_REJECTION_REASONS = frozenset(
+    {
+        "augmented-neg-risk-not-supported",
+        "event-membership-member-invalid",
+        "event-membership-missing-or-empty",
+        "event-neg-risk-enablement-conflict",
+        "event-neg-risk-flags-invalid",
+        "incomplete-quotes",
+        "incomplete-source",
+        "invalid-identity",
+        "market-id-conflict-across-events",
+        "membership-market-mismatch",
+        "neg-risk-group-not-supported",
+        "standard-neg-risk-has-non-tradable-members",
+    }
+)
 
 
 class StaleSnapshotError(RuntimeError):
@@ -57,9 +78,28 @@ class NegRiskOpportunity:
     quote_age_seconds: float | None = None
     universe_snapshot_id: int | None = None
     universe_age_seconds: float | None = None
+    event_id: str | None = None
+    membership_hash: str | None = None
+    quality: str | None = None
 
     def to_dict(self) -> dict:
         return {key: value for key, value in asdict(self).items() if value is not None}
+
+
+@dataclass(frozen=True)
+class OpportunityScanResult:
+    opportunities: tuple[NegRiskOpportunity, ...]
+    rejections: Mapping[str, int]
+    source_snapshot_id: int
+    universe_hash: str
+    quote_run_id: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "rejections",
+            MappingProxyType(dict(self.rejections)),
+        )
 
 
 def scan_neg_risk_buy_all(
@@ -168,7 +208,29 @@ def scan_neg_risk_quote_run(
     limit: int = 50,
     now_s: Callable[[], float] = time.time,
 ) -> list[NegRiskOpportunity]:
-    """Return executable buy-all bundles from one fresh, complete quote run.
+    """Compatibility wrapper returning candidates from one verified quote run."""
+    return list(
+        scan_verified_neg_risk_quote_run(
+            db_path,
+            min_edge_bps=min_edge_bps,
+            max_quote_age_s=max_quote_age_s,
+            max_universe_age_s=max_universe_age_s,
+            limit=limit,
+            now_s=now_s,
+        ).opportunities
+    )
+
+
+def scan_verified_neg_risk_quote_run(
+    db_path: Path | str,
+    *,
+    min_edge_bps: float = 0,
+    max_quote_age_s: float = 300,
+    max_universe_age_s: float = 50_400,
+    limit: int = 50,
+    now_s: Callable[[], float] = time.time,
+) -> OpportunityScanResult:
+    """Return verified candidates and bounded per-group rejection counts.
 
     A run's persisted terminal rows are its complete known universe.  We do
     not consult snapshot best-asks here: doing so could mix observations from
@@ -181,9 +243,17 @@ def scan_neg_risk_quote_run(
     if type(limit) is not int or limit < 0:
         raise ValueError("limit must be a non-negative integer")
 
-    projection = NegRiskQuoteStore(db_path).latest_complete_projection()
+    store = NegRiskQuoteStore(db_path)
+    projection = store.latest_complete_projection()
     if projection is None:
         raise QuoteRunUnavailableError("quote run unavailable")
+    source_universe = store.verified_universe_for_snapshot(
+        projection.universe_snapshot_id
+    )
+    if source_universe.universe_hash != projection.universe_hash:
+        raise QuoteUniverseUnavailableError(
+            "verified source identity does not match quote run"
+        )
 
     now = now_s()
     quote_age_seconds = max(0.0, now - projection.quoted_at_ms / 1000)
@@ -201,10 +271,25 @@ def scan_neg_risk_quote_run(
     for quote in projection.quotes:
         groups.setdefault(quote.neg_risk_market_id, []).append(quote)
 
+    rejections = Counter(
+        _bounded_rejection_reason(rejection.reason)
+        for rejection in source_universe.rejections
+    )
     opportunities: list[NegRiskOpportunity] = []
     threshold = Decimal(str(min_edge_bps))
     for group_id, group_quotes in groups.items():
         if len(group_quotes) < 2:
+            rejections["invalid-identity"] += 1
+            continue
+        event_ids = {quote.event_id for quote in group_quotes}
+        membership_hashes = {quote.membership_hash for quote in group_quotes}
+        if (
+            len(event_ids) != 1
+            or len(membership_hashes) != 1
+            or not next(iter(event_ids)).strip()
+            or not next(iter(membership_hashes)).strip()
+        ):
+            rejections["invalid-identity"] += 1
             continue
         legs: list[OpportunityLeg] = []
         for quote in group_quotes:
@@ -230,6 +315,7 @@ def scan_neg_risk_quote_run(
                 )
             )
         if len(legs) != len(group_quotes):
+            rejections["incomplete-quotes"] += 1
             continue
 
         sum_asks_decimal = sum((Decimal(str(leg.ask_price)) for leg in legs), Decimal(0))
@@ -252,10 +338,27 @@ def scan_neg_risk_quote_run(
                 quote_age_seconds=quote_age_seconds,
                 universe_snapshot_id=projection.universe_snapshot_id,
                 universe_age_seconds=universe_age_seconds,
+                event_id=next(iter(event_ids)),
+                membership_hash=next(iter(membership_hashes)),
+                quality="complete-supported",
             )
         )
     opportunities.sort(key=lambda item: (-item.gross_edge_bps, item.group_id))
-    return opportunities[:limit]
+    return OpportunityScanResult(
+        opportunities=tuple(opportunities[:limit]),
+        rejections={
+            reason: count
+            for reason, count in sorted(rejections.items())
+            if count > 0
+        },
+        source_snapshot_id=projection.universe_snapshot_id,
+        universe_hash=projection.universe_hash,
+        quote_run_id=projection.run_id,
+    )
+
+
+def _bounded_rejection_reason(reason: str) -> str:
+    return reason if reason in BOUNDED_REJECTION_REASONS else "invalid-identity"
 
 
 def _validate_non_negative_finite(value: float, name: str) -> None:

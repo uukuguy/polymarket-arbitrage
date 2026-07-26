@@ -19,6 +19,11 @@ from typer.testing import CliRunner
 
 from polyarb import cli_arbitrage as cli_mod
 from polyarb.cli_arbitrage import app
+from polyarb.routing.opportunity_scanner import (
+    NegRiskOpportunity,
+    OpportunityLeg,
+    OpportunityScanResult,
+)
 from polyarb.routing.position_tracker import PositionTracker
 
 runner = CliRunner()
@@ -164,6 +169,51 @@ def test_status_returns_expected_envelope():
         "max_exposure",
     ):
         assert field in metrics, f"missing snapshot field: {field}"
+
+
+def test_scan_quotes_emits_verified_feed_identity_and_rejections(monkeypatch) -> None:
+    opportunity = NegRiskOpportunity(
+        group_id="g1",
+        snapshot_id=10,
+        snapshot_age_seconds=100.0,
+        sum_asks=0.95,
+        gross_edge_bps=500.0,
+        executable_quantity=8.0,
+        gross_profit=0.4,
+        legs=(
+            OpportunityLeg("m1", "c1", "one", "t1", 0.4, 8.0),
+            OpportunityLeg("m2", "c2", "two", "t2", 0.55, 9.0),
+        ),
+        quote_run_id=20,
+        quote_age_seconds=10.0,
+        universe_snapshot_id=10,
+        universe_age_seconds=100.0,
+        event_id="e1",
+        membership_hash="m1",
+        quality="complete-supported",
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "scan_verified_neg_risk_quote_run",
+        lambda *_args, **_kwargs: OpportunityScanResult(
+            opportunities=(opportunity,),
+            rejections={"augmented-neg-risk-not-supported": 4},
+            source_snapshot_id=10,
+            universe_hash="u1",
+            quote_run_id=20,
+        ),
+    )
+
+    result = runner.invoke(app, ["scan-quotes"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["coverage"] == "verified-standard-neg-risk"
+    assert payload["source_snapshot_id"] == 10
+    assert payload["universe_hash"] == "u1"
+    assert payload["quote_run_id"] == 20
+    assert payload["rejections"] == {"augmented-neg-risk-not-supported": 4}
+    assert payload["opportunities"][0]["membership_hash"] == "m1"
 
 
 # ──────────────────────────────────────────────────────────────────────────

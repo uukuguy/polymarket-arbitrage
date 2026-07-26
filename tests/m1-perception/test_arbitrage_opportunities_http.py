@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from polyarb.routing.neg_risk_quote_store import QuoteUniverseUnavailableError
 from polyarb.routing.opportunity_scanner import (
+    OpportunityScanResult,
     QuoteRunUnavailableError,
     StaleQuoteRunError,
     StaleUniverseError,
@@ -19,8 +21,14 @@ class _Opportunity:
 
 def test_opportunity_endpoint_returns_explicit_gross_basis(http_test_client, monkeypatch) -> None:
     monkeypatch.setattr(
-        "polyarb.http.arbitrage.scan_neg_risk_quote_run",
-        lambda *_args, **_kwargs: [_Opportunity()],
+        "polyarb.http.arbitrage.scan_verified_neg_risk_quote_run",
+        lambda *_args, **_kwargs: OpportunityScanResult(
+            opportunities=(_Opportunity(),),
+            rejections={"augmented-neg-risk-not-supported": 4},
+            source_snapshot_id=10,
+            universe_hash="u1",
+            quote_run_id=20,
+        ),
     )
 
     response = http_test_client.get("/arbitrage/opportunities?min_edge_bps=100")
@@ -29,10 +37,13 @@ def test_opportunity_endpoint_returns_explicit_gross_basis(http_test_client, mon
     assert response.json() == {
         "strategy": "neg-risk-buy-all",
         "profit_basis": "gross-before-fees",
-        "coverage": "known-universe",
+        "coverage": "verified-standard-neg-risk",
+        "source_snapshot_id": 10,
+        "universe_hash": "u1",
+        "quote_run_id": 20,
         "quote_sla_seconds": 300,
-        "universe_sla_seconds": 50400,
         "count": 1,
+        "rejections": {"augmented-neg-risk-not-supported": 4},
         "opportunities": [{"group_id": "group-1", "gross_edge_bps": 250.0}],
     }
 
@@ -48,7 +59,11 @@ def test_opportunity_endpoint_returns_bounded_503_for_quote_run_preconditions(
     http_test_client, monkeypatch
 ) -> None:
     cases = [
-        (QuoteRunUnavailableError("quote run unavailable"), "quote run unavailable"),
+        (
+            QuoteUniverseUnavailableError("source coverage incomplete"),
+            "verified market universe unavailable",
+        ),
+        (QuoteRunUnavailableError("quote run unavailable"), "verified market universe unavailable"),
         (StaleQuoteRunError("quote age 300.1s exceeds 300.0s"), "quote age 300.1s exceeds 300.0s"),
         (
             StaleUniverseError("universe age 50400.1s exceeds 50400.0s"),
@@ -57,7 +72,7 @@ def test_opportunity_endpoint_returns_bounded_503_for_quote_run_preconditions(
     ]
     for error, expected in cases:
         monkeypatch.setattr(
-            "polyarb.http.arbitrage.scan_neg_risk_quote_run",
+            "polyarb.http.arbitrage.scan_verified_neg_risk_quote_run",
             lambda *_args, error=error, **_kwargs: (_ for _ in ()).throw(error),
         )
 

@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from polyarb.routing.opportunity_scanner import BOUNDED_REJECTION_REASONS
+
 DiagnosticKind = Literal[
     "available-zero",
     "available-opportunities",
@@ -46,6 +48,10 @@ class OpportunityFeedDiagnostic:
     max_universe_age_seconds: float | None = None
     strategy: str | None = None
     profit_basis: str | None = None
+    source_snapshot_id: int | None = None
+    universe_hash: str | None = None
+    quote_run_id: int | None = None
+    rejections: dict[str, int] | None = None
 
     @property
     def exit_code(self) -> int:
@@ -69,6 +75,10 @@ class OpportunityFeedDiagnostic:
                 "max_universe_age_seconds": self.max_universe_age_seconds,
                 "strategy": self.strategy,
                 "profit_basis": self.profit_basis,
+                "source_snapshot_id": self.source_snapshot_id,
+                "universe_hash": self.universe_hash,
+                "quote_run_id": self.quote_run_id,
+                "rejections": self.rejections,
             }.items()
             if value is not None
         }
@@ -110,6 +120,10 @@ def diagnose_opportunity_feed(http_status: int, body: str) -> OpportunityFeedDia
         count=count,
         strategy=payload["strategy"],
         profit_basis=payload["profit_basis"],
+        source_snapshot_id=payload["source_snapshot_id"],
+        universe_hash=payload["universe_hash"],
+        quote_run_id=payload["quote_run_id"],
+        rejections=dict(payload["rejections"]),
     )
 
 
@@ -173,22 +187,62 @@ def _is_valid_success_payload(payload: object) -> bool:
     strategy = payload.get("strategy")
     profit_basis = payload.get("profit_basis")
     coverage = payload.get("coverage")
+    source_snapshot_id = payload.get("source_snapshot_id")
+    universe_hash = payload.get("universe_hash")
+    quote_run_id = payload.get("quote_run_id")
     quote_sla_seconds = payload.get("quote_sla_seconds")
-    universe_sla_seconds = payload.get("universe_sla_seconds")
     count = payload.get("count")
+    rejections = payload.get("rejections")
     opportunities = payload.get("opportunities")
     return (
         isinstance(strategy, str)
         and bool(strategy)
         and isinstance(profit_basis, str)
         and bool(profit_basis)
-        and coverage == "known-universe"
+        and coverage == "verified-standard-neg-risk"
+        and type(source_snapshot_id) is int
+        and source_snapshot_id > 0
+        and isinstance(universe_hash, str)
+        and bool(universe_hash)
+        and type(quote_run_id) is int
+        and quote_run_id > 0
         and type(quote_sla_seconds) is int
         and quote_sla_seconds == 300
-        and type(universe_sla_seconds) is int
-        and universe_sla_seconds == 50_400
         and type(count) is int
         and count >= 0
+        and _is_valid_rejections(rejections)
         and isinstance(opportunities, list)
         and len(opportunities) == count
+        and all(
+            _is_valid_opportunity_identity(item, quote_run_id)
+            for item in opportunities
+        )
+    )
+
+
+def _is_valid_rejections(rejections: object) -> bool:
+    return isinstance(rejections, dict) and all(
+        isinstance(reason, str)
+        and reason in BOUNDED_REJECTION_REASONS
+        and type(count) is int
+        and count >= 0
+        for reason, count in rejections.items()
+    )
+
+
+def _is_valid_opportunity_identity(
+    opportunity: object,
+    quote_run_id: object,
+) -> bool:
+    if not isinstance(opportunity, dict):
+        return False
+    return (
+        all(
+            isinstance(opportunity.get(field), str)
+            and bool(opportunity[field])
+            for field in ("event_id", "group_id", "membership_hash")
+        )
+        and opportunity.get("quality") == "complete-supported"
+        and type(opportunity.get("quote_run_id")) is int
+        and opportunity["quote_run_id"] == quote_run_id
     )

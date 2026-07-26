@@ -8,6 +8,7 @@ import pytest
 from polyarb.routing.neg_risk_quote_store import (
     NegRiskQuoteStore,
     PersistedQuote,
+    QuoteUniverseUnavailableError,
 )
 from polyarb.routing.opportunity_scanner import (
     QuoteRunUnavailableError,
@@ -15,6 +16,7 @@ from polyarb.routing.opportunity_scanner import (
     StaleUniverseError,
     scan_neg_risk_buy_all,
     scan_neg_risk_quote_run,
+    scan_verified_neg_risk_quote_run,
 )
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -260,6 +262,74 @@ def test_quote_run_scan_rejects_an_entire_group_with_a_non_executable_sibling(
     opportunities = scan_neg_risk_quote_run(quote_db, now_s=lambda: QUOTE_NOW_S)
 
     assert [item.group_id for item in opportunities] == ["g2"]
+
+
+def test_verified_scan_exposes_exact_identity_and_bounded_rejections(quote_db) -> None:
+    with sqlite3.connect(quote_db) as con:
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (1,'e3','g3','augmented',1,1,'hash-g3',"
+            "'complete-unsupported','augmented-neg-risk-not-supported')"
+        )
+    run_id = _complete_quote_run(
+        quote_db,
+        terminal_states={"yes-2": "missing-ask"},
+    )
+    projection = NegRiskQuoteStore(quote_db).latest_complete_projection()
+    assert projection is not None
+
+    result = scan_verified_neg_risk_quote_run(
+        quote_db,
+        now_s=lambda: QUOTE_NOW_S,
+    )
+
+    assert [item.group_id for item in result.opportunities] == ["g2"]
+    candidate = result.opportunities[0]
+    assert candidate.event_id == "e2"
+    assert candidate.membership_hash == "hash-g2"
+    assert candidate.quality == "complete-supported"
+    assert candidate.quote_run_id == run_id
+    assert result.source_snapshot_id == 1
+    assert result.universe_hash == projection.universe_hash
+    assert result.quote_run_id == run_id
+    assert result.rejections == {
+        "augmented-neg-risk-not-supported": 1,
+        "incomplete-quotes": 1,
+    }
+
+
+def test_verified_scan_recomputes_invalid_group_rejections_for_exact_source(
+    quote_db,
+) -> None:
+    with sqlite3.connect(quote_db) as con:
+        con.execute("DELETE FROM markets WHERE market_id='m2'")
+    _complete_quote_run(quote_db)
+
+    result = scan_verified_neg_risk_quote_run(
+        quote_db,
+        now_s=lambda: QUOTE_NOW_S,
+    )
+
+    assert result.rejections == {"membership-market-mismatch": 1}
+
+
+def test_verified_scan_fails_closed_when_source_identity_drifts_after_run(
+    quote_db,
+) -> None:
+    _complete_quote_run(quote_db)
+    with sqlite3.connect(quote_db) as con:
+        con.execute(
+            "UPDATE neg_risk_group_truth SET membership_hash='changed' "
+            "WHERE neg_risk_market_id='g1'"
+        )
+
+    with pytest.raises(QuoteUniverseUnavailableError):
+        scan_verified_neg_risk_quote_run(
+            quote_db,
+            now_s=lambda: QUOTE_NOW_S,
+        )
 
 
 def test_quote_run_scan_ignores_newer_failed_and_collecting_runs(quote_db) -> None:
