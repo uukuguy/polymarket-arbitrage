@@ -104,6 +104,23 @@ def test_makefile_phony_declaration_present() -> None:
     assert not missing, f"missing .PHONY declarations for: {missing}"
 
 
+def test_dashboard_smoke_uses_canonical_production_project_url() -> None:
+    """The default smoke target must not regress to the dead short alias."""
+    result = subprocess.run(
+        ["make", "-n", "smoke-l2-dashboard"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert (
+        "https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app"
+        in result.stdout
+    )
+    assert "https://polymarket-arbitrage.vercel.app" not in result.stdout
+
+
 # =============================================================================
 # Phase 02 Plan 01: triple-check contract — dry-run only
 # =============================================================================
