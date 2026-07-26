@@ -1356,7 +1356,7 @@ async def test_orphan_neg_risk_parent_lookup_failure_blocks_publication(
 
 
 @pytest.mark.asyncio
-async def test_orphan_neg_risk_market_with_active_parent_blocks_publication(
+async def test_orphan_neg_risk_market_with_active_parent_is_quarantined(
     tmp_path: Path,
 ) -> None:
     settings = _make_settings(tmp_path)
@@ -1390,11 +1390,35 @@ async def test_orphan_neg_risk_market_with_active_parent_blocks_publication(
             "FROM snapshot_source_coverage WHERE snapshot_id=?",
             (result.snapshot_id,),
         ).fetchone()
+        market_count = con.execute(
+            "SELECT COUNT(*) FROM markets WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+        group_count = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_group_truth WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+        layer1 = con.execute(
+            "SELECT category,detail FROM validation_issues "
+            "WHERE snapshot_id=? AND layer=1 ORDER BY id",
+            (result.snapshot_id,),
+        ).fetchall()
 
-    assert result.is_valid is False
-    assert coverage[:2] == (0, "events")
-    assert coverage[2] == f"orphan-neg-risk-parent-active:{market['id']}"
-    assert publish_mock.await_count == 0
+    assert result.is_valid is True
+    assert coverage == (1, None, None)
+    assert market_count == (0,)
+    assert group_count == (0,)
+    assert layer1 == [
+        (
+            "api_jitter",
+            "Gamma active neg-risk parent absent from event catalogue quarantined: "
+            f"{market['id']}",
+        )
+    ]
+    universe = NegRiskQuoteStore(settings.db_path).latest_verified_universe()
+    assert universe.legs == ()
+    assert universe.rejections == ()
+    assert publish_mock.await_count == 1
 
 
 @pytest.mark.asyncio

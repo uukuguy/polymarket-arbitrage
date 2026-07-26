@@ -803,14 +803,28 @@ async def run_snapshot(
                             and state["closed"] is False
                             and state["archived"] is False
                         }
+                        # Every row was strictly identity/group/parent checked
+                        # by GammaClient. The market rows were already excluded
+                        # from target_markets above, so neither an active parent
+                        # that appeared after the event catalogue sample nor a
+                        # stale parent can leak a partial group into M2.
+                        verified_stale_orphan_ids = set(parent_states)
                         if active_parent_ids:
-                            bounded_ids = ",".join(sorted(active_parent_ids)[:5])
-                            orphan_parent_lookup_failure_reason = (
-                                f"orphan-neg-risk-parent-active:{bounded_ids}"
-                            )[:160]
-                        else:
-                            verified_stale_orphan_ids = set(parent_states)
-                            bounded_ids = ",".join(sorted(verified_stale_orphan_ids)[:10])
+                            bounded_ids = ",".join(sorted(active_parent_ids)[:10])
+                            issues.append(
+                                Issue(
+                                    layer=1,
+                                    category=Category.API_JITTER,
+                                    market_id=None,
+                                    detail=(
+                                        "Gamma active neg-risk parent absent from event "
+                                        f"catalogue quarantined: {bounded_ids}"
+                                    )[:200],
+                                )
+                            )
+                        stale_parent_ids = set(parent_states) - active_parent_ids
+                        if stale_parent_ids:
+                            bounded_ids = ",".join(sorted(stale_parent_ids)[:10])
                             issues.append(
                                 Issue(
                                     layer=1,
