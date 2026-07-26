@@ -262,6 +262,123 @@ async def test_fetch_market_states_rejects_unbounded_lookup_set() -> None:
             )
 
 
+async def test_fetch_market_parent_states_returns_inactive_parent_truth() -> None:
+    settings = _fast_settings()
+    payload = {
+        "id": "market-1",
+        "negRisk": True,
+        "negRiskMarketID": "group-1",
+        "events": [
+            {
+                "id": "event-1",
+                "active": False,
+                "closed": False,
+                "archived": True,
+            }
+        ],
+    }
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        route = router.get("/markets", params={"id": "market-1"}).mock(
+            return_value=httpx.Response(200, json=[payload])
+        )
+        async with GammaClient(settings) as client:
+            states = await client.fetch_market_parent_states({"market-1": "group-1"})
+
+    assert states == {
+        "market-1": {
+            "event_id": "event-1",
+            "active": False,
+            "closed": False,
+            "archived": True,
+        }
+    }
+    assert route.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [{"id": "wrong", "negRisk": True, "negRiskMarketID": "group-1", "events": []}],
+        [
+            {
+                "id": "market-1",
+                "negRisk": True,
+                "negRiskMarketID": "wrong-group",
+                "events": [],
+            }
+        ],
+        [
+            {
+                "id": "market-1",
+                "negRisk": True,
+                "negRiskMarketID": "group-1",
+                "events": [],
+            }
+        ],
+        [
+            {
+                "id": "market-1",
+                "negRisk": True,
+                "negRiskMarketID": "group-1",
+                "events": [
+                    {
+                        "id": "event-1",
+                        "active": False,
+                        "closed": False,
+                        "archived": False,
+                    },
+                    {
+                        "id": "event-2",
+                        "active": False,
+                        "closed": False,
+                        "archived": False,
+                    },
+                ],
+            }
+        ],
+        [
+            {
+                "id": "market-1",
+                "negRisk": True,
+                "negRiskMarketID": "group-1",
+                "events": [
+                    {
+                        "id": "event-1",
+                        "active": "false",
+                        "closed": False,
+                        "archived": False,
+                    }
+                ],
+            }
+        ],
+    ],
+)
+async def test_fetch_market_parent_states_fails_closed_on_malformed_truth(
+    payload: list[dict],
+) -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/markets", params={"id": "market-1"}).mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with GammaClient(settings) as client:
+            with pytest.raises(PaginationIntegrityError):
+                await client.fetch_market_parent_states({"market-1": "group-1"})
+
+
+async def test_fetch_market_parent_states_rejects_unbounded_lookup_set() -> None:
+    settings = _fast_settings()
+    async with GammaClient(settings) as client:
+        with pytest.raises(PaginationIntegrityError, match="lookup limit"):
+            await client.fetch_market_parent_states(
+                {
+                    f"market-{index}": f"group-{index}"
+                    for index in range(client.MAX_MARKET_STATE_LOOKUPS + 1)
+                }
+            )
+
+
 # ---------------------------------------------------------------------------
 # Test 6: aclose closes the underlying httpx client
 # ---------------------------------------------------------------------------

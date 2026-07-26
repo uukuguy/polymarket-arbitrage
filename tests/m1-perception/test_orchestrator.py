@@ -112,6 +112,19 @@ def _make_fake_gamma(markets: list[dict], events: list[dict] | None = None) -> A
         return {market_id: {"active": True, "closed": False} for market_id in market_ids}
 
     fake.fetch_market_states = AsyncMock(side_effect=_fetch_market_states)
+
+    async def _fetch_market_parent_states(market_groups):
+        return {
+            market_id: {
+                "event_id": f"parent-{market_id}",
+                "active": True,
+                "closed": False,
+                "archived": False,
+            }
+            for market_id in market_groups
+        }
+
+    fake.fetch_market_parent_states = AsyncMock(side_effect=_fetch_market_parent_states)
     fake.aclose = AsyncMock()
     fake.__aenter__.return_value = fake
     fake.__aexit__.return_value = None
@@ -1052,6 +1065,164 @@ async def test_orphan_market_requires_canonical_non_neg_risk_truth(
     assert result.is_valid is False
     assert coverage[:2] == (0, "events")
     assert market_count == 0
+    assert publish_mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_orphan_neg_risk_market_with_inactive_parent_is_quarantined(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    market = {
+        **_load_gamma_fixture()[0],
+        "negRisk": True,
+        "negRiskMarketID": "stale-group",
+    }
+    fake_gamma = _make_fake_gamma([market], [])
+    fake_gamma.fetch_market_parent_states.side_effect = None
+    fake_gamma.fetch_market_parent_states.return_value = {
+        market["id"]: {
+            "event_id": "inactive-parent",
+            "active": False,
+            "closed": False,
+            "archived": True,
+        }
+    }
+    clob_data = _load_clob_fixture()
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed,failure_source,failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+        market_count = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+        membership_count = con.execute(
+            "SELECT COUNT(*) FROM event_market_memberships WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()[0]
+        group_count = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_group_truth WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()[0]
+        layer1 = con.execute(
+            "SELECT category,detail FROM validation_issues WHERE snapshot_id=? AND layer=1",
+            (result.snapshot_id,),
+        ).fetchall()
+
+    assert result.is_valid is True
+    assert coverage == (1, None, None)
+    assert market_count == 0
+    assert membership_count == 0
+    assert group_count == 0
+    assert layer1 == [
+        (
+            "api_jitter",
+            f"Gamma stale neg-risk market quarantined: {market['id']}",
+        )
+    ]
+    fake_gamma.fetch_market_parent_states.assert_awaited_once_with({market["id"]: "stale-group"})
+    assert publish_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_orphan_neg_risk_parent_lookup_failure_blocks_publication(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    market = {
+        **_load_gamma_fixture()[0],
+        "negRisk": True,
+        "negRiskMarketID": "unknown-group",
+    }
+    fake_gamma = _make_fake_gamma([market], [])
+    fake_gamma.fetch_market_parent_states.side_effect = RuntimeError("parent unavailable")
+    clob_data = _load_clob_fixture()
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed,failure_source,failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+
+    assert result.is_valid is False
+    assert coverage[:2] == (0, "events")
+    assert coverage[2] == "orphan-parent-state-lookup-failed:RuntimeError"
+    assert publish_mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_orphan_neg_risk_market_with_active_parent_blocks_publication(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    market = {
+        **_load_gamma_fixture()[0],
+        "negRisk": True,
+        "negRiskMarketID": "live-group",
+    }
+    fake_gamma = _make_fake_gamma([market], [])
+    clob_data = _load_clob_fixture()
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed,failure_source,failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+
+    assert result.is_valid is False
+    assert coverage[:2] == (0, "events")
+    assert coverage[2] == f"orphan-neg-risk-parent-active:{market['id']}"
     assert publish_mock.await_count == 0
 
 

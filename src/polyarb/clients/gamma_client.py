@@ -268,6 +268,79 @@ class GammaClient:
             states[market_id] = {"active": active, "closed": closed}
         return states
 
+    async def fetch_market_parent_states(
+        self,
+        market_groups: dict[str, str],
+    ) -> dict[str, dict[str, str | bool]]:
+        """Resolve nested parent-event truth for unattached neg-risk markets.
+
+        ``/markets/{id}`` omits nested events, while the exact-id list endpoint
+        includes them. Every identity and state field is validated strictly;
+        ambiguous or missing parents raise so callers cannot quarantine a live
+        group on incomplete evidence.
+        """
+        items = sorted(market_groups.items())
+        if len(items) > self.MAX_MARKET_STATE_LOOKUPS:
+            raise PaginationIntegrityError(
+                f"market parent lookup limit exceeded: {len(items)}>{self.MAX_MARKET_STATE_LOOKUPS}"
+            )
+
+        states: dict[str, dict[str, str | bool]] = {}
+        for market_id, expected_group_id in items:
+            if (
+                type(market_id) is not str
+                or not market_id.strip()
+                or type(expected_group_id) is not str
+                or not expected_group_id.strip()
+            ):
+                raise PaginationIntegrityError("market parent lookup has invalid identity")
+            payload = await self._get("/markets", {"id": market_id})
+            if (
+                not isinstance(payload, list)
+                or len(payload) != 1
+                or not isinstance(payload[0], dict)
+            ):
+                raise PaginationIntegrityError(
+                    f"/markets?id={market_id} parent response has invalid shape"
+                )
+            market = payload[0]
+            if market.get("id") != market_id:
+                raise PaginationIntegrityError(
+                    f"/markets?id={market_id} parent response identity mismatch"
+                )
+            if (
+                market.get("negRisk") is not True
+                or market.get("negRiskMarketID") != expected_group_id
+            ):
+                raise PaginationIntegrityError(
+                    f"/markets?id={market_id} parent response group mismatch"
+                )
+            events = market.get("events")
+            if not isinstance(events, list) or len(events) != 1 or not isinstance(events[0], dict):
+                raise PaginationIntegrityError(
+                    f"/markets?id={market_id} parent response is ambiguous"
+                )
+            event = events[0]
+            event_id = event.get("id")
+            active = event.get("active")
+            closed = event.get("closed")
+            archived = event.get("archived")
+            if type(event_id) is not str or not event_id.strip():
+                raise PaginationIntegrityError(
+                    f"/markets?id={market_id} parent response has invalid identity"
+                )
+            if any(type(value) is not bool for value in (active, closed, archived)):
+                raise PaginationIntegrityError(
+                    f"/markets?id={market_id} parent response has invalid state"
+                )
+            states[market_id] = {
+                "event_id": event_id,
+                "active": active,
+                "closed": closed,
+                "archived": archived,
+            }
+        return states
+
     async def iter_active_events(self, coverage: PaginationCoverage) -> AsyncIterator[dict]:
         """Stream active events and record whether keyset traversal completed."""
         async for raw in self._paginate_keyset(

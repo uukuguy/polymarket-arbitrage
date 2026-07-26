@@ -79,6 +79,8 @@ from polyarb.validator.layers import (
     layer4_cross_source,
 )
 
+MAX_ORPHAN_PARENT_LOOKUPS = GammaClient.MAX_MARKET_STATE_LOOKUPS
+
 
 def _is_dns_jitter(exc: BaseException) -> bool:
     """Match the specific DNS-failure exception shapes seen in Fly machine production.
@@ -280,6 +282,7 @@ def _reconcile_market_truth(
     event_members: list[EventMember],
     group_truths: list[GroupTruth],
     event_optional_market_ids: set[str],
+    verified_stale_orphan_ids: set[str],
     verified_non_open_member_ids: set[str] | None = None,
 ) -> str | None:
     """Reconcile full Gamma identities before any subset publication claim."""
@@ -328,7 +331,10 @@ def _reconcile_market_truth(
     # storage contract for those rows.  Never extend this exemption to a row
     # that claims neg-risk membership: M2 requires complete event/group truth.
     orphan_markets = sorted(
-        observed_market_ids - set(market_to_event_map) - event_optional_market_ids
+        observed_market_ids
+        - set(market_to_event_map)
+        - event_optional_market_ids
+        - verified_stale_orphan_ids
     )
     if orphan_markets:
         return f"orphan-market-without-event:{','.join(orphan_markets[:5])}"[:160]
@@ -380,6 +386,8 @@ async def run_snapshot(
     target_markets: list[dict] = []
     seen_ids: set[str] = set()
     event_optional_market_ids: set[str] = set()
+    orphan_neg_risk_market_groups: dict[str, str] = {}
+    orphan_neg_risk_market_count = 0
     market_semantic_fingerprints: dict[str, tuple[object, ...]] = {}
     raw_market_count = 0
     normalized_count = 0
@@ -395,7 +403,9 @@ async def run_snapshot(
     market_failure_reason: str | None = None
     market_semantic_reason: str | None = None
     member_state_lookup_failure_reason: str | None = None
+    orphan_parent_lookup_failure_reason: str | None = None
     verified_non_open_member_ids: set[str] = set()
+    verified_stale_orphan_ids: set[str] = set()
     threshold = settings.liquidity_threshold_usd
     PROGRESS_EVERY = 5000  # log every N streamed markets so long fetches stay observable
 
@@ -458,6 +468,7 @@ async def run_snapshot(
             authoritative_member_ids = {
                 member.market_id for member in event_members if member.active and not member.closed
             }
+            known_group_ids = {truth.group_id for truth in group_truths}
             semantic_validator = MarketTruthSemanticValidator(
                 event_members,
                 group_truths,
@@ -481,12 +492,19 @@ async def run_snapshot(
                             if mid is None:
                                 continue
 
+                            group_id = normalized.get("neg_risk_market_id")
+                            is_unattached_neg_risk = (
+                                normalized.get("event_id") is None
+                                and normalized.get("neg_risk") is True
+                                and isinstance(group_id, str)
+                                and group_id not in known_group_ids
+                            )
                             # Inspect before duplicate suppression: pagination
                             # overlap may repeat a market ID, but a later row
                             # must not contradict its authoritative event truth.
                             # Keep only the first mismatch to preserve the
                             # streaming memory bound.
-                            if market_semantic_reason is None:
+                            if market_semantic_reason is None and not is_unattached_neg_risk:
                                 market_semantic_reason = semantic_validator.row_mismatch_reason(
                                     normalized
                                 )
@@ -515,11 +533,16 @@ async def run_snapshot(
                                 and normalized.get("neg_risk_market_id") is None
                             ):
                                 event_optional_market_ids.add(mid)
+                            if is_unattached_neg_risk:
+                                orphan_neg_risk_market_count += 1
+                                if len(orphan_neg_risk_market_groups) < MAX_ORPHAN_PARENT_LOOKUPS:
+                                    orphan_neg_risk_market_groups[mid] = group_id
                             normalized_count += 1
 
                             # Mode filter (replaces the old phase-3 block).
-                            if mid in authoritative_member_ids or _include_in_snapshot(
-                                mode, normalized, threshold
+                            if not is_unattached_neg_risk and (
+                                mid in authoritative_member_ids
+                                or _include_in_snapshot(mode, normalized, threshold)
                             ):
                                 target_markets.append(normalized)
                             # Non-target markets: dropped — no buffer, no reference held.
@@ -581,6 +604,47 @@ async def run_snapshot(
                                 )
                             )
 
+                if orphan_neg_risk_market_count > MAX_ORPHAN_PARENT_LOOKUPS:
+                    orphan_parent_lookup_failure_reason = (
+                        f"orphan-parent-state-lookup-limit-exceeded:{orphan_neg_risk_market_count}"
+                    )[:160]
+                elif orphan_neg_risk_market_groups:
+                    try:
+                        parent_states = await gamma.fetch_market_parent_states(
+                            dict(orphan_neg_risk_market_groups)
+                        )
+                    except Exception as e:  # noqa: BLE001 — fail closed at source boundary
+                        orphan_parent_lookup_failure_reason = (
+                            f"orphan-parent-state-lookup-failed:{type(e).__name__}"
+                        )[:160]
+                        logger.error(f"Gamma orphan neg-risk parent lookup failed: {e!r}")
+                    else:
+                        active_parent_ids = {
+                            market_id
+                            for market_id, state in parent_states.items()
+                            if state["active"] is True
+                            and state["closed"] is False
+                            and state["archived"] is False
+                        }
+                        if active_parent_ids:
+                            bounded_ids = ",".join(sorted(active_parent_ids)[:5])
+                            orphan_parent_lookup_failure_reason = (
+                                f"orphan-neg-risk-parent-active:{bounded_ids}"
+                            )[:160]
+                        else:
+                            verified_stale_orphan_ids = set(parent_states)
+                            bounded_ids = ",".join(sorted(verified_stale_orphan_ids)[:10])
+                            issues.append(
+                                Issue(
+                                    layer=1,
+                                    category=Category.API_JITTER,
+                                    market_id=None,
+                                    detail=(
+                                        f"Gamma stale neg-risk market quarantined: {bounded_ids}"
+                                    )[:200],
+                                )
+                            )
+
     # GammaClient closed (exited async-with). httpx AsyncClient fully cleaned
     # up before the CLOB phase starts.
 
@@ -605,6 +669,18 @@ async def run_snapshot(
                 ],
             )
         )
+    elif orphan_parent_lookup_failure_reason is not None:
+        reconciliation_reason = orphan_parent_lookup_failure_reason
+        issues.append(
+            Issue(
+                layer=1,
+                category=Category.API_UNREACHABLE,
+                market_id=None,
+                detail=(f"Gamma event/market reconciliation incomplete: {reconciliation_reason}")[
+                    :200
+                ],
+            )
+        )
     elif (
         events_coverage.result.completed
         and markets_coverage.result.completed
@@ -617,6 +693,7 @@ async def run_snapshot(
             event_members=event_members,
             group_truths=group_truths,
             event_optional_market_ids=event_optional_market_ids,
+            verified_stale_orphan_ids=verified_stale_orphan_ids,
             verified_non_open_member_ids=verified_non_open_member_ids,
         )
         if reconciliation_reason is not None:
@@ -636,6 +713,8 @@ async def run_snapshot(
     seen_ids.clear()
     market_semantic_fingerprints.clear()
     event_optional_market_ids.clear()
+    orphan_neg_risk_market_groups.clear()
+    verified_stale_orphan_ids.clear()
     market_to_event_map.clear()
     authoritative_member_ids.clear()
 
