@@ -5164,3 +5164,41 @@ Resume with `/gsd-resume-work --ws m1-perception`, read legacy
 `05-ws-book-prices/05-06-PLAN.md`, reuse the stricter Phase 05.4 evidence, and
 complete authenticated Dashboard acceptance plus Phase 05 validation/SUMMARY.
 Do not re-run the 24-hour clock unless an actual contract mismatch is found.
+
+## SESSION 102 — 2026-07-26 (M1 operational closure checkpoint)
+
+- [IMPLEMENTED] Plan 05-06 now has a canonical Vercel production URL and one
+  Polywatch decision across L1 quote/collector, opportunity feed, strict
+  L2/L3 evidence, and Dashboard reachability. Empty opportunities and
+  `WAITING_FOR_EVENT` remain healthy only under their explicit data contracts.
+- [PRODUCTION] Corrected the quoted/trailing-space R2 bucket configuration.
+  Read-only listing, snapshot upload evidence, strict L1 health, opportunity
+  feed, scheduled Polywatch, CI, Fly deploy, and Vercel deployment all passed
+  against runtime SHA `21acea5…`.
+- [QUALITY] Full pytest passed with the established one xfail/one skip;
+  repository Ruff, Dashboard typecheck/build, M1 docs contract, and the four
+  application route builds passed. Operator learning doc
+  `docs/learning/12-M1-持续运行.md` was added.
+- [QUOTE] First post-restart complete run 78 is anchored at
+  `2026-07-26T03:54:09.630Z`. Interim runs 78–84 are 7/7 complete,
+  1,278/1,278 each, zero failed/collecting/mismatched, max start gap 121.142
+  seconds. No 24-hour verdict is legal before
+  `2026-07-27T03:54:09.630Z`.
+- [DEPLOY GUARD] A docs-only push accidentally started a Fly workflow, which
+  was cancelled before release/machine/image identity changed. Added a tested
+  `paths-ignore` guard so planning/docs/Markdown-only closure commits cannot
+  restart production; pushed with `[skip ci]` to preserve the active window.
+- [BROWSER] Canonical endpoint and Vercel SSO redirect are reachable, but the
+  current authenticated-browser runtime exposes no browser. No HTTP redirect
+  or standalone automation was substituted for real `/status`, `/candidates`,
+  `/signals`, and `/l3/<asset_id>` acceptance.
+- [BOUNDARY] `05-06-SUMMARY.md`, Phase 05 validation, roadmap completion, and
+  final signoff remain intentionally unsigned until both hard gates pass.
+
+### [NEXT — CURRENT]
+
+At/after `2026-07-27T03:54:09.630Z`, resume with
+`/gsd-resume-work --ws m1-perception`; run the exact read-only quote aggregate
+for runs from anchor 78, recheck immutable Fly identity and all four production
+surfaces, retry the authenticated browser, then create 05-06 SUMMARY, sign
+Phase 05 validation/ROADMAP/STATE, extract learnings, and run final verification.

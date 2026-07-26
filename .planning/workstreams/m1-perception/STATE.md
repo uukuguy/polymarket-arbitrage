@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
-current_phase: 05.5
-status: ready
-stopped_at: Phase 05.5 COMPLETE; resume legacy Phase 05 Plan 06 dashboard/closure
-last_updated: "2026-07-26T01:34:00Z"
+current_phase: 05
+status: in_progress
+stopped_at: Plan 05-06 waiting for post-release quote T+24 and authenticated Dashboard UAT
+last_updated: "2026-07-26T04:13:54Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -17,6 +17,27 @@ progress:
 # M1 Perception — Current State
 
 ## Current Position
+
+Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in progress
+
+- **Implemented:** canonical production Dashboard URL, four-surface Polywatch
+  monitoring, repaired R2 bucket configuration, and the M1 continuous-operation
+  learning/runbook are committed and pushed through `cfdef70`.
+- **Production:** L1 runtime remains release
+  `21acea5c286c8b7a9599933674c1bf570316e1c2`, machine
+  `6830939c0070d8`, with the first post-restart complete quote run 78 at
+  `2026-07-26T03:54:09.630Z`.
+- **Interim quote evidence:** runs 78–84 are 7/7 complete, 1,278/1,278 each,
+  with zero failures/mismatches and maximum start gap 121.142 seconds.
+- **Hard gates:** no final quote verdict before
+  `2026-07-27T03:54:09.630Z`; authenticated browser UAT remains pending because
+  the current browser runtime exposes no browser.
+- **Evidence discipline:** Phase 05.4 A7 is accepted for L3 continuity. No
+  Plan 06 SUMMARY, Phase 05 validation signature, or roadmap completion may be
+  created before both remaining gates pass.
+- **Deploy guard:** L1 deploy now ignores docs/planning/Markdown-only pushes,
+  preventing closure evidence commits from restarting the release-bound quote
+  window.
 
 Phase: 05.5 (production-opportunity-feed) — COMPLETE
 Plan: 1 of 1 complete
