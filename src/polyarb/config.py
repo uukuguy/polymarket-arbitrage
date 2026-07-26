@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     # injection (and operations) can dial it down without redeploy.
     scheduler_interval_s: int = 3600
 
+    # Phase 05.5: dedicated public CLOB quote producer for the M1→M2
+    # known-universe opportunity feed. Disabled unless a deployment explicitly
+    # opts in; production cadence stays below the hard 300-second feed SLA.
+    neg_risk_quote_worker_enabled: bool = False
+    neg_risk_quote_interval_s: int = Field(default=120, gt=0, le=240)
+
     liquidity_threshold_usd: float = 1000.0
 
     retry_attempts: int = 3

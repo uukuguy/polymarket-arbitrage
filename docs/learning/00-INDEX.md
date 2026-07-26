@@ -34,6 +34,7 @@
 | 20 | [NOTIFY 门铃与游标账本](20-NOTIFY门铃与游标账本.md) | NOTIFY wake hint / durable cursor / candidate→WS→mirror 收敛 / quiet refresh 为什么必须等 book→mirror evidence |
 | 21 | [L3 候选与双 Token](21-L3-候选与双Token.md) | observation seed vs promotion gate / L2 asset_id=Yes token / durable Yes+No identity / fail-closed 5→10 expansion / mutation-free dry-run |
 | 22 | [L3 连续浸泡证据](22-L3连续浸泡证据.md) | truthful membership / server append-only evidence / AcceptanceConfig / manifest+五报告+raw-row hashes / event-kind fail-closed / retention privilege boundary |
+| 23 | [生产机会流](23-生产机会流.md) | app 内 quote worker / 120-240-300 秒三层时钟 / durable success anchor / 503 为什么不是零机会 / 日常实战诊断 |
 
 ## Phase 02.1 教学增量（2026-05）
 

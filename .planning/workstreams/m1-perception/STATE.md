@@ -2,24 +2,33 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
-current_phase: 05
-status: ready
-stopped_at: Phase 05.4 COMPLETE; Phase 05 Plan 06 reconciliation is next
-last_updated: "2026-07-25T23:35:16Z"
+current_phase: 05.5
+status: executing
+stopped_at: Phase 05.5 design approved and capacity-proved; execute 05.5-01 TDD
+last_updated: "2026-07-26T00:45:00Z"
 progress:
-  total_phases: 13
+  total_phases: 14
   completed_phases: 12
-  total_plans: 71
+  total_plans: 72
   completed_plans: 70
-  percent: 99
+  percent: 98
 ---
 
 # M1 Perception — Current State
 
 ## Current Position
 
-Phase: 05.4 (continuous-l3-soak-evidence) — COMPLETE
-Plan: 5 of 5 complete
+Phase: 05.5 (production-opportunity-feed) — IN PROGRESS
+Plan: 1 of 1 approved and ready for TDD
+
+- **Current production fact:** H-009 code is deployed but no periodic producer
+  exists. Before the capacity probe, the public route returned HTTP 503
+  `quote run unavailable`.
+- **Capacity proof:** production run 1 fetched 1,278/1,278 books across three
+  batches in 1.013 seconds and made the route return HTTP 200.
+- **Approved implementation:** one fail-soft L1 app-process worker, immediate
+  first run then 120-second cadence, unchanged 300-second quote SLA, durable
+  health chain-truth, no wallet or order capability.
 
 - **Phase:** 05.4 — Continuous L3 soak evidence, completed 2026-07-26
 - **Plan:** 05.4-05 complete — all nine tasks and the final mechanical verifier passed.

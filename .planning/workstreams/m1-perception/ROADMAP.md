@@ -363,6 +363,19 @@ Plans:
 - [x] 05.4-04-PLAN.md — Wave 4 (depends 03): DB-bound manifest, raw-row exact-window verdict/CLI, four read-only Make targets, gated retention cleanup, local chaos, deploy/docs
 - [x] 05.4-05-PLAN.md — Wave 5: production 007 + isolated credentials + exact-SHA release 72 + immutable A7 T0/T6/T12/T18/T24 PASS and final raw-row verification
 
+### Phase 05.5: Production Neg-Risk Opportunity Feed (INSERTED 2026-07-26)
+
+**Goal:** Operationalize the deployed H-009 quote collector inside the L1 app
+process so the known-universe opportunity feed stays fresh, observable, and
+truthful without introducing any order capability.
+**Status:** 🟡 IN PROGRESS — design approved, capacity proof passed, TDD next
+**Depends on:** Phase 05.4 complete + H-009 local implementation
+**Plans:** 1 plan
+
+Plans:
+- [ ] 05.5-01-PLAN.md — in-process 120-second quote worker, health chain-truth,
+  exact deployment, three-run production proof, and operator documentation
+
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 
 **Goal:** [To be planned]

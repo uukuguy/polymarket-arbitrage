@@ -1,4 +1,4 @@
-"""Daemon entry-point: asyncio.gather(http server + scheduler loop).
+"""Daemon entry-point: HTTP server + snapshot scheduler + optional quote worker.
 
 Phase 02 Plan 02 — asyncio SIGINT/SIGTERM graceful shutdown.
 
@@ -8,10 +8,10 @@ Run locally:
 
 Architecture (Plan 02):
     1. init_logging() — loguru JSON to stdout (must be FIRST before any logger calls)
-    2. Build Settings + SQLiteStore + SnapshotScheduler
-    3. create_app(scheduler, sqlite_store, settings) → Starlette app
-    4. uvicorn.Server + asyncio.gather(server_task, scheduler_task)
-    5. SIGINT/SIGTERM → stop_event → server.should_exit + scheduler stops cleanly
+    2. Build Settings + SQLiteStore + SnapshotScheduler + optional QuoteWorker
+    3. create_app(...) → Starlette app with worker runtime health state
+    4. Start uvicorn, scheduler, and quote worker as sibling tasks
+    5. SIGINT/SIGTERM → stop_event → cancel producers and stop cleanly
 
 Plan 04 will add Dockerfile + fly.toml [processes] group.
 Plan 05 will add init_sentry() before init_logging().
@@ -28,11 +28,24 @@ import uvicorn
 from loguru import logger
 
 from polyarb.config import load_settings
-from polyarb.http.app import create_app
+from polyarb.daemon.quote_worker import (
+    QuoteWorker,
+    build_production_quote_worker,
+)
 from polyarb.daemon.scheduler import SnapshotScheduler
+from polyarb.http.app import create_app
 from polyarb.observability.logging import init_logging
 from polyarb.observability.sentry import init_sentry
 from polyarb.storage.sqlite_store import SQLiteStore
+
+
+def _start_quote_worker(
+    quote_worker: QuoteWorker | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if quote_worker is None:
+        return None
+    return asyncio.create_task(quote_worker.run(stop_event))
 
 
 async def main() -> int:
@@ -52,7 +65,13 @@ async def main() -> int:
     sqlite_store.init_schema()
 
     scheduler = SnapshotScheduler(settings=settings, sqlite_store=sqlite_store)
-    app = create_app(scheduler=scheduler, sqlite_store=sqlite_store, settings=settings)
+    quote_worker = build_production_quote_worker(settings)
+    app = create_app(
+        scheduler=scheduler,
+        sqlite_store=sqlite_store,
+        settings=settings,
+        quote_worker_runtime=quote_worker.runtime if quote_worker is not None else None,
+    )
 
     config = uvicorn.Config(
         app,
@@ -87,6 +106,7 @@ async def main() -> int:
     logger.info(f"daemon running: http server on :{settings.http_port}, starting scheduler")
 
     scheduler_task = asyncio.create_task(scheduler.run(stop_event))
+    quote_worker_task = _start_quote_worker(quote_worker, stop_event)
 
     await stop_event.wait()
     logger.info("stop_event set, shutting down server")
@@ -97,15 +117,22 @@ async def main() -> int:
     # within ~1s rather than waiting for the current await to return. The
     # scheduler re-raises CancelledError out of _tick() per F-04 contract.
     scheduler_task.cancel()
+    if quote_worker_task is not None:
+        quote_worker_task.cancel()
 
     # Bounded final wait — even if some task ignores cancellation, the daemon
     # exits within 5s instead of hanging indefinitely.
     try:
         await asyncio.wait_for(
-            asyncio.gather(server_task, scheduler_task, return_exceptions=True),
+            asyncio.gather(
+                server_task,
+                scheduler_task,
+                *([quote_worker_task] if quote_worker_task is not None else []),
+                return_exceptions=True,
+            ),
             timeout=5.0,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("graceful shutdown exceeded 5s; daemon exiting anyway")
 
     logger.info("polyarb daemon stopped cleanly")

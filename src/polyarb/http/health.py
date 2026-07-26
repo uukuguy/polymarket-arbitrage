@@ -45,8 +45,9 @@ Source: datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06
 """
 from __future__ import annotations
 
+import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from starlette.requests import Request
@@ -65,7 +66,7 @@ _MIRROR_FAIL_S = 48 * 3600
 
 def _utc_now_iso() -> str:
     """Current UTC timestamp in ISO 8601 format with Z suffix."""
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _severity(a: str, b: str) -> str:
@@ -78,6 +79,7 @@ def _build_health_checks(
     store: Any,
     settings: Any,
     now_s: float,
+    quote_worker_runtime: Any | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], str]:
     """Compute all health sub-checks and the overall status.
 
@@ -205,10 +207,78 @@ def _build_health_checks(
             }
         ]
 
+    # ── Check 5: production opportunity quote freshness ──────────────────
+    if settings.neg_risk_quote_worker_enabled:
+        from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
+        from polyarb.routing.opportunity_scanner import (
+            QUOTE_SLA_SECONDS,
+            QUOTE_WARN_SECONDS,
+        )
+
+        quote_error_kind: str | None = None
+        try:
+            quote_run = NegRiskQuoteStore(store.db_path).latest_complete_run()
+        except sqlite3.Error as error:
+            quote_run = None
+            quote_error_kind = type(error).__name__
+        if quote_run is None:
+            quote_age_s: float | None = None
+            quote_status = "fail"
+        else:
+            quote_age_s = max(0.0, now_s - quote_run.quoted_at_ms / 1000.0)
+            if quote_age_s < QUOTE_WARN_SECONDS:
+                quote_status = "pass"
+            elif quote_age_s <= QUOTE_SLA_SECONDS:
+                quote_status = "warn"
+            else:
+                quote_status = "fail"
+        overall = _severity(overall, quote_status)
+        checks["quote_feed:last_complete_age_seconds"] = [
+            {
+                "componentId": "neg-risk-quote-worker",
+                "componentType": "component",
+                "observedValue": (
+                    round(quote_age_s, 1) if quote_age_s is not None else None
+                ),
+                "observedUnit": "s",
+                "status": quote_status,
+                "output": (
+                    f"quote-store-unreadable:{quote_error_kind}"
+                    if quote_error_kind is not None
+                    else None
+                ),
+                "time": _utc_now_iso(),
+            }
+        ]
+
+        if quote_worker_runtime is not None:
+            runtime = quote_worker_runtime.snapshot()
+            if runtime.state in {"cold-start", "error"}:
+                collector_status = "warn"
+            elif runtime.state == "stopped":
+                collector_status = "fail"
+            else:
+                collector_status = "pass"
+            overall = _severity(overall, collector_status)
+            checks["quote_feed:collector_state"] = [
+                {
+                    "componentId": "neg-risk-quote-worker",
+                    "componentType": "component",
+                    "observedValue": runtime.state,
+                    "status": collector_status,
+                    "output": runtime.last_error_kind,
+                    "time": _utc_now_iso(),
+                }
+            ]
+
     return checks, overall
 
 
-def _build_health_body(overall: str, checks: dict[str, list[dict[str, Any]]], settings: Any) -> dict[str, Any]:
+def _build_health_body(
+    overall: str,
+    checks: dict[str, list[dict[str, Any]]],
+    settings: Any,
+) -> dict[str, Any]:
     """Shared IETF body shape — same for /health and /healthz (D-06 full mirror)."""
     return {
         "status": overall,
@@ -235,7 +305,12 @@ async def health(request: Request) -> JSONResponse:
     store: SQLiteStore = request.app.state.sqlite_store
     settings = request.app.state.settings
 
-    checks, overall = _build_health_checks(store, settings, time.time())
+    checks, overall = _build_health_checks(
+        store,
+        settings,
+        time.time(),
+        getattr(request.app.state, "quote_worker_runtime", None),
+    )
     body = _build_health_body(overall, checks, settings)
     http_status = 503 if overall == "fail" else 200
     return JSONResponse(body, status_code=http_status, media_type=HEALTH_CONTENT_TYPE)
@@ -264,7 +339,12 @@ async def healthz(request: Request) -> JSONResponse:
     store: SQLiteStore = request.app.state.sqlite_store
     settings = request.app.state.settings
 
-    checks, overall = _build_health_checks(store, settings, time.time())
+    checks, overall = _build_health_checks(
+        store,
+        settings,
+        time.time(),
+        getattr(request.app.state, "quote_worker_runtime", None),
+    )
     body = _build_health_body(overall, checks, settings)
     # KEY: ignore overall when deciding HTTP code — always 200.
     return JSONResponse(body, status_code=200, media_type=HEALTH_CONTENT_TYPE)

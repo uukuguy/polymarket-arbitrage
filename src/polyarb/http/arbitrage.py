@@ -9,6 +9,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from polyarb.routing.opportunity_scanner import (
+    QUOTE_SLA_SECONDS,
+    UNIVERSE_SLA_SECONDS,
     QuoteRunUnavailableError,
     StaleQuoteRunError,
     StaleUniverseError,
@@ -28,8 +30,8 @@ async def opportunities(request: Request) -> JSONResponse:
         found = scan_neg_risk_quote_run(
             request.app.state.sqlite_store.db_path,
             min_edge_bps=min_edge_bps,
-            max_quote_age_s=300,
-            max_universe_age_s=50_400,
+            max_quote_age_s=QUOTE_SLA_SECONDS,
+            max_universe_age_s=UNIVERSE_SLA_SECONDS,
             limit=limit,
         )
     except QuoteRunUnavailableError as error:
@@ -45,8 +47,8 @@ async def opportunities(request: Request) -> JSONResponse:
             "strategy": "neg-risk-buy-all",
             "profit_basis": "gross-before-fees",
             "coverage": "known-universe",
-            "quote_sla_seconds": 300,
-            "universe_sla_seconds": 50_400,
+            "quote_sla_seconds": QUOTE_SLA_SECONDS,
+            "universe_sla_seconds": UNIVERSE_SLA_SECONDS,
             "count": len(found),
             "opportunities": [item.to_dict() for item in found],
         }

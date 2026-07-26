@@ -58,7 +58,56 @@
 
 ### Phase 5: Implementation and verification
 
-- **Status:** pending — ready to start 05.4-01
+- **Status:** complete
+- Actions taken:
+  - Implemented the Phase 05.4 continuous evidence chain.
+  - Deployed exact runtime identity and passed T0/T6/T12/T18/T24.
+  - Sealed the strict 24-hour evidence report and extracted learnings.
+
+## Session: 2026-07-26
+
+### Phase 6: Production neg-risk opportunity feed
+
+- **Status:** in progress
+- Actions taken:
+  - Probed L1/L2 health and verified the market-data base remains operational.
+  - Reproduced the production opportunity-feed 503 and captured its exact body.
+  - Traced the failure to zero complete quote runs, not zero market opportunity.
+  - Verified H-009 code is deployed but was intentionally never scheduled.
+  - Verified the cron machine has no shared volume and recently exited 137.
+  - Measured the latest known universe at 1,278 tokens / 254 groups / 3 batches.
+  - Presented three productionization approaches; user approved the in-process
+    L1 worker (scheme A).
+  - Ran the separately authorized production capacity observation: complete
+    run 1, 1,278/1,278 responses, 1.013 seconds collector time.
+  - Verified the public feed changed from truthful 503 to HTTP 200 immediately
+    after the complete run.
+  - Wrote and self-reviewed the approved production worker design and
+    bite-sized RED/GREEN implementation plan.
+  - Registered Phase 05.5 with one executable plan and updated ROADMAP/STATE.
+  - Completed the first TDD slice for the sequential quote worker: immediate
+    collection, 120-second wait, no overlap, fail-soft recovery, cancellation,
+    and disabled-by-default builder.
+  - Completed health/lifecycle RED/GREEN: 85 focused tests pass.
+  - Full repository pytest passed with the existing one xfail and one skip.
+  - Built `polyarb:quote-worker` and verified its production image imports and
+    default-disabled/120-second settings under the documented local test gate.
+  - Self-reviewed the complete change because the active execution policy
+    disallows a separate review agent. Fixed one important observability edge:
+    an unreadable quote store now produces a fail-closed health entry instead
+    of raising an HTTP 500. Also replaced loose settings attribute access with
+    the concrete `Settings` contract and centralized the 240-second warning
+    threshold.
+- Files modified:
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+  - `docs/superpowers/specs/2026-07-26-production-neg-risk-quote-worker-design.md`
+  - `docs/superpowers/plans/2026-07-26-production-neg-risk-quote-worker.md`
+  - `.planning/workstreams/m1-perception/phases/05.5-production-opportunity-feed/05.5-CONTEXT.md`
+  - `.planning/workstreams/m1-perception/phases/05.5-production-opportunity-feed/05.5-01-PLAN.md`
+  - `.planning/workstreams/m1-perception/ROADMAP.md`
+  - `.planning/workstreams/m1-perception/STATE.md`
 
 ## Test Results
 
@@ -68,19 +117,38 @@
 | Plan structure | Five Phase 05.4 PLAN files | Zero errors/warnings | 5/5 valid, 24 tasks | ✓ |
 | Nyquist map | PLAN tasks vs VALIDATION rows | One-to-one | 24/24 | ✓ |
 | Independent checker | Spec/context/research/plans | Verification passed | Passed after revisions | ✓ |
+| L1 opportunity route | Production GET | 200 or truthful bounded failure | 503 `quote run unavailable` | diagnostic |
+| Production universe | Read-only SQLite query on L1 app | Capacity input | 1,278 tokens, 254 groups, 3 batches | ✓ |
+| Quote capacity run 1 | Public CLOB reads + production SQLite quote run | Finish well inside 120 s | 1.013 s, 1,278/1,278 | ✓ |
+| Feed after run 1 | Production GET, `limit=5` | Fresh HTTP 200 | HTTP 200, `count=5` | ✓ |
+| Quote worker focused tests | `tests/daemon/test_quote_worker.py` | RED then GREEN | 5 behavior failures, then 6 passed | ✓ |
+| Quote worker integration | focused worker/health/route/store/collector suites | All pass | 86 passed | ✓ |
+| Full repository pytest | `uv run pytest -q` | Zero failures | Passed; 1 xfail, 1 skip | ✓ |
+| Changed-file Ruff | changed source/tests | Zero findings | All checks passed | ✓ |
+| Full repository Ruff | all `src tests` | Baseline audit only | 229 pre-existing findings outside changed files | legacy |
+| Docker build | `docker build -t polyarb:quote-worker .` | Exit 0 | image `64214e3e…` | ✓ |
+| Docker smoke | import worker/settings | Default false, interval 120 | Exact expected dict | ✓ |
 
 ## Error Log
 
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
 | 2026-07-21 | `state begin-phase` rewrote custom STATE fields | 1 | Restored canonical workstream STATE and documented tool-template mismatch |
+| 2026-07-26 | zsh rejected assignment to read-only `status` | 1 | Renamed it to `http_code` |
+| 2026-07-26 | Fly SSH requested interactive selection | 1 | Selected machine `6830939c0070d8` explicitly |
+| 2026-07-26 | Remote SQL quoting produced a syntax error | 1 | Used `length(...) > 0` predicates |
+| 2026-07-26 | Runtime image has no `time` executable | 1 | Used Python `time.perf_counter()` and did not install image tooling |
+| 2026-07-26 | Changed-file Ruff found two legacy aliases and one long signature | 1 | Applied behavior-neutral UTC/TimeoutError aliases and multiline formatting |
+| 2026-07-26 | Full pytest found two exact documentation phrase contract failures | 1 | Restored the canonical Make target spelling and fixed real-money/readiness warning phrases |
+| 2026-07-26 | Full Ruff reports 229 legacy findings in unrelated files | 1 | Preserved scope; changed-file Ruff is clean and no bulk rewrite was made |
+| 2026-07-26 | First image smoke lacked the required HMAC secret | 1 | Confirmed fail-closed, then used `POLYARB_ALLOW_EMPTY_SECRET=1` only for local image inspection |
 
 ## 5-Question Reboot Check
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 5 — ready for TDD implementation |
-| Where am I going? | Local Plans 01–04, separate production gates in Plan 05, then new strict soak |
-| What's the goal? | Replace spot-check claims with durable continuous L3 evidence |
-| What have I learned? | See `findings.md` |
-| What have I done? | Completed diagnosis, approved design, five-plan implementation planning, and checker verification |
+| Where am I? | Phase 6 — writing the approved quote-worker rollout plan |
+| Where am I going? | TDD implementation, local verification, L1 deploy, repeated production-run proof |
+| What's the goal? | Turn the truthful but unavailable opportunity route into a continuously fresh known-universe feed |
+| What have I learned? | See `findings.md`, especially the 2026-07-26 production section |
+| What have I done? | Root-caused the 503, rejected unsafe cron placement, and obtained approval for scheme A |

@@ -55,7 +55,13 @@ class ScanAuthMiddleware(BaseHTTPMiddleware):
         return await scan_auth_middleware(request, call_next, secret=self._secret)
 
 
-def create_app(*, scheduler: Any, sqlite_store: Any, settings: Any) -> Starlette:
+def create_app(
+    *,
+    scheduler: Any,
+    sqlite_store: Any,
+    settings: Any,
+    quote_worker_runtime: Any | None = None,
+) -> Starlette:
     """Factory: build Starlette app with /health + /scan routes.
 
     Args:
@@ -91,5 +97,6 @@ def create_app(*, scheduler: Any, sqlite_store: Any, settings: Any) -> Starlette
     app.state.scheduler = scheduler
     app.state.sqlite_store = sqlite_store
     app.state.settings = settings
+    app.state.quote_worker_runtime = quote_worker_runtime
 
     return app

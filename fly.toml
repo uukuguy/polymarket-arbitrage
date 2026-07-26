@@ -14,6 +14,8 @@ primary_region = "ams"
   POLYARB_SNAPSHOT_DIR = "/data/snapshots"
   POLYARB_DB_PATH = "/data/state.db"
   POLYARB_ALLOW_EXTERNAL_PATHS = "1"
+  POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED = "true"
+  POLYARB_NEG_RISK_QUOTE_INTERVAL_S = "120"
 
 # Two process groups — daemon (long-running HTTP+scheduler) + cron (Supercronic)
 # Set count via: flyctl scale count app=1 cron=1

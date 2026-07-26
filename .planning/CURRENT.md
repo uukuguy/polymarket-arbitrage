@@ -17,7 +17,7 @@ release-37 均保留为 diagnostic/rejected evidence。最终 exact SHA `6471d41
 288/288 promoter tick，minimum 5/10/10，最大 gap 38.653337 秒、最大 freshness
 111.039 秒；独立 verifier 重算出同一 raw/report hash。Phase 05.4 已完成。
 机会 feed 最近仍为 HTTP 503，H-009 与真实交易均未获授权；因此**M1 连续 L3
-证据已 production-qualified，但整套系统仍不是可以投入真实资金运行的套利产品**。
+证据已 production-qualified，但整套系统还不是可以投入真实资金运行的套利产品**。
 
 ## 交付状态
 

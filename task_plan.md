@@ -1,4 +1,4 @@
-# Task Plan: Phase 05 continuous observability gap closure
+# Task Plan: M1 production capability closure
 
 ## Goal
 
@@ -9,7 +9,7 @@ the strict 24-hour Phase 05 soak.
 
 ## Current Phase
 
-Phase 5 — Implementation and verification
+Phase 6 — Production neg-risk opportunity feed
 
 ## Phases
 
@@ -46,11 +46,25 @@ Phase 5 — Implementation and verification
 
 ### Phase 5: Implementation and verification
 
-- [ ] Execute under TDD with no production mutation before its explicit gate
-- [ ] Verify durable event history and continuous health sampling
-- [ ] Deploy only with separate production authorization
-- [ ] Restart a strict 24-hour soak with continuous evidence
-- **Status:** pending — ready to start Plan 01
+- [x] Execute under TDD with no production mutation before its explicit gate
+- [x] Verify durable event history and continuous health sampling
+- [x] Deploy only with separate production authorization
+- [x] Restart and pass a strict 24-hour soak with continuous evidence
+- **Status:** complete
+
+### Phase 6: Production neg-risk opportunity feed
+
+- [x] Reproduce production HTTP 503 and identify missing quote runs
+- [x] Prove the existing cron process cannot feed the HTTP service database
+- [x] Obtain approval for an in-process, fail-soft quote collector
+- [x] Write and self-review the production rollout spec and implementation plan
+- [x] Add failing scheduler and health chain-truth tests
+- [x] Implement the quote worker, lifecycle wiring, settings, and health checks
+- [x] Run focused and full local verification
+- [ ] Deploy to L1 and record a timestamped capacity observation
+- [ ] Verify repeated complete runs and a fresh HTTP 200 feed
+- [ ] Update the M1 manual, learning docs, JOURNAL, and project state
+- **Status:** in progress
 
 ## Key Questions
 
@@ -69,16 +83,26 @@ Phase 5 — Implementation and verification
 | Keep 24-hour soak horizon | Duration provides operational exposure; the defect is observation resolution |
 | Use continuous machine evidence plus six-hour human summaries | Detection cadence and review cadence are different concerns |
 | Restart strict soak after observability deployment | A deploy changes runtime identity, and pre-deploy evidence cannot validate post-deploy behavior |
+| Run quotes inside the L1 app process every 120 seconds | The HTTP route and collector must share `/data/state.db`; the cron process has no mounted volume |
+| Keep the public quote SLA at 300 seconds | Operationalizing the producer must not relabel stale quotes as executable |
+| Make quote collection fail-soft and non-overlapping | A quote outage must be visible without stopping snapshots or serving partial runs |
 
 ## Errors Encountered
 
 | Error | Attempt | Resolution |
 |-------|---------|------------|
 | Generic `gsd-tools state begin-phase` corrupted the narrative workstream STATE template | 1 | Root-caused template mismatch, restored canonical STATE manually, and reserved STATE/ROADMAP writes for the orchestrator |
+| Temporary shell probe used zsh's read-only `status` name | 1 | Renamed the variable to `http_code` |
+| First Fly SSH command requested interactive VM selection | 1 | Addressed the L1 app machine explicitly with `--machine` |
+| First remote SQL probe lost shell-quoted empty strings | 1 | Replaced empty-string predicates with `length(column) > 0` |
 
 ## Notes
 
 - Do not claim that five six-hour samples prove `min(active_count) == 5`
   throughout 24 hours.
 - No production deploy, restart, config/secret change, or H-009 work belongs in
-  the design/spec-review steps.
+  the historical Phase 05.4 design/spec-review steps.
+- Production currently returns `503 {"error":"quote run unavailable"}` because
+  H-009 code is deployed but no producer is scheduled.
+- The latest production universe has 1,278 eligible YES tokens across 254
+  neg-risk groups, requiring three configured CLOB batches.

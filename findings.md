@@ -1,4 +1,4 @@
-# Findings & Decisions: Continuous L3 observability
+# Findings & Decisions: M1 production capability closure
 
 ## Requirements
 
@@ -64,4 +64,40 @@
 
 ## Visual/Browser Findings
 
-- None; this investigation used code and local planning artifacts only.
+- The connected browser runtime reported no available browser, so authenticated
+  Dashboard acceptance remains externally blocked. Anonymous HTTP 200 was not
+  substituted for a logged-in acceptance test.
+
+## Production opportunity-feed findings — 2026-07-26
+
+- `GET https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=0`
+  returns HTTP 503 with exact body `{"error":"quote run unavailable"}`.
+- The deployed image is built from Git SHA
+  `95bf1bd8714b92056c1ca6cca2d13ac9bd3d06d5`; it includes the H-009 quote
+  store, collector, scanner, and HTTP route.
+- H-009 deliberately shipped local-only. `crontab` contains snapshot and
+  retention jobs but no quote collection job.
+- The L1 app machine owns `/data/state.db` on volume
+  `vol_40olm80dgol2xqn4`. The running cron machine has no volume mount, so a
+  cron-side SQLite write could never become visible to the HTTP route.
+- The cron machine has 256 MB RAM and its 2026-07-26 00:00 snapshot job exited
+  137. It is not a safe host for the quote producer.
+- Latest production snapshot 711 contains 1,278 eligible, unique YES tokens in
+  254 neg-risk groups. With `clob_batch_size=500`, one collection is three
+  sequential public CLOB requests.
+- Timestamped production capacity observation at 2026-07-26 00:40 UTC:
+  run 1 fetched all 1,278/1,278 books in three batches, collector elapsed
+  1,013 ms and wall elapsed 1.035 s. This is less than 1% of the approved
+  120-second interval and comfortably below the 300-second quote SLA.
+- Immediately after run 1, the public route returned HTTP 200 with five
+  positive gross-before-fees candidates at `limit=5`, proving the existing
+  store→scanner→HTTP chain works when a complete run exists.
+- The returned candidates are discovery leads, not executable trade approval.
+  Very large gross edges can indicate known-universe incompleteness or market
+  semantic issues; production scheduling must not silently upgrade them into
+  order instructions.
+- The approved direction is a separate fail-soft task inside the L1 app
+  process: immediate collection after startup, then every 120 seconds, with
+  durable no-overlap enforcement and `/health` chain-truth.
+- Existing production warnings discovered but kept outside this focused change:
+  malformed R2 bucket configuration and an event-bus database password failure.

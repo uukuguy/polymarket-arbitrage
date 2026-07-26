@@ -12,6 +12,10 @@ from pathlib import Path
 
 from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
 
+QUOTE_SLA_SECONDS = 300
+QUOTE_WARN_SECONDS = 240
+UNIVERSE_SLA_SECONDS = 50_400
+
 
 class StaleSnapshotError(RuntimeError):
     """The source snapshot is too old to support an executable claim."""
