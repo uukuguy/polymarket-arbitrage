@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import httpx
@@ -64,6 +64,7 @@ from polyarb.perception.market_truth import (
     GroupTruth,
     MarketTruthSemanticValidator,
     SourceCoverage,
+    membership_hash,
 )
 from polyarb.snapshot.cache import ChunkCache
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
@@ -205,6 +206,72 @@ def _include_in_snapshot(mode: str, market: dict, threshold: float) -> bool:
     )
 
 
+def _apply_point_member_states(
+    event_members: list[EventMember],
+    group_truths: list[GroupTruth],
+    point_states: dict[str, dict[str, bool]],
+) -> tuple[list[EventMember], list[GroupTruth]]:
+    """Overlay point-market status while preserving event structural membership."""
+    reconciled_members: list[EventMember] = []
+    for member in event_members:
+        state = point_states.get(member.market_id)
+        if state is None:
+            reconciled_members.append(member)
+            continue
+        active = state["active"]
+        closed = state["closed"]
+        member_kind = member.member_kind
+        if member_kind != "other":
+            member_kind = "named" if active else "inactive-reserved"
+        reconciled_members.append(
+            replace(
+                member,
+                member_kind=member_kind,
+                active=active,
+                closed=closed,
+            )
+        )
+
+    members_by_key: dict[tuple[str, str], list[EventMember]] = {}
+    for member in reconciled_members:
+        members_by_key.setdefault((member.event_id, member.group_id), []).append(member)
+
+    reconciled_truths: list[GroupTruth] = []
+    for truth in group_truths:
+        members = members_by_key.get((truth.event_id, truth.group_id), [])
+        quality = truth.quality
+        reason = truth.reason
+        if quality != "incomplete-source":
+            if truth.neg_risk_type == "augmented":
+                quality = "complete-unsupported"
+                reason = "augmented-neg-risk-not-supported"
+            elif all(
+                member.member_kind == "named" and member.active and not member.closed
+                for member in members
+            ):
+                quality = "complete-supported"
+                reason = None
+            else:
+                quality = "complete-unsupported"
+                reason = "standard-neg-risk-has-non-tradable-members"
+        reconciled_truths.append(
+            replace(
+                truth,
+                active_named_count=sum(
+                    member.member_kind == "named" and member.active for member in members
+                ),
+                membership_hash=membership_hash(
+                    truth.event_id,
+                    truth.group_id,
+                    members,
+                ),
+                quality=quality,
+                reason=reason,
+            )
+        )
+    return reconciled_members, reconciled_truths
+
+
 def _reconcile_market_truth(
     *,
     observed_market_ids: set[str],
@@ -212,8 +279,10 @@ def _reconcile_market_truth(
     market_to_event_map: dict[str, str],
     event_members: list[EventMember],
     group_truths: list[GroupTruth],
+    verified_non_open_member_ids: set[str] | None = None,
 ) -> str | None:
     """Reconcile full Gamma identities before any subset publication claim."""
+    non_open_member_ids = verified_non_open_member_ids or set()
     incomplete_truth = next(
         (truth for truth in group_truths if truth.quality == "incomplete-source"),
         None,
@@ -239,7 +308,7 @@ def _reconcile_market_truth(
         seen_member_ids.add(member.market_id)
         if (member.event_id, member.group_id) not in truth_keys:
             return f"member-without-group-truth:{member.market_id}"[:160]
-        if member.active and not member.closed:
+        if member.active and not member.closed and member.market_id not in non_open_member_ids:
             required_member_ids.add(member.market_id)
             mapped_event = market_to_event_map.get(member.market_id)
             if mapped_event != member.event_id:
@@ -256,7 +325,9 @@ def _reconcile_market_truth(
     if orphan_markets:
         return f"orphan-market-without-event:{','.join(orphan_markets[:5])}"[:160]
 
-    missing_mapped_markets = sorted(set(market_to_event_map) - observed_market_ids)
+    missing_mapped_markets = sorted(
+        set(market_to_event_map) - observed_market_ids - non_open_member_ids
+    )
     if missing_mapped_markets:
         return f"event-map-missing-market:{','.join(missing_mapped_markets[:5])}"[:160]
     if semantic_reason is not None:
@@ -314,6 +385,8 @@ async def run_snapshot(
     event_failure_reason: str | None = None
     market_failure_reason: str | None = None
     market_semantic_reason: str | None = None
+    member_state_lookup_failure_reason: str | None = None
+    verified_non_open_member_ids: set[str] = set()
     threshold = settings.liquidity_threshold_usd
     PROGRESS_EVERY = 5000  # log every N streamed markets so long fetches stay observable
 
@@ -454,6 +527,46 @@ async def run_snapshot(
                     )
                 )
 
+            if (
+                events_coverage.result.completed
+                and markets_coverage.result.completed
+                and event_failure_reason is None
+                and market_failure_reason is None
+            ):
+                missing_event_members = sorted(authoritative_member_ids - seen_ids)
+                if missing_event_members:
+                    try:
+                        point_states = await gamma.fetch_market_states(missing_event_members)
+                    except Exception as e:  # noqa: BLE001 — fail closed at source boundary
+                        member_state_lookup_failure_reason = (
+                            f"event-member-state-lookup-failed:{type(e).__name__}"
+                        )[:160]
+                        logger.error(f"Gamma missing event-member point lookup failed: {e!r}")
+                    else:
+                        verified_non_open_member_ids = {
+                            market_id
+                            for market_id, state in point_states.items()
+                            if not state["active"] or state["closed"]
+                        }
+                        if verified_non_open_member_ids:
+                            event_members, group_truths = _apply_point_member_states(
+                                event_members,
+                                group_truths,
+                                point_states,
+                            )
+                            bounded_ids = ",".join(sorted(verified_non_open_member_ids)[:10])
+                            issues.append(
+                                Issue(
+                                    layer=1,
+                                    category=Category.API_JITTER,
+                                    market_id=None,
+                                    detail=(
+                                        "Gamma event/member status disagreement: "
+                                        f"point truth non-open for {bounded_ids}"
+                                    )[:200],
+                                )
+                            )
+
     # GammaClient closed (exited async-with). httpx AsyncClient fully cleaned
     # up before the CLOB phase starts.
 
@@ -466,7 +579,19 @@ async def run_snapshot(
         f"{len(target_markets)} target after mode-filter (mode={mode})"
     )
     reconciliation_reason: str | None = None
-    if (
+    if member_state_lookup_failure_reason is not None:
+        reconciliation_reason = member_state_lookup_failure_reason
+        issues.append(
+            Issue(
+                layer=1,
+                category=Category.API_UNREACHABLE,
+                market_id=None,
+                detail=(f"Gamma event/market reconciliation incomplete: {reconciliation_reason}")[
+                    :200
+                ],
+            )
+        )
+    elif (
         events_coverage.result.completed
         and markets_coverage.result.completed
         and event_failure_reason is None
@@ -477,6 +602,7 @@ async def run_snapshot(
             market_to_event_map=market_to_event_map,
             event_members=event_members,
             group_truths=group_truths,
+            verified_non_open_member_ids=verified_non_open_member_ids,
         )
         if reconciliation_reason is not None:
             issues.append(

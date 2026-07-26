@@ -213,6 +213,55 @@ async def test_no_retry_on_404() -> None:
     assert route.call_count == 1
 
 
+async def test_fetch_market_states_deduplicates_and_preserves_closed_truth() -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        first = router.get("/markets/market-1").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": "market-1", "active": True, "closed": True},
+            )
+        )
+        second = router.get("/markets/market-2").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": "market-2", "active": False, "closed": False},
+            )
+        )
+        async with GammaClient(settings) as client:
+            states = await client.fetch_market_states(["market-2", "market-1", "market-1"])
+
+    assert states == {
+        "market-1": {"active": True, "closed": True},
+        "market-2": {"active": False, "closed": False},
+    }
+    assert first.call_count == 1
+    assert second.call_count == 1
+
+
+async def test_fetch_market_states_fails_closed_on_malformed_identity() -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/markets/market-1").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": "wrong-market", "active": True, "closed": True},
+            )
+        )
+        async with GammaClient(settings) as client:
+            with pytest.raises(PaginationIntegrityError, match="identity mismatch"):
+                await client.fetch_market_states(["market-1"])
+
+
+async def test_fetch_market_states_rejects_unbounded_lookup_set() -> None:
+    settings = _fast_settings()
+    async with GammaClient(settings) as client:
+        with pytest.raises(PaginationIntegrityError, match="lookup limit"):
+            await client.fetch_market_states(
+                [f"market-{index}" for index in range(client.MAX_MARKET_STATE_LOOKUPS + 1)]
+            )
+
+
 # ---------------------------------------------------------------------------
 # Test 6: aclose closes the underlying httpx client
 # ---------------------------------------------------------------------------
@@ -556,9 +605,7 @@ async def test_event_projection_preserves_invalid_membership_evidence() -> None:
             return_value=httpx.Response(200, json=_event_page([raw_event]))
         )
         async with GammaClient(settings) as client:
-            projected = [
-                event async for event in client.iter_active_events(coverage)
-            ][0]
+            projected = [event async for event in client.iter_active_events(coverage)][0]
 
     assert projected["markets"][0] == "not-a-dict"
     assert projected["markets"][1] == {
@@ -654,9 +701,7 @@ async def test_iter_active_markets_max_pages_runaway_raises() -> None:
             def next_page(_request: httpx.Request) -> httpx.Response:
                 nonlocal call_number
                 call_number += 1
-                return httpx.Response(
-                    200, json=_market_page(full_page, f"cursor-{call_number}")
-                )
+                return httpx.Response(200, json=_market_page(full_page, f"cursor-{call_number}"))
 
             router.get("/markets/keyset").mock(side_effect=next_page)
             client = GammaClient(settings)

@@ -36,6 +36,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -69,9 +70,7 @@ class PaginationResult:
 @dataclass
 class PaginationCoverage:
     source: str
-    result: PaginationResult = field(
-        default_factory=lambda: PaginationResult(0, 0, False, None)
-    )
+    result: PaginationResult = field(default_factory=lambda: PaginationResult(0, 0, False, None))
 
 
 class PaginationIntegrityError(RuntimeError):
@@ -86,6 +85,9 @@ class GammaClient:
     """
 
     PAGE_LIMIT = 100
+    # Point lookups only reconcile a small race window between the active event
+    # and market streams. A large disagreement is not safe to fan out.
+    MAX_MARKET_STATE_LOOKUPS = 100
     # F-2 SECURITY: ceiling on pagination loop (100k markets is far above any
     # realistic Polymarket size). See module docstring.
     MAX_PAGES = 1000
@@ -208,9 +210,7 @@ class GammaClient:
     # TODO(02-09 follow-up): once orchestrator confirmed stable on streaming,
     # remove fetch_all_active_markets (events stays a list — Decision A).
 
-    async def iter_active_markets(
-        self, coverage: PaginationCoverage
-    ) -> AsyncIterator[dict]:
+    async def iter_active_markets(self, coverage: PaginationCoverage) -> AsyncIterator[dict]:
         """Stream active markets and record whether keyset traversal completed."""
         async for raw in self._paginate_keyset(
             path="/markets/keyset",
@@ -230,9 +230,45 @@ class GammaClient:
         coverage = PaginationCoverage(source="markets")
         return [m async for m in self.iter_active_markets(coverage)]
 
-    async def iter_active_events(
-        self, coverage: PaginationCoverage
-    ) -> AsyncIterator[dict]:
+    async def fetch_market_states(
+        self,
+        market_ids: list[str],
+    ) -> dict[str, dict[str, bool]]:
+        """Point-check missing event members against authoritative market state.
+
+        Calls are deduplicated, deterministic, and strictly bounded. Any
+        malformed response raises so the snapshot remains fail-closed.
+        """
+        unique_ids = sorted(set(market_ids))
+        if len(unique_ids) > self.MAX_MARKET_STATE_LOOKUPS:
+            raise PaginationIntegrityError(
+                "market state lookup limit exceeded: "
+                f"{len(unique_ids)}>{self.MAX_MARKET_STATE_LOOKUPS}"
+            )
+
+        states: dict[str, dict[str, bool]] = {}
+        for market_id in unique_ids:
+            if type(market_id) is not str or not market_id.strip():
+                raise PaginationIntegrityError("market state lookup has invalid identity")
+            payload = await self._get(f"/markets/{quote(market_id, safe='')}", {})
+            if not isinstance(payload, dict):
+                raise PaginationIntegrityError(
+                    f"/markets/{market_id} point response has invalid shape"
+                )
+            if payload.get("id") != market_id:
+                raise PaginationIntegrityError(
+                    f"/markets/{market_id} point response identity mismatch"
+                )
+            active = payload.get("active")
+            closed = payload.get("closed")
+            if type(active) is not bool or type(closed) is not bool:
+                raise PaginationIntegrityError(
+                    f"/markets/{market_id} point response has invalid state"
+                )
+            states[market_id] = {"active": active, "closed": closed}
+        return states
+
+    async def iter_active_events(self, coverage: PaginationCoverage) -> AsyncIterator[dict]:
         """Stream active events and record whether keyset traversal completed."""
         async for raw in self._paginate_keyset(
             path="/events/keyset",
@@ -284,8 +320,7 @@ class GammaClient:
         items = pages = 0
         progress_every = 50
         logger.info(
-            f"Gamma: starting streaming fetch of {coverage.source} "
-            f"(page_limit={self.PAGE_LIMIT})"
+            f"Gamma: starting streaming fetch of {coverage.source} (page_limit={self.PAGE_LIMIT})"
         )
         while True:
             request_params = {**params, "limit": str(self.PAGE_LIMIT)}
@@ -314,8 +349,7 @@ class GammaClient:
             if next_cursor in (None, ""):
                 coverage.result = PaginationResult(items, pages, True, None)
                 logger.info(
-                    f"Gamma streamed {items} active {coverage.source} "
-                    f"in {pages} pages (final)"
+                    f"Gamma streamed {items} active {coverage.source} in {pages} pages (final)"
                 )
                 return
             if not isinstance(next_cursor, str) or next_cursor in seen:
