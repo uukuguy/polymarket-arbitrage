@@ -388,6 +388,8 @@ async def run_snapshot(
     event_optional_market_ids: set[str] = set()
     orphan_neg_risk_market_groups: dict[str, str] = {}
     orphan_neg_risk_market_count = 0
+    missing_group_neg_risk_count = 0
+    missing_group_neg_risk_samples: list[str] = []
     market_semantic_fingerprints: dict[str, tuple[object, ...]] = {}
     raw_market_count = 0
     normalized_count = 0
@@ -407,6 +409,7 @@ async def run_snapshot(
     verified_non_open_member_ids: set[str] = set()
     pending_open_missing_member_ids: set[str] = set()
     verified_stale_orphan_ids: set[str] = set()
+    source_group_less_neg_risk_ids: set[str] = set()
     threshold = settings.liquidity_threshold_usd
     PROGRESS_EVERY = 5000  # log every N streamed markets so long fetches stay observable
 
@@ -426,6 +429,30 @@ async def run_snapshot(
             try:
                 raw_events = [event async for event in gamma.iter_active_events(events_coverage)]
                 logger.info(f"Gamma: fetched {len(raw_events)} active events")
+                # Preserve the one source-side fact that normalize_events
+                # intentionally cannot express as GroupTruth: a parent event
+                # explicitly enables standard neg-risk but omits the group
+                # identity altogether. Its nested market IDs are eligible for
+                # quarantine (never for inferred/synthetic grouping).
+                for raw_event in raw_events:
+                    if not (
+                        raw_event.get("negRisk") is True
+                        and raw_event.get("enableNegRisk") is True
+                        and raw_event.get("negRiskAugmented") is False
+                        and raw_event.get("negRiskMarketID") is None
+                        and isinstance(raw_event.get("markets"), list)
+                    ):
+                        continue
+                    for raw_member in raw_event["markets"]:
+                        if not isinstance(raw_member, dict):
+                            continue
+                        raw_member_id = raw_member.get("id")
+                        if (
+                            type(raw_member_id) is str
+                            and raw_member_id
+                            and raw_member_id.strip() == raw_member_id
+                        ):
+                            source_group_less_neg_risk_ids.add(raw_member_id)
                 (
                     event_rows,
                     event_tag_rows,
@@ -469,6 +496,7 @@ async def run_snapshot(
             authoritative_member_ids = {
                 member.market_id for member in event_members if member.active and not member.closed
             }
+            structural_member_ids = {member.market_id for member in event_members}
             known_group_ids = {truth.group_id for truth in group_truths}
             semantic_validator = MarketTruthSemanticValidator(
                 event_members,
@@ -494,6 +522,22 @@ async def run_snapshot(
                                 continue
 
                             group_id = normalized.get("neg_risk_market_id")
+                            is_missing_group_neg_risk = (
+                                normalized.get("neg_risk") is True and group_id is None
+                            )
+                            # Gamma occasionally exposes an active market as
+                            # negRisk=true while both the market and its parent
+                            # event omit negRiskMarketID.  There is no source
+                            # identity from which M2 can safely construct a
+                            # group. Quarantine only when event-side structural
+                            # truth also has no member: a known member missing
+                            # its group on /markets remains a fatal semantic
+                            # disagreement below.
+                            is_group_less_neg_risk_quarantine = (
+                                is_missing_group_neg_risk
+                                and mid in source_group_less_neg_risk_ids
+                                and mid not in structural_member_ids
+                            )
                             is_unattached_neg_risk = (
                                 normalized.get("event_id") is None
                                 and normalized.get("neg_risk") is True
@@ -505,7 +549,11 @@ async def run_snapshot(
                             # must not contradict its authoritative event truth.
                             # Keep only the first mismatch to preserve the
                             # streaming memory bound.
-                            if market_semantic_reason is None and not is_unattached_neg_risk:
+                            if (
+                                market_semantic_reason is None
+                                and not is_unattached_neg_risk
+                                and not is_group_less_neg_risk_quarantine
+                            ):
                                 market_semantic_reason = semantic_validator.row_mismatch_reason(
                                     normalized
                                 )
@@ -534,6 +582,14 @@ async def run_snapshot(
                                 and normalized.get("neg_risk_market_id") is None
                             ):
                                 event_optional_market_ids.add(mid)
+                            if is_group_less_neg_risk_quarantine:
+                                missing_group_neg_risk_count += 1
+                                if len(missing_group_neg_risk_samples) < 10:
+                                    missing_group_neg_risk_samples.append(mid)
+                                # It has no provable group or parent identity,
+                                # so it is intentionally outside both event-
+                                # completeness and publication obligations.
+                                event_optional_market_ids.add(mid)
                             if is_unattached_neg_risk:
                                 orphan_neg_risk_market_count += 1
                                 if len(orphan_neg_risk_market_groups) < MAX_ORPHAN_PARENT_LOOKUPS:
@@ -541,9 +597,13 @@ async def run_snapshot(
                             normalized_count += 1
 
                             # Mode filter (replaces the old phase-3 block).
-                            if not is_unattached_neg_risk and (
-                                mid in authoritative_member_ids
-                                or _include_in_snapshot(mode, normalized, threshold)
+                            if (
+                                not is_unattached_neg_risk
+                                and not is_missing_group_neg_risk
+                                and (
+                                    mid in authoritative_member_ids
+                                    or _include_in_snapshot(mode, normalized, threshold)
+                                )
                             ):
                                 target_markets.append(normalized)
                             # Non-target markets: dropped — no buffer, no reference held.
@@ -562,6 +622,22 @@ async def run_snapshot(
                         category=Category.API_UNREACHABLE,
                         market_id=None,
                         detail=f"Gamma unreachable: {str(e)[:200]}",
+                    )
+                )
+
+            if missing_group_neg_risk_count:
+                bounded_ids = ",".join(sorted(missing_group_neg_risk_samples))
+                remainder = missing_group_neg_risk_count - len(missing_group_neg_risk_samples)
+                suffix = f" (+{remainder} more)" if remainder else ""
+                issues.append(
+                    Issue(
+                        layer=1,
+                        category=Category.API_JITTER,
+                        market_id=None,
+                        detail=(
+                            "Gamma neg-risk market missing group identity quarantined: "
+                            f"{bounded_ids}{suffix}"
+                        )[:200],
                     )
                 )
 
@@ -730,8 +806,10 @@ async def run_snapshot(
     event_optional_market_ids.clear()
     orphan_neg_risk_market_groups.clear()
     verified_stale_orphan_ids.clear()
+    source_group_less_neg_risk_ids.clear()
     market_to_event_map.clear()
     authoritative_member_ids.clear()
+    structural_member_ids.clear()
 
     # ── Phase 3: token list extraction (was inlined into old phase 3) ────
     with _phase("3/7: Build token list"):

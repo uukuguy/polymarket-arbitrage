@@ -1142,6 +1142,113 @@ async def test_orphan_neg_risk_market_with_inactive_parent_is_quarantined(
 
 
 @pytest.mark.asyncio
+async def test_neg_risk_markets_without_group_identity_are_quarantined_in_full_mode(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    template = _load_gamma_fixture()
+    group_less_markets = [
+        {
+            **template[index],
+            "id": f"group-less-{index}",
+            "conditionId": f"group-less-condition-{index}",
+            "clobTokenIds": json.dumps([f"group-less-yes-{index}", f"group-less-no-{index}"]),
+            "negRisk": True,
+            "negRiskMarketID": None,
+        }
+        for index in range(2)
+    ]
+    ordinary = {
+        **template[2],
+        "id": "ordinary-market",
+        "conditionId": "ordinary-condition",
+        "clobTokenIds": json.dumps(["ordinary-yes", "ordinary-no"]),
+        "negRisk": False,
+        "negRiskMarketID": None,
+    }
+    group_less_event = {
+        "id": "EV-group-less",
+        "slug": "event-group-less",
+        "title": "Source anomaly without neg-risk group identity",
+        "ticker": "GROUPLESS",
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "enableNegRisk": True,
+        "negRiskAugmented": False,
+        "markets": [
+            {
+                "id": market["id"],
+                "active": True,
+                "closed": False,
+                "negRiskOther": False,
+            }
+            for market in group_less_markets
+        ],
+    }
+    fake_gamma = _make_fake_gamma(
+        [*group_less_markets, ordinary],
+        [group_less_event, *_events_for_markets([ordinary])],
+    )
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=[])
+        clob_inst.get_prices_buy_sell = AsyncMock(return_value={"buy": {}, "sell": {}})
+        result = await run_snapshot(settings, mode="full", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed,failure_source,failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+        persisted_ids = con.execute(
+            "SELECT market_id FROM markets WHERE snapshot_id=? ORDER BY market_id",
+            (result.snapshot_id,),
+        ).fetchall()
+        membership_count = con.execute(
+            "SELECT COUNT(*) FROM event_market_memberships WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()[0]
+        group_count = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_group_truth WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()[0]
+        layer1 = con.execute(
+            "SELECT category,detail FROM validation_issues "
+            "WHERE snapshot_id=? AND layer=1 ORDER BY id",
+            (result.snapshot_id,),
+        ).fetchall()
+
+    assert result.is_valid is True
+    assert coverage == (1, None, None)
+    assert persisted_ids == [("ordinary-market",)]
+    assert membership_count == 0
+    assert group_count == 0
+    assert layer1 == [
+        (
+            "api_jitter",
+            "Gamma neg-risk market missing group identity quarantined: group-less-0,group-less-1",
+        )
+    ]
+    assert clob_inst.get_books.await_args.args[0] == ["ordinary-yes", "ordinary-no"]
+    assert clob_inst.get_prices_buy_sell.await_args.args[0] == [
+        "ordinary-yes",
+        "ordinary-no",
+    ]
+    assert publish_mock.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_137_stale_orphan_neg_risk_markets_are_quarantined(
     tmp_path: Path,
 ) -> None:
