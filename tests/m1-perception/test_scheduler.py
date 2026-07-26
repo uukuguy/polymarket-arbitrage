@@ -138,6 +138,7 @@ async def test_snapshot_pipeline_runs_in_isolated_subprocess(
         "polyarb.snapshot",
         "snapshot",
         "--json",
+        "--low-priority",
     )
     assert kwargs["stdout"] == asyncio.subprocess.PIPE
     assert kwargs["stderr"] == asyncio.subprocess.PIPE

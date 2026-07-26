@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -53,8 +54,17 @@ def snapshot(
         "--json",
         help="Emit one machine-readable result object on stdout.",
     ),
+    low_priority: bool = typer.Option(
+        False,
+        "--low-priority",
+        hidden=True,
+        help="Lower this process priority for the in-app scheduler.",
+    ),
 ) -> None:
     """Capture a one-shot Polymarket market snapshot."""
+    if low_priority:
+        os.nice(10)
+
     # Re-route loguru: default is INFO; --verbose drops to DEBUG.
     # Timestamp prefix lets the user (and post-mortem readers of /tmp logs)
     # measure phase durations and locate slow steps, surfaced after

@@ -9,12 +9,14 @@ import pytest
 
 from polyarb.perception.market_truth import SourceCoverage
 from polyarb.routing.neg_risk_quote_collector import (
+    _QUOTE_RUN_LEASE_RENEWAL_S,
     QuoteCollectionIntegrityError,
     QuoteRunLeaseLostError,
     QuoteUniverseUnavailableError,
     collect_neg_risk_quotes,
 )
 from polyarb.routing.neg_risk_quote_store import (
+    QUOTE_RUN_LEASE_MS,
     NegRiskQuoteStore,
     QuoteRunBusyError,
     UniverseLeg,
@@ -24,6 +26,11 @@ from polyarb.storage.sqlite_store import SQLiteStore
 NOW_MS = 1_700_000_000_000
 EVENT_ID = "event-a"
 MEMBERSHIP_HASH = "membership-hash-a"
+
+
+def test_production_quote_lease_tolerates_single_vcpu_snapshot_contention() -> None:
+    assert QUOTE_RUN_LEASE_MS == 180_000
+    assert _QUOTE_RUN_LEASE_RENEWAL_S == 60.0
 
 
 @dataclass
@@ -565,10 +572,10 @@ def test_slow_collector_renews_lease_before_an_expired_run_can_be_reclaimed(
 
         # Renew just before expiry, then advance beyond the original lease.
         # A second process must still see the renewed owner as live.
-        clock["now"] = NOW_MS + 29_999
+        clock["now"] = NOW_MS + QUOTE_RUN_LEASE_MS - 1
         sleeper.permit_first_tick.set()
         await lease_renewed.wait()
-        clock["now"] = NOW_MS + 30_000
+        clock["now"] = NOW_MS + QUOTE_RUN_LEASE_MS
         with pytest.raises(QuoteRunBusyError, match="collecting quote run"):
             store.begin_run(
                 universe_snapshot_id=1,
@@ -637,7 +644,7 @@ def test_collector_does_not_persist_after_final_renewal_lease_expires(
 
         def expire_after_final_renewal(run_id: int) -> None:
             actual_renew(run_id)
-            clock["now"] = NOW_MS + 30_000
+            clock["now"] = NOW_MS + QUOTE_RUN_LEASE_MS
 
         monkeypatch.setattr(store, "renew_run_lease", expire_after_final_renewal)
         with pytest.raises(QuoteRunLeaseLostError, match="quote-run-lease-lost"):

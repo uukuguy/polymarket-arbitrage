@@ -78,6 +78,7 @@ async def run_snapshot_in_subprocess(
         "polyarb.snapshot",
         "snapshot",
         "--json",
+        "--low-priority",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

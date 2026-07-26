@@ -29,7 +29,10 @@ _TERMINAL_STATES = frozenset(
     }
 )
 
-QUOTE_RUN_LEASE_MS = 30_000
+# A complete-universe quote collection shares one vCPU with the lower-priority
+# snapshot child in production.  The lease must survive a long SDK parse/GIL
+# window while remaining below the canonical 300-second quote freshness SLA.
+QUOTE_RUN_LEASE_MS = 180_000
 
 
 class QuoteRunStateError(RuntimeError):
