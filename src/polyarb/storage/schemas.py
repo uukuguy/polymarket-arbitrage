@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
   finished_at_ms        INTEGER NOT NULL,
   mode                  TEXT NOT NULL CHECK(mode IN ('subset','full')),
   market_count          INTEGER NOT NULL,
+  market_view_published INTEGER NOT NULL DEFAULT 0 CHECK(market_view_published IN (0,1)),
   is_valid              INTEGER NOT NULL,
   parquet_path          TEXT NOT NULL,
   notes                 TEXT,
@@ -427,6 +428,7 @@ SNAPSHOTS_DDL = (
     "finished_at_ms INTEGER NOT NULL, "
     "mode TEXT NOT NULL, "
     "market_count INTEGER NOT NULL, "
+    "market_view_published INTEGER NOT NULL DEFAULT 0, "
     "is_valid INTEGER NOT NULL, "
     "parquet_path TEXT NOT NULL, "
     "notes TEXT, "
@@ -441,6 +443,7 @@ SNAPSHOTS_COLUMN_ORDER: tuple[str, ...] = (
     "finished_at_ms",
     "mode",
     "market_count",
+    "market_view_published",
     "is_valid",
     "parquet_path",
     "notes",
@@ -450,9 +453,10 @@ SNAPSHOTS_COLUMN_ORDER: tuple[str, ...] = (
 
 SNAPSHOTS_INSERT_SQL = (
     "INSERT INTO snapshots("
-    "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes,"
+    "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+    "is_valid,parquet_path,notes,"
     "supabase_mirror_at_ms,parquet_r2_url) "
-    "VALUES (?,?,?,?,?,?,?,?,?)"
+    "VALUES (?,?,?,?,?,?,?,?,?,?)"
 )
 
 SNAPSHOT_SCHEMA: pa.Schema = pa.schema(

@@ -151,6 +151,40 @@ def test_init_schema_creates_three_tables(store: SQLiteStore) -> None:
         con.close()
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_snapshot_records_explicit_market_view_publication_marker(
+    store: SQLiteStore,
+    streaming: bool,
+) -> None:
+    common = {
+        "is_valid": True,
+        "issues": [],
+        "source_coverage": SourceCoverage.complete(0, 0),
+        "event_members": [],
+        "group_truths": [],
+        "publish_markets": True,
+    }
+    published_id = _write_with_mode(
+        store,
+        streaming=streaming,
+        market_rows=[],
+        **common,
+    )
+    diagnostic_id = _write_with_mode(
+        store,
+        streaming=streaming,
+        market_rows=[],
+        **{**common, "is_valid": False, "publish_markets": False},
+    )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT id,market_view_published FROM snapshots "
+            "WHERE id IN (?,?) ORDER BY id",
+            (published_id, diagnostic_id),
+        ).fetchall() == [(published_id, 1), (diagnostic_id, 0)]
+
+
 def test_purge_old_snapshots_bounds_each_transaction(store: SQLiteStore) -> None:
     old_ms = int((time.time() - 8 * 86_400) * 1000)
     for offset in range(35):

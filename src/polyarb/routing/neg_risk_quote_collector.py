@@ -85,24 +85,20 @@ async def collect_neg_risk_quotes(
     universe = quote_store.latest_verified_universe()
     legs = universe.legs
     quote_taken_at_ms = clock()
-    if not legs:
-        run_id = quote_store.begin_verified_run(
-            universe,
-            quoted_at_ms=quote_taken_at_ms,
-        )
-        completed = quote_store.complete_run(
-            run_id,
-            completed_at_ms=clock(),
-            successful_response_count=0,
-        )
-        return QuoteCollectionResult.from_run(completed, elapsed_ms=0)
-    token_ids = list({leg.yes_token_id: None for leg in legs})
     run_id = quote_store.begin_verified_run(
         universe,
         quoted_at_ms=quote_taken_at_ms,
     )
     failure_reason = "collector-error"
     try:
+        if not legs:
+            completed = quote_store.complete_run(
+                run_id,
+                completed_at_ms=clock(),
+                successful_response_count=0,
+            )
+            return QuoteCollectionResult.from_run(completed, elapsed_ms=0)
+        token_ids = list({leg.yes_token_id: None for leg in legs})
         try:
             books = await _get_books_with_lease(
                 quote_store=quote_store,

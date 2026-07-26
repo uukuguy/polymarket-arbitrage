@@ -84,6 +84,7 @@ def test_legacy_db_adds_supabase_mirror_at_ms_column(tmp_path: Path) -> None:
     cols = _column_names(db, "snapshots")
     assert "supabase_mirror_at_ms" in cols
     assert "parquet_r2_url" in cols
+    assert "market_view_published" in cols
 
 
 def test_legacy_db_preserves_existing_rows(tmp_path: Path) -> None:
@@ -108,6 +109,7 @@ def test_legacy_db_preserves_existing_rows(tmp_path: Path) -> None:
     assert row[1] == 42
     assert row[2] is None  # new column NULL for pre-migration row
     assert row[3] is None
+    assert _read_market_view_published(db) == 0
 
 
 def test_migration_is_idempotent(tmp_path: Path) -> None:
@@ -181,3 +183,12 @@ def test_new_columns_usable_after_migration(tmp_path: Path) -> None:
         con.close()
 
     assert row == (1_715_500_000_000, "https://r2.example/snap.parquet")
+
+
+def _read_market_view_published(db: Path) -> int:
+    with sqlite3.connect(db) as con:
+        return int(
+            con.execute(
+                "SELECT market_view_published FROM snapshots WHERE id=1"
+            ).fetchone()[0]
+        )

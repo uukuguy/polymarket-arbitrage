@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from polyarb.perception.market_truth import SourceCoverage
 from polyarb.routing.neg_risk_quote_collector import (
     QuoteCollectionIntegrityError,
     QuoteRunLeaseLostError,
@@ -83,8 +84,9 @@ def quote_db(tmp_path):
     with sqlite3.connect(path) as con:
         con.execute(
             "INSERT INTO snapshots("
-            "taken_at_ms, finished_at_ms, mode, market_count, is_valid, parquet_path"
-            ") VALUES (?, ?, 'subset', 2, 1, 'fixture.parquet')",
+            "taken_at_ms, finished_at_ms, mode, market_count,market_view_published,"
+            "is_valid, parquet_path"
+            ") VALUES (?, ?, 'subset', 2,1,1, 'fixture.parquet')",
             (NOW_MS - 1_000, NOW_MS - 900),
         )
         snapshot_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
@@ -158,8 +160,24 @@ def _collect(store: NegRiskQuoteStore, reader: FakeReader, *, start: int = NOW_M
 
 def _legs() -> tuple[UniverseLeg, ...]:
     return (
-        UniverseLeg("group-a", "market-a", "condition-a", "alpha", "token-a"),
-        UniverseLeg("group-a", "market-b", "condition-b", "beta", "token-b"),
+        UniverseLeg(
+            "group-a",
+            "market-a",
+            "condition-a",
+            "alpha",
+            "token-a",
+            EVENT_ID,
+            MEMBERSHIP_HASH,
+        ),
+        UniverseLeg(
+            "group-a",
+            "market-b",
+            "condition-b",
+            "beta",
+            "token-b",
+            EVENT_ID,
+            MEMBERSHIP_HASH,
+        ),
     )
 
 
@@ -364,8 +382,9 @@ def test_busy_or_unavailable_universe_does_not_call_clob(quote_db) -> None:
     with sqlite3.connect(empty_path) as con:
         con.execute(
             "INSERT INTO snapshots("
-            "taken_at_ms, finished_at_ms, mode, market_count, is_valid, parquet_path"
-            ") VALUES (?, ?, 'subset', 1, 1, 'fixture.parquet')",
+            "taken_at_ms, finished_at_ms, mode, market_count,market_view_published,"
+            "is_valid, parquet_path"
+            ") VALUES (?, ?, 'subset', 1,1,1, 'fixture.parquet')",
             (NOW_MS, NOW_MS),
         )
         con.execute(
@@ -401,6 +420,70 @@ def test_busy_or_unavailable_universe_does_not_call_clob(quote_db) -> None:
     assert result.successful_response_count == 0
     assert result.elapsed_ms == 0
     assert zero_eligible_reader.requests == []
+
+
+def test_complete_published_zero_market_universe_completes_without_clob(tmp_path) -> None:
+    path = tmp_path / "zero-market.db"
+    snapshot_store = SQLiteStore(path)
+    snapshot_store.init_schema()
+    snapshot_store.write_snapshot(
+        taken_at_ms=NOW_MS,
+        finished_at_ms=NOW_MS + 1,
+        mode="subset",
+        parquet_path="zero-market.parquet",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        source_coverage=SourceCoverage.complete(0, 0),
+        event_members=[],
+        group_truths=[],
+        publish_markets=True,
+    )
+    reader = FakeReader([])
+
+    result = _collect(NegRiskQuoteStore(path), reader)
+
+    assert result.status == "complete"
+    assert result.requested_token_count == 0
+    assert reader.requests == []
+
+
+def test_zero_leg_completion_failure_fails_run_without_calling_clob(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "zero-market-failure.db"
+    snapshot_store = SQLiteStore(path)
+    snapshot_store.init_schema()
+    snapshot_store.write_snapshot(
+        taken_at_ms=NOW_MS,
+        finished_at_ms=NOW_MS + 1,
+        mode="subset",
+        parquet_path="zero-market.parquet",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        source_coverage=SourceCoverage.complete(0, 0),
+        event_members=[],
+        group_truths=[],
+        publish_markets=True,
+    )
+    store = NegRiskQuoteStore(path)
+    reader = FakeReader([])
+
+    def fail_complete(*_: object, **__: object):
+        raise sqlite3.OperationalError("injected completion failure")
+
+    monkeypatch.setattr(store, "complete_run", fail_complete)
+
+    with pytest.raises(sqlite3.OperationalError, match="injected completion failure"):
+        _collect(store, reader)
+
+    assert reader.requests == []
+    with sqlite3.connect(path) as con:
+        assert con.execute(
+            "SELECT status,failure_reason FROM neg_risk_quote_runs"
+        ).fetchall() == [("failed", "collector-error")]
 
 
 def test_slow_collector_renews_lease_before_an_expired_run_can_be_reclaimed(

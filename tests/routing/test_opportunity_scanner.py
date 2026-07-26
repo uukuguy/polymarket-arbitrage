@@ -78,8 +78,9 @@ def _seed_quote_universe(path, *, taken_at_ms: int = 9_900_000) -> int:
     with sqlite3.connect(path) as con:
         con.execute(
             "INSERT INTO snapshots("
-            "taken_at_ms, finished_at_ms, mode, market_count, is_valid, parquet_path"
-            ") VALUES (?, ?, 'subset', 4, 1, 'quote-universe.parquet')",
+            "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+            "is_valid,parquet_path"
+            ") VALUES (?,?,'subset',4,1,1,'quote-universe.parquet')",
             (taken_at_ms, taken_at_ms),
         )
         snapshot_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
@@ -87,13 +88,52 @@ def _seed_quote_universe(path, *, taken_at_ms: int = 9_900_000) -> int:
             "INSERT INTO markets("
             "market_id, condition_id, slug, yes_token_id, best_ask_price, "
             "best_ask_size, active, closed, incomplete, neg_risk_market_id, "
-            "fetched_at_ms, snapshot_id"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "fetched_at_ms, snapshot_id,event_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                ("m1", "c1", "alpha", "yes-1", 0.01, 99, 1, 0, 0, "g1", taken_at_ms, snapshot_id),
-                ("m2", "c2", "beta", "yes-2", 0.01, 99, 1, 0, 0, "g1", taken_at_ms, snapshot_id),
-                ("m3", "c3", "gamma", "yes-3", 0.01, 99, 1, 0, 0, "g2", taken_at_ms, snapshot_id),
-                ("m4", "c4", "delta", "yes-4", 0.01, 99, 1, 0, 0, "g2", taken_at_ms, snapshot_id),
+                (
+                    "m1", "c1", "alpha", "yes-1", 0.01, 99, 1, 0, 0,
+                    "g1", taken_at_ms, snapshot_id, "e1",
+                ),
+                (
+                    "m2", "c2", "beta", "yes-2", 0.01, 99, 1, 0, 0,
+                    "g1", taken_at_ms, snapshot_id, "e1",
+                ),
+                (
+                    "m3", "c3", "gamma", "yes-3", 0.01, 99, 1, 0, 0,
+                    "g2", taken_at_ms, snapshot_id, "e2",
+                ),
+                (
+                    "m4", "c4", "delta", "yes-4", 0.01, 99, 1, 0, 0,
+                    "g2", taken_at_ms, snapshot_id, "e2",
+                ),
+            ],
+        )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage("
+            "snapshot_id,completed,market_items,event_items"
+            ") VALUES (?,1,4,2)",
+            (snapshot_id,),
+        )
+        con.executemany(
+            "INSERT INTO event_market_memberships("
+            "snapshot_id,event_id,neg_risk_market_id,market_id,member_kind,active,closed"
+            ") VALUES (?,?,?,?, 'named',1,0)",
+            [
+                (snapshot_id, "e1", "g1", "m1"),
+                (snapshot_id, "e1", "g1", "m2"),
+                (snapshot_id, "e2", "g2", "m3"),
+                (snapshot_id, "e2", "g2", "m4"),
+            ],
+        )
+        con.executemany(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (?,?,?,'standard',2,2,?,'complete-supported',NULL)",
+            [
+                (snapshot_id, "e1", "g1", "hash-g1"),
+                (snapshot_id, "e2", "g2", "hash-g2"),
             ],
         )
     return snapshot_id
@@ -115,9 +155,12 @@ def _complete_quote_run(
     asks: dict[str, tuple[float, float]] | None = None,
 ) -> int:
     store = NegRiskQuoteStore(path)
-    universe = store.latest_universe()
-    assert universe is not None
-    snapshot_id, taken_at_ms, legs = universe
+    universe = store.latest_verified_universe()
+    snapshot_id, taken_at_ms, legs = (
+        universe.snapshot_id,
+        universe.taken_at_ms,
+        universe.legs,
+    )
     run_id = store.begin_run(
         universe_snapshot_id=snapshot_id,
         universe_taken_at_ms=taken_at_ms,
@@ -145,6 +188,8 @@ def _complete_quote_run(
                 state,
                 price,
                 size,
+                leg.event_id,
+                leg.membership_hash,
             )
         )
     store.record_terminal_quotes(run_id, tuple(quotes))
@@ -220,9 +265,12 @@ def test_quote_run_scan_rejects_an_entire_group_with_a_non_executable_sibling(
 def test_quote_run_scan_ignores_newer_failed_and_collecting_runs(quote_db) -> None:
     complete_id = _complete_quote_run(quote_db, quoted_at_ms=9_900_000)
     store = NegRiskQuoteStore(quote_db)
-    universe = store.latest_universe()
-    assert universe is not None
-    snapshot_id, taken_at_ms, legs = universe
+    universe = store.latest_verified_universe()
+    snapshot_id, taken_at_ms, legs = (
+        universe.snapshot_id,
+        universe.taken_at_ms,
+        universe.legs,
+    )
     failed_id = store.begin_run(
         universe_snapshot_id=snapshot_id,
         universe_taken_at_ms=taken_at_ms,
@@ -271,6 +319,43 @@ def test_quote_run_scan_universe_sla_boundary_and_exact_error(quote_db) -> None:
 
 
 def test_quote_run_scan_is_unavailable_without_a_complete_run(quote_db) -> None:
+    with pytest.raises(QuoteRunUnavailableError, match=r"^quote run unavailable$"):
+        scan_neg_risk_quote_run(quote_db, now_s=lambda: QUOTE_NOW_S)
+
+
+@pytest.mark.parametrize("legacy_hash", ["", "a" * 64])
+def test_quote_run_scan_ignores_legacy_unverified_complete_run(
+    quote_db,
+    legacy_hash: str,
+) -> None:
+    with sqlite3.connect(quote_db) as con:
+        cursor = con.execute(
+            "INSERT INTO neg_risk_quote_runs("
+            "universe_snapshot_id,universe_taken_at_ms,universe_hash,quoted_at_ms,"
+            "requested_token_count,successful_response_count,lease_expires_at_ms,"
+            "status,completed_at_ms"
+            ") VALUES (1,?,?,?,1,0,0,'complete',?)",
+            (9_900_000, legacy_hash, 9_990_000, 9_990_001),
+        )
+        legacy_id = int(cursor.lastrowid)
+        con.execute(
+            "INSERT INTO neg_risk_quote_run_legs("
+            "quote_run_id,neg_risk_market_id,event_id,membership_hash,"
+            "market_id,condition_id,slug,yes_token_id"
+            ") VALUES (?,'g1','','','legacy-market','legacy-condition',"
+            "'legacy','legacy-token')",
+            (legacy_id,),
+        )
+        con.execute(
+            "INSERT INTO neg_risk_quotes("
+            "quote_run_id,neg_risk_market_id,event_id,membership_hash,"
+            "market_id,condition_id,slug,yes_token_id,terminal_state,"
+            "best_ask_price,best_ask_size"
+            ") VALUES (?,'g1','','','legacy-market','legacy-condition',"
+            "'legacy','legacy-token','missing-book',NULL,NULL)",
+            (legacy_id,),
+        )
+
     with pytest.raises(QuoteRunUnavailableError, match=r"^quote run unavailable$"):
         scan_neg_risk_quote_run(quote_db, now_s=lambda: QUOTE_NOW_S)
 

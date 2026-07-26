@@ -32,21 +32,50 @@ def _complete_run(settings: Settings, *, age_s: float) -> None:
     with sqlite3.connect(settings.db_path) as con:
         con.execute(
             "INSERT INTO snapshots("
-            "taken_at_ms, finished_at_ms, mode, market_count, is_valid, parquet_path"
-            ") VALUES (?, ?, 'subset', 1, 1, 'fixture.parquet')",
+            "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+            "is_valid,parquet_path"
+            ") VALUES (?,?,'subset',1,1,1,'fixture.parquet')",
             (NOW_MS - 1_000, NOW_MS - 900),
         )
         snapshot_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
         con.execute(
             "INSERT INTO markets("
             "market_id, condition_id, slug, yes_token_id, active, closed, "
-            "neg_risk_market_id, fetched_at_ms, snapshot_id"
+            "neg_risk_market_id, fetched_at_ms, snapshot_id,event_id,incomplete"
             ") VALUES ('market-a', 'condition-a', 'alpha', 'token-a', "
-            "1, 0, 'group-a', ?, ?)",
+            "1, 0, 'group-a', ?, ?,'event-a',0)",
             (NOW_MS, snapshot_id),
         )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage("
+            "snapshot_id,completed,market_items,event_items"
+            ") VALUES (?,1,1,1)",
+            (snapshot_id,),
+        )
+        con.execute(
+            "INSERT INTO event_market_memberships("
+            "snapshot_id,event_id,neg_risk_market_id,market_id,member_kind,active,closed"
+            ") VALUES (?,'event-a','group-a','market-a','named',1,0)",
+            (snapshot_id,),
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (?,'event-a','group-a','standard',1,1,'membership-a',"
+            "'complete-supported',NULL)",
+            (snapshot_id,),
+        )
     store = NegRiskQuoteStore(settings.db_path, now_ms=lambda: NOW_MS)
-    leg = UniverseLeg("group-a", "market-a", "condition-a", "alpha", "token-a")
+    leg = UniverseLeg(
+        "group-a",
+        "market-a",
+        "condition-a",
+        "alpha",
+        "token-a",
+        "event-a",
+        "membership-a",
+    )
     run_id = store.begin_run(
         universe_snapshot_id=snapshot_id,
         universe_taken_at_ms=NOW_MS - 1_000,
@@ -65,6 +94,8 @@ def _complete_run(settings: Settings, *, age_s: float) -> None:
                 "executable",
                 0.4,
                 10.0,
+                "event-a",
+                "membership-a",
             ),
         ),
     )

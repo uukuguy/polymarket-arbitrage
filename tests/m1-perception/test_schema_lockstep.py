@@ -622,6 +622,15 @@ def test_parquet_r2_url_in_snapshots_three_sync_points() -> None:
     )
 
 
+def test_market_view_published_in_snapshots_three_sync_points() -> None:
+    from polyarb.storage.schemas import SNAPSHOTS_COLUMN_ORDER, SNAPSHOTS_DDL, SNAPSHOTS_INSERT_SQL
+
+    assert "market_view_published" in SNAPSHOTS_DDL
+    assert "market_view_published" in SNAPSHOTS_COLUMN_ORDER
+    assert "market_view_published" in SNAPSHOTS_INSERT_SQL
+    assert SNAPSHOTS_INSERT_SQL.count("?") == len(SNAPSHOTS_COLUMN_ORDER) - 1
+
+
 def test_scheduler_state_table_present_in_schema_and_executable() -> None:
     """SCHEDULER_STATE_DDL declares scheduler_state table with singleton constraint.
 
