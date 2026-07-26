@@ -349,6 +349,7 @@ async def sample_once(
 ) -> bool:
     """Append one atomic batch and publish success truth only after its ACK."""
     async with runtime.transition_lock:
+        await runtime.wait_for_membership_convergence()
         batch = await collect_sample(
             scheduled_at=scheduled_at,
             sample_seq=sample_seq,

@@ -207,7 +207,7 @@ async def test_no_l3_desired_falls_back_to_every_active_candidate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evidence_timeout_records_failure_and_compensates_captured_generation(
+async def test_evidence_timeout_records_failure_without_closing_healthy_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[RuntimeEventKind, dict[str, object]]] = []
@@ -234,11 +234,11 @@ async def test_evidence_timeout_records_failure_and_compensates_captured_generat
     finally:
         logger.remove(sink_id)
 
-    ws.close.assert_awaited_once()
-    assert consumer._current_ws is None
+    ws.close.assert_not_awaited()
+    assert consumer._current_ws is ws
     assert consumer._book_evidence_waiters == {}
-    assert consumer.last_quiet_refresh_missing_assets == frozenset()
-    assert consumer._last_quiet_refresh_missing_generation is None
+    assert consumer.last_quiet_refresh_missing_assets == frozenset({"l3-b"})
+    assert consumer._last_quiet_refresh_missing_generation == 0
     _kind, event = next(
         (kind, values)
         for kind, values in events

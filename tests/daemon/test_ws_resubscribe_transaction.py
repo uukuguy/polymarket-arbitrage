@@ -457,6 +457,30 @@ async def test_prepare_target_collects_evidence_without_publishing_membership() 
 
 
 @pytest.mark.asyncio
+async def test_prepare_unchanged_exact_target_reuses_current_evidence_without_controls() -> None:
+    consumer, ws = _consumer()
+    target = frozenset({"old-a", "old-b"})
+    observed_at = datetime(2026, 7, 26, tzinfo=UTC)
+    consumer.set_l3_desired(target)
+    consumer._l3_committed_set = set(target)
+    consumer._l3_business_evidence = {
+        asset_id: (consumer._connection_generation, observed_at) for asset_id in target
+    }
+
+    prepared = await consumer.prepare_l3_target(target)
+
+    assert prepared is not None
+    assert prepared.generation == consumer._connection_generation
+    assert prepared.asset_ids == target
+    assert dict(prepared.evidenced_at) == {
+        "old-a": observed_at,
+        "old-b": observed_at,
+    }
+    ws.send.assert_not_awaited()
+    ws.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_commit_l3_target_publishes_one_exact_make_before_break_snapshot() -> None:
     publications = []
     consumer = WsConsumer(

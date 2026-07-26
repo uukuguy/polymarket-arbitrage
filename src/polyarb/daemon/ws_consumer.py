@@ -721,6 +721,26 @@ class WsConsumer:
     ) -> PreparedL3Target | None:
         """Collect exact durable evidence without publishing new L3 membership."""
         target = frozenset(asset_ids)
+        async with self._subscription_control_lock:
+            generation = self._connection_generation
+            if (
+                self._current_ws is not None
+                and target
+                and target == self._l3_desired_set == self._l3_committed_set
+            ):
+                evidenced_at = {
+                    asset_id: observed_at
+                    for asset_id, (evidence_generation, observed_at) in (
+                        self._l3_business_evidence.items()
+                    )
+                    if evidence_generation == generation and asset_id in target
+                }
+                if set(evidenced_at) == set(target):
+                    return PreparedL3Target(
+                        generation=generation,
+                        asset_ids=target,
+                        evidenced_at=evidenced_at,
+                    )
         result = await self._request_book_evidence(
             required_asset_ids=target,
             operation="promotion_stage",
@@ -757,6 +777,7 @@ class WsConsumer:
         refresh_assets: list[str] = []
         required_assets: frozenset[str] = frozenset()
         failure_reason = "unexpected_exception"
+        final_subscribe_confirmed = False
         try:
             async with self._subscription_control_lock:
                 active_assets = self._compute_active_assets()
@@ -818,6 +839,7 @@ class WsConsumer:
                 failure_reason = "generation_changed"
                 if self._current_ws is not ws or self._connection_generation != generation:
                     raise RuntimeError("connection identity changed during refresh")
+                final_subscribe_confirmed = True
             assert waiter is not None
             failure_reason = "evidence_timeout"
             first_wait_s = min(
@@ -837,6 +859,7 @@ class WsConsumer:
                     failure_reason = "generation_changed"
                     if self._current_ws is not ws or self._connection_generation != generation:
                         raise RuntimeError("connection identity changed before refresh retry")
+                    final_subscribe_confirmed = False
                     failure_reason = "unsubscribe_failed"
                     if not await self._send_control(
                         ws,
@@ -859,6 +882,7 @@ class WsConsumer:
                     failure_reason = "generation_changed"
                     if self._current_ws is not ws or self._connection_generation != generation:
                         raise RuntimeError("connection identity changed during refresh retry")
+                    final_subscribe_confirmed = True
                 failure_reason = "evidence_timeout"
                 completed = await asyncio.wait_for(
                     asyncio.shield(waiter.future),
@@ -904,6 +928,8 @@ class WsConsumer:
                     severity=RuntimeEventSeverity.WARNING,
                     generation=generation,
                 )
+                if final_subscribe_confirmed:
+                    return None
             if ws is not None:
                 await self._compensate_generation(ws, generation)
             return None

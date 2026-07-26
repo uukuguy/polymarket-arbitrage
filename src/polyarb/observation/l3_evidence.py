@@ -1018,11 +1018,23 @@ class L3EvidenceRuntime:
         self._writer_result_at_by_channel: dict[str, datetime] = {}
         self._writer_reason_by_channel: dict[str, str] = {}
         self._transition_lock = asyncio.Lock()
+        self._membership_is_converged = True
+        self._membership_convergence_waiters: set[asyncio.Future[None]] = set()
 
     @property
     def transition_lock(self) -> asyncio.Lock:
         """Serialize mapping publication with the sample that consumes it."""
         return self._transition_lock
+
+    async def wait_for_membership_convergence(self) -> None:
+        """Block durable sampling while membership is an in-flight partial state."""
+        while not self._membership_is_converged:
+            waiter = asyncio.get_running_loop().create_future()
+            self._membership_convergence_waiters.add(waiter)
+            try:
+                await waiter
+            finally:
+                self._membership_convergence_waiters.discard(waiter)
 
     def next_run_seq(self) -> int:
         sequence = self._run_seq
@@ -1161,6 +1173,14 @@ class L3EvidenceRuntime:
         self._committed = copied.committed
         self._evidenced = copied.evidenced
         self._evidenced_at = copied.evidenced_at
+        if copied.desired == copied.committed == copied.evidenced:
+            self._membership_is_converged = True
+            for waiter in tuple(self._membership_convergence_waiters):
+                if not waiter.done():
+                    waiter.set_result(None)
+            self._membership_convergence_waiters.clear()
+        else:
+            self._membership_is_converged = False
 
     def mark_promote_persisted(self, at: datetime) -> None:
         _require_utc("promote persisted at", at)

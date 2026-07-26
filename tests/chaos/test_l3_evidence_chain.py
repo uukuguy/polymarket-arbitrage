@@ -1151,15 +1151,30 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
     await consumer._initialize_connection(ws_v2)
     generation_two = runtime.snapshot().ws_generation
     assert generation_two > generation_one
-    for token in tokens:
+    ordered_tokens = sorted(tokens)
+    for token in ordered_tokens[:-2]:
         consumer.record_book_evidence(
             asset_id=token,
             generation=generation_two,
             book_levels_succeeded=True,
             observed_at=book_at_v2[token],
         )
-    current = runtime.snapshot()
-    assert current.desired == current.committed == current.evidenced
+    assert runtime.snapshot().evidenced == frozenset(ordered_tokens[:-2])
+    store_v2 = _SampleStore(states_v2)
+    sample_v2 = asyncio.create_task(
+        l3_sampler.sample_once(
+            scheduled_at=sampled_v2_at,
+            sample_seq=1,
+            settings=_sampler_settings(),
+            ws_consumer=consumer,
+            reconciliation_state=_reconciliation_state(sampled_v2_at),
+            runtime=runtime,
+            store=store_v2,
+        )
+    )
+    await asyncio.sleep(0)
+    assert sample_v2.done() is False
+    assert store_v2.batches == []
 
     app = create_l2_app(
         sqlite_store=SimpleNamespace(),
@@ -1180,15 +1195,18 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
     assert before_probe.status_code == 200
     assert before_strict.json()["checks"]["l3:membership_convergence"][0]["status"] == "fail"
 
-    assert await l3_sampler.sample_once(
-        scheduled_at=sampled_v2_at,
-        sample_seq=1,
-        settings=_sampler_settings(),
-        ws_consumer=consumer,
-        reconciliation_state=_reconciliation_state(sampled_v2_at),
-        runtime=runtime,
-        store=_SampleStore(states_v2),
-    )
+    for token in ordered_tokens[-2:]:
+        consumer.record_book_evidence(
+            asset_id=token,
+            generation=generation_two,
+            book_levels_succeeded=True,
+            observed_at=book_at_v2[token],
+        )
+    assert await asyncio.wait_for(sample_v2, timeout=0.2)
+    assert len(store_v2.batches) == 1
+    assert store_v2.batches[0].health.evidenced_count == 10
+    current = runtime.snapshot()
+    assert current.desired == current.committed == current.evidenced
 
     with TestClient(app) as client:
         after_strict = client.get("/health")
