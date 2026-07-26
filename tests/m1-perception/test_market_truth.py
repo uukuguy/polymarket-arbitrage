@@ -5,6 +5,8 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from polyarb.perception.market_truth import (
+    INVALID_EVENT_MEMBER_REASON,
+    MISSING_EVENT_MEMBERSHIP_REASON,
     EventMember,
     GroupTruth,
     SourceCoverage,
@@ -146,6 +148,63 @@ def test_closed_active_member_remains_named_but_blocks_standard_support() -> Non
     assert members[0].member_kind == "named"
     assert groups[0].active_named_count == 2
     assert groups[0].quality == "complete-unsupported"
+
+
+@pytest.mark.parametrize("markets", [None, []])
+def test_missing_or_empty_neg_risk_membership_is_incomplete_source(
+    markets: object,
+) -> None:
+    event = _standard_event()
+    event["markets"] = markets
+    _, _, _, members, groups = normalize_events([event])
+    assert members == []
+    assert groups == [
+        GroupTruth(
+            event_id="e-standard",
+            group_id="group-standard",
+            neg_risk_type="standard",
+            expected_member_count=0,
+            active_named_count=0,
+            membership_hash=membership_hash("e-standard", "group-standard", []),
+            quality="incomplete-source",
+            reason=MISSING_EVENT_MEMBERSHIP_REASON,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "invalid_member",
+    [
+        "not-a-dict",
+        {"active": True, "closed": False, "negRiskOther": False},
+        {"id": "   ", "active": True, "closed": False, "negRiskOther": False},
+    ],
+)
+def test_invalid_member_shape_or_id_fails_closed_but_keeps_valid_members(
+    invalid_member: object,
+) -> None:
+    event = _standard_event()
+    event["markets"].append(invalid_member)
+    _, _, _, members, groups = normalize_events([event])
+    assert [member.market_id for member in members] == ["market-a", "market-b"]
+    assert groups[0].expected_member_count == 3
+    assert groups[0].quality == "incomplete-source"
+    assert groups[0].reason == INVALID_EVENT_MEMBER_REASON
+
+
+@pytest.mark.parametrize("field", ["active", "closed", "negRiskOther"])
+@pytest.mark.parametrize("invalid_value", [None, 0, 1, "false"])
+def test_non_boolean_member_status_fails_closed(
+    field: str,
+    invalid_value: object,
+) -> None:
+    event = _standard_event()
+    event["markets"][0][field] = invalid_value
+    _, _, _, members, groups = normalize_events([event])
+    assert [member.market_id for member in members] == ["market-b"]
+    assert groups[0].expected_member_count == 2
+    assert groups[0].quality == "incomplete-source"
+    assert groups[0].reason == INVALID_EVENT_MEMBER_REASON
 
 
 def test_standard_group_hash_is_order_independent() -> None:

@@ -18,6 +18,10 @@ FailureSource = Literal["markets", "events"]
 MemberKind = Literal["named", "other", "inactive-reserved"]
 NegRiskType = Literal["standard", "augmented"]
 
+MISSING_EVENT_MEMBERSHIP_REASON = "event-membership-missing-or-empty"
+INVALID_EVENT_MEMBER_REASON = "event-membership-member-invalid"
+CONFLICTING_EVENT_MEMBERSHIP_REASON = "market-id-conflict-across-events"
+
 
 @dataclass(frozen=True)
 class EventMember:

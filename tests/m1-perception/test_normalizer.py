@@ -14,6 +14,7 @@ Phase 1.1 Amendment 01:
 
 from __future__ import annotations
 
+from polyarb.perception.market_truth import CONFLICTING_EVENT_MEMBERSHIP_REASON
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 
 # Expected output keys (everything in MARKETS_COLUMN_ORDER except snapshot_id).
@@ -409,6 +410,64 @@ def test_normalize_events_first_event_wins_for_market() -> None:
 
     _, _, m2e, _, _ = normalize_events([raw0, raw1])
     assert m2e["M-shared"] == "EV-A"
+
+
+def test_market_shared_across_events_marks_every_neg_risk_group_incomplete() -> None:
+    raw0 = make_event(0, n_markets=0)
+    raw0.update(
+        {
+            "id": "EV-A",
+            "negRisk": True,
+            "negRiskAugmented": False,
+            "negRiskMarketID": "group-a",
+            "markets": [
+                {
+                    "id": "M-shared",
+                    "active": True,
+                    "closed": False,
+                    "negRiskOther": False,
+                },
+                {
+                    "id": "M-a",
+                    "active": True,
+                    "closed": False,
+                    "negRiskOther": False,
+                },
+            ],
+        }
+    )
+    raw1 = make_event(1, n_markets=0)
+    raw1.update(
+        {
+            "id": "EV-B",
+            "negRisk": True,
+            "negRiskAugmented": False,
+            "negRiskMarketID": "group-b",
+            "markets": [
+                {
+                    "id": "M-shared",
+                    "active": True,
+                    "closed": False,
+                    "negRiskOther": False,
+                },
+                {
+                    "id": "M-b",
+                    "active": True,
+                    "closed": False,
+                    "negRiskOther": False,
+                },
+            ],
+        }
+    )
+
+    _, _, market_to_event, members, groups = normalize_events([raw0, raw1])
+
+    assert market_to_event["M-shared"] == "EV-A"
+    assert len(members) == 4
+    assert [(group.event_id, group.quality, group.reason) for group in groups] == [
+        ("EV-A", "incomplete-source", CONFLICTING_EVENT_MEMBERSHIP_REASON),
+        ("EV-B", "incomplete-source", CONFLICTING_EVENT_MEMBERSHIP_REASON),
+    ]
 
 
 def test_normalize_events_empty_input() -> None:

@@ -37,6 +37,9 @@ from typing import Any
 from loguru import logger
 
 from polyarb.perception.market_truth import (
+    CONFLICTING_EVENT_MEMBERSHIP_REASON,
+    INVALID_EVENT_MEMBER_REASON,
+    MISSING_EVENT_MEMBERSHIP_REASON,
     EventMember,
     GroupTruth,
     membership_hash,
@@ -203,6 +206,18 @@ def normalize_events(
     market_to_event_map: dict[str, str] = {}
     event_members: list[EventMember] = []
     group_truths: list[GroupTruth] = []
+    group_candidates: list[
+        tuple[
+            str,
+            str,
+            bool,
+            int,
+            list[EventMember],
+            set[str],
+            str | None,
+        ]
+    ] = []
+    market_event_ids: dict[str, set[str]] = {}
     seen_event_ids: set[str] = set()
 
     for raw in raw_events:
@@ -283,23 +298,46 @@ def normalize_events(
         is_neg_risk_group = bool(raw.get("negRisk")) and group_id_raw not in (None, "")
         group_id = str(group_id_raw) if is_neg_risk_group else None
         group_members: list[EventMember] = []
+        structural_market_ids: set[str] = set()
+        membership_reason: str | None = None
+        expected_member_count = len(markets) if isinstance(markets, list) else 0
+        if group_id is not None and (not isinstance(markets, list) or not markets):
+            membership_reason = MISSING_EVENT_MEMBERSHIP_REASON
         if isinstance(markets, list):
             for m in markets:
                 if not isinstance(m, dict):
+                    if group_id is not None:
+                        membership_reason = INVALID_EVENT_MEMBER_REASON
                     continue
                 m_id = m.get("id")
-                if m_id is None or m_id == "":
+                if m_id is None or (isinstance(m_id, str) and not m_id.strip()):
+                    if group_id is not None:
+                        membership_reason = INVALID_EVENT_MEMBER_REASON
                     continue
                 m_id_str = str(m_id)
+                market_event_ids.setdefault(m_id_str, set()).add(event_id)
                 # Keep FIRST mapping if a market appears in multiple events
                 # (shouldn't normally happen, but be defensive).
                 if m_id_str not in market_to_event_map:
                     market_to_event_map[m_id_str] = event_id
 
                 if group_id is not None:
-                    active = bool(m.get("active", False))
-                    closed = bool(m.get("closed", False))
-                    if bool(m.get("negRiskOther", False)):
+                    if m_id_str in structural_market_ids:
+                        membership_reason = INVALID_EVENT_MEMBER_REASON
+                        continue
+                    structural_market_ids.add(m_id_str)
+                    active_raw = m.get("active")
+                    closed_raw = m.get("closed")
+                    other_raw = m.get("negRiskOther")
+                    if not all(
+                        type(value) is bool
+                        for value in (active_raw, closed_raw, other_raw)
+                    ):
+                        membership_reason = INVALID_EVENT_MEMBER_REASON
+                        continue
+                    active = active_raw
+                    closed = closed_raw
+                    if other_raw:
                         member_kind = "other"
                     elif not active:
                         member_kind = "inactive-reserved"
@@ -316,37 +354,68 @@ def normalize_events(
                         )
                     )
 
-        if group_id is not None and group_members:
+        if group_id is not None:
             event_members.extend(group_members)
-            augmented = bool(raw.get("negRiskAugmented", False))
-            supported = not augmented and all(
-                member.member_kind == "named" and member.active and not member.closed
-                for member in group_members
-            )
-            if augmented:
-                quality = "complete-unsupported"
-                reason = "augmented-neg-risk-not-supported"
-            elif supported:
-                quality = "complete-supported"
-                reason = None
-            else:
-                quality = "complete-unsupported"
-                reason = "standard-neg-risk-has-non-tradable-members"
-            group_truths.append(
-                GroupTruth(
-                    event_id=event_id,
-                    group_id=group_id,
-                    neg_risk_type="augmented" if augmented else "standard",
-                    expected_member_count=len(group_members),
-                    active_named_count=sum(
-                        member.member_kind == "named" and member.active
-                        for member in group_members
-                    ),
-                    membership_hash=membership_hash(event_id, group_id, group_members),
-                    quality=quality,
-                    reason=reason,
+            group_candidates.append(
+                (
+                    event_id,
+                    group_id,
+                    bool(raw.get("negRiskAugmented", False)),
+                    expected_member_count,
+                    group_members,
+                    structural_market_ids,
+                    membership_reason,
                 )
             )
+
+    conflicting_market_ids = {
+        market_id
+        for market_id, event_ids in market_event_ids.items()
+        if len(event_ids) > 1
+    }
+    for (
+        event_id,
+        group_id,
+        augmented,
+        expected_member_count,
+        group_members,
+        structural_market_ids,
+        membership_reason,
+    ) in group_candidates:
+        supported = not augmented and all(
+            member.member_kind == "named" and member.active and not member.closed
+            for member in group_members
+        )
+        if structural_market_ids & conflicting_market_ids:
+            quality = "incomplete-source"
+            reason = CONFLICTING_EVENT_MEMBERSHIP_REASON
+        elif membership_reason is not None:
+            quality = "incomplete-source"
+            reason = membership_reason
+        elif augmented:
+            quality = "complete-unsupported"
+            reason = "augmented-neg-risk-not-supported"
+        elif supported:
+            quality = "complete-supported"
+            reason = None
+        else:
+            quality = "complete-unsupported"
+            reason = "standard-neg-risk-has-non-tradable-members"
+        group_truths.append(
+            GroupTruth(
+                event_id=event_id,
+                group_id=group_id,
+                neg_risk_type="augmented" if augmented else "standard",
+                expected_member_count=expected_member_count,
+                active_named_count=sum(
+                    member.member_kind == "named" and member.active
+                    for member in group_members
+                ),
+                membership_hash=membership_hash(event_id, group_id, group_members),
+                quality=quality,
+                reason=reason,
+            )
+        )
 
     # Dedupe event_tags within a single batch on (event_id, tag_id) — duplicate
     # tag_ids on one event can occur if the API returns the same tag twice

@@ -244,15 +244,18 @@ class GammaClient:
             markets = raw.get("markets")
             if isinstance(markets, list):
                 raw["markets"] = [
-                    {
-                        "id": market.get("id"),
-                        "active": market.get("active"),
-                        "closed": market.get("closed"),
-                        "negRiskOther": market.get("negRiskOther"),
-                        "groupItemTitle": market.get("groupItemTitle"),
-                    }
+                    (
+                        {
+                            "id": market.get("id"),
+                            "active": market.get("active"),
+                            "closed": market.get("closed"),
+                            "negRiskOther": market.get("negRiskOther"),
+                            "groupItemTitle": market.get("groupItemTitle"),
+                        }
+                        if isinstance(market, dict)
+                        else market
+                    )
                     for market in markets
-                    if isinstance(market, dict)
                 ]
             yield raw
 

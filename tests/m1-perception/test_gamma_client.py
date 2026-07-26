@@ -21,6 +21,8 @@ from polyarb.clients.gamma_client import (
     _NonRetryableHTTPError,
 )
 from polyarb.config import Settings
+from polyarb.perception.market_truth import INVALID_EVENT_MEMBER_REASON
+from polyarb.snapshot.normalizer import normalize_events
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -523,6 +525,51 @@ async def test_iter_active_events_trims_nested_markets() -> None:
                 "groupItemTitle",
             }, f"nested markets not trimmed: {m}"
     assert coverage.result == PaginationResult(5, 1, True, None)
+
+
+async def test_event_projection_preserves_invalid_membership_evidence() -> None:
+    settings = _fast_settings()
+    raw_event = _make_event_dict(0, n_markets=0)
+    raw_event["negRisk"] = True
+    raw_event["negRiskMarketID"] = "group-invalid"
+    raw_event["markets"] = [
+        "not-a-dict",
+        {
+            "id": "market-a",
+            "active": True,
+            "closed": False,
+            "negRiskOther": False,
+            "unused": "stripped",
+        },
+        {
+            "id": "market-b",
+            "active": True,
+            "closed": False,
+            "negRiskOther": False,
+        },
+    ]
+    coverage = PaginationCoverage(source="events")
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/events/keyset").mock(
+            return_value=httpx.Response(200, json=_event_page([raw_event]))
+        )
+        async with GammaClient(settings) as client:
+            projected = [
+                event async for event in client.iter_active_events(coverage)
+            ][0]
+
+    assert projected["markets"][0] == "not-a-dict"
+    assert projected["markets"][1] == {
+        "id": "market-a",
+        "active": True,
+        "closed": False,
+        "negRiskOther": False,
+        "groupItemTitle": None,
+    }
+    _, _, _, members, groups = normalize_events([projected])
+    assert [member.market_id for member in members] == ["market-a", "market-b"]
+    assert groups[0].quality == "incomplete-source"
+    assert groups[0].reason == INVALID_EVENT_MEMBER_REASON
 
 
 async def test_fetch_all_active_markets_still_returns_list() -> None:
