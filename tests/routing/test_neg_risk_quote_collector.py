@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from dataclasses import dataclass
 
 import pytest
@@ -35,9 +36,16 @@ class FakeReader:
     def __init__(self, response: object) -> None:
         self.response = response
         self.requests: list[list[str]] = []
+        self.projections: list[str] = []
 
-    async def get_books(self, token_ids: list[str]) -> object:
+    async def get_books(
+        self,
+        token_ids: list[str],
+        *,
+        projection: str = "full",
+    ) -> object:
         self.requests.append(token_ids)
+        self.projections.append(projection)
         if isinstance(self.response, BaseException):
             raise self.response
         return self.response
@@ -50,8 +58,14 @@ class BlockingReader(FakeReader):
         self.release = asyncio.Event()
         self.cancelled = False
 
-    async def get_books(self, token_ids: list[str]) -> object:
+    async def get_books(
+        self,
+        token_ids: list[str],
+        *,
+        projection: str = "full",
+    ) -> object:
         self.requests.append(token_ids)
+        self.projections.append(projection)
         self.started.set()
         try:
             await self.release.wait()
@@ -158,6 +172,36 @@ def _collect(store: NegRiskQuoteStore, reader: FakeReader, *, start: int = NOW_M
     )
 
 
+async def test_slow_universe_reconstruction_does_not_block_event_loop(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    original = store.latest_verified_universe
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_universe():
+        started.set()
+        assert release.wait(timeout=1)
+        return original()
+
+    store.latest_verified_universe = slow_universe  # type: ignore[method-assign]
+    task = asyncio.create_task(
+        collect_neg_risk_quotes(
+            quote_store=store,
+            reader=FakeReader([]),
+            now_ms=_now_sequence(NOW_MS, NOW_MS + 25, NOW_MS + 25, NOW_MS + 25),
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 0.2)
+
+    ticker = asyncio.Event()
+    asyncio.get_running_loop().call_soon(ticker.set)
+    await asyncio.wait_for(ticker.wait(), timeout=0.05)
+    assert not task.done()
+
+    release.set()
+    await task
+
+
 def _legs() -> tuple[UniverseLeg, ...]:
     return (
         UniverseLeg(
@@ -208,6 +252,7 @@ def test_collects_latest_universe_once_and_persists_lowest_valid_ask(quote_db) -
     result = _collect(store, reader)
 
     assert reader.requests == [["token-a", "token-b"]]
+    assert reader.projections == ["top"]
     assert result.status == "complete"
     assert result.universe_snapshot_id == 1
     assert result.requested_token_count == 2

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import threading
+import time
 
 import pytest
 
 from polyarb.config import Settings
 from polyarb.daemon.quote_worker import QuoteWorkerRuntime
 from polyarb.http.health import _build_health_checks
+from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
 from polyarb.routing.neg_risk_quote_store import (
     NegRiskQuoteStore,
     PersistedQuote,
@@ -233,3 +237,56 @@ def test_disabled_worker_registers_no_quote_checks(tmp_path) -> None:
 
     assert not any(name.startswith("quote_feed:") for name in checks)
     assert overall == "fail"  # no snapshot is still truthful
+
+
+async def test_health_reads_previous_cache_while_next_projection_certifies(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon.quote_worker import certify_latest_quote_projection
+
+    settings = _settings(tmp_path, enabled=True)
+    _complete_run(settings, age_s=10)
+    quote_store = NegRiskQuoteStore(settings.db_path)
+    projection = quote_store.latest_complete_projection()
+    assert projection is not None
+    runtime = QuoteWorkerRuntime()
+    runtime.publish_certified_projection(projection)
+    runtime.state = "collecting"
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_certification(_self):
+        started.set()
+        assert release.wait(timeout=1)
+        return projection
+
+    monkeypatch.setattr(
+        NegRiskQuoteStore,
+        "latest_complete_projection",
+        slow_certification,
+    )
+    result = QuoteCollectionResult(
+        run_id=projection.run_id,
+        status="complete",
+        universe_snapshot_id=projection.universe_snapshot_id,
+        requested_token_count=projection.requested_token_count,
+        successful_response_count=projection.successful_response_count,
+        quote_taken_at_ms=projection.quoted_at_ms,
+        elapsed_ms=25,
+    )
+    certification = asyncio.create_task(
+        certify_latest_quote_projection(quote_store, result)
+    )
+    assert await asyncio.to_thread(started.wait, 0.2)
+
+    before = time.perf_counter()
+    checks, overall = _quote_check(settings, runtime=runtime)
+    elapsed = time.perf_counter() - before
+
+    assert elapsed < 0.1
+    assert checks["quote_feed:last_complete_age_seconds"][0]["status"] == "pass"
+    assert overall == "pass"
+    assert not certification.done()
+    release.set()
+    assert await certification is projection

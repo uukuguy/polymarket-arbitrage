@@ -154,14 +154,21 @@ class ClobReaderClient:
                 logger.info(f"CLOB books chunk {i}/{n_chunks}: cached ({len(cached)} books)")
                 continue
             params = [BookParams(token_id=t) for t in chunk]
+
+            def fetch_chunk() -> tuple[list[Any] | None, list[Any]]:
+                raw_books = self._client.get_order_books(params)
+                projected = (
+                    [_compact_book_top(book) for book in raw_books]
+                    if projection == "top"
+                    else raw_books
+                )
+                return (raw_books if cache is not None else None), projected
+
             async with self._limiter:
-                books = await asyncio.to_thread(self._client.get_order_books, params)
-            if cache is not None:
-                cache.save_books_chunk(i, books)
-            if projection == "top":
-                out.extend(_compact_book_top(book) for book in books)
-            else:
-                out.extend(books)
+                raw_books, books = await asyncio.to_thread(fetch_chunk)
+            if cache is not None and raw_books is not None:
+                cache.save_books_chunk(i, raw_books)
+            out.extend(books)
             logger.info(f"CLOB books chunk {i}/{n_chunks}: fetched ({len(chunk)} tokens)")
         return out
 

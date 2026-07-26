@@ -125,6 +125,25 @@ async def _wait_for_stop(stop_event: asyncio.Event, delay_s: float) -> bool:
     return True
 
 
+async def certify_latest_quote_projection(
+    quote_store: NegRiskQuoteStore,
+    result: QuoteCollectionResult,
+) -> CompleteQuoteProjection:
+    """Build one full proof off-loop and bind it to the just-finished run."""
+    started = time.perf_counter()
+    projection = await asyncio.to_thread(
+        quote_store.latest_complete_projection
+    )
+    if projection is None or projection.run_id != result.run_id:
+        raise QuoteProjectionIntegrityError()
+    logger.info(
+        "neg-risk quote projection certified "
+        f"run_id={projection.run_id} "
+        f"elapsed_ms={int((time.perf_counter() - started) * 1000)}"
+    )
+    return projection
+
+
 class QuoteWorker:
     """Run one collection at a time and retry ordinary failures next interval."""
 
@@ -209,18 +228,10 @@ def build_production_quote_worker(settings: Settings) -> QuoteWorker | None:
     async def certify_projection(
         result: QuoteCollectionResult,
     ) -> CompleteQuoteProjection:
-        started = time.perf_counter()
-        projection = await asyncio.to_thread(
-            quote_store.latest_complete_projection
+        return await certify_latest_quote_projection(
+            quote_store,
+            result,
         )
-        if projection is None or projection.run_id != result.run_id:
-            raise QuoteProjectionIntegrityError()
-        logger.info(
-            "neg-risk quote projection certified "
-            f"run_id={projection.run_id} "
-            f"elapsed_ms={int((time.perf_counter() - started) * 1000)}"
-        )
-        return projection
 
     return QuoteWorker(
         collect_once=collect_once,
