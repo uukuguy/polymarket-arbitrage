@@ -415,3 +415,51 @@ historical buffer is never inferred as zero.
 this window's six-hour samples as strict evidence, sign validation, create
 `05-06-SUMMARY.md`, or close Phase 05. The next strict clock starts only after
 the continuous-observability gap phase and a new production readiness proof.
+
+---
+
+## Operational closure production repair — 2026-07-26
+
+This section is newer than both diagnostic-only windows above. It does not
+rewrite either historical verdict and does not replace the Phase 05.4 A7 L3
+evidence.
+
+### R2 archive repair
+
+Before mutation, exact app machine `6830939c0070d8` reproduced the configured
+bucket as a 20-character value whose first and penultimate codepoints were
+literal single quotes and whose final codepoint was a space. A read-only
+`list_objects_v2(MaxKeys=1)` failed locally in botocore before any request with
+`ParamValidationError: Invalid bucket name "'polyarb-snapshots' "`.
+
+The authorized mutation set only
+`POLYARB_R2_BUCKET=polyarb-snapshots` on `polyarb-l1`. Fly rolled the machines
+to version 134; the re-resolved started app instance was
+`01KYE84YNXJ9TVWD7RXKP5W15N`. A read-only list probe then returned HTTP 200 and
+one key count without printing credentials or object names.
+
+The daemon's normal startup subset snapshot 718 completed from
+`2026-07-26T03:40:57Z`, wrote 1,904 markets, uploaded its Parquet archive, and
+persisted a non-null `parquet_r2_url`. The same production `/healthz` body then
+reported `r2:upload_recent_success=true`, status `pass`.
+
+### Tested monitoring release
+
+- Source and release identity:
+  `21acea5c286c8b7a9599933674c1bf570316e1c2`.
+- GitHub CI run `30186857393`: success; Ruff, full pytest, and
+  planning-status all passed.
+- Fly deploy run `30186857388`: success; L1 release 135, app machine
+  `6830939c0070d8`, instance `01KYE8X2AXK1PWN6VW1WVF2KRR`, image
+  `deployment-01KYE8VB7PT2XT0N1XDY09P0P7`.
+- Vercel GitHub deployment 5607104495: Production success for the exact SHA;
+  canonical project URL returned the expected protected-deployment HTTP 302.
+- Polywatch dry-run `30186964396`: success. L1, opportunity feed, L2/L3, and
+  Dashboard all decided `noop`; the quiet L2 `WAITING_FOR_EVENT` state did not
+  create a false alert.
+
+The final Fly deploy is the quote-soak restart boundary. The first eligible
+post-restart quote row is run 78 at
+`2026-07-26T03:54:09.630Z` (`quoted_at_ms=1785038049630`), complete
+1,278/1,278. No 24-hour verdict may be calculated before
+`2026-07-27T03:54:09.630Z`.
