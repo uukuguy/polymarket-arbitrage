@@ -703,7 +703,6 @@ class WsConsumer:
         refresh_assets: list[str] = []
         required_assets: frozenset[str] = frozenset()
         failure_reason = "unexpected_exception"
-        final_subscribe_confirmed = False
         try:
             async with self._subscription_control_lock:
                 active_assets = self._compute_active_assets()
@@ -765,7 +764,6 @@ class WsConsumer:
                 failure_reason = "generation_changed"
                 if self._current_ws is not ws or self._connection_generation != generation:
                     raise RuntimeError("connection identity changed during refresh")
-                final_subscribe_confirmed = True
             assert waiter is not None
             failure_reason = "evidence_timeout"
             first_wait_s = min(
@@ -785,7 +783,6 @@ class WsConsumer:
                     failure_reason = "generation_changed"
                     if self._current_ws is not ws or self._connection_generation != generation:
                         raise RuntimeError("connection identity changed before refresh retry")
-                    final_subscribe_confirmed = False
                     failure_reason = "unsubscribe_failed"
                     if not await self._send_control(
                         ws,
@@ -808,7 +805,6 @@ class WsConsumer:
                     failure_reason = "generation_changed"
                     if self._current_ws is not ws or self._connection_generation != generation:
                         raise RuntimeError("connection identity changed during refresh retry")
-                    final_subscribe_confirmed = True
                 failure_reason = "evidence_timeout"
                 completed = await asyncio.wait_for(
                     asyncio.shield(waiter.future),
@@ -841,8 +837,19 @@ class WsConsumer:
                 len(required_assets),
                 len(missing_assets),
             )
-            if failure_reason == "evidence_timeout" and final_subscribe_confirmed:
-                return False
+            if failure_reason == "evidence_timeout":
+                self._record_runtime_event(
+                    RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
+                    reason_code="evidence_timeout",
+                    detail={
+                        "operation": "book_refresh",
+                        "error_type": "TimeoutError",
+                        "required_count": len(required_assets),
+                        "missing_count": len(missing_assets),
+                    },
+                    severity=RuntimeEventSeverity.WARNING,
+                    generation=generation,
+                )
             if ws is not None:
                 await self._compensate_generation(ws, generation)
             return False

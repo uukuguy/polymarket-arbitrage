@@ -64,7 +64,9 @@ _RUNTIME_EVENT_DETAIL_KEYS: Mapping[RuntimeEventKind, frozenset[str]] = MappingP
         RuntimeEventKind.WS_GENERATION_CHANGED: frozenset(
             {"previous_generation", "new_generation"}
         ),
-        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED: frozenset({"operation", "error_type"}),
+        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED: frozenset(
+            {"operation", "error_type", "required_count", "missing_count"}
+        ),
         RuntimeEventKind.SUBSCRIPTION_COMPENSATED: frozenset({"operation", "close_succeeded"}),
         RuntimeEventKind.EVIDENCE_WRITER_FAILED: frozenset({"failed_event_seq"}),
         RuntimeEventKind.EVIDENCE_WRITER_RECOVERED: frozenset({"recovered_event_seq"}),
@@ -132,12 +134,16 @@ def _validate_runtime_event_detail_values(
             "new_generation",
             "failed_event_seq",
             "recovered_event_seq",
+            "required_count",
+            "missing_count",
         }:
             maximum = {
                 "stale_seconds": 3_600,
                 "reconnect_attempt": 1_000_000,
                 "budget_count": 128,
                 "retry_after_ms": 3_600_000,
+                "required_count": 10_000,
+                "missing_count": 10_000,
             }.get(key, 2**63 - 1)
             _bounded_detail_int(kind, key, value, maximum=maximum)
         elif key == "source" and (
