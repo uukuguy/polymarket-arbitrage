@@ -139,23 +139,27 @@ def _strict_market_bool(raw: object) -> bool | None:
     return None
 
 
-def market_truth_mismatch_reason(
-    event_members: Sequence[EventMember],
-    group_truths: Sequence[GroupTruth],
-    market_rows: Sequence[Mapping[str, object]],
-) -> str | None:
-    """Return the first semantic mismatch between published rows and event truth."""
-    members_by_id = {member.market_id: member for member in event_members}
-    truth_keys = {(truth.event_id, truth.group_id) for truth in group_truths}
-    rows_by_id: dict[str, Mapping[str, object]] = {}
-    row_states: dict[str, tuple[bool, bool, bool]] = {}
+class MarketTruthSemanticValidator:
+    """Validate one normalized market against immutable event-side truth."""
 
-    for row in market_rows:
+    def __init__(
+        self,
+        event_members: Sequence[EventMember],
+        group_truths: Sequence[GroupTruth],
+    ) -> None:
+        self.member_ids = frozenset(member.market_id for member in event_members)
+        self._members_by_id = {
+            member.market_id: member for member in event_members
+        }
+        self._truth_keys = frozenset(
+            (truth.event_id, truth.group_id) for truth in group_truths
+        )
+
+    def row_mismatch_reason(self, row: Mapping[str, object]) -> str | None:
+        """Return the first mismatch for one row without retaining that row."""
         market_id = _strict_market_identity(row.get("market_id"))
         if market_id is None:
             return "published-market-truth-mismatch:market-id"
-        if market_id in rows_by_id:
-            return f"published-market-truth-mismatch:duplicate-market-id:{market_id}"
         active = _strict_market_bool(row.get("active"))
         closed = _strict_market_bool(row.get("closed"))
         neg_risk = _strict_market_bool(row.get("neg_risk"))
@@ -166,41 +170,59 @@ def market_truth_mismatch_reason(
         ):
             if value is None:
                 return f"published-market-truth-mismatch:{field}-invalid:{market_id}"
-        rows_by_id[market_id] = row
-        row_states[market_id] = (active, closed, neg_risk)
 
-    for member in event_members:
-        row = rows_by_id.get(member.market_id)
-        if row is None:
-            return f"published-members-missing:{member.market_id}"
-        event_id = _strict_market_identity(row.get("event_id"))
-        if event_id != member.event_id:
-            return f"published-market-truth-mismatch:event-id:{member.market_id}"
-        group_id = _strict_market_identity(row.get("neg_risk_market_id"))
-        if group_id != member.group_id:
-            return f"published-market-truth-mismatch:group-id:{member.market_id}"
-        active, closed, neg_risk = row_states[member.market_id]
-        if neg_risk is not True:
-            return f"published-market-truth-mismatch:neg-risk-false:{member.market_id}"
-        if active != member.active:
-            return f"published-market-truth-mismatch:active:{member.market_id}"
-        if closed != member.closed:
-            return f"published-market-truth-mismatch:closed:{member.market_id}"
-
-    for market_id, row in rows_by_id.items():
-        _, _, neg_risk = row_states[market_id]
-        if neg_risk is not True:
-            continue
         event_id = _strict_market_identity(row.get("event_id"))
         group_id = _strict_market_identity(row.get("neg_risk_market_id"))
-        member = members_by_id.get(market_id)
-        if (
-            event_id is None
-            or group_id is None
-            or (event_id, group_id) not in truth_keys
-            or member is None
-            or member.event_id != event_id
-            or member.group_id != group_id
-        ):
-            return f"published-neg-risk-without-truth:{market_id}"
+        member = self._members_by_id.get(market_id)
+        if member is not None:
+            if event_id != member.event_id:
+                return f"published-market-truth-mismatch:event-id:{market_id}"
+            if group_id != member.group_id:
+                return f"published-market-truth-mismatch:group-id:{market_id}"
+            if neg_risk is not True:
+                return f"published-market-truth-mismatch:neg-risk-false:{market_id}"
+            if active != member.active:
+                return f"published-market-truth-mismatch:active:{market_id}"
+            if closed != member.closed:
+                return f"published-market-truth-mismatch:closed:{market_id}"
+
+        # Either side of the market-level neg-risk claim activates the reverse
+        # proof obligation. This rejects both true-without-group and
+        # false-with-group rows instead of allowing either partial claim through.
+        if neg_risk is True or group_id is not None:
+            if (
+                event_id is None
+                or group_id is None
+                or (event_id, group_id) not in self._truth_keys
+                or member is None
+                or member.event_id != event_id
+                or member.group_id != group_id
+            ):
+                return f"published-neg-risk-without-truth:{market_id}"
+        return None
+
+
+def market_truth_mismatch_reason(
+    event_members: Sequence[EventMember],
+    group_truths: Sequence[GroupTruth],
+    market_rows: Sequence[Mapping[str, object]],
+) -> str | None:
+    """Return the first semantic mismatch between published rows and event truth."""
+    validator = MarketTruthSemanticValidator(event_members, group_truths)
+    seen_market_ids: set[str] = set()
+
+    for row in market_rows:
+        market_id = _strict_market_identity(row.get("market_id"))
+        if market_id is None:
+            return "published-market-truth-mismatch:market-id"
+        if market_id in seen_market_ids:
+            return f"published-market-truth-mismatch:duplicate-market-id:{market_id}"
+        seen_market_ids.add(market_id)
+        reason = validator.row_mismatch_reason(row)
+        if reason is not None:
+            return reason
+
+    missing_members = validator.member_ids - seen_market_ids
+    if missing_members:
+        return f"published-members-missing:{min(missing_members)}"
     return None

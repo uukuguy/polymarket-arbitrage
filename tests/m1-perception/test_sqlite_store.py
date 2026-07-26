@@ -752,14 +752,47 @@ def test_publish_rejects_numeric_market_id_before_sqlite_can_stringify_it(
 
 
 @pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("neg_risk", [False, True])
 def test_publish_rejects_market_side_neg_risk_group_without_truth(
+    store: SQLiteStore,
+    streaming: bool,
+    neg_risk: bool,
+) -> None:
+    orphan = make_market(
+        "orphan",
+        event_id="event-orphan",
+        neg_risk_market_id="group-orphan",
+        neg_risk=neg_risk,
+        active=True,
+        closed=False,
+    )
+
+    with pytest.raises(ValueError, match="published-neg-risk-without-truth"):
+        _write_with_mode(
+            store,
+            streaming=streaming,
+            market_rows=[orphan],
+            is_valid=True,
+            issues=[],
+            source_coverage=SourceCoverage.complete(1, 1),
+            event_members=[],
+            group_truths=[],
+            publish_markets=True,
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM snapshots").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_publish_rejects_true_neg_risk_without_group_id(
     store: SQLiteStore,
     streaming: bool,
 ) -> None:
     orphan = make_market(
         "orphan",
         event_id="event-orphan",
-        neg_risk_market_id="group-orphan",
+        neg_risk_market_id=None,
         neg_risk=True,
         active=True,
         closed=False,

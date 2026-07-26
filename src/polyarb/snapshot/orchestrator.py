@@ -62,8 +62,8 @@ from polyarb.events.bus import publish_snapshot_complete
 from polyarb.perception.market_truth import (
     EventMember,
     GroupTruth,
+    MarketTruthSemanticValidator,
     SourceCoverage,
-    market_truth_mismatch_reason,
 )
 from polyarb.snapshot.cache import ChunkCache
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
@@ -208,7 +208,7 @@ def _include_in_snapshot(mode: str, market: dict, threshold: float) -> bool:
 def _reconcile_market_truth(
     *,
     observed_market_ids: set[str],
-    normalized_market_rows: list[dict],
+    semantic_reason: str | None,
     market_to_event_map: dict[str, str],
     event_members: list[EventMember],
     group_truths: list[GroupTruth],
@@ -256,11 +256,6 @@ def _reconcile_market_truth(
     missing_mapped_markets = sorted(set(market_to_event_map) - observed_market_ids)
     if missing_mapped_markets:
         return f"event-map-missing-market:{','.join(missing_mapped_markets[:5])}"[:160]
-    semantic_reason = market_truth_mismatch_reason(
-        event_members,
-        group_truths,
-        normalized_market_rows,
-    )
     if semantic_reason is not None:
         return semantic_reason[:160]
     return None
@@ -314,6 +309,7 @@ async def run_snapshot(
     markets_coverage = PaginationCoverage(source="markets")
     event_failure_reason: str | None = None
     market_failure_reason: str | None = None
+    market_semantic_reason: str | None = None
     threshold = settings.liquidity_threshold_usd
     PROGRESS_EVERY = 5000  # log every N streamed markets so long fetches stay observable
 
@@ -378,6 +374,10 @@ async def run_snapshot(
             authoritative_member_ids = {
                 member.market_id for member in event_members
             }
+            semantic_validator = MarketTruthSemanticValidator(
+                event_members,
+                group_truths,
+            )
             try:
                 async for retry_state in AsyncRetrying(
                     retry=retry_if_exception(lambda e: _is_dns_jitter(e) and not first_frame_seen),
@@ -401,6 +401,15 @@ async def run_snapshot(
                                 continue
                             seen_ids.add(mid)
                             normalized_count += 1
+
+                            # Inspect every unique normalized row before subset
+                            # filtering. Keep only the first mismatch so excluded
+                            # low-liquidity rows cannot create a hidden truth gap
+                            # and no full-market buffer is required.
+                            if market_semantic_reason is None:
+                                market_semantic_reason = (
+                                    semantic_validator.row_mismatch_reason(normalized)
+                                )
 
                             # Mode filter (replaces the old phase-3 block).
                             if (
@@ -442,7 +451,7 @@ async def run_snapshot(
     if events_coverage.result.completed and markets_coverage.result.completed:
         reconciliation_reason = _reconcile_market_truth(
             observed_market_ids=seen_ids,
-            normalized_market_rows=target_markets,
+            semantic_reason=market_semantic_reason,
             market_to_event_map=market_to_event_map,
             event_members=event_members,
             group_truths=group_truths,
