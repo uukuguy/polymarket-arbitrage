@@ -518,10 +518,12 @@ docker-smoke:
 
 ## deploy: Deploy to Fly.io prod (requires flyctl + keychain auth — see GAP-4 banner above)
 deploy:
-	@echo ">> deploy — flyctl deploy --remote-only"
-	FLY_API_TOKEN= flyctl deploy --remote-only --wait-timeout 600
+	@RELEASE_ID="$$(git rev-parse HEAD)"; \
+		echo ">> deploy — flyctl deploy --remote-only (release=$$RELEASE_ID)"; \
+		FLY_API_TOKEN= flyctl deploy --remote-only --wait-timeout 600 \
+			--env POLYARB_RELEASE_ID="$$RELEASE_ID"
 	@echo ">> ensuring process scale: app=1 cron=1 (W8 Supercronic)"
-	FLY_API_TOKEN= flyctl scale count app=1 cron=1 -a polyarb-l1 || true
+	FLY_API_TOKEN= flyctl scale count app=1 cron=1 -a polyarb-l1 --yes || true
 	@echo ">> running post-deploy /health smoke probe"
 	bash scripts/deploy_smoke.sh
 
