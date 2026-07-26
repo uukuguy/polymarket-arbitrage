@@ -48,7 +48,9 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from starlette.requests import Request
@@ -63,6 +65,76 @@ _WARN_AGE_S = 25 * 3600  # 14-25h → warn; > 25h → fail
 # Supabase mirror thresholds
 _MIRROR_WARN_S = 25 * 3600
 _MIRROR_FAIL_S = 48 * 3600
+
+
+@dataclass(frozen=True)
+class MarketTruthHealth:
+    """Latest-attempt coverage plus the last complete published truth anchor."""
+
+    coverage_status: str
+    coverage_value: str
+    latest_attempt_snapshot_id: int | None
+    latest_attempt_market_items: int | None
+    latest_attempt_event_items: int | None
+    last_complete_snapshot_id: int | None
+    last_complete_age_seconds: float | None
+
+
+def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
+    """Read durable market-truth health without certifying diagnostic rows."""
+    empty = MarketTruthHealth(
+        coverage_status="fail",
+        coverage_value="incomplete-source",
+        latest_attempt_snapshot_id=None,
+        latest_attempt_market_items=None,
+        latest_attempt_event_items=None,
+        last_complete_snapshot_id=None,
+        last_complete_age_seconds=None,
+    )
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return empty
+    try:
+        con.execute("BEGIN")
+        latest = con.execute(
+            "SELECT s.id,s.market_view_published,c.completed,"
+            "c.market_items,c.event_items "
+            "FROM snapshots s "
+            "LEFT JOIN snapshot_source_coverage c ON c.snapshot_id=s.id "
+            "ORDER BY s.id DESC LIMIT 1"
+        ).fetchone()
+        complete = con.execute(
+            "SELECT s.id,s.taken_at_ms "
+            "FROM snapshots s "
+            "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id "
+            "WHERE s.market_view_published=1 AND s.is_valid=1 AND c.completed=1 "
+            "ORDER BY s.id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return empty
+    finally:
+        con.close()
+
+    if latest is None:
+        return empty
+    latest_id, published, completed, market_items, event_items = latest
+    coverage_complete = completed == 1 and published == 1
+    complete_id = complete[0] if complete is not None else None
+    complete_age = (
+        max(0.0, now_s - complete[1] / 1000.0)
+        if complete is not None
+        else None
+    )
+    return MarketTruthHealth(
+        coverage_status="pass" if coverage_complete else "fail",
+        coverage_value="complete" if coverage_complete else "incomplete-source",
+        latest_attempt_snapshot_id=latest_id,
+        latest_attempt_market_items=market_items,
+        latest_attempt_event_items=event_items,
+        last_complete_snapshot_id=complete_id,
+        last_complete_age_seconds=complete_age,
+    )
 
 
 def _utc_now_iso() -> str:
@@ -99,6 +171,49 @@ def _build_health_checks(
     """
     checks: dict[str, list[dict[str, Any]]] = {}
     overall = "pass"
+
+    # ── Check 0: authoritative market-truth coverage ──────────────────────
+    market_truth = read_market_truth_health(store.db_path, now_s)
+    overall = _severity(overall, market_truth.coverage_status)
+    checks["market_truth:coverage"] = [
+        {
+            "componentId": "market-truth",
+            "componentType": "datastore",
+            "observedValue": market_truth.coverage_value,
+            "status": market_truth.coverage_status,
+            "output": (
+                f"markets={market_truth.latest_attempt_market_items} "
+                f"events={market_truth.latest_attempt_event_items}"
+            ),
+            "time": _utc_now_iso(),
+        }
+    ]
+
+    truth_age = market_truth.last_complete_age_seconds
+    if truth_age is None:
+        truth_age_status = "fail"
+    elif truth_age < _PASS_AGE_S:
+        truth_age_status = "pass"
+    elif truth_age < _WARN_AGE_S:
+        truth_age_status = "warn"
+    else:
+        truth_age_status = "fail"
+    overall = _severity(overall, truth_age_status)
+    checks["market_truth:last_complete_age_seconds"] = [
+        {
+            "componentId": "market-truth",
+            "componentType": "datastore",
+            "observedValue": round(truth_age, 1) if truth_age is not None else None,
+            "observedUnit": "s",
+            "status": truth_age_status,
+            "output": (
+                f"snapshot_id={market_truth.last_complete_snapshot_id}"
+                if market_truth.last_complete_snapshot_id is not None
+                else "no-complete-published-market-truth"
+            ),
+            "time": _utc_now_iso(),
+        }
+    ]
 
     # ── Check 1: snapshot age ─────────────────────────────────────────────
     last_snapshot = store.get_latest_snapshot()

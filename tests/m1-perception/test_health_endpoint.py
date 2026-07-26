@@ -12,7 +12,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 from starlette.testclient import TestClient
+
+from polyarb.http import health as health_module
+
+
+def _read_market_truth_health(path: Path, *, now_s: float):
+    reader = getattr(health_module, "read_market_truth_health", None)
+    assert callable(reader), "read_market_truth_health is not implemented"
+    return reader(path, now_s)
 
 # ---------------------------------------------------------------------------
 # Helper: insert a snapshot row into a tmp SQLite DB
@@ -25,6 +34,11 @@ def _insert_snapshot(
     taken_at_ms: int,
     status: str = "ok",
     market_count: int = 100,
+    coverage_completed: bool = True,
+    market_view_published: bool = True,
+    event_count: int = 20,
+    failure_source: str | None = None,
+    failure_reason: str | None = None,
 ) -> None:
     """Insert a minimal snapshots row so get_latest_snapshot has data."""
     from polyarb.storage.sqlite_store import SQLiteStore
@@ -38,10 +52,34 @@ def _insert_snapshot(
         now_ms = int(time.time() * 1000)
         con.execute(
             "INSERT INTO snapshots("
-            "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes"
+            "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+            "is_valid,parquet_path,notes"
             ")"
-            " VALUES (?,?,?,?,?,?,?)",
-            (taken_at_ms, now_ms, "subset", market_count, 1, "/tmp/dummy.parquet", status),
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (
+                taken_at_ms,
+                now_ms,
+                "subset",
+                market_count,
+                int(market_view_published),
+                1,
+                "/tmp/dummy.parquet",
+                status,
+            ),
+        )
+        snapshot_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+        con.execute(
+            "INSERT INTO snapshot_source_coverage("
+            "snapshot_id,completed,market_items,event_items,failure_source,failure_reason"
+            ") VALUES (?,?,?,?,?,?)",
+            (
+                snapshot_id,
+                int(coverage_completed),
+                market_count,
+                event_count,
+                failure_source,
+                failure_reason,
+            ),
         )
         con.commit()
     finally:
@@ -144,6 +182,79 @@ def test_no_snapshot_returns_fail(
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "fail"
+
+
+def test_market_truth_health_fails_on_latest_incomplete_attempt(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    _insert_snapshot(path, taken_at_ms=1_000)
+    _insert_snapshot(
+        path,
+        taken_at_ms=2_000,
+        coverage_completed=False,
+        market_view_published=False,
+        failure_source="markets",
+        failure_reason="http-422",
+    )
+
+    result = _read_market_truth_health(path, now_s=3.0)
+
+    assert result.coverage_status == "fail"
+    assert result.coverage_value == "incomplete-source"
+    assert result.latest_attempt_snapshot_id == 2
+    assert result.latest_attempt_market_items == 100
+    assert result.latest_attempt_event_items == 20
+    assert result.last_complete_snapshot_id == 1
+    assert result.last_complete_age_seconds == pytest.approx(2.0)
+
+
+def test_market_truth_health_does_not_certify_unpublished_complete_attempt(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    _insert_snapshot(
+        path,
+        taken_at_ms=1_000,
+        coverage_completed=True,
+        market_view_published=False,
+    )
+
+    result = _read_market_truth_health(path, now_s=3.0)
+
+    assert result.coverage_status == "fail"
+    assert result.coverage_value == "incomplete-source"
+    assert result.last_complete_snapshot_id is None
+    assert result.last_complete_age_seconds is None
+
+
+def test_health_exposes_latest_attempt_and_last_complete_truth_separately(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    now_ms = int(time.time() * 1000)
+    _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=now_ms - 2_000,
+    )
+    _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=now_ms - 1_000,
+        coverage_completed=False,
+        market_view_published=False,
+        failure_source="events",
+        failure_reason="cursor-repeat",
+    )
+
+    response = http_test_client.get("/health")
+
+    assert response.status_code == 503
+    checks = response.json()["checks"]
+    coverage = checks["market_truth:coverage"][0]
+    assert coverage["status"] == "fail"
+    assert coverage["observedValue"] == "incomplete-source"
+    assert coverage["output"] == "markets=100 events=20"
+    complete_age = checks["market_truth:last_complete_age_seconds"][0]
+    assert complete_age["status"] == "pass"
+    assert complete_age["observedValue"] == pytest.approx(2.0, abs=0.5)
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,7 @@ def test_l1_quote_age_failure_pushes() -> None:
     health = _health(
         checks={
             "snapshot:last_success_age_seconds": _check(60.0),
+            "market_truth:coverage": _check("complete"),
             "quote_feed:last_complete_age_seconds": _check(301.0, status="fail"),
             "quote_feed:collector_state": _check("running"),
         }
@@ -77,6 +78,7 @@ def test_l1_bad_collector_state_pushes(collector_state: str) -> None:
     health = _health(
         checks={
             "snapshot:last_success_age_seconds": _check(60.0),
+            "market_truth:coverage": _check("complete"),
             "quote_feed:last_complete_age_seconds": _check(20.0),
             "quote_feed:collector_state": _check(collector_state),
         }
@@ -88,11 +90,43 @@ def test_l1_bad_collector_state_pushes(collector_state: str) -> None:
     assert collector_state in reason
 
 
+def test_polywatch_alerts_on_market_truth_coverage_failure() -> None:
+    health = _health(
+        checks={
+            "snapshot:last_success_age_seconds": _check(60.0),
+            "market_truth:coverage": _check("incomplete-source", status="fail"),
+            "quote_feed:last_complete_age_seconds": _check(20.0),
+            "quote_feed:collector_state": _check("running"),
+        }
+    )
+
+    assert WATCHER.decide_l1(health) == (
+        "push",
+        "L1 market truth coverage failed",
+    )
+
+
+def test_polywatch_alerts_when_market_truth_coverage_is_missing() -> None:
+    health = _health(
+        checks={
+            "snapshot:last_success_age_seconds": _check(60.0),
+            "quote_feed:last_complete_age_seconds": _check(20.0),
+            "quote_feed:collector_state": _check("running"),
+        }
+    )
+
+    assert WATCHER.decide_l1(health) == (
+        "push",
+        "L1 market truth coverage failed",
+    )
+
+
 def test_empty_opportunity_list_is_healthy() -> None:
     action, reason = _decision("decide_opportunity")(
         {
             "strategy": "neg-risk-buy-all",
             "profit_basis": "gross-before-fees",
+            "coverage": "verified-standard-neg-risk",
             "count": 0,
             "opportunities": [],
         }
@@ -109,16 +143,25 @@ def test_empty_opportunity_list_is_healthy() -> None:
         {
             "strategy": "wrong",
             "profit_basis": "gross-before-fees",
+            "coverage": "verified-standard-neg-risk",
             "opportunities": [],
         },
         {
             "strategy": "neg-risk-buy-all",
             "profit_basis": "net-after-fees",
+            "coverage": "verified-standard-neg-risk",
             "opportunities": [],
         },
         {
             "strategy": "neg-risk-buy-all",
             "profit_basis": "gross-before-fees",
+            "coverage": "verified-standard-neg-risk",
+        },
+        {
+            "strategy": "neg-risk-buy-all",
+            "profit_basis": "gross-before-fees",
+            "coverage": "legacy-snapshot",
+            "opportunities": [],
         },
     ],
 )

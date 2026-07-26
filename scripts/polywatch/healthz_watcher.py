@@ -325,6 +325,14 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
     if snap_status == "fail":
         return "push", f"L1 snapshot sub-check fail (age={age})"
 
+    market_truth = _extract_check(healthz, "market_truth:coverage", {})
+    if (
+        not market_truth
+        or market_truth.get("status") != "pass"
+        or market_truth.get("observedValue") != "complete"
+    ):
+        return "push", "L1 market truth coverage failed"
+
     quote_age = _extract_check(
         healthz, "quote_feed:last_complete_age_seconds", {}
     )
@@ -367,6 +375,8 @@ def decide_opportunity(payload: dict | None) -> tuple[str, str]:
             "push",
             f"Opportunity profit_basis invalid: {payload.get('profit_basis')!r}",
         )
+    if payload.get("coverage") != "verified-standard-neg-risk":
+        return "push", "Opportunity coverage is not verified-standard-neg-risk"
     opportunities = payload.get("opportunities")
     if not isinstance(opportunities, list):
         return "push", "Opportunity response missing opportunities list"

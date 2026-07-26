@@ -312,7 +312,7 @@ triple-check:
 # tail-logs-local     — stream daemon stdout (for a separately launched daemon)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: daemon-run-local smoke-health-local smoke-health-prod smoke-healthz tail-logs-local
+.PHONY: daemon-run-local smoke-health-local smoke-health-prod smoke-market-truth-prod smoke-healthz tail-logs-local
 
 ## daemon-run-local: Start the polyarb daemon locally on :19080 (HMAC-authenticated /scan + /health). Ctrl-C to stop. Override port via POLYARB_HTTP_PORT.
 daemon-run-local:
@@ -341,6 +341,16 @@ smoke-health-prod:
 	echo "HTTP $$HTTP_STATUS"; \
 	python3 -m json.tool < "$$BODY" || cat "$$BODY"; \
 	if [ "$$HTTP_STATUS" = "200" ]; then echo "PASS: L1 strict /health returned 200"; else echo "FAIL: L1 strict /health returned $$HTTP_STATUS" >&2; exit 1; fi
+
+## smoke-market-truth-prod: Read-only production proof that the latest L1 snapshot attempt published complete market truth
+smoke-market-truth-prod:
+	@BODY=$$(mktemp); trap 'rm -f "$$BODY"' EXIT; \
+	URL="https://polyarb-l1.fly.dev/health"; \
+	echo ">> smoke-market-truth-prod — GET $$URL"; \
+	curl --disable --request GET -fsS -o "$$BODY" "$$URL"; \
+	jq -e '.checks["market_truth:coverage"][0] | select(.status == "pass" and .observedValue == "complete")' "$$BODY" >/dev/null; \
+	jq '{releaseId, market_truth_coverage: .checks["market_truth:coverage"][0], market_truth_last_complete: .checks["market_truth:last_complete_age_seconds"][0]}' "$$BODY"; \
+	echo "PASS: latest L1 snapshot attempt published complete market truth"
 
 ## smoke-healthz: Verify prod /healthz always returns 200 (Fly probe target — D-05). No auth required.
 smoke-healthz:

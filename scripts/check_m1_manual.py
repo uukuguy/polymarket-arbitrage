@@ -38,6 +38,7 @@ M1_MAKE_TARGETS = {
     "daemon-run-local",
     "daemon-l2-run-local",
     "smoke-health-prod",
+    "smoke-market-truth-prod",
     "smoke-l2-health-prod",
     "smoke-l2-health-strict-prod",
     "scan-arb-live",

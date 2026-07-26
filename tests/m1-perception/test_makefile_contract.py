@@ -949,3 +949,31 @@ def test_makefile_exposes_safe_worktree_lifecycle_targets() -> None:
     makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
     assert "--apply" in makefile
     assert "--discard-unmerged" in makefile
+
+
+def test_make_help_exposes_market_truth_production_smoke() -> None:
+    result = subprocess.run(
+        ["make", "help"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "smoke-market-truth-prod:" in result.stdout
+
+
+def test_market_truth_production_smoke_is_read_only() -> None:
+    result = subprocess.run(
+        ["make", "-n", "smoke-market-truth-prod"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "https://polyarb-l1.fly.dev/health" in result.stdout
+    assert "market_truth:coverage" in result.stdout
+    assert "POST" not in result.stdout
