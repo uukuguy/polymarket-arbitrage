@@ -71,12 +71,19 @@
 
 | Trial | Cron 位置 | 备注 |
 |---|---|---|
-| healthz-watcher | GHA (`*/15` schedule) | 已 ship `.github/workflows/polywatch-healthz.yml`, 不动 |
+| healthz-watcher | Fly cron 每 2 分钟（主）+ GHA `*/15`（异地兜底） | 2026-07-26 实证 GitHub schedule 可延迟数小时，不能作准点 SLA |
 | chaos-inj-replay | Fly machine cron (polyarb-l1 内部) | UTC 18:00 nightly, 零网络 overhead |
 | memory-sanity-check | 无 cron (ralph 会话内手动) | memory 改动后 / 月度审查 |
 | autoresearch-validation-tuning | 无 cron (本地脚本) | 需 SQLite/Parquet 本地访问 |
 
 **Why**: 单一 cron 在某些 trial 上是 anti-pattern (chaos 跑 GHA 要拉 Fly state 多绕; autoresearch 跑 Fly 要传历史数据)。
+
+**2026-07-26 production amendment:** `*/15` 只是 workflow 声明，不是执行
+SLA。实际 run history 出现 `01:08Z → 04:43Z` 的约 3.5 小时间隔。M1
+healthz-watcher 因此改为既有 Fly cron machine 每 2 分钟主巡检；首次故障立即
+Telegram、同类故障 30 分钟 reminder、恢复只发一次。GHA 保留在不同控制面做
+Fly/区域级兜底。quote run 每约 120 秒的 SQLite 持久记录负责窗口内审计，resident
+watcher 负责途中介入，两者不能互相替代。
 
 ### D-Polywatch-3: global skill 抽取时机 — ✅ LOCKED = B (本 phase 同步抽) ⚠️ user override
 
@@ -96,7 +103,8 @@
 | L2 Telegram | 红线触发 (max iter 用尽 / 副作用越界 / prod alert chain 自身坏) | Telegram push |
 | L3 GH issue | 基建本身坏 (cron 没启动 ≥2 周期 / harness 启动崩) | `gh issue create` 自动 |
 
-- **Why streak=3 (非 5)**: 配合 healthz-watcher 15min × 3 = ~45min, 人响应窗口合理
+- **Why streak=3 (非 5)**: 适用于非生产红线 trial。M1 healthz 属生产
+  availability 红线，resident watcher 首次失败立即告警，不等待 streak。
 - **Why L3 自动**: issue 可关, 自动开比"无人察觉基建坏掉"危险小很多
 
 ### 4 trial 子决策 (Trial 1-4) 全部在 CONTEXT.md, 不复述
@@ -130,3 +138,5 @@
 
 - 2026-05-26 SESSION 27 thread 起 — 命名 + 三件套框架 + 第一批 trial 设计 + D-1..D-4 候选
 - 2026-05-26 SESSION 28 — D-Polywatch-1..4 全 LOCKED (m5 phase 01 discuss-phase 输出), D-3 user override 反 Claude 推荐 + 反 thread 默认 (本 phase 同步抽 global skill). Canonical 决策出处转移到 `.planning/workstreams/m5-industrialize/phases/01-polywatch-mvp/01-CONTEXT.md`
+- 2026-07-26 SESSION 104 — GHA `*/15` 实际运行历史出现约 3.5 小时空洞；
+  D-Polywatch-2 以生产实证修订为 Fly cron 2 分钟主监控 + GHA 异地兜底。

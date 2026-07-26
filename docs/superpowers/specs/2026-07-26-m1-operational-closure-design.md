@@ -11,7 +11,9 @@ M1 is closed only when all of the following are true at the same time:
 
 1. The current production Dashboard has one canonical, reachable URL.
 2. L1 snapshots, the opportunity quote feed, L2/L3 freshness, L3 membership,
-   and Dashboard availability are checked automatically every 15 minutes.
+   and Dashboard availability are checked by a resident Fly monitor every
+   2 minutes. GitHub Actions retains the 15-minute schedule as an independent
+   fallback, not as the primary detector.
 3. A failed check reaches the existing Telegram escalation path.
 4. The opportunity quote worker has at least one exact 24-hour production
    interval with no failed run and no interval above its scheduling allowance.
@@ -105,26 +107,42 @@ No object deletion or credential rotation is part of this repair.
 
 ## Failure Handling
 
-- Polywatch keeps a single best-effort Telegram message per scheduled tick.
+- The resident monitor records the active failure set in local machine state.
+- A new or changed failure set sends Telegram immediately on the first observed
+  tick. An unchanged failure is suppressed, with a reminder every 30 minutes.
+- Recovery sends one Telegram notification and clears the active failure set
+  only after successful delivery. A failed recovery delivery preserves state
+  so the next tick retries it.
 - Auto-unpause remains limited to the established stale L1 snapshot case.
 - Opportunity, L2/L3, R2, and Dashboard failures are alert-only; no automatic
   mutation is attempted.
-- If Telegram delivery fails, the workflow exits non-zero so GitHub Actions
-  supplies its existing failure notification.
+- The GitHub Actions fallback continues to exit non-zero on delivery or probe
+  failure, preserving provider-independent evidence.
+
+GitHub's declared cron expression is not a scheduling SLA: production history
+on 2026-07-26 contained an approximately 3.5-hour gap between scheduled runs.
+For that reason the Fly-resident 2-minute loop is the operational primary.
 
 ## Verification
 
 1. Unit tests exercise each new decision branch before implementation.
 2. Ruff, focused pytest, full pytest, Dashboard typecheck/build, documentation
    contracts, and planning-status run locally.
-3. The new commit is pushed and its GitHub CI, Fly, and Vercel deployments are
-   checked.
-4. Polywatch workflow is dispatched once in dry-run mode and its decisions are
-   inspected.
-5. Production checks confirm Dashboard deployment availability, L1 opportunity
+3. The candidate image is checked for the watcher script and a valid
+   Supercronic entry before production deployment.
+4. The code commit is pushed without triggering the normal all-process Fly
+   deploy. Only the `cron` process group is updated; the application machine
+   identity, start time, and quote evidence anchor must remain unchanged.
+5. At least three consecutive resident monitor ticks are observed in
+   production, with no gap above 150 seconds. State-transition tests cover
+   first failure, duplicate suppression, reminder, changed failure set,
+   failed-delivery retry, and one-shot recovery.
+6. The GitHub Actions fallback is dispatched once in dry-run mode and its
+   decisions are inspected. CI is then run against the resulting source state.
+7. Production checks confirm Dashboard deployment availability, L1 opportunity
    feed freshness, L3 10/10 convergence, R2 upload success, and the exact
    24-hour quote-run aggregate.
-6. An authenticated browser checks `/status`, `/candidates`, `/signals`, and a
+8. An authenticated browser checks `/status`, `/candidates`, `/signals`, and a
    real `/l3/<asset_id>` page.
 
 ## Out of Scope

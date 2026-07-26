@@ -42,6 +42,7 @@ RUN mkdir -p /data /app/logs && chown -R polyarb:polyarb /data /app/logs
 
 # Copy crontab for Supercronic process group
 COPY --chown=polyarb:polyarb crontab /app/crontab
+COPY --chown=polyarb:polyarb scripts/polywatch/healthz_watcher.py /app/scripts/polywatch/healthz_watcher.py
 
 # NOTE: POLYARB_ALLOW_EXTERNAL_PATHS=1 is REQUIRED for /data abs path acceptance by
 # config.py Settings._within_project validator (PATTERNS §5.1 gotcha #2).
