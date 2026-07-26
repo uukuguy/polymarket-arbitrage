@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Plan 05-06 waiting for post-release quote T+24 and authenticated Dashboard UAT
-last_updated: "2026-07-26T04:13:54Z"
+stopped_at: Plan 05-06 authenticated Dashboard PASS; waiting only for post-release quote T+24
+last_updated: "2026-07-26T05:02:19Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -29,9 +29,12 @@ Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in p
   `2026-07-26T03:54:09.630Z`.
 - **Interim quote evidence:** runs 78–84 are 7/7 complete, 1,278/1,278 each,
   with zero failures/mismatches and maximum start gap 121.142 seconds.
-- **Hard gates:** no final quote verdict before
-  `2026-07-27T03:54:09.630Z`; authenticated browser UAT remains pending because
-  the current browser runtime exposes no browser.
+- **Hard gate:** no final quote verdict before
+  `2026-07-27T03:54:09.630Z`.
+- **Authenticated Dashboard:** PASS at `2026-07-26T05:02:19.364Z` in the
+  dedicated persistent M1 Edge instance. `/status`, `/candidates`, `/signals`,
+  and one real `/l3/<asset_id>` route rendered application content and current
+  production data.
 - **Evidence discipline:** Phase 05.4 A7 is accepted for L3 continuity. No
   Plan 06 SUMMARY, Phase 05 validation signature, or roadmap completion may be
   created before both remaining gates pass.

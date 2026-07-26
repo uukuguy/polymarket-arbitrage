@@ -5202,3 +5202,35 @@ At/after `2026-07-27T03:54:09.630Z`, resume with
 for runs from anchor 78, recheck immutable Fly identity and all four production
 surfaces, retry the authenticated browser, then create 05-06 SUMMARY, sign
 Phase 05 validation/ROADMAP/STATE, extract learnings, and run final verification.
+
+## SESSION 103 — 2026-07-26 (authenticated Dashboard PASS)
+
+- [EDGE] Launched a dedicated persistent M1 Microsoft Edge instance with a
+  fixed browser profile and localhost-only debugging endpoint. The operator
+  completed Vercel authentication directly; no credential, cookie, token, or
+  browser-storage contents were read or exported.
+- [STATUS] Login-state `/status` rendered the real L1 timeline. Latest visible
+  snapshot was `2026-07-26 04:55:02 UTC`, `ok`, 1,905 markets, R2 `✓`.
+- [CANDIDATES] `/candidates` rendered the active table with current
+  `04:55:58 UTC` rows and five real `★ L3` assets.
+- [SIGNALS] `/signals` rendered its declared M4-not-wired empty state, not an
+  auth, transport, or application error.
+- [L3] Real candidate asset `904358…424057` rendered seven chart canvases and
+  a 20-row depth ladder at `05:01:20Z`; best bid/ask were `0.4900/0.5000`.
+- [VERDICT] Authenticated Dashboard acceptance PASS at
+  `2026-07-26T05:02:19.364Z`. The exact post-release quote T+24 interval is now
+  the only remaining Plan 05-06 gate.
+- [USER PREFERENCE] Proactively surface local tools such as Orca only when
+  they materially improve polyarb runtime, operations, monitoring, or browser
+  acceptance. Explain the concrete benefit, required permissions, and cost;
+  do not recommend installation merely because a tool may be useful. Orca is
+  not currently needed because the persistent M1 Edge instance covers
+  Dashboard UAT.
+
+### [NEXT — CURRENT]
+
+At/after `2026-07-27T03:54:09.630Z`, resume with
+`/gsd-resume-work --ws m1-perception`; query the exact quote interval from run
+78, require every run complete and maximum start gap `<=180s`, then create
+05-06 SUMMARY, sign Phase 05 validation/ROADMAP/STATE, extract learnings, and
+run final verification.

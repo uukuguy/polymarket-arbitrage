@@ -488,3 +488,31 @@ remain immutable rejected evidence, and the two legacy windows in this file
 remain diagnostic-only / NOT-CLOSED. Phase 05 as a whole is not signed by this
 reconciliation alone: the post-restart quote interval and authenticated
 Dashboard browser acceptance remain separate mandatory gates.
+
+### Authenticated Dashboard browser acceptance
+
+At `2026-07-26T05:02:19.364Z`, the operator completed Vercel authentication in
+the dedicated persistent M1 Microsoft Edge instance. The same instance was
+then controlled through its localhost-only debugging endpoint without reading
+or exporting cookies, tokens, passwords, or browser storage. Browser identity
+was Edge 150 on macOS (`Edg/150.0.0.0`).
+
+All four production application routes rendered real application content rather
+than the Vercel login page:
+
+- `/status`: title `Polymarket Arbitrage L1 Dashboard`; latest visible snapshot
+  `2026-07-26 04:55:02 UTC`, status `ok`, 1,905 markets, R2 `✓`.
+- `/candidates`: active candidate table rendered with latest visible
+  `included_at` `2026-07-26 04:55:58 UTC`; five rows carried the `★ L3` badge
+  and exposed real L3/tob/trades links.
+- `/signals`: the application rendered the intentional empty state
+  `No signals yet — Phase 04 will populate this surface.` This is the declared
+  M4-not-wired contract, not a transport, auth, or rendering failure.
+- `/l3/90435811253665578014957380826505992530054077692143838383981805324273750424057`:
+  a real `★ L3` candidate selected from `/candidates`; seven canvases rendered
+  the OHLC/depth UI, and the visible depth ladder contained 20 rows at
+  `05:01:20Z`, including best bid `0.4900` and best ask `0.5000`.
+
+Verdict: **authenticated Dashboard acceptance PASS.** The dedicated Edge
+profile remains available for later production UAT. The quote-feed exact
+24-hour interval remains the only unsigned Plan 05-06 gate.
