@@ -42,6 +42,10 @@ def _publish_feed(
         universe_snapshot_id=10,
         quoted_at_ms=int(NOW_S * 1000),
         universe_taken_at_ms=int(NOW_S * 1000),
+        requested_token_count=1,
+        successful_response_count=1,
+        universe_hash="u1",
+        source_truth_hash="truth-1",
     )
     result = OpportunityScanResult(
         opportunities=opportunities,

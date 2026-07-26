@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib.util
 import json
 import os
+import weakref
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +16,19 @@ os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 
 from polyarb.config import Settings
 from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
+
+
+@dataclass
+class _ProjectionFixture:
+    run_id: int
+    universe_snapshot_id: int = 70
+    universe_taken_at_ms: int = 1_700_000_000_000
+    quoted_at_ms: int = 1_700_000_000_100
+    requested_token_count: int = 12
+    successful_response_count: int = 12
+    universe_hash: str = "hash-7"
+    source_truth_hash: str = "truth-7"
+    retained_payload: list[object] = field(default_factory=list)
 
 
 def test_quote_worker_module_exists() -> None:
@@ -173,7 +189,7 @@ async def test_worker_failure_is_recorded_and_next_attempt_can_succeed() -> None
 async def test_worker_publishes_projection_only_after_certification() -> None:
     from polyarb.daemon.quote_worker import QuoteWorker
 
-    projection = SimpleNamespace(run_id=7)
+    projection = _ProjectionFixture(run_id=7)
     published_during_certification: list[object | None] = []
 
     async def collect_once() -> QuoteCollectionResult:
@@ -196,18 +212,17 @@ async def test_worker_publishes_projection_only_after_certification() -> None:
     await worker.run(asyncio.Event())
 
     assert published_during_certification == [None]
-    assert worker.runtime.certified_projection() is projection
+    published = worker.runtime.certified_projection()
+    assert published is not projection
+    assert published is not None
+    assert published.run_id == projection.run_id
     assert worker.runtime.snapshot().success_count == 1
 
 
 async def test_worker_atomically_publishes_projection_and_precomputed_scan() -> None:
     from polyarb.daemon.quote_worker import QuoteWorker
 
-    projection = SimpleNamespace(
-        run_id=7,
-        universe_snapshot_id=70,
-        universe_hash="hash-7",
-    )
+    projection = _ProjectionFixture(run_id=7)
     opportunity_scan = SimpleNamespace(
         quote_run_id=7,
         source_snapshot_id=70,
@@ -241,20 +256,21 @@ async def test_worker_atomically_publishes_projection_and_precomputed_scan() -> 
     assert observed_during_prepare == [None]
     feed = worker.runtime.certified_feed()
     assert feed is not None
-    assert feed.projection is projection
+    assert feed.projection is not projection
+    assert feed.projection.run_id == projection.run_id
     assert feed.opportunity_scan is opportunity_scan
 
 
 async def test_mismatched_precomputed_scan_preserves_previous_feed() -> None:
     from polyarb.daemon.quote_worker import QuoteWorker
 
-    previous_projection = SimpleNamespace(run_id=6)
-    previous_scan = SimpleNamespace(quote_run_id=6)
-    projection = SimpleNamespace(
-        run_id=7,
-        universe_snapshot_id=70,
-        universe_hash="hash-7",
+    previous_projection = _ProjectionFixture(
+        run_id=6,
+        universe_hash="hash-6",
+        source_truth_hash="truth-6",
     )
+    previous_scan = SimpleNamespace(quote_run_id=6)
+    projection = _ProjectionFixture(run_id=7)
     mismatched_scan = SimpleNamespace(
         quote_run_id=7,
         source_snapshot_id=999,
@@ -289,7 +305,8 @@ async def test_mismatched_precomputed_scan_preserves_previous_feed() -> None:
 
     feed = worker.runtime.certified_feed()
     assert feed is not None
-    assert feed.projection is previous_projection
+    assert feed.projection is not previous_projection
+    assert feed.projection.run_id == previous_projection.run_id
     assert feed.opportunity_scan is previous_scan
     snapshot = worker.runtime.snapshot()
     assert snapshot.failure_count == 1
@@ -299,8 +316,8 @@ async def test_mismatched_precomputed_scan_preserves_previous_feed() -> None:
 async def test_failed_certification_preserves_previous_projection() -> None:
     from polyarb.daemon.quote_worker import QuoteWorker
 
-    previous = SimpleNamespace(run_id=6)
-    wrong_run = SimpleNamespace(run_id=999)
+    previous = _ProjectionFixture(run_id=6)
+    wrong_run = _ProjectionFixture(run_id=999)
 
     async def collect_once() -> QuoteCollectionResult:
         return _result(7)
@@ -321,11 +338,60 @@ async def test_failed_certification_preserves_previous_projection() -> None:
 
     await worker.run(asyncio.Event())
 
-    assert worker.runtime.certified_projection() is previous
+    published = worker.runtime.certified_projection()
+    assert published is not previous
+    assert published is not None
+    assert published.run_id == previous.run_id
     snapshot = worker.runtime.snapshot()
     assert snapshot.success_count == 0
     assert snapshot.failure_count == 1
     assert snapshot.last_error_kind == "QuoteProjectionIntegrityError"
+
+
+async def test_worker_releases_full_projection_before_interval_wait() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    projection_ref: weakref.ReferenceType[_ProjectionFixture] | None = None
+
+    async def collect_once() -> QuoteCollectionResult:
+        return _result(7)
+
+    async def certify_projection(_result: QuoteCollectionResult):
+        nonlocal projection_ref
+        projection = _ProjectionFixture(
+            run_id=7,
+            retained_payload=[bytearray(4 * 1024 * 1024)],
+        )
+        projection_ref = weakref.ref(projection)
+        return projection
+
+    async def prepare_opportunities(_projection):
+        return SimpleNamespace(
+            quote_run_id=7,
+            source_snapshot_id=70,
+            universe_hash="hash-7",
+        )
+
+    async def stop_after_release(_stop: asyncio.Event, _delay_s: float) -> bool:
+        gc.collect()
+        assert projection_ref is not None
+        assert projection_ref() is None
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        certify_projection=certify_projection,
+        prepare_opportunities=prepare_opportunities,
+        interval_s=120,
+        wait_for_stop=stop_after_release,
+    )
+
+    await worker.run(asyncio.Event())
+
+    feed = worker.runtime.certified_feed()
+    assert feed is not None
+    assert feed.projection.run_id == 7
+    assert not hasattr(feed.projection, "retained_payload")
 
 
 async def test_worker_cancellation_propagates_without_failure_count() -> None:

@@ -171,6 +171,23 @@ async def test_snapshot_subprocess_rejects_mismatched_exit_contract() -> None:
 
 
 @pytest.mark.asyncio
+async def test_snapshot_subprocess_classifies_sigkill_as_possible_oom() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return _FakeProcess(b"", returncode=-9)
+
+    with pytest.raises(
+        SnapshotSubprocessError,
+        match="snapshot-subprocess-signal-sigkill-possible-oom",
+    ):
+        await run_snapshot_in_subprocess(spawn=spawn)
+
+
+@pytest.mark.asyncio
 async def test_snapshot_subprocess_cancellation_terminates_then_kills() -> None:
     from polyarb.daemon.scheduler import run_snapshot_in_subprocess
 

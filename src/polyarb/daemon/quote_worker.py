@@ -52,8 +52,38 @@ class QuoteWorkerSnapshot:
 
 
 @dataclass(frozen=True)
+class CertifiedQuoteMetadata:
+    """Compact identity/freshness proof retained after full certification."""
+
+    run_id: int
+    universe_snapshot_id: int
+    universe_taken_at_ms: int
+    quoted_at_ms: int
+    requested_token_count: int
+    successful_response_count: int
+    universe_hash: str
+    source_truth_hash: str
+
+    @classmethod
+    def from_projection(
+        cls,
+        projection: CompleteQuoteProjection,
+    ) -> CertifiedQuoteMetadata:
+        return cls(
+            run_id=projection.run_id,
+            universe_snapshot_id=projection.universe_snapshot_id,
+            universe_taken_at_ms=projection.universe_taken_at_ms,
+            quoted_at_ms=projection.quoted_at_ms,
+            requested_token_count=projection.requested_token_count,
+            successful_response_count=projection.successful_response_count,
+            universe_hash=projection.universe_hash,
+            source_truth_hash=projection.source_truth_hash,
+        )
+
+
+@dataclass(frozen=True)
 class CertifiedQuoteFeed:
-    projection: CompleteQuoteProjection
+    projection: CertifiedQuoteMetadata
     opportunity_scan: OpportunityScanResult | None
 
 
@@ -113,16 +143,19 @@ class QuoteWorkerRuntime:
         projection: CompleteQuoteProjection,
     ) -> None:
         """Compatibility helper for tests that do not exercise opportunities."""
-        self._certified_feed = CertifiedQuoteFeed(projection, None)
+        self._certified_feed = CertifiedQuoteFeed(
+            CertifiedQuoteMetadata.from_projection(projection),
+            None,
+        )
 
     def publish_certified_feed(
         self,
         projection: CompleteQuoteProjection,
         opportunity_scan: OpportunityScanResult,
     ) -> None:
-        """Atomically replace projection and its precomputed opportunity scan."""
+        """Atomically retain compact proof and its precomputed opportunity scan."""
         self._certified_feed = CertifiedQuoteFeed(
-            projection,
+            CertifiedQuoteMetadata.from_projection(projection),
             opportunity_scan,
         )
 
@@ -130,8 +163,8 @@ class QuoteWorkerRuntime:
         """Return one immutable projection/result pair without SQLite work."""
         return self._certified_feed
 
-    def certified_projection(self) -> CompleteQuoteProjection | None:
-        """Return one immutable projection pointer without SQLite work."""
+    def certified_projection(self) -> CertifiedQuoteMetadata | None:
+        """Return compact immutable certified metadata without SQLite work."""
         feed = self._certified_feed
         return feed.projection if feed is not None else None
 
@@ -374,6 +407,12 @@ class QuoteWorker:
                         f"{result.requested_token_count} "
                         f"elapsed_ms={result.elapsed_ms}"
                     )
+                finally:
+                    # Certification needs the full run legs, quotes, and source
+                    # universe, but steady-state health/opportunity reads do not.
+                    # Drop the local owner before the interval wait so the next
+                    # snapshot has the memory headroom certification consumed.
+                    certified_projection = None
                 elapsed_s = max(0.0, self._monotonic() - attempt_started)
                 delay_s = max(0.0, self._interval_s - elapsed_s)
                 if await self._wait_for_stop(stop_event, delay_s):

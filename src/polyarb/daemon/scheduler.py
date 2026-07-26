@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -106,6 +107,25 @@ async def run_snapshot_in_subprocess(
                 pass
             await process.communicate()
         raise
+
+    if process.returncode is not None and process.returncode < 0:
+        signal_number = -process.returncode
+        try:
+            signal_name = signal.Signals(signal_number).name.lower()
+        except ValueError:
+            signal_name = str(signal_number)
+        possible_oom = signal_number == signal.SIGKILL
+        logger.error(
+            "isolated snapshot terminated by signal "
+            f"pid={getattr(process, 'pid', None)} "
+            f"exit_class=signal signal={signal_name.upper()} "
+            f"oom_hint={'possible-cgroup-oom' if possible_oom else 'none'} "
+            f"stderr_bytes={len(stderr)}"
+        )
+        suffix = "-possible-oom" if possible_oom else ""
+        raise SnapshotSubprocessError(
+            f"signal-{signal_name}{suffix}"
+        )
 
     try:
         payload = json.loads(stdout)
