@@ -241,6 +241,74 @@ async def test_fetch_market_states_deduplicates_and_preserves_closed_truth() -> 
     assert second.call_count == 1
 
 
+async def test_fetch_market_states_falls_back_from_point_404_to_exact_list() -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        point = router.get("/markets/market-1").mock(
+            return_value=httpx.Response(
+                404,
+                json={"type": "not found error", "error": "id not found"},
+            )
+        )
+        exact = router.get(
+            "/markets",
+            params={"id": "market-1", "limit": "1"},
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json=[{"id": "market-1", "active": True, "closed": False}],
+            )
+        )
+        async with GammaClient(settings) as client:
+            states = await client.fetch_market_states(["market-1"])
+
+    assert states == {"market-1": {"active": True, "closed": False}}
+    assert point.call_count == 1
+    assert exact.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [{"id": "wrong-market", "active": True, "closed": False}],
+        [{"id": "market-1", "active": 1, "closed": False}],
+        [
+            {"id": "market-1", "active": True, "closed": False},
+            {"id": "market-1", "active": True, "closed": False},
+        ],
+    ],
+)
+async def test_fetch_market_states_point_404_fallback_fails_closed(
+    payload: list[dict],
+) -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/markets/market-1").mock(
+            return_value=httpx.Response(404, json={"error": "id not found"})
+        )
+        router.get(
+            "/markets",
+            params={"id": "market-1", "limit": "1"},
+        ).mock(return_value=httpx.Response(200, json=payload))
+        async with GammaClient(settings) as client:
+            with pytest.raises(PaginationIntegrityError, match="fallback"):
+                await client.fetch_market_states(["market-1"])
+
+
+async def test_fetch_market_states_non_404_does_not_fallback() -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        point = router.get("/markets/market-1").mock(
+            return_value=httpx.Response(422, json={"error": "invalid"})
+        )
+        async with GammaClient(settings) as client:
+            with pytest.raises(_NonRetryableHTTPError):
+                await client.fetch_market_states(["market-1"])
+
+    assert point.call_count == 1
+
+
 async def test_fetch_market_states_fails_closed_on_malformed_identity() -> None:
     settings = _fast_settings()
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:

@@ -259,7 +259,33 @@ class GammaClient:
         for market_id in unique_ids:
             if type(market_id) is not str or not market_id.strip():
                 raise PaginationIntegrityError("market state lookup has invalid identity")
-            payload = await self._get(f"/markets/{quote(market_id, safe='')}", {})
+            used_fallback = False
+            try:
+                payload = await self._get(f"/markets/{quote(market_id, safe='')}", {})
+            except _NonRetryableHTTPError as error:
+                cause = error.__cause__
+                if (
+                    not isinstance(cause, httpx.HTTPStatusError)
+                    or cause.response.status_code != 404
+                ):
+                    raise
+                # Gamma's point route can carry a short-lived CDN negative
+                # cache for a newly-created market while the exact-id list
+                # route already has authoritative state. Only 404 activates
+                # this fallback; every other error remains fail-closed.
+                exact = await self._get(
+                    "/markets",
+                    [("id", market_id), ("limit", "1")],
+                )
+                if (
+                    not isinstance(exact, list)
+                    or len(exact) != 1
+                    or not isinstance(exact[0], dict)
+                    or exact[0].get("id") != market_id
+                ):
+                    raise PaginationIntegrityError("market state fallback identity set mismatch")
+                payload = exact[0]
+                used_fallback = True
             if not isinstance(payload, dict):
                 raise PaginationIntegrityError(
                     f"/markets/{market_id} point response has invalid shape"
@@ -271,9 +297,8 @@ class GammaClient:
             active = payload.get("active")
             closed = payload.get("closed")
             if type(active) is not bool or type(closed) is not bool:
-                raise PaginationIntegrityError(
-                    f"/markets/{market_id} point response has invalid state"
-                )
+                source = "fallback" if used_fallback else "point response"
+                raise PaginationIntegrityError(f"/markets/{market_id} {source} has invalid state")
             states[market_id] = {"active": active, "closed": closed}
         return states
 
