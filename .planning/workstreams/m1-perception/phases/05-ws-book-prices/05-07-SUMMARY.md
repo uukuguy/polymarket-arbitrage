@@ -28,23 +28,33 @@ key-files:
 key-decisions:
   - "Do not relax the 120-second threshold or debounce first-failure alerts."
 patterns-established:
-  - "A timed-out evidence barrier invalidates its captured WebSocket generation."
+  - "A business-evidence timeout records bounded failure but preserves a control-consistent WebSocket generation."
   - "A prepared target contains exact durable evidence for one generation and publishes no membership."
-  - "Sampling and promoter publication share one transition lock."
+  - "Sampling waits across both promoter publication and reconnect membership convergence."
 requirements-completed: []
 updated: 2026-07-26
 ---
 
 # Phase 05 Plan 07: L3 Continuity Boundary Repair — In Progress
 
-**Quiet-refresh recovery and the atomic target transaction are green locally;
-promoter integration, deployment, and repaired-release evidence remain in progress.**
+**Release 73 was rejected by its first real promoter boundary; the corrected
+non-destructive timeout and reconnect-sampling repair is green locally and
+awaits L2-only redeployment.**
 
 ## Completed
 
 - Reproduced the production timeout defect with a failing test.
 - Changed evidence timeout handling to emit bounded counts without token IDs.
-- Compensates only the captured WebSocket generation.
+- Release 73 proved that compensating a control-consistent socket was
+  destructive: the `08:04:13Z` promoter timeout closed generation 1 and
+  durable samples 11/12 persisted 8/10; `08:08:01Z` quiet refresh closed
+  generation 2 after missing two identities.
+- Corrected the contract: a confirmed final subscribe plus missing business
+  evidence preserves the socket and exact missing set. Control-send failure,
+  cancellation, and generation drift still compensate only the captured
+  generation.
+- An unchanged exact 10/10/10 promoter target reuses current-generation
+  durable evidence with zero subscription controls.
 - Focused verification: 77 tests passed; Ruff passed.
 - Added immutable `PreparedL3Target` carrying exact target evidence for one
   WebSocket generation.
@@ -53,7 +63,9 @@ promoter integration, deployment, and repaired-release evidence remain in progre
 - Commit sends subscribe-before-unsubscribe and publishes the exact new
   desired/committed/evidenced set once; ambiguous controls compensate the
   captured generation.
-- Sampling waits on the shared runtime transition lock.
+- Sampling waits on the shared runtime transition lock and on reconnect
+  membership convergence; strict live health still exposes partial membership
+  immediately, while no durable 8/10 or 9/10 sample is written.
 - Task 2 verification: 71 focused tests passed; Ruff passed.
 - Replaced promoter `set desired → remove → add` publication with exact target
   preparation followed by one atomic commit.
@@ -73,11 +85,22 @@ promoter integration, deployment, and repaired-release evidence remain in progre
   debt rather than falsely reported as green.
 - Merged the already-qualified resident two-minute Fly monitor and documented
   the exact operator checks and failure meanings.
+- Corrected-repair verification: 232 focused L2/L3 tests passed, changed-file
+  Ruff passed, and the full repository pytest suite exited zero with the
+  established one xfail and one skip.
 
 ## RED Evidence
 
-`test_evidence_timeout_records_failure_and_compensates_captured_generation`
-failed because the old code awaited zero socket closes.
+`test_evidence_timeout_records_failure_without_closing_healthy_generation`
+failed because release-73 source closed the healthy socket.
+
+`test_prepare_unchanged_exact_target_reuses_current_evidence_without_controls`
+timed out and returned no prepared target because release-73 source cycled all
+ten identities even when the target was unchanged.
+
+`test_reconnect_requires_current_generation_sample_before_health_recovers`
+persisted immediately at 8/10 because the sampler gated promoter commits but
+not reconnect convergence.
 
 `test_sample_once_waits_for_membership_transition_lock` failed because the
 runtime exposed no transition lock; prepared-target tests initially had no
@@ -93,6 +116,7 @@ success regression showed the promoter never called either new transaction API.
 77 focused tests passed
 71 target transaction and sampler tests passed
 150 promoter, chaos-chain, health, and consumer tests passed
+232 corrected-repair focused tests passed
 Full pytest: exit 0 (one xfail, one skip)
 Changed-file Ruff: All checks passed
 M1 manual contract: OK
@@ -102,7 +126,9 @@ Ruff: All checks passed
 
 ## Remaining
 
-- Full verification, L2-only deployment, and new exact 24-hour L3 evidence.
+- Corrected L2-only deployment, real promoter/quiet-refresh/reconnect boundary
+  verification, and a new exact 24-hour L3 evidence window. Release 73 and its
+  boot are permanently rejected.
 
 ---
 *Phase: 05-ws-book-prices*

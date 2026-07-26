@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Plan 05-06 resident monitoring PASS; exact quote T+24 remains the only hard gate
-last_updated: "2026-07-26T05:46:00Z"
+stopped_at: Plan 05-07 corrected repair is locally green; release 73 rejected; L2-only redeploy is next
+last_updated: "2026-07-26T08:18:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,6 +19,20 @@ progress:
 ## Current Position
 
 Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in progress
+
+- **Plan 05-07 production rejection:** L2 release 73 / source `90d72aa…` is
+  permanently rejected. At `08:04:13Z`, an unchanged promoter target missed
+  four book dumps, compensated generation 1, and samples 11/12 persisted
+  `10/10/8`; at `08:08:01Z`, quiet refresh missed two and compensated
+  generation 2.
+- **Corrected repair:** commit `92797cc` preserves a control-consistent socket
+  on business-evidence timeout, reuses exact current-generation evidence for
+  unchanged targets, and blocks durable sampling through reconnect
+  convergence while keeping live strict health fail-fast. 232 focused tests,
+  changed-file Ruff, and full pytest pass.
+- **Next mutation:** deploy only L2 from a clean exact SHA, preserve L1
+  identity/quote anchor, reject any new partial durable sample, then bind a new
+  L3 T0 only after real promoter and quiet-refresh boundaries pass.
 
 - **Implemented:** canonical production Dashboard URL, four-surface Polywatch
   monitoring, repaired R2 bucket configuration, and the M1 continuous-operation

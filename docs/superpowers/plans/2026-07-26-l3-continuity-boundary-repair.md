@@ -5,15 +5,23 @@
 > superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Eliminate partial L3 market-rotation publication and force bounded
-WebSocket recovery when quiet-book evidence cannot remain below 120 seconds.
+**Goal:** Eliminate partial L3 market-rotation/reconnect samples and recover
+quiet-book evidence without destroying a control-consistent WebSocket.
 
 **Architecture:** `WsConsumer` gains a generation-scoped prepared-target
 transaction: collect durable book evidence without publishing new L3 truth,
 then send make-before-break controls and publish desired, committed, evidenced,
 and mapping-facing membership at one local commit boundary. Quiet-refresh
-timeouts become persisted generation failures and close only their captured
-socket so the normal reconnect path obtains a complete initial dump.
+timeouts become persisted business-evidence failures while confirmed controls
+keep their socket; genuine control ambiguity still compensates only its
+captured generation. Reconnect convergence gates durable sampling.
+
+> **Production amendment — release 73:** the first implementation deployed as
+> `90d72aa…` disproved its timeout-compensation premise. At `08:04:13Z`, an
+> unchanged promoter target missed four book dumps, closed generation 1, and
+> samples 11/12 persisted 8/10. At `08:08:01Z`, ordinary quiet refresh missed
+> two and closed generation 2. Task 1 below is superseded by the non-destructive
+> timeout and reconnect-sampling tests now recorded in Plan 05-07 SUMMARY.
 
 **Tech Stack:** Python 3.12, asyncio, websockets, asyncpg, Pydantic settings,
 pytest/pytest-asyncio, Ruff, uv, Fly.io, Supabase/PostgreSQL.
@@ -26,8 +34,9 @@ pytest/pytest-asyncio, Ruff, uv, Fly.io, Supabase/PostgreSQL.
   durable `l2_book_levels` writes count as evidence.
 - Evidence is scoped to an exact WebSocket generation and exact target token
   set.
-- A failed transition leaves the last fully converged mapping published unless
-  the socket becomes ambiguous; ambiguity closes only the captured socket.
+- A failed transition leaves the last fully converged mapping published.
+  Missing business evidence alone preserves the socket; control-send or
+  generation ambiguity closes only the captured socket.
 - Runtime events contain operation, reason, generation, required count, and
   missing count, but no token IDs, credentials, DSNs, or raw exception text.
 - Deploy only `polyarb-l2`; do not restart L1 or reset the active quote anchor.
@@ -94,7 +103,8 @@ pytest/pytest-asyncio, Ruff, uv, Fly.io, Supabase/PostgreSQL.
   -> bool`
 - Produces:
   the same public return type, but an evidence timeout now persists
-  `subscription_control_failed` and compensates its captured generation.
+  `subscription_control_failed`, retains the exact missing set, and preserves
+  a socket whose final subscribe was confirmed.
 
 - [ ] **Step 1: Create the Phase 05 plan registration**
 
@@ -105,7 +115,7 @@ Create `05-07-PLAN.md` with frontmatter `phase: 05`, `plan: 07`, `type: tdd`,
 must_haves:
   truths:
     - "A promoter never publishes or reports success with fewer than 10 target-token book evidence identities."
-    - "A quiet-refresh timeout persists failure truth and closes only its captured WebSocket generation."
+    - "A quiet-refresh business-evidence timeout persists failure truth without closing a control-consistent WebSocket generation."
     - "Strict L3 freshness remains below 120 seconds without grace periods or threshold relaxation."
     - "L1 machine identity and the active quote evidence anchor survive the L2-only deployment."
 ```
@@ -116,7 +126,7 @@ step, mark the plan `in progress`, and record the production incidents as the
 reason for the repair. This ensures the pre-commit SUMMARY guard is present
 before the first plan-scoped code commit.
 
-- [ ] **Step 2: Write failing timeout-compensation tests**
+- [x] **Step 2: Write failing non-destructive timeout tests**
 
 Allow the existing fixture to capture bounded runtime events:
 
@@ -128,12 +138,11 @@ def _make_consumer(
     # Preserve the existing fixture body and pass event_recorder to WsConsumer.
 ```
 
-Replace the old expectation that an evidence timeout keeps the socket alive
-with:
+The release-73 production amendment replaces the destructive expectation with:
 
 ```python
 @pytest.mark.asyncio
-async def test_evidence_timeout_records_failure_and_compensates_captured_generation(
+async def test_evidence_timeout_records_failure_without_closing_healthy_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[RuntimeEventKind, dict[str, object]]] = []
@@ -155,8 +164,8 @@ async def test_evidence_timeout_records_failure_and_compensates_captured_generat
     )
 
     assert await asyncio.wait_for(task, timeout=0.2) is False
-    ws.close.assert_awaited_once()
-    assert consumer._current_ws is None
+    ws.close.assert_not_awaited()
+    assert consumer._current_ws is ws
     _kind, event = next(
         (kind, values)
         for kind, values in events
@@ -169,10 +178,8 @@ async def test_evidence_timeout_records_failure_and_compensates_captured_generat
     assert "l3-b" not in str(event["detail"])
 ```
 
-Reuse and retain
-`test_quiet_refresh_evidence_timeout_closes_only_captured_socket`, which already
-replaces `_current_ws` and increments the generation before timeout; it must
-continue to prove that the old socket closes and the replacement does not.
+Retain the captured-generation identity-change test: genuine connection drift
+still closes the old socket and never the replacement.
 
 - [ ] **Step 3: Run the focused tests and verify RED**
 
@@ -180,18 +187,17 @@ Run:
 
 ```bash
 uv run pytest -q \
-  tests/daemon/test_ws_quiet_refresh.py::test_evidence_timeout_records_failure_and_compensates_captured_generation \
+  tests/daemon/test_ws_quiet_refresh.py::test_evidence_timeout_records_failure_without_closing_healthy_generation \
   tests/daemon/test_ws_resubscribe_transaction.py -k "timeout and captured"
 ```
 
-Expected: FAIL because timeout currently returns `False` without a runtime event
-or socket compensation.
+Expected: FAIL on release-73 source because the healthy socket is closed.
 
-- [ ] **Step 4: Implement timeout failure truth and compensation**
+- [x] **Step 4: Implement timeout failure truth without destructive compensation**
 
-In the `request_book_refresh` exception path, replace the special
-`evidence_timeout` return with bounded event emission and captured-generation
-compensation:
+In the `_request_book_evidence` exception path, emit the bounded event and
+return without compensation only when the final subscribe completed on the
+same generation:
 
 ```python
 if failure_reason == "evidence_timeout":
@@ -207,13 +213,13 @@ if failure_reason == "evidence_timeout":
         severity=RuntimeEventSeverity.WARNING,
         generation=generation,
     )
-if ws is not None:
-    await self._compensate_generation(ws, generation)
-return False
+if final_subscribe_confirmed:
+    return None
 ```
 
 Retain the existing `finally` waiter cleanup. Do not update evidence timestamps
-or close a replacement socket.
+or close either a healthy current socket or a replacement socket. All
+non-timeout ambiguity paths retain captured-generation compensation.
 
 - [ ] **Step 5: Run focused and neighboring tests and verify GREEN**
 
@@ -744,22 +750,23 @@ make planning-status
 make check-m1-manual
 ```
 
-Expected: full pytest and Ruff pass, the manual contract passes, and planning
-status reports no new Plan 07 drift.
+Expected: full pytest, changed-file Ruff, the manual contract, and planning
+status pass. Repository-wide Ruff's unrelated inherited baseline is recorded
+separately rather than attributed to Plan 07.
 
 - [ ] **Step 2: Add the learning document**
 
-Write `docs/learning/13-L3-连续性事务.md` with:
+Write `docs/learning/24-L3-连续性事务.md` with:
 
 - 30-second mental model: “prepare evidence → atomic commit → strict sample”;
 - the two 2026-07-26 production incidents;
 - code anchors for `prepare_l3_target`, `commit_l3_target`, promoter exact-target
-  invariant, and timeout compensation;
+  invariant, non-destructive evidence timeout, and reconnect convergence gate;
 - why grace periods and threshold relaxation were rejected;
 - three adversarial self-check questions;
 - an empty `FAQ 增量` section.
 
-Add it after document 12 in `docs/learning/00-INDEX.md`.
+Add it after document 23 in `docs/learning/00-INDEX.md`.
 
 - [ ] **Step 3: Update the M1 manual**
 

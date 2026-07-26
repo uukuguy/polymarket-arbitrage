@@ -5318,3 +5318,36 @@ From the tested repair worktree, capture L1/L2 pre-deploy identities and the
 current quote anchor, deploy only `polyarb-l2`, verify the exact release and
 strict health, observe one promoter plus quiet-refresh boundary, then open a
 new immutable 24-hour L3 evidence interval without resetting L1.
+
+## SESSION 106 — 2026-07-26 (release 73 rejected; corrected repair green)
+
+- [PRODUCTION REJECTION] Exact L2 release 73/source `90d72aa…`, instance
+  `01KYEPW…`, boot `60c3b70b…` started at 10/10/10 but failed its first real
+  promoter boundary. Run 1 timed out after 25.750s with four missing books,
+  compensated generation 1, and durable samples 11/12 persisted 10/10/8.
+- [SECOND PROOF] Ordinary quiet refresh at `08:08:01Z` missed two identities
+  and compensated generation 2. Runtime events, promoter rows, and sample rows
+  agree exactly; no T0 was opened and release 73 is permanently rejected.
+- [ROOT CAUSE] The promoter destructively refreshed an unchanged target every
+  five minutes. The sampler lock covered atomic promoter commit but did not
+  cover a genuine reconnect's incremental initial dump. Missing business
+  frames were incorrectly classified as control ambiguity.
+- [TDD REPAIR] Three new/changed tests all failed on release-73 source:
+  preserve a healthy socket on evidence timeout, reuse exact unchanged-target
+  evidence with zero controls, and block an 8/10 reconnect sample. Corrected
+  commit `92797cc` makes all three pass.
+- [CONTRACT] Live strict health remains fail-fast during reconnect; durable
+  sampling waits for exact desired=committed=evidenced. If convergence exceeds
+  75 seconds, sample-age health fails, so waiting does not create an
+  unmonitored gap. Control-send failure, cancellation, and generation drift
+  still compensate only the captured socket.
+- [QUALITY] 232 focused L2/L3 tests and changed-file Ruff passed. Full pytest
+  reached 100% with the established one xfail and one skip.
+
+### [NEXT — CURRENT]
+
+From clean exact corrected SHA, deploy only `polyarb-l2`; verify release,
+machine/image/boot identity and 10/10/10, then observe at least one real
+unchanged promoter tick plus quiet-refresh boundary with no compensation or
+partial durable sample. Preserve the L1 machine and quote-run-78 anchor. Only
+then create the new L3 T0 manifest.
