@@ -396,20 +396,22 @@ async def run_snapshot(
                             mid = normalized.get("market_id")
                             if mid is None:
                                 continue
+
+                            # Inspect before duplicate suppression: pagination
+                            # overlap may repeat a market ID, but a later row
+                            # must not contradict its authoritative event truth.
+                            # Keep only the first mismatch to preserve the
+                            # streaming memory bound.
+                            if market_semantic_reason is None:
+                                market_semantic_reason = (
+                                    semantic_validator.row_mismatch_reason(normalized)
+                                )
+
                             if mid in seen_ids:
                                 dedup_count += 1
                                 continue
                             seen_ids.add(mid)
                             normalized_count += 1
-
-                            # Inspect every unique normalized row before subset
-                            # filtering. Keep only the first mismatch so excluded
-                            # low-liquidity rows cannot create a hidden truth gap
-                            # and no full-market buffer is required.
-                            if market_semantic_reason is None:
-                                market_semantic_reason = (
-                                    semantic_validator.row_mismatch_reason(normalized)
-                                )
 
                             # Mode filter (replaces the old phase-3 block).
                             if (
