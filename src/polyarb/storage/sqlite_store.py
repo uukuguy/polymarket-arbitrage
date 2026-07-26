@@ -385,6 +385,11 @@ class SQLiteStore:
                 "universe_hash",
                 "TEXT NOT NULL DEFAULT ''",
             )
+            _ensure_column(
+                "neg_risk_quote_runs",
+                "source_truth_hash",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             for table in ("neg_risk_quote_run_legs", "neg_risk_quotes"):
                 _ensure_column(table, "event_id", "TEXT NOT NULL DEFAULT ''")
                 _ensure_column(table, "membership_hash", "TEXT NOT NULL DEFAULT ''")

@@ -316,6 +316,24 @@ def test_verified_scan_recomputes_invalid_group_rejections_for_exact_source(
     assert result.rejections == {"membership-market-mismatch": 1}
 
 
+def test_verified_scan_fails_closed_on_incomplete_source_truth(quote_db) -> None:
+    with sqlite3.connect(quote_db) as con:
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (1,'e3','g3','standard',0,0,'',"
+            "'incomplete-source','source-membership-missing')"
+        )
+    _complete_quote_run(quote_db)
+
+    with pytest.raises(QuoteUniverseUnavailableError):
+        scan_verified_neg_risk_quote_run(
+            quote_db,
+            now_s=lambda: QUOTE_NOW_S,
+        )
+
+
 def test_verified_scan_fails_closed_when_source_identity_drifts_after_run(
     quote_db,
 ) -> None:

@@ -64,6 +64,14 @@ VALID_ONE_PAYLOAD = {
 }
 
 
+def _make_consistent_one_leg(candidate: dict) -> None:
+    candidate["legs"] = candidate["legs"][:1]
+    candidate["sum_asks"] = 0.4
+    candidate["gross_edge_bps"] = 6000.0
+    candidate["executable_quantity"] = 12.0
+    candidate["gross_profit"] = 7.2
+
+
 def test_200_zero_is_the_only_zero_opportunity_result() -> None:
     result = diagnose_opportunity_feed(200, VALID_ZERO_BODY)
 
@@ -241,6 +249,7 @@ def test_200_requires_complete_verified_identity_and_bounded_rejections(body: st
             dict(candidate["legs"][0])
         ),
         lambda candidate: candidate["legs"][0].pop("condition_id"),
+        _make_consistent_one_leg,
     ],
 )
 def test_200_nonzero_requires_full_finite_consistent_candidate(

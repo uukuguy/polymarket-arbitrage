@@ -131,7 +131,7 @@ def test_enabled_health_fails_closed_when_quote_store_is_unreadable(tmp_path, mo
     def unreadable(_self):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(NegRiskQuoteStore, "latest_complete_run", unreadable)
+    monkeypatch.setattr(NegRiskQuoteStore, "latest_complete_projection", unreadable)
 
     checks, overall = _build_health_checks(store, settings, NOW_S)
 
@@ -172,6 +172,30 @@ def test_worker_error_warns_while_complete_run_is_fresh(tmp_path) -> None:
     assert collector["status"] == "warn"
     assert collector["output"] == "RuntimeError"
     assert overall == "warn"
+
+
+def test_enabled_health_fails_when_source_truth_drifts(tmp_path) -> None:
+    settings = _settings(tmp_path, enabled=True)
+    _complete_run(settings, age_s=10)
+    with sqlite3.connect(settings.db_path) as con:
+        snapshot_id = int(
+            con.execute("SELECT id FROM snapshots ORDER BY id DESC LIMIT 1").fetchone()[0]
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (?,'event-z','group-z','augmented',1,1,'membership-z',"
+            "'complete-unsupported','augmented-neg-risk-not-supported')",
+            (snapshot_id,),
+        )
+
+    checks, overall = _quote_check(settings)
+
+    entry = checks["quote_feed:last_complete_age_seconds"][0]
+    assert entry["observedValue"] is None
+    assert entry["status"] == "fail"
+    assert overall == "fail"
 
 
 def test_disabled_worker_registers_no_quote_checks(tmp_path) -> None:

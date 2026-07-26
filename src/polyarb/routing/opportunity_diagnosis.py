@@ -291,7 +291,7 @@ def _is_valid_opportunity(
         return False
 
     legs = opportunity.get("legs")
-    if not isinstance(legs, list) or not legs:
+    if not isinstance(legs, list) or len(legs) < 2:
         return False
     parsed_legs = [_valid_leg_values(leg) for leg in legs]
     if any(values is None for values in parsed_legs):

@@ -210,7 +210,10 @@ def _build_health_checks(
 
     # ── Check 5: production opportunity quote freshness ──────────────────
     if settings.neg_risk_quote_worker_enabled:
-        from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
+        from polyarb.routing.neg_risk_quote_store import (
+            NegRiskQuoteStore,
+            QuoteUniverseUnavailableError,
+        )
         from polyarb.routing.opportunity_scanner import (
             QUOTE_SLA_SECONDS,
             QUOTE_WARN_SECONDS,
@@ -218,8 +221,8 @@ def _build_health_checks(
 
         quote_error_kind: str | None = None
         try:
-            quote_run = NegRiskQuoteStore(store.db_path).latest_complete_run()
-        except sqlite3.Error as error:
+            quote_run = NegRiskQuoteStore(store.db_path).latest_complete_projection()
+        except (sqlite3.Error, QuoteUniverseUnavailableError) as error:
             quote_run = None
             quote_error_kind = type(error).__name__
         if quote_run is None:

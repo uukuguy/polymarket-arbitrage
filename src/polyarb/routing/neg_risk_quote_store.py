@@ -117,6 +117,7 @@ class QuoteRun:
     failure_reason: str | None
     completed_at_ms: int | None
     universe_hash: str = ""
+    source_truth_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,7 @@ class CompleteQuoteProjection:
     quotes: tuple[PersistedQuote, ...]
     source_universe: VerifiedQuoteUniverse
     universe_hash: str
+    source_truth_hash: str
 
 
 class NegRiskQuoteStore:
@@ -239,6 +241,7 @@ class NegRiskQuoteStore:
             legs=universe.legs,
             quoted_at_ms=quoted_at_ms,
             expected_universe_hash=universe.universe_hash,
+            expected_source_truth_hash=_source_truth_hash(universe),
         )
 
     def begin_run(
@@ -256,6 +259,7 @@ class NegRiskQuoteStore:
             legs=legs,
             quoted_at_ms=quoted_at_ms,
             expected_universe_hash=None,
+            expected_source_truth_hash=None,
         )
 
     def _begin_run(
@@ -266,6 +270,7 @@ class NegRiskQuoteStore:
         legs: tuple[UniverseLeg, ...],
         quoted_at_ms: int,
         expected_universe_hash: str | None,
+        expected_source_truth_hash: str | None,
     ) -> int:
         """Revalidate verified truth while atomically acquiring the DB lease."""
         requested_legs = _deduplicate_legs(legs)
@@ -320,15 +325,25 @@ class NegRiskQuoteStore:
                     raise QuoteRunStateError(
                         "requested legs do not match verified snapshot membership"
                     )
+                source_truth_hash = _source_truth_hash(verified)
+                if (
+                    expected_source_truth_hash is not None
+                    and source_truth_hash != expected_source_truth_hash
+                ):
+                    raise QuoteRunStateError(
+                        "requested source truth does not match verified snapshot"
+                    )
                 cur = con.execute(
                     "INSERT INTO neg_risk_quote_runs("
-                    "universe_snapshot_id, universe_taken_at_ms, universe_hash, quoted_at_ms, "
-                    "requested_token_count, lease_expires_at_ms, status"
-                    ") VALUES (?, ?, ?, ?, ?, ?, 'collecting')",
+                    "universe_snapshot_id, universe_taken_at_ms, universe_hash, "
+                    "source_truth_hash, quoted_at_ms, requested_token_count, "
+                    "lease_expires_at_ms, status"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, 'collecting')",
                     (
                         universe_snapshot_id,
                         universe_taken_at_ms,
                         universe_hash,
+                        source_truth_hash,
                         quoted_at_ms,
                         len(requested_legs),
                         now_ms + QUOTE_RUN_LEASE_MS,
@@ -498,7 +513,8 @@ class NegRiskQuoteStore:
                 row = con.execute(
                     "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
                     "requested_token_count, successful_response_count, status, failure_reason, "
-                    "completed_at_ms, universe_hash FROM neg_risk_quote_runs WHERE id = ?",
+                    "completed_at_ms, universe_hash, source_truth_hash "
+                    "FROM neg_risk_quote_runs WHERE id = ?",
                     (run_id,),
                 ).fetchone()
                 con.execute("COMMIT")
@@ -540,8 +556,10 @@ class NegRiskQuoteStore:
             row = con.execute(
                 "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
                 "requested_token_count, successful_response_count, status, failure_reason, "
-                "completed_at_ms, universe_hash FROM neg_risk_quote_runs r "
+                "completed_at_ms, universe_hash, source_truth_hash "
+                "FROM neg_risk_quote_runs r "
                 "WHERE r.status = 'complete' AND length(r.universe_hash)=64 "
+                "AND length(r.source_truth_hash)=64 "
                 "AND EXISTS ("
                 "SELECT 1 FROM snapshots s JOIN snapshot_source_coverage c "
                 "ON c.snapshot_id=s.id AND c.completed=1 "
@@ -575,12 +593,15 @@ class NegRiskQuoteStore:
             run_rows = con.execute(
                 "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
                 "requested_token_count, successful_response_count, status, failure_reason, "
-                "completed_at_ms, universe_hash FROM neg_risk_quote_runs "
+                "completed_at_ms, universe_hash, source_truth_hash "
+                "FROM neg_risk_quote_runs "
                 "WHERE status='complete' "
                 "ORDER BY quoted_at_ms DESC,id DESC"
             ).fetchall()
             for run_row in run_rows:
                 run = _quote_run_from_row(run_row)
+                if not run.source_truth_hash:
+                    continue
                 leg_rows = con.execute(
                     "SELECT neg_risk_market_id,market_id,condition_id,slug,yes_token_id,"
                     "event_id,membership_hash FROM neg_risk_quote_run_legs "
@@ -601,8 +622,6 @@ class NegRiskQuoteStore:
                 if has_blank_provenance and not all_provenance_blank:
                     raise QuoteProjectionIntegrityError()
                 if not run.universe_hash:
-                    if all_provenance_blank:
-                        continue
                     raise QuoteProjectionIntegrityError()
                 run_legs = tuple(UniverseLeg(*row) for row in leg_rows)
                 quotes = tuple(PersistedQuote(*row) for row in quote_rows)
@@ -614,8 +633,6 @@ class NegRiskQuoteStore:
                     (run.universe_snapshot_id,),
                 ).fetchone()
                 if source_row is None:
-                    if all_provenance_blank:
-                        continue
                     raise QuoteProjectionIntegrityError()
                 source_universe = _verified_universe_for_snapshot(
                     con,
@@ -623,9 +640,12 @@ class NegRiskQuoteStore:
                     taken_at_ms=int(source_row[1]),
                 )
                 if all_provenance_blank:
-                    if run.universe_hash == source_universe.universe_hash:
-                        raise QuoteProjectionIntegrityError()
-                    continue
+                    raise QuoteProjectionIntegrityError()
+                if any(
+                    rejection.quality == "incomplete-source"
+                    for rejection in source_universe.rejections
+                ):
+                    raise QuoteUniverseUnavailableError("incomplete-source-unavailable")
                 _validate_complete_projection(
                     con,
                     run=run,
@@ -645,6 +665,7 @@ class NegRiskQuoteStore:
                     quotes=quotes,
                     source_universe=source_universe,
                     universe_hash=run.universe_hash,
+                    source_truth_hash=run.source_truth_hash,
                 )
             return None
         except (TypeError, ValueError, OverflowError) as error:
@@ -681,7 +702,8 @@ def _validate_complete_projection(
     rechecked_run_row = con.execute(
         "SELECT id,universe_snapshot_id,universe_taken_at_ms,quoted_at_ms,"
         "requested_token_count,successful_response_count,status,failure_reason,"
-        "completed_at_ms,universe_hash FROM neg_risk_quote_runs WHERE id=?",
+        "completed_at_ms,universe_hash,source_truth_hash "
+        "FROM neg_risk_quote_runs WHERE id=?",
         (run.run_id,),
     ).fetchone()
     if rechecked_run_row != original_run_row:
@@ -718,6 +740,7 @@ def _validate_complete_projection(
         or run_by_token != quote_by_token
         or run.universe_hash != source_universe.universe_hash
         or run.universe_hash != _universe_hash(run_legs)
+        or run.source_truth_hash != _source_truth_hash(source_universe)
     ):
         raise QuoteProjectionIntegrityError()
 
@@ -918,6 +941,18 @@ def _universe_hash(legs: tuple[UniverseLeg, ...]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _source_truth_hash(universe: VerifiedQuoteUniverse) -> str:
+    identity = [
+        universe.universe_hash,
+        sorted(
+            (rejection.group_id, rejection.quality, rejection.reason)
+            for rejection in universe.rejections
+        ),
+    ]
+    canonical = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _deduplicate_legs(legs: tuple[UniverseLeg, ...]) -> tuple[UniverseLeg, ...]:
     by_token: dict[str, UniverseLeg] = {}
     for leg in legs:
@@ -990,6 +1025,7 @@ def _quote_run_from_row(row: tuple[object, ...]) -> QuoteRun:
         failure_reason=str(row[7]) if row[7] is not None else None,
         completed_at_ms=int(row[8]) if row[8] is not None else None,
         universe_hash=str(row[9]),
+        source_truth_hash=str(row[10]),
     )
 
 

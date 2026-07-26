@@ -237,6 +237,26 @@ def test_scan_quotes_emits_diagnosable_verified_feed(
     assert json.loads(diagnosis.stdout)["kind"] == "available-opportunities"
 
 
+def test_scan_quotes_rejects_noncanonical_quote_sla(monkeypatch) -> None:
+    scanner_called = False
+
+    def scan_should_not_run(*_args, **_kwargs):
+        nonlocal scanner_called
+        scanner_called = True
+        raise AssertionError("scanner must not run for a noncanonical quote SLA")
+
+    monkeypatch.setattr(cli_mod, "scan_verified_neg_risk_quote_run", scan_should_not_run)
+
+    result = runner.invoke(
+        app,
+        ["scan-quotes", "--max-quote-age-s", "299"],
+    )
+
+    assert result.exit_code == 2
+    assert "max_quote_age_s must equal the canonical 300-second SLA" in result.output
+    assert scanner_called is False
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # T5 — paper_close lifecycle + close subcommand
 # ──────────────────────────────────────────────────────────────────────────

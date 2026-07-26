@@ -521,6 +521,7 @@ def test_begin_recovers_legacy_null_collecting_lease(quote_db) -> None:
             "CREATE TABLE neg_risk_quote_runs ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, universe_snapshot_id INTEGER NOT NULL, "
             "universe_taken_at_ms INTEGER NOT NULL, universe_hash TEXT NOT NULL DEFAULT '', "
+            "source_truth_hash TEXT NOT NULL DEFAULT '', "
             "quoted_at_ms INTEGER NOT NULL, "
             "requested_token_count INTEGER NOT NULL, "
             "successful_response_count INTEGER NOT NULL DEFAULT 0, "
@@ -667,10 +668,12 @@ def test_init_schema_adds_quote_lease_to_legacy_quote_runs_table(tmp_path) -> No
         )
 
     SQLiteStore(path).init_schema()
+    SQLiteStore(path).init_schema()
 
     with sqlite3.connect(path) as con:
         columns = {row[1] for row in con.execute("PRAGMA table_info(neg_risk_quote_runs)")}
     assert "lease_expires_at_ms" in columns
+    assert "source_truth_hash" in columns
 
 
 def test_latest_complete_projection_has_one_atomic_run_and_all_metadata(quote_db) -> None:
@@ -900,6 +903,14 @@ def test_missing_required_market_rejects_whole_standard_group(quote_db) -> None:
 
 def test_verified_run_persists_universe_event_and_membership_identity(quote_db) -> None:
     store = NegRiskQuoteStore(quote_db)
+    with sqlite3.connect(quote_db) as con:
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (1,'event-z','group-z','augmented',1,1,'membership-z',"
+            "'complete-unsupported','augmented-neg-risk-not-supported')"
+        )
     universe = store.latest_verified_universe()
 
     run_id = store.begin_verified_run(universe, quoted_at_ms=NOW_MS)
@@ -929,10 +940,24 @@ def test_verified_run_persists_universe_event_and_membership_identity(quote_db) 
 
     assert completed.universe_hash == universe.universe_hash
     with sqlite3.connect(quote_db) as con:
+        expected_source_truth = hashlib.sha256(
+            json.dumps(
+                [
+                    universe.universe_hash,
+                    sorted(
+                        (item.group_id, item.quality, item.reason)
+                        for item in universe.rejections
+                    ),
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         assert con.execute(
-            "SELECT universe_hash FROM neg_risk_quote_runs WHERE id=?",
+            "SELECT universe_hash,source_truth_hash "
+            "FROM neg_risk_quote_runs WHERE id=?",
             (run_id,),
-        ).fetchone() == (universe.universe_hash,)
+        ).fetchone() == (universe.universe_hash, expected_source_truth)
         assert con.execute(
             "SELECT DISTINCT event_id,membership_hash "
             "FROM neg_risk_quote_run_legs WHERE quote_run_id=?",
@@ -943,6 +968,60 @@ def test_verified_run_persists_universe_event_and_membership_identity(quote_db) 
             "FROM neg_risk_quotes WHERE quote_run_id=?",
             (run_id,),
         ).fetchall() == [(EVENT_ID, MEMBERSHIP_HASH)]
+
+
+@pytest.mark.parametrize(
+    "corruption_sql",
+    [
+        (
+            "UPDATE neg_risk_group_truth "
+            "SET reason='standard-neg-risk-not-supported' "
+            "WHERE neg_risk_market_id='group-z'"
+        ),
+        (
+            "UPDATE neg_risk_group_truth "
+            "SET quality='incomplete-quotes',reason='incomplete-quotes' "
+            "WHERE neg_risk_market_id='group-z'"
+        ),
+        "DELETE FROM neg_risk_group_truth WHERE neg_risk_market_id='group-z'",
+        (
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (1,'event-y','group-y','augmented',1,1,'membership-y',"
+            "'complete-unsupported','augmented-neg-risk-not-supported')"
+        ),
+    ],
+)
+def test_complete_projection_rejects_source_rejection_truth_drift(
+    quote_db,
+    corruption_sql: str,
+) -> None:
+    with sqlite3.connect(quote_db) as con:
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (1,'event-z','group-z','augmented',1,1,'membership-z',"
+            "'complete-unsupported','augmented-neg-risk-not-supported')"
+        )
+    store = NegRiskQuoteStore(quote_db)
+    _complete(store)
+    with sqlite3.connect(quote_db) as con:
+        con.execute(corruption_sql)
+
+    with pytest.raises(QuoteProjectionIntegrityError):
+        store.latest_complete_projection()
+
+
+def test_complete_projection_excludes_legacy_blank_source_truth_hash(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    _complete(store)
+    with sqlite3.connect(quote_db) as con:
+        con.execute("UPDATE neg_risk_quote_runs SET source_truth_hash=''")
+
+    assert store.latest_complete_run() is None
+    assert store.latest_complete_projection() is None
 
 
 def test_complete_projection_uses_one_read_connection(

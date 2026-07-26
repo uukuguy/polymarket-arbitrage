@@ -51,6 +51,7 @@ from polyarb.routing.neg_risk_quote_store import (
 )
 from polyarb.routing.opportunity_diagnosis import diagnose_opportunity_feed
 from polyarb.routing.opportunity_scanner import (
+    QUOTE_SLA_SECONDS,
     QuoteRunUnavailableError,
     StaleQuoteRunError,
     StaleSnapshotError,
@@ -370,6 +371,10 @@ def scan_quotes(
 ) -> None:
     """Scan exactly one verified quote run, never a snapshot fallback."""
     try:
+        if max_quote_age_s != QUOTE_SLA_SECONDS:
+            raise ValueError(
+                "max_quote_age_s must equal the canonical 300-second SLA"
+            )
         result = scan_verified_neg_risk_quote_run(
             db_path,
             min_edge_bps=min_edge_bps,
@@ -396,7 +401,7 @@ def scan_quotes(
                 "source_snapshot_id": result.source_snapshot_id,
                 "universe_hash": result.universe_hash,
                 "quote_run_id": result.quote_run_id,
-                "quote_sla_seconds": max_quote_age_s,
+                "quote_sla_seconds": QUOTE_SLA_SECONDS,
                 "count": len(result.opportunities),
                 "rejections": dict(result.rejections),
                 "opportunities": [

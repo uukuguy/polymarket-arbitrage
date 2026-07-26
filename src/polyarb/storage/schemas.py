@@ -219,6 +219,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_runs (
   universe_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
   universe_taken_at_ms INTEGER NOT NULL,
   universe_hash TEXT NOT NULL DEFAULT '',
+  source_truth_hash TEXT NOT NULL DEFAULT '',
   quoted_at_ms INTEGER NOT NULL,
   requested_token_count INTEGER NOT NULL CHECK(requested_token_count >= 0),
   successful_response_count INTEGER NOT NULL DEFAULT 0
