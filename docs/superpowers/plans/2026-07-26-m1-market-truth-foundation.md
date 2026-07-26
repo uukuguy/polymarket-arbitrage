@@ -479,7 +479,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_group_truth (
   event_id TEXT NOT NULL,
   neg_risk_market_id TEXT NOT NULL,
   neg_risk_type TEXT NOT NULL CHECK(neg_risk_type IN ('standard','augmented')),
-  expected_member_count INTEGER NOT NULL CHECK(expected_member_count > 0),
+  expected_member_count INTEGER NOT NULL CHECK(expected_member_count >= 0),
   active_named_count INTEGER NOT NULL CHECK(active_named_count >= 0),
   membership_hash TEXT NOT NULL,
   quality TEXT NOT NULL CHECK(quality IN (
@@ -489,6 +489,11 @@ CREATE TABLE IF NOT EXISTS neg_risk_group_truth (
   PRIMARY KEY(snapshot_id, neg_risk_market_id)
 );
 ```
+
+`expected_member_count=0` is valid only for `quality='incomplete-source'`
+diagnostic truth, such as a neg-risk event whose membership list is missing or
+empty. Complete supported/unsupported groups must still have at least one
+structural member; enforce that invariant in the storage projection tests.
 
 Insert coverage, event rows, membership, group truth, and market publication in
 one `BEGIN IMMEDIATE`. Execute `DELETE FROM markets` only when
