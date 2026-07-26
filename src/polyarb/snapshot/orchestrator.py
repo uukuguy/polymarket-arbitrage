@@ -810,7 +810,11 @@ async def run_snapshot(
                         # stale parent can leak a partial group into M2.
                         verified_stale_orphan_ids = set(parent_states)
                         if active_parent_ids:
-                            bounded_ids = ",".join(sorted(active_parent_ids)[:10])
+                            bounded_ids = ",".join(sorted(active_parent_ids)[:5])
+                            remainder = len(active_parent_ids) - min(
+                                len(active_parent_ids), 5
+                            )
+                            suffix = f" (+{remainder} more)" if remainder else ""
                             issues.append(
                                 Issue(
                                     layer=1,
@@ -818,20 +822,25 @@ async def run_snapshot(
                                     market_id=None,
                                     detail=(
                                         "Gamma active neg-risk parent absent from event "
-                                        f"catalogue quarantined: {bounded_ids}"
+                                        f"catalogue quarantined: {bounded_ids}{suffix}"
                                     )[:200],
                                 )
                             )
                         stale_parent_ids = set(parent_states) - active_parent_ids
                         if stale_parent_ids:
-                            bounded_ids = ",".join(sorted(stale_parent_ids)[:10])
+                            bounded_ids = ",".join(sorted(stale_parent_ids)[:5])
+                            remainder = len(stale_parent_ids) - min(
+                                len(stale_parent_ids), 5
+                            )
+                            suffix = f" (+{remainder} more)" if remainder else ""
                             issues.append(
                                 Issue(
                                     layer=1,
                                     category=Category.API_JITTER,
                                     market_id=None,
                                     detail=(
-                                        f"Gamma stale neg-risk market quarantined: {bounded_ids}"
+                                        "Gamma stale neg-risk market quarantined: "
+                                        f"{bounded_ids}{suffix}"
                                     )[:200],
                                 )
                             )

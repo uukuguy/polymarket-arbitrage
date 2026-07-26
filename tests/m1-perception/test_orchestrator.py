@@ -1361,12 +1361,21 @@ async def test_orphan_neg_risk_market_with_active_parent_is_quarantined(
 ) -> None:
     settings = _make_settings(tmp_path)
     settings.event_bus_enabled = True
-    market = {
-        **_load_gamma_fixture()[0],
-        "negRisk": True,
-        "negRiskMarketID": "live-group",
-    }
-    fake_gamma = _make_fake_gamma([market], [])
+    template = _load_gamma_fixture()[0]
+    markets = [
+        {
+            **template,
+            "id": f"live-market-{index:02d}",
+            "conditionId": f"live-condition-{index:02d}",
+            "clobTokenIds": json.dumps(
+                [f"live-yes-{index:02d}", f"live-no-{index:02d}"]
+            ),
+            "negRisk": True,
+            "negRiskMarketID": "live-group",
+        }
+        for index in range(12)
+    ]
+    fake_gamma = _make_fake_gamma(markets, [])
     clob_data = _load_clob_fixture()
 
     with (
@@ -1412,7 +1421,8 @@ async def test_orphan_neg_risk_market_with_active_parent_is_quarantined(
         (
             "api_jitter",
             "Gamma active neg-risk parent absent from event catalogue quarantined: "
-            f"{market['id']}",
+            "live-market-00,live-market-01,live-market-02,live-market-03,"
+            "live-market-04 (+7 more)",
         )
     ]
     universe = NegRiskQuoteStore(settings.db_path).latest_verified_universe()
