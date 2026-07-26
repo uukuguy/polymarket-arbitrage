@@ -7,6 +7,8 @@ membership and records one all-or-nothing terminal quote set per collection.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import sqlite3
 import time
@@ -48,6 +50,13 @@ class QuoteRunLeaseLostError(QuoteRunStateError):
         super().__init__(detail)
 
 
+class QuoteUniverseUnavailableError(RuntimeError):
+    """No completed source snapshot currently backs the published market view."""
+
+    def __init__(self) -> None:
+        super().__init__("quote-universe-unavailable")
+
+
 @dataclass(frozen=True)
 class UniverseLeg:
     neg_risk_market_id: str
@@ -55,6 +64,24 @@ class UniverseLeg:
     condition_id: str
     slug: str | None
     yes_token_id: str
+    event_id: str = ""
+    membership_hash: str = ""
+
+
+@dataclass(frozen=True)
+class GroupRejection:
+    group_id: str
+    quality: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class VerifiedQuoteUniverse:
+    snapshot_id: int
+    taken_at_ms: int
+    universe_hash: str
+    legs: tuple[UniverseLeg, ...]
+    rejections: tuple[GroupRejection, ...]
 
 
 @dataclass(frozen=True)
@@ -67,6 +94,8 @@ class PersistedQuote:
     terminal_state: str
     best_ask_price: float | None
     best_ask_size: float | None
+    event_id: str = ""
+    membership_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -80,6 +109,7 @@ class QuoteRun:
     status: str
     failure_reason: str | None
     completed_at_ms: int | None
+    universe_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,6 +121,7 @@ class CompleteQuoteProjection:
     requested_token_count: int
     successful_response_count: int
     quotes: tuple[PersistedQuote, ...]
+    universe_hash: str = ""
 
 
 class NegRiskQuoteStore:
@@ -139,6 +170,40 @@ class NegRiskQuoteStore:
             tuple(UniverseLeg(*row) for row in rows),
         )
 
+    def latest_verified_universe(self) -> VerifiedQuoteUniverse:
+        """Select only standard groups backed by complete published source truth."""
+        con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        try:
+            con.execute("BEGIN")
+            snapshot = _latest_completed_published_snapshot(con)
+            if snapshot is None:
+                raise QuoteUniverseUnavailableError()
+            return _verified_universe_for_snapshot(
+                con,
+                snapshot_id=int(snapshot[0]),
+                taken_at_ms=int(snapshot[1]),
+            )
+        finally:
+            con.close()
+
+    def begin_verified_run(
+        self,
+        universe: VerifiedQuoteUniverse,
+        *,
+        quoted_at_ms: int,
+    ) -> int:
+        """Acquire a run lease only if the verified universe is still current."""
+        if universe.universe_hash != _universe_hash(universe.legs):
+            raise QuoteRunStateError("verified universe hash does not match its legs")
+        return self.begin_run(
+            universe_snapshot_id=universe.snapshot_id,
+            universe_taken_at_ms=universe.taken_at_ms,
+            legs=universe.legs,
+            quoted_at_ms=quoted_at_ms,
+            _expected_universe_hash=universe.universe_hash,
+            _require_verified=True,
+        )
+
     def begin_run(
         self,
         *,
@@ -146,9 +211,14 @@ class NegRiskQuoteStore:
         universe_taken_at_ms: int,
         legs: tuple[UniverseLeg, ...],
         quoted_at_ms: int,
+        _expected_universe_hash: str | None = None,
+        _require_verified: bool = False,
     ) -> int:
         """Create a collecting run after atomically acquiring the DB lease."""
         requested_legs = _deduplicate_legs(legs)
+        universe_hash = _universe_hash(requested_legs)
+        if _expected_universe_hash is not None and universe_hash != _expected_universe_hash:
+            raise QuoteRunStateError("requested legs do not match verified universe hash")
         con = self._connect()
         try:
             self._begin_immediate(con)
@@ -178,17 +248,35 @@ class NegRiskQuoteStore:
                     raise QuoteRunStateError(
                         "universe_taken_at_ms does not match the stored snapshot"
                     )
-                snapshot_legs = _snapshot_legs(con, universe_snapshot_id)
+                if _require_verified:
+                    latest = _latest_completed_published_snapshot(con)
+                    if latest is None or int(latest[0]) != universe_snapshot_id:
+                        raise QuoteRunStateError(
+                            "verified universe snapshot is no longer the latest published truth"
+                        )
+                    verified = _verified_universe_for_snapshot(
+                        con,
+                        snapshot_id=universe_snapshot_id,
+                        taken_at_ms=universe_taken_at_ms,
+                    )
+                    snapshot_legs = verified.legs
+                    if verified.universe_hash != universe_hash:
+                        raise QuoteRunStateError(
+                            "requested legs do not match verified snapshot membership"
+                        )
+                else:
+                    snapshot_legs = _snapshot_legs(con, universe_snapshot_id)
                 if _legs_by_token(requested_legs) != _legs_by_token(snapshot_legs):
                     raise QuoteRunStateError("requested legs do not match snapshot membership")
                 cur = con.execute(
                     "INSERT INTO neg_risk_quote_runs("
-                    "universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
+                    "universe_snapshot_id, universe_taken_at_ms, universe_hash, quoted_at_ms, "
                     "requested_token_count, lease_expires_at_ms, status"
-                    ") VALUES (?, ?, ?, ?, ?, 'collecting')",
+                    ") VALUES (?, ?, ?, ?, ?, ?, 'collecting')",
                     (
                         universe_snapshot_id,
                         universe_taken_at_ms,
+                        universe_hash,
                         quoted_at_ms,
                         len(requested_legs),
                         now_ms + QUOTE_RUN_LEASE_MS,
@@ -197,12 +285,15 @@ class NegRiskQuoteStore:
                 run_id = int(cur.lastrowid)
                 con.executemany(
                     "INSERT INTO neg_risk_quote_run_legs("
-                    "quote_run_id, neg_risk_market_id, market_id, condition_id, slug, yes_token_id"
-                    ") VALUES (?, ?, ?, ?, ?, ?)",
+                    "quote_run_id, neg_risk_market_id, event_id, membership_hash, "
+                    "market_id, condition_id, slug, yes_token_id"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (
                             run_id,
                             leg.neg_risk_market_id,
+                            leg.event_id,
+                            leg.membership_hash,
                             leg.market_id,
                             leg.condition_id,
                             leg.slug,
@@ -257,7 +348,8 @@ class NegRiskQuoteStore:
                 requested = {
                     str(row[4]): UniverseLeg(*row)
                     for row in con.execute(
-                        "SELECT neg_risk_market_id, market_id, condition_id, slug, yes_token_id "
+                        "SELECT neg_risk_market_id, market_id, condition_id, slug, yes_token_id, "
+                        "event_id, membership_hash "
                         "FROM neg_risk_quote_run_legs WHERE quote_run_id = ?",
                         (run_id,),
                     )
@@ -272,18 +364,23 @@ class NegRiskQuoteStore:
                         quote.condition_id,
                         quote.slug,
                         quote.yes_token_id,
+                        quote.event_id,
+                        quote.membership_hash,
                     )
                     if quote_leg != requested_leg:
                         raise ValueError("terminal quote identity does not match requested leg")
                 con.executemany(
                     "INSERT INTO neg_risk_quotes("
-                    "quote_run_id, neg_risk_market_id, market_id, condition_id, slug, "
-                    "yes_token_id, terminal_state, best_ask_price, best_ask_size"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "quote_run_id, neg_risk_market_id, event_id, membership_hash, "
+                    "market_id, condition_id, slug, yes_token_id, terminal_state, "
+                    "best_ask_price, best_ask_size"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         (
                             run_id,
                             quote.neg_risk_market_id,
+                            quote.event_id,
+                            quote.membership_hash,
                             quote.market_id,
                             quote.condition_id,
                             quote.slug,
@@ -349,7 +446,7 @@ class NegRiskQuoteStore:
                 row = con.execute(
                     "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
                     "requested_token_count, successful_response_count, status, failure_reason, "
-                    "completed_at_ms FROM neg_risk_quote_runs WHERE id = ?",
+                    "completed_at_ms, universe_hash FROM neg_risk_quote_runs WHERE id = ?",
                     (run_id,),
                 ).fetchone()
                 con.execute("COMMIT")
@@ -391,7 +488,8 @@ class NegRiskQuoteStore:
             row = con.execute(
                 "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
                 "requested_token_count, successful_response_count, status, failure_reason, "
-                "completed_at_ms FROM neg_risk_quote_runs WHERE status = 'complete' "
+                "completed_at_ms, universe_hash FROM neg_risk_quote_runs "
+                "WHERE status = 'complete' "
                 "ORDER BY quoted_at_ms DESC, id DESC LIMIT 1"
             ).fetchone()
         finally:
@@ -407,7 +505,8 @@ class NegRiskQuoteStore:
         try:
             rows = con.execute(
                 "SELECT neg_risk_market_id, market_id, condition_id, slug, yes_token_id, "
-                "terminal_state, best_ask_price, best_ask_size FROM neg_risk_quotes "
+                "terminal_state, best_ask_price, best_ask_size, event_id, membership_hash "
+                "FROM neg_risk_quotes "
                 "WHERE quote_run_id = ? ORDER BY neg_risk_market_id, market_id, yes_token_id",
                 (run.run_id,),
             ).fetchall()
@@ -421,7 +520,147 @@ class NegRiskQuoteStore:
             requested_token_count=run.requested_token_count,
             successful_response_count=run.successful_response_count,
             quotes=tuple(PersistedQuote(*row) for row in rows),
+            universe_hash=run.universe_hash,
         )
+
+
+def _latest_completed_published_snapshot(
+    con: sqlite3.Connection,
+) -> tuple[object, object] | None:
+    return con.execute(
+        "SELECT s.id,s.taken_at_ms FROM snapshots s "
+        "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id AND c.completed=1 "
+        "WHERE EXISTS (SELECT 1 FROM markets m WHERE m.snapshot_id=s.id) "
+        "ORDER BY s.id DESC LIMIT 1"
+    ).fetchone()
+
+
+def _verified_universe_for_snapshot(
+    con: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    taken_at_ms: int,
+) -> VerifiedQuoteUniverse:
+    truth_rows = con.execute(
+        "SELECT event_id,neg_risk_market_id,neg_risk_type,expected_member_count,"
+        "active_named_count,membership_hash,quality,reason "
+        "FROM neg_risk_group_truth WHERE snapshot_id=? "
+        "ORDER BY neg_risk_market_id",
+        (snapshot_id,),
+    ).fetchall()
+    market_rows = con.execute(
+        "SELECT event_id,neg_risk_market_id,market_id,condition_id,slug,yes_token_id,"
+        "active,closed,incomplete FROM markets "
+        "WHERE snapshot_id=? AND neg_risk_market_id IS NOT NULL "
+        "AND neg_risk_market_id!='' ORDER BY neg_risk_market_id,market_id",
+        (snapshot_id,),
+    ).fetchall()
+    membership_rows = con.execute(
+        "SELECT event_id,neg_risk_market_id,market_id,member_kind,active,closed "
+        "FROM event_market_memberships WHERE snapshot_id=? "
+        "ORDER BY neg_risk_market_id,market_id",
+        (snapshot_id,),
+    ).fetchall()
+    markets_by_group: dict[str, list[tuple[object, ...]]] = {}
+    for row in market_rows:
+        markets_by_group.setdefault(str(row[1]), []).append(row)
+    memberships_by_group: dict[str, list[tuple[object, ...]]] = {}
+    for row in membership_rows:
+        memberships_by_group.setdefault(str(row[1]), []).append(row)
+
+    legs: list[UniverseLeg] = []
+    rejections: list[GroupRejection] = []
+    for truth in truth_rows:
+        event_id = str(truth[0])
+        group_id = str(truth[1])
+        neg_risk_type = str(truth[2])
+        expected_member_count = int(truth[3])
+        active_named_count = int(truth[4])
+        membership_hash = str(truth[5])
+        quality = str(truth[6])
+        reason = str(truth[7]) if truth[7] is not None else "neg-risk-group-not-supported"
+        if neg_risk_type != "standard" or quality != "complete-supported":
+            rejections.append(GroupRejection(group_id, quality, reason))
+            continue
+
+        group_markets = markets_by_group.get(group_id, [])
+        group_memberships = memberships_by_group.get(group_id, [])
+        market_ids = {str(row[2]) for row in group_markets}
+        membership_ids = {str(row[2]) for row in group_memberships}
+        membership_matches = (
+            expected_member_count == active_named_count
+            and len(group_markets) == expected_member_count
+            and len(group_memberships) == expected_member_count
+            and market_ids == membership_ids
+            and all(
+                str(row[0]) == event_id
+                and str(row[1]) == group_id
+                and row[3] == "named"
+                and int(row[4]) == 1
+                and int(row[5]) == 0
+                for row in group_memberships
+            )
+            and all(
+                str(row[0]) == event_id
+                and str(row[1]) == group_id
+                and int(row[6]) == 1
+                and int(row[7]) == 0
+                and int(row[8]) == 0
+                and isinstance(row[5], str)
+                and bool(row[5])
+                for row in group_markets
+            )
+        )
+        if not membership_matches:
+            rejections.append(
+                GroupRejection(group_id, quality, "membership-market-mismatch")
+            )
+            continue
+        legs.extend(
+            UniverseLeg(
+                neg_risk_market_id=group_id,
+                market_id=str(row[2]),
+                condition_id=str(row[3]),
+                slug=str(row[4]) if row[4] is not None else None,
+                yes_token_id=str(row[5]),
+                event_id=event_id,
+                membership_hash=membership_hash,
+            )
+            for row in group_markets
+        )
+
+    ordered_legs = tuple(
+        sorted(
+            legs,
+            key=lambda leg: (
+                leg.neg_risk_market_id,
+                leg.membership_hash,
+                leg.market_id,
+                leg.yes_token_id,
+            ),
+        )
+    )
+    return VerifiedQuoteUniverse(
+        snapshot_id=snapshot_id,
+        taken_at_ms=taken_at_ms,
+        universe_hash=_universe_hash(ordered_legs),
+        legs=ordered_legs,
+        rejections=tuple(rejections),
+    )
+
+
+def _universe_hash(legs: tuple[UniverseLeg, ...]) -> str:
+    identity = sorted(
+        (
+            leg.neg_risk_market_id,
+            leg.membership_hash,
+            leg.market_id,
+            leg.yes_token_id,
+        )
+        for leg in legs
+    )
+    canonical = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _deduplicate_legs(legs: tuple[UniverseLeg, ...]) -> tuple[UniverseLeg, ...]:
@@ -510,6 +749,7 @@ def _quote_run_from_row(row: tuple[object, ...]) -> QuoteRun:
         status=str(row[6]),
         failure_reason=str(row[7]) if row[7] is not None else None,
         completed_at_ms=int(row[8]) if row[8] is not None else None,
+        universe_hash=str(row[9]),
     )
 
 

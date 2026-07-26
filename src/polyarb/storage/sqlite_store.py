@@ -375,6 +375,14 @@ class SQLiteStore:
                 "lease_expires_at_ms",
                 "INTEGER NOT NULL DEFAULT 0",
             )
+            _ensure_column(
+                "neg_risk_quote_runs",
+                "universe_hash",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            for table in ("neg_risk_quote_run_legs", "neg_risk_quotes"):
+                _ensure_column(table, "event_id", "TEXT NOT NULL DEFAULT ''")
+                _ensure_column(table, "membership_hash", "TEXT NOT NULL DEFAULT ''")
         finally:
             con.close()
 

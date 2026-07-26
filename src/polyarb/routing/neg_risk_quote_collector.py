@@ -14,16 +14,13 @@ from polyarb.routing.neg_risk_quote_store import (
     QUOTE_RUN_LEASE_MS,
     NegRiskQuoteStore,
     PersistedQuote,
+    QuoteRun,
     QuoteRunLeaseLostError,
     UniverseLeg,
 )
-
-
-class QuoteUniverseUnavailableError(RuntimeError):
-    """The latest snapshot cannot provide an eligible quote universe."""
-
-    def __init__(self) -> None:
-        super().__init__("quote-universe-unavailable")
+from polyarb.routing.neg_risk_quote_store import (
+    QuoteUniverseUnavailableError as QuoteUniverseUnavailableError,
+)
 
 
 class QuoteCollectionIntegrityError(RuntimeError):
@@ -48,6 +45,20 @@ class QuoteCollectionResult:
     successful_response_count: int
     quote_taken_at_ms: int
     elapsed_ms: int
+    universe_hash: str = ""
+
+    @classmethod
+    def from_run(cls, run: QuoteRun, *, elapsed_ms: int) -> QuoteCollectionResult:
+        return cls(
+            run_id=run.run_id,
+            status=run.status,
+            universe_snapshot_id=run.universe_snapshot_id,
+            requested_token_count=run.requested_token_count,
+            successful_response_count=run.successful_response_count,
+            quote_taken_at_ms=run.quoted_at_ms,
+            elapsed_ms=elapsed_ms,
+            universe_hash=run.universe_hash,
+        )
 
 
 _MISSING = object()
@@ -71,16 +82,23 @@ async def collect_neg_risk_quotes(
     so the collector can never finish alongside a replacement run.
     """
     clock = now_ms or quote_store.current_time_ms
-    universe = quote_store.latest_universe()
-    if universe is None or not universe[2]:
-        raise QuoteUniverseUnavailableError()
-    universe_snapshot_id, universe_taken_at_ms, legs = universe
-    token_ids = list({leg.yes_token_id: None for leg in legs})
+    universe = quote_store.latest_verified_universe()
+    legs = universe.legs
     quote_taken_at_ms = clock()
-    run_id = quote_store.begin_run(
-        universe_snapshot_id=universe_snapshot_id,
-        universe_taken_at_ms=universe_taken_at_ms,
-        legs=legs,
+    if not legs:
+        run_id = quote_store.begin_verified_run(
+            universe,
+            quoted_at_ms=quote_taken_at_ms,
+        )
+        completed = quote_store.complete_run(
+            run_id,
+            completed_at_ms=clock(),
+            successful_response_count=0,
+        )
+        return QuoteCollectionResult.from_run(completed, elapsed_ms=0)
+    token_ids = list({leg.yes_token_id: None for leg in legs})
+    run_id = quote_store.begin_verified_run(
+        universe,
         quoted_at_ms=quote_taken_at_ms,
     )
     failure_reason = "collector-error"
@@ -122,13 +140,8 @@ async def collect_neg_risk_quotes(
     except Exception:
         _best_effort_fail(quote_store, run_id, failure_reason)
         raise
-    return QuoteCollectionResult(
-        run_id=completed.run_id,
-        status=completed.status,
-        universe_snapshot_id=completed.universe_snapshot_id,
-        requested_token_count=completed.requested_token_count,
-        successful_response_count=completed.successful_response_count,
-        quote_taken_at_ms=completed.quoted_at_ms,
+    return QuoteCollectionResult.from_run(
+        completed,
         elapsed_ms=completed_at_ms - quote_taken_at_ms,
     )
 
@@ -264,6 +277,8 @@ def _terminal_quote_for_leg(leg: UniverseLeg, book: Any | None) -> PersistedQuot
             "executable",
             best[0],
             best[1],
+            event_id=leg.event_id,
+            membership_hash=leg.membership_hash,
         )
     return _non_executable(leg, "invalid-ask-price" if saw_invalid_price else "invalid-ask-size")
 
@@ -278,6 +293,8 @@ def _non_executable(leg: UniverseLeg, terminal_state: str) -> PersistedQuote:
         terminal_state,
         None,
         None,
+        event_id=leg.event_id,
+        membership_hash=leg.membership_hash,
     )
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -17,6 +19,8 @@ from polyarb.routing.neg_risk_quote_store import (
 from polyarb.storage.sqlite_store import SQLiteStore
 
 NOW_MS = 1_700_000_000_000
+EVENT_ID = "event-a"
+MEMBERSHIP_HASH = "membership-hash-a"
 
 
 @pytest.fixture
@@ -34,12 +38,52 @@ def quote_db(tmp_path):
         con.executemany(
             "INSERT INTO markets("
             "market_id, condition_id, slug, yes_token_id, active, closed, "
-            "neg_risk_market_id, fetched_at_ms, snapshot_id"
-            ") VALUES (?, ?, ?, ?, 1, 0, ?, ?, ?)",
+            "neg_risk_market_id, fetched_at_ms, snapshot_id, incomplete, event_id"
+            ") VALUES (?, ?, ?, ?, 1, 0, ?, ?, ?, 0, ?)",
             [
-                ("market-a", "condition-a", "alpha", "token-a", "group-a", NOW_MS, snapshot_id),
-                ("market-b", "condition-b", "beta", "token-b", "group-a", NOW_MS, snapshot_id),
+                (
+                    "market-a",
+                    "condition-a",
+                    "alpha",
+                    "token-a",
+                    "group-a",
+                    NOW_MS,
+                    snapshot_id,
+                    EVENT_ID,
+                ),
+                (
+                    "market-b",
+                    "condition-b",
+                    "beta",
+                    "token-b",
+                    "group-a",
+                    NOW_MS,
+                    snapshot_id,
+                    EVENT_ID,
+                ),
             ],
+        )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage("
+            "snapshot_id,completed,market_items,event_items"
+            ") VALUES (?,1,2,1)",
+            (snapshot_id,),
+        )
+        con.executemany(
+            "INSERT INTO event_market_memberships("
+            "snapshot_id,event_id,neg_risk_market_id,market_id,member_kind,active,closed"
+            ") VALUES (?,?,?,?, 'named',1,0)",
+            [
+                (snapshot_id, EVENT_ID, "group-a", "market-a"),
+                (snapshot_id, EVENT_ID, "group-a", "market-b"),
+            ],
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (?,?,?,'standard',2,2,?,'complete-supported',NULL)",
+            (snapshot_id, EVENT_ID, "group-a", MEMBERSHIP_HASH),
         )
     return path
 
@@ -453,7 +497,8 @@ def test_begin_recovers_legacy_null_collecting_lease(quote_db) -> None:
         con.execute(
             "CREATE TABLE neg_risk_quote_runs ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, universe_snapshot_id INTEGER NOT NULL, "
-            "universe_taken_at_ms INTEGER NOT NULL, quoted_at_ms INTEGER NOT NULL, "
+            "universe_taken_at_ms INTEGER NOT NULL, universe_hash TEXT NOT NULL DEFAULT '', "
+            "quoted_at_ms INTEGER NOT NULL, "
             "requested_token_count INTEGER NOT NULL, "
             "successful_response_count INTEGER NOT NULL DEFAULT 0, "
             "lease_expires_at_ms INTEGER, status TEXT NOT NULL, failure_reason TEXT, "
@@ -661,6 +706,152 @@ def test_latest_universe_reads_only_latest_active_complete_membership(quote_db) 
         )
 
     assert store.latest_universe() == (latest_id, NOW_MS, ())
+
+
+def test_latest_verified_universe_excludes_augmented_and_reports_reason(quote_db) -> None:
+    with sqlite3.connect(quote_db) as con:
+        con.execute(
+            "INSERT INTO markets("
+            "market_id,condition_id,slug,yes_token_id,active,closed,"
+            "neg_risk_market_id,fetched_at_ms,snapshot_id,incomplete,event_id"
+            ") VALUES ('market-x','condition-x','x','token-x',1,0,"
+            "'group-x',?,?,0,'event-x')",
+            (NOW_MS, 1),
+        )
+        con.execute(
+            "INSERT INTO event_market_memberships("
+            "snapshot_id,event_id,neg_risk_market_id,market_id,member_kind,active,closed"
+            ") VALUES (1,'event-x','group-x','market-x','named',1,0)"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (1,'event-x','group-x','augmented',1,1,'membership-hash-x',"
+            "'complete-unsupported','augmented-neg-risk-not-supported')"
+        )
+
+    universe = NegRiskQuoteStore(quote_db).latest_verified_universe()
+
+    assert {leg.neg_risk_market_id for leg in universe.legs} == {"group-a"}
+    assert {
+        (leg.event_id, leg.membership_hash)
+        for leg in universe.legs
+    } == {(EVENT_ID, MEMBERSHIP_HASH)}
+    expected_identity = sorted(
+        (
+            leg.neg_risk_market_id,
+            leg.membership_hash,
+            leg.market_id,
+            leg.yes_token_id,
+        )
+        for leg in universe.legs
+    )
+    assert universe.universe_hash == hashlib.sha256(
+        json.dumps(
+            expected_identity,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert [
+        (rejection.group_id, rejection.quality, rejection.reason)
+        for rejection in universe.rejections
+    ] == [
+        (
+            "group-x",
+            "complete-unsupported",
+            "augmented-neg-risk-not-supported",
+        )
+    ]
+
+
+def test_latest_verified_universe_ignores_complete_but_unpublished_snapshot(quote_db) -> None:
+    with sqlite3.connect(quote_db) as con:
+        con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path"
+            ") VALUES (?,?,'subset',1,0,'diagnostic.parquet')",
+            (NOW_MS, NOW_MS),
+        )
+        diagnostic_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
+        con.execute(
+            "INSERT INTO snapshot_source_coverage("
+            "snapshot_id,completed,market_items,event_items"
+            ") VALUES (?,1,1,1)",
+            (diagnostic_id,),
+        )
+
+    universe = NegRiskQuoteStore(quote_db).latest_verified_universe()
+
+    assert universe.snapshot_id == 1
+    assert universe.taken_at_ms == NOW_MS - 1_000
+
+
+def test_missing_required_market_rejects_whole_standard_group(quote_db) -> None:
+    with sqlite3.connect(quote_db) as con:
+        con.execute("DELETE FROM markets WHERE market_id='market-b'")
+
+    universe = NegRiskQuoteStore(quote_db).latest_verified_universe()
+
+    assert universe.legs == ()
+    assert [
+        (rejection.group_id, rejection.quality, rejection.reason)
+        for rejection in universe.rejections
+    ] == [
+        (
+            "group-a",
+            "complete-supported",
+            "membership-market-mismatch",
+        )
+    ]
+
+
+def test_verified_run_persists_universe_event_and_membership_identity(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    universe = store.latest_verified_universe()
+
+    run_id = store.begin_verified_run(universe, quoted_at_ms=NOW_MS)
+    store.record_terminal_quotes(
+        run_id,
+        tuple(
+            PersistedQuote(
+                leg.neg_risk_market_id,
+                leg.market_id,
+                leg.condition_id,
+                leg.slug,
+                leg.yes_token_id,
+                "missing-book",
+                None,
+                None,
+                event_id=leg.event_id,
+                membership_hash=leg.membership_hash,
+            )
+            for leg in universe.legs
+        ),
+    )
+    completed = store.complete_run(
+        run_id,
+        completed_at_ms=NOW_MS + 1,
+        successful_response_count=0,
+    )
+
+    assert completed.universe_hash == universe.universe_hash
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT universe_hash FROM neg_risk_quote_runs WHERE id=?",
+            (run_id,),
+        ).fetchone() == (universe.universe_hash,)
+        assert con.execute(
+            "SELECT DISTINCT event_id,membership_hash "
+            "FROM neg_risk_quote_run_legs WHERE quote_run_id=?",
+            (run_id,),
+        ).fetchall() == [(EVENT_ID, MEMBERSHIP_HASH)]
+        assert con.execute(
+            "SELECT DISTINCT event_id,membership_hash "
+            "FROM neg_risk_quotes WHERE quote_run_id=?",
+            (run_id,),
+        ).fetchall() == [(EVENT_ID, MEMBERSHIP_HASH)]
 
 
 def test_begin_rejects_duplicate_token_with_inconsistent_identity(quote_db) -> None:

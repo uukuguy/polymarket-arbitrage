@@ -217,6 +217,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   universe_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
   universe_taken_at_ms INTEGER NOT NULL,
+  universe_hash TEXT NOT NULL DEFAULT '',
   quoted_at_ms INTEGER NOT NULL,
   requested_token_count INTEGER NOT NULL CHECK(requested_token_count >= 0),
   successful_response_count INTEGER NOT NULL DEFAULT 0
@@ -240,6 +241,8 @@ CREATE INDEX IF NOT EXISTS idx_neg_risk_quote_runs_select
 CREATE TABLE IF NOT EXISTS neg_risk_quote_run_legs (
   quote_run_id INTEGER NOT NULL REFERENCES neg_risk_quote_runs(id),
   neg_risk_market_id TEXT NOT NULL,
+  event_id TEXT NOT NULL DEFAULT '',
+  membership_hash TEXT NOT NULL DEFAULT '',
   market_id TEXT NOT NULL,
   condition_id TEXT NOT NULL,
   slug TEXT,
@@ -250,6 +253,8 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_run_legs (
 CREATE TABLE IF NOT EXISTS neg_risk_quotes (
   quote_run_id INTEGER NOT NULL REFERENCES neg_risk_quote_runs(id),
   neg_risk_market_id TEXT NOT NULL,
+  event_id TEXT NOT NULL DEFAULT '',
+  membership_hash TEXT NOT NULL DEFAULT '',
   market_id TEXT NOT NULL,
   condition_id TEXT NOT NULL,
   slug TEXT,
