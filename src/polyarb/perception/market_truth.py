@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -120,3 +120,87 @@ def membership_hash(
     ]
     raw = json.dumps([event_id, group_id, canonical], separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _strict_market_identity(raw: object) -> str | None:
+    if type(raw) is not str:
+        return None
+    value = raw.strip()
+    if not value or value != raw:
+        return None
+    return value
+
+
+def _strict_market_bool(raw: object) -> bool | None:
+    if type(raw) is bool:
+        return raw
+    if type(raw) is int and raw in (0, 1):
+        return bool(raw)
+    return None
+
+
+def market_truth_mismatch_reason(
+    event_members: Sequence[EventMember],
+    group_truths: Sequence[GroupTruth],
+    market_rows: Sequence[Mapping[str, object]],
+) -> str | None:
+    """Return the first semantic mismatch between published rows and event truth."""
+    members_by_id = {member.market_id: member for member in event_members}
+    truth_keys = {(truth.event_id, truth.group_id) for truth in group_truths}
+    rows_by_id: dict[str, Mapping[str, object]] = {}
+    row_states: dict[str, tuple[bool, bool, bool]] = {}
+
+    for row in market_rows:
+        market_id = _strict_market_identity(row.get("market_id"))
+        if market_id is None:
+            return "published-market-truth-mismatch:market-id"
+        if market_id in rows_by_id:
+            return f"published-market-truth-mismatch:duplicate-market-id:{market_id}"
+        active = _strict_market_bool(row.get("active"))
+        closed = _strict_market_bool(row.get("closed"))
+        neg_risk = _strict_market_bool(row.get("neg_risk"))
+        for field, value in (
+            ("active", active),
+            ("closed", closed),
+            ("neg-risk", neg_risk),
+        ):
+            if value is None:
+                return f"published-market-truth-mismatch:{field}-invalid:{market_id}"
+        rows_by_id[market_id] = row
+        row_states[market_id] = (active, closed, neg_risk)
+
+    for member in event_members:
+        row = rows_by_id.get(member.market_id)
+        if row is None:
+            return f"published-members-missing:{member.market_id}"
+        event_id = _strict_market_identity(row.get("event_id"))
+        if event_id != member.event_id:
+            return f"published-market-truth-mismatch:event-id:{member.market_id}"
+        group_id = _strict_market_identity(row.get("neg_risk_market_id"))
+        if group_id != member.group_id:
+            return f"published-market-truth-mismatch:group-id:{member.market_id}"
+        active, closed, neg_risk = row_states[member.market_id]
+        if neg_risk is not True:
+            return f"published-market-truth-mismatch:neg-risk-false:{member.market_id}"
+        if active != member.active:
+            return f"published-market-truth-mismatch:active:{member.market_id}"
+        if closed != member.closed:
+            return f"published-market-truth-mismatch:closed:{member.market_id}"
+
+    for market_id, row in rows_by_id.items():
+        _, _, neg_risk = row_states[market_id]
+        if neg_risk is not True:
+            continue
+        event_id = _strict_market_identity(row.get("event_id"))
+        group_id = _strict_market_identity(row.get("neg_risk_market_id"))
+        member = members_by_id.get(market_id)
+        if (
+            event_id is None
+            or group_id is None
+            or (event_id, group_id) not in truth_keys
+            or member is None
+            or member.event_id != event_id
+            or member.group_id != group_id
+        ):
+            return f"published-neg-risk-without-truth:{market_id}"
+    return None

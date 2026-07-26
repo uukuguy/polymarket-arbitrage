@@ -59,7 +59,12 @@ from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient, PaginationCoverage
 from polyarb.config import Settings
 from polyarb.events.bus import publish_snapshot_complete
-from polyarb.perception.market_truth import EventMember, GroupTruth, SourceCoverage
+from polyarb.perception.market_truth import (
+    EventMember,
+    GroupTruth,
+    SourceCoverage,
+    market_truth_mismatch_reason,
+)
 from polyarb.snapshot.cache import ChunkCache
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_streaming
@@ -203,6 +208,7 @@ def _include_in_snapshot(mode: str, market: dict, threshold: float) -> bool:
 def _reconcile_market_truth(
     *,
     observed_market_ids: set[str],
+    normalized_market_rows: list[dict],
     market_to_event_map: dict[str, str],
     event_members: list[EventMember],
     group_truths: list[GroupTruth],
@@ -250,6 +256,13 @@ def _reconcile_market_truth(
     missing_mapped_markets = sorted(set(market_to_event_map) - observed_market_ids)
     if missing_mapped_markets:
         return f"event-map-missing-market:{','.join(missing_mapped_markets[:5])}"[:160]
+    semantic_reason = market_truth_mismatch_reason(
+        event_members,
+        group_truths,
+        normalized_market_rows,
+    )
+    if semantic_reason is not None:
+        return semantic_reason[:160]
     return None
 
 
@@ -429,6 +442,7 @@ async def run_snapshot(
     if events_coverage.result.completed and markets_coverage.result.completed:
         reconciliation_reason = _reconcile_market_truth(
             observed_market_ids=seen_ids,
+            normalized_market_rows=target_markets,
             market_to_event_map=market_to_event_map,
             event_members=event_members,
             group_truths=group_truths,

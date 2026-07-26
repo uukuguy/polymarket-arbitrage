@@ -23,6 +23,7 @@ from polyarb.perception.market_truth import (
     EventMember,
     GroupTruth,
     SourceCoverage,
+    market_truth_mismatch_reason,
     membership_hash,
 )
 from polyarb.storage.schemas import (
@@ -153,16 +154,14 @@ def _validate_publication_boundary(
         )
 
 
-def _validate_published_member_ids(
+def _validate_published_market_truth(
     event_members: list[EventMember],
-    market_ids: set[str],
+    group_truths: list[GroupTruth],
+    market_rows: list[dict],
 ) -> None:
-    missing = sorted({member.market_id for member in event_members} - market_ids)
-    if missing:
-        raise _truth_error(
-            "market-truth-invalid",
-            f"published-members-missing:{','.join(missing[:5])}",
-        )
+    reason = market_truth_mismatch_reason(event_members, group_truths, market_rows)
+    if reason is not None:
+        raise _truth_error("market-truth-invalid", reason)
 
 
 def _rollback_without_masking(con: object) -> None:
@@ -182,13 +181,32 @@ def _row_to_tuple(row: dict, snapshot_id: int) -> tuple:
     pass 0 as a placeholder before the snapshot_id is known).
     """
     out: list = []
+    market_id = row.get("market_id")
     for col in MARKETS_COLUMN_ORDER:
         if col == "snapshot_id":
             out.append(snapshot_id)
             continue
         v = row.get(col)
+        if col in ("market_id", "event_id", "neg_risk_market_id") and v is not None:
+            if type(v) is not str or not v.strip() or v != v.strip():
+                field = {
+                    "market_id": "market-id",
+                    "event_id": "event-id",
+                    "neg_risk_market_id": "group-id",
+                }[col]
+                raise _truth_error(
+                    "market-truth-invalid",
+                    f"published-market-truth-mismatch:{field}:{market_id}",
+                )
         if col in _BOOL_COLUMNS and v is not None:
-            v = int(bool(v))
+            if type(v) is bool:
+                v = int(v)
+            elif type(v) is not int or v not in (0, 1):
+                field = col.replace("_", "-")
+                raise _truth_error(
+                    "market-truth-invalid",
+                    f"published-market-truth-mismatch:{field}-invalid:{market_id}",
+                )
         out.append(v)
     return tuple(out)
 
@@ -410,9 +428,10 @@ class SQLiteStore:
             publish_markets=publish_markets,
         )
         if publish_markets:
-            _validate_published_member_ids(
+            _validate_published_market_truth(
                 event_members,
-                {str(row.get("market_id")) for row in market_rows},
+                group_truths,
+                market_rows,
             )
 
         con = sqlite3.connect(self._db_path, isolation_level=None)
@@ -622,14 +641,26 @@ class SQLiteStore:
                 batch.clear()
 
             if publish_markets:
-                published_market_ids = {
-                    row[0]
+                published_market_rows = [
+                    {
+                        "market_id": row[0],
+                        "event_id": row[1],
+                        "neg_risk_market_id": row[2],
+                        "neg_risk": row[3],
+                        "active": row[4],
+                        "closed": row[5],
+                    }
                     for row in con.execute(
-                        "SELECT market_id FROM markets WHERE snapshot_id=?",
+                        "SELECT market_id,event_id,neg_risk_market_id,"
+                        "neg_risk,active,closed FROM markets WHERE snapshot_id=?",
                         (snapshot_id,),
                     ).fetchall()
-                }
-                _validate_published_member_ids(event_members, published_market_ids)
+                ]
+                _validate_published_market_truth(
+                    event_members,
+                    group_truths,
+                    published_market_rows,
+                )
 
             # Patch market_count to the real value (still inside same tx)
             con.execute(

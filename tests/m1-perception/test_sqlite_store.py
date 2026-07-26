@@ -92,6 +92,19 @@ def _valid_truth() -> tuple[list[EventMember], GroupTruth]:
     )
 
 
+def _truth_market(member: EventMember, **overrides) -> dict:
+    row = make_market(
+        member.market_id,
+        event_id=member.event_id,
+        neg_risk_market_id=member.group_id,
+        neg_risk=True,
+        active=member.active,
+        closed=member.closed,
+    )
+    row.update(overrides)
+    return row
+
+
 def _write_with_mode(
     store: SQLiteStore,
     *,
@@ -197,7 +210,7 @@ def test_purge_old_snapshots_removes_market_truth_rows(store: SQLiteStore) -> No
                 mode="subset",
                 parquet_path="",
                 is_valid=True,
-                market_rows=[make_market(member.market_id)],
+                market_rows=[_truth_market(member)],
                 issues=[],
                 source_coverage=SourceCoverage.complete(1, 1),
                 event_members=[member],
@@ -391,7 +404,7 @@ def test_group_truth_and_membership_are_same_snapshot_transaction(
         mode="subset",
         parquet_path="truth.parquet",
         is_valid=True,
-        market_rows=[make_market("m1"), make_market("m2")],
+        market_rows=[_truth_market(member) for member in members],
         issues=[],
         source_coverage=SourceCoverage.complete(2, 1),
         event_members=members,
@@ -531,7 +544,7 @@ def test_publish_boundary_rejects_contradictory_truth_before_replacement(
         _write_with_mode(
             store,
             streaming=streaming,
-            market_rows=[make_market("m1"), make_market("m2")],
+            market_rows=[_truth_market(member) for member in members],
             is_valid=is_valid,
             issues=issues,
             source_coverage=source_coverage,
@@ -626,7 +639,7 @@ def test_publish_rejects_missing_authoritative_member_and_restores_last_view(
         _write_with_mode(
             store,
             streaming=streaming,
-            market_rows=[make_market("m1")],
+            market_rows=[_truth_market(members[0])],
             is_valid=True,
             issues=[],
             source_coverage=SourceCoverage.complete(1, 1),
@@ -640,6 +653,133 @@ def test_publish_rejects_missing_authoritative_member_and_restores_last_view(
             ("baseline", baseline_id)
         ]
         assert con.execute("SELECT COUNT(*) FROM snapshots").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    ("case", "overrides"),
+    [
+        ("event-id", {"event_id": "other-event"}),
+        ("group-id", {"neg_risk_market_id": "other-group"}),
+        ("neg-risk-false", {"neg_risk": False}),
+        ("active", {"active": False}),
+        ("active-invalid", {"active": "1"}),
+        ("closed", {"closed": True}),
+    ],
+)
+def test_publish_rejects_member_market_semantic_mismatch_and_restores_last_view(
+    store: SQLiteStore,
+    streaming: bool,
+    case: str,
+    overrides: dict,
+) -> None:
+    baseline_id = store.write_snapshot(
+        taken_at_ms=1,
+        finished_at_ms=2,
+        mode="subset",
+        parquet_path="baseline.parquet",
+        is_valid=True,
+        market_rows=[make_market("baseline")],
+        issues=[],
+        **_complete_publication(),
+    )
+    members, truth = _valid_truth()
+    candidate_rows = [
+        _truth_market(members[0], **overrides),
+        _truth_market(members[1]),
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match=f"published-market-truth-mismatch:{case}",
+    ):
+        _write_with_mode(
+            store,
+            streaming=streaming,
+            market_rows=candidate_rows,
+            is_valid=True,
+            issues=[],
+            source_coverage=SourceCoverage.complete(2, 1),
+            event_members=members,
+            group_truths=[truth],
+            publish_markets=True,
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT market_id, snapshot_id FROM markets").fetchall() == [
+            ("baseline", baseline_id)
+        ]
+        assert con.execute("SELECT COUNT(*) FROM snapshots").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_publish_rejects_numeric_market_id_before_sqlite_can_stringify_it(
+    store: SQLiteStore,
+    streaming: bool,
+) -> None:
+    member = EventMember("e1", "g1", "7", "named", True, False)
+    truth = GroupTruth(
+        event_id="e1",
+        group_id="g1",
+        neg_risk_type="standard",
+        expected_member_count=1,
+        active_named_count=1,
+        membership_hash=membership_hash("e1", "g1", [member]),
+        quality="complete-supported",
+        reason=None,
+    )
+    malformed_id_row = _truth_market(member)
+    malformed_id_row["market_id"] = 7
+
+    with pytest.raises(
+        ValueError,
+        match="published-market-truth-mismatch:market-id",
+    ):
+        _write_with_mode(
+            store,
+            streaming=streaming,
+            market_rows=[malformed_id_row],
+            is_valid=True,
+            issues=[],
+            source_coverage=SourceCoverage.complete(1, 1),
+            event_members=[member],
+            group_truths=[truth],
+            publish_markets=True,
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM snapshots").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_publish_rejects_market_side_neg_risk_group_without_truth(
+    store: SQLiteStore,
+    streaming: bool,
+) -> None:
+    orphan = make_market(
+        "orphan",
+        event_id="event-orphan",
+        neg_risk_market_id="group-orphan",
+        neg_risk=True,
+        active=True,
+        closed=False,
+    )
+
+    with pytest.raises(ValueError, match="published-neg-risk-without-truth"):
+        _write_with_mode(
+            store,
+            streaming=streaming,
+            market_rows=[orphan],
+            is_valid=True,
+            issues=[],
+            source_coverage=SourceCoverage.complete(1, 1),
+            event_members=[],
+            group_truths=[],
+            publish_markets=True,
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM snapshots").fetchone() == (0,)
 
 
 def test_write_snapshot_appends_to_snapshots_table(store: SQLiteStore) -> None:

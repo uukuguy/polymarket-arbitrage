@@ -14,6 +14,8 @@ Phase 1.1 Amendment 01:
 
 from __future__ import annotations
 
+import pytest
+
 from polyarb.perception.market_truth import CONFLICTING_EVENT_MEMBERSHIP_REASON
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 
@@ -116,6 +118,44 @@ def test_normalize_missing_id_returns_none() -> None:
     assert normalize_market({}) is None
     # Empty string is also unrecoverable (no PK).
     assert normalize_market(make_raw(id="")) is None
+
+
+def test_normalize_market_strips_authoritative_market_id_before_lookup() -> None:
+    out = normalize_market(
+        make_raw(id="  M-42  "),
+        market_to_event_map={"M-42": "EV-7"},
+    )
+
+    assert out is not None
+    assert out["market_id"] == "M-42"
+    assert out["event_id"] == "EV-7"
+
+
+@pytest.mark.parametrize("invalid_id", [False, True, 7, [], {}, "   "])
+def test_normalize_market_rejects_non_string_or_blank_identity(
+    invalid_id: object,
+) -> None:
+    assert normalize_market(make_raw(id=invalid_id)) is None
+
+
+@pytest.mark.parametrize(
+    ("raw_field", "normalized_field"),
+    [
+        ("active", "active"),
+        ("closed", "closed"),
+        ("negRisk", "neg_risk"),
+    ],
+)
+@pytest.mark.parametrize("invalid_value", [None, 0, 1, "false", [], {}])
+def test_normalize_market_preserves_malformed_boolean_as_unknown(
+    raw_field: str,
+    normalized_field: str,
+    invalid_value: object,
+) -> None:
+    out = normalize_market(make_raw(**{raw_field: invalid_value}))
+
+    assert out is not None
+    assert out[normalized_field] is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

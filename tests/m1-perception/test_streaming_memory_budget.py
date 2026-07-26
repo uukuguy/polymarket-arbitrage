@@ -74,7 +74,14 @@ async def test_streaming_run_under_memory_budget(tmp_path: Path, gamma_payload_f
     N_EVENTS = 10_000
 
     # Pre-generate as Python lists; respx slices these per-page.
-    all_markets = [make_realistic_market(i) for i in range(N_MARKETS)]
+    all_markets = [
+        {
+            **make_realistic_market(i),
+            "negRisk": False,
+            "negRiskMarketID": None,
+        }
+        for i in range(N_MARKETS)
+    ]
     all_events = [make_realistic_event(i) for i in range(N_EVENTS)]
 
     # Production-default $1k threshold (config.py default). With the log-normal
@@ -217,7 +224,14 @@ async def test_streaming_no_raw_markets_accumulation_smoke(
 
     N_MARKETS = 20_000
     N_EVENTS = 10_000
-    all_markets = [make_realistic_market(i) for i in range(N_MARKETS)]
+    all_markets = [
+        {
+            **make_realistic_market(i),
+            "negRisk": False,
+            "negRiskMarketID": None,
+        }
+        for i in range(N_MARKETS)
+    ]
     all_events = [make_realistic_event(i) for i in range(N_EVENTS)]
 
     settings = Settings(

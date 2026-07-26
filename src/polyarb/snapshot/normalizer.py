@@ -72,6 +72,11 @@ def _safe_float(v: Any) -> float | None:
         return None
 
 
+def _strict_bool(raw: Any) -> bool | None:
+    """Preserve exact external booleans; malformed state remains unknown."""
+    return raw if type(raw) is bool else None
+
+
 def _strict_identity(raw: Any) -> str | None:
     """Return a stripped authoritative string ID; reject every non-string."""
     if type(raw) is not str:
@@ -115,9 +120,9 @@ def normalize_market(raw: dict, market_to_event_map: dict[str, str] | None = Non
     market_id → event_id; if unavailable for a given market, ``event_id`` is
     None (acceptable — orphan markets exist when /events doesn't list them).
     """
-    market_id_raw = raw.get("id")
-    if market_id_raw is None or market_id_raw == "":
-        logger.warning(f"normalize_market: missing 'id' in raw payload (slug={raw.get('slug')})")
+    market_id_str = _strict_identity(raw.get("id"))
+    if market_id_str is None:
+        logger.warning(f"normalize_market: invalid 'id' in raw payload (slug={raw.get('slug')})")
         return None
 
     # ── token IDs (Pitfall 2 + Pitfall 3) ────────────────────────────────────
@@ -145,7 +150,6 @@ def normalize_market(raw: dict, market_to_event_map: dict[str, str] | None = Non
     end_time_ms = _parse_end_time_ms(end_iso)
 
     # ── Phase 1.1 Amendment 01: event_id from reverse lookup ──────────────────
-    market_id_str = str(market_id_raw)
     event_id: str | None = None
     if market_to_event_map is not None:
         event_id = market_to_event_map.get(market_id_str)
@@ -166,10 +170,10 @@ def normalize_market(raw: dict, market_to_event_map: dict[str, str] | None = Non
         "best_ask_price": None,
         "best_ask_size": None,
         "end_time_ms": end_time_ms,
-        "active": bool(raw.get("active", False)),
-        "closed": bool(raw.get("closed", False)),
-        "neg_risk": bool(raw.get("negRisk", False)),
-        "neg_risk_market_id": raw.get("negRiskMarketID"),
+        "active": _strict_bool(raw.get("active")),
+        "closed": _strict_bool(raw.get("closed")),
+        "neg_risk": _strict_bool(raw.get("negRisk")),
+        "neg_risk_market_id": _strict_identity(raw.get("negRiskMarketID")),
         # Stamped by orchestrator at CLOB-fetch completion (Pitfall 6):
         # Phase 02: stage stamp filled by orchestrator stage 5; see schemas.py for semantic note
         "fetched_at_ms": None,
