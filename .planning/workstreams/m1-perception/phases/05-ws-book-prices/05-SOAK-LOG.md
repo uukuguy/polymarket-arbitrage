@@ -463,3 +463,28 @@ post-restart quote row is run 78 at
 `2026-07-26T03:54:09.630Z` (`quoted_at_ms=1785038049630`), complete
 1,278/1,278. No 24-hour verdict may be calculated before
 `2026-07-27T03:54:09.630Z`.
+
+### Reconciliation with Phase 05.4 A7
+
+Phase 05.4 A7 is the authoritative L3 24-hour verdict. It replaces the
+spot-check observation contract, but does **not** rewrite either rejected
+diagnostic window above as a pass.
+
+- Exact interval:
+  `[2026-07-24T16:43:01.704189Z,2026-07-25T16:43:01.704189Z)`.
+- Source SHA `6471d415273748ce9480c9590d55ec09412db5c8`, Fly release 72,
+  machine `85e647c4eed598`, instance `01KYAFJDM7N3PFBJ8RXWXE2AFJ`,
+  DB boot `9eeab4d5-a09f-402b-b8b1-352fc377d852`.
+- Strict rows: 2,880 process-health, 14,400 per-market, and 288/288 promoter
+  ticks across five markets / ten tokens.
+- Maximum health sample gap `38.653337s`, maximum promoter schedule lag
+  `9.050592s`, and worst market freshness `111.039s`, below the strict
+  `<120s` limit.
+- Raw row-set hash `d4fc7567…`, final report hash `dc2d4d7e…`, and common
+  soak hash `b4e00aeb…` reproduced independently after T+24.
+
+Verdict: **A7 PASS is accepted for Phase 05 L3 continuity.** Attempts A1–A6
+remain immutable rejected evidence, and the two legacy windows in this file
+remain diagnostic-only / NOT-CLOSED. Phase 05 as a whole is not signed by this
+reconciliation alone: the post-restart quote interval and authenticated
+Dashboard browser acceptance remain separate mandatory gates.
