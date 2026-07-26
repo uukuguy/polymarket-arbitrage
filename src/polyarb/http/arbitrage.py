@@ -23,7 +23,7 @@ async def opportunities(request: Request) -> JSONResponse:
     try:
         min_edge_bps = float(request.query_params.get("min_edge_bps", "0"))
         limit = min(100, max(1, int(request.query_params.get("limit", "20"))))
-        if not isfinite(min_edge_bps):
+        if not isfinite(min_edge_bps) or min_edge_bps < 0:
             raise ValueError
     except ValueError:
         return JSONResponse({"error": "invalid numeric query"}, status_code=400)

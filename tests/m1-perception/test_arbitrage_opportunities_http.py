@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from polyarb.routing.neg_risk_quote_store import QuoteUniverseUnavailableError
+from polyarb.routing.neg_risk_quote_store import (
+    QuoteProjectionIntegrityError,
+    QuoteUniverseUnavailableError,
+)
 from polyarb.routing.opportunity_scanner import (
     OpportunityScanResult,
     QuoteRunUnavailableError,
@@ -55,12 +58,25 @@ def test_opportunity_endpoint_rejects_non_finite_threshold(http_test_client) -> 
     assert response.json() == {"error": "invalid numeric query"}
 
 
+def test_opportunity_endpoint_rejects_negative_threshold_as_caller_error(
+    http_test_client,
+) -> None:
+    response = http_test_client.get("/arbitrage/opportunities?min_edge_bps=-1")
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid numeric query"}
+
+
 def test_opportunity_endpoint_returns_bounded_503_for_quote_run_preconditions(
     http_test_client, monkeypatch
 ) -> None:
     cases = [
         (
             QuoteUniverseUnavailableError("source coverage incomplete"),
+            "verified market universe unavailable",
+        ),
+        (
+            QuoteProjectionIntegrityError(),
             "verified market universe unavailable",
         ),
         (QuoteRunUnavailableError("quote run unavailable"), "verified market universe unavailable"),

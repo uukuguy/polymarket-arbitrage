@@ -364,7 +364,7 @@ def scan(
 def scan_quotes(
     db_path: Path = typer.Option(Path("data/state.db"), "--db-path"),
     min_edge_bps: float = typer.Option(0.0, "--min-edge-bps"),
-    max_quote_age_s: float = typer.Option(300.0, "--max-quote-age-s"),
+    max_quote_age_s: int = typer.Option(300, "--max-quote-age-s", min=0),
     max_universe_age_s: float = typer.Option(50_400.0, "--max-universe-age-s"),
     limit: int = typer.Option(20, "--limit"),
 ) -> None:

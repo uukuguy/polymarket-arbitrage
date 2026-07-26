@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from decimal import Decimal
+from math import isfinite
 from typing import Literal
 
 from polyarb.routing.opportunity_scanner import BOUNDED_REJECTION_REASONS
@@ -195,10 +197,8 @@ def _is_valid_success_payload(payload: object) -> bool:
     rejections = payload.get("rejections")
     opportunities = payload.get("opportunities")
     return (
-        isinstance(strategy, str)
-        and bool(strategy)
-        and isinstance(profit_basis, str)
-        and bool(profit_basis)
+        strategy == "neg-risk-buy-all"
+        and profit_basis == "gross-before-fees"
         and coverage == "verified-standard-neg-risk"
         and type(source_snapshot_id) is int
         and source_snapshot_id > 0
@@ -214,7 +214,13 @@ def _is_valid_success_payload(payload: object) -> bool:
         and isinstance(opportunities, list)
         and len(opportunities) == count
         and all(
-            _is_valid_opportunity_identity(item, quote_run_id)
+            _is_valid_opportunity(
+                item,
+                source_snapshot_id=source_snapshot_id,
+                universe_hash=universe_hash,
+                quote_run_id=quote_run_id,
+                quote_sla_seconds=quote_sla_seconds,
+            )
             for item in opportunities
         )
     )
@@ -230,19 +236,157 @@ def _is_valid_rejections(rejections: object) -> bool:
     )
 
 
-def _is_valid_opportunity_identity(
+def _is_valid_opportunity(
     opportunity: object,
-    quote_run_id: object,
+    *,
+    source_snapshot_id: int,
+    universe_hash: str,
+    quote_run_id: int,
+    quote_sla_seconds: int,
 ) -> bool:
     if not isinstance(opportunity, dict):
         return False
-    return (
-        all(
-            isinstance(opportunity.get(field), str)
-            and bool(opportunity[field])
-            for field in ("event_id", "group_id", "membership_hash")
+    if not (
+        _has_nonempty_strings(
+            opportunity,
+            ("event_id", "group_id", "membership_hash"),
         )
         and opportunity.get("quality") == "complete-supported"
         and type(opportunity.get("quote_run_id")) is int
         and opportunity["quote_run_id"] == quote_run_id
+        and _optional_identity_matches(
+            opportunity,
+            fields=("snapshot_id", "universe_snapshot_id", "source_snapshot_id"),
+            expected=source_snapshot_id,
+        )
+        and _optional_identity_matches(
+            opportunity,
+            fields=("universe_hash",),
+            expected=universe_hash,
+        )
+    ):
+        return False
+
+    quote_age = _finite_number(opportunity.get("quote_age_seconds"))
+    sum_asks = _finite_number(opportunity.get("sum_asks"))
+    gross_edge_bps = _finite_number(opportunity.get("gross_edge_bps"))
+    executable_quantity = _finite_number(opportunity.get("executable_quantity"))
+    gross_profit = _finite_number(opportunity.get("gross_profit"))
+    if (
+        quote_age is None
+        or not 0 <= quote_age <= quote_sla_seconds
+        or sum_asks is None
+        or not 0 < sum_asks < 1
+        or gross_edge_bps is None
+        or gross_edge_bps <= 0
+        or executable_quantity is None
+        or executable_quantity <= 0
+        or gross_profit is None
+        or gross_profit <= 0
+        or not _optional_finite_nonnegative(
+            opportunity,
+            ("snapshot_age_seconds", "universe_age_seconds"),
+        )
+    ):
+        return False
+
+    legs = opportunity.get("legs")
+    if not isinstance(legs, list) or not legs:
+        return False
+    parsed_legs = [_valid_leg_values(leg) for leg in legs]
+    if any(values is None for values in parsed_legs):
+        return False
+    complete_legs = [values for values in parsed_legs if values is not None]
+    identities = [values[0] for values in complete_legs]
+    if (
+        len(set(identities)) != len(identities)
+        or len({identity[0] for identity in identities}) != len(identities)
+        or len({identity[1] for identity in identities}) != len(identities)
+        or len({identity[2] for identity in identities}) != len(identities)
+    ):
+        return False
+    ask_prices = [values[1] for values in complete_legs]
+    ask_sizes = [values[2] for values in complete_legs]
+    expected_sum = sum(ask_prices, Decimal(0))
+    expected_edge = (Decimal(1) - expected_sum) * Decimal(10_000)
+    expected_quantity = min(ask_sizes)
+    expected_profit = expected_quantity * (Decimal(1) - expected_sum)
+    return (
+        Decimal(str(sum_asks)) == expected_sum
+        and Decimal(str(gross_edge_bps)) == expected_edge
+        and Decimal(str(executable_quantity)) == expected_quantity
+        and Decimal(str(gross_profit)) == expected_profit
+    )
+
+
+def _has_nonempty_strings(payload: dict, fields: tuple[str, ...]) -> bool:
+    return all(
+        isinstance(payload.get(field), str) and bool(payload[field].strip())
+        for field in fields
+    )
+
+
+def _optional_identity_matches(
+    payload: dict,
+    *,
+    fields: tuple[str, ...],
+    expected: object,
+) -> bool:
+    return all(
+        field not in payload
+        or (
+            type(payload[field]) is type(expected)
+            and payload[field] == expected
+        )
+        for field in fields
+    )
+
+
+def _optional_finite_nonnegative(
+    payload: dict,
+    fields: tuple[str, ...],
+) -> bool:
+    for field in fields:
+        if field not in payload:
+            continue
+        value = _finite_number(payload[field])
+        if value is None or value < 0:
+            return False
+    return True
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        numeric = float(value)
+    except OverflowError:
+        return None
+    return numeric if isfinite(numeric) else None
+
+
+def _valid_leg_values(
+    leg: object,
+) -> tuple[tuple[str, str, str], Decimal, Decimal] | None:
+    if not isinstance(leg, dict):
+        return None
+    if not _has_nonempty_strings(
+        leg,
+        ("market_id", "condition_id", "yes_token_id"),
+    ):
+        return None
+    if "slug" in leg and not isinstance(leg["slug"], str):
+        return None
+    ask_price = _finite_number(leg.get("ask_price"))
+    ask_size = _finite_number(leg.get("ask_size"))
+    if ask_price is None or not 0 < ask_price <= 1 or ask_size is None or ask_size <= 0:
+        return None
+    return (
+        (
+            leg["market_id"],
+            leg["condition_id"],
+            leg["yes_token_id"],
+        ),
+        Decimal(str(ask_price)),
+        Decimal(str(ask_size)),
     )

@@ -8,6 +8,7 @@ import pytest
 from polyarb.routing.neg_risk_quote_store import (
     NegRiskQuoteStore,
     PersistedQuote,
+    QuoteProjectionIntegrityError,
     QuoteUniverseUnavailableError,
 )
 from polyarb.routing.opportunity_scanner import (
@@ -326,6 +327,36 @@ def test_verified_scan_fails_closed_when_source_identity_drifts_after_run(
         )
 
     with pytest.raises(QuoteUniverseUnavailableError):
+        scan_verified_neg_risk_quote_run(
+            quote_db,
+            now_s=lambda: QUOTE_NOW_S,
+        )
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("best_ask_price", float("nan")),
+        ("best_ask_price", float("inf")),
+        ("best_ask_size", float("nan")),
+        ("best_ask_size", float("inf")),
+        ("best_ask_size", "not-a-number"),
+    ],
+)
+def test_verified_scan_fails_closed_on_unusable_executable_numeric_truth(
+    quote_db,
+    column: str,
+    value: object,
+) -> None:
+    _complete_quote_run(quote_db)
+    with sqlite3.connect(quote_db) as con:
+        con.execute("PRAGMA ignore_check_constraints=ON")
+        con.execute(
+            f"UPDATE neg_risk_quotes SET {column}=? WHERE yes_token_id='yes-1'",
+            (value,),
+        )
+
+    with pytest.raises(QuoteProjectionIntegrityError):
         scan_verified_neg_risk_quote_run(
             quote_db,
             now_s=lambda: QUOTE_NOW_S,

@@ -57,6 +57,13 @@ class QuoteUniverseUnavailableError(RuntimeError):
         super().__init__(detail)
 
 
+class QuoteProjectionIntegrityError(QuoteUniverseUnavailableError):
+    """A complete run cannot be proven against one atomic source view."""
+
+    def __init__(self) -> None:
+        super().__init__("quote-projection-integrity-unavailable")
+
+
 @dataclass(frozen=True)
 class UniverseLeg:
     neg_risk_market_id: str
@@ -120,8 +127,10 @@ class CompleteQuoteProjection:
     quoted_at_ms: int
     requested_token_count: int
     successful_response_count: int
+    run_legs: tuple[UniverseLeg, ...]
     quotes: tuple[PersistedQuote, ...]
-    universe_hash: str = ""
+    source_universe: VerifiedQuoteUniverse
+    universe_hash: str
 
 
 class NegRiskQuoteStore:
@@ -555,31 +564,217 @@ class NegRiskQuoteStore:
         return _quote_run_from_row(row) if row is not None else None
 
     def latest_complete_projection(self) -> CompleteQuoteProjection | None:
-        """Load metadata and every terminal row from exactly one complete run."""
-        run = self.latest_complete_run()
-        if run is None:
-            return None
-        con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        """Prove one complete run and its source chain in one read transaction."""
+        con = sqlite3.connect(
+            f"file:{self._db_path}?mode=ro",
+            uri=True,
+            isolation_level=None,
+        )
         try:
-            rows = con.execute(
-                "SELECT neg_risk_market_id, market_id, condition_id, slug, yes_token_id, "
-                "terminal_state, best_ask_price, best_ask_size, event_id, membership_hash "
-                "FROM neg_risk_quotes "
-                "WHERE quote_run_id = ? ORDER BY neg_risk_market_id, market_id, yes_token_id",
-                (run.run_id,),
+            con.execute("BEGIN")
+            run_rows = con.execute(
+                "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
+                "requested_token_count, successful_response_count, status, failure_reason, "
+                "completed_at_ms, universe_hash FROM neg_risk_quote_runs "
+                "WHERE status='complete' "
+                "ORDER BY quoted_at_ms DESC,id DESC"
             ).fetchall()
+            for run_row in run_rows:
+                run = _quote_run_from_row(run_row)
+                leg_rows = con.execute(
+                    "SELECT neg_risk_market_id,market_id,condition_id,slug,yes_token_id,"
+                    "event_id,membership_hash FROM neg_risk_quote_run_legs "
+                    "WHERE quote_run_id=? "
+                    "ORDER BY neg_risk_market_id,market_id,yes_token_id",
+                    (run.run_id,),
+                ).fetchall()
+                quote_rows = con.execute(
+                    "SELECT neg_risk_market_id,market_id,condition_id,slug,yes_token_id,"
+                    "terminal_state,best_ask_price,best_ask_size,event_id,membership_hash "
+                    "FROM neg_risk_quotes WHERE quote_run_id=? "
+                    "ORDER BY neg_risk_market_id,market_id,yes_token_id",
+                    (run.run_id,),
+                ).fetchall()
+                has_blank_provenance, all_provenance_blank = (
+                    _blank_provenance_state(leg_rows, quote_rows)
+                )
+                if has_blank_provenance and not all_provenance_blank:
+                    raise QuoteProjectionIntegrityError()
+                if not run.universe_hash:
+                    if all_provenance_blank:
+                        continue
+                    raise QuoteProjectionIntegrityError()
+                run_legs = tuple(UniverseLeg(*row) for row in leg_rows)
+                quotes = tuple(PersistedQuote(*row) for row in quote_rows)
+                source_row = con.execute(
+                    "SELECT s.id,s.taken_at_ms FROM snapshots s "
+                    "JOIN snapshot_source_coverage c "
+                    "ON c.snapshot_id=s.id AND c.completed=1 "
+                    "WHERE s.id=? AND s.market_view_published=1",
+                    (run.universe_snapshot_id,),
+                ).fetchone()
+                if source_row is None:
+                    if all_provenance_blank:
+                        continue
+                    raise QuoteProjectionIntegrityError()
+                source_universe = _verified_universe_for_snapshot(
+                    con,
+                    snapshot_id=int(source_row[0]),
+                    taken_at_ms=int(source_row[1]),
+                )
+                if all_provenance_blank:
+                    if run.universe_hash == source_universe.universe_hash:
+                        raise QuoteProjectionIntegrityError()
+                    continue
+                _validate_complete_projection(
+                    con,
+                    run=run,
+                    original_run_row=run_row,
+                    run_legs=run_legs,
+                    quotes=quotes,
+                    source_universe=source_universe,
+                )
+                return CompleteQuoteProjection(
+                    run_id=run.run_id,
+                    universe_snapshot_id=run.universe_snapshot_id,
+                    universe_taken_at_ms=run.universe_taken_at_ms,
+                    quoted_at_ms=run.quoted_at_ms,
+                    requested_token_count=run.requested_token_count,
+                    successful_response_count=run.successful_response_count,
+                    run_legs=run_legs,
+                    quotes=quotes,
+                    source_universe=source_universe,
+                    universe_hash=run.universe_hash,
+                )
+            return None
+        except (TypeError, ValueError, OverflowError) as error:
+            raise QuoteProjectionIntegrityError() from error
         finally:
             con.close()
-        return CompleteQuoteProjection(
-            run_id=run.run_id,
-            universe_snapshot_id=run.universe_snapshot_id,
-            universe_taken_at_ms=run.universe_taken_at_ms,
-            quoted_at_ms=run.quoted_at_ms,
-            requested_token_count=run.requested_token_count,
-            successful_response_count=run.successful_response_count,
-            quotes=tuple(PersistedQuote(*row) for row in rows),
-            universe_hash=run.universe_hash,
+
+
+def _blank_provenance_state(
+    leg_rows: list[tuple[object, ...]],
+    quote_rows: list[tuple[object, ...]],
+) -> tuple[bool, bool]:
+    provenance = tuple(
+        (str(row[-2]).strip(), str(row[-1]).strip())
+        for row in (*leg_rows, *quote_rows)
+    )
+    has_blank = any(not event_id or not membership_hash for event_id, membership_hash in provenance)
+    all_blank = bool(provenance) and all(
+        not event_id and not membership_hash
+        for event_id, membership_hash in provenance
+    )
+    return has_blank, all_blank
+
+
+def _validate_complete_projection(
+    con: sqlite3.Connection,
+    *,
+    run: QuoteRun,
+    original_run_row: tuple[object, ...],
+    run_legs: tuple[UniverseLeg, ...],
+    quotes: tuple[PersistedQuote, ...],
+    source_universe: VerifiedQuoteUniverse,
+) -> None:
+    rechecked_run_row = con.execute(
+        "SELECT id,universe_snapshot_id,universe_taken_at_ms,quoted_at_ms,"
+        "requested_token_count,successful_response_count,status,failure_reason,"
+        "completed_at_ms,universe_hash FROM neg_risk_quote_runs WHERE id=?",
+        (run.run_id,),
+    ).fetchone()
+    if rechecked_run_row != original_run_row:
+        raise QuoteProjectionIntegrityError()
+    persisted_counts = con.execute(
+        "SELECT "
+        "(SELECT COUNT(*) FROM neg_risk_quote_run_legs WHERE quote_run_id=?),"
+        "(SELECT COUNT(*) FROM neg_risk_quotes WHERE quote_run_id=?)",
+        (run.run_id, run.run_id),
+    ).fetchone()
+    if persisted_counts is None:
+        raise QuoteProjectionIntegrityError()
+    leg_count, quote_count = (int(persisted_counts[0]), int(persisted_counts[1]))
+    if (
+        run.status != "complete"
+        or run.failure_reason is not None
+        or run.completed_at_ms is None
+        or run.universe_snapshot_id != source_universe.snapshot_id
+        or run.universe_taken_at_ms != source_universe.taken_at_ms
+        or run.requested_token_count != leg_count
+        or run.requested_token_count != quote_count
+        or leg_count != len(run_legs)
+        or quote_count != len(quotes)
+        or not 0 <= run.successful_response_count <= run.requested_token_count
+    ):
+        raise QuoteProjectionIntegrityError()
+    _validate_projection_legs(run_legs)
+    _validate_quotes(quotes)
+    source_by_token = _projection_identity_by_token(source_universe.legs)
+    run_by_token = _projection_identity_by_token(run_legs)
+    quote_by_token = _projection_quote_identity_by_token(quotes)
+    if (
+        source_by_token != run_by_token
+        or run_by_token != quote_by_token
+        or run.universe_hash != source_universe.universe_hash
+        or run.universe_hash != _universe_hash(run_legs)
+    ):
+        raise QuoteProjectionIntegrityError()
+
+
+def _validate_projection_legs(legs: tuple[UniverseLeg, ...]) -> None:
+    if any(
+        not value.strip()
+        for leg in legs
+        for value in (
+            leg.neg_risk_market_id,
+            leg.event_id,
+            leg.membership_hash,
+            leg.market_id,
+            leg.condition_id,
+            leg.yes_token_id,
         )
+    ):
+        raise QuoteProjectionIntegrityError()
+    _projection_identity_by_token(legs)
+
+
+def _projection_identity_by_token(
+    legs: tuple[UniverseLeg, ...],
+) -> dict[str, tuple[str, ...]]:
+    identities = {
+        leg.yes_token_id: (
+            leg.neg_risk_market_id,
+            leg.event_id,
+            leg.membership_hash,
+            leg.market_id,
+            leg.condition_id,
+            leg.yes_token_id,
+        )
+        for leg in legs
+    }
+    if len(identities) != len(legs) or len(set(identities.values())) != len(legs):
+        raise QuoteProjectionIntegrityError()
+    return identities
+
+
+def _projection_quote_identity_by_token(
+    quotes: tuple[PersistedQuote, ...],
+) -> dict[str, tuple[str, ...]]:
+    identities = {
+        quote.yes_token_id: (
+            quote.neg_risk_market_id,
+            quote.event_id,
+            quote.membership_hash,
+            quote.market_id,
+            quote.condition_id,
+            quote.yes_token_id,
+        )
+        for quote in quotes
+    }
+    if len(identities) != len(quotes) or len(set(identities.values())) != len(quotes):
+        raise QuoteProjectionIntegrityError()
+    return identities
 
 
 def _latest_completed_published_snapshot(

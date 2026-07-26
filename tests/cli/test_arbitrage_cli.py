@@ -171,7 +171,10 @@ def test_status_returns_expected_envelope():
         assert field in metrics, f"missing snapshot field: {field}"
 
 
-def test_scan_quotes_emits_verified_feed_identity_and_rejections(monkeypatch) -> None:
+def test_scan_quotes_emits_diagnosable_verified_feed(
+    monkeypatch,
+    tmp_path,
+) -> None:
     opportunity = NegRiskOpportunity(
         group_id="g1",
         snapshot_id=10,
@@ -212,8 +215,26 @@ def test_scan_quotes_emits_verified_feed_identity_and_rejections(monkeypatch) ->
     assert payload["source_snapshot_id"] == 10
     assert payload["universe_hash"] == "u1"
     assert payload["quote_run_id"] == 20
+    assert type(payload["quote_sla_seconds"]) is int
+    assert payload["quote_sla_seconds"] == 300
     assert payload["rejections"] == {"augmented-neg-risk-not-supported": 4}
     assert payload["opportunities"][0]["membership_hash"] == "m1"
+    body_file = tmp_path / "scan-quotes.json"
+    body_file.write_text(result.stdout)
+
+    diagnosis = runner.invoke(
+        app,
+        [
+            "diagnose-feed",
+            "--http-status",
+            "200",
+            "--body-file",
+            str(body_file),
+        ],
+    )
+
+    assert diagnosis.exit_code == 0
+    assert json.loads(diagnosis.stdout)["kind"] == "available-opportunities"
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -14,7 +14,6 @@ from types import MappingProxyType
 
 from polyarb.routing.neg_risk_quote_store import (
     NegRiskQuoteStore,
-    QuoteUniverseUnavailableError,
 )
 
 QUOTE_SLA_SECONDS = 300
@@ -247,13 +246,7 @@ def scan_verified_neg_risk_quote_run(
     projection = store.latest_complete_projection()
     if projection is None:
         raise QuoteRunUnavailableError("quote run unavailable")
-    source_universe = store.verified_universe_for_snapshot(
-        projection.universe_snapshot_id
-    )
-    if source_universe.universe_hash != projection.universe_hash:
-        raise QuoteUniverseUnavailableError(
-            "verified source identity does not match quote run"
-        )
+    source_universe = projection.source_universe
 
     now = now_s()
     quote_age_seconds = max(0.0, now - projection.quoted_at_ms / 1000)

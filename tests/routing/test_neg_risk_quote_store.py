@@ -13,6 +13,7 @@ from polyarb.routing.neg_risk_quote_store import (
     QUOTE_RUN_LEASE_MS,
     NegRiskQuoteStore,
     PersistedQuote,
+    QuoteProjectionIntegrityError,
     QuoteRunBusyError,
     QuoteRunStateError,
     UniverseLeg,
@@ -942,6 +943,103 @@ def test_verified_run_persists_universe_event_and_membership_identity(quote_db) 
             "FROM neg_risk_quotes WHERE quote_run_id=?",
             (run_id,),
         ).fetchall() == [(EVENT_ID, MEMBERSHIP_HASH)]
+
+
+def test_complete_projection_uses_one_read_connection(
+    quote_db,
+    monkeypatch,
+) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    _complete(store)
+    real_connect = sqlite3.connect
+    connections: list[sqlite3.Connection] = []
+
+    def tracked_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+
+    projection = store.latest_complete_projection()
+
+    assert projection is not None
+    assert len(connections) == 1
+
+
+@pytest.mark.parametrize(
+    "corruption_sql",
+    [
+        "UPDATE neg_risk_quote_runs SET universe_hash=''",
+        "UPDATE neg_risk_quote_runs SET universe_hash='truncated'",
+        (
+            "UPDATE neg_risk_quote_run_legs SET condition_id='forged-condition' "
+            "WHERE yes_token_id='token-a'"
+        ),
+        (
+            "UPDATE neg_risk_quotes SET event_id='forged-event' "
+            "WHERE yes_token_id='token-a'"
+        ),
+        (
+            "UPDATE neg_risk_quotes SET event_id='' "
+            "WHERE yes_token_id='token-a'"
+        ),
+        "DELETE FROM neg_risk_quotes WHERE yes_token_id='token-a'",
+        (
+            "INSERT INTO neg_risk_quotes("
+            "quote_run_id,neg_risk_market_id,event_id,membership_hash,market_id,"
+            "condition_id,slug,yes_token_id,terminal_state,best_ask_price,best_ask_size"
+            ") VALUES (1,'group-a',?,?, 'extra-market','extra-condition','extra',"
+            "'extra-token','missing-book',NULL,NULL)"
+        ),
+        (
+            "UPDATE markets SET condition_id='source-condition-drift' "
+            "WHERE market_id='market-a'"
+        ),
+    ],
+)
+def test_complete_projection_rejects_any_cross_chain_identity_or_count_drift(
+    quote_db,
+    corruption_sql: str,
+) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    _complete(store)
+    with sqlite3.connect(quote_db) as con:
+        if "VALUES (1,'group-a',?" in corruption_sql:
+            con.execute(corruption_sql, (EVENT_ID, MEMBERSHIP_HASH))
+        else:
+            con.execute(corruption_sql)
+
+    with pytest.raises(QuoteProjectionIntegrityError):
+        store.latest_complete_projection()
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("best_ask_price", float("nan")),
+        ("best_ask_price", float("inf")),
+        ("best_ask_size", float("nan")),
+        ("best_ask_size", float("inf")),
+        ("best_ask_size", "not-a-number"),
+    ],
+)
+def test_complete_projection_rejects_nonfinite_or_nonnumeric_executable_quotes(
+    quote_db,
+    column: str,
+    value: object,
+) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    _complete(store)
+    with sqlite3.connect(quote_db) as con:
+        con.execute("PRAGMA ignore_check_constraints=ON")
+        con.execute(
+            f"UPDATE neg_risk_quotes SET {column}=? WHERE yes_token_id='token-a'",
+            (value,),
+        )
+
+    with pytest.raises(QuoteProjectionIntegrityError):
+        store.latest_complete_projection()
 
 
 @pytest.mark.parametrize("legacy_hash", ["", "a" * 64])
