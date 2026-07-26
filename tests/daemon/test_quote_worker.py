@@ -199,6 +199,102 @@ async def test_worker_publishes_projection_only_after_certification() -> None:
     assert worker.runtime.snapshot().success_count == 1
 
 
+async def test_worker_atomically_publishes_projection_and_precomputed_scan() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    projection = SimpleNamespace(
+        run_id=7,
+        universe_snapshot_id=70,
+        universe_hash="hash-7",
+    )
+    opportunity_scan = SimpleNamespace(
+        quote_run_id=7,
+        source_snapshot_id=70,
+        universe_hash="hash-7",
+    )
+    observed_during_prepare: list[object | None] = []
+
+    async def collect_once() -> QuoteCollectionResult:
+        return _result(7)
+
+    async def certify_projection(_result: QuoteCollectionResult):
+        return projection
+
+    async def prepare_opportunities(_projection):
+        observed_during_prepare.append(worker.runtime.certified_feed())
+        return opportunity_scan
+
+    async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        certify_projection=certify_projection,
+        prepare_opportunities=prepare_opportunities,
+        interval_s=120,
+        wait_for_stop=stop_after_once,
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert observed_during_prepare == [None]
+    feed = worker.runtime.certified_feed()
+    assert feed is not None
+    assert feed.projection is projection
+    assert feed.opportunity_scan is opportunity_scan
+
+
+async def test_mismatched_precomputed_scan_preserves_previous_feed() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    previous_projection = SimpleNamespace(run_id=6)
+    previous_scan = SimpleNamespace(quote_run_id=6)
+    projection = SimpleNamespace(
+        run_id=7,
+        universe_snapshot_id=70,
+        universe_hash="hash-7",
+    )
+    mismatched_scan = SimpleNamespace(
+        quote_run_id=7,
+        source_snapshot_id=999,
+        universe_hash="hash-7",
+    )
+
+    async def collect_once() -> QuoteCollectionResult:
+        return _result(7)
+
+    async def certify_projection(_result: QuoteCollectionResult):
+        return projection
+
+    async def prepare_opportunities(_projection):
+        return mismatched_scan
+
+    async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        certify_projection=certify_projection,
+        prepare_opportunities=prepare_opportunities,
+        interval_s=120,
+        wait_for_stop=stop_after_once,
+    )
+    worker.runtime.publish_certified_feed(
+        previous_projection,
+        previous_scan,
+    )
+
+    await worker.run(asyncio.Event())
+
+    feed = worker.runtime.certified_feed()
+    assert feed is not None
+    assert feed.projection is previous_projection
+    assert feed.opportunity_scan is previous_scan
+    snapshot = worker.runtime.snapshot()
+    assert snapshot.failure_count == 1
+    assert snapshot.last_error_kind == "QuoteProjectionIntegrityError"
+
+
 async def test_failed_certification_preserves_previous_projection() -> None:
     from polyarb.daemon.quote_worker import QuoteWorker
 

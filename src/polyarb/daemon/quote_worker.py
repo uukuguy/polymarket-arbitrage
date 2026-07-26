@@ -20,11 +20,19 @@ from polyarb.routing.neg_risk_quote_store import (
     NegRiskQuoteStore,
     QuoteProjectionIntegrityError,
 )
+from polyarb.routing.opportunity_scanner import (
+    OpportunityScanResult,
+    scan_certified_neg_risk_quote_projection,
+)
 
 CollectOnce = Callable[[], Awaitable[QuoteCollectionResult]]
 CertifyProjection = Callable[
     [QuoteCollectionResult],
     Awaitable[CompleteQuoteProjection],
+]
+PrepareOpportunities = Callable[
+    [CompleteQuoteProjection],
+    Awaitable[OpportunityScanResult],
 ]
 WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
 
@@ -45,6 +53,12 @@ class QuoteWorkerSnapshot:
     last_error_kind: str | None
 
 
+@dataclass(frozen=True)
+class CertifiedQuoteFeed:
+    projection: CompleteQuoteProjection
+    opportunity_scan: OpportunityScanResult | None
+
+
 class QuoteWorkerRuntime:
     """Bounded process-local attempt state; durable success truth stays in SQLite."""
 
@@ -61,7 +75,7 @@ class QuoteWorkerRuntime:
         self.last_successful_response_count: int | None = None
         self.last_elapsed_ms: int | None = None
         self.last_error_kind: str | None = None
-        self._certified_projection: CompleteQuoteProjection | None = None
+        self._certified_feed: CertifiedQuoteFeed | None = None
 
     def mark_started(self) -> None:
         self.state = "collecting"
@@ -93,12 +107,28 @@ class QuoteWorkerRuntime:
         self,
         projection: CompleteQuoteProjection,
     ) -> None:
-        """Atomically replace the bounded immutable HTTP read projection."""
-        self._certified_projection = projection
+        """Compatibility helper for tests that do not exercise opportunities."""
+        self._certified_feed = CertifiedQuoteFeed(projection, None)
+
+    def publish_certified_feed(
+        self,
+        projection: CompleteQuoteProjection,
+        opportunity_scan: OpportunityScanResult,
+    ) -> None:
+        """Atomically replace projection and its precomputed opportunity scan."""
+        self._certified_feed = CertifiedQuoteFeed(
+            projection,
+            opportunity_scan,
+        )
+
+    def certified_feed(self) -> CertifiedQuoteFeed | None:
+        """Return one immutable projection/result pair without SQLite work."""
+        return self._certified_feed
 
     def certified_projection(self) -> CompleteQuoteProjection | None:
         """Return one immutable projection pointer without SQLite work."""
-        return self._certified_projection
+        feed = self._certified_feed
+        return feed.projection if feed is not None else None
 
     def snapshot(self) -> QuoteWorkerSnapshot:
         return QuoteWorkerSnapshot(
@@ -152,6 +182,7 @@ class QuoteWorker:
         *,
         collect_once: CollectOnce,
         certify_projection: CertifyProjection | None = None,
+        prepare_opportunities: PrepareOpportunities | None = None,
         interval_s: float,
         runtime: QuoteWorkerRuntime | None = None,
         wait_for_stop: WaitForStop = _wait_for_stop,
@@ -161,6 +192,7 @@ class QuoteWorker:
             raise ValueError("interval_s must be positive")
         self._collect_once = collect_once
         self._certify_projection = certify_projection
+        self._prepare_opportunities = prepare_opportunities
         self._interval_s = interval_s
         self._wait_for_stop = wait_for_stop
         self._monotonic = monotonic
@@ -178,10 +210,24 @@ class QuoteWorker:
                 try:
                     result = await self._collect_once()
                     certified_projection = None
+                    certified_opportunities = None
                     if self._certify_projection is not None:
                         certified_projection = await self._certify_projection(result)
                         if certified_projection.run_id != result.run_id:
                             raise QuoteProjectionIntegrityError()
+                        if self._prepare_opportunities is not None:
+                            certified_opportunities = await self._prepare_opportunities(
+                                certified_projection
+                            )
+                            if (
+                                certified_opportunities.quote_run_id
+                                != certified_projection.run_id
+                                or certified_opportunities.source_snapshot_id
+                                != certified_projection.universe_snapshot_id
+                                or certified_opportunities.universe_hash
+                                != certified_projection.universe_hash
+                            ):
+                                raise QuoteProjectionIntegrityError()
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:  # fail-soft producer boundary
@@ -193,9 +239,15 @@ class QuoteWorker:
                     )
                 else:
                     if certified_projection is not None:
-                        self.runtime.publish_certified_projection(
-                            certified_projection
-                        )
+                        if certified_opportunities is None:
+                            self.runtime.publish_certified_projection(
+                                certified_projection
+                            )
+                        else:
+                            self.runtime.publish_certified_feed(
+                                certified_projection,
+                                certified_opportunities,
+                            )
                     self.runtime.mark_success(result)
                     logger.info(
                         "neg-risk quote collection complete "
@@ -233,8 +285,27 @@ def build_production_quote_worker(settings: Settings) -> QuoteWorker | None:
             result,
         )
 
+    async def prepare_opportunities(
+        projection: CompleteQuoteProjection,
+    ) -> OpportunityScanResult:
+        started = time.perf_counter()
+        result = await asyncio.to_thread(
+            scan_certified_neg_risk_quote_projection,
+            projection,
+            min_edge_bps=0,
+            limit=projection.requested_token_count,
+        )
+        logger.info(
+            "neg-risk opportunity projection prepared "
+            f"run_id={projection.run_id} "
+            f"count={len(result.opportunities)} "
+            f"elapsed_ms={int((time.perf_counter() - started) * 1000)}"
+        )
+        return result
+
     return QuoteWorker(
         collect_once=collect_once,
         certify_projection=certify_projection,
+        prepare_opportunities=prepare_opportunities,
         interval_s=settings.neg_risk_quote_interval_s,
     )

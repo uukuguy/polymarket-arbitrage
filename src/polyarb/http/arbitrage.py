@@ -19,7 +19,6 @@ from polyarb.routing.opportunity_scanner import (
     QuoteRunUnavailableError,
     StaleQuoteRunError,
     StaleUniverseError,
-    scan_certified_neg_risk_quote_projection,
 )
 
 _SOURCE_TRUTH_READ_TIMEOUT_S = 1.0
@@ -32,6 +31,39 @@ def _last_complete_snapshot_id(db_path: Path) -> int | None:
     ).last_complete_snapshot_id
 
 
+def _select_cached_opportunities(
+    feed,
+    *,
+    min_edge_bps: float,
+    limit: int,
+    now_s: float,
+):
+    projection = feed.projection
+    result = feed.opportunity_scan
+    if result is None:
+        raise QuoteRunUnavailableError("quote run unavailable")
+    quote_age_seconds = max(0.0, now_s - projection.quoted_at_ms / 1000)
+    if quote_age_seconds > QUOTE_SLA_SECONDS:
+        raise StaleQuoteRunError(
+            f"quote age {quote_age_seconds:.1f}s exceeds {QUOTE_SLA_SECONDS:.1f}s"
+        )
+    universe_age_seconds = max(
+        0.0,
+        now_s - projection.universe_taken_at_ms / 1000,
+    )
+    if universe_age_seconds > UNIVERSE_SLA_SECONDS:
+        raise StaleUniverseError(
+            "universe age "
+            f"{universe_age_seconds:.1f}s exceeds {UNIVERSE_SLA_SECONDS:.1f}s"
+        )
+    selected = tuple(
+        item
+        for item in result.opportunities
+        if item.gross_edge_bps >= min_edge_bps
+    )[:limit]
+    return result, selected, quote_age_seconds, universe_age_seconds
+
+
 async def opportunities(request: Request) -> JSONResponse:
     try:
         min_edge_bps = float(request.query_params.get("min_edge_bps", "0"))
@@ -41,12 +73,12 @@ async def opportunities(request: Request) -> JSONResponse:
     except ValueError:
         return JSONResponse({"error": "invalid numeric query"}, status_code=400)
     runtime = getattr(request.app.state, "quote_worker_runtime", None)
-    projection = (
-        runtime.certified_projection()
+    feed = (
+        runtime.certified_feed()
         if runtime is not None
         else None
     )
-    if projection is None:
+    if feed is None or feed.opportunity_scan is None:
         return JSONResponse(
             {"error": "verified market universe unavailable"},
             status_code=503,
@@ -59,15 +91,15 @@ async def opportunities(request: Request) -> JSONResponse:
             ),
             timeout=_SOURCE_TRUTH_READ_TIMEOUT_S,
         )
-        if source_snapshot_id != projection.universe_snapshot_id:
+        if source_snapshot_id != feed.projection.universe_snapshot_id:
             raise QuoteUniverseUnavailableError("source-snapshot-mismatch")
-        result = await asyncio.to_thread(
-            scan_certified_neg_risk_quote_projection,
-            projection,
-            min_edge_bps=min_edge_bps,
-            max_quote_age_s=QUOTE_SLA_SECONDS,
-            max_universe_age_s=UNIVERSE_SLA_SECONDS,
-            limit=limit,
+        result, selected, quote_age_seconds, universe_age_seconds = (
+            _select_cached_opportunities(
+                feed,
+                min_edge_bps=min_edge_bps,
+                limit=limit,
+                now_s=time.time(),
+            )
         )
     except (QuoteUniverseUnavailableError, QuoteRunUnavailableError):
         return JSONResponse(
@@ -92,8 +124,16 @@ async def opportunities(request: Request) -> JSONResponse:
             "universe_hash": result.universe_hash,
             "quote_run_id": result.quote_run_id,
             "quote_sla_seconds": QUOTE_SLA_SECONDS,
-            "count": len(result.opportunities),
+            "count": len(selected),
             "rejections": dict(result.rejections),
-            "opportunities": [item.to_dict() for item in result.opportunities],
+            "opportunities": [
+                {
+                    **item.to_dict(),
+                    "snapshot_age_seconds": universe_age_seconds,
+                    "quote_age_seconds": quote_age_seconds,
+                    "universe_age_seconds": universe_age_seconds,
+                }
+                for item in selected
+            ],
         }
     )
