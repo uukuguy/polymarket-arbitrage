@@ -25,6 +25,9 @@ Tables:
 - event_tags            — many-to-many event→tag, PK (event_id, tag_id, snapshot_id)
 - markets               — atomically overwritten on each snapshot (D-C1); FK event_id
 - validation_issues     — categorized validation failures per snapshot
+- snapshot_source_coverage — completion proof for every snapshot attempt
+- event_market_memberships — structural event membership per snapshot
+- neg_risk_group_truth  — classified, hashed neg-risk group truth per snapshot
 - question_translations — append-only translation cache (T2, never DELETE FROM)
 
 The pyarrow SNAPSHOT_SCHEMA mirrors the markets table plus 1 parquet-only field
@@ -147,6 +150,44 @@ CREATE TABLE IF NOT EXISTS validation_issues (
 
 CREATE INDEX IF NOT EXISTS idx_issues_snapshot ON validation_issues(snapshot_id);
 CREATE INDEX IF NOT EXISTS idx_issues_category ON validation_issues(category);
+
+-- Verified market-truth publication metadata. A row exists for every snapshot
+-- attempt, including diagnostics that were not allowed to replace `markets`.
+CREATE TABLE IF NOT EXISTS snapshot_source_coverage (
+  snapshot_id INTEGER PRIMARY KEY REFERENCES snapshots(id),
+  completed INTEGER NOT NULL CHECK(completed IN (0,1)),
+  market_items INTEGER NOT NULL CHECK(market_items >= 0),
+  event_items INTEGER NOT NULL CHECK(event_items >= 0),
+  failure_source TEXT,
+  failure_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS event_market_memberships (
+  snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+  event_id TEXT NOT NULL,
+  neg_risk_market_id TEXT NOT NULL,
+  market_id TEXT NOT NULL,
+  member_kind TEXT NOT NULL CHECK(member_kind IN ('named','other','inactive-reserved')),
+  active INTEGER NOT NULL CHECK(active IN (0,1)),
+  closed INTEGER NOT NULL CHECK(closed IN (0,1)),
+  PRIMARY KEY(snapshot_id, event_id, market_id)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_group_truth (
+  snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+  event_id TEXT NOT NULL,
+  neg_risk_market_id TEXT NOT NULL,
+  neg_risk_type TEXT NOT NULL CHECK(neg_risk_type IN ('standard','augmented')),
+  expected_member_count INTEGER NOT NULL CHECK(expected_member_count >= 0),
+  active_named_count INTEGER NOT NULL CHECK(active_named_count >= 0),
+  membership_hash TEXT NOT NULL,
+  quality TEXT NOT NULL CHECK(quality IN (
+    'complete-supported','complete-unsupported','incomplete-source','incomplete-quotes'
+  )),
+  reason TEXT,
+  PRIMARY KEY(snapshot_id, neg_risk_market_id),
+  CHECK (expected_member_count > 0 OR quality = 'incomplete-source')
+);
 
 -- Phase 1.1 T2: append-only translation cache.
 -- Invariants:

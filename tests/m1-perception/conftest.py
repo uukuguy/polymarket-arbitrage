@@ -414,16 +414,18 @@ def mocked_gamma_orchestrator(gamma_fixture: list[dict]) -> Any:
     # async iterator. Supply real async-generator stubs that yield the
     # fixture entries one at a time, matching the streaming contract.
     def _make_iter_markets(items):
-        async def _iter(_coverage):
+        async def _iter(coverage):
             for m in items:
                 yield m
+            coverage.result = type(coverage.result)(len(items), 1, True, None)
 
         return _iter
 
     def _make_iter_events(items):
-        async def _iter(_coverage):
+        async def _iter(coverage):
             for e in items:
                 yield e
+            coverage.result = type(coverage.result)(len(items), 1, True, None)
 
         return _iter
 

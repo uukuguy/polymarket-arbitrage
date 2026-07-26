@@ -25,6 +25,7 @@ import pytest
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 
 from polyarb.config import Settings  # noqa: E402
+from polyarb.perception.market_truth import SourceCoverage  # noqa: E402
 from polyarb.snapshot.orchestrator import run_snapshot  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -86,13 +87,14 @@ async def test_parquet_row_count_matches_sqlite_market_count(tmp_path: Path) -> 
     fake_gamma.fetch_all_active_markets.return_value = gamma_data
     fake_gamma.fetch_all_active_events.return_value = _events_for_markets(gamma_data)
 
-    async def _iter_rows(rows: list[dict]):
+    async def _iter_rows(rows: list[dict], coverage):
         for row in rows:
             yield row
+        coverage.result = type(coverage.result)(len(rows), 1, True, None)
 
-    fake_gamma.iter_active_markets = lambda _coverage: _iter_rows(gamma_data)
-    fake_gamma.iter_active_events = lambda _coverage: _iter_rows(
-        _events_for_markets(gamma_data)
+    fake_gamma.iter_active_markets = lambda coverage: _iter_rows(gamma_data, coverage)
+    fake_gamma.iter_active_events = lambda coverage: _iter_rows(
+        _events_for_markets(gamma_data), coverage
     )
     fake_gamma.aclose = AsyncMock()
     fake_gamma.__aenter__.return_value = fake_gamma
@@ -223,6 +225,10 @@ def test_streaming_sqlite_matches_legacy_sqlite(tmp_path: Path) -> None:
         is_valid=True,
         market_rows=rows,
         issues=[],
+        source_coverage=SourceCoverage.complete(1500, 0),
+        event_members=[],
+        group_truths=[],
+        publish_markets=True,
     )
 
     store_stream = SQLiteStore(tmp_path / "stream.db")
@@ -236,6 +242,10 @@ def test_streaming_sqlite_matches_legacy_sqlite(tmp_path: Path) -> None:
         market_rows=(r for r in rows),
         issues=[],
         batch_size=250,
+        source_coverage=SourceCoverage.complete(1500, 0),
+        event_members=[],
+        group_truths=[],
+        publish_markets=True,
     )
     assert count == 1500
 

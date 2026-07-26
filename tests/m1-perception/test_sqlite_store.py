@@ -26,6 +26,12 @@ from pathlib import Path
 
 import pytest
 
+from polyarb.perception.market_truth import (
+    EventMember,
+    GroupTruth,
+    SourceCoverage,
+    membership_hash,
+)
 from polyarb.storage.sqlite_store import SQLiteStore
 from polyarb.validator.category import Category, Issue
 
@@ -57,6 +63,15 @@ def make_market(market_id: str, **overrides) -> dict:
     )
     base.update(overrides)
     return base
+
+
+def _complete_publication() -> dict:
+    return {
+        "source_coverage": SourceCoverage.complete(0, 0),
+        "event_members": [],
+        "group_truths": [],
+        "publish_markets": True,
+    }
 
 
 @pytest.fixture
@@ -95,6 +110,7 @@ def test_purge_old_snapshots_bounds_each_transaction(store: SQLiteStore) -> None
             is_valid=True,
             market_rows=[],
             issues=[],
+            **_complete_publication(),
         )
 
     deleted, deleted_ids = store.purge_old_snapshots(
@@ -153,6 +169,7 @@ def test_streaming_disk_full_preserves_original_error_when_sqlite_auto_rolls_bac
             is_valid=True,
             market_rows=[],
             issues=[],
+            **_complete_publication(),
         )
 
 
@@ -184,6 +201,7 @@ def test_write_snapshot_overwrites_markets(store: SQLiteStore) -> None:
         is_valid=True,
         market_rows=[make_market("a"), make_market("b")],
         issues=[],
+        **_complete_publication(),
     )
     store.write_snapshot(
         taken_at_ms=2_000_000,
@@ -193,6 +211,7 @@ def test_write_snapshot_overwrites_markets(store: SQLiteStore) -> None:
         is_valid=True,
         market_rows=[make_market("c")],
         issues=[],
+        **_complete_publication(),
     )
 
     con = sqlite3.connect(store.db_path)
@@ -206,6 +225,161 @@ def test_write_snapshot_overwrites_markets(store: SQLiteStore) -> None:
     )
 
 
+def test_incomplete_source_does_not_replace_last_complete_markets(store: SQLiteStore) -> None:
+    first = store.write_snapshot(
+        taken_at_ms=1,
+        finished_at_ms=2,
+        mode="subset",
+        parquet_path="complete.parquet",
+        is_valid=True,
+        market_rows=[make_market("complete-market")],
+        issues=[],
+        source_coverage=SourceCoverage.complete(10, 3),
+        event_members=[],
+        group_truths=[],
+        publish_markets=True,
+    )
+    second = store.write_snapshot(
+        taken_at_ms=3,
+        finished_at_ms=4,
+        mode="subset",
+        parquet_path="partial.parquet",
+        is_valid=False,
+        market_rows=[make_market("partial-market")],
+        issues=[],
+        source_coverage=SourceCoverage.incomplete("markets", 2, 100, "http-422"),
+        event_members=[],
+        group_truths=[],
+        publish_markets=False,
+    )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT market_id, snapshot_id FROM markets").fetchall() == [
+            ("complete-market", first)
+        ]
+        assert con.execute(
+            "SELECT completed, failure_source, failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (second,),
+        ).fetchone() == (0, "markets", "http-422")
+
+
+def test_group_truth_and_membership_are_same_snapshot_transaction(
+    store: SQLiteStore,
+) -> None:
+    members = [
+        EventMember("e1", "g1", "m1", "named", True, False),
+        EventMember("e1", "g1", "m2", "named", True, False),
+    ]
+    truth = GroupTruth(
+        event_id="e1",
+        group_id="g1",
+        neg_risk_type="standard",
+        expected_member_count=2,
+        active_named_count=2,
+        membership_hash=membership_hash("e1", "g1", members),
+        quality="complete-supported",
+        reason=None,
+    )
+
+    snapshot_id = store.write_snapshot(
+        taken_at_ms=1,
+        finished_at_ms=2,
+        mode="subset",
+        parquet_path="truth.parquet",
+        is_valid=True,
+        market_rows=[make_market("m1"), make_market("m2")],
+        issues=[],
+        source_coverage=SourceCoverage.complete(2, 1),
+        event_members=members,
+        group_truths=[truth],
+        publish_markets=True,
+    )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT market_id FROM event_market_memberships "
+            "WHERE snapshot_id=? ORDER BY market_id",
+            (snapshot_id,),
+        ).fetchall() == [("m1",), ("m2",)]
+        assert con.execute(
+            "SELECT membership_hash FROM neg_risk_group_truth WHERE snapshot_id=?",
+            (snapshot_id,),
+        ).fetchone() == (truth.membership_hash,)
+
+
+@pytest.mark.parametrize(
+    "quality",
+    ["complete-supported", "complete-unsupported", "incomplete-quotes"],
+)
+def test_zero_member_truth_is_rejected_unless_source_is_incomplete(
+    store: SQLiteStore,
+    quality: str,
+) -> None:
+    truth = GroupTruth(
+        event_id="e1",
+        group_id="g1",
+        neg_risk_type="standard",
+        expected_member_count=0,
+        active_named_count=0,
+        membership_hash=membership_hash("e1", "g1", []),
+        quality=quality,  # type: ignore[arg-type]
+        reason="diagnostic",
+    )
+
+    with pytest.raises(ValueError, match="expected_member_count"):
+        store.write_snapshot(
+            taken_at_ms=1,
+            finished_at_ms=2,
+            mode="subset",
+            parquet_path="invalid-truth.parquet",
+            is_valid=False,
+            market_rows=[],
+            issues=[],
+            source_coverage=SourceCoverage.complete(0, 1),
+            event_members=[],
+            group_truths=[truth],
+            publish_markets=False,
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM snapshots").fetchone() == (0,)
+
+
+def test_zero_member_incomplete_source_truth_is_persisted(store: SQLiteStore) -> None:
+    truth = GroupTruth(
+        event_id="e1",
+        group_id="g1",
+        neg_risk_type="standard",
+        expected_member_count=0,
+        active_named_count=0,
+        membership_hash=membership_hash("e1", "g1", []),
+        quality="incomplete-source",
+        reason="event-membership-missing-or-empty",
+    )
+
+    snapshot_id = store.write_snapshot(
+        taken_at_ms=1,
+        finished_at_ms=2,
+        mode="subset",
+        parquet_path="incomplete-truth.parquet",
+        is_valid=False,
+        market_rows=[],
+        issues=[],
+        source_coverage=SourceCoverage.incomplete("events", 0, 1, "missing-members"),
+        event_members=[],
+        group_truths=[truth],
+        publish_markets=False,
+    )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT expected_member_count, quality FROM neg_risk_group_truth "
+            "WHERE snapshot_id=?",
+            (snapshot_id,),
+        ).fetchone() == (0, "incomplete-source")
+
+
 def test_write_snapshot_appends_to_snapshots_table(store: SQLiteStore) -> None:
     store.write_snapshot(
         taken_at_ms=1_000_000,
@@ -215,6 +389,7 @@ def test_write_snapshot_appends_to_snapshots_table(store: SQLiteStore) -> None:
         is_valid=True,
         market_rows=[make_market("a")],
         issues=[],
+        **_complete_publication(),
     )
     store.write_snapshot(
         taken_at_ms=2_000_000,
@@ -224,6 +399,7 @@ def test_write_snapshot_appends_to_snapshots_table(store: SQLiteStore) -> None:
         is_valid=True,
         market_rows=[make_market("b")],
         issues=[],
+        **_complete_publication(),
     )
     con = sqlite3.connect(store.db_path)
     try:
@@ -249,6 +425,7 @@ def test_write_snapshot_records_issues_with_category(store: SQLiteStore) -> None
         is_valid=True,
         market_rows=[make_market("m1"), make_market("m2")],
         issues=issues,
+        **_complete_publication(),
     )
     con = sqlite3.connect(store.db_path)
     try:
@@ -272,6 +449,7 @@ def test_write_snapshot_invalid_still_persists(store: SQLiteStore) -> None:
         is_valid=False,
         market_rows=[make_market("a")],
         issues=[],
+        **_complete_publication(),
     )
     con = sqlite3.connect(store.db_path)
     try:
@@ -293,6 +471,7 @@ def test_write_snapshot_returns_snapshot_id(store: SQLiteStore) -> None:
         is_valid=True,
         market_rows=[make_market("a")],
         issues=[Issue(layer=2, category=Category.UNKNOWN, market_id="a", detail="x")],
+        **_complete_publication(),
     )
     assert isinstance(sid, int) and sid >= 1
 
@@ -321,6 +500,7 @@ def test_write_snapshot_invalid_mode_raises(store: SQLiteStore) -> None:
             is_valid=True,
             market_rows=[],
             issues=[],
+            **_complete_publication(),
         )
 
 
@@ -338,6 +518,7 @@ def test_token_ids_preserve_uint256_string(store: SQLiteStore) -> None:
         is_valid=True,
         market_rows=[make_market("a", yes_token_id=big_token)],
         issues=[],
+        **_complete_publication(),
     )
     con = sqlite3.connect(store.db_path)
     try:
@@ -361,6 +542,7 @@ def test_rollback_on_executemany_failure(store: SQLiteStore) -> None:
         is_valid=True,
         market_rows=[make_market("baseline")],
         issues=[],
+        **_complete_publication(),
     )
 
     # Build a row missing the NOT NULL `condition_id` to force an integrity error.
@@ -376,6 +558,7 @@ def test_rollback_on_executemany_failure(store: SQLiteStore) -> None:
             is_valid=True,
             market_rows=[bad],
             issues=[],
+            **_complete_publication(),
         )
 
     # The failed transaction must roll back DELETE FROM markets too — so the
@@ -407,6 +590,7 @@ def test_write_snapshot_streaming_basic_parity(store: SQLiteStore) -> None:
         is_valid=True,
         market_rows=rows_a,
         issues=[Issue(layer=2, category=Category.UNKNOWN, market_id="m0", detail="stale")],
+        **_complete_publication(),
     )
 
     # Need a SECOND store / DB for streaming so write_snapshot's
@@ -422,6 +606,7 @@ def test_write_snapshot_streaming_basic_parity(store: SQLiteStore) -> None:
         market_rows=rows_b,
         issues=[Issue(layer=2, category=Category.UNKNOWN, market_id="m0", detail="stale")],
         batch_size=20,
+        **_complete_publication(),
     )
     assert count == 50
 
@@ -464,6 +649,7 @@ def test_write_snapshot_streaming_with_generator(store: SQLiteStore) -> None:
         market_rows=_gen(),
         issues=[],
         batch_size=500,
+        **_complete_publication(),
     )
     assert count == 1500
     con = sqlite3.connect(store.db_path)
@@ -506,6 +692,7 @@ def test_write_snapshot_streaming_atomicity_on_error(store: SQLiteStore) -> None
             market_rows=_explode(),
             issues=[],
             batch_size=200,
+            **_complete_publication(),
         )
 
     # ROLLBACK: counts must be unchanged
@@ -530,6 +717,7 @@ def test_write_snapshot_streaming_empty_markets(store: SQLiteStore) -> None:
         market_rows=iter([]),
         issues=[],
         batch_size=500,
+        **_complete_publication(),
     )
     assert count == 0
     con = sqlite3.connect(store.db_path)
@@ -609,6 +797,7 @@ def test_write_snapshot_streaming_atomicity_on_commit_failure(
             market_rows=rows,
             issues=[],
             batch_size=10,
+            **_complete_publication(),
         )
 
     con = sqlite3.connect(store.db_path)

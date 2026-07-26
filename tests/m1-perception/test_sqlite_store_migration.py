@@ -123,6 +123,28 @@ def test_migration_is_idempotent(tmp_path: Path) -> None:
     assert "parquet_r2_url" in cols
 
 
+def test_legacy_db_adds_market_truth_tables(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.db"
+    _create_legacy_snapshots_table(db)
+
+    store = SQLiteStore(db)
+    store.init_schema()
+
+    with sqlite3.connect(db) as con:
+        tables = {
+            row[0]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+    assert {
+        "snapshot_source_coverage",
+        "event_market_memberships",
+        "neg_risk_group_truth",
+    } <= tables
+
+
 def test_migration_idempotent_after_legacy_migration(tmp_path: Path) -> None:
     """Legacy DB migrated once → migrating again is a no-op (no duplicate column)."""
     db = tmp_path / "legacy.db"

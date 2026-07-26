@@ -59,11 +59,12 @@ from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient, PaginationCoverage
 from polyarb.config import Settings
 from polyarb.events.bus import publish_snapshot_complete
+from polyarb.perception.market_truth import EventMember, GroupTruth, SourceCoverage
 from polyarb.snapshot.cache import ChunkCache
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_streaming
 from polyarb.storage.sqlite_store import SQLiteStore
-from polyarb.validator.category import Category, Issue
+from polyarb.validator.category import Category, Issue, SnapshotStatus
 from polyarb.validator.layers import (
     determine_snapshot_status,
     is_valid_overall,
@@ -240,7 +241,13 @@ async def run_snapshot(
     dedup_count = 0
     event_rows: list[dict] = []
     event_tag_rows: list[dict] = []
+    event_members: list[EventMember] = []
+    group_truths: list[GroupTruth] = []
     market_to_event_map: dict[str, str] = {}
+    events_coverage = PaginationCoverage(source="events")
+    markets_coverage = PaginationCoverage(source="markets")
+    event_failure_reason: str | None = None
+    market_failure_reason: str | None = None
     threshold = settings.liquidity_threshold_usd
     PROGRESS_EVERY = 5000  # log every N streamed markets so long fetches stay observable
 
@@ -258,7 +265,6 @@ async def run_snapshot(
         # ── Phase 1: events (fully materialized — Decision A) ─────────────
         with _phase("1/7: Gamma /events fetch + normalize"):
             try:
-                events_coverage = PaginationCoverage(source="events")
                 raw_events = [
                     event async for event in gamma.iter_active_events(events_coverage)
                 ]
@@ -277,6 +283,7 @@ async def run_snapshot(
                     f"{len(market_to_event_map)} market→event mappings"
                 )
             except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
+                event_failure_reason = str(e)[:200]
                 logger.error(f"Gamma /events fetch failed: {e!r}")
                 issues.append(
                     Issue(
@@ -302,7 +309,6 @@ async def run_snapshot(
         # below appends API_UNREACHABLE (chain-truth preserved).
         with _phase("2/7: Stream /markets — normalize + dedupe + filter"):
             first_frame_seen = False
-            markets_coverage = PaginationCoverage(source="markets")
             try:
                 async for retry_state in AsyncRetrying(
                     retry=retry_if_exception(lambda e: _is_dns_jitter(e) and not first_frame_seen),
@@ -338,6 +344,7 @@ async def run_snapshot(
                                     f"{len(target_markets)} target so far"
                                 )
             except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
+                market_failure_reason = str(e)[:200]
                 logger.error(f"Gamma /markets stream failed: {e!r}")
                 issues.append(
                     Issue(
@@ -513,8 +520,18 @@ async def run_snapshot(
 
         status = determine_snapshot_status(issues)
         is_valid = is_valid_overall(issues)  # True for OK/DEGRADED, False for FAILED
+        source_complete = (
+            events_coverage.result.completed and markets_coverage.result.completed
+        )
+        publish_markets = source_complete and not any(
+            issue.category == Category.API_UNREACHABLE for issue in issues
+        )
+        if not publish_markets:
+            status = SnapshotStatus.FAILED
+            is_valid = False
         logger.info(
-            f"Validated: status={status.value}, is_valid={is_valid}, {len(issues)} total issues "
+            f"Validated: status={status.value}, is_valid={is_valid}, "
+            f"publish_markets={publish_markets}, {len(issues)} total issues "
             f"({sum(1 for i in issues if i.layer == 1)} L1, "
             f"{sum(1 for i in issues if i.layer == 2)} L2, "
             f"{sum(1 for i in issues if i.layer == 4)} L4)"
@@ -549,6 +566,25 @@ async def run_snapshot(
 
         store = SQLiteStore(settings.db_path)
         store.init_schema()
+        if source_complete:
+            source_coverage = SourceCoverage.complete(
+                markets_coverage.result.items_yielded,
+                events_coverage.result.items_yielded,
+            )
+        elif not events_coverage.result.completed:
+            source_coverage = SourceCoverage.incomplete(
+                "events",
+                markets_coverage.result.items_yielded,
+                events_coverage.result.items_yielded,
+                event_failure_reason or "event-pagination-incomplete",
+            )
+        else:
+            source_coverage = SourceCoverage.incomplete(
+                "markets",
+                markets_coverage.result.items_yielded,
+                events_coverage.result.items_yielded,
+                market_failure_reason or "market-pagination-incomplete",
+            )
         snapshot_id, market_count = store.write_snapshot_streaming(
             taken_at_ms=taken_at_ms,
             finished_at_ms=finished_at_ms,
@@ -557,6 +593,10 @@ async def run_snapshot(
             is_valid=is_valid,
             market_rows=target_markets,
             issues=issues,
+            source_coverage=source_coverage,
+            event_members=event_members,
+            group_truths=group_truths,
+            publish_markets=publish_markets,
             notes=_derive_notes_from_issues(issues),  # Plan 03.1-02 GAP-103
             event_rows=event_rows,
             event_tag_rows=event_tag_rows,
@@ -574,7 +614,12 @@ async def run_snapshot(
     # is_valid_overall already says we shouldn't trust. Fail-soft policy says
     # "skip, don't corrupt".
     mirror = None  # type: ignore[assignment]
-    if settings.supabase_mirror_enabled and not is_valid:
+    if settings.supabase_mirror_enabled and not publish_markets:
+        logger.info(
+            f"step 7.5: skip Supabase mirror — market truth was not published "
+            f"(snapshot_id={snapshot_id}, status={status.value})"
+        )
+    elif settings.supabase_mirror_enabled and not is_valid:
         logger.info(
             f"step 7.5: skip Supabase mirror — snapshot is_valid=False "
             f"(snapshot_id={snapshot_id}, status={status.value}); F-05 guard"
@@ -718,7 +763,7 @@ async def run_snapshot(
     # Inj L2-3. Wrapped in try/except so a NOTIFY failure NEVER blocks
     # snapshot completion (D-12 invariant). publish_snapshot_complete
     # itself is fail-soft, but we belt-and-suspender the import call too.
-    if getattr(settings, "event_bus_enabled", False):
+    if getattr(settings, "event_bus_enabled", False) and publish_markets:
         try:
             await publish_snapshot_complete(
                 settings,

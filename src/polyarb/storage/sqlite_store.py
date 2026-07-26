@@ -19,6 +19,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from polyarb.perception.market_truth import EventMember, GroupTruth, SourceCoverage
 from polyarb.storage.schemas import (
     DDL,
     EVENT_TAGS_COLUMN_ORDER,
@@ -91,6 +92,81 @@ def _event_tag_row_to_tuple(row: dict, snapshot_id: int) -> tuple:
             continue
         out.append(row.get(col))
     return tuple(out)
+
+
+def _source_coverage_to_tuple(
+    source_coverage: SourceCoverage,
+    snapshot_id: int,
+) -> tuple:
+    return (
+        snapshot_id,
+        int(source_coverage.completed),
+        source_coverage.market_items,
+        source_coverage.event_items,
+        source_coverage.failure_source,
+        source_coverage.failure_reason,
+    )
+
+
+def _event_member_to_tuple(member: EventMember, snapshot_id: int) -> tuple:
+    return (
+        snapshot_id,
+        member.event_id,
+        member.group_id,
+        member.market_id,
+        member.member_kind,
+        int(member.active),
+        int(member.closed),
+    )
+
+
+def _group_truth_to_tuple(truth: GroupTruth, snapshot_id: int) -> tuple:
+    if truth.expected_member_count == 0 and truth.quality != "incomplete-source":
+        raise ValueError(
+            "expected_member_count=0 is valid only for quality='incomplete-source'"
+        )
+    return (
+        snapshot_id,
+        truth.event_id,
+        truth.group_id,
+        truth.neg_risk_type,
+        truth.expected_member_count,
+        truth.active_named_count,
+        truth.membership_hash,
+        truth.quality,
+        truth.reason,
+    )
+
+
+def _insert_market_truth(
+    con: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    source_coverage: SourceCoverage,
+    event_members: list[EventMember],
+    group_truths: list[GroupTruth],
+) -> None:
+    con.execute(
+        "INSERT INTO snapshot_source_coverage("
+        "snapshot_id,completed,market_items,event_items,failure_source,failure_reason"
+        ") VALUES (?,?,?,?,?,?)",
+        _source_coverage_to_tuple(source_coverage, snapshot_id),
+    )
+    if event_members:
+        con.executemany(
+            "INSERT INTO event_market_memberships("
+            "snapshot_id,event_id,neg_risk_market_id,market_id,member_kind,active,closed"
+            ") VALUES (?,?,?,?,?,?,?)",
+            [_event_member_to_tuple(member, snapshot_id) for member in event_members],
+        )
+    if group_truths:
+        con.executemany(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            [_group_truth_to_tuple(truth, snapshot_id) for truth in group_truths],
+        )
 
 
 class SQLiteStore:
@@ -170,16 +246,20 @@ class SQLiteStore:
         is_valid: bool,
         market_rows: list[dict],
         issues: list[Issue],
+        source_coverage: SourceCoverage,
+        event_members: list[EventMember],
+        group_truths: list[GroupTruth],
+        publish_markets: bool,
         notes: str | None = None,
         event_rows: list[dict] | None = None,
         event_tag_rows: list[dict] | None = None,
     ) -> int:
         """Persist one snapshot atomically.
 
-        Wraps DELETE FROM markets + INSERT snapshot meta + executemany events +
-        executemany event_tags + executemany markets + executemany issues in a
-        single BEGIN IMMEDIATE transaction. Any exception triggers ROLLBACK and
-        re-raises (we never swallow).
+        Inserts snapshot metadata, source coverage, events, memberships, group
+        truth, optional current markets, and issues in one BEGIN IMMEDIATE
+        transaction. ``markets`` is replaced only when ``publish_markets`` is
+        true. Any exception triggers ROLLBACK and re-raises (we never swallow).
 
         FK ordering matters: snapshots → events → event_tags → markets. A market
         that references an event_id which is NOT in events for this snapshot is
@@ -205,7 +285,8 @@ class SQLiteStore:
         con.execute("PRAGMA synchronous=NORMAL")
         con.execute("BEGIN IMMEDIATE")
         try:
-            con.execute("DELETE FROM markets")  # full overwrite (D-C1)
+            if publish_markets:
+                con.execute("DELETE FROM markets")  # full overwrite (D-C1)
             cur = con.execute(
                 "INSERT INTO snapshots("
                 "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes,"
@@ -226,6 +307,14 @@ class SQLiteStore:
             snapshot_id = cur.lastrowid
             assert snapshot_id is not None  # AUTOINCREMENT guarantees this
 
+            _insert_market_truth(
+                con,
+                snapshot_id=snapshot_id,
+                source_coverage=source_coverage,
+                event_members=event_members,
+                group_truths=group_truths,
+            )
+
             # ── Amendment 01: events first (FK target for markets.event_id) ─
             event_tuples = [_event_row_to_tuple(r, snapshot_id) for r in event_rows]
             if event_tuples:
@@ -237,7 +326,11 @@ class SQLiteStore:
                 con.executemany(EVENT_TAGS_INSERT_SQL, event_tag_tuples)
 
             # ── markets (references events.id via event_id, FK not enforced) ─
-            market_tuples = [_row_to_tuple(r, snapshot_id) for r in market_rows]
+            market_tuples = (
+                [_row_to_tuple(r, snapshot_id) for r in market_rows]
+                if publish_markets
+                else []
+            )
             if market_tuples:
                 con.executemany(MARKETS_INSERT_SQL, market_tuples)
 
@@ -292,6 +385,10 @@ class SQLiteStore:
         is_valid: bool,
         market_rows: Iterable[dict],
         issues: list[Issue],
+        source_coverage: SourceCoverage,
+        event_members: list[EventMember],
+        group_truths: list[GroupTruth],
+        publish_markets: bool,
         notes: str | None = None,
         event_rows: list[dict] | None = None,
         event_tag_rows: list[dict] | None = None,
@@ -299,10 +396,10 @@ class SQLiteStore:
     ) -> tuple[int, int]:
         """Streaming variant of write_snapshot.
 
-        Identical semantics to write_snapshot, but `market_rows` can be any
-        iterable (list, generator). Inserts run in batches of `batch_size`
-        inside ONE BEGIN IMMEDIATE → COMMIT transaction, so per-snapshot
-        atomicity is preserved exactly as the legacy path.
+        Identical publication semantics to write_snapshot, but `market_rows`
+        can be any iterable (list, generator). Published inserts run in batches
+        of `batch_size` inside ONE BEGIN IMMEDIATE → COMMIT transaction, so
+        per-snapshot atomicity is preserved exactly as the legacy path.
 
         Because the iterator length is unknown up front, we insert the
         snapshots row with market_count=0 as a placeholder and UPDATE it to
@@ -326,7 +423,8 @@ class SQLiteStore:
         con.execute("BEGIN IMMEDIATE")
         market_count = 0
         try:
-            con.execute("DELETE FROM markets")  # full overwrite (D-C1)
+            if publish_markets:
+                con.execute("DELETE FROM markets")  # full overwrite (D-C1)
             cur = con.execute(
                 "INSERT INTO snapshots("
                 "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes,"
@@ -347,6 +445,14 @@ class SQLiteStore:
             snapshot_id = cur.lastrowid
             assert snapshot_id is not None
 
+            _insert_market_truth(
+                con,
+                snapshot_id=snapshot_id,
+                source_coverage=source_coverage,
+                event_members=event_members,
+                group_truths=group_truths,
+            )
+
             # ── events first (FK target for markets.event_id) ──────────────
             if event_rows:
                 event_tuples = [_event_row_to_tuple(r, snapshot_id) for r in event_rows]
@@ -360,14 +466,14 @@ class SQLiteStore:
             # ── markets streamed in batches ────────────────────────────────
             batch: list[tuple] = []
             for row in market_rows:
-                batch.append(_row_to_tuple(row, snapshot_id))
-                if len(batch) >= batch_size:
-                    con.executemany(MARKETS_INSERT_SQL, batch)
-                    market_count += len(batch)
-                    batch.clear()
+                market_count += 1
+                if publish_markets:
+                    batch.append(_row_to_tuple(row, snapshot_id))
+                    if len(batch) >= batch_size:
+                        con.executemany(MARKETS_INSERT_SQL, batch)
+                        batch.clear()
             if batch:
                 con.executemany(MARKETS_INSERT_SQL, batch)
-                market_count += len(batch)
                 batch.clear()
 
             # Patch market_count to the real value (still inside same tx)

@@ -98,9 +98,10 @@ def _make_fake_gamma(markets: list[dict], events: list[dict] | None = None) -> A
     # generator). AsyncMock returns a coroutine by default, not iterable —
     # supply a real async-generator function bound on the mock instance.
     def _make_iter(items):
-        async def _iter(_coverage):
+        async def _iter(coverage):
             for item in items:
                 yield item
+            coverage.result = type(coverage.result)(len(items), 1, True, None)
 
         return _iter
 
@@ -833,10 +834,10 @@ async def test_amendment_01_orphan_market_event_id_is_null(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_amendment_01_events_failure_does_not_kill_snapshot(tmp_path: Path) -> None:
-    """If /events fetch fails, snapshot still completes — markets get event_id NULL.
+    """If /events fetch fails, the diagnostic snapshot completes without publication.
 
-    /events is the secondary source (category/tags); /markets is the mainline.
-    A /events outage is recorded as Issue but doesn't block the run.
+    Event membership is authoritative market truth. An events outage is recorded
+    as an Issue and source-coverage row, but cannot create a partial current view.
     """
     settings = _make_settings(tmp_path)
     gamma_data = _load_gamma_fixture()
@@ -850,9 +851,10 @@ async def test_amendment_01_events_failure_does_not_kill_snapshot(tmp_path: Path
     # iter_active_events is also stubbed but the test patches the wrapped
     # fetch_all_active_events to raise — for the streaming consumer we need
     # iter_active_events to raise the same RuntimeError.
-    async def _iter_markets(_coverage):
+    async def _iter_markets(coverage):
         for m in gamma_data:
             yield m
+        coverage.result = type(coverage.result)(len(gamma_data), 1, True, None)
 
     async def _iter_events_raise(_coverage):
         raise RuntimeError("simulated /events outage")
@@ -877,21 +879,94 @@ async def test_amendment_01_events_failure_does_not_kill_snapshot(tmp_path: Path
 
         result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
 
-    # Snapshot completed; api_unreachable Issue recorded for /events.
+    # Diagnostic snapshot completed; api_unreachable Issue recorded for /events.
     assert result.market_count == 5
+    assert result.is_valid is False
     assert "api_unreachable" in result.issue_categories
 
     con = sqlite3.connect(settings.db_path)
     try:
         events_count = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-        without_event = con.execute(
-            "SELECT COUNT(*) FROM markets WHERE event_id IS NULL"
-        ).fetchone()[0]
+        market_count = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+        coverage = con.execute(
+            "SELECT completed, failure_source FROM snapshot_source_coverage "
+            "WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
     finally:
         con.close()
 
     assert events_count == 0
-    assert without_event == 5  # all markets event_id NULL when /events fails
+    assert market_count == 0
+    assert coverage == (0, "events")
+
+
+@pytest.mark.asyncio
+async def test_incomplete_event_source_preserves_last_complete_market_truth(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+
+    complete_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
+    incomplete_gamma = AsyncMock()
+
+    async def _iter_markets(coverage):
+        for market in gamma_data[:1]:
+            yield market
+        coverage.result = type(coverage.result)(1, 1, True, None)
+
+    async def _iter_events_raise(_coverage):
+        raise RuntimeError("events stopped after a partial traversal")
+        yield  # pragma: no cover
+
+    incomplete_gamma.iter_active_markets = _iter_markets
+    incomplete_gamma.iter_active_events = _iter_events_raise
+    incomplete_gamma.aclose = AsyncMock()
+    incomplete_gamma.__aenter__.return_value = incomplete_gamma
+    incomplete_gamma.__aexit__.return_value = None
+
+    with (
+        patch(
+            "polyarb.snapshot.orchestrator.GammaClient",
+            side_effect=[complete_gamma, incomplete_gamma],
+        ),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        first = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+        second = await run_snapshot(settings, mode="subset", now_ms=1_777_448_001_000)
+
+    assert first.is_valid is True
+    assert second.is_valid is False
+    assert publish_mock.await_count == 1
+
+    with sqlite3.connect(settings.db_path) as con:
+        current_markets = con.execute(
+            "SELECT market_id, snapshot_id FROM markets ORDER BY market_id"
+        ).fetchall()
+        incomplete_coverage = con.execute(
+            "SELECT completed, failure_source FROM snapshot_source_coverage "
+            "WHERE snapshot_id=?",
+            (second.snapshot_id,),
+        ).fetchone()
+
+    assert current_markets == sorted(
+        [(market["id"], first.snapshot_id) for market in gamma_data]
+    )
+    assert incomplete_coverage == (0, "events")
 
 
 @pytest.mark.asyncio
