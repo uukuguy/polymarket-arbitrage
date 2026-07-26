@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
+from unittest.mock import call as mock_call
 
 import httpx
 import pytest
@@ -295,6 +297,115 @@ async def test_fetch_market_parent_states_returns_inactive_parent_truth() -> Non
     assert route.call_count == 1
 
 
+async def test_fetch_market_parent_states_batches_large_exact_id_set() -> None:
+    settings = _fast_settings()
+    market_groups = {
+        f"market-{index:03d}": f"group-{index:03d}"
+        for index in range(GammaClient.MARKET_PARENT_LOOKUP_BATCH_SIZE * 2 + 2)
+    }
+
+    def _payload(ids: list[str]) -> list[dict]:
+        return [
+            {
+                "id": market_id,
+                "negRisk": True,
+                "negRiskMarketID": market_groups[market_id],
+                "events": [
+                    {
+                        "id": f"event-{market_id}",
+                        "active": False,
+                        "closed": False,
+                        "archived": True,
+                    }
+                ],
+            }
+            for market_id in reversed(ids)
+        ]
+
+    sorted_ids = sorted(market_groups)
+    chunks = [
+        sorted_ids[start : start + GammaClient.MARKET_PARENT_LOOKUP_BATCH_SIZE]
+        for start in range(0, len(sorted_ids), GammaClient.MARKET_PARENT_LOOKUP_BATCH_SIZE)
+    ]
+    async with GammaClient(settings) as client:
+        client._get = AsyncMock(side_effect=[_payload(ids) for ids in chunks])
+        states = await client.fetch_market_parent_states(market_groups)
+
+    assert set(states) == set(market_groups)
+    assert client._get.await_args_list == [
+        mock_call(
+            "/markets",
+            [("id", market_id) for market_id in ids] + [("limit", str(len(ids)))],
+        )
+        for ids in chunks
+    ]
+
+
+@pytest.mark.parametrize("response_kind", ["missing", "extra", "duplicate"])
+async def test_fetch_market_parent_states_requires_exact_response_identity_set(
+    response_kind: str,
+) -> None:
+    settings = _fast_settings()
+    market_groups = {"market-1": "group-1", "market-2": "group-2"}
+
+    def _market(market_id: str) -> dict:
+        return {
+            "id": market_id,
+            "negRisk": True,
+            "negRiskMarketID": market_groups.get(market_id, "group-extra"),
+            "events": [
+                {
+                    "id": f"event-{market_id}",
+                    "active": False,
+                    "closed": False,
+                    "archived": True,
+                }
+            ],
+        }
+
+    payloads = {
+        "missing": [_market("market-1")],
+        "extra": [_market("market-1"), _market("market-2"), _market("market-extra")],
+        "duplicate": [_market("market-1"), _market("market-1")],
+    }
+    async with GammaClient(settings) as client:
+        client._get = AsyncMock(return_value=payloads[response_kind])
+        with pytest.raises(PaginationIntegrityError, match="identity"):
+            await client.fetch_market_parent_states(market_groups)
+
+
+async def test_fetch_market_parent_states_propagates_chunk_failure_and_stops() -> None:
+    settings = _fast_settings()
+    market_groups = {
+        f"market-{index:03d}": f"group-{index:03d}"
+        for index in range(GammaClient.MARKET_PARENT_LOOKUP_BATCH_SIZE + 1)
+    }
+    first_ids = sorted(market_groups)[: GammaClient.MARKET_PARENT_LOOKUP_BATCH_SIZE]
+    first_payload = [
+        {
+            "id": market_id,
+            "negRisk": True,
+            "negRiskMarketID": market_groups[market_id],
+            "events": [
+                {
+                    "id": f"event-{market_id}",
+                    "active": False,
+                    "closed": False,
+                    "archived": True,
+                }
+            ],
+        }
+        for market_id in first_ids
+    ]
+
+    async with GammaClient(settings) as client:
+        client._get = AsyncMock(side_effect=[first_payload, httpx.ConnectError("chunk failed")])
+        with pytest.raises(httpx.ConnectError, match="chunk failed"):
+            await client.fetch_market_parent_states(market_groups)
+
+    assert client._get.await_count == 2
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -374,7 +485,7 @@ async def test_fetch_market_parent_states_rejects_unbounded_lookup_set() -> None
             await client.fetch_market_parent_states(
                 {
                     f"market-{index}": f"group-{index}"
-                    for index in range(client.MAX_MARKET_STATE_LOOKUPS + 1)
+                    for index in range(client.MAX_MARKET_PARENT_LOOKUPS + 1)
                 }
             )
 

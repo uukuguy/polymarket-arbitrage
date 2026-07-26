@@ -88,6 +88,11 @@ class GammaClient:
     # Point lookups only reconcile a small race window between the active event
     # and market streams. A large disagreement is not safe to fan out.
     MAX_MARKET_STATE_LOOKUPS = 100
+    # Gamma can leave a larger stale tail in the active market keyset than the
+    # active event keyset. Batch exact-id enrichment bounds both fan-out and
+    # individual request size.
+    MAX_MARKET_PARENT_LOOKUPS = 500
+    MARKET_PARENT_LOOKUP_BATCH_SIZE = 25
     # F-2 SECURITY: ceiling on pagination loop (100k markets is far above any
     # realistic Polymarket size). See module docstring.
     MAX_PAGES = 1000
@@ -116,7 +121,11 @@ class GammaClient:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.aclose()
 
-    async def _get(self, path: str, params: dict) -> list[dict] | dict:
+    async def _get(
+        self,
+        path: str,
+        params: dict | list[tuple[str, str]],
+    ) -> list[dict] | dict:
         """Single GET with retry policy.
 
         Retries on transient failures (network, timeout, 5xx, 429) up to
@@ -280,12 +289,12 @@ class GammaClient:
         group on incomplete evidence.
         """
         items = sorted(market_groups.items())
-        if len(items) > self.MAX_MARKET_STATE_LOOKUPS:
+        if len(items) > self.MAX_MARKET_PARENT_LOOKUPS:
             raise PaginationIntegrityError(
-                f"market parent lookup limit exceeded: {len(items)}>{self.MAX_MARKET_STATE_LOOKUPS}"
+                "market parent lookup limit exceeded: "
+                f"{len(items)}>{self.MAX_MARKET_PARENT_LOOKUPS}"
             )
 
-        states: dict[str, dict[str, str | bool]] = {}
         for market_id, expected_group_id in items:
             if (
                 type(market_id) is not str
@@ -294,51 +303,69 @@ class GammaClient:
                 or not expected_group_id.strip()
             ):
                 raise PaginationIntegrityError("market parent lookup has invalid identity")
-            payload = await self._get("/markets", {"id": market_id})
-            if (
-                not isinstance(payload, list)
-                or len(payload) != 1
-                or not isinstance(payload[0], dict)
+
+        states: dict[str, dict[str, str | bool]] = {}
+        for start in range(0, len(items), self.MARKET_PARENT_LOOKUP_BATCH_SIZE):
+            batch = items[start : start + self.MARKET_PARENT_LOOKUP_BATCH_SIZE]
+            expected_groups = dict(batch)
+            expected_ids = set(expected_groups)
+            payload = await self._get(
+                "/markets",
+                [("id", market_id) for market_id, _ in batch] + [("limit", str(len(batch)))],
+            )
+            if not isinstance(payload, list) or not all(
+                isinstance(market, dict) for market in payload
             ):
                 raise PaginationIntegrityError(
-                    f"/markets?id={market_id} parent response has invalid shape"
+                    "/markets exact-id parent response has invalid shape"
                 )
-            market = payload[0]
-            if market.get("id") != market_id:
-                raise PaginationIntegrityError(
-                    f"/markets?id={market_id} parent response identity mismatch"
-                )
+            response_ids = [market.get("id") for market in payload]
             if (
-                market.get("negRisk") is not True
-                or market.get("negRiskMarketID") != expected_group_id
+                any(type(market_id) is not str for market_id in response_ids)
+                or len(response_ids) != len(set(response_ids))
+                or set(response_ids) != expected_ids
             ):
                 raise PaginationIntegrityError(
-                    f"/markets?id={market_id} parent response group mismatch"
+                    "/markets exact-id parent response identity set mismatch"
                 )
-            events = market.get("events")
-            if not isinstance(events, list) or len(events) != 1 or not isinstance(events[0], dict):
-                raise PaginationIntegrityError(
-                    f"/markets?id={market_id} parent response is ambiguous"
-                )
-            event = events[0]
-            event_id = event.get("id")
-            active = event.get("active")
-            closed = event.get("closed")
-            archived = event.get("archived")
-            if type(event_id) is not str or not event_id.strip():
-                raise PaginationIntegrityError(
-                    f"/markets?id={market_id} parent response has invalid identity"
-                )
-            if any(type(value) is not bool for value in (active, closed, archived)):
-                raise PaginationIntegrityError(
-                    f"/markets?id={market_id} parent response has invalid state"
-                )
-            states[market_id] = {
-                "event_id": event_id,
-                "active": active,
-                "closed": closed,
-                "archived": archived,
-            }
+
+            for market in payload:
+                market_id = market["id"]
+                if (
+                    market.get("negRisk") is not True
+                    or market.get("negRiskMarketID") != expected_groups[market_id]
+                ):
+                    raise PaginationIntegrityError(
+                        f"/markets?id={market_id} parent response group mismatch"
+                    )
+                events = market.get("events")
+                if (
+                    not isinstance(events, list)
+                    or len(events) != 1
+                    or not isinstance(events[0], dict)
+                ):
+                    raise PaginationIntegrityError(
+                        f"/markets?id={market_id} parent response is ambiguous"
+                    )
+                event = events[0]
+                event_id = event.get("id")
+                active = event.get("active")
+                closed = event.get("closed")
+                archived = event.get("archived")
+                if type(event_id) is not str or not event_id.strip():
+                    raise PaginationIntegrityError(
+                        f"/markets?id={market_id} parent response has invalid identity"
+                    )
+                if any(type(value) is not bool for value in (active, closed, archived)):
+                    raise PaginationIntegrityError(
+                        f"/markets?id={market_id} parent response has invalid state"
+                    )
+                states[market_id] = {
+                    "event_id": event_id,
+                    "active": active,
+                    "closed": closed,
+                    "archived": archived,
+                }
         return states
 
     async def iter_active_events(self, coverage: PaginationCoverage) -> AsyncIterator[dict]:

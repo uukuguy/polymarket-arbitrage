@@ -1142,6 +1142,69 @@ async def test_orphan_neg_risk_market_with_inactive_parent_is_quarantined(
 
 
 @pytest.mark.asyncio
+async def test_137_stale_orphan_neg_risk_markets_are_quarantined(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    template = _load_gamma_fixture()[0]
+    markets = [
+        {
+            **template,
+            "id": f"orphan-{index:03d}",
+            "conditionId": f"condition-{index:03d}",
+            "clobTokenIds": json.dumps([f"yes-token-{index:03d}", f"no-token-{index:03d}"]),
+            "negRisk": True,
+            "negRiskMarketID": f"stale-group-{index:03d}",
+        }
+        for index in range(137)
+    ]
+    fake_gamma = _make_fake_gamma(markets, [])
+    fake_gamma.fetch_market_parent_states.side_effect = None
+    fake_gamma.fetch_market_parent_states.return_value = {
+        market["id"]: {
+            "event_id": f"inactive-parent-{market['id']}",
+            "active": False,
+            "closed": False,
+            "archived": True,
+        }
+        for market in markets
+    }
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=[])
+        clob_inst.get_prices_buy_sell = AsyncMock(return_value={"buy": {}, "sell": {}})
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed,failure_source,failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+        market_count = con.execute(
+            "SELECT COUNT(*) FROM markets WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()[0]
+
+    assert result.is_valid is True
+    assert coverage == (1, None, None)
+    assert market_count == 0
+    fake_gamma.fetch_market_parent_states.assert_awaited_once_with(
+        {market["id"]: market["negRiskMarketID"] for market in markets}
+    )
+    assert publish_mock.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_orphan_neg_risk_parent_lookup_failure_blocks_publication(
     tmp_path: Path,
 ) -> None:

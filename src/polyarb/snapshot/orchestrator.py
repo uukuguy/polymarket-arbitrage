@@ -79,7 +79,7 @@ from polyarb.validator.layers import (
     layer4_cross_source,
 )
 
-MAX_ORPHAN_PARENT_LOOKUPS = GammaClient.MAX_MARKET_STATE_LOOKUPS
+MAX_ORPHAN_PARENT_LOOKUPS = GammaClient.MAX_MARKET_PARENT_LOOKUPS
 
 
 def _is_dns_jitter(exc: BaseException) -> bool:
