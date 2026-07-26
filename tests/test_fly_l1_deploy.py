@@ -12,3 +12,13 @@ def test_deploy_l1_workflow_binds_release_id_to_deployed_sha() -> None:
     text = DEPLOY_L1_YML.read_text()
 
     assert '--env POLYARB_RELEASE_ID="${GITHUB_SHA}"' in text
+
+
+def test_deploy_l1_workflow_ignores_documentation_only_pushes() -> None:
+    """Closure evidence commits must not restart the production quote window."""
+    text = DEPLOY_L1_YML.read_text()
+
+    assert "paths-ignore:" in text
+    assert "- '.planning/**'" in text
+    assert "- 'docs/**'" in text
+    assert "- '**/*.md'" in text

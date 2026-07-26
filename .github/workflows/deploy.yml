@@ -3,6 +3,13 @@ name: Deploy to Fly
 on:
   push:
     branches: [main]
+    # Operational evidence and learning updates must not restart the daemon.
+    # A post-restart 24h quote window is release-bound, so docs-only deploys
+    # would destroy valid continuity evidence without changing runtime code.
+    paths-ignore:
+      - '.planning/**'
+      - 'docs/**'
+      - '**/*.md'
   workflow_dispatch: {}
 
 concurrency:
