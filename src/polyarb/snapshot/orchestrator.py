@@ -56,7 +56,7 @@ from tenacity import (
 )
 
 from polyarb.clients.clob_client import ClobReaderClient
-from polyarb.clients.gamma_client import GammaClient
+from polyarb.clients.gamma_client import GammaClient, PaginationCoverage
 from polyarb.config import Settings
 from polyarb.events.bus import publish_snapshot_complete
 from polyarb.snapshot.cache import ChunkCache
@@ -258,7 +258,10 @@ async def run_snapshot(
         # ── Phase 1: events (fully materialized — Decision A) ─────────────
         with _phase("1/7: Gamma /events fetch + normalize"):
             try:
-                raw_events = await gamma.fetch_all_active_events()
+                events_coverage = PaginationCoverage(source="events")
+                raw_events = [
+                    event async for event in gamma.iter_active_events(events_coverage)
+                ]
                 logger.info(f"Gamma: fetched {len(raw_events)} active events")
                 event_rows, event_tag_rows, market_to_event_map = normalize_events(raw_events)
                 del raw_events  # free 10k+ raw Gamma event dicts immediately
@@ -293,6 +296,7 @@ async def run_snapshot(
         # below appends API_UNREACHABLE (chain-truth preserved).
         with _phase("2/7: Stream /markets — normalize + dedupe + filter"):
             first_frame_seen = False
+            markets_coverage = PaginationCoverage(source="markets")
             try:
                 async for retry_state in AsyncRetrying(
                     retry=retry_if_exception(lambda e: _is_dns_jitter(e) and not first_frame_seen),
@@ -301,7 +305,7 @@ async def run_snapshot(
                     reraise=True,
                 ):
                     with retry_state:
-                        async for raw in gamma.iter_active_markets():
+                        async for raw in gamma.iter_active_markets(markets_coverage):
                             if not first_frame_seen:
                                 first_frame_seen = True
                             raw_market_count += 1

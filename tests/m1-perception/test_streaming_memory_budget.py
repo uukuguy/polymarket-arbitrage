@@ -35,6 +35,21 @@ from polyarb.config import Settings
 from polyarb.snapshot.orchestrator import run_snapshot
 
 
+def _keyset_response(
+    request: httpx.Request, *, rows: list[dict], array_key: str
+) -> httpx.Response:
+    """Serve one deterministic keyset page, using the cursor as an opaque offset."""
+    cursor = request.url.params.get("after_cursor")
+    start = int(cursor) if cursor is not None else 0
+    limit = int(request.url.params.get("limit", "100"))
+    end = min(start + limit, len(rows))
+    next_cursor = str(end) if end < len(rows) else None
+    return httpx.Response(
+        200,
+        json={array_key: rows[start:end], "next_cursor": next_cursor},
+    )
+
+
 @pytest.mark.slow
 @pytest.mark.xfail(
     reason=(
@@ -104,18 +119,14 @@ async def test_streaming_run_under_memory_budget(tmp_path: Path, gamma_payload_f
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=False) as router:
 
-        def _markets_side_effect(request):
-            offset = int(request.url.params.get("offset", "0"))
-            limit = int(request.url.params.get("limit", "100"))
-            return httpx.Response(200, json=all_markets[offset : offset + limit])
+        def _markets_side_effect(request: httpx.Request) -> httpx.Response:
+            return _keyset_response(request, rows=all_markets, array_key="markets")
 
-        def _events_side_effect(request):
-            offset = int(request.url.params.get("offset", "0"))
-            limit = int(request.url.params.get("limit", "100"))
-            return httpx.Response(200, json=all_events[offset : offset + limit])
+        def _events_side_effect(request: httpx.Request) -> httpx.Response:
+            return _keyset_response(request, rows=all_events, array_key="events")
 
-        router.get("/markets").mock(side_effect=_markets_side_effect)
-        router.get("/events").mock(side_effect=_events_side_effect)
+        markets_route = router.get("/markets/keyset").mock(side_effect=_markets_side_effect)
+        events_route = router.get("/events/keyset").mock(side_effect=_events_side_effect)
 
         with (
             patch.object(clob_client.ClobReaderClient, "get_books", _mock_books),
@@ -149,6 +160,9 @@ async def test_streaming_run_under_memory_budget(tmp_path: Path, gamma_payload_f
             print(f"[memory] peak delta:      {peak_delta / 1024 / 1024:.1f}MB")
             print(f"[memory] target_markets:  {result.market_count}")
             print(f"[memory] is_valid:        {result.is_valid}")
+
+            assert markets_route.call_count == 200
+            assert events_route.call_count == 50
 
             # B-1 assertions: delta (architectural claim) AND absolute (OOM relevance)
             DELTA_BUDGET = 30 * 1024 * 1024  # 30MB streaming-claim budget
@@ -239,18 +253,14 @@ async def test_streaming_no_raw_markets_accumulation_smoke(
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=False) as router:
 
-        def _markets_side_effect(request):
-            offset = int(request.url.params.get("offset", "0"))
-            limit = int(request.url.params.get("limit", "100"))
-            return httpx.Response(200, json=all_markets[offset : offset + limit])
+        def _markets_side_effect(request: httpx.Request) -> httpx.Response:
+            return _keyset_response(request, rows=all_markets, array_key="markets")
 
-        def _events_side_effect(request):
-            offset = int(request.url.params.get("offset", "0"))
-            limit = int(request.url.params.get("limit", "100"))
-            return httpx.Response(200, json=all_events[offset : offset + limit])
+        def _events_side_effect(request: httpx.Request) -> httpx.Response:
+            return _keyset_response(request, rows=all_events, array_key="events")
 
-        router.get("/markets").mock(side_effect=_markets_side_effect)
-        router.get("/events").mock(side_effect=_events_side_effect)
+        markets_route = router.get("/markets/keyset").mock(side_effect=_markets_side_effect)
+        events_route = router.get("/events/keyset").mock(side_effect=_events_side_effect)
 
         with (
             patch.object(clob_client.ClobReaderClient, "get_books", _mock_books),
@@ -281,6 +291,13 @@ async def test_streaming_no_raw_markets_accumulation_smoke(
             print(f"[smoke] peak RSS:     {peak[0] / 1024 / 1024:.1f}MB")
             print(f"[smoke] peak delta:   {peak_delta / 1024 / 1024:.1f}MB")
             print(f"[smoke] target:       {result.market_count}")
+
+            assert markets_route.call_count == 200
+            assert events_route.call_count == 50
+            assert markets_route.calls[0].request.url.params.get("after_cursor") is None
+            assert markets_route.calls[-1].request.url.params["after_cursor"] == "19900"
+            assert events_route.calls[0].request.url.params.get("after_cursor") is None
+            assert events_route.calls[-1].request.url.params["after_cursor"] == "4900"
 
             # Wide belt — catches genuine 20k-list accumulation regressions.
             # If streaming broke and re-introduced a 20k full-buffer step,

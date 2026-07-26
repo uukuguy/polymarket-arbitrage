@@ -72,7 +72,7 @@ def _make_fake_gamma(markets: list[dict], events: list[dict] | None = None) -> A
     fake.fetch_all_active_events.return_value = events if events is not None else []
 
     def _make_iter(items):
-        async def _iter():
+        async def _iter(_coverage):
             for item in items:
                 yield item
 

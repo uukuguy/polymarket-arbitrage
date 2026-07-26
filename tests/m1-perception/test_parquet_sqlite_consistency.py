@@ -90,8 +90,10 @@ async def test_parquet_row_count_matches_sqlite_market_count(tmp_path: Path) -> 
         for row in rows:
             yield row
 
-    fake_gamma.iter_active_markets = lambda: _iter_rows(gamma_data)
-    fake_gamma.iter_active_events = lambda: _iter_rows(_events_for_markets(gamma_data))
+    fake_gamma.iter_active_markets = lambda _coverage: _iter_rows(gamma_data)
+    fake_gamma.iter_active_events = lambda _coverage: _iter_rows(
+        _events_for_markets(gamma_data)
+    )
     fake_gamma.aclose = AsyncMock()
     fake_gamma.__aenter__.return_value = fake_gamma
     fake_gamma.__aexit__.return_value = None

@@ -114,7 +114,11 @@ class _FakeGamma:
     async def fetch_all_active_events(self) -> list[dict]:
         return []
 
-    def iter_active_markets(self):
+    async def iter_active_events(self, _coverage):
+        return
+        yield  # pragma: no cover — empty generator
+
+    def iter_active_markets(self, _coverage):
         # Each call to iter_active_markets is one tenacity attempt.
         idx = self.attempt_count
         self.attempt_count += 1

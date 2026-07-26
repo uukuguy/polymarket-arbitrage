@@ -98,7 +98,7 @@ def _make_fake_gamma(markets: list[dict], events: list[dict] | None = None) -> A
     # generator). AsyncMock returns a coroutine by default, not iterable —
     # supply a real async-generator function bound on the mock instance.
     def _make_iter(items):
-        async def _iter():
+        async def _iter(_coverage):
             for item in items:
                 yield item
 
@@ -850,11 +850,11 @@ async def test_amendment_01_events_failure_does_not_kill_snapshot(tmp_path: Path
     # iter_active_events is also stubbed but the test patches the wrapped
     # fetch_all_active_events to raise — for the streaming consumer we need
     # iter_active_events to raise the same RuntimeError.
-    async def _iter_markets():
+    async def _iter_markets(_coverage):
         for m in gamma_data:
             yield m
 
-    async def _iter_events_raise():
+    async def _iter_events_raise(_coverage):
         raise RuntimeError("simulated /events outage")
         yield  # unreachable but keeps this as an async generator
 
