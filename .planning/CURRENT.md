@@ -18,7 +18,8 @@ release-37 均保留为 diagnostic/rejected evidence。最终 exact SHA `6471d41
 111.039 秒；独立 verifier 重算出同一 raw/report hash。Phase 05.4 已完成。
 Phase 05.5 已把 H-009 生产化：L1 内置只读 quote worker 每 120 秒采集一次，
 生产 run 2→3→4 均为 1,278/1,278，机会入口跨周期重复 HTTP 200，quote/snapshot
-health 均为 pass；release 131 的 `/health.releaseId` 已绑定精确 SHA `cb0ba9c…`。
+health 均为 pass；L1 部署工作流已把每次 `/health.releaseId` 绑定到该次精确
+`GITHUB_SHA`（首次由 release 131 / `cb0ba9c…` 验证）。
 这表示 known-universe gross-before-fees 机会发现已可实战巡检，但**整套系统还不是可以投入真实资金运行的套利产品**。
 
 ## 交付状态

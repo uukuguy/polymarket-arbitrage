@@ -25,9 +25,10 @@ Plan: 1 of 1 complete
   seconds. Automatic run 2→3→4 then completed 1,278/1,278 at approximately
   121-second start intervals; every sampled opportunity request returned HTTP
   200 and quote/snapshot health remained pass.
-- **Runtime identity:** L1 release 131 exposes exact
+- **Runtime identity proof:** L1 release 131 first exposed exact
   `releaseId=cb0ba9c54d79ed741f847c9db08ebeda098c5342`; run 6 completed
-  immediately after this release and the feed remained HTTP 200.
+  immediately after this release and the feed remained HTTP 200. Subsequent L1
+  releases inherit the workflow contract and expose their own exact SHA.
 - **Safety boundary:** public CLOB reads plus local SQLite quote persistence
   only. No wallet, signing, orders, or real-money authorization.
 
