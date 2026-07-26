@@ -39,7 +39,9 @@ from loguru import logger
 from polyarb.perception.market_truth import (
     CONFLICTING_EVENT_MEMBERSHIP_REASON,
     INVALID_EVENT_MEMBER_REASON,
+    INVALID_NEG_RISK_FLAGS_REASON,
     MISSING_EVENT_MEMBERSHIP_REASON,
+    NEG_RISK_ENABLEMENT_CONFLICT_REASON,
     EventMember,
     GroupTruth,
     membership_hash,
@@ -68,6 +70,14 @@ def _safe_float(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _strict_identity(raw: Any) -> str | None:
+    """Return a stripped authoritative string ID; reject every non-string."""
+    if type(raw) is not str:
+        return None
+    value = raw.strip()
+    return value or None
 
 
 def _parse_end_time_ms(raw: Any) -> int | None:
@@ -215,17 +225,19 @@ def normalize_events(
             list[EventMember],
             set[str],
             str | None,
+            str | None,
         ]
     ] = []
     market_event_ids: dict[str, set[str]] = {}
     seen_event_ids: set[str] = set()
 
     for raw in raw_events:
-        event_id_raw = raw.get("id")
-        if event_id_raw is None or event_id_raw == "":
-            logger.warning(f"normalize_events: missing 'id' (slug={raw.get('slug')}) — skipped")
+        event_id = _strict_identity(raw.get("id"))
+        if event_id is None:
+            logger.warning(
+                f"normalize_events: invalid 'id' (slug={raw.get('slug')}) — skipped"
+            )
             continue
-        event_id = str(event_id_raw)
 
         # Dedupe by event_id — Gamma /events can return duplicates across pagination
         # boundaries (similar to /markets ~4% dup rate observed in Phase 1).
@@ -294,12 +306,26 @@ def normalize_events(
 
         # ── nested markets → market→event reverse lookup ──────────────────────
         markets = raw.get("markets")
-        group_id_raw = raw.get("negRiskMarketID")
-        is_neg_risk_group = bool(raw.get("negRisk")) and group_id_raw not in (None, "")
-        group_id = str(group_id_raw) if is_neg_risk_group else None
+        group_id = _strict_identity(raw.get("negRiskMarketID"))
         group_members: list[EventMember] = []
         structural_market_ids: set[str] = set()
         membership_reason: str | None = None
+        classification_reason: str | None = None
+        neg_risk_raw = raw.get("negRisk")
+        enable_neg_risk_raw = raw.get("enableNegRisk")
+        augmented_raw = raw.get("negRiskAugmented")
+        if group_id is not None:
+            if not all(
+                type(value) is bool
+                for value in (
+                    neg_risk_raw,
+                    enable_neg_risk_raw,
+                    augmented_raw,
+                )
+            ):
+                classification_reason = INVALID_NEG_RISK_FLAGS_REASON
+            elif not neg_risk_raw or not enable_neg_risk_raw:
+                classification_reason = NEG_RISK_ENABLEMENT_CONFLICT_REASON
         expected_member_count = len(markets) if isinstance(markets, list) else 0
         if group_id is not None and (not isinstance(markets, list) or not markets):
             membership_reason = MISSING_EVENT_MEMBERSHIP_REASON
@@ -309,12 +335,11 @@ def normalize_events(
                     if group_id is not None:
                         membership_reason = INVALID_EVENT_MEMBER_REASON
                     continue
-                m_id = m.get("id")
-                if m_id is None or (isinstance(m_id, str) and not m_id.strip()):
+                m_id_str = _strict_identity(m.get("id"))
+                if m_id_str is None:
                     if group_id is not None:
                         membership_reason = INVALID_EVENT_MEMBER_REASON
                     continue
-                m_id_str = str(m_id)
                 market_event_ids.setdefault(m_id_str, set()).add(event_id)
                 # Keep FIRST mapping if a market appears in multiple events
                 # (shouldn't normally happen, but be defensive).
@@ -360,11 +385,12 @@ def normalize_events(
                 (
                     event_id,
                     group_id,
-                    bool(raw.get("negRiskAugmented", False)),
+                    augmented_raw is True,
                     expected_member_count,
                     group_members,
                     structural_market_ids,
                     membership_reason,
+                    classification_reason,
                 )
             )
 
@@ -381,6 +407,7 @@ def normalize_events(
         group_members,
         structural_market_ids,
         membership_reason,
+        classification_reason,
     ) in group_candidates:
         supported = not augmented and all(
             member.member_kind == "named" and member.active and not member.closed
@@ -389,6 +416,9 @@ def normalize_events(
         if structural_market_ids & conflicting_market_ids:
             quality = "incomplete-source"
             reason = CONFLICTING_EVENT_MEMBERSHIP_REASON
+        elif classification_reason is not None:
+            quality = "incomplete-source"
+            reason = classification_reason
         elif membership_reason is not None:
             quality = "incomplete-source"
             reason = membership_reason

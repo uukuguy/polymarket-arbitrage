@@ -6,13 +6,17 @@ import pytest
 
 from polyarb.perception.market_truth import (
     INVALID_EVENT_MEMBER_REASON,
+    INVALID_NEG_RISK_FLAGS_REASON,
     MISSING_EVENT_MEMBERSHIP_REASON,
+    NEG_RISK_ENABLEMENT_CONFLICT_REASON,
     EventMember,
     GroupTruth,
     SourceCoverage,
     membership_hash,
 )
 from polyarb.snapshot.normalizer import normalize_events
+
+_MISSING = object()
 
 
 def _michigan_event() -> dict:
@@ -150,6 +154,60 @@ def test_closed_active_member_remains_named_but_blocks_standard_support() -> Non
     assert groups[0].quality == "complete-unsupported"
 
 
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("negRisk", _MISSING),
+        ("negRisk", "false"),
+        ("enableNegRisk", _MISSING),
+        ("enableNegRisk", 1),
+        ("negRiskAugmented", _MISSING),
+        ("negRiskAugmented", "false"),
+    ],
+)
+def test_missing_or_non_boolean_neg_risk_flags_fail_closed(
+    field: str,
+    invalid_value: object,
+) -> None:
+    event = _standard_event()
+    if invalid_value is _MISSING:
+        event.pop(field)
+    else:
+        event[field] = invalid_value
+    _, _, _, members, groups = normalize_events([event])
+    assert len(members) == 2
+    assert groups[0].quality == "incomplete-source"
+    assert groups[0].reason == INVALID_NEG_RISK_FLAGS_REASON
+
+
+@pytest.mark.parametrize(
+    ("neg_risk", "enabled"),
+    [(True, False), (False, True), (False, False)],
+)
+def test_contradictory_neg_risk_enablement_fails_closed(
+    neg_risk: bool,
+    enabled: bool,
+) -> None:
+    event = _standard_event()
+    event["negRisk"] = neg_risk
+    event["enableNegRisk"] = enabled
+    _, _, _, members, groups = normalize_events([event])
+    assert len(members) == 2
+    assert groups[0].quality == "incomplete-source"
+    assert groups[0].reason == NEG_RISK_ENABLEMENT_CONFLICT_REASON
+
+
+def test_ordinary_non_neg_risk_event_without_hint_has_no_group_truth() -> None:
+    event = _standard_event()
+    event["negRisk"] = False
+    event.pop("enableNegRisk")
+    event.pop("negRiskAugmented")
+    event.pop("negRiskMarketID")
+    _, _, _, members, groups = normalize_events([event])
+    assert members == []
+    assert groups == []
+
+
 @pytest.mark.parametrize("markets", [None, []])
 def test_missing_or_empty_neg_risk_membership_is_incomplete_source(
     markets: object,
@@ -205,6 +263,62 @@ def test_non_boolean_member_status_fails_closed(
     assert groups[0].expected_member_count == 2
     assert groups[0].quality == "incomplete-source"
     assert groups[0].reason == INVALID_EVENT_MEMBER_REASON
+
+
+@pytest.mark.parametrize("invalid_id", [False, 7, [], {}, "   "])
+def test_non_string_or_blank_market_id_fails_closed(invalid_id: object) -> None:
+    event = _standard_event()
+    event["markets"][0]["id"] = invalid_id
+    _, _, market_to_event, members, groups = normalize_events([event])
+    assert market_to_event == {"market-b": "e-standard"}
+    assert [member.market_id for member in members] == ["market-b"]
+    assert groups[0].expected_member_count == 2
+    assert groups[0].quality == "incomplete-source"
+    assert groups[0].reason == INVALID_EVENT_MEMBER_REASON
+
+
+@pytest.mark.parametrize("invalid_id", [False, 7, [], {}, "   "])
+def test_non_string_or_blank_event_id_is_rejected(invalid_id: object) -> None:
+    event = _standard_event()
+    event["id"] = invalid_id
+    events, _, market_to_event, members, groups = normalize_events([event])
+    assert events == []
+    assert market_to_event == {}
+    assert members == []
+    assert groups == []
+
+
+@pytest.mark.parametrize("invalid_id", [False, 7, [], {}, "   "])
+def test_non_string_or_blank_group_id_is_rejected(invalid_id: object) -> None:
+    event = _standard_event()
+    event["negRiskMarketID"] = invalid_id
+    events, _, market_to_event, members, groups = normalize_events([event])
+    assert len(events) == 1
+    assert market_to_event == {
+        "market-a": "e-standard",
+        "market-b": "e-standard",
+    }
+    assert members == []
+    assert groups == []
+
+
+def test_authoritative_ids_are_stripped_before_use() -> None:
+    event = _standard_event()
+    event["id"] = "  e-standard  "
+    event["negRiskMarketID"] = "  group-standard  "
+    event["markets"][0]["id"] = "  market-a  "
+    _, _, market_to_event, members, groups = normalize_events([event])
+    assert market_to_event["market-a"] == "e-standard"
+    assert members[0] == EventMember(
+        "e-standard",
+        "group-standard",
+        "market-a",
+        "named",
+        True,
+        False,
+    )
+    assert groups[0].event_id == "e-standard"
+    assert groups[0].group_id == "group-standard"
 
 
 def test_standard_group_hash_is_order_independent() -> None:

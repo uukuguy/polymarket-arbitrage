@@ -531,6 +531,8 @@ async def test_event_projection_preserves_invalid_membership_evidence() -> None:
     settings = _fast_settings()
     raw_event = _make_event_dict(0, n_markets=0)
     raw_event["negRisk"] = True
+    raw_event["enableNegRisk"] = True
+    raw_event["negRiskAugmented"] = False
     raw_event["negRiskMarketID"] = "group-invalid"
     raw_event["markets"] = [
         "not-a-dict",

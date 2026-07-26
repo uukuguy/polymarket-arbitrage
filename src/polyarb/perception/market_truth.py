@@ -21,6 +21,8 @@ NegRiskType = Literal["standard", "augmented"]
 MISSING_EVENT_MEMBERSHIP_REASON = "event-membership-missing-or-empty"
 INVALID_EVENT_MEMBER_REASON = "event-membership-member-invalid"
 CONFLICTING_EVENT_MEMBERSHIP_REASON = "market-id-conflict-across-events"
+INVALID_NEG_RISK_FLAGS_REASON = "event-neg-risk-flags-invalid"
+NEG_RISK_ENABLEMENT_CONFLICT_REASON = "event-neg-risk-enablement-conflict"
 
 
 @dataclass(frozen=True)
