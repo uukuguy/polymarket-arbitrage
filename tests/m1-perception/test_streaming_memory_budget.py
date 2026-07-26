@@ -35,9 +35,7 @@ from polyarb.config import Settings
 from polyarb.snapshot.orchestrator import run_snapshot
 
 
-def _keyset_response(
-    request: httpx.Request, *, rows: list[dict], array_key: str
-) -> httpx.Response:
+def _keyset_response(request: httpx.Request, *, rows: list[dict], array_key: str) -> httpx.Response:
     """Serve one deterministic keyset page, using the cursor as an opaque offset."""
     cursor = request.url.params.get("after_cursor")
     start = int(cursor) if cursor is not None else 0
@@ -106,7 +104,12 @@ async def test_streaming_run_under_memory_budget(tmp_path: Path, gamma_payload_f
 
     from polyarb.clients import clob_client
 
-    async def _mock_books(self, token_ids, cache=None):  # noqa: ARG001
+    async def _mock_books(
+        self,
+        token_ids,
+        cache=None,
+        projection="full",  # noqa: ARG001
+    ):
         # Return one minimal-but-valid book per token. SimpleNamespace mimics
         # the py-clob-client SDK object shape (asset_id + asks + bids).
         return [
@@ -249,7 +252,12 @@ async def test_streaming_no_raw_markets_accumulation_smoke(
 
     from polyarb.clients import clob_client
 
-    async def _mock_books(self, token_ids, cache=None):  # noqa: ARG001
+    async def _mock_books(
+        self,
+        token_ids,
+        cache=None,
+        projection="full",  # noqa: ARG001
+    ):
         return [
             SimpleNamespace(
                 asset_id=tid,

@@ -438,6 +438,9 @@ async def test_clob_unreachable_records_issue_but_persists_snapshot(tmp_path: Pa
 
     assert result.market_count == 5
     assert "api_unreachable" in result.issue_categories
+    assert "clob_missing" not in result.issue_categories
+    clob_inst.get_books.assert_awaited_once()
+    assert clob_inst.get_books.await_args.kwargs["projection"] == "top"
     # Snapshot row exists despite CLOB failure
     con = sqlite3.connect(settings.db_path)
     n = con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
@@ -1329,8 +1332,7 @@ async def test_amendment_01_events_failure_does_not_kill_snapshot(tmp_path: Path
         events_count = con.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         market_count = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
         coverage = con.execute(
-            "SELECT completed, failure_source FROM snapshot_source_coverage "
-            "WHERE snapshot_id=?",
+            "SELECT completed, failure_source FROM snapshot_source_coverage WHERE snapshot_id=?",
             (result.snapshot_id,),
         ).fetchone()
     finally:
@@ -1398,14 +1400,11 @@ async def test_incomplete_event_source_preserves_last_complete_market_truth(
             "SELECT market_id, snapshot_id FROM markets ORDER BY market_id"
         ).fetchall()
         incomplete_coverage = con.execute(
-            "SELECT completed, failure_source FROM snapshot_source_coverage "
-            "WHERE snapshot_id=?",
+            "SELECT completed, failure_source FROM snapshot_source_coverage WHERE snapshot_id=?",
             (second.snapshot_id,),
         ).fetchone()
 
-    assert current_markets == sorted(
-        [(market["id"], first.snapshot_id) for market in gamma_data]
-    )
+    assert current_markets == sorted([(market["id"], first.snapshot_id) for market in gamma_data])
     assert incomplete_coverage == (0, "events")
 
 

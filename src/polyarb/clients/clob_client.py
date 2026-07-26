@@ -1,8 +1,8 @@
 """Async wrapper around py-clob-client v0.34.6 (sync SDK).
 
 Pattern: ``asyncio.to_thread`` + manual chunking at ``settings.clob_batch_size``
-(default 500, the CLOB max-per-call). Returns RAW responses verbatim from the
-SDK; normalization is owned by Plan 4.
+(default 500, the CLOB max-per-call). Full mode returns SDK responses verbatim;
+snapshot callers use the bounded top-of-book projection.
 
 Why two methods (``get_books`` + ``get_prices_buy_sell``):
 - The CLOB ``order_book.bids[]`` is the canonical liquidity source (sizes).
@@ -32,7 +32,7 @@ Empirical shapes (from fixtures/clob_sample.json, recorded T1 against live API):
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 
 from aiolimiter import AsyncLimiter
 from loguru import logger
@@ -45,6 +45,31 @@ from polyarb.config import Settings
 def _chunked(seq: list[str], size: int) -> list[list[str]]:
     """Split ``seq`` into chunks of ``size`` (last may be shorter). Empty → []."""
     return [seq[i : i + size] for i in range(0, len(seq), size)]
+
+
+def _field(value: Any, name: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _compact_level(level: Any) -> dict[str, Any]:
+    return {
+        "price": _field(level, "price"),
+        "size": _field(level, "size"),
+    }
+
+
+def _compact_book_top(book: Any) -> dict[str, Any]:
+    """Drop full depth while retaining exactly what snapshot validation reads."""
+    asks = _field(book, "asks")
+    bids = _field(book, "bids")
+    asset_id = _field(book, "asset_id") or _field(book, "market") or _field(book, "token_id")
+    return {
+        "asset_id": asset_id,
+        "asks": ([_compact_level(asks[0])] if isinstance(asks, (list, tuple)) and asks else []),
+        "bids": ([_compact_level(bids[0])] if isinstance(bids, (list, tuple)) and bids else []),
+    }
 
 
 class ClobReaderClient:
@@ -66,12 +91,14 @@ class ClobReaderClient:
         token_ids: list[str],
         *,
         cache: Any | None = None,
+        projection: Literal["full", "top"] = "full",
     ) -> list[Any]:
         """Fetch order books for ``token_ids`` (chunked at ``clob_batch_size``).
 
-        Returns a list of ``OrderBookSummary`` objects (dataclass-like; key
-        attrs: ``market``, ``asset_id``, ``bids``, ``asks``, ``timestamp``).
-        Plan 4 normalizes; this layer returns raw SDK output.
+        ``projection="full"`` returns raw ``OrderBookSummary`` objects.
+        ``projection="top"`` projects every fetched/cache chunk immediately
+        to asset identity plus one ask and bid. This keeps snapshot RSS bounded
+        when the verified universe contains tens of thousands of tokens.
 
         Empty input returns ``[]`` without making any network call.
 
@@ -83,6 +110,8 @@ class ClobReaderClient:
         already accepts.
         """
         out: list[Any] = []
+        if projection not in ("full", "top"):
+            raise ValueError(f"unsupported book projection: {projection!r}")
         if not token_ids:
             return out
 
@@ -91,15 +120,21 @@ class ClobReaderClient:
         for i, chunk in enumerate(chunks, start=1):
             if cache is not None and cache.has_books_chunk(i):
                 cached = cache.load_books_chunk(i)
-                out.extend(cached)
+                if projection == "top":
+                    out.extend(_compact_book_top(book) for book in cached)
+                else:
+                    out.extend(cached)
                 logger.info(f"CLOB books chunk {i}/{n_chunks}: cached ({len(cached)} books)")
                 continue
             params = [BookParams(token_id=t) for t in chunk]
             async with self._limiter:
                 books = await asyncio.to_thread(self._client.get_order_books, params)
-            out.extend(books)
             if cache is not None:
                 cache.save_books_chunk(i, books)
+            if projection == "top":
+                out.extend(_compact_book_top(book) for book in books)
+            else:
+                out.extend(books)
             logger.info(f"CLOB books chunk {i}/{n_chunks}: fetched ({len(chunk)} tokens)")
         return out
 

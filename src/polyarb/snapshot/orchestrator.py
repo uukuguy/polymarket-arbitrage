@@ -328,9 +328,7 @@ async def run_snapshot(
         # ── Phase 1: events (fully materialized — Decision A) ─────────────
         with _phase("1/7: Gamma /events fetch + normalize"):
             try:
-                raw_events = [
-                    event async for event in gamma.iter_active_events(events_coverage)
-                ]
+                raw_events = [event async for event in gamma.iter_active_events(events_coverage)]
                 logger.info(f"Gamma: fetched {len(raw_events)} active events")
                 (
                     event_rows,
@@ -372,9 +370,7 @@ async def run_snapshot(
         # below appends API_UNREACHABLE (chain-truth preserved).
         with _phase("2/7: Stream /markets — normalize + dedupe + filter"):
             first_frame_seen = False
-            authoritative_member_ids = {
-                member.market_id for member in event_members
-            }
+            authoritative_member_ids = {member.market_id for member in event_members}
             semantic_validator = MarketTruthSemanticValidator(
                 event_members,
                 group_truths,
@@ -404,8 +400,8 @@ async def run_snapshot(
                             # Keep only the first mismatch to preserve the
                             # streaming memory bound.
                             if market_semantic_reason is None:
-                                market_semantic_reason = (
-                                    semantic_validator.row_mismatch_reason(normalized)
+                                market_semantic_reason = semantic_validator.row_mismatch_reason(
+                                    normalized
                                 )
 
                             semantic_fingerprint = (
@@ -418,8 +414,7 @@ async def run_snapshot(
                             if mid in seen_ids:
                                 if (
                                     market_semantic_reason is None
-                                    and market_semantic_fingerprints[mid]
-                                    != semantic_fingerprint
+                                    and market_semantic_fingerprints[mid] != semantic_fingerprint
                                 ):
                                     market_semantic_reason = (
                                         f"duplicate-market-truth-conflict:{mid}"
@@ -431,9 +426,8 @@ async def run_snapshot(
                             normalized_count += 1
 
                             # Mode filter (replaces the old phase-3 block).
-                            if (
-                                mid in authoritative_member_ids
-                                or _include_in_snapshot(mode, normalized, threshold)
+                            if mid in authoritative_member_ids or _include_in_snapshot(
+                                mode, normalized, threshold
                             ):
                                 target_markets.append(normalized)
                             # Non-target markets: dropped — no buffer, no reference held.
@@ -486,11 +480,17 @@ async def run_snapshot(
                     category=Category.API_UNREACHABLE,
                     market_id=None,
                     detail=(
-                        "Gamma event/market reconciliation incomplete: "
-                        f"{reconciliation_reason}"
+                        f"Gamma event/market reconciliation incomplete: {reconciliation_reason}"
                     )[:200],
                 )
             )
+    # These maps prove source identity only during streaming/reconciliation.
+    # Releasing them before CLOB prevents the complete-universe maps from
+    # overlapping with tens of thousands of order-book projections.
+    seen_ids.clear()
+    market_semantic_fingerprints.clear()
+    market_to_event_map.clear()
+    authoritative_member_ids.clear()
 
     # ── Phase 3: token list extraction (was inlined into old phase 3) ────
     with _phase("3/7: Build token list"):
@@ -514,6 +514,7 @@ async def run_snapshot(
     prices_buy: dict = {}
     prices_sell: dict = {}
     cache: ChunkCache | None = None
+    clob_fetch_failed = False
     with _phase("4/7: CLOB fetch (books + buy/sell prices)"):
         if use_cache:
             cache = ChunkCache(
@@ -535,16 +536,22 @@ async def run_snapshot(
 
         clob = ClobReaderClient(settings)
         try:
-            books = await clob.get_books(token_ids, cache=cache)
+            books = await clob.get_books(
+                token_ids,
+                cache=cache,
+                projection="top",
+            )
             prices = await clob.get_prices_buy_sell(token_ids, cache=cache)
             prices_buy = prices.get("buy", {})
             prices_sell = prices.get("sell", {})
             books_by_token = _index_books_by_token(books)
+            del books
             logger.info(
                 f"CLOB: {len(books_by_token)} books indexed, "
                 f"{len(prices_buy)}/{len(prices_sell)} buy/sell prices"
             )
         except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
+            clob_fetch_failed = True
             logger.error(f"CLOB fetch failed: {e!r}")
             # F-5: cap exception detail to 200 chars.
             issues.append(
@@ -642,17 +649,24 @@ async def run_snapshot(
             }
             for tid in all_tids
         }
-        issues.extend(layer4_cross_source(target_markets, books_by_token, prices_combined))
+        # A global fetch failure already carries the bounded, actionable L4
+        # signal. Expanding it into one CLOB_MISSING row per token duplicates
+        # no information and can OOM a complete 90k+ token universe.
+        if not clob_fetch_failed:
+            issues.extend(layer4_cross_source(target_markets, books_by_token, prices_combined))
 
         status = determine_snapshot_status(issues)
         is_valid = is_valid_overall(issues)  # True for OK/DEGRADED, False for FAILED
         source_complete = (
-            events_coverage.result.completed and markets_coverage.result.completed
+            events_coverage.result.completed
+            and markets_coverage.result.completed
             and reconciliation_reason is None
             and event_failure_reason is None
         )
-        publish_markets = source_complete and is_valid and not any(
-            issue.category == Category.API_UNREACHABLE for issue in issues
+        publish_markets = (
+            source_complete
+            and is_valid
+            and not any(issue.category == Category.API_UNREACHABLE for issue in issues)
         )
         if not publish_markets:
             status = SnapshotStatus.FAILED
@@ -671,9 +685,10 @@ async def run_snapshot(
     with _phase("7/7: Persist (Parquet then SQLite)"):
         # Plan 02-09 (D-23): streaming writes. Parquet via ParquetWriter chunked
         # write; SQLite via batched executemany in a single BEGIN IMMEDIATE
-        # transaction. Both consume `target_markets` (already post-filter, ≤8k
-        # rows in subset mode at $1k threshold). The architectural win is in
-        # phase 2 above — the 20k raw Gamma list never materializes.
+        # transaction. Both consume `target_markets`. Complete neg-risk
+        # membership can make this much larger than the historical ≤8k liquid
+        # subset, so Phase 4 retains only compact top-of-book projections.
+        # The raw Gamma list and full-depth CLOB books never materialize here.
 
         def _parquet_row_iter():
             """Generator: stamp snapshot metadata on each target market dict."""

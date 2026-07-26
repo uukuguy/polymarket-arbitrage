@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -138,3 +139,36 @@ async def test_propagates_sdk_exceptions() -> None:
     with patch.object(client._client, "get_order_books", side_effect=RuntimeError("boom")):
         with pytest.raises(RuntimeError, match="boom"):
             await client.get_books(["t1"])
+
+
+async def test_get_books_top_projection_discards_full_depth_per_chunk() -> None:
+    """Snapshot callers retain only the two top levels, not every raw depth row."""
+    client = ClobReaderClient(Settings(clob_batch_size=2))
+    token_ids = [f"tok_{i}" for i in range(5)]
+
+    def full_depth(params):
+        return [
+            SimpleNamespace(
+                asset_id=param.token_id,
+                asks=[
+                    SimpleNamespace(price=f"0.{level + 10}", size=str(level + 1))
+                    for level in range(100)
+                ],
+                bids=[
+                    SimpleNamespace(price=f"0.{level + 1:02d}", size=str(level + 2))
+                    for level in range(100)
+                ],
+                hash="raw-book-field-must-not-be-retained",
+            )
+            for param in params
+        ]
+
+    with patch.object(client._client, "get_order_books", side_effect=full_depth) as mocked:
+        out = await client.get_books(token_ids, projection="top")
+
+    assert mocked.call_count == 3
+    assert len(out) == len(token_ids)
+    assert all(set(book) == {"asset_id", "asks", "bids"} for book in out)
+    assert all(len(book["asks"]) == 1 and len(book["bids"]) == 1 for book in out)
+    assert out[0]["asks"] == [{"price": "0.10", "size": "1"}]
+    assert out[0]["bids"] == [{"price": "0.01", "size": "2"}]
