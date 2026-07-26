@@ -515,6 +515,21 @@ class WsConsumer:
         )
         return retry_after_s
 
+    async def compensate_current_generation(self, *, reason_code: str) -> None:
+        """Compensate the current socket without exposing its identity to callers."""
+        if not reason_code or len(reason_code) > 96:
+            raise ValueError("reason_code must contain 1..96 characters")
+        ws = self._current_ws
+        generation = self._connection_generation
+        if ws is None:
+            return
+        logger.warning(
+            "ws current generation compensation requested reason={} generation={}",
+            reason_code,
+            generation,
+        )
+        await self._compensate_generation(ws, generation)
+
     def requires_book_levels(self, asset_id: str) -> bool:
         """Return current-generation depth-write eligibility for one token.
 

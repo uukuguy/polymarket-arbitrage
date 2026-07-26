@@ -208,6 +208,17 @@ async def test_compensation_is_reserved_once_per_generation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_compensation_closes_only_current_snapshot() -> None:
+    consumer, ws = _consumer()
+
+    await consumer.compensate_current_generation(reason_code="promote_append_failed")
+
+    ws.close.assert_awaited_once()
+    assert consumer._current_ws is None
+    assert consumer._connection_generation == 7
+
+
+@pytest.mark.asyncio
 async def test_initial_subscription_failure_closes_candidate_before_publication() -> None:
     consumer, old_ws = _consumer()
     candidate = MagicMock()
