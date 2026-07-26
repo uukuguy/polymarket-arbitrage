@@ -61,6 +61,7 @@ from polyarb.config import Settings
 from polyarb.events.bus import publish_snapshot_complete
 from polyarb.perception.market_truth import (
     ACTIVE_MEMBER_ABSENT_FROM_MARKET_KEYSET_REASON,
+    MARKET_SIDE_ACTIVE_MEMBER_ABSENT_FROM_EVENT_STRUCTURE_REASON,
     EventMember,
     GroupTruth,
     MarketTruthSemanticValidator,
@@ -81,6 +82,7 @@ from polyarb.validator.layers import (
 )
 
 MAX_ORPHAN_PARENT_LOOKUPS = GammaClient.MAX_MARKET_PARENT_LOOKUPS
+MAX_MARKET_STATE_LOOKUPS = GammaClient.MAX_MARKET_STATE_LOOKUPS
 
 
 def _is_dns_jitter(exc: BaseException) -> bool:
@@ -316,6 +318,37 @@ def _quarantine_open_keyset_absent_groups(
     return reconciled_truths, rejected_market_ids
 
 
+def _quarantine_market_side_structure_absent_groups(
+    event_members: list[EventMember],
+    group_truths: list[GroupTruth],
+    trigger_market_groups: dict[str, str],
+) -> tuple[list[GroupTruth], set[str]]:
+    """Reject groups with a point-open market-side member absent from events.
+
+    Preserve event-side members and their immutable membership hash as source
+    evidence. Publication removes both those members and the extra market rows
+    because M2 cannot safely infer whether the extra row belongs in the group.
+    """
+    rejected_group_ids = set(trigger_market_groups.values())
+    rejected_market_ids = set(trigger_market_groups)
+    rejected_market_ids.update(
+        member.market_id for member in event_members if member.group_id in rejected_group_ids
+    )
+    reconciled_truths = [
+        (
+            replace(
+                truth,
+                quality="complete-unsupported",
+                reason=MARKET_SIDE_ACTIVE_MEMBER_ABSENT_FROM_EVENT_STRUCTURE_REASON,
+            )
+            if truth.group_id in rejected_group_ids
+            else truth
+        )
+        for truth in group_truths
+    ]
+    return reconciled_truths, rejected_market_ids
+
+
 def _reconcile_market_truth(
     *,
     observed_market_ids: set[str],
@@ -429,6 +462,7 @@ async def run_snapshot(
     seen_ids: set[str] = set()
     event_optional_market_ids: set[str] = set()
     orphan_neg_risk_market_groups: dict[str, str] = {}
+    market_side_structure_absent_groups: dict[str, str] = {}
     orphan_neg_risk_market_count = 0
     missing_group_neg_risk_count = 0
     missing_group_neg_risk_samples: list[str] = []
@@ -590,6 +624,14 @@ async def run_snapshot(
                                 and isinstance(group_id, str)
                                 and group_id not in known_group_ids
                             )
+                            is_market_side_structure_absent = (
+                                normalized.get("event_id") is None
+                                and normalized.get("neg_risk") is True
+                                and isinstance(group_id, str)
+                                and group_id in known_group_ids
+                                and mid not in structural_member_ids
+                                and mid not in market_to_event_map
+                            )
                             # Inspect before duplicate suppression: pagination
                             # overlap may repeat a market ID, but a later row
                             # must not contradict its authoritative event truth.
@@ -599,6 +641,7 @@ async def run_snapshot(
                                 market_semantic_reason is None
                                 and not is_unattached_neg_risk
                                 and not is_group_less_neg_risk_quarantine
+                                and not is_market_side_structure_absent
                             ):
                                 market_semantic_reason = semantic_validator.row_mismatch_reason(
                                     normalized
@@ -640,6 +683,8 @@ async def run_snapshot(
                                 orphan_neg_risk_market_count += 1
                                 if len(orphan_neg_risk_market_groups) < MAX_ORPHAN_PARENT_LOOKUPS:
                                     orphan_neg_risk_market_groups[mid] = group_id
+                            if is_market_side_structure_absent:
+                                market_side_structure_absent_groups[mid] = group_id
                             normalized_count += 1
 
                             # Mode filter (replaces the old phase-3 block).
@@ -825,7 +870,12 @@ async def run_snapshot(
             event_members=event_members,
             group_truths=group_truths,
             event_optional_market_ids=event_optional_market_ids,
-            verified_stale_orphan_ids=verified_stale_orphan_ids,
+            # Known-group market-side extras are deferred until the final
+            # point lookup after CLOB. Exempt them from this preliminary
+            # reconciliation only; the final lookup remains fail-closed.
+            verified_stale_orphan_ids=(
+                verified_stale_orphan_ids | set(market_side_structure_absent_groups)
+            ),
             # A missing member that still looks open at the first point lookup
             # is deferred, not trusted. Long CLOB runs can span the exact
             # transition to closed, so Phase 5.5 rechecks it before publication.
@@ -1063,6 +1113,104 @@ async def run_snapshot(
                         final_lookup_reason = (
                             f"event-member-normalization-rejected:{bounded_ids}"
                         )[:160]
+
+            if final_lookup_reason is not None:
+                reconciliation_reason = final_lookup_reason
+                issues.append(
+                    Issue(
+                        layer=1,
+                        category=Category.API_UNREACHABLE,
+                        market_id=None,
+                        detail=(
+                            f"Gamma event/market reconciliation incomplete: {reconciliation_reason}"
+                        )[:200],
+                    )
+                )
+
+    if market_side_structure_absent_groups and reconciliation_reason is None:
+        with _phase("5.5/7: Recheck market-side members absent from event structure"):
+            final_lookup_reason: str | None = None
+            candidate_ids = set(market_side_structure_absent_groups)
+            if len(candidate_ids) > MAX_MARKET_STATE_LOOKUPS:
+                final_lookup_reason = (
+                    "market-side-final-state-lookup-limit-exceeded:"
+                    f"{len(candidate_ids)}>{MAX_MARKET_STATE_LOOKUPS}"
+                )[:160]
+            else:
+                try:
+                    async with GammaClient(settings) as final_gamma:
+                        final_states = await final_gamma.fetch_market_states(
+                            sorted(candidate_ids)
+                        )
+                except Exception as e:  # noqa: BLE001 — fail closed at source boundary
+                    final_lookup_reason = (
+                        f"market-side-final-state-lookup-failed:{type(e).__name__}"
+                    )[:160]
+                    logger.error(
+                        "Gamma final market-side/event-structure point lookup "
+                        f"failed: {e!r}"
+                    )
+                else:
+                    non_open_ids = {
+                        market_id
+                        for market_id, state in final_states.items()
+                        if not state["active"] or state["closed"]
+                    }
+                    still_open_ids = candidate_ids - non_open_ids
+                    # All strictly resolved candidates are intentional
+                    # reconciliation exemptions. None may survive publication.
+                    verified_stale_orphan_ids.update(candidate_ids)
+                    if non_open_ids:
+                        target_markets = [
+                            market
+                            for market in target_markets
+                            if market.get("market_id") not in non_open_ids
+                        ]
+                        bounded_ids = ",".join(sorted(non_open_ids)[:10])
+                        remainder = len(non_open_ids) - min(len(non_open_ids), 10)
+                        suffix = f" (+{remainder} more)" if remainder else ""
+                        issues.append(
+                            Issue(
+                                layer=1,
+                                category=Category.API_JITTER,
+                                market_id=None,
+                                detail=(
+                                    "Gamma non-open neg-risk market absent from event "
+                                    f"structure quarantined: {bounded_ids}{suffix}"
+                                )[:200],
+                            )
+                        )
+                    if still_open_ids:
+                        open_market_groups = {
+                            market_id: market_side_structure_absent_groups[market_id]
+                            for market_id in still_open_ids
+                        }
+                        group_truths, rejected_market_ids = (
+                            _quarantine_market_side_structure_absent_groups(
+                                event_members,
+                                group_truths,
+                                open_market_groups,
+                            )
+                        )
+                        target_markets = [
+                            market
+                            for market in target_markets
+                            if market.get("market_id") not in rejected_market_ids
+                        ]
+                        bounded_ids = ",".join(sorted(still_open_ids)[:10])
+                        remainder = len(still_open_ids) - min(len(still_open_ids), 10)
+                        suffix = f" (+{remainder} more)" if remainder else ""
+                        issues.append(
+                            Issue(
+                                layer=1,
+                                category=Category.API_JITTER,
+                                market_id=None,
+                                detail=(
+                                    "Gamma active neg-risk market absent from event "
+                                    f"structure quarantined: {bounded_ids}{suffix}"
+                                )[:200],
+                            )
+                        )
 
             if final_lookup_reason is not None:
                 reconciliation_reason = final_lookup_reason

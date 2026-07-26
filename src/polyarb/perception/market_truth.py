@@ -24,6 +24,9 @@ CONFLICTING_EVENT_MEMBERSHIP_REASON = "market-id-conflict-across-events"
 INVALID_NEG_RISK_FLAGS_REASON = "event-neg-risk-flags-invalid"
 NEG_RISK_ENABLEMENT_CONFLICT_REASON = "event-neg-risk-enablement-conflict"
 ACTIVE_MEMBER_ABSENT_FROM_MARKET_KEYSET_REASON = "active-member-absent-from-market-keyset"
+MARKET_SIDE_ACTIVE_MEMBER_ABSENT_FROM_EVENT_STRUCTURE_REASON = (
+    "market-side-active-member-absent-from-event-structure"
+)
 
 
 @dataclass(frozen=True)
