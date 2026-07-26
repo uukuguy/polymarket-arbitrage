@@ -61,10 +61,10 @@ Phase 6 — Production neg-risk opportunity feed
 - [x] Add failing scheduler and health chain-truth tests
 - [x] Implement the quote worker, lifecycle wiring, settings, and health checks
 - [x] Run focused and full local verification
-- [ ] Deploy to L1 and record a timestamped capacity observation
-- [ ] Verify repeated complete runs and a fresh HTTP 200 feed
-- [ ] Update the M1 manual, learning docs, JOURNAL, and project state
-- **Status:** in progress
+- [x] Deploy to L1 and record a timestamped capacity observation
+- [x] Verify repeated complete runs and a fresh HTTP 200 feed
+- [x] Update the M1 manual, learning docs, JOURNAL, and project state
+- **Status:** complete
 
 ## Key Questions
 
@@ -102,7 +102,7 @@ Phase 6 — Production neg-risk opportunity feed
   throughout 24 hours.
 - No production deploy, restart, config/secret change, or H-009 work belongs in
   the historical Phase 05.4 design/spec-review steps.
-- Production currently returns `503 {"error":"quote run unavailable"}` because
-  H-009 code is deployed but no producer is scheduled.
+- Production now returns a fresh HTTP 200 feed after automatic run 2→3→4;
+  HTTP 503 remains the fail-closed meaning for missing/stale quote truth.
 - The latest production universe has 1,278 eligible YES tokens across 254
   neg-risk groups, requiring three configured CLOB batches.

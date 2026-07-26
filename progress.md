@@ -68,7 +68,7 @@
 
 ### Phase 6: Production neg-risk opportunity feed
 
-- **Status:** in progress
+- **Status:** complete
 - Actions taken:
   - Probed L1/L2 health and verified the market-data base remains operational.
   - Reproduced the production opportunity-feed 503 and captured its exact body.
@@ -98,6 +98,20 @@
     of raising an HTTP 500. Also replaced loose settings attribute access with
     the concrete `Settings` contract and centralized the 240-second warning
     threshold.
+  - Committed exact implementation `bef53d3…`, restored the expired GitHub
+    Fly credential without exposing its value, and deployed Fly L1 release 130
+    via workflow `30182327847`.
+  - Proved automatic production runs 2→3→4 across more than two 120-second
+    intervals. Every run completed 1,278/1,278 responses; repeated feed
+    diagnostics returned HTTP 200 and quote/snapshot health stayed pass.
+  - Observed Python RSS at approximately 400 MB then 356 MB on the 1 GB L1
+    machine, with no rising-memory or snapshot-failure signal.
+  - Added a RED/GREEN L1 workflow contract to inject `GITHUB_SHA` as
+    `POLYARB_RELEASE_ID`; exact SHA `cb0ba9c…` deployed as release 131 and
+    `/health.releaseId` now proves runtime identity. Automatic run 6 completed
+    after that restart and the feed remained HTTP 200.
+  - Updated the living manual, teaching document, CURRENT, ROADMAP, STATE,
+    SUMMARY, JOURNAL, observation thread, and durable planning logs.
 - Files modified:
   - `task_plan.md`
   - `findings.md`
@@ -128,6 +142,10 @@
 | Full repository Ruff | all `src tests` | Baseline audit only | 229 pre-existing findings outside changed files | legacy |
 | Docker build | `docker build -t polyarb:quote-worker .` | Exit 0 | image `64214e3e…` | ✓ |
 | Docker smoke | import worker/settings | Default false, interval 120 | Exact expected dict | ✓ |
+| Production continuity | automatic runs across >240 s | Three increasing complete runs | 2→3→4, each 1,278/1,278 | ✓ |
+| Repeated feed diagnosis | once after each sampled run | HTTP 200 valid feed | `available-opportunities` each time | ✓ |
+| Quote/snapshot health | release 130 sampled health | Both remain pass | quote ages 36.7/17.9/20.3 s; snapshot pass | ✓ |
+| Runtime identity | release 131 strict health | Exact deployed SHA | `cb0ba9c54d79…` | ✓ |
 
 ## Error Log
 
@@ -142,13 +160,17 @@
 | 2026-07-26 | Full pytest found two exact documentation phrase contract failures | 1 | Restored the canonical Make target spelling and fixed real-money/readiness warning phrases |
 | 2026-07-26 | Full Ruff reports 229 legacy findings in unrelated files | 1 | Preserved scope; changed-file Ruff is clean and no bulk rewrite was made |
 | 2026-07-26 | First image smoke lacked the required HMAC secret | 1 | Confirmed fail-closed, then used `POLYARB_ALLOW_EMPTY_SECRET=1` only for local image inspection |
+| 2026-07-26 | First GHA deploy returned Fly `unauthorized` | 1 | Safely refreshed the expired repository secret and reran the exact workflow successfully |
+| 2026-07-26 | Two local remote-build uploads stalled in Fly Depot | 2 | Stopped before production mutation; restored the canonical GHA path instead |
+| 2026-07-26 | First local registry image was ARM64; AMD64 push hit registry errors | 2 | Production rejected the wrong architecture; abandoned the fallback after GHA recovery |
+| 2026-07-26 | `/health.releaseId` remained `dev` after release 130 | 1 | Added workflow contract and injected `GITHUB_SHA`; release 131 reports exact SHA |
 
 ## 5-Question Reboot Check
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 6 — writing the approved quote-worker rollout plan |
-| Where am I going? | TDD implementation, local verification, L1 deploy, repeated production-run proof |
+| Where am I? | Phase 6 — complete |
+| Where am I going? | Legacy Phase 05 Plan 06 dashboard/closure, then M2 paper opportunity evaluation |
 | What's the goal? | Turn the truthful but unavailable opportunity route into a continuously fresh known-universe feed |
 | What have I learned? | See `findings.md`, especially the 2026-07-26 production section |
-| What have I done? | Root-caused the 503, rejected unsafe cron placement, and obtained approval for scheme A |
+| What have I done? | Deployed scheme A, proved three automatic runs and HTTP 200 continuity, and restored exact release identity |

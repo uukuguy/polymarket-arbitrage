@@ -1276,3 +1276,29 @@ transport activity and an orderbook resnapshot:
 - Availability failures are separate from verdict failures. A timed-out
   read that creates no O_EXCL report may be retried exactly; a persisted
   canonical NOT-CLOSED artifact remains immutable.
+
+### §2.14 A durable consumer needs a producer on the same truth path (2026-07-26)
+
+- Deploying a quote store, scanner, and HTTP route did not make the opportunity
+  feed live. With no complete quote-run producer, HTTP 503 `quote run
+  unavailable` was the only truthful answer; it was never a zero-opportunity
+  result.
+- Process placement is part of chain-truth. The L1 app reads
+  `/data/state.db`; the Fly cron machine has no `/data` volume. A cron-side
+  collector could succeed while remaining permanently invisible to the HTTP
+  consumer. The producer therefore belongs in the volume-owning L1 app process
+  unless storage is deliberately moved to a shared service.
+- Producer and consumer clocks stay independent. The worker attempts every
+  120 seconds, health warns at 240, and the public scanner rejects quotes after
+  300. A scheduling fix must not weaken the consumer SLA to hide missed runs.
+- Production capacity must precede cadence commitment. The 1,278-token universe
+  required three configured CLOB batches and completed in 1.013 seconds; runs
+  2→3→4 then proved 1,278/1,278 continuity at about 121-second start intervals.
+- Durable complete-run age is the success truth; process-local collector state
+  explains the current attempt. A recent complete run plus a transient worker
+  error is warn, while no complete run, unreadable storage, or age over 300
+  seconds is fail-closed.
+- Release identity is also a health-chain link. The older L1 workflow deployed
+  exact source but left `/health.releaseId=dev`; release 131 now injects the
+  workflow `GITHUB_SHA`, so the public health body can be matched to the
+  deployed commit without relying only on external release history.

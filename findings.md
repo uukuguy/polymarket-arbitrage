@@ -70,8 +70,9 @@
 
 ## Production opportunity-feed findings — 2026-07-26
 
-- `GET https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=0`
-  returns HTTP 503 with exact body `{"error":"quote run unavailable"}`.
+- Before Phase 05.5, `GET
+  https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=0` returned
+  HTTP 503 with exact body `{"error":"quote run unavailable"}`.
 - The deployed image is built from Git SHA
   `95bf1bd8714b92056c1ca6cca2d13ac9bd3d06d5`; it includes the H-009 quote
   store, collector, scanner, and HTTP route.
@@ -101,3 +102,20 @@
   durable no-overlap enforcement and `/health` chain-truth.
 - Existing production warnings discovered but kept outside this focused change:
   malformed R2 bucket configuration and an event-bus database password failure.
+- Exact implementation SHA `bef53d3…` deployed as Fly L1 release 130. Automatic
+  runs 2, 3, and 4 each completed 1,278/1,278 responses; their start intervals
+  were about 121 seconds and repeated diagnostics returned HTTP 200.
+- Quote health stayed pass at sampled ages 36.7, 17.9, and 20.3 seconds;
+  snapshot health stayed pass. Python RSS was about 400 MB then 356 MB on the
+  1 GB machine, so the worker did not create a rising-memory signal.
+- The existing L1 workflow omitted `POLYARB_RELEASE_ID`, making `/health`
+  report `releaseId=dev`. RED/GREEN workflow coverage fixed this in
+  `cb0ba9c…`; Fly release 131 now reports the exact SHA and completed automatic
+  run 6 immediately after startup.
+- The first deployment attempt failed because the repository's Fly token was
+  expired. The token was safely refreshed from the already authenticated local
+  session without printing it; rerun workflow `30182327847` succeeded. The
+  follow-up exact-identity workflow `30183038209` also succeeded.
+- Repository CI still fails before pytest on 229 pre-existing full-tree Ruff
+  findings outside this phase. Changed files and all local tests are clean;
+  no unrelated 229-file cleanup or weakening of the CI contract was made.

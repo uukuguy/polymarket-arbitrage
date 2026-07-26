@@ -3,32 +3,33 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.5
-status: executing
-stopped_at: Phase 05.5 design approved and capacity-proved; execute 05.5-01 TDD
-last_updated: "2026-07-26T00:45:00Z"
+status: ready
+stopped_at: Phase 05.5 COMPLETE; resume legacy Phase 05 Plan 06 dashboard/closure
+last_updated: "2026-07-26T01:34:00Z"
 progress:
   total_phases: 14
-  completed_phases: 12
+  completed_phases: 13
   total_plans: 72
-  completed_plans: 70
-  percent: 98
+  completed_plans: 71
+  percent: 99
 ---
 
 # M1 Perception — Current State
 
 ## Current Position
 
-Phase: 05.5 (production-opportunity-feed) — IN PROGRESS
-Plan: 1 of 1 approved and ready for TDD
+Phase: 05.5 (production-opportunity-feed) — COMPLETE
+Plan: 1 of 1 complete
 
-- **Current production fact:** H-009 code is deployed but no periodic producer
-  exists. Before the capacity probe, the public route returned HTTP 503
-  `quote run unavailable`.
-- **Capacity proof:** production run 1 fetched 1,278/1,278 books across three
-  batches in 1.013 seconds and made the route return HTTP 200.
-- **Approved implementation:** one fail-soft L1 app-process worker, immediate
-  first run then 120-second cadence, unchanged 300-second quote SLA, durable
-  health chain-truth, no wallet or order capability.
+- **Production result:** capacity run 1 fetched 1,278/1,278 books in 1.013
+  seconds. Automatic run 2→3→4 then completed 1,278/1,278 at approximately
+  121-second start intervals; every sampled opportunity request returned HTTP
+  200 and quote/snapshot health remained pass.
+- **Runtime identity:** L1 release 131 exposes exact
+  `releaseId=cb0ba9c54d79ed741f847c9db08ebeda098c5342`; run 6 completed
+  immediately after this release and the feed remained HTTP 200.
+- **Safety boundary:** public CLOB reads plus local SQLite quote persistence
+  only. No wallet, signing, orders, or real-money authorization.
 
 - **Phase:** 05.4 — Continuous L3 soak evidence, completed 2026-07-26
 - **Plan:** 05.4-05 complete — all nine tasks and the final mechanical verifier passed.
@@ -230,8 +231,8 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 - Reconcile the completed Phase 05.4 strict evidence into legacy Phase 05 Plan
   06, including its dashboard smoke and final Phase 05 validation/closure.
 
-- Keep H-009 pending until separately authorized production
-  deployment/scheduling and timestamped capacity evidence.
+- Phase 05.5/H-009 is complete; use its production feed only as
+  known-universe gross-before-fees discovery input.
 
 - Do not run retention cleanup, production chaos, or trading as part of Phase
   05 closure.
@@ -253,8 +254,8 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 
 ## Session Continuity
 
-- **Last session:** 2026-07-26 07:35 (Asia/Shanghai)
-- **Stopped at:** Phase 05.4 A7 final PASS and planning closure.
+- **Last session:** 2026-07-26 09:34 (Asia/Shanghai)
+- **Stopped at:** Phase 05.5 release 131 and production opportunity-feed PASS.
 - **Proceeding to:** Phase 05 Plan 06 reconciliation and dashboard/Phase 05
   closure, reusing—not re-running—the stricter continuous evidence.
 

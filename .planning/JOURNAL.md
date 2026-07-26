@@ -5116,3 +5116,51 @@ Resume with `/gsd-resume-work --ws m1-perception`, then reconcile the stricter
 Phase 05.4 evidence into legacy Phase 05 Plan 06 and complete its dashboard /
 Phase 05 closure checks. Do not re-run the 24-hour clock unless that plan finds
 an actual contract mismatch.
+
+## SESSION 101 — 2026-07-26 (Phase 05.5 production opportunity feed PASS)
+
+- [ROOT CAUSE] The deployed H-009 store/collector/scanner/HTTP chain had no
+  producer. The public route truthfully returned HTTP 503 `quote run
+  unavailable`. The Fly cron machine could not own the fix because it has no
+  `/data` volume and its 256 MB snapshot job recently exited 137.
+- [CAPACITY] Authorized production run 1 collected the latest 1,278-token,
+  254-group universe in three public CLOB batches: 1,278/1,278 responses,
+  1.013 seconds collector time, then immediate HTTP 200.
+- [IMPLEMENTATION] Exact implementation `bef53d3…` adds a disabled-by-default,
+  production-enabled L1 app-process quote worker: immediate first run,
+  sequential 120-second cadence, fail-soft retry, cancellation propagation,
+  durable quote-age health, collector runtime health, and unchanged
+  240-second warn/300-second hard SLA. No wallet or order path exists.
+- [LOCAL GATES] TDD worker and unreadable-store health cases passed; focused
+  route/store/collector/worker integration reached 86/86. Full pytest passed
+  with the existing one xfail/one skip; changed-file Ruff, compileall, Docker
+  smoke, M1 docs, planning status, and diff checks passed. Full-tree Ruff still
+  has 229 inherited findings outside this phase.
+- [DEPLOY] The repository Fly secret had expired and the first workflow attempt
+  returned `unauthorized`. It was refreshed from the already authenticated
+  local session without printing its value; exact workflow `30182327847`
+  attempt 2 deployed `bef53d3…` as L1 release 130 and passed `/health` smoke.
+- [CONTINUITY] Automatic run 2→3→4 each completed 1,278/1,278 at about
+  121-second start intervals. Repeated `make diagnose-arb-feed-prod
+  min_edge_bps=0` returned HTTP 200 `available-opportunities`; quote/snapshot
+  health stayed pass. Python RSS was approximately 400 MB then 356 MB on the
+  1 GB app machine.
+- [IDENTITY] Release 130 exposed `releaseId=dev`, revealing an older L1 workflow
+  gap. A RED/GREEN workflow contract now injects `GITHUB_SHA`; exact
+  `cb0ba9c54d79ed741f847c9db08ebeda098c5342` deployed through workflow
+  `30183038209` as release 131. Strict health reports that SHA, automatic run 6
+  completed after startup, and the feed remained HTTP 200.
+- [BOUNDARY] The feed is production-qualified as a known-universe,
+  gross-before-fees discovery input only. It does not include post-snapshot new
+  groups and does not solve fees, slippage, multi-leg fill, oracle, capital
+  approval, or real-money execution.
+- [DASHBOARD] Authenticated browser acceptance remains externally blocked
+  because the connected browser runtime had no available browser. Anonymous
+  HTTP 200 was not substituted.
+
+### [NEXT — CURRENT]
+
+Resume with `/gsd-resume-work --ws m1-perception`, read legacy
+`05-ws-book-prices/05-06-PLAN.md`, reuse the stricter Phase 05.4 evidence, and
+complete authenticated Dashboard acceptance plus Phase 05 validation/SUMMARY.
+Do not re-run the 24-hour clock unless an actual contract mismatch is found.
