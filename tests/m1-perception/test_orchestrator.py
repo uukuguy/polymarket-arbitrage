@@ -944,8 +944,10 @@ async def test_amendment_01_event_id_populated_on_markets(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_amendment_01_orphan_market_blocks_publication(tmp_path: Path) -> None:
-    """A market absent from authoritative /events makes the whole view incomplete."""
+async def test_amendment_01_non_neg_risk_orphan_market_is_published(
+    tmp_path: Path,
+) -> None:
+    """Ordinary markets may outlive the active event catalogue."""
     settings = _make_settings(tmp_path)
     settings.event_bus_enabled = True
     gamma_data = _load_gamma_fixture()
@@ -982,12 +984,74 @@ async def test_amendment_01_orphan_market_blocks_publication(tmp_path: Path) -> 
     finally:
         con.close()
 
+    assert result.is_valid is True
+    assert "api_unreachable" not in result.issue_categories
+    assert market_count == 5
+    assert coverage == (1, None, None)
+    assert publish_mock.await_count == 1
+
+    with sqlite3.connect(settings.db_path) as con:
+        orphan_rows = con.execute(
+            "SELECT event_id, neg_risk, neg_risk_market_id FROM markets WHERE event_id IS NULL"
+        ).fetchall()
+    assert orphan_rows == [(None, 0, None)] * 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("neg_risk", "group_id", "drop_neg_risk"),
+    [
+        (True, None, False),
+        (False, "unverified-group", False),
+        ("false", None, False),
+        (False, None, True),
+    ],
+)
+async def test_orphan_market_requires_canonical_non_neg_risk_truth(
+    tmp_path: Path,
+    neg_risk: object,
+    group_id: str | None,
+    drop_neg_risk: bool,
+) -> None:
+    """Only an explicit canonical false/no-group row gets the event exemption."""
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    market = {
+        **_load_gamma_fixture()[0],
+        "negRisk": neg_risk,
+        "negRiskMarketID": group_id,
+    }
+    if drop_neg_risk:
+        market.pop("negRisk")
+    clob_data = _load_clob_fixture()
+    fake_gamma = _make_fake_gamma([market], [])
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed, failure_source, failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+        market_count = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+
     assert result.is_valid is False
-    assert "api_unreachable" in result.issue_categories
-    assert market_count == 0
     assert coverage[:2] == (0, "events")
-    assert "orphan-market" in coverage[2]
-    assert len(coverage[2]) <= 200
+    assert market_count == 0
     assert publish_mock.await_count == 0
 
 

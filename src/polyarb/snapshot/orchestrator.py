@@ -279,6 +279,7 @@ def _reconcile_market_truth(
     market_to_event_map: dict[str, str],
     event_members: list[EventMember],
     group_truths: list[GroupTruth],
+    event_optional_market_ids: set[str],
     verified_non_open_member_ids: set[str] | None = None,
 ) -> str | None:
     """Reconcile full Gamma identities before any subset publication claim."""
@@ -321,7 +322,14 @@ def _reconcile_market_truth(
     if missing_members:
         return f"event-member-missing-market:{','.join(missing_members[:5])}"[:160]
 
-    orphan_markets = sorted(observed_market_ids - set(market_to_event_map))
+    # Gamma's active market catalogue can legitimately contain ordinary
+    # (non-neg-risk) markets whose parent event is inactive and therefore
+    # absent from the active /events catalogue.  event_id=NULL is part of the
+    # storage contract for those rows.  Never extend this exemption to a row
+    # that claims neg-risk membership: M2 requires complete event/group truth.
+    orphan_markets = sorted(
+        observed_market_ids - set(market_to_event_map) - event_optional_market_ids
+    )
     if orphan_markets:
         return f"orphan-market-without-event:{','.join(orphan_markets[:5])}"[:160]
 
@@ -371,6 +379,7 @@ async def run_snapshot(
     issues: list[Issue] = []
     target_markets: list[dict] = []
     seen_ids: set[str] = set()
+    event_optional_market_ids: set[str] = set()
     market_semantic_fingerprints: dict[str, tuple[object, ...]] = {}
     raw_market_count = 0
     normalized_count = 0
@@ -501,6 +510,11 @@ async def run_snapshot(
                                 continue
                             seen_ids.add(mid)
                             market_semantic_fingerprints[mid] = semantic_fingerprint
+                            if (
+                                normalized.get("neg_risk") is False
+                                and normalized.get("neg_risk_market_id") is None
+                            ):
+                                event_optional_market_ids.add(mid)
                             normalized_count += 1
 
                             # Mode filter (replaces the old phase-3 block).
@@ -602,6 +616,7 @@ async def run_snapshot(
             market_to_event_map=market_to_event_map,
             event_members=event_members,
             group_truths=group_truths,
+            event_optional_market_ids=event_optional_market_ids,
             verified_non_open_member_ids=verified_non_open_member_ids,
         )
         if reconciliation_reason is not None:
@@ -620,6 +635,7 @@ async def run_snapshot(
     # overlapping with tens of thousands of order-book projections.
     seen_ids.clear()
     market_semantic_fingerprints.clear()
+    event_optional_market_ids.clear()
     market_to_event_map.clear()
     authoritative_member_ids.clear()
 
