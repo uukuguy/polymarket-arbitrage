@@ -200,6 +200,59 @@ def _include_in_snapshot(mode: str, market: dict, threshold: float) -> bool:
     )
 
 
+def _reconcile_market_truth(
+    *,
+    observed_market_ids: set[str],
+    market_to_event_map: dict[str, str],
+    event_members: list[EventMember],
+    group_truths: list[GroupTruth],
+) -> str | None:
+    """Reconcile full Gamma identities before any subset publication claim."""
+    incomplete_truth = next(
+        (truth for truth in group_truths if truth.quality == "incomplete-source"),
+        None,
+    )
+    if incomplete_truth is not None:
+        reason = incomplete_truth.reason or "unspecified"
+        return f"group-incomplete-source:{incomplete_truth.group_id}:{reason}"[:160]
+
+    truth_keys: set[tuple[str, str]] = set()
+    group_ids: set[str] = set()
+    for truth in group_truths:
+        key = (truth.event_id, truth.group_id)
+        if key in truth_keys or truth.group_id in group_ids:
+            return f"duplicate-group-identity:{truth.event_id}/{truth.group_id}"[:160]
+        truth_keys.add(key)
+        group_ids.add(truth.group_id)
+
+    seen_member_ids: set[str] = set()
+    for member in event_members:
+        if member.market_id in seen_member_ids:
+            return f"duplicate-member-identity:{member.market_id}"[:160]
+        seen_member_ids.add(member.market_id)
+        if (member.event_id, member.group_id) not in truth_keys:
+            return f"member-without-group-truth:{member.market_id}"[:160]
+        mapped_event = market_to_event_map.get(member.market_id)
+        if mapped_event != member.event_id:
+            return (
+                f"event-member-identity-conflict:{member.market_id}:"
+                f"{member.event_id}!={mapped_event}"
+            )[:160]
+
+    missing_members = sorted(seen_member_ids - observed_market_ids)
+    if missing_members:
+        return f"event-member-missing-market:{','.join(missing_members[:5])}"[:160]
+
+    orphan_markets = sorted(observed_market_ids - set(market_to_event_map))
+    if orphan_markets:
+        return f"orphan-market-without-event:{','.join(orphan_markets[:5])}"[:160]
+
+    missing_mapped_markets = sorted(set(market_to_event_map) - observed_market_ids)
+    if missing_mapped_markets:
+        return f"event-map-missing-market:{','.join(missing_mapped_markets[:5])}"[:160]
+    return None
+
+
 async def run_snapshot(
     settings: Settings,
     *,
@@ -309,6 +362,9 @@ async def run_snapshot(
         # below appends API_UNREACHABLE (chain-truth preserved).
         with _phase("2/7: Stream /markets — normalize + dedupe + filter"):
             first_frame_seen = False
+            authoritative_member_ids = {
+                member.market_id for member in event_members
+            }
             try:
                 async for retry_state in AsyncRetrying(
                     retry=retry_if_exception(lambda e: _is_dns_jitter(e) and not first_frame_seen),
@@ -334,7 +390,10 @@ async def run_snapshot(
                             normalized_count += 1
 
                             # Mode filter (replaces the old phase-3 block).
-                            if _include_in_snapshot(mode, normalized, threshold):
+                            if (
+                                mid in authoritative_member_ids
+                                or _include_in_snapshot(mode, normalized, threshold)
+                            ):
                                 target_markets.append(normalized)
                             # Non-target markets: dropped — no buffer, no reference held.
 
@@ -358,13 +417,34 @@ async def run_snapshot(
     # GammaClient closed (exited async-with). httpx AsyncClient fully cleaned
     # up before the CLOB phase starts.
 
-    gamma_count_reported = raw_market_count if raw_market_count > 0 else None
+    unique_market_count = raw_market_count - dedup_count
+    gamma_count_reported = unique_market_count if raw_market_count > 0 else None
     if dedup_count > 0:
         logger.info(f"Deduped {dedup_count} markets by market_id (Gamma pagination overlap)")
     logger.info(
         f"Streamed {normalized_count}/{raw_market_count} normalized; "
         f"{len(target_markets)} target after mode-filter (mode={mode})"
     )
+    reconciliation_reason: str | None = None
+    if events_coverage.result.completed and markets_coverage.result.completed:
+        reconciliation_reason = _reconcile_market_truth(
+            observed_market_ids=seen_ids,
+            market_to_event_map=market_to_event_map,
+            event_members=event_members,
+            group_truths=group_truths,
+        )
+        if reconciliation_reason is not None:
+            issues.append(
+                Issue(
+                    layer=1,
+                    category=Category.API_UNREACHABLE,
+                    market_id=None,
+                    detail=(
+                        "Gamma event/market reconciliation incomplete: "
+                        f"{reconciliation_reason}"
+                    )[:200],
+                )
+            )
 
     # ── Phase 3: token list extraction (was inlined into old phase 3) ────
     with _phase("3/7: Build token list"):
@@ -522,8 +602,9 @@ async def run_snapshot(
         is_valid = is_valid_overall(issues)  # True for OK/DEGRADED, False for FAILED
         source_complete = (
             events_coverage.result.completed and markets_coverage.result.completed
+            and reconciliation_reason is None
         )
-        publish_markets = source_complete and not any(
+        publish_markets = source_complete and is_valid and not any(
             issue.category == Category.API_UNREACHABLE for issue in issues
         )
         if not publish_markets:
@@ -570,6 +651,13 @@ async def run_snapshot(
             source_coverage = SourceCoverage.complete(
                 markets_coverage.result.items_yielded,
                 events_coverage.result.items_yielded,
+            )
+        elif reconciliation_reason is not None:
+            source_coverage = SourceCoverage.incomplete(
+                "events",
+                markets_coverage.result.items_yielded,
+                events_coverage.result.items_yielded,
+                reconciliation_reason,
             )
         elif not events_coverage.result.completed:
             source_coverage = SourceCoverage.incomplete(

@@ -326,7 +326,6 @@ def normalize_events(
                 classification_reason = INVALID_NEG_RISK_FLAGS_REASON
             elif not neg_risk_raw or not enable_neg_risk_raw:
                 classification_reason = NEG_RISK_ENABLEMENT_CONFLICT_REASON
-        expected_member_count = len(markets) if isinstance(markets, list) else 0
         if group_id is not None and (not isinstance(markets, list) or not markets):
             membership_reason = MISSING_EVENT_MEMBERSHIP_REASON
         if isinstance(markets, list):
@@ -386,7 +385,7 @@ def normalize_events(
                     event_id,
                     group_id,
                     augmented_raw is True,
-                    expected_member_count,
+                    len(group_members),
                     group_members,
                     structural_market_ids,
                     membership_reason,

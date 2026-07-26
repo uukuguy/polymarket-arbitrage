@@ -69,9 +69,9 @@ def _keyset_response(
 async def test_streaming_run_under_memory_budget(tmp_path: Path, gamma_payload_factory) -> None:
     make_realistic_market, make_realistic_event = gamma_payload_factory
 
-    # 20k markets in 200 pages of 100 (mirrors PAGE_LIMIT=100); 5k events.
+    # 20k markets in 200 pages and 10k two-market events in 100 pages.
     N_MARKETS = 20_000
-    N_EVENTS = 5_000
+    N_EVENTS = 10_000
 
     # Pre-generate as Python lists; respx slices these per-page.
     all_markets = [make_realistic_market(i) for i in range(N_MARKETS)]
@@ -162,7 +162,7 @@ async def test_streaming_run_under_memory_budget(tmp_path: Path, gamma_payload_f
             print(f"[memory] is_valid:        {result.is_valid}")
 
             assert markets_route.call_count == 200
-            assert events_route.call_count == 50
+            assert events_route.call_count == 100
 
             # B-1 assertions: delta (architectural claim) AND absolute (OOM relevance)
             DELTA_BUDGET = 30 * 1024 * 1024  # 30MB streaming-claim budget
@@ -216,7 +216,7 @@ async def test_streaming_no_raw_markets_accumulation_smoke(
     make_realistic_market, make_realistic_event = gamma_payload_factory
 
     N_MARKETS = 20_000
-    N_EVENTS = 5_000
+    N_EVENTS = 10_000
     all_markets = [make_realistic_market(i) for i in range(N_MARKETS)]
     all_events = [make_realistic_event(i) for i in range(N_EVENTS)]
 
@@ -293,11 +293,11 @@ async def test_streaming_no_raw_markets_accumulation_smoke(
             print(f"[smoke] target:       {result.market_count}")
 
             assert markets_route.call_count == 200
-            assert events_route.call_count == 50
+            assert events_route.call_count == 100
             assert markets_route.calls[0].request.url.params.get("after_cursor") is None
             assert markets_route.calls[-1].request.url.params["after_cursor"] == "19900"
             assert events_route.calls[0].request.url.params.get("after_cursor") is None
-            assert events_route.calls[-1].request.url.params["after_cursor"] == "4900"
+            assert events_route.calls[-1].request.url.params["after_cursor"] == "9900"
 
             # Wide belt — catches genuine 20k-list accumulation regressions.
             # If streaming broke and re-introduced a 20k full-buffer step,

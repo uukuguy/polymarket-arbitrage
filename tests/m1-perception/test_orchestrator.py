@@ -134,6 +134,35 @@ def _events_for_markets(markets: list[dict]) -> list[dict]:
     ]
 
 
+def _standard_neg_risk_event(markets: list[dict]) -> dict:
+    """Build one authoritative standard neg-risk event for the supplied markets."""
+    return {
+        "id": "EV-neg-risk",
+        "slug": "event-neg-risk",
+        "title": "Neg-risk event",
+        "ticker": "NEG",
+        "active": True,
+        "closed": False,
+        "liquidity": 1000.0,
+        "volume": 5000.0,
+        "endDate": "2026-12-31T00:00:00Z",
+        "negRisk": True,
+        "enableNegRisk": True,
+        "negRiskAugmented": False,
+        "negRiskMarketID": "group-neg-risk",
+        "markets": [
+            {
+                "id": market["id"],
+                "active": True,
+                "closed": False,
+                "negRiskOther": False,
+                "groupItemTitle": f"Outcome {index}",
+            }
+            for index, market in enumerate(markets)
+        ],
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # T6.1 — Full pipeline produces SQLite + Parquet with mocks
 # ─────────────────────────────────────────────────────────────────────────────
@@ -789,14 +818,10 @@ async def test_amendment_01_event_id_populated_on_markets(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_amendment_01_orphan_market_event_id_is_null(tmp_path: Path) -> None:
-    """If /events doesn't list a market, its event_id stays None (orphan tolerated).
-
-    Real Gamma data has /markets entries that aren't in /events at all (closed
-    parents, archived events). The pipeline must accept event_id=NULL rather
-    than dropping the market.
-    """
+async def test_amendment_01_orphan_market_blocks_publication(tmp_path: Path) -> None:
+    """A market absent from authoritative /events makes the whole view incomplete."""
     settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
     gamma_data = _load_gamma_fixture()
     clob_data = _load_clob_fixture()
     # /events fixture mentions ONLY the first market — markets 1-4 are orphans
@@ -807,6 +832,10 @@ async def test_amendment_01_orphan_market_event_id_is_null(tmp_path: Path) -> No
     with (
         patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
         patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
     ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
@@ -814,22 +843,115 @@ async def test_amendment_01_orphan_market_event_id_is_null(tmp_path: Path) -> No
             return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
         )
 
-        await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
 
     con = sqlite3.connect(settings.db_path)
     try:
-        with_event = con.execute(
-            "SELECT COUNT(*) FROM markets WHERE event_id IS NOT NULL"
-        ).fetchone()[0]
-        without_event = con.execute(
-            "SELECT COUNT(*) FROM markets WHERE event_id IS NULL"
-        ).fetchone()[0]
+        market_count = con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+        coverage = con.execute(
+            "SELECT completed, failure_source, failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
     finally:
         con.close()
 
-    # 1 market in /events fixture → 1 with event_id; 4 orphans → 4 NULL
-    assert with_event == 1
-    assert without_event == 4
+    assert result.is_valid is False
+    assert "api_unreachable" in result.issue_categories
+    assert market_count == 0
+    assert coverage[:2] == (0, "events")
+    assert "orphan-market" in coverage[2]
+    assert len(coverage[2]) <= 200
+    assert publish_mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_incomplete_source_group_truth_blocks_publication(tmp_path: Path) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    gamma_data = _load_gamma_fixture()[:1]
+    clob_data = _load_clob_fixture()
+    event = _standard_neg_risk_event(gamma_data)
+    event.pop("enableNegRisk")
+    fake_gamma = _make_fake_gamma(gamma_data, [event])
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM markets").fetchone() == (0,)
+        assert con.execute(
+            "SELECT quality FROM neg_risk_group_truth WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone() == ("incomplete-source",)
+        coverage = con.execute(
+            "SELECT completed, failure_source, failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+
+    assert result.is_valid is False
+    assert coverage[:2] == (0, "events")
+    assert "incomplete-source" in coverage[2]
+    assert len(coverage[2]) <= 200
+    assert publish_mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_authoritative_event_member_blocks_publication(tmp_path: Path) -> None:
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    all_markets = _load_gamma_fixture()[:2]
+    observed_markets = all_markets[:1]
+    clob_data = _load_clob_fixture()
+    fake_gamma = _make_fake_gamma(
+        observed_markets,
+        [_standard_neg_risk_event(all_markets)],
+    )
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    with sqlite3.connect(settings.db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM markets").fetchone() == (0,)
+        coverage = con.execute(
+            "SELECT completed, failure_source, failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+
+    assert result.is_valid is False
+    assert coverage[:2] == (0, "events")
+    assert "missing-market" in coverage[2]
+    assert all_markets[1]["id"] in coverage[2]
+    assert len(coverage[2]) <= 200
+    assert publish_mock.await_count == 0
 
 
 @pytest.mark.asyncio

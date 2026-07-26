@@ -245,7 +245,7 @@ def test_invalid_member_shape_or_id_fails_closed_but_keeps_valid_members(
     event["markets"].append(invalid_member)
     _, _, _, members, groups = normalize_events([event])
     assert [member.market_id for member in members] == ["market-a", "market-b"]
-    assert groups[0].expected_member_count == 3
+    assert groups[0].expected_member_count == 2
     assert groups[0].quality == "incomplete-source"
     assert groups[0].reason == INVALID_EVENT_MEMBER_REASON
 
@@ -260,7 +260,7 @@ def test_non_boolean_member_status_fails_closed(
     event["markets"][0][field] = invalid_value
     _, _, _, members, groups = normalize_events([event])
     assert [member.market_id for member in members] == ["market-b"]
-    assert groups[0].expected_member_count == 2
+    assert groups[0].expected_member_count == 1
     assert groups[0].quality == "incomplete-source"
     assert groups[0].reason == INVALID_EVENT_MEMBER_REASON
 
@@ -272,7 +272,7 @@ def test_non_string_or_blank_market_id_fails_closed(invalid_id: object) -> None:
     _, _, market_to_event, members, groups = normalize_events([event])
     assert market_to_event == {"market-b": "e-standard"}
     assert [member.market_id for member in members] == ["market-b"]
-    assert groups[0].expected_member_count == 2
+    assert groups[0].expected_member_count == 1
     assert groups[0].quality == "incomplete-source"
     assert groups[0].reason == INVALID_EVENT_MEMBER_REASON
 

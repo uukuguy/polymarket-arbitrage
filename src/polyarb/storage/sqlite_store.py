@@ -19,7 +19,12 @@ from pathlib import Path
 
 from loguru import logger
 
-from polyarb.perception.market_truth import EventMember, GroupTruth, SourceCoverage
+from polyarb.perception.market_truth import (
+    EventMember,
+    GroupTruth,
+    SourceCoverage,
+    membership_hash,
+)
 from polyarb.storage.schemas import (
     DDL,
     EVENT_TAGS_COLUMN_ORDER,
@@ -31,7 +36,7 @@ from polyarb.storage.schemas import (
     MARKETS_INSERT_SQL,
     SCHEDULER_STATE_DDL,
 )
-from polyarb.validator.category import Issue
+from polyarb.validator.category import Category, Issue
 
 _VALID_MODES = ("subset", "full")
 
@@ -39,6 +44,125 @@ _VALID_MODES = ("subset", "full")
 _BOOL_COLUMNS = ("active", "closed", "neg_risk", "incomplete")
 # events table also has bool fields stored as INTEGER 0/1.
 _EVENT_BOOL_COLUMNS = ("active", "closed")
+
+
+def _truth_error(prefix: str, reason: str) -> ValueError:
+    """Return a stable, bounded publication-boundary error."""
+    return ValueError(f"{prefix}:{reason}"[:200])
+
+
+def _validate_market_truth(
+    event_members: list[EventMember],
+    group_truths: list[GroupTruth],
+) -> None:
+    """Reject projections that cannot be authoritative before touching SQLite."""
+    truths_by_key: dict[tuple[str, str], GroupTruth] = {}
+    seen_group_ids: set[str] = set()
+    for truth in group_truths:
+        key = (truth.event_id, truth.group_id)
+        if key in truths_by_key or truth.group_id in seen_group_ids:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"duplicate-group-identity:{truth.event_id}/{truth.group_id}",
+            )
+        truths_by_key[key] = truth
+        seen_group_ids.add(truth.group_id)
+
+    members_by_key: dict[tuple[str, str], list[EventMember]] = {}
+    seen_member_ids: set[str] = set()
+    seen_member_keys: set[tuple[str, str, str]] = set()
+    for member in event_members:
+        key = (member.event_id, member.group_id)
+        identity = (*key, member.market_id)
+        if identity in seen_member_keys or member.market_id in seen_member_ids:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"duplicate-member-identity:{member.market_id}",
+            )
+        if key not in truths_by_key:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"member-without-group-truth:{member.market_id}",
+            )
+        seen_member_keys.add(identity)
+        seen_member_ids.add(member.market_id)
+        members_by_key.setdefault(key, []).append(member)
+
+    for key, truth in truths_by_key.items():
+        members = members_by_key.get(key, [])
+        member_count = len(members)
+        if truth.expected_member_count != member_count:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"expected-member-count:{truth.group_id}:"
+                f"{truth.expected_member_count}!={member_count}",
+            )
+        active_named_count = sum(
+            member.member_kind == "named" and member.active for member in members
+        )
+        if truth.active_named_count != active_named_count:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"active-named-count:{truth.group_id}:"
+                f"{truth.active_named_count}!={active_named_count}",
+            )
+        expected_hash = membership_hash(truth.event_id, truth.group_id, members)
+        if truth.membership_hash != expected_hash:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"membership-hash:{truth.group_id}",
+            )
+        if truth.quality in ("complete-supported", "complete-unsupported"):
+            if member_count == 0:
+                raise _truth_error(
+                    "market-truth-invalid",
+                    f"expected_member_count-zero:{truth.group_id}",
+                )
+
+
+def _validate_publication_boundary(
+    *,
+    is_valid: bool,
+    issues: list[Issue],
+    source_coverage: SourceCoverage,
+    group_truths: list[GroupTruth],
+    publish_markets: bool,
+) -> None:
+    if not publish_markets:
+        return
+    if not source_coverage.completed:
+        raise _truth_error(
+            "market-truth-publication-rejected",
+            f"source-incomplete:{source_coverage.failure_source}",
+        )
+    if not is_valid:
+        raise _truth_error("market-truth-publication-rejected", "snapshot-invalid")
+    if any(issue.category == Category.API_UNREACHABLE for issue in issues):
+        raise _truth_error(
+            "market-truth-publication-rejected",
+            "blocking-source-issue:api-unreachable",
+        )
+    incomplete = next(
+        (truth for truth in group_truths if truth.quality == "incomplete-source"),
+        None,
+    )
+    if incomplete is not None:
+        raise _truth_error(
+            "market-truth-publication-rejected",
+            f"incomplete-source:{incomplete.group_id}",
+        )
+
+
+def _validate_published_member_ids(
+    event_members: list[EventMember],
+    market_ids: set[str],
+) -> None:
+    missing = sorted({member.market_id for member in event_members} - market_ids)
+    if missing:
+        raise _truth_error(
+            "market-truth-invalid",
+            f"published-members-missing:{','.join(missing[:5])}",
+        )
 
 
 def _rollback_without_masking(con: object) -> None:
@@ -277,6 +401,19 @@ class SQLiteStore:
 
         event_rows = event_rows or []
         event_tag_rows = event_tag_rows or []
+        _validate_market_truth(event_members, group_truths)
+        _validate_publication_boundary(
+            is_valid=is_valid,
+            issues=issues,
+            source_coverage=source_coverage,
+            group_truths=group_truths,
+            publish_markets=publish_markets,
+        )
+        if publish_markets:
+            _validate_published_member_ids(
+                event_members,
+                {str(row.get("market_id")) for row in market_rows},
+            )
 
         con = sqlite3.connect(self._db_path, isolation_level=None)
         # Per-connection PRAGMAs (some are persistent like journal_mode=WAL after
@@ -416,6 +553,14 @@ class SQLiteStore:
 
         event_rows = event_rows or []
         event_tag_rows = event_tag_rows or []
+        _validate_market_truth(event_members, group_truths)
+        _validate_publication_boundary(
+            is_valid=is_valid,
+            issues=issues,
+            source_coverage=source_coverage,
+            group_truths=group_truths,
+            publish_markets=publish_markets,
+        )
 
         con = sqlite3.connect(self._db_path, isolation_level=None)
         con.execute("PRAGMA journal_mode=WAL")
@@ -475,6 +620,16 @@ class SQLiteStore:
             if batch:
                 con.executemany(MARKETS_INSERT_SQL, batch)
                 batch.clear()
+
+            if publish_markets:
+                published_market_ids = {
+                    row[0]
+                    for row in con.execute(
+                        "SELECT market_id FROM markets WHERE snapshot_id=?",
+                        (snapshot_id,),
+                    ).fetchall()
+                }
+                _validate_published_member_ids(event_members, published_market_ids)
 
             # Patch market_count to the real value (still inside same tx)
             con.execute(
@@ -844,6 +999,21 @@ class SQLiteStore:
                 id_placeholders = ",".join("?" for _ in to_delete)
                 con.execute(
                     f"DELETE FROM validation_issues WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    "DELETE FROM snapshot_source_coverage "
+                    f"WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    "DELETE FROM event_market_memberships "
+                    f"WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    "DELETE FROM neg_risk_group_truth "
+                    f"WHERE snapshot_id IN ({id_placeholders})",
                     to_delete,
                 )
                 con.execute(
