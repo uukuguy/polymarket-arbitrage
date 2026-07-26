@@ -44,7 +44,9 @@ Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in p
   immutable manifest every five minutes and creates/commits only due PASS
   reports. Boundaries are T+6 `14:51:13Z`, T+12 `20:51:13Z`, T+18
   `02:51:13Z`, and T+24 `08:51:13Z`. Fly's resident two-minute watcher remains
-  the independent live detector and Telegram alert path.
+  the independent live detector and Telegram alert path. The installed job
+  passed repository/Fly/health/Keychain/upstream-auth preflight, exited 0, and
+  proved the T6 not-before guard without creating a file.
 
 - **Implemented:** canonical production Dashboard URL, four-surface Polywatch
   monitoring, repaired R2 bucket configuration, and the M1 continuous-operation

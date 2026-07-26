@@ -5372,6 +5372,12 @@ then create the new L3 T0 manifest.
   Telegram on failures/recovery. Checkpoint artifact generation is assigned
   to a macOS `launchd` job every five minutes, so no foreground terminal or
   empty 24-hour wait is required.
+- [SCHEDULER PREFLIGHT] LaunchAgent
+  `com.polyarb.l3-soak-autocheckpoint` passed exact repository/Fly/L3
+  health/Keychain/Git checks and exited 0 with
+  `idle next=T+6@2026-07-26T14:51:13.206077Z`. The T6 file does not exist
+  early. A redundant background push wait and stale-lock recovery were fixed
+  before any checkpoint boundary; neither affected production or evidence.
 
 ### [NEXT — CURRENT]
 
