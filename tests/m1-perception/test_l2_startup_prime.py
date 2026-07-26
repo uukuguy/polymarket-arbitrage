@@ -1,4 +1,5 @@
 """Phase 05.1 startup wiring: the durable pump replaces replay and sentinel prime."""
+
 from __future__ import annotations
 
 import os

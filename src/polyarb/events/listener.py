@@ -19,6 +19,7 @@ the asyncpg event loop. If `on_event` is async, callers MUST wrap it in
 `asyncio.create_task` themselves (see l2_main._dispatch_on_snapshot).
 The bare sync wrapper here only parses + dispatches.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -133,9 +134,7 @@ async def listen_snapshot_complete(
                 setattr(state, "is_connected", False)
                 setattr(state, "reconnect_count", getattr(state, "reconnect_count", 0) + 1)
                 setattr(state, "last_error", type(e).__name__)
-            logger.warning(
-                f"event listener reconnecting in {backoff_s:g}s: {type(e).__name__}"
-            )
+            logger.warning(f"event listener reconnecting in {backoff_s:g}s: {type(e).__name__}")
             try:
                 await asyncio.sleep(backoff_s)
             except asyncio.CancelledError:
@@ -181,10 +180,7 @@ async def catchup_from_cursor(
                 last_seen,
             )
         except asyncpg.exceptions.UndefinedTableError:
-            logger.info(
-                "catchup_from_cursor: snapshots table missing (fresh L1); "
-                "skipping catchup"
-            )
+            logger.info("catchup_from_cursor: snapshots table missing (fresh L1); skipping catchup")
             return []
         return [dict(r) for r in missed]
     finally:

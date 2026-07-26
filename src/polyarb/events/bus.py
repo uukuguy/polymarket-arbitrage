@@ -16,6 +16,7 @@ Payload shape:
 Size discipline: realistic payloads are ~80 bytes, well under Postgres'
 8000-byte NOTIFY hard limit. The test suite enforces this invariant.
 """
+
 from __future__ import annotations
 
 import json

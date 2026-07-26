@@ -56,33 +56,21 @@ class RuntimeEventKind(StrEnum):
 _RUNTIME_EVENT_DETAIL_KEYS: Mapping[RuntimeEventKind, frozenset[str]] = MappingProxyType(
     {
         RuntimeEventKind.WATCHDOG_STALE: frozenset({"stale_seconds"}),
-        RuntimeEventKind.RECONNECT_RESERVED: frozenset(
-            {"reconnect_attempt", "budget_count"}
-        ),
-        RuntimeEventKind.RECONNECT_DEFERRED: frozenset(
-            {"retry_after_ms", "budget_count"}
-        ),
+        RuntimeEventKind.RECONNECT_RESERVED: frozenset({"reconnect_attempt", "budget_count"}),
+        RuntimeEventKind.RECONNECT_DEFERRED: frozenset({"retry_after_ms", "budget_count"}),
         RuntimeEventKind.RECONNECT_STARTED: frozenset({"source"}),
         RuntimeEventKind.RECONNECT_SUCCEEDED: frozenset({"source"}),
         RuntimeEventKind.RECONNECT_FAILED: frozenset({"operation", "error_type"}),
         RuntimeEventKind.WS_GENERATION_CHANGED: frozenset(
             {"previous_generation", "new_generation"}
         ),
-        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED: frozenset(
-            {"operation", "error_type"}
-        ),
-        RuntimeEventKind.SUBSCRIPTION_COMPENSATED: frozenset(
-            {"operation", "close_succeeded"}
-        ),
+        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED: frozenset({"operation", "error_type"}),
+        RuntimeEventKind.SUBSCRIPTION_COMPENSATED: frozenset({"operation", "close_succeeded"}),
         RuntimeEventKind.EVIDENCE_WRITER_FAILED: frozenset({"failed_event_seq"}),
-        RuntimeEventKind.EVIDENCE_WRITER_RECOVERED: frozenset(
-            {"recovered_event_seq"}
-        ),
+        RuntimeEventKind.EVIDENCE_WRITER_RECOVERED: frozenset({"recovered_event_seq"}),
         RuntimeEventKind.SHUTDOWN_SIGNAL: frozenset({"signal"}),
         RuntimeEventKind.SOAK_MANIFEST_BOUND: frozenset({"manifest_sha256"}),
-        RuntimeEventKind.CHECKPOINT_REPORT_BOUND: frozenset(
-            {"checkpoint", "report_sha256"}
-        ),
+        RuntimeEventKind.CHECKPOINT_REPORT_BOUND: frozenset({"checkpoint", "report_sha256"}),
     }
 )
 
@@ -204,8 +192,7 @@ def build_runtime_event_detail(
     unknown = set(values) - _RUNTIME_EVENT_DETAIL_KEYS[kind]
     if unknown:
         raise ValueError(
-            f"runtime event detail keys are not allowed for {kind.value}: "
-            f"{sorted(unknown)!r}"
+            f"runtime event detail keys are not allowed for {kind.value}: {sorted(unknown)!r}"
         )
     normalized = _normalize_json(dict(values))
     _validate_runtime_event_detail_values(kind, normalized)
@@ -256,9 +243,7 @@ def _validate_event_detail(value: Any) -> None:
 
 
 def _canonical_json(value: Mapping[str, object] | Sequence[object]) -> bytes:
-    if not isinstance(value, (Mapping, Sequence)) or isinstance(
-        value, (str, bytes, bytearray)
-    ):
+    if not isinstance(value, (Mapping, Sequence)) or isinstance(value, (str, bytes, bytearray)):
         raise TypeError("stable_sha256 requires a mapping or sequence")
     return json.dumps(
         _normalize_json(value),
@@ -879,9 +864,7 @@ class EvidenceStatus:
             required=self.event_integrity_failed,
         )
         if not self.event_integrity_failed and self.event_integrity_reason_code:
-            raise ValueError(
-                "event_integrity_reason_code requires event_integrity_failed"
-            )
+            raise ValueError("event_integrity_reason_code requires event_integrity_failed")
         _require_reason("reason_code", self.reason_code)
         membership = WsMembershipSnapshot(
             self.ws_generation,
@@ -1189,9 +1172,7 @@ class L3EvidenceRuntime:
         next_channel_results[channel] = ok
         aggregate_ok = all(next_channel_results.values())
         transition_at = (
-            at
-            if self._last_writer_result_at is None
-            else max(at, self._last_writer_result_at)
+            at if self._last_writer_result_at is None else max(at, self._last_writer_result_at)
         )
         if not aggregate_ok and prior is not False:
             self.record_event(

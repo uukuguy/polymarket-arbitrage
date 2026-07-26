@@ -96,9 +96,7 @@ class CompleteQuoteProjection:
 class NegRiskQuoteStore:
     """SQLite API for one complete-or-failed neg-risk quote collection."""
 
-    def __init__(
-        self, db_path: Path | str, *, now_ms: Callable[[], int] | None = None
-    ) -> None:
+    def __init__(self, db_path: Path | str, *, now_ms: Callable[[], int] | None = None) -> None:
         self._db_path = Path(db_path)
         self._now_ms = now_ms or _wall_clock_ms
 
@@ -167,9 +165,7 @@ class NegRiskQuoteStore:
                     "SELECT id FROM neg_risk_quote_runs WHERE status = 'collecting' LIMIT 1"
                 ).fetchone()
                 if busy is not None:
-                    raise QuoteRunBusyError(
-                        f"collecting quote run already exists: {int(busy[0])}"
-                    )
+                    raise QuoteRunBusyError(f"collecting quote run already exists: {int(busy[0])}")
                 snapshot = con.execute(
                     "SELECT taken_at_ms FROM snapshots WHERE id = ?",
                     (universe_snapshot_id,),
@@ -184,9 +180,7 @@ class NegRiskQuoteStore:
                     )
                 snapshot_legs = _snapshot_legs(con, universe_snapshot_id)
                 if _legs_by_token(requested_legs) != _legs_by_token(snapshot_legs):
-                    raise QuoteRunStateError(
-                        "requested legs do not match snapshot membership"
-                    )
+                    raise QuoteRunStateError("requested legs do not match snapshot membership")
                 cur = con.execute(
                     "INSERT INTO neg_risk_quote_runs("
                     "universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
@@ -271,9 +265,7 @@ class NegRiskQuoteStore:
                 for quote in quotes:
                     requested_leg = requested.get(quote.yes_token_id)
                     if requested_leg is None:
-                        raise ValueError(
-                            "terminal quote token is not requested by this run"
-                        )
+                        raise ValueError("terminal quote token is not requested by this run")
                     quote_leg = UniverseLeg(
                         quote.neg_risk_market_id,
                         quote.market_id,
@@ -282,9 +274,7 @@ class NegRiskQuoteStore:
                         quote.yes_token_id,
                     )
                     if quote_leg != requested_leg:
-                        raise ValueError(
-                            "terminal quote identity does not match requested leg"
-                        )
+                        raise ValueError("terminal quote identity does not match requested leg")
                 con.executemany(
                     "INSERT INTO neg_risk_quotes("
                     "quote_run_id, neg_risk_market_id, market_id, condition_id, slug, "
@@ -442,16 +432,13 @@ def _deduplicate_legs(legs: tuple[UniverseLeg, ...]) -> tuple[UniverseLeg, ...]:
         existing = by_token.get(leg.yes_token_id)
         if existing is not None and existing != leg:
             raise ValueError(
-                "duplicate yes_token_id maps to inconsistent identity: "
-                f"{leg.yes_token_id!r}"
+                f"duplicate yes_token_id maps to inconsistent identity: {leg.yes_token_id!r}"
             )
         by_token[leg.yes_token_id] = leg
     return tuple(by_token.values())
 
 
-def _snapshot_legs(
-    con: sqlite3.Connection, universe_snapshot_id: int
-) -> tuple[UniverseLeg, ...]:
+def _snapshot_legs(con: sqlite3.Connection, universe_snapshot_id: int) -> tuple[UniverseLeg, ...]:
     rows = con.execute(
         "SELECT neg_risk_market_id, market_id, condition_id, slug, yes_token_id "
         "FROM markets WHERE snapshot_id = ? AND active = 1 AND closed = 0 "
@@ -499,9 +486,7 @@ def _is_valid_executable_value(
     return upper is None or value <= upper
 
 
-def _require_live_collecting(
-    con: sqlite3.Connection, run_id: int, *, now_ms: int
-) -> None:
+def _require_live_collecting(con: sqlite3.Connection, run_id: int, *, now_ms: int) -> None:
     row = con.execute(
         "SELECT status, lease_expires_at_ms FROM neg_risk_quote_runs WHERE id = ?",
         (run_id,),

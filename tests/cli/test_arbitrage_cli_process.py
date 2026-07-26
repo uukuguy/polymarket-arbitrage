@@ -89,9 +89,7 @@ def test_diagnose_feed_reports_stale_as_nonzero(tmp_path) -> None:
 def test_diagnose_feed_missing_body_is_bounded_and_path_safe(tmp_path) -> None:
     missing_body = tmp_path / "private-input.json"
 
-    result = _cli(
-        "diagnose-feed", "--http-status", "200", "--body-file", str(missing_body)
-    )
+    result = _cli("diagnose-feed", "--http-status", "200", "--body-file", str(missing_body))
 
     assert result.returncode == 2
     assert result.stderr.strip() == "opportunity diagnostic input unavailable: read error"
@@ -261,10 +259,13 @@ def test_close_receipt_recovers_lost_response_across_processes(tmp_path) -> None
     assert state["metrics"]["total_realized_pnl"] == 10.0
     assert state["metrics"]["open_positions"] == 0
     with sqlite3.connect(path) as con:
-        assert con.execute(
-            "SELECT COUNT(*) FROM m2_applied_operations WHERE operation_id = ?",
-            ("close-001",),
-        ).fetchone()[0] == 1
+        assert (
+            con.execute(
+                "SELECT COUNT(*) FROM m2_applied_operations WHERE operation_id = ?",
+                ("close-001",),
+            ).fetchone()[0]
+            == 1
+        )
         account = con.execute(
             "SELECT balance_micros, realized_pnl_micros FROM m2_account_state"
         ).fetchone()
@@ -305,10 +306,12 @@ def test_close_receipt_recovers_lost_response_across_processes(tmp_path) -> None
     assert second_close.returncode == 0, second_close.stderr
     assert json.loads(second_close.stdout)["total_realized_pnl"] == 20.0
     with sqlite3.connect(path) as con:
-        assert con.execute(
-            "SELECT COUNT(*) FROM m2_applied_operations "
-            "WHERE operation_type = 'close'"
-        ).fetchone()[0] == 2
+        assert (
+            con.execute(
+                "SELECT COUNT(*) FROM m2_applied_operations WHERE operation_type = 'close'"
+            ).fetchone()[0]
+            == 2
+        )
 
 
 def test_partial_fill_recovers_lost_response_across_processes(tmp_path) -> None:
@@ -409,17 +412,41 @@ def test_partial_fill_recovers_lost_response_across_processes(tmp_path) -> None:
 def test_venue_cash_recovers_lost_response_and_rejects_changed_fee(tmp_path) -> None:
     path = tmp_path / "positions.db"
     opened = _cli(
-        "run", "--mid", "0.40", "--stake", "100", "--legs", "1",
-        "--retry-delay", "0", "--signal-id", "venue-open-001",
-        "--db-path", str(path),
+        "run",
+        "--mid",
+        "0.40",
+        "--stake",
+        "100",
+        "--legs",
+        "1",
+        "--retry-delay",
+        "0",
+        "--signal-id",
+        "venue-open-001",
+        "--db-path",
+        str(path),
     )
     assert opened.returncode == 0, opened.stderr
     venue_args = (
-        "close", "--market-id", "cond-0", "--exit-price", "0.99",
-        "--size", "30", "--fill-id", "venue-cash-001",
-        "--venue-cash", "13.80", "--venue-fee", "0.30",
-        "--venue-status", "CONFIRMED", "--venue-ref", "trade-001",
-        "--db-path", str(path),
+        "close",
+        "--market-id",
+        "cond-0",
+        "--exit-price",
+        "0.99",
+        "--size",
+        "30",
+        "--fill-id",
+        "venue-cash-001",
+        "--venue-cash",
+        "13.80",
+        "--venue-fee",
+        "0.30",
+        "--venue-status",
+        "CONFIRMED",
+        "--venue-ref",
+        "trade-001",
+        "--db-path",
+        str(path),
     )
     committed = _cli(*venue_args)
     assert committed.returncode == 0, committed.stderr

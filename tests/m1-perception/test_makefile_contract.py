@@ -13,6 +13,7 @@ Plan 01-5 T5 — covers two responsibilities:
 Critical: ``make snapshot-markets`` is NEVER actually executed (would hit live
 APIs and take 10-20 minutes). All make assertions use ``-n`` (dry-run).
 """
+
 from __future__ import annotations
 
 import re
@@ -23,7 +24,6 @@ import pytest
 from typer.testing import CliRunner
 
 from polyarb.snapshot.cli import app
-
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
 runner = CliRunner(mix_stderr=False)
@@ -61,14 +61,10 @@ def test_make_snapshot_markets_dry_run_recipe() -> None:
     assert "python -m polyarb.snapshot" in result.stdout
     # subset target MUST NOT include --full (that would silently switch to full mode).
     # We grep the recipe lines (skip echo'd "make[1]:" diagnostics).
-    recipe_lines = [
-        ln for ln in result.stdout.splitlines() if "polyarb.snapshot" in ln
-    ]
+    recipe_lines = [ln for ln in result.stdout.splitlines() if "polyarb.snapshot" in ln]
     assert recipe_lines, "no recipe line found"
     for ln in recipe_lines:
-        assert "--full" not in ln, (
-            f"snapshot-markets recipe must not include --full: {ln!r}"
-        )
+        assert "--full" not in ln, f"snapshot-markets recipe must not include --full: {ln!r}"
 
 
 def test_make_snapshot_markets_full_dry_run_recipe() -> None:
@@ -98,7 +94,7 @@ def test_makefile_phony_declaration_present() -> None:
     for line in makefile.splitlines():
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
-            phony_targets.update(stripped[len(".PHONY:"):].split())
+            phony_targets.update(stripped[len(".PHONY:") :].split())
     required = {"snapshot-markets", "snapshot-markets-full"}
     missing = required - phony_targets
     assert not missing, f"missing .PHONY declarations for: {missing}"
@@ -114,10 +110,7 @@ def test_dashboard_smoke_uses_canonical_production_project_url() -> None:
         timeout=5,
     )
     assert result.returncode == 0, f"make -n failed: {result.stderr}"
-    assert (
-        "https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app"
-        in result.stdout
-    )
+    assert "https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app" in result.stdout
     assert "https://polymarket-arbitrage.vercel.app" not in result.stdout
 
 
@@ -214,7 +207,8 @@ def test_cli_summary_format_matches_spec(
     yaml_path = _build_yaml(tmp_path, tmp_db_path, tmp_parquet_root)
     result = runner.invoke(app, ["snapshot", "--config", str(yaml_path)])
     summary_re = re.compile(
-        r"^(OK|DEGRADED|FAILED) \| \d+ markets \| mode=(subset|full) \| \d+ issues \| -> .+\.parquet$"
+        r"^(OK|DEGRADED|FAILED) \| \d+ markets \| mode=(subset|full)"
+        r" \| \d+ issues \| -> .+\.parquet$"
     )
     summary_lines = [ln for ln in result.stdout.splitlines() if summary_re.match(ln)]
     assert summary_lines, f"no summary line matched, stdout={result.stdout!r}"
@@ -243,9 +237,7 @@ def test_make_translate_pending_dry_run() -> None:
     assert result.returncode == 0, f"make -n failed: {result.stderr}"
     assert "polyarb.cli_translation translate-pending" in result.stdout
     # Without FORCE=1 the recipe must NOT include --force-full
-    recipe_lines = [
-        ln for ln in result.stdout.splitlines() if "cli_translation" in ln
-    ]
+    recipe_lines = [ln for ln in result.stdout.splitlines() if "cli_translation" in ln]
     for ln in recipe_lines:
         assert "--force-full" not in ln, (
             f"translate-pending without FORCE=1 must not pass --force-full: {ln!r}"
@@ -313,7 +305,7 @@ def test_makefile_translation_targets_phony() -> None:
     for line in makefile.splitlines():
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
-            phony_targets.update(stripped[len(".PHONY:"):].split())
+            phony_targets.update(stripped[len(".PHONY:") :].split())
     required = {"translate-pending", "translate-pending-sample", "translation-stats"}
     missing = required - phony_targets
     assert not missing, f"missing .PHONY for translation targets: {missing}"
@@ -346,9 +338,7 @@ def test_make_observation_target_dry_run(target: str) -> None:
         cwd=PROJECT_ROOT,
         timeout=5,
     )
-    assert result.returncode == 0, (
-        f"make -n {target} failed: {result.stderr}"
-    )
+    assert result.returncode == 0, f"make -n {target} failed: {result.stderr}"
     assert "polyarb.cli_observation" in result.stdout
 
 
@@ -397,7 +387,7 @@ def test_makefile_observation_targets_phony() -> None:
     for line in makefile.splitlines():
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
-            phony_targets.update(stripped[len(".PHONY:"):].split())
+            phony_targets.update(stripped[len(".PHONY:") :].split())
     required = {*_OBSERVATION_TARGETS, "scan"}
     missing = required - phony_targets
     assert not missing, f"missing .PHONY for observation targets: {missing}"
@@ -410,14 +400,10 @@ def test_makefile_scan_by_tag_replaces_by_category() -> None:
     # Recipe lines (target definitions, not comments) should not reference
     # the old `by-category` recipe name.
     recipe_lines = [
-        ln
-        for ln in makefile.splitlines()
-        if ln.startswith("scan-") and ln.endswith(":")
+        ln for ln in makefile.splitlines() if ln.startswith("scan-") and ln.endswith(":")
     ]
     for ln in recipe_lines:
-        assert "by-category" not in ln, (
-            f"stale by-category target should be by-tag: {ln!r}"
-        )
+        assert "by-category" not in ln, f"stale by-category target should be by-tag: {ln!r}"
 
 
 # =============================================================================
@@ -490,7 +476,7 @@ def test_makefile_plan04_targets_phony() -> None:
     for line in makefile.splitlines():
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
-            phony_targets.update(stripped[len(".PHONY:"):].split())
+            phony_targets.update(stripped[len(".PHONY:") :].split())
     missing = set(_PLAN04_TARGETS) - phony_targets
     assert not missing, f"missing .PHONY for plan-04 targets: {missing}"
 
@@ -558,7 +544,7 @@ def test_makefile_plan05_targets_phony() -> None:
     for line in makefile.splitlines():
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
-            phony_targets.update(stripped[len(".PHONY:"):].split())
+            phony_targets.update(stripped[len(".PHONY:") :].split())
     missing = set(_PLAN05_TARGETS) - phony_targets
     assert not missing, f"missing .PHONY for plan-05 targets: {missing}"
 
@@ -656,12 +642,13 @@ def test_make_r2_list_dry_run() -> None:
         text=True,
         cwd=PROJECT_ROOT,
         timeout=5,
-        env={**__import__("os").environ, "POLYARB_R2_ENDPOINT": "https://test.r2.cloudflarestorage.com"},
+        env={
+            **__import__("os").environ,
+            "POLYARB_R2_ENDPOINT": "https://test.r2.cloudflarestorage.com",
+        },
     )
     assert result.returncode == 0, f"make -n r2-list failed: {result.stderr}"
-    assert "boto3" in result.stdout, (
-        f"r2-list recipe must invoke boto3, got: {result.stdout!r}"
-    )
+    assert "boto3" in result.stdout, f"r2-list recipe must invoke boto3, got: {result.stdout!r}"
 
 
 def test_makefile_daemon_targets_phony() -> None:
@@ -671,7 +658,7 @@ def test_makefile_daemon_targets_phony() -> None:
     for line in makefile.splitlines():
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
-            phony_targets.update(stripped[len(".PHONY:"):].split())
+            phony_targets.update(stripped[len(".PHONY:") :].split())
     required = {"daemon-run-local", "smoke-health-local", "tail-logs-local"}
     missing = required - phony_targets
     assert not missing, f"missing .PHONY for daemon targets: {missing}"
@@ -801,7 +788,7 @@ def test_makefile_phase02_plan05_targets_phony() -> None:
     for line in makefile.splitlines():
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
-            phony_targets.update(stripped[len(".PHONY:"):].split())
+            phony_targets.update(stripped[len(".PHONY:") :].split())
     expected = {"sentry-test", "alerts-test", "logs-tail-axiom"}
     missing = expected - phony_targets
     assert not missing, f"missing .PHONY for phase-02 plan-05 targets: {missing}"
@@ -873,7 +860,7 @@ def test_makefile_phase02_plan06_targets_phony() -> None:
     for line in makefile.splitlines():
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
-            phony_targets.update(stripped[len(".PHONY:"):].split())
+            phony_targets.update(stripped[len(".PHONY:") :].split())
     expected = {"dashboard-dev", "dashboard-build", "dashboard-typecheck", "dashboard-deploy"}
     missing = expected - phony_targets
     assert not missing, f"missing .PHONY for phase-02 plan-06 targets: {missing}"
@@ -936,7 +923,7 @@ def test_makefile_phase02_plan07_targets_phony() -> None:
     for line in makefile.splitlines():
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
-            phony_targets.update(stripped[len(".PHONY:"):].split())
+            phony_targets.update(stripped[len(".PHONY:") :].split())
     expected = {"soak-status", "soak-export", "soak-fault-inject"}
     missing = expected - phony_targets
     assert not missing, f"missing .PHONY for phase-02 plan-07 soak targets: {missing}"

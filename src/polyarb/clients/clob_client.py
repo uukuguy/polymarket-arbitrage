@@ -139,8 +139,7 @@ class ClobReaderClient:
                     cached = cache.load_prices_chunk(side, i)
                     acc.update(cached)
                     logger.info(
-                        f"CLOB prices {side} chunk {i}/{n_chunks}: cached "
-                        f"({len(cached)} entries)"
+                        f"CLOB prices {side} chunk {i}/{n_chunks}: cached ({len(cached)} entries)"
                     )
                     continue
                 params = [BookParams(token_id=t, side=side) for t in chunk]

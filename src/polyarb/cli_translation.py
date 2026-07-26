@@ -76,11 +76,7 @@ def translate_pending_cmd(
     # ─── Sample-first guard (Warning #8) ─────────────────────────────────────
     # Triggers ONLY when the user did NOT pass --limit (so they're trying to
     # translate everything) AND the cache is empty (first run).
-    if (
-        limit is None
-        and not force_full
-        and cache.translated_count() == 0
-    ):
+    if limit is None and not force_full and cache.translated_count() == 0:
         typer.echo(
             "first run detected (cache empty).\n"
             "  Run `make translate-pending-sample` (50 条 sample) first to verify .env config.\n"
@@ -104,9 +100,7 @@ def translate_pending_cmd(
 
     # Run translate_pending — ConfigError surfaces as exit 1 with hint.
     try:
-        summary = asyncio.run(
-            translate_pending(cfg, settings.db_path, sample_limit=limit)
-        )
+        summary = asyncio.run(translate_pending(cfg, settings.db_path, sample_limit=limit))
     except ConfigError as e:
         typer.echo(
             f"translation config error: {e}\n"

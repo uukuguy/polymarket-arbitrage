@@ -8,13 +8,15 @@ Tests use botocore.stub.Stubber (no real network calls). Key contract:
 - upload_parquet_to_r2(*, parquet_path, bucket, key, endpoint, access_key, secret_key) -> str
 - R2UploadError: raised on upload failure (project-typed, not bare boto exception)
 """
+
 from __future__ import annotations
 
 import inspect
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -32,8 +34,9 @@ _R2_TEST_ACCESS_KEY = "dummy-access-key"
 _R2_TEST_SECRET_KEY = "dummy-secret-key"
 
 
-def _make_boto3_client(endpoint: str = _R2_TEST_ENDPOINT) -> "Any":
+def _make_boto3_client(endpoint: str = _R2_TEST_ENDPOINT) -> Any:
     import boto3
+
     return boto3.client(
         "s3",
         endpoint_url=endpoint,
@@ -50,7 +53,6 @@ def _make_boto3_client(endpoint: str = _R2_TEST_ENDPOINT) -> "Any":
 
 def test_upload_to_r2(tmp_path: Path) -> None:
     """upload_parquet_to_r2 sends PutObject with correct bucket+key and returns URL."""
-    import boto3
     from botocore.stub import Stubber
 
     from polyarb.storage.r2_sync import compute_r2_key, upload_parquet_to_r2
@@ -61,7 +63,7 @@ def test_upload_to_r2(tmp_path: Path) -> None:
 
     # taken_at_ms: 2026-05-12 08:32:00 UTC
     # datetime(2026, 5, 12, 8, 32, 0, tzinfo=timezone.utc)
-    taken_at_ms = int(datetime(2026, 5, 12, 8, 32, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    taken_at_ms = int(datetime(2026, 5, 12, 8, 32, 0, tzinfo=UTC).timestamp() * 1000)
     key = compute_r2_key(taken_at_ms)
     assert key == "2026/05/12/08-32-00.parquet", f"unexpected key: {key!r}"
 
@@ -80,6 +82,7 @@ def test_upload_to_r2(tmp_path: Path) -> None:
 
         # We patch boto3.client inside r2_sync so the Stubber client is used
         import unittest.mock as mock
+
         with mock.patch("polyarb.storage.r2_sync._build_client", return_value=client):
             url = upload_parquet_to_r2(
                 parquet_path=parquet_file,
@@ -123,7 +126,7 @@ def test_compute_r2_key_utc_only() -> None:
     from polyarb.storage.r2_sync import compute_r2_key
 
     # midnight UTC: 2026-05-12 00:00:00 UTC
-    midnight_utc_ms = int(datetime(2026, 5, 12, 0, 0, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    midnight_utc_ms = int(datetime(2026, 5, 12, 0, 0, 0, tzinfo=UTC).timestamp() * 1000)
     key = compute_r2_key(midnight_utc_ms)
 
     # The key must start with 2026/05/12/00-00-00
@@ -141,7 +144,6 @@ def test_compute_r2_key_utc_only() -> None:
 
 def test_r2_upload_failure_raises_known_exception(tmp_path: Path) -> None:
     """When R2 upload fails, R2UploadError is raised (project-typed)."""
-    import boto3
     from botocore.stub import Stubber
 
     from polyarb.storage.r2_sync import R2UploadError, compute_r2_key, upload_parquet_to_r2
@@ -161,6 +163,7 @@ def test_r2_upload_failure_raises_known_exception(tmp_path: Path) -> None:
         )
 
         import unittest.mock as mock
+
         with mock.patch("polyarb.storage.r2_sync._build_client", return_value=client):
             with pytest.raises(R2UploadError) as exc_info:
                 upload_parquet_to_r2(
@@ -184,14 +187,12 @@ def test_r2_upload_failure_raises_known_exception(tmp_path: Path) -> None:
 
 def test_r2_retry_config_applied(tmp_path: Path) -> None:
     """Stubber: first call 503 + second call 200 → upload succeeds with retry."""
-    import boto3
-    from botocore.stub import Stubber
 
-    from polyarb.storage.r2_sync import R2UploadError, compute_r2_key, upload_parquet_to_r2
+    from polyarb.storage.r2_sync import compute_r2_key
 
     parquet_file = tmp_path / "retry.parquet"
     parquet_file.write_bytes(b"PAR1retry")
-    key = compute_r2_key(1715500000000)
+    _key = compute_r2_key(1715500000000)
 
     # The retry config has max_attempts=3; one 503 followed by 200 should succeed.
     # However, botocore Stubber does not actually retry automatically through the
@@ -200,12 +201,8 @@ def test_r2_retry_config_applied(tmp_path: Path) -> None:
     from polyarb.storage.r2_sync import _R2_RETRY_CONFIG
 
     retry_cfg = _R2_RETRY_CONFIG.retries
-    assert retry_cfg.get("max_attempts") == 3, (
-        f"Expected max_attempts=3, got {retry_cfg}"
-    )
-    assert retry_cfg.get("mode") == "standard", (
-        f"Expected mode='standard', got {retry_cfg}"
-    )
+    assert retry_cfg.get("max_attempts") == 3, f"Expected max_attempts=3, got {retry_cfg}"
+    assert retry_cfg.get("mode") == "standard", f"Expected mode='standard', got {retry_cfg}"
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +220,7 @@ def test_r2_key_rejects_user_input() -> None:
         f"compute_r2_key must accept ONLY 'taken_at_ms' parameter (T-02-12 path injection). "
         f"Got: {params}"
     )
-    # Verify it's typed as int in annotations (either bare int or string 'int' from __future__.annotations)
+    # It is either bare int or string "int" under future annotations.
     ann = compute_r2_key.__annotations__
     ann_val = ann.get("taken_at_ms")
-    assert ann_val in (int, "int"), (
-        f"taken_at_ms must be annotated as int, got: {ann_val!r}"
-    )
+    assert ann_val in (int, "int"), f"taken_at_ms must be annotated as int, got: {ann_val!r}"

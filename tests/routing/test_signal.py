@@ -1,13 +1,13 @@
-\
 """Tests for signal models."""
+
 import pytest
+
 from polyarb.models.signal import (
-    MarketSignal,
-    MarketOutcome,
     ArbitrageSignal,
-    SignalStatus,
+    MarketOutcome,
+    MarketSignal,
     Outcome,
-    LegSide,
+    SignalStatus,
 )
 
 
@@ -83,6 +83,7 @@ class TestArbitrageSignal:
 
     def test_total_stake(self):
         from polyarb.models.signal import ArbitrageLeg, SignalSide
+
         leg = ArbitrageLeg(
             market_id="test",
             pm_side=SignalSide.YES,
@@ -109,6 +110,7 @@ class TestMarketOutcome:
 class TestArbitrageLeg:
     def test_effective_cost_yes(self):
         from polyarb.models.signal import ArbitrageLeg, SignalSide
+
         leg = ArbitrageLeg(
             market_id="test",
             pm_side=SignalSide.YES,
@@ -119,6 +121,7 @@ class TestArbitrageLeg:
 
     def test_effective_cost_no(self):
         from polyarb.models.signal import ArbitrageLeg, SignalSide
+
         leg = ArbitrageLeg(
             market_id="test",
             pm_side=SignalSide.NO,
@@ -130,6 +133,7 @@ class TestArbitrageLeg:
 
     def test_is_hedged(self):
         from polyarb.models.signal import ArbitrageLeg, SignalSide
+
         leg = ArbitrageLeg(
             market_id="test",
             pm_side=SignalSide.YES,

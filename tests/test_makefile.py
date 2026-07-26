@@ -80,8 +80,7 @@ def test_local_quote_make_entries_are_safe_discoverable_and_forward_options() ->
     )
 
     collect_entry = (
-        'cli_arbitrage collect-neg-risk-quotes --db-path '
-        '"$(if $(strip $(db)),$(db),data/state.db)"'
+        'cli_arbitrage collect-neg-risk-quotes --db-path "$(if $(strip $(db)),$(db),data/state.db)"'
     )
     assert collect_entry in collect_recipe
     assert "cli_arbitrage scan-quotes" in scan_recipe

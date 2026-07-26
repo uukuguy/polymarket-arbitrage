@@ -5,6 +5,7 @@ Plan 04 Task 1 — covers:
 - track_market: parameterized query (slug injection defense T-01.1-16)
 - track_market: >200 parquet files triggers warning log (T-01.1-17)
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,7 +15,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from polyarb.observation.tracker import _PARQUET_COUNT_WARN_THRESHOLD, track_market
-
 
 # =============================================================================
 # Fixtures

@@ -9,6 +9,7 @@ Verifies the CLI surface created in T7 Revision 8 (SESSION 36):
 These tests don't exercise real venue code — `run` uses the default no-op
 leg_executor so all legs trivially succeed (paper mode).
 """
+
 from __future__ import annotations
 
 import json
@@ -49,8 +50,15 @@ def test_evaluate_below_threshold_exits_nonzero():
     result = runner.invoke(
         app,
         [
-            "evaluate", "--mid", "0.5", "--stake", "100",
-            "--profit-pct", "0.5", "--min-threshold-pct", "2.0",
+            "evaluate",
+            "--mid",
+            "0.5",
+            "--stake",
+            "100",
+            "--profit-pct",
+            "0.5",
+            "--min-threshold-pct",
+            "2.0",
         ],
     )
     assert result.exit_code != 0, (
@@ -66,8 +74,17 @@ def test_run_happy_path_paper_executor_marks_completed():
     result = runner.invoke(
         app,
         [
-            "run", "--mid", "0.45", "--stake", "500", "--profit-pct", "3.0",
-            "--legs", "2", "--retry-delay", "0",
+            "run",
+            "--mid",
+            "0.45",
+            "--stake",
+            "500",
+            "--profit-pct",
+            "3.0",
+            "--legs",
+            "2",
+            "--retry-delay",
+            "0",
         ],
     )
     assert result.exit_code == 0, f"non-zero exit: {result.exit_code}\n{result.output}"
@@ -86,9 +103,16 @@ def test_run_happy_path_paper_executor_marks_completed():
         ["--venue-cash", "13.80"],
         ["--venue-cash", "13.80", "--venue-fee", "0.30"],
         [
-            "--venue-cash", "13.80", "--venue-fee", "0.30",
-            "--venue-status", "CONFIRMED", "--venue-ref", "trade-001",
-            "--fill-id", "fill-001",
+            "--venue-cash",
+            "13.80",
+            "--venue-fee",
+            "0.30",
+            "--venue-status",
+            "CONFIRMED",
+            "--venue-ref",
+            "trade-001",
+            "--fill-id",
+            "fill-001",
         ],
     ],
 )
@@ -107,9 +131,12 @@ def test_close_rejects_fill_id_without_explicit_size():
         app,
         [
             "close",
-            "--market-id", "m1",
-            "--exit-price", "0.5",
-            "--fill-id", "fill-001",
+            "--market-id",
+            "m1",
+            "--exit-price",
+            "0.5",
+            "--fill-id",
+            "fill-001",
         ],
     )
 
@@ -150,8 +177,18 @@ def test_run_paper_close_closes_lifecycle_zero_pnl():
     result = runner.invoke(
         app,
         [
-            "run", "--mid", "0.45", "--stake", "500", "--profit-pct", "3.0",
-            "--legs", "2", "--retry-delay", "0", "--paper-close",
+            "run",
+            "--mid",
+            "0.45",
+            "--stake",
+            "500",
+            "--profit-pct",
+            "3.0",
+            "--legs",
+            "2",
+            "--retry-delay",
+            "0",
+            "--paper-close",
         ],
     )
     assert result.exit_code == 0, f"non-zero exit: {result.exit_code}\n{result.output}"
@@ -176,8 +213,17 @@ def test_close_subcommand_books_realized_pnl(isolated_tracker):
     run_result = runner.invoke(
         app,
         [
-            "run", "--mid", "0.40", "--stake", "100", "--profit-pct", "3.0",
-            "--legs", "1", "--retry-delay", "0",
+            "run",
+            "--mid",
+            "0.40",
+            "--stake",
+            "100",
+            "--profit-pct",
+            "3.0",
+            "--legs",
+            "1",
+            "--retry-delay",
+            "0",
         ],
     )
     assert run_result.exit_code == 0
@@ -199,8 +245,10 @@ def test_close_subcommand_books_realized_pnl(isolated_tracker):
         app,
         [
             "close",
-            "--market-id", open_market_id,
-            "--exit-price", str(open_pos.entry_price + 0.05),  # 5¢ profit
+            "--market-id",
+            open_market_id,
+            "--exit-price",
+            str(open_pos.entry_price + 0.05),  # 5¢ profit
         ],
     )
     assert close_result.exit_code == 0, (

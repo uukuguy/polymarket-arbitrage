@@ -6,6 +6,7 @@ Patterns reused:
 - Phase 02.1 L4 — loguru StringIO sink (not caplog)
 - Phase 02.2 backlog preemptive — success path also emits breadcrumb (Open Q 9)
 """
+
 from __future__ import annotations
 
 import io
@@ -60,17 +61,18 @@ async def test_publish_success_emits_breadcrumb_info(loguru_sink, fake_settings)
     fake_conn.close = AsyncMock()
     recorded, rec = _make_breadcrumb_recorder()
 
-    with patch.object(bus.asyncpg, "connect", AsyncMock(return_value=fake_conn)), \
-         patch.object(bus.sentry_sdk, "add_breadcrumb", side_effect=rec):
+    with (
+        patch.object(bus.asyncpg, "connect", AsyncMock(return_value=fake_conn)),
+        patch.object(bus.sentry_sdk, "add_breadcrumb", side_effect=rec),
+    ):
         ok = await bus.publish_snapshot_complete(
             fake_settings, snapshot_id=42, taken_at_ms=1234567890
         )
 
     assert ok is True
-    assert any(
-        b.get("category") == "event-bus" and b.get("level") == "info"
-        for b in recorded
-    ), f"expected info breadcrumb category=event-bus, got {recorded}"
+    assert any(b.get("category") == "event-bus" and b.get("level") == "info" for b in recorded), (
+        f"expected info breadcrumb category=event-bus, got {recorded}"
+    )
 
 
 @pytest.mark.asyncio
@@ -79,18 +81,15 @@ async def test_publish_failsoft_logs(loguru_sink, fake_settings):
     from polyarb.events import bus
 
     recorded, rec = _make_breadcrumb_recorder()
-    with patch.object(bus.asyncpg, "connect", AsyncMock(side_effect=RuntimeError("conn refused"))), \
-         patch.object(bus.sentry_sdk, "add_breadcrumb", side_effect=rec):
-        ok = await bus.publish_snapshot_complete(
-            fake_settings, snapshot_id=1, taken_at_ms=2
-        )
+    with (
+        patch.object(bus.asyncpg, "connect", AsyncMock(side_effect=RuntimeError("conn refused"))),
+        patch.object(bus.sentry_sdk, "add_breadcrumb", side_effect=rec),
+    ):
+        ok = await bus.publish_snapshot_complete(fake_settings, snapshot_id=1, taken_at_ms=2)
 
     assert ok is False
     assert "event bus publish failed" in loguru_sink.getvalue()
-    assert any(
-        b.get("category") == "event-bus" and b.get("level") == "warning"
-        for b in recorded
-    )
+    assert any(b.get("category") == "event-bus" and b.get("level") == "warning" for b in recorded)
 
 
 @pytest.mark.asyncio
@@ -102,11 +101,11 @@ async def test_publish_payload_shape(fake_settings):
     fake_conn.execute = AsyncMock(return_value="NOTIFY")
     fake_conn.close = AsyncMock()
 
-    with patch.object(bus.asyncpg, "connect", AsyncMock(return_value=fake_conn)), \
-         patch.object(bus.sentry_sdk, "add_breadcrumb"):
-        await bus.publish_snapshot_complete(
-            fake_settings, snapshot_id=42, taken_at_ms=1234567890
-        )
+    with (
+        patch.object(bus.asyncpg, "connect", AsyncMock(return_value=fake_conn)),
+        patch.object(bus.sentry_sdk, "add_breadcrumb"),
+    ):
+        await bus.publish_snapshot_complete(fake_settings, snapshot_id=42, taken_at_ms=1234567890)
 
     # spy on execute call args
     assert fake_conn.execute.call_count == 1
@@ -127,11 +126,11 @@ async def test_connection_closed_in_finally(fake_settings):
     fake_conn.execute = AsyncMock(side_effect=RuntimeError("exec failed"))
     fake_conn.close = AsyncMock()
 
-    with patch.object(bus.asyncpg, "connect", AsyncMock(return_value=fake_conn)), \
-         patch.object(bus.sentry_sdk, "add_breadcrumb"):
-        ok = await bus.publish_snapshot_complete(
-            fake_settings, snapshot_id=1, taken_at_ms=2
-        )
+    with (
+        patch.object(bus.asyncpg, "connect", AsyncMock(return_value=fake_conn)),
+        patch.object(bus.sentry_sdk, "add_breadcrumb"),
+    ):
+        ok = await bus.publish_snapshot_complete(fake_settings, snapshot_id=1, taken_at_ms=2)
 
     assert ok is False
     assert fake_conn.close.await_count == 1, "conn.close() must run in finally"
@@ -146,8 +145,10 @@ async def test_payload_size_under_8000_bytes(fake_settings):
     fake_conn.execute = AsyncMock(return_value="NOTIFY")
     fake_conn.close = AsyncMock()
 
-    with patch.object(bus.asyncpg, "connect", AsyncMock(return_value=fake_conn)), \
-         patch.object(bus.sentry_sdk, "add_breadcrumb"):
+    with (
+        patch.object(bus.asyncpg, "connect", AsyncMock(return_value=fake_conn)),
+        patch.object(bus.sentry_sdk, "add_breadcrumb"),
+    ):
         # max realistic: 10-digit snapshot id, 13-digit ms
         await bus.publish_snapshot_complete(
             fake_settings, snapshot_id=9_999_999_999, taken_at_ms=9_999_999_999_999

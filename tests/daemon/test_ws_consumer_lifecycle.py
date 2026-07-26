@@ -25,9 +25,7 @@ def _consumer(*, on_event=lambda event: True):
     consumer._current_ws = object()
     consumer._connection_generation = 3
     consumer._l3_committed_set = {"l3-token"}
-    consumer._l3_business_evidence = {
-        "l3-token": (3, datetime(2026, 7, 23, tzinfo=UTC))
-    }
+    consumer._l3_business_evidence = {"l3-token": (3, datetime(2026, 7, 23, tzinfo=UTC))}
     return consumer, publications
 
 

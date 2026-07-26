@@ -13,6 +13,7 @@ Contract (verbatim from `push_top_of_book` envelope + the chain-truth anchor):
 - On FAILURE: anchor remains untouched (chain-truth — failure path is pure)
 - Sentry breadcrumb category="l2-mirror"; data.table="l2_book_levels"
 """
+
 from __future__ import annotations
 
 import os
@@ -70,6 +71,7 @@ def _book_rows(n: int) -> list[dict]:
 def _reset_chain_truth_anchor() -> None:
     """Reset `_last_book_levels_write_at_s` before every test for isolation."""
     from polyarb.observation import l3_promote
+
     prior = l3_promote._last_book_levels_write_at_s
     l3_promote._last_book_levels_write_at_s = None
     yield
@@ -83,9 +85,7 @@ def test_push_book_levels_happy_path_returns_true() -> None:
     from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 
     sb_mock = _make_supabase_mock()
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ):
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         rows = _book_rows(5)
         result = mirror.push_book_levels(rows)
@@ -99,7 +99,7 @@ def test_push_book_levels_happy_path_returns_true() -> None:
     # (sb_mock.table returns a fresh MagicMock per call, but they share
     # side_effect; we grab the last tbl by replaying.)
     # Easier: count insert calls across all returned tbls via side_effect.
-    insert_calls = []
+    _insert_calls = []
     for call in sb_mock.table.call_args_list:
         # Walk the chain: every table() call returned a tbl whose insert(...)
         # was called with the chunk. We re-invoke side_effect to get the
@@ -115,9 +115,7 @@ def test_push_book_levels_failure_returns_false_no_raise() -> None:
     from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 
     sb_mock = _make_supabase_mock(raise_on_insert=True)
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ):
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         result = mirror.push_book_levels(_book_rows(3))
 
@@ -139,20 +137,14 @@ def test_push_book_levels_chunks_at_1000() -> None:
     sb_mock = MagicMock()
     sb_mock.table.return_value = tbl_mock
 
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ):
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         result = mirror.push_book_levels(_book_rows(2500))
 
     assert result is True
     assert tbl_mock.insert.call_count == 3
-    chunk_sizes = [
-        len(call.args[0]) for call in tbl_mock.insert.call_args_list
-    ]
-    assert chunk_sizes == [1000, 1000, 500], (
-        f"expected chunks 1000+1000+500 but got {chunk_sizes}"
-    )
+    chunk_sizes = [len(call.args[0]) for call in tbl_mock.insert.call_args_list]
+    assert chunk_sizes == [1000, 1000, 500], f"expected chunks 1000+1000+500 but got {chunk_sizes}"
 
 
 def test_push_book_levels_narrow_projection() -> None:
@@ -179,9 +171,7 @@ def test_push_book_levels_narrow_projection() -> None:
         }
     ]
 
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ):
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         assert mirror.push_book_levels(polluted) is True
 
@@ -203,9 +193,7 @@ def test_push_book_levels_updates_chain_truth_anchor_on_success() -> None:
     sb_mock = _make_supabase_mock()
     assert l3_promote._last_book_levels_write_at_s is None  # autouse reset
 
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ):
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         before = time.time()
         result = mirror.push_book_levels(_book_rows(2))
@@ -214,9 +202,7 @@ def test_push_book_levels_updates_chain_truth_anchor_on_success() -> None:
     assert result is True
     anchor = l3_promote._last_book_levels_write_at_s
     assert anchor is not None
-    assert before <= anchor <= after, (
-        f"anchor {anchor} outside [{before}, {after}]"
-    )
+    assert before <= anchor <= after, f"anchor {anchor} outside [{before}, {after}]"
 
 
 def test_push_book_levels_does_NOT_update_anchor_on_failure() -> None:
@@ -227,9 +213,7 @@ def test_push_book_levels_does_NOT_update_anchor_on_failure() -> None:
     sb_mock = _make_supabase_mock(raise_on_insert=True)
     assert l3_promote._last_book_levels_write_at_s is None  # autouse reset
 
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ):
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         result = mirror.push_book_levels(_book_rows(2))
 
@@ -243,17 +227,17 @@ def test_push_book_levels_sentry_breadcrumb_category() -> None:
     from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 
     sb_mock = _make_supabase_mock()
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ), patch(
-        "polyarb.storage.l2_supabase_mirror.sentry_sdk"
-    ) as sentry_mock:
+    with (
+        patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock),
+        patch("polyarb.storage.l2_supabase_mirror.sentry_sdk") as sentry_mock,
+    ):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         assert mirror.push_book_levels(_book_rows(3)) is True
 
     calls = sentry_mock.add_breadcrumb.call_args_list
     matching = [
-        c for c in calls
+        c
+        for c in calls
         if c.kwargs.get("category") == "l2-mirror"
         and (c.kwargs.get("data") or {}).get("table") == "l2_book_levels"
     ]

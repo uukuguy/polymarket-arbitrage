@@ -55,6 +55,23 @@ from tenacity import (
     wait_exponential,
 )
 
+from polyarb.clients.clob_client import ClobReaderClient
+from polyarb.clients.gamma_client import GammaClient
+from polyarb.config import Settings
+from polyarb.events.bus import publish_snapshot_complete
+from polyarb.snapshot.cache import ChunkCache
+from polyarb.snapshot.normalizer import normalize_events, normalize_market
+from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_streaming
+from polyarb.storage.sqlite_store import SQLiteStore
+from polyarb.validator.category import Category, Issue
+from polyarb.validator.layers import (
+    determine_snapshot_status,
+    is_valid_overall,
+    layer1_count,
+    layer2_fields,
+    layer4_cross_source,
+)
+
 
 def _is_dns_jitter(exc: BaseException) -> bool:
     """Match the specific DNS-failure exception shapes seen in Fly machine production.
@@ -109,23 +126,6 @@ def _phase(label: str):
     finally:
         logger.info(f"► Phase {label} — done in {_format_elapsed(time.monotonic() - t0)}")
 
-from polyarb.clients.clob_client import ClobReaderClient
-from polyarb.clients.gamma_client import GammaClient
-from polyarb.config import Settings
-from polyarb.events.bus import publish_snapshot_complete
-from polyarb.snapshot.cache import ChunkCache
-from polyarb.snapshot.normalizer import normalize_events, normalize_market
-from polyarb.storage.parquet_writer import compute_snapshot_path, write_parquet_streaming
-from polyarb.storage.sqlite_store import SQLiteStore
-from polyarb.validator.category import Category, Issue
-from polyarb.validator.layers import (
-    determine_snapshot_status,
-    is_valid_overall,
-    layer1_count,
-    layer2_fields,
-    layer4_cross_source,
-)
-
 
 def _derive_notes_from_issues(issues: list[Issue]) -> str | None:
     """Phase 03.1 Plan 02 GAP-103 — pull a one-line fail-reason for snapshots.notes.
@@ -155,9 +155,7 @@ def _derive_notes_from_issues(issues: list[Issue]) -> str | None:
 
 @dataclass
 class SnapshotResult:
-    """Return value of ``run_snapshot`` — what the CLI prints + what tests assert on.
-
-    """
+    """Return value of ``run_snapshot`` — what the CLI prints + what tests assert on."""
 
     snapshot_id: int
     market_count: int
@@ -262,9 +260,7 @@ async def run_snapshot(
             try:
                 raw_events = await gamma.fetch_all_active_events()
                 logger.info(f"Gamma: fetched {len(raw_events)} active events")
-                event_rows, event_tag_rows, market_to_event_map = normalize_events(
-                    raw_events
-                )
+                event_rows, event_tag_rows, market_to_event_map = normalize_events(raw_events)
                 del raw_events  # free 10k+ raw Gamma event dicts immediately
                 logger.info(
                     f"Events normalized: {len(event_rows)} events, "
@@ -299,9 +295,7 @@ async def run_snapshot(
             first_frame_seen = False
             try:
                 async for retry_state in AsyncRetrying(
-                    retry=retry_if_exception(
-                        lambda e: _is_dns_jitter(e) and not first_frame_seen
-                    ),
+                    retry=retry_if_exception(lambda e: _is_dns_jitter(e) and not first_frame_seen),
                     stop=stop_after_attempt(3),
                     wait=wait_exponential(multiplier=1, min=1, max=5),
                     reraise=True,
@@ -349,9 +343,7 @@ async def run_snapshot(
 
     gamma_count_reported = raw_market_count if raw_market_count > 0 else None
     if dedup_count > 0:
-        logger.info(
-            f"Deduped {dedup_count} markets by market_id (Gamma pagination overlap)"
-        )
+        logger.info(f"Deduped {dedup_count} markets by market_id (Gamma pagination overlap)")
     logger.info(
         f"Streamed {normalized_count}/{raw_market_count} normalized; "
         f"{len(target_markets)} target after mode-filter (mode={mode})"
@@ -579,6 +571,7 @@ async def run_snapshot(
         )
     elif settings.supabase_mirror_enabled:
         from polyarb.storage.supabase_mirror import SupabaseMirror, narrow_market_row
+
         try:
             mirror = SupabaseMirror(
                 settings.supabase_url,
@@ -610,7 +603,10 @@ async def run_snapshot(
                         layer=4,
                         category=Category.UNKNOWN,
                         market_id=None,
-                        detail=f"Supabase mirror push returned False (fail-soft, snapshot_id={snapshot_id})",
+                        detail=(
+                            "Supabase mirror push returned False "
+                            f"(fail-soft, snapshot_id={snapshot_id})"
+                        ),
                     )
                 )
         except Exception as e:  # noqa: BLE001
@@ -657,6 +653,7 @@ async def run_snapshot(
     # Upload the already-written parquet to Cloudflare R2. Failure → DEGRADED.
     if settings.r2_enabled:
         from polyarb.storage.r2_sync import R2UploadError, compute_r2_key, upload_parquet_to_r2
+
         r2_url: str | None = None
         try:
             r2_key = compute_r2_key(taken_at_ms)
@@ -699,7 +696,9 @@ async def run_snapshot(
             try:
                 mirror.update_parquet_url(snapshot_id, r2_url)
             except Exception:  # noqa: BLE001
-                logger.warning("update_parquet_url post-r2 failed; snapshots.parquet_url stays NULL")
+                logger.warning(
+                    "update_parquet_url post-r2 failed; snapshots.parquet_url stays NULL"
+                )
 
     # ── 7.7. Event bus fan-out (Plan 03-05, D-05) — fail-soft post-write ─────
     # L1 → L2 cross-process NOTIFY so the L2 daemon can refresh its

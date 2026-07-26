@@ -91,9 +91,7 @@ def test_money_pnl_at_rejects_unknown_side() -> None:
     ("side", "price", "expected"),
     [("BUY", "0.50", "50"), ("SELL", "0.60", "40")],
 )
-def test_money_collateral_for_quantity_is_side_aware(
-    side: str, price: str, expected: str
-) -> None:
+def test_money_collateral_for_quantity_is_side_aware(side: str, price: str, expected: str) -> None:
     quantity = Quantity.from_value("100")
 
     assert Money.collateral_for(quantity, price, side) == Money.from_value(expected)

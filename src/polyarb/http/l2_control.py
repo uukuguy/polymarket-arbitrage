@@ -37,13 +37,14 @@ Routes (registered in l2_app.py):
 Handler does NOT import from polyarb.http.control (module independence) —
 the HMAC gate is entirely in the middleware, not in this handler.
 """
+
 from __future__ import annotations
 
 from loguru import logger
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from polyarb.daemon.ws_consumer import set_ws_test_kill, get_ws_test_kill
+from polyarb.daemon.ws_consumer import get_ws_test_kill, set_ws_test_kill
 
 
 async def ws_test_kill_handler(request: Request) -> JSONResponse:

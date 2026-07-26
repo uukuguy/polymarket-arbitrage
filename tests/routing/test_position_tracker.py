@@ -13,6 +13,7 @@ T5 locks the lifecycle:
 Each test class isolates one slice. Bug-fix tests (T5.1) come first because
 they unblock the rest.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -242,12 +243,8 @@ class TestStopLossTriggerChain:
 class TestRepositoryBackedTracker:
     def test_two_trackers_observe_the_same_open_and_close(self, tmp_path):
         path = tmp_path / "positions.db"
-        first = PositionTracker(
-            repository=SQLitePositionRepository(path, initial_balance=1000.0)
-        )
-        second = PositionTracker(
-            repository=SQLitePositionRepository(path, initial_balance=1000.0)
-        )
+        first = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
+        second = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
 
         assert first.open_position(
             "m1",
@@ -261,9 +258,7 @@ class TestRepositoryBackedTracker:
         )
         assert second.open_count == 1
 
-        pnl = second.close_position_with_fill(
-            Fill("m1", 0.5, 100.0), operation_id="close:f1"
-        )
+        pnl = second.close_position_with_fill(Fill("m1", 0.5, 100.0), operation_id="close:f1")
 
         assert pnl == pytest.approx(10.0)
         assert first.open_count == 0
@@ -272,21 +267,15 @@ class TestRepositoryBackedTracker:
 
     def test_persisted_position_timestamp_is_timezone_aware(self, tmp_path):
         tracker = PositionTracker(
-            repository=SQLitePositionRepository(
-                tmp_path / "positions.db", initial_balance=1000.0
-            )
+            repository=SQLitePositionRepository(tmp_path / "positions.db", initial_balance=1000.0)
         )
-        tracker.open_position(
-            "m1", "c1", "BUY", "YES", 100.0, 0.4, operation_id="open:m1"
-        )
+        tracker.open_position("m1", "c1", "BUY", "YES", 100.0, 0.4, operation_id="open:m1")
 
         assert tracker.open_positions()[0].opened_at.utcoffset() is not None
 
     def test_duplicate_operation_ids_do_not_double_book(self, tmp_path):
         tracker = PositionTracker(
-            repository=SQLitePositionRepository(
-                tmp_path / "positions.db", initial_balance=1000.0
-            )
+            repository=SQLitePositionRepository(tmp_path / "positions.db", initial_balance=1000.0)
         )
 
         for _ in range(2):
@@ -303,27 +292,21 @@ class TestRepositoryBackedTracker:
         assert tracker.open_count == 1
 
         fill = Fill("m1", 0.5, 100.0)
-        assert tracker.close_position_with_fill(
-            fill, operation_id="close:f1"
-        ) == pytest.approx(10.0)
-        assert tracker.close_position_with_fill(
-            fill, operation_id="close:f1"
-        ) == pytest.approx(10.0)
+        assert tracker.close_position_with_fill(fill, operation_id="close:f1") == pytest.approx(
+            10.0
+        )
+        assert tracker.close_position_with_fill(fill, operation_id="close:f1") == pytest.approx(
+            10.0
+        )
         assert tracker.balance == pytest.approx(1010.0)
         assert tracker.total_realized_pnl == pytest.approx(10.0)
 
     def test_tracker_exposes_committed_close_receipt(self, tmp_path):
         tracker = PositionTracker(
-            repository=SQLitePositionRepository(
-                tmp_path / "positions.db", initial_balance=1000.0
-            )
+            repository=SQLitePositionRepository(tmp_path / "positions.db", initial_balance=1000.0)
         )
-        tracker.open_position(
-            "m1", "c1", "BUY", "YES", 100.0, 0.4, operation_id="open:m1"
-        )
-        tracker.close_position_with_fill(
-            Fill("m1", 0.5, 100.0), operation_id="close:f1"
-        )
+        tracker.open_position("m1", "c1", "BUY", "YES", 100.0, 0.4, operation_id="open:m1")
+        tracker.close_position_with_fill(Fill("m1", 0.5, 100.0), operation_id="close:f1")
 
         receipt = tracker.operation_receipt("close:f1")
 
@@ -334,27 +317,17 @@ class TestRepositoryBackedTracker:
         assert receipt.result == Money.from_value("10")
         assert tracker.operation_receipt("unknown") is None
 
-    def test_rejected_open_and_partial_fill_leave_durable_state_unchanged(
-        self, tmp_path
-    ):
+    def test_rejected_open_and_partial_fill_leave_durable_state_unchanged(self, tmp_path):
         config = PositionConfig(initial_balance=1000.0, max_total_exposure=40.0)
         tracker = PositionTracker(
             config,
-            repository=SQLitePositionRepository(
-                tmp_path / "positions.db", initial_balance=1000.0
-            ),
+            repository=SQLitePositionRepository(tmp_path / "positions.db", initial_balance=1000.0),
         )
-        assert tracker.open_position(
-            "m1", "c1", "BUY", "YES", 100.0, 0.4, operation_id="open:m1"
-        )
+        assert tracker.open_position("m1", "c1", "BUY", "YES", 100.0, 0.4, operation_id="open:m1")
 
-        assert not tracker.open_position(
-            "m2", "c2", "BUY", "YES", 1.0, 0.4, operation_id="open:m2"
-        )
+        assert not tracker.open_position("m2", "c2", "BUY", "YES", 1.0, 0.4, operation_id="open:m2")
         with pytest.raises(ValueError, match="partial fill"):
-            tracker.close_position_with_fill(
-                Fill("m1", 0.5, 50.0), operation_id="close:partial"
-            )
+            tracker.close_position_with_fill(Fill("m1", 0.5, 50.0), operation_id="close:partial")
 
         assert tracker.balance == pytest.approx(960.0)
         assert [position.market_id for position in tracker.open_positions()] == ["m1"]
@@ -400,9 +373,7 @@ class TestExactCashDomain:
         assert tracker.repository.load().balance_money.micros == 180_000
 
     def test_exposure_limit_compares_quantized_stakes(self) -> None:
-        tracker = PositionTracker(
-            PositionConfig(initial_balance=1.0, max_total_exposure=0.3)
-        )
+        tracker = PositionTracker(PositionConfig(initial_balance=1.0, max_total_exposure=0.3))
 
         assert tracker.open_position("m1", "c1", "BUY", "YES", 0.1, 0.4)
         assert tracker.open_position("m2", "c2", "BUY", "YES", 0.2, 0.4)
@@ -412,9 +383,7 @@ class TestExactCashDomain:
         tracker = PositionTracker(PositionConfig(initial_balance=1.0))
         assert tracker.open_position("m1", "c1", "BUY", "YES", 0.3, 0.4)
 
-        pnl = tracker.close_position_with_fill(
-            Fill("m1", 0.5, 0.1 + 0.2), operation_id="close:m1"
-        )
+        pnl = tracker.close_position_with_fill(Fill("m1", 0.5, 0.1 + 0.2), operation_id="close:m1")
 
         assert pnl == pytest.approx(0.03)
         assert tracker.open_count == 0
@@ -457,13 +426,9 @@ class TestDurablePartialFillAccounting:
         assert tracker.balance == pytest.approx(1008.5)
         assert tracker.total_realized_pnl == pytest.approx(8.5)
 
-    def test_fill_id_is_canonical_across_different_caller_operation_ids(
-        self, tmp_path
-    ) -> None:
+    def test_fill_id_is_canonical_across_different_caller_operation_ids(self, tmp_path) -> None:
         path = tmp_path / "positions.db"
-        tracker = PositionTracker(
-            repository=SQLitePositionRepository(path, initial_balance=1000.0)
-        )
+        tracker = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
         self._open(tracker)
         fill = Fill("m1", 0.45, filled_quantity=30, fill_id="venue-123")
 
@@ -488,13 +453,9 @@ class TestDurablePartialFillAccounting:
         self, tmp_path, changed_quantity: float, changed_price: float
     ) -> None:
         path = tmp_path / "positions.db"
-        tracker = PositionTracker(
-            repository=SQLitePositionRepository(path, initial_balance=1000.0)
-        )
+        tracker = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
         self._open(tracker)
-        tracker.close_position_with_fill(
-            Fill("m1", 0.45, filled_quantity=30, fill_id="venue-123")
-        )
+        tracker.close_position_with_fill(Fill("m1", 0.45, filled_quantity=30, fill_id="venue-123"))
 
         with pytest.raises(ValueError, match="operation identity conflict"):
             tracker.close_position_with_fill(
@@ -525,9 +486,7 @@ class TestDurablePartialFillAccounting:
         assert tracker.operation_receipt("close:anonymous") is None
 
     @pytest.mark.parametrize("filled_quantity", [0, 101])
-    def test_zero_or_overfill_fails_without_mutation(
-        self, filled_quantity: float
-    ) -> None:
+    def test_zero_or_overfill_fails_without_mutation(self, filled_quantity: float) -> None:
         tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
         self._open(tracker)
 
@@ -546,9 +505,7 @@ class TestDurablePartialFillAccounting:
 
     def test_final_micro_fill_consumes_all_cost_basis_residual(self) -> None:
         tracker = PositionTracker(PositionConfig(initial_balance=1.0))
-        assert tracker.open_position(
-            "m1", "c1", "BUY", "YES", price=0.333333, quantity=0.000003
-        )
+        assert tracker.open_position("m1", "c1", "BUY", "YES", price=0.333333, quantity=0.000003)
 
         for index in range(2):
             tracker.close_position_with_fill(
@@ -589,9 +546,7 @@ class TestVenueTruthReconciliation:
         )
 
     @staticmethod
-    def _settlement(
-        *, gross: str = "13.80", fee: str = "0.30", source_ref: str = "trade-001"
-    ):
+    def _settlement(*, gross: str = "13.80", fee: str = "0.30", source_ref: str = "trade-001"):
         return tracker_module.VenueSettlement(
             gross_cash=Money.from_value(gross),
             fee=Money.from_value(fee),
@@ -627,9 +582,7 @@ class TestVenueTruthReconciliation:
 
     def test_identical_settlement_replays_after_restart(self, tmp_path) -> None:
         path = tmp_path / "positions.db"
-        first = PositionTracker(
-            repository=SQLitePositionRepository(path, initial_balance=1000.0)
-        )
+        first = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
         self._open(first)
         fill = Fill(
             "m1",
@@ -664,9 +617,7 @@ class TestVenueTruthReconciliation:
         self, tmp_path, exit_price, quantity, gross, fee, source_ref
     ) -> None:
         path = tmp_path / "positions.db"
-        tracker = PositionTracker(
-            repository=SQLitePositionRepository(path, initial_balance=1000.0)
-        )
+        tracker = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
         self._open(tracker)
         tracker.close_position_with_fill(
             Fill(
@@ -685,9 +636,7 @@ class TestVenueTruthReconciliation:
                     exit_price,
                     filled_quantity=quantity,
                     fill_id="venue-001",
-                    settlement=self._settlement(
-                        gross=gross, fee=fee, source_ref=source_ref
-                    ),
+                    settlement=self._settlement(gross=gross, fee=fee, source_ref=source_ref),
                 )
             )
 
@@ -711,9 +660,7 @@ class TestVenueTruthReconciliation:
             ),
         ],
     )
-    def test_invalid_or_nonterminal_settlement_fails_at_boundary(
-        self, kwargs, match
-    ) -> None:
+    def test_invalid_or_nonterminal_settlement_fails_at_boundary(self, kwargs, match) -> None:
         values = {
             "gross_cash": Money.from_value("13.80"),
             "fee": Money.from_value("0.30"),

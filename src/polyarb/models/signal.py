@@ -3,6 +3,7 @@
 Defines the canonical data structures used throughout the routing engine,
 execution pipeline, and position tracker.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -54,6 +55,7 @@ class PipelineOutcome(Enum):
 
 
 # ─── Routing-layer aliases (also used by routing.engine) ───────────────────────
+
 
 class Side(Enum):
     BUY = "buy"
@@ -287,8 +289,7 @@ class ExecutionLeg:
     @property
     def notional_money(self) -> Money:
         return Money.from_value(
-            self.quantity_value.to_decimal()
-            * Money._price(self.estimated_price)
+            self.quantity_value.to_decimal() * Money._price(self.estimated_price)
         )
 
     @property

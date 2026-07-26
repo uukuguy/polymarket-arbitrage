@@ -1,4 +1,5 @@
 """Phase 05.1 live event-chain health contracts."""
+
 from __future__ import annotations
 
 import json
@@ -76,9 +77,7 @@ def test_quiet_notifications_do_not_fail_caught_up_chain() -> None:
 
 
 def test_stale_reconciliation_fails_strict_health() -> None:
-    checks, overall = _checks(
-        _live_state(last_reconciliation_success_s=700.0), now=1_000.0
-    )
+    checks, overall = _checks(_live_state(last_reconciliation_success_s=700.0), now=1_000.0)
 
     assert checks["event_bus:last_reconciliation_age_seconds"][0]["status"] == "fail"
     assert overall == "fail"

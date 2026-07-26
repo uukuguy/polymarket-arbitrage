@@ -26,6 +26,7 @@ Upsert contract:
 - upsert_l2_tob_mirror_state(last_mirror_at_s: int) -> None
 - Inserts when missing; overwrites when present (CHECK(id=1) enforces singleton)
 """
+
 from __future__ import annotations
 
 import os

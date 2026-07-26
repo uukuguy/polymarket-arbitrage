@@ -1,9 +1,11 @@
 """Tests for routing engine."""
+
 import pytest
-from polyarb.models.signal import ArbitrageSignal, MarketSignal, MarketOutcome, Outcome
+
+from polyarb.models.signal import ArbitrageSignal, MarketOutcome, MarketSignal, Outcome
 from polyarb.models.slippage import SlippageCalculator, SlippageParams
-from polyarb.routing.engine import RoutingEngine
 from polyarb.routing.config import RoutingConfig
+from polyarb.routing.engine import RoutingEngine
 
 
 def make_signal(

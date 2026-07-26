@@ -45,6 +45,7 @@ raises, markets_latest fetch raises), the promoter FREEZES
 the live websocket keep streaming the existing tokens; the append-only
 terminal row surfaces the frozen reason without pretending control changed.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -84,10 +85,7 @@ _last_book_levels_write_at_s: float | None = None
 # Plan 04 additions — last-known-good fallbacks for Open Q #5 freeze policy
 # AND the reverse map needed to compute MARKET-level diffs from a
 # TOKEN-level _l3_active_set on subsequent ticks.
-_TokenIdentity = (
-    tuple[str | None, str | None]
-    | tuple[str | None, str | None, str | None]
-)
+_TokenIdentity = tuple[str | None, str | None] | tuple[str | None, str | None, str | None]
 _last_known_tob_rows: list[dict] | None = None
 _last_known_market_token_map: dict[str, _TokenIdentity] | None = None
 # Last durably recorded current dashboard target.  This is a bounded diagnostic
@@ -170,17 +168,10 @@ def _fetch_latest_tob_rows_from_supabase(client: Any) -> list[dict]:
     before the recipe LIMIT so five rows mean five distinct markets.
     """
     cutoff_ms = int(time.time() * 1000) - 3600 * 1000
-    cutoff_iso = (
-        datetime.fromtimestamp(cutoff_ms / 1000, tz=UTC)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
+    cutoff_iso = datetime.fromtimestamp(cutoff_ms / 1000, tz=UTC).isoformat().replace("+00:00", "Z")
     resp = (
         client.table("l2_top_of_book")
-        .select(
-            "asset_id, ts, best_bid, best_ask, spread, "
-            "mid_price, depth_yes_usd, depth_no_usd"
-        )
+        .select("asset_id, ts, best_bid, best_ask, spread, mid_price, depth_yes_usd, depth_no_usd")
         .gte("ts", cutoff_iso)
         .order("ts", desc=True)
         .limit(1000)
@@ -197,9 +188,7 @@ def _fetch_latest_tob_rows_from_supabase(client: Any) -> list[dict]:
     return latest
 
 
-def _fetch_market_token_map(
-    client: Any, yes_asset_ids: list[str]
-) -> dict[str, _TokenIdentity]:
+def _fetch_market_token_map(client: Any, yes_asset_ids: list[str]) -> dict[str, _TokenIdentity]:
     """Fetch complete outcome identity for selected Yes-side TOB assets.
 
     ``l2_top_of_book.asset_id`` is the Yes token ID. Alembic 006 makes the
@@ -380,9 +369,7 @@ def _load_recipe(recipe_yaml_path: Path) -> Any:
                     "'depth_yes_usd > 500' not found in yaml — leaving WHERE unchanged"
                 )
             else:
-                where = where.replace(
-                    "depth_yes_usd > 500", f"depth_yes_usd > {override_min:g}"
-                )
+                where = where.replace("depth_yes_usd > 500", f"depth_yes_usd > {override_min:g}")
                 logger.info(
                     f"l3-promote: depth threshold overridden via "
                     f"POLYARB_L3_DEPTH_MIN_USD={override_min:g} (yaml baseline=500)"
@@ -433,14 +420,11 @@ def _mirror_l3_promoted_at_ts(
     committed = sorted(set(committed_yes_asset_ids))
     if len(committed) > _MIRROR_RECONCILE_BATCH_SIZE:
         logger.warning(
-            "l3-promote: committed mirror target exceeds bounded payload "
-            "rows={}",
+            "l3-promote: committed mirror target exceeds bounded payload rows={}",
             len(committed),
         )
         return _MirrorReconcileResult(succeeded=False)
-    now_iso = (
-        datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    )
+    now_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     try:
         if committed:
             (
@@ -451,17 +435,11 @@ def _mirror_l3_promoted_at_ts(
             )
 
         query = (
-            client.table("l2_candidates")
-            .select("asset_id")
-            .not_.is_("l3_promoted_at_ts", "null")
+            client.table("l2_candidates").select("asset_id").not_.is_("l3_promoted_at_ts", "null")
         )
         if committed:
             query = query.not_.in_("asset_id", committed)
-        response = (
-            query.order("id")
-            .limit(_MIRROR_RECONCILE_BATCH_SIZE)
-            .execute()
-        )
+        response = query.order("id").limit(_MIRROR_RECONCILE_BATCH_SIZE).execute()
         rows = list(response.data or [])
         if len(rows) > _MIRROR_RECONCILE_BATCH_SIZE:
             raise ValueError("candidate badge query exceeded reconciliation cap")
@@ -727,8 +705,7 @@ def _locked_proposal(
                 identity,
             )
             if not all(
-                isinstance(value, str) and value
-                for value in (market_id, yes_token, no_token)
+                isinstance(value, str) and value for value in (market_id, yes_token, no_token)
             ):
                 continue
             pair = {yes_token, no_token}
@@ -813,9 +790,7 @@ async def _promote_run_impl(
         effective_acceptance = acceptance_config
         if effective_acceptance is None:
             code_version = (
-                runtime_status.identity.code_version
-                if runtime_status is not None
-                else "dry-run"
+                runtime_status.identity.code_version if runtime_status is not None else "dry-run"
             )
             effective_acceptance = AcceptanceConfig.from_settings(
                 settings, recipe_yaml_path, code_version
@@ -877,18 +852,14 @@ async def _promote_run_impl(
                 "l3-promote: soak mapping lock read failed type={}",
                 type(exc).__name__,
             )
-            return await finish(
-                early(PromoteStatus.FAILED, "soak_mapping_lock_read_failed")
-            )
+            return await finish(early(PromoteStatus.FAILED, "soak_mapping_lock_read_failed"))
     locked_proposal = (
         _locked_proposal(soak_lock, initial, staged_market_token_map or {})
         if soak_lock is not None
         else None
     )
     if soak_lock is not None and locked_proposal is None:
-        return await finish(
-            early(PromoteStatus.FAILED, "soak_mapping_lock_mismatch")
-        )
+        return await finish(early(PromoteStatus.FAILED, "soak_mapping_lock_mismatch"))
 
     supabase_url = getattr(settings, "supabase_url", "")
     try:
@@ -964,9 +935,7 @@ async def _promote_run_impl(
 
             proposed_tokens: set[str] = set()
             accepted_markets = set()
-            for market_id in sorted(
-                str(value) for value in frame["asset_id"].tolist() if value
-            ):
+            for market_id in sorted(str(value) for value in frame["asset_id"].tolist() if value):
                 _actual_market_id, raw_yes, raw_no = _token_identity_parts(
                     market_id,
                     token_map.get(market_id, (None, None)),
@@ -1053,9 +1022,7 @@ async def _promote_run_impl(
                 and control_snapshot.generation == initial.generation
             )
         except Exception as exc:  # noqa: BLE001 - terminal row still required
-            logger.warning(
-                "l3-promote: control snapshot failed type={}", type(exc).__name__
-            )
+            logger.warning("l3-promote: control snapshot failed type={}", type(exc).__name__)
             control_identity_ok = False
     if (
         added
@@ -1142,9 +1109,7 @@ async def _promote_run_impl(
     staged_active_set = current.committed
     if mirror_succeeded and not identity_limit_exceeded:
         staged_mirrored_market_ids = frozenset(current_markets)
-    controls_ok = (not added or add_succeeded is True) and (
-        not removed or remove_succeeded is True
-    )
+    controls_ok = (not added or add_succeeded is True) and (not removed or remove_succeeded is True)
     if not desired_set_succeeded:
         status, reason = PromoteStatus.FAILED, "desired_update_failed"
     elif not control_identity_ok or current.generation != initial.generation:
@@ -1219,10 +1184,8 @@ async def promote_run(
         else (0 if run_seq is None else run_seq)
     )
     effective_scheduled_at = started_at if scheduled_at is None else scheduled_at
-    if (
-        effective_scheduled_at.tzinfo is None
-        or effective_scheduled_at.utcoffset()
-        != UTC.utcoffset(effective_scheduled_at)
+    if effective_scheduled_at.tzinfo is None or effective_scheduled_at.utcoffset() != UTC.utcoffset(
+        effective_scheduled_at
     ):
         raise ValueError("scheduled_at must be timezone-aware UTC")
 
@@ -1240,9 +1203,7 @@ async def promote_run(
             desired=frozenset(_l3_active_set),
             committed=frozenset(_l3_active_set),
         )
-        canonical_hash = (
-            acceptance_config.digest() if acceptance_config is not None else "0" * 64
-        )
+        canonical_hash = acceptance_config.digest() if acceptance_config is not None else "0" * 64
     append_attempt = _PromoteAppendAttempt()
 
     try:
@@ -1328,9 +1289,8 @@ async def run_periodic(
             evidence_runtime.snapshot().identity.code_version,
         )
     logger.info("l3-promote: run_periodic started interval_s={}", interval_s)
-    while (
-        not stop_event.is_set()
-        and not bool(getattr(ws_consumer, "has_active_connection", False))
+    while not stop_event.is_set() and not bool(
+        getattr(ws_consumer, "has_active_connection", False)
     ):
         try:
             await asyncio.wait_for(

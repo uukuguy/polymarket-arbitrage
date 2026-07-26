@@ -11,6 +11,7 @@ OrbStack/Docker Desktop). The migration FILE is still validated by the static
 text-grep tests (test_no_drop_in_upgrade + test_down_revision_chain_to_002),
 which run regardless of Docker.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,8 +37,7 @@ def test_down_revision_chain_to_002() -> None:
     assert MIGRATION_PATH.exists(), f"missing {MIGRATION_PATH}"
     content = MIGRATION_PATH.read_text()
     assert 'down_revision = "002"' in content, (
-        "must chain after 002_add_top_movers_view (Plan 02-08); "
-        "current down_revision is incorrect"
+        "must chain after 002_add_top_movers_view (Plan 02-08); current down_revision is incorrect"
     )
 
 
@@ -47,9 +47,7 @@ def test_no_drop_in_upgrade() -> None:
     content = MIGRATION_PATH.read_text()
     upgrade_start = content.find("def upgrade(")
     downgrade_start = content.find("def downgrade(")
-    assert 0 < upgrade_start < downgrade_start, (
-        "upgrade() must precede downgrade() in source order"
-    )
+    assert 0 < upgrade_start < downgrade_start, "upgrade() must precede downgrade() in source order"
     upgrade_body = content[upgrade_start:downgrade_start]
     assert "op.drop_" not in upgrade_body, (
         "upgrade() must not contain op.drop_* (Phase 02 L15 — schema-add discipline)"
@@ -71,9 +69,7 @@ pytestmark_slow = pytest.mark.slow
 
 def _docker_available() -> bool:
     try:
-        r = subprocess.run(
-            ["docker", "info"], capture_output=True, text=True, timeout=5
-        )
+        r = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=5)
         return r.returncode == 0
     except Exception:
         return False
@@ -100,7 +96,7 @@ def pg_dsn():
         #   postgresql+psycopg://...
         for prefix in ("postgresql+psycopg2://", "postgresql+psycopg://"):
             if url.startswith(prefix):
-                url = "postgresql://" + url[len(prefix):]
+                url = "postgresql://" + url[len(prefix) :]
                 break
         asyncio.run(_create_supabase_roles(url))
         yield url
@@ -150,8 +146,7 @@ def test_003_creates_all_tables(pg_dsn):
     assert r.returncode == 0, f"alembic upgrade failed:\nSTDOUT={r.stdout}\nSTDERR={r.stderr}"
     rows = _q(
         pg_dsn,
-        "SELECT tablename FROM pg_tables "
-        "WHERE schemaname='public' ORDER BY tablename",
+        "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename",
     )
     names = {row["tablename"] for row in rows}
     expected_tables = (
@@ -200,10 +195,7 @@ def test_003_brin_indexes_present(pg_dsn):
         "WHERE schemaname='public' AND tablename LIKE 'l2_%' AND indexdef ILIKE '%using brin%'",
     )
     # Expect at least one BRIN index on l2_top_of_book and one on l2_trades.
-    brin_tables = {
-        row["indexname"]
-        for row in rows
-    }
+    brin_tables = {row["indexname"] for row in rows}
     assert len(brin_tables) >= 2, (
         f"expected >=2 BRIN indexes on l2_top_of_book / l2_trades ts cols; got {brin_tables}"
     )
@@ -241,7 +233,15 @@ def test_trade_hash_unique(pg_dsn):
                 "INSERT INTO l2_trades "
                 "(asset_id, market_id, ts, price, size, side, taker_address, trade_hash, source) "
                 "VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8, $9)",
-                "asset-A", "mkt-A", now, 0.5, 10.0, "BUY", "0xabc", "0xdup", "test",
+                "asset-A",
+                "mkt-A",
+                now,
+                0.5,
+                10.0,
+                "BUY",
+                "0xabc",
+                "0xdup",
+                "test",
             )
             try:
                 await conn.execute(
@@ -249,7 +249,15 @@ def test_trade_hash_unique(pg_dsn):
                     "(asset_id, market_id, ts, price, size, side, taker_address, "
                     "trade_hash, source) "
                     "VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8, $9)",
-                    "asset-A", "mkt-A", now, 0.5, 10.0, "BUY", "0xabc", "0xdup", "test",
+                    "asset-A",
+                    "mkt-A",
+                    now,
+                    0.5,
+                    10.0,
+                    "BUY",
+                    "0xabc",
+                    "0xdup",
+                    "test",
                 )
                 return False, "duplicate insert did not raise UniqueViolation"
             except asyncpg.exceptions.UniqueViolationError as e:

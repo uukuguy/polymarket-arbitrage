@@ -104,9 +104,7 @@ class TranslationCache:
 
     # ── Read ─────────────────────────────────────────────────────────────────
 
-    def list_untranslated(
-        self, limit: int | None = None
-    ) -> list[tuple[str, str]]:
+    def list_untranslated(self, limit: int | None = None) -> list[tuple[str, str]]:
         """Return ``[(question_hash, question_en), ...]`` for markets lacking a translation.
 
         A question is "untranslated" if either:
@@ -129,7 +127,7 @@ class TranslationCache:
                 "  ON qt.question_en = m.question "
                 "WHERE m.question IS NOT NULL "
                 "  AND ("
-                "    qt.question_hash IS NULL "       # never attempted
+                "    qt.question_hash IS NULL "  # never attempted
                 "    OR (qt.question_zh = '' AND qt.is_dead = 0)"  # placeholder, retryable
                 "  )"
             )
@@ -303,17 +301,12 @@ class TranslationCache:
         try:
             con.execute("BEGIN IMMEDIATE")
             try:
-                tuples = [
-                    (h, en, "", translator_model, now_ms, 0)
-                    for (h, en) in pending
-                ]
+                tuples = [(h, en, "", translator_model, now_ms, 0) for (h, en) in pending]
                 con.executemany(_UPSERT_SQL, tuples)
                 con.execute("COMMIT")
             except Exception:
                 con.execute("ROLLBACK")
-                logger.exception(
-                    "TranslationCache.insert_retry_placeholders rolled back"
-                )
+                logger.exception("TranslationCache.insert_retry_placeholders rolled back")
                 raise
         finally:
             con.close()

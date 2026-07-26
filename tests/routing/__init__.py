@@ -1,2 +1,1 @@
-"""Polymarket arbitrage routing and execution module.
-"""
+"""Polymarket arbitrage routing and execution module."""

@@ -20,6 +20,7 @@ fills will arrive when T5+ wires py-clob-client). `status` reads T5's
 PositionTracker. None of these touch real venues yet; they're the
 operator's window into what the system *would* do.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -265,9 +266,7 @@ def run(
     import asyncio
 
     _setup_logger(verbose)
-    signal = _build_synthetic_signal(
-        mid, stake, profit_pct, n_legs, venue, signal_id=signal_id
-    )
+    signal = _build_synthetic_signal(mid, stake, profit_pct, n_legs, venue, signal_id=signal_id)
 
     routing_engine = RoutingEngine(
         config=RoutingConfig(min_profit_threshold_pct=min_threshold_pct),
@@ -331,9 +330,7 @@ def run(
 def scan(
     db_path: Path = typer.Option(Path("data/state.db"), "--db-path"),
     min_edge_bps: float = typer.Option(0.0, "--min-edge-bps"),
-    max_snapshot_age_s: float | None = typer.Option(
-        None, "--max-snapshot-age-s"
-    ),
+    max_snapshot_age_s: float | None = typer.Option(None, "--max-snapshot-age-s"),
     limit: int = typer.Option(20, "--limit"),
 ) -> None:
     """Discover executable neg-risk buy-all bundles from an M1 database."""
@@ -505,12 +502,8 @@ def close(
         "--fill-id",
         help="Venue-owned immutable fill identity; required for partial fills",
     ),
-    venue_cash: str | None = typer.Option(
-        None, "--venue-cash", help="Venue-confirmed gross cash"
-    ),
-    venue_fee: str | None = typer.Option(
-        None, "--venue-fee", help="Venue-confirmed fee"
-    ),
+    venue_cash: str | None = typer.Option(None, "--venue-cash", help="Venue-confirmed gross cash"),
+    venue_fee: str | None = typer.Option(None, "--venue-fee", help="Venue-confirmed fee"),
     venue_status: str | None = typer.Option(
         None, "--venue-status", help="Venue terminal status (CONFIRMED)"
     ),
@@ -534,9 +527,7 @@ def close(
     venue_values = (venue_cash, venue_fee, venue_status, venue_ref)
     venue_requested = any(value is not None for value in venue_values)
     if venue_requested and (
-        not all(value is not None for value in venue_values)
-        or fill_id is None
-        or size is None
+        not all(value is not None for value in venue_values) or fill_id is None or size is None
     ):
         typer.secho(
             "venue truth requires --venue-cash, --venue-fee, --venue-status, "
@@ -577,11 +568,7 @@ def close(
         else operation_id or f"local:operator-close:{market_id}:{uuid4()}"
     )
     replayed = False
-    receipt = (
-        tracker.operation_receipt(effective_operation_id)
-        if caller_supplied
-        else None
-    )
+    receipt = tracker.operation_receipt(effective_operation_id) if caller_supplied else None
     if receipt is not None and fill_id is None and not venue_requested:
         if receipt.operation_type != "close" or receipt.target_id != market_id:
             typer.secho(
@@ -628,13 +615,7 @@ def close(
         fill = Fill(
             market_id=market_id,
             exit_price=exit_price,
-            filled_quantity=(
-                size
-                if size is not None
-                else pos.quantity
-                if pos is not None
-                else 0
-            ),
+            filled_quantity=(size if size is not None else pos.quantity if pos is not None else 0),
             fill_id=fill_id or "",
             settlement=settlement,
         )

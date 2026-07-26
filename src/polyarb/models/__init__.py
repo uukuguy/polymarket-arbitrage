@@ -1,4 +1,5 @@
 """Arbitrage signal models."""
+
 from polyarb.models.signal import (
     ArbitrageLeg,
     ArbitrageSignal,

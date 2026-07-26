@@ -21,6 +21,7 @@ Amendment 01 note (2026-05-02):
     aggregation path joins markets → event_tags by event_id (see
     run_recipe_grouped in scanner.py).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -82,9 +83,7 @@ BUILTIN_RECIPES: dict[str, Recipe] = {
         name="l3-seed",
         description="L3 观察覆盖：流动性中间价市场（上限 100）",
         where=(
-            "yes_token_id IS NOT NULL "
-            "AND mid_price BETWEEN 0.1 AND 0.9 "
-            "AND liquidity_usd >= 500"
+            "yes_token_id IS NOT NULL AND mid_price BETWEEN 0.1 AND 0.9 AND liquidity_usd >= 500"
         ),
         order_by="liquidity_usd DESC, market_id ASC",
         limit=100,

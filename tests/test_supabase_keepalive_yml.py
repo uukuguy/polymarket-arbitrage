@@ -28,12 +28,7 @@ from pathlib import Path
 
 import yaml
 
-WORKFLOW = (
-    Path(__file__).resolve().parents[1]
-    / ".github"
-    / "workflows"
-    / "supabase-keepalive.yml"
-)
+WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "supabase-keepalive.yml"
 
 
 def _raw_text() -> str:
@@ -79,8 +74,7 @@ def test_workflow_references_supabase_secrets():
         "POLYARB_SUPABASE_URL not referenced — no Supabase endpoint to ping"
     )
     assert (
-        "secrets.POLYARB_SUPABASE_ANON_KEY" in text
-        or "secrets.POLYARB_SUPABASE_DB_DSN" in text
+        "secrets.POLYARB_SUPABASE_ANON_KEY" in text or "secrets.POLYARB_SUPABASE_DB_DSN" in text
     ), "neither anon key nor DSN referenced — no auth path for the ping"
 
 
@@ -92,8 +86,7 @@ def test_workflow_no_hardcoded_supabase_url():
     # The 10+ length requirement skips synthetic short matches.
     literal_matches = re.findall(r"https://[a-z0-9]{10,}\.supabase\.co", text)
     assert not literal_matches, (
-        f"hardcoded Supabase URLs found (should use ${{{{ secrets.* }}}}): "
-        f"{literal_matches}"
+        f"hardcoded Supabase URLs found (should use ${{{{ secrets.* }}}}): {literal_matches}"
     )
 
 
@@ -132,8 +125,6 @@ def test_workflow_yaml_is_parseable():
     assert parsed is not None, "workflow YAML parsed to None"
     # `on:` parses as True (boolean) due to YAML 1.1 legacy — accept either key
     trigger_key = "on" if "on" in parsed else True
-    assert trigger_key in parsed, (
-        f"no trigger key in parsed YAML (keys: {list(parsed.keys())})"
-    )
+    assert trigger_key in parsed, f"no trigger key in parsed YAML (keys: {list(parsed.keys())})"
     triggers = parsed[trigger_key]
     assert "schedule" in triggers, f"no `schedule` in triggers ({triggers!r})"

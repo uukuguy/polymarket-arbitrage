@@ -16,6 +16,7 @@ Coverage:
   7  : DNS jitter persists past stop_after_attempt(3) → existing except clause
        fires → API_UNREACHABLE issue appended (bounded retry, no infinite loop)
 """
+
 from __future__ import annotations
 
 import os
@@ -29,7 +30,6 @@ os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 
 from polyarb.snapshot.orchestrator import _is_dns_jitter  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Tests 1-4: pure predicate tests on _is_dns_jitter (fast)
@@ -124,11 +124,13 @@ class _FakeGamma:
             async def _gen():
                 raise raise_exc
                 yield  # pragma: no cover — make it a generator
+
             return _gen()
 
         async def _gen():
             return
             yield  # pragma: no cover — empty generator
+
         return _gen()
 
 
@@ -139,9 +141,7 @@ async def test_dns_jitter_first_attempt_retries_and_succeeds(
     """First iter_active_markets raises EAI_NODATA, second succeeds → no issue, retry consumed."""
     from polyarb.snapshot import orchestrator as orch
 
-    eai_nodata = httpx.ConnectError(
-        "[Errno -5] No address associated with hostname"
-    )
+    eai_nodata = httpx.ConnectError("[Errno -5] No address associated with hostname")
     fake = _FakeGamma(fail_sequence=[eai_nodata, None])
 
     monkeypatch.setattr(orch, "GammaClient", lambda settings: fake)
@@ -156,8 +156,7 @@ async def test_dns_jitter_first_attempt_retries_and_succeeds(
     # No API_UNREACHABLE issue because the retry succeeded
     cats = result.issue_categories
     assert "api_unreachable" not in cats or cats.get("api_unreachable", 0) == 0, (
-        f"DNS jitter retry should have absorbed the failure, "
-        f"got issue_categories={cats}"
+        f"DNS jitter retry should have absorbed the failure, got issue_categories={cats}"
     )
 
 
@@ -177,12 +176,10 @@ async def test_non_dns_connect_error_NOT_retried(
     result = await orch.run_snapshot(settings, mode="subset")
 
     assert fake.attempt_count == 1, (
-        f"non-DNS ConnectError must NOT trigger retry; "
-        f"expected 1 attempt, got {fake.attempt_count}"
+        f"non-DNS ConnectError must NOT trigger retry; expected 1 attempt, got {fake.attempt_count}"
     )
     assert result.issue_categories.get("api_unreachable", 0) >= 1, (
-        f"non-DNS ConnectError must surface as API_UNREACHABLE issue, "
-        f"got {result.issue_categories}"
+        f"non-DNS ConnectError must surface as API_UNREACHABLE issue, got {result.issue_categories}"
     )
 
 
@@ -193,9 +190,7 @@ async def test_dns_jitter_exhausts_retries_then_appends_issue(
     """EAI_NODATA on all 3 attempts → tenacity reraises → existing except clause appends issue."""
     from polyarb.snapshot import orchestrator as orch
 
-    eai_nodata = httpx.ConnectError(
-        "[Errno -5] No address associated with hostname"
-    )
+    eai_nodata = httpx.ConnectError("[Errno -5] No address associated with hostname")
     # 4 entries: tenacity should stop at 3.
     fake = _FakeGamma(fail_sequence=[eai_nodata, eai_nodata, eai_nodata, eai_nodata])
 
@@ -205,8 +200,7 @@ async def test_dns_jitter_exhausts_retries_then_appends_issue(
     result = await orch.run_snapshot(settings, mode="subset")
 
     assert fake.attempt_count == 3, (
-        f"tenacity stop_after_attempt(3) must cap retries at 3, "
-        f"got {fake.attempt_count}"
+        f"tenacity stop_after_attempt(3) must cap retries at 3, got {fake.attempt_count}"
     )
     assert result.issue_categories.get("api_unreachable", 0) >= 1, (
         f"after exhausting retries, fail-soft path must surface API_UNREACHABLE issue, "

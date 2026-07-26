@@ -13,6 +13,7 @@ GeneratorExp, Starred, anything else.
 Warning #9: if any variable referenced by alert_when resolves to None in
 the market row, evaluate_alert returns False + logs warning (skip, not throw).
 """
+
 from __future__ import annotations
 
 import ast
@@ -26,15 +27,17 @@ from loguru import logger
 
 _MAX_EXPR_LEN = 200
 
-_ALLOWED_AST_NODES = frozenset({
-    ast.Expression,
-    ast.Constant,
-    ast.Name,
-    ast.UnaryOp,
-    ast.BinOp,
-    ast.Compare,
-    ast.BoolOp,
-})
+_ALLOWED_AST_NODES = frozenset(
+    {
+        ast.Expression,
+        ast.Constant,
+        ast.Name,
+        ast.UnaryOp,
+        ast.BinOp,
+        ast.Compare,
+        ast.BoolOp,
+    }
+)
 
 ALLOWED_VARS: dict[str, str] = {
     "mid": "mid_price",
@@ -177,8 +180,11 @@ def load_watchlist(yaml_path: Path) -> list[WatchlistEntry]:
     if not isinstance(data, list):
         raise ValueError("watchlist yaml must be a list of entries")
     dummy = {
-        "mid_price": 0.5, "best_bid_price": 0.4, "best_ask_price": 0.5,
-        "liquidity_usd": 1000.0, "volume_usd": 100.0,
+        "mid_price": 0.5,
+        "best_bid_price": 0.4,
+        "best_ask_price": 0.5,
+        "liquidity_usd": 1000.0,
+        "volume_usd": 100.0,
     }
     entries: list[WatchlistEntry] = []
     for i, d in enumerate(data):
@@ -192,12 +198,14 @@ def load_watchlist(yaml_path: Path) -> list[WatchlistEntry]:
                     f"invalid alert_when {alert!r} — {e}; disabling alert"
                 )
                 alert = None
-        entries.append(WatchlistEntry(
-            slug=d["slug"],
-            reason=d.get("reason", ""),
-            alert_when=alert,
-            added=d.get("added", ""),
-        ))
+        entries.append(
+            WatchlistEntry(
+                slug=d["slug"],
+                reason=d.get("reason", ""),
+                alert_when=alert,
+                added=d.get("added", ""),
+            )
+        )
     return entries
 
 
@@ -205,9 +213,7 @@ def check_alerts(
     watchlist: list[WatchlistEntry], db_path: Path
 ) -> list[tuple[WatchlistEntry, dict]]:
     con = connect(f"file:{db_path}?mode=ro", uri=True)
-    con.row_factory = lambda c, r: dict(
-        zip([col[0] for col in c.description], r)
-    )
+    con.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
     try:
         triggered: list[tuple[WatchlistEntry, dict]] = []
         for entry in watchlist:

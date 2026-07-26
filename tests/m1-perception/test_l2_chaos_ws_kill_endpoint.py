@@ -14,6 +14,7 @@ path-guarded on /control/*). The route lives under /control/ so the guard covers
 
 Threat model: T-04.1-01..08 (see 04.1-03-PLAN.md threat_model section).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -21,8 +22,8 @@ import hmac
 
 import pytest
 
-
 # ── Helper: compute valid X-Signature for a body + secret ────────────────────
+
 
 def _sign(body: bytes, secret: str) -> str:
     """Compute HMAC-SHA256 signature in sha256=<hex> format (same as control.py)."""
@@ -31,6 +32,7 @@ def _sign(body: bytes, secret: str) -> str:
 
 
 # ── Fake settings for l2_app ──────────────────────────────────────────────────
+
 
 class _FakeSecret:
     def get_secret_value(self) -> str:
@@ -117,8 +119,9 @@ def test_module_flag_seeds_false_when_env_unset(monkeypatch):
 def l2_app():
     """Create L2 Starlette app with HMAC middleware for endpoint testing."""
     from starlette.testclient import TestClient
-    from polyarb.http.l2_app import create_l2_app
+
     from polyarb.daemon.ws_consumer import set_ws_test_kill
+    from polyarb.http.l2_app import create_l2_app
 
     # Ensure clean flag state
     set_ws_test_kill(False)
@@ -157,7 +160,7 @@ def test_endpoint_valid_sig_enabled_true(l2_app):
 
 
 def test_endpoint_valid_sig_enabled_false(l2_app):
-    """POST /control/chaos/ws-test-kill with valid X-Signature + enabled:false → 200, flag cleared."""
+    """Valid signature plus enabled:false clears the kill flag."""
     from polyarb.daemon.ws_consumer import get_ws_test_kill, set_ws_test_kill
 
     set_ws_test_kill(True)  # start with flag set
@@ -205,7 +208,9 @@ def test_endpoint_wrong_signature_returns_401(l2_app):
         "/control/chaos/ws-test-kill",
         content=body,
         headers={
-            "X-Signature": "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "X-Signature": (
+                "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            ),
             "Content-Type": "application/json",
         },
     )
@@ -241,6 +246,7 @@ def test_health_reflects_process_local_flag_when_set(monkeypatch):
     This is the G-03 key invariant: env is cold-start only; runtime toggle is via endpoint.
     """
     import time
+
     from polyarb.daemon.ws_consumer import set_ws_test_kill
     from polyarb.http.l2_health import _build_l2_health_checks
 
@@ -276,6 +282,7 @@ def test_health_hides_flag_when_process_local_false(monkeypatch):
     the /health surface now reads the process-local flag, not env.
     """
     import time
+
     from polyarb.daemon.ws_consumer import set_ws_test_kill
     from polyarb.http.l2_health import _build_l2_health_checks
 

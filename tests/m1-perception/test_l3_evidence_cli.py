@@ -519,7 +519,7 @@ async def test_concurrent_manifest_bind_serializes_to_exactly_one_row(
                         event_seq=args[2],
                         occurred_at=server_time,
                         recorded_at=server_time,
-                            detail=json.dumps(_binding_detail(manifest)),
+                        detail=json.dumps(_binding_detail(manifest)),
                     )
                 )
                 return dict(shared)

@@ -112,9 +112,7 @@ def _create_phase4_database(path, *, balance: float = 919.9999999999999) -> None
         )
 
 
-def _create_phase5_database(
-    path, *, balance_micros: int = 900_000_000, side: str = "BUY"
-) -> None:
+def _create_phase5_database(path, *, balance_micros: int = 900_000_000, side: str = "BUY") -> None:
     with sqlite3.connect(path) as con:
         con.executescript(_PHASE5_SCHEMA)
         con.execute(
@@ -285,9 +283,7 @@ def test_sqlite_instances_share_committed_account_and_positions(tmp_path) -> Non
 
 
 def test_sqlite_duplicate_operation_returns_original_result(tmp_path) -> None:
-    repository = SQLitePositionRepository(
-        tmp_path / "positions.db", initial_balance=1000.0
-    )
+    repository = SQLitePositionRepository(tmp_path / "positions.db", initial_balance=1000.0)
     calls = 0
 
     def transition(state: PositionState) -> float:
@@ -303,9 +299,7 @@ def test_sqlite_duplicate_operation_returns_original_result(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("result", [True, False, 3.25, None])
-def test_sqlite_receipt_survives_restart_with_original_result_type(
-    tmp_path, result
-) -> None:
+def test_sqlite_receipt_survives_restart_with_original_result_type(tmp_path, result) -> None:
     path = tmp_path / "positions.db"
     repository = SQLitePositionRepository(path, initial_balance=1000.0)
     repository.apply("op-1", "close", "m1", lambda state: result)
@@ -329,16 +323,12 @@ def test_sqlite_unknown_receipt_is_observational(tmp_path) -> None:
     assert repository.get_receipt("unknown") is None
 
     with sqlite3.connect(path) as con:
-        operation_count = con.execute(
-            "SELECT COUNT(*) FROM m2_applied_operations"
-        ).fetchone()[0]
+        operation_count = con.execute("SELECT COUNT(*) FROM m2_applied_operations").fetchone()[0]
     assert operation_count == 0
 
 
 def test_sqlite_receipt_lookup_propagates_storage_errors(tmp_path, monkeypatch) -> None:
-    repository = SQLitePositionRepository(
-        tmp_path / "positions.db", initial_balance=1000.0
-    )
+    repository = SQLitePositionRepository(tmp_path / "positions.db", initial_balance=1000.0)
 
     def unavailable() -> sqlite3.Connection:
         raise sqlite3.DatabaseError("storage unavailable")
@@ -350,9 +340,7 @@ def test_sqlite_receipt_lookup_propagates_storage_errors(tmp_path, monkeypatch) 
 
 
 def test_sqlite_apply_rolls_back_account_and_positions_on_exception(tmp_path) -> None:
-    repository = SQLitePositionRepository(
-        tmp_path / "positions.db", initial_balance=1000.0
-    )
+    repository = SQLitePositionRepository(tmp_path / "positions.db", initial_balance=1000.0)
 
     def transition(state: PositionState) -> None:
         _open(state)
@@ -369,9 +357,7 @@ def test_sqlite_apply_rolls_back_account_and_positions_on_exception(tmp_path) ->
 
 
 def test_sqlite_reopen_requires_a_new_operation_id(tmp_path) -> None:
-    repository = SQLitePositionRepository(
-        tmp_path / "positions.db", initial_balance=1000.0
-    )
+    repository = SQLitePositionRepository(tmp_path / "positions.db", initial_balance=1000.0)
     repository.apply("open:first", "open", "m1", _open)
 
     def close(state: PositionState) -> float:
@@ -522,24 +508,15 @@ def test_sqlite_partial_v3_authority_fails_closed_without_repair(tmp_path) -> No
     path = tmp_path / "positions.db"
     _create_phase5_database(path)
     with sqlite3.connect(path) as con:
-        con.execute(
-            "ALTER TABLE m2_open_positions ADD COLUMN quantity_micros INTEGER"
-        )
-        con.execute(
-            "UPDATE m2_open_positions SET quantity_micros = 100000000"
-        )
+        con.execute("ALTER TABLE m2_open_positions ADD COLUMN quantity_micros INTEGER")
+        con.execute("UPDATE m2_open_positions SET quantity_micros = 100000000")
 
     with pytest.raises(RepositoryStateError, match="partial v3"):
         SQLitePositionRepository(path, initial_balance=1000.0)
 
     with sqlite3.connect(path) as con:
-        balance = con.execute(
-            "SELECT balance_micros FROM m2_account_state"
-        ).fetchone()[0]
-        columns = {
-            row[1]
-            for row in con.execute("PRAGMA table_info(m2_open_positions)")
-        }
+        balance = con.execute("SELECT balance_micros FROM m2_account_state").fetchone()[0]
+        columns = {row[1] for row in con.execute("PRAGMA table_info(m2_open_positions)")}
     assert balance == 900_000_000
     assert "cost_basis_micros" not in columns
 
@@ -552,13 +529,8 @@ def test_sqlite_invalid_phase5_side_rolls_back_v3_migration(tmp_path) -> None:
         SQLitePositionRepository(path, initial_balance=1000.0)
 
     with sqlite3.connect(path) as con:
-        balance = con.execute(
-            "SELECT balance_micros FROM m2_account_state"
-        ).fetchone()[0]
-        columns = {
-            row[1]
-            for row in con.execute("PRAGMA table_info(m2_open_positions)")
-        }
+        balance = con.execute("SELECT balance_micros FROM m2_account_state").fetchone()[0]
+        columns = {row[1] for row in con.execute("PRAGMA table_info(m2_open_positions)")}
     assert balance == 900_000_000
     assert "quantity_micros" not in columns
     assert "cost_basis_micros" not in columns
@@ -583,10 +555,7 @@ def test_sqlite_migrates_phase4_real_state_and_preserves_identity(tmp_path) -> N
             "SELECT snapshot_balance_micros, balance_micros, "
             "realized_pnl_micros FROM m2_account_state"
         ).fetchone()
-        columns = {
-            row[1]
-            for row in con.execute("PRAGMA table_info(m2_open_positions)").fetchall()
-        }
+        columns = {row[1] for row in con.execute("PRAGMA table_info(m2_open_positions)").fetchall()}
     assert raw == (1_000_000_000, 980_000_000, 20_000_000)
     assert "stake_micros" in columns
 
@@ -622,12 +591,10 @@ def test_sqlite_invalid_phase4_money_rolls_back_schema_migration(tmp_path) -> No
 
     with sqlite3.connect(path) as con:
         account_columns = {
-            row[1]
-            for row in con.execute("PRAGMA table_info(m2_account_state)").fetchall()
+            row[1] for row in con.execute("PRAGMA table_info(m2_account_state)").fetchall()
         }
         position_columns = {
-            row[1]
-            for row in con.execute("PRAGMA table_info(m2_open_positions)").fetchall()
+            row[1] for row in con.execute("PRAGMA table_info(m2_open_positions)").fetchall()
         }
     assert "balance_micros" not in account_columns
     assert "stake_micros" not in position_columns
@@ -639,13 +606,9 @@ def test_sqlite_existing_integer_columns_with_null_authority_fail_closed(
     path = tmp_path / "positions.db"
     _create_phase4_database(path)
     with sqlite3.connect(path) as con:
-        con.execute(
-            "ALTER TABLE m2_account_state ADD COLUMN snapshot_balance_micros INTEGER"
-        )
+        con.execute("ALTER TABLE m2_account_state ADD COLUMN snapshot_balance_micros INTEGER")
         con.execute("ALTER TABLE m2_account_state ADD COLUMN balance_micros INTEGER")
-        con.execute(
-            "ALTER TABLE m2_account_state ADD COLUMN realized_pnl_micros INTEGER"
-        )
+        con.execute("ALTER TABLE m2_account_state ADD COLUMN realized_pnl_micros INTEGER")
         con.execute("ALTER TABLE m2_open_positions ADD COLUMN stake_micros INTEGER")
 
     with pytest.raises(RepositoryStateError, match="authoritative money"):
@@ -699,12 +662,15 @@ def test_money_receipt_round_trips_exact_value(repository_factory, tmp_path) -> 
     expected = Money.from_value("-0.000001")
 
     assert repository.apply("close:exact", "close", "m1", lambda state: expected) == expected
-    assert repository.apply(
-        "close:exact",
-        "close",
-        "m1",
-        lambda state: pytest.fail("replay invoked transition"),
-    ) == expected
+    assert (
+        repository.apply(
+            "close:exact",
+            "close",
+            "m1",
+            lambda state: pytest.fail("replay invoked transition"),
+        )
+        == expected
+    )
     assert repository.get_receipt("close:exact").result == expected
 
 
@@ -737,9 +703,7 @@ def test_sqlite_money_receipt_uses_tagged_micro_json(tmp_path) -> None:
         float("nan"),
     ],
 )
-def test_sqlite_malformed_or_ambiguous_receipt_fails_closed(
-    tmp_path, payload
-) -> None:
+def test_sqlite_malformed_or_ambiguous_receipt_fails_closed(tmp_path, payload) -> None:
     path = tmp_path / "positions.db"
     repository = SQLitePositionRepository(path, initial_balance=1000.0)
     with sqlite3.connect(path) as con:
@@ -882,9 +846,7 @@ class TestVenueSettlementReceiptAndFingerprint:
                     request_fingerprint=supplied,
                 )
 
-    def test_conflicting_overlapping_writer_serializes_before_replay(
-        self, tmp_path
-    ) -> None:
+    def test_conflicting_overlapping_writer_serializes_before_replay(self, tmp_path) -> None:
         path = tmp_path / "positions.db"
         writer_a = SQLitePositionRepository(path, initial_balance=1000.0)
         writer_b = SQLitePositionRepository(path, initial_balance=1000.0)
@@ -999,7 +961,8 @@ class TestVenueSettlementReceiptAndFingerprint:
         assert receipt.request_fingerprint == ""
         with sqlite3.connect(path) as con:
             column = next(
-                row for row in con.execute("PRAGMA table_info(m2_applied_operations)")
+                row
+                for row in con.execute("PRAGMA table_info(m2_applied_operations)")
                 if row[1] == "request_fingerprint"
             )
         assert column[2].upper() == "TEXT"

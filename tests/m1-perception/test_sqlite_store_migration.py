@@ -19,6 +19,7 @@ Tests cover:
 3. INSERT / SELECT on the new columns works after migration.
 4. Data in pre-existing rows is preserved (they get NULL for new columns).
 """
+
 from __future__ import annotations
 
 import os

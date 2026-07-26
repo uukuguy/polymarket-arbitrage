@@ -1,4 +1,5 @@
 """Exact micro-pUSD values for the M2 paper-account ledger."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,11 +36,7 @@ class Money:
             raise ValueError(f"invalid money value: {value!r}") from exc
         if not decimal_value.is_finite():
             raise ValueError("money value must be finite")
-        micros = int(
-            (decimal_value * MICROS_PER_PUSD).to_integral_value(
-                rounding=ROUND_HALF_EVEN
-            )
-        )
+        micros = int((decimal_value * MICROS_PER_PUSD).to_integral_value(rounding=ROUND_HALF_EVEN))
         return cls(micros)
 
     def to_decimal(self) -> Decimal:
@@ -154,9 +151,7 @@ class Money:
             return total
         allocated_micros = int(
             (
-                Decimal(total.micros)
-                * Decimal(part.micros)
-                / Decimal(whole.micros)
+                Decimal(total.micros) * Decimal(part.micros) / Decimal(whole.micros)
             ).to_integral_value(rounding=ROUND_HALF_EVEN)
         )
         return cls(allocated_micros)

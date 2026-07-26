@@ -53,9 +53,22 @@ def make_realistic_market(idx: int, rnd: Random | None = None) -> dict:
     token_no = "".join(str(rnd.randint(0, 9)) for _ in range(77))
 
     subjects = [
-        "Trump", "Biden", "Bitcoin", "Ethereum", "Apple", "OpenAI",
-        "Nvidia", "Elon", "the Fed", "Russia", "Ukraine", "Israel",
-        "Iran", "China", "Tesla", "SpaceX",
+        "Trump",
+        "Biden",
+        "Bitcoin",
+        "Ethereum",
+        "Apple",
+        "OpenAI",
+        "Nvidia",
+        "Elon",
+        "the Fed",
+        "Russia",
+        "Ukraine",
+        "Israel",
+        "Iran",
+        "China",
+        "Tesla",
+        "SpaceX",
     ]
     verbs = ["reach", "hit", "exceed", "fall below", "announce"]
     objects = ["$100k", "$150k", "100,000 users", "5% inflation"]
@@ -69,13 +82,7 @@ def make_realistic_market(idx: int, rnd: Random | None = None) -> dict:
         rnd.choice(suffixes),
     ]
     question = " ".join(parts)
-    slug = (
-        "-".join(parts[:5])
-        .lower()
-        .replace("$", "")
-        .replace("?", "")
-        [:60]
-    )
+    slug = "-".join(parts[:5]).lower().replace("$", "").replace("?", "")[:60]
     liq = _sample_liquidity(rnd)
     vol = liq * rnd.uniform(0.5, 50.0)
     return {
@@ -92,7 +99,8 @@ def make_realistic_market(idx: int, rnd: Random | None = None) -> dict:
         "negRisk": rnd.random() < 0.3,
         "negRiskMarketID": (
             "0x" + "".join(rnd.choice("0123456789abcdef") for _ in range(64))
-            if rnd.random() < 0.3 else None
+            if rnd.random() < 0.3
+            else None
         ),
         "liquidity": f"{liq:.2f}",
         "liquidityNum": liq,
@@ -119,9 +127,7 @@ def make_realistic_event(idx: int, rnd: Random | None = None) -> dict:
         "volume": f"{rnd.uniform(1000, 1_000_000):.2f}",
         "volumeNum": rnd.uniform(1000, 1_000_000),
         "endDate": "2026-06-30T23:59:59Z",
-        "tags": [
-            {"id": str(rnd.randint(1, 100)), "label": "Politics", "slug": "politics"}
-        ],
+        "tags": [{"id": str(rnd.randint(1, 100)), "label": "Politics", "slug": "politics"}],
         "markets": [
             {"id": str(500000 + idx * 2)},
             {"id": str(500000 + idx * 2 + 1)},

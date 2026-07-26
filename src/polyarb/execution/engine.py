@@ -30,6 +30,7 @@ T5 Revision 9 (2026-06-06 SESSION 37) — close-path integration:
   `ExecutionResult.stop_loss` so callers (CLI, monitor) can halt new
   signals without re-querying the tracker.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -55,7 +56,7 @@ class ExecutionStatus(Enum):
     COMPLETED = "completed"
     PARTIAL = "partial"  # some legs succeeded, some failed without abort path
     ABORTED = "aborted"  # first-leg-fail path — subsequent legs skipped
-    FAILED = "failed"    # all legs failed
+    FAILED = "failed"  # all legs failed
 
 
 @dataclass
@@ -89,9 +90,7 @@ LegExecutor = Callable[[ExecutionLeg, int], Awaitable[tuple[bool, str | None]]]
 FillProvider = Callable[[ExecutionLeg], Awaitable[Fill]]
 
 
-async def _default_leg_executor(
-    leg: ExecutionLeg, attempt: int
-) -> tuple[bool, str | None]:
+async def _default_leg_executor(leg: ExecutionLeg, attempt: int) -> tuple[bool, str | None]:
     """Stub executor — succeeds after a small simulated latency.
 
     Replace via `ExecutionEngine(leg_executor=...)` for tests or real venue
@@ -160,7 +159,10 @@ class ExecutionEngine:
             if aborted:
                 leg_results.append(
                     ExecutionLegResult(
-                        leg=leg, success=False, attempts=0, skipped=True,
+                        leg=leg,
+                        success=False,
+                        attempts=0,
+                        skipped=True,
                         error="aborted — prior leg failed",
                     )
                 )
@@ -186,9 +188,10 @@ class ExecutionEngine:
                 aborted = True
                 first_leg_failed = True
                 logger.warning(
-                    "First leg (id=%s) failed after %d attempts — "
-                    "aborting remaining %d legs",
-                    leg.leg_id, leg_result.attempts, len(plan.legs) - 1,
+                    "First leg (id=%s) failed after %d attempts — aborting remaining %d legs",
+                    leg.leg_id,
+                    leg_result.attempts,
+                    len(plan.legs) - 1,
                 )
 
         executed = sum(1 for r in leg_results if r.success)
@@ -245,22 +248,35 @@ class ExecutionEngine:
                 if attempt > 1:
                     logger.info(
                         "Leg %s (index=%d) succeeded on attempt %d/%d",
-                        leg.leg_id, leg_index, attempt, max_attempts,
+                        leg.leg_id,
+                        leg_index,
+                        attempt,
+                        max_attempts,
                     )
                 return ExecutionLegResult(
-                    leg=leg, success=True, attempts=attempt, error=None,
+                    leg=leg,
+                    success=True,
+                    attempts=attempt,
+                    error=None,
                 )
 
             last_error = error
             logger.warning(
                 "Leg %s (index=%d) attempt %d/%d failed: %s",
-                leg.leg_id, leg_index, attempt, max_attempts, error,
+                leg.leg_id,
+                leg_index,
+                attempt,
+                max_attempts,
+                error,
             )
             if attempt < max_attempts and delay > 0:
                 await asyncio.sleep(delay)
 
         return ExecutionLegResult(
-            leg=leg, success=False, attempts=max_attempts, error=last_error,
+            leg=leg,
+            success=False,
+            attempts=max_attempts,
+            error=last_error,
         )
 
     def _update_tracker_for_leg(self, signal_id: str, leg: ExecutionLeg) -> bool:
@@ -283,9 +299,7 @@ class ExecutionEngine:
             operation_id=f"open:{signal_id}:{leg.leg_id}",
         )
 
-    async def _maybe_close_for_leg(
-        self, signal_id: str, leg: ExecutionLeg
-    ) -> None:
+    async def _maybe_close_for_leg(self, signal_id: str, leg: ExecutionLeg) -> None:
         """T5 close-path hook — only fires for successfully-executed legs.
 
         Priority:
@@ -299,7 +313,8 @@ class ExecutionEngine:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "fill_provider raised for leg %s: %r — leaving position open",
-                    leg.leg_id, exc,
+                    leg.leg_id,
+                    exc,
                 )
                 return
             try:
@@ -311,10 +326,7 @@ class ExecutionEngine:
                         "durable retry guarantees unavailable",
                         leg.leg_id,
                     )
-                    operation_id = (
-                        f"close:{signal_id}:{leg.leg_id}:"
-                        f"{fill.filled_at.isoformat()}"
-                    )
+                    operation_id = f"close:{signal_id}:{leg.leg_id}:{fill.filled_at.isoformat()}"
                 self.tracker.close_position_with_fill(
                     fill,
                     operation_id=operation_id,
@@ -322,7 +334,9 @@ class ExecutionEngine:
             except ValueError as exc:
                 # Partial fill or other tracker rejection — log and skip close.
                 logger.warning(
-                    "tracker rejected fill for leg %s: %s", leg.leg_id, exc,
+                    "tracker rejected fill for leg %s: %s",
+                    leg.leg_id,
+                    exc,
                 )
             return
 
@@ -337,9 +351,7 @@ class ExecutionEngine:
                 operation_id=f"close:{signal_id}:{leg.leg_id}:paper-close",
             )
 
-    def _calc_realized_pnl(
-        self, decision: RoutingDecision, executed: int, total: int
-    ) -> float:
+    def _calc_realized_pnl(self, decision: RoutingDecision, executed: int, total: int) -> float:
         """Pro-rata PnL based on legs successfully executed.
 
         Note: this is the SIGNAL-time expected PnL scaled by execution ratio,

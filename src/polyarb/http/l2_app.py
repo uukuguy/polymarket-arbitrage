@@ -14,6 +14,7 @@ Phase 04.1 Plan 03 — G-03 (D-03.4): L2's FIRST HMAC-gated admin endpoint.
 app.state stashes sqlite_store + settings + ws_consumer + event_listener
 for route handlers.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -85,9 +86,7 @@ def create_l2_app(
     # Omission is reserved for explicit local/legacy fixtures and warns.  A
     # configured L2 caller passes its exact runtime; explicitly passing None is
     # therefore a fail-closed wiring error rather than an implicit opt-out.
-    app.state.l3_evidence_runtime_required = (
-        evidence_runtime is not _LOCAL_BOUNDARY_RUNTIME
-    )
+    app.state.l3_evidence_runtime_required = evidence_runtime is not _LOCAL_BOUNDARY_RUNTIME
     app.state.l3_evidence_runtime = (
         None if evidence_runtime is _LOCAL_BOUNDARY_RUNTIME else evidence_runtime
     )

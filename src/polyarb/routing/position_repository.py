@@ -1,4 +1,5 @@
 """Persistence boundary for M2 paper-account position state."""
+
 from __future__ import annotations
 
 import json
@@ -101,11 +102,7 @@ _BASE_REQUIRED_COLUMNS = {
         required
         - set(_MONEY_COLUMNS.get(table, {}))
         - (_POSITION_UNIT_COLUMNS if table == "m2_open_positions" else set())
-        - (
-            {_OPERATION_FINGERPRINT_COLUMN}
-            if table == "m2_applied_operations"
-            else set()
-        )
+        - ({_OPERATION_FINGERPRINT_COLUMN} if table == "m2_applied_operations" else set())
     )
     for table, required in _REQUIRED_COLUMNS.items()
 }
@@ -216,19 +213,13 @@ class RepositoryStateError(RuntimeError):
 
 
 def _validate_transition_result(result: object) -> TransitionResult:
-    if (
-        result is None
-        or type(result) is bool
-        or isinstance(result, (Money, SettlementReceipt))
-    ):
+    if result is None or type(result) is bool or isinstance(result, (Money, SettlementReceipt)):
         return result
     if type(result) is float:
         if not math.isfinite(result):
             raise ValueError("transition float result must be finite")
         return result
-    raise TypeError(
-        "transition result must be bool, float, Money, SettlementReceipt, or None"
-    )
+    raise TypeError("transition result must be bool, float, Money, SettlementReceipt, or None")
 
 
 def _validate_request_fingerprint(value: object) -> str:
@@ -476,9 +467,7 @@ class SQLitePositionRepository:
             self._migrate_position_units(con)
             self._migrate_operation_fingerprints(con)
             self._verify_schema(con, _REQUIRED_COLUMNS)
-            rows = con.execute(
-                "SELECT snapshot_balance_micros FROM m2_account_state"
-            ).fetchall()
+            rows = con.execute("SELECT snapshot_balance_micros FROM m2_account_state").fetchall()
             if not rows:
                 now = datetime.now(UTC).isoformat()
                 con.execute(
@@ -499,13 +488,10 @@ class SQLitePositionRepository:
                     ),
                 )
             elif len(rows) != 1:
-                raise RepositoryStateError(
-                    "m2_account_state must contain exactly one account row"
-                )
+                raise RepositoryStateError("m2_account_state must contain exactly one account row")
             elif int(rows[0][0]) != self._initial_balance_money.micros:
                 logger.warning(
-                    "Configured initial balance %.2f differs from durable %.2f; "
-                    "durable state wins",
+                    "Configured initial balance %.2f differs from durable %.2f; durable state wins",
                     self._initial_balance_money.to_float(),
                     Money(int(rows[0][0])).to_float(),
                 )
@@ -518,13 +504,9 @@ class SQLitePositionRepository:
             con.close()
 
     @staticmethod
-    def _verify_schema(
-        con: sqlite3.Connection, required_columns: dict[str, set[str]]
-    ) -> None:
+    def _verify_schema(con: sqlite3.Connection, required_columns: dict[str, set[str]]) -> None:
         for table, required in required_columns.items():
-            actual = {
-                row[1] for row in con.execute(f"PRAGMA table_info({table})").fetchall()
-            }
+            actual = {row[1] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
             if not required.issubset(actual):
                 missing = ", ".join(sorted(required - actual))
                 raise RepositoryStateError(
@@ -534,28 +516,21 @@ class SQLitePositionRepository:
     @classmethod
     def _migrate_money_schema(cls, con: sqlite3.Connection) -> None:
         existing = {
-            table: {
-                row[1]
-                for row in con.execute(f"PRAGMA table_info({table})").fetchall()
-            }
+            table: {row[1] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
             for table in _MONEY_COLUMNS
         }
         all_money_columns_existed = all(
-            set(columns).issubset(existing[table])
-            for table, columns in _MONEY_COLUMNS.items()
+            set(columns).issubset(existing[table]) for table, columns in _MONEY_COLUMNS.items()
         )
 
         for table, columns in _MONEY_COLUMNS.items():
             for money_column in columns:
                 if money_column not in existing[table]:
-                    con.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {money_column} INTEGER"
-                    )
+                    con.execute(f"ALTER TABLE {table} ADD COLUMN {money_column} INTEGER")
 
         if not all_money_columns_existed:
             account_rows = con.execute(
-                "SELECT account_id, snapshot_balance, balance, realized_pnl "
-                "FROM m2_account_state"
+                "SELECT account_id, snapshot_balance, balance, realized_pnl FROM m2_account_state"
             ).fetchall()
             for account_id, snapshot, balance, realized in account_rows:
                 con.execute(
@@ -569,13 +544,10 @@ class SQLitePositionRepository:
                         account_id,
                     ),
                 )
-            position_rows = con.execute(
-                "SELECT market_id, stake FROM m2_open_positions"
-            ).fetchall()
+            position_rows = con.execute("SELECT market_id, stake FROM m2_open_positions").fetchall()
             for market_id, stake in position_rows:
                 con.execute(
-                    "UPDATE m2_open_positions SET stake_micros = ? "
-                    "WHERE market_id = ?",
+                    "UPDATE m2_open_positions SET stake_micros = ? WHERE market_id = ?",
                     (Money.from_value(stake).micros, market_id),
                 )
 
@@ -584,39 +556,27 @@ class SQLitePositionRepository:
     @staticmethod
     def _validate_money_authority(con: sqlite3.Connection) -> None:
         for table, columns in _MONEY_COLUMNS.items():
-            invalid_predicate = " OR ".join(
-                f"typeof({column}) != 'integer'" for column in columns
-            )
+            invalid_predicate = " OR ".join(f"typeof({column}) != 'integer'" for column in columns)
             invalid_count = con.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE {invalid_predicate}"
             ).fetchone()[0]
             if invalid_count:
-                raise RepositoryStateError(
-                    f"{table} contains invalid authoritative money values"
-                )
+                raise RepositoryStateError(f"{table} contains invalid authoritative money values")
 
     @classmethod
     def _migrate_position_units(cls, con: sqlite3.Connection) -> None:
-        existing = {
-            row[1]
-            for row in con.execute("PRAGMA table_info(m2_open_positions)")
-        }
+        existing = {row[1] for row in con.execute("PRAGMA table_info(m2_open_positions)")}
         present = _POSITION_UNIT_COLUMNS & existing
         if present and present != _POSITION_UNIT_COLUMNS:
-            raise RepositoryStateError(
-                "m2_open_positions contains partial v3 position authority"
-            )
+            raise RepositoryStateError("m2_open_positions contains partial v3 position authority")
 
         if not present:
             for column in sorted(_POSITION_UNIT_COLUMNS):
-                con.execute(
-                    f"ALTER TABLE m2_open_positions ADD COLUMN {column} INTEGER"
-                )
+                con.execute(f"ALTER TABLE m2_open_positions ADD COLUMN {column} INTEGER")
 
             refund = Money(0)
             rows = con.execute(
-                "SELECT market_id, side, stake_micros, entry_price "
-                "FROM m2_open_positions"
+                "SELECT market_id, side, stake_micros, entry_price FROM m2_open_positions"
             ).fetchall()
             for market_id, side, legacy_quantity_micros, entry_price in rows:
                 quantity = Quantity(int(legacy_quantity_micros))
@@ -630,9 +590,7 @@ class SQLitePositionRepository:
                 refund = refund + legacy_reserve - cost_basis
 
             if refund.micros:
-                account = con.execute(
-                    "SELECT balance_micros FROM m2_account_state"
-                ).fetchall()
+                account = con.execute("SELECT balance_micros FROM m2_account_state").fetchall()
                 if len(account) != 1:
                     raise RepositoryStateError(
                         "m2_account_state must contain exactly one account row"
@@ -653,24 +611,18 @@ class SQLitePositionRepository:
             "OR typeof(cost_basis_micros) != 'integer'"
         ).fetchone()[0]
         if invalid_count:
-            raise RepositoryStateError(
-                "m2_open_positions contains invalid v3 position authority"
-            )
+            raise RepositoryStateError("m2_open_positions contains invalid v3 position authority")
 
     @classmethod
     def _migrate_operation_fingerprints(cls, con: sqlite3.Connection) -> None:
-        columns = {
-            row[1]
-            for row in con.execute("PRAGMA table_info(m2_applied_operations)")
-        }
+        columns = {row[1] for row in con.execute("PRAGMA table_info(m2_applied_operations)")}
         if _OPERATION_FINGERPRINT_COLUMN not in columns:
             con.execute(
                 "ALTER TABLE m2_applied_operations "
                 "ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT ''"
             )
         invalid_count = con.execute(
-            "SELECT COUNT(*) FROM m2_applied_operations "
-            "WHERE typeof(request_fingerprint) != 'text'"
+            "SELECT COUNT(*) FROM m2_applied_operations WHERE typeof(request_fingerprint) != 'text'"
         ).fetchone()[0]
         if invalid_count:
             raise RepositoryStateError(
@@ -686,9 +638,7 @@ class SQLitePositionRepository:
             "realized_pnl_micros FROM m2_account_state"
         ).fetchall()
         if len(accounts) != 1:
-            raise RepositoryStateError(
-                "m2_account_state must contain exactly one account row"
-            )
+            raise RepositoryStateError("m2_account_state must contain exactly one account row")
 
         from polyarb.routing.position_tracker import Position
 
@@ -731,9 +681,7 @@ class SQLitePositionRepository:
         )
 
     @staticmethod
-    def _write_state(
-        con: sqlite3.Connection, state: PositionState, updated_at: str
-    ) -> None:
+    def _write_state(con: sqlite3.Connection, state: PositionState, updated_at: str) -> None:
         updated = con.execute(
             "UPDATE m2_account_state SET snapshot_balance = ?, balance = ?, "
             "realized_pnl = ?, snapshot_balance_micros = ?, balance_micros = ?, "
@@ -749,16 +697,12 @@ class SQLitePositionRepository:
             ),
         )
         if updated.rowcount != 1:
-            raise RepositoryStateError(
-                "m2_account_state must contain exactly one account row"
-            )
+            raise RepositoryStateError("m2_account_state must contain exactly one account row")
 
         con.execute("DELETE FROM m2_open_positions")
         for market_id, position in state.open_positions.items():
             if market_id != position.market_id:
-                raise RepositoryStateError(
-                    "open position key must match its market_id"
-                )
+                raise RepositoryStateError("open position key must match its market_id")
             con.execute(
                 "INSERT INTO m2_open_positions "
                 "(market_id, condition_id, side, outcome, stake, stake_micros, "

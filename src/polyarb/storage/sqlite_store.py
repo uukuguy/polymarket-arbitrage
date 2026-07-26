@@ -46,8 +46,7 @@ def _rollback_without_masking(con: object) -> None:
         con.execute("ROLLBACK")  # type: ignore[attr-defined]
     except sqlite3.Error as rollback_error:
         logger.warning(
-            "SQLite rollback was already unavailable after the original failure: "
-            f"{rollback_error}"
+            f"SQLite rollback was already unavailable after the original failure: {rollback_error}"
         )
 
 
@@ -228,16 +227,12 @@ class SQLiteStore:
             assert snapshot_id is not None  # AUTOINCREMENT guarantees this
 
             # ── Amendment 01: events first (FK target for markets.event_id) ─
-            event_tuples = [
-                _event_row_to_tuple(r, snapshot_id) for r in event_rows
-            ]
+            event_tuples = [_event_row_to_tuple(r, snapshot_id) for r in event_rows]
             if event_tuples:
                 con.executemany(EVENTS_INSERT_SQL, event_tuples)
 
             # ── Amendment 01: event_tags (FK references events.id) ─────────
-            event_tag_tuples = [
-                _event_tag_row_to_tuple(r, snapshot_id) for r in event_tag_rows
-            ]
+            event_tag_tuples = [_event_tag_row_to_tuple(r, snapshot_id) for r in event_tag_rows]
             if event_tag_tuples:
                 con.executemany(EVENT_TAGS_INSERT_SQL, event_tag_tuples)
 
@@ -354,16 +349,12 @@ class SQLiteStore:
 
             # ── events first (FK target for markets.event_id) ──────────────
             if event_rows:
-                event_tuples = [
-                    _event_row_to_tuple(r, snapshot_id) for r in event_rows
-                ]
+                event_tuples = [_event_row_to_tuple(r, snapshot_id) for r in event_rows]
                 con.executemany(EVENTS_INSERT_SQL, event_tuples)
 
             # ── event_tags (FK references events.id) ───────────────────────
             if event_tag_rows:
-                event_tag_tuples = [
-                    _event_tag_row_to_tuple(r, snapshot_id) for r in event_tag_rows
-                ]
+                event_tag_tuples = [_event_tag_row_to_tuple(r, snapshot_id) for r in event_tag_rows]
                 con.executemany(EVENT_TAGS_INSERT_SQL, event_tag_tuples)
 
             # ── markets streamed in batches ────────────────────────────────
@@ -643,7 +634,7 @@ class SQLiteStore:
                     "market_count": row[5],
                     "notes": row[6],
                     "supabase_mirror_at_ms": row[7],  # Phase 02 Plan 03: nullable
-                    "parquet_r2_url": row[8],           # Phase 02 Plan 03: nullable
+                    "parquet_r2_url": row[8],  # Phase 02 Plan 03: nullable
                 }
             except sqlite3.OperationalError:
                 # Old DB schema without Plan 03 columns — fall back to 7-column query
@@ -712,14 +703,18 @@ class SQLiteStore:
                 ).fetchall()
             ]
             # Also fetch parquet paths for cleanup
-            parquet_paths = [
-                r[0]
-                for r in con.execute(
-                    f"SELECT parquet_path FROM snapshots "
-                    f"WHERE id IN ({','.join('?' for _ in to_delete)})",
-                    to_delete,
-                ).fetchall()
-            ] if parquet_root is not None and to_delete else []
+            parquet_paths = (
+                [
+                    r[0]
+                    for r in con.execute(
+                        f"SELECT parquet_path FROM snapshots "
+                        f"WHERE id IN ({','.join('?' for _ in to_delete)})",
+                        to_delete,
+                    ).fetchall()
+                ]
+                if parquet_root is not None and to_delete
+                else []
+            )
         finally:
             con.close()
 

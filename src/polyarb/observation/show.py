@@ -5,10 +5,11 @@ Composition: markets row + question_translations + neg-risk siblings +
 
 Read-only SQLite + parameterized queries throughout.
 """
+
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -53,7 +54,7 @@ def show_time_dimension(row: dict) -> str:
     end_ms = row.get("end_time_ms")
     if end_ms is None:
         return "无固定结算时间 (perpetual)"
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     if end_ms <= now_ms:
         return "已结算"
     remaining = end_ms - now_ms
@@ -83,18 +84,14 @@ def show_neg_risk_siblings(row: dict, db_path: Path) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def show_recent_history(
-    slug: str, parquet_root: Path, n: int = 5
-) -> pd.DataFrame:
+def show_recent_history(slug: str, parquet_root: Path, n: int = 5) -> pd.DataFrame:
     df = track_market(slug, parquet_root)
     if df.empty:
         return df
     return df.tail(n)
 
 
-def show_market(
-    slug: str, db_path: Path, parquet_root: Path
-) -> dict:
+def show_market(slug: str, db_path: Path, parquet_root: Path) -> dict:
     """Orchestrate multi-source detail for a single market.
 
     Returns dict with keys: market, bilingual, time_dim, neg_risk_siblings,

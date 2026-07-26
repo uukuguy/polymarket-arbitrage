@@ -142,9 +142,7 @@ async def test_connection_identity_change_during_send_cannot_commit() -> None:
 
 async def test_reconnect_commits_latest_desired_only_after_initial_subscribe() -> None:
     snapshots = []
-    consumer = _make_consumer(
-        initial_assets=["candidate"], membership_observer=snapshots.append
-    )
+    consumer = _make_consumer(initial_assets=["candidate"], membership_observer=snapshots.append)
     consumer.set_l3_desired(["yes", "no"])
     ws = _live_ws()
 

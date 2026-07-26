@@ -18,6 +18,7 @@ Lives in its own module to avoid circular imports between
 ``observability.sentry`` (uses for Sentry before_send) and
 ``observability.logging`` (uses for loguru filter).
 """
+
 from __future__ import annotations
 
 import re
@@ -44,9 +45,7 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     # JWT: three base64-url segments joined by dots, each ≥ 20 chars.
     # Match the whole JWT as a single redacted unit (no prefix to preserve).
-    re.compile(
-        r"(eyJ[A-Za-z0-9_\-]{10,})\.([A-Za-z0-9_\-]{10,})\.([A-Za-z0-9_\-]{10,})"
-    ),
+    re.compile(r"(eyJ[A-Za-z0-9_\-]{10,})\.([A-Za-z0-9_\-]{10,})\.([A-Za-z0-9_\-]{10,})"),
     # Stripe-style sk-... openai-style keys.
     re.compile(r"(sk-)([A-Za-z0-9]{16,})"),
 )
@@ -122,10 +121,7 @@ def _redact_obj(obj: Any) -> Any:
     if isinstance(obj, str):
         return _redact_string(obj)
     if isinstance(obj, dict):
-        return {
-            k: (REDACTED if _is_sensitive_key(k) else _redact_obj(v))
-            for k, v in obj.items()
-        }
+        return {k: (REDACTED if _is_sensitive_key(k) else _redact_obj(v)) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return type(obj)(_redact_obj(x) for x in obj)
     return obj

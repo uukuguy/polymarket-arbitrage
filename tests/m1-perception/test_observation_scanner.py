@@ -9,6 +9,7 @@ Plan 03 Task 1 — covers:
 - run_recipe_grouped: same validators called (Blocker #3 no-bypass)
 - load_yaml_recipes: safe_load only / fail-fast / drops group_by / does not override builtin
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -29,7 +30,6 @@ from polyarb.observation.scanner import (
     run_recipe_grouped,
 )
 from polyarb.storage.schemas import DDL
-
 
 # =============================================================================
 # Fixture: tmp DB seeded with markets + question_translations + validation_issues
@@ -65,14 +65,84 @@ def tmp_db_with_seed(tmp_path: Path) -> Path:
         # 5 markets — covers thick / coin-flip / ghost / generic
         markets = [
             # market_id, slug, question, mid, liq, vol, bid, ask, end, neg_risk_id, event_id
-            ("M1", "thick-1", "Will X happen?", 0.5, 200000, 50000, 0.40, 0.55, 1900000000000, None, "EV-1"),
-            ("M2", "near-1",  "Will Y resolve?", 0.5, 5000, 1000, 0.49, 0.51, 1700100000000, None, "EV-1"),
-            ("M3", "ghost-1", "Will Z trigger?", 0.5, 50000, 10000, 0.45, 0.55, 2000000000000, None, "EV-1"),
-            ("M4", "coin-1",  "Will A win?", 0.50, 10000, 20000, 0.49, 0.51, 1700050000000, None, "EV-1"),
-            ("M5", "neg-1",   "Will B occur?", 0.30, 8000, 4000, 0.29, 0.31, 1900000000000, "NRG-1", "EV-1"),
+            (
+                "M1",
+                "thick-1",
+                "Will X happen?",
+                0.5,
+                200000,
+                50000,
+                0.40,
+                0.55,
+                1900000000000,
+                None,
+                "EV-1",
+            ),
+            (
+                "M2",
+                "near-1",
+                "Will Y resolve?",
+                0.5,
+                5000,
+                1000,
+                0.49,
+                0.51,
+                1700100000000,
+                None,
+                "EV-1",
+            ),
+            (
+                "M3",
+                "ghost-1",
+                "Will Z trigger?",
+                0.5,
+                50000,
+                10000,
+                0.45,
+                0.55,
+                2000000000000,
+                None,
+                "EV-1",
+            ),
+            (
+                "M4",
+                "coin-1",
+                "Will A win?",
+                0.50,
+                10000,
+                20000,
+                0.49,
+                0.51,
+                1700050000000,
+                None,
+                "EV-1",
+            ),
+            (
+                "M5",
+                "neg-1",
+                "Will B occur?",
+                0.30,
+                8000,
+                4000,
+                0.29,
+                0.31,
+                1900000000000,
+                "NRG-1",
+                "EV-1",
+            ),
         ]
         for (
-            mid_, slug, q, mid, liq, vol, bid, ask, end, nrg, eid,
+            mid_,
+            slug,
+            q,
+            mid,
+            liq,
+            vol,
+            bid,
+            ask,
+            end,
+            nrg,
+            eid,
         ) in markets:
             con.execute(
                 "INSERT INTO markets(market_id, condition_id, slug, question, "
@@ -168,9 +238,7 @@ def test_validate_where_rejects_select_in_yaml_path() -> None:
 
 def test_validate_where_accepts_valid_simple() -> None:
     # No exception
-    _validate_where(
-        "liquidity_usd > 1000 AND mid_price BETWEEN 0.4 AND 0.6", trusted=False
-    )
+    _validate_where("liquidity_usd > 1000 AND mid_price BETWEEN 0.4 AND 0.6", trusted=False)
 
 
 def test_validate_where_case_insensitive() -> None:
@@ -186,16 +254,14 @@ def test_validate_where_case_insensitive() -> None:
 def test_validate_where_trusted_bypasses_blacklist() -> None:
     """ghost-suspicious's WHERE contains 'SELECT' — must pass for trusted=True."""
     _validate_where(
-        "market_id IN (SELECT v.market_id FROM validation_issues v "
-        "WHERE v.category='ghost_book')",
+        "market_id IN (SELECT v.market_id FROM validation_issues v WHERE v.category='ghost_book')",
         trusted=True,
     )
 
 
 def test_validate_where_trusted_strftime_passes() -> None:
     _validate_where(
-        "end_time_ms BETWEEN strftime('%s','now')*1000 "
-        "AND strftime('%s','now','+72 hours')*1000",
+        "end_time_ms BETWEEN strftime('%s','now')*1000 AND strftime('%s','now','+72 hours')*1000",
         trusted=True,
     )
 
@@ -502,10 +568,7 @@ def test_load_yaml_uses_safe_load_rejects_unsafe_tag(tmp_path: Path) -> None:
     # is even resolved. Using a known-safe class name (datetime.datetime) makes
     # the test intent unambiguous: we are testing the SAFE-LOAD GATE itself,
     # not exercising any callable.
-    yaml_path.write_text(
-        "recipes:\n"
-        "  forbidden: !!python/object/apply:datetime.datetime [2024]\n"
-    )
+    yaml_path.write_text("recipes:\n  forbidden: !!python/object/apply:datetime.datetime [2024]\n")
     with pytest.raises(_yaml.YAMLError):
         load_yaml_recipes(yaml_path)
 
@@ -532,10 +595,7 @@ def test_load_yaml_recipe_validated_at_load_time(tmp_path: Path) -> None:
     """Fail-fast: bad WHERE rejected at load, not at first execution."""
     yaml_path = tmp_path / "recipes.yaml"
     yaml_path.write_text(
-        "recipes:\n"
-        "  evil:\n"
-        "    where: 1=1; DROP TABLE markets\n"
-        "    order_by: liquidity_usd\n"
+        "recipes:\n  evil:\n    where: 1=1; DROP TABLE markets\n    order_by: liquidity_usd\n"
     )
     with pytest.raises(ValueError):
         load_yaml_recipes(yaml_path)
@@ -558,10 +618,7 @@ def test_load_yaml_empty_returns_empty(tmp_path: Path) -> None:
 def test_load_yaml_recipe_has_is_trusted_false(tmp_path: Path) -> None:
     yaml_path = tmp_path / "recipes.yaml"
     yaml_path.write_text(
-        "recipes:\n"
-        "  r1:\n"
-        "    where: liquidity_usd > 10\n"
-        "    order_by: liquidity_usd\n"
+        "recipes:\n  r1:\n    where: liquidity_usd > 10\n    order_by: liquidity_usd\n"
     )
     result = load_yaml_recipes(yaml_path)
     assert result["r1"]._is_trusted is False
@@ -609,10 +666,7 @@ def test_list_all_recipes_no_yaml() -> None:
 def test_list_all_recipes_merges_yaml(tmp_path: Path) -> None:
     yaml_path = tmp_path / "recipes.yaml"
     yaml_path.write_text(
-        "recipes:\n"
-        "  user-only:\n"
-        "    where: liquidity_usd > 1\n"
-        "    order_by: liquidity_usd\n"
+        "recipes:\n  user-only:\n    where: liquidity_usd > 1\n    order_by: liquidity_usd\n"
     )
     result = list_all_recipes(yaml_path)
     assert "user-only" in result
@@ -644,11 +698,7 @@ def test_scanner_module_uses_safe_load_only() -> None:
     src = Path(__file__).parent.parent.parent / "src" / "polyarb" / "observation" / "scanner.py"
     content = src.read_text()
     # Strip line comments
-    code_lines = [
-        ln
-        for ln in content.splitlines()
-        if not ln.lstrip().startswith("#")
-    ]
+    code_lines = [ln for ln in content.splitlines() if not ln.lstrip().startswith("#")]
     code = "\n".join(code_lines)
     assert "yaml.safe_load" in code
     assert "yaml.load(" not in code

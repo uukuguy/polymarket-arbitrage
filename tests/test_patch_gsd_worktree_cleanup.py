@@ -6,8 +6,8 @@ import pytest
 
 from scripts import patch_gsd_worktree_cleanup as patcher
 
-
-EXECUTE_FIXTURE = """Before spawning, capture the current HEAD:
+EXECUTE_FIXTURE = (
+    """Before spawning, capture the current HEAD:
    ```bash
    EXPECTED_BASE=$(git rev-parse HEAD)
    ```
@@ -15,7 +15,8 @@ EXECUTE_FIXTURE = """Before spawning, capture the current HEAD:
 5.5. Worktree cleanup:
 ```bash
    # List worktrees created by this wave's agents
-   WORKTREES=$(git worktree list --porcelain | grep "^worktree " | grep -v "$(pwd)$" | sed 's/^worktree //')
+   WORKTREES=$(git worktree list --porcelain | grep "^worktree " | """
+    """grep -v "$(pwd)$" | sed 's/^worktree //')
 
    for WT in $WORKTREES; do
      WT_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null)
@@ -28,9 +29,11 @@ EXECUTE_FIXTURE = """Before spawning, capture the current HEAD:
    done
 ```
 """
+)
 
 
-QUICK_FIXTURE = """Capture current HEAD before spawning (used for worktree branch check):
+QUICK_FIXTURE = (
+    """Capture current HEAD before spawning (used for worktree branch check):
 ```bash
 EXPECTED_BASE=$(git rev-parse HEAD)
 ```
@@ -38,7 +41,8 @@ EXPECTED_BASE=$(git rev-parse HEAD)
 After executor returns:
 ```bash
    # Find worktrees created by the executor
-   WORKTREES=$(git worktree list --porcelain | grep "^worktree " | grep -v "$(pwd)$" | sed 's/^worktree //')
+   WORKTREES=$(git worktree list --porcelain | grep "^worktree " | """
+    """grep -v "$(pwd)$" | sed 's/^worktree //')
    for WT in $WORKTREES; do
      WT_BRANCH=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null)
        git worktree remove "$WT" --force 2>/dev/null || true
@@ -47,6 +51,7 @@ After executor returns:
    done
 ```
 """
+)
 
 
 @pytest.mark.parametrize(
@@ -56,9 +61,7 @@ After executor returns:
         (patcher.rewrite_quick, QUICK_FIXTURE),
     ],
 )
-def test_rewriter_scopes_cleanup_and_uses_locked_removal(
-    rewriter: object, fixture: str
-) -> None:
+def test_rewriter_scopes_cleanup_and_uses_locked_removal(rewriter: object, fixture: str) -> None:
     rewritten = rewriter(fixture)  # type: ignore[operator]
 
     assert "GSD_WORKTREE_CLEANUP_V2" in rewritten

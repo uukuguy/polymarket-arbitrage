@@ -10,6 +10,7 @@ Phase 02 LEARNINGS cited:
 
 Test fixtures use loguru StringIO sink (Phase 02.1 L4) for log capture.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,6 +34,7 @@ os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 # Loguru capture fixture (Phase 02.1 L4)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def loguru_sink():
     """Capture loguru output into a StringIO buffer for assertion."""
@@ -45,6 +47,7 @@ def loguru_sink():
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: build a fake settings MagicMock with all fields tests need
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _make_fake_settings():
     """Phase 02.1 L3 — explicitly populate all fields so .env渗透 cannot bleed in."""
@@ -349,10 +352,7 @@ async def test_main_shares_exact_runtime_store_and_dsn_after_successful_boot():
     assert sampler_kwargs["store"] is store
     assert sampler_kwargs["settings"] is settings
     assert sampler_kwargs["ws_consumer"] is consumer
-    assert (
-        promoter_kwargs["acceptance_config"].digest()
-        == dependencies.boot.acceptance_config_hash
-    )
+    assert promoter_kwargs["acceptance_config"].digest() == dependencies.boot.acceptance_config_hash
     assert store.append_boot.await_args.args[0].boot_id == runtime.snapshot().boot_id
     assert lifecycle == ["http_bind", "boot", "event_writer", "promoter", "sampler"]
     assert task_names == [
@@ -461,9 +461,7 @@ async def test_main_signal_durably_drains_shutdown_event_within_five_seconds():
         assert await asyncio.wait_for(l2_main.main(), timeout=5.0) == 0
 
     assert loop.time() - started < 5.0
-    assert [event.kind for event in durable_events] == [
-        RuntimeEventKind.SHUTDOWN_SIGNAL
-    ]
+    assert [event.kind for event in durable_events] == [RuntimeEventKind.SHUTDOWN_SIGNAL]
     assert stop_states_at_record == [False]
     assert durable_events[0].detail == {"signal": "SIGTERM"}
     source = Path(l2_main.__file__).read_text()
@@ -1039,8 +1037,7 @@ async def test_cancellation_during_steady_state_reaps_every_named_task_once():
     assert started == reaped == expected
     assert all(task.done() for task in tracked)
     assert all(
-        task.cancelling() == (0 if task.get_name() == "l3-boot-append" else 1)
-        for task in tracked
+        task.cancelling() == (0 if task.get_name() == "l3-boot-append" else 1) for task in tracked
     )
 
 
@@ -1083,16 +1080,12 @@ async def test_server_gate_timeout_cleans_server_and_never_starts_boot_or_runtim
     async def _yield_only(_delay):
         await real_sleep(0)
 
-    common = _patch_minimal_l2_main(
-        l2_main, settings=settings, server=server, store=store
-    )
+    common = _patch_minimal_l2_main(l2_main, settings=settings, server=server, store=store)
     with ExitStack() as stack:
         for context in common:
             stack.enter_context(context)
         stack.enter_context(patch("polyarb.daemon.l2_main._append_l3_boot", append_boot))
-        stack.enter_context(
-            patch("polyarb.daemon.l2_main.asyncio.sleep", side_effect=_yield_only)
-        )
+        stack.enter_context(patch("polyarb.daemon.l2_main.asyncio.sleep", side_effect=_yield_only))
         with pytest.raises(TimeoutError, match="server.*start"):
             await asyncio.wait_for(l2_main.main(), timeout=1.0)
 
@@ -1115,9 +1108,7 @@ async def test_server_gate_propagates_serve_failure_before_boot_or_runtime_tasks
 
     server.serve = _serve
     append_boot = AsyncMock(return_value=True)
-    common = _patch_minimal_l2_main(
-        l2_main, settings=settings, server=server, store=store
-    )
+    common = _patch_minimal_l2_main(l2_main, settings=settings, server=server, store=store)
     with ExitStack() as stack:
         for context in common:
             stack.enter_context(context)
@@ -1162,9 +1153,7 @@ async def test_cancellation_during_boot_cleans_server_without_starting_runtime_t
     listener = AsyncMock()
     pump = MagicMock()
     pump.run = AsyncMock()
-    common = _patch_minimal_l2_main(
-        l2_main, settings=settings, server=server, store=store
-    )
+    common = _patch_minimal_l2_main(l2_main, settings=settings, server=server, store=store)
     with ExitStack() as stack:
         for context in common:
             stack.enter_context(context)
@@ -1173,9 +1162,7 @@ async def test_cancellation_during_boot_cleans_server_without_starting_runtime_t
         )
         stack.enter_context(patch("polyarb.daemon.l2_main.WsConsumer", return_value=consumer))
         stack.enter_context(patch("polyarb.daemon.l2_main.WsWatchdog", return_value=watchdog))
-        stack.enter_context(
-            patch("polyarb.daemon.l2_main.ReconciliationPump", return_value=pump)
-        )
+        stack.enter_context(patch("polyarb.daemon.l2_main.ReconciliationPump", return_value=pump))
         stack.enter_context(patch("polyarb.daemon.l2_main.listen_snapshot_complete", listener))
         main_task = asyncio.create_task(l2_main.main())
         await asyncio.wait_for(boot_entered.wait(), timeout=1.0)
@@ -1283,6 +1270,7 @@ async def test_failed_runtime_authorization_gates_all_direct_postgres_tasks(
 # main sets should_exit, matching uvicorn's supervised lifetime contract.
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _make_mock_server():
     instance = MagicMock()
     instance.started = True
@@ -1300,6 +1288,7 @@ def _make_mock_server():
 # Test 1 — init order: logging → settings → sentry → sqlite
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 async def test_init_order():
     """init_logging → load_settings → init_sentry → SQLiteStore (Phase 02 P9 invariant)."""
     calls: list[str] = []
@@ -1308,6 +1297,7 @@ async def test_init_order():
         def _inner(*a, **kw):
             calls.append(name)
             return ret if ret is not None else MagicMock()
+
         return _inner
 
     fake_settings = _make_fake_settings()
@@ -1334,6 +1324,7 @@ async def test_init_order():
         patch("polyarb.daemon.l2_main.sentry_sdk.set_tag"),
     ):
         from polyarb.daemon import l2_main
+
         try:
             await asyncio.wait_for(l2_main.main(), timeout=3.0)
         except (TimeoutError, SystemExit):
@@ -1353,6 +1344,7 @@ async def test_init_order():
 # Test 2 — server-started polling loop (P9 invariant)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_server_started_gate_polled():
     """Grep-style assertion: l2_main.py source contains range(100) + sleep(0.1) gate."""
     src_path = Path(__file__).resolve().parents[2] / "src" / "polyarb" / "daemon" / "l2_main.py"
@@ -1366,6 +1358,7 @@ def test_server_started_gate_polled():
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 3 — Sentry service tag set to polyarb-l2
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 async def test_sentry_service_tag_polyarb_l2():
     """sentry_sdk.set_tag('service', 'polyarb-l2') called during main()."""
@@ -1390,6 +1383,7 @@ async def test_sentry_service_tag_polyarb_l2():
         patch("polyarb.daemon.l2_main.asyncio.Event", return_value=real_event),
     ):
         from polyarb.daemon import l2_main
+
         try:
             await asyncio.wait_for(l2_main.main(), timeout=3.0)
         except (TimeoutError, SystemExit):
@@ -1403,6 +1397,7 @@ async def test_sentry_service_tag_polyarb_l2():
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 4 — no L1 cross-pollination (T-03-03-03 mitigation)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_no_import_from_l1_main():
     """l2_main.py must NOT import from polyarb.daemon.main (T-03-03-03)."""
@@ -1418,6 +1413,7 @@ def test_no_import_from_l1_main():
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 5 — first log line contains "polyarb-l2"
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 async def test_logger_first_line_is_polyarb_l2(loguru_sink):
     """First INFO log line emitted by main() must contain 'polyarb-l2'."""
@@ -1437,6 +1433,7 @@ async def test_logger_first_line_is_polyarb_l2(loguru_sink):
         patch("polyarb.daemon.l2_main.asyncio.Event", return_value=real_event),
     ):
         from polyarb.daemon import l2_main
+
         try:
             await asyncio.wait_for(l2_main.main(), timeout=3.0)
         except (TimeoutError, SystemExit):
@@ -1449,6 +1446,7 @@ async def test_logger_first_line_is_polyarb_l2(loguru_sink):
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 6 — shutdown signal propagates (F-04 contract — CancelledError NOT swallowed)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 async def test_shutdown_uses_one_five_second_drain_deadline():
     """Server, writer, and peers share one bounded shutdown deadline (F-04)."""

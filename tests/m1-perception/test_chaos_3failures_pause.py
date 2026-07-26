@@ -11,6 +11,7 @@ Also verifies:
 
 This mirrors RESEARCH §11 row "consecutive FAILED → PAUSED + alert".
 """
+
 from __future__ import annotations
 
 import os
@@ -26,7 +27,6 @@ os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 from polyarb.daemon.scheduler import SchedulerState, SnapshotScheduler  # noqa: E402
 from polyarb.validator.category import SnapshotStatus  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -34,12 +34,14 @@ from polyarb.validator.category import SnapshotStatus  # noqa: E402
 
 class _FakeResult:
     """Minimal snapshot result stub."""
+
     def __init__(self, status: SnapshotStatus) -> None:
         self.status = status
 
 
 def _make_store(tmp_path: Path) -> Any:
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()
     return store
@@ -47,7 +49,9 @@ def _make_store(tmp_path: Path) -> Any:
 
 def _make_settings(tmp_path: Path) -> Any:
     from pydantic import SecretStr
+
     from polyarb.config import Settings
+
     return Settings(
         db_path=tmp_path / "state.db",
         parquet_root=tmp_path / "snapshots",
@@ -111,6 +115,7 @@ async def test_paused_alert_called_once_on_pause(tmp_path: Path) -> None:
     scheduler._run_snapshot = AsyncMock(side_effect=RuntimeError("chaos: always fail"))
 
     from polyarb.daemon import alerts as _alerts_mod
+
     _alerts_mod._LAST_ALERT_TIME_MS.clear()  # reset dedup state
 
     with patch.object(
@@ -183,6 +188,7 @@ async def test_unpause_resumes_ticks(tmp_path: Path) -> None:
 
     # Next tick: run_snapshot is called
     from polyarb.daemon import alerts as _alerts_mod
+
     with patch.object(_alerts_mod, "send_heartbeat_ok", new=AsyncMock(return_value=None)):
         await scheduler._tick()
     ok_mock.assert_called_once()
@@ -221,6 +227,7 @@ async def test_failure_counter_persists_restart(tmp_path: Path) -> None:
     )
 
     from polyarb.daemon import alerts as _alerts_mod
+
     _alerts_mod._LAST_ALERT_TIME_MS.clear()
 
     with patch.object(_alerts_mod, "send_paused_alert", new=AsyncMock(return_value=None)):

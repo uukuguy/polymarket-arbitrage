@@ -479,11 +479,9 @@ def _assert_catalog_contract(dsn: str) -> None:
         "pk_l3_runtime_boots": "PRIMARY KEY (boot_id)",
         "pk_l3_promote_runs": "PRIMARY KEY (id)",
         "fk_l3_promote_runs_boot": ("FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"),
-            "uq_l3_promote_runs_boot_seq": "UNIQUE (boot_id, run_seq)",
-            "pk_l3_health_samples": "PRIMARY KEY (boot_id, sample_seq)",
-            "uq_l3_health_samples_boot_scheduled": (
-                "UNIQUE (boot_id, scheduled_at)"
-            ),
+        "uq_l3_promote_runs_boot_seq": "UNIQUE (boot_id, run_seq)",
+        "pk_l3_health_samples": "PRIMARY KEY (boot_id, sample_seq)",
+        "uq_l3_health_samples_boot_scheduled": ("UNIQUE (boot_id, scheduled_at)"),
         "fk_l3_health_samples_boot": ("FOREIGN KEY (boot_id) REFERENCES l3_runtime_boots(boot_id)"),
         "pk_l3_market_samples": "PRIMARY KEY (boot_id, sample_seq, market_id)",
         "fk_l3_market_samples_health": (

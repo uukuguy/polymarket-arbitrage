@@ -12,6 +12,7 @@ Coverage:
 - _fetch_page eventually raises HTTPStatusError after stop_after_attempt(5)
   exhausts (we mock the sleep to avoid waiting 10s × 5 attempts in CI)
 """
+
 from __future__ import annotations
 
 import json

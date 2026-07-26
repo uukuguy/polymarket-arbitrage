@@ -10,6 +10,7 @@ FAILURE_THRESHOLD 3 → 5 to absorb DNS jitter via tenacity retry):
 - Counter persists across restart (restored from DB)
 - 4 failures keep RUNNING; the 5th transitions to PAUSED (explicit guard)
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -25,9 +26,11 @@ from polyarb.validator.category import SnapshotStatus
 # scheduler_interval_s configurability (Inj 2 P0 fix, 2026-05-20)
 # ---------------------------------------------------------------------------
 
+
 def test_scheduler_interval_default_3600() -> None:
     """Default Settings.scheduler_interval_s == 3600 (preserves Plan 02 behavior)."""
     from polyarb.config import Settings
+
     s = Settings(_env_file=None)
     assert s.scheduler_interval_s == 3600
 
@@ -41,6 +44,7 @@ def test_scheduler_interval_reads_env_var(monkeypatch: pytest.MonkeyPatch) -> No
     the 3-failure-pause path within a reasonable window.
     """
     from polyarb.config import Settings
+
     monkeypatch.setenv("POLYARB_SCHEDULER_INTERVAL_S", "60")
     s = Settings(_env_file=None)
     assert s.scheduler_interval_s == 60
@@ -50,8 +54,10 @@ def test_scheduler_interval_reads_env_var(monkeypatch: pytest.MonkeyPatch) -> No
 # Helper result types
 # ---------------------------------------------------------------------------
 
+
 class _FakeResult:
     """Minimal snapshot result stub."""
+
     def __init__(self, status: SnapshotStatus) -> None:
         self.status = status
 
@@ -72,6 +78,7 @@ async def test_pause_after_3_failures(
     invariant ("after N failures we pause") survives future tuning.
     """
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -98,6 +105,7 @@ async def test_pause_after_5_failures_not_3(
     FAILURE_THRESHOLD to 3 (or 7), this test should fail loudly.
     """
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -127,6 +135,7 @@ async def test_no_pause_after_degraded_then_ok(
 ) -> None:
     """DEGRADED then OK → counter resets, state stays RUNNING."""
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -151,6 +160,7 @@ async def test_paused_skips_tick(
 ) -> None:
     """When scheduler is PAUSED, _tick() does nothing — run_snapshot NOT called."""
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -174,6 +184,7 @@ async def test_degraded_does_not_count_as_failure(
     3 consecutive DEGRADED must NOT pause the scheduler.
     """
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -198,6 +209,7 @@ async def test_successful_tick_calls_heartbeat_ok(
     Test patches the module attribute so we can assert the call without HTTP traffic.
     """
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -220,9 +232,7 @@ async def test_successful_tick_purges_expired_snapshots_on_attached_store(
     store.init_schema()
     purge = MagicMock(return_value=(0, []))
     store.purge_old_snapshots = purge  # type: ignore[method-assign]
-    scheduler = SnapshotScheduler(
-        settings=daemon_settings_for_test, sqlite_store=store
-    )
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
     scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK))
 
     with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()):
@@ -247,6 +257,7 @@ async def test_degraded_tick_also_calls_heartbeat_ok(
     through silencing the heartbeat.
     """
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -268,6 +279,7 @@ async def test_failed_tick_does_not_call_heartbeat_ok(
     never triggers, defeating the external-watcher safety net.
     """
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -289,6 +301,7 @@ async def test_counter_persists_across_restart(
     attribute so the persistence invariant survives future tuning.
     """
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 

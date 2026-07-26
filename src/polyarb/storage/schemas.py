@@ -307,8 +307,7 @@ EVENT_TAGS_COLUMN_ORDER: tuple[str, ...] = (
 )
 
 EVENT_TAGS_INSERT_SQL = (
-    "INSERT INTO event_tags(event_id,tag_id,tag_label,tag_slug,snapshot_id) "
-    "VALUES (?,?,?,?,?)"
+    "INSERT INTO event_tags(event_id,tag_id,tag_label,tag_slug,snapshot_id) VALUES (?,?,?,?,?)"
 )
 
 # Pyarrow schema for Parquet — token IDs are pa.string() (Pitfall 3: uint256 > int64).
@@ -386,7 +385,7 @@ SNAPSHOTS_DDL = (
     "parquet_path TEXT NOT NULL, "
     "notes TEXT, "
     "supabase_mirror_at_ms INTEGER, "  # Phase 02 Plan 03
-    "parquet_r2_url TEXT"               # Phase 02 Plan 03
+    "parquet_r2_url TEXT"  # Phase 02 Plan 03
     ")"
 )
 
@@ -400,7 +399,7 @@ SNAPSHOTS_COLUMN_ORDER: tuple[str, ...] = (
     "parquet_path",
     "notes",
     "supabase_mirror_at_ms",  # Phase 02 Plan 03: nullable mirror timestamp
-    "parquet_r2_url",          # Phase 02 Plan 03: nullable R2 URL
+    "parquet_r2_url",  # Phase 02 Plan 03: nullable R2 URL
 )
 
 SNAPSHOTS_INSERT_SQL = (

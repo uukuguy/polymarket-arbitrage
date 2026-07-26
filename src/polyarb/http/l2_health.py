@@ -16,6 +16,7 @@ Sub-check scaffolding (Plan 03 ships skeleton; Plan 04/05/06 wire data):
 T-03-03-04 mitigation: serviceId is the literal "polyarb-l2" — never "polyarb-l1".
 T-03-03-06 mitigation: response body whitelists fields; never dict(settings) dump.
 """
+
 from __future__ import annotations
 
 import time
@@ -31,8 +32,8 @@ from polyarb.observation.l3_evidence import HealthStatus
 HEALTH_CONTENT_TYPE = "application/health+json"
 
 # WS age thresholds (seconds)
-_WS_AGE_PASS_S = 30      # < 30s → pass
-_WS_AGE_WARN_S = 120     # 30-120s → warn; > 120s → fail
+_WS_AGE_PASS_S = 30  # < 30s → pass
+_WS_AGE_WARN_S = 120  # 30-120s → warn; > 120s → fail
 
 # RECONNECTING age threshold for "too long" (Phase 02.1 D-05)
 _RECONNECTING_FAIL_S = 60
@@ -42,8 +43,8 @@ _RECONNECTING_FAIL_S = 60
 # Plan 07 chaos knob can lower them via env override to flip /health within
 # 60s instead of waiting 10 minutes. The constants below remain as compatibility
 # fallbacks ONLY if Settings somehow lacks the fields (defensive).
-_MIRROR_PASS_S_DEFAULT = 300   # default warn threshold (override via settings.l2_tob_age_warn_s)
-_MIRROR_FAIL_S_DEFAULT = 600   # default fail threshold (override via settings.l2_tob_age_fail_s)
+_MIRROR_PASS_S_DEFAULT = 300  # default warn threshold (override via settings.l2_tob_age_warn_s)
+_MIRROR_FAIL_S_DEFAULT = 600  # default fail threshold (override via settings.l2_tob_age_fail_s)
 
 # Phase 04 Plan 02 Task 3 — candidates:supabase_fetch_age_seconds thresholds.
 # The default refresh debounce is 60s (REFRESH_DEBOUNCE_S), so:
@@ -137,13 +138,9 @@ def _build_l3_evidence_checks(
 
     sample_age = _runtime_age_seconds(now, runtime_status.last_sample_persisted_at)
     sticky_fault = bool(
-        runtime_status.event_integrity_failed
-        or runtime_status.event_queue_overflowed
+        runtime_status.event_integrity_failed or runtime_status.event_queue_overflowed
     )
-    sample_fresh = (
-        sample_age is not None
-        and 0 <= sample_age < _L3_EVIDENCE_SAMPLE_FAIL_S
-    )
+    sample_fresh = sample_age is not None and 0 <= sample_age < _L3_EVIDENCE_SAMPLE_FAIL_S
     sample_status = "pass" if sample_fresh and not sticky_fault else "fail"
     if sticky_fault:
         sample_output = runtime_status.reason_code
@@ -153,15 +150,11 @@ def _build_l3_evidence_checks(
         sample_output = "durable evidence sample timestamp is in the future"
     else:
         sample_output = (
-            f"last durable sample {sample_age:.1f}s ago "
-            f"(strict <{_L3_EVIDENCE_SAMPLE_FAIL_S}s)"
+            f"last durable sample {sample_age:.1f}s ago (strict <{_L3_EVIDENCE_SAMPLE_FAIL_S}s)"
         )
 
     promote_age = _runtime_age_seconds(now, runtime_status.last_promote_persisted_at)
-    promote_fresh = (
-        promote_age is not None
-        and 0 <= promote_age < _L3_PROMOTER_LEDGER_FAIL_S
-    )
+    promote_fresh = promote_age is not None and 0 <= promote_age < _L3_PROMOTER_LEDGER_FAIL_S
     promote_status = "pass" if promote_fresh else "fail"
     if promote_age is None:
         promote_output = "cold-start: no durable promoter ledger row"
@@ -202,9 +195,7 @@ def _build_l3_evidence_checks(
         and sample.no_evidenced
     )
     persisted_batch_valid = (
-        mapping_complete
-        and len(sample_sequences) == 1
-        and rows_current_and_passing == 5
+        mapping_complete and len(sample_sequences) == 1 and rows_current_and_passing == 5
     )
     membership_converged = (
         persisted_batch_valid
@@ -280,9 +271,7 @@ def _build_l3_evidence_checks(
         "l3:worst_market_freshness": _l3_check_entry(
             component_id="l3-market-evidence",
             component_type="datastore",
-            observed_value=(
-                round(worst_freshness, 1) if worst_freshness is not None else None
-            ),
+            observed_value=(round(worst_freshness, 1) if worst_freshness is not None else None),
             observed_unit="s",
             status=freshness_status,
             output=freshness_output,
@@ -336,14 +325,16 @@ def _build_l2_health_checks(
 
     # ── Check 1: ws:connection_state ───────────────────────────────────────
     if ws_consumer is None:
-        checks["ws:connection_state"] = [{
-            "componentId": "ws-consumer",
-            "componentType": "websocket",
-            "observedValue": "not_configured",
-            "status": "warn",
-            "output": "ws_consumer not yet wired (Plan 04 deliverable)",
-            "time": _utc_now_iso(),
-        }]
+        checks["ws:connection_state"] = [
+            {
+                "componentId": "ws-consumer",
+                "componentType": "websocket",
+                "observedValue": "not_configured",
+                "status": "warn",
+                "output": "ws_consumer not yet wired (Plan 04 deliverable)",
+                "time": _utc_now_iso(),
+            }
+        ]
         overall = _severity(overall, "warn")
     else:
         state = getattr(ws_consumer, "current_state", "UNKNOWN")
@@ -362,13 +353,15 @@ def _build_l2_health_checks(
         else:
             ws_state_status = "fail"
 
-        checks["ws:connection_state"] = [{
-            "componentId": "ws-consumer",
-            "componentType": "websocket",
-            "observedValue": state,
-            "status": ws_state_status,
-            "time": _utc_now_iso(),
-        }]
+        checks["ws:connection_state"] = [
+            {
+                "componentId": "ws-consumer",
+                "componentType": "websocket",
+                "observedValue": state,
+                "status": ws_state_status,
+                "time": _utc_now_iso(),
+            }
+        ]
         overall = _severity(overall, ws_state_status)
 
     # ── Check 2: ws:last_event_age_seconds ─────────────────────────────────
@@ -390,14 +383,16 @@ def _build_l2_health_checks(
                 age_status = "warn"
             else:
                 age_status = "fail"
-        checks["ws:last_event_age_seconds"] = [{
-            "componentId": "ws-consumer",
-            "componentType": "websocket",
-            "observedValue": round(age_val, 1) if age_val is not None else None,
-            "observedUnit": "s",
-            "status": age_status,
-            "time": _utc_now_iso(),
-        }]
+        checks["ws:last_event_age_seconds"] = [
+            {
+                "componentId": "ws-consumer",
+                "componentType": "websocket",
+                "observedValue": round(age_val, 1) if age_val is not None else None,
+                "observedUnit": "s",
+                "status": age_status,
+                "time": _utc_now_iso(),
+            }
+        ]
         overall = _severity(overall, age_status)
 
     # ── Check 2b: ws:subscribed_count ──────────────────────────────────────
@@ -418,15 +413,17 @@ def _build_l2_health_checks(
             sub_count = len(subscribed)
         except Exception:  # noqa: BLE001 — fail-soft on /health read
             sub_count = 0
-        checks["ws:subscribed_count"] = [{
-            "componentId": "ws-consumer",
-            "componentType": "websocket",
-            "observedValue": sub_count,
-            "observedUnit": "assets",
-            "status": "pass",
-            "output": f"{sub_count} assets currently subscribed",
-            "time": _utc_now_iso(),
-        }]
+        checks["ws:subscribed_count"] = [
+            {
+                "componentId": "ws-consumer",
+                "componentType": "websocket",
+                "observedValue": sub_count,
+                "observedUnit": "assets",
+                "status": "pass",
+                "output": f"{sub_count} assets currently subscribed",
+                "time": _utc_now_iso(),
+            }
+        ]
 
     # ── Check 3: event-bus chain truth (Phase 05.1) ────────────────────────
     dsn_value = ""
@@ -463,37 +460,39 @@ def _build_l2_health_checks(
             notification_age = max(0.0, now_s - float(last_notification))
         except (TypeError, ValueError):
             notification_age = None
-        checks["event_bus:last_notification_age_seconds"] = [{
-            "componentId": "event-listener",
-            "componentType": "asyncpg-listener",
-            "observedValue": (
-                round(notification_age, 1) if notification_age is not None else None
-            ),
-            "observedUnit": "s",
-            "status": "pass",
-            "output": "diagnostic only; quiet notifications do not imply stalled work",
-            "time": _utc_now_iso(),
-        }]
-        checks["event_bus:last_notification_at"] = [{
-            "componentId": "event-listener",
-            "componentType": "asyncpg-listener",
-            "observedValue": (
-                float(last_notification) if notification_age is not None else None
-            ),
-            "observedUnit": "unix-seconds",
-            "status": "pass",
-            "output": "exact diagnostic anchor for NOTIFY-vs-poll recovery proof",
-            "time": _utc_now_iso(),
-        }]
+        checks["event_bus:last_notification_age_seconds"] = [
+            {
+                "componentId": "event-listener",
+                "componentType": "asyncpg-listener",
+                "observedValue": (
+                    round(notification_age, 1) if notification_age is not None else None
+                ),
+                "observedUnit": "s",
+                "status": "pass",
+                "output": "diagnostic only; quiet notifications do not imply stalled work",
+                "time": _utc_now_iso(),
+            }
+        ]
+        checks["event_bus:last_notification_at"] = [
+            {
+                "componentId": "event-listener",
+                "componentType": "asyncpg-listener",
+                "observedValue": (
+                    float(last_notification) if notification_age is not None else None
+                ),
+                "observedUnit": "unix-seconds",
+                "status": "pass",
+                "output": "exact diagnostic anchor for NOTIFY-vs-poll recovery proof",
+                "time": _utc_now_iso(),
+            }
+        ]
 
         stale_seconds_raw = getattr(settings, "event_reconcile_stale_seconds", 180)
         try:
             stale_seconds = float(stale_seconds_raw)
         except (TypeError, ValueError):
             stale_seconds = 180.0
-        last_success = getattr(
-            event_listener, "last_reconciliation_success_s", None
-        )
+        last_success = getattr(event_listener, "last_reconciliation_success_s", None)
         try:
             reconciliation_age = max(0.0, now_s - float(last_success))
         except (TypeError, ValueError):
@@ -507,17 +506,19 @@ def _build_l2_health_checks(
         else:
             reconciliation_status = "pass"
             reconciliation_output = "durable reconciliation is fresh"
-        checks["event_bus:last_reconciliation_age_seconds"] = [{
-            "componentId": "event-reconciliation",
-            "componentType": "durable-cursor",
-            "observedValue": (
-                round(reconciliation_age, 1) if reconciliation_age is not None else None
-            ),
-            "observedUnit": "s",
-            "status": reconciliation_status,
-            "output": reconciliation_output,
-            "time": _utc_now_iso(),
-        }]
+        checks["event_bus:last_reconciliation_age_seconds"] = [
+            {
+                "componentId": "event-reconciliation",
+                "componentType": "durable-cursor",
+                "observedValue": (
+                    round(reconciliation_age, 1) if reconciliation_age is not None else None
+                ),
+                "observedUnit": "s",
+                "status": reconciliation_status,
+                "output": reconciliation_output,
+                "time": _utc_now_iso(),
+            }
+        ]
         overall = _severity(overall, reconciliation_status)
 
         try:
@@ -538,32 +539,34 @@ def _build_l2_health_checks(
         else:
             lag_status = "warn"
             lag_output = "cursor lag is within reconciliation grace"
-        checks["event_bus:cursor_lag"] = [{
-            "componentId": "event-reconciliation",
-            "componentType": "durable-cursor",
-            "observedValue": cursor_lag,
-            "observedUnit": "snapshots",
-            "status": lag_status,
-            "output": lag_output,
-            "time": _utc_now_iso(),
-        }]
+        checks["event_bus:cursor_lag"] = [
+            {
+                "componentId": "event-reconciliation",
+                "componentType": "durable-cursor",
+                "observedValue": cursor_lag,
+                "observedUnit": "snapshots",
+                "status": lag_status,
+                "output": lag_output,
+                "time": _utc_now_iso(),
+            }
+        ]
         overall = _severity(overall, lag_status)
 
         try:
-            reconnect_count = max(
-                0, int(getattr(event_listener, "reconnect_count", 0))
-            )
+            reconnect_count = max(0, int(getattr(event_listener, "reconnect_count", 0)))
         except (TypeError, ValueError):
             reconnect_count = 0
-        checks["event_bus:reconnect_count"] = [{
-            "componentId": "event-listener",
-            "componentType": "asyncpg-listener",
-            "observedValue": reconnect_count,
-            "observedUnit": "reconnects",
-            "status": "pass",
-            "output": "diagnostic reconnect counter",
-            "time": _utc_now_iso(),
-        }]
+        checks["event_bus:reconnect_count"] = [
+            {
+                "componentId": "event-listener",
+                "componentType": "asyncpg-listener",
+                "observedValue": reconnect_count,
+                "observedUnit": "reconnects",
+                "status": "pass",
+                "output": "diagnostic reconnect counter",
+                "time": _utc_now_iso(),
+            }
+        ]
 
     # ── Check 4: mirror:l2_tob_age_seconds — D-08 three-branch (GAP-200) ──
     # Phase 04 Plan 03: three-branch chain-truth gate. Inverse of Phase 03.1
@@ -592,15 +595,17 @@ def _build_l2_health_checks(
         # GAP-200: surface as a /health fail so the misconfiguration is
         # observable, not silent. Output names the missing field (no secret
         # material leaked — T-04-04 in plan threat model).
-        checks["mirror:l2_tob_age_seconds"] = [{
-            "componentId": "supabase-l2-mirror",
-            "componentType": "datastore",
-            "observedValue": None,
-            "observedUnit": "s",
-            "status": "fail",
-            "output": "mirror disabled by config (service_key empty)",
-            "time": _utc_now_iso(),
-        }]
+        checks["mirror:l2_tob_age_seconds"] = [
+            {
+                "componentId": "supabase-l2-mirror",
+                "componentType": "datastore",
+                "observedValue": None,
+                "observedUnit": "s",
+                "status": "fail",
+                "output": "mirror disabled by config (service_key empty)",
+                "time": _utc_now_iso(),
+            }
+        ]
         overall = _severity(overall, "fail")
     elif getattr(settings, "l2_mirror_enabled", False):
         # Case (c): both url + key set — existing age sub-check (unchanged
@@ -626,23 +631,24 @@ def _build_l2_health_checks(
                 else:
                     mirror_status = "pass"
                 mirror_output = (
-                    f"last mirror push {mirror_age:.0f}s ago "
-                    f"(warn>={warn_s}s, fail>={fail_s}s)"
+                    f"last mirror push {mirror_age:.0f}s ago (warn>={warn_s}s, fail>={fail_s}s)"
                 )
         except Exception as e:
             logger.warning(f"L2 mirror age check failed (fail-soft): {e!r}")
             mirror_status = "warn"
             mirror_age = None
             mirror_output = f"check error: {e!r}"
-        checks["mirror:l2_tob_age_seconds"] = [{
-            "componentId": "supabase-l2-mirror",
-            "componentType": "datastore",
-            "observedValue": round(mirror_age, 1) if mirror_age is not None else None,
-            "observedUnit": "s",
-            "status": mirror_status,
-            "output": mirror_output,
-            "time": _utc_now_iso(),
-        }]
+        checks["mirror:l2_tob_age_seconds"] = [
+            {
+                "componentId": "supabase-l2-mirror",
+                "componentType": "datastore",
+                "observedValue": round(mirror_age, 1) if mirror_age is not None else None,
+                "observedUnit": "s",
+                "status": mirror_status,
+                "output": mirror_output,
+                "time": _utc_now_iso(),
+            }
+        ]
         overall = _severity(overall, mirror_status)
     # else: case (a) — supabase_url also empty → no sub-check (correct,
     # operator opted out of Supabase entirely; reporting fail would be a
@@ -707,15 +713,17 @@ def _build_l2_health_checks(
                     f"(warn>={_CANDIDATES_FETCH_WARN_S}s, "
                     f"fail>={_CANDIDATES_FETCH_FAIL_S}s)"
                 )
-        checks["candidates:supabase_fetch_age_seconds"] = [{
-            "componentId": "l2-candidate-refresh",
-            "componentType": "candidate-set",
-            "observedValue": round(fetch_age, 1) if fetch_age is not None else None,
-            "observedUnit": "s",
-            "status": fetch_status,
-            "output": fetch_output,
-            "time": _utc_now_iso(),
-        }]
+        checks["candidates:supabase_fetch_age_seconds"] = [
+            {
+                "componentId": "l2-candidate-refresh",
+                "componentType": "candidate-set",
+                "observedValue": round(fetch_age, 1) if fetch_age is not None else None,
+                "observedUnit": "s",
+                "status": fetch_status,
+                "output": fetch_output,
+                "time": _utc_now_iso(),
+            }
+        ]
         overall = _severity(overall, fetch_status)
 
     # ── Check 5: chaos:ws_test_kill_flag (Phase 03.1-06 W-5 / Phase 04.1 G-03) ─
@@ -734,21 +742,24 @@ def _build_l2_health_checks(
     # somehow fails, /health degrades gracefully to omitting the sub-check).
     try:
         from polyarb.daemon.ws_consumer import get_ws_test_kill  # lazy, fail-soft
+
         _ws_kill_active = get_ws_test_kill()
     except Exception:  # noqa: BLE001 — fail-soft: missing import must not crash /health
         _ws_kill_active = False
     if _ws_kill_active:
-        checks["chaos:ws_test_kill_flag"] = [{
-            "componentId": "ws-consumer",
-            "componentType": "system",
-            "observedValue": True,  # IN-01 (04.1 review): bool, not string "1"
-            "status": "warn",
-            "output": (
-                "WS test-kill flag active (process-local) — CHAOS MODE; "
-                "should never appear in production"
-            ),
-            "time": _utc_now_iso(),
-        }]
+        checks["chaos:ws_test_kill_flag"] = [
+            {
+                "componentId": "ws-consumer",
+                "componentType": "system",
+                "observedValue": True,  # IN-01 (04.1 review): bool, not string "1"
+                "status": "warn",
+                "output": (
+                    "WS test-kill flag active (process-local) — CHAOS MODE; "
+                    "should never appear in production"
+                ),
+                "time": _utc_now_iso(),
+            }
+        ]
         overall = _severity(overall, "warn")
 
     # ── Check 6: process:rss_kb — G-04 (04.1) current-process RSS ───────────
@@ -759,6 +770,7 @@ def _build_l2_health_checks(
     # to warn, not a /health import crash.
     try:
         import psutil  # lazy — runtime dep (pyproject), degrade-soft if absent
+
         rss_kb = psutil.Process().memory_info().rss / 1024
         rss_status = "pass"
         rss_output = f"current-process RSS {rss_kb:.0f} kB (psutil.Process, not PID 1)"
@@ -766,15 +778,17 @@ def _build_l2_health_checks(
         rss_kb = None
         rss_status = "warn"
         rss_output = f"rss read unavailable (fail-soft): {e!r}"
-    checks["process:rss_kb"] = [{
-        "componentId": "l2-daemon",
-        "componentType": "system",
-        "observedValue": round(rss_kb, 1) if rss_kb is not None else None,
-        "observedUnit": "kB",
-        "status": rss_status,
-        "output": rss_output,
-        "time": _utc_now_iso(),
-    }]
+    checks["process:rss_kb"] = [
+        {
+            "componentId": "l2-daemon",
+            "componentType": "system",
+            "observedValue": round(rss_kb, 1) if rss_kb is not None else None,
+            "observedUnit": "kB",
+            "status": rss_status,
+            "output": rss_output,
+            "time": _utc_now_iso(),
+        }
+    ]
     # NOTE: intentionally NO `overall = _severity(overall, rss_status)` —
     # informational (D-04.4); even the fail-soft warn must not alarm /health.
 
@@ -788,6 +802,7 @@ def _build_l2_health_checks(
     # contract; <10 = under-filled (warn, not fail).
     try:
         from polyarb.observation import l3_promote
+
         l3_active_count = l3_promote.get_l3_active_count()
         l3_last_promote_at = l3_promote.get_last_promote_at_s()
         l3_last_book_levels_at = l3_promote.get_last_book_levels_write_at_s()
@@ -801,21 +816,21 @@ def _build_l2_health_checks(
     L3_EXPECTED_TOKEN_COUNT = 10  # D-05 N=5 markets × 2 (Yes+No)
     if l3_active_count < L3_EXPECTED_TOKEN_COUNT:
         l3_count_status = "warn"
-        l3_count_output = (
-            f"{l3_active_count}/{L3_EXPECTED_TOKEN_COUNT} (under-filled)"
-        )
+        l3_count_output = f"{l3_active_count}/{L3_EXPECTED_TOKEN_COUNT} (under-filled)"
     else:
         l3_count_status = "pass"
         l3_count_output = f"{l3_active_count}/{L3_EXPECTED_TOKEN_COUNT}"
-    checks["l3:active_count"] = [{
-        "componentId": "l3-promoter",
-        "componentType": "datastore",
-        "observedValue": l3_active_count,
-        "observedUnit": "tokens",
-        "status": l3_count_status,
-        "output": l3_count_output,
-        "time": _utc_now_iso(),
-    }]
+    checks["l3:active_count"] = [
+        {
+            "componentId": "l3-promoter",
+            "componentType": "datastore",
+            "observedValue": l3_active_count,
+            "observedUnit": "tokens",
+            "status": l3_count_status,
+            "output": l3_count_output,
+            "time": _utc_now_iso(),
+        }
+    ]
     # NOTE: intentionally NO `overall = _severity(...)` — informational
     # only (matches ws:subscribed_count pattern); under-fill on cold-start
     # must not alarm.
@@ -837,17 +852,17 @@ def _build_l2_health_checks(
         else:
             l3_promote_status = "pass"
         l3_promote_output = f"{l3_promote_age:.0f}s since last promote"
-    checks["l3:last_promote_at_s"] = [{
-        "componentId": "l3-promoter",
-        "componentType": "system",
-        "observedValue": (
-            round(l3_promote_age, 1) if l3_promote_age is not None else None
-        ),
-        "observedUnit": "s",
-        "status": l3_promote_status,
-        "output": l3_promote_output,
-        "time": _utc_now_iso(),
-    }]
+    checks["l3:last_promote_at_s"] = [
+        {
+            "componentId": "l3-promoter",
+            "componentType": "system",
+            "observedValue": (round(l3_promote_age, 1) if l3_promote_age is not None else None),
+            "observedUnit": "s",
+            "status": l3_promote_status,
+            "output": l3_promote_output,
+            "time": _utc_now_iso(),
+        }
+    ]
     overall = _severity(overall, l3_promote_status)
 
     # Sub-check 3: l3:last_book_levels_write_at_s — chain-truth age gate.
@@ -867,17 +882,17 @@ def _build_l2_health_checks(
         else:
             l3_book_status = "pass"
         l3_book_output = f"{l3_book_age:.0f}s since last l2_book_levels write"
-    checks["l3:last_book_levels_write_at_s"] = [{
-        "componentId": "l3-book-levels",
-        "componentType": "datastore",
-        "observedValue": (
-            round(l3_book_age, 1) if l3_book_age is not None else None
-        ),
-        "observedUnit": "s",
-        "status": l3_book_status,
-        "output": l3_book_output,
-        "time": _utc_now_iso(),
-    }]
+    checks["l3:last_book_levels_write_at_s"] = [
+        {
+            "componentId": "l3-book-levels",
+            "componentType": "datastore",
+            "observedValue": (round(l3_book_age, 1) if l3_book_age is not None else None),
+            "observedUnit": "s",
+            "status": l3_book_status,
+            "output": l3_book_output,
+            "time": _utc_now_iso(),
+        }
+    ]
     overall = _severity(overall, l3_book_status)
 
     # ── Phase 05.4: strict persisted-success evidence checks ──────────────

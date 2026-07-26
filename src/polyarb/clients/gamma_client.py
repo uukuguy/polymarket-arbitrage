@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -135,17 +135,45 @@ class GammaClient:
     # Fields the normalizer actually reads — everything else is dead weight
     # in memory. Polymarket events carry 50+ fields per object including
     # multi-KB description text and nested arrays we never use.
-    _MARKET_KEEP = frozenset({
-        "id", "conditionId", "slug", "question", "clobTokenIds",
-        "outcomePrices", "active", "closed", "negRisk", "negRiskMarketID",
-        "liquidity", "liquidityNum", "volume", "volumeNum",
-        "endDate", "end_date_iso", "_page_fetched_at_ms",
-    })
-    _EVENT_KEEP = frozenset({
-        "id", "slug", "title", "ticker", "active", "closed",
-        "liquidity", "liquidityNum", "volume", "volumeNum",
-        "endDate", "tags", "markets", "_page_fetched_at_ms",
-    })
+    _MARKET_KEEP = frozenset(
+        {
+            "id",
+            "conditionId",
+            "slug",
+            "question",
+            "clobTokenIds",
+            "outcomePrices",
+            "active",
+            "closed",
+            "negRisk",
+            "negRiskMarketID",
+            "liquidity",
+            "liquidityNum",
+            "volume",
+            "volumeNum",
+            "endDate",
+            "end_date_iso",
+            "_page_fetched_at_ms",
+        }
+    )
+    _EVENT_KEEP = frozenset(
+        {
+            "id",
+            "slug",
+            "title",
+            "ticker",
+            "active",
+            "closed",
+            "liquidity",
+            "liquidityNum",
+            "volume",
+            "volumeNum",
+            "endDate",
+            "tags",
+            "markets",
+            "_page_fetched_at_ms",
+        }
+    )
 
     # Plan 02-09 (D-23): streaming primary API ───────────────────────────
     # iter_active_markets is the memory-bounded path the orchestrator uses;
@@ -185,9 +213,7 @@ class GammaClient:
         ):
             markets = raw.get("markets")
             if isinstance(markets, list):
-                raw["markets"] = [
-                    {"id": m.get("id")} for m in markets if isinstance(m, dict)
-                ]
+                raw["markets"] = [{"id": m.get("id")} for m in markets if isinstance(m, dict)]
             yield raw
 
     async def fetch_all_active_events(self) -> list[dict]:
@@ -222,9 +248,7 @@ class GammaClient:
         items_yielded = 0
         PROGRESS_EVERY = 50
 
-        logger.info(
-            f"Gamma: starting streaming fetch of {label} (page_limit={self.PAGE_LIMIT})"
-        )
+        logger.info(f"Gamma: starting streaming fetch of {label} (page_limit={self.PAGE_LIMIT})")
 
         while True:
             page_params = {**params, "limit": self.PAGE_LIMIT, "offset": offset}
@@ -241,9 +265,7 @@ class GammaClient:
                     return
                 raise
             if not isinstance(page, list):
-                raise RuntimeError(
-                    f"Gamma {path} returned {type(page).__name__}, expected list"
-                )
+                raise RuntimeError(f"Gamma {path} returned {type(page).__name__}, expected list")
 
             # Phase 02 Plan 01: stamp per-page fetch time on each raw dict.
             page_fetched_at_ms = int(time.time() * 1000)
@@ -264,8 +286,7 @@ class GammaClient:
 
             if pages_fetched == 1 or pages_fetched % PROGRESS_EVERY == 0:
                 logger.info(
-                    f"Gamma: {label} page {pages_fetched} fetched "
-                    f"({items_yielded} {label} so far)"
+                    f"Gamma: {label} page {pages_fetched} fetched ({items_yielded} {label} so far)"
                 )
 
             # Short-page terminate check uses the raw response length, not

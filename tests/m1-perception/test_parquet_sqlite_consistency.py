@@ -8,6 +8,7 @@ Validates D-12 amendment: parquet row count == SQLite snapshots.market_count
 This closes the dual-source validation gap — previously only SQLite was
 checked, leaving silent parquet failures undetected (LEARNINGS L11/S5).
 """
+
 from __future__ import annotations
 
 import json
@@ -95,13 +96,12 @@ async def test_parquet_row_count_matches_sqlite_market_count(tmp_path: Path) -> 
     fake_gamma.__aenter__.return_value = fake_gamma
     fake_gamma.__aexit__.return_value = None
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
-        clob_inst.get_books = AsyncMock(
-            return_value=_books_as_objects(clob_data["books"])
-        )
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
             return_value={
                 "buy": clob_data["prices_buy"],
@@ -137,8 +137,7 @@ async def test_parquet_row_count_matches_sqlite_market_count(tmp_path: Path) -> 
         f"snapshots.market_count {sqlite_market_count} in SQLite"
     )
     assert parquet_row_count == sqlite_actual_rows, (
-        f"Parquet row count {parquet_row_count} != "
-        f"COUNT(*) FROM markets {sqlite_actual_rows}"
+        f"Parquet row count {parquet_row_count} != COUNT(*) FROM markets {sqlite_actual_rows}"
     )
     assert sqlite_market_count == sqlite_actual_rows, (
         f"snapshots.market_count {sqlite_market_count} != "
@@ -215,17 +214,25 @@ def test_streaming_sqlite_matches_legacy_sqlite(tmp_path: Path) -> None:
     store_legacy = SQLiteStore(tmp_path / "legacy.db")
     store_legacy.init_schema()
     legacy_id = store_legacy.write_snapshot(
-        taken_at_ms=1, finished_at_ms=2, mode="subset",
-        parquet_path="x.parquet", is_valid=True,
-        market_rows=rows, issues=[],
+        taken_at_ms=1,
+        finished_at_ms=2,
+        mode="subset",
+        parquet_path="x.parquet",
+        is_valid=True,
+        market_rows=rows,
+        issues=[],
     )
 
     store_stream = SQLiteStore(tmp_path / "stream.db")
     store_stream.init_schema()
     stream_id, count = store_stream.write_snapshot_streaming(
-        taken_at_ms=1, finished_at_ms=2, mode="subset",
-        parquet_path="x.parquet", is_valid=True,
-        market_rows=(r for r in rows), issues=[],
+        taken_at_ms=1,
+        finished_at_ms=2,
+        mode="subset",
+        parquet_path="x.parquet",
+        is_valid=True,
+        market_rows=(r for r in rows),
+        issues=[],
         batch_size=250,
     )
     assert count == 1500
@@ -242,12 +249,8 @@ def test_streaming_sqlite_matches_legacy_sqlite(tmp_path: Path) -> None:
         ).fetchone()[0]
         assert mc_a == mc_b == 1500
 
-        ids_a = sorted(
-            r[0] for r in con_a.execute("SELECT market_id FROM markets").fetchall()
-        )
-        ids_b = sorted(
-            r[0] for r in con_b.execute("SELECT market_id FROM markets").fetchall()
-        )
+        ids_a = sorted(r[0] for r in con_a.execute("SELECT market_id FROM markets").fetchall())
+        ids_b = sorted(r[0] for r in con_b.execute("SELECT market_id FROM markets").fetchall())
         assert ids_a == ids_b
     finally:
         con_a.close()

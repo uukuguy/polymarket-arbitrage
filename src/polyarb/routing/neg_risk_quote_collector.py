@@ -203,9 +203,7 @@ async def _cancel_task(task: asyncio.Task[object], *, suppress_errors: bool = Fa
         await task
 
 
-def _best_effort_fail(
-    quote_store: NegRiskQuoteStore, run_id: int, failure_reason: str
-) -> None:
+def _best_effort_fail(quote_store: NegRiskQuoteStore, run_id: int, failure_reason: str) -> None:
     try:
         quote_store.fail_run(run_id, failure_reason=failure_reason)
     except Exception:
@@ -220,9 +218,7 @@ def _deduplicated_legs(legs: tuple[UniverseLeg, ...]) -> tuple[UniverseLeg, ...]
     return tuple(by_token.values())
 
 
-def _index_books_by_token(
-    books: Sequence[Any], token_ids: list[str]
-) -> dict[str, Any]:
+def _index_books_by_token(books: Sequence[Any], token_ids: list[str]) -> dict[str, Any]:
     if not isinstance(books, (list, tuple)):
         raise QuoteCollectionIntegrityError()
     requested = set(token_ids)
@@ -269,9 +265,7 @@ def _terminal_quote_for_leg(leg: UniverseLeg, book: Any | None) -> PersistedQuot
             best[0],
             best[1],
         )
-    return _non_executable(
-        leg, "invalid-ask-price" if saw_invalid_price else "invalid-ask-size"
-    )
+    return _non_executable(leg, "invalid-ask-price" if saw_invalid_price else "invalid-ask-size")
 
 
 def _non_executable(leg: UniverseLeg, terminal_state: str) -> PersistedQuote:
@@ -293,9 +287,7 @@ def _field(value: Any, name: str) -> Any:
     return getattr(value, name, _MISSING)
 
 
-def _finite_number(
-    value: Any, *, lower: float, upper: float | None = None
-) -> float | None:
+def _finite_number(value: Any, *, lower: float, upper: float | None = None) -> float | None:
     if isinstance(value, bool) or value is _MISSING:
         return None
     try:

@@ -18,6 +18,7 @@ Error handling:
     (e.g. DB missing) → friendly stderr + typer.Exit(1). Never let raw
     tracebacks reach users (T-01.1-14 mitigation).
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -35,6 +36,7 @@ from polyarb.observation.diff import (
     resolve_snapshot_path,
 )
 from polyarb.observation.formatter import render_table, write_scan_parquet
+from polyarb.observation.overview import build_overview
 from polyarb.observation.recipes import BUILTIN_RECIPES
 from polyarb.observation.scanner import (
     list_all_recipes,
@@ -43,7 +45,6 @@ from polyarb.observation.scanner import (
 )
 from polyarb.observation.show import show_market
 from polyarb.observation.tracker import track_market
-from polyarb.observation.overview import build_overview
 from polyarb.observation.watchlist import check_alerts, load_watchlist
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -67,9 +68,7 @@ def scan(
     name: str = typer.Option(
         ..., "--name", help="Recipe name (builtin or from config/scan_recipes.yaml)"
     ),
-    yaml_path: Path = typer.Option(
-        _DEFAULT_YAML, "--yaml", help="User recipes yaml file path."
-    ),
+    yaml_path: Path = typer.Option(_DEFAULT_YAML, "--yaml", help="User recipes yaml file path."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     no_parquet: bool = typer.Option(
         False, "--no-parquet", help="Skip parquet write (terminal output only)."
@@ -146,9 +145,7 @@ def scans_purge_cmd(
 
 @app.command(name="compare-snapshots")
 def compare_snapshots_cmd(
-    from_id: int | None = typer.Option(
-        None, "--from", help="Snapshot ID (default: N-1)"
-    ),
+    from_id: int | None = typer.Option(None, "--from", help="Snapshot ID (default: N-1)"),
     to_id: int | None = typer.Option(None, "--to", help="Snapshot ID (default: N)"),
     limit: int = typer.Option(50, "--limit", help="Top N rows by drift magnitude"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -217,7 +214,7 @@ def show_market_cmd(
     slug: str = typer.Option(..., "--slug"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Full detail for a single market — bilingual, time-dim, neg-risk siblings, 5-snapshot history."""
+    """Show bilingual, time, neg-risk sibling, and five-snapshot market detail."""
     from rich.console import Console
 
     _setup_logger(verbose)
@@ -239,13 +236,18 @@ def show_market_cmd(
         f"mid={m.get('mid_price')}  "
         f"bid={m.get('best_bid_price')}  "
         f"ask={m.get('best_ask_price')}  "
-        f"spread={float(m.get('best_ask_price', 0) or 0) - float(m.get('best_bid_price', 0) or 0):.4f}"
+        "spread="
+        f"{float(m.get('best_ask_price', 0) or 0) - float(m.get('best_bid_price', 0) or 0):.4f}"
     )
-    console.print(f"[cyan]neg_risk:[/cyan] {m.get('neg_risk')}  market_id={m.get('neg_risk_market_id')}  event_id={m.get('event_id')}")
+    console.print(
+        f"[cyan]neg_risk:[/cyan] {m.get('neg_risk')}  "
+        f"market_id={m.get('neg_risk_market_id')}  event_id={m.get('event_id')}"
+    )
 
     if result["neg_risk_siblings"]:
         console.rule("[dim]Neg-risk 同组兄弟[/dim]")
         import pandas as pd
+
         render_table(
             pd.DataFrame(result["neg_risk_siblings"]),
             title="neg-risk siblings",
@@ -258,9 +260,14 @@ def show_market_cmd(
             recent,
             title=f"recent history: {slug}",
             columns=(
-                "taken_at_ms", "snapshot_id", "mid_price",
-                "best_bid_price", "best_ask_price", "spread",
-                "liquidity_usd", "volume_usd",
+                "taken_at_ms",
+                "snapshot_id",
+                "mid_price",
+                "best_bid_price",
+                "best_ask_price",
+                "spread",
+                "liquidity_usd",
+                "volume_usd",
             ),
         )
 
@@ -284,14 +291,16 @@ def watchlist_cmd(
     entries = load_watchlist(path)
     if not entries:
         typer.echo(
-            "watchlist is empty. Copy watchlist.yaml.example → watchlist.yaml "
-            "and add markets.", err=True
+            "watchlist is empty. Copy watchlist.yaml.example → watchlist.yaml and add markets.",
+            err=True,
         )
         raise typer.Exit(1)
 
     settings = load_settings()
     import sqlite3
+
     import pandas as pd
+
     con = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
     try:
         slugs = [e.slug for e in entries]
@@ -310,26 +319,43 @@ def watchlist_cmd(
     for e in entries:
         r = slug_map.get(e.slug)
         if r is None:
-            rows_out.append({
-                "slug": e.slug, "alert": e.alert_when or "-",
-                "question": "(not in DB)", "mid_price": None,
-                "best_bid_price": None, "best_ask_price": None,
-                "liquidity_usd": None, "volume_usd": None,
-            })
+            rows_out.append(
+                {
+                    "slug": e.slug,
+                    "alert": e.alert_when or "-",
+                    "question": "(not in DB)",
+                    "mid_price": None,
+                    "best_bid_price": None,
+                    "best_ask_price": None,
+                    "liquidity_usd": None,
+                    "volume_usd": None,
+                }
+            )
         else:
-            rows_out.append({
-                "slug": r[0], "alert": e.alert_when or "-",
-                "question": r[1], "mid_price": r[2],
-                "best_bid_price": r[3], "best_ask_price": r[4],
-                "liquidity_usd": r[5], "volume_usd": r[6],
-            })
+            rows_out.append(
+                {
+                    "slug": r[0],
+                    "alert": e.alert_when or "-",
+                    "question": r[1],
+                    "mid_price": r[2],
+                    "best_bid_price": r[3],
+                    "best_ask_price": r[4],
+                    "liquidity_usd": r[5],
+                    "volume_usd": r[6],
+                }
+            )
 
     render_table(
         pd.DataFrame(rows_out),
         title="watchlist",
         columns=(
-            "slug", "alert", "mid_price", "best_bid_price",
-            "best_ask_price", "liquidity_usd", "volume_usd",
+            "slug",
+            "alert",
+            "mid_price",
+            "best_bid_price",
+            "best_ask_price",
+            "liquidity_usd",
+            "volume_usd",
         ),
     )
     typer.echo(f"OK | watchlist={len(entries)} entries")
@@ -448,9 +474,7 @@ def overview_cmd(
             pct = f"{d['count'] / total * 100:.1f}%" if total > 0 else "—"
             time_table.add_row(d["bucket"], f"{d['count']:,}", pct)
         console.print(time_table)
-        near_end = next(
-            (d["count"] for d in data.time_distribution if d["bucket"] == "< 24h"), 0
-        )
+        near_end = next((d["count"] for d in data.time_distribution if d["bucket"] == "< 24h"), 0)
         if near_end > 0:
             console.print(
                 f"  -> [bold]{near_end}[/bold] markets resolving within 24h. "
@@ -476,9 +500,7 @@ def overview_cmd(
                 f"[{drift_color}]{m['drift']:+.4f}[/{drift_color}]",
             )
         console.print(mover_table)
-        console.print(
-            "  -> Run [bold]make compare-snapshots[/bold] for full drift details"
-        )
+        console.print("  -> Run [bold]make compare-snapshots[/bold] for full drift details")
     else:
         console.print("  (need at least 2 snapshots to compute drift)")
 
@@ -486,10 +508,7 @@ def overview_cmd(
     console.rule("[bold cyan]翻译覆盖[/bold cyan]")
     tc = data.translation_coverage
     if tc["total_markets"] > 0:
-        console.print(
-            f"  {tc['translated']:,} / {tc['total_markets']:,} translated "
-            f"({tc['pct']}%)"
-        )
+        console.print(f"  {tc['translated']:,} / {tc['total_markets']:,} translated ({tc['pct']}%)")
         if tc["pct"] < 50:
             console.print(
                 "  [yellow]-> Coverage low. Run [bold]make translate-pending FORCE=1[/bold]"

@@ -15,6 +15,7 @@ N=5 markets × 2 Yes+No tokens). active_count < 10 → status=warn,
 informational only (does NOT bump overall). last_promote_at_s + book_levels
 DO bump overall when stale.
 """
+
 from __future__ import annotations
 
 import os
@@ -34,11 +35,7 @@ os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 
 
 HEALTH_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "polyarb"
-    / "http"
-    / "l2_health.py"
+    Path(__file__).resolve().parents[2] / "src" / "polyarb" / "http" / "l2_health.py"
 )
 
 
@@ -239,7 +236,7 @@ def test_health_l3_subchecks_chain_truth_no_config_gate() -> None:
 
     # Find the L3 sub-check region (between the L3 D-08 marker comment and
     # the `return checks, overall` line). All three checks must live here.
-    region_start = text.find('# ── Phase 05 Plan 04 D-08')
+    region_start = text.find("# ── Phase 05 Plan 04 D-08")
     assert region_start >= 0, "L3 sub-check region marker missing"
     region_end = text.find("return checks, overall", region_start)
     assert region_end >= 0
@@ -258,7 +255,7 @@ def test_health_l3_subchecks_chain_truth_no_config_gate() -> None:
     #   - settings.l3_..._enabled
     forbidden_patterns = [
         r'getattr\(\s*settings\s*,\s*["\']l3[_a-z]*enabled["\']',
-        r'settings\.l3[_a-z]*enabled',
+        r"settings\.l3[_a-z]*enabled",
     ]
     for pat in forbidden_patterns:
         m = re.search(pat, region)
@@ -279,7 +276,7 @@ def test_health_l3_subchecks_use_chain_truth_getters() -> None:
     """The L3 region must call the three getters directly, not read the
     module attributes — getters are the chain-truth interface."""
     text = HEALTH_MODULE_PATH.read_text()
-    region_start = text.find('# ── Phase 05 Plan 04 D-08')
+    region_start = text.find("# ── Phase 05 Plan 04 D-08")
     region_end = text.find("return checks, overall", region_start)
     region = text[region_start:region_end]
 
@@ -362,9 +359,7 @@ def _seed_runtime(
     from polyarb.observation.l3_evidence import WsMembershipSnapshot
 
     runtime = _runtime(now)
-    tokens = frozenset(
-        token for index in range(5) for token in (f"yes-{index}", f"no-{index}")
-    )
+    tokens = frozenset(token for index in range(5) for token in (f"yes-{index}", f"no-{index}"))
     runtime.update_membership(
         WsMembershipSnapshot(
             generation=7,
@@ -448,8 +443,7 @@ def test_strict_l3_health_uses_locked_age_boundaries(
     now = datetime.now(UTC)
     minimum_market_age = max(sample_age_s + 1, 12)
     ages = tuple(
-        (minimum_market_age, minimum_market_age + 1, minimum_market_age + 2)
-        for _ in range(5)
+        (minimum_market_age, minimum_market_age + 1, minimum_market_age + 2) for _ in range(5)
     )
     runtime = _seed_runtime(
         now,
@@ -624,11 +618,7 @@ def test_strict_endpoint_returns_503_while_healthz_remains_200() -> None:
 def test_health_and_sampler_never_read_consumer_membership_directly() -> None:
     health_source = HEALTH_MODULE_PATH.read_text()
     sampler_source = (
-        Path(__file__).resolve().parents[2]
-        / "src"
-        / "polyarb"
-        / "observation"
-        / "l3_sampler.py"
+        Path(__file__).resolve().parents[2] / "src" / "polyarb" / "observation" / "l3_sampler.py"
     ).read_text()
 
     assert ".l3_membership_snapshot" not in health_source

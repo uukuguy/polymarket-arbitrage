@@ -73,10 +73,7 @@ def test_tracked_state_is_resumable_and_best_effort() -> None:
     by_id = {item["id"]: item for item in hypotheses["hypotheses"]}
     assert by_id["H-001"]["status"] == "confirmed"
     assert by_id["H-001"]["results"]
-    assert all(
-        item["status"] in {"pending", "confirmed", "falsified"}
-        for item in by_id.values()
-    )
+    assert all(item["status"] in {"pending", "confirmed", "falsified"} for item in by_id.values())
     assert isinstance(session["session"], str)
     assert session["session"].strip()
     assert session["last_cycle"] == len(runs)
@@ -122,9 +119,7 @@ def test_push_creates_local_artifact_without_external_submission(tmp_path: Path)
             }
         )
     )
-    (tmp_path / "local-eval.json").write_text(
-        json.dumps({"total": 100.0, "subscores": {}})
-    )
+    (tmp_path / "local-eval.json").write_text(json.dumps({"total": 100.0, "subscores": {}}))
 
     completed = subprocess.run(
         ["bash", "tools/climb/push.sh", str(tmp_path)],

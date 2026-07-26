@@ -51,9 +51,7 @@ from polyarb.snapshot.orchestrator import run_snapshot
     strict=False,
 )
 @pytest.mark.asyncio
-async def test_streaming_run_under_memory_budget(
-    tmp_path: Path, gamma_payload_factory
-) -> None:
+async def test_streaming_run_under_memory_budget(tmp_path: Path, gamma_payload_factory) -> None:
     make_realistic_market, make_realistic_event = gamma_payload_factory
 
     # 20k markets in 200 pages of 100 (mirrors PAGE_LIMIT=100); 5k events.
@@ -83,6 +81,7 @@ async def test_streaming_run_under_memory_budget(
     # issues that aren't part of the real production working set). This mirrors
     # what production data looks like — most target tokens DO have books.
     from types import SimpleNamespace
+
     from polyarb.clients import clob_client
 
     async def _mock_books(self, token_ids, cache=None):  # noqa: ARG001
@@ -104,6 +103,7 @@ async def test_streaming_run_under_memory_budget(
         }
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=False) as router:
+
         def _markets_side_effect(request):
             offset = int(request.url.params.get("offset", "0"))
             limit = int(request.url.params.get("limit", "100"))
@@ -117,9 +117,10 @@ async def test_streaming_run_under_memory_budget(
         router.get("/markets").mock(side_effect=_markets_side_effect)
         router.get("/events").mock(side_effect=_events_side_effect)
 
-        with patch.object(clob_client.ClobReaderClient, "get_books", _mock_books), \
-             patch.object(clob_client.ClobReaderClient, "get_prices_buy_sell", _mock_prices):
-
+        with (
+            patch.object(clob_client.ClobReaderClient, "get_books", _mock_books),
+            patch.object(clob_client.ClobReaderClient, "get_prices_buy_sell", _mock_prices),
+        ):
             proc = psutil.Process(os.getpid())
             baseline_rss = proc.memory_info().rss
             peak = [baseline_rss]
@@ -217,6 +218,7 @@ async def test_streaming_no_raw_markets_accumulation_smoke(
     )
 
     from types import SimpleNamespace
+
     from polyarb.clients import clob_client
 
     async def _mock_books(self, token_ids, cache=None):  # noqa: ARG001
@@ -236,6 +238,7 @@ async def test_streaming_no_raw_markets_accumulation_smoke(
         }
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=False) as router:
+
         def _markets_side_effect(request):
             offset = int(request.url.params.get("offset", "0"))
             limit = int(request.url.params.get("limit", "100"))
@@ -249,8 +252,10 @@ async def test_streaming_no_raw_markets_accumulation_smoke(
         router.get("/markets").mock(side_effect=_markets_side_effect)
         router.get("/events").mock(side_effect=_events_side_effect)
 
-        with patch.object(clob_client.ClobReaderClient, "get_books", _mock_books),              patch.object(clob_client.ClobReaderClient, "get_prices_buy_sell", _mock_prices):
-
+        with (
+            patch.object(clob_client.ClobReaderClient, "get_books", _mock_books),
+            patch.object(clob_client.ClobReaderClient, "get_prices_buy_sell", _mock_prices),
+        ):
             proc = psutil.Process(os.getpid())
             baseline_rss = proc.memory_info().rss
             peak = [baseline_rss]
@@ -289,4 +294,3 @@ async def test_streaming_no_raw_markets_accumulation_smoke(
                 "regressed into the orchestrator. Investigate before merging."
             )
             assert result.is_valid
-

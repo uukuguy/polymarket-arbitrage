@@ -5,6 +5,7 @@ Plan 03 Task 2 — covers:
 - write_scan_parquet atomic (tmp + os.replace) / empty skip / path layout
 - CLI smoke (typer.testing.CliRunner) for cli_observation.py
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -23,7 +24,6 @@ from polyarb.observation.formatter import (
     write_scan_parquet,
 )
 from polyarb.storage.schemas import DDL
-
 
 runner = CliRunner(mix_stderr=False)
 
@@ -103,9 +103,7 @@ def test_render_table_does_not_interpret_rich_markup(
     """rich-style markup `[red]X[/red]` in user data is rendered literally,
     not as styling. add_row defaults to interpreting markup; we explicitly
     pass safe strings only — and column overflow='fold' is text-mode."""
-    df = pd.DataFrame(
-        [{"slug": "a", "question": "[red]X[/red]", "liquidity_usd": 100}]
-    )
+    df = pd.DataFrame([{"slug": "a", "question": "[red]X[/red]", "liquidity_usd": 100}])
     render_table(df, title="markup-test")
     out = capsys.readouterr().out
     # The literal `[red]X[/red]` substring is present
@@ -113,9 +111,7 @@ def test_render_table_does_not_interpret_rich_markup(
 
 
 def test_render_table_explicit_columns_arg(capsys: pytest.CaptureFixture) -> None:
-    df = pd.DataFrame(
-        [{"slug": "a", "question": "Q", "liquidity_usd": 100, "extra": "skip-me"}]
-    )
+    df = pd.DataFrame([{"slug": "a", "question": "Q", "liquidity_usd": 100, "extra": "skip-me"}])
     render_table(df, title="cols-test", columns=("slug", "extra"))
     out = capsys.readouterr().out
     assert "slug" in out
@@ -256,9 +252,7 @@ def seeded_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             liquidity_threshold_usd=1.0,
         )
 
-    monkeypatch.setattr(
-        "polyarb.cli_observation.load_settings", _fake_load_settings
-    )
+    monkeypatch.setattr("polyarb.cli_observation.load_settings", _fake_load_settings)
     return db_path
 
 
@@ -277,9 +271,7 @@ def test_cli_list_recipes_lists_all_six_builtins(seeded_db: Path) -> None:
         assert f"[builtin] {name}" in result.stdout
 
 
-def test_cli_scan_runs_thick_but_slippery(
-    seeded_db: Path, tmp_path: Path
-) -> None:
+def test_cli_scan_runs_thick_but_slippery(seeded_db: Path, tmp_path: Path) -> None:
     """Run the thick-but-slippery recipe — fixture has 1 matching market (M1
     has liq 200000 + spread 0.15)."""
     scans = tmp_path / "scans"
@@ -305,9 +297,7 @@ def test_cli_scan_unknown_recipe_exits_1(seeded_db: Path) -> None:
     assert "unknown recipe" in result.stderr
 
 
-def test_cli_scan_writes_parquet_to_scans_root(
-    seeded_db: Path, tmp_path: Path
-) -> None:
+def test_cli_scan_writes_parquet_to_scans_root(seeded_db: Path, tmp_path: Path) -> None:
     scans = tmp_path / "scans"
     result = runner.invoke(
         obs_app,

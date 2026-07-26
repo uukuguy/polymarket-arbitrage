@@ -19,6 +19,7 @@ app.state stashes scheduler + sqlite_store + settings for route handlers.
 
 Source: starlette.io (RESEARCH.md §9 lines 1372-1398)
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -86,8 +87,8 @@ def create_app(
         Route("/healthz", healthz, methods=["GET"]),
         Route("/arbitrage/opportunities", opportunities, methods=["GET"]),
         Route("/scan", scan, methods=["POST"]),
-        Route("/control/unpause", unpause, methods=["POST"]),       # D-03 Phase 02.1
-        Route("/control/pause", pause, methods=["POST"]),           # stub 501, Phase 03+ 填实现
+        Route("/control/unpause", unpause, methods=["POST"]),  # D-03 Phase 02.1
+        Route("/control/pause", pause, methods=["POST"]),  # stub 501, Phase 03+ 填实现
         Route("/control/status", control_status, methods=["GET"]),  # stub 501, Phase 03+ 填实现
     ]
 

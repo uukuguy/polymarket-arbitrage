@@ -35,6 +35,7 @@ Threat model carry-over (T-03-06-04/-05):
 - push_trades uses on_conflict='trade_hash' so duplicate inserts during
   backfill replay are silently dropped (no log spam, no UniqueViolation).
 """
+
 from __future__ import annotations
 
 import time as _time
@@ -207,9 +208,7 @@ class L2SupabaseMirror:
             self._refresh_freshness_cache()
             return True
         except Exception as e:  # noqa: BLE001 — fail-soft per D-12
-            logger.error(
-                f"l2-mirror push_top_of_book failed rows={len(rows)}: {str(e)[:200]}"
-            )
+            logger.error(f"l2-mirror push_top_of_book failed rows={len(rows)}: {str(e)[:200]}")
             sentry_sdk.add_breadcrumb(
                 category="l2-mirror",
                 level="warning",
@@ -254,13 +253,11 @@ class L2SupabaseMirror:
             # a module-init cycle (l3_promote may itself import storage in a
             # future plan; deferring to call-time keeps this resilient).
             from polyarb.observation import l3_promote
+
             l3_promote._last_book_levels_write_at_s = _time.time()
             return True
         except Exception as e:  # noqa: BLE001 — fail-soft per D-12
-            logger.error(
-                f"l2-mirror push_book_levels failed rows={len(rows)}: "
-                f"{str(e)[:200]}"
-            )
+            logger.error(f"l2-mirror push_book_levels failed rows={len(rows)}: {str(e)[:200]}")
             sentry_sdk.add_breadcrumb(
                 category="l2-mirror",
                 level="warning",
@@ -286,9 +283,7 @@ class L2SupabaseMirror:
         try:
             narrow = _project(rows, _NARROW_TRADE_COLUMNS)
             for chunk in _chunk(narrow, _CHUNK_SIZE):
-                self._client.table("l2_trades").upsert(
-                    chunk, on_conflict="trade_hash"
-                ).execute()
+                self._client.table("l2_trades").upsert(chunk, on_conflict="trade_hash").execute()
             sentry_sdk.add_breadcrumb(
                 category="l2-mirror",
                 level="info",
@@ -301,9 +296,7 @@ class L2SupabaseMirror:
             self._refresh_freshness_cache()
             return True
         except Exception as e:  # noqa: BLE001 — fail-soft per D-12
-            logger.error(
-                f"l2-mirror push_trades failed rows={len(rows)}: {str(e)[:200]}"
-            )
+            logger.error(f"l2-mirror push_trades failed rows={len(rows)}: {str(e)[:200]}")
             sentry_sdk.add_breadcrumb(
                 category="l2-mirror",
                 level="warning",
@@ -338,9 +331,7 @@ class L2SupabaseMirror:
             logger.info(f"l2-mirror: inserted {len(rows)} candidate rows")
             return True
         except Exception as e:  # noqa: BLE001 — fail-soft per D-12
-            logger.error(
-                f"l2-mirror upsert_candidates failed rows={len(rows)}: {str(e)[:200]}"
-            )
+            logger.error(f"l2-mirror upsert_candidates failed rows={len(rows)}: {str(e)[:200]}")
             sentry_sdk.add_breadcrumb(
                 category="l2-mirror",
                 level="warning",
@@ -360,9 +351,7 @@ class L2SupabaseMirror:
             )
             return list(response.data or [])
         except Exception as e:  # noqa: BLE001 — fail-soft per D-12
-            logger.error(
-                f"l2-mirror fetch_active_candidates failed: {str(e)[:200]}"
-            )
+            logger.error(f"l2-mirror fetch_active_candidates failed: {str(e)[:200]}")
             sentry_sdk.add_breadcrumb(
                 category="l2-mirror",
                 level="warning",
@@ -391,8 +380,7 @@ class L2SupabaseMirror:
                 return False
             desired_by_key[key] = row
         active_keys = {
-            (str(row.get("asset_id", "")), str(row.get("recipe_name", "")))
-            for row in active_rows
+            (str(row.get("asset_id", "")), str(row.get("recipe_name", ""))) for row in active_rows
         }
 
         try:
@@ -431,9 +419,7 @@ class L2SupabaseMirror:
             )
             return True
         except Exception as e:  # noqa: BLE001 — fail-soft per D-12
-            logger.error(
-                f"l2-mirror reconcile_candidates failed: {str(e)[:200]}"
-            )
+            logger.error(f"l2-mirror reconcile_candidates failed: {str(e)[:200]}")
             sentry_sdk.add_breadcrumb(
                 category="l2-mirror",
                 level="warning",

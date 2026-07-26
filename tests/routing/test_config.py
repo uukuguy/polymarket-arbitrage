@@ -3,6 +3,7 @@
 Each config class is now a pydantic BaseSettings with POLYARB_ prefix.
 Tests must isolate env state since BaseSettings reads os.environ at import time.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -85,14 +86,10 @@ class TestPositionConfigEnvOverride:
         cfg = PositionConfig(stop_loss_pct=3.0)
         assert cfg.stop_loss_pct == 3.0
 
-    def test_position_db_path_env_and_explicit_precedence(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_position_db_path_env_and_explicit_precedence(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("POLYARB_POSITION_DB_PATH", "data/from-env.db")
         assert PositionConfig().db_path == Path("data/from-env.db")
-        assert PositionConfig(db_path=Path("data/explicit.db")).db_path == Path(
-            "data/explicit.db"
-        )
+        assert PositionConfig(db_path=Path("data/explicit.db")).db_path == Path("data/explicit.db")
 
 
 class TestAppConfig:

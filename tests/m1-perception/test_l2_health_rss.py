@@ -10,6 +10,7 @@ Invariants:
 - Fail-soft: psutil failure → status "warn" + None observedValue, no /health crash
 - process:rss_kb NEVER escalates overall to "fail" (informational — D-04.4)
 """
+
 from __future__ import annotations
 
 import time
@@ -39,6 +40,7 @@ def _call_build_checks(**kwargs: Any):
 # Test 1: process:rss_kb present with correct shape when psutil is available
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_rss_kb_present_with_correct_shape():
     """process:rss_kb sub-check has correct shape when psutil is importable."""
     checks, _overall = _call_build_checks()
@@ -62,6 +64,7 @@ def test_rss_kb_present_with_correct_shape():
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 2: uses psutil.Process() with NO pid argument (current-process fix)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_rss_reads_current_process_not_pid1():
     """process:rss_kb uses psutil.Process() with no arg — current process, not PID 1."""
@@ -96,6 +99,7 @@ def test_rss_reads_current_process_not_pid1():
 # Test 3: fail-soft — psutil import/read failure degrades to warn + None
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_rss_fail_soft_when_psutil_raises():
     """If psutil read raises, sub-check degrades to status='warn', observedValue=None."""
 
@@ -108,9 +112,7 @@ def test_rss_fail_soft_when_psutil_raises():
 
     assert "process:rss_kb" in checks
     entry = checks["process:rss_kb"][0]
-    assert entry["status"] == "warn", (
-        f"Expected 'warn' on psutil failure, got {entry['status']!r}"
-    )
+    assert entry["status"] == "warn", f"Expected 'warn' on psutil failure, got {entry['status']!r}"
     assert entry["observedValue"] is None, (
         f"Expected None observedValue on failure, got {entry['observedValue']!r}"
     )
@@ -121,6 +123,7 @@ def test_rss_fail_soft_when_psutil_raises():
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 4: process:rss_kb NEVER escalates overall to "fail" (informational)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_rss_warn_does_not_escalate_overall_to_fail():
     """Even when rss sub-check returns warn (fail-soft path), overall must not become 'fail'."""

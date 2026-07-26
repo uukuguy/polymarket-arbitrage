@@ -1,4 +1,5 @@
 """Process contract for the mutation-free L3 promoter diagnostic."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
@@ -20,8 +21,9 @@ async def test_dry_run_requests_plan_only_and_prints_proposed_state(capsys) -> N
         }
     )
 
-    with patch("polyarb.config.load_settings", return_value=settings), patch(
-        "polyarb.observation.l3_promote.promote_run", promote
+    with (
+        patch("polyarb.config.load_settings", return_value=settings),
+        patch("polyarb.observation.l3_promote.promote_run", promote),
     ):
         result = await l3_promote_dry_run._main()
 

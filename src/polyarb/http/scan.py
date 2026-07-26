@@ -16,6 +16,7 @@ Security:
 
 Source: RESEARCH.md §9 lines 1402-1465 (adapted)
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -72,7 +73,9 @@ async def scan(request: Request) -> JSONResponse:
 
     # Input validation: recipe_name must be str ≤ 64 chars
     if not isinstance(recipe_name, str) or len(recipe_name) > 64:
-        return JSONResponse({"error": "invalid recipe_name: must be str ≤ 64 chars"}, status_code=400)
+        return JSONResponse(
+            {"error": "invalid recipe_name: must be str ≤ 64 chars"}, status_code=400
+        )
 
     settings = request.app.state.settings
 
@@ -101,7 +104,9 @@ async def scan(request: Request) -> JSONResponse:
         return JSONResponse({"error": f"unknown recipe: {e}"}, status_code=404)
     except ValueError as e:
         # Layer 2/3/4 validation failure (forbidden token / order_by whitelist / limit range)
-        return JSONResponse({"error": f"Layer 2/3/4 validation failed: {str(e)[:200]}"}, status_code=400)
+        return JSONResponse(
+            {"error": f"Layer 2/3/4 validation failed: {str(e)[:200]}"}, status_code=400
+        )
     except sqlite3.OperationalError as e:
         return JSONResponse({"error": f"database error: {str(e)[:200]}"}, status_code=500)
 

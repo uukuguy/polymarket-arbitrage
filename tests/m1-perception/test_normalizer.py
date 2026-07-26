@@ -11,10 +11,10 @@ Phase 1.1 Amendment 01:
   - normalize_market accepts market_to_event_map → writes event_id column
   - new normalize_events: Gamma /events raw → events + event_tags + reverse map
 """
+
 from __future__ import annotations
 
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
-
 
 # Expected output keys (everything in MARKETS_COLUMN_ORDER except snapshot_id).
 # Phase 1.1 Amendment 01: -category -tags +event_id
@@ -263,9 +263,7 @@ def test_normalize_with_event_map_assigns_event_id() -> None:
 
 def test_normalize_with_event_map_missing_market_returns_none_event_id() -> None:
     """Market not in the map → event_id None (orphan markets are tolerated)."""
-    out = normalize_market(
-        make_raw(id="M-orphan"), market_to_event_map={"M-other": "EV-1"}
-    )
+    out = normalize_market(make_raw(id="M-orphan"), market_to_event_map={"M-other": "EV-1"})
     assert out is not None
     assert out["event_id"] is None
 
@@ -295,12 +293,9 @@ def make_event(idx: int, n_markets: int = 2, n_tags: int = 3) -> dict:
         "volume": 6789.0,
         "endDate": "2026-12-31T00:00:00Z",
         "tags": [
-            {"id": str(100 + j), "label": f"Tag{j}", "slug": f"tag{j}"}
-            for j in range(n_tags)
+            {"id": str(100 + j), "label": f"Tag{j}", "slug": f"tag{j}"} for j in range(n_tags)
         ],
-        "markets": [
-            {"id": str(540000 + idx * 10 + k)} for k in range(n_markets)
-        ],
+        "markets": [{"id": str(540000 + idx * 10 + k)} for k in range(n_markets)],
     }
 
 
@@ -310,8 +305,8 @@ def test_normalize_events_happy_path() -> None:
     events, event_tags, m2e = normalize_events(raw_events)
 
     assert len(events) == 3
-    assert len(event_tags) == 9   # 3 events × 3 tags each
-    assert len(m2e) == 6          # 3 events × 2 markets each
+    assert len(event_tags) == 9  # 3 events × 3 tags each
+    assert len(m2e) == 6  # 3 events × 2 markets each
 
     # Spot-check event row shape
     ev = events[0]
@@ -367,9 +362,9 @@ def test_normalize_events_skips_incomplete_tags() -> None:
     raw["tags"] = [
         {"id": "1", "label": "Good", "slug": "good"},
         {"id": "2", "label": None, "slug": "no-label"},  # incomplete
-        {"id": None, "label": "X", "slug": "no-id"},     # incomplete
-        {"id": "4", "label": "Y", "slug": ""},            # incomplete (empty slug)
-        "not-a-dict",                                     # garbage
+        {"id": None, "label": "X", "slug": "no-id"},  # incomplete
+        {"id": "4", "label": "Y", "slug": ""},  # incomplete (empty slug)
+        "not-a-dict",  # garbage
     ]
     _, event_tags, _ = normalize_events([raw])
     assert len(event_tags) == 1

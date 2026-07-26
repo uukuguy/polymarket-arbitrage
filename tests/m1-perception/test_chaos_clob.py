@@ -9,6 +9,7 @@ in asks/bids). The orchestrator's F-1 safe_float guard must:
 
 This mirrors RESEARCH §11 row "CLOB malformed book → F-1 _safe_float capture → DEGRADED".
 """
+
 from __future__ import annotations
 
 import os
@@ -35,6 +36,7 @@ _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 def _load_gamma() -> list[dict]:
     import json
+
     return json.loads((_FIXTURES_DIR / "gamma_sample.json").read_text())
 
 
@@ -60,6 +62,7 @@ def _make_fake_gamma(markets: list[dict]) -> object:
         async def _iter():
             for item in items:
                 yield item
+
         return _iter
 
     fake.iter_active_markets = _make_iter(markets)
@@ -90,6 +93,7 @@ async def test_clob_malformed_book_captured_as_issue(tmp_path: Path) -> None:
 
     # Build a malformed book: asks is a string, not a list of {price, size} dicts
     import json
+
     yes_tid = json.loads(gamma_data[0]["clobTokenIds"])[0]
     malformed_book = SimpleNamespace(
         market=gamma_data[0]["conditionId"],
@@ -104,7 +108,10 @@ async def test_clob_malformed_book_captured_as_issue(tmp_path: Path) -> None:
             clob_inst = ClobMock.return_value
             clob_inst.get_books = AsyncMock(return_value=[malformed_book])
             clob_inst.get_prices_buy_sell = AsyncMock(
-                return_value={"buy": {yes_tid: {"BUY": "0.55"}}, "sell": {yes_tid: {"SELL": "0.56"}}}
+                return_value={
+                    "buy": {yes_tid: {"BUY": "0.55"}},
+                    "sell": {yes_tid: {"SELL": "0.56"}},
+                }
             )
 
             result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
@@ -115,7 +122,7 @@ async def test_clob_malformed_book_captured_as_issue(tmp_path: Path) -> None:
 
     # An unknown/F-1 issue must have been recorded
     con = sqlite3.connect(settings.db_path)
-    rows = con.execute(
+    _rows = con.execute(
         "SELECT layer, category, detail FROM validation_issues WHERE layer = 4"
     ).fetchall()
     con.close()
@@ -142,6 +149,7 @@ async def test_clob_malformed_book_does_not_crash_orchestrator(tmp_path: Path) -
     fake_gamma = _make_fake_gamma(gamma_data)
 
     import json
+
     # All books have bids and asks as raw strings (completely broken)
     broken_books = []
     for mkt in gamma_data[:3]:

@@ -6,6 +6,7 @@ Plan 01-5 T4 — Coverage targets:
   - Missing config_path → defaults
   - F-3 path validator: db_path/parquet_root constrained to project root unless escape hatch
 """
+
 from __future__ import annotations
 
 import os
@@ -19,7 +20,6 @@ import pytest
 # inside specific tests to verify F-3 enforcement.
 from polyarb.config import Settings, load_settings
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # YAML loading happy paths
 # ─────────────────────────────────────────────────────────────────────────────
@@ -28,9 +28,7 @@ from polyarb.config import Settings, load_settings
 def test_load_settings_from_explicit_path(tmp_path: Path) -> None:
     yaml_path = tmp_path / "snap.yaml"
     yaml_path.write_text(
-        "gamma_url: https://yaml-host.test\n"
-        "liquidity_threshold_usd: 250.0\n"
-        "retry_attempts: 7\n"
+        "gamma_url: https://yaml-host.test\nliquidity_threshold_usd: 250.0\nretry_attempts: 7\n"
     )
     s = load_settings(yaml_path)
     assert s.gamma_url == "https://yaml-host.test"

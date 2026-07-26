@@ -309,17 +309,9 @@ async def test_sampling_market_state_uses_one_aggregate_query_and_closes(
     connection.fetch = AsyncMock(return_value=rows)
     connect = AsyncMock(return_value=connection)
     monkeypatch.setattr(store_module.asyncpg, "connect", connect)
-    token_ids = sorted(
-        {
-            token
-            for index in range(5)
-            for token in (f"yes-{index}", f"no-{index}")
-        }
-    )
+    token_ids = sorted({token for index in range(5) for token in (f"yes-{index}", f"no-{index}")})
 
-    result = await L3EvidenceStore(
-        "postgresql://secret"
-    ).fetch_sampling_market_state(token_ids)
+    result = await L3EvidenceStore("postgresql://secret").fetch_sampling_market_state(token_ids)
 
     assert result == tuple(SamplingMarketState(**row) for row in rows)
     fetch_calls = [call for call in connection.calls if call[0] == "fetch"]
@@ -483,9 +475,7 @@ async def test_store_reads_active_soak_mapping_lock_with_runtime_preflight(
         AsyncMock(return_value=connection),
     )
 
-    lock = await L3EvidenceStore(
-        "postgresql://secret"
-    ).fetch_active_soak_mapping_lock(
+    lock = await L3EvidenceStore("postgresql://secret").fetch_active_soak_mapping_lock(
         boot_id=boot_id,
         observed_at=t0,
     )
@@ -578,9 +568,7 @@ async def test_evidence_store_rejects_wrong_credential_topology_before_operation
     connection = _FakeConnection(authorization=MappingProxyType(authorization))
     monkeypatch.setattr(store_module.asyncpg, "connect", AsyncMock(return_value=connection))
 
-    assert not await L3EvidenceStore("postgresql://masked").append_boot(
-        _boot(datetime.now(UTC))
-    )
+    assert not await L3EvidenceStore("postgresql://masked").append_boot(_boot(datetime.now(UTC)))
 
     assert [call[0] for call in connection.calls] == ["fetchrow"]
     assert connection.closed
@@ -923,9 +911,7 @@ def postgres_dsns() -> Iterator[dict[str, str]]:
             "admin": admin_dsn,
             "daemon": _credential_dsn(admin_dsn, "daemon_login", "daemon-test-secret"),
             "service": _credential_dsn(admin_dsn, "service_login", "service-test-secret"),
-            "retention": _credential_dsn(
-                admin_dsn, "retention_login", "retention-test-secret"
-            ),
+            "retention": _credential_dsn(admin_dsn, "retention_login", "retention-test-secret"),
             "daemon_service": _credential_dsn(
                 admin_dsn, "daemon_service_login", "daemon-service-secret"
             ),
@@ -988,9 +974,7 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     assert await store.append_boot(boot)
     assert not await store.append_boot(boot)
     for seq, status in enumerate(PromoteStatus):
-        assert await store.append_promote_run(
-            _promote(boot.boot_id, now, seq=seq, status=status)
-        )
+        assert await store.append_promote_run(_promote(boot.boot_id, now, seq=seq, status=status))
     assert not await store.append_promote_run(_promote(boot.boot_id, now, seq=0))
     batch = _batch(boot.boot_id, now)
     assert await store.append_sample(batch)
@@ -1030,14 +1014,20 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     )
     admin = await asyncpg.connect(dsn=postgres_dsns["admin"])
     try:
-        assert await admin.fetchval(
-            "SELECT count(*) FROM l3_health_samples WHERE boot_id=$1 AND sample_seq=9",
-            boot.boot_id,
-        ) == 0
-        assert await admin.fetchval(
-            "SELECT count(*) FROM l3_market_samples WHERE boot_id=$1 AND sample_seq=9",
-            boot.boot_id,
-        ) == 0
+        assert (
+            await admin.fetchval(
+                "SELECT count(*) FROM l3_health_samples WHERE boot_id=$1 AND sample_seq=9",
+                boot.boot_id,
+            )
+            == 0
+        )
+        assert (
+            await admin.fetchval(
+                "SELECT count(*) FROM l3_market_samples WHERE boot_id=$1 AND sample_seq=9",
+                boot.boot_id,
+            )
+            == 0
+        )
         with pytest.raises(asyncpg.exceptions.CheckViolationError):
             await admin.execute(
                 "INSERT INTO l3_runtime_events "
@@ -1066,24 +1056,14 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
             [("yes-0", start), ("yes-0", end)],
         )
         await admin.executemany(
-            "INSERT INTO markets_latest (market_id, yes_token_id, no_token_id) "
-            "VALUES ($1,$2,$3)",
-            [
-                (f"market-{index}", f"yes-{index}", f"no-{index}")
-                for index in range(5)
-            ],
+            "INSERT INTO markets_latest (market_id, yes_token_id, no_token_id) VALUES ($1,$2,$3)",
+            [(f"market-{index}", f"yes-{index}", f"no-{index}") for index in range(5)],
         )
     finally:
         await admin.close()
 
     sampling_state = await store.fetch_sampling_market_state(
-        sorted(
-            {
-                token
-                for index in range(5)
-                for token in (f"yes-{index}", f"no-{index}")
-            }
-        )
+        sorted({token for index in range(5) for token in (f"yes-{index}", f"no-{index}")})
     )
     assert len(sampling_state) == 5
     assert sampling_state[0] == SamplingMarketState(
@@ -1095,9 +1075,7 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
         yes_ohlc_at=end,
     )
     assert all(
-        market.yes_book_at is None
-        and market.no_book_at is None
-        and market.yes_ohlc_at is None
+        market.yes_book_at is None and market.no_book_at is None and market.yes_ohlc_at is None
         for market in sampling_state[1:]
     )
 
@@ -1139,16 +1117,10 @@ async def test_real_postgres_appends_duplicates_atomicity_windows_and_bounds(
     assert window.book_coverage_counts["no-0"] == 1
     assert window.yes_ohlc_coverage_counts["yes-0"] == expected_ohlc_count
     assert all(
-        count == 0
-        for token, count in window.yes_ohlc_coverage_counts.items()
-        if token != "yes-0"
+        count == 0 for token, count in window.yes_ohlc_coverage_counts.items() if token != "yes-0"
     )
     assert "id" in window.raw_rows_by_table["l3_promote_runs"][0]
-    assert all(
-        "recorded_at" in rows[0]
-        for rows in window.raw_rows_by_table.values()
-        if rows
-    )
+    assert all("recorded_at" in rows[0] for rows in window.raw_rows_by_table.values() if rows)
     bounds = await store.retention_bounds()
     assert set(bounds.row_count_by_table) == {
         "l3_runtime_boots",

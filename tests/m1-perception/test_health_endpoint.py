@@ -4,6 +4,7 @@ Covers D-12 / D-16 — IETF draft-inadarei-api-health-check-06 compliance.
 Three-state health: pass (< 14h), warn (14-25h stale), fail (> 25h stale OR no snapshot).
 HTTP 200 for pass/warn, 503 for fail.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -11,13 +12,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-import pytest
 from starlette.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Helper: insert a snapshot row into a tmp SQLite DB
 # ---------------------------------------------------------------------------
+
 
 def _insert_snapshot(
     db_path: Path,
@@ -37,7 +37,9 @@ def _insert_snapshot(
     try:
         now_ms = int(time.time() * 1000)
         con.execute(
-            "INSERT INTO snapshots(taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes)"
+            "INSERT INTO snapshots("
+            "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes"
+            ")"
             " VALUES (?,?,?,?,?,?,?)",
             (taken_at_ms, now_ms, "subset", market_count, 1, "/tmp/dummy.parquet", status),
         )
@@ -134,6 +136,7 @@ def test_no_snapshot_returns_fail(
     """Empty DB (no snapshots) → status=fail, HTTP 503 (first deploy edge case)."""
     # db_path exists but has no snapshots — init schema only
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 

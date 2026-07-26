@@ -61,9 +61,7 @@ def test_position_separates_quantity_from_cash_cost_basis() -> None:
 def test_buy_lifecycle_reserves_cost_not_quantity() -> None:
     tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
 
-    assert tracker.open_position(
-        "m1", "c1", "BUY", "YES", price=0.5, quantity=100
-    )
+    assert tracker.open_position("m1", "c1", "BUY", "YES", price=0.5, quantity=100)
     position = tracker.open_positions()[0]
     assert tracker.balance == 950.0
     assert tracker.snapshot().max_exposure == 50.0
@@ -82,9 +80,7 @@ def test_buy_lifecycle_reserves_cost_not_quantity() -> None:
 def test_sell_lifecycle_uses_fully_collateralized_binary_short() -> None:
     tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
 
-    assert tracker.open_position(
-        "m1", "c1", "SELL", "YES", price=0.6, quantity=100
-    )
+    assert tracker.open_position("m1", "c1", "SELL", "YES", price=0.6, quantity=100)
     assert tracker.balance == 960.0
     assert tracker.snapshot().max_exposure == 40.0
 
@@ -98,9 +94,7 @@ def test_sell_lifecycle_uses_fully_collateralized_binary_short() -> None:
 
 def test_full_fill_compares_exact_quantity_and_preserves_state_on_mismatch() -> None:
     tracker = PositionTracker(PositionConfig(initial_balance=1000.0))
-    assert tracker.open_position(
-        "m1", "c1", "BUY", "YES", price=0.4, quantity=0.3
-    )
+    assert tracker.open_position("m1", "c1", "BUY", "YES", price=0.4, quantity=0.3)
 
     with pytest.raises(ValueError, match="partial fill"):
         tracker.close_position_with_fill(

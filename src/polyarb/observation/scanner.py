@@ -57,6 +57,7 @@ Amendment 01 note: the by-tag grouped path joins
 (via et.event_id = e.id). markets.category was deleted by amendment 01;
 event_tags.tag_label is the new tag surface.
 """
+
 from __future__ import annotations
 
 import re
@@ -68,7 +69,6 @@ import yaml
 from loguru import logger
 
 from polyarb.observation.recipes import BUILTIN_RECIPES, Recipe
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 2 — character-level blacklist (yaml path only; bypassed for trusted)
@@ -263,9 +263,7 @@ def load_yaml_recipes(yaml_path: Path) -> dict[str, Recipe]:
             logger.warning(f"yaml recipe {name!r}: body is not a dict, skipping")
             continue
         if "group_by" in body:
-            logger.warning(
-                f"yaml recipe {name!r}: group_by is builtin-only, dropping key"
-            )
+            logger.warning(f"yaml recipe {name!r}: group_by is builtin-only, dropping key")
             body = {k: v for k, v in body.items() if k != "group_by"}
         r = Recipe.from_yaml(name, body)
         # fail-fast strict validation (Layer 2/3/4 — Layer 1 only at execution time).
@@ -290,9 +288,7 @@ def list_all_recipes(yaml_path: Path | None = None) -> dict[str, Recipe]:
     if yaml_path is not None:
         for name, r in load_yaml_recipes(yaml_path).items():
             if name in BUILTIN_RECIPES:
-                logger.warning(
-                    f"yaml recipe {name!r} cannot override builtin, ignoring"
-                )
+                logger.warning(f"yaml recipe {name!r} cannot override builtin, ignoring")
                 continue
             merged[name] = r
     return merged

@@ -18,6 +18,7 @@ T4 wired `open_position`. T5 wires the rest of the lifecycle:
 - **Bug fix**: `PositionSnapshot.roi_pct` referenced a non-existent
   `self.snapshot_balance` field. Fixed to use `self.balance`.
 """
+
 from __future__ import annotations
 
 import json
@@ -196,12 +197,8 @@ class Fill:
         filled_size: int | float | str | Quantity | None = None,
     ) -> None:
         if filled_quantity is not None and filled_size is not None:
-            raise TypeError(
-                "provide filled_quantity, not both it and legacy filled_size"
-            )
-        raw_quantity = (
-            filled_quantity if filled_quantity is not None else filled_size
-        )
+            raise TypeError("provide filled_quantity, not both it and legacy filled_size")
+        raw_quantity = filled_quantity if filled_quantity is not None else filled_size
         if raw_quantity is None:
             raise TypeError("fill quantity is required")
         self.market_id = market_id
@@ -277,9 +274,7 @@ class PositionTracker:
         repository: PositionRepository | None = None,
     ) -> None:
         self.config = config or PositionConfig()
-        self.repository = repository or InMemoryPositionRepository(
-            self.config.initial_balance
-        )
+        self.repository = repository or InMemoryPositionRepository(self.config.initial_balance)
 
     def operation_receipt(self, operation_id: str) -> OperationReceipt | None:
         """Return the committed result for an immutable operation identity."""
@@ -296,8 +291,7 @@ class PositionTracker:
         if size_money.micros > state.balance_money.micros:
             return (
                 False,
-                f"Insufficient balance: need {size_money.to_float():.2f}, "
-                f"have {state.balance:.2f}",
+                f"Insufficient balance: need {size_money.to_float():.2f}, have {state.balance:.2f}",
             )
         total_exposure = self._exposure_money(state)
         requested_exposure = total_exposure + size_money
@@ -388,22 +382,17 @@ class PositionTracker:
         assert isinstance(result, bool)
         return result
 
-    def update(
-        self, legs: int, pnl: float, operation_id: str | None = None
-    ) -> None:
+    def update(self, legs: int, pnl: float, operation_id: str | None = None) -> None:
         """Legacy compatibility shim — `orchestrator.py` still calls it.
 
         Production T5+ should use `close_position_with_fill` instead. Kept
         here so the orchestrator's tests don't fail; flagged for removal
         in a follow-up task once the orchestrator is migrated.
         """
+
         def transition(state: PositionState) -> None:
-            state.realized_pnl_money = (
-                state.realized_pnl_money + Money.from_value(pnl)
-            )
-            logger.debug(
-                "Updated tracker (legacy path): +%d legs, PnL=%.2f", legs, pnl
-            )
+            state.realized_pnl_money = state.realized_pnl_money + Money.from_value(pnl)
+            logger.debug("Updated tracker (legacy path): +%d legs, PnL=%.2f", legs, pnl)
 
         self.repository.apply(
             self._operation_id(operation_id, "legacy-update", "account"),
@@ -412,9 +401,7 @@ class PositionTracker:
             transition,
         )
 
-    def update_prices(
-        self, prices: dict[str, float], operation_id: str | None = None
-    ) -> None:
+    def update_prices(self, prices: dict[str, float], operation_id: str | None = None) -> None:
         def transition(state: PositionState) -> None:
             for market_id, price in prices.items():
                 if market_id in state.open_positions:
@@ -440,6 +427,7 @@ class PositionTracker:
         size match). This primitive stays for explicit operator close (e.g.,
         `make close-arb market_id=... exit_price=...`).
         """
+
         def transition(state: PositionState) -> Money:
             pos = state.open_positions.pop(market_id, None)
             if pos is None:
@@ -448,9 +436,7 @@ class PositionTracker:
             if exit_price is not None:
                 pos.current_price = exit_price
             pnl_money = pos.pnl_money
-            state.balance_money = (
-                state.balance_money + pos.cost_basis_money + pnl_money
-            )
+            state.balance_money = state.balance_money + pos.cost_basis_money + pnl_money
             state.realized_pnl_money = state.realized_pnl_money + pnl_money
             logger.info(
                 "Closed position: %s @ %.4f, PnL=%.2f",
@@ -492,9 +478,7 @@ class PositionTracker:
 
         request_fingerprint = ""
         if fill.fill_id and fill.settlement is None:
-            canonical_exit_price = format(
-                Decimal(str(fill.exit_price)).normalize(), "f"
-            )
+            canonical_exit_price = format(Decimal(str(fill.exit_price)).normalize(), "f")
             request_fingerprint = "modeled-fill:v1:" + json.dumps(
                 {
                     "exit_price": canonical_exit_price,
@@ -508,9 +492,7 @@ class PositionTracker:
             settlement = fill.settlement
             request_fingerprint = "venue-settlement:v1:" + json.dumps(
                 {
-                    "exit_price": format(
-                        Decimal(str(fill.exit_price)).normalize(), "f"
-                    ),
+                    "exit_price": format(Decimal(str(fill.exit_price)).normalize(), "f"),
                     "fee_micros": settlement.fee.micros,
                     "gross_micros": settlement.gross_cash.micros,
                     "market_id": fill.market_id,
@@ -531,9 +513,7 @@ class PositionTracker:
                 )
                 return Money(0)
             if fill.filled_quantity_value.micros <= 0:
-                raise ValueError(
-                    "fill quantity must be positive"
-                )
+                raise ValueError("fill quantity must be positive")
             if fill.filled_quantity_value.micros > pos.quantity_value.micros:
                 raise ValueError(
                     f"fill quantity {fill.filled_quantity} exceeds remaining "
@@ -570,15 +550,12 @@ class PositionTracker:
             state.balance_money = state.balance_money + cash_returned
             state.realized_pnl_money = state.realized_pnl_money + pnl_money
             if is_partial:
-                pos.quantity_value = (
-                    pos.quantity_value - fill.filled_quantity_value
-                )
+                pos.quantity_value = pos.quantity_value - fill.filled_quantity_value
                 pos.cost_basis_money = pos.cost_basis_money - allocated_cost
             else:
                 del state.open_positions[fill.market_id]
             logger.info(
-                "Applied fill: %s @ %.4f, quantity=%.6f, remaining=%.6f, "
-                "PnL=%.2f",
+                "Applied fill: %s @ %.4f, quantity=%.6f, remaining=%.6f, PnL=%.2f",
                 fill.market_id,
                 fill.exit_price,
                 fill.filled_quantity,

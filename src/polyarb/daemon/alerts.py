@@ -21,17 +21,16 @@ Module-level state ``_LAST_ALERT_TIME_MS`` is intentional — alerts are
 process-global, and the daemon is a single process. Tests clear it between
 runs (``alerts._LAST_ALERT_TIME_MS.clear()``).
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any
 
 import httpx
 import sentry_sdk
 from loguru import logger
 
 from polyarb.config import Settings
-
 
 # ---------------------------------------------------------------------------
 # Module-level dedup state
@@ -97,9 +96,7 @@ async def send_paused_alert(settings: Settings, *, reason: str) -> None:
 
     # (3) Telegram direct — unconditional primary path
     if settings.telegram_bot_token.get_secret_value():
-        await _telegram_direct(
-            settings, text=f"polyarb-l1 scheduler PAUSED: {reason}"
-        )
+        await _telegram_direct(settings, text=f"polyarb-l1 scheduler PAUSED: {reason}")
 
 
 async def send_heartbeat_ok(settings: Settings) -> None:

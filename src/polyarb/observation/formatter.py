@@ -10,18 +10,18 @@ ever changed its default, an LLM-supplied question_zh containing
 ``\\x1b[31m`` will not render as colored output. Pre-stripping is the single
 load-bearing line; the rest is plain text rendering.
 """
+
 from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
 from loguru import logger
 from rich.console import Console
 from rich.table import Table
-
 
 # ANSI CSI / OSC sequences (T-01.1-13). Strip before rendering.
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)")
@@ -47,9 +47,7 @@ def _safe_str(value: object) -> str:
     return _ANSI_RE.sub("", s)
 
 
-def render_table(
-    df: pd.DataFrame, title: str, columns: tuple[str, ...] | None = None
-) -> None:
+def render_table(df: pd.DataFrame, title: str, columns: tuple[str, ...] | None = None) -> None:
     """Render a DataFrame to terminal as a rich.Table.
 
     Empty DataFrames print a yellow "(no rows)" line and return.
@@ -73,9 +71,7 @@ def render_table(
     console.print(table)
 
 
-def write_scan_parquet(
-    df: pd.DataFrame, recipe_name: str, scans_root: Path
-) -> Path | None:
+def write_scan_parquet(df: pd.DataFrame, recipe_name: str, scans_root: Path) -> Path | None:
     """Atomic write to ``data/scans/<recipe>/<timestamp>.parquet``.
 
     Empty DataFrames are skipped — there's nothing to persist, but no error.
@@ -88,7 +84,7 @@ def write_scan_parquet(
     if df.empty:
         logger.info(f"scan {recipe_name}: 0 rows, skipping parquet write")
         return None
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
     out_path = scans_root / recipe_name / f"{timestamp}.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_suffix(".parquet.tmp")

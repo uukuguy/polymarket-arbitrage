@@ -5,6 +5,7 @@ Plan 04 Task 1 — covers:
 - resolve_snapshot_path: int validation + read-only sqlite lookup
 - latest_snapshot_pair: two newest IDs
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -19,7 +20,6 @@ from polyarb.observation.diff import (
     latest_snapshot_pair,
     resolve_snapshot_path,
 )
-
 
 # =============================================================================
 # Fixtures — two small parquet snapshots + SQLite snapshots table
@@ -216,9 +216,7 @@ def snap_c(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def db_with_snapshots(
-    snap_a: Path, snap_b: Path, snap_c: Path
-) -> Path:
+def db_with_snapshots(snap_a: Path, snap_b: Path, snap_c: Path) -> Path:
     """SQLite db with snapshots table pointing at the three fixtures."""
     db_path = snap_a.parent.parent / "state.db"
     con = sqlite3.connect(str(db_path))
@@ -335,14 +333,20 @@ def test_diff_latest_pair_skips_empty_snapshots(tmp_path: Path, snap_a: Path, sn
         );
     """)
     # id=1: valid, 5 markets
-    con.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?)",
-                (1, 1700000000000, 1700000060000, "subset", 5, 1, str(snap_a), None))
+    con.execute(
+        "INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?)",
+        (1, 1700000000000, 1700000060000, "subset", 5, 1, str(snap_a), None),
+    )
     # id=2: EMPTY (market_count=0 — failed run)
-    con.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?)",
-                (2, 1700000100000, 1700000160000, "subset", 0, 0, str(snap_b), None))
+    con.execute(
+        "INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?)",
+        (2, 1700000100000, 1700000160000, "subset", 0, 0, str(snap_b), None),
+    )
     # id=3: valid, 5 markets
-    con.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?)",
-                (3, 1700000200000, 1700000260000, "subset", 5, 1, str(snap_b), None))
+    con.execute(
+        "INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?)",
+        (3, 1700000200000, 1700000260000, "subset", 5, 1, str(snap_b), None),
+    )
     con.commit()
     con.close()
 

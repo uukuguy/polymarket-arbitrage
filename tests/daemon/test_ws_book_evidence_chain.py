@@ -68,9 +68,7 @@ def _consumer(
         watchdog=WsWatchdog(stale_s=30),
         on_event=make_l2_event_handler(
             mirror,
-            book_levels_required=lambda asset_id: holder[
-                "consumer"
-            ].requires_book_levels(asset_id),
+            book_levels_required=lambda asset_id: holder["consumer"].requires_book_levels(asset_id),
         ),
         initial_assets=["asset-a"],
     )
@@ -125,9 +123,7 @@ async def test_no_l3_candidate_refresh_uses_real_handler_consumer_barrier(
         watchdog=WsWatchdog(stale_s=30),
         on_event=make_l2_event_handler(
             mirror,
-            book_levels_required=lambda asset_id: holder[
-                "consumer"
-            ].requires_book_levels(asset_id),
+            book_levels_required=lambda asset_id: holder["consumer"].requires_book_levels(asset_id),
         ),
         initial_assets=candidate_ids,
     )

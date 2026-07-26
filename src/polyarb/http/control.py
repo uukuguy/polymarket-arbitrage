@@ -38,6 +38,7 @@ Sync vs async (per RESEARCH Pitfall 4):
     Call it WITHOUT ``await`` — otherwise Python raises
     ``TypeError: object NoneType can't be used in 'await' expression``.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -51,9 +52,7 @@ from starlette.responses import JSONResponse
 from polyarb.daemon.scheduler import SchedulerState
 
 
-async def control_auth_middleware(
-    request: Request, call_next: Any, *, secret: str
-) -> Any:
+async def control_auth_middleware(request: Request, call_next: Any, *, secret: str) -> Any:
     """HMAC-of-body auth gate for /control/*; bypass everything else.
 
     Path guard scope:
@@ -75,9 +74,7 @@ async def control_auth_middleware(
 
     received_sig = request.headers.get("X-Signature")
     if not received_sig:
-        return JSONResponse(
-            {"error": "missing X-Signature header"}, status_code=401
-        )
+        return JSONResponse({"error": "missing X-Signature header"}, status_code=401)
 
     # Accept both `sha256=<hex>` (Stripe/GitHub) and bare `<hex>` (backward compat).
     if received_sig.startswith("sha256="):
@@ -113,9 +110,7 @@ class ControlAuthMiddleware(BaseHTTPMiddleware):
         self._secret = secret
 
     async def dispatch(self, request: Any, call_next: Any) -> Any:
-        return await control_auth_middleware(
-            request, call_next, secret=self._secret
-        )
+        return await control_auth_middleware(request, call_next, secret=self._secret)
 
 
 async def unpause(request: Request) -> JSONResponse:
@@ -147,9 +142,7 @@ async def unpause(request: Request) -> JSONResponse:
     scheduler.unpause()
 
     state_repr = (
-        scheduler.state.value
-        if hasattr(scheduler.state, "value")
-        else str(scheduler.state)
+        scheduler.state.value if hasattr(scheduler.state, "value") else str(scheduler.state)
     )
     return JSONResponse(
         {

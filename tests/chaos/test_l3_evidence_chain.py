@@ -68,26 +68,16 @@ def _market_states(
             market_id=f"market-{index}",
             yes_token_id=f"yes-{index}",
             no_token_id=f"no-{index}",
-            yes_book_at=sampled_at - timedelta(
-                seconds=121 if index in stale_markets else 5
-            ),
-            no_book_at=sampled_at - timedelta(
-                seconds=122 if index in stale_markets else 6
-            ),
-            yes_ohlc_at=sampled_at - timedelta(
-                seconds=123 if index in stale_markets else 7
-            ),
+            yes_book_at=sampled_at - timedelta(seconds=121 if index in stale_markets else 5),
+            no_book_at=sampled_at - timedelta(seconds=122 if index in stale_markets else 6),
+            yes_ohlc_at=sampled_at - timedelta(seconds=123 if index in stale_markets else 7),
         )
         for index in range(5)
     )
 
 
 def _tokens(states: tuple[SamplingMarketState, ...]) -> frozenset[str]:
-    return frozenset(
-        token
-        for state in states
-        for token in (state.yes_token_id, state.no_token_id)
-    )
+    return frozenset(token for state in states for token in (state.yes_token_id, state.no_token_id))
 
 
 def _publish_membership(
@@ -937,8 +927,7 @@ async def test_promoter_ledger_failure_ages_health_to_503():
         staged_state=l3_promote._PromoteStagedState(
             tob_rows=[],
             market_token_map={
-                state.market_id: (state.yes_token_id, state.no_token_id)
-                for state in states
+                state.market_id: (state.yes_token_id, state.no_token_id) for state in states
             },
             active_set=tokens,
             mirrored_market_ids=frozenset(state.market_id for state in states),
@@ -1146,9 +1135,7 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
     )
     assert after_strict.status_code == 200, after_strict.json()
     assert after_probe.status_code == 200
-    assert {
-        after_strict.json()["checks"][name][0]["status"] for name in strict_names
-    } == {"pass"}
+    assert {after_strict.json()["checks"][name][0]["status"] for name in strict_names} == {"pass"}
 
 
 def test_l3_evidence_chaos_harness_uses_real_local_chain_for_all_modes() -> None:
@@ -1226,9 +1213,7 @@ def test_partial_container_start_is_removed_without_masking_start_failure(
             raise CleanupFailure("client close failed after remove")
 
     container = PartialStartContainer()
-    harness = chaos_l3_evidence.LocalEvidenceHarness.__new__(
-        chaos_l3_evidence.LocalEvidenceHarness
-    )
+    harness = chaos_l3_evidence.LocalEvidenceHarness.__new__(chaos_l3_evidence.LocalEvidenceHarness)
     harness._postgres = container
     harness._admin_dsn = ""
     harness._daemon_dsn = ""
@@ -1263,9 +1248,7 @@ def test_pre_creation_start_failure_is_not_masked_by_cleanup_failure(
             raise AttributeError("no container handle")
 
     container = BeforeCreateContainer()
-    harness = chaos_l3_evidence.LocalEvidenceHarness.__new__(
-        chaos_l3_evidence.LocalEvidenceHarness
-    )
+    harness = chaos_l3_evidence.LocalEvidenceHarness.__new__(chaos_l3_evidence.LocalEvidenceHarness)
     harness._postgres = container
     harness._admin_dsn = ""
     harness._daemon_dsn = ""

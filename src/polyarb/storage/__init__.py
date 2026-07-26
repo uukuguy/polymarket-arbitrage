@@ -6,6 +6,7 @@ Phase 02 Plan 03 additions:
   - compute_r2_key: deterministic R2 key from UTC timestamp (T-02-12)
   - upload_parquet_to_r2: fail-soft R2 upload function (D-03)
 """
+
 from polyarb.storage.r2_sync import R2UploadError, compute_r2_key, upload_parquet_to_r2
 from polyarb.storage.supabase_mirror import SupabaseMirror, narrow_market_row
 

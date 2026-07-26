@@ -11,6 +11,7 @@ Additionally verifies that the R2 client is configured with max_attempts=3,
 mode='standard' (test_r2_retry_config_applied from test_r2_sync.py verifies the
 low-level config; this test verifies the orchestrator-level behavior).
 """
+
 from __future__ import annotations
 
 import os
@@ -38,11 +39,13 @@ _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 def _load_gamma() -> list[dict]:
     import json
+
     return json.loads((_FIXTURES_DIR / "gamma_sample.json").read_text())
 
 
 def _load_clob() -> dict:
     import json
+
     return json.loads((_FIXTURES_DIR / "clob_sample.json").read_text())
 
 
@@ -72,6 +75,7 @@ def _make_fake_gamma(markets: list[dict]) -> object:
         async def _iter():
             for item in items:
                 yield item
+
         return _iter
 
     fake.iter_active_markets = _make_iter(markets)

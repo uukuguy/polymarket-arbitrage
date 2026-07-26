@@ -15,6 +15,7 @@ Monkeypatch strategy:
 - time.monotonic via monkeypatch.setattr at ws_watchdog import site
 - asyncio.sleep via monkeypatch.setattr at ws_watchdog import site (records waits)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -52,9 +53,7 @@ async def test_30s_timeout_triggers_RECONNECTING(monkeypatch: pytest.MonkeyPatch
     await wd._on_stale()
 
     assert callback_fires, "on_reconnect was never called"
-    assert wd.current_state == "RECONNECTING", (
-        f"unexpected state={wd.current_state}"
-    )
+    assert wd.current_state == "RECONNECTING", f"unexpected state={wd.current_state}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,9 +89,7 @@ async def test_backoff_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
         await wd._on_stale()
 
     backoff_only = [s for s in recorded_sleeps if s in (1, 2, 4, 8, 16, 30)]
-    assert backoff_only == [1, 2, 4, 8, 16, 30], (
-        f"backoff sequence wrong, got: {backoff_only}"
-    )
+    assert backoff_only == [1, 2, 4, 8, 16, 30], f"backoff sequence wrong, got: {backoff_only}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,8 +168,7 @@ async def test_reconnect_storm_cap(monkeypatch: pytest.MonkeyPatch) -> None:
         f"storm cap did NOT trigger; state={wd.current_state}"
     )
     found_warn_breadcrumb = any(
-        bc.get("category") == "l2-ws" and bc.get("level") == "warning"
-        for bc in breadcrumb_calls
+        bc.get("category") == "l2-ws" and bc.get("level") == "warning" for bc in breadcrumb_calls
     )
     assert found_warn_breadcrumb, f"no l2-ws warning breadcrumb; got: {breadcrumb_calls}"
     assert capture_msg_calls, "capture_message never called on storm cap"

@@ -90,9 +90,7 @@ def snapshots_purge_cmd(
     older_than_days: int = typer.Option(
         7, "--older-than-days", help="Delete snapshots older than N days."
     ),
-    keep_last: int = typer.Option(
-        5, "--keep-last", help="Always keep the last M snapshots."
-    ),
+    keep_last: int = typer.Option(5, "--keep-last", help="Always keep the last M snapshots."),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be deleted without doing it."
     ),

@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -66,20 +66,18 @@ def query_snapshot_summary(db_path: Path) -> dict:
         sid, taken_ms, finished_ms, mode, count, is_valid = row
         # Get L1 issues for status computation
         l1_rows = con.execute(
-            "SELECT category, detail FROM validation_issues "
-            "WHERE snapshot_id = ? AND layer = 1",
+            "SELECT category, detail FROM validation_issues WHERE snapshot_id = ? AND layer = 1",
             (sid,),
         ).fetchall()
         status = _compute_status(is_valid, l1_rows)
 
         issue_counts = con.execute(
-            "SELECT layer, COUNT(*) FROM validation_issues "
-            "WHERE snapshot_id = ? GROUP BY layer",
+            "SELECT layer, COUNT(*) FROM validation_issues WHERE snapshot_id = ? GROUP BY layer",
             (sid,),
         ).fetchall()
         issue_summary = {f"L{layer}": cnt for layer, cnt in issue_counts}
 
-        taken_dt = datetime.fromtimestamp(taken_ms / 1000, tz=timezone.utc)
+        taken_dt = datetime.fromtimestamp(taken_ms / 1000, tz=UTC)
         return {
             "snapshot_id": sid,
             "taken_at": taken_dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -125,9 +123,7 @@ def query_top_tags(db_path: Path, limit: int = 10) -> list[dict]:
             "ORDER BY n_markets DESC "
             f"LIMIT {int(limit)}"
         ).fetchall()
-        return [
-            {"tag": r[0], "markets": r[1], "liquidity_usd": int(r[2])} for r in rows
-        ]
+        return [{"tag": r[0], "markets": r[1], "liquidity_usd": int(r[2])} for r in rows]
     finally:
         con.close()
 
@@ -136,21 +132,22 @@ def query_time_distribution(db_path: Path) -> list[dict]:
     """Counts by resolution window: <24h, 1-7d, 7-30d, 30d+, perpetual."""
     con = _ro_connect(db_path)
     try:
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
         day_ms = 24 * 60 * 60 * 1000
         buckets = [
             ("< 24h", f"end_time_ms > {now_ms} AND end_time_ms <= {now_ms + day_ms}"),
             ("1-7d", f"end_time_ms > {now_ms + day_ms} AND end_time_ms <= {now_ms + 7 * day_ms}"),
-            ("7-30d", f"end_time_ms > {now_ms + 7 * day_ms} AND end_time_ms <= {now_ms + 30 * day_ms}"),
+            (
+                "7-30d",
+                f"end_time_ms > {now_ms + 7 * day_ms} AND end_time_ms <= {now_ms + 30 * day_ms}",
+            ),
             ("30d+", f"end_time_ms > {now_ms + 30 * day_ms}"),
             ("perpetual", "end_time_ms IS NULL"),
             ("expired", f"end_time_ms <= {now_ms}"),
         ]
         result = []
         for label, where in buckets:
-            cnt = con.execute(
-                f"SELECT COUNT(*) FROM markets WHERE {where}"
-            ).fetchone()[0]
+            cnt = con.execute(f"SELECT COUNT(*) FROM markets WHERE {where}").fetchone()[0]
             result.append({"bucket": label, "count": cnt})
         return result
     finally:
@@ -159,7 +156,11 @@ def query_time_distribution(db_path: Path) -> list[dict]:
 
 def query_top_movers(db_path: Path, parquet_root: Path, limit: int = 10) -> list[dict]:
     """Largest mid_price drift from N-1 to N snapshot."""
-    from polyarb.observation.diff import latest_snapshot_pair, resolve_snapshot_path, compare_snapshots
+    from polyarb.observation.diff import (
+        compare_snapshots,
+        latest_snapshot_pair,
+        resolve_snapshot_path,
+    )
 
     try:
         older_id, newer_id = latest_snapshot_pair(db_path)
@@ -200,13 +201,15 @@ def query_top_movers(db_path: Path, parquet_root: Path, limit: int = 10) -> list
         slug = str(row["slug"])
         zh = zh_map.get(slug, "")
         question = zh if zh else str(row.get("question", ""))[:80]
-        result.append({
-            "slug": slug,
-            "question": question,
-            "mid_from": float(row["mid_from"]),
-            "mid_to": float(row["mid_to"]),
-            "drift": float(row["mid_drift"]),
-        })
+        result.append(
+            {
+                "slug": slug,
+                "question": question,
+                "mid_from": float(row["mid_from"]),
+                "mid_to": float(row["mid_to"]),
+                "drift": float(row["mid_drift"]),
+            }
+        )
     return result
 
 

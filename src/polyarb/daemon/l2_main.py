@@ -188,9 +188,7 @@ def _request_shutdown(
             ),
         )
     except Exception as exc:  # noqa: BLE001 - overflow already fails runtime truth
-        logger.warning(
-            "shutdown event enqueue failed error_type={}", type(exc).__name__
-        )
+        logger.warning("shutdown event enqueue failed error_type={}", type(exc).__name__)
     stop_event.set()
 
 
@@ -405,6 +403,7 @@ async def _drain_daemon_tasks(
         raise
     if writer_missed_drain_deadline:
         raise RuntimeError("event writer drain deadline exceeded")
+
 
 # ── Plan 06 D-07: WS frame → l2_* row builders ───────────────────────────
 # Polymarket WS market-channel event shapes (empirical):
@@ -683,9 +682,7 @@ def make_l2_event_handler(
             tob_written = False
             book_levels_written = False
             if row is not None:
-                tob_written = (
-                    await asyncio.to_thread(l2_mirror.push_top_of_book, [row])
-                ) is True
+                tob_written = (await asyncio.to_thread(l2_mirror.push_top_of_book, [row])) is True
             if event_type == "book":
                 if (
                     asset_id_raw
@@ -910,12 +907,8 @@ async def main() -> int:
         # HTTP is reachable before boot role preflight touches PostgreSQL.
         # The successful boot append is the authorization capability for every
         # daemon-owned direct PostgreSQL task, not merely the promoter.
-        stop_wait_task = _create_daemon_task(
-            stop_event.wait(), name="l2-stop-wait"
-        )
-        l3_boot_task = _create_daemon_task(
-            _append_l3_boot(l3_evidence), name="l3-boot-append"
-        )
+        stop_wait_task = _create_daemon_task(stop_event.wait(), name="l2-stop-wait")
+        l3_boot_task = _create_daemon_task(_append_l3_boot(l3_evidence), name="l3-boot-append")
         l3_boot_persisted, stopped_during_boot = await _await_boot_or_daemon_exit(
             boot_task=l3_boot_task,
             server_task=server_task,
@@ -928,12 +921,8 @@ async def main() -> int:
         if stopped_during_boot:
             normal_shutdown = True
         else:
-            watchdog_task = _create_daemon_task(
-                watchdog.watch(stop_event), name="ws-watchdog"
-            )
-            consumer_task = _create_daemon_task(
-                ws_consumer.run(stop_event), name="ws-consumer"
-            )
+            watchdog_task = _create_daemon_task(watchdog.watch(stop_event), name="ws-watchdog")
+            consumer_task = _create_daemon_task(ws_consumer.run(stop_event), name="ws-consumer")
             quiet_refresh_task = _create_daemon_task(
                 ws_consumer.run_quiet_refresh(stop_event), name="ws-quiet-refresh"
             )

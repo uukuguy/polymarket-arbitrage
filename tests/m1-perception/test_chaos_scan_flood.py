@@ -11,9 +11,9 @@ Run explicitly: uv run pytest -m slow tests/m1-perception/test_chaos_scan_flood.
 
 This mirrors RESEARCH §11 row "/scan flood (10 req/s × 30s) → no crash".
 """
+
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -36,7 +36,9 @@ _TEST_SCAN_SECRET = "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef1
 
 def _make_settings(tmp_path: Path) -> Any:
     from pydantic import SecretStr
+
     from polyarb.config import Settings
+
     return Settings(
         db_path=tmp_path / "state.db",
         parquet_root=tmp_path / "snapshots",
@@ -50,13 +52,10 @@ def _make_settings(tmp_path: Path) -> Any:
 
 
 def _sign_body(body_bytes: bytes) -> str:
-    return hmac.new(
-        _TEST_SCAN_SECRET.encode("utf-8"), body_bytes, hashlib.sha256
-    ).hexdigest()
+    return hmac.new(_TEST_SCAN_SECRET.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
 
 
 def _make_test_app(settings: Any) -> Any:
-    from starlette.testclient import TestClient
     from polyarb.http.app import create_app
     from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -123,9 +122,7 @@ def test_scan_flood_no_daemon_crash(tmp_path: Path) -> None:
             exceptions.append(exc)
 
     # Critical assertion: no exceptions (daemon didn't crash)
-    assert not exceptions, (
-        f"Daemon raised exceptions under flood: {exceptions[:3]}"
-    )
+    assert not exceptions, f"Daemon raised exceptions under flood: {exceptions[:3]}"
 
     # No 500 responses
     server_errors = [sc for sc in status_codes if sc >= 500]
@@ -136,9 +133,7 @@ def test_scan_flood_no_daemon_crash(tmp_path: Path) -> None:
     # All responses must be in acceptable set
     acceptable = {200, 201, 400, 404, 422}
     unexpected = [sc for sc in status_codes if sc not in acceptable]
-    assert not unexpected, (
-        f"Unexpected status codes under flood: {set(unexpected)}"
-    )
+    assert not unexpected, f"Unexpected status codes under flood: {set(unexpected)}"
 
 
 @pytest.mark.slow
@@ -182,12 +177,8 @@ def test_hmac_validation_survives_flood(tmp_path: Path) -> None:
 
     # Invalid sigs must all be 401
     non_401 = [sc for sc in invalid_codes if sc != 401]
-    assert not non_401, (
-        f"Bad HMAC must always yield 401, got non-401: {non_401}"
-    )
+    assert not non_401, f"Bad HMAC must always yield 401, got non-401: {non_401}"
 
     # Valid sigs must not produce 500
     server_errors = [sc for sc in valid_codes if sc >= 500]
-    assert not server_errors, (
-        f"Valid HMAC sigs produced 5xx under mixed flood: {server_errors}"
-    )
+    assert not server_errors, f"Valid HMAC sigs produced 5xx under mixed flood: {server_errors}"

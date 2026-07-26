@@ -1,4 +1,5 @@
 """Smoke tests proving the polyarb package skeleton is importable and configured."""
+
 from pathlib import Path
 
 import polyarb

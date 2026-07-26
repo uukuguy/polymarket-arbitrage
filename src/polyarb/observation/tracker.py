@@ -19,6 +19,7 @@ Output column note (Warning #7 决议):
   when re-running snapshot in close succession; ORDER BY (taken_at_ms,
   snapshot_id) is stable)
 """
+
 from __future__ import annotations
 
 import warnings

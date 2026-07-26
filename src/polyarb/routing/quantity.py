@@ -1,4 +1,5 @@
 """Exact outcome-token quantities for M2 execution accounting."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -36,11 +37,7 @@ class Quantity:
             raise ValueError("quantity must be finite")
         if decimal_value < 0:
             raise ValueError("quantity cannot be negative")
-        micros = int(
-            (decimal_value * MICROS_PER_SHARE).to_integral_value(
-                rounding=ROUND_HALF_EVEN
-            )
-        )
+        micros = int((decimal_value * MICROS_PER_SHARE).to_integral_value(rounding=ROUND_HALF_EVEN))
         return cls(micros)
 
     def to_decimal(self) -> Decimal:

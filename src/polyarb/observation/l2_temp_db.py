@@ -39,6 +39,7 @@ candidates" rather than "recipe references column not in narrow projection".
 Missing auxiliary TABLES would crash scanner — so this adapter ALWAYS creates
 all DDL tables (``CREATE TABLE IF NOT EXISTS`` semantics in schemas.DDL).
 """
+
 from __future__ import annotations
 
 import sqlite3

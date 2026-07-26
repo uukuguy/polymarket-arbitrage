@@ -12,6 +12,7 @@ These tests assert that AFTER Plan 02:
 Test 10 — full e2e: simulated NOTIFY → candidate set replaced, L3 preserved
 Test 11 — lint: `on_snapshot_complete` source no longer assigns to `_subscribed_assets`
 """
+
 from __future__ import annotations
 
 import inspect
@@ -176,6 +177,5 @@ def test_refresh_source_does_not_assign_to_subscribed_assets_directly() -> None:
 
     assert not offending, (
         "on_snapshot_complete must NOT assign to ws_consumer._subscribed_assets "
-        "directly (use update_candidate_set helper). Offending lines:\n"
-        + "\n".join(offending)
+        "directly (use update_candidate_set helper). Offending lines:\n" + "\n".join(offending)
     )

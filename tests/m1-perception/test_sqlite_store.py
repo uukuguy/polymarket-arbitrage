@@ -74,9 +74,7 @@ def test_init_schema_creates_three_tables(store: SQLiteStore) -> None:
     try:
         tables = {
             r[0]
-            for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         assert {"snapshots", "markets", "validation_issues"} <= tables
         # WAL pragma is persistent at the DB level; should report 'wal'.
@@ -144,9 +142,7 @@ def test_streaming_disk_full_preserves_original_error_when_sqlite_auto_rolls_bac
             return _DiskFullProxy(connection)
         return connection
 
-    monkeypatch.setattr(
-        "polyarb.storage.sqlite_store.sqlite3.connect", _connect_proxy
-    )
+    monkeypatch.setattr("polyarb.storage.sqlite_store.sqlite3.connect", _connect_proxy)
 
     with pytest.raises(sqlite3.OperationalError, match="database or disk is full"):
         store.write_snapshot_streaming(
@@ -168,9 +164,7 @@ def test_init_schema_idempotent(tmp_path: Path) -> None:
     try:
         tables = {
             r[0]
-            for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         assert {"snapshots", "markets", "validation_issues"} <= tables
     finally:
@@ -281,9 +275,7 @@ def test_write_snapshot_invalid_still_persists(store: SQLiteStore) -> None:
     )
     con = sqlite3.connect(store.db_path)
     try:
-        row = con.execute(
-            "SELECT is_valid, market_count FROM snapshots"
-        ).fetchone()
+        row = con.execute("SELECT is_valid, market_count FROM snapshots").fetchone()
     finally:
         con.close()
     assert row == (0, 1), "D-D3: is_valid=False rows must be queryable"
@@ -306,12 +298,10 @@ def test_write_snapshot_returns_snapshot_id(store: SQLiteStore) -> None:
 
     con = sqlite3.connect(store.db_path)
     try:
-        market_sid = con.execute(
-            "SELECT snapshot_id FROM markets WHERE market_id='a'"
-        ).fetchone()[0]
-        issue_sid = con.execute(
-            "SELECT snapshot_id FROM validation_issues"
-        ).fetchone()[0]
+        market_sid = con.execute("SELECT snapshot_id FROM markets WHERE market_id='a'").fetchone()[
+            0
+        ]
+        issue_sid = con.execute("SELECT snapshot_id FROM validation_issues").fetchone()[0]
     finally:
         con.close()
     assert market_sid == sid
@@ -351,9 +341,7 @@ def test_token_ids_preserve_uint256_string(store: SQLiteStore) -> None:
     )
     con = sqlite3.connect(store.db_path)
     try:
-        got = con.execute(
-            "SELECT yes_token_id FROM markets WHERE market_id='a'"
-        ).fetchone()[0]
+        got = con.execute("SELECT yes_token_id FROM markets WHERE market_id='a'").fetchone()[0]
     finally:
         con.close()
     assert got == big_token
@@ -398,9 +386,7 @@ def test_rollback_on_executemany_failure(store: SQLiteStore) -> None:
         n_snaps = con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     finally:
         con.close()
-    assert rows == [("baseline",)], (
-        "Rollback must restore prior markets state — got: " + repr(rows)
-    )
+    assert rows == [("baseline",)], "Rollback must restore prior markets state — got: " + repr(rows)
     assert n_snaps == 1, "Failed snapshot must NOT leave a snapshots row behind"
 
 
@@ -414,8 +400,11 @@ def test_write_snapshot_streaming_basic_parity(store: SQLiteStore) -> None:
 
     # Legacy path
     legacy_id = store.write_snapshot(
-        taken_at_ms=1, finished_at_ms=2, mode="subset",
-        parquet_path="x.parquet", is_valid=True,
+        taken_at_ms=1,
+        finished_at_ms=2,
+        mode="subset",
+        parquet_path="x.parquet",
+        is_valid=True,
         market_rows=rows_a,
         issues=[Issue(layer=2, category=Category.UNKNOWN, market_id="m0", detail="stale")],
     )
@@ -425,8 +414,11 @@ def test_write_snapshot_streaming_basic_parity(store: SQLiteStore) -> None:
     store2 = SQLiteStore(Path(str(store.db_path).replace(".db", ".2.db")))
     store2.init_schema()
     snap_id, count = store2.write_snapshot_streaming(
-        taken_at_ms=1, finished_at_ms=2, mode="subset",
-        parquet_path="x.parquet", is_valid=True,
+        taken_at_ms=1,
+        finished_at_ms=2,
+        mode="subset",
+        parquet_path="x.parquet",
+        is_valid=True,
         market_rows=rows_b,
         issues=[Issue(layer=2, category=Category.UNKNOWN, market_id="m0", detail="stale")],
         batch_size=20,
@@ -439,12 +431,16 @@ def test_write_snapshot_streaming_basic_parity(store: SQLiteStore) -> None:
     try:
         assert con_a.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == 50
         assert con_b.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == 50
-        assert con_a.execute(
-            "SELECT market_count FROM snapshots WHERE id=?", (legacy_id,)
-        ).fetchone()[0] == 50
-        assert con_b.execute(
-            "SELECT market_count FROM snapshots WHERE id=?", (snap_id,)
-        ).fetchone()[0] == 50
+        assert (
+            con_a.execute("SELECT market_count FROM snapshots WHERE id=?", (legacy_id,)).fetchone()[
+                0
+            ]
+            == 50
+        )
+        assert (
+            con_b.execute("SELECT market_count FROM snapshots WHERE id=?", (snap_id,)).fetchone()[0]
+            == 50
+        )
         assert con_a.execute("SELECT COUNT(*) FROM validation_issues").fetchone()[0] == 1
         assert con_b.execute("SELECT COUNT(*) FROM validation_issues").fetchone()[0] == 1
     finally:
@@ -454,13 +450,17 @@ def test_write_snapshot_streaming_basic_parity(store: SQLiteStore) -> None:
 
 def test_write_snapshot_streaming_with_generator(store: SQLiteStore) -> None:
     """1500 rows yielded from a generator, batch_size=500 → all 1500 persisted."""
+
     def _gen():
         for i in range(1500):
             yield make_market(f"m{i}")
 
     snap_id, count = store.write_snapshot_streaming(
-        taken_at_ms=10, finished_at_ms=20, mode="full",
-        parquet_path="g.parquet", is_valid=True,
+        taken_at_ms=10,
+        finished_at_ms=20,
+        mode="full",
+        parquet_path="g.parquet",
+        is_valid=True,
         market_rows=_gen(),
         issues=[],
         batch_size=500,
@@ -468,9 +468,10 @@ def test_write_snapshot_streaming_with_generator(store: SQLiteStore) -> None:
     assert count == 1500
     con = sqlite3.connect(store.db_path)
     try:
-        assert con.execute(
-            "SELECT market_count FROM snapshots WHERE id=?", (snap_id,)
-        ).fetchone()[0] == 1500
+        assert (
+            con.execute("SELECT market_count FROM snapshots WHERE id=?", (snap_id,)).fetchone()[0]
+            == 1500
+        )
         assert con.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == 1500
     finally:
         con.close()
@@ -478,6 +479,7 @@ def test_write_snapshot_streaming_with_generator(store: SQLiteStore) -> None:
 
 def test_write_snapshot_streaming_atomicity_on_error(store: SQLiteStore) -> None:
     """Generator raises mid-stream → no snapshot row, no market rows, exception propagates."""
+
     class BoomError(RuntimeError):
         pass
 
@@ -496,8 +498,11 @@ def test_write_snapshot_streaming_atomicity_on_error(store: SQLiteStore) -> None
 
     with pytest.raises(BoomError):
         store.write_snapshot_streaming(
-            taken_at_ms=30, finished_at_ms=40, mode="subset",
-            parquet_path="boom.parquet", is_valid=True,
+            taken_at_ms=30,
+            finished_at_ms=40,
+            mode="subset",
+            parquet_path="boom.parquet",
+            is_valid=True,
             market_rows=_explode(),
             issues=[],
             batch_size=200,
@@ -517,8 +522,11 @@ def test_write_snapshot_streaming_atomicity_on_error(store: SQLiteStore) -> None
 def test_write_snapshot_streaming_empty_markets(store: SQLiteStore) -> None:
     """Empty iterator → snapshots row with market_count=0 persisted, valid."""
     snap_id, count = store.write_snapshot_streaming(
-        taken_at_ms=50, finished_at_ms=60, mode="subset",
-        parquet_path="empty.parquet", is_valid=True,
+        taken_at_ms=50,
+        finished_at_ms=60,
+        mode="subset",
+        parquet_path="empty.parquet",
+        is_valid=True,
         market_rows=iter([]),
         issues=[],
         batch_size=500,
@@ -555,14 +563,17 @@ def test_write_snapshot_streaming_atomicity_on_commit_failure(
         def __init__(self, real_con):
             self._real = real_con
             self.rollback_invoked = False
+
         def execute(self, sql, *args, **kwargs):
             if isinstance(sql, str) and sql.strip().upper() == "COMMIT":
                 raise sqlite3.OperationalError("synthetic commit failure")
             if isinstance(sql, str) and sql.strip().upper() == "ROLLBACK":
                 self.rollback_invoked = True
             return self._real.execute(sql, *args, **kwargs)
+
         def close(self):
             return self._real.close()
+
         def __getattr__(self, name):
             return getattr(self._real, name)
 
@@ -578,9 +589,7 @@ def test_write_snapshot_streaming_atomicity_on_commit_failure(
             return bomb
         return real_con
 
-    monkeypatch.setattr(
-        "polyarb.storage.sqlite_store.sqlite3.connect", _connect_proxy
-    )
+    monkeypatch.setattr("polyarb.storage.sqlite_store.sqlite3.connect", _connect_proxy)
 
     con = sqlite3.connect(store.db_path)
     try:
@@ -592,8 +601,11 @@ def test_write_snapshot_streaming_atomicity_on_commit_failure(
     rows = [make_market(f"m{i}") for i in range(20)]
     with pytest.raises(sqlite3.OperationalError, match="commit failure"):
         store.write_snapshot_streaming(
-            taken_at_ms=70, finished_at_ms=80, mode="subset",
-            parquet_path="cf.parquet", is_valid=True,
+            taken_at_ms=70,
+            finished_at_ms=80,
+            mode="subset",
+            parquet_path="cf.parquet",
+            is_valid=True,
             market_rows=rows,
             issues=[],
             batch_size=10,
@@ -601,13 +613,11 @@ def test_write_snapshot_streaming_atomicity_on_commit_failure(
 
     con = sqlite3.connect(store.db_path)
     try:
-        assert (
-            con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
-            == snapshots_before
-        ), "commit-failure leaked a snapshots row"
-        assert (
-            con.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
-            == markets_before
-        ), "commit-failure leaked markets rows"
+        assert con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0] == snapshots_before, (
+            "commit-failure leaked a snapshots row"
+        )
+        assert con.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == markets_before, (
+            "commit-failure leaked markets rows"
+        )
     finally:
         con.close()

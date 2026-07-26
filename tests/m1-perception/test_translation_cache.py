@@ -19,7 +19,6 @@ from polyarb.translation.cache import (
     question_hash_for,
 )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures — fresh schema per test
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,9 +139,7 @@ def test_list_untranslated_excludes_dead(
     """
     # Insert a placeholder + mark dead by incrementing 4 times.
     pending = cache_with_3_markets.list_untranslated()
-    cache_with_3_markets.insert_retry_placeholders(
-        pending[:1], translator_model="m"
-    )
+    cache_with_3_markets.insert_retry_placeholders(pending[:1], translator_model="m")
     h = pending[0][0]
     for _ in range(4):
         cache_with_3_markets.increment_retry([h])
@@ -162,14 +159,10 @@ def test_list_untranslated_excludes_dead(
 def test_upsert_batch_persists_token_cost(
     fresh_cache: TranslationCache,
 ) -> None:
-    fresh_cache.upsert_batch(
-        [_make_row("q1", "翻1", model="m", tokens=123)]
-    )
+    fresh_cache.upsert_batch([_make_row("q1", "翻1", model="m", tokens=123)])
     con = sqlite3.connect(fresh_cache.db_path)
     try:
-        row = con.execute(
-            "SELECT token_cost FROM question_translations"
-        ).fetchone()
+        row = con.execute("SELECT token_cost FROM question_translations").fetchone()
     finally:
         con.close()
     assert row[0] == 123
@@ -204,9 +197,7 @@ def test_increment_retry_marks_dead_after_3(
     fresh_cache: TranslationCache,
 ) -> None:
     """retry_count goes 0 → 1 → 2 → 3 → 4; on the 4th increment, is_dead=1."""
-    fresh_cache.insert_retry_placeholders(
-        [(question_hash_for("q1"), "q1")], translator_model="m"
-    )
+    fresh_cache.insert_retry_placeholders([(question_hash_for("q1"), "q1")], translator_model="m")
     h = question_hash_for("q1")
 
     # Three retries: counter at 3, still alive
@@ -252,16 +243,12 @@ def test_translated_count_zero_for_fresh_db(fresh_cache: TranslationCache) -> No
 
 
 def test_translated_count_after_upsert(fresh_cache: TranslationCache) -> None:
-    fresh_cache.upsert_batch(
-        [_make_row(f"q{i}", f"翻{i}") for i in range(5)]
-    )
+    fresh_cache.upsert_batch([_make_row(f"q{i}", f"翻{i}") for i in range(5)])
     assert fresh_cache.translated_count() == 5
 
 
 def test_translated_count_excludes_dead(fresh_cache: TranslationCache) -> None:
-    fresh_cache.insert_retry_placeholders(
-        [(question_hash_for("q1"), "q1")], translator_model="m"
-    )
+    fresh_cache.insert_retry_placeholders([(question_hash_for("q1"), "q1")], translator_model="m")
     h = question_hash_for("q1")
     for _ in range(4):
         fresh_cache.increment_retry([h])
@@ -300,11 +287,7 @@ def test_cache_module_does_not_delete_from_question_translations() -> None:
     explanatory text.
     """
     src = (
-        Path(__file__).parent.parent.parent
-        / "src"
-        / "polyarb"
-        / "translation"
-        / "cache.py"
+        Path(__file__).parent.parent.parent / "src" / "polyarb" / "translation" / "cache.py"
     ).read_text()
     # We want the production *executable* code to never contain the literal
     # "DELETE FROM question_translations". Module top docstring describes the
@@ -321,6 +304,5 @@ def test_cache_module_does_not_delete_from_question_translations() -> None:
         if "DELETE FROM question_translations" in ln:
             forbidden.append(ln)
     assert not forbidden, (
-        f"cache.py contains DELETE FROM question_translations in production code: "
-        f"{forbidden}"
+        f"cache.py contains DELETE FROM question_translations in production code: {forbidden}"
     )

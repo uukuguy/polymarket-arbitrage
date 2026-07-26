@@ -278,9 +278,7 @@ async def test_initial_subscription_desired_change_never_commits_unsent_tokens()
     )
     consumer.set_l3_desired(["sent-l3"])
     consumer._l3_committed_set = {"stale-l3"}
-    consumer._l3_business_evidence = {
-        "stale-l3": (0, datetime(2026, 7, 23, tzinfo=UTC))
-    }
+    consumer._l3_business_evidence = {"stale-l3": (0, datetime(2026, 7, 23, tzinfo=UTC))}
     candidate = MagicMock()
     send_entered = asyncio.Event()
     release_send = asyncio.Event()

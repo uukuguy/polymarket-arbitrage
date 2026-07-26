@@ -8,9 +8,8 @@ the reason is not.
 This module tests the `_derive_notes_from_issues` pure helper in isolation
 (no orchestrator integration test needed — helper is small + deterministic).
 """
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 
 def _make_issue(layer: int, category_value: str, detail: str, market_id: str | None = None):
@@ -66,10 +65,12 @@ def test_derive_notes_multiple_api_unreachable_joined() -> None:
     from polyarb.snapshot.orchestrator import _derive_notes_from_issues
 
     issues = [
-        _make_issue(layer=1, category_value="api_unreachable",
-                    detail="Gamma unreachable: ConnectError(...)"),
-        _make_issue(layer=4, category_value="api_unreachable",
-                    detail="CLOB unreachable: TimeoutError(...)"),
+        _make_issue(
+            layer=1, category_value="api_unreachable", detail="Gamma unreachable: ConnectError(...)"
+        ),
+        _make_issue(
+            layer=4, category_value="api_unreachable", detail="CLOB unreachable: TimeoutError(...)"
+        ),
     ]
     out = _derive_notes_from_issues(issues)
     assert out is not None
@@ -89,10 +90,10 @@ def test_derive_notes_excludes_non_api_issues() -> None:
     from polyarb.snapshot.orchestrator import _derive_notes_from_issues
 
     issues = [
-        _make_issue(layer=2, category_value="zombie_market",
-                    detail="market past endDate but still active"),
-        _make_issue(layer=2, category_value="unknown",
-                    detail="some odd validator finding"),
+        _make_issue(
+            layer=2, category_value="zombie_market", detail="market past endDate but still active"
+        ),
+        _make_issue(layer=2, category_value="unknown", detail="some odd validator finding"),
     ]
     out = _derive_notes_from_issues(issues)
     assert out is None, f"non-API issues should produce no notes, got {out!r}"

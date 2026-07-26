@@ -26,6 +26,7 @@ Design decisions:
 
 Source: RESEARCH.md §Architecture Patterns §2.5, CONTEXT.md D-13
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -127,6 +128,7 @@ class SnapshotScheduler:
         )
         try:
             from polyarb.daemon import alerts as _alerts
+
             await _alerts.send_paused_alert(
                 self._settings,
                 reason=f"{self._failure_counter} consecutive FAILED snapshots",
@@ -159,8 +161,7 @@ class SnapshotScheduler:
                 # DEGRADED is NOT a failure (D-12 amendment)
                 self._failure_counter = 0
                 logger.info(
-                    f"snapshot tick success: status={result_status} "
-                    f"failure_counter reset to 0"
+                    f"snapshot tick success: status={result_status} failure_counter reset to 0"
                 )
                 # Plan 02-05 fix-up: Better Stack heartbeat OK pulse.
                 # Reference via the module attribute (not from-import) so tests
@@ -168,6 +169,7 @@ class SnapshotScheduler:
                 # encapsulated inside send_heartbeat_ok itself.
                 try:
                     from polyarb.daemon import alerts as _alerts
+
                     await _alerts.send_heartbeat_ok(self._settings)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"send_heartbeat_ok failed: {e!r}")
@@ -180,9 +182,7 @@ class SnapshotScheduler:
                         parquet_root=self._settings.parquet_root,
                     )
                     if deleted:
-                        logger.info(
-                            f"snapshot retention deleted {deleted} expired snapshots"
-                        )
+                        logger.info(f"snapshot retention deleted {deleted} expired snapshots")
                 except Exception as e:  # noqa: BLE001
                     # Retention is fail-soft relative to a valid fresh snapshot,
                     # but its failure remains visible in production logs.

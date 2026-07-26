@@ -1,5 +1,5 @@
-\
 """Routing orchestrator: wires together signal -> routing -> execution."""
+
 from __future__ import annotations
 
 import logging
@@ -40,9 +40,7 @@ class RoutingOrchestrator:
             return None
 
         # Calculate total stake from execution plan
-        total_stake = sum(
-            leg.cost_basis_money.to_float() for leg in decision.plan.legs
-        )
+        total_stake = sum(leg.cost_basis_money.to_float() for leg in decision.plan.legs)
 
         position_ok, reason = self.position_tracker.can_open_position(total_stake)
         if not position_ok:
@@ -64,9 +62,7 @@ class RoutingOrchestrator:
             decision=decision,
             execution=execution,
             profit_realized=(
-                execution.realized_pnl
-                if execution.status.name in ("COMPLETED", "PARTIAL")
-                else 0.0
+                execution.realized_pnl if execution.status.name in ("COMPLETED", "PARTIAL") else 0.0
             ),
             status="executed" if execution.status.name in ("COMPLETED", "PARTIAL") else "failed",
         )

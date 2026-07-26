@@ -44,12 +44,13 @@ Trade dict shape (per probe):
 CLI:
     python -m polyarb.clients.data_api_client --market <asset_id> --days 7
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import time
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import httpx
 from aiolimiter import AsyncLimiter

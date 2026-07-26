@@ -13,6 +13,7 @@ Cases:
 - not configured (Supabase URL empty): sub-check absent (case (a) parity with
   the Plan 03 mirror gate)
 """
+
 from __future__ import annotations
 
 import time

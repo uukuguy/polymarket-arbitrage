@@ -11,13 +11,13 @@ Expected:
 
 This mirrors RESEARCH §11 row "SQLite WAL lock contention → reader waits + eventually succeeds".
 """
+
 from __future__ import annotations
 
 import sqlite3
 import threading
 import time
 from pathlib import Path
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -28,9 +28,7 @@ def _setup_wal_db(db_path: Path) -> None:
     """Initialize a SQLite DB with WAL journal mode + a test table."""
     con = sqlite3.connect(str(db_path))
     con.execute("PRAGMA journal_mode=WAL")
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS chaos_test (id INTEGER PRIMARY KEY, value TEXT)"
-    )
+    con.execute("CREATE TABLE IF NOT EXISTS chaos_test (id INTEGER PRIMARY KEY, value TEXT)")
     con.commit()
     con.close()
 

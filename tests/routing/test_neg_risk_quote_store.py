@@ -551,9 +551,7 @@ def test_record_does_not_write_after_waiting_to_begin_transaction(quote_db) -> N
     error = _run_after_begin_gate(
         gate,
         clock,
-        lambda: store.record_terminal_quotes(
-            run_id, (_quote("token-a"), _quote("token-b"))
-        ),
+        lambda: store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b"))),
     )
 
     assert isinstance(error, QuoteRunStateError)

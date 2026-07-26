@@ -6,21 +6,15 @@ Covers D-21 / D-22 / T-02-01 / T-02-02:
 - Input validation (recipe_name length, unknown recipe → 404)
 - W11: yaml trust-split preserved (tampered yaml → 400 validation failed)
 """
+
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
-import sqlite3
-import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-import pytest
 import yaml
 from starlette.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -36,7 +30,10 @@ def test_rejects_missing_signature(
         json={"recipe_name": "thick-but-slippery", "params": {}},
     )
     assert resp.status_code == 401
-    assert "X-Signature" in resp.json().get("error", "") or "signature" in resp.json().get("error", "").lower()
+    assert (
+        "X-Signature" in resp.json().get("error", "")
+        or "signature" in resp.json().get("error", "").lower()
+    )
 
 
 def test_rejects_bad_hmac(
@@ -59,6 +56,7 @@ def test_invokes_run_recipe(
     """POST /scan with valid HMAC → 200; verifies run_recipe was called (not parallel SQL)."""
     # Initialize DB so scanner can connect
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -67,6 +65,7 @@ def test_invokes_run_recipe(
     # Patch at scan.py's import site (where scan() calls run_recipe directly)
     with patch("polyarb.http.scan.run_recipe") as mock_run_recipe:
         import pandas as pd
+
         mock_run_recipe.return_value = pd.DataFrame(
             [{"market_id": "m1", "question": "Will X?", "liquidity_usd": 999.0}]
         )
@@ -89,6 +88,7 @@ def test_unknown_recipe_404(
 ) -> None:
     """POST /scan with valid HMAC but unknown recipe_name → 404."""
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -105,6 +105,7 @@ def test_recipe_name_too_long_400(
 ) -> None:
     """POST /scan with recipe_name > 64 chars → 400 (input validation)."""
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -127,6 +128,7 @@ def test_yaml_trust_split_preserved(
     This proves Phase 01.1 4-layer SQL defense is engaged via /scan, not bypassed.
     """
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -145,15 +147,19 @@ def test_yaml_trust_split_preserved(
     good_yaml_path.write_text(yaml.dump(good_yaml))
 
     # Patch settings to point at this yaml
-    import polyarb.http.scan as scan_module
     with patch.object(daemon_settings_for_test, "recipes_yaml_path", good_yaml_path):
         with patch("polyarb.http.scan.run_recipe") as mock_run:
             import pandas as pd
+
             mock_run.return_value = pd.DataFrame([])
-            resp = make_signed_request(http_test_client, "/scan", {"recipe_name": "test-yaml-valid", "params": {}})
-    # Valid yaml recipe should be allowed (200 or 404 if settings not injected) — depends on implementation
+            resp = make_signed_request(
+                http_test_client, "/scan", {"recipe_name": "test-yaml-valid", "params": {}}
+            )
+    # Valid yaml recipe may return 200 or 404 when settings are not injected.
     # The key check is: no 400 from validation failure for a clean yaml
-    assert resp.status_code in (200, 404), f"Unexpected status for valid yaml: {resp.status_code}: {resp.text}"
+    assert resp.status_code in (200, 404), (
+        f"Unexpected status for valid yaml: {resp.status_code}: {resp.text}"
+    )
 
     # (b) Tampered yaml — inject SQL injection token into where clause
     tampered_yaml_content = """
@@ -175,6 +181,7 @@ recipes:
     # Load the tampered yaml — the scanner.load_yaml_recipes should reject it at load time
     # If using list_all_recipes with tampered path, it should raise ValueError during validation
     from polyarb.observation.scanner import load_yaml_recipes
+
     try:
         recipes = load_yaml_recipes(tampered_yaml_path)
         # If loaded without error, the tampered recipe should have been silently dropped
@@ -203,6 +210,7 @@ def test_nan_in_rows_renders_as_null(
     After fix: scan._sanitize_for_json walks the dict and replaces NaN/Inf with None.
     """
     from polyarb.storage.sqlite_store import SQLiteStore
+
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
 
@@ -210,10 +218,16 @@ def test_nan_in_rows_renders_as_null(
 
     with patch("polyarb.http.scan.run_recipe") as mock_run_recipe:
         import pandas as pd
+
         mock_run_recipe.return_value = pd.DataFrame(
             [
                 {"market_id": "m1", "question": "Q?", "spread": float("nan"), "mid_price": 0.5},
-                {"market_id": "m2", "question": "Q2?", "spread": float("inf"), "mid_price": float("-inf")},
+                {
+                    "market_id": "m2",
+                    "question": "Q2?",
+                    "spread": float("inf"),
+                    "mid_price": float("-inf"),
+                },
                 {"market_id": "m3", "question": "Q3?", "spread": 0.02, "mid_price": 0.55},
             ]
         )

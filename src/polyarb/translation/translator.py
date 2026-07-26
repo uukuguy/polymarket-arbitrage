@@ -47,7 +47,6 @@ from openai import (
     NotFoundError,
     RateLimitError,
 )
-
 from tqdm import tqdm
 
 from polyarb.translation.cache import (
@@ -152,8 +151,7 @@ async def translate_pending(
     ) as client:
         # Slice pending into batches of cfg.batch_size.
         batches: list[list[tuple[str, str]]] = [
-            pending[i : i + cfg.batch_size]
-            for i in range(0, len(pending), cfg.batch_size)
+            pending[i : i + cfg.batch_size] for i in range(0, len(pending), cfg.batch_size)
         ]
 
         pbar = tqdm(
@@ -170,19 +168,13 @@ async def translate_pending(
             try:
                 result = await client.translate_batch(ens)
             except (AuthenticationError, NotFoundError) as e:
-                raise ConfigError(
-                    f"invalid translation config (auth/model): {e}"
-                ) from e
+                raise ConfigError(f"invalid translation config (auth/model): {e}") from e
             except BadRequestError as e:
                 code = _badrequest_code(e)
                 if code in _CONFIG_ERROR_BAD_REQUEST_CODES:
-                    raise ConfigError(
-                        f"bad request (config invalid, code={code}): {e}"
-                    ) from e
+                    raise ConfigError(f"bad request (config invalid, code={code}): {e}") from e
                 # Non-config BadRequest → transient, retry++
-                logger.warning(
-                    f"batch BadRequest (non-config, code={code}): {e!r}"
-                )
+                logger.warning(f"batch BadRequest (non-config, code={code}): {e!r}")
                 cache.insert_retry_placeholders(batch, translator_model=cfg.model)
                 cache.increment_retry(hashes)
                 summary.skipped += len(batch)
@@ -244,9 +236,7 @@ async def translate_pending(
     return summary
 
 
-def _overwrite_placeholders(
-    cache: TranslationCache, rows: list[TranslationRow]
-) -> None:
+def _overwrite_placeholders(cache: TranslationCache, rows: list[TranslationRow]) -> None:
     """Force-set the (zh, model, translated_at_ms, token_cost) for each row.
 
     upsert_batch's INSERT OR IGNORE preserves any prior placeholder (with

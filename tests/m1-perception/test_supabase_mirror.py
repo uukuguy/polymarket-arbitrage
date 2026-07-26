@@ -10,6 +10,7 @@ Tests use unittest.mock (no real network calls). Mirror API contract:
 - reconcile(sqlite_store) -> list[int]  (returns missing snapshot IDs that were pushed)
 - SupabaseMirror.__init__(url, service_key) creates exactly ONE supabase client
 """
+
 from __future__ import annotations
 
 import os
@@ -24,6 +25,7 @@ os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_market_rows(n: int, snapshot_id: int = 1) -> list[dict]:
     """Build n minimal market rows shaped like narrow_market_row output."""
@@ -205,9 +207,11 @@ def test_chunks_large_market_list() -> None:
         tbl.execute.return_value = MagicMock(data=[])
 
         if name == "markets_latest":
+
             def _insert(chunk: list) -> MagicMock:
                 insert_calls.append(len(chunk))
                 return tbl
+
             tbl.insert.side_effect = _insert
         else:
             tbl.insert.return_value = tbl
@@ -226,9 +230,7 @@ def test_chunks_large_market_list() -> None:
         )
 
     assert insert_calls, "insert was never called for markets_latest"
-    assert all(c <= 1000 for c in insert_calls), (
-        f"chunk sizes exceed 1000: {insert_calls}"
-    )
+    assert all(c <= 1000 for c in insert_calls), f"chunk sizes exceed 1000: {insert_calls}"
     total_inserted = sum(insert_calls)
     assert total_inserted == 3500, f"expected 3500 rows inserted, got {total_inserted}"
 
@@ -438,9 +440,7 @@ def test_step_7_5_skips_mirror_when_snapshot_invalid() -> None:
     # in the source. This is a structural test — narrow but catches regressions
     # where someone removes the guard.
     has_validity_guard = (
-        "if not is_valid" in src
-        or "if is_valid" in src
-        or "is_valid=False" in src.replace(" ", "")
+        "if not is_valid" in src or "if is_valid" in src or "is_valid=False" in src.replace(" ", "")
     )
     assert has_validity_guard, (
         "step 7.5 must guard mirror.push_snapshot with an is_valid check (F-05)"

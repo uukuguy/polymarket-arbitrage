@@ -39,7 +39,6 @@ from polyarb.storage.schemas import (
 )
 from polyarb.storage.sqlite_store import SQLiteStore
 
-
 # Parquet-only fields (in SNAPSHOT_SCHEMA but NOT in markets DDL/COLUMN_ORDER).
 # Currently just the snapshot timestamp injected by the parquet writer.
 PARQUET_ONLY_FIELDS = {"snapshot_taken_at_ms"}
@@ -89,9 +88,7 @@ def test_lockstep_column_count_matches() -> None:
     """
     ddl_cols = _ddl_markets_columns()
     placeholder_count = MARKETS_INSERT_SQL.count("?")
-    schema_non_parquet = [
-        f.name for f in SNAPSHOT_SCHEMA if f.name not in PARQUET_ONLY_FIELDS
-    ]
+    schema_non_parquet = [f.name for f in SNAPSHOT_SCHEMA if f.name not in PARQUET_ONLY_FIELDS]
 
     assert len(ddl_cols) == len(MARKETS_COLUMN_ORDER), (
         f"DDL markets column count {len(ddl_cols)} != "
@@ -156,17 +153,11 @@ def test_category_and_tags_removed_from_markets() -> None:
     assert "category" not in MARKETS_INSERT_SQL, (
         "category should be removed from MARKETS_INSERT_SQL"
     )
-    assert "category" not in schema_names, (
-        "category should be removed from SNAPSHOT_SCHEMA"
-    )
+    assert "category" not in schema_names, "category should be removed from SNAPSHOT_SCHEMA"
 
     assert "tags" not in ddl_cols, "tags should be removed from markets DDL"
-    assert "tags" not in MARKETS_COLUMN_ORDER, (
-        "tags should be removed from MARKETS_COLUMN_ORDER"
-    )
-    assert "tags" not in MARKETS_INSERT_SQL, (
-        "tags should be removed from MARKETS_INSERT_SQL"
-    )
+    assert "tags" not in MARKETS_COLUMN_ORDER, "tags should be removed from MARKETS_COLUMN_ORDER"
+    assert "tags" not in MARKETS_INSERT_SQL, "tags should be removed from MARKETS_INSERT_SQL"
     assert "tags" not in schema_names, "tags should be removed from SNAPSHOT_SCHEMA"
 
 
@@ -183,9 +174,7 @@ def test_question_translations_ddl_exists(tmp_path: Path) -> None:
     try:
         tables = {
             r[0]
-            for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
     finally:
         con.close()
@@ -268,9 +257,7 @@ def test_events_table_exists(tmp_path: Path) -> None:
     try:
         tables = {
             r[0]
-            for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
     finally:
         con.close()
@@ -317,9 +304,7 @@ def test_events_composite_primary_key(tmp_path: Path) -> None:
         con.execute(EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, None, 2))
         # But same (id, snapshot_id) must be rejected.
         with pytest.raises(sqlite3.IntegrityError):
-            con.execute(
-                EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, None, 1)
-            )
+            con.execute(EVENTS_INSERT_SQL, ("EV-1", "ev-1", "T1", "TKR", 1, 0, 0, 0, 0, 0, None, 1))
     finally:
         con.close()
 
@@ -337,9 +322,7 @@ def test_event_tags_table_exists(tmp_path: Path) -> None:
     try:
         tables = {
             r[0]
-            for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
     finally:
         con.close()
@@ -378,9 +361,7 @@ def test_event_tags_composite_primary_key(tmp_path: Path) -> None:
         con.execute(EVENT_TAGS_INSERT_SQL, ("EV-1", "100328", "Economy", "economy", 1))
         # Duplicate (event_id, tag_id, snapshot_id) must be rejected.
         with pytest.raises(sqlite3.IntegrityError):
-            con.execute(
-                EVENT_TAGS_INSERT_SQL, ("EV-1", "120", "Finance", "finance", 1)
-            )
+            con.execute(EVENT_TAGS_INSERT_SQL, ("EV-1", "120", "Finance", "finance", 1))
     finally:
         con.close()
 
@@ -393,9 +374,7 @@ def test_event_tags_indexes_exist(tmp_path: Path) -> None:
     try:
         idx_names = {
             r[0]
-            for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='index'"
-            ).fetchall()
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
         }
     finally:
         con.close()
@@ -444,7 +423,7 @@ def test_page_fetched_at_ms_in_all_four_sync_points() -> None:
     1. DDL CREATE TABLE markets - must have page_fetched_at_ms INTEGER (nullable)
     2. MARKETS_COLUMN_ORDER - must include "page_fetched_at_ms"
     3. MARKETS_INSERT_SQL - must include column name and matching ? placeholder
-    4. SNAPSHOT_SCHEMA (pyarrow) - must have pa.field("page_fetched_at_ms", pa.int64(), nullable=True)
+    4. SNAPSHOT_SCHEMA (pyarrow) - must have nullable int64 page_fetched_at_ms
 
     Sync points for events (no parquet schema — 3 points only):
     1. DDL CREATE TABLE events - must have page_fetched_at_ms INTEGER (nullable)
@@ -466,9 +445,7 @@ def test_page_fetched_at_ms_in_all_four_sync_points() -> None:
     ddl_body = m.group(1)
     # The column definition line must be non-comment: e.g. "  page_fetched_at_ms INTEGER,"
     # Filter out comment lines and search only in non-comment lines.
-    non_comment_lines = [
-        ln for ln in ddl_body.splitlines() if not ln.strip().startswith("--")
-    ]
+    non_comment_lines = [ln for ln in ddl_body.splitlines() if not ln.strip().startswith("--")]
     non_comment_body = "\n".join(non_comment_lines)
     page_col_match = re.search(
         r"^\s*page_fetched_at_ms\s+(\w+)(.*?)$",
@@ -525,9 +502,7 @@ def test_page_fetched_at_ms_in_all_four_sync_points() -> None:
     assert "page_fetched_at_ms" in EVENTS_COLUMN_ORDER, (
         "page_fetched_at_ms not in EVENTS_COLUMN_ORDER"
     )
-    assert "page_fetched_at_ms" in EVENTS_INSERT_SQL, (
-        "page_fetched_at_ms not in EVENTS_INSERT_SQL"
-    )
+    assert "page_fetched_at_ms" in EVENTS_INSERT_SQL, "page_fetched_at_ms not in EVENTS_INSERT_SQL"
     # events placeholder count must also match
     events_placeholder_count = EVENTS_INSERT_SQL.count("?")
     assert events_placeholder_count == len(EVENTS_COLUMN_ORDER), (
@@ -573,18 +548,14 @@ def test_supabase_mirror_at_ms_in_snapshots_three_sync_points() -> None:
     insert_cols = [c for c in SNAPSHOTS_COLUMN_ORDER if c != "id"]
     n_cols = len(insert_cols)
     n_placeholders = SNAPSHOTS_INSERT_SQL.count("?")
-    assert n_cols == n_placeholders, (
-        f"col count {n_cols} != placeholder count {n_placeholders}"
-    )
+    assert n_cols == n_placeholders, f"col count {n_cols} != placeholder count {n_placeholders}"
 
 
 def test_parquet_r2_url_in_snapshots_three_sync_points() -> None:
     """parquet_r2_url must appear in all 3 snapshots sync points."""
     from polyarb.storage.schemas import SNAPSHOTS_COLUMN_ORDER, SNAPSHOTS_DDL, SNAPSHOTS_INSERT_SQL
 
-    assert "parquet_r2_url" in SNAPSHOTS_DDL, (
-        "parquet_r2_url missing from SNAPSHOTS_DDL"
-    )
+    assert "parquet_r2_url" in SNAPSHOTS_DDL, "parquet_r2_url missing from SNAPSHOTS_DDL"
     assert "parquet_r2_url" in SNAPSHOTS_COLUMN_ORDER, (
         "parquet_r2_url missing from SNAPSHOTS_COLUMN_ORDER"
     )
@@ -601,8 +572,9 @@ def test_scheduler_state_table_present_in_schema_and_executable() -> None:
     This is a 1-point lockstep (no COLUMN_ORDER / INSERT_SQL / parquet schema
     because scheduler_state has no parquet mirror and is a singleton).
     """
-    from polyarb.storage.schemas import SCHEDULER_STATE_DDL
     import sqlite3
+
+    from polyarb.storage.schemas import SCHEDULER_STATE_DDL
 
     # DDL string assertions
     assert "scheduler_state" in SCHEDULER_STATE_DDL, "table name missing from SCHEDULER_STATE_DDL"

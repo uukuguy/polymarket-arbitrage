@@ -6,8 +6,8 @@ Encapsulates the logic for computing:
 3. Effective all-in cost per leg
 4. Cross-execution fee differential vs. single-venue baseline
 """
+
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -34,9 +34,7 @@ class SlippageParams:
     small_notional: float = 100.0
     mid_notional: float = 1000.0
 
-    def fee_diff_bps(
-        self, side: str, clob_maker_avail: bool
-    ) -> float:
+    def fee_diff_bps(self, side: str, clob_maker_avail: bool) -> float:
         """Fee differential vs. single-venue baseline, in bps of notional."""
         if side.upper() == "BUY":
             if clob_maker_avail:
@@ -69,7 +67,7 @@ class SlippageResult:
     net_cost_after_rebate_bps: float = 0.0
 
     # Execution metadata
-    filled_at: Optional[float] = None  # actual fill price (None if not yet filled)
+    filled_at: float | None = None  # actual fill price (None if not yet filled)
     size_usd: float = 0.0
 
     def net_cost_dollars(self) -> float:
@@ -102,10 +100,10 @@ class SlippageCalculator:
         venue: str,
         size_usd: float,
         mid_price: float,
-        clob_bid: Optional[float] = None,
-        clob_ask: Optional[float] = None,
-        pm_bid: Optional[float] = None,
-        pm_ask: Optional[float] = None,
+        clob_bid: float | None = None,
+        clob_ask: float | None = None,
+        pm_bid: float | None = None,
+        pm_ask: float | None = None,
         clob_maker_avail: bool = False,
         daily_volume_usd: float = 10_000.0,
     ) -> SlippageResult:
@@ -157,9 +155,7 @@ class SlippageCalculator:
 
         # --- Totals ---
         result.total_cost_bps = (
-            result.market_impact_bps
-            + abs(result.fee_bps)
-            + result.mid_price_delta_bps
+            result.market_impact_bps + abs(result.fee_bps) + result.mid_price_delta_bps
         )
         result.net_cost_after_rebate_bps = (
             result.market_impact_bps
@@ -174,10 +170,10 @@ class SlippageCalculator:
         size_usd: float,
         side: str,
         mid_price: float,
-        clob_bid: Optional[float] = None,
-        clob_ask: Optional[float] = None,
-        pm_bid: Optional[float] = None,
-        pm_ask: Optional[float] = None,
+        clob_bid: float | None = None,
+        clob_ask: float | None = None,
+        pm_bid: float | None = None,
+        pm_ask: float | None = None,
         daily_volume_usd: float = 10_000.0,
     ) -> dict:
         """Estimate savings from cross-execution vs. single-venue.
@@ -185,19 +181,29 @@ class SlippageCalculator:
         Returns dict with PM-only, CLOB-only, and cross-exec costs.
         """
         pm_result = self.estimate(
-            side=side, venue="PM", size_usd=size_usd,
-            mid_price=mid_price, pm_bid=pm_bid, pm_ask=pm_ask,
+            side=side,
+            venue="PM",
+            size_usd=size_usd,
+            mid_price=mid_price,
+            pm_bid=pm_bid,
+            pm_ask=pm_ask,
             daily_volume_usd=daily_volume_usd,
         )
         clob_result = self.estimate(
-            side=side, venue="CLOB", size_usd=size_usd,
-            mid_price=mid_price, clob_bid=clob_bid, clob_ask=clob_ask,
-            clob_maker_avail=False, daily_volume_usd=daily_volume_usd,
+            side=side,
+            venue="CLOB",
+            size_usd=size_usd,
+            mid_price=mid_price,
+            clob_bid=clob_bid,
+            clob_ask=clob_ask,
+            clob_maker_avail=False,
+            daily_volume_usd=daily_volume_usd,
         )
         return {
             "pm_net_cost_bps": pm_result.net_cost_after_rebate_bps,
             "clob_net_cost_bps": clob_result.net_cost_after_rebate_bps,
-            "savings_bps": clob_result.net_cost_after_rebate_bps - pm_result.net_cost_after_rebate_bps,
+            "savings_bps": clob_result.net_cost_after_rebate_bps
+            - pm_result.net_cost_after_rebate_bps,
             "pm_result": pm_result.to_dict(),
             "clob_result": clob_result.to_dict(),
         }
@@ -239,7 +245,7 @@ class SlippageCalculator:
         side: str,
         mid_price: float,
         quantity_shares: float,
-        quantity_usd: Optional[float] = None,
+        quantity_usd: float | None = None,
         maker_rebate_bps: float = 1.0,
         daily_volume_usd: float = 10_000.0,
     ) -> dict:
@@ -258,25 +264,35 @@ class SlippageCalculator:
         """
         size_usd = quantity_usd if quantity_usd is not None else quantity_shares * mid_price
         pm_result = self.estimate(
-            side=side, venue="PM", size_usd=size_usd,
-            mid_price=mid_price, daily_volume_usd=daily_volume_usd,
+            side=side,
+            venue="PM",
+            size_usd=size_usd,
+            mid_price=mid_price,
+            daily_volume_usd=daily_volume_usd,
         )
         clob_result = self.estimate(
-            side=side, venue="CLOB", size_usd=size_usd,
-            mid_price=mid_price, clob_maker_avail=False, daily_volume_usd=daily_volume_usd,
+            side=side,
+            venue="CLOB",
+            size_usd=size_usd,
+            mid_price=mid_price,
+            clob_maker_avail=False,
+            daily_volume_usd=daily_volume_usd,
         )
         return {
             "pm_result": pm_result,
             "clob_result": clob_result,
-            "savings_bps": clob_result.net_cost_after_rebate_bps - pm_result.net_cost_after_rebate_bps,
+            "savings_bps": clob_result.net_cost_after_rebate_bps
+            - pm_result.net_cost_after_rebate_bps,
         }
 
 
 # ─── Signal-layer slippage abstractions ─────────────────────────────────────────
 
+
 @dataclass
 class SlippageEstimate:
     """Computed slippage for a single venue leg."""
+
     base_bps: float
     market_impact_bps: float
     fee_bps: float
@@ -290,6 +306,7 @@ class SlippageEstimate:
 @dataclass
 class VenueSlippageProfile:
     """Venue-specific slippage calibration."""
+
     venue: str
     base_spread_bps: float = 5.0
     market_impact_coef: float = 0.01
@@ -302,9 +319,19 @@ class SlippageModel:
     """Model-based slippage estimator using venue profiles."""
 
     DEFAULT_PROFILES: dict[str, VenueSlippageProfile] = {
-        "PM": VenueSlippageProfile(venue="PM", base_spread_bps=3.0, market_impact_coef=0.005, fee_bps=0.0),
-        "CLOB": VenueSlippageProfile(venue="CLOB", base_spread_bps=2.0, market_impact_coef=0.008, fee_bps=50.0, maker_rebate_bps=-10.0),
-        "POL": VenueSlippageProfile(venue="POL", base_spread_bps=4.0, market_impact_coef=0.006, fee_bps=0.0),
+        "PM": VenueSlippageProfile(
+            venue="PM", base_spread_bps=3.0, market_impact_coef=0.005, fee_bps=0.0
+        ),
+        "CLOB": VenueSlippageProfile(
+            venue="CLOB",
+            base_spread_bps=2.0,
+            market_impact_coef=0.008,
+            fee_bps=50.0,
+            maker_rebate_bps=-10.0,
+        ),
+        "POL": VenueSlippageProfile(
+            venue="POL", base_spread_bps=4.0, market_impact_coef=0.006, fee_bps=0.0
+        ),
     }
 
     def __init__(self, profiles: dict[str, VenueSlippageProfile] | None = None) -> None:
@@ -317,4 +344,6 @@ class SlippageModel:
         base = profile.base_spread_bps / 2
         impact = min(profile.market_impact_coef * (size_usd / 1000), profile.max_impact_bps)
         total = base + impact + profile.fee_bps + profile.maker_rebate_bps
-        return SlippageEstimate(base_bps=base, market_impact_bps=impact, fee_bps=profile.fee_bps, total_bps=total)
+        return SlippageEstimate(
+            base_bps=base, market_impact_bps=impact, fee_bps=profile.fee_bps, total_bps=total
+        )

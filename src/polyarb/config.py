@@ -91,8 +91,7 @@ class Settings(BaseSettings):
     daemon_variant: Literal["l1", "l2"] = Field(
         default="l1",
         description=(
-            "Daemon variant identifier — 'l1' for snapshot daemon, "
-            "'l2' for orderbook daemon"
+            "Daemon variant identifier — 'l1' for snapshot daemon, 'l2' for orderbook daemon"
         ),
     )
 
@@ -145,15 +144,13 @@ class Settings(BaseSettings):
     l2_tob_age_warn_s: int = Field(
         default=300,
         description=(
-            "WARN threshold for /health mirror:l2_tob_age_seconds "
-            "(env POLYARB_L2_TOB_AGE_WARN_S)"
+            "WARN threshold for /health mirror:l2_tob_age_seconds (env POLYARB_L2_TOB_AGE_WARN_S)"
         ),
     )
     l2_tob_age_fail_s: int = Field(
         default=600,
         description=(
-            "FAIL threshold for /health mirror:l2_tob_age_seconds "
-            "(env POLYARB_L2_TOB_AGE_FAIL_S)"
+            "FAIL threshold for /health mirror:l2_tob_age_seconds (env POLYARB_L2_TOB_AGE_FAIL_S)"
         ),
     )
 
@@ -307,9 +304,7 @@ class Settings(BaseSettings):
         try:
             resolved.relative_to(project_root)
         except ValueError as e:
-            raise ValueError(
-                f"path {v} resolves outside project root {project_root}"
-            ) from e
+            raise ValueError(f"path {v} resolves outside project root {project_root}") from e
         return resolved
 
 

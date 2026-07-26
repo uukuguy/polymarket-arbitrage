@@ -15,12 +15,12 @@ Tests:
 7. Consumer liveness closure: returns False when ws is None or not OPEN
 8. Consumer liveness closure: returns True when ws.state==OPEN and ws.latency>0
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
 import pytest
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 1 — liveness_check=True: no RECONNECTING after stale_s silence
@@ -60,9 +60,7 @@ async def test_liveness_alive_no_reconnect(monkeypatch: pytest.MonkeyPatch) -> N
     assert wd.current_state == "WAITING_FOR_EVENT", (
         f"state should stay WAITING_FOR_EVENT when alive; got {wd.current_state!r}"
     )
-    assert wd.reconnect_attempt == 0, (
-        f"reconnect_attempt should stay 0; got {wd.reconnect_attempt}"
-    )
+    assert wd.reconnect_attempt == 0, f"reconnect_attempt should stay 0; got {wd.reconnect_attempt}"
     assert len(wd._reconnect_timestamps) == 0, (
         "no storm-cap timestamp should be appended for a benign silence"
     )
@@ -276,6 +274,7 @@ async def test_liveness_alive_multiple_stale_ticks_no_reconnect(
 def test_consumer_liveness_closure_none_ws() -> None:
     """WsConsumer liveness closure returns False when _current_ws is None."""
     from unittest.mock import MagicMock
+
     from polyarb.daemon.ws_consumer import WsConsumer
     from polyarb.daemon.ws_watchdog import WsWatchdog
 
@@ -302,6 +301,7 @@ def test_consumer_liveness_closure_none_ws() -> None:
 def test_consumer_liveness_closure_closed_ws() -> None:
     """WsConsumer liveness closure returns False when ws.state is CLOSED."""
     from websockets.protocol import State
+
     from polyarb.daemon.ws_consumer import WsConsumer
     from polyarb.daemon.ws_watchdog import WsWatchdog
 
@@ -330,6 +330,7 @@ def test_consumer_liveness_closure_closed_ws() -> None:
 def test_consumer_liveness_closure_no_pong_yet() -> None:
     """WsConsumer liveness closure returns False when latency==0 (pong not yet seen)."""
     from websockets.protocol import State
+
     from polyarb.daemon.ws_consumer import WsConsumer
     from polyarb.daemon.ws_watchdog import WsWatchdog
 
@@ -358,6 +359,7 @@ def test_consumer_liveness_closure_no_pong_yet() -> None:
 def test_consumer_liveness_closure_open_with_pong() -> None:
     """WsConsumer liveness closure returns True when OPEN and latency > 0."""
     from websockets.protocol import State
+
     from polyarb.daemon.ws_consumer import WsConsumer
     from polyarb.daemon.ws_watchdog import WsWatchdog
 

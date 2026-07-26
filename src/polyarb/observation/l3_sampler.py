@@ -448,9 +448,7 @@ async def run_event_writer(
     producers_done: asyncio.Event | None = None,
 ) -> None:
     """Append queued events in sequence order without losing failed records."""
-    if isinstance(flush_interval_s, bool) or not isinstance(
-        flush_interval_s, (int, float)
-    ):
+    if isinstance(flush_interval_s, bool) or not isinstance(flush_interval_s, (int, float)):
         raise TypeError("flush_interval_s must be numeric")
     if flush_interval_s < 0:
         raise ValueError("flush_interval_s must be non-negative")
@@ -458,18 +456,14 @@ async def run_event_writer(
     while True:
         event = runtime.peek_pending_event()
         if event is None:
-            if stop_event.is_set() and (
-                producers_done is None or producers_done.is_set()
-            ):
+            if stop_event.is_set() and (producers_done is None or producers_done.is_set()):
                 return
             if stop_event.is_set() and producers_done is not None:
                 if flush_interval_s == 0:
                     await asyncio.sleep(0)
                 else:
                     try:
-                        await asyncio.wait_for(
-                            producers_done.wait(), timeout=flush_interval_s
-                        )
+                        await asyncio.wait_for(producers_done.wait(), timeout=flush_interval_s)
                     except TimeoutError:
                         pass
                 continue
@@ -504,9 +498,7 @@ async def run_event_writer(
         result_at = _utc_now()
         if persisted:
             runtime.acknowledge_pending_event(event)
-            runtime.note_writer_result(
-                True, result_at, "writer_ok", channel="event"
-            )
+            runtime.note_writer_result(True, result_at, "writer_ok", channel="event")
             continue
 
         try:

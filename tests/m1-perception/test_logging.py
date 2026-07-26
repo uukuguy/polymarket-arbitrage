@@ -5,14 +5,13 @@ Covers D-14 / T-02-07:
 - InterceptHandler redirects stdlib logging (uvicorn.error etc.) to loguru
 - backtrace=False + diagnose=False: no source paths or variable values in prod logs
 """
+
 from __future__ import annotations
 
 import io
 import json
 import logging
-import sys
 
-import pytest
 from loguru import logger
 
 
@@ -46,7 +45,9 @@ def test_json_serialize() -> None:
 
     # Must be parseable JSON (already validated by json.loads above)
     # Must have message field
-    text = record.get("text") or record.get("message") or record.get("record", {}).get("message", "")
+    text = (
+        record.get("text") or record.get("message") or record.get("record", {}).get("message", "")
+    )
     # loguru serialize=True wraps in {"text": ..., "record": {...}}
     if not text:
         # Try nested record structure
@@ -110,8 +111,8 @@ def test_no_diagnose_no_backtrace_in_prod_mode() -> None:
         buffer,
         serialize=True,
         level="ERROR",
-        backtrace=False,   # no source path in stacktrace
-        diagnose=False,    # no local variable values
+        backtrace=False,  # no source path in stacktrace
+        diagnose=False,  # no local variable values
     )
 
     try:
@@ -166,9 +167,7 @@ def _capture_with_redact(level: str, message: str, **bind_kwargs) -> str:
 
 def test_redact_bearer_token() -> None:
     """`Bearer secret123` in log message → `Bearer [REDACTED]` in JSON output."""
-    output = _capture_with_redact(
-        "INFO", "calling api with Bearer secret_token_xyz_12345"
-    )
+    output = _capture_with_redact("INFO", "calling api with Bearer secret_token_xyz_12345")
 
     assert output, "redact filter swallowed the log line"
     assert "secret_token_xyz_12345" not in output, (
@@ -179,13 +178,9 @@ def test_redact_bearer_token() -> None:
 
 def test_redact_token_param() -> None:
     """`token=abc123` in URL → `token=[REDACTED]`."""
-    output = _capture_with_redact(
-        "INFO", "url=https://x.example.com?token=my_secret_value_abc123"
-    )
+    output = _capture_with_redact("INFO", "url=https://x.example.com?token=my_secret_value_abc123")
 
-    assert "my_secret_value_abc123" not in output, (
-        f"token= param leaked: {output[:300]}"
-    )
+    assert "my_secret_value_abc123" not in output, f"token= param leaked: {output[:300]}"
     assert "[REDACTED]" in output
 
 
@@ -202,9 +197,7 @@ def test_redact_authorization_header() -> None:
 
 def test_no_redact_for_non_secret_text() -> None:
     """A line with no secrets is left intact (no spurious redactions)."""
-    output = _capture_with_redact(
-        "INFO", "snapshot taken with market_count=20000 elapsed=8m12s"
-    )
+    output = _capture_with_redact("INFO", "snapshot taken with market_count=20000 elapsed=8m12s")
 
     assert "[REDACTED]" not in output, (
         f"redact filter triggered on non-secret message: {output[:300]}"
@@ -217,9 +210,7 @@ def test_redact_filter_does_not_break_json_serialize() -> None:
     """After redaction, the JSON line is still parseable."""
     import json as _json
 
-    output = _capture_with_redact(
-        "INFO", "calling external Bearer secret_AAA_BBB_CCC service"
-    )
+    output = _capture_with_redact("INFO", "calling external Bearer secret_AAA_BBB_CCC service")
 
     parsed = _json.loads(output)
     assert isinstance(parsed, dict), f"redact filter broke JSON: {output[:300]}"
@@ -229,11 +220,6 @@ def test_redact_filter_does_not_break_json_serialize() -> None:
 
 def test_redact_extra_field_by_key_name() -> None:
     """logger.bind(api_key=...) → 'api_key' value redacted in extras."""
-    output = _capture_with_redact(
-        "INFO", "calling api", api_key="sk-abcdef0123456789"
-    )
+    output = _capture_with_redact("INFO", "calling api", api_key="sk-abcdef0123456789")
 
-    assert "sk-abcdef0123456789" not in output, (
-        f"api_key extras leaked: {output[:300]}"
-    )
-
+    assert "sk-abcdef0123456789" not in output, f"api_key extras leaked: {output[:300]}"

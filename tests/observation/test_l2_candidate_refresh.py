@@ -1272,10 +1272,13 @@ async def test_supabase_fetch_does_not_block_event_loop(tmp_path):
     safety = threading.Timer(0.2, release.set)
     safety.start()
     try:
-        with patch.object(mod, "create_client", return_value=MagicMock()), patch.object(
-            mod,
-            "_fetch_all_markets_latest",
-            side_effect=_blocking_fetch,
+        with (
+            patch.object(mod, "create_client", return_value=MagicMock()),
+            patch.object(
+                mod,
+                "_fetch_all_markets_latest",
+                side_effect=_blocking_fetch,
+            ),
         ):
             task = asyncio.create_task(
                 mod.on_snapshot_complete(

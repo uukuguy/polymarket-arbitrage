@@ -20,7 +20,6 @@ os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 
 from polyarb.validator.category import Category, Issue, SnapshotStatus
 from polyarb.validator.layers import (
-    RESOLVING_WINDOW_MS,
     ZOMBIE_LIQUIDITY_USD,
     determine_snapshot_status,
     is_valid_overall,
@@ -230,7 +229,9 @@ def test_is_valid_true_when_small_mismatch() -> None:
 
 def test_is_valid_false_when_api_unreachable() -> None:
     """API_UNREACHABLE at Layer 1 → FAILED regardless of count."""
-    issues = [Issue(layer=1, category=Category.API_UNREACHABLE, market_id=None, detail="Gamma timeout")]
+    issues = [
+        Issue(layer=1, category=Category.API_UNREACHABLE, market_id=None, detail="Gamma timeout")
+    ]
     assert is_valid_overall(issues) is False
 
 

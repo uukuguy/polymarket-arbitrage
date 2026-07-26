@@ -18,6 +18,7 @@ Schema contract (from 05-01-PLAN.md and 05-RESEARCH.md Example 1):
   views don't inherit base-table RLS the same way (RESEARCH §Architecture)
 - ``downgrade()`` reverses in the correct order: drop views BEFORE table
 """
+
 from __future__ import annotations
 
 import re
@@ -29,10 +30,7 @@ import pytest
 # pytest's cwd. parents[2] = project root (tests/m1-perception/<file> →
 # project root).
 _MIGRATION_PATH: Path = (
-    Path(__file__).resolve().parents[2]
-    / "alembic"
-    / "versions"
-    / "005_l2_book_levels_and_ohlc.py"
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "005_l2_book_levels_and_ohlc.py"
 )
 
 
@@ -196,12 +194,8 @@ def test_005_downgrade_reverses_in_correct_order() -> None:
         r"drop_table\s*\(\s*[\"']l2_book_levels[\"']",
         text,
     )
-    assert drop_view_1h_pos >= 0, (
-        "downgrade() must contain 'DROP VIEW IF EXISTS l2_ohlc_1h'"
-    )
-    assert drop_table_match is not None, (
-        "downgrade() must contain op.drop_table(\"l2_book_levels\")"
-    )
+    assert drop_view_1h_pos >= 0, "downgrade() must contain 'DROP VIEW IF EXISTS l2_ohlc_1h'"
+    assert drop_table_match is not None, 'downgrade() must contain op.drop_table("l2_book_levels")'
     drop_table_pos = drop_table_match.start()
     assert drop_view_1h_pos < drop_table_pos, (
         "Views must be dropped before the l2_book_levels table — "

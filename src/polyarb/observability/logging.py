@@ -15,6 +15,7 @@ Source references:
 - dash0.com/guides/python-logging-with-loguru
 - RESEARCH.md §9 lines 1483-1513 (verbatim)
 """
+
 from __future__ import annotations
 
 import logging
@@ -24,7 +25,6 @@ from typing import Any
 from loguru import logger
 
 from polyarb.observability.redact import (
-    SENSITIVE_KEY_NAMES,
     _is_sensitive_key,
     _redact_string,
 )
@@ -106,11 +106,11 @@ def init_logging() -> None:
     # Add JSON stdout sink for Axiom ingestion
     logger.add(
         sys.stdout,
-        serialize=True,   # JSON output — one line per log record
+        serialize=True,  # JSON output — one line per log record
         level="INFO",
-        enqueue=False,    # in-process; daemon-friendly (no background thread)
+        enqueue=False,  # in-process; daemon-friendly (no background thread)
         backtrace=False,  # T-02-07: no source path in exception output
-        diagnose=False,   # T-02-07: no local variable values in exception output
+        diagnose=False,  # T-02-07: no local variable values in exception output
         filter=redact_secrets,  # Plan 05 T-02-07: mask Bearer/token=/key=/JWT before serialize
     )
 

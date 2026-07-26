@@ -11,6 +11,7 @@ Scenario 1b: Gamma timeout mid-pagination (first page OK, second page 503 ×
              - Second /markets returns 503 every retry
              - orchestrator proceeds with what it got → partial data → DEGRADED or FAILED
 """
+
 from __future__ import annotations
 
 import os
@@ -100,9 +101,7 @@ async def test_gamma_503_exhausted_yields_failed(tmp_path: Path) -> None:
         f"Expected api_unreachable Issue, got categories: {result.issue_categories}"
     )
     # Status must be FAILED (api_unreachable at Layer 1 → no markets → FAILED)
-    assert result.status == SnapshotStatus.FAILED.value, (
-        f"Expected FAILED, got {result.status!r}"
-    )
+    assert result.status == SnapshotStatus.FAILED.value, f"Expected FAILED, got {result.status!r}"
 
 
 @pytest.mark.asyncio
@@ -121,21 +120,17 @@ async def test_gamma_503_issue_detail_contains_gamma_or_503(tmp_path: Path) -> N
             clob_inst.get_books = AsyncMock(return_value=[])
             clob_inst.get_prices_buy_sell = AsyncMock(return_value={"buy": {}, "sell": {}})
 
-            result = await run_snapshot(settings, mode="subset")
+            _result = await run_snapshot(settings, mode="subset")
 
     # Verify the issue was persisted to SQLite with some descriptive detail
     con = sqlite3.connect(settings.db_path)
-    rows = con.execute(
-        "SELECT category, detail FROM validation_issues"
-    ).fetchall()
+    rows = con.execute("SELECT category, detail FROM validation_issues").fetchall()
     con.close()
 
     assert rows, "Expected at least one validation_issues row"
     # At least one row should be api_unreachable
     categories = [r[0] for r in rows]
-    assert "api_unreachable" in categories, (
-        f"Expected api_unreachable in {categories}"
-    )
+    assert "api_unreachable" in categories, f"Expected api_unreachable in {categories}"
 
 
 # ---------------------------------------------------------------------------

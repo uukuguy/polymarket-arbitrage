@@ -69,9 +69,7 @@ class SamplingMarketState:
             raise ValueError("sampling market Yes/No token IDs must be distinct")
         for name in ("yes_book_at", "no_book_at", "yes_ohlc_at"):
             value = getattr(self, name)
-            if value is not None and (
-                value.tzinfo is None or value.utcoffset() != timedelta(0)
-            ):
+            if value is not None and (value.tzinfo is None or value.utcoffset() != timedelta(0)):
                 raise ValueError(f"{name} must be timezone-aware UTC")
 
 
@@ -309,6 +307,7 @@ FROM pg_roles AS role WHERE role.rolname=current_user
 
 _RETENTION_CALL = "SELECT * FROM l3_retention_cleanup($1,$2,$3)"
 
+
 def _require_utc_interval(start: datetime, end: datetime) -> None:
     for name, value in (("start", start), ("end", end)):
         if value.tzinfo is None or value.utcoffset() != timedelta(0):
@@ -347,8 +346,7 @@ def _active_soak_mapping_lock(
             if (
                 row["boot_id"] != boot_id
                 or not isinstance(detail, dict)
-                or set(detail)
-                != {"manifest_sha256", "mapping_hash", "t0", "t24"}
+                or set(detail) != {"manifest_sha256", "mapping_hash", "t0", "t24"}
             ):
                 raise ValueError
             manifest_hash = detail["manifest_sha256"]
@@ -401,7 +399,6 @@ def _report_failure(operation: str, error: BaseException) -> None:
         )
     except Exception:  # noqa: BLE001 - observability cannot break the storage envelope
         logger.warning("l3 evidence operation={} breadcrumb_failed", operation)
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -746,9 +743,7 @@ class L3EvidenceStore:
         return await self._append_one(_AppendOperation.BOOT, lambda: _boot_args(record))
 
     async def append_promote_run(self, record: PromoteRunRecord) -> bool:
-        return await self._append_one(
-            _AppendOperation.PROMOTE_RUN, lambda: _promote_args(record)
-        )
+        return await self._append_one(_AppendOperation.PROMOTE_RUN, lambda: _promote_args(record))
 
     async def append_sample(self, batch: SampleBatch) -> bool:
         connection: asyncpg.Connection | None = None
@@ -878,9 +873,7 @@ class L3EvidenceStore:
                     raise
                 except Exception as error:  # noqa: BLE001
                     _report_failure("fetch_sampling_market_state_close", error)
-                    raise L3EvidenceReadError(
-                        "l3 sampling market state read failed"
-                    ) from None
+                    raise L3EvidenceReadError("l3 sampling market state read failed") from None
 
     async def fetch_active_soak_mapping_lock(
         self,
@@ -912,9 +905,7 @@ class L3EvidenceStore:
                     raise
                 except Exception as error:  # noqa: BLE001
                     _report_failure("fetch_active_soak_mapping_lock_close", error)
-                    raise L3EvidenceReadError(
-                        "l3 soak mapping lock read failed"
-                    ) from None
+                    raise L3EvidenceReadError("l3 soak mapping lock read failed") from None
 
     async def fetch_status(self, *, boot_id: UUID) -> Mapping[str, object] | None:
         connection: asyncpg.Connection | None = None
@@ -959,9 +950,7 @@ class L3EvidenceStore:
                     },
                     key=str,
                 )
-                boot_rows = await connection.fetch(
-                    _BOOT_WINDOW, start, end, referenced_boots
-                )
+                boot_rows = await connection.fetch(_BOOT_WINDOW, start, end, referenced_boots)
                 yes_tokens = sorted({row["yes_token_id"] for row in market_rows})
                 all_tokens = sorted(
                     {
@@ -970,12 +959,8 @@ class L3EvidenceStore:
                         for token in (row["yes_token_id"], row["no_token_id"])
                     }
                 )
-                book_rows = await connection.fetch(
-                    _BOOK_COVERAGE, start, end, all_tokens
-                )
-                ohlc_rows = await connection.fetch(
-                    _OHLC_COVERAGE, start, end, yes_tokens
-                )
+                book_rows = await connection.fetch(_BOOK_COVERAGE, start, end, all_tokens)
+                ohlc_rows = await connection.fetch(_OHLC_COVERAGE, start, end, yes_tokens)
             raw = {
                 "l3_runtime_boots": tuple(dict(row) for row in boot_rows),
                 "l3_promote_runs": tuple(dict(row) for row in promote_rows),
@@ -991,9 +976,7 @@ class L3EvidenceStore:
                 health_samples=tuple(_decode_health(row) for row in health_rows),
                 market_samples=tuple(_decode_market(row) for row in market_rows),
                 runtime_events=tuple(_decode_event(row) for row in event_rows),
-                book_coverage_counts={
-                    row["asset_id"]: row["coverage_count"] for row in book_rows
-                },
+                book_coverage_counts={row["asset_id"]: row["coverage_count"] for row in book_rows},
                 yes_ohlc_coverage_counts={
                     row["asset_id"]: row["coverage_count"] for row in ohlc_rows
                 },
@@ -1047,9 +1030,7 @@ class L3EvidenceStore:
                     raise
                 except Exception as error:  # noqa: BLE001
                     _report_failure("retention_bounds_close", error)
-                    raise L3EvidenceReadError(
-                        "l3 evidence retention bounds read failed"
-                    ) from None
+                    raise L3EvidenceReadError("l3 evidence retention bounds read failed") from None
 
 
 class L3RetentionOperator:
@@ -1084,9 +1065,7 @@ class L3RetentionOperator:
                 or not authorization.retention_member
             ):
                 raise L3RetentionError("retention credential is not authorized")
-            row = await connection.fetchrow(
-                _RETENTION_CALL, cutoff, protected_start, protected_end
-            )
+            row = await connection.fetchrow(_RETENTION_CALL, cutoff, protected_start, protected_end)
             if row is None:
                 raise L3RetentionError("retention function returned no result")
             return RetentionCleanupResult(

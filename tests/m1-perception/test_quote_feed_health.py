@@ -92,9 +92,7 @@ def test_enabled_health_fails_when_no_complete_run(tmp_path) -> None:
     assert overall == "fail"
 
 
-def test_enabled_health_fails_closed_when_quote_store_is_unreadable(
-    tmp_path, monkeypatch
-) -> None:
+def test_enabled_health_fails_closed_when_quote_store_is_unreadable(tmp_path, monkeypatch) -> None:
     settings = _settings(tmp_path, enabled=True)
     store = SQLiteStore(settings.db_path)
     store.init_schema()

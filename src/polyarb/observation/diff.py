@@ -4,6 +4,7 @@ Resolution: snapshot_id (int) → SELECT parquet_path FROM snapshots → DuckDB
 The user gives integer snapshot IDs (from SQLite snapshots.id), never raw
 paths (T-01.1-15 — defense against arbitrary file access).
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -36,8 +37,7 @@ def latest_snapshot_pair(db_path: Path) -> tuple[int, int]:
             "SELECT id FROM snapshots WHERE market_count > 0 ORDER BY id DESC LIMIT 2"
         ).fetchall()
         if len(rows) < 2:
-            raise ValueError("need at least 2 snapshots to compare; only "
-                             f"{len(rows)} found")
+            raise ValueError(f"need at least 2 snapshots to compare; only {len(rows)} found")
         return (rows[1][0], rows[0][0])  # (older, newer)
     finally:
         con.close()
@@ -72,7 +72,13 @@ def compare_snapshots(from_path: Path, to_path: Path) -> pd.DataFrame:
             SELECT
                 COALESCE(a.slug, b.slug) AS slug,
                 COALESCE(a.question, b.question) AS question,
-                NULLIF(COALESCE(NULLIF(NULLIF(a.category, ''), 'None'), NULLIF(NULLIF(b.category, ''), 'None')), '') AS category,
+                NULLIF(
+                    COALESCE(
+                        NULLIF(NULLIF(a.category, ''), 'None'),
+                        NULLIF(NULLIF(b.category, ''), 'None')
+                    ),
+                    ''
+                ) AS category,
                 a.mid_price AS mid_from,
                 b.mid_price AS mid_to,
                 (b.mid_price - a.mid_price) AS mid_drift,

@@ -18,6 +18,7 @@ Plan 05 will add init_sentry() before init_logging().
 
 Source: RESEARCH.md §Architecture Patterns Pattern 1 (lines 295-349, verbatim)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -75,10 +76,10 @@ async def main() -> int:
 
     config = uvicorn.Config(
         app,
-        host="0.0.0.0",      # Fly internal network only — fly.toml controls exposure
+        host="0.0.0.0",  # Fly internal network only — fly.toml controls exposure
         port=settings.http_port,
-        log_config=None,      # use loguru, not uvicorn's logger
-        access_log=False,     # Axiom doesn't need access logs at this volume
+        log_config=None,  # use loguru, not uvicorn's logger
+        access_log=False,  # Axiom doesn't need access logs at this volume
     )
     server = uvicorn.Server(config)
 

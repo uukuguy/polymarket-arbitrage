@@ -9,6 +9,7 @@ Locks the atomic-execution contract:
 - Pluggable leg executor — tests inject simulators; production injects
   py-clob-client adapter (T5+ scope).
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -126,9 +127,7 @@ async def test_first_leg_fail_aborts_subsequent_legs():
 
     assert result.status == ExecutionStatus.ABORTED
     assert result.legs_executed == 0
-    assert seen == ["leg-0"], (
-        f"only leg-0 should be attempted under abort; got {seen}"
-    )
+    assert seen == ["leg-0"], f"only leg-0 should be attempted under abort; got {seen}"
     # leg_results still has 3 entries — legs 1 and 2 marked skipped.
     assert len(result.leg_results) == 3
     assert result.leg_results[0].success is False
@@ -266,9 +265,7 @@ async def test_position_tracker_called_only_for_successful_legs():
 @pytest.mark.asyncio
 async def test_replaying_decision_reuses_one_durable_open_operation(tmp_path):
     path = tmp_path / "positions.db"
-    tracker = PositionTracker(
-        repository=SQLitePositionRepository(path, initial_balance=1000.0)
-    )
+    tracker = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
     engine = ExecutionEngine(tracker=tracker)
     decision = _make_decision(n_legs=1)
 
@@ -286,9 +283,7 @@ async def test_replaying_decision_reuses_one_durable_open_operation(tmp_path):
 async def test_booking_rejection_fails_leg_instead_of_reporting_profit(tmp_path):
     """A venue success is not completed until its position is durably booked."""
     tracker = PositionTracker(
-        repository=SQLitePositionRepository(
-            tmp_path / "positions.db", initial_balance=1000.0
-        )
+        repository=SQLitePositionRepository(tmp_path / "positions.db", initial_balance=1000.0)
     )
     engine = ExecutionEngine(tracker=tracker)
 
@@ -307,9 +302,7 @@ async def test_booking_rejection_fails_leg_instead_of_reporting_profit(tmp_path)
 @pytest.mark.asyncio
 async def test_replaying_paper_close_reuses_open_and_close_operations(tmp_path):
     path = tmp_path / "positions.db"
-    tracker = PositionTracker(
-        repository=SQLitePositionRepository(path, initial_balance=1000.0)
-    )
+    tracker = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
     engine = ExecutionEngine(tracker=tracker, paper_close=True)
     decision = _make_decision(n_legs=1)
 
@@ -325,15 +318,11 @@ async def test_replaying_paper_close_reuses_open_and_close_operations(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_replaying_venue_fill_uses_immutable_fill_identity(
-    tmp_path, caplog
-):
+async def test_replaying_venue_fill_uses_immutable_fill_identity(tmp_path, caplog):
     from polyarb.routing.position_tracker import Fill
 
     path = tmp_path / "positions.db"
-    tracker = PositionTracker(
-        repository=SQLitePositionRepository(path, initial_balance=1000.0)
-    )
+    tracker = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
 
     async def fill_provider(leg: ExecutionLeg) -> Fill:
         return Fill(
@@ -372,9 +361,7 @@ async def test_engine_forwards_complete_venue_settlement_without_fee_math(tmp_pa
     from polyarb.routing.position_tracker import Fill, VenueSettlement
 
     path = tmp_path / "positions.db"
-    tracker = PositionTracker(
-        repository=SQLitePositionRepository(path, initial_balance=1000.0)
-    )
+    tracker = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
 
     async def fill_provider(leg: ExecutionLeg) -> Fill:
         return Fill(
@@ -449,9 +436,7 @@ async def test_partial_fill_sequence_survives_engine_retry_and_restart(tmp_path)
     first_tracker = PositionTracker(
         repository=SQLitePositionRepository(path, initial_balance=1000.0)
     )
-    await ExecutionEngine(
-        tracker=first_tracker, fill_provider=fill_provider
-    ).execute(decision)
+    await ExecutionEngine(tracker=first_tracker, fill_provider=fill_provider).execute(decision)
 
     first_remaining = first_tracker.open_positions()[0]
     assert first_remaining.quantity == 70.0
@@ -461,9 +446,7 @@ async def test_partial_fill_sequence_survives_engine_retry_and_restart(tmp_path)
     restarted_tracker = PositionTracker(
         repository=SQLitePositionRepository(path, initial_balance=1000.0)
     )
-    restarted_engine = ExecutionEngine(
-        tracker=restarted_tracker, fill_provider=fill_provider
-    )
+    restarted_engine = ExecutionEngine(tracker=restarted_tracker, fill_provider=fill_provider)
     await restarted_engine.execute(decision)
     replayed_remaining = restarted_tracker.open_positions()[0]
     assert replayed_remaining.quantity == 70.0
@@ -487,15 +470,11 @@ async def test_partial_fill_sequence_survives_engine_retry_and_restart(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_venue_fill_without_fill_id_warns_and_uses_legacy_identity(
-    tmp_path, caplog
-):
+async def test_venue_fill_without_fill_id_warns_and_uses_legacy_identity(tmp_path, caplog):
     from polyarb.routing.position_tracker import Fill
 
     path = tmp_path / "positions.db"
-    tracker = PositionTracker(
-        repository=SQLitePositionRepository(path, initial_balance=1000.0)
-    )
+    tracker = PositionTracker(repository=SQLitePositionRepository(path, initial_balance=1000.0))
 
     async def fill_provider(leg: ExecutionLeg) -> Fill:
         return Fill(market_id=leg.asset, exit_price=0.525, filled_size=leg.size)
@@ -506,8 +485,7 @@ async def test_venue_fill_without_fill_id_warns_and_uses_legacy_identity(
 
     with sqlite3.connect(path) as con:
         close_id = con.execute(
-            "SELECT operation_id FROM m2_applied_operations "
-            "WHERE operation_type = 'close'"
+            "SELECT operation_id FROM m2_applied_operations WHERE operation_type = 'close'"
         ).fetchone()[0]
     assert close_id.startswith("close:sig-1:leg-0:")
     assert ":fill:" not in close_id

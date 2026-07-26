@@ -6,6 +6,7 @@ Plan 04 Wave 0. Drives WsConsumer implementation:
 - last_event_at_s updates on each event
 - subscribed_assets tracked from constructor
 """
+
 from __future__ import annotations
 
 import os

@@ -47,9 +47,7 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     assert cfg.request_timeout_s == 30.0
 
 
-def test_missing_api_base_raises(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_missing_api_base_raises(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """Without TRANSLATION_API_BASE the constructor fails fast."""
     _clear_translation_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -60,9 +58,7 @@ def test_missing_api_base_raises(
         TranslationConfig()
 
 
-def test_missing_api_key_raises(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_missing_api_key_raises(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """Without TRANSLATION_API_KEY the constructor fails fast."""
     _clear_translation_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -73,9 +69,7 @@ def test_missing_api_key_raises(
         TranslationConfig()
 
 
-def test_missing_model_raises(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_missing_model_raises(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """Without TRANSLATION_MODEL the constructor fails fast."""
     _clear_translation_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -86,9 +80,7 @@ def test_missing_model_raises(
         TranslationConfig()
 
 
-def test_does_not_pickup_polyarb_prefix(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_does_not_pickup_polyarb_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """env_prefix=TRANSLATION_ must NOT pick up POLYARB_* env.
 
     Verifies namespace isolation — Phase 1's POLYARB_DB_PATH or any other
@@ -106,9 +98,7 @@ def test_does_not_pickup_polyarb_prefix(
         TranslationConfig()
 
 
-def test_repr_does_not_leak_api_key(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_repr_does_not_leak_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """SecretStr wrapping → repr(cfg) does not contain the secret."""
     _clear_translation_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -123,9 +113,7 @@ def test_repr_does_not_leak_api_key(
     assert cfg.secret_api_key() == "sk-super-secret-12345"
 
 
-def test_str_does_not_leak_api_key(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_str_does_not_leak_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """str(cfg) and the model_dump default also redact the secret."""
     _clear_translation_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -137,9 +125,7 @@ def test_str_does_not_leak_api_key(
     assert "sk-super-secret-12345" not in str(cfg)
 
 
-def test_max_concurrency_override_via_env(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_max_concurrency_override_via_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """User can dial max_concurrency via .env (e.g. DeepSeek free tier)."""
     _clear_translation_env(monkeypatch)
     monkeypatch.chdir(tmp_path)

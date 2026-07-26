@@ -1,4 +1,5 @@
 import pytest
+
 from polyarb.models.slippage import SlippageCalculator, SlippageParams, SlippageResult
 
 
@@ -159,8 +160,11 @@ class TestImdeaType2FeeDifferential:
 
         # Structural contract first.
         assert set(result.keys()) >= {
-            "pm_net_cost_bps", "clob_net_cost_bps", "savings_bps",
-            "pm_result", "clob_result",
+            "pm_net_cost_bps",
+            "clob_net_cost_bps",
+            "savings_bps",
+            "pm_result",
+            "clob_result",
         }, f"missing keys; got {sorted(result.keys())}"
 
         savings_bps = result["savings_bps"]

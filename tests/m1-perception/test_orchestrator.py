@@ -83,9 +83,7 @@ def _books_as_objects(book_dicts: list[dict]) -> list[SimpleNamespace]:
     return [SimpleNamespace(**bd) for bd in book_dicts]
 
 
-def _make_fake_gamma(
-    markets: list[dict], events: list[dict] | None = None
-) -> AsyncMock:
+def _make_fake_gamma(markets: list[dict], events: list[dict] | None = None) -> AsyncMock:
     """Build a fake_gamma with both /markets and /events return values configured.
 
     Phase 1.1 Amendment 01: orchestrator phase 1 fetches /events first then
@@ -103,6 +101,7 @@ def _make_fake_gamma(
         async def _iter():
             for item in items:
                 yield item
+
         return _iter
 
     fake.iter_active_markets = _make_iter(markets)
@@ -147,9 +146,10 @@ async def test_full_pipeline_writes_sqlite_and_parquet(tmp_path: Path) -> None:
 
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -195,6 +195,7 @@ async def test_layer1_count_mismatch_flips_is_valid_false(
 
     # Real normalize for first 4, None for the 5th.
     from polyarb.snapshot import orchestrator as orch_mod
+
     real_normalize = orch_mod.normalize_market
     seen = {"count": 0}
 
@@ -208,9 +209,10 @@ async def test_layer1_count_mismatch_flips_is_valid_false(
 
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -256,9 +258,10 @@ async def test_ghost_book_detected_in_validation_issues(tmp_path: Path) -> None:
 
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects([ghost_book]))
         # /price says 0.55 — far from book ask of 0.99 → ghost-book signal
@@ -310,9 +313,10 @@ async def test_f1_unparseable_price_does_not_crash(tmp_path: Path) -> None:
 
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects([bad_book]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -354,9 +358,10 @@ async def test_fetched_at_ms_stamped_on_db_rows(tmp_path: Path) -> None:
 
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -366,9 +371,7 @@ async def test_fetched_at_ms_stamped_on_db_rows(tmp_path: Path) -> None:
         result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
 
     con = sqlite3.connect(settings.db_path)
-    rows = con.execute(
-        "SELECT market_id, fetched_at_ms FROM markets"
-    ).fetchall()
+    rows = con.execute("SELECT market_id, fetched_at_ms FROM markets").fetchall()
     con.close()
     assert rows, "markets table must have rows"
     for market_id, fetched_at_ms in rows:
@@ -393,9 +396,10 @@ async def test_clob_unreachable_records_issue_but_persists_snapshot(tmp_path: Pa
 
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(side_effect=RuntimeError("simulated CLOB outage"))
         clob_inst.get_prices_buy_sell = AsyncMock(return_value={"buy": {}, "sell": {}})
@@ -500,9 +504,7 @@ async def test_validation_issues_have_non_empty_categories(
     """D-D4: every persisted Issue row must have a non-empty category string."""
     await run_snapshot(settings_for_test, mode="subset", now_ms=1_714_435_200_000)
     con = sqlite3.connect(settings_for_test.db_path)
-    cats = con.execute(
-        "SELECT DISTINCT category FROM validation_issues"
-    ).fetchall()
+    cats = con.execute("SELECT DISTINCT category FROM validation_issues").fetchall()
     con.close()
     # If there are no issues at all, the assertion is vacuously true (some
     # subset runs are clean). If there ARE rows, none may have empty category.
@@ -570,9 +572,10 @@ async def test_gamma_duplicate_market_id_deduped(tmp_path: Path) -> None:
     fake_gamma = _make_fake_gamma(duplicated, _events_for_markets(duplicated))
 
     clob_data = _load_clob_fixture()
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -617,9 +620,10 @@ async def test_subset_persists_only_target_markets(tmp_path: Path) -> None:
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
     clob_data = _load_clob_fixture()
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -659,13 +663,12 @@ async def test_phase_timing_lines_emitted(tmp_path: Path) -> None:
     sink_id = logger.add(lambda msg: captured.append(msg.record["message"]), level="INFO")
 
     try:
-        with patch(
-            "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-        ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+        with (
+            patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+            patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        ):
             clob_inst = ClobMock.return_value
-            clob_inst.get_books = AsyncMock(
-                return_value=_books_as_objects(clob_data["books"])
-            )
+            clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
             clob_inst.get_prices_buy_sell = AsyncMock(
                 return_value={
                     "buy": clob_data["prices_buy"],
@@ -712,9 +715,10 @@ async def test_amendment_01_events_persisted_to_sqlite(tmp_path: Path) -> None:
 
     fake_gamma = _make_fake_gamma(gamma_data, events_data)
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -751,9 +755,10 @@ async def test_amendment_01_event_id_populated_on_markets(tmp_path: Path) -> Non
 
     fake_gamma = _make_fake_gamma(gamma_data, events_data)
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -764,13 +769,10 @@ async def test_amendment_01_event_id_populated_on_markets(tmp_path: Path) -> Non
 
     con = sqlite3.connect(settings.db_path)
     try:
-        rows = con.execute(
-            "SELECT market_id, event_id FROM markets ORDER BY market_id"
-        ).fetchall()
+        rows = con.execute("SELECT market_id, event_id FROM markets ORDER BY market_id").fetchall()
         # JOIN check — every market_row's event_id must exist in events table.
         joined = con.execute(
-            "SELECT COUNT(*) FROM markets m "
-            "INNER JOIN events e ON m.event_id = e.id"
+            "SELECT COUNT(*) FROM markets m INNER JOIN events e ON m.event_id = e.id"
         ).fetchone()[0]
     finally:
         con.close()
@@ -801,9 +803,10 @@ async def test_amendment_01_orphan_market_event_id_is_null(tmp_path: Path) -> No
 
     fake_gamma = _make_fake_gamma(gamma_data, partial_events)
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -841,9 +844,7 @@ async def test_amendment_01_events_failure_does_not_kill_snapshot(tmp_path: Path
 
     fake_gamma = AsyncMock()
     fake_gamma.fetch_all_active_markets.return_value = gamma_data
-    fake_gamma.fetch_all_active_events.side_effect = RuntimeError(
-        "simulated /events outage"
-    )
+    fake_gamma.fetch_all_active_events.side_effect = RuntimeError("simulated /events outage")
 
     # Plan 02-09: provide iter_active_markets async generator.
     # iter_active_events is also stubbed but the test patches the wrapped
@@ -864,9 +865,10 @@ async def test_amendment_01_events_failure_does_not_kill_snapshot(tmp_path: Path
     fake_gamma.__aenter__.return_value = fake_gamma
     fake_gamma.__aexit__.return_value = None
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -922,9 +924,10 @@ async def test_amendment_01_event_tags_writeable_with_multiple_tags(tmp_path: Pa
 
     fake_gamma = _make_fake_gamma(gamma_data, events_data)
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -953,8 +956,6 @@ async def test_amendment_01_event_tags_writeable_with_multiple_tags(tmp_path: Pa
     assert distinct_labels == 3
 
 
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Plan 03-05 — Step 7.7: event bus NOTIFY fan-out (feature-flagged)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -971,13 +972,15 @@ async def test_step_7_7_emits_snapshot_complete_when_enabled(tmp_path: Path) -> 
     clob_data = _load_clob_fixture()
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock, patch(
-        "polyarb.snapshot.orchestrator.publish_snapshot_complete",
-        new_callable=AsyncMock,
-        return_value=True,
-    ) as publish_mock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as publish_mock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -1003,15 +1006,16 @@ async def test_step_7_7_failsoft_when_publish_raises(tmp_path: Path) -> None:
     clob_data = _load_clob_fixture()
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock, patch(
-        "polyarb.snapshot.orchestrator.publish_snapshot_complete",
-        new_callable=AsyncMock,
-        side_effect=RuntimeError("simulated NOTIFY failure"),
-    ), patch(
-        "polyarb.snapshot.orchestrator.sentry_sdk.add_breadcrumb"
-    ) as breadcrumb_mock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("simulated NOTIFY failure"),
+        ),
+        patch("polyarb.snapshot.orchestrator.sentry_sdk.add_breadcrumb") as breadcrumb_mock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -1024,8 +1028,7 @@ async def test_step_7_7_failsoft_when_publish_raises(tmp_path: Path) -> None:
     assert result.snapshot_id >= 1
     # At least one breadcrumb with category="event-bus" level="warning"
     bus_breadcrumbs = [
-        c for c in breadcrumb_mock.call_args_list
-        if c.kwargs.get("category") == "event-bus"
+        c for c in breadcrumb_mock.call_args_list if c.kwargs.get("category") == "event-bus"
     ]
     assert bus_breadcrumbs, "fail-soft step 7.7 must emit event-bus breadcrumb"
 
@@ -1040,12 +1043,14 @@ async def test_step_7_7_skipped_when_event_bus_disabled(tmp_path: Path) -> None:
     clob_data = _load_clob_fixture()
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock, patch(
-        "polyarb.snapshot.orchestrator.publish_snapshot_complete",
-        new_callable=AsyncMock,
-    ) as publish_mock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
@@ -1069,12 +1074,14 @@ async def test_step_7_7_skipped_by_default(tmp_path: Path, monkeypatch) -> None:
     clob_data = _load_clob_fixture()
     fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock, patch(
-        "polyarb.snapshot.orchestrator.publish_snapshot_complete",
-        new_callable=AsyncMock,
-    ) as publish_mock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
         clob_inst = ClobMock.return_value
         clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(

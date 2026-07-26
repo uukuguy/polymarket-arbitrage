@@ -54,9 +54,7 @@ def test_living_doc_contract_selects_focused_gates() -> None:
 
 
 def test_opportunity_feed_chain_truth_profile_is_dedicated() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "opportunity-feed-chain-truth"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "opportunity-feed-chain-truth"})
 
     assert commands == {
         "planning": ["make", "planning-status"],
@@ -90,9 +88,7 @@ def test_opportunity_feed_chain_truth_profile_is_dedicated() -> None:
 
 
 def test_opportunity_feed_cadence_sla_profile_is_fixture_only() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "opportunity-feed-cadence-sla"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "opportunity-feed-cadence-sla"})
 
     required_tests = {
         "tests/routing/test_neg_risk_quote_store.py",
@@ -115,9 +111,7 @@ def test_opportunity_feed_cadence_sla_profile_is_fixture_only() -> None:
 
 
 def test_l3_prerequisite_profile_uses_only_local_relevant_gates() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "l3-prerequisite-chain-truth"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "l3-prerequisite-chain-truth"})
 
     flattened = [argument for command in commands.values() for argument in command]
     assert commands["planning"] == ["make", "planning-status"]
@@ -138,6 +132,8 @@ def test_l3_prerequisite_profile_uses_only_local_relevant_gates() -> None:
             for forbidden in ("http://", "https://", "flyctl", "deploy", "migrate")
         )
     }
+
+
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS

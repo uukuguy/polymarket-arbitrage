@@ -7,6 +7,7 @@ Plan 03 Task 1 — covers:
 - neg-risk-incomplete 0.02 容差体现在 group_by 字段
 - by-tag 替代 by-category（amendment 01）
 """
+
 from __future__ import annotations
 
 import pytest
@@ -20,16 +21,12 @@ from polyarb.observation.recipes import BUILTIN_RECIPES, Recipe
 
 def test_recipe_default_is_not_trusted() -> None:
     """Defensive default: a Recipe constructed without specifying trust is untrusted."""
-    r = Recipe(
-        name="x", description="d", where="liq > 1", order_by="liq DESC"
-    )
+    r = Recipe(name="x", description="d", where="liq > 1", order_by="liq DESC")
     assert r._is_trusted is False
 
 
 def test_recipe_from_builtin_sets_trusted_true() -> None:
-    r = Recipe.from_builtin(
-        name="x", description="d", where="liq > 1", order_by="liq DESC"
-    )
+    r = Recipe.from_builtin(name="x", description="d", where="liq > 1", order_by="liq DESC")
     assert r._is_trusted is True
 
 
@@ -52,9 +49,7 @@ def test_recipe_from_yaml_drops_group_by() -> None:
     """from_yaml itself does not enforce drop — load_yaml_recipes does. But
     from_yaml MUST always set group_by=None regardless of body content (the
     invariant is yaml never has group_by)."""
-    r = Recipe.from_yaml(
-        "x", {"where": "liq > 1", "group_by": "category"}
-    )
+    r = Recipe.from_yaml("x", {"where": "liq > 1", "group_by": "category"})
     assert r.group_by is None
 
 

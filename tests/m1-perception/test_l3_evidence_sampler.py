@@ -399,9 +399,7 @@ async def test_run_sampler_emits_real_76_second_gap_and_skips_missed_boundaries(
     stop_event = asyncio.Event()
 
     async def _sample_once(**kwargs):
-        calls.append(
-            (kwargs["sample_seq"], kwargs["scheduled_at"], l3_sampler._utc_now())
-        )
+        calls.append((kwargs["sample_seq"], kwargs["scheduled_at"], l3_sampler._utc_now()))
         if len(calls) == 2:
             stop_event.set()
         return True
@@ -477,9 +475,7 @@ async def test_run_sampler_rechecks_clock_after_early_timer_wakeup(
     stop_event = asyncio.Event()
 
     async def _sample_once(**kwargs):
-        calls.append(
-            (kwargs["sample_seq"], kwargs["scheduled_at"], l3_sampler._utc_now())
-        )
+        calls.append((kwargs["sample_seq"], kwargs["scheduled_at"], l3_sampler._utc_now()))
         if len(calls) == 2:
             stop_event.set()
         return True
@@ -598,11 +594,7 @@ async def test_pre_t0_missed_boundary_does_not_poison_complete_later_window(
         ManifestReport(
             checkpoint=label,
             start=t0,
-            end=(
-                end
-                if hours == 0
-                else t0 + timedelta(hours=hours)
-            ),
+            end=(end if hours == 0 else t0 + timedelta(hours=hours)),
             path=f"reports/{label.lower().replace('+', '')}.json",
         )
         for label, hours in (
@@ -663,9 +655,7 @@ async def test_pre_t0_missed_boundary_does_not_poison_complete_later_window(
             for row in later_batch.markets
             for token_id in (row.yes_token_id, row.no_token_id)
         },
-        yes_ohlc_coverage_counts={
-            row.yes_token_id: 1 for row in later_batch.markets
-        },
+        yes_ohlc_coverage_counts={row.yes_token_id: 1 for row in later_batch.markets},
         raw_rows_by_table={
             "l3_runtime_boots": (
                 _raw(boot, recorded_at=START + timedelta(seconds=1), stopped_at=None),

@@ -12,6 +12,7 @@ acceptance criteria, this file is the canonical D-07 regression test
 location. Keeping the narrow_market_row contract in a small dedicated
 file makes future column additions (D-XX) straightforward to extend.
 """
+
 from __future__ import annotations
 
 import os
@@ -96,16 +97,17 @@ def test_narrow_yes_token_id_none_when_explicit_none() -> None:
 def test_narrow_no_token_id_passthrough_and_nullable() -> None:
     from polyarb.storage.supabase_mirror import narrow_market_row
 
-    assert narrow_market_row(
-        _make_full_row(no_token_id="NO-X"), snapshot_id=42
-    )["no_token_id"] == "NO-X"
+    assert (
+        narrow_market_row(_make_full_row(no_token_id="NO-X"), snapshot_id=42)["no_token_id"]
+        == "NO-X"
+    )
 
     missing = _make_full_row()
     missing.pop("no_token_id")
     assert narrow_market_row(missing, snapshot_id=42)["no_token_id"] is None
-    assert narrow_market_row(
-        _make_full_row(no_token_id=None), snapshot_id=42
-    )["no_token_id"] is None
+    assert (
+        narrow_market_row(_make_full_row(no_token_id=None), snapshot_id=42)["no_token_id"] is None
+    )
 
 
 def test_narrow_projection_is_twelve_columns() -> None:
@@ -135,12 +137,10 @@ def test_narrow_projection_is_twelve_columns() -> None:
         "no_token_id",
     }
     assert set(_NARROW_MARKET_COLUMNS) == expected_columns, (
-        f"_NARROW_MARKET_COLUMNS must be 12-column post-05.3; "
-        f"got {set(_NARROW_MARKET_COLUMNS)!r}"
+        f"_NARROW_MARKET_COLUMNS must be 12-column post-05.3; got {set(_NARROW_MARKET_COLUMNS)!r}"
     )
     assert len(_NARROW_MARKET_COLUMNS) == 12, (
-        f"_NARROW_MARKET_COLUMNS must have exactly 12 entries; "
-        f"got {len(_NARROW_MARKET_COLUMNS)}"
+        f"_NARROW_MARKET_COLUMNS must have exactly 12 entries; got {len(_NARROW_MARKET_COLUMNS)}"
     )
 
     full = _make_full_row()

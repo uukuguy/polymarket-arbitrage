@@ -34,7 +34,6 @@ from polyarb.translation.config import TranslationConfig
 from polyarb.translation.translator import (
     ConfigError,
     TranslateSummary,
-    TransientError,
     translate_pending,
 )
 
@@ -64,9 +63,7 @@ def cache_with_3_markets(tmp_path: Path) -> TranslationCache:
             (1, 2, "subset", 3, 1, "/tmp/x.parquet"),
         )
         sid = con.execute("SELECT last_insert_rowid()").fetchone()[0]
-        for i, q in enumerate(
-            ["Will Trump win 2024?", "Will BTC hit 100k?", "Rain in Paris?"]
-        ):
+        for i, q in enumerate(["Will Trump win 2024?", "Will BTC hit 100k?", "Rain in Paris?"]):
             con.execute(
                 "INSERT INTO markets(market_id, condition_id, question, "
                 "fetched_at_ms, snapshot_id) VALUES (?,?,?,?,?)",
@@ -123,9 +120,7 @@ async def test_translate_pending_persists_token_cost(
         completion_tokens=30,
     )
 
-    summary = await translate_pending(
-        _cfg(), cache_with_3_markets.db_path, sample_limit=None
-    )
+    summary = await translate_pending(_cfg(), cache_with_3_markets.db_path, sample_limit=None)
 
     assert summary.translated == 3
     assert summary.skipped == 0
@@ -158,9 +153,7 @@ async def test_translate_pending_sample_limit(
         translations=["甲", "乙"], prompt_tokens=20, completion_tokens=10
     )
 
-    summary = await translate_pending(
-        _cfg(), cache_with_3_markets.db_path, sample_limit=2
-    )
+    summary = await translate_pending(_cfg(), cache_with_3_markets.db_path, sample_limit=2)
 
     assert summary.translated == 2
     # The 3rd market is still untranslated
@@ -271,9 +264,7 @@ async def test_translate_pending_does_not_raise_on_transient(
     cache_with_3_markets: TranslationCache, patched_client
 ) -> None:
     """APIConnectionError → retry++ on this batch's hashes, summary.skipped += N."""
-    patched_client.translate_batch.side_effect = APIConnectionError(
-        request=_mk_request()
-    )
+    patched_client.translate_batch.side_effect = APIConnectionError(request=_mk_request())
 
     summary = await translate_pending(_cfg(), cache_with_3_markets.db_path)
     # All 3 markets in one batch (batch_size 20) → all 3 retried.
@@ -282,9 +273,7 @@ async def test_translate_pending_does_not_raise_on_transient(
 
     con = sqlite3.connect(cache_with_3_markets.db_path)
     try:
-        rows = con.execute(
-            "SELECT retry_count, is_dead FROM question_translations"
-        ).fetchall()
+        rows = con.execute("SELECT retry_count, is_dead FROM question_translations").fetchall()
     finally:
         con.close()
     assert len(rows) == 3
@@ -298,18 +287,14 @@ async def test_translate_pending_marks_dead_after_4_retries(
     cache_with_3_markets: TranslationCache, patched_client
 ) -> None:
     """Run translate_pending 4 times with persistent transient errors → is_dead=1."""
-    patched_client.translate_batch.side_effect = APIConnectionError(
-        request=_mk_request()
-    )
+    patched_client.translate_batch.side_effect = APIConnectionError(request=_mk_request())
 
     for _ in range(4):
         await translate_pending(_cfg(), cache_with_3_markets.db_path)
 
     con = sqlite3.connect(cache_with_3_markets.db_path)
     try:
-        rows = con.execute(
-            "SELECT retry_count, is_dead FROM question_translations"
-        ).fetchall()
+        rows = con.execute("SELECT retry_count, is_dead FROM question_translations").fetchall()
     finally:
         con.close()
     # After 4 increments, retry_count=4 and is_dead=1
@@ -432,9 +417,7 @@ def test_cli_with_limit_does_not_trigger_first_run_guard(
     assert "first run detected" not in result.stderr
 
 
-def test_cli_config_error_exits_1(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_config_error_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """ConfigError from translate_pending → exit 1 + .env hint on stderr."""
     _setup_cli_settings(tmp_path, monkeypatch)
     monkeypatch.setenv("TRANSLATION_API_BASE", "https://api.example.com/v1")
@@ -455,9 +438,7 @@ def test_cli_config_error_exits_1(
     assert "TRANSLATION_API_KEY" in result.stderr
 
 
-def test_cli_validation_error_exits_1(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_validation_error_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Missing TRANSLATION_API_BASE → ValidationError → exit 1."""
     _setup_cli_settings(tmp_path, monkeypatch)
     # Strip TRANSLATION_* env to force ValidationError
@@ -471,9 +452,7 @@ def test_cli_validation_error_exits_1(
     assert "TranslationConfig invalid" in result.stderr
 
 
-def test_cli_translation_stats_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_translation_stats_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """translation-stats on a fresh cache prints '(no translations yet)'."""
     _setup_cli_settings(tmp_path, monkeypatch)
     result = runner.invoke(cli_app, ["translation-stats"])

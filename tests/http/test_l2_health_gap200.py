@@ -22,6 +22,7 @@ Pattern reference (copied verbatim where applicable):
 - Header + autouse fixture: tests/m1-perception/test_l2_health_mirror_check.py
 - Mock store + _build_l2_health_checks call shape: same file (Section 2)
 """
+
 from __future__ import annotations
 
 import time
@@ -73,9 +74,9 @@ def test_both_empty_no_subcheck() -> None:
     """Case (a): supabase_url=='' AND service_key=='' → mirror sub-check is
     entirely absent from .checks (backwards-compat — operator chose not to
     configure Supabase at all, so reporting fail would be a false alarm)."""
-    from polyarb.config import Settings
-
     from pydantic import SecretStr
+
+    from polyarb.config import Settings
 
     settings = Settings(supabase_url="", supabase_service_key=SecretStr(""))
     # Sanity: model_validator did NOT auto-enable the mirror flag.
@@ -135,8 +136,7 @@ def test_url_set_key_empty_registers_fail() -> None:
         f"case (b): output must name the missing field; got {entry['output']!r}"
     )
     assert overall == "fail", (
-        f"case (b): overall must propagate fail (so /health → 503 alarm), "
-        f"got {overall!r}"
+        f"case (b): overall must propagate fail (so /health → 503 alarm), got {overall!r}"
     )
 
 

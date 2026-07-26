@@ -14,6 +14,7 @@ Coverage:
 - test_snapshot_fk_does_not_block_insert: FK on snapshot_id does not block
     insert when no snapshots row exists (PRAGMA foreign_keys=OFF in temp DB)
 """
+
 from __future__ import annotations
 
 import os
@@ -128,8 +129,7 @@ def test_build_temp_db_preserves_token_pair() -> None:
     try:
         with sqlite3.connect(tmp) as con:
             pair = con.execute(
-                "SELECT yes_token_id, no_token_id "
-                "FROM markets WHERE market_id='m1'"
+                "SELECT yes_token_id, no_token_id FROM markets WHERE market_id='m1'"
             ).fetchone()
         assert pair == ("YES-m1", "NO-custom")
     finally:

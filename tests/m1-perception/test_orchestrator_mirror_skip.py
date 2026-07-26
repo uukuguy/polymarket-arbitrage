@@ -17,18 +17,15 @@ Test pattern mirrors PATTERNS.md § "tests/m1-perception/test_orchestrator.py"
 lives in ``test_orchestrator.py`` (not conftest) and copying is the cheapest
 path; the upstream fixture refactor is out of D-07 scope.
 """
+
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
-import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
-
-import pytest
 
 # F-3 escape hatch: tmp_path is outside project root by design.
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
@@ -38,7 +35,6 @@ from pydantic import SecretStr  # noqa: E402
 
 from polyarb.config import Settings  # noqa: E402
 from polyarb.snapshot.orchestrator import run_snapshot  # noqa: E402
-
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -107,22 +103,19 @@ def _run(settings: Settings) -> Any:
     gamma_data, clob_data = _load_fixtures()
     fake_gamma = _make_fake_gamma(gamma_data)
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma
-    ), patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
         clob_inst = ClobMock.return_value
-        clob_inst.get_books = AsyncMock(
-            return_value=_books_as_objects(clob_data["books"])
-        )
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
         clob_inst.get_prices_buy_sell = AsyncMock(
             return_value={
                 "buy": clob_data["prices_buy"],
                 "sell": clob_data["prices_sell"],
             }
         )
-        return asyncio.run(
-            run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
-        )
+        return asyncio.run(run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,6 +135,7 @@ def test_mirror_disabled_logs_audit_entry(tmp_path: Path) -> None:
     grep that.
     """
     import io
+
     from loguru import logger as _loguru_logger
 
     buf = io.StringIO()
@@ -171,9 +165,7 @@ def test_mirror_disabled_logs_audit_entry(tmp_path: Path) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_mirror_disabled_adds_sentry_breadcrumb(
-    tmp_path: Path, mocked_sentry: Any
-) -> None:
+def test_mirror_disabled_adds_sentry_breadcrumb(tmp_path: Path, mocked_sentry: Any) -> None:
     """When supabase_mirror_enabled=False, sentry_sdk.add_breadcrumb must be
     called with category='mirror', level='info', message containing
     'config-disabled' (D-01, BUG-7).
@@ -202,6 +194,4 @@ def test_mirror_disabled_adds_sentry_breadcrumb(
     assert data.get("supabase_mirror_enabled") is False, (
         f"expected data.supabase_mirror_enabled=False — got {data!r}"
     )
-    assert "snapshot_id" in data, (
-        f"expected data.snapshot_id field — got {data!r}"
-    )
+    assert "snapshot_id" in data, f"expected data.snapshot_id field — got {data!r}"

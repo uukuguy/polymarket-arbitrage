@@ -1,4 +1,3 @@
-\
 """Routing engine: selects best arbitrage paths across venues.
 
 T3 Revision 6 (2026-06-02 SESSION 36): venue selection is now slippage-aware.
@@ -7,6 +6,7 @@ picks the cheaper of PM vs CLOB based on net_cost_after_rebate_bps. The
 prior "polymarket-first hardcoded" policy is replaced — see venue-selection
 tests in tests/routing/test_engine.py for the locked behavior matrix.
 """
+
 from __future__ import annotations
 
 import logging
@@ -75,10 +75,7 @@ class RoutingEngine:
 
         expected_profit_pct = signal.max_arbitrage_pct
         expected_profit_abs = (
-            expected_profit_pct
-            / 100.0
-            * signal.max_stake_per_leg
-            * len(execution_legs)
+            expected_profit_pct / 100.0 * signal.max_stake_per_leg * len(execution_legs)
         )
 
         plan = ExecutionPlan(
@@ -233,7 +230,10 @@ class RoutingEngine:
 
         logger.debug(
             "venue selection: side=%s pm=%.2fbps clob=%.2fbps → %s",
-            action_side, pm_cost, clob_cost, chosen,
+            action_side,
+            pm_cost,
+            clob_cost,
+            chosen,
         )
         return chosen, result
 

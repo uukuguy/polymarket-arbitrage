@@ -183,9 +183,7 @@ async def test_fetch_all_emits_periodic_progress() -> None:
 
     settings = _fast_settings()
     # 110 full pages + 1 short page → 111 calls, terminates on the short one.
-    full_pages = [
-        [_make_market_dict(i + 100 * p) for i in range(100)] for p in range(110)
-    ]
+    full_pages = [[_make_market_dict(i + 100 * p) for i in range(100)] for p in range(110)]
     short_page = [_make_market_dict(11000 + i) for i in range(7)]
 
     captured: list[str] = []
@@ -244,12 +242,9 @@ def _make_event_dict(idx: int, n_markets: int = 2, n_tags: int = 3) -> dict:
         "volume": 78901.2,
         "endDate": "2026-12-31T00:00:00Z",
         "tags": [
-            {"id": str(100 + j), "label": f"Tag{j}", "slug": f"tag{j}"}
-            for j in range(n_tags)
+            {"id": str(100 + j), "label": f"Tag{j}", "slug": f"tag{j}"} for j in range(n_tags)
         ],
-        "markets": [
-            {"id": str(540000 + idx * 10 + k)} for k in range(n_markets)
-        ],
+        "markets": [{"id": str(540000 + idx * 10 + k)} for k in range(n_markets)],
     }
 
 
@@ -290,9 +285,7 @@ async def test_fetch_events_single_short_page() -> None:
     events = [_make_event_dict(i) for i in range(7)]
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        route = router.get("/events").mock(
-            return_value=httpx.Response(200, json=events)
-        )
+        route = router.get("/events").mock(return_value=httpx.Response(200, json=events))
         client = GammaClient(settings)
         try:
             out = await client.fetch_all_active_events()
@@ -437,8 +430,7 @@ async def test_iter_active_events_trims_nested_markets() -> None:
             "active": True,
             "closed": False,
             "markets": [
-                {"id": str(540000 + i * 10 + k), "extra": "junk", "more": [1, 2]}
-                for k in range(3)
+                {"id": str(540000 + i * 10 + k), "extra": "junk", "more": [1, 2]} for k in range(3)
             ],
         }
         for i in range(5)

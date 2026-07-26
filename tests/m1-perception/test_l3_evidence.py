@@ -114,9 +114,7 @@ def test_acceptance_config_defaults_digest_and_every_field_is_sensitive(tmp_path
     recipe.write_bytes(b"recipes: {}\n")
     settings = Settings()
 
-    acceptance = evidence.AcceptanceConfig.from_settings(
-        settings, recipe, code_version="9.8.7"
-    )
+    acceptance = evidence.AcceptanceConfig.from_settings(settings, recipe, code_version="9.8.7")
 
     assert acceptance == evidence.AcceptanceConfig(
         recipe_sha256="7dd561ccf625ef3624bba67b64366b013993ef1082208de43f83c00a2908f7ea",
@@ -203,11 +201,7 @@ def test_runtime_identity_uses_fly_environment_and_exact_recipe_bytes(
     monkeypatch.setenv("FLY_MACHINE_VERSION", "v42")
     monkeypatch.setenv("FLY_IMAGE_REF", "registry.example/image@sha256:abc")
     settings = Settings(release_id="release-123")
-    recipe_path = (
-        Path(evidence.__file__).resolve().parents[1]
-        / "scan_recipes"
-        / "l3-promote.yaml"
-    )
+    recipe_path = Path(evidence.__file__).resolve().parents[1] / "scan_recipes" / "l3-promote.yaml"
 
     identity = evidence.RuntimeIdentity.from_environment(settings)
     acceptance = evidence.AcceptanceConfig.from_settings(
@@ -619,9 +613,7 @@ def test_membership_events_windows_and_retention_are_defensively_immutable() -> 
     committed = {"yes", "no", "old"}
     evidenced = {"yes", "no"}
     evidence_times = {"yes": NOW, "no": NOW}
-    membership = evidence.WsMembershipSnapshot(
-        4, desired, committed, evidenced, evidence_times
-    )
+    membership = evidence.WsMembershipSnapshot(4, desired, committed, evidenced, evidence_times)
     desired.add("mutated")
     evidence_times["yes"] = NOW + timedelta(seconds=1)
     assert membership.desired == frozenset({"yes", "no", "old"})
@@ -704,9 +696,7 @@ def test_stable_hash_normalizes_supported_values_and_rejects_credentials() -> No
         "tokens": ["a", "b"],
     }
     assert evidence.stable_sha256(rich) == evidence.stable_sha256(primitive)
-    assert evidence.stable_sha256({"ratio": 1.25}) == hashlib.sha256(
-        b'{"ratio":1.25}'
-    ).hexdigest()
+    assert evidence.stable_sha256({"ratio": 1.25}) == hashlib.sha256(b'{"ratio":1.25}').hexdigest()
     with pytest.raises(TypeError, match="unsupported"):
         evidence.stable_sha256({"secret": SecretStr("do-not-hash")})
     with pytest.raises(TypeError, match="unsupported"):
@@ -868,10 +858,13 @@ def test_event_queue_preserves_first_128_and_surfaces_overflow_failure() -> None
     assert status.event_queue_overflowed is True
     assert status.status is evidence.HealthStatus.FAIL
     assert [event.event_seq for event in runtime.drain_pending_events()] == list(range(128))
-    assert runtime.record_event(
-        evidence.RuntimeEventKind.RECONNECT_STARTED,
-        occurred_at=NOW + timedelta(seconds=2),
-    ).event_seq == 129
+    assert (
+        runtime.record_event(
+            evidence.RuntimeEventKind.RECONNECT_STARTED,
+            occurred_at=NOW + timedelta(seconds=2),
+        ).event_seq
+        == 129
+    )
 
 
 def test_full_event_queue_does_not_commit_unrecorded_writer_transition() -> None:

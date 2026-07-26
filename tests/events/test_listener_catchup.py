@@ -2,6 +2,7 @@
 
 Plan 03-05 Task 2 — reconnect loop + cursor catch-up + cancellation.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -76,8 +77,10 @@ async def test_listener_reconnects_after_connection_loss(loguru_sink):
     connect_mock = AsyncMock(side_effect=[RuntimeError("conn lost"), fake_conn])
     stop_event = asyncio.Event()
 
-    with patch.object(listener.asyncpg, "connect", connect_mock), \
-         patch.object(listener.asyncio, "sleep", _fake_sleep):
+    with (
+        patch.object(listener.asyncpg, "connect", connect_mock),
+        patch.object(listener.asyncio, "sleep", _fake_sleep),
+    ):
         task = asyncio.create_task(
             listener.listen_snapshot_complete(
                 dsn="postgresql://test",

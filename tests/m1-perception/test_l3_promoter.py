@@ -16,6 +16,7 @@ the tob columns (asset_id, ts, spread, depth_yes_usd, …) plus an empty
 ``question_translations`` table for the LEFT JOIN — this is the Plan 04
 adapter pattern documented in l3_promote._build_tob_temp_db.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,11 +41,7 @@ os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 
 
 RECIPE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "polyarb"
-    / "scan_recipes"
-    / "l3-promote.yaml"
+    Path(__file__).resolve().parents[2] / "src" / "polyarb" / "scan_recipes" / "l3-promote.yaml"
 )
 
 
@@ -213,9 +210,9 @@ def test_l3_promote_yaml_parses() -> None:
     assert "depth_yes_usd > 500" in where, "D-13 depth threshold missing"
     assert "strftime" in where, "Blocker #2 — strftime epoch ms predicate missing"
     assert "* 1000" in where, "Blocker #2 — epoch-ms scaling missing"
-    assert (
-        "datetime('now'" not in where
-    ), "Blocker #2 anti-regression — lex comparison anti-pattern present"
+    assert "datetime('now'" not in where, (
+        "Blocker #2 anti-regression — lex comparison anti-pattern present"
+    )
 
     assert body["order_by"].strip() == "depth_yes_usd DESC", body["order_by"]
     assert int(body["limit"]) == 5, body["limit"]
@@ -229,16 +226,12 @@ def test_l3_promote_yaml_parses() -> None:
 def test_scanner_documents_trusted_yaml_tier() -> None:
     """scanner.py module docstring must document the 3rd recipe trust tier."""
     scanner_path = (
-        Path(__file__).resolve().parents[2]
-        / "src"
-        / "polyarb"
-        / "observation"
-        / "scanner.py"
+        Path(__file__).resolve().parents[2] / "src" / "polyarb" / "observation" / "scanner.py"
     )
     text = scanner_path.read_text()
-    assert (
-        "Source-controlled yaml" in text or "trusted-yaml" in text
-    ), "scanner.py must document trusted-yaml tier per Warning #10"
+    assert "Source-controlled yaml" in text or "trusted-yaml" in text, (
+        "scanner.py must document trusted-yaml tier per Warning #10"
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -379,8 +372,7 @@ async def test_promote_run_no_supabase_keeps_l3_active_set() -> None:
     mock_consumer = _truthful_consumer(initial_committed={"x", "y"})
 
     result = await _promote_mutating(
-        l3_promote,
-        settings=settings, ws_consumer=mock_consumer, recipe_yaml_path=RECIPE_PATH
+        l3_promote, settings=settings, ws_consumer=mock_consumer, recipe_yaml_path=RECIPE_PATH
     )
 
     assert l3_promote._l3_active_set == {"x", "y"}, "set must freeze"
@@ -464,9 +456,7 @@ def _make_supabase_client_mock(
                     self._payload = payload
 
                 def in_(self, col: str, ids: list[str]) -> _UpdateChain:
-                    capture.append(
-                        {"payload": self._payload, "col": col, "ids": list(ids)}
-                    )
+                    capture.append({"payload": self._payload, "col": col, "ids": list(ids)})
                     return self
 
                 def execute(self) -> MagicMock:
@@ -506,9 +496,7 @@ def _make_bounded_reconciliation_client(
         def in_(self, column: str, ids: list[str]) -> _CandidateUpdate:
             assert column == "asset_id"
             self._ids = list(ids)
-            capture_updates.append(
-                {"payload": self._payload, "col": column, "ids": list(ids)}
-            )
+            capture_updates.append({"payload": self._payload, "col": column, "ids": list(ids)})
             return self
 
         def execute(self) -> MagicMock:
@@ -647,9 +635,7 @@ async def test_soak_mapping_lock_keeps_bound_mapping_when_dynamic_top_five_chang
     settings = _make_settings()
     runtime = _make_runtime(settings)
     locked_tokens = {
-        token
-        for index in range(5)
-        for token in (f"yes_locked_{index}", f"no_locked_{index}")
+        token for index in range(5) for token in (f"yes_locked_{index}", f"no_locked_{index}")
     }
     locked_map = {
         f"yes_locked_{index}": (
@@ -671,9 +657,7 @@ async def test_soak_mapping_lock_keeps_bound_mapping_when_dynamic_top_five_chang
     )
     consumer = _truthful_consumer(initial_committed=locked_tokens)
     consumer._test_state["evidenced"] = set(locked_tokens)
-    consumer._test_state["evidenced_at"] = {
-        token: now for token in locked_tokens
-    }
+    consumer._test_state["evidenced_at"] = {token: now for token in locked_tokens}
     l3_promote._l3_active_set = set(locked_tokens)
     l3_promote._last_known_market_token_map = locked_map
     dynamic_tob, dynamic_mapping = _five_market_inputs("dynamic")
@@ -715,9 +699,7 @@ async def test_soak_mapping_lock_failure_terminalizes_without_control_mutation(
     settings = _make_settings()
     runtime = _make_runtime(settings)
     tokens = {
-        token
-        for index in range(5)
-        for token in (f"yes_locked_{index}", f"no_locked_{index}")
+        token for index in range(5) for token in (f"yes_locked_{index}", f"no_locked_{index}")
     }
     consumer = _truthful_consumer(initial_committed=tokens)
     now = datetime.now(UTC)
@@ -727,11 +709,7 @@ async def test_soak_mapping_lock_failure_terminalizes_without_control_mutation(
             t0=now - timedelta(minutes=1),
             t24=now + timedelta(hours=24),
         ),
-        lock_error=(
-            L3EvidenceReadError("redacted")
-            if failure == "read_error"
-            else None
-        ),
+        lock_error=(L3EvidenceReadError("redacted") if failure == "read_error" else None),
     )
 
     result = await l3_promote.promote_run(
@@ -816,18 +794,13 @@ async def test_promote_run_happy_path_top_5_markets_expanded_to_10_tokens_yes_no
         ]
     )
 
-    token_map_rows = [
-        {"yes_token_id": f"yes_m{i}", "no_token_id": f"no_m{i}"}
-        for i in range(5)
-    ]
+    token_map_rows = [{"yes_token_id": f"yes_m{i}", "no_token_id": f"no_m{i}"} for i in range(5)]
     capture_updates: list[dict] = []
     client = _make_supabase_client_mock(tob_rows, token_map_rows, capture_updates)
 
     mock_consumer = _truthful_consumer()
 
-    with patch(
-        "polyarb.observation.l3_promote.create_client", return_value=client
-    ):
+    with patch("polyarb.observation.l3_promote.create_client", return_value=client):
         before = time.time()
         await _promote_mutating(
             l3_promote,
@@ -857,9 +830,7 @@ async def test_promote_run_happy_path_top_5_markets_expanded_to_10_tokens_yes_no
 
     # l2_candidates write-through (Blocker #1) — one update payload with
     # `l3_promoted_at_ts: <iso>` and 5 market asset_ids.
-    add_updates = [
-        u for u in capture_updates if u["payload"].get("l3_promoted_at_ts") is not None
-    ]
+    add_updates = [u for u in capture_updates if u["payload"].get("l3_promoted_at_ts") is not None]
     assert len(add_updates) == 1, (
         f"expected 1 add-update, got {len(add_updates)}: {capture_updates}"
     )
@@ -901,10 +872,7 @@ async def test_promote_run_filters_no_side_tob_before_recipe_limit() -> None:
             "depth_no_usd": 10_000.0,
         }
     )
-    token_rows = [
-        {"yes_token_id": f"yes_{i}", "no_token_id": f"no_{i}"}
-        for i in range(5)
-    ]
+    token_rows = [{"yes_token_id": f"yes_{i}", "no_token_id": f"no_{i}"} for i in range(5)]
     consumer = _truthful_consumer()
 
     with patch(
@@ -920,9 +888,7 @@ async def test_promote_run_filters_no_side_tob_before_recipe_limit() -> None:
         )
 
     assert len(result["active"]) == 10
-    assert set(result["active"]) == {
-        token for i in range(5) for token in (f"yes_{i}", f"no_{i}")
-    }
+    assert set(result["active"]) == {token for i in range(5) for token in (f"yes_{i}", f"no_{i}")}
 
 
 @pytest.mark.asyncio
@@ -989,10 +955,7 @@ async def test_promote_run_dry_run_has_zero_mutations() -> None:
         }
         for i in range(5)
     ]
-    token_rows = [
-        {"yes_token_id": f"yes_dry_{i}", "no_token_id": f"no_dry_{i}"}
-        for i in range(5)
-    ]
+    token_rows = [{"yes_token_id": f"yes_dry_{i}", "no_token_id": f"no_dry_{i}"} for i in range(5)]
     capture_updates: list[dict] = []
     consumer = _truthful_consumer(initial_committed={"old-active"})
 
@@ -1011,9 +974,7 @@ async def test_promote_run_dry_run_has_zero_mutations() -> None:
 
     with patch(
         "polyarb.observation.l3_promote.create_client",
-        return_value=_make_supabase_client_mock(
-            tob_rows, token_rows, capture_updates
-        ),
+        return_value=_make_supabase_client_mock(tob_rows, token_rows, capture_updates),
     ):
         result = await l3_promote.promote_run(
             settings=_make_settings(),
@@ -1100,9 +1061,7 @@ async def test_promote_run_diff_calls_add_AND_remove_with_yes_no_expansion() -> 
         initial_committed={"yes_old1", "no_old1", "yes_old2", "no_old2"}
     )
 
-    with patch(
-        "polyarb.observation.l3_promote.create_client", return_value=client
-    ):
+    with patch("polyarb.observation.l3_promote.create_client", return_value=client):
         await _promote_mutating(
             l3_promote,
             settings=settings,
@@ -1152,10 +1111,7 @@ async def test_promote_run_writes_l3_promoted_at_ts_on_add_and_clears_on_remove(
         }
         for i in range(2, 7)
     ]
-    token_map_rows = [
-        {"yes_token_id": f"yes_m{i}", "no_token_id": f"no_m{i}"}
-        for i in range(2, 7)
-    ]
+    token_map_rows = [{"yes_token_id": f"yes_m{i}", "no_token_id": f"no_m{i}"} for i in range(2, 7)]
     capture_updates: list[dict] = []
     capture_queries: list[dict] = []
     promoted_rows = ["yes_m1"]
@@ -1169,9 +1125,7 @@ async def test_promote_run_writes_l3_promoted_at_ts_on_add_and_clears_on_remove(
 
     mock_consumer = _truthful_consumer(initial_committed={"yes_m1", "no_m1"})
 
-    with patch(
-        "polyarb.observation.l3_promote.create_client", return_value=client
-    ):
+    with patch("polyarb.observation.l3_promote.create_client", return_value=client):
         await _promote_mutating(
             l3_promote,
             settings=settings,
@@ -1180,12 +1134,8 @@ async def test_promote_run_writes_l3_promoted_at_ts_on_add_and_clears_on_remove(
         )
 
     # Find the add update and the remove update.
-    add_ups = [
-        u for u in capture_updates if u["payload"].get("l3_promoted_at_ts") is not None
-    ]
-    rm_ups = [
-        u for u in capture_updates if u["payload"].get("l3_promoted_at_ts") is None
-    ]
+    add_ups = [u for u in capture_updates if u["payload"].get("l3_promoted_at_ts") is not None]
+    rm_ups = [u for u in capture_updates if u["payload"].get("l3_promoted_at_ts") is None]
     assert len(add_ups) == 1
     assert add_ups[0]["ids"] == [f"yes_m{i}" for i in range(2, 7)]
     assert len(rm_ups) == 1
@@ -1225,10 +1175,7 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
         }
         for i in range(2, 7)
     ]
-    token_map_rows = [
-        {"yes_token_id": f"yes_m{i}", "no_token_id": f"no_m{i}"}
-        for i in range(2, 7)
-    ]
+    token_map_rows = [{"yes_token_id": f"yes_m{i}", "no_token_id": f"no_m{i}"} for i in range(2, 7)]
 
     # Build a client where l2_candidates update.in_().execute() raises.
     def _table_side_effect(name: str) -> MagicMock:
@@ -1244,6 +1191,7 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
             tbl.in_.return_value = tbl
             tbl.execute.return_value = MagicMock(data=_with_market_ids(token_map_rows))
         elif name == "l2_candidates":
+
             class _UpdateChainFails:
                 def __init__(self, _payload: dict) -> None:
                     pass
@@ -1272,11 +1220,12 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
         lambda message: log_messages.append(str(message)), level="WARNING"
     )
     try:
-        with patch(
-            "polyarb.observation.l3_promote.create_client", return_value=client
-        ), patch(
-            "polyarb.observation.l3_promote.sentry_sdk.add_breadcrumb",
-            side_effect=_capture_breadcrumb,
+        with (
+            patch("polyarb.observation.l3_promote.create_client", return_value=client),
+            patch(
+                "polyarb.observation.l3_promote.sentry_sdk.add_breadcrumb",
+                side_effect=_capture_breadcrumb,
+            ),
         ):
             # MUST not raise.
             await _promote_mutating(
@@ -1295,8 +1244,7 @@ async def test_promote_run_write_through_failure_does_not_abort_promote_run() ->
 
     # At least one warning-level breadcrumb with category=l2-mirror.
     mirror_warn = [
-        b for b in sentry_calls
-        if b.get("category") == "l2-mirror" and b.get("level") == "warning"
+        b for b in sentry_calls if b.get("category") == "l2-mirror" and b.get("level") == "warning"
     ]
     assert len(mirror_warn) >= 1, f"expected mirror-warning breadcrumb, got: {sentry_calls}"
     warning = next(message for message in log_messages if "mirror failed" in message)
@@ -1327,11 +1275,12 @@ async def test_promote_run_fail_soft_on_scanner_exception() -> None:
 
     mock_consumer = _truthful_consumer(initial_committed={"a"})
 
-    with patch(
-        "polyarb.observation.l3_promote.create_client", return_value=client
-    ), patch(
-        "polyarb.observation.scanner.run_recipe",
-        side_effect=ValueError("recipe invalid"),
+    with (
+        patch("polyarb.observation.l3_promote.create_client", return_value=client),
+        patch(
+            "polyarb.observation.scanner.run_recipe",
+            side_effect=ValueError("recipe invalid"),
+        ),
     ):
         # No raise.
         await _promote_mutating(
@@ -1397,9 +1346,7 @@ async def test_terminal_promote_success_appends_one_truthful_record() -> None:
         )
 
     expected = frozenset(
-        token
-        for i in range(5)
-        for token in (f"yes_terminal_{i}", f"no_terminal_{i}")
+        token for i in range(5) for token in (f"yes_terminal_{i}", f"no_terminal_{i}")
     )
     assert result.status is PromoteStatus.SUCCESS
     assert result.persisted is True
@@ -1446,10 +1393,13 @@ async def test_promoter_supabase_fetch_does_not_block_event_loop() -> None:
     safety = threading.Timer(0.2, release.set)
     safety.start()
     try:
-        with patch.object(l3_promote, "create_client", return_value=client), patch.object(
-            l3_promote,
-            "_fetch_latest_tob_rows_from_supabase",
-            side_effect=_blocking_fetch,
+        with (
+            patch.object(l3_promote, "create_client", return_value=client),
+            patch.object(
+                l3_promote,
+                "_fetch_latest_tob_rows_from_supabase",
+                side_effect=_blocking_fetch,
+            ),
         ):
             task = asyncio.create_task(
                 l3_promote.promote_run(
@@ -1653,13 +1603,15 @@ async def test_acceptance_config_construction_failure_terminalizes_before_effect
     store = _RecordingEvidenceStore()
     consumer = _truthful_consumer(initial_committed={"old-yes", "old-no"})
 
-    with patch.object(
-        l3_promote.AcceptanceConfig,
-        "from_settings",
-        side_effect=ValueError("malformed acceptance input"),
-    ), patch.object(l3_promote, "create_client") as create, patch.object(
-        l3_promote, "_mirror_l3_promoted_at_ts"
-    ) as mirror:
+    with (
+        patch.object(
+            l3_promote.AcceptanceConfig,
+            "from_settings",
+            side_effect=ValueError("malformed acceptance input"),
+        ),
+        patch.object(l3_promote, "create_client") as create,
+        patch.object(l3_promote, "_mirror_l3_promoted_at_ts") as mirror,
+    ):
         result = await l3_promote.promote_run(
             settings=settings,
             ws_consumer=consumer,
@@ -1699,14 +1651,18 @@ async def test_post_selection_malformed_frame_terminalizes_once_without_mutation
     l3_promote._last_known_tob_rows = before_tob
     l3_promote._last_known_market_token_map = before_map
 
-    with patch.object(
-        l3_promote,
-        "create_client",
-        return_value=_make_supabase_client_mock(tob_rows, token_rows),
-    ), patch(
-        "polyarb.observation.scanner.run_recipe",
-        return_value=pd.DataFrame({"wrong_column": ["malformed"]}),
-    ), patch.object(l3_promote, "_mirror_l3_promoted_at_ts") as mirror:
+    with (
+        patch.object(
+            l3_promote,
+            "create_client",
+            return_value=_make_supabase_client_mock(tob_rows, token_rows),
+        ),
+        patch(
+            "polyarb.observation.scanner.run_recipe",
+            return_value=pd.DataFrame({"wrong_column": ["malformed"]}),
+        ),
+        patch.object(l3_promote, "_mirror_l3_promoted_at_ts") as mirror,
+    ):
         result = await l3_promote.promote_run(
             settings=settings,
             ws_consumer=consumer,
@@ -1753,11 +1709,14 @@ async def test_mirror_false_retries_complete_committed_target_and_pending_cleanu
             )
         return len(mirror_calls) > 1
 
-    with patch.object(
-        l3_promote,
-        "create_client",
-        return_value=_make_supabase_client_mock(tob_rows, token_rows),
-    ), patch.object(l3_promote, "_mirror_l3_promoted_at_ts", side_effect=_mirror):
+    with (
+        patch.object(
+            l3_promote,
+            "create_client",
+            return_value=_make_supabase_client_mock(tob_rows, token_rows),
+        ),
+        patch.object(l3_promote, "_mirror_l3_promoted_at_ts", side_effect=_mirror),
+    ):
         first_store = _RecordingEvidenceStore()
         first = await l3_promote.promote_run(
             settings=settings,
@@ -1818,9 +1777,7 @@ async def test_remove_false_keeps_committed_mirror_then_recovery_clears_old() ->
     consumer.remove_subscriptions.side_effect = _remove_then_recover
     consumer.add_subscriptions.side_effect = _record_add
     tob_rows, token_rows = _five_market_inputs("remove-retry")
-    l3_promote._last_known_market_token_map = {
-        "yes_old": ("yes_old", "no_old")
-    }
+    l3_promote._last_known_market_token_map = {"yes_old": ("yes_old", "no_old")}
     l3_promote._last_mirrored_market_ids = frozenset({"yes_old"})
     mirror_calls: list[list[str]] = []
 
@@ -1828,11 +1785,14 @@ async def test_remove_false_keeps_committed_mirror_then_recovery_clears_old() ->
         mirror_calls.append(list(target))
         return True
 
-    with patch.object(
-        l3_promote,
-        "create_client",
-        return_value=_make_supabase_client_mock(tob_rows, token_rows),
-    ), patch.object(l3_promote, "_mirror_l3_promoted_at_ts", side_effect=_mirror):
+    with (
+        patch.object(
+            l3_promote,
+            "create_client",
+            return_value=_make_supabase_client_mock(tob_rows, token_rows),
+        ),
+        patch.object(l3_promote, "_mirror_l3_promoted_at_ts", side_effect=_mirror),
+    ):
         first_store = _RecordingEvidenceStore()
         first = await l3_promote.promote_run(
             settings=settings,
@@ -1873,9 +1833,7 @@ async def test_repeated_rotations_with_remove_false_never_add_or_grow_state() ->
     settings = _make_settings()
     runtime = _make_runtime(settings)
     original_tokens = {
-        token
-        for index in range(5)
-        for token in (f"yes_original_{index}", f"no_original_{index}")
+        token for index in range(5) for token in (f"yes_original_{index}", f"no_original_{index}")
     }
     original_map = {
         f"yes_original_{index}": (
@@ -1896,15 +1854,16 @@ async def test_repeated_rotations_with_remove_false_never_add_or_grow_state() ->
     for tick in range(6):
         tob_rows, token_rows = _five_market_inputs(f"rotation_{tick}")
         store = _RecordingEvidenceStore()
-        with patch.object(
-            l3_promote,
-            "create_client",
-            return_value=_make_supabase_client_mock(tob_rows, token_rows),
-        ), patch.object(
-            l3_promote,
-            "_mirror_l3_promoted_at_ts",
-            side_effect=lambda _client, target: (
-                mirror_targets.append(list(target)) or True
+        with (
+            patch.object(
+                l3_promote,
+                "create_client",
+                return_value=_make_supabase_client_mock(tob_rows, token_rows),
+            ),
+            patch.object(
+                l3_promote,
+                "_mirror_l3_promoted_at_ts",
+                side_effect=lambda _client, target: mirror_targets.append(list(target)) or True,
             ),
         ):
             result = await l3_promote.promote_run(
@@ -1946,20 +1905,20 @@ async def test_oversized_precontrol_identity_state_is_removed_before_bounded_mir
         for index in range(l3_promote._MAX_TOKEN_MAP_CACHE + 1)
     }
     oversized_tokens = {
-        token
-        for pair in oversized_map.values()
-        for token in pair
-        if token is not None
+        token for pair in oversized_map.values() for token in pair if token is not None
     }
     consumer = _truthful_consumer(initial_committed=oversized_tokens)
     l3_promote._last_known_market_token_map = oversized_map
     tob_rows, token_rows = _five_market_inputs("bounded_recovery")
 
-    with patch.object(
-        l3_promote,
-        "create_client",
-        return_value=_make_supabase_client_mock(tob_rows, token_rows),
-    ), patch.object(l3_promote, "_mirror_l3_promoted_at_ts") as mirror:
+    with (
+        patch.object(
+            l3_promote,
+            "create_client",
+            return_value=_make_supabase_client_mock(tob_rows, token_rows),
+        ),
+        patch.object(l3_promote, "_mirror_l3_promoted_at_ts") as mirror,
+    ):
         first_store = _RecordingEvidenceStore()
         first = await l3_promote.promote_run(
             settings=settings,
@@ -1976,9 +1935,7 @@ async def test_oversized_precontrol_identity_state_is_removed_before_bounded_mir
     assert len(first_store.records) == 1
     expected_current = sorted(f"yes_bounded_recovery_{index}" for index in range(5))
     mirror.assert_called_once_with(ANY, expected_current)
-    assert len(l3_promote._last_known_market_token_map or {}) <= (
-        l3_promote._MAX_TOKEN_MAP_CACHE
-    )
+    assert len(l3_promote._last_known_market_token_map or {}) <= (l3_promote._MAX_TOKEN_MAP_CACHE)
     assert l3_promote._last_mirrored_market_ids == frozenset(expected_current)
 
     capture_updates: list[dict] = []
@@ -2003,9 +1960,7 @@ async def test_oversized_precontrol_identity_state_is_removed_before_bounded_mir
 
     assert second.status.value == "success"
     assert len(second_store.records) == 1
-    assert len(l3_promote._last_known_market_token_map or {}) <= (
-        l3_promote._MAX_TOKEN_MAP_CACHE
-    )
+    assert len(l3_promote._last_known_market_token_map or {}) <= (l3_promote._MAX_TOKEN_MAP_CACHE)
     assert len(l3_promote._last_mirrored_market_ids) == 5
     assert capture_updates
     assert max(len(update["ids"]) for update in capture_updates) <= (
@@ -2027,10 +1982,7 @@ async def test_oversized_preexisting_state_with_failed_remove_never_grows() -> N
         for index in range(l3_promote._MAX_TOKEN_MAP_CACHE + 1)
     }
     oversized_tokens = {
-        token
-        for pair in oversized_map.values()
-        for token in pair
-        if token is not None
+        token for pair in oversized_map.values() for token in pair if token is not None
     }
     consumer = _truthful_consumer(
         initial_committed=oversized_tokens,
@@ -2042,11 +1994,14 @@ async def test_oversized_preexisting_state_with_failed_remove_never_grows() -> N
     before_mirror = l3_promote._last_mirrored_market_ids
     tob_rows, token_rows = _five_market_inputs("stuck_bounded")
 
-    with patch.object(
-        l3_promote,
-        "create_client",
-        return_value=_make_supabase_client_mock(tob_rows, token_rows),
-    ), patch.object(l3_promote, "_mirror_l3_promoted_at_ts") as mirror:
+    with (
+        patch.object(
+            l3_promote,
+            "create_client",
+            return_value=_make_supabase_client_mock(tob_rows, token_rows),
+        ),
+        patch.object(l3_promote, "_mirror_l3_promoted_at_ts") as mirror,
+    ):
         store = _RecordingEvidenceStore()
         result = await l3_promote.promote_run(
             settings=settings,
@@ -2080,8 +2035,7 @@ async def test_db_driven_badge_cleanup_converges_over_more_than_two_bounded_batc
     tob_rows, token_rows = _five_market_inputs("paged_cleanup")
     current = {f"yes_paged_cleanup_{index}" for index in range(5)}
     stale = {
-        f"yes_stale_{index:04d}"
-        for index in range(l3_promote._MIRROR_RECONCILE_BATCH_SIZE * 2 + 7)
+        f"yes_stale_{index:04d}" for index in range(l3_promote._MIRROR_RECONCILE_BATCH_SIZE * 2 + 7)
     }
     promoted_rows = sorted(current | stale)
     updates: list[dict] = []
@@ -2096,8 +2050,7 @@ async def test_db_driven_badge_cleanup_converges_over_more_than_two_bounded_batc
     # Deliberately unrelated memory proves the database, not the cache, owns
     # stale cleanup recovery.
     l3_promote._last_mirrored_market_ids = frozenset(
-        f"legacy_only_{index}"
-        for index in range(l3_promote._MIRROR_RECONCILE_BATCH_SIZE * 4)
+        f"legacy_only_{index}" for index in range(l3_promote._MIRROR_RECONCILE_BATCH_SIZE * 4)
     )
 
     results = []
@@ -2139,21 +2092,14 @@ async def test_db_driven_badge_cleanup_converges_over_more_than_two_bounded_batc
     )
 
     current_updates = [
-        update
-        for update in updates
-        if update["payload"].get("l3_promoted_at_ts") is not None
+        update for update in updates if update["payload"].get("l3_promoted_at_ts") is not None
     ]
     stale_updates = [
-        update
-        for update in updates
-        if update["payload"].get("l3_promoted_at_ts") is None
+        update for update in updates if update["payload"].get("l3_promoted_at_ts") is None
     ]
     assert len(current_updates) == 3
     assert all(set(update["ids"]) == current for update in current_updates)
-    assert all(
-        len(update["ids"]) <= l3_promote._MIRROR_RECONCILE_BATCH_SIZE
-        for update in updates
-    )
+    assert all(len(update["ids"]) <= l3_promote._MIRROR_RECONCILE_BATCH_SIZE for update in updates)
     assert set().union(*(set(update["ids"]) for update in stale_updates)) == stale
     assert all(current.isdisjoint(update["ids"]) for update in stale_updates)
     assert all(query["excluded"] == current for query in queries)
@@ -2223,9 +2169,7 @@ async def test_oversized_legacy_mirror_cache_converges_from_empty_stale_db_page(
     assert set(updates[0]["ids"]) == current_yes
     assert len(updates[0]["ids"]) <= l3_promote._MIRROR_RECONCILE_BATCH_SIZE
     assert l3_promote._last_mirrored_market_ids == frozenset(current_yes)
-    assert len(l3_promote._last_known_market_token_map or {}) <= (
-        l3_promote._MAX_TOKEN_MAP_CACHE
-    )
+    assert len(l3_promote._last_known_market_token_map or {}) <= (l3_promote._MAX_TOKEN_MAP_CACHE)
 
 
 @pytest.mark.asyncio
@@ -2637,9 +2581,7 @@ async def test_run_periodic_stops_after_first_append_attempt_exception() -> None
 
     store = _AppendRaises()
 
-    with patch.object(
-        l3_promote, "_utc_now", return_value=runtime.snapshot().started_at
-    ):
+    with patch.object(l3_promote, "_utc_now", return_value=runtime.snapshot().started_at):
         await asyncio.wait_for(
             l3_promote.run_periodic(
                 stop_event=stop_event,

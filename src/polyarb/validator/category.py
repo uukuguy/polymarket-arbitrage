@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 
-class Category(str, Enum):
+class Category(str, Enum):  # noqa: UP042  # preserve existing string-enum behavior
     ZOMBIE_MARKET = "zombie_market"
     RESOLVING = "resolving"
     API_JITTER = "api_jitter"
@@ -23,7 +23,7 @@ class Category(str, Enum):
     UNKNOWN = "unknown"  # never tolerate persistent unknowns — converge to specifics
 
 
-class SnapshotStatus(str, Enum):
+class SnapshotStatus(str, Enum):  # noqa: UP042  # preserve serialized compatibility
     """Overall snapshot health — beyond the binary is_valid int.
 
     OK:       No Layer 1 issues. Count matches within tolerance.

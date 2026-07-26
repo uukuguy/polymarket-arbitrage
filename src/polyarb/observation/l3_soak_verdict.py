@@ -785,9 +785,7 @@ def _raw_row_set(
             not isinstance(row.get("sampled_at"), datetime)
             or not isinstance(row.get("recorded_at"), datetime)
             or not (
-                row["sampled_at"]
-                <= row["recorded_at"]
-                < row["sampled_at"] + timedelta(seconds=30)
+                row["sampled_at"] <= row["recorded_at"] < row["sampled_at"] + timedelta(seconds=30)
             )
             for row in rows
         ):
@@ -1167,9 +1165,7 @@ def build_soak_report(
         sorted(evidence.health_samples, key=lambda row: (row.scheduled_at, row.sample_seq))
     )
     sample_times = [row.sampled_at for row in samples]
-    schedule_lags = [
-        (row.sampled_at - row.scheduled_at).total_seconds() for row in samples
-    ]
+    schedule_lags = [(row.sampled_at - row.scheduled_at).total_seconds() for row in samples]
     max_schedule_lag = max(schedule_lags, default=None)
     if boot is not None:
         interval = timedelta(seconds=config.sample_interval_s)
@@ -1179,12 +1175,9 @@ def build_soak_report(
             end=end,
             interval_s=config.sample_interval_s,
         )
-        actual_health_schedule = tuple(
-            (row.sample_seq, row.scheduled_at) for row in samples
-        )
+        actual_health_schedule = tuple((row.sample_seq, row.scheduled_at) for row in samples)
         slot_window_invalid = any(
-            not row.scheduled_at <= row.sampled_at < row.scheduled_at + interval
-            for row in samples
+            not row.scheduled_at <= row.sampled_at < row.scheduled_at + interval for row in samples
         )
         if actual_health_schedule != expected_health_schedule or slot_window_invalid:
             _add(
@@ -1198,9 +1191,7 @@ def build_soak_report(
         for earlier, later in zip(boundary_times, boundary_times[1:])
     ]
     max_sample_gap = max(sample_gaps, default=None)
-    if (
-        not samples or any(gap < 0 or gap > config.max_sample_gap_s for gap in sample_gaps)
-    ):
+    if not samples or any(gap < 0 or gap > config.max_sample_gap_s for gap in sample_gaps):
         _add(reasons, "sample_gap", "health sample boundary/consecutive gap exceeds 75s")
     if samples and any(
         next_row.sample_seq != row.sample_seq + 1 for row, next_row in zip(samples, samples[1:])
@@ -1331,8 +1322,7 @@ def build_soak_report(
     is_t0_sample_probe = (
         not require_24h
         and start == manifest.t0
-        and end
-        == manifest.t0 + timedelta(seconds=config.sample_interval_s)
+        and end == manifest.t0 + timedelta(seconds=config.sample_interval_s)
     )
     if (
         set(evidence.book_coverage_counts) != expected_book_tokens

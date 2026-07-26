@@ -12,17 +12,15 @@ Invariants asserted:
 - application/health+json content type (RESEARCH Pitfall 5)
 - graceful degradation when ws_consumer=None (Plan 04 not yet wired)
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any
-
-import pytest
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 1 — pass when ws_consumer is CONNECTED + fresh event
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_l2_pass_when_ws_connected_and_fresh(l2_http_test_client, mock_ws_consumer):
     """WS CONNECTED + event 5s old → status pass (or warn from optional sub-checks)."""
@@ -38,6 +36,7 @@ def test_l2_pass_when_ws_connected_and_fresh(l2_http_test_client, mock_ws_consum
 # Test 2 — warn when WS WAITING_FOR_EVENT with mid-age event
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_health_warn_when_ws_waiting(l2_http_test_client, mock_ws_consumer):
     """WS WAITING_FOR_EVENT + last event 45s ago → warn (not fail)."""
     mock_ws_consumer.current_state = "WAITING_FOR_EVENT"
@@ -52,6 +51,7 @@ def test_health_warn_when_ws_waiting(l2_http_test_client, mock_ws_consumer):
 # Test 3 — fail when WS RECONNECTING > 60s (Phase 02.1 D-05 strict)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_health_fail_when_ws_reconnecting_too_long(l2_http_test_client, mock_ws_consumer):
     """WS RECONNECTING > 60s → /health returns 503 + body status=fail."""
     mock_ws_consumer.current_state = "RECONNECTING"
@@ -64,6 +64,7 @@ def test_health_fail_when_ws_reconnecting_too_long(l2_http_test_client, mock_ws_
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 4 — /healthz ALWAYS 200 even when underlying is fail (BUG-6 invariant)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_healthz_always_200(l2_http_test_client, mock_ws_consumer):
     """SAME failing setup as Test 3 → /healthz returns 200 (body still reports fail)."""
@@ -79,6 +80,7 @@ def test_healthz_always_200(l2_http_test_client, mock_ws_consumer):
 # Test 5 — serviceId is "polyarb-l2" (T-03-03-04)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_health_body_serviceid_polyarb_l2(l2_http_test_client):
     """T-03-03-04 — serviceId MUST be polyarb-l2, never polyarb-l1."""
     resp = l2_http_test_client.get("/health")
@@ -89,6 +91,7 @@ def test_health_body_serviceid_polyarb_l2(l2_http_test_client):
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 6 — no secret leak in health body (T-03-03-06)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_health_body_no_secret_leak(l2_http_test_client):
     """T-03-03-06 — body must not include db_path / secret / dsn / token / key substrings."""
@@ -102,6 +105,7 @@ def test_health_body_no_secret_leak(l2_http_test_client):
 # Test 7 — Content-Type is application/health+json (RESEARCH Pitfall 5)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_healthz_content_type_health_json(l2_http_test_client):
     """RESEARCH Pitfall 5 — must use application/health+json."""
     resp = l2_http_test_client.get("/healthz")
@@ -113,9 +117,11 @@ def test_healthz_content_type_health_json(l2_http_test_client):
 # Test 8 — graceful degradation when ws_consumer is None (Plan 04 not wired yet)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_health_when_ws_consumer_none(daemon_settings_for_test):
     """ws_consumer=None (Plan 03 boundary) → /health degrades to warn, not 500."""
     from starlette.testclient import TestClient
+
     from polyarb.http.l2_app import create_l2_app
     from polyarb.storage.sqlite_store import SQLiteStore
 

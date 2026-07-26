@@ -7,6 +7,7 @@ Plan 05 Task 2 — covers:
 - Warning #9: None bid/ask/spread → skip
 - Security invariants: no yaml.load(, no Python builtin eval/exec
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -60,15 +61,57 @@ def db_with_markets(tmp_path: Path) -> Path:
     """)
     con.execute(
         "INSERT INTO markets VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("m1", "c1", "test-slug-1", "Q1", "ty", "tn",
-         0.50, 1000.0, 100.0, 0.49, 10.0, 0.50, 10.0,
-         1800000000000, 1, 0, 0, None, 1700000000000, 1, 0, None),
+        (
+            "m1",
+            "c1",
+            "test-slug-1",
+            "Q1",
+            "ty",
+            "tn",
+            0.50,
+            1000.0,
+            100.0,
+            0.49,
+            10.0,
+            0.50,
+            10.0,
+            1800000000000,
+            1,
+            0,
+            0,
+            None,
+            1700000000000,
+            1,
+            0,
+            None,
+        ),
     )
     con.execute(
         "INSERT INTO markets VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("m2", "c2", "test-slug-2", "Q2", "ty", "tn",
-         0.70, 5000.0, 200.0, 0.68, 10.0, 0.72, 10.0,
-         1800000000000, 1, 0, 0, None, 1700000000000, 1, 0, None),
+        (
+            "m2",
+            "c2",
+            "test-slug-2",
+            "Q2",
+            "ty",
+            "tn",
+            0.70,
+            5000.0,
+            200.0,
+            0.68,
+            10.0,
+            0.72,
+            10.0,
+            1800000000000,
+            1,
+            0,
+            0,
+            None,
+            1700000000000,
+            1,
+            0,
+            None,
+        ),
     )
     con.commit()
     con.close()
@@ -118,19 +161,30 @@ def test_evaluate_alert_simple() -> None:
 
 
 def test_evaluate_alert_simple_false() -> None:
-    assert evaluate_alert("spread < 0.02", {"best_ask_price": 0.51, "best_bid_price": 0.40}) is False
+    assert (
+        evaluate_alert("spread < 0.02", {"best_ask_price": 0.51, "best_bid_price": 0.40}) is False
+    )
 
 
 def test_evaluate_alert_compound_and() -> None:
-    assert evaluate_alert("mid > 0.6 and liq > 1000", {"mid_price": 0.70, "liquidity_usd": 5000.0}) is True
+    assert (
+        evaluate_alert("mid > 0.6 and liq > 1000", {"mid_price": 0.70, "liquidity_usd": 5000.0})
+        is True
+    )
 
 
 def test_evaluate_alert_compound_and_false() -> None:
-    assert evaluate_alert("mid > 0.6 and liq > 1000", {"mid_price": 0.70, "liquidity_usd": 500.0}) is False
+    assert (
+        evaluate_alert("mid > 0.6 and liq > 1000", {"mid_price": 0.70, "liquidity_usd": 500.0})
+        is False
+    )
 
 
 def test_evaluate_alert_compound_or() -> None:
-    assert evaluate_alert("mid < 0.4 or mid > 0.6", {"mid_price": 0.30, "liquidity_usd": 5000.0}) is True
+    assert (
+        evaluate_alert("mid < 0.4 or mid > 0.6", {"mid_price": 0.30, "liquidity_usd": 5000.0})
+        is True
+    )
 
 
 def test_evaluate_alert_rejects_function_call() -> None:
@@ -160,11 +214,15 @@ def test_evaluate_alert_long_expression_capped() -> None:
 
 
 def test_evaluate_alert_skips_when_bid_none() -> None:
-    assert evaluate_alert("spread < 0.02", {"best_bid_price": None, "best_ask_price": 0.51}) is False
+    assert (
+        evaluate_alert("spread < 0.02", {"best_bid_price": None, "best_ask_price": 0.51}) is False
+    )
 
 
 def test_evaluate_alert_skips_when_ask_none() -> None:
-    assert evaluate_alert("spread < 0.02", {"best_bid_price": 0.50, "best_ask_price": None}) is False
+    assert (
+        evaluate_alert("spread < 0.02", {"best_bid_price": 0.50, "best_ask_price": None}) is False
+    )
 
 
 def test_evaluate_alert_skips_when_mid_none() -> None:
@@ -226,17 +284,22 @@ def test_check_alerts_skips_missing_market(watchlist_yaml: Path, tmp_path: Path)
 
 
 def test_yaml_safe_load_invariant_in_source() -> None:
-    src = (Path(__file__).parent.parent.parent / "src" / "polyarb" / "observation" / "watchlist.py").read_text()
+    src = (
+        Path(__file__).parent.parent.parent / "src" / "polyarb" / "observation" / "watchlist.py"
+    ).read_text()
     assert "yaml.safe_load" in src
     assert "yaml.load(" not in src
 
 
 def test_no_python_eval_in_source() -> None:
     import re
-    src = (Path(__file__).parent.parent.parent / "src" / "polyarb" / "observation" / "watchlist.py").read_text()
+
+    src = (
+        Path(__file__).parent.parent.parent / "src" / "polyarb" / "observation" / "watchlist.py"
+    ).read_text()
     # Strip docstrings so mentions of eval/exec in comments don't false-positive
-    code = re.sub(r'""".*?"""', '', src, flags=re.DOTALL)
-    code = re.sub(r"'''.*?'''", '', code, flags=re.DOTALL)
+    code = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+    code = re.sub(r"'''.*?'''", "", code, flags=re.DOTALL)
     assert "eval(" not in code
     assert "exec(" not in code
 

@@ -5,7 +5,8 @@ Phase 02.1 Plan 02 — D-03 / D-04 / D-22 / T-02.1-8-01..03 / BUG-8.
 Covers:
 - HMAC X-Signature enforcement (missing → 401, invalid → 401, constant-time compare)
 - POST /control/unpause (HMAC valid) when scheduler.state=PAUSED → 200 + state=RUNNING + counter=0
-- POST /control/unpause (HMAC valid) when scheduler.state=RUNNING → 200 + status=already_running (idempotent)
+- POST /control/unpause (HMAC valid) when scheduler.state=RUNNING
+  → 200 + status=already_running (idempotent)
 - ISSUE-04 sentinel: empty-body HMAC test exercises the EXACT bytes that
   ``make unpause-prod`` sends in production (``b""``, not ``b"{}"``). Without
   this test, fixture-based unit tests can be 100% green while ``make unpause-prod``
@@ -14,17 +15,16 @@ Covers:
 Wave 0 — these tests intentionally fail (RED) until Plan 02 Task 2 (control.py)
 and Task 3 (app.py route registration) land.
 """
+
 from __future__ import annotations
 
 import hashlib
 import hmac
 from typing import Any
 
-import pytest
 from starlette.testclient import TestClient
 
 from polyarb.daemon.scheduler import SchedulerState
-
 
 # The test secret is defined in conftest.py as a module-private constant.
 # We re-declare it here (same value) so this test file does not need to import
@@ -42,6 +42,7 @@ def _install_real_unpause(scheduler: Any) -> None:
     ``unpause`` attribute to a callable that mutates the mock's own attributes,
     mirroring the real ``SnapshotScheduler.unpause()`` body (scheduler.py:192).
     """
+
     def _side_effect() -> None:
         scheduler.state = SchedulerState.RUNNING
         scheduler._failure_counter = 0
@@ -107,7 +108,9 @@ def test_unpause_invalid_hmac_returns_401(
     resp = http_test_client.post(
         "/control/unpause",
         content=b"{}",
-        headers={"X-Signature": "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+        headers={
+            "X-Signature": "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        },
     )
     assert resp.status_code == 401
 

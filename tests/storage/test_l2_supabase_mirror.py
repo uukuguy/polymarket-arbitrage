@@ -14,6 +14,7 @@ Mirror contract:
 
 W6 invariant: constructor receives REST URL (https://...supabase.co), NOT DSN.
 """
+
 from __future__ import annotations
 
 import os
@@ -93,9 +94,7 @@ def test_init_creates_single_client() -> None:
     from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 
     mock = _make_supabase_mock()
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=mock
-    ) as cc:
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=mock) as cc:
         L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         assert cc.call_count == 1
         # Constructor must accept REST URL (https://), NOT a DSN (postgresql://)
@@ -179,23 +178,24 @@ def test_push_top_of_book_failsoft() -> None:
     mock.table.side_effect = _explode
     breadcrumbs: list[dict] = []
 
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=mock
-    ), patch(
-        "polyarb.storage.l2_supabase_mirror.sentry_sdk.add_breadcrumb",
-        side_effect=lambda **kw: breadcrumbs.append(kw),
+    with (
+        patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=mock),
+        patch(
+            "polyarb.storage.l2_supabase_mirror.sentry_sdk.add_breadcrumb",
+            side_effect=lambda **kw: breadcrumbs.append(kw),
+        ),
     ):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         ok = mirror.push_top_of_book(_tob_rows(3))
 
     assert ok is False, "fail-soft must return False (not raise)"
     warning_breadcrumbs = [
-        bc for bc in breadcrumbs
+        bc
+        for bc in breadcrumbs
         if bc.get("category") == "l2-mirror" and bc.get("level") == "warning"
     ]
     assert warning_breadcrumbs, (
-        f"expected at least one warning breadcrumb category='l2-mirror'; "
-        f"got {breadcrumbs!r}"
+        f"expected at least one warning breadcrumb category='l2-mirror'; got {breadcrumbs!r}"
     )
 
 
@@ -206,23 +206,22 @@ def test_push_top_of_book_success_emits_info_breadcrumb() -> None:
     mock = _make_supabase_mock()
     breadcrumbs: list[dict] = []
 
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=mock
-    ), patch(
-        "polyarb.storage.l2_supabase_mirror.sentry_sdk.add_breadcrumb",
-        side_effect=lambda **kw: breadcrumbs.append(kw),
+    with (
+        patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=mock),
+        patch(
+            "polyarb.storage.l2_supabase_mirror.sentry_sdk.add_breadcrumb",
+            side_effect=lambda **kw: breadcrumbs.append(kw),
+        ),
     ):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         ok = mirror.push_top_of_book(_tob_rows(5))
 
     assert ok is True
     info_bc = [
-        bc for bc in breadcrumbs
-        if bc.get("category") == "l2-mirror" and bc.get("level") == "info"
+        bc for bc in breadcrumbs if bc.get("category") == "l2-mirror" and bc.get("level") == "info"
     ]
     assert info_bc, (
-        f"Phase 02.2 preemptive: success path must emit info breadcrumb; "
-        f"got {breadcrumbs!r}"
+        f"Phase 02.2 preemptive: success path must emit info breadcrumb; got {breadcrumbs!r}"
     )
 
 
@@ -245,17 +244,19 @@ def test_upsert_candidates_inserts_new_rows() -> None:
 
     with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=mock):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
-        ok = mirror.upsert_candidates([
-            {
-                "snapshot_id": 1,
-                "recipe_name": "high_liquidity",
-                "asset_id": "asset-A",
-                "market_id": "mkt-A",
-                "event_id": "evt-A",
-                "source": "recipe",
-                "ranking_score": {"liquidity": 1000.0},
-            },
-        ])
+        ok = mirror.upsert_candidates(
+            [
+                {
+                    "snapshot_id": 1,
+                    "recipe_name": "high_liquidity",
+                    "asset_id": "asset-A",
+                    "market_id": "mkt-A",
+                    "event_id": "evt-A",
+                    "source": "recipe",
+                    "ranking_score": {"liquidity": 1000.0},
+                },
+            ]
+        )
 
     assert ok is True
     assert "l2_candidates" in tables_used
@@ -291,34 +292,37 @@ def test_reconcile_candidates_closes_and_inserts_by_asset_recipe_key() -> None:
     def _table(_name: str) -> MagicMock:
         query = MagicMock()
         query._is_select = False
+
         def _select(*args):
             selects.append(args)
             query._is_select = True
             return query
+
         query.select.side_effect = _select
         query.eq.return_value = query
         query.is_.return_value = query
-        query.update.side_effect = lambda values: (updates.append(values) or query)
-        query.insert.side_effect = lambda rows: (inserts.append(rows) or query)
-        query.execute.side_effect = lambda: MagicMock(
-            data=active if query._is_select else []
-        )
+        query.update.side_effect = lambda values: updates.append(values) or query
+        query.insert.side_effect = lambda rows: inserts.append(rows) or query
+        query.execute.side_effect = lambda: MagicMock(data=active if query._is_select else [])
         return query
 
     client.table.side_effect = _table
     with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=client):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
-        assert mirror.reconcile_candidates([
-            _candidate("A", "keep"),
-            _candidate("A", "new"),
-        ]) is True
+        assert (
+            mirror.reconcile_candidates(
+                [
+                    _candidate("A", "keep"),
+                    _candidate("A", "new"),
+                ]
+            )
+            is True
+        )
 
     # Two stale composite keys close independently; the unchanged key is retained.
     assert len(updates) == 2
     assert len(inserts) == 1
-    assert {(row["asset_id"], row["recipe_name"]) for row in inserts[0]} == {
-        ("A", "new")
-    }
+    assert {(row["asset_id"], row["recipe_name"]) for row in inserts[0]} == {("A", "new")}
 
 
 def test_reconcile_candidates_empty_desired_closes_all_active_keys() -> None:
@@ -379,11 +383,12 @@ def test_category_l2_mirror_not_plain_mirror() -> None:
     mock = _make_supabase_mock()
     breadcrumbs: list[dict] = []
 
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=mock
-    ), patch(
-        "polyarb.storage.l2_supabase_mirror.sentry_sdk.add_breadcrumb",
-        side_effect=lambda **kw: breadcrumbs.append(kw),
+    with (
+        patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=mock),
+        patch(
+            "polyarb.storage.l2_supabase_mirror.sentry_sdk.add_breadcrumb",
+            side_effect=lambda **kw: breadcrumbs.append(kw),
+        ),
     ):
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         mirror.push_top_of_book(_tob_rows(1))

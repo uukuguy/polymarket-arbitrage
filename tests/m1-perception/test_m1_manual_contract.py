@@ -86,9 +86,7 @@ def _repo(tmp_path: Path) -> Path:
         *L3_MUTATION_MAKE_TARGETS,
         *L3_CREDENTIAL_PROOF_TARGETS,
     )
-    (tmp_path / "Makefile").write_text(
-        "".join(f"{target}:\n\t@true\n" for target in make_targets)
-    )
+    (tmp_path / "Makefile").write_text("".join(f"{target}:\n\t@true\n" for target in make_targets))
     (tmp_path / ".planning/CURRENT.md").write_text("current\n")
     (tmp_path / "src/polyarb/http/health.py").write_text(
         'checks["snapshot:last_success_age_seconds"] = []\n'

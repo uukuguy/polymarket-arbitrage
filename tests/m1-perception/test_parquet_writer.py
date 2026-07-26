@@ -16,7 +16,7 @@ import os
 
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -80,7 +80,7 @@ def test_compute_snapshot_path_format(tmp_path: Path) -> None:
 def test_compute_snapshot_path_uses_utc(tmp_path: Path) -> None:
     """A UTC-noon timestamp must produce UTC components regardless of local TZ."""
     # 2024-06-15T12:34:56Z
-    dt_utc = datetime(2024, 6, 15, 12, 34, 56, tzinfo=timezone.utc)
+    dt_utc = datetime(2024, 6, 15, 12, 34, 56, tzinfo=UTC)
     epoch_ms = int(dt_utc.timestamp() * 1000)
     p = compute_snapshot_path(tmp_path, epoch_ms)
     assert p == tmp_path / "2024" / "06" / "15" / "12-34-56.parquet"
@@ -173,9 +173,7 @@ def test_write_parquet_streaming_basic(tmp_path: Path) -> None:
 
     assert table.schema.names == SNAPSHOT_SCHEMA.names
     # Row content survives — pick a sentinel field.
-    assert sorted(table.column("market_id").to_pylist()) == sorted(
-        f"m{i}" for i in range(100)
-    )
+    assert sorted(table.column("market_id").to_pylist()) == sorted(f"m{i}" for i in range(100))
 
 
 def test_write_parquet_streaming_byte_equivalent_to_atomic(tmp_path: Path) -> None:

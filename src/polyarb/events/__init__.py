@@ -7,6 +7,7 @@ Public surface:
 - listen_snapshot_complete (L2 side, async LISTEN consumer with reconnect)
 - catchup_from_cursor (L2 side, drop-mitigation startup procedure)
 """
+
 from polyarb.events.bus import publish_snapshot_complete
 from polyarb.events.listener import catchup_from_cursor, listen_snapshot_complete
 

@@ -12,9 +12,9 @@ Schema: explicit pa.Schema (NOT inferred — see Pitfall 3 for token_id).
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -29,7 +29,7 @@ def compute_snapshot_path(parquet_root: Path, taken_at_ms: int) -> Path:
     Does NOT mkdir — that's `write_parquet_atomic`'s job (so callers can compute
     paths cheaply without filesystem side effects).
     """
-    dt = datetime.fromtimestamp(taken_at_ms / 1000, tz=timezone.utc)
+    dt = datetime.fromtimestamp(taken_at_ms / 1000, tz=UTC)
     return (
         Path(parquet_root)
         / dt.strftime("%Y")
@@ -126,7 +126,5 @@ def write_parquet_streaming(
         raise
 
     os.replace(tmp, out_path)
-    logger.info(
-        f"Parquet streaming written: {out_path} ({total} rows, batch_size={batch_size})"
-    )
+    logger.info(f"Parquet streaming written: {out_path} ({total} rows, batch_size={batch_size})")
     return total

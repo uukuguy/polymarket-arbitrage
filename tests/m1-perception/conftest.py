@@ -21,6 +21,7 @@ F-4 SECURITY (credential-leak regression guard):
 Plan 02-02: Added daemon_settings_for_test, http_test_client, make_signed_request
     fixtures for HTTP server + scheduler tests.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -104,9 +105,7 @@ def tmp_cache_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def settings_for_test(
-    tmp_db_path: Path, tmp_parquet_root: Path, tmp_cache_root: Path
-) -> Settings:
+def settings_for_test(tmp_db_path: Path, tmp_parquet_root: Path, tmp_cache_root: Path) -> Settings:
     """Settings tuned for fast tests: tiny retries + low liquidity threshold.
 
     The lowered ``liquidity_threshold_usd=100.0`` ensures all 5 fixture
@@ -138,9 +137,7 @@ def mocked_gamma(gamma_fixture: list[dict], settings_for_test: Settings) -> Any:
     GammaClient code path). For most orchestrator tests, prefer patching the
     GammaClient class symbol on ``polyarb.snapshot.orchestrator`` instead.
     """
-    with respx.mock(
-        base_url=settings_for_test.gamma_url, assert_all_called=False
-    ) as mock:
+    with respx.mock(base_url=settings_for_test.gamma_url, assert_all_called=False) as mock:
         route = mock.get("/markets")
         # First call: real fixture data; second call: empty list to terminate pagination.
         route.side_effect = [
@@ -174,9 +171,7 @@ def mocked_clob(clob_fixture: dict) -> Any:
         }
     )
 
-    with patch(
-        "polyarb.snapshot.orchestrator.ClobReaderClient"
-    ) as ClobMock:
+    with patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock:
         clob_inst = ClobMock.return_value
         clob_inst.get_books = get_books_mock
         clob_inst.get_prices_buy_sell = get_prices_mock
@@ -197,6 +192,7 @@ def daemon_settings_for_test(
 ) -> Settings:
     """Settings for HTTP daemon tests — includes scan_shared_secret and empty-secret bypass."""
     from pydantic import SecretStr
+
     return Settings(
         db_path=tmp_db_path,
         parquet_root=tmp_parquet_root,
@@ -267,6 +263,7 @@ def make_signed_request() -> Callable:
     Usage:
         resp = make_signed_request(client, "/scan", {"recipe_name": "..."})
     """
+
     def _make_signed_request(
         client: Any,
         path: str,
@@ -337,6 +334,7 @@ def settings_for_test_with_supabase_mirror(
 ) -> Settings:
     """Settings with Supabase mirror config enabled (mocked — not real endpoint)."""
     from pydantic import SecretStr
+
     return Settings(
         db_path=tmp_db_path,
         parquet_root=tmp_parquet_root,
@@ -357,6 +355,7 @@ def settings_for_test_with_r2(
 ) -> Settings:
     """Settings with R2 config enabled (mocked — not real endpoint)."""
     from pydantic import SecretStr
+
     return Settings(
         db_path=tmp_db_path,
         parquet_root=tmp_parquet_root,
@@ -418,12 +417,14 @@ def mocked_gamma_orchestrator(gamma_fixture: list[dict]) -> Any:
         async def _iter():
             for m in items:
                 yield m
+
         return _iter
 
     def _make_iter_events(items):
         async def _iter():
             for e in items:
                 yield e
+
         return _iter
 
     fake.iter_active_markets = _make_iter_markets(gamma_fixture)
@@ -432,9 +433,7 @@ def mocked_gamma_orchestrator(gamma_fixture: list[dict]) -> Any:
     fake.__aenter__.return_value = fake
     fake.__aexit__.return_value = None
 
-    with patch(
-        "polyarb.snapshot.orchestrator.GammaClient", return_value=fake
-    ):
+    with patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake):
         yield fake
 
 
@@ -455,9 +454,7 @@ def gamma_payload_factory() -> tuple[Any, Any]:
     from pathlib import Path
 
     payload_path = Path(__file__).parent / "fixtures" / "gamma_streaming_payload.py"
-    spec = importlib.util.spec_from_file_location(
-        "gamma_streaming_payload", payload_path
-    )
+    spec = importlib.util.spec_from_file_location("gamma_streaming_payload", payload_path)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -494,11 +491,13 @@ def mocked_sentry(monkeypatch: pytest.MonkeyPatch) -> Any:
     # module load at conftest import time.
     try:
         import polyarb.observability.sentry as obs_sentry  # noqa: WPS433
+
         monkeypatch.setattr(obs_sentry, "sentry_sdk", sentry_sdk, raising=False)
     except ImportError:
         pass  # module not yet implemented in RED phase
     try:
         import polyarb.daemon.alerts as alerts_mod  # noqa: WPS433
+
         monkeypatch.setattr(alerts_mod, "sentry_sdk", sentry_sdk, raising=False)
     except ImportError:
         pass
@@ -555,18 +554,16 @@ def mocked_better_stack(monkeypatch: pytest.MonkeyPatch) -> Any:
         async def __aexit__(self, *args: Any) -> None:
             return None
 
-        async def post(
-            self, url: str, json: dict | None = None, **kwargs: Any
-        ) -> _FakeResponse:
+        async def post(self, url: str, json: dict | None = None, **kwargs: Any) -> _FakeResponse:
             state["calls"].append(("POST", url, json))
-            for (m, sub, sc) in state["overrides"]:
+            for m, sub, sc in state["overrides"]:
                 if m == "POST" and sub in url:
                     return _FakeResponse(sc)
             return _FakeResponse(state["default_status"])
 
         async def get(self, url: str, **kwargs: Any) -> _FakeResponse:
             state["calls"].append(("GET", url, None))
-            for (m, sub, sc) in state["overrides"]:
+            for m, sub, sc in state["overrides"]:
                 if m == "GET" and sub in url:
                     return _FakeResponse(sc)
             return _FakeResponse(state["default_status"])
@@ -652,6 +649,7 @@ def daemon_settings_with_observability(
     Used by observability tests that need a fully-populated Settings.
     """
     from pydantic import SecretStr
+
     return Settings(
         db_path=tmp_db_path,
         parquet_root=tmp_parquet_root,
@@ -665,9 +663,7 @@ def daemon_settings_with_observability(
         sentry_dsn="https://abcdef0123456789@o000000.ingest.sentry.io/123456",
         axiom_token=SecretStr("axiom-test-token"),
         axiom_dataset="polyarb-test",
-        better_stack_heartbeat_url=(
-            "https://uptime.betterstack.com/api/v1/heartbeat/test"
-        ),
+        better_stack_heartbeat_url=("https://uptime.betterstack.com/api/v1/heartbeat/test"),
         telegram_bot_token=SecretStr("7012345:test-bot-token"),
         telegram_chat_id="-1001234567890",
         alert_dedupe_window_seconds=300,

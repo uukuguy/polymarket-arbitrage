@@ -52,9 +52,7 @@ def _healthy_l2_checks() -> dict[str, Any]:
         "l3:active_count": _check(10),
         "l3:evidence_sample_age_seconds": _check(15.0),
         "l3:promoter_ledger_age_seconds": _check(60.0),
-        "l3:membership_convergence": _check(
-            {"desired": 10, "committed": 10, "evidenced": 10}
-        ),
+        "l3:membership_convergence": _check({"desired": 10, "committed": 10, "evidenced": 10}),
         "l3:worst_market_freshness": _check(30.0),
     }
 
@@ -165,9 +163,7 @@ def test_failed_strict_l3_check_pushes(failed_key: str) -> None:
 
 
 def test_waiting_for_event_with_fresh_data_is_quiet() -> None:
-    action, reason = WATCHER.decide_l2(
-        _health(status="warn", checks=_healthy_l2_checks())
-    )
+    action, reason = WATCHER.decide_l2(_health(status="warn", checks=_healthy_l2_checks()))
 
     assert action == "noop"
     assert "ok" in reason.lower()

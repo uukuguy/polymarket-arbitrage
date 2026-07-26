@@ -91,9 +91,7 @@ def test_system_prompt_contains_json_keyword() -> None:
 @pytest.mark.asyncio
 async def test_translate_batch_parses_json(mock_openai_class) -> None:
     create_mock, _ = mock_openai_class
-    create_mock.return_value = _mk_chat_response(
-        json.dumps({"translations": ["甲", "乙"]})
-    )
+    create_mock.return_value = _mk_chat_response(json.dumps({"translations": ["甲", "乙"]}))
 
     async with TranslationClient(
         base_url="https://api.example.com/v1",
@@ -132,9 +130,7 @@ async def test_translate_batch_empty_input_returns_empty(mock_openai_class) -> N
 @pytest.mark.asyncio
 async def test_translate_batch_count_mismatch_raises(mock_openai_class) -> None:
     create_mock, _ = mock_openai_class
-    create_mock.return_value = _mk_chat_response(
-        json.dumps({"translations": ["only one"]})
-    )
+    create_mock.return_value = _mk_chat_response(json.dumps({"translations": ["only one"]}))
 
     async with TranslationClient(
         base_url="https://api.example.com/v1",
@@ -294,11 +290,7 @@ def test_client_module_does_not_import_tenacity() -> None:
     from pathlib import Path
 
     src = (
-        Path(__file__).parent.parent.parent
-        / "src"
-        / "polyarb"
-        / "translation"
-        / "client.py"
+        Path(__file__).parent.parent.parent / "src" / "polyarb" / "translation" / "client.py"
     ).read_text()
 
     # We allow the word "tenacity" inside docstrings / comments (anti-pattern doc)
@@ -308,9 +300,7 @@ def test_client_module_does_not_import_tenacity() -> None:
         stripped = line.strip()
         if stripped.startswith("#") or stripped.startswith('"'):
             continue
-        if stripped.startswith("import tenacity") or stripped.startswith(
-            "from tenacity"
-        ):
+        if stripped.startswith("import tenacity") or stripped.startswith("from tenacity"):
             forbidden_imports.append(stripped)
 
     assert not forbidden_imports, (

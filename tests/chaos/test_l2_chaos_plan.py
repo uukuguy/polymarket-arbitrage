@@ -61,11 +61,14 @@ L2_CHAOS_PLAN: list[ChaosInjection] = [
         ],
         programmatic_cmds=[
             # Watchdog state visible via /health right after kill — expect RECONNECTING.
-            'curl -fsS https://polyarb-l2.fly.dev/health | jq ".checks[\\"ws:connection_state\\"][0].observedValue"',
+            "curl -fsS https://polyarb-l2.fly.dev/health | "
+            'jq ".checks[\\"ws:connection_state\\"][0].observedValue"',
             # Then within 45s expect CONNECTED again and l2_top_of_book latest row younger than 45s.
-            'sleep 50 && curl -fsS https://polyarb-l2.fly.dev/health | jq ".checks[\\"ws:last_event_age_seconds\\"][0].observedValue"',
+            "sleep 50 && curl -fsS https://polyarb-l2.fly.dev/health | "
+            'jq ".checks[\\"ws:last_event_age_seconds\\"][0].observedValue"',
             # Ground truth: a new l2_top_of_book row after the kill timestamp.
-            'psql "$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT count(*) FROM l2_top_of_book WHERE ts > now() - interval \'45 seconds\'"',
+            'psql "$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT count(*) '
+            "FROM l2_top_of_book WHERE ts > now() - interval '45 seconds'\"",
         ],
         container_localhost_fallback=[
             'flyctl ssh console -a polyarb-l2 -C "curl -fsS localhost:8080/health"',
@@ -86,18 +89,22 @@ L2_CHAOS_PLAN: list[ChaosInjection] = [
             # Snapshot current secret first so cleanup restores it byte-for-byte.
             'echo "BACKUP=$(grep ^POLYARB_SUPABASE_SERVICE_KEY .env | cut -d= -f2-)"',
             # Unset the service key on polyarb-l2 ONLY (L1 keeps its key).
-            'flyctl secrets unset POLYARB_SUPABASE_SERVICE_KEY -a polyarb-l2',
+            "flyctl secrets unset POLYARB_SUPABASE_SERVICE_KEY -a polyarb-l2",
         ],
         programmatic_cmds=[
             # After ~60s, mirror writes should be failing fail-soft; daemon stays up.
             'curl -fsS https://polyarb-l2.fly.dev/healthz | jq ".status"  # always 200',
-            'curl -sS -o /dev/null -w "%{http_code}\\n" https://polyarb-l2.fly.dev/health  # likely 503 due to mirror skipped',
+            'curl -sS -o /dev/null -w "%{http_code}\\n" '
+            "https://polyarb-l2.fly.dev/health  # likely 503 due to mirror skipped",
             # Sentry breadcrumb category=l2-mirror present in last hour:
-            'curl -fsS "https://de.sentry.io/api/0/projects/$SENTRY_ORG/$SENTRY_PROJECT/events/?statsPeriod=1h&query=category%3Al2-mirror" -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" | jq "length"',
+            'curl -fsS "https://de.sentry.io/api/0/projects/$SENTRY_ORG/'
+            '$SENTRY_PROJECT/events/?statsPeriod=1h&query=category%3Al2-mirror" '
+            '-H "Authorization: Bearer $SENTRY_AUTH_TOKEN" | jq "length"',
             # Crucial: daemon does NOT crash — Fly machine still in started state.
             'flyctl status -a polyarb-l2 | grep "started"',
             # No new l2_top_of_book rows in last 60s (mirror write was skipped):
-            'psql "$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT count(*) FROM l2_top_of_book WHERE ts > now() - interval \'60 seconds\'"',
+            'psql "$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT count(*) '
+            "FROM l2_top_of_book WHERE ts > now() - interval '60 seconds'\"",
         ],
         container_localhost_fallback=[
             'flyctl ssh console -a polyarb-l2 -C "curl -fsS localhost:8080/health"',
@@ -111,69 +118,93 @@ L2_CHAOS_PLAN: list[ChaosInjection] = [
         ),
         cleanup_cmds=[
             # Restore from .env (which still has the key — we only unset on Fly).
-            'set -a; . ./.env; set +a; '
-            'flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="$POLYARB_SUPABASE_SERVICE_KEY" -a polyarb-l2',
+            "set -a; . ./.env; set +a; "
+            "flyctl secrets set POLYARB_SUPABASE_SERVICE_KEY="
+            '"$POLYARB_SUPABASE_SERVICE_KEY" -a polyarb-l2',
         ],
     ),
     ChaosInjection(
         inj_id="L2-3",
         title="L1 NOTIFY emission gate probe (default OFF + opt-in path)",
-        code_path="src/polyarb/snapshot/orchestrator.py step 7.7 + src/polyarb/events/listener.py (Plan 05, B1 spawn constraint)",
+        code_path=(
+            "src/polyarb/snapshot/orchestrator.py step 7.7 + "
+            "src/polyarb/events/listener.py (Plan 05, B1 spawn constraint)"
+        ),
         action_cmds=[
             # Part A — confirm default-state is OFF on L1:
-            'flyctl secrets list -a polyarb-l1 | grep -i event_bus || echo "EVENT_BUS_ENABLED unset = OFF (B1 default)"',
+            "flyctl secrets list -a polyarb-l1 | grep -i event_bus || "
+            'echo "EVENT_BUS_ENABLED unset = OFF (B1 default)"',
             # Confirm L1 does NOT emit NOTIFY when running a snapshot:
-            'flyctl logs -a polyarb-l1 --no-tail | grep -c "publish_snapshot_complete\\|event-bus" || echo "0 publishes (expected)"',
+            "flyctl logs -a polyarb-l1 --no-tail | "
+            'grep -c "publish_snapshot_complete\\|event-bus" || '
+            'echo "0 publishes (expected)"',
             # Part B — temporarily opt-in:
-            'flyctl secrets set POLYARB_EVENT_BUS_ENABLED=1 -a polyarb-l1',
+            "flyctl secrets set POLYARB_EVENT_BUS_ENABLED=1 -a polyarb-l1",
             # Force an L1 snapshot to fire NOTIFY:
-            'curl -fsS -X POST -H "X-Signature: $(echo -n \'{}\' | openssl dgst -sha256 -hmac \\"$POLYARB_SCAN_SHARED_SECRET\\" | cut -d\\" \\" -f2)" -d \'{}\' https://polyarb-l1.fly.dev/scan',
+            "curl -fsS -X POST -H \"X-Signature: $(echo -n '{}' | "
+            "openssl dgst -sha256 -hmac \\"
+            '"$POLYARB_SCAN_SHARED_SECRET\\" | cut -d\\" \\" -f2)" '
+            "-d '{}' https://polyarb-l1.fly.dev/scan",
         ],
         programmatic_cmds=[
-            # Part A: L2 still functioning despite no L1 NOTIFY (catchup_from_cursor + bootstrap_assets keep it alive).
-            'curl -fsS https://polyarb-l2.fly.dev/health | jq ".checks[\\"event_bus:listener_state\\"][0].observedValue"  # = listening',
-            # Part B: after opt-in + L1 scan, L2 logs should show NOTIFY received + candidate_refresh dispatch:
-            'sleep 90 && flyctl logs -a polyarb-l2 --no-tail | grep -oE "candidate refresh.*snapshot_id=[0-9]+" | tail -3',
+            # L2 stays alive without L1 NOTIFY via cursor catchup + bootstrap.
+            "curl -fsS https://polyarb-l2.fly.dev/health | "
+            'jq ".checks[\\"event_bus:listener_state\\"][0].observedValue" '
+            "# = listening",
+            # After opt-in, L2 logs show NOTIFY and candidate_refresh dispatch.
+            "sleep 90 && flyctl logs -a polyarb-l2 --no-tail | "
+            'grep -oE "candidate refresh.*snapshot_id=[0-9]+" | tail -3',
             # Cursor advanced post-NOTIFY:
-            'psql "$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT last_snapshot_id FROM l2_event_cursor WHERE consumer=\'l2-candidate-refresh\'"',
+            'psql "$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT last_snapshot_id '
+            "FROM l2_event_cursor WHERE consumer='l2-candidate-refresh'\"",
         ],
         container_localhost_fallback=[
             'flyctl ssh console -a polyarb-l2 -C "curl -fsS localhost:8080/health | jq .checks"',
         ],
         expected_truth=(
-            "Part A (default OFF): L1 publishes 0 NOTIFYs; L2 event_listener.state=listening; "
-            "L2 still gets candidates via catchup_from_cursor and bootstrap_asset_ids — daemon healthy. "
+            "Part A (default OFF): L1 publishes 0 NOTIFYs; "
+            "L2 event_listener.state=listening; L2 still gets candidates via "
+            "catchup_from_cursor and bootstrap_asset_ids — daemon healthy. "
             "Part B (opt-in): after enabling + scan, L2 receives NOTIFY, candidate_refresh runs, "
             "l2_event_cursor.last_snapshot_id advances by ≥1."
         ),
         cleanup_cmds=[
             # CRITICAL: revert to default OFF (B1 invariant — opt-in only after this Inj PASS).
-            'flyctl secrets unset POLYARB_EVENT_BUS_ENABLED -a polyarb-l1',
+            "flyctl secrets unset POLYARB_EVENT_BUS_ENABLED -a polyarb-l1",
         ],
     ),
     ChaosInjection(
         inj_id="L2-4",
         title="Cross-bug: WS reconnect storm + Supabase pause simultaneously",
-        code_path="ws_watchdog (Plan 04) + supabase-keepalive GHA (Plan 01) + L2 mirror fail-soft (Plan 06)",
+        code_path=(
+            "ws_watchdog (Plan 04) + supabase-keepalive GHA (Plan 01) + "
+            "L2 mirror fail-soft (Plan 06)"
+        ),
         action_cmds=[
             # Trigger reconnect storm: 11 successive WS process kills in <1 hour
             # forces watchdog into MAX_RECONNECTS_PER_HOUR cap → degrade to REST.
-            'for i in $(seq 1 11); do flyctl ssh console -a polyarb-l2 -C "pkill -SIGTERM -f polyarb.daemon.l2_main"; sleep 60; done &',
+            "for i in $(seq 1 11); do flyctl ssh console -a polyarb-l2 "
+            '-C "pkill -SIGTERM -f polyarb.daemon.l2_main"; sleep 60; done &',
             # Simultaneously: simulate Supabase pause by unsetting the DB DSN on L2.
             # (Real Supabase Free pause takes 4 days idle — too long; this is the
             # closest impl-substitute that hits the same code path — listener fail.)
-            'flyctl secrets unset POLYARB_SUPABASE_DB_DSN -a polyarb-l2',
+            "flyctl secrets unset POLYARB_SUPABASE_DB_DSN -a polyarb-l2",
         ],
         programmatic_cmds=[
             # Daemon stays in started state through the storm:
             'flyctl status -a polyarb-l2 | grep "started"',
             # Watchdog hits storm cap → state = DEGRADED_REST visible:
-            'curl -fsS https://polyarb-l2.fly.dev/health | jq ".checks[\\"ws:connection_state\\"][0].observedValue"',
+            "curl -fsS https://polyarb-l2.fly.dev/health | "
+            'jq ".checks[\\"ws:connection_state\\"][0].observedValue"',
             # event_bus:listener_state observability = either listening (cached state)
             # or degraded after Supabase DSN unset.
-            'curl -fsS https://polyarb-l2.fly.dev/healthz | jq ".checks[\\"event_bus:listener_state\\"][0].observedValue"',
+            "curl -fsS https://polyarb-l2.fly.dev/healthz | "
+            'jq ".checks[\\"event_bus:listener_state\\"][0].observedValue"',
             # Alert dedup proof — Sentry should NOT have 11 separate ws-reconnect events:
-            'curl -fsS "https://de.sentry.io/api/0/projects/$SENTRY_ORG/$SENTRY_PROJECT/events/?statsPeriod=1h&query=ws_watchdog" -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" | jq "[.[] | select(.message | contains(\\"reconnect\\"))] | length"',
+            'curl -fsS "https://de.sentry.io/api/0/projects/$SENTRY_ORG/'
+            '$SENTRY_PROJECT/events/?statsPeriod=1h&query=ws_watchdog" '
+            '-H "Authorization: Bearer $SENTRY_AUTH_TOKEN" | '
+            'jq "[.[] | select(.message | contains(\\"reconnect\\"))] | length"',
         ],
         container_localhost_fallback=[
             'flyctl ssh console -a polyarb-l2 -C "curl -fsS localhost:8080/healthz"',
@@ -183,13 +214,14 @@ L2_CHAOS_PLAN: list[ChaosInjection] = [
             "Despite 11 SIGTERM + DSN unset, polyarb-l2 machine state stays 'started'. "
             "Watchdog hits storm cap (10/hour) and degrades to REST. Listener gracefully "
             "marks itself degraded. Alert dedup keeps Sentry event count ≤3 not 11. "
-            "GHA supabase-keepalive next cron run unpauses (in real scenario; here we restore DSN manually)."
+            "GHA supabase-keepalive next cron run unpauses "
+            "(in real scenario; here we restore DSN manually)."
         ),
         cleanup_cmds=[
-            'set -a; . ./.env; set +a; '
+            "set -a; . ./.env; set +a; "
             'flyctl secrets set POLYARB_SUPABASE_DB_DSN="$POLYARB_SUPABASE_DB_DSN" -a polyarb-l2',
             # Wait for the kill-loop to terminate (it's backgrounded above).
-            'wait',
+            "wait",
         ],
     ),
     ChaosInjection(
@@ -200,21 +232,25 @@ L2_CHAOS_PLAN: list[ChaosInjection] = [
             # Trigger many backfill calls in tight loop — should hit 429 from
             # Polymarket Data API (rate-limit 15 RPS via AsyncLimiter(150,10),
             # but a tight loop on `make backfill-trades` can exceed).
-            'for i in $(seq 1 30); do '
+            "for i in $(seq 1 30); do "
             '  flyctl ssh console -a polyarb-l2 -C "cd /app && python -c \\"'
-            'import asyncio; from polyarb.clients.data_api_client import PolymarketDataApiClient; '
-            'async def m(): '
-            '  c = PolymarketDataApiClient(); '
-            '  rows = await c.backfill_trades_for_asset(\\\\\\"53465512181802150755993130711224070738002100921790051090044528012833736167995\\\\\\", days=1); '
-            '  print(len(rows)); '
+            "import asyncio; from polyarb.clients.data_api_client import PolymarketDataApiClient; "
+            "async def m(): "
+            "  c = PolymarketDataApiClient(); "
+            "  rows = await c.backfill_trades_for_asset("
+            '\\\\\\"5346551218180215075599313071122407073800210092179005109004'
+            '4528012833736167995\\\\\\", days=1); '
+            "  print(len(rows)); "
             'asyncio.run(m())\\""; '
-            'done',
+            "done",
         ],
         programmatic_cmds=[
             # 429 retry log lines visible in flyctl logs:
-            'flyctl logs -a polyarb-l2 --no-tail | grep -c "status_code == 429\\|429.*backoff" || true',
+            "flyctl logs -a polyarb-l2 --no-tail | "
+            'grep -c "status_code == 429\\|429.*backoff" || true',
             # Backfill checkpoint progress: rows added to l2_trades over time:
-            'psql "$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT count(*) FROM l2_trades WHERE created_at > now() - interval \'10 minutes\'"',
+            'psql "$POLYARB_SUPABASE_DB_DSN" -tAc "SELECT count(*) '
+            "FROM l2_trades WHERE created_at > now() - interval '10 minutes'\"",
             # No daemon crash:
             'flyctl status -a polyarb-l2 | grep "started"',
         ],
@@ -238,8 +274,7 @@ L2_CHAOS_PLAN: list[ChaosInjection] = [
 def test_l2_chaos_plan_has_5_entries() -> None:
     """Sanity: VALIDATION.md mandates exactly 5 chaos injections."""
     assert len(L2_CHAOS_PLAN) == 5, (
-        f"Phase 03 VALIDATION.md locks 5 chaos injections; "
-        f"L2_CHAOS_PLAN has {len(L2_CHAOS_PLAN)}"
+        f"Phase 03 VALIDATION.md locks 5 chaos injections; L2_CHAOS_PLAN has {len(L2_CHAOS_PLAN)}"
     )
 
 
@@ -266,9 +301,7 @@ def test_every_injection_has_programmatic_verification(inj: ChaosInjection) -> N
     for cmd in inj.programmatic_cmds:
         cmd_lower = cmd.lower()
         for bad in forbidden_substrings:
-            assert bad not in cmd_lower, (
-                f"Inj {inj.inj_id} has UI-bound verification: {cmd!r}"
-            )
+            assert bad not in cmd_lower, f"Inj {inj.inj_id} has UI-bound verification: {cmd!r}"
 
 
 @pytest.mark.parametrize("inj", L2_CHAOS_PLAN, ids=lambda i: i.inj_id)
@@ -284,8 +317,7 @@ def test_every_injection_has_container_fallback(inj: ChaosInjection) -> None:
         f"Phase 02.1 L8 mandates a flyctl ssh localhost probe"
     )
     has_ssh_localhost = any(
-        "flyctl ssh" in cmd and "localhost" in cmd
-        for cmd in inj.container_localhost_fallback
+        "flyctl ssh" in cmd and "localhost" in cmd for cmd in inj.container_localhost_fallback
     )
     assert has_ssh_localhost, (
         f"Inj {inj.inj_id} container_localhost_fallback does not contain a "

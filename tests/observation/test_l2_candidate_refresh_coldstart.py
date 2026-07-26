@@ -13,6 +13,7 @@ that contract.
 
 Memory: feedback_cold-start-debounce-trap-2026-05.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,6 +34,7 @@ def test_cold_start_initial_value_is_below_negative_debounce():
     we observe the literal module-load state, not any runtime monkeypatch.
     """
     import polyarb.observation.l2_candidate_refresh as mod
+
     importlib.reload(mod)
 
     assert mod._last_refresh_at_s < -mod.REFRESH_DEBOUNCE_S, (
@@ -57,6 +59,7 @@ def test_first_call_after_module_load_passes_debounce(tmp_path):
     from pydantic import SecretStr
 
     import polyarb.observation.l2_candidate_refresh as mod
+
     importlib.reload(mod)
 
     # Confirm cold-start state (no prior monkeypatch leakage from other tests)
@@ -65,6 +68,7 @@ def test_first_call_after_module_load_passes_debounce(tmp_path):
     )
 
     from polyarb.config import Settings
+
     settings = Settings(
         db_path=tmp_path / "state.db",
         parquet_root=tmp_path / "snapshots",

@@ -9,17 +9,16 @@ Contracts asserted:
 1. Constructor accepts optional `store=` (defaults None) — legacy callers unchanged
 2. push_top_of_book success → calls store.upsert_l2_tob_mirror_state(int wall-clock)
 3. push_top_of_book FAILURE → does NOT call store.upsert (failure path remains pure)
-4. push_trades success → ALSO calls store.upsert_l2_tob_mirror_state (any successful write refreshes)
+4. push_trades success → ALSO calls store.upsert_l2_tob_mirror_state
+   (any successful write refreshes)
 5. store=None at construction → success path is silent no-op (no AttributeError)
 """
+
 from __future__ import annotations
 
 import os
 import time
-from typing import Any
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
@@ -92,15 +91,11 @@ def test_constructor_accepts_optional_store_kwarg() -> None:
     from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 
     mock = _make_supabase_mock()
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=mock
-    ):
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=mock):
         # No store kwarg — must not raise.
         m = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         # And with store kwarg — must accept.
-        m2 = L2SupabaseMirror(
-            url="https://x.supabase.co", service_key="key", store=MagicMock()
-        )
+        m2 = L2SupabaseMirror(url="https://x.supabase.co", service_key="key", store=MagicMock())
         assert m is not None and m2 is not None
 
 
@@ -110,12 +105,8 @@ def test_push_top_of_book_success_writes_freshness_cache() -> None:
 
     sb_mock = _make_supabase_mock()
     store_mock = MagicMock()
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ):
-        mirror = L2SupabaseMirror(
-            url="https://x.supabase.co", service_key="key", store=store_mock
-        )
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock):
+        mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key", store=store_mock)
 
         before = int(time.time())
         result = mirror.push_top_of_book(_tob_rows(3))
@@ -136,12 +127,8 @@ def test_push_top_of_book_failure_does_not_write_cache() -> None:
 
     sb_mock = _make_supabase_mock(raise_on_insert=True)
     store_mock = MagicMock()
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ):
-        mirror = L2SupabaseMirror(
-            url="https://x.supabase.co", service_key="key", store=store_mock
-        )
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock):
+        mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key", store=store_mock)
         result = mirror.push_top_of_book(_tob_rows(3))
 
         # Fail-soft envelope returns False but does NOT raise.
@@ -156,12 +143,8 @@ def test_push_trades_success_writes_freshness_cache() -> None:
 
     sb_mock = _make_supabase_mock()
     store_mock = MagicMock()
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ):
-        mirror = L2SupabaseMirror(
-            url="https://x.supabase.co", service_key="key", store=store_mock
-        )
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock):
+        mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key", store=store_mock)
         before = int(time.time())
         result = mirror.push_trades(_trade_rows(2))
         after = int(time.time())
@@ -178,9 +161,7 @@ def test_store_none_success_path_is_silent_noop() -> None:
     from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 
     sb_mock = _make_supabase_mock()
-    with patch(
-        "polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock
-    ):
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=sb_mock):
         # No store= kwarg.
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         # Must complete cleanly with True; no AttributeError on self._store.upsert(...).

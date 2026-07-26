@@ -10,12 +10,12 @@ behavior now use set_ws_test_kill() for isolation (env-seeding is tested in
 test_l2_chaos_ws_kill_endpoint.py via module reload). The prod-safety invariant
 (fly-l2.toml must not contain POLYARB_WS_TEST_KILL) is unaffected.
 """
+
 from __future__ import annotations
 
 import time
 
 import pytest
-
 
 # ── Helper import — driven via TDD ───────────────────────────────────────────
 
@@ -47,7 +47,11 @@ def test_set_to_1_raises():
     (the in-band endpoint path). The env cold-start seeding is tested separately
     via module reload in test_l2_chaos_ws_kill_endpoint.py.
     """
-    from polyarb.daemon.ws_consumer import WsTestKillRequested, _check_ws_test_kill, set_ws_test_kill
+    from polyarb.daemon.ws_consumer import (
+        WsTestKillRequested,
+        _check_ws_test_kill,
+        set_ws_test_kill,
+    )
 
     set_ws_test_kill(True)
     try:
@@ -139,7 +143,9 @@ def test_health_surfaces_kill_flag_when_set():
         "chaos:ws_test_kill_flag sub-check in /health response"
     )
     sub = checks["chaos:ws_test_kill_flag"][0]
-    assert sub["status"] == "warn", "chaos flag is warn (not fail) — flag itself doesn't trip overall"
+    assert sub["status"] == "warn", (
+        "chaos flag is warn (not fail) — flag itself doesn't trip overall"
+    )
     output = (sub.get("output") or "").lower()
     assert "chaos" in output or "should never" in output or "production" in output, (
         f"chaos sub-check output should mention chaos/production; got: {sub.get('output')!r}"

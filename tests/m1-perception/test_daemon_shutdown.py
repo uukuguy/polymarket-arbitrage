@@ -15,6 +15,7 @@ The tests below mock _run_snapshot so we test the scheduler's responsiveness
 in isolation — the orchestrator's actual runtime is out of scope (it takes
 ~minutes per snapshot and is itself cancellation-aware via async/await).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -69,8 +70,15 @@ async def test_scheduler_stops_within_1s_of_stop_event(tmp_path: Path) -> None:
     # Replace the snapshot runner with a fast no-op so the first tick returns
     # instantly and the loop drops into the inter-tick wait.
     scheduler._run_snapshot = AsyncMock(
-        return_value=type("R", (), {"status": __import__("polyarb.validator.category",
-                                                          fromlist=["SnapshotStatus"]).SnapshotStatus.OK})()
+        return_value=type(
+            "R",
+            (),
+            {
+                "status": __import__(
+                    "polyarb.validator.category", fromlist=["SnapshotStatus"]
+                ).SnapshotStatus.OK
+            },
+        )()
     )
 
     stop = asyncio.Event()
@@ -84,7 +92,7 @@ async def test_scheduler_stops_within_1s_of_stop_event(tmp_path: Path) -> None:
     stop.set()
     try:
         await asyncio.wait_for(run_task, timeout=2.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         run_task.cancel()
         pytest.fail("scheduler.run() did not exit within 2s of stop_event")
     elapsed = time.monotonic() - t0
@@ -121,8 +129,15 @@ async def test_in_flight_tick_responds_to_cancellation(tmp_path: Path) -> None:
         # Simulate an in-flight orchestrator call — long await that yields
         # control back to the event loop (cancellation can land here).
         await asyncio.sleep(30)
-        return type("R", (), {"status": __import__("polyarb.validator.category",
-                                                    fromlist=["SnapshotStatus"]).SnapshotStatus.OK})()
+        return type(
+            "R",
+            (),
+            {
+                "status": __import__(
+                    "polyarb.validator.category", fromlist=["SnapshotStatus"]
+                ).SnapshotStatus.OK
+            },
+        )()
 
     scheduler._run_snapshot = _slow_snapshot  # type: ignore[assignment]
 
@@ -135,9 +150,7 @@ async def test_in_flight_tick_responds_to_cancellation(tmp_path: Path) -> None:
     with pytest.raises((asyncio.CancelledError, BaseException)):
         await run_task
     elapsed = time.monotonic() - t0
-    assert elapsed < 1.5, (
-        f"in-flight tick took {elapsed:.2f}s to cancel; F-04 requires < 1.5s"
-    )
+    assert elapsed < 1.5, f"in-flight tick took {elapsed:.2f}s to cancel; F-04 requires < 1.5s"
 
 
 # ---------------------------------------------------------------------------

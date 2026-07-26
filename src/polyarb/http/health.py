@@ -43,6 +43,7 @@ no DB schema, no IPs, no secrets. (D-22 amendment + D-06.)
 Source: datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06
         RESEARCH.md §8 / 02.1-RESEARCH.md Area 1-2
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -56,8 +57,8 @@ from starlette.responses import JSONResponse
 HEALTH_CONTENT_TYPE = "application/health+json"
 
 # Age thresholds in seconds
-_PASS_AGE_S = 14 * 3600     # < 14h → pass
-_WARN_AGE_S = 25 * 3600     # 14-25h → warn; > 25h → fail
+_PASS_AGE_S = 14 * 3600  # < 14h → pass
+_WARN_AGE_S = 25 * 3600  # 14-25h → warn; > 25h → fail
 
 # Supabase mirror thresholds
 _MIRROR_WARN_S = 25 * 3600
@@ -237,9 +238,7 @@ def _build_health_checks(
             {
                 "componentId": "neg-risk-quote-worker",
                 "componentType": "component",
-                "observedValue": (
-                    round(quote_age_s, 1) if quote_age_s is not None else None
-                ),
+                "observedValue": (round(quote_age_s, 1) if quote_age_s is not None else None),
                 "observedUnit": "s",
                 "status": quote_status,
                 "output": (

@@ -15,6 +15,7 @@ Usage:
     from polyarb.routing.config import load_m2_settings
     app = load_m2_settings()
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -63,9 +64,7 @@ class PositionConfig(BaseSettings):
     )
     busy_timeout_ms: int = Field(
         default=5000,
-        validation_alias=AliasChoices(
-            "busy_timeout_ms", "POLYARB_POSITION_BUSY_TIMEOUT_MS"
-        ),
+        validation_alias=AliasChoices("busy_timeout_ms", "POLYARB_POSITION_BUSY_TIMEOUT_MS"),
     )
 
 

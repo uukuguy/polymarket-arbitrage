@@ -10,13 +10,13 @@ Coverage:
 - alert dedup window suppresses repeat within window
 - scheduler PAUSED transition invokes alerts.send_paused_alert
 """
+
 from __future__ import annotations
 
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # send_paused_alert
@@ -43,8 +43,7 @@ async def test_send_paused_alert_calls_better_stack_heartbeat_fail(
     # Better Stack /fail endpoint received a POST
     fail_calls = [c for c in mocked_better_stack.calls if c[0] == "POST" and "/fail" in c[1]]
     assert fail_calls, (
-        f"send_paused_alert did not POST to Better Stack /fail: "
-        f"calls={mocked_better_stack.calls}"
+        f"send_paused_alert did not POST to Better Stack /fail: calls={mocked_better_stack.calls}"
     )
 
 
@@ -92,8 +91,7 @@ async def test_send_paused_alert_calls_telegram_direct_when_better_stack_503(
     )
 
     telegram_calls = [
-        c for c in mocked_better_stack.calls
-        if c[0] == "POST" and "api.telegram.org" in c[1]
+        c for c in mocked_better_stack.calls if c[0] == "POST" and "api.telegram.org" in c[1]
     ]
     assert telegram_calls, (
         f"Telegram direct must fire on BS 503. observed={mocked_better_stack.calls}"
@@ -126,8 +124,7 @@ async def test_send_paused_alert_calls_telegram_direct_when_better_stack_200(
     )
 
     telegram_calls = [
-        c for c in mocked_better_stack.calls
-        if c[0] == "POST" and "api.telegram.org" in c[1]
+        c for c in mocked_better_stack.calls if c[0] == "POST" and "api.telegram.org" in c[1]
     ]
     assert telegram_calls, (
         f"Telegram direct MUST fire even when BS returns 200 (2026-05-19 contract). "
@@ -146,7 +143,8 @@ async def test_send_heartbeat_ok(
     await alerts.send_heartbeat_ok(daemon_settings_with_observability)
 
     heartbeat_calls = [
-        c for c in mocked_better_stack.calls
+        c
+        for c in mocked_better_stack.calls
         if "uptime.betterstack.com" in c[1] and "/fail" not in c[1]
     ]
     assert heartbeat_calls, (
@@ -174,9 +172,7 @@ async def test_alert_deduplication(
         reason="first call",
     )
     first_call_count = mocked_sentry.capture_message.call_count
-    first_bs_count = len(
-        [c for c in mocked_better_stack.calls if "/fail" in c[1]]
-    )
+    first_bs_count = len([c for c in mocked_better_stack.calls if "/fail" in c[1]])
 
     # Second call within window: should be deduped
     await alerts.send_paused_alert(
@@ -203,7 +199,7 @@ async def test_scheduler_paused_invokes_alerts(
     daemon_settings_with_observability: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When scheduler hits FAILURE_THRESHOLD consecutive failures, _on_paused → alerts.send_paused_alert.
+    """Verify FAILURE_THRESHOLD consecutive failures call the paused alert.
 
     Phase 03.1-04 D-02: threshold is 5 (was 3). Drive the loop off the class
     attribute so future tuning doesn't drift this assertion.
@@ -217,9 +213,7 @@ async def test_scheduler_paused_invokes_alerts(
     store = SQLiteStore(daemon_settings_with_observability.db_path)
     store.init_schema()
 
-    scheduler = SnapshotScheduler(
-        settings=daemon_settings_with_observability, sqlite_store=store
-    )
+    scheduler = SnapshotScheduler(settings=daemon_settings_with_observability, sqlite_store=store)
 
     # Replace alerts.send_paused_alert with a counting AsyncMock
     send_mock = AsyncMock()

@@ -13,15 +13,15 @@ Backfill contract (post-Open Q 2 resolution, 2026-05-24):
 - Trade fields (per probe): timestamp (unix seconds), transactionHash (hash),
   asset (token id), price, size, side, proxyWallet (taker)
 """
+
 from __future__ import annotations
 
 import asyncio
 import os
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import httpx
-import pytest
 import respx
 
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
@@ -44,8 +44,11 @@ def _trade(idx: int, *, asset: str, ts: int) -> dict:
         "outcomeIndex": 0,
         "title": f"trade-{idx}",
         "icon": "",
-        "name": "", "pseudonym": "", "bio": "",
-        "profileImage": "", "profileImageOptimized": "",
+        "name": "",
+        "pseudonym": "",
+        "bio": "",
+        "profileImage": "",
+        "profileImageOptimized": "",
     }
 
 
@@ -70,6 +73,7 @@ async def test_pagination_0_500_1000() -> None:
     call_offsets: list[int] = []
 
     with respx.mock(base_url=DATA_API_BASE) as router:
+
         def _handler(request):
             off = int(request.url.params.get("offset", "0"))
             call_offsets.append(off)
@@ -83,9 +87,7 @@ async def test_pagination_0_500_1000() -> None:
         async for t in backfill_trades_for_asset(asset_id=asset, days=7):
             out.append(t)
 
-    assert call_offsets[:3] == [0, 500, 1000], (
-        f"expected offsets 0,500,1000; got {call_offsets}"
-    )
+    assert call_offsets[:3] == [0, 500, 1000], f"expected offsets 0,500,1000; got {call_offsets}"
     # All 1500 rows belong to target asset → all yielded
     assert len(out) == 1500, f"expected 1500 trades; got {len(out)}"
 
@@ -138,6 +140,7 @@ async def test_cutoff_at_7_days() -> None:
     call_count = 0
 
     with respx.mock(base_url=DATA_API_BASE) as router:
+
         def _handler(request):
             nonlocal call_count
             call_count += 1
@@ -166,8 +169,8 @@ async def test_trade_hash_dedup() -> None:
     asset = "asset-A"
     now = int(time.time())
     # Both pages have exactly page_size=2 rows so pagination advances.
-    page1 = [_trade(i, asset=asset, ts=now - i) for i in range(2)]   # hashes 0,1
-    page2 = [_trade(i, asset=asset, ts=now - i) for i in [1, 2]]      # hash 1 dupe, 2 new
+    page1 = [_trade(i, asset=asset, ts=now - i) for i in range(2)]  # hashes 0,1
+    page2 = [_trade(i, asset=asset, ts=now - i) for i in [1, 2]]  # hash 1 dupe, 2 new
     page3: list[dict] = []  # short page → terminate
 
     with respx.mock(base_url=DATA_API_BASE) as router:

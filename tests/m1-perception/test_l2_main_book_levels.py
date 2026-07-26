@@ -19,6 +19,7 @@ Contract (mirrored from `_trade_row_from_frame`):
 - Bids → `side="BUY"`, asks → `side="SELL"` (uppercase, matches l2_trades).
 - `max_levels` caps per side (default 10 → up to 20 rows total).
 """
+
 from __future__ import annotations
 
 import os
@@ -77,9 +78,7 @@ def test_book_levels_rows_top10_per_side() -> None:
 
     expected_keys = {"asset_id", "ts", "side", "level", "price", "size"}
     for r in rows:
-        assert set(r.keys()) == expected_keys, (
-            f"row {r} keys must be exactly {expected_keys}"
-        )
+        assert set(r.keys()) == expected_keys, f"row {r} keys must be exactly {expected_keys}"
 
     # level is 1-indexed and corresponds to position in input list (best=1)
     assert [r["level"] for r in bids_out] == list(range(1, 11))
@@ -121,9 +120,9 @@ def test_book_levels_skips_zero_or_negative_size() -> None:
 
     bids = [
         _lvl(0.50, 100.0),  # valid (level=1)
-        _lvl(0.49, 0.0),    # skipped
-        _lvl(0.48, -5.0),   # skipped
-        _lvl(0.47, 50.0),   # valid (level=2)
+        _lvl(0.49, 0.0),  # skipped
+        _lvl(0.48, -5.0),  # skipped
+        _lvl(0.47, 50.0),  # valid (level=2)
     ]
     rows = _book_levels_rows_from_frame(_make_book_frame(bids=bids, asks=[]))
 
@@ -158,8 +157,8 @@ def test_book_levels_handles_malformed_entries() -> None:
 
     bids = [
         _lvl("not-a-number", 1),  # skipped — price not float-able
-        "not-a-dict",             # skipped — not a dict
-        _lvl(0.50, 100.0),        # valid
+        "not-a-dict",  # skipped — not a dict
+        _lvl(0.50, 100.0),  # valid
     ]
     rows = _book_levels_rows_from_frame(_make_book_frame(bids=bids, asks=[]))
 
@@ -384,6 +383,7 @@ def test_tob_row_book_event_fills_depth_yes_usd_from_top_10_bids():
     import pytest
 
     from polyarb.daemon.l2_main import _tob_row_from_frame
+
     frame = _make_book_frame(
         asset_id="AID-1",
         bids=[{"price": "0.45", "size": "1000"}, {"price": "0.44", "size": "500"}],
@@ -425,12 +425,8 @@ def test_tob_row_normalizes_polymarket_worst_first_order():
     assert row["best_ask"] == pytest.approx(0.377)
     assert row["spread"] == pytest.approx(0.008)
     assert row["mid_price"] == pytest.approx(0.373)
-    assert row["depth_yes_usd"] == pytest.approx(
-        0.369 * 40 + 0.30 * 30 + 0.20 * 20 + 0.001 * 1000
-    )
-    assert row["depth_no_usd"] == pytest.approx(
-        0.377 * 40 + 0.50 * 50 + 0.60 * 60 + 0.999 * 1000
-    )
+    assert row["depth_yes_usd"] == pytest.approx(0.369 * 40 + 0.30 * 30 + 0.20 * 20 + 0.001 * 1000)
+    assert row["depth_no_usd"] == pytest.approx(0.377 * 40 + 0.50 * 50 + 0.60 * 60 + 0.999 * 1000)
 
 
 def test_tob_row_book_event_caps_at_top_10_levels():
@@ -438,6 +434,7 @@ def test_tob_row_book_event_caps_at_top_10_levels():
     import pytest
 
     from polyarb.daemon.l2_main import _tob_row_from_frame
+
     frame = _make_book_frame(
         asset_id="AID-1",
         bids=[{"price": "0.5", "size": "100"} for _ in range(15)],
@@ -456,13 +453,14 @@ def test_tob_row_book_event_skips_zero_size_levels():
     import pytest
 
     from polyarb.daemon.l2_main import _tob_row_from_frame
+
     frame = _make_book_frame(
         asset_id="AID-1",
         bids=[
             {"price": "0.5", "size": "100"},
-            {"price": "0.4", "size": "0"},   # skip — zero size
+            {"price": "0.4", "size": "0"},  # skip — zero size
             {"price": "0.3", "size": "200"},
-            {"price": "0.2", "size": "-50"}, # skip — negative size
+            {"price": "0.2", "size": "-50"},  # skip — negative size
         ],
         asks=[],
     )
@@ -481,6 +479,7 @@ def test_tob_row_price_change_event_leaves_depth_none():
     as None for those, to preserve chain-truth (depth populated <=> source was a book frame).
     """
     from polyarb.daemon.l2_main import _tob_row_from_frame
+
     frame = {
         "event_type": "price_change",
         "asset_id": "AID-1",

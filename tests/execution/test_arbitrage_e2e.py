@@ -12,24 +12,20 @@ Covers:
   - Only-successful-legs-tracked invariant (T4 bug fix regression)
   - Multi-venue routing (T3 slippage-aware selection)
 """
+
 from __future__ import annotations
 
-import asyncio
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 import pytest
 
 from polyarb.execution.engine import (
     ExecutionEngine,
-    ExecutionLegResult,
-    ExecutionResult,
     ExecutionStatus,
 )
 from polyarb.models.signal import (
     ArbitrageSignal,
     ExecutionLeg,
-    ExecutionPlan,
-    LegSide,
     MarketSignal,
     RoutingDecision,
 )
@@ -40,7 +36,7 @@ from polyarb.routing.config import (
     RoutingConfig,
 )
 from polyarb.routing.engine import RoutingEngine
-from polyarb.routing.position_tracker import Fill, PositionTracker, StopLossEvent
+from polyarb.routing.position_tracker import Fill, PositionTracker
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -81,9 +77,7 @@ def _synth_decision(
     return engine.route(signal)
 
 
-def _always_succeed_executor() -> (
-    Callable[[ExecutionLeg, int], Awaitable[tuple[bool, str | None]]]
-):
+def _always_succeed_executor() -> Callable[[ExecutionLeg, int], Awaitable[tuple[bool, str | None]]]:
     async def _exec(leg: ExecutionLeg, attempt: int) -> tuple[bool, str | None]:
         return True, None
 
@@ -110,9 +104,9 @@ def _fail_then_succeed_executor(
     return _exec
 
 
-def _fail_first_leg_only_executor() -> (
-    Callable[[ExecutionLeg, int], Awaitable[tuple[bool, str | None]]]
-):
+def _fail_first_leg_only_executor() -> Callable[
+    [ExecutionLeg, int], Awaitable[tuple[bool, str | None]]
+]:
     async def _exec(leg: ExecutionLeg, attempt: int) -> tuple[bool, str | None]:
         # leg_id is UUID-suffixed (e.g. "abc123-e2e-cond-0"); match on asset
         if leg.asset == "e2e-cond-0":
@@ -229,9 +223,7 @@ class TestE2EPartialExecution:
         engine = ExecutionEngine(
             config=ExecutionConfig(retry_attempts=1, retry_delay_seconds=0.0),
             tracker=tracker,
-            leg_executor=_build_leg_executor(
-                [(True, None), (False, "second leg failed")]
-            ),
+            leg_executor=_build_leg_executor([(True, None), (False, "second leg failed")]),
         )
         result = await engine.execute(decision)
         assert result.status == ExecutionStatus.PARTIAL
@@ -247,9 +239,7 @@ class TestE2EPartialExecution:
         engine = ExecutionEngine(
             config=ExecutionConfig(retry_attempts=1, retry_delay_seconds=0.0),
             tracker=tracker,
-            leg_executor=_build_leg_executor(
-                [(True, None), (False, "second leg failed")]
-            ),
+            leg_executor=_build_leg_executor([(True, None), (False, "second leg failed")]),
         )
         await engine.execute(decision)
         assert tracker.open_count == 1  # only first leg tracked
@@ -298,25 +288,19 @@ class TestE2EStopLoss:
     """T5: stop-loss triggers when realized loss crosses threshold."""
 
     def test_check_stop_loss_not_triggered_initially(self):
-        tracker = PositionTracker(
-            PositionConfig(enable_pnl_stop=True, stop_loss_pct=5.0)
-        )
+        tracker = PositionTracker(PositionConfig(enable_pnl_stop=True, stop_loss_pct=5.0))
         assert tracker.check_stop_loss() is False
         assert tracker.check_stop_loss_event() is None
 
     def test_check_stop_loss_disabled_always_none(self):
-        tracker = PositionTracker(
-            PositionConfig(enable_pnl_stop=False, stop_loss_pct=5.0)
-        )
+        tracker = PositionTracker(PositionConfig(enable_pnl_stop=False, stop_loss_pct=5.0))
         # Force a loss through the legacy update path
         tracker.update(legs=1, pnl=-100.0)
         assert tracker.check_stop_loss() is False
         assert tracker.check_stop_loss_event() is None
 
     def test_check_stop_loss_threshold_exact_match(self):
-        cfg = PositionConfig(
-            initial_balance=1000.0, enable_pnl_stop=True, stop_loss_pct=5.0
-        )
+        cfg = PositionConfig(initial_balance=1000.0, enable_pnl_stop=True, stop_loss_pct=5.0)
         tracker = PositionTracker(cfg)
         # Realized loss = 50.0 → exactly 5% of 1000
         tracker.update(legs=1, pnl=-50.0)
@@ -327,18 +311,14 @@ class TestE2EStopLoss:
         assert tracker.check_stop_loss() is True
 
     def test_check_stop_loss_below_threshold(self):
-        cfg = PositionConfig(
-            initial_balance=1000.0, enable_pnl_stop=True, stop_loss_pct=5.0
-        )
+        cfg = PositionConfig(initial_balance=1000.0, enable_pnl_stop=True, stop_loss_pct=5.0)
         tracker = PositionTracker(cfg)
         tracker.update(legs=1, pnl=-10.0)  # only 1% loss
         assert tracker.check_stop_loss() is False
         assert tracker.check_stop_loss_event() is None
 
     def test_check_stop_loss_profit_does_not_trigger(self):
-        cfg = PositionConfig(
-            initial_balance=1000.0, enable_pnl_stop=True, stop_loss_pct=5.0
-        )
+        cfg = PositionConfig(initial_balance=1000.0, enable_pnl_stop=True, stop_loss_pct=5.0)
         tracker = PositionTracker(cfg)
         tracker.update(legs=1, pnl=100.0)  # profit!
         assert tracker.check_stop_loss() is False
@@ -417,9 +397,7 @@ class TestE2EPaperClose:
         engine = ExecutionEngine(
             config=ExecutionConfig(retry_attempts=1, retry_delay_seconds=0.0),
             tracker=tracker,
-            leg_executor=_build_leg_executor(
-                [(True, None), (False, "second leg failed")]
-            ),
+            leg_executor=_build_leg_executor([(True, None), (False, "second leg failed")]),
             paper_close=True,
         )
         result = await engine.execute(decision)
@@ -478,9 +456,7 @@ class TestE2EFillProvider:
         engine = ExecutionEngine(
             config=ExecutionConfig(retry_attempts=1, retry_delay_seconds=0.0),
             tracker=tracker,
-            leg_executor=_build_leg_executor(
-                [(True, None), (False, "second leg failed")]
-            ),
+            leg_executor=_build_leg_executor([(True, None), (False, "second leg failed")]),
             fill_provider=_counting_fill,
         )
         await engine.execute(decision)

@@ -13,14 +13,13 @@ New contract:
 - A W-6 typo guard logs a warning for non-canonical values (dev/staging/production)
   WITHOUT refusing — preserves opt-in for custom envs.
 """
+
 from __future__ import annotations
 
 import logging
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Test 1: Settings field exists with default "dev"
@@ -69,7 +68,7 @@ def test_init_sentry_forwards_environment_kwarg(
     daemon_settings_with_observability: Any,
     mocked_sentry: Any,
 ) -> None:
-    """init_sentry(settings.sentry_environment='production') → sentry_sdk.init(environment='production')."""
+    """Forward the production environment setting to sentry_sdk.init."""
     from polyarb.observability.sentry import init_sentry
 
     settings = daemon_settings_with_observability.model_copy(

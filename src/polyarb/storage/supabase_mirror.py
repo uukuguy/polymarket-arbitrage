@@ -126,8 +126,7 @@ class SupabaseMirror:
             # mutation; otherwise this method degenerates into DELETE-only and
             # erases the last known-good market universe.
             logger.error(
-                f"Supabase mirror rejected empty market projection "
-                f"snapshot_id={snapshot_id}"
+                f"Supabase mirror rejected empty market projection snapshot_id={snapshot_id}"
             )
             return False
         try:
@@ -137,9 +136,7 @@ class SupabaseMirror:
                 self._client.table("markets_latest").insert(chunk).execute()
             return True
         except Exception as e:  # noqa: BLE001 — fail-soft per RESEARCH §3
-            logger.error(
-                f"Supabase mirror failed snapshot_id={snapshot_id}: {str(e)[:200]}"
-            )
+            logger.error(f"Supabase mirror failed snapshot_id={snapshot_id}: {str(e)[:200]}")
             return False
 
     def update_parquet_url(self, snapshot_id: int, parquet_url: str) -> bool:
@@ -181,9 +178,7 @@ class SupabaseMirror:
                 return False
             return True
         except Exception as e:  # noqa: BLE001 — fail-soft per RESEARCH §3
-            logger.warning(
-                f"update_parquet_url snapshot_id={snapshot_id} failed: {str(e)[:200]}"
-            )
+            logger.warning(f"update_parquet_url snapshot_id={snapshot_id} failed: {str(e)[:200]}")
             return False
 
     def get_latest_remote_snapshot_id(self) -> int | None:
@@ -232,15 +227,11 @@ class SupabaseMirror:
             remote_id = 0
 
         if local_id <= remote_id:
-            logger.info(
-                f"reconcile: up-to-date (local={local_id}, remote={remote_id})"
-            )
+            logger.info(f"reconcile: up-to-date (local={local_id}, remote={remote_id})")
             return []
 
         gap_ids = list(range(remote_id + 1, local_id + 1))
-        logger.info(
-            f"reconcile: gap found — pushing snapshot_ids {gap_ids[0]}..{gap_ids[-1]}"
-        )
+        logger.info(f"reconcile: gap found — pushing snapshot_ids {gap_ids[0]}..{gap_ids[-1]}")
 
         pushed: list[int] = []
         for sid in gap_ids:

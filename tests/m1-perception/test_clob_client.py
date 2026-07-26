@@ -11,13 +11,13 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+from py_clob_client.clob_types import BookParams
 
 from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.config import Settings
-from py_clob_client.clob_types import BookParams
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -66,9 +66,7 @@ async def test_get_books_multiple_chunks() -> None:
     token_ids = [f"tok_{i}" for i in range(7)]
 
     # Each call returns a 1-element stub list (we're testing chunking math, not content).
-    with patch.object(
-        client._client, "get_order_books", return_value=[{"asset_id": "stub"}]
-    ) as m:
+    with patch.object(client._client, "get_order_books", return_value=[{"asset_id": "stub"}]) as m:
         out = await client.get_books(token_ids)
 
     assert m.call_count == math.ceil(7 / 3)  # == 3
@@ -109,9 +107,7 @@ async def test_get_prices_buy_sell_uses_correct_side(real_clob_sample: dict) -> 
     buy_response = {"t1": {"BUY": "0.46"}, "t2": {"BUY": "0.53"}}
     sell_response = {"t1": {"SELL": "0.47"}, "t2": {"SELL": "0.54"}}
 
-    with patch.object(
-        client._client, "get_prices", side_effect=[buy_response, sell_response]
-    ) as m:
+    with patch.object(client._client, "get_prices", side_effect=[buy_response, sell_response]) as m:
         out = await client.get_prices_buy_sell(token_ids)
 
     # 2 calls: one for BUY, one for SELL.

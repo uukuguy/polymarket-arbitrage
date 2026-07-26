@@ -327,9 +327,7 @@ def test_t0_sample_gate_does_not_require_new_raw_source_rows(
         replace(
             window,
             book_coverage_counts={
-                token: 0
-                for index in range(5)
-                for token in (f"yes-{index}", f"no-{index}")
+                token: 0 for index in range(5) for token in (f"yes-{index}", f"no-{index}")
             },
             yes_ohlc_coverage_counts={f"yes-{index}": 0 for index in range(5)},
         ),
@@ -378,9 +376,7 @@ def test_health_schedule_must_remain_on_exact_boot_grid(
     report = _report(
         replace(
             golden,
-            health_samples=golden.health_samples[:3]
-            + (changed,)
-            + golden.health_samples[4:],
+            health_samples=golden.health_samples[:3] + (changed,) + golden.health_samples[4:],
             raw_rows_by_table=raw,
         ),
         manifest,
@@ -441,16 +437,13 @@ def test_health_sample_seq_must_equal_boot_derived_slot(
     )
     raw["l3_health_samples"] = tuple(raw_health)
     raw["l3_market_samples"] = tuple(
-        _raw(row, recorded_at=row.sampled_at + timedelta(seconds=1))
-        for row in market_rows
+        _raw(row, recorded_at=row.sampled_at + timedelta(seconds=1)) for row in market_rows
     )
 
     report = _report(
         replace(
             golden,
-            health_samples=golden.health_samples[:3]
-            + (health_row,)
-            + golden.health_samples[4:],
+            health_samples=golden.health_samples[:3] + (health_row,) + golden.health_samples[4:],
             market_samples=market_rows,
             raw_rows_by_table=raw,
         ),

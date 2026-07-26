@@ -1,4 +1,5 @@
 """Alembic 006 contract tests for markets_latest.no_token_id."""
+
 from __future__ import annotations
 
 import asyncio
@@ -34,9 +35,7 @@ def test_006_upgrade_is_add_only_nullable_text() -> None:
 
 def _docker_available() -> bool:
     try:
-        result = subprocess.run(
-            ["docker", "info"], capture_output=True, text=True, timeout=5
-        )
+        result = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=5)
         return result.returncode == 0
     except Exception:
         return False
@@ -96,9 +95,7 @@ async def _column_rows(dsn: str) -> list[dict]:
 def test_006_upgrade_and_replay(pg_dsn: str) -> None:
     first = _run_alembic(pg_dsn, "upgrade", "006")
     assert first.returncode == 0, first.stderr
-    assert asyncio.run(_column_rows(pg_dsn)) == [
-        {"is_nullable": "YES", "data_type": "text"}
-    ]
+    assert asyncio.run(_column_rows(pg_dsn)) == [{"is_nullable": "YES", "data_type": "text"}]
 
     down = _run_alembic(pg_dsn, "downgrade", "-1")
     assert down.returncode == 0, down.stderr
@@ -106,6 +103,4 @@ def test_006_upgrade_and_replay(pg_dsn: str) -> None:
 
     second = _run_alembic(pg_dsn, "upgrade", "006")
     assert second.returncode == 0, second.stderr
-    assert asyncio.run(_column_rows(pg_dsn)) == [
-        {"is_nullable": "YES", "data_type": "text"}
-    ]
+    assert asyncio.run(_column_rows(pg_dsn)) == [{"is_nullable": "YES", "data_type": "text"}]

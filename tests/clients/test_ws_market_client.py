@@ -445,9 +445,7 @@ async def test_initializer_cancel_chain_bounds_transport_second_close(
         "polyarb.clients.ws_market_client.websockets.connect",
         _make_connect([ws], []),
     )
-    monkeypatch.setattr(
-        ws_market_client, "CANCEL_CLOSE_TIMEOUT_S", 0.01, raising=False
-    )
+    monkeypatch.setattr(ws_market_client, "CANCEL_CLOSE_TIMEOUT_S", 0.01, raising=False)
 
     async def _drain() -> None:
         async for _ in ws_market_client.stream_market_events(

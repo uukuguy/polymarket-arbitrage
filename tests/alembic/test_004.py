@@ -13,6 +13,7 @@ The REAL live verification of Phase 04 D-07 is Task 2's `make supabase-migrate`
 against the production `POLYARB_SUPABASE_DB_DSN`. The Docker testcontainer here
 is a CI safety net only.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -37,8 +38,7 @@ def test_down_revision_chain_to_003() -> None:
     assert MIGRATION_PATH.exists(), f"missing {MIGRATION_PATH}"
     content = MIGRATION_PATH.read_text()
     assert 'down_revision = "003"' in content, (
-        "must chain after 003_l2_tables (Phase 03 Plan 06); "
-        "current down_revision is incorrect"
+        "must chain after 003_l2_tables (Phase 03 Plan 06); current down_revision is incorrect"
     )
 
 
@@ -48,9 +48,7 @@ def test_no_drop_in_upgrade() -> None:
     content = MIGRATION_PATH.read_text()
     upgrade_start = content.find("def upgrade(")
     downgrade_start = content.find("def downgrade(")
-    assert 0 < upgrade_start < downgrade_start, (
-        "upgrade() must precede downgrade() in source order"
-    )
+    assert 0 < upgrade_start < downgrade_start, "upgrade() must precede downgrade() in source order"
     upgrade_body = content[upgrade_start:downgrade_start]
     assert "op.drop_" not in upgrade_body, (
         "upgrade() must not contain op.drop_* (Phase 02 L15 — schema-add discipline)"
@@ -69,9 +67,7 @@ def test_revision_id_is_004() -> None:
 
 def _docker_available() -> bool:
     try:
-        r = subprocess.run(
-            ["docker", "info"], capture_output=True, text=True, timeout=5
-        )
+        r = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=5)
         return r.returncode == 0
     except Exception:
         return False
@@ -90,7 +86,7 @@ def pg_dsn():
         # alembic (psycopg) and asyncpg here.
         for prefix in ("postgresql+psycopg2://", "postgresql+psycopg://"):
             if url.startswith(prefix):
-                url = "postgresql://" + url[len(prefix):]
+                url = "postgresql://" + url[len(prefix) :]
                 break
         asyncio.run(_create_supabase_roles(url))
         yield url
@@ -137,9 +133,7 @@ def _q(dsn: str, query: str) -> list[dict]:
 def test_004_up(pg_dsn):
     """After `upgrade 004`, markets_latest must have yes_token_id (nullable TEXT)."""
     r = _run_alembic(pg_dsn, "upgrade 004")
-    assert r.returncode == 0, (
-        f"alembic upgrade failed:\nSTDOUT={r.stdout}\nSTDERR={r.stderr}"
-    )
+    assert r.returncode == 0, f"alembic upgrade failed:\nSTDOUT={r.stdout}\nSTDERR={r.stderr}"
     rows = _q(
         pg_dsn,
         "SELECT column_name, is_nullable, data_type "
@@ -169,9 +163,7 @@ def test_004_idempotent_replay(pg_dsn):
         "SELECT column_name FROM information_schema.columns "
         "WHERE table_name='markets_latest' AND column_name='yes_token_id'",
     )
-    assert not rows_after_down, (
-        "yes_token_id should be absent after downgrade -1 from 004"
-    )
+    assert not rows_after_down, "yes_token_id should be absent after downgrade -1 from 004"
     r3 = _run_alembic(pg_dsn, "upgrade 004")
     assert r3.returncode == 0, f"second upgrade failed: {r3.stderr}"
     rows_after_up = _q(

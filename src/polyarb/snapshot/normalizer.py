@@ -31,7 +31,7 @@ Output contract (markets):
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
@@ -73,16 +73,14 @@ def _parse_end_time_ms(raw: Any) -> int | None:
     except (ValueError, TypeError):
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     try:
         return int(dt.timestamp() * 1000)
     except (OverflowError, OSError, ValueError):
         return None
 
 
-def normalize_market(
-    raw: dict, market_to_event_map: dict[str, str] | None = None
-) -> dict | None:
+def normalize_market(raw: dict, market_to_event_map: dict[str, str] | None = None) -> dict | None:
     """Convert a Gamma ``/markets`` raw response item to a storage row dict.
 
     Returns ``None`` if ``market_id`` (Gamma's ``id``) is missing — those rows
@@ -193,9 +191,7 @@ def normalize_events(
     for raw in raw_events:
         event_id_raw = raw.get("id")
         if event_id_raw is None or event_id_raw == "":
-            logger.warning(
-                f"normalize_events: missing 'id' (slug={raw.get('slug')}) — skipped"
-            )
+            logger.warning(f"normalize_events: missing 'id' (slug={raw.get('slug')}) — skipped")
             continue
         event_id = str(event_id_raw)
 

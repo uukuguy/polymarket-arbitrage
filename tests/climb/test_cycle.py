@@ -7,8 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -131,9 +131,7 @@ def test_regen_tree_projects_append_only_supersession(tmp_path: Path) -> None:
             "supersedes_run": "20260717-climb-h001",
         }
     )
-    (state / "hypotheses.yaml").write_text(
-        yaml.safe_dump(hypotheses, sort_keys=False)
-    )
+    (state / "hypotheses.yaml").write_text(yaml.safe_dump(hypotheses, sort_keys=False))
 
     rendered = regenerate(state)
 
@@ -301,30 +299,39 @@ def _write_passing_opportunity_eval(run_dir: Path) -> None:
                 },
                 "disaster_pattern": False,
                 "commands": {
-                    "planning": {
-                        "argv": ["make", "planning-status"], "returncode": 0
-                    },
+                    "planning": {"argv": ["make", "planning-status"], "returncode": 0},
                     "unit": {
                         "argv": [
-                            "uv", "run", "pytest",
-                            "tests/routing/test_opportunity_diagnosis.py", "-q",
+                            "uv",
+                            "run",
+                            "pytest",
+                            "tests/routing/test_opportunity_diagnosis.py",
+                            "-q",
                         ],
                         "returncode": 0,
                     },
                     "integration": {
                         "argv": [
-                            "uv", "run", "pytest",
-                            "tests/cli/test_arbitrage_cli_process.py", "-k",
-                            "diagnose_feed", "-q",
+                            "uv",
+                            "run",
+                            "pytest",
+                            "tests/cli/test_arbitrage_cli_process.py",
+                            "-k",
+                            "diagnose_feed",
+                            "-q",
                         ],
                         "returncode": 0,
                     },
                     "cli": {"argv": ["make", "docs-m1-check"], "returncode": 0},
                     "restart": {
                         "argv": [
-                            "uv", "run", "pytest",
-                            "tests/m1-perception/test_m1_manual_contract.py", "-k",
-                            "opportunity_diagnosis", "-q",
+                            "uv",
+                            "run",
+                            "pytest",
+                            "tests/m1-perception/test_m1_manual_contract.py",
+                            "-k",
+                            "opportunity_diagnosis",
+                            "-q",
                         ],
                         "returncode": 0,
                     },
@@ -354,8 +361,11 @@ def test_recorder_cli_requires_verified_local_eval_and_refuses_second_evidence(
     fake_make = fake_bin / "make"
     fake_make.write_text(
         "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >> \"$MAKE_CALL_LOG\"\n"
-        "printf '%s\\n' '{\"http_status\":503,\"kind\":\"stale-snapshot\",\"reason\":\"snapshot-age-exceeded\",\"snapshot_age_seconds\":901.0,\"max_snapshot_age_seconds\":900.0}'\n"
+        'printf \'%s\\n\' "$*" >> "$MAKE_CALL_LOG"\n'
+        "printf '%s\\n' "
+        '\'{"http_status":503,"kind":"stale-snapshot",'
+        '"reason":"snapshot-age-exceeded","snapshot_age_seconds":901.0,'
+        '"max_snapshot_age_seconds":900.0}\'\n'
         "exit 2\n"
     )
     fake_make.chmod(0o755)

@@ -17,15 +17,14 @@ Plan 01 contract consumed (NOT touched by this plan):
 - SQLiteStore.get_l2_tob_last_mirror_at_s() -> int | None
 - L2SupabaseMirror(store=...) kwarg threads the freshness anchor write-side
 """
+
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Section 1: Settings auto-detect + threshold defaults / env override

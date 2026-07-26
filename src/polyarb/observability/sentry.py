@@ -27,6 +27,7 @@ Source references:
 - docs.sentry.io/platforms/python/configuration/options/#before-send
 - RESEARCH.md §10 (Sentry verification) + §12 T-02-08 mitigations
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -37,7 +38,6 @@ from sentry_sdk.integrations.loguru import LoguruIntegration
 
 from polyarb.config import Settings
 from polyarb.observability.redact import _redact_obj, _redact_string
-
 
 # ---------------------------------------------------------------------------
 # before_send hook — strip secrets from outgoing Sentry events

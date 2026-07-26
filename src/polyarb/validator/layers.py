@@ -92,9 +92,9 @@ def layer1_count(reported_total: int, fetched_count: int) -> list[Issue]:
                 layer=1,
                 category=Category.API_JITTER,
                 market_id=None,
-                detail=(
-                    f"Gamma reported {reported_total} active markets, fetched {fetched_count}"
-                )[:_DETAIL_MAX_CHARS],
+                detail=(f"Gamma reported {reported_total} active markets, fetched {fetched_count}")[
+                    :_DETAIL_MAX_CHARS
+                ],
             )
         ]
     return []
@@ -187,9 +187,7 @@ def layer4_cross_source(
                         layer=4,
                         category=Category.CLOB_MISSING,
                         market_id=market_id,
-                        detail=(f"CLOB has no book for {token_field}={tid}")[
-                            :_DETAIL_MAX_CHARS
-                        ],
+                        detail=(f"CLOB has no book for {token_field}={tid}")[:_DETAIL_MAX_CHARS],
                     )
                 )
                 continue
@@ -235,12 +233,8 @@ def layer4_cross_source(
                         layer=4,
                         category=Category.UNKNOWN,
                         market_id=market_id,
-                        detail=(f"unparseable book for {token_field}={tid}")[
-                            :_DETAIL_MAX_CHARS
-                        ],
-                        raw_payload=json.dumps(book, default=str)[
-                            :_BOOK_PAYLOAD_MAX_BYTES
-                        ],
+                        detail=(f"unparseable book for {token_field}={tid}")[:_DETAIL_MAX_CHARS],
+                        raw_payload=json.dumps(book, default=str)[:_BOOK_PAYLOAD_MAX_BYTES],
                     )
                 )
                 continue
@@ -275,8 +269,7 @@ def layer4_cross_source(
                         category=Category.GHOST_BOOK,
                         market_id=market_id,
                         detail=(
-                            f"book bid={top_bid_price}/ask={top_ask_price} but "
-                            f"/price={ref_val}"
+                            f"book bid={top_bid_price}/ask={top_ask_price} but /price={ref_val}"
                         )[:_DETAIL_MAX_CHARS],
                     )
                 )

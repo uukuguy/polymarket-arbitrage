@@ -21,13 +21,12 @@ from pathlib import Path
 
 from polyarb.config import Settings
 from polyarb.snapshot.cache import (
-    MAX_AGE_S,
     CACHE_VERSION,
+    MAX_AGE_S,
     ChunkCache,
     _fingerprint_settings,
     _fingerprint_tokens,
 )
-
 
 # ─── helpers ───────────────────────────────────────────────────────────────────
 
@@ -41,9 +40,7 @@ class _FakeBook:
         self.asks = asks
 
 
-def _make_settings(
-    tmp_cache_root: Path, threshold: float = 1000.0, batch: int = 500
-) -> Settings:
+def _make_settings(tmp_cache_root: Path, threshold: float = 1000.0, batch: int = 500) -> Settings:
     return Settings(
         cache_root=tmp_cache_root,
         liquidity_threshold_usd=threshold,

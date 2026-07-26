@@ -9,6 +9,7 @@ The orchestrator's step 7.5 is fail-soft:
 
 This mirrors RESEARCH §11 row "Supabase API 500 → mirror failure → DEGRADED but snapshot OK".
 """
+
 from __future__ import annotations
 
 import os
@@ -37,11 +38,13 @@ _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 def _load_gamma() -> list[dict]:
     import json
+
     return json.loads((_FIXTURES_DIR / "gamma_sample.json").read_text())
 
 
 def _load_clob() -> dict:
     import json
+
     return json.loads((_FIXTURES_DIR / "clob_sample.json").read_text())
 
 
@@ -69,6 +72,7 @@ def _make_fake_gamma(markets: list[dict]) -> object:
         async def _iter():
             for item in items:
                 yield item
+
         return _iter
 
     fake.iter_active_markets = _make_iter(markets)
@@ -192,7 +196,9 @@ async def test_supabase_sqlite_still_written_on_mirror_failure(tmp_path: Path) -
                 "polyarb.storage.supabase_mirror.SupabaseMirror",
                 return_value=mock_mirror,
             ):
-                result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+                _result = await run_snapshot(
+                    settings, mode="subset", now_ms=1_777_448_000_000
+                )
 
     # Directly verify SQLite has the snapshot row
     con = sqlite3.connect(settings.db_path)

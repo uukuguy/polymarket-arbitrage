@@ -18,7 +18,7 @@ Design decisions:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import boto3
@@ -67,7 +67,7 @@ def compute_r2_key(taken_at_ms: int) -> str:
 
     Example: taken_at_ms=1715500000000 → "2024/05/12/08-26-40.parquet" (UTC)
     """
-    dt = datetime.fromtimestamp(taken_at_ms / 1000, tz=timezone.utc)
+    dt = datetime.fromtimestamp(taken_at_ms / 1000, tz=UTC)
     return f"{dt:%Y}/{dt:%m}/{dt:%d}/{dt:%H}-{dt:%M}-{dt:%S}.parquet"
 
 
@@ -104,9 +104,7 @@ def upload_parquet_to_r2(
         body = Path(parquet_path).read_bytes()
         client.put_object(Bucket=bucket, Key=key, Body=body)
     except Exception as e:
-        raise R2UploadError(
-            f"R2 upload failed key={key}: {str(e)[:200]}"
-        ) from e
+        raise R2UploadError(f"R2 upload failed key={key}: {str(e)[:200]}") from e
     url = f"{endpoint.rstrip('/')}/{bucket}/{key}"
     logger.info(f"R2 upload success: {url}")
     return url

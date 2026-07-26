@@ -181,8 +181,7 @@ class ChunkCache:
         n_buy = self._count_chunks(self._prices_buy_dir)
         n_sell = self._count_chunks(self._prices_sell_dir)
         logger.info(
-            f"cache: resuming {best_dir.name} "
-            f"(books {n_books}, prices buy {n_buy}, sell {n_sell})"
+            f"cache: resuming {best_dir.name} (books {n_books}, prices buy {n_buy}, sell {n_sell})"
         )
         self._resumed = True
         return True

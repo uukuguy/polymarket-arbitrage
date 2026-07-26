@@ -10,10 +10,10 @@ Coverage:
 - before_send leaves normal exception events unchanged
 - release_id propagated to sentry_sdk.init(release=...)
 """
+
 from __future__ import annotations
 
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # init_sentry behaviour
@@ -39,7 +39,7 @@ def test_init_sentry_calls_sdk_with_pii_false(
     daemon_settings_with_observability: Any,
     mocked_sentry: Any,
 ) -> None:
-    """Real DSN → init called with send_default_pii=False + before_send callable + LoguruIntegration."""
+    """Real DSN configures PII filtering, before_send, and Loguru."""
     from polyarb.observability.sentry import init_sentry
 
     init_sentry(daemon_settings_with_observability)
@@ -78,18 +78,12 @@ def test_before_send_strips_token_pattern() -> None:
     """Event request.data containing `Bearer abc123` is redacted to `Bearer [REDACTED]`."""
     from polyarb.observability.sentry import _before_send
 
-    event = {
-        "request": {
-            "data": "POST /scan Bearer abc123secret_value_here"
-        }
-    }
+    event = {"request": {"data": "POST /scan Bearer abc123secret_value_here"}}
 
     cleaned = _before_send(event, hint=None)
 
     data = cleaned["request"]["data"]
-    assert "abc123secret_value_here" not in data, (
-        f"raw token leaked through redact filter: {data}"
-    )
+    assert "abc123secret_value_here" not in data, f"raw token leaked through redact filter: {data}"
     assert "[REDACTED]" in data
 
 

@@ -159,15 +159,11 @@ def test_explicit_discard_removes_nonancestor_worktree_and_branch(repo: Path) ->
     assert _git(repo, "show-ref", "--verify", f"refs/heads/{branch}", check=False).returncode != 0
 
 
-def test_remove_failure_does_not_delete_branch(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_remove_failure_does_not_delete_branch(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path, branch = _add_agent_worktree(repo, "agent-remove-fails")
     original = cleanup.run_git
 
-    def fail_remove(
-        cwd: Path, *args: str, check: bool = True
-    ) -> subprocess.CompletedProcess[str]:
+    def fail_remove(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         if args[:2] == ("worktree", "remove"):
             return subprocess.CompletedProcess(["git", *args], 1, "", "synthetic remove failure")
         return original(cwd, *args, check=check)

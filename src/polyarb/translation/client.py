@@ -81,7 +81,7 @@ class TranslationClient:
         "Translate each English question to Simplified Chinese. "
         "Preserve date hedges (e.g. 'by April 30, 2026'), conditional language "
         "('according to official data'), and proper nouns verbatim. "
-        "Return a JSON object: {\"translations\": [\"zh1\", \"zh2\", ...]} "
+        'Return a JSON object: {"translations": ["zh1", "zh2", ...]} '
         "preserving the input array order exactly."
     )
 
@@ -148,9 +148,7 @@ class TranslationClient:
                         {"role": "system", "content": self.SYSTEM_PROMPT},
                         {
                             "role": "user",
-                            "content": json.dumps(
-                                {"questions": questions}, ensure_ascii=False
-                            ),
+                            "content": json.dumps({"questions": questions}, ensure_ascii=False),
                         },
                     ],
                     max_tokens=6000,
@@ -184,17 +182,12 @@ class TranslationClient:
             )
         if len(translations) != len(questions):
             raise ValueError(
-                f"translation count mismatch: got {len(translations)}, "
-                f"expected {len(questions)}"
+                f"translation count mismatch: got {len(translations)}, expected {len(questions)}"
             )
 
         usage = resp.usage
         prompt_tokens = int(usage.prompt_tokens) if usage and usage.prompt_tokens else 0
-        completion_tokens = (
-            int(usage.completion_tokens)
-            if usage and usage.completion_tokens
-            else 0
-        )
+        completion_tokens = int(usage.completion_tokens) if usage and usage.completion_tokens else 0
 
         return TranslationResult(
             translations=[str(t) for t in translations],
