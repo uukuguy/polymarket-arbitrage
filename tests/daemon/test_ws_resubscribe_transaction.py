@@ -394,3 +394,158 @@ async def test_identity_change_after_first_unsubscribe_closes_only_captured_old(
     old_ws.close.assert_awaited_once()
     replacement.close.assert_not_awaited()
     assert consumer._book_evidence_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_prepare_target_collects_evidence_without_publishing_membership() -> None:
+    publications = []
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=WsWatchdog(stale_s=30),
+        on_event=lambda event: True,
+        initial_assets=["candidate"],
+        membership_observer=publications.append,
+    )
+    ws = MagicMock()
+    ws.send = AsyncMock(return_value=None)
+    ws.close = AsyncMock(return_value=None)
+    consumer._current_ws = ws
+    consumer._connection_generation = 7
+    consumer.set_l3_desired(["old-a", "old-b"])
+    consumer._l3_committed_set = {"old-a", "old-b"}
+    observed_at = datetime(2026, 7, 26, tzinfo=UTC)
+    consumer._l3_business_evidence = {
+        "old-a": (7, observed_at),
+        "old-b": (7, observed_at),
+    }
+    before = consumer.l3_membership_snapshot()
+    publication_count = len(publications)
+
+    task = asyncio.create_task(
+        consumer.prepare_l3_target(frozenset({"new-a", "new-b"}))
+    )
+    await _wait_until(lambda: ws.send.await_count >= 2)
+    for asset_id in ("new-a", "new-b"):
+        consumer.record_book_evidence(
+            asset_id=asset_id,
+            generation=7,
+            book_levels_succeeded=True,
+            observed_at=observed_at,
+        )
+    prepared = await asyncio.wait_for(task, timeout=0.2)
+
+    assert prepared is not None
+    assert prepared.generation == 7
+    assert prepared.asset_ids == frozenset({"new-a", "new-b"})
+    assert dict(prepared.evidenced_at) == {
+        "new-a": observed_at,
+        "new-b": observed_at,
+    }
+    assert consumer.l3_membership_snapshot() == before
+    assert len(publications) == publication_count
+
+
+@pytest.mark.asyncio
+async def test_commit_l3_target_publishes_one_exact_make_before_break_snapshot() -> None:
+    publications = []
+    consumer = WsConsumer(
+        settings=MagicMock(),
+        watchdog=WsWatchdog(stale_s=30),
+        on_event=lambda event: True,
+        membership_observer=publications.append,
+    )
+    ws = MagicMock()
+    ws.send = AsyncMock(return_value=None)
+    ws.close = AsyncMock(return_value=None)
+    consumer._current_ws = ws
+    consumer._connection_generation = 7
+    consumer._l3_desired_set = {"old-a", "old-b"}
+    consumer._l3_committed_set = {"old-a", "old-b"}
+    observed_at = datetime(2026, 7, 26, tzinfo=UTC)
+
+    prepare = asyncio.create_task(
+        consumer.prepare_l3_target(frozenset({"old-b", "new-a"}))
+    )
+    await _wait_until(lambda: ws.send.await_count >= 2)
+    for asset_id in ("old-b", "new-a"):
+        consumer.record_book_evidence(
+            asset_id=asset_id,
+            generation=7,
+            book_levels_succeeded=True,
+            observed_at=observed_at,
+        )
+    prepared = await asyncio.wait_for(prepare, timeout=0.2)
+    assert prepared is not None
+    ws.send.reset_mock()
+    publication_count = len(publications)
+
+    assert await consumer.commit_l3_target(prepared) is True
+
+    assert [json.loads(call.args[0]) for call in ws.send.await_args_list] == [
+        {
+            "operation": "subscribe",
+            "assets_ids": ["new-a"],
+            "initial_dump": True,
+        },
+        {"operation": "unsubscribe", "assets_ids": ["old-a"]},
+    ]
+    assert len(publications) == publication_count + 1
+    committed = publications[-1]
+    assert committed.desired == frozenset({"old-b", "new-a"})
+    assert committed.committed == committed.desired
+    assert committed.evidenced == committed.desired
+
+
+@pytest.mark.asyncio
+async def test_commit_l3_target_rejects_stale_generation_without_publication() -> None:
+    publications = []
+    consumer, ws = _consumer()
+    consumer._membership_observer = publications.append
+    observed_at = datetime(2026, 7, 26, tzinfo=UTC)
+    prepare = asyncio.create_task(consumer.prepare_l3_target(frozenset({"new-a"})))
+    await _wait_until(lambda: ws.send.await_count >= 2)
+    consumer.record_book_evidence(
+        asset_id="new-a",
+        generation=7,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    prepared = await asyncio.wait_for(prepare, timeout=0.2)
+    assert prepared is not None
+    consumer._connection_generation = 8
+    ws.send.reset_mock()
+
+    assert await consumer.commit_l3_target(prepared) is False
+    ws.send.assert_not_awaited()
+    assert publications == []
+
+
+@pytest.mark.asyncio
+async def test_commit_l3_target_second_control_failure_compensates_without_publish() -> None:
+    publications = []
+    consumer, ws = _consumer()
+    consumer._membership_observer = publications.append
+    consumer._l3_desired_set = {"old-a"}
+    consumer._l3_committed_set = {"old-a"}
+    observed_at = datetime(2026, 7, 26, tzinfo=UTC)
+    prepare = asyncio.create_task(consumer.prepare_l3_target(frozenset({"new-a"})))
+    await _wait_until(lambda: ws.send.await_count >= 2)
+    consumer.record_book_evidence(
+        asset_id="new-a",
+        generation=7,
+        book_levels_succeeded=True,
+        observed_at=observed_at,
+    )
+    prepared = await asyncio.wait_for(prepare, timeout=0.2)
+    assert prepared is not None
+    ws.send.reset_mock()
+    ws.send.side_effect = [None, RuntimeError("ambiguous")]
+
+    assert await consumer.commit_l3_target(prepared) is False
+    ws.close.assert_awaited_once()
+    assert publications
+    assert all(
+        snapshot.desired != frozenset({"new-a"})
+        or snapshot.committed != frozenset({"new-a"})
+        for snapshot in publications
+    )

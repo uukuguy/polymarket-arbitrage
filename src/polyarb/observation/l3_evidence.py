@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -86,6 +87,7 @@ _RUNTIME_EVENT_OPERATIONS = frozenset(
         "connection_close",
         "candidate_replace",
         "book_refresh",
+        "promotion_stage",
     }
 )
 _RUNTIME_EVENT_ERROR_TYPES = frozenset(
@@ -812,6 +814,28 @@ class WsMembershipSnapshot:
 
 
 @dataclass(frozen=True)
+class PreparedL3Target:
+    """Generation-scoped durable evidence staged before membership publication."""
+
+    generation: int
+    asset_ids: frozenset[str]
+    evidenced_at: Mapping[str, datetime]
+
+    def __post_init__(self) -> None:
+        _require_nonnegative("generation", self.generation)
+        assets = frozenset(self.asset_ids)
+        evidence = dict(self.evidenced_at)
+        if not assets or set(evidence) != set(assets):
+            raise ValueError("prepared evidence must exactly match target assets")
+        for asset_id in assets:
+            _require_nonempty("prepared asset ID", asset_id)
+        for asset_id, observed_at in evidence.items():
+            _require_utc(f"prepared evidence[{asset_id!r}]", observed_at)
+        object.__setattr__(self, "asset_ids", assets)
+        object.__setattr__(self, "evidenced_at", _frozen_mapping(evidence))
+
+
+@dataclass(frozen=True)
 class FrameDispatchResult:
     """Durable write outcomes for one production WebSocket frame."""
 
@@ -993,6 +1017,12 @@ class L3EvidenceRuntime:
         self._writer_ok_by_channel: dict[str, bool] = {}
         self._writer_result_at_by_channel: dict[str, datetime] = {}
         self._writer_reason_by_channel: dict[str, str] = {}
+        self._transition_lock = asyncio.Lock()
+
+    @property
+    def transition_lock(self) -> asyncio.Lock:
+        """Serialize mapping publication with the sample that consumes it."""
+        return self._transition_lock
 
     def next_run_seq(self) -> int:
         sequence = self._run_seq

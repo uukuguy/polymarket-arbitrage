@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -200,3 +201,58 @@ async def test_tob_true_depth_false_does_not_resolve_and_cleans_waiter(
     mirror.push_book_levels.assert_called_once()
     ws.close.assert_awaited_once()
     assert consumer._book_evidence_waiters == {}
+
+
+@pytest.mark.asyncio
+async def test_prepare_target_rejects_tob_without_durable_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    consumer, mirror, ws = _consumer(tob_written=True, book_levels_written=False)
+    monkeypatch.setattr(ws_consumer_module, "_BOOK_EVIDENCE_TIMEOUT_S", 0.01)
+
+    async def _stream(*args, **kwargs):
+        yield {
+            "event_type": "book",
+            "asset_id": "asset-a",
+            "bids": [{"price": "0.4", "size": "10"}],
+            "asks": [{"price": "0.6", "size": "10"}],
+            "timestamp": "1",
+        }
+
+    monkeypatch.setattr(ws_consumer_module, "stream_market_events", _stream)
+    prepare = asyncio.create_task(
+        consumer.prepare_l3_target(frozenset({"asset-a"}))
+    )
+    await _wait_until(lambda: ws.send.await_count >= 2)
+    await asyncio.wait_for(consumer.run(asyncio.Event()), timeout=0.2)
+
+    assert await asyncio.wait_for(prepare, timeout=0.2) is None
+    mirror.push_top_of_book.assert_called_once()
+    mirror.push_book_levels.assert_called_once()
+    ws.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_prepare_target_rejects_evidence_from_replaced_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    consumer, _mirror, ws = _consumer(tob_written=True, book_levels_written=True)
+    monkeypatch.setattr(ws_consumer_module, "_BOOK_EVIDENCE_TIMEOUT_S", 0.01)
+    replacement = MagicMock()
+    replacement.close = AsyncMock(return_value=None)
+    prepare = asyncio.create_task(
+        consumer.prepare_l3_target(frozenset({"asset-a"}))
+    )
+    await _wait_until(lambda: ws.send.await_count >= 2)
+    consumer._current_ws = replacement
+    consumer._connection_generation = 5
+    consumer.record_book_evidence(
+        asset_id="asset-a",
+        generation=4,
+        book_levels_succeeded=True,
+        observed_at=datetime(2026, 7, 26, tzinfo=UTC),
+    )
+
+    assert await asyncio.wait_for(prepare, timeout=0.2) is None
+    ws.close.assert_awaited_once()
+    replacement.close.assert_not_awaited()

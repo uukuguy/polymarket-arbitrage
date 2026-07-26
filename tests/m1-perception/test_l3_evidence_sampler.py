@@ -389,6 +389,35 @@ async def test_sample_once_propagates_cancellation_without_advancing_anchor():
     assert runtime.snapshot().last_sample_persisted_at is None
 
 
+async def test_sample_once_waits_for_membership_transition_lock() -> None:
+    pairs = _pairs()
+    runtime = _runtime()
+    _publish_current_membership(runtime, pairs)
+    store = SimpleNamespace(
+        fetch_sampling_market_state=AsyncMock(return_value=pairs),
+        append_sample=AsyncMock(return_value=True),
+    )
+
+    await runtime.transition_lock.acquire()
+    task = asyncio.create_task(
+        l3_sampler.sample_once(
+            scheduled_at=START,
+            sample_seq=0,
+            settings=_settings(),
+            ws_consumer=_ConsumerWithoutMembershipReads(),
+            reconciliation_state=_reconciliation(),
+            runtime=runtime,
+            store=store,
+        )
+    )
+    await asyncio.sleep(0)
+    store.fetch_sampling_market_state.assert_not_awaited()
+
+    runtime.transition_lock.release()
+    assert await asyncio.wait_for(task, timeout=0.2) is True
+    store.fetch_sampling_market_state.assert_awaited_once()
+
+
 async def test_run_sampler_emits_real_76_second_gap_and_skips_missed_boundaries(
     monkeypatch: pytest.MonkeyPatch,
 ):

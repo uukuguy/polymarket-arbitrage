@@ -348,16 +348,17 @@ async def sample_once(
     store: L3EvidenceStore,
 ) -> bool:
     """Append one atomic batch and publish success truth only after its ACK."""
-    batch = await collect_sample(
-        scheduled_at=scheduled_at,
-        sample_seq=sample_seq,
-        settings=settings,
-        ws_consumer=ws_consumer,
-        reconciliation_state=reconciliation_state,
-        runtime=runtime,
-        store=store,
-    )
-    persisted = await store.append_sample(batch)
+    async with runtime.transition_lock:
+        batch = await collect_sample(
+            scheduled_at=scheduled_at,
+            sample_seq=sample_seq,
+            settings=settings,
+            ws_consumer=ws_consumer,
+            reconciliation_state=reconciliation_state,
+            runtime=runtime,
+            store=store,
+        )
+        persisted = await store.append_sample(batch)
     result_at = _utc_now()
     runtime.note_writer_result(
         persisted,
