@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Plan 05-07 corrected repair is locally green; release 73 rejected; L2-only redeploy is next
-last_updated: "2026-07-26T08:18:00Z"
+stopped_at: Plan 05-07 release 75 is live; corrected continuity T0 passed; automated T6/T12/T18/T24 collection is active
+last_updated: "2026-07-26T09:00:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -30,9 +30,21 @@ Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in p
   unchanged targets, and blocks durable sampling through reconnect
   convergence while keeping live strict health fail-fast. 232 focused tests,
   changed-file Ruff, and full pytest pass.
-- **Next mutation:** deploy only L2 from a clean exact SHA, preserve L1
-  identity/quote anchor, reject any new partial durable sample, then bind a new
-  L3 T0 only after real promoter and quiet-refresh boundaries pass.
+- **Current L2 production:** release 75 runs exact executable source
+  `9f385cacc104fa54dd444151a8c4ecb423e94dde`, machine
+  `85e647c4eed598`, instance `01KYES89KD9WA8VV9V2B3PJV7R`, boot
+  `d029c2ea-e357-4ce2-8f7c-6c4e11867254`, and digest
+  `sha256:f0d39892207577bb024995d76e91f5c0b8c0a88fd8e2839e182d25125da16ad5`.
+  Two real promoter ticks and a quiet refresh passed 10/10/10 on generation 1.
+- **Selected continuity attempt:** corrected manifest `3ad69a90…` is bound to
+  `[2026-07-26T08:51:13.206077Z,2026-07-27T08:51:13.206077Z)`. T0 is PASS
+  with five market rows, exact 10/10/10 membership, maximum freshness
+  36.893 seconds, and no runtime event.
+- **Checkpoint automation:** a user-domain macOS `launchd` job evaluates the
+  immutable manifest every five minutes and creates/commits only due PASS
+  reports. Boundaries are T+6 `14:51:13Z`, T+12 `20:51:13Z`, T+18
+  `02:51:13Z`, and T+24 `08:51:13Z`. Fly's resident two-minute watcher remains
+  the independent live detector and Telegram alert path.
 
 - **Implemented:** canonical production Dashboard URL, four-surface Polywatch
   monitoring, repaired R2 bucket configuration, and the M1 continuous-operation

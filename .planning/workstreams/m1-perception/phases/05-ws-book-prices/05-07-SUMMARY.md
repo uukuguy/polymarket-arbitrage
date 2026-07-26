@@ -37,9 +37,9 @@ updated: 2026-07-26
 
 # Phase 05 Plan 07: L3 Continuity Boundary Repair — In Progress
 
-**Release 73 was rejected by its first real promoter boundary; the corrected
-non-destructive timeout and reconnect-sampling repair is green locally and
-awaits L2-only redeployment.**
+**Release 73 was rejected by its first real promoter boundary; corrected
+release 75 is live, its real promoter/quiet-refresh boundaries and T0 passed,
+and the immutable 24-hour continuity interval is actively monitored.**
 
 ## Completed
 
@@ -88,6 +88,22 @@ awaits L2-only redeployment.**
 - Corrected-repair verification: 232 focused L2/L3 tests passed, changed-file
   Ruff passed, and the full repository pytest suite exited zero with the
   established one xfail and one skip.
+- Deployed the same corrected image by digest as Fly release 75. Exact runtime
+  identity is machine `85e647c4eed598`, instance
+  `01KYES89KD9WA8VV9V2B3PJV7R`, boot
+  `d029c2ea-e357-4ce2-8f7c-6c4e11867254`, release
+  `9f385cacc104fa54dd444151a8c4ecb423e94dde`, digest
+  `sha256:f0d39892207577bb024995d76e91f5c0b8c0a88fd8e2839e182d25125da16ad5`.
+- Real promoter runs at `08:39:43Z` and `08:44:43Z` both completed
+  5/10/10/10 on generation 1. A later real quiet refresh also completed
+  without compensation; all persisted samples remained 10/10/10.
+- Bound corrected manifest `3ad69a90…` before its exact T0
+  `2026-07-26T08:51:13.206077Z`. Its T0 report is PASS with one health row,
+  five market rows, zero events, maximum gap 24.989517 seconds, and maximum
+  freshness 36.893 seconds.
+- Fly Polywatch continues two-minute live fault detection. A separate local
+  `launchd` operator job handles the immutable T6/T12/T18/T24 artifact
+  boundaries without a foreground wait.
 
 ## RED Evidence
 
@@ -126,9 +142,12 @@ Ruff: All checks passed
 
 ## Remaining
 
-- Corrected L2-only deployment, real promoter/quiet-refresh/reconnect boundary
-  verification, and a new exact 24-hour L3 evidence window. Release 73 and its
-  boot are permanently rejected.
+- Collect immutable PASS reports at T+6/T+12/T+18/T+24 and run the final
+  mechanical verifier. No final continuity claim is permitted before
+  `2026-07-27T08:51:13.206077Z`.
+- Reconcile this repaired-window result with the independent L1 quote interval
+  and finish Plan 05-06/Phase 05 closure. Release 73 and both incorrectly
+  located/corrected-manifest preflights remain immutable rejected evidence.
 
 ---
 *Phase: 05-ws-book-prices*

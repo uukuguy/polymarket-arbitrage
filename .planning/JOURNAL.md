@@ -5351,3 +5351,31 @@ machine/image/boot identity and 10/10/10, then observe at least one real
 unchanged promoter tick plus quiet-refresh boundary with no compensation or
 partial durable sample. Preserve the L1 machine and quote-run-78 anchor. Only
 then create the new L3 T0 manifest.
+
+## SESSION 107 — 2026-07-26 (release 75 live; corrected T0 PASS)
+
+- [DEPLOY] Corrected executable release
+  `9f385cacc104fa54dd444151a8c4ecb423e94dde` is live as Fly release 75,
+  machine `85e647c4eed598`, instance `01KYES89KD9WA8VV9V2B3PJV7R`, boot
+  `d029c2ea-e357-4ce2-8f7c-6c4e11867254`, digest
+  `sha256:f0d39892207577bb024995d76e91f5c0b8c0a88fd8e2839e182d25125da16ad5`.
+- [PRODUCTION PROOF] Two real promoter ticks passed 5/10/10/10 on generation
+  1, a real quiet refresh completed without compensation, and every inspected
+  durable sample remained 10/10/10.
+- [REJECTED PREFLIGHT] The first release-75 manifest declared `/tmp` report
+  paths. It is retained and rejected; no T0 report exists.
+- [SELECTED ATTEMPT] Corrected manifest `3ad69a90…`, soak `ac32e70a…`, was
+  bound before exact T0 `2026-07-26T08:51:13.206077Z`. Canonical T0 is PASS:
+  1 health, 5 market, 0 promoter, 0 event rows; maximum freshness 36.893
+  seconds; exact 10/10/10 membership.
+- [ACTIVE MONITORING] Fly Polywatch continues every two minutes and sends
+  Telegram on failures/recovery. Checkpoint artifact generation is assigned
+  to a macOS `launchd` job every five minutes, so no foreground terminal or
+  empty 24-hour wait is required.
+
+### [NEXT — CURRENT]
+
+The scheduler creates T+6/T+12/T+18/T+24 reports at their immutable
+not-before boundaries and runs final verification at/after
+`2026-07-27T08:51:13.206077Z`. Do not restart L2, alter the manifest, or sign
+Plan 05 closure before the final verifier and the independent quote T+24 gate.

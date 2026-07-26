@@ -151,4 +151,36 @@ For that reason the Fly-resident 2-minute loop is the operational primary.
 - Strategy profitability claims after fees.
 - New monitoring vendors.
 - Custom DNS.
-- Re-running the already passed Phase 05.4 L3 24-hour evidence window.
+
+## Post-repair L3 continuity window
+
+Release 73 disproved continuity at a real promoter boundary after the original
+Phase 05.4 qualification had completed. The corrected release therefore needs
+one new immutable continuity window without weakening or replacing the
+original A7 evidence.
+
+Three schedulers were considered:
+
+- another Fly process would survive the operator laptop, but changing the
+  production process topology during the selected boot would reset the
+  identity being qualified;
+- GitHub Actions is an independent fallback, but scheduled workflows run from
+  the default branch and this exact repair remains isolated until the window
+  closes; observed scheduling also has a multi-hour gap;
+- a user-domain macOS `launchd` agent can call the existing
+  `make l3-soak-checkpoint` verifier every five minutes without touching the
+  production daemon.
+
+The selected checkpoint scheduler is `launchd`. It reads the runtime password
+from macOS Keychain, constructs the allowlisted direct-TLS DSN only in process
+memory, validates the immutable Fly machine/instance/image/release identity,
+and creates only manifest-declared reports whose not-before boundary has
+passed. It commits and pushes each PASS artifact. T+24 additionally runs the
+existing final verifier before recording a local completion marker.
+
+The scheduler is not the production fault detector. Fly's resident two-minute
+Polywatch remains responsible for live L1/L2/L3/Dashboard checks and Telegram
+alerts. If the Mac sleeps, `launchd` catches up after wake; the database ledger
+continues recording every 30-second sample, so delayed artifact generation
+does not lose the underlying evidence. Any non-PASS report is retained
+immutably and stops later checkpoints.
