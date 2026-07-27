@@ -5557,3 +5557,38 @@ gating strict and Archive non-blocking.
 Start with `uv run pytest tests/routing/test_opportunity_ledger.py -q`, then
 implement `OpportunityWatcher` to reconcile only successfully certified global
 Quote projections into the durable ledger and deliver its notification outbox.
+
+## SESSION 114 — 2026-07-27 (M1 observer-only neg-risk watcher, local closure)
+
+- [IMPLEMENTED] `7632844` and `c2fda53` add `OpportunityWatcher` global
+  reconciliation after complete Quote certification, durable Telegram delivery
+  evidence, and full observer-only card provenance. A missing Telegram
+  credential is retryable rather than falsely delivered; every attempt is
+  append-only.
+- [IMPLEMENTED] `8fd7eb1` and `8b9200b` add a 15-second focused top-of-book
+  tracker. It reads only active masters, requires exact membership from the
+  newest published Structure revision before CLOB I/O, retains the opening
+  Quote run as immutable provenance, and drops expected global-refresh races
+  without stopping later polls.
+- [VERIFIED] Task 3 and Task 4 passed focused pytest/Ruff gates and independent
+  spec-plus-quality review. The Task 4 closing suite passed 44 tests. No
+  wallet, signing, order, balance, Fly deployment, cadence, or configuration
+  change was made.
+- [PRODUCTION] Strict L1 `/health` is currently 503: latest Structure attempt
+  is `snapshot-subprocess-timeout`, consecutive failure counter is 5, and the
+  scheduler is paused. Quote children still complete roughly every 2–2.5
+  minutes, but that cannot certify a current Structure map or enable the new
+  watcher.
+- [DECISION] Do not execute the watcher plan's stale Task 5 instruction to
+  stretch Structure cadence to 1,800 seconds. Production already proves the
+  child itself exceeds the 240-second boundary; the next work is bounded,
+  stage-level Structure/Gamma runtime diagnosis before any deadline or cadence
+  decision. Keep Quote/M2 gates strict and Archive non-blocking.
+
+### [NEXT — CURRENT]
+
+Start with `make smoke-health-prod`, inspect mounted-L1 `snapshot_attempts`
+and bounded child-reap logs, then plan a TDD stage-timing diagnostic for the
+variable Gamma-only Structure subprocess. Do not deploy, change cadence, or
+claim cloud watcher operation until a new Structure revision and strict health
+are green.
