@@ -475,6 +475,11 @@ def _build_health_checks(
             QUOTE_WARN_SECONDS,
         )
 
+        runtime_snapshot = (
+            quote_worker_runtime.snapshot()
+            if quote_worker_runtime is not None
+            else None
+        )
         quote_run = (
             quote_worker_runtime.certified_projection()
             if quote_worker_runtime is not None
@@ -487,8 +492,28 @@ def _build_health_checks(
             quote_output = "certified-projection-unavailable"
         elif quote_run.universe_snapshot_id != market_truth.last_complete_snapshot_id:
             quote_age_s = None
-            quote_status = "fail"
-            quote_output = "source-snapshot-mismatch"
+            snapshot_finished_at_ms = last_snapshot.get("finished_at_ms")
+            refresh_age_s = (
+                max(0.0, now_s - float(snapshot_finished_at_ms) / 1000.0)
+                if isinstance(snapshot_finished_at_ms, (int, float))
+                else None
+            )
+            if (
+                runtime_snapshot is not None
+                and runtime_snapshot.state == "collecting"
+                and refresh_age_s is not None
+                and refresh_age_s <= QUOTE_SLA_SECONDS
+            ):
+                # A newly published Structure invalidates the previous Quote by
+                # design.  Keep M2 unavailable until the matching run commits,
+                # but represent the bounded re-quote as warn rather than an
+                # operational failure.  Once this SLA-bound window expires the
+                # same mismatch fails closed.
+                quote_status = "warn"
+                quote_output = "source-snapshot-refreshing"
+            else:
+                quote_status = "fail"
+                quote_output = "source-snapshot-mismatch"
         else:
             quote_age_s = max(0.0, now_s - quote_run.quoted_at_ms / 1000.0)
             if quote_age_s < QUOTE_WARN_SECONDS:
@@ -510,8 +535,8 @@ def _build_health_checks(
             }
         ]
 
-        if quote_worker_runtime is not None:
-            runtime = quote_worker_runtime.snapshot()
+        if runtime_snapshot is not None:
+            runtime = runtime_snapshot
             if runtime.state in {"cold-start", "error"}:
                 collector_status = "warn"
             elif runtime.state == "stopped":

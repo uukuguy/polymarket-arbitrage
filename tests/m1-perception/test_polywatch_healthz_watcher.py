@@ -41,8 +41,20 @@ def _health(*, status: str = "pass", checks: dict[str, Any]) -> dict[str, Any]:
     return {"status": status, "checks": checks}
 
 
-def _check(value: Any, *, status: str = "pass") -> list[dict[str, Any]]:
-    return [{"componentId": "test", "observedValue": value, "status": status}]
+def _check(
+    value: Any,
+    *,
+    status: str = "pass",
+    output: str | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "componentId": "test",
+            "observedValue": value,
+            "status": status,
+            "output": output,
+        }
+    ]
 
 
 def _healthy_l2_checks() -> dict[str, Any]:
@@ -71,6 +83,46 @@ def test_l1_quote_age_failure_pushes() -> None:
 
     assert action == "push"
     assert "quote" in reason.lower()
+
+
+def test_l1_quote_refresh_transition_does_not_alert() -> None:
+    health = _health(
+        status="warn",
+        checks={
+            "snapshot:last_success_age_seconds": _check(20.0),
+            "market_truth:coverage": _check("complete"),
+            "quote_feed:last_complete_age_seconds": _check(
+                None,
+                status="warn",
+                output="source-snapshot-refreshing",
+            ),
+            "quote_feed:collector_state": _check("collecting"),
+        },
+    )
+
+    assert WATCHER.decide_l1(health) == (
+        "noop",
+        "L1 quote refresh in progress for current Structure",
+    )
+
+
+def test_opportunity_transition_waits_for_current_quote_without_alert() -> None:
+    health = _health(
+        status="warn",
+        checks={
+            "quote_feed:last_complete_age_seconds": _check(
+                None,
+                status="warn",
+                output="source-snapshot-refreshing",
+            ),
+            "quote_feed:collector_state": _check("collecting"),
+        },
+    )
+
+    assert WATCHER.decide_opportunity(None, l1_health=health) == (
+        "noop",
+        "Opportunity refresh waits for current Structure Quote",
+    )
 
 
 @pytest.mark.parametrize("collector_state", ["error", "stopped"])

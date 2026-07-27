@@ -5478,10 +5478,20 @@ manifest, and 24-hour T0. Also persist Polywatch alert reason/timestamp.
   current app cgroup usage was about 716MB with zero kernel memory fail count.
   The host does not expose a trustworthy cgroup peak here, so this is current
   occupancy evidence, not a claimed peak headroom measurement.
+- [CONFIG] Release 163 deployed `e9f3cbd` to the app process only. Production
+  scheduler logs prove `tick interval=300s`; Structure 755 completed in about
+  108 seconds and Quote 741 bound to it before M2 feed publication.
+- [BUG] Polywatch's recurring Quote alerts were not market failures: a newly
+  published Structure correctly invalidated the previous Quote, while the
+  matching Quote child was still collecting for seconds. Mark that exact,
+  bounded `source-snapshot-refreshing` state as warn and suppress only its
+  paired opportunity 503; a timeout, failed collector, or stopped worker still
+  alerts fail-closed.
 
 ### [NEXT — CURRENT]
 
-Deploy the tested 300-second Structure cadence to the app process only, then
-verify the exact release/config and the next automatic Structure+Quote cycle.
-Do not label the next long-running production window closed until its evidence
-is evaluated; Polywatch remains the active two-minute fault detector throughout.
+Deploy the tested bounded Structure→Quote transition repair, then verify a
+full automatic 5-minute Structure cycle produces no Telegram alert while a
+true Quote failure would still surface. Do not label the next long-running
+production window closed until its evidence is evaluated; Polywatch remains
+the active two-minute fault detector throughout.

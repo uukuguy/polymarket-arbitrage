@@ -460,15 +460,22 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
     )
     quote_status = quote_age.get("status") if quote_age else None
     quote_value = quote_age.get("observedValue") if quote_age else None
+    collector = _extract_check(healthz, "quote_feed:collector_state", {})
+    collector_status = collector.get("status") if collector else None
+    collector_state = collector.get("observedValue") if collector else None
+    if (
+        quote_status == "warn"
+        and quote_age.get("output") == "source-snapshot-refreshing"
+        and collector_status == "pass"
+        and collector_state == "collecting"
+    ):
+        return "noop", "L1 quote refresh in progress for current Structure"
     if quote_status != "pass":
         return (
             "push",
             f"L1 quote age check {quote_status or 'missing'} (age={quote_value})",
         )
 
-    collector = _extract_check(healthz, "quote_feed:collector_state", {})
-    collector_status = collector.get("status") if collector else None
-    collector_state = collector.get("observedValue") if collector else None
     if collector_status != "pass" or collector_state in {"error", "stopped"}:
         return (
             "push",
@@ -484,9 +491,26 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
     )
 
 
-def decide_opportunity(payload: dict | None) -> tuple[str, str]:
+def decide_opportunity(
+    payload: dict | None,
+    *,
+    l1_health: dict | None = None,
+) -> tuple[str, str]:
     """Validate the read-only opportunity response contract, not signal count."""
     if payload is None:
+        quote_age = _extract_check(
+            l1_health or {}, "quote_feed:last_complete_age_seconds", {}
+        )
+        collector = _extract_check(
+            l1_health or {}, "quote_feed:collector_state", {}
+        )
+        if (
+            quote_age.get("status") == "warn"
+            and quote_age.get("output") == "source-snapshot-refreshing"
+            and collector.get("status") == "pass"
+            and collector.get("observedValue") == "collecting"
+        ):
+            return "noop", "Opportunity refresh waits for current Structure Quote"
         return "push", "Opportunity endpoint unreachable or returned invalid JSON"
     if not isinstance(payload, dict):
         return "push", "Opportunity response is not an object"
@@ -585,7 +609,10 @@ def main() -> int:
     )
 
     l1_action, l1_reason = decide_l1(l1)
-    opportunity_action, opportunity_reason = decide_opportunity(opportunity)
+    opportunity_action, opportunity_reason = decide_opportunity(
+        opportunity,
+        l1_health=l1,
+    )
     l2_action, l2_reason = decide_l2(l2)
     dashboard_action, dashboard_reason = decide_dashboard(
         dashboard_status, dashboard_headers, dashboard_error
