@@ -354,3 +354,86 @@ async def test_focused_loop_cancellation_preserves_committed_observation(
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
     assert observation == ("focused", "observe")
+
+
+async def test_focused_loop_drops_stale_master_and_runs_the_next_poll(
+    settings: Settings,
+) -> None:
+    from polyarb.daemon.opportunity_watcher import OpportunityWatcher
+    from polyarb.routing.focused_quote_collector import (
+        ActiveOpportunity,
+        StructureGroup,
+        StructureLeg,
+    )
+    from polyarb.routing.opportunity_ledger import FocusedObservationStaleError
+
+    master = ActiveOpportunity(
+        id="opportunity-1",
+        event_id="event-1",
+        group_id="group-1",
+        membership_hash="membership-1",
+        structure_revision=10,
+        quote_run_id=42,
+        legs=(
+            StructureLeg("market-1", "condition-1", "alpha", "token-1"),
+            StructureLeg("market-2", "condition-2", "beta", "token-2"),
+        ),
+    )
+
+    class RacingLedger:
+        def __init__(self) -> None:
+            self.poll_count = 0
+            self.record_count = 0
+            self.committed: list[object] = []
+
+        def active_masters(self) -> tuple[ActiveOpportunity, ...]:
+            self.poll_count += 1
+            return (master,) if self.poll_count <= 2 else ()
+
+        def record_focused(self, observation: object) -> None:
+            self.record_count += 1
+            if self.record_count == 1:
+                raise FocusedObservationStaleError()
+            self.committed.append(observation)
+
+        def pending_notifications(self, *, now_ms: int) -> tuple[object, ...]:
+            return ()
+
+    class Reader:
+        async def get_books(self, _: list[str], *, projection: str = "full") -> list[object]:
+            assert projection == "top"
+            return [
+                {"asset_id": "token-1", "asks": [{"price": "0.45", "size": "42"}]},
+                {"asset_id": "token-2", "asks": [{"price": "0.52", "size": "40"}]},
+            ]
+
+    class MembershipReader:
+        def current_group(self, event_id: str, group_id: str) -> StructureGroup:
+            return StructureGroup(
+                structure_revision=11,
+                event_id=event_id,
+                group_id=group_id,
+                membership_hash="membership-1",
+                legs=master.legs,
+            )
+
+    delays: list[float] = []
+
+    async def wait_two_polls(_: object, delay_s: float) -> bool:
+        delays.append(delay_s)
+        return len(delays) == 2
+
+    ledger = RacingLedger()
+    await OpportunityWatcher.for_test(
+        settings,
+        ledger=ledger,  # type: ignore[arg-type]
+        send_telegram=AsyncMock(),
+        focused_reader=Reader(),
+        membership_reader=MembershipReader(),
+        wait_for_stop=wait_two_polls,
+    ).run(asyncio.Event())
+
+    assert ledger.poll_count == 2
+    assert ledger.record_count == 2
+    assert len(ledger.committed) == 1
+    assert delays == [15.0, 15.0]

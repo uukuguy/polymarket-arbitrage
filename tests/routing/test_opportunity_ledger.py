@@ -273,3 +273,50 @@ def test_record_focused_membership_invalidation_closes_master(tmp_path) -> None:
             (opened.opportunity_id,),
         ).fetchone()
     assert master == ("invalidated", "structure-membership-changed")
+
+
+def test_focused_records_keep_the_opening_global_quote_run_after_refresh(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    ledger = OpportunityLedger(db_path)
+    opened = ledger.reconcile_global(_observe_assessment(), observed_at_ms=NOW_MS)
+    refreshed = replace(
+        _observe_assessment(),
+        quote_run_id=43,
+        bundle_cost=0.965,
+        gross_edge_bps=350.0,
+    )
+    ledger.reconcile_global(refreshed, observed_at_ms=NOW_MS + 120_000)
+
+    master = ledger.active_masters()[0]
+    ledger.record_focused(
+        FocusedObservation(
+            opportunity_id=opened.opportunity_id,
+            status="observe",
+            reason=None,
+            bundle_cost=0.96,
+            gross_edge_bps=400.0,
+            max_bundle_size=40.0,
+            legs=(
+                OpportunityLeg("market-a", "condition-a", "alpha", "token-a", 0.44, 50),
+                OpportunityLeg("market-b", "condition-b", "beta", "token-b", 0.52, 40),
+            ),
+            structure_revision=18,
+            quote_run_id=master.quote_run_id,
+            observed_at_ms=NOW_MS + 135_000,
+        )
+    )
+
+    assert master.quote_run_id == 42
+    with sqlite3.connect(db_path) as con:
+        current_run_id = con.execute(
+            "SELECT quote_run_id FROM neg_risk_opportunities WHERE id=?",
+            (opened.opportunity_id,),
+        ).fetchone()[0]
+        focused_run_id = con.execute(
+            "SELECT quote_run_id FROM neg_risk_opportunity_observations "
+            "WHERE opportunity_id=? AND source='focused' ORDER BY id DESC LIMIT 1",
+            (opened.opportunity_id,),
+        ).fetchone()[0]
+    assert current_run_id == 43
+    assert focused_run_id == 42

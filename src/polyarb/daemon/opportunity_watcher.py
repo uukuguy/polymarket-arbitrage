@@ -21,7 +21,11 @@ from polyarb.routing.focused_quote_collector import (
     collect_focused_observation,
 )
 from polyarb.routing.neg_risk_quote_store import CompleteQuoteProjection
-from polyarb.routing.opportunity_ledger import OpportunityLedger, PendingNotification
+from polyarb.routing.opportunity_ledger import (
+    FocusedObservationStaleError,
+    OpportunityLedger,
+    PendingNotification,
+)
 from polyarb.routing.opportunity_scanner import (
     assess_certified_neg_risk_quote_projection,
 )
@@ -133,7 +137,15 @@ class OpportunityWatcher:
                         quote_run_id=master.quote_run_id,
                         observed_at_ms=self._clock_ms(),
                     )
-                await asyncio.to_thread(self._ledger.record_focused, observation)
+                try:
+                    await asyncio.to_thread(self._ledger.record_focused, observation)
+                except asyncio.CancelledError:
+                    raise
+                except FocusedObservationStaleError:
+                    logger.warning(
+                        "focused observation dropped after global reconciliation "
+                        f"opportunity_id={master.id}"
+                    )
             await self.deliver_pending_notifications()
             if await self._wait_for_stop(stop_event, self._focused_interval_s):
                 break

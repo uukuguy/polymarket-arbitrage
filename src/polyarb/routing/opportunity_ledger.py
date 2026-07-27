@@ -22,6 +22,10 @@ class OpportunityTransition:
     kind: str
 
 
+class FocusedObservationStaleError(RuntimeError):
+    """A global reconciliation changed or closed this master before focused write."""
+
+
 @dataclass(frozen=True)
 class PendingNotification:
     id: int
@@ -302,12 +306,14 @@ class OpportunityLedger:
         try:
             rows = con.execute(
                 "SELECT o.id,o.event_id,o.group_id,o.membership_hash,"
-                "o.structure_revision,o.quote_run_id,g.legs_json "
+                "o.structure_revision,opening.quote_run_id,opening.legs_json "
                 "FROM neg_risk_opportunities o JOIN "
-                "(SELECT opportunity_id,MAX(id) AS id "
+                "(SELECT opportunity_id,MIN(id) AS id "
                 "FROM neg_risk_opportunity_observations WHERE source='global' "
-                "GROUP BY opportunity_id) latest ON latest.opportunity_id=o.id "
-                "JOIN neg_risk_opportunity_observations g ON g.id=latest.id "
+                "GROUP BY opportunity_id) first_global "
+                "ON first_global.opportunity_id=o.id "
+                "JOIN neg_risk_opportunity_observations opening "
+                "ON opening.id=first_global.id "
                 "WHERE o.status='observe' ORDER BY o.updated_at_ms DESC,o.id"
             ).fetchall()
         finally:
@@ -350,17 +356,16 @@ class OpportunityLedger:
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
-                "SELECT status,quote_run_id FROM neg_risk_opportunities WHERE id=?",
+                "SELECT o.status,(SELECT quote_run_id "
+                "FROM neg_risk_opportunity_observations "
+                "WHERE opportunity_id=o.id AND source='global' ORDER BY id LIMIT 1) "
+                "FROM neg_risk_opportunities o WHERE o.id=?",
                 (observation.opportunity_id,),
             ).fetchone()
             if row is None or row[0] != "observe":
-                con.execute("COMMIT")
-                return OpportunityTransition(
-                    opportunity_id=observation.opportunity_id,
-                    kind="inactive",
-                )
-            if int(row[1]) != observation.quote_run_id:
-                raise ValueError("focused observation must retain original quote run")
+                raise FocusedObservationStaleError()
+            if row[1] is None or int(row[1]) != observation.quote_run_id:
+                raise FocusedObservationStaleError()
 
             status = observation.status
             persisted_status = "closed" if status == "no-edge" else status
