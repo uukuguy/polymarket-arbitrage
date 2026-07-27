@@ -264,7 +264,9 @@ changing the scheduler counter. Close exactly once:
 In _build_health_checks read latest_attempt and scheduler_state. Add
 snapshot:latest_attempt with observedValue latest outcome or never-started.
 For failed/cancelled attempts choose warn when market_truth:last_complete_age_seconds
-is pass, otherwise fail; output only failure_kind. Add snapshot:failure_counter:
+is pass, otherwise fail; output only failure_kind. never-started is pass for
+backward compatibility with valid snapshots written before attempt recording,
+but it is never evidence of a successful new attempt. Add snapshot:failure_counter:
 0 is pass, 1 through SnapshotScheduler.FAILURE_THRESHOLD - 1 is warn, and
 threshold-or-greater is fail. Use a local import of SnapshotScheduler to avoid
 duplicating literal 5.

@@ -265,6 +265,30 @@ class SnapshotScheduler:
             # is bad, losing the pause-state is worse.
             logger.warning(f"send_paused_alert failed: {e!r}")
 
+    async def _finish_attempt(
+        self,
+        *,
+        attempt_id: int,
+        outcome: str,
+        snapshot_id: int | None,
+        failure_kind: str | None,
+    ) -> None:
+        """Best-effort terminal record; scheduler behavior remains primary truth."""
+        try:
+            await asyncio.to_thread(
+                self._sqlite_store.finish_snapshot_attempt,
+                attempt_id=attempt_id,
+                outcome=outcome,
+                finished_at_ms=int(time.time() * 1000),
+                snapshot_id=snapshot_id,
+                failure_kind=failure_kind,
+            )
+        except Exception as error:  # noqa: BLE001 - operational evidence is fail-soft
+            logger.warning(
+                "could not finish snapshot attempt "
+                f"attempt_id={attempt_id} kind={type(error).__name__}"
+            )
+
     async def _tick(self) -> None:
         """Execute one scheduler tick.
 
@@ -279,11 +303,25 @@ class SnapshotScheduler:
             logger.info("scheduler is PAUSED, skipping tick")
             return
 
+        attempt_id = await asyncio.to_thread(
+            self._sqlite_store.begin_snapshot_attempt,
+            started_at_ms=int(time.time() * 1000),
+        )
+
         try:
             result = await self._run_snapshot()
             result_status = getattr(result, "status", None)
 
             if result_status in (SnapshotStatus.OK, SnapshotStatus.DEGRADED):
+                snapshot_id = getattr(result, "snapshot_id", None)
+                if not isinstance(snapshot_id, int) or snapshot_id <= 0:
+                    raise SnapshotSubprocessError("missing-snapshot-id")
+                await self._finish_attempt(
+                    attempt_id=attempt_id,
+                    outcome="succeeded",
+                    snapshot_id=snapshot_id,
+                    failure_kind=None,
+                )
                 # DEGRADED is NOT a failure (D-12 amendment)
                 self._failure_counter = 0
                 logger.info(
@@ -314,6 +352,13 @@ class SnapshotScheduler:
                     # but its failure remains visible in production logs.
                     logger.warning(f"snapshot retention failed: {e!r}")
             else:
+                snapshot_id = getattr(result, "snapshot_id", None)
+                await self._finish_attempt(
+                    attempt_id=attempt_id,
+                    outcome="failed",
+                    snapshot_id=(snapshot_id if isinstance(snapshot_id, int) else None),
+                    failure_kind="snapshot-status-failed",
+                )
                 # FAILED status
                 self._failure_counter += 1
                 logger.warning(
@@ -324,9 +369,21 @@ class SnapshotScheduler:
         except asyncio.CancelledError:
             # F-04: cancellation must propagate so run() can stop in <1s.
             # Do NOT count as a failure — this is a graceful shutdown signal.
+            await self._finish_attempt(
+                attempt_id=attempt_id,
+                outcome="cancelled",
+                snapshot_id=None,
+                failure_kind="scheduler-cancelled",
+            )
             logger.info("scheduler tick cancelled mid-flight; propagating CancelledError")
             raise
-        except Exception:
+        except Exception as error:
+            await self._finish_attempt(
+                attempt_id=attempt_id,
+                outcome="failed",
+                snapshot_id=None,
+                failure_kind=str(error),
+            )
             self._failure_counter += 1
             logger.exception(
                 f"snapshot tick raised exception "

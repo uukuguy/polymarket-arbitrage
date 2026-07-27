@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -62,6 +63,7 @@ class _FakeResult:
 
     def __init__(self, status: SnapshotStatus) -> None:
         self.status = status
+        self.snapshot_id = 1
 
 
 class _FakeProcess:
@@ -146,6 +148,33 @@ def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
             snapshot_id=None,
             failure_kind="late-rewrite",
         )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_persists_sigkill_attempt_failure(
+    daemon_settings_for_test: Any,
+) -> None:
+    """A kernel-killed child leaves durable operational evidence behind."""
+    from polyarb.daemon.scheduler import SnapshotSubprocessError
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(
+        side_effect=SnapshotSubprocessError("signal-sigkill-possible-oom")
+    )
+
+    await scheduler._tick()
+
+    assert store.get_latest_snapshot_attempt() == {
+        "id": 1,
+        "started_at_ms": pytest.approx(int(time.time() * 1000), abs=2_000),
+        "finished_at_ms": pytest.approx(int(time.time() * 1000), abs=2_000),
+        "outcome": "failed",
+        "snapshot_id": None,
+        "failure_kind": "snapshot-subprocess-signal-sigkill-possible-oom",
+    }
 
 
 @pytest.mark.asyncio

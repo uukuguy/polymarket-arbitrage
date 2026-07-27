@@ -273,6 +273,60 @@ def _build_health_checks(
             }
         ]
 
+    # ── Check 2.5: parent-observed scheduler attempt truth ───────────────
+    latest_attempt = store.get_latest_snapshot_attempt()
+    if latest_attempt is None:
+        attempt_value = "never-started"
+        # Existing installations can have valid published truth from before
+        # attempt recording was introduced. Absence is not a fabricated fault;
+        # an explicit failed/cancelled row below is the new alert signal.
+        attempt_status = "pass"
+        attempt_output = None
+    else:
+        attempt_value = str(latest_attempt["outcome"])
+        attempt_output = latest_attempt["failure_kind"]
+        if attempt_value in {"failed", "cancelled"}:
+            attempt_status = "warn" if truth_age_status == "pass" else "fail"
+        else:
+            attempt_status = "pass"
+            attempt_output = None
+    overall = _severity(overall, attempt_status)
+    checks["snapshot:latest_attempt"] = [
+        {
+            "componentId": "snapshot-scheduler",
+            "componentType": "component",
+            "observedValue": attempt_value,
+            "status": attempt_status,
+            "output": attempt_output,
+            "time": _utc_now_iso(),
+        }
+    ]
+
+    scheduler_state = store.get_scheduler_state()
+    failure_counter = (
+        int(scheduler_state.get("failure_counter", 0))
+        if scheduler_state is not None
+        else 0
+    )
+    from polyarb.daemon.scheduler import SnapshotScheduler
+
+    if failure_counter == 0:
+        counter_status = "pass"
+    elif failure_counter < SnapshotScheduler.FAILURE_THRESHOLD:
+        counter_status = "warn"
+    else:
+        counter_status = "fail"
+    overall = _severity(overall, counter_status)
+    checks["snapshot:failure_counter"] = [
+        {
+            "componentId": "snapshot-scheduler",
+            "componentType": "component",
+            "observedValue": failure_counter,
+            "status": counter_status,
+            "time": _utc_now_iso(),
+        }
+    ]
+
     # ── Check 3: Supabase mirror age (only if mirror enabled) ────────────
     # supabase:mirror_age_seconds — seconds since last successful Supabase push.
     # Uses supabase_mirror_at_ms column added in Plan 03.

@@ -257,6 +257,38 @@ def test_health_exposes_latest_attempt_and_last_complete_truth_separately(
     assert complete_age["observedValue"] == pytest.approx(2.0, abs=0.5)
 
 
+def test_health_surfaces_failed_scheduler_attempt_while_truth_is_fresh(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """A fresh published revision cannot conceal a later scheduler OOM."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1000)
+    _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=now_ms - 2_000,
+    )
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    attempt_id = store.begin_snapshot_attempt(started_at_ms=now_ms - 1_000)
+    store.finish_snapshot_attempt(
+        attempt_id=attempt_id,
+        outcome="failed",
+        finished_at_ms=now_ms - 500,
+        snapshot_id=None,
+        failure_kind="snapshot-subprocess-signal-sigkill-possible-oom",
+    )
+
+    response = http_test_client.get("/health")
+
+    assert response.status_code == 200
+    checks = response.json()["checks"]
+    assert checks["market_truth:last_complete_age_seconds"][0]["status"] == "pass"
+    assert checks["snapshot:latest_attempt"][0]["observedValue"] == "failed"
+    assert checks["snapshot:latest_attempt"][0]["status"] == "warn"
+    assert "possible-oom" in checks["snapshot:latest_attempt"][0]["output"]
+
+
 # ---------------------------------------------------------------------------
 # Plan 02.1-03 — /healthz Fly-friendly probe (D-05 / D-06)
 #
