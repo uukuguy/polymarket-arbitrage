@@ -104,3 +104,16 @@ def test_material_edge_change_enqueues_one_follow_up_notification(tmp_path) -> N
         "entered-gross-edge-threshold",
         "edge-changed",
     ]
+
+
+def test_notification_delivery_is_audited_without_changing_market_fact(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    ledger = OpportunityLedger(db_path)
+    opened = ledger.reconcile_global(_observe_assessment(), observed_at_ms=NOW_MS)
+    notification = ledger.pending_notifications(now_ms=NOW_MS)[0]
+
+    ledger.mark_notification_delivered(notification.id, delivered_at_ms=NOW_MS + 1)
+
+    assert ledger.pending_notifications(now_ms=NOW_MS + 1) == ()
+    assert ledger.current_opportunities()[0]["id"] == opened.opportunity_id

@@ -312,3 +312,42 @@ class OpportunityLedger:
             )
             for row in rows
         )
+
+    def mark_notification_delivered(
+        self,
+        notification_id: int,
+        *,
+        delivered_at_ms: int,
+    ) -> None:
+        """Record delivery without mutating the market observation it describes."""
+        con = self._connect()
+        try:
+            con.execute(
+                "UPDATE neg_risk_opportunity_notifications "
+                "SET status='delivered',attempt_count=attempt_count+1,"
+                "attempted_at_ms=?,delivered_at_ms=?,error_kind=NULL "
+                "WHERE id=? AND status IN ('pending','failed')",
+                (delivered_at_ms, delivered_at_ms, notification_id),
+            )
+        finally:
+            con.close()
+
+    def mark_notification_failed(
+        self,
+        notification_id: int,
+        *,
+        attempted_at_ms: int,
+        error_kind: str,
+    ) -> None:
+        """Keep failed delivery retryable and auditable without touching market state."""
+        con = self._connect()
+        try:
+            con.execute(
+                "UPDATE neg_risk_opportunity_notifications "
+                "SET status='failed',attempt_count=attempt_count+1,"
+                "attempted_at_ms=?,error_kind=? "
+                "WHERE id=? AND status IN ('pending','failed')",
+                (attempted_at_ms, error_kind, notification_id),
+            )
+        finally:
+            con.close()
