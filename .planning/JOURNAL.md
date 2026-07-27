@@ -5612,3 +5612,10 @@ are green.
   is present. Observe exactly one scheduler attempt through the read-only
   status and strict-health targets; record either terminal stage/duration
   evidence or a non-sensitive blocker. No automatic recovery loop.
+- [BLOCKED — NO DEPLOYMENT] `make planning-status` was clean and the prescribed
+  targeted suite passed (49 tests), but the third required local gate failed:
+  `make: *** No rule to make target 'smoke-health'.  Stop.` The Makefile exposes
+  `smoke-health-local` and `smoke-health-prod`, not the mandated target. Do not
+  substitute either target or perform push/deploy/unpause until the task owner
+  explicitly resolves the gate contract; no production request was made and no
+  secret was inspected or exposed.
