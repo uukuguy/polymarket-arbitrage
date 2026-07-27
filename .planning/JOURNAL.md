@@ -5495,3 +5495,41 @@ full automatic 5-minute Structure cycle produces no Telegram alert while a
 true Quote failure would still surface. Do not label the next long-running
 production window closed until its evidence is evaluated; Polywatch remains
 the active two-minute fault detector throughout.
+
+## SESSION 112 — 2026-07-27 (M1 child lifecycle continuity repair)
+
+- [REAL FAULT] A rolling L1 deploy could cancel the Quote worker parent while
+  leaving its isolated CLOB child and durable `collecting` quote lease alive.
+  The replacement then safely waited for expiry, creating an avoidable M2
+  availability gap. The original child-reap path also cancelled its pipe reader
+  and attempted a second `communicate()`, which cannot reliably reap that child.
+- [IMPLEMENTED] Release 173 (`f9e5ff9`) gives Quote collection one shielded
+  reap task for its entire lifetime: TERM, bounded wait, KILL if needed, then
+  atomically fail only durable `collecting` runs as `collector-cancelled`.
+  Complete Quote runs remain immutable.
+- [PRODUCTION EVIDENCE] A controlled restart interrupted Quote run 797. SQLite
+  records `797=failed/collector-cancelled`; the replacement created and completed
+  run 798 on the same Structure revision, and `make diagnose-arb-feed-prod
+  min_edge_bps=0` returned a verified opportunity feed.
+- [FOLLOW-UP FAULT] The bounded Structure timeout path had the same cancelled
+  pipe-reader / second-communicate defect. A timeout could be recorded while
+  child reaping was not mechanically proven.
+- [IMPLEMENTED] Release 174 (`a960f32`) applies the same one-reap-task contract
+  to Structure. New RED tests require one communicator, TERM, KILL fallback,
+  and terminal reaping for Quote cancellation and Structure timeout.
+- [PRODUCTION EVIDENCE] Under release 174, Structure attempt 22 completed in
+  235.8 seconds and atomically published Structure 764; Quote run 802 bound to
+  that exact revision and produced 14 verified gross-before-fees candidates.
+  Strict L1 health returned 200, latest attempt succeeded, failure counter 0.
+- [OPEN] Structure runtime remains variable (about 113–236 seconds with some
+  pre-repair 240-second timeouts). The new boundary guarantees bounded, visible,
+  non-orphaned failure; it does not yet explain or eliminate upstream Gamma
+  latency. Archive remains intentionally unscheduled and non-blocking.
+
+### [NEXT — CURRENT]
+
+Start with `make smoke-health-prod`, then inspect the latest three
+`snapshot_attempts` on the mounted L1 app machine and correlate any timeout
+with bounded child-reap logs. Instrument/diagnose the variable Gamma Structure
+runtime before changing the 240-second production deadline; keep Quote/M2
+gating strict and Archive non-blocking.
