@@ -237,3 +237,31 @@ async def test_production_quote_worker_can_restore_an_empty_durable_store(tmp_pa
     assert worker is not None
     assert worker._restore_feed is not None
     assert await worker._restore_feed() is None
+
+
+@pytest.mark.asyncio
+async def test_quote_worker_cancellation_releases_its_durable_lease() -> None:
+    """A replacement daemon must not wait for the stopped worker's quote run lease."""
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    entered = asyncio.Event()
+    cleaned = AsyncMock(return_value=1)
+    stop_event = asyncio.Event()
+
+    async def collect_once():
+        entered.set()
+        await asyncio.Event().wait()
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        interval_s=120,
+        cleanup_collecting_runs=cleaned,
+    )
+    task = asyncio.create_task(worker.run(stop_event))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    task.cancel()
+    result = await asyncio.gather(task, return_exceptions=True)
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    cleaned.assert_awaited_once_with()

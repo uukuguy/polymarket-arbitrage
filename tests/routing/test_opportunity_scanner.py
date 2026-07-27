@@ -83,8 +83,8 @@ def _seed_quote_universe(path, *, taken_at_ms: int = 9_900_000) -> int:
         con.execute(
             "INSERT INTO snapshots("
             "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
-            "is_valid,parquet_path"
-            ") VALUES (?,?,'subset',4,1,1,'quote-universe.parquet')",
+            "data_product,is_valid,parquet_path"
+            ") VALUES (?,?,'subset',4,1,'structure',1,'quote-universe.parquet')",
             (taken_at_ms, taken_at_ms),
         )
         snapshot_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])

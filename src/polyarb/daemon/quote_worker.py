@@ -108,6 +108,7 @@ class CertifiedQuoteFeed:
 
 
 RestoreFeed = Callable[[], Awaitable[CertifiedQuoteFeed | None]]
+CleanupCollectingRuns = Callable[[], Awaitable[int]]
 
 
 class QuoteCollectionSubprocessError(RuntimeError):
@@ -386,6 +387,7 @@ class QuoteWorker:
         certify_projection: CertifyProjection | None = None,
         prepare_opportunities: PrepareOpportunities | None = None,
         restore_feed: RestoreFeed | None = None,
+        cleanup_collecting_runs: CleanupCollectingRuns | None = None,
         interval_s: float,
         runtime: QuoteWorkerRuntime | None = None,
         wait_for_stop: WaitForStop = _wait_for_stop,
@@ -400,6 +402,7 @@ class QuoteWorker:
         self._certify_projection = certify_projection
         self._prepare_opportunities = prepare_opportunities
         self._restore_feed = restore_feed
+        self._cleanup_collecting_runs = cleanup_collecting_runs
         self._interval_s = interval_s
         self._wait_for_stop = wait_for_stop
         self._monotonic = monotonic
@@ -411,6 +414,21 @@ class QuoteWorker:
         return self._interval_s
 
     async def run(self, stop_event: asyncio.Event) -> None:
+        async def cleanup_after_cancellation() -> None:
+            if self._cleanup_collecting_runs is None:
+                return
+            try:
+                released = await self._cleanup_collecting_runs()
+                logger.info(
+                    "released collecting quote runs after cancellation "
+                    f"count={released}"
+                )
+            except Exception as error:  # preserve cancellation semantics
+                logger.warning(
+                    "collecting quote run cleanup failed "
+                    f"kind={type(error).__name__}"
+                )
+
         try:
             if self._restore_feed is not None:
                 try:
@@ -422,6 +440,7 @@ class QuoteWorker:
                             f"run_id={restored_feed.projection.run_id}"
                         )
                 except asyncio.CancelledError:
+                    await cleanup_after_cancellation()
                     raise
                 except Exception as error:  # fail-soft; fresh collection follows
                     logger.warning(
@@ -454,6 +473,7 @@ class QuoteWorker:
                             ):
                                 raise QuoteProjectionIntegrityError()
                 except asyncio.CancelledError:
+                    await cleanup_after_cancellation()
                     raise
                 except QuoteCollectionSourceSupersededError:
                     # Structure publication invalidated the quote input while
@@ -559,10 +579,17 @@ def build_production_quote_worker(settings: Settings) -> QuoteWorker | None:
             opportunities,
         )
 
+    async def cleanup_collecting_runs() -> int:
+        return await asyncio.to_thread(
+            quote_store.fail_collecting_runs,
+            failure_reason="collector-cancelled",
+        )
+
     return QuoteWorker(
         collect_once=collect_once,
         certify_projection=certify_projection,
         prepare_opportunities=prepare_opportunities,
         restore_feed=restore_feed,
+        cleanup_collecting_runs=cleanup_collecting_runs,
         interval_s=settings.neg_risk_quote_interval_s,
     )

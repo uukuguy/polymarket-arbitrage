@@ -553,6 +553,33 @@ class NegRiskQuoteStore:
         finally:
             con.close()
 
+    def fail_collecting_runs(self, *, failure_reason: str) -> int:
+        """Release all in-flight leases after their sole worker has stopped.
+
+        This is deliberately a shutdown-only primitive: the production worker
+        invokes it only after its isolated child has been terminated and
+        awaited, so a replacement process never waits for an orphaned lease.
+        Complete runs remain immutable.
+        """
+        if not isinstance(failure_reason, str) or not failure_reason:
+            raise ValueError("failure_reason must be a non-empty string")
+        con = self._connect()
+        try:
+            self._begin_immediate(con)
+            try:
+                cur = con.execute(
+                    "UPDATE neg_risk_quote_runs SET status = 'failed', failure_reason = ? "
+                    "WHERE status = 'collecting'",
+                    (failure_reason,),
+                )
+                con.execute("COMMIT")
+                return int(cur.rowcount)
+            except Exception:
+                _rollback_without_masking(con)
+                raise
+        finally:
+            con.close()
+
     def latest_complete_run(self) -> QuoteRun | None:
         """Return the newest complete run's metadata, without its terminal rows."""
         con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)

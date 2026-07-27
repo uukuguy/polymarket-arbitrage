@@ -410,6 +410,25 @@ def test_begin_run_lock_is_database_state_not_instance_state(quote_db) -> None:
     assert after_complete_run > third_run > second_run > first_run
 
 
+def test_shutdown_fails_only_collecting_quote_runs(quote_db) -> None:
+    """A stopped worker releases its durable lease without rewriting complete truth."""
+    store = NegRiskQuoteStore(quote_db)
+    complete_id = _complete(store)
+    collecting_id = _begin(store)
+
+    failed_count = store.fail_collecting_runs(failure_reason="collector-cancelled")
+
+    assert failed_count == 1
+    with sqlite3.connect(quote_db) as con:
+        rows = con.execute(
+            "SELECT id,status,failure_reason FROM neg_risk_quote_runs ORDER BY id"
+        ).fetchall()
+    assert rows == [
+        (complete_id, "complete", None),
+        (collecting_id, "failed", "collector-cancelled"),
+    ]
+
+
 def test_begin_run_recovers_only_an_expired_crashed_collecting_run(quote_db) -> None:
     clock = {"now": NOW_MS}
     first = NegRiskQuoteStore(quote_db, now_ms=lambda: clock["now"])
