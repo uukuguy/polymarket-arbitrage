@@ -171,6 +171,21 @@
 - No production configuration, deploy, storage migration, or resource change
   has been made by this design work.
 
+### Written-spec review
+
+- User approved the staged data-layer design on 2026-07-27.
+- The task has entered implementation planning. The approved design has three
+  independently shippable scopes: M1 attempt/incident truth, M1 Structure vs
+  Archive/Quote contract separation, and later M1→M2 shared publication.
+
+### First-wave implementation plan
+
+- Wrote and self-reviewed
+  `docs/superpowers/plans/2026-07-27-m1-attempt-truth-and-component-incidents.md`.
+- It covers durable scheduler attempt records, direct health exposure, per-
+  component Polywatch recovery, a read-only operator command, tests, manual,
+  learning documentation, and no production mutation.
+
 ## Error Log
 
 | Timestamp | Error | Attempt | Resolution |

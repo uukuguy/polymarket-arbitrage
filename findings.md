@@ -148,3 +148,23 @@
 - Polywatch currently stores one global active-failure set and sends recovery
   only when it becomes empty. A continuing L2 incident therefore suppresses a
   distinct L1 recovery event; per-component incident state is required.
+- The existing SQLite model already has atomic snapshot publication plus
+  `snapshot_source_coverage`, group-membership truth, and quote-run binding to
+  a completed `universe_snapshot_id`. The repair should extend this contract
+  to an explicit Structure revision rather than create a second competing
+  truth model.
+- The scheduler currently knows a child was SIGKILLed but records only a
+  scalar failure counter. The first repair plan can add append-only attempt
+  rows and expose them without changing the successful snapshot transaction.
+- The current snapshot CLI has no purpose switch: every online scheduler run
+  executes the Gamma catalogue, full CLOB top-of-book fetch, CLOB-era final
+  reconciliation, validation, and archive write as one unit. A future
+  Structure path must retain the bounded final Gamma membership reconciliation;
+  merely skipping the CLOB block would change correctness semantics.
+- The volume-less cron machine runs direct snapshot commands while the mounted
+  app scheduler runs the online truth path. The refactor must name these as
+  separate products and must never infer online publication success from a
+  cron-side archive command.
+- Commit `9bf026a` is present on the active branch. It binds quote runs to the
+  existing verified source truth hash; the new Structure revision should extend
+  that already-shipped identity chain rather than duplicate it.

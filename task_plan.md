@@ -73,8 +73,9 @@ Phase 7 — Consolidated M1 production repair
 - [x] Build a single incident inventory across snapshot, quote freshness, health, and notifications
 - [x] Produce a staged M1→M2→live-arbitrage design before implementation
 - [x] Self-review the staged design for ambiguity and scope drift
-- [ ] Obtain written-spec review before implementation planning
-- [ ] Create an executable repair plan with resource, deployment, and qualification gates
+- [x] Obtain written-spec review before implementation planning
+- [x] Create the executable first-wave repair plan for attempt/incident truth
+- [ ] Create the Structure/Archive contract migration plan after first-wave interfaces are verified
 - [ ] Implement and verify the repair in dependency order
 - [ ] Obtain a new clean production baseline and start a meaningful 24-hour observation
 - **Status:** in progress
@@ -108,6 +109,7 @@ Phase 7 — Consolidated M1 production repair
 | Temporary shell probe used zsh's read-only `status` name | 1 | Renamed the variable to `http_code` |
 | First Fly SSH command requested interactive VM selection | 1 | Addressed the L1 app machine explicitly with `--machine` |
 | First remote SQL probe lost shell-quoted empty strings | 1 | Replaced empty-string predicates with `length(column) > 0` |
+| Initial long plan patch omitted add-file markers on embedded lines | 1 | Recreated the patch with every new line programmatically marked as an addition |
 
 ## Notes
 
