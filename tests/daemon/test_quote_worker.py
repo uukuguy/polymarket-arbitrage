@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import importlib.util
 import json
 import os
@@ -65,6 +64,7 @@ async def test_worker_collects_immediately_then_waits_for_interval() -> None:
         collect_once=collect_once,
         interval_s=120,
         wait_for_stop=wait_for_stop,
+        release_projection_memory=lambda: None,
     )
 
     await worker.run(asyncio.Event())
@@ -372,10 +372,15 @@ async def test_worker_releases_full_projection_before_interval_wait() -> None:
             universe_hash="hash-7",
         )
 
-    async def stop_after_release(_stop: asyncio.Event, _delay_s: float) -> bool:
-        gc.collect()
+    release_calls = 0
+
+    def release_projection_memory() -> None:
+        nonlocal release_calls
+        release_calls += 1
         assert projection_ref is not None
         assert projection_ref() is None
+
+    async def stop_after_release(_stop: asyncio.Event, _delay_s: float) -> bool:
         return True
 
     worker = QuoteWorker(
@@ -384,6 +389,7 @@ async def test_worker_releases_full_projection_before_interval_wait() -> None:
         prepare_opportunities=prepare_opportunities,
         interval_s=120,
         wait_for_stop=stop_after_release,
+        release_projection_memory=release_projection_memory,
     )
 
     await worker.run(asyncio.Event())
@@ -392,6 +398,51 @@ async def test_worker_releases_full_projection_before_interval_wait() -> None:
     assert feed is not None
     assert feed.projection.run_id == 7
     assert not hasattr(feed.projection, "retained_payload")
+    assert release_calls == 1
+
+
+def test_projection_memory_release_runs_gc_then_linux_malloc_trim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.daemon import quote_worker
+
+    events: list[object] = []
+
+    class FakeTrim:
+        argtypes: list[object] = []
+        restype: object = None
+
+        def __call__(self, pad: int) -> int:
+            events.append(("trim", pad))
+            return 1
+
+    class FakeLibc:
+        malloc_trim = FakeTrim()
+
+    monkeypatch.setattr(quote_worker.gc, "collect", lambda: events.append("gc"))
+    monkeypatch.setattr(quote_worker.sys, "platform", "linux")
+    monkeypatch.setattr(
+        quote_worker.ctypes,
+        "CDLL",
+        lambda _name: events.append("cdll") or FakeLibc(),
+    )
+
+    quote_worker._release_projection_memory()
+
+    assert events == ["gc", "cdll", ("trim", 0)]
+
+
+def test_projection_memory_release_is_fail_soft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.daemon import quote_worker
+
+    def fail_gc() -> None:
+        raise RuntimeError("injected gc failure")
+
+    monkeypatch.setattr(quote_worker.gc, "collect", fail_gc)
+
+    quote_worker._release_projection_memory()
 
 
 async def test_worker_cancellation_propagates_without_failure_count() -> None:

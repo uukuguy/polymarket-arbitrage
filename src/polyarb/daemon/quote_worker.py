@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import gc
 import json
 import sys
 import time
@@ -33,6 +35,24 @@ PrepareOpportunities = Callable[
     Awaitable[OpportunityScanResult],
 ]
 WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
+ReleaseProjectionMemory = Callable[[], None]
+
+
+def _release_projection_memory() -> None:
+    """Best-effort return of one released full projection to the cgroup."""
+    try:
+        gc.collect()
+        if not sys.platform.startswith("linux"):
+            return
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+        malloc_trim.argtypes = [ctypes.c_size_t]
+        malloc_trim.restype = ctypes.c_int
+        malloc_trim(0)
+    except Exception as error:  # noqa: BLE001 - memory trim must stay fail-soft
+        logger.debug(
+            "certified projection memory release skipped "
+            f"kind={type(error).__name__}"
+        )
 
 
 @dataclass(frozen=True)
@@ -338,6 +358,9 @@ class QuoteWorker:
         runtime: QuoteWorkerRuntime | None = None,
         wait_for_stop: WaitForStop = _wait_for_stop,
         monotonic: Callable[[], float] = time.monotonic,
+        release_projection_memory: ReleaseProjectionMemory = (
+            _release_projection_memory
+        ),
     ) -> None:
         if isinstance(interval_s, bool) or interval_s <= 0:
             raise ValueError("interval_s must be positive")
@@ -347,6 +370,7 @@ class QuoteWorker:
         self._interval_s = interval_s
         self._wait_for_stop = wait_for_stop
         self._monotonic = monotonic
+        self._release_projection_memory = release_projection_memory
         self.runtime = runtime or QuoteWorkerRuntime()
 
     @property
@@ -413,6 +437,7 @@ class QuoteWorker:
                     # Drop the local owner before the interval wait so the next
                     # snapshot has the memory headroom certification consumed.
                     certified_projection = None
+                    self._release_projection_memory()
                 elapsed_s = max(0.0, self._monotonic() - attempt_started)
                 delay_s = max(0.0, self._interval_s - elapsed_s)
                 if await self._wait_for_stop(stop_event, delay_s):
