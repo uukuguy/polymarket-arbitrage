@@ -114,6 +114,13 @@ class QuoteCollectionSubprocessError(RuntimeError):
         super().__init__(f"quote-collection-subprocess-{reason}")
 
 
+class QuoteCollectionSourceSupersededError(QuoteCollectionSubprocessError):
+    """A newer certified Structure revision replaced the quote input mid-run."""
+
+    def __init__(self) -> None:
+        super().__init__("source-superseded")
+
+
 class QuoteWorkerRuntime:
     """Bounded process-local attempt state; durable success truth stays in SQLite."""
 
@@ -286,6 +293,13 @@ async def collect_quotes_in_subprocess(
         raise
 
     if process.returncode != 0:
+        diagnostic = stderr.decode("utf-8", errors="replace")
+        if "verified universe snapshot is no longer the latest published truth" in diagnostic:
+            logger.info(
+                "isolated quote collection superseded by a newer Structure revision "
+                f"pid={getattr(process, 'pid', None)}"
+            )
+            raise QuoteCollectionSourceSupersededError()
         logger.warning(
             "isolated quote collection failed "
             f"returncode={process.returncode} "
@@ -381,6 +395,7 @@ class QuoteWorker:
         try:
             while not stop_event.is_set():
                 attempt_started = self._monotonic()
+                retry_immediately = False
                 self.runtime.mark_started()
                 try:
                     result = await self._collect_once()
@@ -405,6 +420,17 @@ class QuoteWorker:
                                 raise QuoteProjectionIntegrityError()
                 except asyncio.CancelledError:
                     raise
+                except QuoteCollectionSourceSupersededError:
+                    # Structure publication invalidated the quote input while
+                    # the child was collecting.  The old run was safely
+                    # rejected; immediately bind a new run rather than
+                    # waiting a full periodic interval and raising a false
+                    # operational incident.
+                    retry_immediately = True
+                    logger.info(
+                        "neg-risk quote collection superseded by Structure; "
+                        "retrying immediately"
+                    )
                 except Exception as error:  # fail-soft producer boundary
                     self.runtime.mark_failure(error)
                     logger.exception(
@@ -439,7 +465,7 @@ class QuoteWorker:
                     certified_projection = None
                     self._release_projection_memory()
                 elapsed_s = max(0.0, self._monotonic() - attempt_started)
-                delay_s = max(0.0, self._interval_s - elapsed_s)
+                delay_s = 0.0 if retry_immediately else max(0.0, self._interval_s - elapsed_s)
                 if await self._wait_for_stop(stop_event, delay_s):
                     break
         finally:

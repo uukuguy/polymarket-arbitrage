@@ -6,6 +6,8 @@ import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from polyarb.config import Settings
 from polyarb.http.app import create_app
 from polyarb.storage.sqlite_store import SQLiteStore
@@ -73,3 +75,87 @@ def test_fly_refreshes_structure_within_the_quote_freshness_window() -> None:
     config = tomllib.loads(Path("fly.toml").read_text())
 
     assert config["env"]["POLYARB_SCHEDULER_INTERVAL_S"] == "300"
+
+
+@pytest.mark.asyncio
+async def test_quote_subprocess_classifies_replaced_structure_revision(tmp_path) -> None:
+    """A safe rejection of an old Structure revision is retryable, not opaque."""
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSourceSupersededError,
+        collect_quotes_in_subprocess,
+    )
+
+    class Process:
+        returncode = 2
+
+        async def communicate(self):
+            return (
+                b"",
+                b"quote collection failed: verified universe snapshot is no longer "
+                b"the latest published truth\n",
+            )
+
+    async def spawn(*_args, **_kwargs):
+        return Process()
+
+    with pytest.raises(QuoteCollectionSourceSupersededError):
+        await collect_quotes_in_subprocess(
+            Settings(db_path=tmp_path / "state.db"),
+            spawn=spawn,
+        )
+
+
+@pytest.mark.asyncio
+async def test_quote_worker_immediately_retries_superseded_structure_revision() -> None:
+    """A Structure publish during CLOB collection does not create a two-minute gap."""
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSourceSupersededError,
+        QuoteWorker,
+        QuoteWorkerRuntime,
+    )
+    from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
+
+    stop_event = asyncio.Event()
+    waits: list[float] = []
+    outcomes: list[object] = [
+        QuoteCollectionSourceSupersededError(),
+        QuoteCollectionResult(
+            run_id=11,
+            status="complete",
+            universe_snapshot_id=22,
+            requested_token_count=4,
+            successful_response_count=4,
+            quote_taken_at_ms=1_000,
+            elapsed_ms=20,
+            universe_hash="a" * 64,
+        ),
+    ]
+
+    async def collect_once() -> QuoteCollectionResult:
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        assert isinstance(outcome, QuoteCollectionResult)
+        return outcome
+
+    async def wait_for_stop(_stop_event: asyncio.Event, delay_s: float) -> bool:
+        waits.append(delay_s)
+        if len(waits) == 2:
+            stop_event.set()
+            return True
+        return False
+
+    runtime = QuoteWorkerRuntime()
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        interval_s=120,
+        runtime=runtime,
+        wait_for_stop=wait_for_stop,
+    )
+
+    await worker.run(stop_event)
+
+    assert outcomes == []
+    assert waits[0] == 0
+    assert runtime.failure_count == 0
+    assert runtime.success_count == 1
