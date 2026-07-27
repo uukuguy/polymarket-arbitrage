@@ -94,6 +94,60 @@ class _FakeProcess:
         self.killed = True
 
 
+def test_snapshot_attempt_lifecycle_is_append_only(daemon_settings_for_test: Any) -> None:
+    """A terminal scheduler attempt keeps its original OOM classification."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    attempt_id = store.begin_snapshot_attempt(started_at_ms=1_000)
+    store.finish_snapshot_attempt(
+        attempt_id=attempt_id,
+        outcome="failed",
+        finished_at_ms=2_000,
+        snapshot_id=None,
+        failure_kind="snapshot-subprocess-signal-sigkill-possible-oom",
+    )
+
+    assert store.get_latest_snapshot_attempt() == {
+        "id": attempt_id,
+        "started_at_ms": 1_000,
+        "finished_at_ms": 2_000,
+        "outcome": "failed",
+        "snapshot_id": None,
+        "failure_kind": "snapshot-subprocess-signal-sigkill-possible-oom",
+    }
+
+
+def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
+    daemon_settings_for_test: Any,
+) -> None:
+    """A later writer cannot turn recorded success into a fabricated failure."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    attempt_id = store.begin_snapshot_attempt(started_at_ms=1_000)
+    store.finish_snapshot_attempt(
+        attempt_id=attempt_id,
+        outcome="succeeded",
+        finished_at_ms=2_000,
+        snapshot_id=746,
+        failure_kind=None,
+    )
+
+    with pytest.raises(ValueError, match="not running"):
+        store.finish_snapshot_attempt(
+            attempt_id=attempt_id,
+            outcome="failed",
+            finished_at_ms=3_000,
+            snapshot_id=None,
+            failure_kind="late-rewrite",
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "is_valid", "returncode"),

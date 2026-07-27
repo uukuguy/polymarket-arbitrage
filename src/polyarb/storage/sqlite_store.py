@@ -36,6 +36,7 @@ from polyarb.storage.schemas import (
     MARKETS_COLUMN_ORDER,
     MARKETS_INSERT_SQL,
     SCHEDULER_STATE_DDL,
+    SNAPSHOT_ATTEMPTS_DDL,
 )
 from polyarb.validator.category import Category, Issue
 
@@ -348,6 +349,8 @@ class SQLiteStore:
             con.executescript(DDL)
             # Phase 02 Plan 02: scheduler_state singleton table
             con.executescript(SCHEDULER_STATE_DDL)
+            # Parent-observed outcomes for isolated scheduler snapshot children.
+            con.executescript(SNAPSHOT_ATTEMPTS_DDL)
             # Phase 03.1 Plan 01: l2_mirror_state singleton (GAP-2 + GAP-3)
             con.executescript(L2_MIRROR_STATE_DDL)
 
@@ -856,6 +859,70 @@ class SQLiteStore:
                 "updated_at_ms=excluded.updated_at_ms",
                 (state, failure_counter, updated_at_ms),
             )
+        finally:
+            con.close()
+
+    def begin_snapshot_attempt(self, *, started_at_ms: int) -> int:
+        """Append one running scheduler attempt before spawning its child."""
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            cur = con.execute(
+                "INSERT INTO snapshot_attempts(started_at_ms,outcome) "
+                "VALUES (?, 'running')",
+                (started_at_ms,),
+            )
+            assert cur.lastrowid is not None
+            return int(cur.lastrowid)
+        finally:
+            con.close()
+
+    def finish_snapshot_attempt(
+        self,
+        *,
+        attempt_id: int,
+        outcome: str,
+        finished_at_ms: int,
+        snapshot_id: int | None,
+        failure_kind: str | None,
+    ) -> None:
+        """Close one running attempt exactly once with a bounded outcome."""
+        if outcome not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError(f"invalid terminal snapshot attempt outcome: {outcome}")
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            cur = con.execute(
+                "UPDATE snapshot_attempts "
+                "SET finished_at_ms=?, outcome=?, snapshot_id=?, failure_kind=? "
+                "WHERE id=? AND outcome='running'",
+                (finished_at_ms, outcome, snapshot_id, failure_kind, attempt_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError(f"snapshot attempt {attempt_id} is not running")
+        finally:
+            con.close()
+
+    def get_latest_snapshot_attempt(self) -> dict[str, object] | None:
+        """Read one newest scheduler attempt without mutating operational truth."""
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            return None
+        try:
+            row = con.execute(
+                "SELECT id,started_at_ms,finished_at_ms,outcome,snapshot_id,failure_kind "
+                "FROM snapshot_attempts ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "started_at_ms": row[1],
+                "finished_at_ms": row[2],
+                "outcome": row[3],
+                "snapshot_id": row[4],
+                "failure_kind": row[5],
+            }
         finally:
             con.close()
 

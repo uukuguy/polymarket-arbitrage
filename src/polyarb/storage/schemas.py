@@ -385,6 +385,29 @@ CREATE TABLE IF NOT EXISTS scheduler_state (
 )
 """
 
+# Append-only parent-process evidence for scheduler-launched snapshot children.
+# A child killed by the kernel cannot write a terminal snapshots row; this table
+# records the parent-observed result without changing market publication truth.
+SNAPSHOT_ATTEMPTS_DDL = """
+CREATE TABLE IF NOT EXISTS snapshot_attempts (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at_ms  INTEGER NOT NULL,
+    finished_at_ms INTEGER,
+    outcome        TEXT NOT NULL CHECK(outcome IN ('running','succeeded','failed','cancelled')),
+    snapshot_id    INTEGER REFERENCES snapshots(id),
+    failure_kind   TEXT,
+    CHECK(
+        (outcome = 'running' AND finished_at_ms IS NULL
+         AND snapshot_id IS NULL AND failure_kind IS NULL)
+        OR (outcome = 'succeeded' AND finished_at_ms IS NOT NULL
+            AND snapshot_id IS NOT NULL AND failure_kind IS NULL)
+        OR (outcome IN ('failed','cancelled') AND finished_at_ms IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_snapshot_attempts_started_at_ms
+ON snapshot_attempts(started_at_ms DESC);
+"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 03.1 Plan 01: l2_mirror_state singleton table (GAP-2 + GAP-3)
 #
