@@ -233,6 +233,22 @@ Expected: PASS; empty watchlist makes no CLOB call and cancellation preserves co
 
 ## Task 5: Cloud read models, triggers, and Make controls
 
+### 2026-07-28 production-evidence amendment
+
+Keep the current Structure scheduler cadence at **300 seconds** in this task.
+Production evidence shows the isolated Structure child can take approximately
+240 seconds and the scheduler is paused after timeouts; changing it to 1,800
+seconds would conceal the availability problem before the new bounded stage
+diagnostics can identify it. Map maximum-age (1,800s), global Quote (120s),
+and focused polling (15s) remain read-model/collector contracts, not a reason
+to alter Structure cadence here.
+
+New HMAC controls must fail closed if the local
+`POLYARB_SCAN_SHARED_SECRET` is absent. Their cloud acceptance may be deferred
+until that local authority is configured; do not retrieve a remote secret or
+use a trigger to bypass the paused scheduler. Public read endpoints remain
+deployable and verifiable without credentials.
+
 **Files:** Create `src/polyarb/http/market_map.py`, `src/polyarb/cli_perception.py`, `tests/m1-perception/test_opportunity_watcher_http.py`; modify `src/polyarb/http/arbitrage.py`, `src/polyarb/http/app.py`, `src/polyarb/http/control.py`, `src/polyarb/daemon/scheduler.py`, `src/polyarb/daemon/quote_worker.py`, `src/polyarb/config.py`, `fly.toml`, `Makefile`, `tests/test_makefile.py`.
 
 **Interfaces:** Public reads are `/market-map`, `/market-map?event_id=`, `/opportunity-watch/status`, `/arbitrage/opportunities`, and `/arbitrage/opportunities/<id>/history`. HMAC writes are `/control/market-map/build` and `/control/neg-risk/scan`.
@@ -265,7 +281,9 @@ Expected: FAIL because routes, controls, settings, and Make targets are absent.
 
 Add event-backed `request_now()` methods to Scheduler and Quote worker so a trigger queues one normal cycle and never starts a concurrent child. Existing Control HMAC protects both new routes, which return `202 queued`, `200 already_queued`, or `409 unavailable` for disabled/paused producers. `cli_perception.py` serializes JSON, calculates HMAC from `POLYARB_SCAN_SHARED_SECRET`, exits before a request if secret is empty, and never logs it.
 
-Set Settings defaults to 100bps, 15s focus, 1,800s map age, and 30d retention. Change Fly Structure cadence from 300 to 1,800 seconds, keep global Quote at 120 seconds, and keep the measured 1GB VM unchanged.
+Set Settings defaults to 100bps, 15s focus, 1,800s map age, and 30d retention.
+Keep Fly Structure cadence at 300 seconds, global Quote at 120 seconds, and
+the measured 1GB VM unchanged.
 
 Add Make targets: `build-market-map`, `inspect-market-map`, `scan-neg-risk-map`, `watch-opportunities-status`, `watch-opportunities`, `watch-opportunity-history`. Control targets call `cli_perception`; read targets call public cloud GETs. Require `opportunity_id` for replay and document every target as cloud/read-only/no-order.
 
