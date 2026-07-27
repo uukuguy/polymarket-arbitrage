@@ -85,6 +85,8 @@ def test_legacy_db_adds_supabase_mirror_at_ms_column(tmp_path: Path) -> None:
     assert "supabase_mirror_at_ms" in cols
     assert "parquet_r2_url" in cols
     assert "market_view_published" in cols
+    assert "data_product" in cols
+    assert "archive_status" in cols
 
 
 def test_legacy_db_preserves_existing_rows(tmp_path: Path) -> None:
@@ -98,7 +100,8 @@ def test_legacy_db_preserves_existing_rows(tmp_path: Path) -> None:
     con = sqlite3.connect(db)
     try:
         row = con.execute(
-            "SELECT mode, market_count, supabase_mirror_at_ms, parquet_r2_url "
+            "SELECT mode, market_count, supabase_mirror_at_ms, parquet_r2_url, "
+            "data_product, archive_status "
             "FROM snapshots WHERE id = 1"
         ).fetchone()
     finally:
@@ -109,6 +112,8 @@ def test_legacy_db_preserves_existing_rows(tmp_path: Path) -> None:
     assert row[1] == 42
     assert row[2] is None  # new column NULL for pre-migration row
     assert row[3] is None
+    assert row[4] == "legacy_combined"
+    assert row[5] == "legacy"
     assert _read_market_view_published(db) == 0
 
 
@@ -123,6 +128,8 @@ def test_migration_is_idempotent(tmp_path: Path) -> None:
     cols = _column_names(db, "snapshots")
     assert "supabase_mirror_at_ms" in cols
     assert "parquet_r2_url" in cols
+    assert "data_product" in cols
+    assert "archive_status" in cols
 
 
 def test_legacy_db_adds_market_truth_tables(tmp_path: Path) -> None:

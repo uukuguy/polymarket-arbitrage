@@ -375,6 +375,16 @@ class SQLiteStore:
                 "market_view_published",
                 "INTEGER NOT NULL DEFAULT 0",
             )
+            _ensure_column(
+                "snapshots",
+                "data_product",
+                "TEXT NOT NULL DEFAULT 'legacy_combined'",
+            )
+            _ensure_column(
+                "snapshots",
+                "archive_status",
+                "TEXT NOT NULL DEFAULT 'legacy'",
+            )
             # H-009: quote collectors lease their collecting run.  A default
             # of zero makes any legacy collecting row immediately recoverable
             # rather than leaving the single-run gate permanently wedged.
@@ -416,6 +426,8 @@ class SQLiteStore:
         notes: str | None = None,
         event_rows: list[dict] | None = None,
         event_tag_rows: list[dict] | None = None,
+        data_product: str = "legacy_combined",
+        archive_status: str = "legacy",
     ) -> int:
         """Persist one snapshot atomically.
 
@@ -467,14 +479,17 @@ class SQLiteStore:
             cur = con.execute(
                 "INSERT INTO snapshots("
                 "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
-                "is_valid,parquet_path,notes,supabase_mirror_at_ms,parquet_r2_url"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "data_product,archive_status,is_valid,parquet_path,notes,"
+                "supabase_mirror_at_ms,parquet_r2_url"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     taken_at_ms,
                     finished_at_ms,
                     mode,
                     len(market_rows),
                     int(publish_markets),
+                    data_product,
+                    archive_status,
                     int(is_valid),
                     parquet_path,
                     notes,
@@ -571,6 +586,8 @@ class SQLiteStore:
         event_rows: list[dict] | None = None,
         event_tag_rows: list[dict] | None = None,
         batch_size: int = 500,
+        data_product: str = "legacy_combined",
+        archive_status: str = "legacy",
     ) -> tuple[int, int]:
         """Streaming variant of write_snapshot.
 
@@ -614,14 +631,17 @@ class SQLiteStore:
             cur = con.execute(
                 "INSERT INTO snapshots("
                 "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
-                "is_valid,parquet_path,notes,supabase_mirror_at_ms,parquet_r2_url"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "data_product,archive_status,is_valid,parquet_path,notes,"
+                "supabase_mirror_at_ms,parquet_r2_url"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     taken_at_ms,
                     finished_at_ms,
                     mode,
                     0,  # placeholder; UPDATEd after stream consumed
                     int(publish_markets),
+                    data_product,
+                    archive_status,
                     int(is_valid),
                     parquet_path,
                     notes,

@@ -229,6 +229,8 @@ def test_streaming_sqlite_matches_legacy_sqlite(tmp_path: Path) -> None:
         event_members=[],
         group_truths=[],
         publish_markets=True,
+        data_product="structure",
+        archive_status="not_requested",
     )
 
     store_stream = SQLiteStore(tmp_path / "stream.db")
@@ -246,6 +248,8 @@ def test_streaming_sqlite_matches_legacy_sqlite(tmp_path: Path) -> None:
         event_members=[],
         group_truths=[],
         publish_markets=True,
+        data_product="structure",
+        archive_status="not_requested",
     )
     assert count == 1500
 
@@ -253,13 +257,15 @@ def test_streaming_sqlite_matches_legacy_sqlite(tmp_path: Path) -> None:
     con_a = sqlite3.connect(store_legacy.db_path)
     con_b = sqlite3.connect(store_stream.db_path)
     try:
-        mc_a = con_a.execute(
-            "SELECT market_count FROM snapshots WHERE id=?", (legacy_id,)
-        ).fetchone()[0]
-        mc_b = con_b.execute(
-            "SELECT market_count FROM snapshots WHERE id=?", (stream_id,)
-        ).fetchone()[0]
-        assert mc_a == mc_b == 1500
+        metadata_a = con_a.execute(
+            "SELECT market_count,data_product,archive_status FROM snapshots WHERE id=?",
+            (legacy_id,),
+        ).fetchone()
+        metadata_b = con_b.execute(
+            "SELECT market_count,data_product,archive_status FROM snapshots WHERE id=?",
+            (stream_id,),
+        ).fetchone()
+        assert metadata_a == metadata_b == (1500, "structure", "not_requested")
 
         ids_a = sorted(r[0] for r in con_a.execute("SELECT market_id FROM markets").fetchall())
         ids_b = sorted(r[0] for r in con_b.execute("SELECT market_id FROM markets").fetchall())
