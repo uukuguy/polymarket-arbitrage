@@ -106,6 +106,61 @@ async def test_quote_subprocess_classifies_replaced_structure_revision(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_quote_subprocess_cancellation_keeps_one_reap_task_until_child_exit(
+    tmp_path,
+) -> None:
+    """Cancellation must reap one child, not abandon its pipe reader and lease."""
+    from polyarb.daemon.quote_worker import collect_quotes_in_subprocess
+
+    class Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.calls = 0
+            self.started = asyncio.Event()
+            self.released = asyncio.Event()
+            self.terminated = False
+            self.killed = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            self.calls += 1
+            if self.calls != 1:
+                raise AssertionError("communicate must not be re-entered after cancellation")
+            self.started.set()
+            await self.released.wait()
+            return b"", b""
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+            self.released.set()
+
+    process = Process()
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    task = asyncio.create_task(
+        collect_quotes_in_subprocess(
+            Settings(db_path=tmp_path / "state.db"),
+            spawn=spawn,
+            terminate_timeout_s=0.01,
+        )
+    )
+    await asyncio.wait_for(process.started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_quote_worker_immediately_retries_superseded_structure_revision() -> None:
     """A Structure publish during CLOB collection does not create a two-minute gap."""
     from polyarb.daemon.quote_worker import (

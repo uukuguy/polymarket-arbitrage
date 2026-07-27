@@ -290,8 +290,14 @@ async def collect_quotes_in_subprocess(
         "isolated quote collection started "
         f"pid={getattr(process, 'pid', None)}"
     )
+    # Keep ownership of one pipe-reader task across cancellation.  Awaiting
+    # communicate() directly lets task cancellation tear down its stream
+    # readers; a second communicate() then cannot reliably reap the still-live
+    # child.  The shutdown path must prove the child exited before the durable
+    # collecting lease can be released.
+    communicate_task = asyncio.create_task(process.communicate())
     try:
-        stdout, stderr = await process.communicate()
+        stdout, stderr = await asyncio.shield(communicate_task)
     except asyncio.CancelledError:
         try:
             process.terminate()
@@ -299,7 +305,7 @@ async def collect_quotes_in_subprocess(
             pass
         try:
             await asyncio.wait_for(
-                process.communicate(),
+                asyncio.shield(communicate_task),
                 timeout=terminate_timeout_s,
             )
         except TimeoutError:
@@ -307,7 +313,7 @@ async def collect_quotes_in_subprocess(
                 process.kill()
             except ProcessLookupError:
                 pass
-            await process.communicate()
+            await asyncio.shield(communicate_task)
         raise
 
     if process.returncode != 0:
