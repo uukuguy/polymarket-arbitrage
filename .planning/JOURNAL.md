@@ -5461,6 +5461,9 @@ manifest, and 24-hour T0. Also persist Polywatch alert reason/timestamp.
 - [OPERATOR] Added `make sync-structure-local` and `make archive-markets-local`.
   The former is Gamma-only local mutation; the latter is deliberate research
   archive work, not production scheduling.
+- [CONFIG] Removed the volume-less cron's direct snapshot and purge jobs. The
+  256MB cron process now runs only independent Polywatch; only the mounted app
+  scheduler may publish Structure.
 - [QUALITY] 371 related tests, scoped Ruff, `make docs-m1-check`, and
   `make planning-status` pass. No Fly/cron/deploy/capacity mutation has occurred.
 

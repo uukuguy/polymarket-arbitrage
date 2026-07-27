@@ -40,27 +40,13 @@ primary_region = "ams"
     path = "/healthz"
     timeout = "10s"
 
-# VM sizing — 2026-05-16 SESSION 19 final: 1GB after empirical OOM observations.
+# Capacity baseline — retain the currently provisioned 1GB app VM while the
+# Structure-only release is measured in production. The prior all-in-one CLOB
+# snapshot repeatedly exhausted this cgroup; Archive is no longer a reason to
+# resize the online path. Any future 4/8GB choice must be based on measured
+# Structure+Quote headroom, not on making Archive fit here.
 #
-# Plan 02-09 streaming refactor IS architecturally correct — the 20k raw Gamma
-# response no longer accumulates. But empirical Linux RSS at production
-# $1k threshold (6700 target_markets, 13400 CLOB tokens) tops out at 402MB
-# anonymous RSS before kernel OOM-kills the daemon process:
-#
-#   [Linux OOM] Killed process 647 (python) total-vm:871344kB,
-#     anon-rss:402364kB, file-rss:60kB ... oom_score_adj:0
-#
-# Fly cgroup limit includes kernel + container overhead, so a 512MB VM gives
-# the user process ~400MB headroom — exactly where Plan 02-09's data-resident
-# working set ends up. 1GB ($7.12/mo) gives ~900MB usable, easily absorbing
-# 2× data growth and the periodic CLOB cache memory bursts.
-#
-# We are not chasing further memory savings on this data-collection daemon.
-# It's a small program; the right tradeoff is paying for headroom rather than
-# adding code complexity. If we ever care about cost per market, plan 02-10
-# can revisit (multi-process snapshot? separate CLOB worker? lazy book fetch?).
-#
-# Cron stays 256MB — supercronic is a small binary, no Python workload.
+# Cron stays 256MB because it only runs Polywatch and has no /data volume.
 [[vm]]
   size = "shared-cpu-1x"
   memory = "1024mb"

@@ -380,12 +380,14 @@ def test_failed_l1_recovery_delivery_keeps_only_l1_incident() -> None:
     }
 
 
-def test_cron_machine_runs_polywatch_every_two_minutes() -> None:
+def test_cron_machine_runs_only_polywatch_every_two_minutes() -> None:
     crontab = (PROJECT_ROOT / "crontab").read_text()
 
     assert "*/2 * * * *" in crontab
     assert "POLYWATCH_STATE_FILE=/tmp/polywatch-healthz-state.json" in crontab
     assert "python /app/scripts/polywatch/healthz_watcher.py" in crontab
+    assert "polyarb.snapshot" not in crontab
+    assert "snapshots-purge" not in crontab
 
 
 def test_runtime_image_contains_polywatch_script() -> None:
