@@ -39,6 +39,8 @@ def test_snapshot_attempt_status_reports_latest_failed_attempt(tmp_path: Path) -
         finished_at_ms=2_000,
         snapshot_id=None,
         failure_kind="snapshot-subprocess-signal-sigkill-possible-oom",
+        last_stage="gamma-markets",
+        elapsed_ms=245_012,
     )
 
     result = _run(db_path)
@@ -47,8 +49,10 @@ def test_snapshot_attempt_status_reports_latest_failed_attempt(tmp_path: Path) -
     assert json.loads(result.stdout) == {
         "latest": {
             "failure_kind": "snapshot-subprocess-signal-sigkill-possible-oom",
+            "elapsed_ms": 245_012,
             "finished_at_ms": 2_000,
             "id": 1,
+            "last_stage": "gamma-markets",
             "outcome": "failed",
             "snapshot_id": None,
             "started_at_ms": 1_000,

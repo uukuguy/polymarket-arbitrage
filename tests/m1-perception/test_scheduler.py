@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -61,9 +62,18 @@ def test_scheduler_interval_reads_env_var(monkeypatch: pytest.MonkeyPatch) -> No
 class _FakeResult:
     """Minimal snapshot result stub."""
 
-    def __init__(self, status: SnapshotStatus) -> None:
+    def __init__(
+        self,
+        status: SnapshotStatus,
+        *,
+        snapshot_id: int = 1,
+        last_stage: str | None = None,
+        elapsed_ms: int | None = None,
+    ) -> None:
         self.status = status
-        self.snapshot_id = 1
+        self.snapshot_id = snapshot_id
+        self.last_stage = last_stage
+        self.elapsed_ms = elapsed_ms
 
 
 class _FakeProcess:
@@ -123,7 +133,45 @@ def test_snapshot_attempt_lifecycle_is_append_only(daemon_settings_for_test: Any
         "outcome": "failed",
         "snapshot_id": None,
         "failure_kind": "snapshot-subprocess-signal-sigkill-possible-oom",
+        "last_stage": None,
+        "elapsed_ms": None,
     }
+
+
+def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(tmp_path: Path) -> None:
+    """Fresh and pre-diagnostic attempt tables expose nullable diagnostic columns."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    fresh_db = tmp_path / "fresh.db"
+    SQLiteStore(fresh_db).init_schema()
+    with sqlite3.connect(fresh_db) as con:
+        fresh_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
+    assert {"elapsed_ms", "last_stage"} <= fresh_columns
+
+    legacy_db = tmp_path / "legacy.db"
+    with sqlite3.connect(legacy_db) as con:
+        con.execute(
+            "CREATE TABLE snapshot_attempts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, started_at_ms INTEGER NOT NULL, "
+            "finished_at_ms INTEGER, outcome TEXT NOT NULL, snapshot_id INTEGER, "
+            "failure_kind TEXT)"
+        )
+        con.execute(
+            "INSERT INTO snapshot_attempts(started_at_ms, outcome) VALUES (?, ?)",
+            (1_000, "running"),
+        )
+
+    legacy_store = SQLiteStore(legacy_db)
+    legacy_store.init_schema()
+    legacy_store.init_schema()
+
+    with sqlite3.connect(legacy_db) as con:
+        legacy_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
+        historical_diagnostics = con.execute(
+            "SELECT last_stage, elapsed_ms FROM snapshot_attempts WHERE id = 1"
+        ).fetchone()
+    assert {"elapsed_ms", "last_stage"} <= legacy_columns
+    assert historical_diagnostics == (None, None)
 
 
 def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
@@ -166,7 +214,11 @@ async def test_scheduler_persists_sigkill_attempt_failure(
     store.init_schema()
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
     scheduler._run_snapshot = AsyncMock(
-        side_effect=SnapshotSubprocessError("signal-sigkill-possible-oom")
+        side_effect=SnapshotSubprocessError(
+            "timeout",
+            last_stage="gamma-markets",
+            elapsed_ms=245_012,
+        )
     )
 
     await scheduler._tick()
@@ -177,8 +229,65 @@ async def test_scheduler_persists_sigkill_attempt_failure(
         "finished_at_ms": pytest.approx(int(time.time() * 1000), abs=2_000),
         "outcome": "failed",
         "snapshot_id": None,
-        "failure_kind": "snapshot-subprocess-signal-sigkill-possible-oom",
+        "failure_kind": "snapshot-subprocess-timeout",
+        "last_stage": "gamma-markets",
+        "elapsed_ms": 245_012,
     }
+
+
+@pytest.mark.asyncio
+async def test_scheduler_persists_successful_attempt_diagnostics(
+    daemon_settings_for_test: Any,
+) -> None:
+    """A terminal successful row retains parent-observed diagnostics."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(
+        return_value=_FakeResult(
+            SnapshotStatus.OK,
+            last_stage="persist",
+            elapsed_ms=1_234,
+        )
+    )
+
+    await scheduler._tick()
+
+    latest_attempt = store.get_latest_snapshot_attempt()
+    assert latest_attempt is not None
+    assert latest_attempt["outcome"] == "succeeded"
+    assert latest_attempt["last_stage"] == "persist"
+    assert latest_attempt["elapsed_ms"] == 1_234
+
+
+@pytest.mark.asyncio
+async def test_scheduler_preserves_result_diagnostics_when_result_is_rejected(
+    daemon_settings_for_test: Any,
+) -> None:
+    """A parent validation error retains the child facts it was handed."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(
+        return_value=_FakeResult(
+            SnapshotStatus.OK,
+            snapshot_id=0,
+            last_stage="persist",
+            elapsed_ms=1_234,
+        )
+    )
+
+    await scheduler._tick()
+
+    latest_attempt = store.get_latest_snapshot_attempt()
+    assert latest_attempt is not None
+    assert latest_attempt["failure_kind"] == "snapshot-subprocess-missing-snapshot-id"
+    assert latest_attempt["last_stage"] == "persist"
+    assert latest_attempt["elapsed_ms"] == 1_234
 
 
 @pytest.mark.asyncio

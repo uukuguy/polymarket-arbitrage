@@ -359,6 +359,8 @@ class SnapshotScheduler:
         outcome: str,
         snapshot_id: int | None,
         failure_kind: str | None,
+        last_stage: str | None = None,
+        elapsed_ms: int | None = None,
     ) -> None:
         """Best-effort terminal record; scheduler behavior remains primary truth."""
         try:
@@ -369,6 +371,8 @@ class SnapshotScheduler:
                 finished_at_ms=int(time.time() * 1000),
                 snapshot_id=snapshot_id,
                 failure_kind=failure_kind,
+                last_stage=last_stage,
+                elapsed_ms=elapsed_ms,
             )
         except Exception as error:  # noqa: BLE001 - operational evidence is fail-soft
             logger.warning(
@@ -402,12 +406,20 @@ class SnapshotScheduler:
             if result_status in (SnapshotStatus.OK, SnapshotStatus.DEGRADED):
                 snapshot_id = getattr(result, "snapshot_id", None)
                 if not isinstance(snapshot_id, int) or snapshot_id <= 0:
-                    raise SnapshotSubprocessError("missing-snapshot-id")
+                    last_stage = getattr(result, "last_stage", None)
+                    elapsed_ms = getattr(result, "elapsed_ms", 0)
+                    raise SnapshotSubprocessError(
+                        "missing-snapshot-id",
+                        last_stage=last_stage if isinstance(last_stage, str) else None,
+                        elapsed_ms=elapsed_ms if isinstance(elapsed_ms, int) else 0,
+                    )
                 await self._finish_attempt(
                     attempt_id=attempt_id,
                     outcome="succeeded",
                     snapshot_id=snapshot_id,
                     failure_kind=None,
+                    last_stage=getattr(result, "last_stage", None),
+                    elapsed_ms=getattr(result, "elapsed_ms", None),
                 )
                 # DEGRADED is NOT a failure (D-12 amendment)
                 self._failure_counter = 0
@@ -445,6 +457,8 @@ class SnapshotScheduler:
                     outcome="failed",
                     snapshot_id=(snapshot_id if isinstance(snapshot_id, int) else None),
                     failure_kind="snapshot-status-failed",
+                    last_stage=getattr(result, "last_stage", None),
+                    elapsed_ms=getattr(result, "elapsed_ms", None),
                 )
                 # FAILED status
                 self._failure_counter += 1
@@ -470,6 +484,8 @@ class SnapshotScheduler:
                 outcome="failed",
                 snapshot_id=None,
                 failure_kind=str(error),
+                last_stage=getattr(error, "last_stage", None),
+                elapsed_ms=getattr(error, "elapsed_ms", None),
             )
             self._failure_counter += 1
             logger.exception(

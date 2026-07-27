@@ -371,7 +371,17 @@ def _build_health_checks(
         attempt_output = None
     else:
         attempt_value = str(latest_attempt["outcome"])
-        attempt_output = latest_attempt["failure_kind"]
+        diagnostic_parts = []
+        failure_kind = latest_attempt["failure_kind"]
+        if failure_kind is not None:
+            diagnostic_parts.append(str(failure_kind))
+        last_stage = latest_attempt["last_stage"]
+        if last_stage is not None:
+            diagnostic_parts.append(f"stage={last_stage}")
+        elapsed_ms = latest_attempt["elapsed_ms"]
+        if elapsed_ms is not None:
+            diagnostic_parts.append(f"elapsed_ms={elapsed_ms}")
+        attempt_output = " ".join(diagnostic_parts) or None
         if attempt_value in {"failed", "cancelled"}:
             attempt_status = "warn" if truth_age_status == "pass" else "fail"
         elif attempt_value == "running":
@@ -389,7 +399,6 @@ def _build_health_checks(
                 attempt_output = None
         else:
             attempt_status = "pass"
-            attempt_output = None
     overall = _severity(overall, attempt_status)
     checks["snapshot:latest_attempt"] = [
         {

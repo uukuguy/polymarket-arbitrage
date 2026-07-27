@@ -471,6 +471,8 @@ CREATE TABLE IF NOT EXISTS snapshot_attempts (
     outcome        TEXT NOT NULL CHECK(outcome IN ('running','succeeded','failed','cancelled')),
     snapshot_id    INTEGER REFERENCES snapshots(id),
     failure_kind   TEXT,
+    last_stage     TEXT,
+    elapsed_ms     INTEGER,
     CHECK(
         (outcome = 'running' AND finished_at_ms IS NULL
          AND snapshot_id IS NULL AND failure_kind IS NULL)

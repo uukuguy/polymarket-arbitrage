@@ -293,6 +293,8 @@ def test_health_surfaces_failed_scheduler_attempt_while_truth_is_fresh(
         finished_at_ms=now_ms - 500,
         snapshot_id=None,
         failure_kind="snapshot-subprocess-signal-sigkill-possible-oom",
+        last_stage="gamma-markets",
+        elapsed_ms=245_012,
     )
 
     response = http_test_client.get("/health")
@@ -302,7 +304,35 @@ def test_health_surfaces_failed_scheduler_attempt_while_truth_is_fresh(
     assert checks["market_truth:last_complete_age_seconds"][0]["status"] == "pass"
     assert checks["snapshot:latest_attempt"][0]["observedValue"] == "failed"
     assert checks["snapshot:latest_attempt"][0]["status"] == "warn"
-    assert "possible-oom" in checks["snapshot:latest_attempt"][0]["output"]
+    assert checks["snapshot:latest_attempt"][0]["output"] == (
+        "snapshot-subprocess-signal-sigkill-possible-oom "
+        "stage=gamma-markets elapsed_ms=245012"
+    )
+
+
+def test_health_omits_stage_for_historical_attempt_without_diagnostics(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """Nullable legacy fields must not fabricate a stage label in health."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1000)
+    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=now_ms - 2_000)
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    attempt_id = store.begin_snapshot_attempt(started_at_ms=now_ms - 1_000)
+    store.finish_snapshot_attempt(
+        attempt_id=attempt_id,
+        outcome="failed",
+        finished_at_ms=now_ms - 500,
+        snapshot_id=None,
+        failure_kind="snapshot-status-failed",
+    )
+
+    attempt = http_test_client.get("/health").json()["checks"]["snapshot:latest_attempt"][0]
+
+    assert attempt["output"] == "snapshot-status-failed"
+    assert "stage=" not in attempt["output"]
 
 
 def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(

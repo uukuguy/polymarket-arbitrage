@@ -407,7 +407,7 @@ class SQLiteStore:
             con.executescript(L2_MIRROR_STATE_DDL)
 
             # Phase 02 Plan 02-08 (F-01): idempotent ADD COLUMN for legacy DBs.
-            # Targets: snapshots.supabase_mirror_at_ms, snapshots.parquet_r2_url.
+            # Targets include snapshot archival metadata and scheduler evidence.
             # Note: SQLite ALTER TABLE ADD COLUMN cannot add NOT NULL columns
             # without a default — both targets are nullable, which is correct
             # (NULL = "never mirrored / not yet uploaded").
@@ -442,6 +442,8 @@ class SQLiteStore:
                 "snapshot_status",
                 "TEXT NOT NULL DEFAULT 'ok'",
             )
+            _ensure_column("snapshot_attempts", "last_stage", "TEXT")
+            _ensure_column("snapshot_attempts", "elapsed_ms", "INTEGER")
             _backfill_structure_snapshot_statuses(con)
             # H-009: quote collectors lease their collecting run.  A default
             # of zero makes any legacy collecting row immediately recoverable
@@ -966,6 +968,8 @@ class SQLiteStore:
         finished_at_ms: int,
         snapshot_id: int | None,
         failure_kind: str | None,
+        last_stage: str | None = None,
+        elapsed_ms: int | None = None,
     ) -> None:
         """Close one running attempt exactly once with a bounded outcome."""
         if outcome not in {"succeeded", "failed", "cancelled"}:
@@ -974,9 +978,18 @@ class SQLiteStore:
         try:
             cur = con.execute(
                 "UPDATE snapshot_attempts "
-                "SET finished_at_ms=?, outcome=?, snapshot_id=?, failure_kind=? "
+                "SET finished_at_ms=?, outcome=?, snapshot_id=?, failure_kind=?, "
+                "last_stage=?, elapsed_ms=? "
                 "WHERE id=? AND outcome='running'",
-                (finished_at_ms, outcome, snapshot_id, failure_kind, attempt_id),
+                (
+                    finished_at_ms,
+                    outcome,
+                    snapshot_id,
+                    failure_kind,
+                    last_stage,
+                    elapsed_ms,
+                    attempt_id,
+                ),
             )
             if cur.rowcount != 1:
                 raise ValueError(f"snapshot attempt {attempt_id} is not running")
@@ -992,7 +1005,8 @@ class SQLiteStore:
             return None
         try:
             row = con.execute(
-                "SELECT id,started_at_ms,finished_at_ms,outcome,snapshot_id,failure_kind "
+                "SELECT id,started_at_ms,finished_at_ms,outcome,snapshot_id,failure_kind,"
+                "last_stage,elapsed_ms "
                 "FROM snapshot_attempts ORDER BY id DESC LIMIT 1"
             ).fetchone()
             if row is None:
@@ -1004,6 +1018,8 @@ class SQLiteStore:
                 "outcome": row[3],
                 "snapshot_id": row[4],
                 "failure_kind": row[5],
+                "last_stage": row[6],
+                "elapsed_ms": row[7],
             }
         finally:
             con.close()
