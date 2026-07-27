@@ -5418,3 +5418,17 @@ Start with `/gsd-resume-work --ws m1-perception`; implement and test
 replay-idempotent `l2_book_levels` persistence while preserving fail-closed
 behavior for conflicting payloads. Then deploy only L2 and create a fresh boot,
 manifest, and 24-hour T0. Also persist Polywatch alert reason/timestamp.
+
+## SESSION 109 — 2026-07-27 (snapshot capacity decision deferred to holistic repair)
+
+- [DECISION] Treat the 1 GB snapshot OOM as a system capacity/topology problem,
+  not a new isolated defect. Production evidence shows the HTTP parent,
+  snapshot child, and quote child can collectively exhaust the current cgroup.
+- [DIRECTION] Use a reliability-first staged design: measured headroom for M1
+  initial operation; snapshot/feed isolation plus atomic publication for M2
+  integration; separate perception/strategy/execution failure domains before
+  live trading.
+- [BOUNDARY] Record the direction now but do not independently resize or
+  re-architect yet. Exact resources, cadence, storage boundary, and migration
+  order will be decided from the complete observation evidence and executed as
+  part of the consolidated repair.

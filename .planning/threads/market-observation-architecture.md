@@ -1319,3 +1319,35 @@ transport activity and an orderbook resnapshot:
 - Alert/recovery state also needs durable reason context. Persisting only an
   active component key supports deduplication but cannot explain a recovered
   incident after short runtime logs expire.
+
+### §2.16 1 GB OOM is a capacity-model problem, not a one-off defect (2026-07-27)
+
+- [PRODUCTION EVIDENCE] In the expanded production universe, the L1 HTTP
+  parent, isolated snapshot child, and quote child can overlap in the same
+  1 GB cgroup. One observed overlap reached about 306 MB + 403 MB + 134 MB
+  RSS before the kernel OOM-killed the snapshot process. The exact values are
+  samples rather than allocation ceilings, but they prove that 1 GB has no
+  defensible production safety margin for the current co-located topology.
+- [HISTORICAL CONTINUITY] This is the same capacity class first exposed on
+  256/512 MB during Phase 02, now amplified by a much larger market universe,
+  an always-on HTTP process, and the two-minute M2 quote producer. Individual
+  retention, streaming, subprocess, compact-projection, GC, and allocator-trim
+  fixes reduce waste; they do not turn the remaining aggregate working set into
+  a transient bug.
+- [STAGED DESIGN ITEM] Resource sizing and snapshot policy must be designed as
+  one staged production contract:
+  1. M1 initial operation separates slow structural-market discovery from the
+     fast quote truth path and gives both measured memory headroom.
+  2. M1→M2 integration isolates snapshot work from the online feed, defines an
+     atomic publication boundary, and removes shared SQLite concurrency from
+     the cross-machine design before adding workers.
+  3. Formal arbitrage isolates perception, strategy, and execution failure
+     domains; live decisions never wait for a full-market snapshot and fail
+     closed when their source identity/freshness contract is not met.
+- [DEFERRED DECISION] Do not independently resize the VM or redesign the
+  pipeline from this note. During the consolidated repair, use the accumulated
+  long-run evidence to decide exact memory/CPU, process placement, snapshot
+  cadence, storage migration, retry policy, and promotion gates for each stage.
+  The user has accepted reliability-first staged separation as the design
+  direction, while asking that the final choice be considered and implemented
+  together with the holistic repair.
