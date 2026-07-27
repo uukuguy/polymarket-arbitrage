@@ -107,6 +107,9 @@ class CertifiedQuoteFeed:
     opportunity_scan: OpportunityScanResult | None
 
 
+RestoreFeed = Callable[[], Awaitable[CertifiedQuoteFeed | None]]
+
+
 class QuoteCollectionSubprocessError(RuntimeError):
     """The isolated quote collector did not return one valid complete result."""
 
@@ -189,6 +192,16 @@ class QuoteWorkerRuntime:
             CertifiedQuoteMetadata.from_projection(projection),
             opportunity_scan,
         )
+
+    def restore_certified_feed(self, feed: CertifiedQuoteFeed) -> None:
+        """Restore an already-validated durable feed after process restart."""
+        self._certified_feed = feed
+        self.state = "pass"
+        self.last_run_id = feed.projection.run_id
+        self.last_requested_token_count = feed.projection.requested_token_count
+        self.last_successful_response_count = feed.projection.successful_response_count
+        self.last_elapsed_ms = None
+        self.last_error_kind = None
 
     def certified_feed(self) -> CertifiedQuoteFeed | None:
         """Return one immutable projection/result pair without SQLite work."""
@@ -372,6 +385,7 @@ class QuoteWorker:
         collect_once: CollectOnce,
         certify_projection: CertifyProjection | None = None,
         prepare_opportunities: PrepareOpportunities | None = None,
+        restore_feed: RestoreFeed | None = None,
         interval_s: float,
         runtime: QuoteWorkerRuntime | None = None,
         wait_for_stop: WaitForStop = _wait_for_stop,
@@ -385,6 +399,7 @@ class QuoteWorker:
         self._collect_once = collect_once
         self._certify_projection = certify_projection
         self._prepare_opportunities = prepare_opportunities
+        self._restore_feed = restore_feed
         self._interval_s = interval_s
         self._wait_for_stop = wait_for_stop
         self._monotonic = monotonic
@@ -397,6 +412,22 @@ class QuoteWorker:
 
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
+            if self._restore_feed is not None:
+                try:
+                    restored_feed = await self._restore_feed()
+                    if restored_feed is not None:
+                        self.runtime.restore_certified_feed(restored_feed)
+                        logger.info(
+                            "restored certified neg-risk quote feed "
+                            f"run_id={restored_feed.projection.run_id}"
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # fail-soft; fresh collection follows
+                    logger.warning(
+                        "certified quote feed restore failed "
+                        f"kind={type(error).__name__}"
+                    )
             while not stop_event.is_set():
                 attempt_started = self._monotonic()
                 retry_immediately = False
@@ -511,9 +542,27 @@ def build_production_quote_worker(settings: Settings) -> QuoteWorker | None:
         )
         return result
 
+    async def restore_feed() -> CertifiedQuoteFeed | None:
+        """Rebuild the compact M2 feed from a durable, already-certified run."""
+        projection = await asyncio.to_thread(quote_store.latest_complete_projection)
+        if projection is None:
+            return None
+        opportunities = await prepare_opportunities(projection)
+        if (
+            opportunities.quote_run_id != projection.run_id
+            or opportunities.source_snapshot_id != projection.universe_snapshot_id
+            or opportunities.universe_hash != projection.universe_hash
+        ):
+            raise QuoteProjectionIntegrityError()
+        return CertifiedQuoteFeed(
+            CertifiedQuoteMetadata.from_projection(projection),
+            opportunities,
+        )
+
     return QuoteWorker(
         collect_once=collect_once,
         certify_projection=certify_projection,
         prepare_opportunities=prepare_opportunities,
+        restore_feed=restore_feed,
         interval_s=settings.neg_risk_quote_interval_s,
     )

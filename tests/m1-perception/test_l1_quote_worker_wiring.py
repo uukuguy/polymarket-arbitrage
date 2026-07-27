@@ -159,3 +159,81 @@ async def test_quote_worker_immediately_retries_superseded_structure_revision() 
     assert waits[0] == 0
     assert runtime.failure_count == 0
     assert runtime.success_count == 1
+
+
+@pytest.mark.asyncio
+async def test_quote_worker_restores_certified_feed_before_first_collection() -> None:
+    """A daemon restart can serve the durable certified feed before fresh CLOB I/O."""
+    from polyarb.daemon.quote_worker import (
+        CertifiedQuoteFeed,
+        CertifiedQuoteMetadata,
+        QuoteWorker,
+        QuoteWorkerRuntime,
+    )
+    from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
+
+    restored = CertifiedQuoteFeed(
+        projection=CertifiedQuoteMetadata(
+            run_id=11,
+            universe_snapshot_id=22,
+            universe_taken_at_ms=900,
+            quoted_at_ms=1_000,
+            requested_token_count=4,
+            successful_response_count=4,
+            universe_hash="a" * 64,
+            source_truth_hash="b" * 64,
+        ),
+        opportunity_scan=None,
+    )
+    stop_event = asyncio.Event()
+    runtime = QuoteWorkerRuntime()
+
+    async def restore_feed() -> CertifiedQuoteFeed | None:
+        return restored
+
+    async def collect_once() -> QuoteCollectionResult:
+        assert runtime.certified_feed() is restored
+        return QuoteCollectionResult(
+            run_id=12,
+            status="complete",
+            universe_snapshot_id=22,
+            requested_token_count=4,
+            successful_response_count=4,
+            quote_taken_at_ms=1_010,
+            elapsed_ms=20,
+            universe_hash="a" * 64,
+        )
+
+    async def wait_for_stop(_stop_event: asyncio.Event, _delay_s: float) -> bool:
+        stop_event.set()
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        interval_s=120,
+        runtime=runtime,
+        restore_feed=restore_feed,
+        wait_for_stop=wait_for_stop,
+    )
+
+    await worker.run(stop_event)
+
+    assert runtime.certified_feed() is restored
+
+
+@pytest.mark.asyncio
+async def test_production_quote_worker_can_restore_an_empty_durable_store(tmp_path) -> None:
+    """Cold production storage stays a normal no-feed state, not a startup error."""
+    from polyarb.daemon.quote_worker import build_production_quote_worker
+
+    settings = Settings(
+        db_path=tmp_path / "state.db",
+        neg_risk_quote_worker_enabled=True,
+    )
+    SQLiteStore(settings.db_path).init_schema()
+
+    worker = build_production_quote_worker(settings)
+
+    assert worker is not None
+    assert worker._restore_feed is not None
+    assert await worker._restore_feed() is None
