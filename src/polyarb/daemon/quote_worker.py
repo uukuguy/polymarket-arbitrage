@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from polyarb.config import Settings
+from polyarb.daemon.opportunity_watcher import OpportunityWatcher
 from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
 from polyarb.routing.neg_risk_quote_store import (
     CompleteQuoteProjection,
@@ -34,6 +35,7 @@ PrepareOpportunities = Callable[
     [CompleteQuoteProjection],
     Awaitable[OpportunityScanResult],
 ]
+ReconcileGlobalProjection = Callable[[CompleteQuoteProjection], Awaitable[None]]
 WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
 ReleaseProjectionMemory = Callable[[], None]
 
@@ -392,6 +394,7 @@ class QuoteWorker:
         collect_once: CollectOnce,
         certify_projection: CertifyProjection | None = None,
         prepare_opportunities: PrepareOpportunities | None = None,
+        reconcile_global_projection: ReconcileGlobalProjection | None = None,
         restore_feed: RestoreFeed | None = None,
         cleanup_collecting_runs: CleanupCollectingRuns | None = None,
         interval_s: float,
@@ -407,6 +410,7 @@ class QuoteWorker:
         self._collect_once = collect_once
         self._certify_projection = certify_projection
         self._prepare_opportunities = prepare_opportunities
+        self._reconcile_global_projection = reconcile_global_projection
         self._restore_feed = restore_feed
         self._cleanup_collecting_runs = cleanup_collecting_runs
         self._interval_s = interval_s
@@ -465,6 +469,19 @@ class QuoteWorker:
                         certified_projection = await self._certify_projection(result)
                         if certified_projection.run_id != result.run_id:
                             raise QuoteProjectionIntegrityError()
+                        if self._reconcile_global_projection is not None:
+                            try:
+                                await self._reconcile_global_projection(
+                                    certified_projection
+                                )
+                            except Exception as error:
+                                # A durable observer/Telegram failure must not
+                                # invalidate the independently certified quote
+                                # feed or turn a successful collection false.
+                                logger.exception(
+                                    "neg-risk opportunity watcher failed "
+                                    f"kind={type(error).__name__}"
+                                )
                         if self._prepare_opportunities is not None:
                             certified_opportunities = await self._prepare_opportunities(
                                 certified_projection
@@ -538,6 +555,7 @@ def build_production_quote_worker(settings: Settings) -> QuoteWorker | None:
     if not settings.neg_risk_quote_worker_enabled:
         return None
     quote_store = NegRiskQuoteStore(settings.db_path)
+    opportunity_watcher = OpportunityWatcher(settings)
 
     async def collect_once() -> QuoteCollectionResult:
         return await collect_quotes_in_subprocess(settings)
@@ -591,10 +609,16 @@ def build_production_quote_worker(settings: Settings) -> QuoteWorker | None:
             failure_reason="collector-cancelled",
         )
 
+    async def reconcile_global_projection(
+        projection: CompleteQuoteProjection,
+    ) -> None:
+        await opportunity_watcher.reconcile_global_projection(projection)
+
     return QuoteWorker(
         collect_once=collect_once,
         certify_projection=certify_projection,
         prepare_opportunities=prepare_opportunities,
+        reconcile_global_projection=reconcile_global_projection,
         restore_feed=restore_feed,
         cleanup_collecting_runs=cleanup_collecting_runs,
         interval_s=settings.neg_risk_quote_interval_s,
