@@ -1411,6 +1411,7 @@ async def run_snapshot(
             event_tag_rows=event_tag_rows,
             batch_size=500,
             data_product=product,
+            snapshot_status=status.value,
             archive_status=(
                 "not_requested"
                 if product == "structure"

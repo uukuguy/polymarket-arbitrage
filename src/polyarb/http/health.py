@@ -336,13 +336,14 @@ def _build_health_checks(
 
     # ── Check 2: last snapshot status ─────────────────────────────────────
     if last_snapshot is not None:
-        # notes column carries status string written by orchestrator (ok/degraded/failed)
-        # is_valid=True → snapshot completed (OK or DEGRADED); is_valid=False → FAILED
-        notes = (last_snapshot.get("notes") or "").lower()
-        if "degraded" in notes:
+        # snapshot_status is written atomically with the result.  `notes` is
+        # intentionally only a bounded failure reason and cannot distinguish
+        # a valid DEGRADE from a clean OK.
+        persisted_status = str(last_snapshot.get("snapshot_status") or "").lower()
+        if persisted_status == "degraded":
             last_status_val = "DEGRADED"
             status_check = "warn"
-        elif not last_snapshot.get("is_valid", True):
+        elif persisted_status == "failed" or not last_snapshot.get("is_valid", True):
             last_status_val = "FAILED"
             status_check = "fail"
         else:

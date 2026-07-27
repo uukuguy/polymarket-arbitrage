@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
   -- mistaken for a current certified Structure revision after the split.
   data_product          TEXT NOT NULL DEFAULT 'legacy_combined',
   archive_status        TEXT NOT NULL DEFAULT 'legacy',
+  snapshot_status       TEXT NOT NULL DEFAULT 'ok',
   is_valid              INTEGER NOT NULL,
   parquet_path          TEXT NOT NULL,
   notes                 TEXT,
@@ -459,6 +460,7 @@ SNAPSHOTS_DDL = (
     "market_view_published INTEGER NOT NULL DEFAULT 0, "
     "data_product TEXT NOT NULL DEFAULT 'legacy_combined', "
     "archive_status TEXT NOT NULL DEFAULT 'legacy', "
+    "snapshot_status TEXT NOT NULL DEFAULT 'ok', "
     "is_valid INTEGER NOT NULL, "
     "parquet_path TEXT NOT NULL, "
     "notes TEXT, "
@@ -476,6 +478,7 @@ SNAPSHOTS_COLUMN_ORDER: tuple[str, ...] = (
     "market_view_published",
     "data_product",
     "archive_status",
+    "snapshot_status",
     "is_valid",
     "parquet_path",
     "notes",
@@ -486,9 +489,9 @@ SNAPSHOTS_COLUMN_ORDER: tuple[str, ...] = (
 SNAPSHOTS_INSERT_SQL = (
     "INSERT INTO snapshots("
     "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
-    "data_product,archive_status,is_valid,parquet_path,notes,"
+    "data_product,archive_status,snapshot_status,is_valid,parquet_path,notes,"
     "supabase_mirror_at_ms,parquet_r2_url) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 SNAPSHOT_SCHEMA: pa.Schema = pa.schema(

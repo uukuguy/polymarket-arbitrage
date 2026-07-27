@@ -192,6 +192,63 @@ def test_new_columns_usable_after_migration(tmp_path: Path) -> None:
     assert row == (1_715_500_000_000, "https://r2.example/snap.parquet")
 
 
+def test_legacy_structure_snapshot_backfills_degraded_status(tmp_path: Path) -> None:
+    """A pre-status Structure revision keeps its recorded Layer-1 truth after upgrade."""
+    db = tmp_path / "legacy-structure.db"
+    con = sqlite3.connect(db, isolation_level=None)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE snapshots (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              taken_at_ms INTEGER NOT NULL,
+              finished_at_ms INTEGER NOT NULL,
+              mode TEXT NOT NULL,
+              market_count INTEGER NOT NULL,
+              market_view_published INTEGER NOT NULL DEFAULT 0,
+              data_product TEXT NOT NULL DEFAULT 'legacy_combined',
+              archive_status TEXT NOT NULL DEFAULT 'legacy',
+              is_valid INTEGER NOT NULL,
+              parquet_path TEXT NOT NULL,
+              notes TEXT
+            );
+            CREATE TABLE validation_issues (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              snapshot_id INTEGER NOT NULL,
+              layer INTEGER NOT NULL,
+              category TEXT NOT NULL,
+              market_id TEXT,
+              detail TEXT,
+              raw_payload TEXT
+            );
+            """
+        )
+        con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+            "data_product,archive_status,is_valid,parquet_path"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            (1_700_000_000_000, 1_700_000_060_000, "full", 75_611, 1,
+             "structure", "not_requested", 1, "structure://snapshot"),
+        )
+        con.execute(
+            "INSERT INTO validation_issues(snapshot_id,layer,category,detail) "
+            "VALUES (1,1,'api_jitter',?)",
+            ("Gamma reported 75793 active markets, fetched 75611",),
+        )
+    finally:
+        con.close()
+
+    store = SQLiteStore(db)
+    store.init_schema()
+
+    with sqlite3.connect(db) as read_con:
+        status = read_con.execute(
+            "SELECT snapshot_status FROM snapshots WHERE id=1"
+        ).fetchone()[0]
+    assert status == "degraded"
+
+
 def _read_market_view_published(db: Path) -> int:
     with sqlite3.connect(db) as con:
         return int(

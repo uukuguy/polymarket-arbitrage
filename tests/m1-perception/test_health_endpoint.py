@@ -38,6 +38,7 @@ def _insert_snapshot(
     market_view_published: bool = True,
     data_product: str = "structure",
     archive_status: str = "not_requested",
+    snapshot_status: str = "ok",
     event_count: int = 20,
     failure_source: str | None = None,
     failure_reason: str | None = None,
@@ -55,9 +56,9 @@ def _insert_snapshot(
         con.execute(
             "INSERT INTO snapshots("
             "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
-            "data_product,archive_status,is_valid,parquet_path,notes"
+            "data_product,archive_status,snapshot_status,is_valid,parquet_path,notes"
             ")"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 taken_at_ms,
                 now_ms,
@@ -66,6 +67,7 @@ def _insert_snapshot(
                 int(market_view_published),
                 data_product,
                 archive_status,
+                snapshot_status,
                 1,
                 "/tmp/dummy.parquet",
                 status,
@@ -329,6 +331,25 @@ def test_archive_failure_is_visible_but_does_not_fail_structure_health(
     assert body["checks"]["archive:last_attempt"][0]["observedValue"] == "failed"
     assert body["checks"]["archive:last_attempt"][0]["status"] == "warn"
     assert body["checks"]["archive:last_success_age_seconds"][0]["status"] == "warn"
+
+
+def test_health_reports_persisted_degraded_structure_status(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """A valid-but-degraded Structure must not be silently relabeled as OK."""
+    _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=int(time.time() * 1000) - 1_000,
+        snapshot_status="degraded",
+    )
+
+    response = http_test_client.get("/health")
+
+    assert response.status_code == 200
+    check = response.json()["checks"]["snapshot:last_status"][0]
+    assert check["observedValue"] == "DEGRADED"
+    assert check["status"] == "warn"
 
 
 # ---------------------------------------------------------------------------

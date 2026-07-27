@@ -5464,6 +5464,10 @@ manifest, and 24-hour T0. Also persist Polywatch alert reason/timestamp.
 - [CONFIG] Removed the volume-less cron's direct snapshot and purge jobs. The
   256MB cron process now runs only independent Polywatch; only the mounted app
   scheduler may publish Structure.
+- [CORRECTION] Production Structure 753 proved the old `notes` heuristic could
+  mislabel a valid `DEGRADED` result as `snapshot:last_status=OK`. Persist
+  `snapshot_status` atomically and have health read it before the next cadence
+  decision; this is a truthfulness repair, not a data-product change.
 - [QUALITY] 371 related tests, scoped Ruff, `make docs-m1-check`, and
   `make planning-status` pass. No Fly/cron/deploy/capacity mutation has occurred.
 

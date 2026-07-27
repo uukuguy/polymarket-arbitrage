@@ -38,7 +38,8 @@ from polyarb.storage.schemas import (
     SCHEDULER_STATE_DDL,
     SNAPSHOT_ATTEMPTS_DDL,
 )
-from polyarb.validator.category import Category, Issue
+from polyarb.validator.category import Category, Issue, SnapshotStatus
+from polyarb.validator.layers import determine_snapshot_status
 
 _VALID_MODES = ("subset", "full")
 
@@ -46,6 +47,57 @@ _VALID_MODES = ("subset", "full")
 _BOOL_COLUMNS = ("active", "closed", "neg_risk", "incomplete")
 # events table also has bool fields stored as INTEGER 0/1.
 _EVENT_BOOL_COLUMNS = ("active", "closed")
+
+
+def _backfill_structure_snapshot_statuses(con: sqlite3.Connection) -> None:
+    """Derive persisted status for Structure rows created before that column existed.
+
+    The source of truth is the same Layer-1 issue policy used by the
+    orchestrator.  Re-running this is safe: Structure status is a deterministic
+    projection of its immutable validation issues and ``is_valid`` result.
+    Archive and legacy-combined rows intentionally remain outside this contract.
+    """
+    rows = con.execute(
+        "SELECT s.id,s.is_valid,vi.layer,vi.category,vi.market_id,vi.detail,"
+        "vi.raw_payload "
+        "FROM snapshots s "
+        "LEFT JOIN validation_issues vi ON vi.snapshot_id=s.id "
+        "WHERE s.data_product='structure' "
+        "ORDER BY s.id,vi.id"
+    ).fetchall()
+    if not rows:
+        return
+
+    snapshots: dict[int, tuple[bool, list[Issue]]] = {}
+    for snapshot_id, is_valid, layer, category, market_id, detail, raw_payload in rows:
+        if snapshot_id not in snapshots:
+            snapshots[snapshot_id] = (bool(is_valid), [])
+        if layer is None:
+            continue
+        try:
+            parsed_category = Category(category)
+        except ValueError:
+            parsed_category = Category.UNKNOWN
+        snapshots[snapshot_id][1].append(
+            Issue(
+                layer=int(layer),
+                category=parsed_category,
+                market_id=market_id,
+                detail=detail or "",
+                raw_payload=raw_payload,
+            )
+        )
+
+    for snapshot_id, (is_valid, issues) in snapshots.items():
+        status = (
+            SnapshotStatus.FAILED
+            if not is_valid
+            else determine_snapshot_status(issues)
+        )
+        con.execute(
+            "UPDATE snapshots SET snapshot_status=? WHERE id=?",
+            (status.value, snapshot_id),
+        )
 
 
 def _truth_error(prefix: str, reason: str) -> ValueError:
@@ -385,6 +437,12 @@ class SQLiteStore:
                 "archive_status",
                 "TEXT NOT NULL DEFAULT 'legacy'",
             )
+            _ensure_column(
+                "snapshots",
+                "snapshot_status",
+                "TEXT NOT NULL DEFAULT 'ok'",
+            )
+            _backfill_structure_snapshot_statuses(con)
             # H-009: quote collectors lease their collecting run.  A default
             # of zero makes any legacy collecting row immediately recoverable
             # rather than leaving the single-run gate permanently wedged.
@@ -428,6 +486,7 @@ class SQLiteStore:
         event_tag_rows: list[dict] | None = None,
         data_product: str = "legacy_combined",
         archive_status: str = "legacy",
+        snapshot_status: str = "ok",
     ) -> int:
         """Persist one snapshot atomically.
 
@@ -479,9 +538,9 @@ class SQLiteStore:
             cur = con.execute(
                 "INSERT INTO snapshots("
                 "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
-                "data_product,archive_status,is_valid,parquet_path,notes,"
+                "data_product,archive_status,snapshot_status,is_valid,parquet_path,notes,"
                 "supabase_mirror_at_ms,parquet_r2_url"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     taken_at_ms,
                     finished_at_ms,
@@ -490,6 +549,7 @@ class SQLiteStore:
                     int(publish_markets),
                     data_product,
                     archive_status,
+                    snapshot_status,
                     int(is_valid),
                     parquet_path,
                     notes,
@@ -588,6 +648,7 @@ class SQLiteStore:
         batch_size: int = 500,
         data_product: str = "legacy_combined",
         archive_status: str = "legacy",
+        snapshot_status: str = "ok",
     ) -> tuple[int, int]:
         """Streaming variant of write_snapshot.
 
@@ -631,9 +692,9 @@ class SQLiteStore:
             cur = con.execute(
                 "INSERT INTO snapshots("
                 "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
-                "data_product,archive_status,is_valid,parquet_path,notes,"
+                "data_product,archive_status,snapshot_status,is_valid,parquet_path,notes,"
                 "supabase_mirror_at_ms,parquet_r2_url"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     taken_at_ms,
                     finished_at_ms,
@@ -642,6 +703,7 @@ class SQLiteStore:
                     int(publish_markets),
                     data_product,
                     archive_status,
+                    snapshot_status,
                     int(is_valid),
                     parquet_path,
                     notes,
@@ -1023,6 +1085,7 @@ class SQLiteStore:
             try:
                 row = con.execute(
                     "SELECT id, taken_at_ms, finished_at_ms, mode, is_valid, market_count, notes, "
+                    "snapshot_status, "
                     "supabase_mirror_at_ms, parquet_r2_url "
                     f"FROM snapshots {where} ORDER BY id DESC LIMIT 1",
                     params,
@@ -1037,8 +1100,9 @@ class SQLiteStore:
                     "is_valid": bool(row[4]),
                     "market_count": row[5],
                     "notes": row[6],
-                    "supabase_mirror_at_ms": row[7],  # Phase 02 Plan 03: nullable
-                    "parquet_r2_url": row[8],  # Phase 02 Plan 03: nullable
+                    "snapshot_status": row[7],
+                    "supabase_mirror_at_ms": row[8],  # Phase 02 Plan 03: nullable
+                    "parquet_r2_url": row[9],  # Phase 02 Plan 03: nullable
                 }
             except sqlite3.OperationalError:
                 # Old DB schema without Plan 03 columns — fall back to 7-column query
@@ -1056,6 +1120,7 @@ class SQLiteStore:
                     "is_valid": bool(row[4]),
                     "market_count": row[5],
                     "notes": row[6],
+                    "snapshot_status": None,
                     "supabase_mirror_at_ms": None,
                     "parquet_r2_url": None,
                 }
