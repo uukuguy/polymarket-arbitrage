@@ -5468,12 +5468,20 @@ manifest, and 24-hour T0. Also persist Polywatch alert reason/timestamp.
   mislabel a valid `DEGRADED` result as `snapshot:last_status=OK`. Persist
   `snapshot_status` atomically and have health read it before the next cadence
   decision; this is a truthfulness repair, not a data-product change.
-- [QUALITY] 371 related tests, scoped Ruff, `make docs-m1-check`, and
-  `make planning-status` pass. No Fly/cron/deploy/capacity mutation has occurred.
+- [DEPLOY] Release 162 deployed `51a34f8`. The migration backfilled Structure
+  753 as `DEGRADED`; strict health now reports that truth without blocking a
+  complete Structure, fresh Quote, or verified M2 evaluation feed.
+- [EVIDENCE] Structure 753 and 754 both completed and published full Gamma
+  coverage; scheduler attempts are 2/2 succeeded with failure counter 0. The
+  754-bound Quote run produced a verified-standard-neg-risk opportunity feed.
+- [CAPACITY] Full Structure children completed in roughly 100–116 seconds;
+  current app cgroup usage was about 716MB with zero kernel memory fail count.
+  The host does not expose a trustworthy cgroup peak here, so this is current
+  occupancy evidence, not a claimed peak headroom measurement.
 
 ### [NEXT — CURRENT]
 
-Inspect the exact production cron/Fly configuration, then deploy the tested
-Structure-only release with a first certified Structure revision and Quote
-binding proof. Do not start the next 24-hour qualification window until those
-post-deploy gates pass.
+Deploy the tested 300-second Structure cadence to the app process only, then
+verify the exact release/config and the next automatic Structure+Quote cycle.
+Do not label the next long-running production window closed until its evidence
+is evaluated; Polywatch remains the active two-minute fault detector throughout.

@@ -544,7 +544,7 @@ def _build_health_body(
         "version": settings.version,
         "releaseId": settings.release_id,
         "serviceId": "polyarb-l1",
-        "description": "Polymarket L1 observation daemon — subset 2x/day, full 1/week",
+        "description": "Polymarket L1 observation daemon — Structure 5m + Quote 2m",
         "checks": checks,
     }
 

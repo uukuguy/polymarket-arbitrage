@@ -14,6 +14,10 @@ primary_region = "ams"
   POLYARB_SNAPSHOT_DIR = "/data/snapshots"
   POLYARB_DB_PATH = "/data/state.db"
   POLYARB_ALLOW_EXTERNAL_PATHS = "1"
+  # Structure is Gamma-only and measured at roughly two minutes per full run.
+  # Five-minute refresh keeps M1 discovery materially fresher than the quote
+  # SLA without overlapping complete Structure publications.
+  POLYARB_SCHEDULER_INTERVAL_S = "300"
   POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED = "true"
   POLYARB_NEG_RISK_QUOTE_INTERVAL_S = "120"
 

@@ -66,3 +66,10 @@ def test_fly_enables_worker_at_120_seconds() -> None:
 
     assert env["POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED"] == "true"
     assert env["POLYARB_NEG_RISK_QUOTE_INTERVAL_S"] == "120"
+
+
+def test_fly_refreshes_structure_within_the_quote_freshness_window() -> None:
+    """Production must not silently fall back to the one-hour scheduler default."""
+    config = tomllib.loads(Path("fly.toml").read_text())
+
+    assert config["env"]["POLYARB_SCHEDULER_INTERVAL_S"] == "300"

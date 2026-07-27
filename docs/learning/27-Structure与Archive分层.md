@@ -77,6 +77,10 @@ make snapshot-attempt-status
 `archive:*` warn 时，先判断是否真的需要新的历史样本。它不是“没有机会”或“报价不可用”的
 同义词。
 
+线上 Structure 当前每 5 分钟刷新，Quote 每 2 分钟刷新。前者更新“哪些 outcome 必须一起
+判断”，后者更新“此刻能否以什么 ask 买齐”；不要为了报价快就把 Archive 或 CLOB 历史采集
+塞回 Structure。
+
 ## 设计取舍
 
 | 选择 | 为什么 |
