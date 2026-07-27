@@ -59,7 +59,7 @@ class OpportunityLedger:
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
-                "SELECT id FROM neg_risk_opportunities "
+                "SELECT id,gross_edge_bps,max_bundle_size FROM neg_risk_opportunities "
                 "WHERE event_id=? AND group_id=? AND membership_hash=? AND status='observe'",
                 (assessment.event_id, assessment.group_id, assessment.membership_hash),
             ).fetchone()
@@ -159,6 +159,7 @@ class OpportunityLedger:
                 kind = "entered"
             else:
                 opportunity_id = str(row[0])
+                previous_edge_bps = float(row[1])
                 con.execute(
                     "UPDATE neg_risk_opportunities SET bundle_cost=?,gross_edge_bps=?,"
                     "max_bundle_size=?,structure_revision=?,quote_run_id=?,updated_at_ms=? "
@@ -173,7 +174,11 @@ class OpportunityLedger:
                         opportunity_id,
                     ),
                 )
-                kind = "unchanged"
+                kind = (
+                    "edge-changed"
+                    if abs(assessment.gross_edge_bps - previous_edge_bps) >= 25
+                    else "unchanged"
+                )
 
             legs_json = json.dumps(
                 [
@@ -225,6 +230,30 @@ class OpportunityLedger:
                     (
                         opportunity_id,
                         "entered-gross-edge-threshold",
+                        json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                        observed_at_ms,
+                    ),
+                )
+            elif kind == "edge-changed":
+                payload = {
+                    "status": "observe",
+                    "strategy": "neg-risk-buy-all",
+                    "event_id": assessment.event_id,
+                    "group_id": assessment.group_id,
+                    "bundle_cost": assessment.bundle_cost,
+                    "gross_edge_bps": assessment.gross_edge_bps,
+                    "max_bundle_size": assessment.max_bundle_size,
+                    "structure_revision": assessment.structure_revision,
+                    "quote_run_id": assessment.quote_run_id,
+                    "execution_status": "not-verified",
+                }
+                con.execute(
+                    "INSERT INTO neg_risk_opportunity_notifications("
+                    "opportunity_id,reason,payload_json,status,created_at_ms"
+                    ") VALUES (?,? ,?,'pending',?)",
+                    (
+                        opportunity_id,
+                        "edge-changed",
                         json.dumps(payload, separators=(",", ":"), sort_keys=True),
                         observed_at_ms,
                     ),

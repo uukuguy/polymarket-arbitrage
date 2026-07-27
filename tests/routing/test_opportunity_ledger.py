@@ -83,3 +83,24 @@ def test_complete_below_threshold_observation_closes_existing_opportunity(tmp_pa
         "entered-gross-edge-threshold",
         "closed-gross-edge-threshold",
     ]
+
+
+def test_material_edge_change_enqueues_one_follow_up_notification(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    ledger = OpportunityLedger(db_path)
+    opened = ledger.reconcile_global(_observe_assessment(), observed_at_ms=NOW_MS)
+    changed = replace(
+        _observe_assessment(),
+        gross_edge_bps=325.0,
+        bundle_cost=0.9675,
+        quote_run_id=43,
+    )
+
+    transition = ledger.reconcile_global(changed, observed_at_ms=NOW_MS + 120_000)
+
+    assert transition == replace(opened, kind="edge-changed")
+    assert [item.reason for item in ledger.pending_notifications(now_ms=NOW_MS)] == [
+        "entered-gross-edge-threshold",
+        "edge-changed",
+    ]
