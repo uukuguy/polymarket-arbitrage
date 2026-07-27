@@ -1,0 +1,32 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-07-27T12:51:33.365Z",
+  "phase": "m1-perception-opportunity-watcher",
+  "phase_name": "neg-risk opportunity watcher",
+  "phase_dir": "docs/superpowers/plans/2026-07-27-neg-risk-opportunity-watcher.md",
+  "plan": 1,
+  "task": 3,
+  "total_tasks": 6,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "complete verified-group assessment", "status": "done", "commit": "8fd425b"},
+    {"id": 2, "name": "durable lifecycle ledger and notification outbox", "status": "in_progress", "progress": "enter, close, material edge change, pending/delivered/failed audit are implemented and tested", "commit": "00a2537"}
+  ],
+  "remaining_tasks": [
+    {"id": 2, "name": "unavailable/invalidation, capacity-change, replay and retention coverage", "status": "not_started"},
+    {"id": 3, "name": "global Quote worker reconciliation and Telegram delivery", "status": "not_started"},
+    {"id": 4, "name": "focused 15-second tracker", "status": "not_started"},
+    {"id": 5, "name": "cloud map/read/control API and Make targets", "status": "not_started"},
+    {"id": 6, "name": "configuration, documentation, deploy and production acceptance", "status": "not_started"}
+  ],
+  "blockers": [],
+  "human_actions_pending": [],
+  "decisions": [
+    {"decision": "Use complete Structure + atomic complete Quote only for global discovery", "rationale": "missing data must not become a false zero-price opportunity", "phase": "m1-perception-opportunity-watcher"},
+    {"decision": "Persist lifecycle evidence and notification outbox before Telegram I/O", "rationale": "delivery failures must not erase or alter market facts", "phase": "m1-perception-opportunity-watcher"},
+    {"decision": "Do not deploy incrementally", "rationale": "the daemon, controls, operation surface, and production verification are not yet wired", "phase": "m1-perception-opportunity-watcher"}
+  ],
+  "uncommitted_files": ["findings.md", "progress.md", "task_plan.md"],
+  "next_action": "Run `uv run pytest tests/routing/test_opportunity_ledger.py -q`, then write a failing OpportunityWatcher test and connect only successful certified Quote projections to the ledger.",
+  "context_notes": "Worktree is /Users/sujiangwen/sandbox/hacker2026/PolyMarket/polymarket-arbitrage/.worktrees/l3-continuity-repair on fix/l3-continuity-repair. No server, watcher, or deployment was started. The user-owned uncommitted planning files must remain untouched."
+}
