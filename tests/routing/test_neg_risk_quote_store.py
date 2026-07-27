@@ -33,8 +33,8 @@ def quote_db(tmp_path):
         con.execute(
             "INSERT INTO snapshots("
             "taken_at_ms, finished_at_ms, mode, market_count,market_view_published,"
-            "is_valid, parquet_path"
-            ") VALUES (?, ?, 'subset', 2,1,1, 'fixture.parquet')",
+            "data_product,is_valid, parquet_path"
+            ") VALUES (?, ?, 'subset', 2,1,'structure',1, 'fixture.parquet')",
             (NOW_MS - 1_000, NOW_MS - 900),
         )
         snapshot_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
@@ -828,9 +828,11 @@ def test_complete_published_zero_market_snapshot_is_valid_empty_universe(tmp_pat
         issues=[],
         source_coverage=SourceCoverage.complete(0, 0),
         event_members=[],
-        group_truths=[],
-        publish_markets=True,
-    )
+            group_truths=[],
+            publish_markets=True,
+            data_product="structure",
+            archive_status="not_requested",
+        )
 
     universe = NegRiskQuoteStore(path).latest_verified_universe()
 

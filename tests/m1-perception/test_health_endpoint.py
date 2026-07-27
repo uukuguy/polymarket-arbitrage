@@ -36,6 +36,7 @@ def _insert_snapshot(
     market_count: int = 100,
     coverage_completed: bool = True,
     market_view_published: bool = True,
+    data_product: str = "structure",
     event_count: int = 20,
     failure_source: str | None = None,
     failure_reason: str | None = None,
@@ -53,15 +54,16 @@ def _insert_snapshot(
         con.execute(
             "INSERT INTO snapshots("
             "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
-            "is_valid,parquet_path,notes"
+            "data_product,is_valid,parquet_path,notes"
             ")"
-            " VALUES (?,?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 taken_at_ms,
                 now_ms,
                 "subset",
                 market_count,
                 int(market_view_published),
+                data_product,
                 1,
                 "/tmp/dummy.parquet",
                 status,
@@ -224,6 +226,16 @@ def test_market_truth_health_does_not_certify_unpublished_complete_attempt(
     assert result.coverage_value == "incomplete-source"
     assert result.last_complete_snapshot_id is None
     assert result.last_complete_age_seconds is None
+
+
+def test_market_truth_health_rejects_legacy_combined_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    _insert_snapshot(path, taken_at_ms=1_000, data_product="legacy_combined")
+
+    result = _read_market_truth_health(path, now_s=3.0)
+
+    assert result.coverage_status == "fail"
+    assert result.last_complete_snapshot_id is None
 
 
 def test_health_exposes_latest_attempt_and_last_complete_truth_separately(

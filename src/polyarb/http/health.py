@@ -106,13 +106,15 @@ def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
             "c.market_items,c.event_items "
             "FROM snapshots s "
             "LEFT JOIN snapshot_source_coverage c ON c.snapshot_id=s.id "
+            "WHERE s.data_product='structure' "
             "ORDER BY s.id DESC LIMIT 1"
         ).fetchone()
         complete = con.execute(
             "SELECT s.id,s.taken_at_ms "
             "FROM snapshots s "
             "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id "
-            "WHERE s.market_view_published=1 AND s.is_valid=1 AND c.completed=1 "
+            "WHERE s.data_product='structure' AND s.market_view_published=1 "
+            "AND s.is_valid=1 AND c.completed=1 "
             "ORDER BY s.id DESC LIMIT 1"
         ).fetchone()
     except sqlite3.Error:

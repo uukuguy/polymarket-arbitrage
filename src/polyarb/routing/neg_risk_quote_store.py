@@ -216,7 +216,8 @@ class NegRiskQuoteStore:
                 "SELECT s.id,s.taken_at_ms FROM snapshots s "
                 "JOIN snapshot_source_coverage c "
                 "ON c.snapshot_id=s.id AND c.completed=1 "
-                "WHERE s.id=? AND s.market_view_published=1",
+                "WHERE s.id=? AND s.data_product='structure' "
+                "AND s.market_view_published=1",
                 (snapshot_id,),
             ).fetchone()
             if snapshot is None:
@@ -809,7 +810,7 @@ def _latest_completed_published_snapshot(
     return con.execute(
         "SELECT s.id,s.taken_at_ms FROM snapshots s "
         "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id AND c.completed=1 "
-        "WHERE s.market_view_published=1 "
+        "WHERE s.data_product='structure' AND s.market_view_published=1 "
         "ORDER BY s.id DESC LIMIT 1"
     ).fetchone()
 
