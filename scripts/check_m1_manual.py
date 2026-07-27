@@ -32,6 +32,7 @@ L3_CREDENTIAL_PROOF_TARGETS = (
 M1_MAKE_TARGETS = {
     "snapshot-markets-v",
     "snapshot-status",
+    "snapshot-attempt-status",
     "overview",
     "list-recipes",
     "scan-l3-seed",

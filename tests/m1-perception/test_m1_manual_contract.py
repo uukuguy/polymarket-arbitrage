@@ -598,6 +598,13 @@ def test_manual_exposes_polywatch_alert_destination_and_local_checks() -> None:
     assert "@polyarb_l1_bot" in text
     assert "make polywatch-healthz-dry\nmake polywatch-resident-status" in text
     assert "不会发送 Telegram" in text
+
+
+def test_manual_exposes_latest_snapshot_attempt_diagnostic() -> None:
+    text = (ROOT / "docs/M1-市场感知平台使用手册.md").read_text()
+
+    assert "make snapshot-attempt-status" in text
+    assert "最新一次快照尝试" in text
     assert "`active_keys`" in text
     assert "每 2 分钟" in text
 

@@ -91,7 +91,7 @@ patch-gsd-worktree-cleanup:
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-fresh snapshots-purge snapshot-cache-purge
+.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-attempt-status snapshot-fresh snapshots-purge snapshot-cache-purge
 
 ## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly. Auto-loads .env for Supabase+R2 mirror.
 snapshot-markets:
@@ -126,6 +126,10 @@ snapshot-markets-full-v:
 ## snapshot-status: One-glance status — running process, recent SQLite rows, latest parquet (local time)
 snapshot-status:
 	@uv run python scripts/snapshot_status.py
+
+## snapshot-attempt-status: Show the latest L1 scheduler snapshot attempt. Read-only.
+snapshot-attempt-status:
+	@uv run python scripts/snapshot_attempt_status.py
 
 ## snapshot-fresh: Force full refetch (purge all caches, then run verbose)
 snapshot-fresh:

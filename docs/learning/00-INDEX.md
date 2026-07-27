@@ -38,6 +38,7 @@
 | 23 | [生产机会流](23-生产机会流.md) | app 内 quote worker / 120-240-300 秒三层时钟 / durable success anchor / 503 为什么不是零机会 / 日常实战诊断 |
 | 24 | [L3 连续性事务](24-L3-连续性事务.md) | prepare evidence → atomic commit → strict sample / generation-scoped evidence / 10/10/10 成功门 / 超时补偿而非 grace period |
 | 25 | [市场全集不是请求成功](25-市场全集不是请求成功.md) | 2,100 行截断为何制造假套利 / keyset completion proof / exact event membership / standard 与 augmented / M1→M2 provenance 门 |
+| 26 | [M1 数据层与失败事实](26-M1数据层与失败事实.md) | 为什么“旧快照仍新鲜”不能掩盖新 OOM / published truth 与 scheduler attempt 的边界 / 为什么 L2 不应阻塞 L1 recovery |
 
 ## Phase 02.1 教学增量（2026-05）
 

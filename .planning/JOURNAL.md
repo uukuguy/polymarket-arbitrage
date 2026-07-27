@@ -5432,3 +5432,17 @@ manifest, and 24-hour T0. Also persist Polywatch alert reason/timestamp.
   re-architect yet. Exact resources, cadence, storage boundary, and migration
   order will be decided from the complete observation evidence and executed as
   part of the consolidated repair.
+
+## SESSION 110 — 2026-07-27 (M1 continuity truth first wave)
+
+- [LEARNING] Published market truth and the latest scheduler attempt are separate
+  operational facts. A current published revision may remain readable, but a
+  newly failed attempt is immediately visible and independently alertable.
+- [DECISION] Persist every scheduler-created snapshot attempt append-only, expose
+  latest attempt plus consecutive-failure count in L1 strict health, and keep
+  `never-started` compatibility-neutral rather than pretending it is success.
+- [DECISION] Polywatch incidents are now component-scoped: L1, opportunity, L2,
+  and Dashboard recover independently. A continuing L2 incident cannot conceal
+  an L1 recovery; failed Telegram delivery retains only the affected incident.
+- [OPERATOR] `make snapshot-attempt-status` is a read-only local JSON diagnostic.
+  It does not connect to Fly, create schema, or start a new qualification run.

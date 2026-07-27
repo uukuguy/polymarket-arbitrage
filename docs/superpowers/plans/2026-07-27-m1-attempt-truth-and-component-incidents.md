@@ -383,7 +383,7 @@ Expected: pytest and Ruff exit 0 before commit.
 - Modify: docs/M1-市场感知平台使用手册.md
 - Create: tests/m1-perception/test_snapshot_attempt_status.py
 - Modify: tests/m1-perception/test_m1_manual_contract.py
-- Create: docs/learning/25-M1数据层与失败事实.md
+- Create: docs/learning/26-M1数据层与失败事实.md
 - Modify: docs/learning/00-INDEX.md
 - Modify: .planning/JOURNAL.md
 - Modify: .planning/threads/market-observation-architecture.md

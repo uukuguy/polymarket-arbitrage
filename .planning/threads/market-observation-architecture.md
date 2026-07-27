@@ -13,6 +13,15 @@ updated: 2026-05-10
 >
 > 跨能力线永久存活。任何观察 / 抓取 / 数据落库相关讨论应预读本文。
 
+## 0.3 失败事实与已发布事实必须分离（2026-07-27）
+
+`snapshots` / `market_view_published` 说明最近一版可读市场事实；`snapshot_attempts` 说明
+调度器刚刚做了什么。两者不能互相覆盖：旧完整 revision 可能仍适合解释 M2 的已知结构，
+同时新的采集已因 OOM 失败。严格健康检查必须同时暴露 published truth age、latest attempt
+和连续失败计数；Polywatch 也必须按 L1、机会 feed、L2、Dashboard 各自管理 incident/recovery。
+这一层只解决可观测性，不能被误写成 all-in-one snapshot 已满足 Structure production SLO，
+也不等同启动下一轮 24 小时资格验证。
+
 ---
 
 ## 0. 起点 — 用户洞察（2026-05-10）
