@@ -11,6 +11,7 @@ from decimal import Decimal
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
+from typing import Literal
 
 from polyarb.routing.neg_risk_quote_store import (
     CompleteQuoteProjection,
@@ -93,6 +94,39 @@ class OpportunityScanResult:
     source_snapshot_id: int
     universe_hash: str
     quote_run_id: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "rejections",
+            MappingProxyType(dict(self.rejections)),
+        )
+
+
+@dataclass(frozen=True)
+class GroupAssessment:
+    """One group classification from exactly one certified Quote projection."""
+
+    group_id: str
+    event_id: str | None
+    membership_hash: str | None
+    status: Literal["observe", "no-edge", "unavailable"]
+    reason: str | None
+    bundle_cost: float | None
+    gross_edge_bps: float | None
+    max_bundle_size: float | None
+    legs: tuple[OpportunityLeg, ...]
+    structure_revision: int
+    quote_run_id: int
+    quoted_at_ms: int
+
+
+@dataclass(frozen=True)
+class AssessmentResult:
+    """Complete classification result; callers choose their own projection."""
+
+    assessments: tuple[GroupAssessment, ...]
+    rejections: Mapping[str, int]
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -254,6 +288,138 @@ def scan_verified_neg_risk_quote_run(
         max_universe_age_s=max_universe_age_s,
         limit=limit,
         now_s=now_s,
+    )
+
+
+def assess_certified_neg_risk_quote_projection(
+    projection: CompleteQuoteProjection,
+    *,
+    min_edge_bps: float = 0,
+    max_quote_age_s: float = 300,
+    max_universe_age_s: float = 50_400,
+    now_s: Callable[[], float] = time.time,
+) -> AssessmentResult:
+    """Classify every group in one complete, fresh Quote projection.
+
+    Unlike the legacy candidate scan, this keeps the distinction between a
+    valid group below threshold and a group whose quote evidence is incomplete.
+    """
+    _validate_non_negative_finite(min_edge_bps, "min_edge_bps")
+    _validate_non_negative_finite(max_quote_age_s, "max_quote_age_s")
+    _validate_non_negative_finite(max_universe_age_s, "max_universe_age_s")
+
+    now = now_s()
+    quote_age_seconds = max(0.0, now - projection.quoted_at_ms / 1000)
+    if quote_age_seconds > max_quote_age_s:
+        raise StaleQuoteRunError(
+            f"quote age {quote_age_seconds:.1f}s exceeds {max_quote_age_s:.1f}s"
+        )
+    universe_age_seconds = max(0.0, now - projection.universe_taken_at_ms / 1000)
+    if universe_age_seconds > max_universe_age_s:
+        raise StaleUniverseError(
+            f"universe age {universe_age_seconds:.1f}s exceeds {max_universe_age_s:.1f}s"
+        )
+
+    expected_by_group: dict[str, list[object]] = {}
+    for source_leg in projection.source_universe.legs:
+        expected_by_group.setdefault(source_leg.neg_risk_market_id, []).append(source_leg)
+    quotes_by_group: dict[str, list[object]] = {}
+    for quote in projection.quotes:
+        quotes_by_group.setdefault(quote.neg_risk_market_id, []).append(quote)
+
+    threshold = Decimal(str(min_edge_bps))
+    assessments: list[GroupAssessment] = []
+    for group_id in sorted(expected_by_group):
+        expected = expected_by_group[group_id]
+        quotes = quotes_by_group.get(group_id, [])
+        event_ids = {leg.event_id for leg in expected}
+        membership_hashes = {leg.membership_hash for leg in expected}
+        event_id = next(iter(event_ids), None)
+        membership_hash = next(iter(membership_hashes), None)
+        unavailable_reason: str | None = None
+        if (
+            len(expected) < 2
+            or len(event_ids) != 1
+            or len(membership_hashes) != 1
+            or not event_id
+            or not membership_hash
+        ):
+            unavailable_reason = "invalid-identity"
+        elif {leg.yes_token_id for leg in expected} != {
+            quote.yes_token_id for quote in quotes
+        }:
+            unavailable_reason = "incomplete-quotes"
+
+        legs: list[OpportunityLeg] = []
+        if unavailable_reason is None:
+            for quote in quotes:
+                if (
+                    quote.event_id != event_id
+                    or quote.membership_hash != membership_hash
+                    or quote.terminal_state != "executable"
+                    or quote.best_ask_price is None
+                    or quote.best_ask_size is None
+                    or not (0 < float(quote.best_ask_price) <= 1)
+                    or float(quote.best_ask_size) <= 0
+                ):
+                    unavailable_reason = "incomplete-quotes"
+                    break
+                legs.append(
+                    OpportunityLeg(
+                        market_id=quote.market_id,
+                        condition_id=quote.condition_id,
+                        slug=quote.slug or "",
+                        yes_token_id=quote.yes_token_id,
+                        ask_price=float(quote.best_ask_price),
+                        ask_size=float(quote.best_ask_size),
+                    )
+                )
+
+        if unavailable_reason is not None:
+            assessments.append(
+                GroupAssessment(
+                    group_id=group_id,
+                    event_id=event_id,
+                    membership_hash=membership_hash,
+                    status="unavailable",
+                    reason=unavailable_reason,
+                    bundle_cost=None,
+                    gross_edge_bps=None,
+                    max_bundle_size=None,
+                    legs=(),
+                    structure_revision=projection.universe_snapshot_id,
+                    quote_run_id=projection.run_id,
+                    quoted_at_ms=projection.quoted_at_ms,
+                )
+            )
+            continue
+
+        bundle_cost = sum((Decimal(str(leg.ask_price)) for leg in legs), Decimal(0))
+        gross_edge_bps = (Decimal(1) - bundle_cost) * Decimal(10_000)
+        assessments.append(
+            GroupAssessment(
+                group_id=group_id,
+                event_id=event_id,
+                membership_hash=membership_hash,
+                status="observe" if gross_edge_bps >= threshold else "no-edge",
+                reason=None,
+                bundle_cost=float(bundle_cost),
+                gross_edge_bps=float(gross_edge_bps),
+                max_bundle_size=min(leg.ask_size for leg in legs),
+                legs=tuple(legs),
+                structure_revision=projection.universe_snapshot_id,
+                quote_run_id=projection.run_id,
+                quoted_at_ms=projection.quoted_at_ms,
+            )
+        )
+
+    rejections = Counter(
+        _bounded_rejection_reason(rejection.reason)
+        for rejection in projection.source_universe.rejections
+    )
+    return AssessmentResult(
+        assessments=tuple(assessments),
+        rejections={reason: count for reason, count in sorted(rejections.items()) if count},
     )
 
 

@@ -15,6 +15,7 @@ from polyarb.routing.opportunity_scanner import (
     QuoteRunUnavailableError,
     StaleQuoteRunError,
     StaleUniverseError,
+    assess_certified_neg_risk_quote_projection,
     scan_certified_neg_risk_quote_projection,
     scan_neg_risk_buy_all,
     scan_neg_risk_quote_run,
@@ -511,3 +512,43 @@ def test_quote_run_scan_ignores_legacy_unverified_complete_run(
 def test_quote_run_scan_rejects_ambiguous_boolean_arguments(quote_db, kwargs) -> None:
     with pytest.raises(ValueError):
         scan_neg_risk_quote_run(quote_db, **kwargs)
+
+
+def test_assessment_distinguishes_observe_no_edge_and_unavailable(quote_db) -> None:
+    _complete_quote_run(
+        quote_db,
+        asks={
+            "yes-1": (0.55, 12.0),
+            "yes-2": (0.45, 8.0),
+            "yes-3": (0.42, 7.0),
+            "yes-4": (0.40, 9.0),
+        },
+    )
+    first_projection = NegRiskQuoteStore(quote_db).latest_complete_projection()
+    assert first_projection is not None
+
+    first = assess_certified_neg_risk_quote_projection(
+        first_projection,
+        min_edge_bps=100,
+        now_s=lambda: QUOTE_NOW_S,
+    )
+    first_by_group = {item.group_id: item for item in first.assessments}
+    assert first_by_group["g1"].status == "no-edge"
+    assert first_by_group["g2"].status == "observe"
+
+    _complete_quote_run(
+        quote_db,
+        quoted_at_ms=9_901_000,
+        terminal_states={"yes-2": "missing-ask"},
+    )
+    incomplete_projection = NegRiskQuoteStore(quote_db).latest_complete_projection()
+    assert incomplete_projection is not None
+
+    incomplete = assess_certified_neg_risk_quote_projection(
+        incomplete_projection,
+        min_edge_bps=100,
+        now_s=lambda: QUOTE_NOW_S,
+    )
+    by_group = {item.group_id: item for item in incomplete.assessments}
+    assert by_group["g1"].status == "unavailable"
+    assert by_group["g1"].reason == "incomplete-quotes"
