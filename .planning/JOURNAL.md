@@ -5533,3 +5533,27 @@ Start with `make smoke-health-prod`, then inspect the latest three
 with bounded child-reap logs. Instrument/diagnose the variable Gamma Structure
 runtime before changing the 240-second production deadline; keep Quote/M2
 gating strict and Archive non-blocking.
+
+## SESSION 113 — 2026-07-27 (M1 neg-risk opportunity watcher implementation)
+
+- [DECISION] The user approved the cloud-first neg-risk watcher design: 30-minute
+  Structure map, 2-minute global verified Quote discovery, 15-second focused
+  top-of-book follow-up only after a >=100 gross-bps observation, observer-only
+  Telegram cards, and bounded evidence retention. The approved design and
+  implementation plan are committed as `48a2b6e` and `829644f`.
+- [IMPLEMENTED] `8fd425b` adds complete per-group Quote assessment. A valid
+  group below threshold is now explicitly `no-edge`; a missing/non-executable
+  leg is `unavailable`, never a false zero-price opportunity.
+- [IMPLEMENTED] `b623e31`, `916c55f`, and `00a2537` add the local durable
+  opportunity ledger: atomic master + append-only global observation + outbox;
+  close on a complete below-threshold observation; 25bps material-edge
+  notification intent; and delivery/failure audit mutations that do not alter
+  market facts. All focused ledger/scanner regressions and Ruff pass.
+- [NOT DEPLOYED] The new watcher is not wired into the L1 daemon yet and no
+  Fly configuration, scheduler cadence, or production data has been changed.
+
+### [NEXT — CURRENT]
+
+Start with `uv run pytest tests/routing/test_opportunity_ledger.py -q`, then
+implement `OpportunityWatcher` to reconcile only successfully certified global
+Quote projections into the durable ledger and deliver its notification outbox.
