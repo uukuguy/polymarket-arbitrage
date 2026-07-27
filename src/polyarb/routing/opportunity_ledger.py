@@ -8,6 +8,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from polyarb.routing.focused_quote_collector import (
+    ActiveOpportunity,
+    FocusedObservation,
+    StructureLeg,
+)
 from polyarb.routing.opportunity_scanner import GroupAssessment
 
 
@@ -82,6 +87,7 @@ class OpportunityLedger:
                         {
                             "market_id": leg.market_id,
                             "condition_id": leg.condition_id,
+                            "slug": leg.slug,
                             "token_id": leg.yes_token_id,
                             "ask": leg.ask_price,
                             "ask_size": leg.ask_size,
@@ -192,6 +198,7 @@ class OpportunityLedger:
                     {
                         "market_id": leg.market_id,
                         "condition_id": leg.condition_id,
+                        "slug": leg.slug,
                         "token_id": leg.yes_token_id,
                         "ask": leg.ask_price,
                         "ask_size": leg.ask_size,
@@ -283,6 +290,179 @@ class OpportunityLedger:
             "quote_run_id",
         )
         return [dict(zip(keys, row, strict=True)) for row in rows]
+
+    def active_masters(self) -> tuple[ActiveOpportunity, ...]:
+        """Return open masters with their immutable global all-leg identity.
+
+        Focused polling deliberately derives its request universe from the
+        original global observation, then proves that the newest Structure
+        still names the same legs before touching CLOB.
+        """
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT o.id,o.event_id,o.group_id,o.membership_hash,"
+                "o.structure_revision,o.quote_run_id,g.legs_json "
+                "FROM neg_risk_opportunities o JOIN "
+                "(SELECT opportunity_id,MAX(id) AS id "
+                "FROM neg_risk_opportunity_observations WHERE source='global' "
+                "GROUP BY opportunity_id) latest ON latest.opportunity_id=o.id "
+                "JOIN neg_risk_opportunity_observations g ON g.id=latest.id "
+                "WHERE o.status='observe' ORDER BY o.updated_at_ms DESC,o.id"
+            ).fetchall()
+        finally:
+            con.close()
+        masters: list[ActiveOpportunity] = []
+        for row in rows:
+            try:
+                raw_legs = json.loads(str(row[6]))
+                legs = tuple(
+                    StructureLeg(
+                        market_id=str(leg["market_id"]),
+                        condition_id=str(leg["condition_id"]),
+                        slug=str(leg.get("slug", "")),
+                        yes_token_id=str(leg["token_id"]),
+                    )
+                    for leg in raw_legs
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                # A corrupted historical observation cannot safely produce a
+                # focused CLOB request. It remains auditable but is not active.
+                continue
+            if not legs or len({leg.yes_token_id for leg in legs}) != len(legs):
+                continue
+            masters.append(
+                ActiveOpportunity(
+                    id=str(row[0]),
+                    event_id=str(row[1]),
+                    group_id=str(row[2]),
+                    membership_hash=str(row[3]),
+                    structure_revision=int(row[4]),
+                    quote_run_id=int(row[5]),
+                    legs=legs,
+                )
+            )
+        return tuple(masters)
+
+    def record_focused(self, observation: FocusedObservation) -> OpportunityTransition:
+        """Append a focused fact without opening masters or creating Quote runs."""
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT status,quote_run_id FROM neg_risk_opportunities WHERE id=?",
+                (observation.opportunity_id,),
+            ).fetchone()
+            if row is None or row[0] != "observe":
+                con.execute("COMMIT")
+                return OpportunityTransition(
+                    opportunity_id=observation.opportunity_id,
+                    kind="inactive",
+                )
+            if int(row[1]) != observation.quote_run_id:
+                raise ValueError("focused observation must retain original quote run")
+
+            status = observation.status
+            persisted_status = "closed" if status == "no-edge" else status
+            reason = observation.reason
+            if status == "no-edge":
+                reason = "closed-gross-edge-threshold"
+                assert observation.bundle_cost is not None
+                assert observation.gross_edge_bps is not None
+                assert observation.max_bundle_size is not None
+                con.execute(
+                    "UPDATE neg_risk_opportunities SET status='closed',bundle_cost=?,"
+                    "gross_edge_bps=?,max_bundle_size=?,structure_revision=?,updated_at_ms=?,"
+                    "closed_at_ms=?,transition_reason=? WHERE id=?",
+                    (
+                        observation.bundle_cost,
+                        observation.gross_edge_bps,
+                        observation.max_bundle_size,
+                        observation.structure_revision,
+                        observation.observed_at_ms,
+                        observation.observed_at_ms,
+                        reason,
+                        observation.opportunity_id,
+                    ),
+                )
+                kind = "closed"
+            elif status == "invalidated":
+                con.execute(
+                    "UPDATE neg_risk_opportunities SET status='invalidated',updated_at_ms=?,"
+                    "closed_at_ms=?,transition_reason=? WHERE id=?",
+                    (
+                        observation.observed_at_ms,
+                        observation.observed_at_ms,
+                        reason,
+                        observation.opportunity_id,
+                    ),
+                )
+                kind = "invalidated"
+            elif status == "observe":
+                assert observation.bundle_cost is not None
+                assert observation.gross_edge_bps is not None
+                assert observation.max_bundle_size is not None
+                con.execute(
+                    "UPDATE neg_risk_opportunities SET bundle_cost=?,gross_edge_bps=?,"
+                    "max_bundle_size=?,structure_revision=?,updated_at_ms=?,transition_reason=NULL "
+                    "WHERE id=?",
+                    (
+                        observation.bundle_cost,
+                        observation.gross_edge_bps,
+                        observation.max_bundle_size,
+                        observation.structure_revision,
+                        observation.observed_at_ms,
+                        observation.opportunity_id,
+                    ),
+                )
+                kind = "observed"
+            else:  # unavailable remains retriable; the append-only fact carries its state.
+                con.execute(
+                    "UPDATE neg_risk_opportunities "
+                    "SET updated_at_ms=?,transition_reason=? WHERE id=?",
+                    (observation.observed_at_ms, reason, observation.opportunity_id),
+                )
+                kind = "unavailable"
+
+            legs_json = json.dumps(
+                [
+                    {
+                        "market_id": leg.market_id,
+                        "condition_id": leg.condition_id,
+                        "token_id": leg.yes_token_id,
+                        "ask": leg.ask_price,
+                        "ask_size": leg.ask_size,
+                    }
+                    for leg in observation.legs
+                ],
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            con.execute(
+                "INSERT INTO neg_risk_opportunity_observations("
+                "opportunity_id,observed_at_ms,source,status,reason,bundle_cost,"
+                "gross_edge_bps,max_bundle_size,structure_revision,quote_run_id,legs_json"
+                ") VALUES (?,?,'focused',?,?,?,?,?,?,?,?)",
+                (
+                    observation.opportunity_id,
+                    observation.observed_at_ms,
+                    persisted_status,
+                    reason,
+                    observation.bundle_cost,
+                    observation.gross_edge_bps,
+                    observation.max_bundle_size,
+                    observation.structure_revision,
+                    observation.quote_run_id,
+                    legs_json,
+                ),
+            )
+            con.execute("COMMIT")
+            return OpportunityTransition(opportunity_id=observation.opportunity_id, kind=kind)
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
 
     def pending_notifications(self, *, now_ms: int) -> tuple[PendingNotification, ...]:
         del now_ms  # The first version has no backoff window; delivery owns retry policy.

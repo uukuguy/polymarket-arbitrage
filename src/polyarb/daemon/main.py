@@ -1,4 +1,4 @@
-"""Daemon entry-point: HTTP server + snapshot scheduler + optional quote worker.
+"""Daemon entry-point: HTTP server + snapshot scheduler + observer workers.
 
 Phase 02 Plan 02 — asyncio SIGINT/SIGTERM graceful shutdown.
 
@@ -29,6 +29,10 @@ import uvicorn
 from loguru import logger
 
 from polyarb.config import load_settings
+from polyarb.daemon.opportunity_watcher import (
+    OpportunityWatcher,
+    build_focused_opportunity_watcher,
+)
 from polyarb.daemon.quote_worker import (
     QuoteWorker,
     build_production_quote_worker,
@@ -49,6 +53,13 @@ def _start_quote_worker(
     return asyncio.create_task(quote_worker.run(stop_event))
 
 
+def _start_opportunity_watcher(
+    watcher: OpportunityWatcher,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None]:
+    return asyncio.create_task(watcher.run(stop_event))
+
+
 async def main() -> int:
     # MUST be first — sets up JSON stdout sink + InterceptHandler
     init_logging()
@@ -67,6 +78,7 @@ async def main() -> int:
 
     scheduler = SnapshotScheduler(settings=settings, sqlite_store=sqlite_store)
     quote_worker = build_production_quote_worker(settings)
+    focused_watcher = build_focused_opportunity_watcher(settings)
     app = create_app(
         scheduler=scheduler,
         sqlite_store=sqlite_store,
@@ -108,6 +120,7 @@ async def main() -> int:
 
     scheduler_task = asyncio.create_task(scheduler.run(stop_event))
     quote_worker_task = _start_quote_worker(quote_worker, stop_event)
+    focused_watcher_task = _start_opportunity_watcher(focused_watcher, stop_event)
 
     await stop_event.wait()
     logger.info("stop_event set, shutting down server")
@@ -118,6 +131,7 @@ async def main() -> int:
     # within ~1s rather than waiting for the current await to return. The
     # scheduler re-raises CancelledError out of _tick() per F-04 contract.
     scheduler_task.cancel()
+    focused_watcher_task.cancel()
     if quote_worker_task is not None:
         quote_worker_task.cancel()
 
@@ -128,6 +142,7 @@ async def main() -> int:
             asyncio.gather(
                 server_task,
                 scheduler_task,
+                focused_watcher_task,
                 *([quote_worker_task] if quote_worker_task is not None else []),
                 return_exceptions=True,
             ),

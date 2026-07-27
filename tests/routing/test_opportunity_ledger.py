@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 
+from polyarb.routing.focused_quote_collector import (
+    ActiveOpportunity,
+    FocusedObservation,
+    StructureLeg,
+)
 from polyarb.routing.opportunity_ledger import OpportunityLedger
 from polyarb.routing.opportunity_scanner import GroupAssessment, OpportunityLeg
 from polyarb.storage.sqlite_store import SQLiteStore
@@ -141,3 +147,129 @@ def test_notification_attempts_are_append_only_and_retry_state_is_derived(tmp_pa
         ("failed", "TelegramUnavailableError"),
         ("delivered", None),
     ]
+
+
+def test_active_masters_rebuild_the_original_all_leg_identity(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    ledger = OpportunityLedger(db_path)
+    opened = ledger.reconcile_global(_observe_assessment(), observed_at_ms=NOW_MS)
+
+    masters = ledger.active_masters()
+
+    assert masters == (
+        ActiveOpportunity(
+            id=opened.opportunity_id,
+            event_id="event-1",
+            group_id="group-1",
+            membership_hash="membership-1",
+            structure_revision=17,
+            quote_run_id=42,
+            legs=(
+                StructureLeg("market-a", "condition-a", "alpha", "token-a"),
+                StructureLeg("market-b", "condition-b", "beta", "token-b"),
+            ),
+        ),
+    )
+
+
+def test_record_focused_no_edge_closes_master_without_a_quote_run_write(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    ledger = OpportunityLedger(db_path)
+    opened = ledger.reconcile_global(_observe_assessment(), observed_at_ms=NOW_MS)
+
+    ledger.record_focused(
+        FocusedObservation(
+            opportunity_id=opened.opportunity_id,
+            status="no-edge",
+            reason=None,
+            bundle_cost=1.03,
+            gross_edge_bps=-300.0,
+            max_bundle_size=40.0,
+            legs=(
+                OpportunityLeg("market-a", "condition-a", "alpha", "token-a", 0.51, 50),
+                OpportunityLeg("market-b", "condition-b", "beta", "token-b", 0.52, 40),
+            ),
+            structure_revision=18,
+            quote_run_id=42,
+            observed_at_ms=NOW_MS + 15_000,
+        )
+    )
+
+    assert ledger.current_opportunities() == []
+    with sqlite3.connect(db_path) as con:
+        master = con.execute(
+            "SELECT status,transition_reason,quote_run_id FROM neg_risk_opportunities WHERE id=?",
+            (opened.opportunity_id,),
+        ).fetchone()
+        observation = con.execute(
+            "SELECT source,status,reason,quote_run_id FROM neg_risk_opportunity_observations "
+            "WHERE opportunity_id=? ORDER BY id DESC LIMIT 1",
+            (opened.opportunity_id,),
+        ).fetchone()
+        quote_runs = con.execute("SELECT COUNT(*) FROM neg_risk_quote_runs").fetchone()[0]
+    assert master == ("closed", "closed-gross-edge-threshold", 42)
+    assert observation == ("focused", "closed", "closed-gross-edge-threshold", 42)
+    assert quote_runs == 0
+
+
+def test_record_focused_unavailable_preserves_a_retriable_master(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    ledger = OpportunityLedger(db_path)
+    opened = ledger.reconcile_global(_observe_assessment(), observed_at_ms=NOW_MS)
+
+    ledger.record_focused(
+        FocusedObservation(
+            opportunity_id=opened.opportunity_id,
+            status="unavailable",
+            reason="incomplete-quotes",
+            bundle_cost=None,
+            gross_edge_bps=None,
+            max_bundle_size=None,
+            legs=(),
+            structure_revision=18,
+            quote_run_id=42,
+            observed_at_ms=NOW_MS + 15_000,
+        )
+    )
+
+    assert ledger.active_masters()[0].id == opened.opportunity_id
+    with sqlite3.connect(db_path) as con:
+        observation = con.execute(
+            "SELECT source,status,reason FROM neg_risk_opportunity_observations "
+            "WHERE opportunity_id=? ORDER BY id DESC LIMIT 1",
+            (opened.opportunity_id,),
+        ).fetchone()
+    assert observation == ("focused", "unavailable", "incomplete-quotes")
+
+
+def test_record_focused_membership_invalidation_closes_master(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    ledger = OpportunityLedger(db_path)
+    opened = ledger.reconcile_global(_observe_assessment(), observed_at_ms=NOW_MS)
+
+    ledger.record_focused(
+        FocusedObservation(
+            opportunity_id=opened.opportunity_id,
+            status="invalidated",
+            reason="structure-membership-changed",
+            bundle_cost=None,
+            gross_edge_bps=None,
+            max_bundle_size=None,
+            legs=(),
+            structure_revision=18,
+            quote_run_id=42,
+            observed_at_ms=NOW_MS + 15_000,
+        )
+    )
+
+    assert ledger.active_masters() == ()
+    with sqlite3.connect(db_path) as con:
+        master = con.execute(
+            "SELECT status,transition_reason FROM neg_risk_opportunities WHERE id=?",
+            (opened.opportunity_id,),
+        ).fetchone()
+    assert master == ("invalidated", "structure-membership-changed")

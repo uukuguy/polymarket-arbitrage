@@ -10,8 +10,16 @@ from dataclasses import dataclass
 
 from loguru import logger
 
+from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.config import Settings
 from polyarb.daemon.alerts import send_opportunity_alert
+from polyarb.routing.focused_quote_collector import (
+    BooksReader,
+    FocusedObservation,
+    MembershipReader,
+    SqliteStructureMembershipReader,
+    collect_focused_observation,
+)
 from polyarb.routing.neg_risk_quote_store import CompleteQuoteProjection
 from polyarb.routing.opportunity_ledger import OpportunityLedger, PendingNotification
 from polyarb.routing.opportunity_scanner import (
@@ -20,6 +28,7 @@ from polyarb.routing.opportunity_scanner import (
 
 SendTelegram = Callable[[Settings, str], Awaitable[None]]
 ClockMs = Callable[[], int]
+WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
 
 _OBSERVER_WARNING = "仅观察，未扣手续费、滑点和多腿成交风险"
 
@@ -45,11 +54,19 @@ class OpportunityWatcher:
         ledger: OpportunityLedger | None = None,
         send_telegram: SendTelegram = send_opportunity_alert,
         clock_ms: ClockMs | None = None,
+        focused_reader: BooksReader | None = None,
+        membership_reader: MembershipReader | None = None,
+        wait_for_stop: WaitForStop | None = None,
+        focused_interval_s: float = 15.0,
     ) -> None:
         self._settings = settings
         self._ledger = ledger or OpportunityLedger(settings.db_path)
         self._send_telegram = send_telegram
         self._clock_ms = clock_ms or _wall_clock_ms
+        self._focused_reader = focused_reader
+        self._membership_reader = membership_reader
+        self._wait_for_stop = wait_for_stop or _wait_for_stop
+        self._focused_interval_s = focused_interval_s
         self._reconciliation_count = 0
         self._last_reconciled_at_ms: int | None = None
         self._notification_delivery_count = 0
@@ -64,6 +81,10 @@ class OpportunityWatcher:
         ledger: OpportunityLedger,
         send_telegram: SendTelegram = send_opportunity_alert,
         clock_ms: ClockMs | None = None,
+        focused_reader: BooksReader | None = None,
+        membership_reader: MembershipReader | None = None,
+        wait_for_stop: WaitForStop | None = None,
+        focused_interval_s: float = 15.0,
     ) -> OpportunityWatcher:
         """Construct with explicit durable and transport seams for unit tests."""
         return cls(
@@ -71,7 +92,51 @@ class OpportunityWatcher:
             ledger=ledger,
             send_telegram=send_telegram,
             clock_ms=clock_ms,
+            focused_reader=focused_reader,
+            membership_reader=membership_reader,
+            wait_for_stop=wait_for_stop,
+            focused_interval_s=focused_interval_s,
         )
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        """Poll only durable active masters and preserve every completed fact."""
+        if self._focused_reader is None or self._membership_reader is None:
+            logger.warning("focused opportunity watcher has no collection dependencies")
+            return
+        while not stop_event.is_set():
+            masters = await asyncio.to_thread(self._ledger.active_masters)
+            for master in masters:
+                try:
+                    observation = await collect_focused_observation(
+                        master,
+                        reader=self._focused_reader,
+                        membership_reader=self._membership_reader,
+                        now_ms=self._clock_ms,
+                        min_edge_bps=self._observe_min_edge_bps(),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.warning(
+                        "focused opportunity quote fetch failed "
+                        f"opportunity_id={master.id} kind={type(error).__name__}"
+                    )
+                    observation = FocusedObservation(
+                        opportunity_id=master.id,
+                        status="unavailable",
+                        reason="clob-fetch-failed",
+                        bundle_cost=None,
+                        gross_edge_bps=None,
+                        max_bundle_size=None,
+                        legs=(),
+                        structure_revision=master.structure_revision,
+                        quote_run_id=master.quote_run_id,
+                        observed_at_ms=self._clock_ms(),
+                    )
+                await asyncio.to_thread(self._ledger.record_focused, observation)
+            await self.deliver_pending_notifications()
+            if await self._wait_for_stop(stop_event, self._focused_interval_s):
+                break
 
     async def reconcile_global_projection(
         self,
@@ -179,3 +244,20 @@ def _format_card(notification: PendingNotification) -> str:
 
 def _wall_clock_ms() -> int:
     return int(time.time() * 1000)
+
+
+async def _wait_for_stop(stop_event: asyncio.Event, delay_s: float) -> bool:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=delay_s)
+    except TimeoutError:
+        return False
+    return True
+
+
+def build_focused_opportunity_watcher(settings: Settings) -> OpportunityWatcher:
+    """Build the local observer loop with the CLOB client's existing limiter."""
+    return OpportunityWatcher(
+        settings,
+        focused_reader=ClobReaderClient(settings),
+        membership_reader=SqliteStructureMembershipReader(settings.db_path),
+    )

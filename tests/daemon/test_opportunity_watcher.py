@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import sqlite3
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -192,3 +194,163 @@ async def test_close_sends_one_card_with_observer_only_warning(
         assert '"token_id":"token-2"' in card
     assert "status=closed" in send_telegram.await_args_list[-1].args[1]
     assert "unknown" not in send_telegram.await_args_list[-1].args[1]
+
+
+async def test_focused_loop_persists_one_top_of_book_observation(
+    settings: Settings,
+    ledger: OpportunityLedger,
+    complete_projection: CompleteQuoteProjection,
+) -> None:
+    from polyarb.daemon.opportunity_watcher import OpportunityWatcher
+    from polyarb.routing.focused_quote_collector import StructureGroup, StructureLeg
+
+    class Reader:
+        requests: list[list[str]] = []
+        projections: list[str] = []
+
+        async def get_books(
+            self,
+            token_ids: list[str],
+            *,
+            projection: str = "full",
+        ) -> list[object]:
+            self.requests.append(token_ids)
+            self.projections.append(projection)
+            return [
+                {"asset_id": "token-1", "asks": [{"price": "0.45", "size": "42"}]},
+                {"asset_id": "token-2", "asks": [{"price": "0.52", "size": "40"}]},
+            ]
+
+    class MembershipReader:
+        def current_group(self, event_id: str, group_id: str) -> StructureGroup:
+            assert (event_id, group_id) == ("event-1", "group-1")
+            return StructureGroup(
+                structure_revision=11,
+                event_id=event_id,
+                group_id=group_id,
+                membership_hash="membership-1",
+                legs=(
+                    StructureLeg("market-1", "condition-1", "alpha", "token-1"),
+                    StructureLeg("market-2", "condition-2", "beta", "token-2"),
+                ),
+            )
+
+    async def stop_after_one(_: object, __: float) -> bool:
+        return True
+
+    await OpportunityWatcher.for_test(
+        settings,
+        ledger=ledger,
+        send_telegram=AsyncMock(),
+        focused_reader=Reader(),
+        membership_reader=MembershipReader(),
+        wait_for_stop=stop_after_one,
+    ).reconcile_global_projection(complete_projection)
+    reader = Reader()
+    watcher = OpportunityWatcher.for_test(
+        settings,
+        ledger=ledger,
+        send_telegram=AsyncMock(),
+        focused_reader=reader,
+        membership_reader=MembershipReader(),
+        wait_for_stop=stop_after_one,
+    )
+
+    await watcher.run(asyncio.Event())
+
+    assert reader.requests == [["token-1", "token-2"]]
+    assert reader.projections == ["top"]
+    with sqlite3.connect(settings.db_path) as con:
+        observation = con.execute(
+            "SELECT source,status,quote_run_id FROM neg_risk_opportunity_observations "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert observation == ("focused", "observe", 1)
+
+
+async def test_focused_loop_empty_watchlist_makes_no_clob_request(
+    settings: Settings,
+    ledger: OpportunityLedger,
+) -> None:
+    from polyarb.daemon.opportunity_watcher import OpportunityWatcher
+
+    reader = AsyncMock()
+
+    async def stop_after_one(_: object, __: float) -> bool:
+        return True
+
+    watcher = OpportunityWatcher.for_test(
+        settings,
+        ledger=ledger,
+        send_telegram=AsyncMock(),
+        focused_reader=reader,
+        membership_reader=object(),
+        wait_for_stop=stop_after_one,
+    )
+
+    await watcher.run(asyncio.Event())
+
+    reader.get_books.assert_not_awaited()
+
+
+async def test_focused_loop_cancellation_preserves_committed_observation(
+    settings: Settings,
+    ledger: OpportunityLedger,
+    complete_projection: CompleteQuoteProjection,
+) -> None:
+    from polyarb.daemon.opportunity_watcher import OpportunityWatcher
+    from polyarb.routing.focused_quote_collector import StructureGroup, StructureLeg
+
+    class Reader:
+        async def get_books(self, _: list[str], *, projection: str = "full") -> list[object]:
+            assert projection == "top"
+            return [
+                {"asset_id": "token-1", "asks": [{"price": "0.45", "size": "42"}]},
+                {"asset_id": "token-2", "asks": [{"price": "0.52", "size": "40"}]},
+            ]
+
+    class MembershipReader:
+        def current_group(self, event_id: str, group_id: str) -> StructureGroup:
+            return StructureGroup(
+                structure_revision=11,
+                event_id=event_id,
+                group_id=group_id,
+                membership_hash="membership-1",
+                legs=(
+                    StructureLeg("market-1", "condition-1", "alpha", "token-1"),
+                    StructureLeg("market-2", "condition-2", "beta", "token-2"),
+                ),
+            )
+
+    wait_started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def block_after_commit(_: object, __: float) -> bool:
+        wait_started.set()
+        await never.wait()
+        return False
+
+    await OpportunityWatcher.for_test(settings, ledger=ledger).reconcile_global_projection(
+        complete_projection
+    )
+    task = asyncio.create_task(
+        OpportunityWatcher.for_test(
+            settings,
+            ledger=ledger,
+            send_telegram=AsyncMock(),
+            focused_reader=Reader(),
+            membership_reader=MembershipReader(),
+            wait_for_stop=block_after_commit,
+        ).run(asyncio.Event())
+    )
+    await asyncio.wait_for(wait_started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    with sqlite3.connect(settings.db_path) as con:
+        observation = con.execute(
+            "SELECT source,status FROM neg_risk_opportunity_observations "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert observation == ("focused", "observe")
