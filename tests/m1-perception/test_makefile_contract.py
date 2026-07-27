@@ -81,6 +81,28 @@ def test_make_snapshot_markets_full_dry_run_recipe() -> None:
     assert "uv run python -m polyarb.snapshot snapshot --full" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("target", "product"),
+    [
+        ("sync-structure-local", "structure"),
+        ("archive-markets-local", "archive"),
+    ],
+)
+def test_make_explicit_data_product_targets_are_wired(
+    target: str, product: str
+) -> None:
+    """Operators must not need to reconstruct product-selection flags by hand."""
+    result = subprocess.run(
+        ["make", "-n", target],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n {target} failed: {result.stderr}"
+    assert f"--product {product}" in result.stdout
+
+
 def test_makefile_phony_declaration_present() -> None:
     """Core snapshot recipe names must be declared .PHONY so a file by that name
     in the project root can't shadow the recipe.
@@ -95,7 +117,12 @@ def test_makefile_phony_declaration_present() -> None:
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
             phony_targets.update(stripped[len(".PHONY:") :].split())
-    required = {"snapshot-markets", "snapshot-markets-full"}
+    required = {
+        "snapshot-markets",
+        "snapshot-markets-full",
+        "sync-structure-local",
+        "archive-markets-local",
+    }
     missing = required - phony_targets
     assert not missing, f"missing .PHONY declarations for: {missing}"
 

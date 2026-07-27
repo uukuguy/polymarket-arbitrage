@@ -428,6 +428,7 @@ async def run_snapshot(
     settings: Settings,
     *,
     mode: str = "subset",
+    product: str = "legacy_combined",
     now_ms: int | None = None,
     use_cache: bool = True,
 ) -> SnapshotResult:
@@ -436,7 +437,11 @@ async def run_snapshot(
     Args:
         settings: Plan-1 ``Settings`` (URLs, rate caps, retry knobs, paths).
         mode: ``"subset"`` (default; only liquidity_usd > threshold)
-              or ``"full"`` (all markets).
+                  or ``"full"`` (all markets).
+        product: ``"structure"`` publishes Gamma-only online market truth;
+                 ``"archive"`` writes research evidence only and never
+                 replaces the published ``markets`` view; ``"legacy_combined"``
+                 preserves the pre-separation behavior for historical tooling.
         now_ms: Override for the snapshot's ``taken_at_ms`` timestamp (test hook).
                 Defaults to ``int(time.time() * 1000)`` at function entry.
 
@@ -455,6 +460,8 @@ async def run_snapshot(
     """
     if mode not in ("subset", "full"):
         raise ValueError(f"invalid mode: {mode!r} (must be 'subset' or 'full')")
+    if product not in ("legacy_combined", "structure", "archive"):
+        raise ValueError(f"invalid product: {product!r}")
 
     taken_at_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     issues: list[Issue] = []
@@ -491,7 +498,8 @@ async def run_snapshot(
     PROGRESS_EVERY = 5000  # log every N streamed markets so long fetches stay observable
 
     logger.info(
-        f"snapshot starting — mode={mode}, cache={'on' if use_cache else 'off'}, "
+        f"snapshot starting — product={product}, mode={mode}, "
+        f"cache={'on' if use_cache else 'off'}, "
         f"taken_at_ms={taken_at_ms}"
     )
 
@@ -933,11 +941,12 @@ async def run_snapshot(
     # ── Phase 3: token list extraction (was inlined into old phase 3) ────
     with _phase("3/7: Build token list"):
         token_ids: list[str] = []
-        for m in target_markets:
-            for k in ("yes_token_id", "no_token_id"):
-                tid = m.get(k)
-                if tid:
-                    token_ids.append(tid)
+        if product != "structure":
+            for m in target_markets:
+                for k in ("yes_token_id", "no_token_id"):
+                    tid = m.get(k)
+                    if tid:
+                        token_ids.append(tid)
         logger.info(
             f"Mode={mode}: {len(target_markets)} target markets, "
             f"{len(token_ids)} tokens to fetch from CLOB"
@@ -954,7 +963,7 @@ async def run_snapshot(
     cache: ChunkCache | None = None
     clob_fetch_failed = False
     with _phase("4/7: CLOB fetch (books + buy/sell prices)"):
-        if use_cache:
+        if use_cache and product != "structure":
             cache = ChunkCache(
                 cache_root=settings.cache_root,
                 taken_at_ms=taken_at_ms,
@@ -967,39 +976,42 @@ async def run_snapshot(
             # We DON'T adopt the cached taken_at_ms — the run's taken_at_ms is
             # the moment THIS run started, used for parquet path + DB row.
             # Cache is just intermediate IO; final timestamps stay fresh.
-        else:
+        elif product != "structure":
             purged = ChunkCache.purge_all(settings.cache_root)
             if purged > 0:
                 logger.info(f"--no-cache: purged {purged} cache directories")
 
-        clob = ClobReaderClient(settings)
-        try:
-            books = await clob.get_books(
-                token_ids,
-                cache=cache,
-                projection="top",
-            )
-            prices = await clob.get_prices_buy_sell(token_ids, cache=cache)
-            prices_buy = prices.get("buy", {})
-            prices_sell = prices.get("sell", {})
-            books_by_token = _index_books_by_token(books)
-            del books
-            logger.info(
-                f"CLOB: {len(books_by_token)} books indexed, "
-                f"{len(prices_buy)}/{len(prices_sell)} buy/sell prices"
-            )
-        except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
-            clob_fetch_failed = True
-            logger.error(f"CLOB fetch failed: {e!r}")
-            # F-5: cap exception detail to 200 chars.
-            issues.append(
-                Issue(
-                    layer=4,
-                    category=Category.API_UNREACHABLE,
-                    market_id=None,
-                    detail=f"CLOB unreachable: {str(e)[:200]}",
+        if product == "structure":
+            logger.info("Structure product: CLOB fetch intentionally skipped")
+        else:
+            clob = ClobReaderClient(settings)
+            try:
+                books = await clob.get_books(
+                    token_ids,
+                    cache=cache,
+                    projection="top",
                 )
-            )
+                prices = await clob.get_prices_buy_sell(token_ids, cache=cache)
+                prices_buy = prices.get("buy", {})
+                prices_sell = prices.get("sell", {})
+                books_by_token = _index_books_by_token(books)
+                del books
+                logger.info(
+                    f"CLOB: {len(books_by_token)} books indexed, "
+                    f"{len(prices_buy)}/{len(prices_sell)} buy/sell prices"
+                )
+            except Exception as e:  # noqa: BLE001 — categorize, do NOT propagate
+                clob_fetch_failed = True
+                logger.error(f"CLOB fetch failed: {e!r}")
+                # F-5: cap exception detail to 200 chars.
+                issues.append(
+                    Issue(
+                        layer=4,
+                        category=Category.API_UNREACHABLE,
+                        market_id=None,
+                        detail=f"CLOB unreachable: {str(e)[:200]}",
+                    )
+                )
 
     # ── 5. Stamp fetched_at_ms + attach top-of-book (yes side; F-1 wrapped) ──
     # Only target_markets are persisted, so only stamp/attach those. Filtered-out
@@ -1281,11 +1293,18 @@ async def run_snapshot(
         # A global fetch failure already carries the bounded, actionable L4
         # signal. Expanding it into one CLOB_MISSING row per token duplicates
         # no information and can OOM a complete 90k+ token universe.
-        if not clob_fetch_failed:
+        if product != "structure" and not clob_fetch_failed:
             issues.extend(layer4_cross_source(target_markets, books_by_token, prices_combined))
 
         status = determine_snapshot_status(issues)
         is_valid = is_valid_overall(issues)  # True for OK/DEGRADED, False for FAILED
+        if product == "archive" and any(issue.layer == 4 for issue in issues):
+            # An archive is only useful as a complete quote-bearing artifact.
+            # Its failure is non-critical to Structure, but it is not a
+            # successful Archive result merely because the online product can
+            # tolerate Layer-4 degradation.
+            status = SnapshotStatus.FAILED
+            is_valid = False
         source_complete = (
             events_coverage.result.completed
             and markets_coverage.result.completed
@@ -1297,9 +1316,15 @@ async def run_snapshot(
             and is_valid
             and not any(issue.category == Category.API_UNREACHABLE for issue in issues)
         )
+        if product == "archive":
+            # Archive is a non-critical evidence product.  Its catalog is
+            # useful to interpret the parquet artifact, but it must never
+            # replace the Structure revision that Quote and M2 consume.
+            publish_markets = False
         if not publish_markets:
-            status = SnapshotStatus.FAILED
-            is_valid = False
+            if product != "archive":
+                status = SnapshotStatus.FAILED
+                is_valid = False
         logger.info(
             f"Validated: status={status.value}, is_valid={is_valid}, "
             f"publish_markets={publish_markets}, {len(issues)} total issues "
@@ -1310,7 +1335,11 @@ async def run_snapshot(
 
     # ── 7. Persist (Parquet atomic FIRST, then SQLite single-tx) ──────────────
     finished_at_ms = int(time.time() * 1000)
-    parquet_path = compute_snapshot_path(settings.parquet_root, taken_at_ms)
+    parquet_path = (
+        compute_snapshot_path(settings.parquet_root, taken_at_ms)
+        if product != "structure"
+        else Path("not-requested")
+    )
     with _phase("7/7: Persist (Parquet then SQLite)"):
         # Plan 02-09 (D-23): streaming writes. Parquet via ParquetWriter chunked
         # write; SQLite via batched executemany in a single BEGIN IMMEDIATE
@@ -1328,7 +1357,8 @@ async def run_snapshot(
                 row.setdefault("fetched_at_ms", clob_done_ms)
                 yield row
 
-        write_parquet_streaming(_parquet_row_iter(), parquet_path, batch_size=500)
+        if product != "structure":
+            write_parquet_streaming(_parquet_row_iter(), parquet_path, batch_size=500)
 
         # Phase 1.1 Amendment 01: stamp events with finished_at_ms (NOT
         # clob_done_ms — events are fetched by Gamma in phase 1, not CLOB).
@@ -1380,6 +1410,16 @@ async def run_snapshot(
             event_rows=event_rows,
             event_tag_rows=event_tag_rows,
             batch_size=500,
+            data_product=product,
+            archive_status=(
+                "not_requested"
+                if product == "structure"
+                else "local_complete"
+                if product == "archive" and is_valid
+                else "failed"
+                if product == "archive"
+                else "legacy"
+            ),
         )
 
     # ── 7.5. Supabase mirror (D-02 dashboard) — fail-soft post-write ─────────
@@ -1393,7 +1433,9 @@ async def run_snapshot(
     # is_valid_overall already says we shouldn't trust. Fail-soft policy says
     # "skip, don't corrupt".
     mirror = None  # type: ignore[assignment]
-    if settings.supabase_mirror_enabled and not publish_markets:
+    if product == "structure":
+        logger.info(f"step 7.5: mirror skipped for Structure snapshot_id={snapshot_id}")
+    elif settings.supabase_mirror_enabled and not publish_markets:
         logger.info(
             f"step 7.5: skip Supabase mirror — market truth was not published "
             f"(snapshot_id={snapshot_id}, status={status.value})"
@@ -1485,7 +1527,7 @@ async def run_snapshot(
 
     # ── 7.6. R2 parquet archive (D-03) — fail-soft post-write ────────────────
     # Upload the already-written parquet to Cloudflare R2. Failure → DEGRADED.
-    if settings.r2_enabled:
+    if settings.r2_enabled and product != "structure":
         from polyarb.storage.r2_sync import R2UploadError, compute_r2_key, upload_parquet_to_r2
 
         r2_url: str | None = None

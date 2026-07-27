@@ -211,6 +211,47 @@ def test_purge_old_snapshots_bounds_each_transaction(store: SQLiteStore) -> None
         assert con.execute("SELECT count(*) FROM snapshots").fetchone()[0] == 25
 
 
+def test_purge_old_snapshots_never_unlinks_no_archive_product_sentinel(
+    store: SQLiteStore, tmp_path: Path
+) -> None:
+    """A Structure row may carry a marker, never a file ownership claim."""
+    old_ms = int((time.time() - 8 * 86_400) * 1000)
+    sentinel = tmp_path / "not-requested"
+    sentinel.write_text("must survive retention")
+    store.write_snapshot(
+        taken_at_ms=old_ms,
+        finished_at_ms=old_ms,
+        mode="full",
+        parquet_path=str(sentinel),
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        data_product="structure",
+        archive_status="not_requested",
+        **_complete_publication(),
+    )
+    # Keep a newer row so retention is allowed to delete the old Structure row.
+    store.write_snapshot(
+        taken_at_ms=int(time.time() * 1000),
+        finished_at_ms=int(time.time() * 1000),
+        mode="full",
+        parquet_path="",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        **_complete_publication(),
+    )
+
+    deleted, _ = store.purge_old_snapshots(
+        older_than_days=7,
+        keep_last=1,
+        parquet_root=tmp_path,
+    )
+
+    assert deleted == 1
+    assert sentinel.exists(), "no-archive marker must never be unlinked as a parquet file"
+
+
 def test_purge_old_snapshots_removes_market_truth_rows(store: SQLiteStore) -> None:
     old_ms = int((time.time() - 8 * 86_400) * 1000)
     snapshot_ids: list[int] = []

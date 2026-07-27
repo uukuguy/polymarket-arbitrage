@@ -39,6 +39,7 @@
 | 24 | [L3 连续性事务](24-L3-连续性事务.md) | prepare evidence → atomic commit → strict sample / generation-scoped evidence / 10/10/10 成功门 / 超时补偿而非 grace period |
 | 25 | [市场全集不是请求成功](25-市场全集不是请求成功.md) | 2,100 行截断为何制造假套利 / keyset completion proof / exact event membership / standard 与 augmented / M1→M2 provenance 门 |
 | 26 | [M1 数据层与失败事实](26-M1数据层与失败事实.md) | 为什么“旧快照仍新鲜”不能掩盖新 OOM / published truth 与 scheduler attempt 的边界 / 为什么 L2 不应阻塞 L1 recovery |
+| 27 | [Structure 与 Archive：把市场成员关系从历史归档中救出来](27-Structure与Archive分层.md) | 为什么 Gamma 结构、可交易报价和历史文件不能绑成同一项作业 / Archive 失败为何不能拖垮 M2 |
 
 ## Phase 02.1 教学增量（2026-05）
 

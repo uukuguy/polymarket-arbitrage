@@ -31,6 +31,8 @@ L3_CREDENTIAL_PROOF_TARGETS = (
 )
 M1_MAKE_TARGETS = {
     "snapshot-markets-v",
+    "sync-structure-local",
+    "archive-markets-local",
     "snapshot-status",
     "snapshot-attempt-status",
     "overview",

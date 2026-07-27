@@ -5446,3 +5446,27 @@ manifest, and 24-hour T0. Also persist Polywatch alert reason/timestamp.
   an L1 recovery; failed Telegram delivery retains only the affected incident.
 - [OPERATOR] `make snapshot-attempt-status` is a read-only local JSON diagnostic.
   It does not connect to Fly, create schema, or start a new qualification run.
+
+## SESSION 111 — 2026-07-27 (Structure/Archive execution split, local green)
+
+- [IMPLEMENTED] The L1 in-app scheduler now starts only `snapshot --product structure`.
+  Structure is full Gamma plus final member reconciliation; it never creates a CLOB
+  client, writes Parquet/R2, or mirrors price data.
+- [IMPLEMENTED] Archive is an explicit full CLOB/Parquet product with
+  `market_view_published=0`. Its CLOB failure records `data_product=archive`,
+  `archive_status=failed` and leaves the prior Structure `markets` view intact.
+- [HEALTH] strict health reads only Structure for its online status. New
+  `archive:last_attempt` / `archive:last_success_age_seconds` are visible but
+  deliberately non-blocking warning evidence.
+- [OPERATOR] Added `make sync-structure-local` and `make archive-markets-local`.
+  The former is Gamma-only local mutation; the latter is deliberate research
+  archive work, not production scheduling.
+- [QUALITY] 371 related tests, scoped Ruff, `make docs-m1-check`, and
+  `make planning-status` pass. No Fly/cron/deploy/capacity mutation has occurred.
+
+### [NEXT — CURRENT]
+
+Inspect the exact production cron/Fly configuration, then deploy the tested
+Structure-only release with a first certified Structure revision and Quote
+binding proof. Do not start the next 24-hour qualification window until those
+post-deploy gates pass.

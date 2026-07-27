@@ -24,6 +24,19 @@ updated: 2026-05-10
 
 ---
 
+## 0.4 Structure、Quote、Archive 是三个产品（2026-07-27）
+
+生产上的 **Structure** 是 Gamma 的完整市场/事件/member truth，必须可以原子发布给 Quote 和
+M2；它不读取 CLOB、不写 Parquet/R2。**Quote** 才是可交易价格事实，绑定一个 Structure
+revision 并有独立时钟。**Archive** 是按需的 CLOB/Parquet/R2 研究证据：可以慢、可以失败、
+必须有自己的状态，但 `market_view_published=0`，不得替换 Structure。
+
+这不是“给 all-in-one snapshot 加更多内存”的变体。第一阶段只在线调度 Structure；Archive
+要等独立容量、成本预算和结果通道后才可进入生产日程。strict health 的 `archive:*` 项只作
+非阻断证据，Archive warning 不能把 Structure→Quote→M2 健康误判为中断。
+
+---
+
 ## 0. 起点 — 用户洞察（2026-05-10）
 
 ### 0.1 全量快照的本质（早些时候的洞察）

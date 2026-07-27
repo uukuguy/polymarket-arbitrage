@@ -220,6 +220,8 @@ async def test_snapshot_pipeline_runs_in_isolated_subprocess(
         "-m",
         "polyarb.snapshot",
         "snapshot",
+        "--product",
+        "structure",
         "--json",
         "--low-priority",
     )

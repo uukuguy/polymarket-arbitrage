@@ -78,6 +78,8 @@ async def run_snapshot_in_subprocess(
         "-m",
         "polyarb.snapshot",
         "snapshot",
+        "--product",
+        "structure",
         "--json",
         "--low-priority",
         stdout=asyncio.subprocess.PIPE,

@@ -222,6 +222,84 @@ async def test_full_pipeline_writes_sqlite_and_parquet(tmp_path: Path) -> None:
     assert market_count == 5  # all 5 fixture markets persisted (mark-don't-drop)
 
 
+@pytest.mark.asyncio
+async def test_structure_product_publishes_gamma_truth_without_clob_or_archive(
+    tmp_path: Path,
+) -> None:
+    """Structure is the lightweight online truth product, never a combined snapshot."""
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
+        result = await run_snapshot(
+            settings,
+            mode="full",
+            product="structure",
+            now_ms=1_777_448_000_000,
+        )
+
+    assert result.is_valid is True
+    assert result.market_count == len(gamma_data)
+    assert not list(settings.parquet_root.rglob("*.parquet"))
+    ClobMock.assert_not_called()
+
+    con = sqlite3.connect(settings.db_path)
+    product, archive_status, published = con.execute(
+        "SELECT data_product, archive_status, market_view_published "
+        "FROM snapshots WHERE id = ?",
+        (result.snapshot_id,),
+    ).fetchone()
+    con.close()
+    assert (product, archive_status, published) == ("structure", "not_requested", 1)
+
+
+@pytest.mark.asyncio
+async def test_archive_clob_failure_never_replaces_published_structure(tmp_path: Path) -> None:
+    """Archive is research evidence: its failure cannot disturb online market truth."""
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
+
+    with patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma):
+        structure = await run_snapshot(
+            settings,
+            mode="full",
+            product="structure",
+            now_ms=1_777_448_000_000,
+        )
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+    ):
+        ClobMock.return_value.get_books = AsyncMock(side_effect=RuntimeError("CLOB down"))
+        archive = await run_snapshot(
+            settings,
+            mode="full",
+            product="archive",
+            now_ms=1_777_448_100_000,
+        )
+
+    assert archive.is_valid is False
+    assert archive.status == "failed"
+    con = sqlite3.connect(settings.db_path)
+    archived = con.execute(
+        "SELECT data_product, archive_status, market_view_published "
+        "FROM snapshots WHERE id = ?",
+        (archive.snapshot_id,),
+    ).fetchone()
+    current_market_snapshot_ids = {
+        row[0] for row in con.execute("SELECT DISTINCT snapshot_id FROM markets")
+    }
+    con.close()
+    assert archived == ("archive", "failed", 0)
+    assert current_market_snapshot_ids == {structure.snapshot_id}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # T6.2 — Layer 1 mismatch flips is_valid=False
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1391,7 +1469,12 @@ async def test_orphan_neg_risk_market_with_active_parent_is_quarantined(
         clob_inst.get_prices_buy_sell = AsyncMock(
             return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
         )
-        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+        result = await run_snapshot(
+            settings,
+            mode="subset",
+            product="structure",
+            now_ms=1_777_448_000_000,
+        )
 
     with sqlite3.connect(settings.db_path) as con:
         coverage = con.execute(
@@ -1513,7 +1596,12 @@ async def test_open_neg_risk_member_absent_from_keyset_quarantines_whole_group(
             return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
         )
 
-        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+        result = await run_snapshot(
+            settings,
+            mode="subset",
+            product="structure",
+            now_ms=1_777_448_000_000,
+        )
 
     with sqlite3.connect(settings.db_path) as con:
         assert con.execute("SELECT COUNT(*) FROM markets").fetchone() == (0,)
@@ -1618,7 +1706,12 @@ async def test_closed_market_side_neg_risk_extra_is_quarantined_without_changing
             return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
         )
 
-        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+        result = await run_snapshot(
+            settings,
+            mode="subset",
+            product="structure",
+            now_ms=1_777_448_000_000,
+        )
 
     with sqlite3.connect(settings.db_path) as con:
         persisted_ids = con.execute(
@@ -1704,7 +1797,12 @@ async def test_open_market_side_neg_risk_extra_quarantines_whole_group(
             return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
         )
 
-        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+        result = await run_snapshot(
+            settings,
+            mode="subset",
+            product="structure",
+            now_ms=1_777_448_000_000,
+        )
 
     with sqlite3.connect(settings.db_path) as con:
         assert con.execute(

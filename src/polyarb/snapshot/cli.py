@@ -60,6 +60,14 @@ def snapshot(
         hidden=True,
         help="Lower this process priority for the in-app scheduler.",
     ),
+    product: str = typer.Option(
+        "legacy_combined",
+        "--product",
+        help=(
+            "Data product: structure (Gamma-only online truth), archive "
+            "(research-only CLOB/Parquet), or legacy_combined."
+        ),
+    ),
 ) -> None:
     """Capture a one-shot Polymarket market snapshot."""
     if low_priority:
@@ -78,9 +86,11 @@ def snapshot(
     )
 
     settings = load_settings(config)
-    mode = "full" if full else "subset"
+    mode = "full" if full or product in ("structure", "archive") else "subset"
 
-    result = asyncio.run(run_snapshot(settings, mode=mode, use_cache=not no_cache))
+    result = asyncio.run(
+        run_snapshot(settings, mode=mode, product=product, use_cache=not no_cache)
+    )
 
     # D-F1: single-line summary on stdout (cron / make can grep this).
     status = result.status.upper()  # "ok" → "OK", "degraded" → "DEGRADED", etc.

@@ -91,7 +91,7 @@ patch-gsd-worktree-cleanup:
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-attempt-status snapshot-fresh snapshots-purge snapshot-cache-purge
+.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v sync-structure-local archive-markets-local snapshot-status snapshot-attempt-status snapshot-fresh snapshots-purge snapshot-cache-purge
 
 ## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly. Auto-loads .env for Supabase+R2 mirror.
 snapshot-markets:
@@ -122,6 +122,18 @@ snapshot-markets-full-v:
 	echo ">> snapshot-markets-full-v (verbose mode) — PID $$$$ — started $$(date '+%Y-%m-%d %H:%M:%S')"; \
 	echo ""; \
 	uv run python -m polyarb.snapshot snapshot --full --verbose
+
+## sync-structure-local: Gamma-only full market structure revision for the local M1→M2 contract; no CLOB, Parquet, R2, or price mirror.
+sync-structure-local:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo ">> sync-structure-local — Gamma-only Structure revision (local mutation)"; \
+	uv run python -m polyarb.snapshot snapshot --product structure --verbose
+
+## archive-markets-local: Explicit full CLOB/Parquet research archive; never replaces the online Structure market view or schedules production work.
+archive-markets-local:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo ">> archive-markets-local — research archive (local mutation; may be long-running)"; \
+	uv run python -m polyarb.snapshot snapshot --product archive --verbose
 
 ## snapshot-status: One-glance status — running process, recent SQLite rows, latest parquet (local time)
 snapshot-status:

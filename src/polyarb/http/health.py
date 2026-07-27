@@ -80,6 +80,16 @@ class MarketTruthHealth:
     last_complete_age_seconds: float | None
 
 
+@dataclass(frozen=True)
+class ArchiveHealth:
+    """Non-blocking evidence about the explicit research archive product."""
+
+    latest_status: str
+    latest_snapshot_id: int | None
+    last_success_snapshot_id: int | None
+    last_success_age_seconds: float | None
+
+
 def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
     """Read durable market-truth health without certifying diagnostic rows."""
     empty = MarketTruthHealth(
@@ -140,6 +150,44 @@ def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
         latest_attempt_event_items=event_items,
         last_complete_snapshot_id=complete_id,
         last_complete_age_seconds=complete_age,
+    )
+
+
+def read_archive_health(path: Path, now_s: float) -> ArchiveHealth:
+    """Read Archive evidence without allowing it to gate online market truth."""
+    empty = ArchiveHealth(
+        latest_status="never-run",
+        latest_snapshot_id=None,
+        last_success_snapshot_id=None,
+        last_success_age_seconds=None,
+    )
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25)
+    except sqlite3.Error:
+        return empty
+    try:
+        latest = con.execute(
+            "SELECT id,archive_status FROM snapshots "
+            "WHERE data_product='archive' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        success = con.execute(
+            "SELECT id,taken_at_ms FROM snapshots "
+            "WHERE data_product='archive' AND is_valid=1 "
+            "AND archive_status IN ('local_complete','r2_uploaded') "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return empty
+    finally:
+        con.close()
+    if latest is None:
+        return empty
+    success_age = max(0.0, now_s - success[1] / 1000.0) if success is not None else None
+    return ArchiveHealth(
+        latest_status=str(latest[1]),
+        latest_snapshot_id=int(latest[0]),
+        last_success_snapshot_id=int(success[0]) if success is not None else None,
+        last_success_age_seconds=success_age,
     )
 
 
@@ -221,8 +269,44 @@ def _build_health_checks(
         }
     ]
 
+    # ── Check 0.5: explicit Archive evidence (non-blocking by design) ─────
+    # Archive is P1 research/audit.  A failure remains visible, but it must
+    # not make strict health fail or pause the Structure → Quote → M2 path.
+    archive = read_archive_health(store.db_path, now_s)
+    archive_attempt_status = "pass" if archive.latest_status == "local_complete" else "warn"
+    checks["archive:last_attempt"] = [
+        {
+            "componentId": "market-archive",
+            "componentType": "datastore",
+            "observedValue": archive.latest_status,
+            "status": archive_attempt_status,
+            "output": (
+                f"snapshot_id={archive.latest_snapshot_id}"
+                if archive.latest_snapshot_id is not None
+                else "archive-not-scheduled"
+            ),
+            "time": _utc_now_iso(),
+        }
+    ]
+    archive_age = archive.last_success_age_seconds
+    checks["archive:last_success_age_seconds"] = [
+        {
+            "componentId": "market-archive",
+            "componentType": "datastore",
+            "observedValue": round(archive_age, 1) if archive_age is not None else None,
+            "observedUnit": "s",
+            "status": "pass" if archive_age is not None else "warn",
+            "output": (
+                f"snapshot_id={archive.last_success_snapshot_id}"
+                if archive.last_success_snapshot_id is not None
+                else "no-successful-archive"
+            ),
+            "time": _utc_now_iso(),
+        }
+    ]
+
     # ── Check 1: snapshot age ─────────────────────────────────────────────
-    last_snapshot = store.get_latest_snapshot()
+    last_snapshot = store.get_latest_snapshot(data_product="structure")
 
     if last_snapshot is None:
         age_s: float | None = None

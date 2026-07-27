@@ -997,15 +997,17 @@ class SQLiteStore:
         finally:
             con.close()
 
-    def get_latest_snapshot(self) -> dict | None:
+    def get_latest_snapshot(self, *, data_product: str | None = None) -> dict | None:
         """Read the most-recent snapshot row for /health endpoint.
 
         Phase 02 Plan 02 — used by /health handler to determine pass/warn/fail.
         Uses read-only mode=ro URI (P3.8: HTTP server NEVER writes SQLite).
         Returns None if no snapshots exist (first deploy edge case).
 
-        Columns returned: id, taken_at_ms, finished_at_ms, mode, status (notes field),
-        market_count, is_valid.
+        ``data_product`` narrows the result to one explicit product when a
+        consumer has a production contract (for example health reads only
+        Structure).  ``None`` retains the legacy all-snapshot behavior for
+        historical reconciliation tooling.
         """
         uri = f"file:{self._db_path}?mode=ro"
         try:
@@ -1014,13 +1016,16 @@ class SQLiteStore:
             # DB file doesn't exist yet → no snapshot
             return None
         try:
+            where = "WHERE data_product = ?" if data_product is not None else ""
+            params = (data_product,) if data_product is not None else ()
             # Try to read the new Plan 03 columns; fall back gracefully for old DBs
             # that haven't been migrated (supabase_mirror_at_ms + parquet_r2_url).
             try:
                 row = con.execute(
                     "SELECT id, taken_at_ms, finished_at_ms, mode, is_valid, market_count, notes, "
                     "supabase_mirror_at_ms, parquet_r2_url "
-                    "FROM snapshots ORDER BY id DESC LIMIT 1"
+                    f"FROM snapshots {where} ORDER BY id DESC LIMIT 1",
+                    params,
                 ).fetchone()
                 if not row:
                     return None
@@ -1101,15 +1106,19 @@ class SQLiteStore:
                     [cutoff_ms, *keep_ids, max_snapshots_per_run],
                 ).fetchall()
             ]
-            # Also fetch parquet paths for cleanup
+            # Archive ownership is explicit.  A Structure snapshot carries the
+            # no-archive marker in parquet_path for compatibility with the old
+            # non-null column contract; that marker is not a file to unlink.
+            # Never infer deletion ownership from a path-shaped string alone.
             parquet_paths = (
                 [
                     r[0]
                     for r in con.execute(
-                        f"SELECT parquet_path FROM snapshots "
+                        f"SELECT parquet_path, archive_status FROM snapshots "
                         f"WHERE id IN ({','.join('?' for _ in to_delete)})",
                         to_delete,
                     ).fetchall()
+                    if r[1] != "not_requested"
                 ]
                 if parquet_root is not None and to_delete
                 else []
