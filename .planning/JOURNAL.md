@@ -5619,3 +5619,30 @@ are green.
   substitute either target or perform push/deploy/unpause until the task owner
   explicitly resolves the gate contract; no production request was made and no
   secret was inspected or exposed.
+
+## SESSION 116 — 2026-07-28 (corrected gate, deployment evidence blocked)
+
+- [RESOLVED] Commit `109ce48` replaced the unavailable `make smoke-health`
+  gate with `make docs-m1-check`. The corrected full local gate was green:
+  planning status reported no drift, the stage diagnostic suite passed 49 tests,
+  and the M1 manual contract reported `OK`. The verified repair branch was
+  pushed to `origin/fix/l3-continuity-repair` at `109ce48`.
+- [DEPLOYMENT EVIDENCE BLOCKED] `make deploy` began a remote build for
+  `109ce484d9b939c83188236570c26b2a698094f8`, but its captured output stopped
+  during Dockerfile transfer and did not establish a completed release.
+  A subsequent read-only `flyctl releases -a polyarb-l1` query still listed
+  `v174` (about 13 hours old) as newest; no new release number/SHA can be
+  truthfully recorded. Do not retry within this task.
+- [AUTHORITY BLOCKED] `POLYARB_SCAN_SHARED_SECRET` was absent from the local
+  environment. No secret was printed or read, `make unpause-prod` did not run,
+  and no attempt/strict-health sample was fabricated. No timeout, cadence,
+  resource, wallet, signing, balance, or execution setting changed.
+
+### [NEXT — CURRENT]
+
+Resolve why the authorized Fly deploy did not yield a new release, then run the
+deployment from the verified `109ce48` branch once. Only with a locally
+configured shared secret issue one signed unpause, then collect one terminal
+attempt's persisted outcome/stage/elapsed and strict-health evidence. Keep the
+prior no-deploy entry as historical evidence; do not auto-unpause or tune
+Structure performance from this diagnostic alone.
