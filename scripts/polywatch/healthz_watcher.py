@@ -74,6 +74,7 @@ L2_WS_SILENCE_S = int(os.environ.get("POLYWATCH_L2_WS_SILENCE_S", "600"))       
 DRY_RUN = os.environ.get("POLYWATCH_DRY_RUN", "0") == "1"
 STATE_FILE = os.environ.get("POLYWATCH_STATE_FILE", "")
 REMINDER_S = int(os.environ.get("POLYWATCH_REMINDER_S", "1800"))
+COMPONENTS = ("l1", "l2", "opportunity", "dashboard")
 
 # Sentry issue link (well-known: SCHEDULER_PAUSED issue 121111789)
 SENTRY_PAUSED_LINK = (
@@ -206,6 +207,114 @@ def _load_notification_state(path: str) -> dict:
         return {}
 
 
+def normalize_notification_state(state: Mapping[str, object]) -> dict:
+    """Return component-scoped incidents, converting legacy global state once.
+
+    The resident watcher originally stored one shared ``active_keys`` set.  That
+    shape cannot represent one component recovering while another remains
+    unhealthy, so every reader converts it to independent incidents before
+    deciding or persisting the next tick.
+    """
+    raw_incidents = state.get("incidents")
+    incidents: dict[str, dict[str, float | bool]] = {}
+    if isinstance(raw_incidents, Mapping):
+        for component, raw_incident in raw_incidents.items():
+            if not isinstance(component, str) or not isinstance(raw_incident, Mapping):
+                continue
+            if raw_incident.get("active") is not True:
+                continue
+            raw_last_alert = raw_incident.get("last_alert_at_s", 0.0)
+            incidents[component] = {
+                "active": True,
+                "last_alert_at_s": (
+                    float(raw_last_alert)
+                    if isinstance(raw_last_alert, (int, float))
+                    else 0.0
+                ),
+            }
+    else:
+        raw_active_keys = state.get("active_keys", [])
+        raw_last_alert = state.get("last_alert_at_s", 0.0)
+        last_alert = (
+            float(raw_last_alert) if isinstance(raw_last_alert, (int, float)) else 0.0
+        )
+        if isinstance(raw_active_keys, list):
+            for component in raw_active_keys:
+                if isinstance(component, str):
+                    incidents[component] = {"active": True, "last_alert_at_s": last_alert}
+
+    normalized: dict[str, object] = {"incidents": incidents}
+    raw_last_seen = state.get("last_seen_at_s")
+    if isinstance(raw_last_seen, (int, float)):
+        normalized["last_seen_at_s"] = float(raw_last_seen)
+    return normalized
+
+
+def component_notification_decisions(
+    active_by_component: Mapping[str, bool],
+    state: Mapping[str, object],
+    *,
+    now_s: float,
+    reminder_s: int,
+) -> dict[str, str]:
+    """Decide each component's alert lifecycle independently."""
+    incidents = normalize_notification_state(state)["incidents"]
+    assert isinstance(incidents, Mapping)
+    components = tuple(sorted(set(active_by_component) | set(incidents)))
+    decisions: dict[str, str] = {}
+    for component in components:
+        active = active_by_component.get(component, False)
+        raw_incident = incidents.get(component)
+        previous_active = isinstance(raw_incident, Mapping) and raw_incident.get("active") is True
+        if active:
+            if not previous_active:
+                decisions[component] = "alert"
+                continue
+            raw_last_alert = raw_incident.get("last_alert_at_s", 0.0)
+            last_alert = (
+                float(raw_last_alert)
+                if isinstance(raw_last_alert, (int, float))
+                else 0.0
+            )
+            decisions[component] = "alert" if now_s - last_alert >= reminder_s else "suppress"
+        else:
+            decisions[component] = "recovery" if previous_active else "noop"
+    return decisions
+
+
+def updated_component_notification_state(
+    active_by_component: Mapping[str, bool],
+    state: Mapping[str, object],
+    decisions: Mapping[str, str],
+    *,
+    now_s: float,
+    delivery_ok_by_component: Mapping[str, bool],
+) -> dict:
+    """Persist only transitions whose own notification delivery succeeded."""
+    normalized = normalize_notification_state(state)
+    raw_incidents = normalized["incidents"]
+    assert isinstance(raw_incidents, Mapping)
+    incidents = {component: dict(incident) for component, incident in raw_incidents.items()}
+    for component, decision in decisions.items():
+        delivery_ok = delivery_ok_by_component.get(component, True)
+        if decision == "recovery":
+            if delivery_ok:
+                incidents.pop(component, None)
+            continue
+        if active_by_component.get(component, False):
+            previous = incidents.get(component, {})
+            previous_last_alert = previous.get("last_alert_at_s", 0.0)
+            incidents[component] = {
+                "active": True,
+                "last_alert_at_s": (
+                    now_s
+                    if decision == "alert" and delivery_ok
+                    else previous_last_alert
+                ),
+            }
+    return {"incidents": incidents, "last_seen_at_s": now_s}
+
+
 def _save_notification_state(path: str, state: dict) -> bool:
     """Atomically persist transition/reminder state on the resident cron VM."""
     if not path:
@@ -324,6 +433,19 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
 
     if snap_status == "fail":
         return "push", f"L1 snapshot sub-check fail (age={age})"
+
+    latest_attempt = _extract_check(healthz, "snapshot:latest_attempt", {})
+    latest_outcome = latest_attempt.get("observedValue") if latest_attempt else None
+    if latest_outcome in {"failed", "cancelled"}:
+        return "push", f"L1 latest snapshot attempt {latest_outcome}"
+
+    failure_counter = _extract_check(healthz, "snapshot:failure_counter", {})
+    if failure_counter and failure_counter.get("status") == "fail":
+        return (
+            "push",
+            "L1 snapshot failure counter "
+            f"failed (count={failure_counter.get('observedValue')})",
+        )
 
     market_truth = _extract_check(healthz, "market_truth:coverage", {})
     if (
@@ -479,38 +601,41 @@ def main() -> int:
         f"[polywatch] Dashboard → {dashboard_action}: {dashboard_reason}"
     )
 
-    active_keys: list[str] = []
+    active_by_component = {
+        "l1": l1_action in {"push", "unpause+push"},
+        "l2": l2_action == "push",
+        "opportunity": opportunity_action == "push",
+        "dashboard": dashboard_action == "push",
+    }
     escalation_ok = True
-
-    if l1_action == "unpause+push":
-        active_keys.append("l1")
-    elif l1_action == "push":
-        active_keys.append("l1")
-
-    if l2_action == "push":
-        active_keys.append("l2")
-
-    if opportunity_action == "push":
-        active_keys.append("opportunity")
-
-    if dashboard_action == "push":
-        active_keys.append("dashboard")
 
     now_s = time.time()
     state = _load_notification_state(STATE_FILE)
     if STATE_FILE:
-        notification = notification_decision(
-            tuple(active_keys),
+        decisions = component_notification_decisions(
+            active_by_component,
             state,
             now_s=now_s,
             reminder_s=REMINDER_S,
         )
     else:
-        notification = "alert" if active_keys else "noop"
+        decisions = {
+            component: "alert" if active else "noop"
+            for component, active in active_by_component.items()
+        }
 
-    if notification == "alert":
+    alert_components = [
+        component for component in COMPONENTS if decisions.get(component) == "alert"
+    ]
+    recovery_components = [
+        component for component in COMPONENTS if decisions.get(component) == "recovery"
+    ]
+    delivery_ok_by_component: dict[str, bool] = {}
+
+    if alert_components:
         push_lines: list[str] = []
-        if l1_action == "unpause+push":
+        l1_unpause_ok = True
+        if "l1" in alert_components and l1_action == "unpause+push":
             unpause_ok, unpause_msg = _post_unpause()
             print(f"[polywatch] unpause result: ok={unpause_ok} msg={unpause_msg}")
             push_lines.append(
@@ -522,16 +647,17 @@ def main() -> int:
             )
             if not unpause_ok:
                 escalation_ok = False
-        elif l1_action == "push":
+                l1_unpause_ok = False
+        elif "l1" in alert_components:
             push_lines.append(f"⚠️ <b>polyarb-l1 unhealthy</b>\n{l1_reason}")
 
-        if l2_action == "push":
+        if "l2" in alert_components:
             push_lines.append(f"⚠️ <b>polyarb-l2 unhealthy</b>\n{l2_reason}")
-        if opportunity_action == "push":
+        if "opportunity" in alert_components:
             push_lines.append(
                 f"⚠️ <b>polyarb opportunity feed unhealthy</b>\n{opportunity_reason}"
             )
-        if dashboard_action == "push":
+        if "dashboard" in alert_components:
             push_lines.append(
                 f"⚠️ <b>polyarb Dashboard unhealthy</b>\n{dashboard_reason}"
             )
@@ -540,29 +666,39 @@ def main() -> int:
         telegram_ok = _send_telegram(msg)
         escalation_ok = escalation_ok and telegram_ok
         print(f"[polywatch] telegram push: ok={telegram_ok}")
-    elif notification == "suppress":
-        print(
-            "[polywatch] duplicate alert suppressed "
-            f"(keys={','.join(active_keys)}, reminder_s={REMINDER_S})"
-        )
-    elif notification == "recovery":
-        previous = state.get("active_keys", [])
-        recovered = ", ".join(str(value) for value in previous)
+        for component in alert_components:
+            delivery_ok_by_component[component] = telegram_ok and (
+                l1_unpause_ok if component == "l1" else True
+            )
+
+    if recovery_components:
+        recovered = ", ".join(recovery_components)
         telegram_ok = _send_telegram(
             f"✅ polywatch recovered — {now_iso}\nresolved: {recovered}"
         )
         escalation_ok = escalation_ok and telegram_ok
         print(f"[polywatch] recovery push: ok={telegram_ok}")
-    else:
+        for component in recovery_components:
+            delivery_ok_by_component[component] = telegram_ok
+
+    suppressed = [
+        component for component in COMPONENTS if decisions.get(component) == "suppress"
+    ]
+    if suppressed:
+        print(
+            "[polywatch] duplicate alert suppressed "
+            f"(components={','.join(suppressed)}, reminder_s={REMINDER_S})"
+        )
+    if not alert_components and not recovery_components and not suppressed:
         print("[polywatch] all green — no push")
 
     if STATE_FILE:
-        next_state = updated_notification_state(
-            tuple(active_keys),
+        next_state = updated_component_notification_state(
+            active_by_component,
             state,
-            notification=notification,
             now_s=now_s,
-            delivery_ok=escalation_ok,
+            decisions=decisions,
+            delivery_ok_by_component=delivery_ok_by_component,
         )
         state_ok = _save_notification_state(STATE_FILE, next_state)
         escalation_ok = escalation_ok and state_ok

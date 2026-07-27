@@ -337,8 +337,9 @@ Expected: FAIL because component_notification_decisions does not exist.
 
 - [ ] **Step 3: Implement component state and messages**
 
-Extend decide_l1 to push on a missing, failed, or cancelled snapshot:latest_attempt,
-and on a fail-status snapshot:failure_counter. Preserve existing market-truth and
+Extend decide_l1 to push on a failed or cancelled snapshot:latest_attempt,
+and on a fail-status snapshot:failure_counter. ``never-started`` remains neutral
+because existing valid snapshots can predate attempt recording. Preserve market-truth and
 quote checks.
 
 Replace global notification_decision with:

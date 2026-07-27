@@ -121,6 +121,24 @@ def test_polywatch_alerts_when_market_truth_coverage_is_missing() -> None:
     )
 
 
+def test_failed_snapshot_attempt_pushes_even_when_last_success_is_fresh() -> None:
+    health = _health(
+        checks={
+            "snapshot:last_success_age_seconds": _check(60.0),
+            "snapshot:latest_attempt": _check("failed", status="warn"),
+            "snapshot:failure_counter": _check(1, status="warn"),
+            "market_truth:coverage": _check("complete"),
+            "quote_feed:last_complete_age_seconds": _check(20.0),
+            "quote_feed:collector_state": _check("running"),
+        }
+    )
+
+    action, reason = WATCHER.decide_l1(health)
+
+    assert action == "push"
+    assert "latest snapshot attempt failed" in reason.lower()
+
+
 def test_empty_opportunity_list_is_healthy() -> None:
     action, reason = _decision("decide_opportunity")(
         {
@@ -312,6 +330,53 @@ def test_successful_recovery_clears_resident_state() -> None:
         "active_keys": [],
         "last_seen_at_s": 1100.0,
         "last_alert_at_s": 0.0,
+    }
+
+
+def test_l1_recovery_is_sent_while_l2_remains_active() -> None:
+    decisions = WATCHER.component_notification_decisions(
+        {"l1": False, "l2": True},
+        {
+            "incidents": {
+                "l1": {"active": True, "last_alert_at_s": 1_000.0},
+                "l2": {"active": True, "last_alert_at_s": 1_000.0},
+            }
+        },
+        now_s=1_100.0,
+        reminder_s=1_800,
+    )
+
+    assert decisions == {"l1": "recovery", "l2": "suppress"}
+
+
+def test_legacy_active_keys_become_independent_incidents() -> None:
+    normalized = WATCHER.normalize_notification_state(
+        {"active_keys": ["l1", "l2"], "last_alert_at_s": 1_000.0}
+    )
+
+    assert normalized["incidents"] == {
+        "l1": {"active": True, "last_alert_at_s": 1_000.0},
+        "l2": {"active": True, "last_alert_at_s": 1_000.0},
+    }
+
+
+def test_failed_l1_recovery_delivery_keeps_only_l1_incident() -> None:
+    updated = WATCHER.updated_component_notification_state(
+        {"l1": False, "l2": True},
+        {
+            "incidents": {
+                "l1": {"active": True, "last_alert_at_s": 1_000.0},
+                "l2": {"active": True, "last_alert_at_s": 1_000.0},
+            }
+        },
+        {"l1": "recovery", "l2": "suppress"},
+        now_s=1_100.0,
+        delivery_ok_by_component={"l1": False, "l2": True},
+    )
+
+    assert updated["incidents"] == {
+        "l1": {"active": True, "last_alert_at_s": 1_000.0},
+        "l2": {"active": True, "last_alert_at_s": 1_000.0},
     }
 
 
