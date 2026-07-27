@@ -127,6 +127,26 @@ async def test_telegram_failure_is_retryable_without_losing_observation(
     assert pending[0].attempt_count == 1
 
 
+async def test_opportunity_alert_without_telegram_configuration_stays_retryable(
+    settings: Settings,
+    ledger: OpportunityLedger,
+    complete_projection: CompleteQuoteProjection,
+) -> None:
+    from polyarb.daemon.alerts import TelegramUnavailableError, send_opportunity_alert
+    from polyarb.daemon.opportunity_watcher import OpportunityWatcher
+
+    with pytest.raises(TelegramUnavailableError):
+        await send_opportunity_alert(settings, "observer-only card")
+
+    await OpportunityWatcher.for_test(settings, ledger=ledger).reconcile_global_projection(
+        complete_projection
+    )
+
+    notification = ledger.pending_notifications(now_ms=int(time.time() * 1000))[0]
+    assert notification.attempt_count == 1
+    assert ledger.notification_attempts(notification.id)[0].error_kind == "TelegramUnavailableError"
+
+
 async def test_stable_observation_sends_no_duplicate_card(
     settings: Settings,
     ledger: OpportunityLedger,
@@ -163,4 +183,12 @@ async def test_close_sends_one_card_with_observer_only_warning(
         card = call.args[1]
         assert "execution_status=not-verified" in card
         assert "仅观察，未扣手续费、滑点和多腿成交风险" in card
+        assert "event_id=event-1" in card
+        assert "group_id=group-1" in card
+        assert "membership_hash=membership-1" in card
+        assert "structure_revision=10" in card
+        assert "quote_run_id=" in card
+        assert '"token_id":"token-1"' in card
+        assert '"token_id":"token-2"' in card
     assert "status=closed" in send_telegram.await_args_list[-1].args[1]
+    assert "unknown" not in send_telegram.await_args_list[-1].args[1]

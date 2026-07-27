@@ -43,6 +43,10 @@ from polyarb.config import Settings
 _LAST_ALERT_TIME_MS: dict[str, int] = {}
 
 
+class TelegramUnavailableError(RuntimeError):
+    """The configured Telegram transport cannot accept an opportunity card."""
+
+
 def _is_deduped(key: str, window_seconds: int) -> bool:
     """True if `key` fired within the last ``window_seconds`` (and we should suppress)."""
     now_ms = int(time.time() * 1000)
@@ -174,6 +178,8 @@ async def _telegram_direct(
     token = settings.telegram_bot_token.get_secret_value()
     chat_id = settings.telegram_chat_id
     if not token or not chat_id:
+        if raise_on_failure:
+            raise TelegramUnavailableError("telegram credentials are not configured")
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"

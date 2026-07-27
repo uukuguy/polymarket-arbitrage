@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -155,11 +156,18 @@ def _format_card(notification: PendingNotification) -> str:
         ("strategy", payload.get("strategy", "neg-risk-buy-all")),
         ("event_id", payload.get("event_id", "unknown")),
         ("group_id", payload.get("group_id", "unknown")),
+        ("membership_hash", payload.get("membership_hash", "unknown")),
+        (
+            "legs",
+            json.dumps(payload.get("legs", "unknown"), separators=(",", ":"), sort_keys=True),
+        ),
         ("bundle_cost", payload.get("bundle_cost", "unknown")),
         ("gross_edge_bps", payload.get("gross_edge_bps", "unknown")),
         ("max_bundle_size", payload.get("max_bundle_size", "unknown")),
         ("structure_revision", payload.get("structure_revision", "unknown")),
         ("quote_run_id", payload.get("quote_run_id", "unknown")),
+        ("quoted_at_ms", payload.get("quoted_at_ms", "unknown")),
+        ("transition_reason", payload.get("transition_reason", notification.reason)),
         ("execution_status", "not-verified"),
     )
     return "\n".join(

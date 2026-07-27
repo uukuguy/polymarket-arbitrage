@@ -117,3 +117,27 @@ def test_notification_delivery_is_audited_without_changing_market_fact(tmp_path)
 
     assert ledger.pending_notifications(now_ms=NOW_MS + 1) == ()
     assert ledger.current_opportunities()[0]["id"] == opened.opportunity_id
+
+
+def test_notification_attempts_are_append_only_and_retry_state_is_derived(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    ledger = OpportunityLedger(db_path)
+    opened = ledger.reconcile_global(_observe_assessment(), observed_at_ms=NOW_MS)
+    notification = ledger.pending_notifications(now_ms=NOW_MS)[0]
+
+    ledger.mark_notification_failed(
+        notification.id,
+        attempted_at_ms=NOW_MS + 1,
+        error_kind="TelegramUnavailableError",
+    )
+    assert ledger.pending_notifications(now_ms=NOW_MS + 1)[0].attempt_count == 1
+    ledger.mark_notification_delivered(notification.id, delivered_at_ms=NOW_MS + 2)
+
+    assert ledger.pending_notifications(now_ms=NOW_MS + 2) == ()
+    assert ledger.current_opportunities()[0]["id"] == opened.opportunity_id
+    attempts = ledger.notification_attempts(notification.id)
+    assert [(item.outcome, item.error_kind) for item in attempts] == [
+        ("failed", "TelegramUnavailableError"),
+        ("delivered", None),
+    ]

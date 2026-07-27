@@ -26,6 +26,15 @@ class PendingNotification:
     attempt_count: int
 
 
+@dataclass(frozen=True)
+class NotificationAttempt:
+    id: int
+    notification_id: int
+    attempted_at_ms: int
+    outcome: str
+    error_kind: str | None
+
+
 class OpportunityLedger:
     """SQLite ledger where a market transition and its alert intent commit together."""
 
@@ -115,13 +124,11 @@ class OpportunityLedger:
                         legs_json,
                     ),
                 )
-                payload = {
-                    "status": "closed",
-                    "event_id": assessment.event_id,
-                    "group_id": assessment.group_id,
-                    "gross_edge_bps": assessment.gross_edge_bps,
-                    "execution_status": "not-verified",
-                }
+                payload = _notification_payload(
+                    assessment,
+                    status="closed",
+                    transition_reason="closed-gross-edge-threshold",
+                )
                 con.execute(
                     "INSERT INTO neg_risk_opportunity_notifications("
                     "opportunity_id,reason,payload_json,status,created_at_ms"
@@ -211,18 +218,11 @@ class OpportunityLedger:
                 ),
             )
             if kind == "entered":
-                payload = {
-                    "status": "observe",
-                    "strategy": "neg-risk-buy-all",
-                    "event_id": assessment.event_id,
-                    "group_id": assessment.group_id,
-                    "bundle_cost": assessment.bundle_cost,
-                    "gross_edge_bps": assessment.gross_edge_bps,
-                    "max_bundle_size": assessment.max_bundle_size,
-                    "structure_revision": assessment.structure_revision,
-                    "quote_run_id": assessment.quote_run_id,
-                    "execution_status": "not-verified",
-                }
+                payload = _notification_payload(
+                    assessment,
+                    status="observe",
+                    transition_reason="entered-gross-edge-threshold",
+                )
                 con.execute(
                     "INSERT INTO neg_risk_opportunity_notifications("
                     "opportunity_id,reason,payload_json,status,created_at_ms"
@@ -235,18 +235,11 @@ class OpportunityLedger:
                     ),
                 )
             elif kind == "edge-changed":
-                payload = {
-                    "status": "observe",
-                    "strategy": "neg-risk-buy-all",
-                    "event_id": assessment.event_id,
-                    "group_id": assessment.group_id,
-                    "bundle_cost": assessment.bundle_cost,
-                    "gross_edge_bps": assessment.gross_edge_bps,
-                    "max_bundle_size": assessment.max_bundle_size,
-                    "structure_revision": assessment.structure_revision,
-                    "quote_run_id": assessment.quote_run_id,
-                    "execution_status": "not-verified",
-                }
+                payload = _notification_payload(
+                    assessment,
+                    status="observe",
+                    transition_reason="edge-changed",
+                )
                 con.execute(
                     "INSERT INTO neg_risk_opportunity_notifications("
                     "opportunity_id,reason,payload_json,status,created_at_ms"
@@ -296,9 +289,15 @@ class OpportunityLedger:
         con = self._connect()
         try:
             rows = con.execute(
-                "SELECT id,opportunity_id,reason,payload_json,attempt_count "
-                "FROM neg_risk_opportunity_notifications WHERE status IN ('pending','failed') "
-                "ORDER BY created_at_ms,id"
+                "SELECT n.id,n.opportunity_id,n.reason,n.payload_json,"
+                "n.attempt_count+(SELECT COUNT(*) "
+                "FROM neg_risk_opportunity_notification_attempts a "
+                "WHERE a.notification_id=n.id) "
+                "FROM neg_risk_opportunity_notifications n "
+                "WHERE n.status != 'delivered' AND NOT EXISTS("
+                "SELECT 1 FROM neg_risk_opportunity_notification_attempts a "
+                "WHERE a.notification_id=n.id AND a.outcome='delivered'"
+                ") ORDER BY n.created_at_ms,n.id"
             ).fetchall()
         finally:
             con.close()
@@ -319,15 +318,20 @@ class OpportunityLedger:
         *,
         delivered_at_ms: int,
     ) -> None:
-        """Record delivery without mutating the market observation it describes."""
+        """Append a delivery attempt without changing its immutable intent."""
         con = self._connect()
         try:
             con.execute(
-                "UPDATE neg_risk_opportunity_notifications "
-                "SET status='delivered',attempt_count=attempt_count+1,"
-                "attempted_at_ms=?,delivered_at_ms=?,error_kind=NULL "
-                "WHERE id=? AND status IN ('pending','failed')",
-                (delivered_at_ms, delivered_at_ms, notification_id),
+                "INSERT INTO neg_risk_opportunity_notification_attempts("
+                "notification_id,attempted_at_ms,outcome,error_kind"
+                ") SELECT ?,?,'delivered',NULL WHERE EXISTS("
+                "SELECT 1 FROM neg_risk_opportunity_notifications "
+                "WHERE id=? AND status != 'delivered'"
+                ") AND NOT EXISTS("
+                "SELECT 1 FROM neg_risk_opportunity_notification_attempts "
+                "WHERE notification_id=? AND outcome='delivered'"
+                ")",
+                (notification_id, delivered_at_ms, notification_id, notification_id),
             )
         finally:
             con.close()
@@ -339,15 +343,84 @@ class OpportunityLedger:
         attempted_at_ms: int,
         error_kind: str,
     ) -> None:
-        """Keep failed delivery retryable and auditable without touching market state."""
+        """Append a retryable failed attempt without touching market state."""
         con = self._connect()
         try:
             con.execute(
-                "UPDATE neg_risk_opportunity_notifications "
-                "SET status='failed',attempt_count=attempt_count+1,"
-                "attempted_at_ms=?,error_kind=? "
-                "WHERE id=? AND status IN ('pending','failed')",
-                (attempted_at_ms, error_kind, notification_id),
+                "INSERT INTO neg_risk_opportunity_notification_attempts("
+                "notification_id,attempted_at_ms,outcome,error_kind"
+                ") SELECT ?,?,'failed',? WHERE EXISTS("
+                "SELECT 1 FROM neg_risk_opportunity_notifications "
+                "WHERE id=? AND status != 'delivered'"
+                ") AND NOT EXISTS("
+                "SELECT 1 FROM neg_risk_opportunity_notification_attempts "
+                "WHERE notification_id=? AND outcome='delivered'"
+                ")",
+                (
+                    notification_id,
+                    attempted_at_ms,
+                    error_kind,
+                    notification_id,
+                    notification_id,
+                ),
             )
         finally:
             con.close()
+
+    def notification_attempts(self, notification_id: int) -> tuple[NotificationAttempt, ...]:
+        """Return append-only delivery evidence in its original order."""
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT id,notification_id,attempted_at_ms,outcome,error_kind "
+                "FROM neg_risk_opportunity_notification_attempts "
+                "WHERE notification_id=? ORDER BY attempted_at_ms,id",
+                (notification_id,),
+            ).fetchall()
+        finally:
+            con.close()
+        return tuple(
+            NotificationAttempt(
+                id=int(row[0]),
+                notification_id=int(row[1]),
+                attempted_at_ms=int(row[2]),
+                outcome=str(row[3]),
+                error_kind=str(row[4]) if row[4] is not None else None,
+            )
+            for row in rows
+        )
+
+
+def _notification_payload(
+    assessment: GroupAssessment,
+    *,
+    status: str,
+    transition_reason: str,
+) -> dict[str, object]:
+    """Freeze every available global provenance fact into the outbox intent."""
+    return {
+        "status": status,
+        "strategy": "neg-risk-buy-all",
+        "event_id": assessment.event_id,
+        "group_id": assessment.group_id,
+        "membership_hash": assessment.membership_hash,
+        "bundle_cost": assessment.bundle_cost,
+        "gross_edge_bps": assessment.gross_edge_bps,
+        "max_bundle_size": assessment.max_bundle_size,
+        "structure_revision": assessment.structure_revision,
+        "quote_run_id": assessment.quote_run_id,
+        "quoted_at_ms": assessment.quoted_at_ms,
+        "legs": [
+            {
+                "market_id": leg.market_id,
+                "condition_id": leg.condition_id,
+                "slug": leg.slug,
+                "token_id": leg.yes_token_id,
+                "ask": leg.ask_price,
+                "ask_size": leg.ask_size,
+            }
+            for leg in assessment.legs
+        ],
+        "transition_reason": transition_reason,
+        "execution_status": "not-verified",
+    }

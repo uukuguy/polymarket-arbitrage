@@ -337,6 +337,19 @@ CREATE TABLE IF NOT EXISTS neg_risk_opportunity_notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_opportunity_notifications_pending
   ON neg_risk_opportunity_notifications(status, created_at_ms, id);
+
+-- Notification rows are immutable delivery intents. Each transport result is
+-- an append-only attempt so retry state can be derived without erasing prior
+-- failure or delivery evidence from deployed databases.
+CREATE TABLE IF NOT EXISTS neg_risk_opportunity_notification_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  notification_id INTEGER NOT NULL REFERENCES neg_risk_opportunity_notifications(id),
+  attempted_at_ms INTEGER NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('delivered','failed')),
+  error_kind TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_opportunity_notification_attempts_replay
+  ON neg_risk_opportunity_notification_attempts(notification_id, attempted_at_ms, id);
 """
 
 # Order MUST match the DDL `CREATE TABLE markets(...)` declaration
