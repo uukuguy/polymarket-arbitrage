@@ -94,6 +94,11 @@ async def run_snapshot_in_subprocess(
         "isolated snapshot started "
         f"pid={getattr(process, 'pid', None)}"
     )
+    # Own one pipe-reader task for the child lifetime.  A timeout/cancellation
+    # must not cancel the reader and then attempt a second communicate(), which
+    # can leave the original child alive after the scheduler records failure.
+    communicate_task = asyncio.create_task(process.communicate())
+
     async def terminate_then_kill() -> tuple[bytes, bytes]:
         try:
             process.terminate()
@@ -101,7 +106,7 @@ async def run_snapshot_in_subprocess(
             pass
         try:
             return await asyncio.wait_for(
-                process.communicate(),
+                asyncio.shield(communicate_task),
                 timeout=terminate_timeout_s,
             )
         except TimeoutError:
@@ -109,10 +114,13 @@ async def run_snapshot_in_subprocess(
                 process.kill()
             except ProcessLookupError:
                 pass
-            return await process.communicate()
+            return await asyncio.shield(communicate_task)
 
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=timeout_s,
+        )
     except asyncio.CancelledError:
         await terminate_then_kill()
         raise

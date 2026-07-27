@@ -83,10 +83,11 @@ class _FakeProcess:
         self.block = block
         self.terminated = False
         self.killed = False
+        self._reaped = asyncio.Event()
 
     async def communicate(self):
         if self.block and not self.killed:
-            await asyncio.Event().wait()
+            await self._reaped.wait()
         return self.stdout, b"bounded stderr"
 
     def terminate(self) -> None:
@@ -94,6 +95,7 @@ class _FakeProcess:
 
     def kill(self) -> None:
         self.killed = True
+        self._reaped.set()
 
 
 def test_snapshot_attempt_lifecycle_is_append_only(daemon_settings_for_test: Any) -> None:
@@ -318,6 +320,54 @@ async def test_snapshot_subprocess_timeout_terminates_then_kills() -> None:
 
     assert process.terminated is True
     assert process.killed is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_timeout_keeps_one_reap_task_until_child_exit() -> None:
+    """Timeout cleanup must not abandon a child after cancelling its pipe reader."""
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    class Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.calls = 0
+            self.released = asyncio.Event()
+            self.terminated = False
+            self.killed = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            self.calls += 1
+            if self.calls != 1:
+                raise AssertionError("communicate must not be re-entered after timeout")
+            await self.released.wait()
+            return b"", b""
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+            self.released.set()
+
+    process = Process()
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-timeout"):
+        await run_snapshot_in_subprocess(
+            spawn=spawn,
+            timeout_s=0.01,
+            terminate_timeout_s=0.01,
+        )
+
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.calls == 1
 
 
 # ---------------------------------------------------------------------------
