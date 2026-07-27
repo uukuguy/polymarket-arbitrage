@@ -143,6 +143,10 @@ class QuoteWorkerRuntime:
         self.state = "collecting"
         self.attempt_count += 1
         self.last_attempt_started_at_s = time.time()
+        # Health describes the current attempt.  Keep the durable/cumulative
+        # failure evidence, but do not attach a previous error to a fresh
+        # in-flight re-quote.
+        self.last_error_kind = None
 
     def mark_success(self, result: QuoteCollectionResult) -> None:
         self.state = "pass"

@@ -188,6 +188,20 @@ def test_worker_error_warns_while_complete_run_is_fresh(tmp_path) -> None:
     assert overall == "warn"
 
 
+def test_new_quote_attempt_does_not_report_a_previous_error_as_current() -> None:
+    """A current re-quote is collecting; its old failure stays only in counters."""
+    runtime = QuoteWorkerRuntime()
+    runtime.mark_started()
+    runtime.mark_failure(RuntimeError("previous attempt"))
+    runtime.mark_started()
+
+    snapshot = runtime.snapshot()
+
+    assert snapshot.state == "collecting"
+    assert snapshot.failure_count == 1
+    assert snapshot.last_error_kind is None
+
+
 def test_enabled_health_fails_when_source_truth_drifts(tmp_path) -> None:
     settings = _settings(tmp_path, enabled=True)
     _complete_run(settings, age_s=10)
