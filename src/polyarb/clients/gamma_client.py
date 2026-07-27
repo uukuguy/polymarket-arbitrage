@@ -93,6 +93,11 @@ class GammaClient:
     # individual request size.
     MAX_MARKET_PARENT_LOOKUPS = 500
     MARKET_PARENT_LOOKUP_BATCH_SIZE = 25
+    # Parent enrichment is a bounded reconciliation side path.  Four parallel
+    # exact-id batches stay far below Gamma's published request budget while
+    # preventing one slow batch per 25 rows from serially consuming the whole
+    # Structure deadline.
+    MAX_CONCURRENT_PARENT_LOOKUPS = 4
     # F-2 SECURITY: ceiling on pagination loop (100k markets is far above any
     # realistic Polymarket size). See module docstring.
     MAX_PAGES = 1000
@@ -329,9 +334,9 @@ class GammaClient:
             ):
                 raise PaginationIntegrityError("market parent lookup has invalid identity")
 
-        states: dict[str, dict[str, str | bool]] = {}
-        for start in range(0, len(items), self.MARKET_PARENT_LOOKUP_BATCH_SIZE):
-            batch = items[start : start + self.MARKET_PARENT_LOOKUP_BATCH_SIZE]
+        async def fetch_batch(
+            batch: list[tuple[str, str]],
+        ) -> dict[str, dict[str, str | bool]]:
             expected_groups = dict(batch)
             expected_ids = set(expected_groups)
             payload = await self._get(
@@ -354,6 +359,7 @@ class GammaClient:
                     "/markets exact-id parent response identity set mismatch"
                 )
 
+            batch_states: dict[str, dict[str, str | bool]] = {}
             for market in payload:
                 market_id = market["id"]
                 if (
@@ -385,12 +391,23 @@ class GammaClient:
                     raise PaginationIntegrityError(
                         f"/markets?id={market_id} parent response has invalid state"
                     )
-                states[market_id] = {
+                batch_states[market_id] = {
                     "event_id": event_id,
                     "active": active,
                     "closed": closed,
                     "archived": archived,
                 }
+            return batch_states
+
+        batches = [
+            items[start : start + self.MARKET_PARENT_LOOKUP_BATCH_SIZE]
+            for start in range(0, len(items), self.MARKET_PARENT_LOOKUP_BATCH_SIZE)
+        ]
+        states: dict[str, dict[str, str | bool]] = {}
+        for start in range(0, len(batches), self.MAX_CONCURRENT_PARENT_LOOKUPS):
+            wave = batches[start : start + self.MAX_CONCURRENT_PARENT_LOOKUPS]
+            for batch_states in await asyncio.gather(*(fetch_batch(batch) for batch in wave)):
+                states.update(batch_states)
         return states
 
     async def iter_active_events(self, coverage: PaginationCoverage) -> AsyncIterator[dict]:

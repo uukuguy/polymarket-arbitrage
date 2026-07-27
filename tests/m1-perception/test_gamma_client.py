@@ -6,6 +6,7 @@ asyncio_mode=auto is set in pyproject [tool.pytest.ini_options], so plain
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -407,6 +408,49 @@ async def test_fetch_market_parent_states_batches_large_exact_id_set() -> None:
         )
         for ids in chunks
     ]
+
+
+async def test_fetch_market_parent_states_bounds_parallel_batch_lookups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow Gamma batch cannot serially consume the whole Structure deadline."""
+    settings = _fast_settings()
+    monkeypatch.setattr(GammaClient, "MARKET_PARENT_LOOKUP_BATCH_SIZE", 1)
+    market_groups = {f"market-{index}": f"group-{index}" for index in range(6)}
+    active = 0
+    peak = 0
+
+    async def get_batch(_path, params):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0)
+            market_id = params[0][1]
+            return [
+                {
+                    "id": market_id,
+                    "negRisk": True,
+                    "negRiskMarketID": market_groups[market_id],
+                    "events": [
+                        {
+                            "id": f"event-{market_id}",
+                            "active": False,
+                            "closed": False,
+                            "archived": True,
+                        }
+                    ],
+                }
+            ]
+        finally:
+            active -= 1
+
+    async with GammaClient(settings) as client:
+        client._get = get_batch
+        states = await client.fetch_market_parent_states(market_groups)
+
+    assert set(states) == set(market_groups)
+    assert peak == GammaClient.MAX_CONCURRENT_PARENT_LOOKUPS
 
 
 @pytest.mark.parametrize("response_kind", ["missing", "extra", "duplicate"])

@@ -89,6 +89,16 @@ make snapshot-attempt-status
 | Structure 不碰 CLOB/Parquet/R2 | 这些慢/大/外部依赖不该占用保障市场成员关系和 Quote cadence 的内存预算。 |
 | Archive 写自己的 snapshot 行但 `market_view_published=0` | 留下成功/失败证据，仍让当前在线市场视图保持原子不变。 |
 | Archive health 只 warn、不参与 overall | 历史研究重要，但它的失败不能伪造成交易数据面故障。 |
+
+## FAQ 增量
+
+### 为什么 Structure 会核验“孤立”的负风险市场，且现在并行做？
+
+Gamma 的 event 与 market 两条目录在切换时可能短暂不同步。对 event 目录中找不到父事件的负风险
+market，Structure 会再按精确 market id 读取父事件；缺任何一条、重复或身份不匹配都拒绝发布，不能
+把半个组交给 M2。这个核验最多 500 条、每批 25 条；以前逐批串行，单个上游慢响应会把整轮拖过
+生产 deadline。现在每波最多并行 4 批，仍受 Gamma 总速率限制和全部身份校验约束，目标是缩短
+慢路径而不是放宽数据证明。
 | 保留 `legacy_combined` | 老历史仍然有研究价值；但健康和 Quote 明确拒绝把它当新 Structure。 |
 
 ## 自检题
