@@ -40,6 +40,7 @@ Phase 1 simplifications (documented for Phase 2 cleanup):
 from __future__ import annotations
 
 import json
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -124,19 +125,50 @@ def _format_elapsed(seconds: float) -> str:
     return f"{h}h {m:02d}m {s:02d}s"
 
 
+_STRUCTURE_DIAGNOSTIC_STAGES = frozenset(
+    {
+        "gamma-events",
+        "gamma-markets",
+        "membership-recheck",
+        "validate",
+        "persist",
+    }
+)
+
+
 @contextmanager
-def _phase(label: str):
+def _phase(label: str, *, stage: str | None):
     """Bracket a pipeline phase with start/done log lines and elapsed timing.
 
     The 'done' line uses a ► glyph so post-run grep can isolate phase summaries:
         grep '► Phase' /tmp/snap.log
+
+    Structure snapshots additionally emit one fixed-vocabulary stderr marker at
+    entry and completion. The scheduler retains only the final valid stage.
     """
+    if stage is not None and stage not in _STRUCTURE_DIAGNOSTIC_STAGES:
+        raise ValueError(f"invalid snapshot diagnostic stage: {stage!r}")
     logger.info(f"Phase {label} — start")
     t0 = time.monotonic()
+    if stage is not None:
+        print(
+            f"snapshot-stage stage={stage} state=start elapsed_ms=0",
+            file=sys.stderr,
+            flush=True,
+        )
     try:
         yield
     finally:
-        logger.info(f"► Phase {label} — done in {_format_elapsed(time.monotonic() - t0)}")
+        elapsed_seconds = time.monotonic() - t0
+        if stage is not None:
+            print(
+                "snapshot-stage "
+                f"stage={stage} state=complete "
+                f"elapsed_ms={max(0, int(elapsed_seconds * 1000))}",
+                file=sys.stderr,
+                flush=True,
+            )
+        logger.info(f"► Phase {label} — done in {_format_elapsed(elapsed_seconds)}")
 
 
 def _derive_notes_from_issues(issues: list[Issue]) -> str | None:
@@ -510,7 +542,10 @@ async def run_snapshot(
     # is shared across /events + /markets and shutdown is clean.
     async with GammaClient(settings) as gamma:
         # ── Phase 1: events (fully materialized — Decision A) ─────────────
-        with _phase("1/7: Gamma /events fetch + normalize"):
+        with _phase(
+            "1/7: Gamma /events fetch + normalize",
+            stage="gamma-events" if product == "structure" else None,
+        ):
             try:
                 raw_events = [event async for event in gamma.iter_active_events(events_coverage)]
                 logger.info(f"Gamma: fetched {len(raw_events)} active events")
@@ -576,7 +611,10 @@ async def run_snapshot(
         # idempotent retry boundary). Stops at 3 attempts, exponential wait
         # 1..5s. Re-raises last exception → existing fail-soft except clause
         # below appends API_UNREACHABLE (chain-truth preserved).
-        with _phase("2/7: Stream /markets — normalize + dedupe + filter"):
+        with _phase(
+            "2/7: Stream /markets — normalize + dedupe + filter",
+            stage="gamma-markets" if product == "structure" else None,
+        ):
             first_frame_seen = False
             authoritative_member_ids = {
                 member.market_id for member in event_members if member.active and not member.closed
@@ -939,7 +977,7 @@ async def run_snapshot(
     structural_member_ids.clear()
 
     # ── Phase 3: token list extraction (was inlined into old phase 3) ────
-    with _phase("3/7: Build token list"):
+    with _phase("3/7: Build token list", stage=None):
         token_ids: list[str] = []
         if product != "structure":
             for m in target_markets:
@@ -962,7 +1000,7 @@ async def run_snapshot(
     prices_sell: dict = {}
     cache: ChunkCache | None = None
     clob_fetch_failed = False
-    with _phase("4/7: CLOB fetch (books + buy/sell prices)"):
+    with _phase("4/7: CLOB fetch (books + buy/sell prices)", stage=None):
         if use_cache and product != "structure":
             cache = ChunkCache(
                 cache_root=settings.cache_root,
@@ -1019,7 +1057,7 @@ async def run_snapshot(
     # write them anywhere. (Closes the "fetched_at_ms semantically wrong on
     # filter-excluded rows" gap from 01-4-SUMMARY.)
     clob_done_ms = int(time.time() * 1000)
-    with _phase("5/7: Stamp + attach top-of-book"):
+    with _phase("5/7: Stamp + attach top-of-book", stage=None):
         for m in target_markets:
             m["fetched_at_ms"] = clob_done_ms
 
@@ -1076,7 +1114,10 @@ async def run_snapshot(
     # verified point-open/keyset-absent row is quarantined as source-status
     # inconsistency; malformed responses and transport failures remain fatal.
     if pending_open_missing_member_ids and reconciliation_reason is None:
-        with _phase("5.5/7: Recheck pending event members"):
+        with _phase(
+            "5.5/7: Recheck pending event members",
+            stage="membership-recheck" if product == "structure" else None,
+        ):
             final_lookup_reason: str | None = None
             try:
                 async with GammaClient(settings) as final_gamma:
@@ -1163,7 +1204,10 @@ async def run_snapshot(
                 )
 
     if market_side_structure_absent_groups and reconciliation_reason is None:
-        with _phase("5.5/7: Recheck market-side members absent from event structure"):
+        with _phase(
+            "5.5/7: Recheck market-side members absent from event structure",
+            stage="membership-recheck" if product == "structure" else None,
+        ):
             final_lookup_reason: str | None = None
             candidate_ids = set(market_side_structure_absent_groups)
             if len(candidate_ids) > MAX_MARKET_STATE_LOOKUPS:
@@ -1261,7 +1305,10 @@ async def run_snapshot(
                 )
 
     # ── 6. Validate (Layer 1 / 2 / 4) ─────────────────────────────────────────
-    with _phase("6/7: Validate (Layer 1/2/4)"):
+    with _phase(
+        "6/7: Validate (Layer 1/2/4)",
+        stage="validate" if product == "structure" else None,
+    ):
         if gamma_count_reported is not None:
             # Layer 1 compares Gamma's reported active count vs how many we kept
             # post-normalize. A diff means either a bug in normalize OR API jitter.
@@ -1340,7 +1387,10 @@ async def run_snapshot(
         if product != "structure"
         else Path("not-requested")
     )
-    with _phase("7/7: Persist (Parquet then SQLite)"):
+    with _phase(
+        "7/7: Persist (Parquet then SQLite)",
+        stage="persist" if product == "structure" else None,
+    ):
         # Plan 02-09 (D-23): streaming writes. Parquet via ParquetWriter chunked
         # write; SQLite via batched executemany in a single BEGIN IMMEDIATE
         # transaction. Both consume `target_markets`. Complete neg-risk

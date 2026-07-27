@@ -73,6 +73,7 @@ class _FakeProcess:
         *,
         returncode: int,
         block: bool = False,
+        stderr: bytes = b"bounded stderr",
     ) -> None:
         self.stdout = (
             payload
@@ -81,6 +82,7 @@ class _FakeProcess:
         )
         self.returncode = returncode
         self.block = block
+        self.stderr = stderr
         self.terminated = False
         self.killed = False
         self._reaped = asyncio.Event()
@@ -88,7 +90,7 @@ class _FakeProcess:
     async def communicate(self):
         if self.block and not self.killed:
             await self._reaped.wait()
-        return self.stdout, b"bounded stderr"
+        return self.stdout, self.stderr
 
     def terminate(self) -> None:
         self.terminated = True
@@ -229,6 +231,90 @@ async def test_snapshot_pipeline_runs_in_isolated_subprocess(
     )
     assert kwargs["stdout"] == asyncio.subprocess.PIPE
     assert kwargs["stderr"] == asyncio.subprocess.PIPE
+
+
+def test_snapshot_stage_parser_keeps_only_final_allowlisted_marker() -> None:
+    """Arbitrary child stderr never becomes a scheduler diagnostic."""
+    from polyarb.daemon.scheduler import _parse_last_snapshot_stage
+
+    stderr = b"\n".join(
+        (
+            b"network error: upstream sent a secret-looking message",
+            b"snapshot-stage stage=gamma-events state=complete elapsed_ms=12",
+            b"snapshot-stage stage=not-allowed state=start elapsed_ms=13",
+            b"snapshot-stage stage=gamma-markets state=unexpected elapsed_ms=14",
+            b"snapshot-stage stage=gamma-markets state=start elapsed_ms=-1",
+            b"snapshot-stage stage=gamma-markets state=start elapsed_ms=15",
+        )
+    )
+
+    assert _parse_last_snapshot_stage(stderr) == "gamma-markets"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_result_has_parent_elapsed_and_final_stage() -> None:
+    """The parent returns bounded diagnostics, never the child's stderr payload."""
+    from polyarb.daemon.scheduler import run_snapshot_in_subprocess
+
+    process = _FakeProcess(
+        {
+            "status": "ok",
+            "is_valid": True,
+            "snapshot_id": 746,
+            "market_count": 81959,
+            "issue_count": 3,
+        },
+        returncode=0,
+        stderr=(
+            b"snapshot-stage stage=gamma-events state=complete elapsed_ms=91\n"
+            b"snapshot-stage stage=gamma-markets state=start elapsed_ms=999999"
+        ),
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    result = await run_snapshot_in_subprocess(spawn=spawn)
+
+    assert result.last_stage == "gamma-markets"
+    assert 0 <= result.elapsed_ms < 999999
+    assert not hasattr(result, "stderr")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> None:
+    """Timeout data arrives only from the child communicate result after reaping."""
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    process = _FakeProcess(
+        {},
+        returncode=0,
+        block=True,
+        stderr=(
+            b"arbitrary child error\n"
+            b"snapshot-stage stage=gamma-markets state=start elapsed_ms=17"
+        ),
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-timeout") as raised:
+        await run_snapshot_in_subprocess(
+            spawn=spawn,
+            timeout_s=0.01,
+            terminate_timeout_s=0.01,
+        )
+
+    error = raised.value
+    assert process.terminated is True
+    assert process.killed is True
+    assert error.last_stage == "gamma-markets"
+    assert error.elapsed_ms >= 0
+    assert not hasattr(error, "stderr")
 
 
 @pytest.mark.asyncio

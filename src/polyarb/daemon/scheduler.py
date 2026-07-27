@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import signal
 import sys
 import time
@@ -53,11 +54,34 @@ class SchedulerState(StrEnum):
 class SnapshotSubprocessError(RuntimeError):
     """The isolated snapshot process did not return one bounded result."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        last_stage: str | None = None,
+        elapsed_ms: int = 0,
+    ) -> None:
         super().__init__(f"snapshot-subprocess-{reason}")
+        self.last_stage = last_stage
+        self.elapsed_ms = max(0, elapsed_ms)
 
 
 SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
+
+_SNAPSHOT_STAGE_MARKER_RE = re.compile(
+    rb"^snapshot-stage stage="
+    rb"(gamma-events|gamma-markets|membership-recheck|validate|persist) "
+    rb"state=(?:start|complete) elapsed_ms=(?:0|[1-9][0-9]*)$",
+    re.MULTILINE,
+)
+
+
+def _parse_last_snapshot_stage(stderr: bytes) -> str | None:
+    """Extract only the final fixed-vocabulary stage marker from child stderr."""
+    last_stage: str | None = None
+    for marker in _SNAPSHOT_STAGE_MARKER_RE.finditer(stderr):
+        last_stage = marker.group(1).decode("ascii")
+    return last_stage
 
 
 @dataclass(frozen=True)
@@ -66,6 +90,8 @@ class IsolatedSnapshotResult:
     snapshot_id: int
     market_count: int
     issue_count: int
+    last_stage: str | None
+    elapsed_ms: int
 
 
 async def run_snapshot_in_subprocess(
@@ -89,7 +115,7 @@ async def run_snapshot_in_subprocess(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    started = time.perf_counter()
+    started = time.monotonic()
     logger.info(
         "isolated snapshot started "
         f"pid={getattr(process, 'pid', None)}"
@@ -116,6 +142,20 @@ async def run_snapshot_in_subprocess(
                 pass
             return await asyncio.shield(communicate_task)
 
+    def elapsed_ms() -> int:
+        return max(0, int((time.monotonic() - started) * 1000))
+
+    def subprocess_error(
+        reason: str,
+        *,
+        stderr: bytes,
+    ) -> SnapshotSubprocessError:
+        return SnapshotSubprocessError(
+            reason,
+            last_stage=_parse_last_snapshot_stage(stderr),
+            elapsed_ms=elapsed_ms(),
+        )
+
     try:
         stdout, stderr = await asyncio.wait_for(
             asyncio.shield(communicate_task),
@@ -129,8 +169,11 @@ async def run_snapshot_in_subprocess(
             "isolated snapshot timed out "
             f"pid={getattr(process, 'pid', None)} timeout_s={timeout_s}"
         )
-        await terminate_then_kill()
-        raise SnapshotSubprocessError("timeout") from error
+        _, stderr = await terminate_then_kill()
+        raise subprocess_error("timeout", stderr=stderr) from error
+
+    last_stage = _parse_last_snapshot_stage(stderr)
+    process_elapsed_ms = elapsed_ms()
 
     if process.returncode is not None and process.returncode < 0:
         signal_number = -process.returncode
@@ -148,7 +191,9 @@ async def run_snapshot_in_subprocess(
         )
         suffix = "-possible-oom" if possible_oom else ""
         raise SnapshotSubprocessError(
-            f"signal-{signal_name}{suffix}"
+            f"signal-{signal_name}{suffix}",
+            last_stage=last_stage,
+            elapsed_ms=process_elapsed_ms,
         )
 
     try:
@@ -158,13 +203,25 @@ async def run_snapshot_in_subprocess(
             "isolated snapshot returned invalid output "
             f"returncode={process.returncode} stderr_bytes={len(stderr)}"
         )
-        raise SnapshotSubprocessError("invalid-json") from error
+        raise SnapshotSubprocessError(
+            "invalid-json",
+            last_stage=last_stage,
+            elapsed_ms=process_elapsed_ms,
+        ) from error
     if not isinstance(payload, dict):
-        raise SnapshotSubprocessError("invalid-json")
+        raise SnapshotSubprocessError(
+            "invalid-json",
+            last_stage=last_stage,
+            elapsed_ms=process_elapsed_ms,
+        )
     try:
         status = SnapshotStatus(str(payload.get("status", "")).lower())
     except ValueError as error:
-        raise SnapshotSubprocessError("invalid-json") from error
+        raise SnapshotSubprocessError(
+            "invalid-json",
+            last_stage=last_stage,
+            elapsed_ms=process_elapsed_ms,
+        ) from error
     is_valid = payload.get("is_valid")
     snapshot_id = payload.get("snapshot_id")
     market_count = payload.get("market_count")
@@ -183,12 +240,16 @@ async def run_snapshot_in_subprocess(
         or (status == SnapshotStatus.FAILED) == is_valid
         or (process.returncode == 0) != is_valid
     ):
-        raise SnapshotSubprocessError("invalid-json")
-    elapsed_ms = int((time.perf_counter() - started) * 1000)
+        raise SnapshotSubprocessError(
+            "invalid-json",
+            last_stage=last_stage,
+            elapsed_ms=process_elapsed_ms,
+        )
     logger.info(
         "isolated snapshot complete "
         f"pid={getattr(process, 'pid', None)} "
-        f"elapsed_ms={elapsed_ms} "
+        f"elapsed_ms={process_elapsed_ms} "
+        f"last_stage={last_stage} "
         f"status={status.value} "
         f"snapshot_id={snapshot_id} "
         f"market_count={market_count} "
@@ -199,6 +260,8 @@ async def run_snapshot_in_subprocess(
         snapshot_id=snapshot_id,
         market_count=market_count,
         issue_count=issue_count,
+        last_stage=last_stage,
+        elapsed_ms=process_elapsed_ms,
     )
 
 
