@@ -280,6 +280,63 @@ CREATE TABLE IF NOT EXISTS neg_risk_quotes (
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_quotes_run_group
   ON neg_risk_quotes(quote_run_id, neg_risk_market_id, market_id);
+
+-- Observer-only lifecycle ledger. A master represents one continuously
+-- observed Structure membership; observations and notification attempts are
+-- immutable evidence beneath it.
+CREATE TABLE IF NOT EXISTS neg_risk_opportunities (
+  id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,
+  membership_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('observe','closed','invalidated','unavailable')),
+  bundle_cost REAL NOT NULL,
+  gross_edge_bps REAL NOT NULL,
+  max_bundle_size REAL NOT NULL,
+  structure_revision INTEGER NOT NULL,
+  quote_run_id INTEGER NOT NULL,
+  opened_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  closed_at_ms INTEGER,
+  transition_reason TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_neg_risk_opportunities_active_identity
+  ON neg_risk_opportunities(event_id, group_id, membership_hash)
+  WHERE status = 'observe';
+CREATE INDEX IF NOT EXISTS idx_neg_risk_opportunities_current
+  ON neg_risk_opportunities(status, updated_at_ms DESC);
+
+CREATE TABLE IF NOT EXISTS neg_risk_opportunity_observations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  opportunity_id TEXT NOT NULL REFERENCES neg_risk_opportunities(id),
+  observed_at_ms INTEGER NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('global','focused')),
+  status TEXT NOT NULL CHECK(status IN ('observe','closed','invalidated','unavailable')),
+  reason TEXT,
+  bundle_cost REAL,
+  gross_edge_bps REAL,
+  max_bundle_size REAL,
+  structure_revision INTEGER NOT NULL,
+  quote_run_id INTEGER,
+  legs_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_opportunity_observations_replay
+  ON neg_risk_opportunity_observations(opportunity_id, observed_at_ms, id);
+
+CREATE TABLE IF NOT EXISTS neg_risk_opportunity_notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  opportunity_id TEXT NOT NULL REFERENCES neg_risk_opportunities(id),
+  reason TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','delivered','failed')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+  created_at_ms INTEGER NOT NULL,
+  attempted_at_ms INTEGER,
+  delivered_at_ms INTEGER,
+  error_kind TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_opportunity_notifications_pending
+  ON neg_risk_opportunity_notifications(status, created_at_ms, id);
 """
 
 # Order MUST match the DDL `CREATE TABLE markets(...)` declaration
