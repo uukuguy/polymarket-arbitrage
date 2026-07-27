@@ -296,6 +296,30 @@ async def test_snapshot_subprocess_cancellation_terminates_then_kills() -> None:
     assert process.killed is True
 
 
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_timeout_terminates_then_kills() -> None:
+    """A CPU-bound child cannot hold the 5-minute production cadence forever."""
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    process = _FakeProcess({}, returncode=0, block=True)
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-timeout"):
+        await run_snapshot_in_subprocess(
+            spawn=spawn,
+            timeout_s=0.01,
+            terminate_timeout_s=0.01,
+        )
+
+    assert process.terminated is True
+    assert process.killed is True
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------

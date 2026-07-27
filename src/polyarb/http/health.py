@@ -374,6 +374,19 @@ def _build_health_checks(
         attempt_output = latest_attempt["failure_kind"]
         if attempt_value in {"failed", "cancelled"}:
             attempt_status = "warn" if truth_age_status == "pass" else "fail"
+        elif attempt_value == "running":
+            from polyarb.daemon.scheduler import SNAPSHOT_SUBPROCESS_TIMEOUT_S
+
+            attempt_age_s = max(
+                0.0,
+                now_s - int(latest_attempt["started_at_ms"]) / 1000.0,
+            )
+            if attempt_age_s > SNAPSHOT_SUBPROCESS_TIMEOUT_S:
+                attempt_status = "fail"
+                attempt_output = "snapshot-subprocess-timeout-exceeded"
+            else:
+                attempt_status = "pass"
+                attempt_output = None
         else:
             attempt_status = "pass"
             attempt_output = None

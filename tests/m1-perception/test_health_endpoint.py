@@ -305,6 +305,30 @@ def test_health_surfaces_failed_scheduler_attempt_while_truth_is_fresh(
     assert "possible-oom" in checks["snapshot:latest_attempt"][0]["output"]
 
 
+def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """An in-flight child beyond its production deadline is an outage, not pass."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1000)
+    _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=now_ms - 2_000,
+    )
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.begin_snapshot_attempt(started_at_ms=now_ms - 241_000)
+
+    response = http_test_client.get("/health")
+
+    assert response.status_code == 503
+    attempt = response.json()["checks"]["snapshot:latest_attempt"][0]
+    assert attempt["observedValue"] == "running"
+    assert attempt["status"] == "fail"
+    assert attempt["output"] == "snapshot-subprocess-timeout-exceeded"
+
+
 def test_archive_failure_is_visible_but_does_not_fail_structure_health(
     daemon_settings_for_test: Any,
     http_test_client: TestClient,

@@ -57,6 +57,9 @@ class SnapshotSubprocessError(RuntimeError):
         super().__init__(f"snapshot-subprocess-{reason}")
 
 
+SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
+
+
 @dataclass(frozen=True)
 class IsolatedSnapshotResult:
     status: SnapshotStatus
@@ -70,6 +73,7 @@ async def run_snapshot_in_subprocess(
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (
         asyncio.create_subprocess_exec
     ),
+    timeout_s: float = SNAPSHOT_SUBPROCESS_TIMEOUT_S,
     terminate_timeout_s: float = 3.0,
 ) -> IsolatedSnapshotResult:
     """Run the CPU/GIL-heavy snapshot pipeline outside the HTTP process."""
@@ -90,15 +94,13 @@ async def run_snapshot_in_subprocess(
         "isolated snapshot started "
         f"pid={getattr(process, 'pid', None)}"
     )
-    try:
-        stdout, stderr = await process.communicate()
-    except asyncio.CancelledError:
+    async def terminate_then_kill() -> tuple[bytes, bytes]:
         try:
             process.terminate()
         except ProcessLookupError:
             pass
         try:
-            await asyncio.wait_for(
+            return await asyncio.wait_for(
                 process.communicate(),
                 timeout=terminate_timeout_s,
             )
@@ -107,8 +109,20 @@ async def run_snapshot_in_subprocess(
                 process.kill()
             except ProcessLookupError:
                 pass
-            await process.communicate()
+            return await process.communicate()
+
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
+    except asyncio.CancelledError:
+        await terminate_then_kill()
         raise
+    except TimeoutError as error:
+        logger.error(
+            "isolated snapshot timed out "
+            f"pid={getattr(process, 'pid', None)} timeout_s={timeout_s}"
+        )
+        await terminate_then_kill()
+        raise SnapshotSubprocessError("timeout") from error
 
     if process.returncode is not None and process.returncode < 0:
         signal_number = -process.returncode
