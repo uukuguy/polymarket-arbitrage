@@ -100,9 +100,12 @@ Create the learning note with the required 30-second mental model, code map with
 
 - [ ] **Step 2: Verify local gates**
 
-Run: `make planning-status && uv run pytest tests/m1-perception/test_scheduler.py tests/m1-perception/test_health_endpoint.py tests/m1-perception/test_snapshot_attempt_status.py -q && make smoke-health`
+Run: `make planning-status && uv run pytest tests/m1-perception/test_scheduler.py tests/m1-perception/test_health_endpoint.py tests/m1-perception/test_snapshot_attempt_status.py -q && make docs-m1-check`
 
-Expected: clean planning status, passing targeted suite, and a local health response.
+Expected: clean planning status, passing targeted suite, and offline verification
+that the M1 manual's command/route/health references match the repository.
+`smoke-health-local` deliberately requires a separately running daemon and is
+therefore an operator smoke, not a deployment-blocking local gate.
 
 - [ ] **Step 3: Deploy only the verified commit and collect an explicit diagnostic sample**
 
@@ -118,4 +121,3 @@ Do not apply a performance fix in response within this task.
 - [ ] **Step 4: Commit documentation and write the required plan summary**
 
 Commit the learning note/JOURNAL after the verified deployment evidence, then create the required SUMMARY with commits, verification commands, release evidence, decisions, and remaining follow-up. Run `make planning-status` again and commit the SUMMARY if the hook/plan workflow requires it.
-
