@@ -5646,3 +5646,20 @@ configured shared secret issue one signed unpause, then collect one terminal
 attempt's persisted outcome/stage/elapsed and strict-health evidence. Keep the
 prior no-deploy entry as historical evidence; do not auto-unpause or tune
 Structure performance from this diagnostic alone.
+
+## SESSION 117 — 2026-07-28 (deployment evidence correction)
+
+- [CORRECTION — DEPLOYMENT CONFIRMED] Preserve Session 116's early
+  read-only query as its time-bounded evidence: it did not yet list a new
+  release. A later read-only `flyctl releases -a polyarb-l1` query lists
+  `v175` as `complete`, and `flyctl status -a polyarb-l1` shows both `app` and
+  `cron` started at version 175. Production logs also confirm
+  `sentry initialized — release=109ce484...` and the additive
+  `snapshot_attempts.last_stage` / `snapshot_attempts.elapsed_ms` migrations.
+  The verified `109ce484d9b939c83188236570c26b2a698094f8` deployment is
+  therefore established; no rollout parameter was changed.
+- [REMAINING BLOCKER] The locally exported `POLYARB_SCAN_SHARED_SECRET` remains
+  absent. Do not retrieve it remotely, do not unpause, and do not manufacture a
+  scheduler/health sample. The next authorized operator with that local secret
+  may issue exactly one signed `make unpause-prod`, then capture the named
+  read-only attempt and strict-health evidence.
