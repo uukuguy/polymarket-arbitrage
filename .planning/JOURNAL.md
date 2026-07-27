@@ -5592,3 +5592,23 @@ and bounded child-reap logs, then plan a TDD stage-timing diagnostic for the
 variable Gamma-only Structure subprocess. Do not deploy, change cadence, or
 claim cloud watcher operation until a new Structure revision and strict health
 are green.
+
+## SESSION 115 — 2026-07-28 (Structure stage diagnostics, pre-deployment)
+
+- [IMPLEMENTED] Commit `3e0c604` persists a bounded, parent-observed
+  `last_stage` and monotonic `elapsed_ms` on every terminal Structure scheduler
+  attempt. Only the fixed stage vocabulary is accepted from child stderr;
+  timeout first reaps the child, then records the final marker and elapsed time.
+- [CHAIN-TRUTH] The scheduler creates and closes the append-only
+  `snapshot_attempts` row; strict `/health` and `make snapshot-attempt-status`
+  read that exact row. This keeps child timeout evidence visible without
+  mutating published Structure truth.
+- [OPERATOR] Added learning note 29: a `gamma-markets` timeout is a bounded
+  diagnostic hypothesis, while a terminal `persist` success supplies a timing
+  baseline. Neither result authorizes automatic changes to the 240-second
+  timeout, cadence, VM/resource limits, retry behavior, or scheduler state.
+- [NEXT] Run the scoped local gates, push only the verified repair commit, then
+  deploy and manually unpause once only if the locally configured shared secret
+  is present. Observe exactly one scheduler attempt through the read-only
+  status and strict-health targets; record either terminal stage/duration
+  evidence or a non-sensitive blocker. No automatic recovery loop.
