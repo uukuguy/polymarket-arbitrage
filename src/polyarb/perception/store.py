@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -43,6 +44,10 @@ class ReconciliationIncompleteError(RuntimeError):
     """Raised when an incomplete calibration window is asked to publish."""
 
 
+class ReconciliationUnprovableError(ValueError):
+    """Raised when a legacy window has no captured baseline proof."""
+
+
 @dataclass(frozen=True)
 class ReconciliationWindow:
     id: str
@@ -58,6 +63,7 @@ class ReconciliationWindow:
     rejected_count: int
     observations_count: int
     baseline_count: int
+    baseline_digest: str | None
     added_count: int | None
     changed_count: int | None
     closed_count: int | None
@@ -324,6 +330,11 @@ class OpportunityPerceptionStore:
                     "neg_risk_reconciliation_windows",
                     "observations_count",
                     "INTEGER NOT NULL DEFAULT 0",
+                ),
+                (
+                    "neg_risk_reconciliation_windows",
+                    "baseline_digest",
+                    "TEXT",
                 ),
                 (
                     "neg_risk_reconciliation_batches",
@@ -1963,8 +1974,15 @@ class OpportunityPerceptionStore:
                 "AND failure_reason IS NULL ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
             if existing is not None:
-                con.execute("COMMIT")
-                return self._reconciliation_window_from_row(existing)
+                if existing["baseline_digest"] is not None:
+                    con.execute("COMMIT")
+                    return self._reconciliation_window_from_row(existing)
+                con.execute(
+                    "UPDATE neg_risk_reconciliation_windows SET "
+                    "failure_reason='baseline-proof-unavailable',"
+                    "finished_at_ms=MAX(checkpoint_at_ms,?) WHERE id=?",
+                    (started_at_ms, existing["id"]),
+                )
             window_id = uuid.uuid4().hex
             baseline = con.execute(
                 "SELECT r.group_id,r.event_id,r.revision,r.membership_hash,"
@@ -1974,13 +1992,20 @@ class OpportunityPerceptionStore:
                 "ON latest.group_id=r.group_id AND latest.revision=r.revision "
                 "WHERE r.status='certified' ORDER BY r.group_id"
             ).fetchall()
+            baseline_digest = self._reconciliation_baseline_digest(baseline)
             con.execute(
                 "INSERT INTO neg_risk_reconciliation_windows("
                 "id,status,next_cursor,started_at_ms,checkpoint_at_ms,"
                 "pages_completed,events_seen,groups_staged,rejected_count,"
-                "observations_count,baseline_count"
-                ") VALUES (?,'open',NULL,?,?,0,0,0,0,0,?)",
-                (window_id, started_at_ms, started_at_ms, len(baseline)),
+                "observations_count,baseline_count,baseline_digest"
+                ") VALUES (?,'open',NULL,?,?,0,0,0,0,0,?,?)",
+                (
+                    window_id,
+                    started_at_ms,
+                    started_at_ms,
+                    len(baseline),
+                    baseline_digest,
+                ),
             )
             con.executemany(
                 "INSERT INTO neg_risk_reconciliation_baseline("
@@ -2042,7 +2067,21 @@ class OpportunityPerceptionStore:
                 "WHERE window_id=? ORDER BY group_id",
                 (row["id"],),
             ).fetchall()
-            self._validate_reconciliation_snapshot(row, receipts, batch_samples, staged, baseline)
+            evidence = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_diff_evidence "
+                "WHERE window_id=? ORDER BY group_id,action",
+                (row["id"],),
+            ).fetchall()
+            result_revisions = self._reconciliation_evidence_result_revisions(con, row["id"])
+            self._validate_reconciliation_snapshot(
+                row,
+                receipts,
+                batch_samples,
+                staged,
+                baseline,
+                evidence,
+                result_revisions,
+            )
             result = self._reconciliation_window_from_row(row)
             con.execute("COMMIT")
             return result
@@ -2107,7 +2146,7 @@ class OpportunityPerceptionStore:
             raise ValueError("invalid-reconciliation-timestamp-order")
         if completed != (next_cursor is None):
             raise ValueError("invalid-reconciliation-completion-cursor")
-        if completed and page_event_count != 0:
+        if completed and (page_event_count != 0 or candidates):
             raise ValueError("reconciliation-terminal-page-must-be-empty")
         con = self._connect()
         try:
@@ -2303,8 +2342,20 @@ class OpportunityPerceptionStore:
                 "WHERE window_id=? ORDER BY group_id",
                 (window_id,),
             ).fetchall()
+            evidence = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_diff_evidence "
+                "WHERE window_id=? ORDER BY group_id,action",
+                (window_id,),
+            ).fetchall()
+            result_revisions = self._reconciliation_evidence_result_revisions(con, window_id)
             self._validate_reconciliation_snapshot(
-                window, receipts, batch_samples, staged, baseline
+                window,
+                receipts,
+                batch_samples,
+                staged,
+                baseline,
+                evidence,
+                result_revisions,
             )
             if window["failure_reason"] is not None:
                 raise ReconciliationIncompleteError("reconciliation-window-failed")
@@ -2317,22 +2368,51 @@ class OpportunityPerceptionStore:
             staged_by_group = {str(row["group_id"]): row for row in staged}
             baseline_by_group = {str(row["group_id"]): row for row in baseline}
             added = changed = closed = unchanged = 0
-            rejected = int(window["rejected_count"])
+            rejected = 0
             for row in staged:
+                group_id = str(row["group_id"])
+                baseline_row = baseline_by_group.get(group_id)
                 if row["quality"] != "complete-supported":
+                    self._insert_reconciliation_diff_evidence(
+                        con,
+                        window_id=window_id,
+                        action="rejected",
+                        group_id=group_id,
+                        baseline=baseline_row,
+                        staged=row,
+                        result=None,
+                    )
+                    rejected += 1
                     continue
                 legs = self._group_legs_from_json(str(row["legs_json"]))
                 if GroupRevision.membership_digest(legs) != row["membership_hash"]:
                     raise ValueError("reconciliation-staging-identity-mismatch")
-                current = self._current_group_row(con, str(row["group_id"]))
-                baseline_row = baseline_by_group.get(str(row["group_id"]))
+                current = self._current_group_row(con, group_id)
                 if baseline_row is not None and row["event_id"] != baseline_row["event_id"]:
+                    self._insert_reconciliation_diff_evidence(
+                        con,
+                        window_id=window_id,
+                        action="rejected",
+                        group_id=group_id,
+                        baseline=baseline_row,
+                        staged=row,
+                        result=None,
+                    )
                     rejected += 1
                     continue
                 if current is not None and (
                     baseline_row is None
                     or not self._group_row_matches_reconciliation_baseline(current, baseline_row)
                 ):
+                    self._insert_reconciliation_diff_evidence(
+                        con,
+                        window_id=window_id,
+                        action="unchanged",
+                        group_id=group_id,
+                        baseline=baseline_row,
+                        staged=row,
+                        result=current,
+                    )
                     unchanged += 1
                     continue
                 if (
@@ -2341,10 +2421,19 @@ class OpportunityPerceptionStore:
                     and current["event_id"] == row["event_id"]
                     and current["membership_hash"] == row["membership_hash"]
                 ):
+                    self._insert_reconciliation_diff_evidence(
+                        con,
+                        window_id=window_id,
+                        action="unchanged",
+                        group_id=group_id,
+                        baseline=baseline_row,
+                        staged=row,
+                        result=current,
+                    )
                     unchanged += 1
                     continue
                 revision = GroupRevision.certified(
-                    group_id=str(row["group_id"]),
+                    group_id=group_id,
                     event_id=str(row["event_id"]),
                     revision=1 if current is None else int(current["revision"]) + 1,
                     started_at_ms=int(row["observed_at_ms"]),
@@ -2356,9 +2445,21 @@ class OpportunityPerceptionStore:
                 )
                 self._insert_group_revision(con, revision, current)
                 if current is None:
+                    action = "added"
                     added += 1
                 else:
+                    action = "changed"
                     changed += 1
+                result = self._current_group_row(con, group_id)
+                self._insert_reconciliation_diff_evidence(
+                    con,
+                    window_id=window_id,
+                    action=action,
+                    group_id=group_id,
+                    baseline=baseline_row,
+                    staged=row,
+                    result=result,
+                )
 
             for baseline_row in baseline:
                 group_id = str(baseline_row["group_id"])
@@ -2382,6 +2483,16 @@ class OpportunityPerceptionStore:
                     legs=self._group_legs_from_json(str(current["legs_json"])),
                 )
                 self._insert_group_revision(con, revision, current)
+                result = self._current_group_row(con, group_id)
+                self._insert_reconciliation_diff_evidence(
+                    con,
+                    window_id=window_id,
+                    action="closed",
+                    group_id=group_id,
+                    baseline=baseline_row,
+                    staged=None,
+                    result=result,
+                )
                 closed += 1
             con.execute(
                 "UPDATE neg_risk_reconciliation_windows SET status='applied',"
@@ -2393,6 +2504,21 @@ class OpportunityPerceptionStore:
                 "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
                 (window_id,),
             ).fetchone()
+            evidence = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_diff_evidence "
+                "WHERE window_id=? ORDER BY group_id,action",
+                (window_id,),
+            ).fetchall()
+            result_revisions = self._reconciliation_evidence_result_revisions(con, window_id)
+            self._validate_reconciliation_snapshot(
+                applied,
+                receipts,
+                batch_samples,
+                staged,
+                baseline,
+                evidence,
+                result_revisions,
+            )
             result = self._reconciliation_diff_from_row(applied)
             con.execute("COMMIT")
             return result
@@ -3108,6 +3234,9 @@ class OpportunityPerceptionStore:
             rejected_count=int(row["rejected_count"]),
             observations_count=int(row["observations_count"]),
             baseline_count=int(row["baseline_count"]),
+            baseline_digest=(
+                None if row["baseline_digest"] is None else str(row["baseline_digest"])
+            ),
             added_count=(None if row["added_count"] is None else int(row["added_count"])),
             changed_count=(None if row["changed_count"] is None else int(row["changed_count"])),
             closed_count=(None if row["closed_count"] is None else int(row["closed_count"])),
@@ -3122,12 +3251,87 @@ class OpportunityPerceptionStore:
         )
 
     @staticmethod
+    def _reconciliation_baseline_digest(rows: list[sqlite3.Row]) -> str:
+        canonical_rows = sorted(
+            (
+                str(row["group_id"]),
+                str(row["event_id"]),
+                int(row["revision"]),
+                str(row["membership_hash"]),
+                str(row["status"]),
+            )
+            for row in rows
+        )
+        canonical = json.dumps(
+            {
+                "domain": "polyarb.reconciliation.baseline",
+                "version": 1,
+                "count": len(canonical_rows),
+                "rows": canonical_rows,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+    @staticmethod
+    def _reconciliation_evidence_result_revisions(
+        con: sqlite3.Connection,
+        window_id: str,
+    ) -> list[sqlite3.Row]:
+        return con.execute(
+            "SELECT r.* FROM neg_risk_group_revisions r "
+            "JOIN neg_risk_reconciliation_diff_evidence e "
+            "ON e.group_id=r.group_id AND e.result_revision=r.revision "
+            "WHERE e.window_id=? AND e.result_revision IS NOT NULL "
+            "ORDER BY r.group_id,r.revision",
+            (window_id,),
+        ).fetchall()
+
+    @staticmethod
+    def _insert_reconciliation_diff_evidence(
+        con: sqlite3.Connection,
+        *,
+        window_id: str,
+        group_id: str,
+        action: str,
+        baseline: sqlite3.Row | None,
+        staged: sqlite3.Row | None,
+        result: sqlite3.Row | None,
+    ) -> None:
+        con.execute(
+            "INSERT INTO neg_risk_reconciliation_diff_evidence("
+            "window_id,group_id,action,"
+            "baseline_event_id,baseline_revision,baseline_membership_hash,"
+            "staged_event_id,staged_membership_hash,staged_quality,"
+            "result_event_id,result_revision,result_membership_hash,result_status"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                window_id,
+                group_id,
+                action,
+                None if baseline is None else baseline["event_id"],
+                None if baseline is None else baseline["revision"],
+                None if baseline is None else baseline["membership_hash"],
+                None if staged is None else staged["event_id"],
+                None if staged is None else staged["membership_hash"],
+                None if staged is None else staged["quality"],
+                None if result is None else result["event_id"],
+                None if result is None else result["revision"],
+                None if result is None else result["membership_hash"],
+                None if result is None else result["status"],
+            ),
+        )
+
+    @staticmethod
     def _validate_reconciliation_snapshot(
         row: sqlite3.Row,
         receipts: list[sqlite3.Row],
         batch_samples: list[sqlite3.Row],
         staged: list[sqlite3.Row],
         baseline: list[sqlite3.Row],
+        evidence: list[sqlite3.Row],
+        result_revisions: list[sqlite3.Row],
     ) -> None:
         raw_status = str(row["status"])
         failure_reason = row["failure_reason"]
@@ -3136,6 +3340,8 @@ class OpportunityPerceptionStore:
         started = int(row["started_at_ms"])
         checkpoint = int(row["checkpoint_at_ms"])
         finished = row["finished_at_ms"]
+        if row["baseline_digest"] is None:
+            raise ReconciliationUnprovableError("reconciliation-baseline-digest-unavailable")
         if (
             raw_status not in {"open", "complete", "applied"}
             or (failure_reason is not None and raw_status != "open")
@@ -3149,8 +3355,10 @@ class OpportunityPerceptionStore:
             or sum(int(item["observed_count"]) for item in receipts)
             != int(row["observations_count"])
             or sum(int(item["rejected_count"]) for item in receipts) != int(row["rejected_count"])
+            or str(row["baseline_digest"])
+            != OpportunityPerceptionStore._reconciliation_baseline_digest(baseline)
         ):
-            raise ValueError("invalid-reconciliation-window")
+            raise ValueError("invalid-reconciliation-window-or-baseline-digest")
         for baseline_row in baseline:
             if (
                 baseline_row["status"] != "certified"
@@ -3187,6 +3395,12 @@ class OpportunityPerceptionStore:
             or any(value is not None and int(value) < 0 for value in diff_counts)
         ):
             raise ValueError("invalid-reconciliation-diff-counts")
+        if status == "applied":
+            OpportunityPerceptionStore._validate_reconciliation_diff_evidence(
+                row, staged, baseline, evidence, result_revisions
+            )
+        elif evidence or result_revisions:
+            raise ValueError("invalid-reconciliation-premature-diff-evidence")
         seen_cursors: set[str] = set()
         for sequence, receipt in enumerate(receipts, start=1):
             observed = int(receipt["observed_count"])
@@ -3299,6 +3513,16 @@ class OpportunityPerceptionStore:
             ):
                 raise ValueError("invalid-reconciliation-materialized-staging")
         latest = receipts[-1]
+        latest_samples = samples_by_batch[int(latest["id"])]
+        terminal_counts = (
+            latest["page_event_count"],
+            latest["groups_staged"],
+            latest["observed_count"],
+            latest["unique_count"],
+            latest["update_count"],
+            latest["duplicate_count"],
+            latest["rejected_count"],
+        )
         if (
             latest["next_cursor"] != row["next_cursor"]
             or int(latest["finished_at_ms"]) != checkpoint
@@ -3308,7 +3532,8 @@ class OpportunityPerceptionStore:
                 and (
                     finished is None
                     or int(finished) != checkpoint
-                    or int(latest["page_event_count"]) != 0
+                    or any(int(value) != 0 for value in terminal_counts)
+                    or latest_samples
                     or row["failure_reason"] is not None
                 )
             )
@@ -3324,6 +3549,183 @@ class OpportunityPerceptionStore:
             )
         ):
             raise ValueError("invalid-reconciliation-checkpoint")
+
+    @staticmethod
+    def _validate_reconciliation_diff_evidence(
+        window: sqlite3.Row,
+        staged: list[sqlite3.Row],
+        baseline: list[sqlite3.Row],
+        evidence: list[sqlite3.Row],
+        result_revisions: list[sqlite3.Row],
+    ) -> None:
+        staged_by_group = {str(row["group_id"]): row for row in staged}
+        baseline_by_group = {str(row["group_id"]): row for row in baseline}
+        result_by_identity = {
+            (str(row["group_id"]), int(row["revision"])): row for row in result_revisions
+        }
+        actions = {"added", "changed", "closed", "unchanged", "rejected"}
+        action_counts = {action: 0 for action in actions}
+        staged_actions: dict[str, list[sqlite3.Row]] = {}
+        result_evidence_count = 0
+        for item in evidence:
+            action = str(item["action"])
+            group_id = str(item["group_id"])
+            if action not in actions:
+                raise ValueError("invalid-reconciliation-diff-evidence-action")
+            action_counts[action] += 1
+            baseline_row = baseline_by_group.get(group_id)
+            staged_row = staged_by_group.get(group_id)
+            if action != "closed":
+                staged_actions.setdefault(group_id, []).append(item)
+            expected_baseline = (
+                (None, None, None)
+                if baseline_row is None
+                else (
+                    baseline_row["event_id"],
+                    int(baseline_row["revision"]),
+                    baseline_row["membership_hash"],
+                )
+            )
+            actual_baseline = (
+                item["baseline_event_id"],
+                (None if item["baseline_revision"] is None else int(item["baseline_revision"])),
+                item["baseline_membership_hash"],
+            )
+            if actual_baseline != expected_baseline:
+                raise ValueError("invalid-reconciliation-diff-evidence-baseline")
+            if action == "closed":
+                if any(
+                    item[name] is not None
+                    for name in (
+                        "staged_event_id",
+                        "staged_membership_hash",
+                        "staged_quality",
+                    )
+                ):
+                    raise ValueError("invalid-reconciliation-closed-evidence-staging")
+            elif staged_row is None or (
+                item["staged_event_id"],
+                item["staged_membership_hash"],
+                item["staged_quality"],
+            ) != (
+                staged_row["event_id"],
+                staged_row["membership_hash"],
+                staged_row["quality"],
+            ):
+                raise ValueError("invalid-reconciliation-diff-evidence-staging")
+
+            result_revision = item["result_revision"]
+            result_row = (
+                None
+                if result_revision is None
+                else result_by_identity.get((group_id, int(result_revision)))
+            )
+            if result_revision is not None:
+                result_evidence_count += 1
+            expected_result = (
+                (None, None, None, None)
+                if result_row is None
+                else (
+                    result_row["event_id"],
+                    int(result_row["revision"]),
+                    result_row["membership_hash"],
+                    result_row["status"],
+                )
+            )
+            actual_result = (
+                item["result_event_id"],
+                None if result_revision is None else int(result_revision),
+                item["result_membership_hash"],
+                item["result_status"],
+            )
+            if actual_result != expected_result:
+                raise ValueError("invalid-reconciliation-diff-evidence-result")
+
+            if action == "rejected":
+                if (
+                    result_row is not None
+                    or staged_row is None
+                    or not (
+                        staged_row["quality"] != "complete-supported"
+                        or (
+                            baseline_row is not None
+                            and staged_row["event_id"] != baseline_row["event_id"]
+                        )
+                    )
+                ):
+                    raise ValueError("invalid-reconciliation-rejected-evidence")
+            elif action == "added":
+                if (
+                    baseline_row is not None
+                    or staged_row is None
+                    or staged_row["quality"] != "complete-supported"
+                    or result_row is None
+                    or int(result_row["revision"]) != 1
+                    or result_row["event_id"] != staged_row["event_id"]
+                    or result_row["membership_hash"] != staged_row["membership_hash"]
+                    or result_row["status"] != "certified"
+                ):
+                    raise ValueError("invalid-reconciliation-added-evidence")
+            elif action == "changed":
+                if (
+                    baseline_row is None
+                    or staged_row is None
+                    or staged_row["quality"] != "complete-supported"
+                    or staged_row["event_id"] != baseline_row["event_id"]
+                    or result_row is None
+                    or int(result_row["revision"]) != int(baseline_row["revision"]) + 1
+                    or result_row["event_id"] != staged_row["event_id"]
+                    or result_row["membership_hash"] != staged_row["membership_hash"]
+                    or result_row["status"] != "certified"
+                ):
+                    raise ValueError("invalid-reconciliation-changed-evidence")
+            elif action == "unchanged":
+                if (
+                    staged_row is None
+                    or staged_row["quality"] != "complete-supported"
+                    or result_row is None
+                    or (
+                        baseline_row is not None
+                        and OpportunityPerceptionStore._group_row_matches_reconciliation_baseline(
+                            result_row, baseline_row
+                        )
+                        and (
+                            result_row["event_id"] != staged_row["event_id"]
+                            or result_row["membership_hash"] != staged_row["membership_hash"]
+                        )
+                    )
+                ):
+                    raise ValueError("invalid-reconciliation-unchanged-evidence")
+            elif (
+                baseline_row is None
+                or result_row is None
+                or result_row["event_id"] != baseline_row["event_id"]
+                or int(result_row["revision"]) != int(baseline_row["revision"]) + 1
+                or result_row["membership_hash"] != baseline_row["membership_hash"]
+                or result_row["status"] != "closed"
+                or (staged_row is not None and staged_row["event_id"] == baseline_row["event_id"])
+            ):
+                raise ValueError("invalid-reconciliation-closed-evidence")
+
+        if result_evidence_count != len(result_revisions):
+            raise ValueError("invalid-reconciliation-diff-evidence-results")
+        if set(staged_actions) != set(staged_by_group) or any(
+            len(items) != 1 for items in staged_actions.values()
+        ):
+            raise ValueError("invalid-reconciliation-staged-diff-evidence")
+        expected_counts = (
+            int(window["added_count"]),
+            int(window["changed_count"]),
+            int(window["closed_count"]),
+            int(window["unchanged_count"]),
+            int(window["applied_rejected_count"]),
+        )
+        actual_counts = tuple(
+            action_counts[action]
+            for action in ("added", "changed", "closed", "unchanged", "rejected")
+        )
+        if actual_counts != expected_counts or action_counts["closed"] > len(baseline):
+            raise ValueError("invalid-reconciliation-diff-evidence-counts")
 
     @staticmethod
     def _reconciliation_rows_same_fact(

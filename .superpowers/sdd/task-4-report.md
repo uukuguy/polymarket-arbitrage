@@ -25,9 +25,10 @@ trading capability.
    and quote-supersession semantics. It persists added, changed, closed,
    unchanged and rejected counts plus the full observation interval.
 5. Window creation atomically captures an exact append-only certified baseline.
-   Change and closure use baseline CAS, not timestamps: equal-millisecond,
-   clock-skewed and all post-begin online revisions win. Closure applies only
-   when current still exactly matches the baseline revision/identity/status.
+   A versioned/domain-separated digest binds the canonical ordered baseline
+   rows and count; legacy windows without this proof restart rather than
+   guessing a backfill. Change and closure use baseline CAS, not timestamps:
+   equal-millisecond, clock-skewed and all post-begin online revisions win.
 6. Incomplete/unsupported identity suppresses closure only when group/event
    binds the exact baseline. A forged attacker event cannot mask a missing
    baseline group.
@@ -35,13 +36,17 @@ trading capability.
    staging deterministically classifies cross-page observations as unique,
    updated/latest-wins or duplicate/no-op. Receipts retain all four counts plus
    rejected count.
-8. A cursor loop atomically terminates the window as failed/cursor-loop; it can
+8. Apply writes append-only per-group action evidence in the same transaction
+   as revision mutations and counters. Applied validation replays
+   added/changed/closed/unchanged/rejected actions, binds their baseline,
+   staging and exact result revisions, and recomputes all five counters.
+9. A cursor loop atomically terminates the window as failed/cursor-loop; it can
    never apply, and the next run starts a fresh window from cursor None.
-9. Health reuses the store's complete validated snapshot. Reconciliation
+10. Health reuses the store's complete validated snapshot. Reconciliation
    progress/checkpoint age are scoped checks and do not alter overall or
    Candidate availability. Missing/corrupt schema or numeric state is
    unavailable, not idle or an exception.
-10. New and legacy producers are independently default-off. Legacy Structure
+11. New and legacy producers are independently default-off. Legacy Structure
    adaptive timing and history remain readable, but main does not start its
    universe-sized loop unless explicitly enabled.
 
@@ -49,9 +54,9 @@ trading capability.
 
 ```text
 Initial RED: ModuleNotFoundError for polyarb.perception.reconciliation
-Focused reconciliation + health: 40 passed
+Focused reconciliation + health: 45 passed
 Proportional perception/scheduler/config/wiring/watcher suite: passed
-Full repository: 2502 collected, 100% passed (1 expected xfail, 1 skip)
+Full repository: 2507 collected, 100% passed (1 expected xfail, 1 skip)
 Changed-file Ruff and Ruff format: pass
 python compileall: pass
 make reconciliation-status fixture: pass

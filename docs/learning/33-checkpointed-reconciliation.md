@@ -7,11 +7,11 @@ Candidate Watcher 负责“现在值得盯的完整组”；Full Reconciliation 
 
 ```text
 window(open)
-  + exact certified baseline（窗口开始事务）
+  + exact certified baseline + versioned digest（窗口开始事务）
   -> page staging + batch receipt + opaque cursor（一个事务）
   -> ... 重启后继续 cursor
   -> terminal empty page => window(complete)
-  -> added/changed/closed/unchanged/rejected（一个原子 diff）
+  -> revisions + per-group diff evidence + 5 counters（一个原子 diff）
   -> window(applied)
 ```
 
@@ -24,7 +24,7 @@ window(open)
 |---|---|
 | `src/polyarb/perception/reconciliation.py` | 单页 worker、持续 runner、取消收敛 |
 | `src/polyarb/perception/store.py` | window/batch/staging checkpoint 与原子 diff |
-| `src/polyarb/storage/schemas.py` | 三组 additive SQLite 表 |
+| `src/polyarb/storage/schemas.py` | checkpoint、baseline、sample、diff evidence 表 |
 | `src/polyarb/http/health.py` | 从真实 checkpoint/receipt 读 scoped health |
 | `src/polyarb/cli_reconciliation.py` | 单页推进与只读状态 |
 
@@ -51,6 +51,11 @@ baseline 外后来出现的 online group，以及 baseline 后发生过任何 re
 group，都由 hot online authority 胜出。closure 也只遍历 baseline，且 current 必须仍
 精确匹配。
 
+window 同时保存带 domain、version、count 的 canonical ordered baseline SHA-256。
+validator 会从 baseline rows 重算；即使攻击者保持行数不变、只把一行换成 post-begin
+group，也不能获得 closure authority。旧窗口没有这个证明时只会 fail closed 并新建
+窗口，绝不从当前状态猜测回填历史 baseline。
+
 不完整或 unsupported 的 group 也会以 rejected staging 留下证据。只有其
 `group_id + event_id` 能绑定 baseline 时才抑制 closure；伪造同 group 的 attacker event
 不能替任意旧 event 续命。
@@ -61,6 +66,13 @@ batch samples：相同事实记 `duplicate` 且不改 materialized staging，变
 observed/unique/update/duplicate/rejected，状态读取会重放样本证明最终 staging。
 若 opaque cursor 指回当前或任一历史 cursor，窗口原子变为 `failed/cursor-loop`，
 绝不 apply；下一轮创建新窗口从头恢复。
+
+apply 还会在同一个写事务为每个最终 staged group 写唯一的
+added/changed/unchanged/rejected action；exact baseline CAS closure 另写 closed action。
+每条 evidence 同时绑定 baseline、最终 staging 与实际 result revision。状态读取会从
+evidence 重算五个计数，因此手改 `closed_count`、删除 evidence 或伪造 revision 都会
+fail closed。这里的 applied rejected 是“最终 rejected group 数”，不是跨页历史
+rejected observation 数。
 
 ## 运维入口
 
@@ -84,8 +96,8 @@ Candidate/整体 availability；Task 5 才负责把 stalled checkpoint 变成独
 
 ## 设计取舍
 
-- terminal 必须是 upstream 明确返回的空页与空 cursor；没有 completion proof 就没有
-  closure authority。
+- terminal 必须同时证明 event/candidate/sample 和 receipt 的所有计数为零，并返回空
+  cursor；没有 completion proof 就没有 closure authority。
 - duplicate group、cursor race、receipt/计数链损坏全部 fail closed。
 - window 记录 `started_at_ms..finished_at_ms`，不伪装成单一 `as_of` 时刻。
 - Slice D 仍是 observer-only、default-off、未部署；不包含钱包、签名、余额或订单。

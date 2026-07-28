@@ -437,6 +437,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_windows (
   rejected_count INTEGER NOT NULL CHECK(rejected_count >= 0),
   observations_count INTEGER NOT NULL CHECK(observations_count >= 0),
   baseline_count INTEGER NOT NULL CHECK(baseline_count >= 0),
+  baseline_digest TEXT,
   added_count INTEGER,
   changed_count INTEGER,
   closed_count INTEGER,
@@ -501,6 +502,24 @@ CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_batch_samples (
   materialization TEXT NOT NULL CHECK(materialization IN
     ('unique','updated','duplicate')),
   PRIMARY KEY(batch_id,group_id)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_diff_evidence (
+  window_id TEXT NOT NULL REFERENCES neg_risk_reconciliation_windows(id),
+  group_id TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN
+    ('added','changed','closed','unchanged','rejected')),
+  baseline_event_id TEXT,
+  baseline_revision INTEGER,
+  baseline_membership_hash TEXT,
+  staged_event_id TEXT,
+  staged_membership_hash TEXT,
+  staged_quality TEXT,
+  result_event_id TEXT,
+  result_revision INTEGER,
+  result_membership_hash TEXT,
+  result_status TEXT,
+  PRIMARY KEY(window_id,group_id,action)
 );
 
 -- Phase 1.1 T2: append-only translation cache.

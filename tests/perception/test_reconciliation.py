@@ -9,6 +9,7 @@ import pytest
 from polyarb.cli_reconciliation import main as reconciliation_status_main
 from polyarb.clients.gamma_client import EventPage
 from polyarb.config import Settings
+from polyarb.perception.discovery import DiscoveryWorker
 from polyarb.perception.models import GroupLeg, GroupRevision
 from polyarb.perception.reconciliation import (
     ReconciliationIncompleteError,
@@ -16,7 +17,10 @@ from polyarb.perception.reconciliation import (
 from polyarb.perception.reconciliation import (
     ReconciliationWorker as _ReconciliationWorker,
 )
-from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.store import (
+    OpportunityPerceptionStore,
+    ReconciliationUnprovableError,
+)
 
 
 def _event(event_id: str, group_id: str, *, suffix: str = "a") -> dict:
@@ -151,7 +155,8 @@ def test_reconciliation_schema_upgrades_original_task4_tables_additively(
             """
         )
 
-    OpportunityPerceptionStore(db_path).init_schema()
+    store = OpportunityPerceptionStore(db_path)
+    store.init_schema()
 
     with sqlite3.connect(db_path) as con:
         window_columns = {
@@ -160,14 +165,34 @@ def test_reconciliation_schema_upgrades_original_task4_tables_additively(
         batch_columns = {
             row[1] for row in con.execute("PRAGMA table_info(neg_risk_reconciliation_batches)")
         }
+        diff_evidence_table = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_reconciliation_diff_evidence'"
+        ).fetchone()
         con.execute(
             "INSERT INTO neg_risk_reconciliation_windows("
             "id,status,next_cursor,started_at_ms,checkpoint_at_ms,finished_at_ms,"
             "pages_completed,events_seen,groups_staged,rejected_count,failure_reason"
-            ") VALUES ('failed-window','open',NULL,0,0,1,0,0,0,0,'cursor-loop')"
+            ") VALUES ('legacy-window','open',NULL,0,0,NULL,0,0,0,0,NULL)"
         )
-    assert {"baseline_count", "failure_reason", "observations_count"} <= window_columns
+    assert {
+        "baseline_count",
+        "baseline_digest",
+        "failure_reason",
+        "observations_count",
+    } <= window_columns
     assert {"observed_count", "unique_count", "update_count", "duplicate_count"} <= batch_columns
+    assert diff_evidence_table == (1,)
+    with pytest.raises(ReconciliationUnprovableError):
+        store.current_reconciliation()
+    restarted = store.begin_reconciliation(started_at_ms=10)
+    assert restarted.id != "legacy-window"
+    assert restarted.baseline_digest is not None
+    with sqlite3.connect(db_path) as con:
+        failure_reason = con.execute(
+            "SELECT failure_reason FROM neg_risk_reconciliation_windows WHERE id='legacy-window'"
+        ).fetchone()[0]
+    assert failure_reason == "baseline-proof-unavailable"
 
 
 def _revision(
@@ -249,6 +274,142 @@ def test_incomplete_window_cannot_replace_online_group_revision(
     assert store.current_group("g-1").revision == 3
 
 
+def test_terminal_batch_rejects_nonempty_candidate_proof(tmp_path: Path) -> None:
+    store = _store(tmp_path / "state.db")
+    window = store.begin_reconciliation(started_at_ms=100)
+    page = _page(
+        _event("e-attacker", "g-attacker"),
+        requested=None,
+        next_cursor=None,
+        started=100,
+        finished=110,
+    )
+    candidates = DiscoveryWorker._normalize_page(page)
+
+    with pytest.raises(ValueError, match="terminal-page-must-be-empty"):
+        store.publish_reconciliation_batch(
+            window_id=window.id,
+            requested_cursor=None,
+            next_cursor=None,
+            completed=True,
+            started_at_ms=100,
+            finished_at_ms=110,
+            page_event_count=0,
+            candidates=candidates,
+        )
+
+    current = store.current_reconciliation()
+    assert current.status == "open"
+    assert current.pages_completed == 0
+
+
+def test_baseline_digest_rejects_exact_count_row_substitution(tmp_path: Path) -> None:
+    store = _store(tmp_path / "state.db")
+    store.publish_group_revision(_revision("g-1", revision=1, observed_at_ms=50))
+    window = store.begin_reconciliation(started_at_ms=100)
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute(
+            "UPDATE neg_risk_reconciliation_baseline "
+            "SET group_id='g-post-begin',event_id='e-g-post-begin' "
+            "WHERE window_id=? AND group_id='g-1'",
+            (window.id,),
+        )
+
+    with pytest.raises(ValueError, match="baseline-digest"):
+        store.current_reconciliation()
+
+
+def test_apply_rechecks_baseline_digest_inside_write_transaction(tmp_path: Path) -> None:
+    store = _store(tmp_path / "state.db")
+    store.publish_group_revision(_revision("g-1", revision=1, observed_at_ms=50))
+    window = store.begin_reconciliation(started_at_ms=100)
+    store.publish_reconciliation_batch(
+        window_id=window.id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=100,
+        finished_at_ms=110,
+        page_event_count=0,
+        candidates=(),
+    )
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute(
+            "UPDATE neg_risk_reconciliation_baseline "
+            "SET group_id='g-post-begin',event_id='e-g-post-begin' "
+            "WHERE window_id=? AND group_id='g-1'",
+            (window.id,),
+        )
+
+    with pytest.raises(ValueError, match="baseline-digest"):
+        store.apply_reconciliation_diff(window.id)
+    assert store.current_group("g-1").status == "certified"
+
+
+def test_terminal_receipt_validator_requires_zero_counts_and_no_samples(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path / "state.db")
+    window = store.begin_reconciliation(started_at_ms=100)
+    first_page = _page(
+        _event("e-1", "g-1"),
+        requested=None,
+        next_cursor="c-2",
+        started=100,
+        finished=110,
+    )
+    candidates = DiscoveryWorker._normalize_page(first_page)
+    store.publish_reconciliation_batch(
+        window_id=window.id,
+        requested_cursor=None,
+        next_cursor="c-2",
+        completed=False,
+        started_at_ms=100,
+        finished_at_ms=110,
+        page_event_count=1,
+        candidates=candidates,
+    )
+    store.publish_reconciliation_batch(
+        window_id=window.id,
+        requested_cursor="c-2",
+        next_cursor=None,
+        completed=True,
+        started_at_ms=120,
+        finished_at_ms=130,
+        page_event_count=0,
+        candidates=(),
+    )
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        terminal_batch_id = con.execute(
+            "SELECT id FROM neg_risk_reconciliation_batches WHERE window_id=? AND completed=1",
+            (window.id,),
+        ).fetchone()[0]
+        sample = con.execute(
+            "SELECT group_id,event_id,membership_hash,quality,reason,legs_json "
+            "FROM neg_risk_reconciliation_staging WHERE window_id=?",
+            (window.id,),
+        ).fetchone()
+        con.execute(
+            "UPDATE neg_risk_reconciliation_batches SET "
+            "groups_staged=1,observed_count=1,duplicate_count=1 WHERE id=?",
+            (terminal_batch_id,),
+        )
+        con.execute(
+            "UPDATE neg_risk_reconciliation_windows SET observations_count=2 WHERE id=?",
+            (window.id,),
+        )
+        con.execute(
+            "INSERT INTO neg_risk_reconciliation_batch_samples("
+            "batch_id,group_id,event_id,membership_hash,quality,reason,legs_json,"
+            "observed_at_ms,source_cursor,materialization"
+            ") VALUES (?,?,?,?,?,?,?,130,'c-2','duplicate')",
+            (terminal_batch_id, *sample),
+        )
+
+    with pytest.raises(ValueError, match="checkpoint"):
+        store.current_reconciliation()
+
+
 @pytest.mark.asyncio
 async def test_terminal_batch_applies_one_atomic_diff_and_is_idempotent(
     tmp_path: Path,
@@ -301,6 +462,28 @@ async def test_terminal_batch_applies_one_atomic_diff_and_is_idempotent(
         applied.unchanged_count,
         applied.applied_rejected_count,
     ) == (1, 1, 1, 0, 0)
+    with sqlite3.connect(path) as con:
+        evidence_table = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_reconciliation_diff_evidence'"
+        ).fetchone()
+        assert evidence_table == (1,)
+        actions = con.execute(
+            "SELECT group_id,action FROM neg_risk_reconciliation_diff_evidence "
+            "WHERE window_id=? ORDER BY group_id,action",
+            (terminal.window_id,),
+        ).fetchall()
+        assert actions == [
+            ("added", "added"),
+            ("changed", "changed"),
+            ("closed", "closed"),
+        ]
+        con.execute(
+            "UPDATE neg_risk_reconciliation_windows SET closed_count=999 WHERE id=?",
+            (terminal.window_id,),
+        )
+    with pytest.raises(ValueError, match="diff-evidence"):
+        store.current_reconciliation()
 
 
 @pytest.mark.asyncio
@@ -649,6 +832,49 @@ async def test_cross_page_duplicate_is_deduped_and_change_is_latest_wins(
         ).fetchone()[0]
     assert counts == [(1, 1, 0, 0), (1, 0, 0, 1), (1, 0, 1, 0), (0, 0, 0, 0)]
     assert sample_count == 3
+
+
+@pytest.mark.asyncio
+async def test_applied_rejected_counts_final_group_not_historical_observations(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path / "state.db")
+    invalid = _event("e-1", "g-1")
+    invalid["markets"][1]["conditionId"] = ""
+    gamma = FakeGamma(
+        [
+            _page(
+                invalid,
+                requested=None,
+                next_cursor="c-2",
+                started=100,
+                finished=110,
+            ),
+            _page(
+                _event("e-1", "g-1"),
+                requested="c-2",
+                next_cursor="c-3",
+                started=120,
+                finished=130,
+            ),
+            _page(requested="c-3", next_cursor=None, started=140, finished=150),
+        ]
+    )
+    worker = ReconciliationWorker(gamma=gamma, store=store)
+
+    await worker.run_batch()
+    await worker.run_batch()
+    terminal = await worker.run_batch()
+
+    assert terminal.diff.added == 1
+    assert terminal.diff.rejected == 0
+    assert store.current_reconciliation().rejected_count == 1
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        actions = con.execute(
+            "SELECT action FROM neg_risk_reconciliation_diff_evidence WHERE window_id=?",
+            (terminal.window_id,),
+        ).fetchall()
+    assert actions == [("added",)]
 
 
 @pytest.mark.asyncio

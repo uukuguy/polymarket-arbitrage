@@ -16,6 +16,7 @@ from polyarb.perception.store import (
     OpportunityPerceptionStore,
     ReconciliationDiff,
     ReconciliationIncompleteError,
+    ReconciliationUnprovableError,
 )
 
 
@@ -58,7 +59,10 @@ class ReconciliationWorker:
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
 
     async def run_batch(self) -> ReconciliationBatchResult:
-        window = await asyncio.to_thread(self._store.current_reconciliation)
+        try:
+            window = await asyncio.to_thread(self._store.current_reconciliation)
+        except ReconciliationUnprovableError:
+            window = None
         if window is not None and window.status in {"applied", "failed"}:
             window = None
         if window is None:
