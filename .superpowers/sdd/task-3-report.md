@@ -34,7 +34,10 @@ validation. No Task 4, deployment, process isolation, Dashboard/API, or trading.
    finite nonnegative liquidity, quality/reason, and promotion semantics.
    `complete-supported` requires its exact revision by batch completion.
    Legitimate first `incomplete-source` and `complete-unsupported` samples may
-   have no revision and remain valid non-promoted evidence.
+   have no revision and remain valid non-promoted evidence. Every sample also
+   writes append-only schedule evidence in the same batch transaction; status
+   exact-joins batch/time/identity/quality/reason/promotion, rejecting
+   semantically valid-looking ghost edits to nonlatest rejected samples.
 6. Generic schema initialization is additive and policy-free. Explicit active
    configuration records audits for retained legacy promotions; admit-next and
    late-start transitions append new audits transactionally.
@@ -42,8 +45,8 @@ validation. No Task 4, deployment, process isolation, Dashboard/API, or trading.
 ## Verification
 
 ```text
-Focused Discovery/Candidate/config/status suite: 112 passed
-Full repository: 2480 collected, 100% passed (1 expected xfail, 1 skip)
+Focused Discovery/Candidate/config/status suite: 113 passed
+Full repository: 2481 collected, 100% passed (1 expected xfail, 1 skip)
 Changed-file Ruff: pass
 git diff --check: pass
 make planning-status: 82 plans, no drift

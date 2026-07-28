@@ -95,6 +95,13 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
             (receipt.lastrowid,),
         )
         con.execute(
+            "INSERT INTO neg_risk_discovery_schedule_evidence("
+            "batch_id,group_id,event_id,membership_hash,quality,reason,"
+            "promoted,effective_at_ms"
+            ") VALUES (?,'g-1','e-1','h','incomplete-source','fixture',0,20)",
+            (receipt.lastrowid,),
+        )
+        con.execute(
             "INSERT INTO neg_risk_group_revisions("
             "group_id,event_id,revision,membership_hash,started_at_ms,"
             "observed_at_ms,source_cursor,status,legs_json"

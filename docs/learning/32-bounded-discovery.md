@@ -132,6 +132,9 @@ inputs/anchors 用同一 Decimal 函数重算 score/reason。`group_id` 从 sche
 - historical sample 按语义校验：`complete-supported` 必须有 batch 完成前的精确
   certified revision；合法 `incomplete-source` / `complete-unsupported` 首次发现
   本来就没有 revision，但仍必须 non-promoted、身份字段非空、reason 合法且计数闭合。
+  每个 sample 还会在同一 batch 事务追加 schedule evidence（batch/time/identity/
+  quality/reason/promotion）；无 revision 的历史拒绝样本必须 exact join 这条 evidence，
+  因而篡改非最新 sample 为 ghost 也会 fail closed。
 - promotion source 和 freshness 共享 current certified +（独立 bootstrap authority、
   Candidate fact 或 admitted promotion）权威谓词；legacy seed 只保序，不能绕过或
   复活失效 authority。

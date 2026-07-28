@@ -204,6 +204,14 @@ class OpportunityPerceptionStore:
     def init_schema(self) -> None:
         con = self._connect()
         try:
+            schedule_evidence_existed = (
+                con.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' "
+                    "AND name='neg_risk_discovery_schedule_evidence'"
+                ).fetchone()
+                is not None
+            )
             con.executescript(DDL)
             migrations = (
                 (
@@ -297,6 +305,19 @@ class OpportunityPerceptionStore:
                         (sweep_id, batch_sequence, int(row["id"])),
                     )
                 previous_completed = bool(row["completed"])
+            if not schedule_evidence_existed:
+                con.execute(
+                    "INSERT INTO neg_risk_discovery_schedule_evidence("
+                    "batch_id,group_id,event_id,membership_hash,quality,reason,"
+                    "promoted,effective_at_ms"
+                    ") SELECT bs.batch_id,bs.group_id,bs.event_id,"
+                    "bs.membership_hash,bs.quality,bs.reason,bs.promoted,"
+                    "b.finished_at_ms FROM neg_risk_discovery_batch_samples bs "
+                    "JOIN neg_risk_discovery_batches b ON b.id=bs.batch_id "
+                    "WHERE bs.event_id IS NOT NULL "
+                    "AND bs.membership_hash IS NOT NULL "
+                    "AND bs.quality IS NOT NULL"
+                )
         finally:
             con.close()
 
@@ -598,6 +619,24 @@ class OpportunityPerceptionStore:
                         candidate.reason,
                         str(candidate.liquidity_weight),
                         int(candidate.group_id in promoted_ids),
+                    )
+                    for candidate in candidates
+                ],
+            )
+            con.executemany(
+                "INSERT INTO neg_risk_discovery_schedule_evidence("
+                "batch_id,group_id,event_id,membership_hash,quality,reason,"
+                "promoted,effective_at_ms) VALUES (?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        batch_id,
+                        candidate.group_id,
+                        candidate.event_id,
+                        candidate.membership_hash,
+                        candidate.quality,
+                        candidate.reason,
+                        int(candidate.group_id in promoted_ids),
+                        finished_at_ms,
                     )
                     for candidate in candidates
                 ],
@@ -1228,6 +1267,10 @@ class OpportunityPerceptionStore:
                 "SELECT * FROM neg_risk_discovery_batch_samples "
                 "ORDER BY batch_id,group_id"
             ).fetchall()
+            schedule_evidence = con.execute(
+                "SELECT * FROM neg_risk_discovery_schedule_evidence "
+                "ORDER BY batch_id,group_id"
+            ).fetchall()
             latest_samples = [
                 row
                 for row in batch_samples
@@ -1272,6 +1315,7 @@ class OpportunityPerceptionStore:
                 revision_identities=revision_identities,
                 batches=batches,
                 batch_samples=batch_samples,
+                schedule_evidence=schedule_evidence,
                 latest_batch=latest_batch,
                 latest_samples=latest_samples,
                 load_row=load_row,
@@ -1413,6 +1457,7 @@ class OpportunityPerceptionStore:
         revision_identities: dict[tuple[str, str, str], int],
         batches: list[sqlite3.Row],
         batch_samples: list[sqlite3.Row],
+        schedule_evidence: list[sqlite3.Row],
         latest_batch: sqlite3.Row | None,
         latest_samples: list[sqlite3.Row],
         load_row: sqlite3.Row | None,
@@ -1457,6 +1502,10 @@ class OpportunityPerceptionStore:
             samples_by_batch.setdefault(int(sample["batch_id"]), []).append(
                 sample
             )
+        evidence_by_key = {
+            (int(row["batch_id"]), str(row["group_id"])): row
+            for row in schedule_evidence
+        }
         for batch in batches:
             counts = (
                 int(batch["promoted_count"]),
@@ -1516,6 +1565,10 @@ class OpportunityPerceptionStore:
                     str(sample["event_id"]),
                     str(sample["membership_hash"]),
                 )
+                evidence = evidence_by_key.pop(
+                    (int(sample["batch_id"]), str(sample["group_id"])),
+                    None,
+                )
                 if (
                     not weight.is_finite()
                     or weight < 0
@@ -1549,11 +1602,26 @@ class OpportunityPerceptionStore:
                         quality != "complete-supported"
                         and (reason is None or not str(reason))
                     )
+                    or evidence is None
+                    or any(
+                        evidence[name] != sample[name]
+                        for name in (
+                            "event_id",
+                            "membership_hash",
+                            "quality",
+                            "reason",
+                            "promoted",
+                        )
+                    )
+                    or int(evidence["effective_at_ms"])
+                    != int(batch["finished_at_ms"])
                 ):
                     raise ValueError("invalid-discovery-historical-sample")
             previous = batch
         if samples_by_batch:
             raise ValueError("orphan-discovery-batch-sample")
+        if evidence_by_key:
+            raise ValueError("orphan-discovery-schedule-evidence")
         admission_keys: set[tuple[str, str, str, int, int]] = set()
         for admission in admissions:
             identity = (

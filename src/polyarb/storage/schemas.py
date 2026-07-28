@@ -333,6 +333,19 @@ CREATE TABLE IF NOT EXISTS neg_risk_discovery_batch_samples (
   PRIMARY KEY(batch_id, group_id)
 );
 
+CREATE TABLE IF NOT EXISTS neg_risk_discovery_schedule_evidence (
+  batch_id INTEGER NOT NULL,
+  group_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  membership_hash TEXT NOT NULL,
+  quality TEXT NOT NULL CHECK(quality IN
+    ('complete-supported','complete-unsupported','incomplete-source')),
+  reason TEXT,
+  promoted INTEGER NOT NULL CHECK(promoted IN (0,1)),
+  effective_at_ms INTEGER NOT NULL CHECK(effective_at_ms >= 0),
+  PRIMARY KEY(batch_id, group_id)
+);
+
 CREATE TABLE IF NOT EXISTS neg_risk_discovery_load_state (
   id INTEGER PRIMARY KEY CHECK(id = 1),
   degraded_streak INTEGER NOT NULL CHECK(degraded_streak >= 0),

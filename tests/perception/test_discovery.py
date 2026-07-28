@@ -454,6 +454,45 @@ async def test_incomplete_first_sample_without_revision_is_valid_history(
 
 
 @pytest.mark.asyncio
+async def test_status_rejects_forged_nonlatest_incomplete_sample_identity(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(_event(event_id="e-1", group_id="g-1", valid=False))
+        ),
+        store=store,
+    ).run_batch()
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            EventPage(
+                events=(_event(event_id="e-2", group_id="g-2"),),
+                requested_cursor="c-2",
+                next_cursor="c-3",
+                completed=False,
+                started_at_ms=20_000,
+                finished_at_ms=20_100,
+            )
+        ),
+        store=store,
+    ).run_batch()
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute(
+            "UPDATE neg_risk_discovery_batch_samples "
+            "SET group_id='ghost',event_id='ghost-event',"
+            "membership_hash='ghost-hash' WHERE batch_id=("
+            "SELECT MIN(id) FROM neg_risk_discovery_batches)"
+        )
+
+    assert discovery_status_main(
+        ["--db-path", str(tmp_path / "state.db"), "--now-ms", "20101"]
+    ) == 2
+    assert "invalid discovery state" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
 async def test_status_rejects_attempt_without_real_admission_as_of_identity(
     tmp_path: Path,
     capsys,

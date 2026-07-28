@@ -94,6 +94,10 @@ including the exact identity, promotion/deadline, and full capacity proof.
 Status requires attempt receipts to exact-join that audit and requires the
 certified revision to predate promotion. Incomplete or unsupported discovery
 samples are valid without a revision; complete-supported samples are not.
+Every sample also writes append-only schedule evidence in the same batch
+transaction. Historical validation exact-joins batch/time/identity/quality/
+reason/promotion, so an old rejected sample cannot be changed to a semantically
+plausible ghost identity.
 
 ## 4. Group-Level Data Contract
 
