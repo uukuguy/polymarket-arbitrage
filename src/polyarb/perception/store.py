@@ -1619,8 +1619,7 @@ class OpportunityPerceptionStore:
                     len(promoted),
                 ),
             )
-            if completed:
-                self._compact_discovery_authority(con)
+            self._compact_discovery_authority(con)
             con.execute("COMMIT")
             return tuple(group_id for _, group_id in promoted)
         except BaseException:
@@ -2208,7 +2207,6 @@ class OpportunityPerceptionStore:
                 or not isinstance(anchor, dict)
                 or not isinstance(batch, dict)
                 or int(batch["id"]) != int(row["through_batch_id"])
-                or not bool(batch["completed"])
                 or not isinstance(samples, list)
                 or not isinstance(evidence, list)
                 or not isinstance(visits, list)
@@ -2253,9 +2251,7 @@ class OpportunityPerceptionStore:
         compact_target = count - _DISCOVERY_AUTHORITY_COMPACT_LOW_ROWS
         through_row = con.execute(
             "SELECT * FROM neg_risk_discovery_batches "
-            "WHERE completed=1 AND id<=("
-            "SELECT id FROM neg_risk_discovery_batches ORDER BY id LIMIT 1 OFFSET ?"
-            ") ORDER BY id DESC LIMIT 1",
+            "ORDER BY id LIMIT 1 OFFSET ?",
             (compact_target - 1,),
         ).fetchone()
         if through_row is None:

@@ -171,6 +171,27 @@ def _publish_empty_discovery_sweep(
     )
 
 
+def _publish_empty_discovery_page(
+    store: OpportunityPerceptionStore,
+    *,
+    sequence: int,
+    requested_cursor: str | None,
+    completed: bool = False,
+) -> str | None:
+    next_cursor = None if completed else f"long-sweep-{sequence + 1}"
+    store.publish_discovery_batch(
+        requested_cursor=requested_cursor,
+        next_cursor=next_cursor,
+        completed=completed,
+        started_at_ms=sequence * 100,
+        finished_at_ms=sequence * 100 + 10,
+        page_event_count=0,
+        candidates=(),
+        admission_proof=store.discovery_admission_proof(),
+    )
+    return next_cursor
+
+
 def _publish_quote(
     store: OpportunityPerceptionStore,
     group_id: str,
@@ -238,6 +259,137 @@ def test_discovery_checkpoint_bounds_status_history_reads(
     ]
     assert history_reads
     assert all("WHERE id>" in statement for statement in history_reads)
+
+
+def test_discovery_checkpoint_segments_one_long_sweep_and_terminal_commits(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        store_module, "_DISCOVERY_AUTHORITY_COMPACT_HIGH_ROWS", 3, raising=False
+    )
+    monkeypatch.setattr(
+        store_module, "_DISCOVERY_AUTHORITY_COMPACT_LOW_ROWS", 1, raising=False
+    )
+    monkeypatch.setattr(
+        store_module, "_DISCOVERY_AUTHORITY_UNCOMPACTED_MAX_ROWS", 4, raising=False
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.configure_discovery_admission(_admission_proof(), now_ms=0)
+    cursor = None
+    for sequence in range(1, 9):
+        cursor = _publish_empty_discovery_page(
+            store,
+            sequence=sequence,
+            requested_cursor=cursor,
+        )
+        status = store.discovery_status(now_ms=sequence * 100 + 10)
+        assert status.completed is False
+        assert status.next_cursor == cursor
+    with store._connect() as con:
+        anchor = json.loads(
+            con.execute(
+                "SELECT anchor_json FROM neg_risk_discovery_authority_checkpoints "
+                "WHERE id=1"
+            ).fetchone()[0]
+        )
+        assert anchor["batch"]["completed"] == 0
+        assert anchor["batch"]["sweep_id"] == 1
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_discovery_batches"
+        ).fetchone()[0] <= 3
+
+    _publish_empty_discovery_page(
+        store,
+        sequence=9,
+        requested_cursor=cursor,
+        completed=True,
+    )
+
+    assert store.discovery_status(now_ms=910).completed is True
+
+
+def test_discovery_incomplete_checkpoint_prune_failure_rolls_back_page(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        store_module, "_DISCOVERY_AUTHORITY_COMPACT_HIGH_ROWS", 2, raising=False
+    )
+    monkeypatch.setattr(
+        store_module, "_DISCOVERY_AUTHORITY_COMPACT_LOW_ROWS", 1, raising=False
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.configure_discovery_admission(_admission_proof(), now_ms=0)
+    cursor = _publish_empty_discovery_page(
+        store,
+        sequence=1,
+        requested_cursor=None,
+    )
+    cursor = _publish_empty_discovery_page(
+        store,
+        sequence=2,
+        requested_cursor=cursor,
+    )
+    with store._connect() as con:
+        con.execute(
+            "CREATE TRIGGER reject_incomplete_discovery_compaction BEFORE DELETE "
+            "ON neg_risk_discovery_batches BEGIN "
+            "SELECT RAISE(ABORT,'reject incomplete discovery compaction'); END"
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="reject incomplete discovery compaction",
+    ):
+        _publish_empty_discovery_page(
+            store,
+            sequence=3,
+            requested_cursor=cursor,
+        )
+
+    status = store.discovery_status(now_ms=210)
+    assert status.next_cursor == cursor
+    with store._connect() as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_discovery_batches"
+        ).fetchone()[0] == 2
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_discovery_authority_checkpoints"
+        ).fetchone()[0] == 0
+
+
+def test_discovery_incomplete_checkpoint_anchor_tamper_fails_closed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        store_module, "_DISCOVERY_AUTHORITY_COMPACT_HIGH_ROWS", 2, raising=False
+    )
+    monkeypatch.setattr(
+        store_module, "_DISCOVERY_AUTHORITY_COMPACT_LOW_ROWS", 1, raising=False
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.configure_discovery_admission(_admission_proof(), now_ms=0)
+    cursor = None
+    for sequence in range(1, 4):
+        cursor = _publish_empty_discovery_page(
+            store,
+            sequence=sequence,
+            requested_cursor=cursor,
+        )
+    with store._connect() as con:
+        con.execute(
+            "UPDATE neg_risk_discovery_authority_checkpoints "
+            "SET anchor_json=json_set(anchor_json,'$.batch.next_cursor','tampered') "
+            "WHERE id=1"
+        )
+
+    with pytest.raises(ValueError, match="invalid-discovery-authority-checkpoint"):
+        store.discovery_status(now_ms=310)
 
 
 def test_discovery_checkpoint_survives_sample_rowid_reuse(
@@ -317,21 +469,12 @@ def test_discovery_checkpoint_tamper_and_prune_failure_fail_closed(
     with store._connect() as con:
         assert con.execute(
             "SELECT COUNT(*) FROM neg_risk_discovery_batches"
-        ).fetchone()[0] == 3
+        ).fetchone()[0] == 2
         assert con.execute(
             "SELECT COUNT(*) FROM neg_risk_discovery_authority_checkpoints"
         ).fetchone()[0] == 0
         con.execute("DROP TRIGGER reject_discovery_compaction")
-    store.publish_discovery_batch(
-        requested_cursor="sweep-2-page-2",
-        next_cursor=None,
-        completed=True,
-        started_at_ms=2_020,
-        finished_at_ms=2_030,
-        page_event_count=0,
-        candidates=(),
-        admission_proof=store.discovery_admission_proof(),
-    )
+    _publish_empty_discovery_sweep(store, sweep=2)
     with store._connect() as con:
         con.execute(
             "UPDATE neg_risk_discovery_authority_checkpoints "
