@@ -77,8 +77,11 @@ async def main() -> int:
     sqlite_store.init_schema()
 
     scheduler = SnapshotScheduler(settings=settings, sqlite_store=sqlite_store)
-    quote_worker = build_production_quote_worker(settings)
     focused_watcher = build_focused_opportunity_watcher(settings)
+    quote_worker = build_production_quote_worker(
+        settings,
+        opportunity_watcher=focused_watcher,
+    )
     app = create_app(
         scheduler=scheduler,
         sqlite_store=sqlite_store,

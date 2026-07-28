@@ -56,7 +56,8 @@ def test_l1_main_owns_quote_worker_shutdown() -> None:
     from polyarb.daemon import main
 
     source = inspect.getsource(main.main)
-    assert "build_production_quote_worker(settings)" in source
+    assert "build_production_quote_worker(" in source
+    assert "opportunity_watcher=focused_watcher" in source
     assert "_start_quote_worker(quote_worker, stop_event)" in source
     assert "quote_worker_task.cancel()" in source
     assert "quote_worker_task" in source.partition("asyncio.gather(")[2]

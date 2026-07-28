@@ -594,12 +594,16 @@ class QuoteWorker:
             self.runtime.mark_stopped()
 
 
-def build_production_quote_worker(settings: Settings) -> QuoteWorker | None:
+def build_production_quote_worker(
+    settings: Settings,
+    *,
+    opportunity_watcher: OpportunityWatcher | None = None,
+) -> QuoteWorker | None:
     """Build the public-read-only production worker when explicitly enabled."""
     if not settings.neg_risk_quote_worker_enabled:
         return None
     quote_store = NegRiskQuoteStore(settings.db_path)
-    opportunity_watcher = OpportunityWatcher(settings)
+    opportunity_watcher = opportunity_watcher or OpportunityWatcher(settings)
 
     async def collect_once() -> QuoteCollectionResult:
         return await collect_quotes_in_subprocess(settings)

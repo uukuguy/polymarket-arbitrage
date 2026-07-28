@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from polyarb.daemon.scheduler import SchedulerState
 
@@ -116,6 +117,97 @@ def test_market_map_without_a_fresh_published_structure_is_bounded_503(http_test
 
     assert response.status_code == 503
     assert response.json() == {"error": "market map unavailable"}
+
+
+def test_new_structure_revision_hides_old_observer_opportunity(http_test_client):
+    old_revision = _seed_market_map(http_test_client)
+    now_ms = int(time.time() * 1000)
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO neg_risk_opportunities("
+            "id,event_id,group_id,membership_hash,status,bundle_cost,gross_edge_bps,"
+            "max_bundle_size,structure_revision,quote_run_id,opened_at_ms,updated_at_ms"
+            ") VALUES ('old-observer','event-scannable','group-scannable',"
+            "'membership-scannable','observe',0.95,500,1,?,1,?,?)",
+            (old_revision, now_ms, now_ms),
+        )
+        cursor = con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+            "data_product,archive_status,snapshot_status,is_valid,parquet_path"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (now_ms, now_ms, "full", 2, 1, "structure", "not-requested", "ok", 1, ""),
+        )
+        new_revision = int(cursor.lastrowid)
+        con.execute(
+            "INSERT INTO snapshot_source_coverage("
+            "snapshot_id,completed,market_items,event_items,failure_source,failure_reason"
+            ") VALUES (?,1,2,1,NULL,NULL)",
+            (new_revision,),
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                new_revision,
+                "event-scannable",
+                "group-scannable",
+                "standard",
+                2,
+                2,
+                "membership-scannable",
+                "complete-supported",
+                None,
+            ),
+        )
+
+    response = http_test_client.get("/market-map")
+
+    assert response.status_code == 200
+    assert response.json()["structure_revision"] == new_revision
+    assert response.json()["current_opportunities"] == []
+
+
+async def test_status_reports_the_watcher_used_for_global_reconciliation(
+    http_test_client,
+    daemon_settings_for_test,
+):
+    from polyarb.daemon.quote_worker import build_production_quote_worker
+
+    _seed_market_map(http_test_client)
+
+    class GlobalWatcher:
+        reconciliation_count = 0
+
+        async def reconcile_global_projection(self, _projection) -> None:
+            self.reconciliation_count += 1
+
+        def snapshot(self):
+            return SimpleNamespace(
+                reconciliation_count=self.reconciliation_count,
+                last_reconciled_at_ms=None,
+                notification_delivery_count=0,
+                notification_failure_count=0,
+                last_notification_error_kind=None,
+            )
+
+    watcher = GlobalWatcher()
+    settings = daemon_settings_for_test.model_copy(
+        update={"neg_risk_quote_worker_enabled": True}
+    )
+    worker = build_production_quote_worker(settings, opportunity_watcher=watcher)
+    assert worker is not None
+    assert worker._reconcile_global_projection is not None
+    await worker._reconcile_global_projection(object())
+    http_test_client.app.state.opportunity_watcher = watcher
+
+    response = http_test_client.get("/opportunity-watch/status")
+
+    assert response.status_code == 200
+    assert response.json()["watcher"]["reconciliation_count"] == 1
 
 
 @dataclass

@@ -94,12 +94,13 @@ async def opportunities(request: Request) -> JSONResponse:
         )
         if source_snapshot_id != feed.projection.universe_snapshot_id:
             raise QuoteUniverseUnavailableError("source-snapshot-mismatch")
+        now_s = time.time()
         result, selected, quote_age_seconds, universe_age_seconds = (
             _select_cached_opportunities(
                 feed,
                 min_edge_bps=min_edge_bps,
                 limit=limit,
-                now_s=time.time(),
+                now_s=now_s,
             )
         )
         durable_ids = await asyncio.wait_for(
@@ -107,6 +108,12 @@ async def opportunities(request: Request) -> JSONResponse:
                 durable_opportunity_ids,
                 request.app.state.sqlite_store.db_path,
                 {item.group_id for item in selected},
+                structure_revision=result.source_snapshot_id,
+                quote_run_id=result.quote_run_id,
+                now_ms=int(now_s * 1000),
+                quote_max_age_s=float(
+                    request.app.state.settings.neg_risk_quote_interval_s
+                ),
             ),
             timeout=_SOURCE_TRUTH_READ_TIMEOUT_S,
         )

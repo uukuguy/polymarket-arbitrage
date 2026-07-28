@@ -34,6 +34,7 @@ def _read_market_map(
     event_id: str | None,
     now_ms: int,
     max_age_s: float,
+    quote_max_age_s: float,
 ) -> dict[str, object]:
     con = _connect_read_only(db_path)
     try:
@@ -61,12 +62,25 @@ def _read_market_map(
             (*params, _GROUP_LIMIT),
         ).fetchall()
         opportunities = con.execute(
-            "SELECT id,event_id,group_id,status,bundle_cost,gross_edge_bps,max_bundle_size,"
-            "structure_revision,quote_run_id,updated_at_ms FROM neg_risk_opportunities "
-            "WHERE status='observe' "
-            + ("AND event_id=? " if event_id is not None else "")
-            + "ORDER BY updated_at_ms DESC,id LIMIT ?",
-            (*( [event_id] if event_id is not None else []), _GROUP_LIMIT),
+            "SELECT o.id,o.event_id,o.group_id,o.status,o.bundle_cost,o.gross_edge_bps,"
+            "o.max_bundle_size,o.structure_revision,o.quote_run_id,o.updated_at_ms "
+            "FROM neg_risk_opportunities o "
+            "JOIN neg_risk_group_truth t ON t.snapshot_id=? AND t.event_id=o.event_id "
+            "AND t.neg_risk_market_id=o.group_id AND t.membership_hash=o.membership_hash "
+            "AND t.quality='complete-supported' "
+            "JOIN neg_risk_quote_runs q ON q.id=o.quote_run_id AND q.status='complete' "
+            "AND q.universe_snapshot_id=? AND q.quoted_at_ms>=? "
+            "WHERE o.status='observe' AND o.structure_revision=? "
+            + ("AND o.event_id=? " if event_id is not None else "")
+            + "ORDER BY o.updated_at_ms DESC,o.id LIMIT ?",
+            (
+                revision_id,
+                revision_id,
+                now_ms - int(quote_max_age_s * 1000),
+                revision_id,
+                *([event_id] if event_id is not None else []),
+                _GROUP_LIMIT,
+            ),
         ).fetchall()
     finally:
         con.close()
@@ -161,17 +175,44 @@ def _read_history(db_path: Path, opportunity_id: str) -> dict[str, object] | Non
     }
 
 
-def durable_opportunity_ids(db_path: Path, group_ids: set[str]) -> dict[str, str]:
-    """Return current observer IDs for legacy feed rows without any rescan."""
+def durable_opportunity_ids(
+    db_path: Path,
+    group_ids: set[str],
+    *,
+    structure_revision: int,
+    quote_run_id: int,
+    now_ms: int,
+    quote_max_age_s: float,
+) -> dict[str, str]:
+    """Return IDs only when observer, current Structure, and Quote truth match."""
     if not group_ids:
         return {}
     placeholders = ",".join("?" for _ in group_ids)
     con = _connect_read_only(db_path)
     try:
         rows = con.execute(
-            "SELECT group_id,id FROM neg_risk_opportunities "
-            f"WHERE status='observe' AND group_id IN ({placeholders})",
-            tuple(sorted(group_ids)),
+            "SELECT o.group_id,o.id FROM neg_risk_opportunities o "
+            "JOIN snapshots s ON s.id=o.structure_revision "
+            "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id AND c.completed=1 "
+            "JOIN neg_risk_group_truth t ON t.snapshot_id=s.id AND t.event_id=o.event_id "
+            "AND t.neg_risk_market_id=o.group_id AND t.membership_hash=o.membership_hash "
+            "AND t.quality='complete-supported' "
+            "JOIN neg_risk_quote_runs q ON q.id=o.quote_run_id AND q.status='complete' "
+            "AND q.universe_snapshot_id=s.id AND q.quoted_at_ms>=? "
+            "WHERE o.status='observe' AND o.structure_revision=? AND o.quote_run_id=? "
+            "AND s.data_product='structure' AND s.market_view_published=1 AND s.is_valid=1 "
+            "AND s.id=(SELECT current.id FROM snapshots current "
+            "JOIN snapshot_source_coverage current_coverage "
+            "ON current_coverage.snapshot_id=current.id AND current_coverage.completed=1 "
+            "WHERE current.data_product='structure' AND current.market_view_published=1 "
+            "AND current.is_valid=1 ORDER BY current.id DESC LIMIT 1) "
+            f"AND o.group_id IN ({placeholders})",
+            (
+                now_ms - int(quote_max_age_s * 1000),
+                structure_revision,
+                quote_run_id,
+                *sorted(group_ids),
+            ),
         ).fetchall()
     finally:
         con.close()
@@ -187,6 +228,7 @@ async def market_map(request: Request) -> JSONResponse:
                 event_id=request.query_params.get("event_id"),
                 now_ms=int(time.time() * 1000),
                 max_age_s=float(request.app.state.settings.market_map_max_age_s),
+                quote_max_age_s=float(request.app.state.settings.neg_risk_quote_interval_s),
             ),
             timeout=_READ_TIMEOUT_S,
         )

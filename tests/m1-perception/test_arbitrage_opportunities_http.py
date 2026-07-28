@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -92,6 +93,75 @@ def test_opportunity_endpoint_returns_explicit_gross_basis(http_test_client, mon
             }
         ],
     }
+
+
+def test_legacy_feed_does_not_attach_an_old_observer_after_new_structure_publishes(
+    http_test_client, monkeypatch
+) -> None:
+    now_ms = int(NOW_S * 1000)
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    with sqlite3.connect(db_path) as con:
+        for revision in (10, 11):
+            con.execute(
+                "INSERT INTO snapshots("
+                "id,taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+                "data_product,archive_status,snapshot_status,is_valid,parquet_path"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    revision,
+                    now_ms,
+                    now_ms,
+                    "full",
+                    1,
+                    1,
+                    "structure",
+                    "not-requested",
+                    "ok",
+                    1,
+                    "",
+                ),
+            )
+            con.execute(
+                "INSERT INTO snapshot_source_coverage("
+                "snapshot_id,completed,market_items,event_items,failure_source,failure_reason"
+                ") VALUES (?,1,1,1,NULL,NULL)",
+                (revision,),
+            )
+            con.execute(
+                "INSERT INTO neg_risk_group_truth("
+                "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+                "expected_member_count,active_named_count,membership_hash,quality,reason"
+                ") VALUES (?, 'event-1','group-1','standard',1,1,'membership-1',"
+                "'complete-supported',NULL)",
+                (revision,),
+            )
+        con.execute(
+            "INSERT INTO neg_risk_quote_runs("
+            "id,universe_snapshot_id,universe_taken_at_ms,universe_hash,source_truth_hash,"
+            "quoted_at_ms,requested_token_count,successful_response_count,lease_expires_at_ms,"
+            "status,failure_reason,completed_at_ms"
+            ") VALUES (20,10,?,'u1','truth-1',?,1,1,0,'complete',NULL,?)",
+            (now_ms, now_ms, now_ms),
+        )
+        con.execute(
+            "INSERT INTO neg_risk_opportunities("
+            "id,event_id,group_id,membership_hash,status,bundle_cost,gross_edge_bps,"
+            "max_bundle_size,structure_revision,quote_run_id,opened_at_ms,updated_at_ms"
+            ") VALUES ('old-observer','event-1','group-1','membership-1','observe',"
+            "0.95,500,1,10,20,?,?)",
+            (now_ms, now_ms),
+        )
+
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr("polyarb.http.arbitrage._last_complete_snapshot_id", lambda _path: 10)
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
+    assert response.status_code == 200
+    assert response.json()["opportunities"][0]["opportunity_id"] is None
 
 
 def test_opportunity_endpoint_rejects_non_finite_threshold(http_test_client) -> None:
