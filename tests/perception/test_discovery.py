@@ -305,8 +305,30 @@ def test_discovery_status_projection_tamper_fails_closed(tmp_path: Path) -> None
             "SET generation=generation+1"
         )
 
-    with pytest.raises(ValueError, match="invalid-discovery-status-projection"):
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
         store.discovery_status(now_ms=1)
+
+
+@pytest.mark.asyncio
+async def test_discovery_group_projection_visit_anchor_tamper_fails_closed(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-derived", group_id="g-derived"))),
+        store=store,
+    ).run_batch()
+
+    with store._connect() as con:
+        con.execute(
+            "UPDATE neg_risk_discovery_group_projection "
+            "SET visit_anchor_ms=COALESCE(visit_anchor_ms,0)+1 "
+            "WHERE group_id=?",
+            ("g-derived",),
+        )
+
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.discovery_status(now_ms=3)
 
 
 def test_discovery_projection_write_failure_rolls_back_owner_mutation(
@@ -512,6 +534,98 @@ async def test_owner_raw_mutations_remain_pending_and_cannot_be_washed(
             probe_every_cycles=10,
             now_ms=10_003,
         )
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.init_schema()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("table", "operation"),
+    (
+        ("neg_risk_candidate_current_authority", "INSERT"),
+        ("neg_risk_candidate_current_authority", "UPDATE"),
+        ("neg_risk_candidate_current_authority", "DELETE"),
+        ("neg_risk_candidate_current_aggregate", "UPDATE"),
+        ("neg_risk_candidate_current_aggregate", "DELETE"),
+        ("neg_risk_discovery_group_projection", "INSERT"),
+        ("neg_risk_discovery_group_projection", "UPDATE"),
+        ("neg_risk_discovery_group_projection", "DELETE"),
+        ("neg_risk_discovery_status_projection", "UPDATE"),
+        ("neg_risk_discovery_status_projection", "DELETE"),
+    ),
+)
+async def test_derived_authority_mutations_remain_pending(
+    tmp_path: Path,
+    table: str,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-derived", group_id="g-derived"))),
+        store=store,
+        clock_ms=lambda: 10_000,
+    ).run_batch()
+    group = store.current_group("g-derived")
+    assert group is not None
+    quote = GroupQuoteBatch.complete(
+        group_id=group.group_id,
+        membership_hash=group.membership_hash,
+        quote_batch_id="derived-owner-quote",
+        started_at_ms=10_001,
+        quoted_at_ms=10_002,
+        legs=tuple(
+            GroupQuoteLeg(
+                leg.yes_token_id,
+                group.membership_hash,
+                0.4,
+                10,
+                "executable",
+            )
+            for leg in group.legs
+        ),
+    )
+    store.publish_candidate_success(
+        quote,
+        observed_at_ms=quote.quoted_at_ms,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.8,
+        gross_edge_bps=2_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="derived-owner",
+        next_due_at_ms=25_002,
+    )
+
+    with store._connect() as con:
+        if operation == "INSERT":
+            row = dict(con.execute(f"SELECT * FROM {table} LIMIT 1").fetchone())
+            row["group_id"] = f"{row['group_id']}-ghost"
+            columns = tuple(row)
+            con.execute(
+                f"INSERT INTO {table}({','.join(columns)}) "
+                f"VALUES({','.join('?' for _ in columns)})",
+                tuple(row[column] for column in columns),
+            )
+        elif operation == "UPDATE":
+            assignment = {
+                "neg_risk_candidate_current_authority": "last_result='no-edge'",
+                "neg_risk_candidate_current_aggregate": (
+                    "aggregate_digest=lower(hex(randomblob(32)))"
+                ),
+                "neg_risk_discovery_group_projection": (
+                    "visit_anchor_ms=COALESCE(visit_anchor_ms,0)+1"
+                ),
+                "neg_risk_discovery_status_projection": "generation=generation+1",
+            }[table]
+            con.execute(f"UPDATE {table} SET {assignment}")
+        else:
+            con.execute(f"DELETE FROM {table}")
+
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.discovery_status(now_ms=10_003)
     with pytest.raises(ValueError, match="pending-owner-mutation"):
         store.init_schema()
 

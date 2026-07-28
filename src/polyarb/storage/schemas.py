@@ -585,7 +585,11 @@ CREATE TABLE IF NOT EXISTS neg_risk_owner_mutation_journal (
 CREATE TABLE IF NOT EXISTS neg_risk_owner_mutation_guard (
   id INTEGER PRIMARY KEY CHECK(id = 1),
   consumed_journal_id INTEGER NOT NULL CHECK(consumed_journal_id >= 0),
-  consumed_hash TEXT
+  consumed_hash TEXT,
+  retained_base_id INTEGER NOT NULL DEFAULT 0 CHECK(retained_base_id >= 0),
+  retained_base_hash TEXT,
+  candidate_aggregate_hash TEXT,
+  discovery_aggregate_hash TEXT
 );
 
 CREATE TRIGGER IF NOT EXISTS trg_owner_candidate_fact_insert
@@ -1149,6 +1153,30 @@ OWNER_JOURNAL_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "candidate_max_wait_ms", "started_at_ms",
         "candidate_start_deadline_at_ms", "deadline_breached",
     ),
+    "neg_risk_candidate_current_authority": (
+        "group_id", "event_id", "membership_hash", "group_revision",
+        "quote_batch_id", "fact_id", "last_result", "opportunity", "legs_json",
+        "canonical_json", "row_hash",
+    ),
+    "neg_risk_candidate_current_aggregate": (
+        "id", "current_group_count", "opportunity_count", "aggregate_digest",
+    ),
+    "neg_risk_discovery_status_projection": (
+        "id", "domain", "version", "generation", "raw_authority_seq",
+        "owner_journal_id", "groups_json", "candidate_attempt_start_count",
+        "candidate_start_deadline_breach_count", "group_count", "queue_high",
+        "queue_normal", "queue_explore", "promotion_queue_depth",
+        "outstanding_admitted_count", "total_liquidity_weight",
+        "projection_digest", "checkpoint_hash",
+    ),
+    "neg_risk_discovery_group_projection": (
+        "group_id", "visit_anchor_ms", "payload_json", "row_hash",
+    ),
+}
+
+OWNER_JOURNAL_TABLE_ROW_KEYS: dict[str, str] = {
+    "neg_risk_candidate_current_aggregate": "CAST({alias}.id AS TEXT)",
+    "neg_risk_discovery_status_projection": "CAST({alias}.id AS TEXT)",
 }
 
 
@@ -1168,6 +1196,10 @@ def _owner_journal_triggers() -> tuple[str, tuple[str, ...]]:
         ):
             name = f"trg_owner_{short}_{operation.lower()}"
             names.append(name)
+            row_key = OWNER_JOURNAL_TABLE_ROW_KEYS.get(
+                table,
+                "{alias}.group_id",
+            ).format(alias=alias)
             old_json = (
                 "NULL"
                 if operation == "INSERT"
@@ -1187,7 +1219,7 @@ def _owner_journal_triggers() -> tuple[str, tuple[str, ...]]:
                 "BEGIN INSERT INTO neg_risk_owner_mutation_journal("
                 "writer_token,table_name,operation,row_key,old_json,new_json) VALUES("
                 "(SELECT writer_token FROM neg_risk_owner_write_context WHERE id=1),"
-                f"'{table}','{operation}',{alias}.group_id,{old_json},{new_json}); END;"
+                f"'{table}','{operation}',{row_key},{old_json},{new_json}); END;"
             )
     return "\n".join(statements), tuple(names)
 

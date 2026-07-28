@@ -38,15 +38,23 @@ without adding producer or trading authority.
   attempt/breach counters and a bounded receipt suffix, so it no longer scans
   Group revision, admission, attempt, or Candidate fact lifecycles. Every legal
   owner writer refreshes the projection in the same transaction.
+- Raw and derived authority now share one transaction-scoped owner token.
+  Canonical triggers cover Candidate current authority/aggregate and Discovery
+  status/group projection as well as the seven raw owner tables. The guard
+  authenticates Candidate and Discovery aggregate roots and carries an
+  atomically advanced retained-prefix base id/hash. Every read, initialization,
+  and next writer fully replays the retained 128-event chain, including its
+  base and consumed tail; changed hashes, deleted tails, broken links, direct
+  derived mutations, and later attempted writes all fail closed.
 - Five Make targets and the living M1 manual provide the supported cloud
   workflow.
 
-Verification: 2652 of 2654 repository tests passed (one expected xfail, one
-skip); the committed Task 6 baseline collected 2586, the first remediation
-collected 2596, the formal remediation collected 2618, and the authority
-checkpoint remediation collected 2642. All 41 focused API/control tests,
-10,010-success Candidate continuity, 62 Discovery status/checkpoint
-regressions, 238 perception tests, tamper and atomic rollback tests passed;
+Verification: 2763 of 2765 repository tests passed (one expected xfail, one
+skip); the committed Task 6 baseline collected 2586 and successive authority
+remediations collected 2596, 2618, 2642, 2654, 2723, and 2765. All 41 focused
+API/control tests, 10,010-success Candidate continuity (60.62 seconds with the
+128-event proof window), 349 perception tests, raw/derived mutation, retained
+hash/tail/link tamper, concurrent-writer, deadline, and atomic rollback tests passed;
 Ruff, compileall, docs, planning status, and diff checks passed.
 
 No deployment or trading capability was introduced. Task 7 remains the

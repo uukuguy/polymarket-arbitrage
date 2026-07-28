@@ -81,6 +81,12 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
             "trg_owner_group_schedule_insert",
             "trg_owner_group_schedule_update",
             "trg_owner_group_schedule_delete",
+            "trg_owner_discovery_status_projection_insert",
+            "trg_owner_discovery_status_projection_update",
+            "trg_owner_discovery_status_projection_delete",
+            "trg_owner_discovery_group_projection_insert",
+            "trg_owner_discovery_group_projection_update",
+            "trg_owner_discovery_group_projection_delete",
         ):
             con.execute(f"DROP TRIGGER {trigger}")
         con.execute(
@@ -130,6 +136,10 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
         )
         con.execute("DELETE FROM neg_risk_discovery_status_projection")
         con.execute("DELETE FROM neg_risk_discovery_group_projection")
+        con.execute(
+            "UPDATE neg_risk_owner_mutation_guard "
+            "SET discovery_aggregate_hash=NULL WHERE id=1"
+        )
     store.init_schema()
     original = OpportunityPerceptionStore._coverage_windows_in_snapshot
     writer_done = threading.Event()

@@ -138,6 +138,106 @@ def test_only_atomic_candidate_publish_creates_success_receipt(tmp_path: Path) -
     assert receipts == [(atomic_batch.quote_batch_id, fact.id)]
 
 
+def test_candidate_success_uses_one_owner_token_and_one_begin_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-token", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    clean_checks = 0
+    original = store._assert_owner_journal_clean
+
+    def counted_clean_check(con: sqlite3.Connection) -> None:
+        nonlocal clean_checks
+        clean_checks += 1
+        original(con)
+
+    monkeypatch.setattr(store, "_assert_owner_journal_clean", counted_clean_check)
+    batch = batch_for(group, quote_batch_id="qb-one-token")
+    store.publish_candidate_success(
+        batch,
+        observed_at_ms=batch.quoted_at_ms,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.9,
+        gross_edge_bps=1_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="one-token",
+        next_due_at_ms=batch.quoted_at_ms + 15_000,
+    )
+
+    with store._connect() as con:
+        receipt_token = str(
+            con.execute(
+                "SELECT writer_token FROM neg_risk_owner_mutation_journal "
+                "WHERE table_name='neg_risk_candidate_success_receipts' "
+                "AND row_key=? ORDER BY id DESC LIMIT 1",
+                (group.group_id,),
+            ).fetchone()[0]
+        )
+        token_tables = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT DISTINCT table_name FROM neg_risk_owner_mutation_journal "
+                "WHERE writer_token=?",
+                (receipt_token,),
+            )
+        }
+    assert {
+        "neg_risk_group_quote_batches",
+        "neg_risk_candidate_watch_facts",
+        "neg_risk_candidate_current_authority",
+        "neg_risk_candidate_current_aggregate",
+        "neg_risk_discovery_status_projection",
+        "neg_risk_candidate_success_receipts",
+    } <= token_tables
+    assert clean_checks == 2  # one begin validation plus one post-finalize proof
+
+
+def test_concurrent_candidate_writers_leave_owner_chain_clean(tmp_path: Path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-concurrent", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    errors: list[BaseException] = []
+
+    def write_fact(sequence: int) -> None:
+        try:
+            store.record_candidate_watch_fact(
+                group_id=group.group_id,
+                membership_hash=group.membership_hash,
+                quote_batch_id=None,
+                observed_at_ms=4_000 + sequence,
+                last_result="unavailable",
+                reason=f"concurrent-{sequence}",
+                bundle_cost=None,
+                gross_edge_bps=None,
+                max_bundle_size=None,
+                priority_class="normal",
+                consecutive_failures=sequence,
+                effective_interval_s=60,
+                schedule_reason="concurrent",
+                next_due_at_ms=64_000 + sequence,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write_fact, args=(sequence,)) for sequence in (1, 2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert len(store.candidate_watch_facts(group.group_id)) == 2
+    assert store.validated_candidate_opportunity_count() == 0
+
+
 def test_candidate_authority_rolls_checkpoint_beyond_daily_history_bound(
     tmp_path: Path,
 ) -> None:
@@ -727,6 +827,60 @@ def test_owner_journal_consume_crash_rolls_back_business_and_guard(
         assert con.execute(
             "SELECT 1 FROM neg_risk_owner_write_context"
         ).fetchone() is None
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        "current_group_count=current_group_count+1",
+        "aggregate_digest=lower(hex(randomblob(32)))",
+    ),
+)
+def test_candidate_current_aggregate_direct_mutation_fails_closed(
+    tmp_path: Path,
+    assignment: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+
+    with store._connect() as con:
+        con.execute(
+            f"UPDATE neg_risk_candidate_current_aggregate SET {assignment} WHERE id=1"
+        )
+
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.validated_candidate_opportunity_count()
+
+
+@pytest.mark.parametrize(
+    "tamper_sql",
+    (
+        "UPDATE neg_risk_owner_mutation_journal "
+        "SET event_hash=lower(hex(randomblob(32))) WHERE id=("
+        "SELECT MIN(id) FROM neg_risk_owner_mutation_journal)",
+        "DELETE FROM neg_risk_owner_mutation_journal WHERE id=("
+        "SELECT MAX(id) FROM neg_risk_owner_mutation_journal)",
+        "UPDATE neg_risk_owner_mutation_journal "
+        "SET previous_hash=lower(hex(randomblob(32))) WHERE id=("
+        "SELECT MAX(id) FROM neg_risk_owner_mutation_journal)",
+    ),
+    ids=("event-hash", "delete-tail", "break-chain"),
+)
+def test_retained_owner_journal_tamper_fails_closed(
+    tmp_path: Path,
+    tamper_sql: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.publish_group_revision(
+        revision(group_id="g-journal", revision=1, token_suffix="a")
+    )
+
+    with store._connect() as con:
+        con.execute(tamper_sql)
+
+    with pytest.raises(ValueError, match="invalid-owner-mutation-chain"):
+        store.validated_candidate_opportunity_count()
 
 
 def test_candidate_checkpoint_tracks_group_supersede_across_boundary(
