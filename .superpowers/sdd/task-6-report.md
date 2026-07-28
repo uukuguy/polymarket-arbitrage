@@ -1,6 +1,6 @@
 # Task 6 Implementer Report
 
-Status: CONTINUITY REMEDIATION COMPLETE — awaiting independent re-review
+Status: AUTHORITY CONTINUITY REMEDIATION COMPLETE — awaiting independent re-review
 
 ## Scope
 
@@ -33,7 +33,19 @@ wallet, signing, balances, orders, or real-money execution.
    incident evidence is HTTP 503 `unavailable`.
 3. Group list/history validate the same event/revision/time/status transition
    chain, not only membership digests or ascending revision numbers.
-   Discovery and Reconciliation reuse the Task 3/4 full-history validators.
+   Discovery and Reconciliation preserve the Task 3/4 validators without
+   unbounded history reads. Discovery validates and atomically compacts a
+   completed receipt prefix after 8,000 rows, leaving a 1,000-row suffix. Its
+   versioned checkpoint binds the completed batch/sample/schedule-evidence
+   anchor, cumulative compacted counts, coverage seed and chained prefix
+   digest. Reconciliation checkpoints every successfully published page and
+   binds the exact window owner, staging digest/count, latest page receipt,
+   seen cursors, cumulative page metrics and chained prefix digest before
+   pruning that page's receipt/sample rows in the same transaction. Status
+   validates each checkpoint and replays only the bounded suffix; checkpoint
+   tampering, retained-prefix injection or prune failure fails closed.
+   Validated legacy histories migrate atomically and idempotently, while
+   histories that cannot prove the new checkpoint are not guessed or pruned.
    Incidents validate lifecycle ordering plus Task 5 component-specific
    recovery proof. Returned incident evidence is size/depth bounded and
    recursively redacted.
@@ -74,8 +86,10 @@ Initial RED: 8 expected failures (404/auth/Make contracts)
 Four review-remediation rounds: all Important findings covered by adversarial tests
 Focused API/control: 41 pass
 Candidate/control/HTTP regression: pass
-Full repository: 2618 collected; 2616 pass, 1 expected xfail, 1 skip
-Collection audit: 0eb4031 2586 -> 6717e48 2596 -> current 2618
+Discovery + Reconciliation + migration checkpoint regression: 82 pass
+Perception package: 226 pass
+Full repository: 2642 collected; 2640 pass, 1 expected xfail, 1 skip
+Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> current 2642
 Ruff changed scope: pass
 compileall: pass
 make docs-m1-check: pass

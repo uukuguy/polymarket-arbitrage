@@ -122,7 +122,7 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
     original = OpportunityPerceptionStore._coverage_windows_in_snapshot
     writer_done = threading.Event()
 
-    def hooked(con, now_ms):
+    def hooked(con, now_ms, **kwargs):
         def write() -> None:
             with sqlite3.connect(db_path) as writer:
                 writer.execute(
@@ -134,7 +134,7 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
         thread.start()
         assert writer_done.wait(timeout=2)
         thread.join(timeout=2)
-        return original(con, now_ms)
+        return original(con, now_ms, **kwargs)
 
     monkeypatch.setattr(
         OpportunityPerceptionStore,

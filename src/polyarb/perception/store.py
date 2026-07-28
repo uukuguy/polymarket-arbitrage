@@ -39,6 +39,13 @@ _CANDIDATE_AUTHORITY_VERSION = 1
 _CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS = 8_000
 _CANDIDATE_AUTHORITY_COMPACT_HIGH_BYTES = 4_194_304
 _CANDIDATE_AUTHORITY_UNCOMPACTED_MAX_ROWS = 20_000
+_DISCOVERY_AUTHORITY_DOMAIN = "polyarb-discovery-authority-checkpoint-v1"
+_DISCOVERY_AUTHORITY_VERSION = 1
+_DISCOVERY_AUTHORITY_COMPACT_HIGH_ROWS = 8_000
+_DISCOVERY_AUTHORITY_COMPACT_LOW_ROWS = 1_000
+_DISCOVERY_AUTHORITY_UNCOMPACTED_MAX_ROWS = 20_000
+_RECONCILIATION_AUTHORITY_DOMAIN = "polyarb-reconciliation-authority-checkpoint-v1"
+_RECONCILIATION_AUTHORITY_VERSION = 1
 _HEARTBEAT_AUTH_DOMAIN = "polyarb-producer-heartbeat-v1"
 _CHILD_HEARTBEAT_PREIMAGES: dict[tuple[str, str, int], str] = {}
 _GROUP_STATUSES = {"discovered", "certified", "stale", "invalidated", "closed"}
@@ -119,6 +126,74 @@ def candidate_authority_checkpoint_hash(
             "through_quote_rowid": through_quote_rowid,
             "through_receipt_id": through_receipt_id,
             "version": version,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+
+def discovery_authority_checkpoint_hash(
+    *,
+    domain: str,
+    version: int,
+    generation: int,
+    through_batch_id: int,
+    through_sample_id: int,
+    through_evidence_id: int,
+    compacted_batch_rows: int,
+    compacted_sample_rows: int,
+    compacted_evidence_rows: int,
+    prefix_digest: str,
+    anchor_digest: str,
+) -> str:
+    payload = json.dumps(
+        {
+            "anchor_digest": anchor_digest,
+            "compacted_batch_rows": compacted_batch_rows,
+            "compacted_evidence_rows": compacted_evidence_rows,
+            "compacted_sample_rows": compacted_sample_rows,
+            "domain": domain,
+            "generation": generation,
+            "prefix_digest": prefix_digest,
+            "through_batch_id": through_batch_id,
+            "through_evidence_id": through_evidence_id,
+            "through_sample_id": through_sample_id,
+            "version": version,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+
+def reconciliation_authority_checkpoint_hash(
+    *,
+    window_id: str,
+    domain: str,
+    version: int,
+    generation: int,
+    through_batch_id: int,
+    through_sequence: int,
+    compacted_batch_rows: int,
+    compacted_sample_rows: int,
+    prefix_digest: str,
+    anchor_digest: str,
+) -> str:
+    payload = json.dumps(
+        {
+            "anchor_digest": anchor_digest,
+            "compacted_batch_rows": compacted_batch_rows,
+            "compacted_sample_rows": compacted_sample_rows,
+            "domain": domain,
+            "generation": generation,
+            "prefix_digest": prefix_digest,
+            "through_batch_id": through_batch_id,
+            "through_sequence": through_sequence,
+            "version": version,
+            "window_id": window_id,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -1140,6 +1215,30 @@ class OpportunityPerceptionStore:
                     "AND bs.membership_hash IS NOT NULL "
                     "AND bs.quality IS NOT NULL"
                 )
+            self._compact_discovery_authority(con)
+            latest_reconciliation = con.execute(
+                "SELECT id,baseline_digest FROM neg_risk_reconciliation_windows "
+                "ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            if (
+                latest_reconciliation is not None
+                and latest_reconciliation["baseline_digest"] is not None
+                and con.execute(
+                    "SELECT EXISTS(SELECT 1 FROM neg_risk_reconciliation_batches "
+                    "WHERE window_id=?) AND NOT EXISTS("
+                    "SELECT 1 FROM neg_risk_reconciliation_authority_checkpoints "
+                    "WHERE window_id=?)",
+                    (
+                        latest_reconciliation["id"],
+                        latest_reconciliation["id"],
+                    ),
+                ).fetchone()[0]
+            ):
+                self.current_reconciliation(_connection=con)
+                self._checkpoint_reconciliation_authority(
+                    con,
+                    str(latest_reconciliation["id"]),
+                )
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
@@ -1340,6 +1439,11 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
+            if con.execute(
+                "SELECT EXISTS(SELECT 1 FROM neg_risk_discovery_batches) "
+                "OR EXISTS(SELECT 1 FROM neg_risk_discovery_authority_checkpoints)"
+            ).fetchone()[0]:
+                self.discovery_status(now_ms=started_at_ms, _connection=con)
             state = con.execute(
                 "SELECT next_cursor,completed FROM neg_risk_discovery_state WHERE id=1"
             ).fetchone()
@@ -1484,6 +1588,8 @@ class OpportunityPerceptionStore:
                     len(promoted),
                 ),
             )
+            if completed:
+                self._compact_discovery_authority(con)
             con.execute("COMMIT")
             return tuple(group_id for _, group_id in promoted)
         except BaseException:
@@ -2017,11 +2123,280 @@ class OpportunityPerceptionStore:
             con.close()
         return tuple(str(row["group_id"]) for row in rows)
 
+    def _validated_discovery_checkpoint(
+        self,
+        con: sqlite3.Connection,
+    ) -> tuple[sqlite3.Row, dict[str, object]] | None:
+        row = con.execute(
+            "SELECT * FROM neg_risk_discovery_authority_checkpoints WHERE id=1"
+        ).fetchone()
+        if row is None:
+            return None
+        self._check_deadline("discovery-authority-deadline")
+        try:
+            anchor = json.loads(str(row["anchor_json"]))
+            canonical = json.dumps(
+                anchor,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            anchor_digest = f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+            expected_hash = discovery_authority_checkpoint_hash(
+                domain=str(row["domain"]),
+                version=int(row["version"]),
+                generation=int(row["generation"]),
+                through_batch_id=int(row["through_batch_id"]),
+                through_sample_id=int(row["through_sample_id"]),
+                through_evidence_id=int(row["through_evidence_id"]),
+                compacted_batch_rows=int(row["compacted_batch_rows"]),
+                compacted_sample_rows=int(row["compacted_sample_rows"]),
+                compacted_evidence_rows=int(row["compacted_evidence_rows"]),
+                prefix_digest=str(row["prefix_digest"]),
+                anchor_digest=str(row["anchor_digest"]),
+            )
+            batch = anchor["batch"]
+            samples = anchor["samples"]
+            evidence = anchor["evidence"]
+            visits = anchor["coverage_visits"]
+            if (
+                row["domain"] != _DISCOVERY_AUTHORITY_DOMAIN
+                or int(row["version"]) != _DISCOVERY_AUTHORITY_VERSION
+                or int(row["generation"]) <= 0
+                or any(
+                    int(row[name]) < 0
+                    for name in (
+                        "through_batch_id",
+                        "through_sample_id",
+                        "through_evidence_id",
+                        "compacted_batch_rows",
+                        "compacted_sample_rows",
+                        "compacted_evidence_rows",
+                    )
+                )
+                or not isinstance(anchor, dict)
+                or not isinstance(batch, dict)
+                or int(batch["id"]) != int(row["through_batch_id"])
+                or not bool(batch["completed"])
+                or not isinstance(samples, list)
+                or not isinstance(evidence, list)
+                or not isinstance(visits, list)
+                or canonical != str(row["anchor_json"])
+                or not hmac.compare_digest(str(row["anchor_digest"]), anchor_digest)
+                or not hmac.compare_digest(str(row["checkpoint_hash"]), expected_hash)
+            ):
+                raise ValueError("invalid-discovery-authority-checkpoint")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("invalid-discovery-authority-checkpoint") from error
+        retained_prefix = con.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM neg_risk_discovery_batches WHERE id<=?),"
+            "(SELECT COUNT(*) FROM neg_risk_discovery_batch_samples WHERE batch_id<=?),"
+            "(SELECT COUNT(*) FROM neg_risk_discovery_schedule_evidence WHERE batch_id<=?)",
+            (
+                int(row["through_batch_id"]),
+                int(row["through_batch_id"]),
+                int(row["through_batch_id"]),
+            ),
+        ).fetchone()
+        if any(int(value) for value in retained_prefix):
+            raise ValueError("invalid-discovery-authority-checkpoint")
+        return row, anchor
+
+    def _compact_discovery_authority(self, con: sqlite3.Connection) -> None:
+        count = int(
+            con.execute("SELECT COUNT(*) FROM neg_risk_discovery_batches").fetchone()[0]
+        )
+        if count <= _DISCOVERY_AUTHORITY_COMPACT_HIGH_ROWS:
+            return
+        self.discovery_status(
+            now_ms=int(
+                con.execute(
+                    "SELECT COALESCE(MAX(finished_at_ms),0) "
+                    "FROM neg_risk_discovery_batches"
+                ).fetchone()[0]
+            ),
+            _connection=con,
+        )
+        previous = self._validated_discovery_checkpoint(con)
+        compact_target = count - _DISCOVERY_AUTHORITY_COMPACT_LOW_ROWS
+        through_row = con.execute(
+            "SELECT * FROM neg_risk_discovery_batches "
+            "WHERE completed=1 AND id<=("
+            "SELECT id FROM neg_risk_discovery_batches ORDER BY id LIMIT 1 OFFSET ?"
+            ") ORDER BY id DESC LIMIT 1",
+            (compact_target - 1,),
+        ).fetchone()
+        if through_row is None:
+            return
+        through_batch = int(through_row["id"])
+        batch_rows = con.execute(
+            "SELECT * FROM neg_risk_discovery_batches WHERE id<=? ORDER BY id",
+            (through_batch,),
+        ).fetchall()
+        sample_rows = con.execute(
+            "SELECT rowid,* FROM neg_risk_discovery_batch_samples "
+            "WHERE batch_id<=? ORDER BY rowid",
+            (through_batch,),
+        ).fetchall()
+        evidence_rows = con.execute(
+            "SELECT rowid,* FROM neg_risk_discovery_schedule_evidence "
+            "WHERE batch_id<=? ORDER BY rowid",
+            (through_batch,),
+        ).fetchall()
+        latest_samples = [
+            dict(row) for row in sample_rows if int(row["batch_id"]) == through_batch
+        ]
+        latest_evidence = [
+            dict(row) for row in evidence_rows if int(row["batch_id"]) == through_batch
+        ]
+        cutoff = int(through_row["finished_at_ms"]) - 60 * 60_000
+        prior_visits = (
+            []
+            if previous is None
+            else list(previous[1].get("coverage_visits", []))
+        )
+        coverage_visits = {
+            (str(item[1]), int(item[0]))
+            for item in prior_visits
+            if isinstance(item, list) and len(item) == 2 and int(item[0]) >= cutoff
+        }
+        finished_by_batch = {
+            int(row["id"]): int(row["finished_at_ms"]) for row in batch_rows
+        }
+        coverage_visits.update(
+            (str(row["group_id"]), finished_by_batch[int(row["batch_id"])])
+            for row in sample_rows
+            if finished_by_batch[int(row["batch_id"])] >= cutoff
+        )
+        anchor = {
+            "batch": dict(through_row),
+            "coverage_visits": [
+                [finished_at_ms, group_id]
+                for group_id, finished_at_ms in sorted(coverage_visits)
+            ],
+            "evidence": latest_evidence,
+            "samples": latest_samples,
+        }
+        anchor_json = json.dumps(
+            anchor,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        anchor_digest = f"sha256:{hashlib.sha256(anchor_json.encode()).hexdigest()}"
+        prefix_payload = {
+            "previous_prefix_digest": (
+                None if previous is None else str(previous[0]["prefix_digest"])
+            ),
+            "batches": [dict(row) for row in batch_rows],
+            "samples": [dict(row) for row in sample_rows],
+            "evidence": [dict(row) for row in evidence_rows],
+        }
+        prefix_json = json.dumps(
+            prefix_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        prefix_digest = f"sha256:{hashlib.sha256(prefix_json.encode()).hexdigest()}"
+        prior_counts = (
+            (0, 0, 0)
+            if previous is None
+            else tuple(
+                int(previous[0][name])
+                for name in (
+                    "compacted_batch_rows",
+                    "compacted_sample_rows",
+                    "compacted_evidence_rows",
+                )
+            )
+        )
+        compacted = (
+            prior_counts[0] + len(batch_rows),
+            prior_counts[1] + len(sample_rows),
+            prior_counts[2] + len(evidence_rows),
+        )
+        through_sample = max((int(row["rowid"]) for row in sample_rows), default=0)
+        through_evidence = max(
+            (int(row["rowid"]) for row in evidence_rows),
+            default=0,
+        )
+        generation = 1 if previous is None else int(previous[0]["generation"]) + 1
+        checkpoint_hash = discovery_authority_checkpoint_hash(
+            domain=_DISCOVERY_AUTHORITY_DOMAIN,
+            version=_DISCOVERY_AUTHORITY_VERSION,
+            generation=generation,
+            through_batch_id=through_batch,
+            through_sample_id=through_sample,
+            through_evidence_id=through_evidence,
+            compacted_batch_rows=compacted[0],
+            compacted_sample_rows=compacted[1],
+            compacted_evidence_rows=compacted[2],
+            prefix_digest=prefix_digest,
+            anchor_digest=anchor_digest,
+        )
+        con.execute(
+            "INSERT INTO neg_risk_discovery_authority_checkpoints("
+            "id,domain,version,generation,through_batch_id,through_sample_id,"
+            "through_evidence_id,compacted_batch_rows,compacted_sample_rows,"
+            "compacted_evidence_rows,prefix_digest,anchor_json,anchor_digest,"
+            "checkpoint_hash) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET domain=excluded.domain,"
+            "version=excluded.version,generation=excluded.generation,"
+            "through_batch_id=excluded.through_batch_id,"
+            "through_sample_id=excluded.through_sample_id,"
+            "through_evidence_id=excluded.through_evidence_id,"
+            "compacted_batch_rows=excluded.compacted_batch_rows,"
+            "compacted_sample_rows=excluded.compacted_sample_rows,"
+            "compacted_evidence_rows=excluded.compacted_evidence_rows,"
+            "prefix_digest=excluded.prefix_digest,anchor_json=excluded.anchor_json,"
+            "anchor_digest=excluded.anchor_digest,"
+            "checkpoint_hash=excluded.checkpoint_hash",
+            (
+                _DISCOVERY_AUTHORITY_DOMAIN,
+                _DISCOVERY_AUTHORITY_VERSION,
+                generation,
+                through_batch,
+                through_sample,
+                through_evidence,
+                *compacted,
+                prefix_digest,
+                anchor_json,
+                anchor_digest,
+                checkpoint_hash,
+            ),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_discovery_batch_samples WHERE batch_id<=?",
+            (through_batch,),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_discovery_schedule_evidence WHERE batch_id<=?",
+            (through_batch,),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_discovery_batches WHERE id<=?",
+            (through_batch,),
+        )
+        self.discovery_status(
+            now_ms=int(through_row["finished_at_ms"]),
+            _connection=con,
+        )
+
     def coverage_windows(self, now_ms: int) -> CoverageWindows:
         con = self._connect()
         try:
             con.execute("BEGIN")
-            result = self._coverage_windows_in_snapshot(con, now_ms)
+            checkpoint = self._validated_discovery_checkpoint(con)
+            result = self._coverage_windows_in_snapshot(
+                con,
+                now_ms,
+                checkpoint=(None if checkpoint is None else checkpoint[1]),
+                through_batch_id=(
+                    0 if checkpoint is None else int(checkpoint[0]["through_batch_id"])
+                ),
+            )
             con.execute("COMMIT")
             return result
         except BaseException:
@@ -2042,6 +2417,18 @@ class OpportunityPerceptionStore:
         try:
             if owns_connection:
                 con.execute("BEGIN")
+            checkpoint = self._validated_discovery_checkpoint(con)
+            through_batch_id = 0 if checkpoint is None else int(
+                checkpoint[0]["through_batch_id"]
+            )
+            suffix_count = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM neg_risk_discovery_batches WHERE id>?",
+                    (through_batch_id,),
+                ).fetchone()[0]
+            )
+            if suffix_count > _DISCOVERY_AUTHORITY_UNCOMPACTED_MAX_ROWS:
+                raise ValueError("discovery-authority-bound-exceeded")
             state = con.execute("SELECT * FROM neg_risk_discovery_state WHERE id=1").fetchone()
             schedules = con.execute(
                 "SELECT * FROM neg_risk_group_schedule ORDER BY group_id"
@@ -2077,14 +2464,36 @@ class OpportunityPerceptionStore:
                     " GROUP BY group_id,event_id,membership_hash"
                 ).fetchall()
             }
-            batches = con.execute("SELECT * FROM neg_risk_discovery_batches ORDER BY id").fetchall()
+            suffix_batches = con.execute(
+                "SELECT * FROM neg_risk_discovery_batches WHERE id>? ORDER BY id",
+                (through_batch_id,),
+            ).fetchall()
+            batches = (
+                suffix_batches
+                if checkpoint is None
+                else [checkpoint[1]["batch"], *suffix_batches]
+            )
             latest_batch = batches[-1] if batches else None
-            batch_samples = con.execute(
-                "SELECT * FROM neg_risk_discovery_batch_samples ORDER BY batch_id,group_id"
+            suffix_samples = con.execute(
+                "SELECT * FROM neg_risk_discovery_batch_samples "
+                "WHERE batch_id>? ORDER BY batch_id,group_id",
+                (through_batch_id,),
             ).fetchall()
-            schedule_evidence = con.execute(
-                "SELECT * FROM neg_risk_discovery_schedule_evidence ORDER BY batch_id,group_id"
+            suffix_evidence = con.execute(
+                "SELECT * FROM neg_risk_discovery_schedule_evidence "
+                "WHERE batch_id>? ORDER BY batch_id,group_id",
+                (through_batch_id,),
             ).fetchall()
+            batch_samples = (
+                suffix_samples
+                if checkpoint is None
+                else [*checkpoint[1]["samples"], *suffix_samples]
+            )
+            schedule_evidence = (
+                suffix_evidence
+                if checkpoint is None
+                else [*checkpoint[1]["evidence"], *suffix_evidence]
+            )
             latest_samples = [
                 row
                 for row in batch_samples
@@ -2119,7 +2528,12 @@ class OpportunityPerceptionStore:
             admissions = con.execute(
                 "SELECT * FROM neg_risk_candidate_admissions ORDER BY id"
             ).fetchall()
-            coverage = self._coverage_windows_in_snapshot(con, now_ms)
+            coverage = self._coverage_windows_in_snapshot(
+                con,
+                now_ms,
+                checkpoint=(None if checkpoint is None else checkpoint[1]),
+                through_batch_id=through_batch_id,
+            )
             self._validate_discovery_snapshot(
                 state=state,
                 schedules=schedules,
@@ -2137,6 +2551,7 @@ class OpportunityPerceptionStore:
                 attempt_starts=attempt_starts,
                 admissions=admissions,
                 coverage=coverage,
+                checkpointed_prefix=checkpoint is not None,
                 deadline_check=lambda: self._check_deadline(
                     "discovery-status-deadline"
                 ),
@@ -2205,6 +2620,9 @@ class OpportunityPerceptionStore:
     def _coverage_windows_in_snapshot(
         con: sqlite3.Connection,
         now_ms: int,
+        *,
+        checkpoint: dict[str, object] | None = None,
+        through_batch_id: int = 0,
     ) -> CoverageWindows:
         totals = con.execute(
             "SELECT COUNT(*) AS groups_count,"
@@ -2215,19 +2633,37 @@ class OpportunityPerceptionStore:
         total_weight = Decimal(str(totals["total_weight"]))
         windows: dict[int, CoverageWindow] = {}
         for minutes in (15, 30, 60):
-            row = con.execute(
-                "WITH visited AS ("
-                "SELECT DISTINCT bs.group_id "
-                "FROM neg_risk_discovery_batch_samples bs "
-                "JOIN neg_risk_discovery_batches b ON b.id=bs.batch_id "
-                "WHERE b.finished_at_ms>=? AND b.finished_at_ms<=?"
-                ") SELECT COUNT(*) AS visited_groups,"
-                "COALESCE(SUM(CAST(s.liquidity_weight AS REAL)),0) AS visited_weight "
-                "FROM neg_risk_group_schedule s JOIN visited v USING(group_id)",
-                (now_ms - minutes * 60_000, now_ms),
-            ).fetchone()
-            visited_groups = int(row["visited_groups"])
-            visited_weight = Decimal(str(row["visited_weight"]))
+            lower = now_ms - minutes * 60_000
+            visited_ids = {
+                str(row["group_id"])
+                for row in con.execute(
+                    "SELECT DISTINCT bs.group_id "
+                    "FROM neg_risk_discovery_batch_samples bs "
+                    "JOIN neg_risk_discovery_batches b ON b.id=bs.batch_id "
+                    "WHERE b.id>? AND b.finished_at_ms>=? AND b.finished_at_ms<=?",
+                    (through_batch_id, lower, now_ms),
+                ).fetchall()
+            }
+            if checkpoint is not None:
+                visited_ids.update(
+                    str(item[1])
+                    for item in checkpoint["coverage_visits"]
+                    if lower <= int(item[0]) <= now_ms
+                )
+            if visited_ids:
+                placeholders = ",".join("?" for _ in visited_ids)
+                row = con.execute(
+                    "SELECT COUNT(*) AS visited_groups,"
+                    "COALESCE(SUM(CAST(liquidity_weight AS REAL)),0) "
+                    "AS visited_weight FROM neg_risk_group_schedule "
+                    f"WHERE group_id IN ({placeholders})",
+                    tuple(sorted(visited_ids)),
+                ).fetchone()
+                visited_groups = int(row["visited_groups"])
+                visited_weight = Decimal(str(row["visited_weight"]))
+            else:
+                visited_groups = 0
+                visited_weight = Decimal("0")
             windows[minutes] = CoverageWindow(
                 minutes=minutes,
                 visited_groups=visited_groups,
@@ -2265,6 +2701,7 @@ class OpportunityPerceptionStore:
         attempt_starts: list[sqlite3.Row],
         admissions: list[sqlite3.Row],
         coverage: CoverageWindows,
+        checkpointed_prefix: bool = False,
         deadline_check: Callable[[], None] = lambda: None,
     ) -> None:
         if load_row is not None:
@@ -2315,7 +2752,13 @@ class OpportunityPerceptionStore:
             ):
                 raise ValueError("invalid-discovery-batch-receipt")
             if previous is None:
-                if int(batch["sweep_id"]) != 1 or int(batch["batch_sequence"]) != 1:
+                if (
+                    not checkpointed_prefix
+                    and (
+                        int(batch["sweep_id"]) != 1
+                        or int(batch["batch_sequence"]) != 1
+                    )
+                ):
                     raise ValueError("invalid-discovery-batch-sequence")
             elif bool(previous["completed"]):
                 if (
@@ -3468,6 +3911,413 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
 
+    @staticmethod
+    def _reconciliation_window_seed(row: sqlite3.Row) -> dict[str, object]:
+        names = (
+            "id",
+            "status",
+            "failure_reason",
+            "next_cursor",
+            "started_at_ms",
+            "checkpoint_at_ms",
+            "finished_at_ms",
+            "pages_completed",
+            "events_seen",
+            "groups_staged",
+            "rejected_count",
+            "observations_count",
+            "baseline_count",
+            "baseline_digest",
+            "added_count",
+            "changed_count",
+            "closed_count",
+            "unchanged_count",
+            "applied_rejected_count",
+        )
+        return {name: row[name] for name in names}
+
+    @staticmethod
+    def _reconciliation_rows_digest(rows: list[sqlite3.Row]) -> str:
+        canonical = json.dumps(
+            [dict(row) for row in rows],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+
+    def _validated_reconciliation_checkpoint(
+        self,
+        con: sqlite3.Connection,
+        window: sqlite3.Row,
+        staged: list[sqlite3.Row],
+    ) -> tuple[sqlite3.Row, dict[str, object]] | None:
+        row = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_authority_checkpoints "
+            "WHERE window_id=?",
+            (window["id"],),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            anchor = json.loads(str(row["anchor_json"]))
+            canonical = json.dumps(
+                anchor,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            anchor_digest = f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+            expected_hash = reconciliation_authority_checkpoint_hash(
+                window_id=str(row["window_id"]),
+                domain=str(row["domain"]),
+                version=int(row["version"]),
+                generation=int(row["generation"]),
+                through_batch_id=int(row["through_batch_id"]),
+                through_sequence=int(row["through_sequence"]),
+                compacted_batch_rows=int(row["compacted_batch_rows"]),
+                compacted_sample_rows=int(row["compacted_sample_rows"]),
+                prefix_digest=str(row["prefix_digest"]),
+                anchor_digest=str(row["anchor_digest"]),
+            )
+            receipt = anchor["receipt"]
+            if (
+                row["domain"] != _RECONCILIATION_AUTHORITY_DOMAIN
+                or int(row["version"]) != _RECONCILIATION_AUTHORITY_VERSION
+                or int(row["generation"]) <= 0
+                or str(row["window_id"]) != str(window["id"])
+                or int(row["through_batch_id"]) != int(receipt["id"])
+                or int(row["through_sequence"]) != int(receipt["batch_sequence"])
+                or any(
+                    int(row[name]) < 0
+                    for name in (
+                        "through_batch_id",
+                        "through_sequence",
+                        "compacted_batch_rows",
+                        "compacted_sample_rows",
+                    )
+                )
+                or canonical != str(row["anchor_json"])
+                or not hmac.compare_digest(str(row["anchor_digest"]), anchor_digest)
+                or not hmac.compare_digest(str(row["checkpoint_hash"]), expected_hash)
+                or anchor["window"] != self._reconciliation_window_seed(window)
+                or anchor["staging_digest"]
+                != self._reconciliation_rows_digest(staged)
+                or not isinstance(anchor["seen_cursors"], list)
+                or not isinstance(anchor["cumulative"], dict)
+            ):
+                raise ValueError("invalid-reconciliation-authority-checkpoint")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("invalid-reconciliation-authority-checkpoint") from error
+        retained = con.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM neg_risk_reconciliation_batches "
+            " WHERE window_id=? AND batch_sequence<=?),"
+            "(SELECT COUNT(*) FROM neg_risk_reconciliation_batch_samples "
+            " WHERE batch_id<=?)",
+            (
+                window["id"],
+                int(row["through_sequence"]),
+                int(row["through_batch_id"]),
+            ),
+        ).fetchone()
+        if any(int(value) for value in retained):
+            raise ValueError("invalid-reconciliation-authority-checkpoint")
+        return row, anchor
+
+    def _validate_reconciliation_checkpoint_snapshot(
+        self,
+        con: sqlite3.Connection,
+        window: sqlite3.Row,
+        staged: list[sqlite3.Row],
+        baseline: list[sqlite3.Row],
+        evidence: list[sqlite3.Row],
+        result_revisions: list[sqlite3.Row],
+    ) -> tuple[sqlite3.Row, dict[str, object]]:
+        checkpoint = self._validated_reconciliation_checkpoint(con, window, staged)
+        if checkpoint is None:
+            raise ValueError("reconciliation-authority-checkpoint-required")
+        suffix = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_batches "
+            "WHERE window_id=? AND batch_sequence>? ORDER BY batch_sequence LIMIT 2",
+            (window["id"], int(checkpoint[0]["through_sequence"])),
+        ).fetchall()
+        if suffix:
+            raise ValueError("invalid-reconciliation-authority-suffix")
+        if (
+            len(staged) != int(window["groups_staged"])
+            or len(baseline) != int(window["baseline_count"])
+            or str(window["baseline_digest"])
+            != self._reconciliation_baseline_digest(baseline)
+        ):
+            raise ValueError("invalid-reconciliation-window-or-baseline-digest")
+        receipt = checkpoint[1]["receipt"]
+        cumulative = checkpoint[1]["cumulative"]
+        status = (
+            "failed"
+            if window["failure_reason"] is not None
+            else str(window["status"])
+        )
+        if (
+            int(window["pages_completed"]) != int(receipt["batch_sequence"])
+            or int(cumulative["observed_count"]) != int(window["observations_count"])
+            or int(cumulative["unique_count"]) != int(window["groups_staged"])
+            or int(cumulative["rejected_count"]) != int(window["rejected_count"])
+            or int(cumulative["page_event_count"]) != int(window["events_seen"])
+            or int(cumulative["observed_count"])
+            != int(cumulative["unique_count"])
+            + int(cumulative["update_count"])
+            + int(cumulative["duplicate_count"])
+            or window["next_cursor"] != receipt["next_cursor"]
+            or int(window["checkpoint_at_ms"]) != int(receipt["finished_at_ms"])
+            or bool(receipt["completed"]) != (receipt["next_cursor"] is None)
+            or (status in {"complete", "applied"}) != bool(receipt["completed"])
+            or (
+                status in {"complete", "applied"}
+                and (
+                    window["finished_at_ms"] is None
+                    or int(window["finished_at_ms"]) != int(receipt["finished_at_ms"])
+                    or any(
+                        int(receipt[name]) != 0
+                        for name in (
+                            "page_event_count",
+                            "groups_staged",
+                            "observed_count",
+                            "unique_count",
+                            "update_count",
+                            "duplicate_count",
+                            "rejected_count",
+                        )
+                    )
+                )
+            )
+            or (status == "open" and window["finished_at_ms"] is not None)
+            or (
+                status == "failed"
+                and (
+                    window["failure_reason"] != "cursor-loop"
+                    or window["finished_at_ms"] is None
+                    or int(window["finished_at_ms"])
+                    < int(receipt["finished_at_ms"])
+                    or bool(receipt["completed"])
+                )
+            )
+        ):
+            raise ValueError("invalid-reconciliation-checkpoint")
+        if status == "applied":
+            self._validate_reconciliation_diff_evidence(
+                window,
+                staged,
+                baseline,
+                evidence,
+                result_revisions,
+            )
+        elif evidence or result_revisions:
+            raise ValueError("invalid-reconciliation-premature-diff-evidence")
+        return checkpoint
+
+    def _checkpoint_reconciliation_authority(
+        self,
+        con: sqlite3.Connection,
+        window_id: str,
+        *,
+        previous: tuple[sqlite3.Row, dict[str, object]] | None = None,
+    ) -> None:
+        window = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
+            (window_id,),
+        ).fetchone()
+        staged = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_staging "
+            "WHERE window_id=? ORDER BY group_id",
+            (window_id,),
+        ).fetchall()
+        if previous is None:
+            previous = self._validated_reconciliation_checkpoint(con, window, staged)
+        receipts = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_batches "
+            "WHERE window_id=? ORDER BY batch_sequence",
+            (window_id,),
+        ).fetchall()
+        if not receipts:
+            return
+        samples = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_batch_samples "
+            "WHERE batch_id IN (SELECT id FROM neg_risk_reconciliation_batches "
+            "WHERE window_id=?) ORDER BY batch_id,group_id",
+            (window_id,),
+        ).fetchall()
+        latest = receipts[-1]
+        prior_seen = set() if previous is None else set(previous[1]["seen_cursors"])
+        seen = prior_seen | {
+            str(value)
+            for receipt in receipts
+            for value in (receipt["requested_cursor"], receipt["next_cursor"])
+            if value is not None
+        }
+        prior_cumulative = (
+            {
+                "duplicate_count": 0,
+                "observed_count": 0,
+                "page_event_count": 0,
+                "rejected_count": 0,
+                "unique_count": 0,
+                "update_count": 0,
+            }
+            if previous is None
+            else dict(previous[1]["cumulative"])
+        )
+        cumulative = {
+            name: int(prior_cumulative[name])
+            + sum(int(receipt[name]) for receipt in receipts)
+            for name in prior_cumulative
+        }
+        anchor = {
+            "cumulative": cumulative,
+            "receipt": dict(latest),
+            "seen_cursors": sorted(seen),
+            "staging_digest": self._reconciliation_rows_digest(staged),
+            "window": self._reconciliation_window_seed(window),
+        }
+        anchor_json = json.dumps(
+            anchor,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        anchor_digest = f"sha256:{hashlib.sha256(anchor_json.encode()).hexdigest()}"
+        prefix_payload = {
+            "previous_prefix_digest": (
+                None if previous is None else str(previous[0]["prefix_digest"])
+            ),
+            "receipts": [dict(row) for row in receipts],
+            "samples": [dict(row) for row in samples],
+        }
+        prefix_json = json.dumps(
+            prefix_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        prefix_digest = f"sha256:{hashlib.sha256(prefix_json.encode()).hexdigest()}"
+        generation = 1 if previous is None else int(previous[0]["generation"]) + 1
+        compacted_batches = len(receipts) + (
+            0 if previous is None else int(previous[0]["compacted_batch_rows"])
+        )
+        compacted_samples = len(samples) + (
+            0 if previous is None else int(previous[0]["compacted_sample_rows"])
+        )
+        checkpoint_hash = reconciliation_authority_checkpoint_hash(
+            window_id=window_id,
+            domain=_RECONCILIATION_AUTHORITY_DOMAIN,
+            version=_RECONCILIATION_AUTHORITY_VERSION,
+            generation=generation,
+            through_batch_id=int(latest["id"]),
+            through_sequence=int(latest["batch_sequence"]),
+            compacted_batch_rows=compacted_batches,
+            compacted_sample_rows=compacted_samples,
+            prefix_digest=prefix_digest,
+            anchor_digest=anchor_digest,
+        )
+        con.execute(
+            "INSERT INTO neg_risk_reconciliation_authority_checkpoints("
+            "window_id,domain,version,generation,through_batch_id,"
+            "through_sequence,compacted_batch_rows,compacted_sample_rows,"
+            "prefix_digest,anchor_json,anchor_digest,checkpoint_hash"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(window_id) DO UPDATE SET domain=excluded.domain,"
+            "version=excluded.version,generation=excluded.generation,"
+            "through_batch_id=excluded.through_batch_id,"
+            "through_sequence=excluded.through_sequence,"
+            "compacted_batch_rows=excluded.compacted_batch_rows,"
+            "compacted_sample_rows=excluded.compacted_sample_rows,"
+            "prefix_digest=excluded.prefix_digest,anchor_json=excluded.anchor_json,"
+            "anchor_digest=excluded.anchor_digest,"
+            "checkpoint_hash=excluded.checkpoint_hash",
+            (
+                window_id,
+                _RECONCILIATION_AUTHORITY_DOMAIN,
+                _RECONCILIATION_AUTHORITY_VERSION,
+                generation,
+                int(latest["id"]),
+                int(latest["batch_sequence"]),
+                compacted_batches,
+                compacted_samples,
+                prefix_digest,
+                anchor_json,
+                anchor_digest,
+                checkpoint_hash,
+            ),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_reconciliation_batch_samples "
+            "WHERE batch_id IN (SELECT id FROM neg_risk_reconciliation_batches "
+            "WHERE window_id=?)",
+            (window_id,),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_reconciliation_batches WHERE window_id=?",
+            (window_id,),
+        )
+        refreshed = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
+            (window_id,),
+        ).fetchone()
+        refreshed_staged = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_staging "
+            "WHERE window_id=? ORDER BY group_id",
+            (window_id,),
+        ).fetchall()
+        self._validated_reconciliation_checkpoint(con, refreshed, refreshed_staged)
+
+    def _refresh_reconciliation_checkpoint(
+        self,
+        con: sqlite3.Connection,
+        window: sqlite3.Row,
+        staged: list[sqlite3.Row],
+        *,
+        checkpoint: tuple[sqlite3.Row, dict[str, object]] | None = None,
+    ) -> None:
+        if checkpoint is None:
+            checkpoint = self._validated_reconciliation_checkpoint(con, window, staged)
+        if checkpoint is None:
+            return
+        anchor = dict(checkpoint[1])
+        anchor["window"] = self._reconciliation_window_seed(window)
+        anchor["staging_digest"] = self._reconciliation_rows_digest(staged)
+        anchor_json = json.dumps(
+            anchor,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        anchor_digest = f"sha256:{hashlib.sha256(anchor_json.encode()).hexdigest()}"
+        generation = int(checkpoint[0]["generation"]) + 1
+        checkpoint_hash = reconciliation_authority_checkpoint_hash(
+            window_id=str(window["id"]),
+            domain=str(checkpoint[0]["domain"]),
+            version=int(checkpoint[0]["version"]),
+            generation=generation,
+            through_batch_id=int(checkpoint[0]["through_batch_id"]),
+            through_sequence=int(checkpoint[0]["through_sequence"]),
+            compacted_batch_rows=int(checkpoint[0]["compacted_batch_rows"]),
+            compacted_sample_rows=int(checkpoint[0]["compacted_sample_rows"]),
+            prefix_digest=str(checkpoint[0]["prefix_digest"]),
+            anchor_digest=anchor_digest,
+        )
+        con.execute(
+            "UPDATE neg_risk_reconciliation_authority_checkpoints SET "
+            "generation=?,anchor_json=?,anchor_digest=?,checkpoint_hash=? "
+            "WHERE window_id=?",
+            (
+                generation,
+                anchor_json,
+                anchor_digest,
+                checkpoint_hash,
+                window["id"],
+            ),
+        )
+
     def current_reconciliation(
         self,
         *,
@@ -3485,18 +4335,6 @@ class OpportunityPerceptionStore:
                 if owns_connection:
                     con.execute("COMMIT")
                 return None
-            receipts = con.execute(
-                "SELECT * FROM neg_risk_reconciliation_batches "
-                "WHERE window_id=? ORDER BY batch_sequence",
-                (row["id"],),
-            ).fetchall()
-            batch_samples = con.execute(
-                "SELECT * FROM neg_risk_reconciliation_batch_samples "
-                "WHERE batch_id IN (SELECT id "
-                "FROM neg_risk_reconciliation_batches WHERE window_id=?) "
-                "ORDER BY batch_id,group_id",
-                (row["id"],),
-            ).fetchall()
             staged = con.execute(
                 "SELECT * FROM neg_risk_reconciliation_staging WHERE window_id=? ORDER BY group_id",
                 (row["id"],),
@@ -3512,18 +4350,45 @@ class OpportunityPerceptionStore:
                 (row["id"],),
             ).fetchall()
             result_revisions = self._reconciliation_evidence_result_revisions(con, row["id"])
-            self._validate_reconciliation_snapshot(
-                row,
-                receipts,
-                batch_samples,
-                staged,
-                baseline,
-                evidence,
-                result_revisions,
-                deadline_check=lambda: self._check_deadline(
-                    "reconciliation-status-deadline"
-                ),
-            )
+            checkpoint = con.execute(
+                "SELECT 1 FROM neg_risk_reconciliation_authority_checkpoints "
+                "WHERE window_id=?",
+                (row["id"],),
+            ).fetchone()
+            if checkpoint is None:
+                receipts = con.execute(
+                    "SELECT * FROM neg_risk_reconciliation_batches "
+                    "WHERE window_id=? ORDER BY batch_sequence",
+                    (row["id"],),
+                ).fetchall()
+                batch_samples = con.execute(
+                    "SELECT * FROM neg_risk_reconciliation_batch_samples "
+                    "WHERE batch_id IN (SELECT id "
+                    "FROM neg_risk_reconciliation_batches WHERE window_id=?) "
+                    "ORDER BY batch_id,group_id",
+                    (row["id"],),
+                ).fetchall()
+                self._validate_reconciliation_snapshot(
+                    row,
+                    receipts,
+                    batch_samples,
+                    staged,
+                    baseline,
+                    evidence,
+                    result_revisions,
+                    deadline_check=lambda: self._check_deadline(
+                        "reconciliation-status-deadline"
+                    ),
+                )
+            else:
+                self._validate_reconciliation_checkpoint_snapshot(
+                    con,
+                    row,
+                    staged,
+                    baseline,
+                    evidence,
+                    result_revisions,
+                )
             result = self._reconciliation_window_from_row(row)
             if owns_connection:
                 con.execute("COMMIT")
@@ -3548,11 +4413,23 @@ class OpportunityPerceptionStore:
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
-                "SELECT status FROM neg_risk_reconciliation_windows WHERE id=?",
+                "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
                 (window_id,),
             ).fetchone()
             if row is None or row["status"] != "open":
                 raise ValueError("reconciliation-window-not-open")
+            staged_before = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_staging "
+                "WHERE window_id=? ORDER BY group_id",
+                (window_id,),
+            ).fetchall()
+            checkpoint = self._validated_reconciliation_checkpoint(
+                con,
+                row,
+                staged_before,
+            )
+            if checkpoint is not None:
+                raise ValueError("reconciliation-checkpointed-staging-requires-page")
             self._stage_reconciliation_sample(
                 con,
                 window_id=window_id,
@@ -3601,6 +4478,17 @@ class OpportunityPerceptionStore:
             ).fetchone()
             if window is None or window["status"] != "open" or window["failure_reason"] is not None:
                 raise ValueError("reconciliation-window-not-open")
+            self.current_reconciliation(_connection=con)
+            staged_before = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_staging "
+                "WHERE window_id=? ORDER BY group_id",
+                (window_id,),
+            ).fetchall()
+            checkpoint_before = self._validated_reconciliation_checkpoint(
+                con,
+                window,
+                staged_before,
+            )
             if window["next_cursor"] != requested_cursor:
                 raise ValueError("reconciliation-cursor-race")
             if started_at_ms < int(window["checkpoint_at_ms"]):
@@ -3610,7 +4498,11 @@ class OpportunityPerceptionStore:
                 "FROM neg_risk_reconciliation_batches WHERE window_id=?",
                 (window_id,),
             ).fetchall()
-            seen_cursors = {
+            seen_cursors = (
+                set()
+                if checkpoint_before is None
+                else set(checkpoint_before[1]["seen_cursors"])
+            ) | {
                 str(value)
                 for receipt in prior_receipts
                 for value in (receipt["requested_cursor"], receipt["next_cursor"])
@@ -3629,6 +4521,12 @@ class OpportunityPerceptionStore:
                     "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
                     (window_id,),
                 ).fetchone()
+                self._refresh_reconciliation_checkpoint(
+                    con,
+                    failed,
+                    staged_before,
+                    checkpoint=checkpoint_before,
+                )
                 con.execute("COMMIT")
                 return self._reconciliation_window_from_row(failed)
 
@@ -3743,6 +4641,11 @@ class OpportunityPerceptionStore:
                 "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
                 (window_id,),
             ).fetchone()
+            self._checkpoint_reconciliation_authority(
+                con,
+                window_id,
+                previous=checkpoint_before,
+            )
             con.execute("COMMIT")
             return self._reconciliation_window_from_row(updated)
         except BaseException:
@@ -3792,15 +4695,30 @@ class OpportunityPerceptionStore:
                 (window_id,),
             ).fetchall()
             result_revisions = self._reconciliation_evidence_result_revisions(con, window_id)
-            self._validate_reconciliation_snapshot(
+            checkpoint_before = self._validated_reconciliation_checkpoint(
+                con,
                 window,
-                receipts,
-                batch_samples,
                 staged,
-                baseline,
-                evidence,
-                result_revisions,
             )
+            if checkpoint_before is None:
+                self._validate_reconciliation_snapshot(
+                    window,
+                    receipts,
+                    batch_samples,
+                    staged,
+                    baseline,
+                    evidence,
+                    result_revisions,
+                )
+            else:
+                self._validate_reconciliation_checkpoint_snapshot(
+                    con,
+                    window,
+                    staged,
+                    baseline,
+                    evidence,
+                    result_revisions,
+                )
             if window["failure_reason"] is not None:
                 raise ReconciliationIncompleteError("reconciliation-window-failed")
             finished_at_ms = int(window["finished_at_ms"])
@@ -3954,15 +4872,31 @@ class OpportunityPerceptionStore:
                 (window_id,),
             ).fetchall()
             result_revisions = self._reconciliation_evidence_result_revisions(con, window_id)
-            self._validate_reconciliation_snapshot(
-                applied,
-                receipts,
-                batch_samples,
-                staged,
-                baseline,
-                evidence,
-                result_revisions,
-            )
+            if checkpoint_before is None:
+                self._validate_reconciliation_snapshot(
+                    applied,
+                    receipts,
+                    batch_samples,
+                    staged,
+                    baseline,
+                    evidence,
+                    result_revisions,
+                )
+            else:
+                self._refresh_reconciliation_checkpoint(
+                    con,
+                    applied,
+                    staged,
+                    checkpoint=checkpoint_before,
+                )
+                self._validate_reconciliation_checkpoint_snapshot(
+                    con,
+                    applied,
+                    staged,
+                    baseline,
+                    evidence,
+                    result_revisions,
+                )
             result = self._reconciliation_diff_from_row(applied)
             con.execute("COMMIT")
             return result

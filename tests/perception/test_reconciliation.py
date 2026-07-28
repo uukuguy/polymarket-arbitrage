@@ -255,6 +255,141 @@ def _revision(
     )
 
 
+def _publish_empty_reconciliation_page(
+    store: OpportunityPerceptionStore,
+    *,
+    window_id: str,
+    sequence: int,
+) -> None:
+    requested = None if sequence == 1 else f"cursor-{sequence}"
+    store.publish_reconciliation_batch(
+        window_id=window_id,
+        requested_cursor=requested,
+        next_cursor=f"cursor-{sequence + 1}",
+        completed=False,
+        started_at_ms=sequence * 100,
+        finished_at_ms=sequence * 100 + 10,
+        page_event_count=0,
+        candidates=(),
+    )
+
+
+def test_reconciliation_checkpoint_bounds_latest_window_page_history_reads(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path / "state.db")
+    window = store.begin_reconciliation(started_at_ms=0)
+    for sequence in range(1, 7):
+        _publish_empty_reconciliation_page(
+            store,
+            window_id=window.id,
+            sequence=sequence,
+        )
+
+    statements: list[str] = []
+    with store._connect() as con:
+        con.set_trace_callback(statements.append)
+        current = store.current_reconciliation(_connection=con)
+        checkpoint = con.execute(
+            "SELECT through_sequence FROM "
+            "neg_risk_reconciliation_authority_checkpoints WHERE window_id=?",
+            (window.id,),
+        ).fetchone()
+        retained = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_reconciliation_batches "
+            "WHERE window_id=?",
+            (window.id,),
+        ).fetchone()[0]
+
+    assert current.pages_completed == 6
+    assert checkpoint["through_sequence"] == 6
+    assert retained <= 1
+    authority_reads = [
+        statement
+        for statement in statements
+        if "SELECT * FROM neg_risk_reconciliation_batches" in statement
+    ]
+    assert authority_reads
+    assert all("batch_sequence>" in statement for statement in authority_reads)
+
+
+def test_reconciliation_checkpoint_prune_failure_rolls_back_page(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path / "state.db")
+    window = store.begin_reconciliation(started_at_ms=0)
+    with store._connect() as con:
+        con.execute(
+            "CREATE TRIGGER reject_reconciliation_compaction BEFORE DELETE "
+            "ON neg_risk_reconciliation_batches BEGIN "
+            "SELECT RAISE(ABORT,'reject reconciliation compaction'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="reject reconciliation compaction"):
+        _publish_empty_reconciliation_page(store, window_id=window.id, sequence=1)
+
+    current = store.current_reconciliation()
+    assert current.pages_completed == 0
+    with store._connect() as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_reconciliation_batches"
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_reconciliation_authority_checkpoints"
+        ).fetchone()[0] == 0
+
+
+def test_reconciliation_checkpoint_tamper_fails_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path / "state.db")
+    window = store.begin_reconciliation(started_at_ms=0)
+    _publish_empty_reconciliation_page(store, window_id=window.id, sequence=1)
+    with store._connect() as con:
+        con.execute(
+            "UPDATE neg_risk_reconciliation_authority_checkpoints "
+            "SET checkpoint_hash='sha256:tampered' WHERE window_id=?",
+            (window.id,),
+        )
+
+    with pytest.raises(ValueError, match="invalid-reconciliation-authority-checkpoint"):
+        store.current_reconciliation()
+
+
+def test_reconciliation_checkpoint_legacy_upgrade_is_idempotent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = _store(tmp_path / "state.db")
+    window = store.begin_reconciliation(started_at_ms=0)
+    monkeypatch.setattr(
+        store,
+        "_checkpoint_reconciliation_authority",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    _publish_empty_reconciliation_page(store, window_id=window.id, sequence=1)
+    with store._connect() as con:
+        con.execute(
+            "DROP TABLE IF EXISTS neg_risk_reconciliation_authority_checkpoints"
+        )
+
+    restarted = OpportunityPerceptionStore(store.db_path)
+    restarted.init_schema()
+    restarted.init_schema()
+
+    assert restarted.current_reconciliation().pages_completed == 1
+    _publish_empty_reconciliation_page(
+        restarted,
+        window_id=window.id,
+        sequence=2,
+    )
+    with restarted._connect() as con:
+        assert con.execute(
+            "SELECT through_sequence FROM "
+            "neg_risk_reconciliation_authority_checkpoints WHERE window_id=?",
+            (window.id,),
+        ).fetchone()[0] == 2
+
+
 @pytest.mark.asyncio
 async def test_restart_resumes_after_last_committed_cursor(tmp_path: Path) -> None:
     path = tmp_path / "state.db"
@@ -418,33 +553,14 @@ def test_terminal_receipt_validator_requires_zero_counts_and_no_samples(
         candidates=(),
     )
     with sqlite3.connect(tmp_path / "state.db") as con:
-        terminal_batch_id = con.execute(
-            "SELECT id FROM neg_risk_reconciliation_batches WHERE window_id=? AND completed=1",
-            (window.id,),
-        ).fetchone()[0]
-        sample = con.execute(
-            "SELECT group_id,event_id,membership_hash,quality,reason,legs_json "
-            "FROM neg_risk_reconciliation_staging WHERE window_id=?",
-            (window.id,),
-        ).fetchone()
         con.execute(
-            "UPDATE neg_risk_reconciliation_batches SET "
-            "groups_staged=1,observed_count=1,duplicate_count=1 WHERE id=?",
-            (terminal_batch_id,),
-        )
-        con.execute(
-            "UPDATE neg_risk_reconciliation_windows SET observations_count=2 WHERE id=?",
+            "UPDATE neg_risk_reconciliation_authority_checkpoints SET "
+            "anchor_json=json_set(anchor_json,'$.receipt.groups_staged',1) "
+            "WHERE window_id=?",
             (window.id,),
-        )
-        con.execute(
-            "INSERT INTO neg_risk_reconciliation_batch_samples("
-            "batch_id,group_id,event_id,membership_hash,quality,reason,legs_json,"
-            "observed_at_ms,source_cursor,materialization"
-            ") VALUES (?,?,?,?,?,?,?,130,'c-2','duplicate')",
-            (terminal_batch_id, *sample),
         )
 
-    with pytest.raises(ValueError, match="checkpoint"):
+    with pytest.raises(ValueError, match="authority-checkpoint"):
         store.current_reconciliation()
 
 
@@ -520,7 +636,7 @@ async def test_terminal_batch_applies_one_atomic_diff_and_is_idempotent(
             "UPDATE neg_risk_reconciliation_windows SET closed_count=999 WHERE id=?",
             (terminal.window_id,),
         )
-    with pytest.raises(ValueError, match="diff-evidence"):
+    with pytest.raises(ValueError, match="reconciliation"):
         store.current_reconciliation()
 
 
@@ -688,7 +804,8 @@ async def test_apply_validates_complete_receipt_chain_inside_write_transaction(
     window = store.current_reconciliation()
     with sqlite3.connect(tmp_path / "state.db") as con:
         con.execute(
-            "DELETE FROM neg_risk_reconciliation_batches WHERE window_id=? AND batch_sequence=1",
+            "UPDATE neg_risk_reconciliation_authority_checkpoints "
+            "SET prefix_digest='sha256:deleted-prefix' WHERE window_id=?",
             (window.id,),
         )
 
@@ -861,15 +978,26 @@ async def test_cross_page_duplicate_is_deduped_and_change_is_latest_wins(
         "g-1-yes2-b",
     )
     with sqlite3.connect(tmp_path / "state.db") as con:
-        counts = con.execute(
-            "SELECT observed_count,unique_count,update_count,duplicate_count "
-            "FROM neg_risk_reconciliation_batches ORDER BY batch_sequence"
-        ).fetchall()
+        checkpoint = json.loads(
+            con.execute(
+                "SELECT anchor_json FROM "
+                "neg_risk_reconciliation_authority_checkpoints WHERE window_id=?",
+                (terminal.window_id,),
+            ).fetchone()[0]
+        )
         sample_count = con.execute(
             "SELECT COUNT(*) FROM neg_risk_reconciliation_batch_samples"
         ).fetchone()[0]
-    assert counts == [(1, 1, 0, 0), (1, 0, 0, 1), (1, 0, 1, 0), (0, 0, 0, 0)]
-    assert sample_count == 3
+    assert checkpoint["cumulative"] == {
+        "duplicate_count": 1,
+        "observed_count": 3,
+        "page_event_count": 3,
+        "rejected_count": 0,
+        "unique_count": 1,
+        "update_count": 1,
+    }
+    assert checkpoint["receipt"]["completed"] == 1
+    assert sample_count == 0
 
 
 @pytest.mark.asyncio

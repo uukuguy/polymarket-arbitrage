@@ -24,14 +24,23 @@ without adding producer or trading authority.
   per-component checkpoints instead of eventually reaching a permanent hard
   cap. Legacy Task 6 schemas migrate atomically and idempotently only after
   their old chain validates.
+- Discovery and Reconciliation authority reads are also bounded for continuous
+  operation. Discovery compacts only a fully validated completed prefix and
+  retains a checkpointed completed-batch/sample/evidence/coverage anchor plus
+  a bounded suffix. Reconciliation checkpoints each page with its exact window
+  seed, staging digest, cursor set and cumulative metrics, then atomically
+  prunes the replaced page receipts/samples. Tampering, retained-prefix
+  injection, or prune failure fails closed; validated legacy histories migrate
+  idempotently without changing reconciliation apply semantics.
 - Five Make targets and the living M1 manual provide the supported cloud
   workflow.
 
-Verification: 2616 of 2618 repository tests passed (one expected xfail, one
+Verification: 2640 of 2642 repository tests passed (one expected xfail, one
 skip); the committed Task 6 baseline collected 2586, the first remediation
-collected 2596, and the formal remediation collected 2618. All 41 focused
-API/control tests, 10,010-success Candidate continuity, tamper and atomic
-rollback tests passed;
+collected 2596, the formal remediation collected 2618, and the authority
+checkpoint remediation collects 2642. All 41 focused API/control tests,
+10,010-success Candidate continuity, 82 Discovery/Reconciliation/migration
+checkpoint regressions, 226 perception tests, tamper and atomic rollback tests passed;
 Ruff, compileall, docs, planning status, and diff checks passed.
 
 No deployment or trading capability was introduced. Task 7 remains the

@@ -94,6 +94,19 @@ receipt，并复用 store 对完整 receipt/sample/staging/baseline 链的同一
 显示 unavailable，而不是抛出或伪装 idle。它们是 scoped evidence，不参与
 Candidate/整体 availability；Task 5 才负责把 stalled checkpoint 变成独立 incident。
 
+这里的“完整链验证”不等于每次从第一页扫描到最后一页。每个成功页面提交时，writer
+同时创建/推进一个版本化 authority checkpoint：它绑定 exact latest window seed、
+当前 staging count/digest、最新 page receipt、所有已见 cursor、累计
+observed/unique/update/duplicate/rejected 指标和链式 prefix digest；随后在同一事务
+删除被 checkpoint 替代的 page receipt/sample。正常状态读取只验证 checkpoint 加一个
+有界 suffix（逐页 checkpoint 后通常为空），不会随运行天数线性变慢。
+
+apply 仍执行原有完整 diff/baseline/evidence 语义；apply 或 cursor-loop 改变窗口后会
+刷新 checkpoint 的 window/staging binding，而不是绕过验证。checkpoint hash、anchor、
+staging 或 retained prefix 任一不一致都 fail closed；prune 失败会回滚整页。旧窗口
+只有在原 receipt/sample/baseline 链本身通过验证时才原子升级，无法证明的历史不会被
+猜测回填，也不会获得 closure authority。
+
 ## 设计取舍
 
 - terminal 必须同时证明 event/candidate/sample 和 receipt 的所有计数为零，并返回空

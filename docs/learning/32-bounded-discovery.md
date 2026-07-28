@@ -102,6 +102,15 @@ inputs/anchors 用同一 Decimal 函数重算 score/reason。`group_id` 从 sche
 就绑定 `event_id`，不必等到 certified authority；同 group/hash 却换 event 会整页
 回滚。
 
+持续运行时，status 不会永远重扫从第一轮开始的所有 receipt。batch 超过 8,000 行后，
+writer 先在同一事务重放并验证完整 authority chain，再选择一个已完成 batch 边界，
+把前缀替换为版本化 checkpoint，并保留约 1,000 行实时后缀。checkpoint 绑定最后一个
+已完成 batch、对应 samples/schedule evidence、最近覆盖 visit seed、累计压缩计数和
+链式 prefix digest；status 随后只查询 `batch_id > through_batch_id` 的后缀并与 anchor
+一起验证。checkpoint/hash/anchor 被改、被删除前缀重新注入，或 prune 中途失败都会
+fail closed；checkpoint upsert 与 prefix delete 是一个事务，不能留下“证明已写但历史
+未删”或反向状态。旧库只在完整历史可证明时原子迁移，重复初始化幂等。
+
 ## 设计取舍
 
 - Candidate freshness 是“已有 durable Candidate fact 的 current certified groups

@@ -387,6 +387,23 @@ CREATE TABLE IF NOT EXISTS neg_risk_discovery_schedule_evidence (
   PRIMARY KEY(batch_id, group_id)
 );
 
+CREATE TABLE IF NOT EXISTS neg_risk_discovery_authority_checkpoints (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  domain TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  through_batch_id INTEGER NOT NULL CHECK(through_batch_id >= 0),
+  through_sample_id INTEGER NOT NULL CHECK(through_sample_id >= 0),
+  through_evidence_id INTEGER NOT NULL CHECK(through_evidence_id >= 0),
+  compacted_batch_rows INTEGER NOT NULL CHECK(compacted_batch_rows >= 0),
+  compacted_sample_rows INTEGER NOT NULL CHECK(compacted_sample_rows >= 0),
+  compacted_evidence_rows INTEGER NOT NULL CHECK(compacted_evidence_rows >= 0),
+  prefix_digest TEXT NOT NULL,
+  anchor_json TEXT NOT NULL,
+  anchor_digest TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS neg_risk_discovery_load_state (
   id INTEGER PRIMARY KEY CHECK(id = 1),
   degraded_streak INTEGER NOT NULL CHECK(degraded_streak >= 0),
@@ -543,6 +560,21 @@ CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_batch_samples (
   materialization TEXT NOT NULL CHECK(materialization IN
     ('unique','updated','duplicate')),
   PRIMARY KEY(batch_id,group_id)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_authority_checkpoints (
+  window_id TEXT PRIMARY KEY REFERENCES neg_risk_reconciliation_windows(id),
+  domain TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  through_batch_id INTEGER NOT NULL CHECK(through_batch_id >= 0),
+  through_sequence INTEGER NOT NULL CHECK(through_sequence >= 0),
+  compacted_batch_rows INTEGER NOT NULL CHECK(compacted_batch_rows >= 0),
+  compacted_sample_rows INTEGER NOT NULL CHECK(compacted_sample_rows >= 0),
+  prefix_digest TEXT NOT NULL,
+  anchor_json TEXT NOT NULL,
+  anchor_digest TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_diff_evidence (
