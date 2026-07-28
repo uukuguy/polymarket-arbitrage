@@ -111,6 +111,14 @@ writer 先在同一事务重放并验证完整 authority chain，再选择一个
 fail closed；checkpoint upsert 与 prefix delete 是一个事务，不能留下“证明已写但历史
 未删”或反向状态。旧库只在完整历史可证明时原子迁移，重复初始化幂等。
 
+Group revision、admission、attempt-start 和 Candidate fact 是另一组会持续增长的
+lifecycle。热 `discovery_status` 不再全表重放它们：owner writer 在同一事务刷新一个
+hash-bound current projection；SQLite triggers 对 admission/attempt 的
+insert/update/delete 推进 raw-authority sequence 和 attempt/breach counters。status
+只点读 projection、raw guard 与上面的有界 Discovery suffix。直接修改原始审计行会让
+sequence 漂移，修改 projection 会破坏 digest/hash，projection 写失败则整笔 owner
+事务回滚。这样 fail-close 不依赖每次 status 扫描全部历史。
+
 ## 设计取舍
 
 - Candidate freshness 是“已有 durable Candidate fact 的 current certified groups

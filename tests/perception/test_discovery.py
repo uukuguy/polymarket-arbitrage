@@ -28,7 +28,12 @@ from polyarb.perception.group_structure import (
     GroupStructureReader,
     GroupStructureUnavailableError,
 )
-from polyarb.perception.models import GroupQuoteBatch, GroupQuoteLeg
+from polyarb.perception.models import (
+    GroupLeg,
+    GroupQuoteBatch,
+    GroupQuoteLeg,
+    GroupRevision,
+)
 from polyarb.perception.store import (
     DiscoveryAdmissionProof,
     OpportunityPerceptionStore,
@@ -259,6 +264,87 @@ def test_discovery_checkpoint_bounds_status_history_reads(
     ]
     assert history_reads
     assert all("WHERE id>" in statement for statement in history_reads)
+
+
+def test_discovery_status_never_scans_lifecycle_authority_tables(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.configure_discovery_admission(_admission_proof(), now_ms=0)
+    _publish_empty_discovery_sweep(store, sweep=1)
+
+    statements: list[str] = []
+    with store._connect() as con:
+        con.set_trace_callback(statements.append)
+        store.discovery_status(now_ms=1_000, _connection=con)
+
+    normalized = [" ".join(statement.lower().split()) for statement in statements]
+    forbidden_full_lifecycle_reads = (
+        "from neg_risk_group_revisions where status='certified' group by",
+        "select distinct group_id from neg_risk_candidate_watch_facts",
+        "from neg_risk_candidate_watch_facts where last_result='unavailable'",
+        "select * from neg_risk_candidate_attempt_starts order by id",
+        "select * from neg_risk_candidate_admissions order by id",
+    )
+    observed = [
+        fragment
+        for fragment in forbidden_full_lifecycle_reads
+        if any(fragment in statement for statement in normalized)
+    ]
+    assert observed == []
+
+
+def test_discovery_status_projection_tamper_fails_closed(tmp_path: Path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        con.execute(
+            "UPDATE neg_risk_discovery_status_projection "
+            "SET generation=generation+1"
+        )
+
+    with pytest.raises(ValueError, match="invalid-discovery-status-projection"):
+        store.discovery_status(now_ms=1)
+
+
+def test_discovery_projection_write_failure_rolls_back_owner_mutation(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        con.execute(
+            "CREATE TRIGGER reject_discovery_projection BEFORE UPDATE "
+            "ON neg_risk_discovery_status_projection BEGIN "
+            "SELECT RAISE(ABORT,'reject discovery projection'); END"
+        )
+    group = GroupRevision.certified(
+        group_id="g-rollback",
+        event_id="e-rollback",
+        revision=1,
+        started_at_ms=1,
+        observed_at_ms=2,
+        source_cursor="rollback",
+        legs=(
+            GroupLeg("m-1", "c-1", "yes-1", "One"),
+            GroupLeg("m-2", "c-2", "yes-2", "Two"),
+        ),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="reject discovery projection"):
+        store.publish_group_revision(group)
+
+    assert store.current_group(group.group_id) is None
+
+
+def test_discovery_status_projection_honors_deadline(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    OpportunityPerceptionStore(db_path).init_schema()
+    expired = OpportunityPerceptionStore(db_path, deadline_monotonic=0)
+
+    with pytest.raises(TimeoutError, match="discovery-status-deadline"):
+        expired.discovery_status(now_ms=1)
 
 
 def test_discovery_checkpoint_segments_one_long_sweep_and_terminal_commits(

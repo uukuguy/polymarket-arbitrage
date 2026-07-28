@@ -26,7 +26,9 @@ wallet, signing, balances, orders, or real-money execution.
    exact. Once the live Quote/fact/receipt suffix crosses 8,000 rows, a fully
    validated prefix is atomically replaced by a versioned rolling checkpoint
    that binds its cumulative digest and the retained per-group seed rows.
-   Validation then checks the checkpoint and replays a bounded suffix. A
+   Validation then checks the checkpoint and replays a bounded suffix. Revoked
+   historical groups are committed by the prefix digest and evicted from the
+   live seed; current watching authority and its exact legs remain present. A
    10,010-success continuity test, checkpoint/suffix tampering, membership
    supersede across the boundary, and delete-failure rollback all pass.
    Valid count zero is `available/no-certified-edge`; corrupt Candidate or
@@ -41,8 +43,13 @@ wallet, signing, balances, orders, or real-money execution.
    digest. Reconciliation checkpoints every successfully published page and
    binds the exact window owner, staging digest/count, latest page receipt,
    seen cursors, cumulative page metrics and chained prefix digest before
-   pruning that page's receipt/sample rows in the same transaction. Status
-   validates each checkpoint and replays only the bounded suffix; checkpoint
+   pruning that page's receipt/sample rows in the same transaction. Discovery
+   status reads a hash-bound current-identity projection and trigger-maintained
+   attempt/breach counters instead of scanning Group revision, admission,
+   attempt, or Candidate fact lifecycles. Legal writers refresh it in their
+   owner transaction; raw/projection tampering and projection-write failure
+   fail closed. Status validates each checkpoint and replays only the bounded
+   suffix; checkpoint
    tampering, retained-prefix injection or prune failure fails closed.
    Validated legacy histories migrate atomically and idempotently, while
    histories that cannot prove the new checkpoint are not guessed or pruned.
@@ -86,10 +93,10 @@ Initial RED: 8 expected failures (404/auth/Make contracts)
 Four review-remediation rounds: all Important findings covered by adversarial tests
 Focused API/control: 41 pass
 Candidate/control/HTTP regression: pass
-Discovery + Reconciliation + migration checkpoint regression: 82 pass
-Perception package: 226 pass
-Full repository: 2642 collected; 2640 pass, 1 expected xfail, 1 skip
-Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> current 2642
+Discovery status/checkpoint regression: 62 pass
+Perception package: 238 pass
+Full repository: 2654 collected; 2652 pass, 1 expected xfail, 1 skip
+Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> 2642 -> current 2654
 Ruff changed scope: pass
 compileall: pass
 make docs-m1-check: pass

@@ -44,6 +44,8 @@ _DISCOVERY_AUTHORITY_VERSION = 1
 _DISCOVERY_AUTHORITY_COMPACT_HIGH_ROWS = 8_000
 _DISCOVERY_AUTHORITY_COMPACT_LOW_ROWS = 1_000
 _DISCOVERY_AUTHORITY_UNCOMPACTED_MAX_ROWS = 20_000
+_DISCOVERY_STATUS_PROJECTION_DOMAIN = "polyarb-discovery-status-projection-v1"
+_DISCOVERY_STATUS_PROJECTION_VERSION = 1
 _RECONCILIATION_AUTHORITY_DOMAIN = "polyarb-reconciliation-authority-checkpoint-v1"
 _RECONCILIATION_AUTHORITY_VERSION = 1
 _HEARTBEAT_AUTH_DOMAIN = "polyarb-producer-heartbeat-v1"
@@ -171,6 +173,35 @@ def discovery_authority_checkpoint_hash(
             "through_batch_id": through_batch_id,
             "through_evidence_id": through_evidence_id,
             "through_sample_id": through_sample_id,
+            "version": version,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+
+def discovery_status_projection_hash(
+    *,
+    domain: str,
+    version: int,
+    generation: int,
+    raw_authority_seq: int,
+    candidate_attempt_start_count: int,
+    candidate_start_deadline_breach_count: int,
+    projection_digest: str,
+) -> str:
+    payload = json.dumps(
+        {
+            "candidate_attempt_start_count": candidate_attempt_start_count,
+            "candidate_start_deadline_breach_count": (
+                candidate_start_deadline_breach_count
+            ),
+            "domain": domain,
+            "generation": generation,
+            "projection_digest": projection_digest,
+            "raw_authority_seq": raw_authority_seq,
             "version": version,
         },
         ensure_ascii=False,
@@ -1281,6 +1312,7 @@ class OpportunityPerceptionStore:
                     con,
                     window_id,
                 )
+            self._refresh_discovery_status_projection(con)
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
@@ -1442,6 +1474,7 @@ class OpportunityPerceptionStore:
                 recorded_at_ms=now_ms,
             )
             self._admit_waiting_candidates(con, now_ms=now_ms)
+            self._refresh_discovery_status_projection(con)
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
@@ -1630,6 +1663,7 @@ class OpportunityPerceptionStore:
                     len(promoted),
                 ),
             )
+            self._refresh_discovery_status_projection(con)
             self._compact_discovery_authority(con)
             con.execute("COMMIT")
             return tuple(group_id for _, group_id in promoted)
@@ -2444,6 +2478,267 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
 
+    @staticmethod
+    def _refresh_discovery_status_projection(con: sqlite3.Connection) -> None:
+        """Atomically materialize current Discovery identity and audit counters."""
+        previous = con.execute(
+            "SELECT generation FROM neg_risk_discovery_status_projection WHERE id=1"
+        ).fetchone()
+        schedule_rows = con.execute(
+            "SELECT * FROM neg_risk_group_schedule ORDER BY group_id"
+        ).fetchall()
+        fact_group_ids = {
+            str(row["group_id"])
+            for row in con.execute(
+                "SELECT DISTINCT group_id FROM neg_risk_candidate_watch_facts"
+            ).fetchall()
+        }
+        groups: list[dict[str, object]] = []
+        for schedule in schedule_rows:
+            group_id = str(schedule["group_id"])
+            current = con.execute(
+                "SELECT * FROM neg_risk_group_revisions WHERE group_id=? "
+                "ORDER BY revision DESC LIMIT 1",
+                (group_id,),
+            ).fetchone()
+            first_observed = (
+                None
+                if current is None
+                else con.execute(
+                    "SELECT MIN(observed_at_ms) FROM neg_risk_group_revisions "
+                    "WHERE group_id=? AND event_id=? AND membership_hash=? "
+                    "AND status='certified'",
+                    (
+                        group_id,
+                        str(current["event_id"]),
+                        str(current["membership_hash"]),
+                    ),
+                ).fetchone()[0]
+            )
+            admission = None
+            if schedule["promoted_at_ms"] is not None:
+                admission_row = con.execute(
+                    "SELECT * FROM neg_risk_candidate_admissions "
+                    "WHERE group_id=? AND event_id=? AND membership_hash=? "
+                    "AND promoted_at_ms=? AND candidate_start_deadline_at_ms=? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (
+                        group_id,
+                        str(schedule["event_id"]),
+                        str(schedule["membership_hash"]),
+                        int(schedule["promoted_at_ms"]),
+                        int(schedule["candidate_start_deadline_at_ms"]),
+                    ),
+                ).fetchone()
+                admission = None if admission_row is None else dict(admission_row)
+            groups.append(
+                {
+                    "admission": admission,
+                    "current": None if current is None else dict(current),
+                    "first_certified_observed_at_ms": first_observed,
+                    "group_id": group_id,
+                    "has_candidate_fact": group_id in fact_group_ids,
+                }
+            )
+        groups_json = json.dumps(
+            groups,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        projection_digest = (
+            f"sha256:{hashlib.sha256(groups_json.encode()).hexdigest()}"
+        )
+        guard = con.execute(
+            "SELECT * FROM neg_risk_discovery_status_raw_guard WHERE id=1"
+        ).fetchone()
+        if guard is None:
+            counters = con.execute(
+                "SELECT COUNT(*),COALESCE(SUM(deadline_breached),0) "
+                "FROM neg_risk_candidate_attempt_starts"
+            ).fetchone()
+            admission_count = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM neg_risk_candidate_admissions"
+                ).fetchone()[0]
+            )
+            con.execute(
+                "INSERT INTO neg_risk_discovery_status_raw_guard("
+                "id,authority_seq,candidate_attempt_start_count,"
+                "candidate_start_deadline_breach_count) VALUES(1,?,?,?)",
+                (
+                    admission_count + int(counters[0]),
+                    int(counters[0]),
+                    int(counters[1]),
+                ),
+            )
+            guard = con.execute(
+                "SELECT * FROM neg_risk_discovery_status_raw_guard WHERE id=1"
+            ).fetchone()
+        raw_authority_seq = int(guard["authority_seq"])
+        attempt_count = int(guard["candidate_attempt_start_count"])
+        breach_count = int(guard["candidate_start_deadline_breach_count"])
+        generation = 1 if previous is None else int(previous["generation"]) + 1
+        checkpoint_hash = discovery_status_projection_hash(
+            domain=_DISCOVERY_STATUS_PROJECTION_DOMAIN,
+            version=_DISCOVERY_STATUS_PROJECTION_VERSION,
+            generation=generation,
+            raw_authority_seq=raw_authority_seq,
+            candidate_attempt_start_count=attempt_count,
+            candidate_start_deadline_breach_count=breach_count,
+            projection_digest=projection_digest,
+        )
+        con.execute(
+            "INSERT INTO neg_risk_discovery_status_projection("
+            "id,domain,version,generation,raw_authority_seq,groups_json,"
+            "candidate_attempt_start_count,"
+            "candidate_start_deadline_breach_count,projection_digest,"
+            "checkpoint_hash) VALUES(1,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET domain=excluded.domain,"
+            "version=excluded.version,generation=excluded.generation,"
+            "raw_authority_seq=excluded.raw_authority_seq,"
+            "groups_json=excluded.groups_json,"
+            "candidate_attempt_start_count="
+            "excluded.candidate_attempt_start_count,"
+            "candidate_start_deadline_breach_count="
+            "excluded.candidate_start_deadline_breach_count,"
+            "projection_digest=excluded.projection_digest,"
+            "checkpoint_hash=excluded.checkpoint_hash",
+            (
+                _DISCOVERY_STATUS_PROJECTION_DOMAIN,
+                _DISCOVERY_STATUS_PROJECTION_VERSION,
+                generation,
+                raw_authority_seq,
+                groups_json,
+                attempt_count,
+                breach_count,
+                projection_digest,
+                checkpoint_hash,
+            ),
+        )
+
+    @staticmethod
+    def _validated_discovery_status_projection(
+        con: sqlite3.Connection,
+    ) -> tuple[
+        dict[str, sqlite3.Row | dict[str, object]],
+        dict[tuple[str, str, str], int],
+        list[dict[str, object]],
+        set[str],
+        dict[str, int],
+    ]:
+        row = con.execute(
+            "SELECT * FROM neg_risk_discovery_status_projection WHERE id=1"
+        ).fetchone()
+        if row is None:
+            raise ValueError("missing-discovery-status-projection")
+        try:
+            groups = json.loads(str(row["groups_json"]))
+            canonical = json.dumps(
+                groups,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            projection_digest = (
+                f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+            )
+            expected_hash = discovery_status_projection_hash(
+                domain=str(row["domain"]),
+                version=int(row["version"]),
+                generation=int(row["generation"]),
+                raw_authority_seq=int(row["raw_authority_seq"]),
+                candidate_attempt_start_count=int(
+                    row["candidate_attempt_start_count"]
+                ),
+                candidate_start_deadline_breach_count=int(
+                    row["candidate_start_deadline_breach_count"]
+                ),
+                projection_digest=str(row["projection_digest"]),
+            )
+            if (
+                row["domain"] != _DISCOVERY_STATUS_PROJECTION_DOMAIN
+                or int(row["version"]) != _DISCOVERY_STATUS_PROJECTION_VERSION
+                or int(row["generation"]) <= 0
+                or int(row["raw_authority_seq"]) < 0
+                or not isinstance(groups, list)
+                or canonical != str(row["groups_json"])
+                or not hmac.compare_digest(
+                    str(row["projection_digest"]),
+                    projection_digest,
+                )
+                or not hmac.compare_digest(
+                    str(row["checkpoint_hash"]),
+                    expected_hash,
+                )
+            ):
+                raise ValueError
+            current_revisions: dict[
+                str, sqlite3.Row | dict[str, object]
+            ] = {}
+            revision_identities: dict[tuple[str, str, str], int] = {}
+            admissions: list[dict[str, object]] = []
+            fact_group_ids: set[str] = set()
+            for item in groups:
+                if not isinstance(item, dict):
+                    raise ValueError
+                current = item["current"]
+                group_id = str(item["group_id"])
+                if current is not None and not isinstance(current, dict):
+                    raise ValueError
+                if current is not None:
+                    if (
+                        str(current["group_id"]) != group_id
+                        or group_id in current_revisions
+                    ):
+                        raise ValueError
+                    current_revisions[group_id] = current
+                first_observed = item["first_certified_observed_at_ms"]
+                if current is not None and first_observed is not None:
+                    revision_identities[
+                        (
+                            group_id,
+                            str(current["event_id"]),
+                            str(current["membership_hash"]),
+                        )
+                    ] = int(first_observed)
+                if bool(item["has_candidate_fact"]):
+                    fact_group_ids.add(group_id)
+                admission = item.get("admission")
+                if admission is not None:
+                    if not isinstance(admission, dict):
+                        raise ValueError
+                    admissions.append(admission)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("invalid-discovery-status-projection") from error
+        counters = {
+            "attempts": int(row["candidate_attempt_start_count"]),
+            "breaches": int(row["candidate_start_deadline_breach_count"]),
+        }
+        guard = con.execute(
+            "SELECT authority_seq,candidate_attempt_start_count,"
+            "candidate_start_deadline_breach_count "
+            "FROM neg_risk_discovery_status_raw_guard WHERE id=1"
+        ).fetchone()
+        if (
+            guard is None
+            or int(guard["authority_seq"]) != int(row["raw_authority_seq"])
+            or int(guard["candidate_attempt_start_count"]) != counters["attempts"]
+            or int(guard["candidate_start_deadline_breach_count"])
+            != counters["breaches"]
+            or counters["attempts"] < 0
+            or counters["breaches"] < 0
+            or counters["breaches"] > counters["attempts"]
+        ):
+            raise ValueError("invalid-discovery-status-projection")
+        return (
+            current_revisions,
+            revision_identities,
+            admissions,
+            fact_group_ids,
+            counters,
+        )
+
     def discovery_status(
         self,
         now_ms: int,
@@ -2455,6 +2750,7 @@ class OpportunityPerceptionStore:
         try:
             if owns_connection:
                 con.execute("BEGIN")
+            self._check_deadline("discovery-status-deadline")
             checkpoint = self._validated_discovery_checkpoint(con)
             through_batch_id = 0 if checkpoint is None else int(
                 checkpoint[0]["through_batch_id"]
@@ -2480,28 +2776,13 @@ class OpportunityPerceptionStore:
                 "SELECT MIN(COALESCE(last_visited_at_ms,first_discovered_at_ms)) "
                 "AS oldest FROM neg_risk_group_schedule"
             ).fetchone()
-            current_revisions = {
-                str(row["group_id"]): row
-                for row in con.execute(
-                    "SELECT r.* FROM neg_risk_group_revisions r JOIN ("
-                    "SELECT group_id,MAX(revision) AS revision "
-                    "FROM neg_risk_group_revisions GROUP BY group_id"
-                    ") c ON c.group_id=r.group_id AND c.revision=r.revision"
-                ).fetchall()
-            }
-            revision_identities = {
-                (
-                    str(row["group_id"]),
-                    str(row["event_id"]),
-                    str(row["membership_hash"]),
-                ): int(row["first_observed_at_ms"])
-                for row in con.execute(
-                    "SELECT group_id,event_id,membership_hash,"
-                    "MIN(observed_at_ms) AS first_observed_at_ms "
-                    "FROM neg_risk_group_revisions WHERE status='certified'"
-                    " GROUP BY group_id,event_id,membership_hash"
-                ).fetchall()
-            }
+            (
+                current_revisions,
+                revision_identities,
+                admissions,
+                fact_group_ids,
+                candidate_counters,
+            ) = self._validated_discovery_status_projection(con)
             suffix_batches = con.execute(
                 "SELECT * FROM neg_risk_discovery_batches WHERE id>? ORDER BY id",
                 (through_batch_id,),
@@ -2532,6 +2813,25 @@ class OpportunityPerceptionStore:
                 if checkpoint is None
                 else [*checkpoint[1]["evidence"], *suffix_evidence]
             )
+            for sample in batch_samples:
+                if sample["quality"] != "complete-supported":
+                    continue
+                identity = (
+                    str(sample["group_id"]),
+                    str(sample["event_id"]),
+                    str(sample["membership_hash"]),
+                )
+                if identity in revision_identities:
+                    continue
+                first_observed = con.execute(
+                    "SELECT MIN(observed_at_ms) "
+                    "FROM neg_risk_group_revisions "
+                    "WHERE group_id=? AND event_id=? AND membership_hash=? "
+                    "AND status='certified'",
+                    identity,
+                ).fetchone()[0]
+                if first_observed is not None:
+                    revision_identities[identity] = int(first_observed)
             latest_samples = [
                 row
                 for row in batch_samples
@@ -2545,27 +2845,6 @@ class OpportunityPerceptionStore:
             admission_row = con.execute(
                 "SELECT * FROM neg_risk_discovery_admission_state WHERE id=1"
             ).fetchone()
-            fact_group_ids = {
-                str(row["group_id"])
-                for row in con.execute(
-                    "SELECT DISTINCT group_id FROM neg_risk_candidate_watch_facts"
-                ).fetchall()
-            }
-            breach_fact_evidence = {
-                (str(row["group_id"]), int(row["observed_at_ms"]))
-                for row in con.execute(
-                    "SELECT group_id,observed_at_ms "
-                    "FROM neg_risk_candidate_watch_facts "
-                    "WHERE last_result='unavailable' "
-                    "AND reason='candidate-start-deadline-breached'"
-                ).fetchall()
-            }
-            attempt_starts = con.execute(
-                "SELECT * FROM neg_risk_candidate_attempt_starts ORDER BY id"
-            ).fetchall()
-            admissions = con.execute(
-                "SELECT * FROM neg_risk_candidate_admissions ORDER BY id"
-            ).fetchall()
             coverage = self._coverage_windows_in_snapshot(
                 con,
                 now_ms,
@@ -2585,8 +2864,8 @@ class OpportunityPerceptionStore:
                 load_row=load_row,
                 admission_row=admission_row,
                 fact_group_ids=fact_group_ids,
-                breach_fact_evidence=breach_fact_evidence,
-                attempt_starts=attempt_starts,
+                breach_fact_evidence=set(),
+                attempt_starts=[],
                 admissions=admissions,
                 coverage=coverage,
                 checkpointed_prefix=checkpoint is not None,
@@ -2647,11 +2926,9 @@ class OpportunityPerceptionStore:
                 for row in schedules
                 if row["promoted_at_ms"] is not None and str(row["group_id"]) not in fact_group_ids
             ),
-            candidate_attempt_start_count=len(attempt_starts),
-            candidate_start_deadline_breach_count=sum(
-                int(row["deadline_breached"]) for row in attempt_starts
-            ),
-            candidate_start_ready=not any(bool(row["deadline_breached"]) for row in attempt_starts),
+            candidate_attempt_start_count=candidate_counters["attempts"],
+            candidate_start_deadline_breach_count=candidate_counters["breaches"],
+            candidate_start_ready=candidate_counters["breaches"] == 0,
         )
 
     @staticmethod
@@ -4951,6 +5228,7 @@ class OpportunityPerceptionStore:
                     evidence,
                     result_revisions,
                 )
+            self._refresh_discovery_status_projection(con)
             result = self._reconciliation_diff_from_row(applied)
             con.execute("COMMIT")
             return result
@@ -4987,6 +5265,7 @@ class OpportunityPerceptionStore:
             self._insert_group_revision(con, revision, current_row)
             if candidate_checkpoint is not None:
                 self._refresh_candidate_checkpoint(con, candidate_checkpoint)
+            self._refresh_discovery_status_projection(con)
             self._compact_candidate_authority(con)
             con.execute("COMMIT")
         except BaseException:
@@ -5093,6 +5372,7 @@ class OpportunityPerceptionStore:
                 ),
             )
             self._admit_waiting_candidates(con, now_ms=observed_at_ms)
+            self._refresh_discovery_status_projection(con)
             self._compact_candidate_authority(con)
             con.execute("COMMIT")
             return fact
@@ -5170,6 +5450,7 @@ class OpportunityPerceptionStore:
                 next_due_at_ms=next_due_at_ms,
             )
             self._admit_waiting_candidates(con, now_ms=observed_at_ms)
+            self._refresh_discovery_status_projection(con)
             self._compact_candidate_authority(con)
             con.execute("COMMIT")
             return fact
@@ -5335,6 +5616,7 @@ class OpportunityPerceptionStore:
                     next_due_at_ms=started_at_ms + 60_000,
                 )
                 self._admit_waiting_candidates(con, now_ms=started_at_ms)
+            self._refresh_discovery_status_projection(con)
             con.execute("COMMIT")
             return fact
         except BaseException:

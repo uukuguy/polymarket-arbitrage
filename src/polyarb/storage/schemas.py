@@ -478,6 +478,73 @@ CREATE INDEX IF NOT EXISTS idx_neg_risk_candidate_admission_identity
   ON neg_risk_candidate_admissions(
     group_id,event_id,membership_hash,promoted_at_ms);
 
+CREATE TABLE IF NOT EXISTS neg_risk_discovery_status_projection (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  domain TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  raw_authority_seq INTEGER NOT NULL CHECK(raw_authority_seq >= 0),
+  groups_json TEXT NOT NULL,
+  candidate_attempt_start_count INTEGER NOT NULL CHECK(
+    candidate_attempt_start_count >= 0),
+  candidate_start_deadline_breach_count INTEGER NOT NULL CHECK(
+    candidate_start_deadline_breach_count >= 0),
+  projection_digest TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_discovery_status_raw_guard (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  authority_seq INTEGER NOT NULL CHECK(authority_seq >= 0),
+  candidate_attempt_start_count INTEGER NOT NULL CHECK(
+    candidate_attempt_start_count >= 0),
+  candidate_start_deadline_breach_count INTEGER NOT NULL CHECK(
+    candidate_start_deadline_breach_count >= 0)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_discovery_guard_admission_insert
+AFTER INSERT ON neg_risk_candidate_admissions BEGIN
+  UPDATE neg_risk_discovery_status_raw_guard
+  SET authority_seq=authority_seq+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_discovery_guard_admission_update
+AFTER UPDATE ON neg_risk_candidate_admissions BEGIN
+  UPDATE neg_risk_discovery_status_raw_guard
+  SET authority_seq=authority_seq+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_discovery_guard_admission_delete
+AFTER DELETE ON neg_risk_candidate_admissions BEGIN
+  UPDATE neg_risk_discovery_status_raw_guard
+  SET authority_seq=authority_seq+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_discovery_guard_attempt_insert
+AFTER INSERT ON neg_risk_candidate_attempt_starts BEGIN
+  UPDATE neg_risk_discovery_status_raw_guard SET
+    authority_seq=authority_seq+1,
+    candidate_attempt_start_count=candidate_attempt_start_count+1,
+    candidate_start_deadline_breach_count=
+      candidate_start_deadline_breach_count+NEW.deadline_breached
+  WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_discovery_guard_attempt_update
+AFTER UPDATE ON neg_risk_candidate_attempt_starts BEGIN
+  UPDATE neg_risk_discovery_status_raw_guard SET
+    authority_seq=authority_seq+1,
+    candidate_start_deadline_breach_count=
+      candidate_start_deadline_breach_count+
+      NEW.deadline_breached-OLD.deadline_breached
+  WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_discovery_guard_attempt_delete
+AFTER DELETE ON neg_risk_candidate_attempt_starts BEGIN
+  UPDATE neg_risk_discovery_status_raw_guard SET
+    authority_seq=authority_seq+1,
+    candidate_attempt_start_count=candidate_attempt_start_count-1,
+    candidate_start_deadline_breach_count=
+      candidate_start_deadline_breach_count-OLD.deadline_breached
+  WHERE id=1;
+END;
+
 -- Full Reconciliation is a checkpointed calibration window. Page receipts,
 -- staging samples, cursor advancement, completion and final diff publication
 -- are durable facts; incomplete windows never touch online group authority.
