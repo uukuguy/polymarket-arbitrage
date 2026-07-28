@@ -1216,28 +1216,59 @@ class OpportunityPerceptionStore:
                     "AND bs.quality IS NOT NULL"
                 )
             self._compact_discovery_authority(con)
-            latest_reconciliation = con.execute(
-                "SELECT id,baseline_digest FROM neg_risk_reconciliation_windows "
-                "ORDER BY rowid DESC LIMIT 1"
-            ).fetchone()
-            if (
-                latest_reconciliation is not None
-                and latest_reconciliation["baseline_digest"] is not None
-                and con.execute(
-                    "SELECT EXISTS(SELECT 1 FROM neg_risk_reconciliation_batches "
-                    "WHERE window_id=?) AND NOT EXISTS("
-                    "SELECT 1 FROM neg_risk_reconciliation_authority_checkpoints "
-                    "WHERE window_id=?)",
-                    (
-                        latest_reconciliation["id"],
-                        latest_reconciliation["id"],
-                    ),
-                ).fetchone()[0]
-            ):
-                self.current_reconciliation(_connection=con)
+            legacy_reconciliations = con.execute(
+                "SELECT w.* FROM neg_risk_reconciliation_windows w "
+                "WHERE w.baseline_digest IS NOT NULL "
+                "AND EXISTS(SELECT 1 FROM neg_risk_reconciliation_batches b "
+                "WHERE b.window_id=w.id) "
+                "AND NOT EXISTS("
+                "SELECT 1 FROM neg_risk_reconciliation_authority_checkpoints c "
+                "WHERE c.window_id=w.id) ORDER BY w.rowid"
+            ).fetchall()
+            for legacy_reconciliation in legacy_reconciliations:
+                window_id = str(legacy_reconciliation["id"])
+                receipts = con.execute(
+                    "SELECT * FROM neg_risk_reconciliation_batches "
+                    "WHERE window_id=? ORDER BY batch_sequence",
+                    (window_id,),
+                ).fetchall()
+                batch_samples = con.execute(
+                    "SELECT s.* FROM neg_risk_reconciliation_batch_samples s "
+                    "JOIN neg_risk_reconciliation_batches b ON b.id=s.batch_id "
+                    "WHERE b.window_id=? ORDER BY s.batch_id,s.group_id",
+                    (window_id,),
+                ).fetchall()
+                staged = con.execute(
+                    "SELECT * FROM neg_risk_reconciliation_staging "
+                    "WHERE window_id=? ORDER BY group_id",
+                    (window_id,),
+                ).fetchall()
+                baseline = con.execute(
+                    "SELECT * FROM neg_risk_reconciliation_baseline "
+                    "WHERE window_id=? ORDER BY group_id",
+                    (window_id,),
+                ).fetchall()
+                evidence = con.execute(
+                    "SELECT * FROM neg_risk_reconciliation_diff_evidence "
+                    "WHERE window_id=? ORDER BY group_id,action",
+                    (window_id,),
+                ).fetchall()
+                result_revisions = self._reconciliation_evidence_result_revisions(
+                    con,
+                    window_id,
+                )
+                self._validate_reconciliation_snapshot(
+                    legacy_reconciliation,
+                    receipts,
+                    batch_samples,
+                    staged,
+                    baseline,
+                    evidence,
+                    result_revisions,
+                )
                 self._checkpoint_reconciliation_authority(
                     con,
-                    str(latest_reconciliation["id"]),
+                    window_id,
                 )
             con.execute("COMMIT")
         except BaseException:
@@ -4013,11 +4044,13 @@ class OpportunityPerceptionStore:
             "SELECT "
             "(SELECT COUNT(*) FROM neg_risk_reconciliation_batches "
             " WHERE window_id=? AND batch_sequence<=?),"
-            "(SELECT COUNT(*) FROM neg_risk_reconciliation_batch_samples "
-            " WHERE batch_id<=?)",
+            "(SELECT COUNT(*) FROM neg_risk_reconciliation_batch_samples s "
+            " JOIN neg_risk_reconciliation_batches b ON b.id=s.batch_id "
+            " WHERE b.window_id=? AND s.batch_id<=?)",
             (
                 window["id"],
                 int(row["through_sequence"]),
+                window["id"],
                 int(row["through_batch_id"]),
             ),
         ).fetchone()
@@ -4660,6 +4693,7 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
+            candidate_checkpoint = self._validated_candidate_checkpoint(con)
             window = con.execute(
                 "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
                 (window_id,),
@@ -4872,6 +4906,9 @@ class OpportunityPerceptionStore:
                 (window_id,),
             ).fetchall()
             result_revisions = self._reconciliation_evidence_result_revisions(con, window_id)
+            if candidate_checkpoint is not None:
+                self._refresh_candidate_checkpoint(con, candidate_checkpoint)
+                self._validated_candidate_checkpoint(con)
             if checkpoint_before is None:
                 self._validate_reconciliation_snapshot(
                     applied,

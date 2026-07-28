@@ -12,7 +12,12 @@ from polyarb.cli_reconciliation import main as reconciliation_status_main
 from polyarb.clients.gamma_client import EventPage
 from polyarb.config import Settings
 from polyarb.perception.discovery import DiscoveryWorker
-from polyarb.perception.models import GroupLeg, GroupRevision
+from polyarb.perception.models import (
+    GroupLeg,
+    GroupQuoteBatch,
+    GroupQuoteLeg,
+    GroupRevision,
+)
 from polyarb.perception.reconciliation import (
     ReconciliationIncompleteError,
     ReconciliationRunner,
@@ -274,6 +279,100 @@ def _publish_empty_reconciliation_page(
     )
 
 
+def _publish_reconciliation_candidate_page(
+    store: OpportunityPerceptionStore,
+    *,
+    window_id: str,
+    group_id: str,
+    requested_cursor: str | None,
+    next_cursor: str,
+    started_at_ms: int,
+) -> None:
+    page = _page(
+        _event(f"e-{group_id}", group_id),
+        requested=requested_cursor,
+        next_cursor=next_cursor,
+        started=started_at_ms,
+        finished=started_at_ms + 10,
+    )
+    store.publish_reconciliation_batch(
+        window_id=window_id,
+        requested_cursor=requested_cursor,
+        next_cursor=next_cursor,
+        completed=False,
+        started_at_ms=started_at_ms,
+        finished_at_ms=started_at_ms + 10,
+        page_event_count=1,
+        candidates=DiscoveryWorker._normalize_page(page),
+    )
+
+
+def _complete_reconciliation(
+    store: OpportunityPerceptionStore,
+    *,
+    window_id: str,
+    requested_cursor: str,
+    started_at_ms: int,
+) -> None:
+    store.publish_reconciliation_batch(
+        window_id=window_id,
+        requested_cursor=requested_cursor,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=started_at_ms,
+        finished_at_ms=started_at_ms + 10,
+        page_event_count=0,
+        candidates=(),
+    )
+    store.apply_reconciliation_diff(window_id)
+
+
+def _seed_candidate_checkpoint(
+    store: OpportunityPerceptionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> GroupRevision:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        2,
+    )
+    group = _revision("candidate-owned", revision=1, observed_at_ms=1_000)
+    store.publish_group_revision(group)
+    for sequence in range(3):
+        quoted_at_ms = 2_000 + sequence
+        batch = GroupQuoteBatch.complete(
+            group_id=group.group_id,
+            membership_hash=group.membership_hash,
+            quote_batch_id=f"candidate-owned-{sequence}",
+            started_at_ms=quoted_at_ms - 1,
+            quoted_at_ms=quoted_at_ms,
+            legs=tuple(
+                GroupQuoteLeg(
+                    leg.yes_token_id,
+                    group.membership_hash,
+                    0.4 + index * 0.1,
+                    10.0,
+                    "executable",
+                )
+                for index, leg in enumerate(group.legs)
+            ),
+        )
+        store.publish_candidate_success(
+            batch,
+            observed_at_ms=quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="test",
+            next_due_at_ms=quoted_at_ms + 15_000,
+        )
+    return group
+
+
 def test_reconciliation_checkpoint_bounds_latest_window_page_history_reads(
     tmp_path: Path,
 ) -> None:
@@ -388,6 +487,192 @@ def test_reconciliation_checkpoint_legacy_upgrade_is_idempotent(
             "neg_risk_reconciliation_authority_checkpoints WHERE window_id=?",
             (window.id,),
         ).fetchone()[0] == 2
+
+
+def test_reconciliation_checkpoint_upgrades_two_legacy_windows_and_new_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path / "state.db")
+    monkeypatch.setattr(
+        store,
+        "_checkpoint_reconciliation_authority",
+        lambda *_args, **_kwargs: None,
+    )
+    first = store.begin_reconciliation(started_at_ms=100)
+    _publish_reconciliation_candidate_page(
+        store,
+        window_id=first.id,
+        group_id="legacy-one",
+        requested_cursor=None,
+        next_cursor="first-terminal",
+        started_at_ms=100,
+    )
+    _complete_reconciliation(
+        store,
+        window_id=first.id,
+        requested_cursor="first-terminal",
+        started_at_ms=120,
+    )
+    second = store.begin_reconciliation(started_at_ms=200)
+    _publish_reconciliation_candidate_page(
+        store,
+        window_id=second.id,
+        group_id="legacy-two",
+        requested_cursor=None,
+        next_cursor="second-terminal",
+        started_at_ms=200,
+    )
+    _complete_reconciliation(
+        store,
+        window_id=second.id,
+        requested_cursor="second-terminal",
+        started_at_ms=220,
+    )
+
+    restarted = OpportunityPerceptionStore(store.db_path)
+    restarted.init_schema()
+    restarted.init_schema()
+    with restarted._connect() as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_reconciliation_authority_checkpoints"
+        ).fetchone()[0] == 2
+
+    third = restarted.begin_reconciliation(started_at_ms=300)
+    _publish_reconciliation_candidate_page(
+        restarted,
+        window_id=third.id,
+        group_id="new-window",
+        requested_cursor=None,
+        next_cursor="third-terminal",
+        started_at_ms=300,
+    )
+    assert restarted.current_reconciliation().pages_completed == 1
+    with restarted._connect() as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_reconciliation_authority_checkpoints"
+        ).fetchone()[0] == 3
+
+
+def test_apply_reconciliation_rejects_corrupt_candidate_checkpoint_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path / "state.db")
+    group = _seed_candidate_checkpoint(store, monkeypatch)
+    window = store.begin_reconciliation(started_at_ms=10_000)
+    store.publish_reconciliation_batch(
+        window_id=window.id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=10_000,
+        finished_at_ms=10_010,
+        page_event_count=0,
+        candidates=(),
+    )
+    with store._connect() as con:
+        before = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_group_revisions"
+        ).fetchone()[0]
+        con.execute(
+            "UPDATE neg_risk_candidate_authority_checkpoints "
+            "SET checkpoint_hash='sha256:tampered' WHERE id=1"
+        )
+
+    with pytest.raises(ValueError, match="invalid-candidate-authority-checkpoint"):
+        store.apply_reconciliation_diff(window.id)
+
+    with store._connect() as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_group_revisions"
+        ).fetchone()[0] == before
+        assert con.execute(
+            "SELECT status FROM neg_risk_reconciliation_windows WHERE id=?",
+            (window.id,),
+        ).fetchone()[0] == "complete"
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_reconciliation_diff_evidence "
+            "WHERE window_id=?",
+            (window.id,),
+        ).fetchone()[0] == 0
+    assert store.current_group(group.group_id).status == "certified"
+
+
+def test_apply_reconciliation_refreshes_candidate_checkpoint_after_group_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path / "state.db")
+    group = _seed_candidate_checkpoint(store, monkeypatch)
+    window = store.begin_reconciliation(started_at_ms=10_000)
+    store.publish_reconciliation_batch(
+        window_id=window.id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=10_000,
+        finished_at_ms=10_010,
+        page_event_count=0,
+        candidates=(),
+    )
+    with store._connect() as con:
+        generation = con.execute(
+            "SELECT generation FROM neg_risk_candidate_authority_checkpoints WHERE id=1"
+        ).fetchone()[0]
+
+    store.apply_reconciliation_diff(window.id)
+
+    assert store.current_group(group.group_id).status == "closed"
+    assert store.validated_candidate_opportunity_count() == 0
+    with store._connect() as con:
+        assert con.execute(
+            "SELECT generation FROM neg_risk_candidate_authority_checkpoints WHERE id=1"
+        ).fetchone()[0] > generation
+
+
+def test_apply_reconciliation_candidate_checkpoint_refresh_failure_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path / "state.db")
+    group = _seed_candidate_checkpoint(store, monkeypatch)
+    window = store.begin_reconciliation(started_at_ms=10_000)
+    store.publish_reconciliation_batch(
+        window_id=window.id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=10_000,
+        finished_at_ms=10_010,
+        page_event_count=0,
+        candidates=(),
+    )
+    with store._connect() as con:
+        con.execute(
+            "CREATE TRIGGER reject_candidate_checkpoint_refresh BEFORE UPDATE "
+            "ON neg_risk_candidate_authority_checkpoints BEGIN "
+            "SELECT RAISE(ABORT,'reject candidate checkpoint refresh'); END"
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="reject candidate checkpoint refresh",
+    ):
+        store.apply_reconciliation_diff(window.id)
+
+    assert store.current_group(group.group_id).status == "certified"
+    assert store.validated_candidate_opportunity_count() == 1
+    with store._connect() as con:
+        assert con.execute(
+            "SELECT status FROM neg_risk_reconciliation_windows WHERE id=?",
+            (window.id,),
+        ).fetchone()[0] == "complete"
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_reconciliation_diff_evidence "
+            "WHERE window_id=?",
+            (window.id,),
+        ).fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
