@@ -133,7 +133,24 @@ def test_candidate_watcher_controller_settings_are_explicit_and_off_by_default()
     assert settings.candidate_selection_budget_s == 6
     assert settings.candidate_source_max_groups == 500
     assert settings.candidate_terminal_write_budget_s == 5
+    assert settings.candidate_attempt_start_write_budget_s == 5
     assert settings.discovery_effective_start_bound_ms == 47_000
+
+
+def test_discovery_capacity_charges_every_attempt_start_write() -> None:
+    settings = Settings(
+        candidate_scheduler_poll_s=1,
+        candidate_selection_budget_s=1,
+        candidate_group_timeout_s=10,
+        candidate_terminal_write_budget_s=5,
+        candidate_attempt_start_write_budget_s=5,
+        candidate_high_burst_groups=1,
+        candidate_reserved_non_high_slots=3,
+        discovery_candidate_max_wait_s=60,
+    )
+
+    assert settings.discovery_effective_admission_capacity == 2
+    assert settings.discovery_effective_start_bound_ms == 42_000
 
 
 @pytest.mark.parametrize(
@@ -164,6 +181,7 @@ def test_candidate_watcher_controller_settings_are_explicit_and_off_by_default()
         {"candidate_selection_budget_s": float("inf")},
         {"candidate_source_max_groups": 0},
         {"candidate_terminal_write_budget_s": 4.999},
+        {"candidate_attempt_start_write_budget_s": 4.999},
         {
             "candidate_group_timeout_s": 30,
             "candidate_high_burst_groups": 2,

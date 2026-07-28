@@ -323,6 +323,11 @@ CREATE TABLE IF NOT EXISTS neg_risk_discovery_batches (
 CREATE TABLE IF NOT EXISTS neg_risk_discovery_batch_samples (
   batch_id INTEGER NOT NULL,
   group_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  membership_hash TEXT NOT NULL,
+  quality TEXT NOT NULL CHECK(quality IN
+    ('complete-supported','complete-unsupported','incomplete-source')),
+  reason TEXT,
   liquidity_weight TEXT NOT NULL,
   promoted INTEGER NOT NULL CHECK(promoted IN (0,1)),
   PRIMARY KEY(batch_id, group_id)
@@ -348,6 +353,8 @@ CREATE TABLE IF NOT EXISTS neg_risk_discovery_admission_state (
   group_timeout_ms INTEGER NOT NULL CHECK(group_timeout_ms > 0),
   terminal_write_budget_ms INTEGER NOT NULL CHECK(
     terminal_write_budget_ms >= 5000),
+  attempt_start_write_budget_ms INTEGER NOT NULL CHECK(
+    attempt_start_write_budget_ms >= 5000),
   high_burst_groups INTEGER NOT NULL CHECK(high_burst_groups > 0),
   reserved_non_high_slots INTEGER NOT NULL CHECK(reserved_non_high_slots > 0),
   effective_start_bound_ms INTEGER,
@@ -357,6 +364,11 @@ CREATE TABLE IF NOT EXISTS neg_risk_discovery_admission_state (
 CREATE TABLE IF NOT EXISTS neg_risk_candidate_attempt_starts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   group_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  membership_hash TEXT NOT NULL,
+  promoted_at_ms INTEGER NOT NULL CHECK(promoted_at_ms >= 0),
+  candidate_max_wait_ms INTEGER NOT NULL CHECK(
+    candidate_max_wait_ms > 0 AND candidate_max_wait_ms <= 60000),
   started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
   candidate_start_deadline_at_ms INTEGER NOT NULL CHECK(
     candidate_start_deadline_at_ms >= 0),

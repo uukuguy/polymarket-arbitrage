@@ -25,6 +25,11 @@ from polyarb.storage.schemas import DDL
 
 _BUSY_TIMEOUT_MS = 5_000
 _GROUP_STATUSES = {"discovered", "certified", "stale", "invalidated", "closed"}
+_ACTUAL_CANDIDATE_AUTHORITY_SQL = (
+    "(s.group_id IS NULL OR s.promoted_at_ms IS NOT NULL OR EXISTS ("
+    "SELECT 1 FROM neg_risk_candidate_watch_facts f "
+    "WHERE f.group_id=c.group_id))"
+)
 
 DiscoveryQuality = Literal[
     "complete-supported",
@@ -72,6 +77,15 @@ class GroupSchedule:
 
 
 @dataclass(frozen=True)
+class CandidateAdmissionContext:
+    group_id: str
+    event_id: str
+    membership_hash: str
+    promoted_at_ms: int
+    candidate_start_deadline_at_ms: int
+
+
+@dataclass(frozen=True)
 class DiscoveryAdmissionProof:
     effective_capacity: int
     candidate_max_wait_ms: int
@@ -81,6 +95,7 @@ class DiscoveryAdmissionProof:
     terminal_write_budget_ms: int
     high_burst_groups: int
     reserved_non_high_slots: int
+    attempt_start_write_budget_ms: int = 5_000
 
     @property
     def effective_start_bound_ms(self) -> int | None:
@@ -89,7 +104,7 @@ class DiscoveryAdmissionProof:
         return (
             self.poll_interval_ms
             + self.selection_budget_ms
-            + self.terminal_write_budget_ms
+            + self.effective_capacity * self.attempt_start_write_budget_ms
             + (
                 self.high_burst_groups
                 + self.effective_capacity
@@ -106,6 +121,7 @@ class DiscoveryAdmissionProof:
             or self.poll_interval_ms <= 0
             or self.group_timeout_ms <= 0
             or self.terminal_write_budget_ms < _BUSY_TIMEOUT_MS
+            or self.attempt_start_write_budget_ms < _BUSY_TIMEOUT_MS
             or self.high_burst_groups <= 0
             or self.reserved_non_high_slots <= 0
             or self.effective_capacity > self.reserved_non_high_slots
@@ -220,6 +236,35 @@ class OpportunityPerceptionStore:
                 (
                     "neg_risk_discovery_admission_state",
                     "terminal_write_budget_ms",
+                    "INTEGER NOT NULL DEFAULT 5000",
+                ),
+                ("neg_risk_candidate_attempt_starts", "event_id", "TEXT"),
+                (
+                    "neg_risk_candidate_attempt_starts",
+                    "membership_hash",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_candidate_attempt_starts",
+                    "promoted_at_ms",
+                    "INTEGER",
+                ),
+                (
+                    "neg_risk_candidate_attempt_starts",
+                    "candidate_max_wait_ms",
+                    "INTEGER",
+                ),
+                ("neg_risk_discovery_batch_samples", "event_id", "TEXT"),
+                (
+                    "neg_risk_discovery_batch_samples",
+                    "membership_hash",
+                    "TEXT",
+                ),
+                ("neg_risk_discovery_batch_samples", "quality", "TEXT"),
+                ("neg_risk_discovery_batch_samples", "reason", "TEXT"),
+                (
+                    "neg_risk_discovery_admission_state",
+                    "attempt_start_write_budget_ms",
                     "INTEGER NOT NULL DEFAULT 5000",
                 ),
             )
@@ -534,12 +579,16 @@ class OpportunityPerceptionStore:
             batch_id = int(receipt.lastrowid)
             con.executemany(
                 "INSERT INTO neg_risk_discovery_batch_samples("
-                "batch_id,group_id,liquidity_weight,promoted"
-                ") VALUES (?,?,?,?)",
+                "batch_id,group_id,event_id,membership_hash,quality,reason,"
+                "liquidity_weight,promoted) VALUES (?,?,?,?,?,?,?,?)",
                 [
                     (
                         batch_id,
                         candidate.group_id,
+                        candidate.event_id,
+                        candidate.membership_hash,
+                        candidate.quality,
+                        candidate.reason,
                         str(candidate.liquidity_weight),
                         int(candidate.group_id in promoted_ids),
                     )
@@ -588,15 +637,16 @@ class OpportunityPerceptionStore:
             "INSERT INTO neg_risk_discovery_admission_state("
             "id,effective_capacity,candidate_max_wait_ms,poll_interval_ms,"
             "selection_budget_ms,group_timeout_ms,terminal_write_budget_ms,"
-            "high_burst_groups,reserved_non_high_slots,"
+            "attempt_start_write_budget_ms,high_burst_groups,reserved_non_high_slots,"
             "effective_start_bound_ms,updated_at_ms"
-            ") VALUES (1,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            ") VALUES (1,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
             "effective_capacity=excluded.effective_capacity,"
             "candidate_max_wait_ms=excluded.candidate_max_wait_ms,"
             "poll_interval_ms=excluded.poll_interval_ms,"
             "selection_budget_ms=excluded.selection_budget_ms,"
             "group_timeout_ms=excluded.group_timeout_ms,"
             "terminal_write_budget_ms=excluded.terminal_write_budget_ms,"
+            "attempt_start_write_budget_ms=excluded.attempt_start_write_budget_ms,"
             "high_burst_groups=excluded.high_burst_groups,"
             "reserved_non_high_slots=excluded.reserved_non_high_slots,"
             "effective_start_bound_ms=excluded.effective_start_bound_ms,"
@@ -608,6 +658,7 @@ class OpportunityPerceptionStore:
                 proof.selection_budget_ms,
                 proof.group_timeout_ms,
                 proof.terminal_write_budget_ms,
+                proof.attempt_start_write_budget_ms,
                 proof.high_burst_groups,
                 proof.reserved_non_high_slots,
                 proof.effective_start_bound_ms,
@@ -628,6 +679,9 @@ class OpportunityPerceptionStore:
             terminal_write_budget_ms=int(row["terminal_write_budget_ms"]),
             high_burst_groups=int(row["high_burst_groups"]),
             reserved_non_high_slots=int(row["reserved_non_high_slots"]),
+            attempt_start_write_budget_ms=int(
+                row["attempt_start_write_budget_ms"]
+            ),
         )
 
     @staticmethod
@@ -641,6 +695,7 @@ class OpportunityPerceptionStore:
                 proof.poll_interval_ms,
                 proof.group_timeout_ms,
                 proof.terminal_write_budget_ms,
+                proof.attempt_start_write_budget_ms,
                 proof.high_burst_groups,
             )
         return (
@@ -649,6 +704,7 @@ class OpportunityPerceptionStore:
             int(proof["poll_interval_ms"]),
             int(proof["group_timeout_ms"]),
             int(proof["terminal_write_budget_ms"]),
+            int(proof["attempt_start_write_budget_ms"]),
             int(proof["high_burst_groups"]),
         )
 
@@ -1010,10 +1066,8 @@ class OpportunityPerceptionStore:
                 ") c ON c.group_id=r.group_id AND c.revision=r.revision"
                 ") SELECT c.group_id FROM current c "
                 "LEFT JOIN neg_risk_group_schedule s ON s.group_id=c.group_id "
-                "WHERE c.status='certified' AND ("
-                "s.promoted_at_ms IS NOT NULL OR EXISTS ("
-                "SELECT 1 FROM neg_risk_candidate_watch_facts f "
-                "WHERE f.group_id=c.group_id)) "
+                "WHERE c.status='certified' AND "
+                f"{_ACTUAL_CANDIDATE_AUTHORITY_SQL} "
                 "ORDER BY (s.promoted_at_ms IS NOT NULL) DESC,"
                 "CAST(COALESCE(s.priority_score,'0') AS REAL) DESC,c.group_id"
             ).fetchall()
@@ -1063,6 +1117,19 @@ class OpportunityPerceptionStore:
                     ") c ON c.group_id=r.group_id AND c.revision=r.revision"
                 ).fetchall()
             }
+            revision_identities = {
+                (
+                    str(row["group_id"]),
+                    str(row["event_id"]),
+                    str(row["membership_hash"]),
+                ): int(row["first_observed_at_ms"])
+                for row in con.execute(
+                    "SELECT group_id,event_id,membership_hash,"
+                    "MIN(observed_at_ms) AS first_observed_at_ms "
+                    "FROM neg_risk_group_revisions"
+                    " GROUP BY group_id,event_id,membership_hash"
+                ).fetchall()
+            }
             batches = con.execute(
                 "SELECT * FROM neg_risk_discovery_batches ORDER BY id"
             ).fetchall()
@@ -1092,6 +1159,15 @@ class OpportunityPerceptionStore:
                     "FROM neg_risk_candidate_watch_facts"
                 ).fetchall()
             }
+            breach_fact_evidence = {
+                (str(row["group_id"]), int(row["observed_at_ms"]))
+                for row in con.execute(
+                    "SELECT group_id,observed_at_ms "
+                    "FROM neg_risk_candidate_watch_facts "
+                    "WHERE last_result='unavailable' "
+                    "AND reason='candidate-start-deadline-breached'"
+                ).fetchall()
+            }
             attempt_starts = con.execute(
                 "SELECT * FROM neg_risk_candidate_attempt_starts ORDER BY id"
             ).fetchall()
@@ -1100,6 +1176,7 @@ class OpportunityPerceptionStore:
                 state=state,
                 schedules=schedules,
                 current_revisions=current_revisions,
+                revision_identities=revision_identities,
                 batches=batches,
                 batch_samples=batch_samples,
                 latest_batch=latest_batch,
@@ -1107,6 +1184,7 @@ class OpportunityPerceptionStore:
                 load_row=load_row,
                 admission_row=admission_row,
                 fact_group_ids=fact_group_ids,
+                breach_fact_evidence=breach_fact_evidence,
                 attempt_starts=attempt_starts,
                 coverage=coverage,
             )
@@ -1238,6 +1316,7 @@ class OpportunityPerceptionStore:
         state: sqlite3.Row | None,
         schedules: list[sqlite3.Row],
         current_revisions: dict[str, sqlite3.Row],
+        revision_identities: dict[tuple[str, str, str], int],
         batches: list[sqlite3.Row],
         batch_samples: list[sqlite3.Row],
         latest_batch: sqlite3.Row | None,
@@ -1245,6 +1324,7 @@ class OpportunityPerceptionStore:
         load_row: sqlite3.Row | None,
         admission_row: sqlite3.Row | None,
         fact_group_ids: set[str],
+        breach_fact_evidence: set[tuple[str, int]],
         attempt_starts: list[sqlite3.Row],
         coverage: CoverageWindows,
     ) -> None:
@@ -1327,13 +1407,75 @@ class OpportunityPerceptionStore:
                 != int(batch["promoted_count"])
             ):
                 raise ValueError("invalid-discovery-historical-sample-count")
+            for sample in samples:
+                try:
+                    weight = Decimal(str(sample["liquidity_weight"]))
+                except Exception as error:
+                    raise ValueError(
+                        "invalid-discovery-historical-sample"
+                    ) from error
+                quality = sample["quality"]
+                reason = sample["reason"]
+                identity = (
+                    str(sample["group_id"]),
+                    str(sample["event_id"]),
+                    str(sample["membership_hash"]),
+                )
+                if (
+                    not weight.is_finite()
+                    or weight < 0
+                    or quality
+                    not in {
+                        "complete-supported",
+                        "complete-unsupported",
+                        "incomplete-source",
+                    }
+                    or identity not in revision_identities
+                    or revision_identities[identity]
+                    > int(batch["finished_at_ms"])
+                    or (
+                        bool(sample["promoted"])
+                        and quality != "complete-supported"
+                    )
+                    or (
+                        quality == "complete-supported"
+                        and reason is not None
+                    )
+                    or (
+                        quality != "complete-supported"
+                        and (reason is None or not str(reason))
+                    )
+                ):
+                    raise ValueError("invalid-discovery-historical-sample")
             previous = batch
         if samples_by_batch:
             raise ValueError("orphan-discovery-batch-sample")
         for attempt in attempt_starts:
-            if bool(attempt["deadline_breached"]) != (
+            identity = (
+                str(attempt["group_id"]),
+                str(attempt["event_id"]),
+                str(attempt["membership_hash"]),
+            )
+            if (
+                identity not in revision_identities
+                or attempt["promoted_at_ms"] is None
+                or attempt["candidate_max_wait_ms"] is None
+                or not 0 < int(attempt["candidate_max_wait_ms"]) <= 60_000
+                or int(attempt["candidate_start_deadline_at_ms"])
+                != int(attempt["promoted_at_ms"])
+                + int(attempt["candidate_max_wait_ms"])
+                or bool(attempt["deadline_breached"]) != (
                 int(attempt["started_at_ms"])
                 > int(attempt["candidate_start_deadline_at_ms"])
+                )
+                or (
+                    bool(attempt["deadline_breached"])
+                    and (
+                        str(attempt["group_id"]),
+                        int(attempt["started_at_ms"]),
+                    )
+                    not in breach_fact_evidence
+                )
             ):
                 raise ValueError("invalid-candidate-attempt-start-receipt")
         admission_proof: DiscoveryAdmissionProof | None = None
@@ -1399,19 +1541,6 @@ class OpportunityPerceptionStore:
                 raise ValueError("discovery-receipt-promotion-count-mismatch")
         elif latest_batch is not None or latest_samples:
             raise ValueError("orphan-discovery-batch-receipt")
-        schedules_by_id = {str(row["group_id"]): row for row in schedules}
-        for sample in latest_samples:
-            schedule = schedules_by_id.get(str(sample["group_id"]))
-            if (
-                schedule is None
-                or Decimal(str(sample["liquidity_weight"]))
-                != Decimal(str(schedule["liquidity_weight"]))
-                or (
-                    bool(sample["promoted"])
-                    and schedule["promoted_at_ms"] is None
-                )
-            ):
-                raise ValueError("invalid-discovery-receipt-sample")
         for row in schedules:
             decimals = {
                 name: Decimal(str(row[name]))
@@ -1591,10 +1720,8 @@ class OpportunityPerceptionStore:
                 " AND q.membership_hash=c.membership_hash "
                 " AND q.status='complete' AND q.quoted_at_ms<=?) AS quoted_at_ms "
                 "FROM current c LEFT JOIN neg_risk_group_schedule s "
-                "ON s.group_id=c.group_id WHERE c.status='certified' "
-                "AND (s.group_id IS NULL OR s.promoted_at_ms IS NOT NULL "
-                "OR EXISTS (SELECT 1 FROM neg_risk_candidate_watch_facts f "
-                "WHERE f.group_id=c.group_id)) "
+                "ON s.group_id=c.group_id WHERE c.status='certified' AND "
+                f"{_ACTUAL_CANDIDATE_AUTHORITY_SQL} "
                 "ORDER BY c.group_id",
                 (now_ms,),
             ).fetchall()
@@ -1933,9 +2060,9 @@ class OpportunityPerceptionStore:
     def record_candidate_attempt_start(
         self,
         *,
-        group_id: str,
+        admission: CandidateAdmissionContext,
         clock_ms: Callable[[], int],
-    ) -> bool:
+    ) -> CandidateWatchFact | None:
         """Atomically prove an admitted first start or persist its breach fact."""
         con = self._connect()
         try:
@@ -1943,32 +2070,61 @@ class OpportunityPerceptionStore:
             started_at_ms = clock_ms()
             schedule = con.execute(
                 "SELECT * FROM neg_risk_group_schedule WHERE group_id=?",
-                (group_id,),
+                (admission.group_id,),
             ).fetchone()
             if (
                 schedule is None
-                or schedule["promoted_at_ms"] is None
-                or schedule["candidate_start_deadline_at_ms"] is None
+                or str(schedule["event_id"]) != admission.event_id
+                or str(schedule["membership_hash"]) != admission.membership_hash
+                or schedule["promoted_at_ms"] != admission.promoted_at_ms
+                or schedule["candidate_start_deadline_at_ms"]
+                != admission.candidate_start_deadline_at_ms
             ):
-                raise ValueError("candidate-attempt-start-without-admission")
-            deadline = int(schedule["candidate_start_deadline_at_ms"])
+                raise ValueError("candidate-attempt-start-admission-mismatch")
+            current = self._current_group_row(con, admission.group_id)
+            if (
+                current is None
+                or str(current["status"]) != "certified"
+                or str(current["event_id"]) != admission.event_id
+                or str(current["membership_hash"]) != admission.membership_hash
+            ):
+                raise ValueError("candidate-attempt-start-authority-mismatch")
+            deadline = admission.candidate_start_deadline_at_ms
+            proof = con.execute(
+                "SELECT candidate_max_wait_ms "
+                "FROM neg_risk_discovery_admission_state WHERE id=1"
+            ).fetchone()
+            if (
+                proof is None
+                or deadline
+                != admission.promoted_at_ms + int(proof["candidate_max_wait_ms"])
+            ):
+                raise ValueError("candidate-attempt-start-deadline-mismatch")
+            candidate_max_wait_ms = int(proof["candidate_max_wait_ms"])
             breached = started_at_ms > deadline
             con.execute(
                 "INSERT INTO neg_risk_candidate_attempt_starts("
-                "group_id,started_at_ms,candidate_start_deadline_at_ms,"
-                "deadline_breached) VALUES (?,?,?,?)",
-                (group_id, started_at_ms, deadline, int(breached)),
+                "group_id,event_id,membership_hash,promoted_at_ms,"
+                "candidate_max_wait_ms,started_at_ms,"
+                "candidate_start_deadline_at_ms,deadline_breached"
+                ") VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    admission.group_id,
+                    admission.event_id,
+                    admission.membership_hash,
+                    admission.promoted_at_ms,
+                    candidate_max_wait_ms,
+                    started_at_ms,
+                    deadline,
+                    int(breached),
+                ),
             )
+            fact: CandidateWatchFact | None = None
             if breached:
-                current = self._current_group_row(con, group_id)
-                self._insert_candidate_watch_fact(
+                fact = self._insert_candidate_watch_fact(
                     con,
-                    group_id=group_id,
-                    membership_hash=(
-                        None
-                        if current is None
-                        else str(current["membership_hash"])
-                    ),
+                    group_id=admission.group_id,
+                    membership_hash=admission.membership_hash,
                     quote_batch_id=None,
                     observed_at_ms=started_at_ms,
                     last_result="unavailable",
@@ -1984,7 +2140,7 @@ class OpportunityPerceptionStore:
                 )
                 self._admit_waiting_candidates(con, now_ms=started_at_ms)
             con.execute("COMMIT")
-            return not breached
+            return fact
         except BaseException:
             if con.in_transaction:
                 con.execute("ROLLBACK")

@@ -22,6 +22,7 @@ from polyarb.perception.models import (
     GroupRevision,
 )
 from polyarb.perception.store import (
+    CandidateAdmissionContext,
     CandidateSchedulingSnapshotItem,
     DiscoveryAdmissionProof,
     OpportunityPerceptionStore,
@@ -305,7 +306,29 @@ class CandidateWatcher:
         group_id: str,
         *,
         priority_hint: CandidatePriority = "high",
+        admission_context: CandidateAdmissionContext | None = None,
     ) -> CandidateObservation:
+        if admission_context is not None:
+            if admission_context.group_id != group_id:
+                raise ValueError("candidate-admission-group-mismatch")
+            breach = await self._commit_attempt_start(admission_context)
+            if breach is not None:
+                return CandidateObservation(
+                    group_id=breach.group_id,
+                    membership_hash=breach.membership_hash,
+                    quote_batch_id=breach.quote_batch_id,
+                    status=breach.last_result,
+                    reason=breach.reason,
+                    bundle_cost=breach.bundle_cost,
+                    gross_edge_bps=breach.gross_edge_bps,
+                    max_bundle_size=breach.max_bundle_size,
+                    observed_at_ms=breach.observed_at_ms,
+                    priority_class=breach.priority_class,
+                    consecutive_failures=breach.consecutive_failures,
+                    effective_interval_s=breach.effective_interval_s,
+                    next_due_at_ms=breach.next_due_at_ms,
+                    schedule_reason=breach.schedule_reason,
+                )
         started_at_ms = self._clock_ms()
         observed_at_ms: int | None = None
         before: GroupRevision | None = None
@@ -529,6 +552,35 @@ class CandidateWatcher:
             raise cancellation
         return fact
 
+    async def _commit_attempt_start(
+        self,
+        admission: CandidateAdmissionContext,
+    ) -> CandidateWatchFact | None:
+        """Make run entry durable before any Structure or book I/O."""
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self._store.record_candidate_attempt_start,
+                admission=admission,
+                clock_ms=self._clock_ms,
+            )
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                fact = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as error:
+                if cancellation is None:
+                    cancellation = error
+                if task.done():
+                    fact = task.result()
+                    break
+        if fact is not None:
+            self._runtime.record(fact)
+        if cancellation is not None:
+            raise cancellation
+        return fact
+
     async def record_timeout(self, group_id: str) -> None:
         """Persist an explicit unavailable transition for a bounded group timeout."""
         await self._record_unavailable(
@@ -614,10 +666,6 @@ class CandidateWatcherScheduler:
             max_workers=1,
             thread_name_prefix="candidate-selection",
         )
-        self._control_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="candidate-control-write",
-        )
         self._reserved_lane_cursor = 0
         self._close_callbacks = tuple(close_callbacks)
         self._closed = False
@@ -648,7 +696,6 @@ class CandidateWatcherScheduler:
             or terminal_write_budget_s < 5
         ):
             self._selection_executor.shutdown(wait=False, cancel_futures=True)
-            self._control_executor.shutdown(wait=False, cancel_futures=True)
             raise ValueError("invalid-candidate-scheduler-controller-input")
 
     @property
@@ -667,6 +714,7 @@ class CandidateWatcherScheduler:
         now_ms = self._clock_ms()
         due: list[tuple[int, int, str]] = []
         admitted_group_ids: set[str] = set()
+        admission_contexts: dict[str, CandidateAdmissionContext] = {}
         rank = {"high": 0, "normal": 1, "explore": 2}
         for item in selection:
             group_id = item.group_id
@@ -685,6 +733,15 @@ class CandidateWatcherScheduler:
                     ):
                         continue
                     admitted_group_ids.add(group_id)
+                    admission_contexts[group_id] = CandidateAdmissionContext(
+                        group_id=group_id,
+                        event_id=schedule.event_id,
+                        membership_hash=schedule.membership_hash,
+                        promoted_at_ms=schedule.promoted_at_ms,
+                        candidate_start_deadline_at_ms=(
+                            schedule.candidate_start_deadline_at_ms
+                        ),
+                    )
                     score_order = (
                         schedule.candidate_start_deadline_at_ms * 1_000_000
                         - int(schedule.priority_score * 1_000)
@@ -707,27 +764,13 @@ class CandidateWatcherScheduler:
             due,
             admitted_group_ids=admitted_group_ids,
         ):
-            if group_id in admitted_group_ids:
-                allowed = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._control_executor,
-                        lambda selected_group_id=group_id: (
-                            self._store.record_candidate_attempt_start(
-                                group_id=selected_group_id,
-                                clock_ms=self._clock_ms,
-                            )
-                        ),
-                    ),
-                    timeout=self._terminal_write_budget_s,
-                )
-                if not allowed:
-                    continue
             before_count = self._runtime.snapshot().attempt_count
             try:
                 await asyncio.wait_for(
                     self._watcher.run_once(
                         group_id,
                         priority_hint=priority_by_rank[rank_value],
+                        admission_context=admission_contexts.get(group_id),
                     ),
                     timeout=self._group_timeout_s,
                 )
@@ -839,7 +882,6 @@ class CandidateWatcherScheduler:
             return
         self._closed = True
         self._selection_executor.shutdown(wait=False, cancel_futures=True)
-        self._control_executor.shutdown(wait=False, cancel_futures=True)
         for callback in self._close_callbacks:
             try:
                 callback()

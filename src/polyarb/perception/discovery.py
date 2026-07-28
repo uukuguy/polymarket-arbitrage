@@ -82,6 +82,7 @@ def effective_promotion_admission_capacity(
     poll_interval_s: float,
     group_timeout_s: float,
     terminal_write_budget_s: float,
+    attempt_start_write_budget_s: float = 5.0,
     high_burst_groups: int,
     reserved_non_high_slots: int,
 ) -> int:
@@ -90,32 +91,41 @@ def effective_promotion_admission_capacity(
     selection_budget_ms = math.ceil(selection_budget_s * 1_000)
     group_timeout_ms = math.ceil(group_timeout_s * 1_000)
     terminal_write_budget_ms = math.ceil(terminal_write_budget_s * 1_000)
-    residual_ms = (
-        candidate_max_wait_ms
-        - poll_interval_ms
-        - selection_budget_ms
-        - terminal_write_budget_ms
-        - high_burst_groups
-        * (group_timeout_ms + terminal_write_budget_ms)
+    attempt_start_write_budget_ms = math.ceil(
+        attempt_start_write_budget_s * 1_000
     )
-    if residual_ms < 0:
-        return 0
-    time_capacity = (
-        residual_ms // (group_timeout_ms + terminal_write_budget_ms) + 1
-    )
-    return min(reserved_non_high_slots, time_capacity)
+    capacity = 0
+    for candidate_capacity in range(1, reserved_non_high_slots + 1):
+        bound = (
+            poll_interval_ms
+            + selection_budget_ms
+            + high_burst_groups
+            * (group_timeout_ms + terminal_write_budget_ms)
+            + candidate_capacity * attempt_start_write_budget_ms
+            + (candidate_capacity - 1)
+            * (group_timeout_ms + terminal_write_budget_ms)
+        )
+        if bound > candidate_max_wait_ms:
+            break
+        capacity = candidate_capacity
+    return capacity
 
 
 def compose_candidate_group_ids(
     legacy_source: CandidateGroupIds,
     store: OpportunityPerceptionStore,
 ) -> CandidateGroupIds:
-    """Keep every legacy seed and append durable Discovery promotions."""
+    """Return only current durable Candidate authorities, preserving seed order."""
 
     def source() -> tuple[str, ...]:
+        actual = store.actual_candidate_group_ids()
+        actual_set = set(actual)
         return tuple(
             dict.fromkeys(
-                (*legacy_source(), *store.actual_candidate_group_ids())
+                (
+                    *(group_id for group_id in legacy_source() if group_id in actual_set),
+                    *actual,
+                )
             )
         )
 
@@ -138,6 +148,7 @@ class DiscoveryWorker:
         candidate_poll_interval_s: float = 1.0,
         candidate_group_timeout_s: float = 30.0,
         candidate_terminal_write_budget_s: float = 5.0,
+        candidate_attempt_start_write_budget_s: float = 5.0,
         candidate_high_burst_groups: int = 1,
         candidate_reserved_non_high_slots: int = 3,
         clock_ms: Callable[[], int] | None = None,
@@ -154,6 +165,7 @@ class DiscoveryWorker:
             poll_interval_s=candidate_poll_interval_s,
             group_timeout_s=candidate_group_timeout_s,
             terminal_write_budget_s=candidate_terminal_write_budget_s,
+            attempt_start_write_budget_s=candidate_attempt_start_write_budget_s,
             high_burst_groups=candidate_high_burst_groups,
             reserved_non_high_slots=candidate_reserved_non_high_slots,
         )
@@ -175,6 +187,9 @@ class DiscoveryWorker:
             ),
             high_burst_groups=candidate_high_burst_groups,
             reserved_non_high_slots=candidate_reserved_non_high_slots,
+            attempt_start_write_budget_ms=math.ceil(
+                candidate_attempt_start_write_budget_s * 1_000
+            ),
         )
         self._admission_proof.validate()
         if effective_capacity > computed_capacity:
@@ -466,6 +481,9 @@ def build_production_discovery(
         candidate_group_timeout_s=settings.candidate_group_timeout_s,
         candidate_terminal_write_budget_s=(
             settings.candidate_terminal_write_budget_s
+        ),
+        candidate_attempt_start_write_budget_s=(
+            settings.candidate_attempt_start_write_budget_s
         ),
         candidate_high_burst_groups=settings.candidate_high_burst_groups,
         candidate_reserved_non_high_slots=(

@@ -12,8 +12,10 @@ import pytest
 from polyarb.cli_discovery import main as discovery_status_main
 from polyarb.clients.gamma_client import EventPage
 from polyarb.perception.candidate_watcher import (
+    CandidateWatcher,
     CandidateWatcherRuntime,
     CandidateWatcherScheduler,
+    IntervalController,
 )
 from polyarb.perception.discovery import (
     CandidateFreshness,
@@ -834,7 +836,7 @@ async def test_degraded_duty_cycle_persists_probe_phase_across_restart(
     ).discovery_load_state() == recovered
 
 
-def test_candidate_source_composes_legacy_seed_with_discovery_promotions(
+def test_candidate_source_filters_legacy_seed_through_current_authority(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -846,10 +848,41 @@ def test_candidate_source_composes_legacy_seed_with_discovery_promotions(
             clock_ms=lambda: 10_000,
         ).run_batch()
     )
+    # A pre-Discovery bootstrap authority has no schedule row; it remains
+    # independently actual while an authority-free legacy string is rejected.
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute(
+            "DELETE FROM neg_risk_group_schedule WHERE group_id='g-new'"
+        )
 
     source = compose_candidate_group_ids(lambda: ("g-legacy", "g-new"), store)
 
-    assert source() == ("g-legacy", "g-new")
+    assert source() == ("g-new",)
+    assert store.candidate_freshness_snapshot(now_ms=10_001).candidate_count == 1
+
+
+def test_status_rejects_forged_historical_sample_with_correct_count(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = _store(tmp_path)
+    asyncio.run(
+        DiscoveryWorker(
+            gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+            store=store,
+        ).run_batch()
+    )
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute(
+            "UPDATE neg_risk_discovery_batch_samples "
+            "SET group_id='ghost' WHERE batch_id=("
+            "SELECT MIN(id) FROM neg_risk_discovery_batches)"
+        )
+
+    assert discovery_status_main(
+        ["--db-path", str(tmp_path / "state.db"), "--now-ms", "10001"]
+    ) == 2
+    assert "invalid discovery state" in capsys.readouterr().err
 
 
 @pytest.mark.asyncio
@@ -872,8 +905,16 @@ async def test_new_promotions_enter_candidate_scheduler_in_discovery_score_order
     calls: list[str] = []
 
     class Watcher:
-        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
-            calls.append(group_id)
+        async def run_once(
+            self, group_id: str, *, priority_hint: str, admission_context=None
+        ) -> None:
+            assert admission_context is not None
+            breach = store.record_candidate_attempt_start(
+                admission=admission_context,
+                clock_ms=lambda: 20_000,
+            )
+            if breach is None:
+                calls.append(group_id)
 
     scheduler = CandidateWatcherScheduler(
         watcher=Watcher(),
@@ -920,7 +961,9 @@ async def test_promotion_admission_is_capacity_bounded_and_backfills_after_fact(
     now = 10_001
 
     class Watcher:
-        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
+        async def run_once(
+            self, group_id: str, *, priority_hint: str, admission_context=None
+        ) -> None:
             calls.append((group_id, now))
 
     scheduler = CandidateWatcherScheduler(
@@ -977,23 +1020,48 @@ async def test_admitted_attempt_start_is_durable_and_within_deadline(
         store=store,
     ).run_batch()
     calls: list[str] = []
+    revision = store.current_group("g-1")
 
-    class Watcher:
-        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
-            calls.append(group_id)
+    class Structure:
+        async def read_group(self, group_id: str):
+            calls.append(f"structure:{group_id}")
+            return revision
+
+    class Books:
+        async def get_books(self, token_ids, *, projection):
+            calls.append(f"books:{','.join(token_ids)}")
+            return [
+                {
+                    "asset_id": token_id,
+                    "asks": [{"price": "0.40", "size": "10"}],
+                }
+                for token_id in token_ids
+            ]
+
+    times = iter((20_000, 20_001, 20_002))
+    runtime = CandidateWatcherRuntime()
+    watcher = CandidateWatcher(
+        structure_reader=Structure(),
+        books_reader=Books(),
+        store=store,
+        runtime=runtime,
+        interval_controller=IntervalController(),
+        clock_ms=lambda: next(times),
+    )
 
     scheduler = CandidateWatcherScheduler(
-        watcher=Watcher(),
+        watcher=watcher,
         store=store,
         candidate_group_ids=lambda: store.actual_candidate_group_ids(),
-        runtime=CandidateWatcherRuntime(),
+        runtime=runtime,
         clock_ms=lambda: 20_000,
     )
 
     await scheduler.run_due_once()
 
     status = store.discovery_status(now_ms=20_001)
-    assert calls == ["g-1"]
+    assert calls[0] == "structure:g-1"
+    assert any(call.startswith("books:") for call in calls)
     assert status.candidate_attempt_start_count == 1
     assert status.candidate_start_deadline_breach_count == 0
     assert status.candidate_start_ready is True
@@ -1010,16 +1078,33 @@ async def test_restart_after_candidate_start_deadline_records_breach_not_call(
         store=store,
     ).run_batch()
     calls: list[str] = []
+    revision = store.current_group("g-1")
 
-    class Watcher:
-        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
-            calls.append(group_id)
+    class Structure:
+        async def read_group(self, group_id: str):
+            calls.append(f"structure:{group_id}")
+            return revision
+
+    class Books:
+        async def get_books(self, token_ids, *, projection):
+            calls.append("books")
+            return []
+
+    runtime = CandidateWatcherRuntime()
+    watcher = CandidateWatcher(
+        structure_reader=Structure(),
+        books_reader=Books(),
+        store=OpportunityPerceptionStore(tmp_path / "state.db"),
+        runtime=runtime,
+        interval_controller=IntervalController(),
+        clock_ms=lambda: 70_001,
+    )
 
     restarted = CandidateWatcherScheduler(
-        watcher=Watcher(),
+        watcher=watcher,
         store=OpportunityPerceptionStore(tmp_path / "state.db"),
         candidate_group_ids=lambda: ("g-1",),
-        runtime=CandidateWatcherRuntime(),
+        runtime=runtime,
         clock_ms=lambda: 70_001,
     )
 
@@ -1077,7 +1162,7 @@ async def test_generic_init_preserves_legacy_promotions_until_explicit_config(
         ),
         store=store,
         promotion_admission_capacity=3,
-        candidate_group_timeout_s=10,
+        candidate_group_timeout_s=7,
     ).run_batch()
     with sqlite3.connect(tmp_path / "state.db") as con:
         con.execute("DELETE FROM neg_risk_discovery_admission_state")
@@ -1161,7 +1246,9 @@ async def test_unadmitted_factless_group_never_bypasses_capacity(
     calls: list[str] = []
 
     class Watcher:
-        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
+        async def run_once(
+            self, group_id: str, *, priority_hint: str, admission_context=None
+        ) -> None:
             calls.append(group_id)
 
     def scheduler() -> CandidateWatcherScheduler:

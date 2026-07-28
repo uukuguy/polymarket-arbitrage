@@ -20,8 +20,11 @@ from polyarb.perception.candidate_watcher import (
     next_interval_s,
 )
 from polyarb.perception.group_structure import GroupStructureReader
-from polyarb.perception.models import GroupLeg, GroupRevision
-from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.models import CandidateWatchFact, GroupLeg, GroupRevision
+from polyarb.perception.store import (
+    CandidateAdmissionContext,
+    OpportunityPerceptionStore,
+)
 
 
 def certified_group(
@@ -124,6 +127,111 @@ async def test_candidate_watcher_publishes_only_one_complete_group_batch(
     assert batch is not None
     assert batch.quote_batch_id == observation.quote_batch_id
     assert tuple(leg.yes_token_id for leg in batch.legs) == ("yes-1", "yes-2")
+
+
+@pytest.mark.asyncio
+async def test_attempt_start_is_first_run_once_operation_and_late_skips_io(
+    tmp_path: Path,
+) -> None:
+    revision = certified_group()
+    operations: list[str] = []
+
+    class Store(OpportunityPerceptionStore):
+        def record_candidate_attempt_start(self, **_kwargs):
+            operations.append("attempt-start")
+            return CandidateWatchFact(
+                id=1,
+                group_id="g-1",
+                membership_hash=revision.membership_hash,
+                quote_batch_id=None,
+                observed_at_ms=70_001,
+                last_result="unavailable",
+                reason="candidate-start-deadline-breached",
+                bundle_cost=None,
+                gross_edge_bps=None,
+                max_bundle_size=None,
+                priority_class="normal",
+                consecutive_failures=1,
+                effective_interval_s=60,
+                schedule_reason="candidate-start-deadline-breached",
+                next_due_at_ms=130_001,
+            )
+
+    class Structure:
+        async def read_group(self, group_id: str) -> GroupRevision:
+            operations.append("structure")
+            return revision
+
+    store = Store(tmp_path / "state.db")
+    store.init_schema()
+    candidate = CandidateWatcher(
+        structure_reader=Structure(),
+        books_reader=FakeBooksReader([]),
+        store=store,
+        runtime=CandidateWatcherRuntime(),
+        interval_controller=IntervalController(),
+    )
+    admission = CandidateAdmissionContext(
+        group_id="g-1",
+        event_id="e-1",
+        membership_hash=revision.membership_hash,
+        promoted_at_ms=10_000,
+        candidate_start_deadline_at_ms=70_000,
+    )
+
+    result = await candidate.run_once("g-1", admission_context=admission)
+
+    assert result.reason == "candidate-start-deadline-breached"
+    assert operations == ["attempt-start"]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_attempt_start_waits_for_transaction(
+    tmp_path: Path,
+) -> None:
+    revision = certified_group()
+    entered = threading.Event()
+    release = threading.Event()
+    structure_calls: list[str] = []
+
+    class Store(OpportunityPerceptionStore):
+        def record_candidate_attempt_start(self, **_kwargs):
+            entered.set()
+            assert release.wait(timeout=2)
+            return None
+
+    class Structure:
+        async def read_group(self, group_id: str) -> GroupRevision:
+            structure_calls.append(group_id)
+            return revision
+
+    store = Store(tmp_path / "state.db")
+    store.init_schema()
+    candidate = CandidateWatcher(
+        structure_reader=Structure(),
+        books_reader=FakeBooksReader([]),
+        store=store,
+        runtime=CandidateWatcherRuntime(),
+        interval_controller=IntervalController(),
+    )
+    admission = CandidateAdmissionContext(
+        group_id="g-1",
+        event_id="e-1",
+        membership_hash=revision.membership_hash,
+        promoted_at_ms=10_000,
+        candidate_start_deadline_at_ms=70_000,
+    )
+    task = asyncio.create_task(
+        candidate.run_once("g-1", admission_context=admission)
+    )
+    assert await asyncio.to_thread(entered.wait, 2)
+
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert structure_calls == []
 
 
 @pytest.mark.asyncio
@@ -938,7 +1046,9 @@ async def test_scheduler_reads_many_candidates_in_one_bounded_store_snapshot(
     calls: list[str] = []
 
     class Watcher:
-        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
+        async def run_once(
+            self, group_id: str, *, priority_hint: str, admission_context=None
+        ) -> None:
             calls.append(group_id)
 
     def forbidden(*args, **kwargs):

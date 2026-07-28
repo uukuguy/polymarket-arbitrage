@@ -115,17 +115,19 @@ inputs/anchors 用同一 Decimal 函数重算 score/reason。`group_id` 从 sche
   modulus 与 decision 一起持久化并接受 status 校验；重启不能重置或加速相位，
   fresh recovery 明确把 streak 归零。
 - complete-supported 先认证并进入 durable promotion queue，不等于立即 promotion。
-  admission capacity 由 `poll + bounded selection + attempt-start SQLite write +
+  admission capacity 由 `poll + bounded selection + capacity × attempt-start SQLite write +
   (high burst + prior admitted slots) × (group timeout + terminal-write budget) ≤ 60s`
   证明；所有毫秒预算向上取整，默认有效上界 47 秒、只允许一个 factless promotion。
   source 枚举和 facts/schedules 使用一个专用单线程 executor 与一次 bulk SQLite
   snapshot。Candidate 终态事实与 admit-next 在同一事务完成。
-- admitted group 真正调用 watcher 前先原子写 attempt-start receipt。晚于持久化 deadline
+- admitted group 进入 watcher 后的第一条 durable operation 原子校验 admission identity
+  并写 attempt-start receipt。晚于持久化 deadline
   时不再静默执行，而是写 `candidate-start-deadline-breached/unavailable`，status
   保持 non-ready。进程级强杀/隔离仍属于 Task 5，本层证明的是线程、SQLite busy 和
   每组 timeout 的数学上界。
-- promotion source 是 legacy seed 与 Discovery promotion 的稳定去重并集，不会因接入
-  新 producer 丢掉当前 hot candidates。
+- promotion source 和 freshness 共享 current certified +（独立 bootstrap authority、
+  Candidate fact 或 admitted promotion）权威谓词；legacy seed 只保序，不能绕过或
+  复活失效 authority。
 - feature flag 默认关闭；本 slice 只完成生产代码路径，不等于已经完成部署和切换。
 - 这里仍是 observer-only，不含钱包、签名、余额、下单或资金执行。
 

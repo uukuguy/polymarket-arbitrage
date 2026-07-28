@@ -89,9 +89,16 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
         )
         con.execute(
             "INSERT INTO neg_risk_discovery_batch_samples("
-            "batch_id,group_id,liquidity_weight,promoted"
-            ") VALUES (?,'g-1','0',0)",
+            "batch_id,group_id,event_id,membership_hash,quality,reason,"
+            "liquidity_weight,promoted"
+            ") VALUES (?,'g-1','e-1','h','incomplete-source','fixture','0',0)",
             (receipt.lastrowid,),
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_revisions("
+            "group_id,event_id,revision,membership_hash,started_at_ms,"
+            "observed_at_ms,source_cursor,status,legs_json"
+            ") VALUES ('g-1','e-1',1,'h',10,20,'c-1','invalidated','[]')"
         )
         con.execute(
             "INSERT INTO neg_risk_group_schedule("

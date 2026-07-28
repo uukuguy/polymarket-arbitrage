@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     candidate_terminal_write_budget_s: float = Field(
         default=5.0, ge=5.0, allow_inf_nan=False
     )
+    candidate_attempt_start_write_budget_s: float = Field(
+        default=5.0, ge=5.0, allow_inf_nan=False
+    )
     candidate_high_clob_workers: int = Field(default=2, ge=1)
     candidate_lower_clob_workers: int = Field(default=1, ge=1)
     # Slice C remains dark until production qualification. Each run fetches
@@ -411,21 +414,24 @@ class Settings(BaseSettings):
         terminal_ms = math.ceil(
             self.candidate_terminal_write_budget_s * 1_000
         )
-        residual_ms = (
-            max_wait_ms
-            - poll_ms
-            - selection_ms
-            - terminal_ms
-            - self.candidate_high_burst_groups
-            * (timeout_ms + terminal_ms)
+        start_write_ms = math.ceil(
+            self.candidate_attempt_start_write_budget_s * 1_000
         )
-        if residual_ms < 0:
-            return 0
-        time_capacity = residual_ms // (timeout_ms + terminal_ms) + 1
-        return min(
-            self.candidate_reserved_non_high_slots,
-            time_capacity,
-        )
+        capacity = 0
+        for candidate_capacity in range(
+            1, self.candidate_reserved_non_high_slots + 1
+        ):
+            bound = (
+                poll_ms
+                + selection_ms
+                + self.candidate_high_burst_groups * (timeout_ms + terminal_ms)
+                + candidate_capacity * start_write_ms
+                + (candidate_capacity - 1) * (timeout_ms + terminal_ms)
+            )
+            if bound > max_wait_ms:
+                break
+            capacity = candidate_capacity
+        return capacity
 
     @property
     def discovery_effective_start_bound_ms(self) -> int | None:
@@ -435,7 +441,10 @@ class Settings(BaseSettings):
         return (
             math.ceil(self.candidate_scheduler_poll_s * 1_000)
             + math.ceil(self.candidate_selection_budget_s * 1_000)
-            + math.ceil(self.candidate_terminal_write_budget_s * 1_000)
+            + capacity
+            * math.ceil(
+                self.candidate_attempt_start_write_budget_s * 1_000
+            )
             + (
                 self.candidate_high_burst_groups
                 + capacity
