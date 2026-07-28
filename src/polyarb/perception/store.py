@@ -2849,7 +2849,6 @@ class OpportunityPerceptionStore:
     def _compact_candidate_authority(self, con: sqlite3.Connection) -> None:
         counts = con.execute(
             "SELECT "
-            "(SELECT COUNT(*) FROM neg_risk_group_revisions),"
             "(SELECT COUNT(*) FROM neg_risk_group_quote_batches),"
             "(SELECT COUNT(*) FROM neg_risk_candidate_watch_facts),"
             "(SELECT COUNT(*) FROM neg_risk_candidate_success_receipts)"
@@ -2863,26 +2862,19 @@ class OpportunityPerceptionStore:
         previous = self._validated_candidate_checkpoint(con)
         through = con.execute(
             "SELECT "
-            "(SELECT COALESCE(MAX(id),0) FROM neg_risk_group_revisions),"
             "(SELECT COALESCE(MAX(rowid),0) FROM neg_risk_group_quote_batches),"
             "(SELECT COALESCE(MAX(id),0) FROM neg_risk_candidate_watch_facts),"
             "(SELECT COALESCE(MAX(id),0) "
             " FROM neg_risk_candidate_success_receipts)"
         ).fetchone()
-        through_group, through_quote, through_fact, through_receipt = (
-            int(value) for value in through
-        )
+        through_group = 0
+        through_quote, through_fact, through_receipt = (int(value) for value in through)
 
         # Retain the physical rows needed by ordinary readers and by the next
         # suffix replay: current group, latest fact, its success tuple, and the
         # latest complete quote for each group.  Everything else is summarized.
         before_counts = {
-            "groups": int(
-                con.execute(
-                    "SELECT COUNT(*) FROM neg_risk_group_revisions WHERE id<=?",
-                    (through_group,),
-                ).fetchone()[0]
-            ),
+            "groups": 0,
             "quotes": int(
                 con.execute(
                     "SELECT COUNT(*) FROM neg_risk_group_quote_batches WHERE rowid<=?",
@@ -2944,13 +2936,6 @@ class OpportunityPerceptionStore:
             "SELECT MAX(id) FROM neg_risk_candidate_watch_facts GROUP BY group_id)",
             (through_fact,),
         )
-        con.execute(
-            "DELETE FROM neg_risk_group_revisions "
-            "WHERE id<=? AND id NOT IN ("
-            "SELECT MAX(id) FROM neg_risk_group_revisions GROUP BY group_id)",
-            (through_group,),
-        )
-
         seeds = self._candidate_seed_payload(
             con,
             through_group_revision_id=through_group,

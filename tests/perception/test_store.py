@@ -501,7 +501,7 @@ def test_candidate_checkpoint_tracks_group_supersede_across_boundary(
     assert store.validated_candidate_opportunity_count() == 0
 
 
-def test_candidate_checkpoint_compacts_group_only_revision_history(
+def test_candidate_checkpoint_does_not_own_group_only_revision_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -523,11 +523,80 @@ def test_candidate_checkpoint_compacts_group_only_revision_history(
 
     assert store.validated_candidate_opportunity_count() == 0
     with sqlite3.connect(store.db_path) as con:
-        assert con.execute("SELECT COUNT(*) FROM neg_risk_group_revisions").fetchone() == (1,)
+        assert con.execute("SELECT COUNT(*) FROM neg_risk_group_revisions").fetchone() == (3,)
         assert con.execute(
-            "SELECT compacted_group_rows "
+            "SELECT COUNT(*) "
             "FROM neg_risk_candidate_authority_checkpoints"
-        ).fetchone() == (2,)
+        ).fetchone() == (0,)
+
+
+def test_candidate_compaction_preserves_shared_group_revision_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        2,
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    first = revision(group_id="g-1", revision=1, token_suffix="a")
+    store.publish_group_revision(first)
+    for sequence in range(3):
+        batch = batch_for(
+            first,
+            quote_batch_id=f"before-{sequence}",
+            quoted_at_ms=3_100 + sequence,
+        )
+        store.publish_candidate_success(
+            batch,
+            observed_at_ms=batch.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="before-revision",
+            next_due_at_ms=batch.quoted_at_ms + 15_000,
+        )
+
+    changed = revision(
+        group_id="g-1",
+        revision=2,
+        token_suffix="b",
+        observed_at_ms=4_000,
+    )
+    store.publish_group_revision(changed)
+    for sequence in range(2):
+        batch = batch_for(
+            changed,
+            quote_batch_id=f"after-{sequence}",
+            quoted_at_ms=4_100 + sequence,
+        )
+        store.publish_candidate_success(
+            batch,
+            observed_at_ms=batch.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="after-revision",
+            next_due_at_ms=batch.quoted_at_ms + 15_000,
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT revision FROM neg_risk_group_revisions "
+            "WHERE group_id='g-1' ORDER BY revision"
+        ).fetchall() == [(1,), (2,)]
+    assert store.validated_candidate_opportunity_count() == 1
 
 
 def test_membership_change_invalidates_previous_quote_atomically(
