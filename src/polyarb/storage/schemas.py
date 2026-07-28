@@ -195,6 +195,42 @@ CREATE TABLE IF NOT EXISTS neg_risk_group_truth (
   CHECK (expected_member_count > 0 OR quality = 'incomplete-source')
 );
 
+-- Opportunity-first read model. Group revisions are immutable membership
+-- evidence; quote batches are published only against the certified membership
+-- re-read inside the same SQLite write transaction.
+CREATE TABLE IF NOT EXISTS neg_risk_group_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  membership_hash TEXT NOT NULL,
+  started_at_ms INTEGER NOT NULL,
+  observed_at_ms INTEGER NOT NULL,
+  source_cursor TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN
+    ('discovered','certified','stale','invalidated','closed')),
+  legs_json TEXT NOT NULL,
+  UNIQUE(group_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_group_revisions_current
+  ON neg_risk_group_revisions(group_id, revision DESC);
+
+CREATE TABLE IF NOT EXISTS neg_risk_group_quote_batches (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL,
+  group_revision INTEGER NOT NULL,
+  membership_hash TEXT NOT NULL,
+  started_at_ms INTEGER NOT NULL,
+  quoted_at_ms INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('complete','failed','superseded')),
+  failure_reason TEXT,
+  legs_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_group_quote_batches_current
+  ON neg_risk_group_quote_batches(
+    group_id, membership_hash, status, quoted_at_ms DESC
+  );
+
 -- Phase 1.1 T2: append-only translation cache.
 -- Invariants:
 --  * never DELETE FROM (cumulative across snapshots)
