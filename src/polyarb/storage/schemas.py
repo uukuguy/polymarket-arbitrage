@@ -1212,6 +1212,28 @@ OWNER_JOURNAL_TABLE_ROW_KEYS: dict[str, str] = {
     "neg_risk_discovery_status_projection": "CAST({alias}.id AS TEXT)",
 }
 
+# Complete attachment scope for authority-sensitive triggers. This includes
+# all seven raw owners, four derived owners, and the three internal
+# journal/guard/context tables even though the latter intentionally have no
+# canonical triggers. Any trigger attached inside this scope is part of the
+# exact manifest regardless of its name.
+OWNER_TRIGGER_TABLES: tuple[str, ...] = (
+    "neg_risk_group_revisions",
+    "neg_risk_group_schedule",
+    "neg_risk_group_quote_batches",
+    "neg_risk_candidate_success_receipts",
+    "neg_risk_candidate_admissions",
+    "neg_risk_candidate_attempt_starts",
+    "neg_risk_candidate_watch_facts",
+    "neg_risk_candidate_current_authority",
+    "neg_risk_candidate_current_aggregate",
+    "neg_risk_discovery_status_projection",
+    "neg_risk_discovery_group_projection",
+    "neg_risk_owner_mutation_journal",
+    "neg_risk_owner_mutation_guard",
+    "neg_risk_owner_write_context",
+)
+
 
 def _owner_journal_triggers() -> tuple[str, tuple[str, ...]]:
     statements: list[str] = []

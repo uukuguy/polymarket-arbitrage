@@ -15,6 +15,7 @@ from polyarb.perception.models import (
     GroupRevision,
 )
 from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.storage.schemas import OWNER_TRIGGER_TABLES
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -356,6 +357,54 @@ def test_unknown_or_partial_owner_manifest_fails_before_ddl(
                     "PRAGMA table_info(neg_risk_owner_mutation_guard)"
                 )
             }
+
+
+@pytest.mark.parametrize("table_name", OWNER_TRIGGER_TABLES)
+@pytest.mark.parametrize("surface", ("read", "init", "next-writer"))
+def test_arbitrary_name_trigger_on_owner_table_fails_closed(
+    tmp_path: Path,
+    table_name: str,
+    surface: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        con.execute(
+            "CREATE TRIGGER arbitrary_extra_authority_trigger "
+            f"AFTER INSERT ON {table_name} BEGIN SELECT 1; END"
+        )
+
+    with pytest.raises(ValueError, match="invalid-owner-authority-manifest"):
+        if surface == "read":
+            store.validated_candidate_opportunity_count()
+        elif surface == "init":
+            store.init_schema()
+        else:
+            store.record_discovery_load_decision(
+                degraded_reason=None,
+                probe_every_cycles=10,
+                now_ms=5_000,
+            )
+
+
+def test_trigger_on_non_owner_table_does_not_change_owner_manifest(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        con.execute(
+            "CREATE TRIGGER unrelated_market_trigger "
+            "AFTER INSERT ON markets BEGIN SELECT 1; END"
+        )
+
+    assert store.validated_candidate_opportunity_count() == 0
+    store.init_schema()
+    store.record_discovery_load_decision(
+        degraded_reason=None,
+        probe_every_cycles=10,
+        now_ms=5_000,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1175,12 +1224,21 @@ def test_candidate_checkpoint_compaction_rolls_back_on_delete_failure(
             schedule_reason="continuous",
             next_due_at_ms=batch.quoted_at_ms + 15_000,
         )
-    with sqlite3.connect(store.db_path) as con:
-        con.execute(
-            "CREATE TRIGGER reject_candidate_compaction BEFORE DELETE "
-            "ON neg_risk_group_quote_batches BEGIN "
-            "SELECT RAISE(ABORT,'reject compaction'); END"
-        )
+    original_consume = store._consume_expected_owner_mutations
+
+    def fail_after_quote_delete(*args: object, **kwargs: object) -> None:
+        original_consume(*args, **kwargs)
+        if (
+            kwargs["table_name"] == "neg_risk_group_quote_batches"
+            and kwargs["operation"] == "DELETE"
+        ):
+            raise sqlite3.IntegrityError("reject compaction")
+
+    monkeypatch.setattr(
+        store,
+        "_consume_expected_owner_mutations",
+        fail_after_quote_delete,
+    )
     third = batch_for(group, quote_batch_id="qb-2", quoted_at_ms=3_102)
     with pytest.raises(sqlite3.IntegrityError, match="reject compaction"):
         store.publish_candidate_success(
@@ -1781,6 +1839,7 @@ def test_quote_authority_uses_one_statement_for_group_and_quote(
         statement
         for statement in reader.statements
         if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+        and "sqlite_master" not in statement
         and (
             "neg_risk_group_revisions" in statement
             or "neg_risk_group_quote_batches" in statement

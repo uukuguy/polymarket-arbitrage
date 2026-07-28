@@ -333,15 +333,21 @@ async def test_discovery_group_projection_visit_anchor_tamper_fails_closed(
 
 def test_discovery_projection_write_failure_rolls_back_owner_mutation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = OpportunityPerceptionStore(tmp_path / "state.db")
     store.init_schema()
-    with store._connect() as con:
-        con.execute(
-            "CREATE TRIGGER reject_discovery_projection BEFORE UPDATE "
-            "ON neg_risk_discovery_status_projection BEGIN "
-            "SELECT RAISE(ABORT,'reject discovery projection'); END"
-        )
+    original_refresh = store._refresh_discovery_status_projection
+
+    def fail_after_projection_write(*args: object, **kwargs: object) -> None:
+        original_refresh(*args, **kwargs)
+        raise sqlite3.IntegrityError("reject discovery projection")
+
+    monkeypatch.setattr(
+        store,
+        "_refresh_discovery_status_projection",
+        fail_after_projection_write,
+    )
     group = GroupRevision.certified(
         group_id="g-rollback",
         event_id="e-rollback",

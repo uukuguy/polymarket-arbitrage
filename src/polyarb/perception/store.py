@@ -14,6 +14,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -30,8 +31,8 @@ from polyarb.perception.priority import GroupScheduleInput, priority_components
 from polyarb.storage.schemas import (
     A527_OWNER_MUTATION_GUARD_DDL,
     DDL,
-    OWNER_JOURNAL_TRIGGER_NAMES,
     OWNER_MUTATION_GUARD_DDL,
+    OWNER_TRIGGER_TABLES,
 )
 
 _BUSY_TIMEOUT_MS = 5_000
@@ -981,6 +982,7 @@ class OpportunityPerceptionStore:
 
     @classmethod
     def _assert_owner_journal_clean(cls, con: sqlite3.Connection) -> None:
+        cls._assert_owner_trigger_manifest(con)
         guard = con.execute(
             "SELECT consumed_journal_id,consumed_hash,"
             "retained_base_id,retained_base_hash,"
@@ -1169,30 +1171,7 @@ class OpportunityPerceptionStore:
 
     @staticmethod
     def _validate_owner_trigger_sql(con: sqlite3.Connection) -> None:
-        names = OWNER_JOURNAL_TRIGGER_NAMES
-        expected_con = sqlite3.connect(":memory:")
-        try:
-            expected_con.executescript(DDL)
-            expected = {
-                str(name): " ".join(str(sql).split())
-                for name, sql in expected_con.execute(
-                    "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
-                    "AND name IN (" + ",".join("?" for _ in names) + ")",
-                    names,
-                )
-            }
-        finally:
-            expected_con.close()
-        actual = {
-            str(row["name"]): " ".join(str(row["sql"]).split())
-            for row in con.execute(
-                "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
-                "AND name IN (" + ",".join("?" for _ in names) + ")",
-                names,
-            )
-        }
-        if actual != expected:
-            raise ValueError("owner-trigger-sql-drift")
+        OpportunityPerceptionStore._assert_owner_trigger_manifest(con)
 
     def _begin_expected_owner_mutation(
         self,
@@ -1410,6 +1389,56 @@ class OpportunityPerceptionStore:
     def _normalized_schema_sql(sql: str) -> str:
         return " ".join(sql.split())
 
+    @classmethod
+    def _owner_trigger_fingerprints(
+        cls,
+        con: sqlite3.Connection,
+    ) -> tuple[tuple[str, str, str], ...]:
+        placeholders = ",".join("?" for _ in OWNER_TRIGGER_TABLES)
+        return tuple(
+            sorted(
+                (
+                    str(row["name"]),
+                    str(row["tbl_name"]),
+                    cls._normalized_schema_sql(str(row["sql"])),
+                )
+                for row in con.execute(
+                    "SELECT name,tbl_name,sql FROM sqlite_master "
+                    f"WHERE type='trigger' AND tbl_name IN ({placeholders})",
+                    OWNER_TRIGGER_TABLES,
+                )
+            )
+        )
+
+    @classmethod
+    @lru_cache(maxsize=1)
+    def _expected_owner_trigger_fingerprints(
+        cls,
+    ) -> tuple[tuple[str, str, str], ...]:
+        expected_con = sqlite3.connect(":memory:")
+        expected_con.row_factory = sqlite3.Row
+        try:
+            expected_con.executescript(DDL)
+            return cls._owner_trigger_fingerprints(expected_con)
+        finally:
+            expected_con.close()
+
+    @classmethod
+    def _assert_owner_trigger_manifest(cls, con: sqlite3.Connection) -> None:
+        expected = cls._expected_owner_trigger_fingerprints()
+        actual = cls._owner_trigger_fingerprints(con)
+        if actual == expected:
+            return
+        expected_identities = {
+            (name, table_name) for name, table_name, _sql in expected
+        }
+        actual_identities = {
+            (name, table_name) for name, table_name, _sql in actual
+        }
+        if actual_identities == expected_identities:
+            raise ValueError("owner-trigger-sql-drift")
+        raise ValueError("invalid-owner-authority-manifest")
+
     @staticmethod
     def _quoted_identifier(identifier: str) -> str:
         return '"' + identifier.replace('"', '""') + '"'
@@ -1538,18 +1567,12 @@ class OpportunityPerceptionStore:
                 ),
             )
         }
-        present_triggers = {
-            str(row["name"])
-            for row in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='trigger' "
-                "AND name LIKE 'trg_owner_%'"
-            )
-        }
-        expected_triggers = set(OWNER_JOURNAL_TRIGGER_NAMES)
+        present_triggers = cls._owner_trigger_fingerprints(con)
         if not present_tables and not present_triggers:
             return "fresh"
-        if present_tables != owner_tables or present_triggers != expected_triggers:
+        if present_tables != owner_tables:
             raise ValueError("invalid-owner-authority-manifest")
+        cls._assert_owner_trigger_manifest(con)
 
         current_manifest, legacy_manifest = cls._expected_owner_manifests()
         actual_manifest = (

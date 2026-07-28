@@ -53,21 +53,25 @@ without adding producer or trading authority.
   plus ordered `table_xinfo`, and every explicit owner index with canonical
   DDL, uniqueness/origin/partial flags, and ordered `index_xinfo`, before DDL:
   only empty, exact current v2, and the explicitly encoded a527 manifest are
-  accepted. A527 retained windows up to 1,025 events migrate under one write
-  lock by full replay, atomic base advancement/prune to 128, root derivation,
-  and transactional table rebuild into the complete v2 constraints. Unknown or
-  partial manifests, semantic table/index drift, corrupt tails, deadline
-  interruption, and concurrent migration cannot be washed or partially
-  upgraded. The oldest-group query is pinned to the canonical covering order
-  without a temporary B-tree.
+  accepted. Trigger discovery uses the complete 14-table raw/derived/internal
+  owner attachment scope instead of a name prefix and compares the exact
+  canonical `(name, table, SQL)` set on initialization, reads, and next
+  writers. Arbitrary-name extra triggers fail closed while triggers on
+  unrelated non-owner tables remain out of scope. A527 retained windows up to
+  1,025 events migrate under one write lock by full replay, atomic base
+  advancement/prune to 128, root derivation, and transactional table rebuild
+  into the complete v2 constraints. Unknown or partial manifests, semantic
+  table/index drift, corrupt tails, deadline interruption, and concurrent
+  migration cannot be washed or partially upgraded. The oldest-group query is
+  pinned to the canonical covering order without a temporary B-tree.
 - Five Make targets and the living M1 manual provide the supported cloud
   workflow.
 
-Verification: 2797 of 2799 repository tests passed (one expected xfail, one
+Verification: 2840 of 2842 repository tests passed (one expected xfail, one
 skip); the committed Task 6 baseline collected 2586 and successive authority
-remediations collected 2596, 2618, 2642, 2654, 2723, 2765, 2787, and 2799. All 41 focused
+remediations collected 2596, 2618, 2642, 2654, 2723, 2765, 2787, 2799, and 2842. All 41 focused
 API/control tests, 10,010-success Candidate continuity (60.62 seconds with the
-128-event proof window), 383 perception tests, raw/derived mutation, deleted
+128-event proof window), 426 perception tests, raw/derived mutation, deleted
 pending sequence, retained hash/tail/link tamper, v2 guard, manifest,
 concurrent-writer/migration, deadline, and atomic rollback tests passed;
 Ruff, compileall, docs, planning status, and diff checks passed.
