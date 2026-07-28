@@ -667,7 +667,62 @@ def _discovery(db_path: Path) -> dict[str, Any]:
             "oldest_visit_age_ms": status.oldest_visit_age_ms,
             "promotion_queue_depth": status.promotion_queue_depth,
             "outstanding_admitted_count": status.outstanding_admitted_count,
+            "candidate_attempt_start_count": status.candidate_attempt_start_count,
+            "candidate_start_deadline_breach_count": (
+                status.candidate_start_deadline_breach_count
+            ),
             "candidate_start_ready": status.candidate_start_ready,
+            "coverage": {
+                "known_groups": status.coverage.known_groups,
+                "total_liquidity_weight": float(
+                    status.coverage.total_liquidity_weight
+                ),
+                "by_minutes": {
+                    str(minutes): {
+                        "visited_groups": window.visited_groups,
+                        "raw_fraction": float(window.raw_fraction),
+                        "liquidity_weighted_fraction": float(
+                            window.liquidity_weighted_fraction
+                        ),
+                    }
+                    for minutes, window in sorted(
+                        status.coverage.by_minutes.items()
+                    )
+                },
+            },
+            "load_state": {
+                "degraded_streak": status.load_state.degraded_streak,
+                "last_reason": status.load_state.last_reason,
+                "last_decision": status.load_state.last_decision,
+                "probe_every_cycles": status.load_state.probe_every_cycles,
+                "updated_at_ms": status.load_state.updated_at_ms,
+            },
+            "admission_proof": (
+                None
+                if status.admission_proof is None
+                else {
+                    "effective_capacity": status.admission_proof.effective_capacity,
+                    "candidate_max_wait_ms": (
+                        status.admission_proof.candidate_max_wait_ms
+                    ),
+                    "selection_budget_ms": status.admission_proof.selection_budget_ms,
+                    "poll_interval_ms": status.admission_proof.poll_interval_ms,
+                    "group_timeout_ms": status.admission_proof.group_timeout_ms,
+                    "terminal_write_budget_ms": (
+                        status.admission_proof.terminal_write_budget_ms
+                    ),
+                    "attempt_start_write_budget_ms": (
+                        status.admission_proof.attempt_start_write_budget_ms
+                    ),
+                    "high_burst_groups": status.admission_proof.high_burst_groups,
+                    "reserved_non_high_slots": (
+                        status.admission_proof.reserved_non_high_slots
+                    ),
+                    "effective_start_bound_ms": (
+                        status.admission_proof.effective_start_bound_ms
+                    ),
+                }
+            ),
         },
     }
 
@@ -700,6 +755,18 @@ def _reconciliation(db_path: Path) -> dict[str, Any]:
             "events_seen": window.events_seen,
             "groups_staged": window.groups_staged,
             "rejected_count": window.rejected_count,
+            "duration_ms": max(
+                0,
+                (window.finished_at_ms or window.checkpoint_at_ms)
+                - window.started_at_ms,
+            ),
+            "observations_count": window.observations_count,
+            "baseline_count": window.baseline_count,
+            "added_count": window.added_count,
+            "changed_count": window.changed_count,
+            "closed_count": window.closed_count,
+            "unchanged_count": window.unchanged_count,
+            "applied_rejected_count": window.applied_rejected_count,
         },
     }
 

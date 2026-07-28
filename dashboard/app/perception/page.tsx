@@ -18,6 +18,14 @@ function fmtTime(ms: number | null | undefined): string {
   return new Date(ms).toISOString().replace("T", " ").slice(0, 19) + " UTC";
 }
 
+function fmtPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function fmtOptionalCount(value: number | null): string {
+  return value == null ? "pending" : String(value);
+}
+
 function countStatus(
   statuses: PerceptionGroupStatus[],
   status: PerceptionGroupStatus,
@@ -144,15 +152,37 @@ export default async function PerceptionOverviewPage() {
             </tr>
           </thead>
           <tbody>
-            {["15m", "30m", "60m"].map((window) => (
-              <tr key={window} style={{ borderBottom: "1px solid #222" }}>
-                <td style={{ padding: 8 }}>{window}</td>
-                <td style={{ padding: 8 }}><NotExposed /></td>
-                <td style={{ padding: 8 }}><NotExposed /></td>
-              </tr>
-            ))}
+            {(
+              [
+                ["15", "15m"],
+                ["30", "30m"],
+                ["60", "60m"],
+              ] as const
+            ).map(([minutes, label]) => {
+              const window = discovery.discovery?.coverage.by_minutes[minutes];
+              return (
+                <tr key={minutes} style={{ borderBottom: "1px solid #222" }}>
+                  <td style={{ padding: 8 }}>{label}</td>
+                  <td style={{ padding: 8 }}>
+                    {window ? fmtPercent(window.raw_fraction) : "not recorded"}
+                  </td>
+                  <td style={{ padding: 8 }}>
+                    {window
+                      ? fmtPercent(window.liquidity_weighted_fraction)
+                      : "not recorded"}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
+        {discovery.discovery && (
+          <p style={muted}>
+            Known groups: {discovery.discovery.coverage.known_groups} · total
+            liquidity weight:{" "}
+            {discovery.discovery.coverage.total_liquidity_weight.toFixed(2)}
+          </p>
+        )}
       </section>
 
       <div
@@ -171,6 +201,33 @@ export default async function PerceptionOverviewPage() {
               <p>groups seen: {discovery.discovery.groups_seen}</p>
               <p>promoted: {discovery.discovery.promoted_count}</p>
               <p>promotion queue: {discovery.discovery.promotion_queue_depth}</p>
+              <p>
+                queue classes:{" "}
+                {Object.entries(discovery.discovery.queue_depth_by_class)
+                  .map(([priority, depth]) => `${priority}=${depth}`)
+                  .join(", ") || "empty"}
+              </p>
+              <p>
+                oldest visit age:{" "}
+                {discovery.discovery.oldest_visit_age_ms == null
+                  ? "none"
+                  : `${discovery.discovery.oldest_visit_age_ms} ms`}
+              </p>
+              <p>
+                load_state: {discovery.discovery.load_state.last_decision} ·{" "}
+                {discovery.discovery.load_state.last_reason ?? "fresh"}
+              </p>
+              <p>
+                admission_proof capacity:{" "}
+                {discovery.discovery.admission_proof?.effective_capacity ??
+                  "not configured"}
+              </p>
+              <p>
+                candidate_attempt_start_count:{" "}
+                {discovery.discovery.candidate_attempt_start_count} ·
+                candidate_start_deadline_breach_count:{" "}
+                {discovery.discovery.candidate_start_deadline_breach_count}
+              </p>
               <p>last finish: {fmtTime(discovery.discovery.last_finished_at_ms)}</p>
             </>
           ) : (
@@ -185,8 +242,34 @@ export default async function PerceptionOverviewPage() {
               <p>pages: {reconciliation.reconciliation.pages_completed}</p>
               <p>events: {reconciliation.reconciliation.events_seen}</p>
               <p>rejected: {reconciliation.reconciliation.rejected_count}</p>
+              <p>duration_ms: {reconciliation.reconciliation.duration_ms}</p>
+              <p>
+                observations / baseline:{" "}
+                {reconciliation.reconciliation.observations_count} /{" "}
+                {reconciliation.reconciliation.baseline_count}
+              </p>
+              <p>
+                added_count:{" "}
+                {fmtOptionalCount(reconciliation.reconciliation.added_count)} ·
+                changed_count:{" "}
+                {fmtOptionalCount(reconciliation.reconciliation.changed_count)} ·
+                closed_count:{" "}
+                {fmtOptionalCount(reconciliation.reconciliation.closed_count)}
+              </p>
+              <p>
+                unchanged_count:{" "}
+                {fmtOptionalCount(reconciliation.reconciliation.unchanged_count)} ·
+                applied_rejected_count:{" "}
+                {fmtOptionalCount(
+                  reconciliation.reconciliation.applied_rejected_count,
+                )}
+              </p>
               <p>
                 checkpoint: {fmtTime(reconciliation.reconciliation.checkpoint_at_ms)}
+              </p>
+              <p style={muted}>
+                Historical duration distribution is not tracked; duration_ms is
+                the current validated window only.
               </p>
             </>
           ) : (

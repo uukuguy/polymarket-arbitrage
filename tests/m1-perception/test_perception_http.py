@@ -219,6 +219,99 @@ def test_discovery_status_does_not_permanently_fail_on_old_receipt_volume(
     assert response.json()["discovery"]["groups_seen"] == 0
 
 
+def test_discovery_exposes_validated_coverage_load_and_admission_evidence(
+    http_test_client,
+) -> None:
+    store = OpportunityPerceptionStore(
+        http_test_client.app.state.sqlite_store.db_path
+    )
+    proof = DiscoveryAdmissionProof(
+        effective_capacity=2,
+        candidate_max_wait_ms=60_000,
+        selection_budget_ms=6_000,
+        poll_interval_ms=1_000,
+        group_timeout_ms=10_000,
+        terminal_write_budget_ms=5_000,
+        high_burst_groups=1,
+        reserved_non_high_slots=3,
+    )
+    store.configure_discovery_admission(proof, now_ms=1)
+    store.record_discovery_load_decision(
+        degraded_reason="candidate-quote-stale",
+        probe_every_cycles=3,
+        now_ms=2,
+    )
+    store.publish_discovery_batch(
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=3,
+        finished_at_ms=4,
+        page_event_count=0,
+        candidates=(),
+        admission_proof=proof,
+    )
+
+    response = http_test_client.get("/perception/discovery")
+
+    assert response.status_code == 200
+    discovery = response.json()["discovery"]
+    assert discovery["coverage"] == {
+        "known_groups": 0,
+        "total_liquidity_weight": 0.0,
+        "by_minutes": {
+            "15": {
+                "visited_groups": 0,
+                "raw_fraction": 0.0,
+                "liquidity_weighted_fraction": 0.0,
+            },
+            "30": {
+                "visited_groups": 0,
+                "raw_fraction": 0.0,
+                "liquidity_weighted_fraction": 0.0,
+            },
+            "60": {
+                "visited_groups": 0,
+                "raw_fraction": 0.0,
+                "liquidity_weighted_fraction": 0.0,
+            },
+        },
+    }
+    assert discovery["load_state"] == {
+        "degraded_streak": 1,
+        "last_reason": "candidate-quote-stale",
+        "last_decision": "yield",
+        "probe_every_cycles": 3,
+        "updated_at_ms": 2,
+    }
+    assert discovery["admission_proof"]["effective_capacity"] == 2
+    assert discovery["candidate_attempt_start_count"] == 0
+    assert discovery["candidate_start_deadline_breach_count"] == 0
+
+
+def test_reconciliation_exposes_validated_duration_and_diff_counts(
+    http_test_client,
+) -> None:
+    store = OpportunityPerceptionStore(
+        http_test_client.app.state.sqlite_store.db_path
+    )
+    window = store.begin_reconciliation(started_at_ms=10)
+
+    response = http_test_client.get("/perception/reconciliation")
+
+    assert response.status_code == 200
+    reconciliation = response.json()["reconciliation"]
+    assert reconciliation["id"] == window.id
+    assert reconciliation["duration_ms"] == 0
+    assert reconciliation["observations_count"] == 0
+    assert reconciliation["baseline_count"] == 0
+    assert reconciliation["added_count"] is None
+    assert reconciliation["changed_count"] is None
+    assert reconciliation["closed_count"] is None
+    assert reconciliation["unchanged_count"] is None
+    assert reconciliation["applied_rejected_count"] is None
+
+
 def test_incidents_recursively_redact_legacy_secret_shapes(http_test_client) -> None:
     db_path = http_test_client.app.state.sqlite_store.db_path
     evidence = (

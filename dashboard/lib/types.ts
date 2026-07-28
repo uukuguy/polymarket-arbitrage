@@ -135,7 +135,40 @@ export interface PerceptionDiscoveryStatus {
   oldest_visit_age_ms: number | null;
   promotion_queue_depth: number;
   outstanding_admitted_count: number;
+  candidate_attempt_start_count: number;
+  candidate_start_deadline_breach_count: number;
   candidate_start_ready: boolean;
+  coverage: {
+    known_groups: number;
+    total_liquidity_weight: number;
+    by_minutes: Record<
+      "15" | "30" | "60",
+      {
+        visited_groups: number;
+        raw_fraction: number;
+        liquidity_weighted_fraction: number;
+      }
+    >;
+  };
+  load_state: {
+    degraded_streak: number;
+    last_reason: string | null;
+    last_decision: "fresh" | "yield" | "probe";
+    probe_every_cycles: number;
+    updated_at_ms: number;
+  };
+  admission_proof: {
+    effective_capacity: number;
+    candidate_max_wait_ms: number;
+    selection_budget_ms: number;
+    poll_interval_ms: number;
+    group_timeout_ms: number;
+    terminal_write_budget_ms: number;
+    attempt_start_write_budget_ms: number;
+    high_burst_groups: number;
+    reserved_non_high_slots: number;
+    effective_start_bound_ms: number | null;
+  } | null;
 }
 
 export interface PerceptionDiscoveryEnvelope {
@@ -155,6 +188,14 @@ export interface PerceptionReconciliationStatus {
   events_seen: number;
   groups_staged: number;
   rejected_count: number;
+  duration_ms: number;
+  observations_count: number;
+  baseline_count: number;
+  added_count: number | null;
+  changed_count: number | null;
+  closed_count: number | null;
+  unchanged_count: number | null;
+  applied_rejected_count: number | null;
 }
 
 export interface PerceptionReconciliationEnvelope {

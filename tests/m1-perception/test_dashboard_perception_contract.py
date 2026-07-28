@@ -123,6 +123,32 @@ def test_overview_contains_operator_perception_and_incident_vocabulary() -> None
         assert phrase in overview
 
 
+def test_dashboard_validates_and_renders_progress_evidence() -> None:
+    reader = _source("dashboard/lib/perception.ts")
+    types = _source("dashboard/lib/types.ts")
+    overview = _source("dashboard/app/perception/page.tsx")
+
+    for field in (
+        "coverage",
+        "load_state",
+        "admission_proof",
+        "candidate_attempt_start_count",
+        "candidate_start_deadline_breach_count",
+        "duration_ms",
+        "added_count",
+        "changed_count",
+        "closed_count",
+        "unchanged_count",
+        "applied_rejected_count",
+    ):
+        assert field in reader
+        assert field in types
+        assert field in overview
+
+    assert "<NotExposed />" not in overview.split("<h2 style={{ marginTop: 0 }}>Coverage windows</h2>", 1)[1].split("</section>", 1)[0]
+    assert "Historical duration distribution is not tracked" in overview
+
+
 def test_group_page_builds_one_timestamped_operator_timeline() -> None:
     history = _source("dashboard/app/perception/[group_id]/page.tsx")
 

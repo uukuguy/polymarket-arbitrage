@@ -25,7 +25,42 @@ function isStringOrNull(value: unknown): value is string | null {
 }
 
 function isNumberOrNull(value: unknown): value is number | null {
-  return typeof value === "number" || value === null;
+  return (typeof value === "number" && Number.isFinite(value)) || value === null;
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isFraction(value: unknown): value is number {
+  return isNonNegativeNumber(value) && value <= 1;
+}
+
+function isCoverageWindow(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isNonNegativeNumber(value.visited_groups) &&
+    isFraction(value.raw_fraction) &&
+    isFraction(value.liquidity_weighted_fraction)
+  );
+}
+
+function isAdmissionProof(value: unknown): boolean {
+  if (value === null) return true;
+  return (
+    isRecord(value) &&
+    isNonNegativeNumber(value.effective_capacity) &&
+    isNonNegativeNumber(value.candidate_max_wait_ms) &&
+    isNonNegativeNumber(value.selection_budget_ms) &&
+    isNonNegativeNumber(value.poll_interval_ms) &&
+    isNonNegativeNumber(value.group_timeout_ms) &&
+    isNonNegativeNumber(value.terminal_write_budget_ms) &&
+    isNonNegativeNumber(value.attempt_start_write_budget_ms) &&
+    isNonNegativeNumber(value.high_burst_groups) &&
+    isNonNegativeNumber(value.reserved_non_high_slots) &&
+    (value.effective_start_bound_ms === null ||
+      isNonNegativeNumber(value.effective_start_bound_ms))
+  );
 }
 
 function isGroupRevision(value: unknown): boolean {
@@ -94,6 +129,9 @@ function isDiscoveryEnvelope(
   if (!isRecord(value) || value.status !== "available") return false;
   if (value.discovery === null) return true;
   const discovery = value.discovery;
+  const coverage = isRecord(discovery) ? discovery.coverage : null;
+  const windows = isRecord(coverage) ? coverage.by_minutes : null;
+  const loadState = isRecord(discovery) ? discovery.load_state : null;
   return (
     isRecord(discovery) &&
     isStringOrNull(discovery.next_cursor) &&
@@ -110,7 +148,23 @@ function isDiscoveryEnvelope(
     isNumberOrNull(discovery.oldest_visit_age_ms) &&
     typeof discovery.promotion_queue_depth === "number" &&
     typeof discovery.outstanding_admitted_count === "number" &&
-    typeof discovery.candidate_start_ready === "boolean"
+    isNonNegativeNumber(discovery.candidate_attempt_start_count) &&
+    isNonNegativeNumber(discovery.candidate_start_deadline_breach_count) &&
+    typeof discovery.candidate_start_ready === "boolean" &&
+    isRecord(coverage) &&
+    isNonNegativeNumber(coverage.known_groups) &&
+    isNonNegativeNumber(coverage.total_liquidity_weight) &&
+    isRecord(windows) &&
+    isCoverageWindow(windows["15"]) &&
+    isCoverageWindow(windows["30"]) &&
+    isCoverageWindow(windows["60"]) &&
+    isRecord(loadState) &&
+    isNonNegativeNumber(loadState.degraded_streak) &&
+    isStringOrNull(loadState.last_reason) &&
+    ["fresh", "yield", "probe"].includes(String(loadState.last_decision)) &&
+    isNonNegativeNumber(loadState.probe_every_cycles) &&
+    isNonNegativeNumber(loadState.updated_at_ms) &&
+    isAdmissionProof(discovery.admission_proof)
   );
 }
 
@@ -134,7 +188,15 @@ function isReconciliationEnvelope(
     typeof reconciliation.pages_completed === "number" &&
     typeof reconciliation.events_seen === "number" &&
     typeof reconciliation.groups_staged === "number" &&
-    typeof reconciliation.rejected_count === "number"
+    typeof reconciliation.rejected_count === "number" &&
+    isNonNegativeNumber(reconciliation.duration_ms) &&
+    isNonNegativeNumber(reconciliation.observations_count) &&
+    isNonNegativeNumber(reconciliation.baseline_count) &&
+    isNumberOrNull(reconciliation.added_count) &&
+    isNumberOrNull(reconciliation.changed_count) &&
+    isNumberOrNull(reconciliation.closed_count) &&
+    isNumberOrNull(reconciliation.unchanged_count) &&
+    isNumberOrNull(reconciliation.applied_rejected_count)
   );
 }
 
