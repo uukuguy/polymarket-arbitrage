@@ -66,6 +66,16 @@ At least 20% of the exploration budget is reserved for age-based anti-starvation
 No region of the known universe may be permanently excluded merely because it
 has historically produced no edge.
 
+Candidate scheduling enforces that reservation in both count and time. At
+least `ceil(20% * cycle_max_groups)` slots are reserved for normal/explore
+work. Each cycle executes one configured high burst first, then the reserved
+lanes, then the remaining selected work. The configured worst-case
+`high_burst_groups * group_timeout_s` must remain strictly below the explicit
+normal-candidate maximum wait, which may be tightened but never raised above
+the 120-second production acceptance boundary. The high burst cannot exceed
+the bounded high CLOB worker capacity, so queued high calls cannot consume the
+lower-lane wait budget.
+
 ## 4. Group-Level Data Contract
 
 The unit of online certification is one neg-risk group.
@@ -315,6 +325,9 @@ M1 may be called production-usable only when the following are proven.
 - High-priority candidate Quote age p95 is at most 30 seconds and never silently
   exceeds 90 seconds.
 - Normal candidate Quote age is at most 120 seconds or explicitly stale.
+- The Candidate scheduler exposes this 120-second normal-candidate boundary as
+  configuration, reserves at least 20% of every cycle for normal/explore, and
+  proves the pre-lower high timeout budget is strictly smaller.
 - Every watching opportunity passes the group identity and all-leg batch gates.
 - A valid empty candidate/opportunity result is distinguishable from failure.
 
@@ -364,4 +377,3 @@ is supporting evidence, not the definition of stability.
   moves from a global snapshot dependency to group revision plus membership hash.
 - The previously considered design in which Structure globally preempts Quote is
   rejected: background completeness must not starve the opportunity-first path.
-

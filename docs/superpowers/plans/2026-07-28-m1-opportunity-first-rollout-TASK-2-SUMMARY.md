@@ -38,6 +38,11 @@
   kill already-running SDK threads.
 - Settings and constructors reject non-finite controller values, a high cadence
   beyond hard-stale, and reserved slots greater than or equal to cycle capacity.
+- Final re-review remediation makes anti-starvation time-bounded as well as
+  count-bounded: one configured high burst runs first, then at least 20% reserved
+  normal/explore slots, then remaining work. The pre-lower timeout budget must
+  remain strictly below the explicit, at-most-120-second normal-candidate
+  acceptance boundary and the burst cannot exceed high-worker capacity.
 
 ## Safety and Scope
 
@@ -87,7 +92,12 @@ Second re-review RED → GREEN additions cover:
 - finite/relational validation at Settings, interval-controller, and scheduler
   construction boundaries.
 
-Final verification passed 54 focused tests and 177 proportional Task 1/Task 2
+Final re-review RED → GREEN additions cover more stalled high groups than high
+workers, lower-lane execution before the configured bound, rejection at the
+exact `burst * timeout == 120s` edge, rejection below the 20% reservation, and
+continued one-slot normal/explore rotation across cycles.
+
+Final verification passed 62 focused tests and 185 proportional Task 1/Task 2
 plus legacy regression tests. Changed-file Ruff and `git diff --check` also
 passed.
 

@@ -71,9 +71,18 @@ class Settings(BaseSettings):
         default=90.0, gt=0, allow_inf_nan=False
     )
     candidate_cycle_max_groups: int = Field(default=12, ge=2)
-    candidate_reserved_non_high_slots: int = Field(default=2, ge=1)
+    candidate_reserved_non_high_slots: int = Field(default=3, ge=1)
     candidate_group_timeout_s: float = Field(
         default=30.0, gt=0, allow_inf_nan=False
+    )
+    candidate_high_burst_groups: int = Field(default=1, ge=1)
+    # Production acceptance requires normal candidates to be quoted or
+    # explicitly stale within 120s. Operators may tighten, never relax, it.
+    candidate_lower_lane_max_wait_s: float = Field(
+        default=120.0,
+        gt=0,
+        le=120,
+        allow_inf_nan=False,
     )
     candidate_supervisor_retry_s: float = Field(
         default=1.0, gt=0, allow_inf_nan=False
@@ -322,6 +331,38 @@ class Settings(BaseSettings):
             raise ValueError(
                 "candidate_reserved_non_high_slots must be less than "
                 "candidate_cycle_max_groups"
+            )
+        if (
+            self.candidate_reserved_non_high_slots * 5
+            < self.candidate_cycle_max_groups
+        ):
+            raise ValueError(
+                "candidate_reserved_non_high_slots must reserve at least "
+                "20 percent of each cycle"
+            )
+        if self.candidate_high_burst_groups > (
+            self.candidate_cycle_max_groups
+            - self.candidate_reserved_non_high_slots
+        ):
+            raise ValueError(
+                "candidate_high_burst_groups exceeds the cycle high capacity"
+            )
+        if (
+            self.candidate_high_burst_groups
+            > self.candidate_high_clob_workers
+        ):
+            raise ValueError(
+                "candidate_high_burst_groups must not exceed "
+                "candidate_high_clob_workers"
+            )
+        if (
+            self.candidate_high_burst_groups
+            * self.candidate_group_timeout_s
+            >= self.candidate_lower_lane_max_wait_s
+        ):
+            raise ValueError(
+                "candidate high burst timeout budget must stay below "
+                "candidate_lower_lane_max_wait_s"
             )
         # Auto-enable Supabase mirror if both URL + service key are set
         # Phase 03.1-02: same secrets gate l2_mirror_enabled (L2 daemon uses the

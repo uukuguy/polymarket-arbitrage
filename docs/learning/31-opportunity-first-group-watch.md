@@ -61,8 +61,11 @@ shield 同一个 writer task，直到它返回 durable fact。成功时 runtime 
 cause。这避免关机或 per-group timeout 撞上 COMMIT 时出现“数据库已写、runtime 永远
 没看见”，也不会因第二次取消打断收敛。
 
-Scheduler 每轮只处理配置的最大组数，并为 normal/explore 保留槽位；high 仍先执行，
-但每个组有独立 timeout。由于 py-clob-client 是同步 SDK，取消 asyncio task 无法杀死
+Scheduler 每轮只处理配置的最大组数，并为 normal/explore 至少保留 20% 槽位。执行
+顺序不是“所有 high 再 lower”，而是“有界 high burst → 保留 lower lanes → 其余工作”。
+因此 hot 至少先服务一组，而 lower 开始前的最坏等待是
+`high_burst_groups * group_timeout_s`，并在构造时被要求严格小于显式的 120 秒以内
+normal-candidate 验收边界。由于 py-clob-client 是同步 SDK，取消 asyncio task 无法杀死
 已经运行的 SDK 线程；生产 builder 因而把 high 和 normal/explore 放入两个独立的有界
 线程池。卡住的 high 最多占用配置的 high worker 数，不会耗尽默认 executor，也不会
 阻止 lower lane 继续采集。shutdown 会取消尚未开始的 future，但运行中的 SDK 调用只能
@@ -78,13 +81,15 @@ Scheduler 每轮只处理配置的最大组数，并为 normal/explore 保留槽
   全市场 `collect_quotes_in_subprocess()`。
 - **失败不降级优先级**：high 候选一次失败后仍是 high，只进行有上限的退避；
   否则最值得盯的组反而会因瞬时错误掉入五分钟慢车道。
-- **优先不等于垄断**：每轮保留 normal/explore 槽位，并用 per-group timeout 限制
-  卡住的 high。这样 freshness priority 与 age-based anti-starvation 同时成立。
+- **优先不等于垄断**：至少 20% 槽位保留给 normal/explore；首段 high burst 后立即执行
+  这些槽，而不是把 lower 放在所有 high 之后。这样 freshness priority 与时间有界的
+  age-based anti-starvation 同时成立。
 - **退避先封顶再指数**：先由 `cap/base` 算出最大有效翻倍次数，再做 `2**n`；
   即使 durable failure count 是 100000，也只得到配置 cap，不会先发生数值溢出。
 - **配置先拒绝不可能的控制器**：所有秒数必须为正有限数，high cadence 不得超过
-  hard-stale；保留槽必须满足 `1 <= reserved < cycle_max_groups`。normal/explore cadence
-  可以高于 high 的 hard-stale，因为它们是低优先级基准周期，不是 high freshness SLA。
+  hard-stale；保留槽至少是 cycle 的 20%。`high_burst * timeout < lower_max_wait <= 120s`
+  且 burst 不超过 high worker。normal/explore cadence 可以高于 high 的 hard-stale，
+  因为它们是低优先级基准周期，不是 high freshness SLA。
 - **隔离资源而非假装可取消**：high/lower CLOB worker 分池；SQLite、Structure 读取仍走
   默认 executor。线程池 shutdown 不承诺中止已经进入同步 SDK 的调用。
 - **旧链仍保留**：本 slice 没有替换原机会 API。新 worker 默认关闭，待后续

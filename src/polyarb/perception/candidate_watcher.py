@@ -580,8 +580,10 @@ class CandidateWatcherScheduler:
         poll_interval_s: float = 1.0,
         supervisor_retry_s: float = 1.0,
         cycle_max_groups: int = 12,
-        reserved_non_high_slots: int = 2,
+        reserved_non_high_slots: int = 3,
         group_timeout_s: float = 30.0,
+        high_burst_groups: int = 1,
+        lower_lane_max_wait_s: float = 120.0,
         close_callbacks: Sequence[Callable[[], None]] = (),
     ) -> None:
         self._watcher = watcher
@@ -594,6 +596,8 @@ class CandidateWatcherScheduler:
         self._cycle_max_groups = cycle_max_groups
         self._reserved_non_high_slots = reserved_non_high_slots
         self._group_timeout_s = group_timeout_s
+        self._high_burst_groups = high_burst_groups
+        self._lower_lane_max_wait_s = lower_lane_max_wait_s
         self._reserved_lane_cursor = 0
         self._close_callbacks = tuple(close_callbacks)
         self._closed = False
@@ -605,8 +609,15 @@ class CandidateWatcherScheduler:
             or cycle_max_groups < 2
             or reserved_non_high_slots <= 0
             or reserved_non_high_slots >= cycle_max_groups
+            or reserved_non_high_slots * 5 < cycle_max_groups
             or not math.isfinite(group_timeout_s)
             or group_timeout_s <= 0
+            or high_burst_groups <= 0
+            or high_burst_groups > cycle_max_groups - reserved_non_high_slots
+            or not math.isfinite(lower_lane_max_wait_s)
+            or lower_lane_max_wait_s <= 0
+            or lower_lane_max_wait_s > 120
+            or high_burst_groups * group_timeout_s >= lower_lane_max_wait_s
         ):
             raise ValueError("invalid-candidate-scheduler-controller-input")
 
@@ -680,13 +691,19 @@ class CandidateWatcherScheduler:
             self._reserved_lane_cursor + 1
         ) % len(lanes)
         remaining = self._cycle_max_groups - len(reserved)
-        selected = high[:remaining]
-        remaining -= len(selected)
-        if remaining:
-            selected.extend((normal + explore)[:remaining])
-        # Hot candidates retain execution priority, but reserved lower-lane
-        # work is guaranteed into this bounded cycle.
-        return tuple(sorted(selected, key=lambda item: (item[0], item[1], item[2])) + reserved)
+        selected_high = high[:remaining]
+        remaining -= len(selected_high)
+        selected_lower = (normal + explore)[:remaining] if remaining else []
+        # At least one hot candidate gets first service. Reserved lower-lane
+        # work then runs before any queue-only high can consume another timeout
+        # budget. Remaining selected work retains priority order afterwards.
+        high_burst = selected_high[: self._high_burst_groups]
+        tail = selected_high[self._high_burst_groups :] + selected_lower
+        return tuple(
+            high_burst
+            + reserved
+            + sorted(tail, key=lambda item: (item[0], item[1], item[2]))
+        )
 
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
@@ -777,6 +794,8 @@ def build_production_candidate_watcher(
             cycle_max_groups=settings.candidate_cycle_max_groups,
             reserved_non_high_slots=settings.candidate_reserved_non_high_slots,
             group_timeout_s=settings.candidate_group_timeout_s,
+            high_burst_groups=settings.candidate_high_burst_groups,
+            lower_lane_max_wait_s=settings.candidate_lower_lane_max_wait_s,
             close_callbacks=(executors.close,),
         )
     except BaseException:

@@ -660,12 +660,49 @@ def test_single_reserved_slot_rotates_between_normal_and_explore(
     first = scheduler._select_cycle(due)
     second = scheduler._select_cycle(due)
 
-    assert {item[2] for item in first} == {"high", "normal"}
-    assert {item[2] for item in second} == {"high", "explore"}
+    assert [item[2] for item in first] == ["high", "normal"]
+    assert [item[2] for item in second] == ["high", "explore"]
+
+
+def test_cycle_interleaves_reserved_lanes_after_configured_high_burst(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    scheduler = CandidateWatcherScheduler(
+        watcher=object(),
+        store=store,
+        candidate_group_ids=lambda: (),
+        runtime=CandidateWatcherRuntime(),
+        cycle_max_groups=6,
+        reserved_non_high_slots=2,
+        high_burst_groups=1,
+        group_timeout_s=30,
+        lower_lane_max_wait_s=120,
+    )
+    due = [
+        (0, 1_000, "high-1"),
+        (0, 1_000, "high-2"),
+        (0, 1_000, "high-3"),
+        (0, 1_000, "high-4"),
+        (1, 1_000, "normal"),
+        (2, 1_000, "explore"),
+    ]
+
+    selected = scheduler._select_cycle(due)
+
+    assert [item[2] for item in selected] == [
+        "high-1",
+        "normal",
+        "explore",
+        "high-2",
+        "high-3",
+        "high-4",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_stuck_real_clob_threads_cannot_block_timeout_facts_or_lower_lanes(
+async def test_more_stalled_highs_than_workers_cannot_delay_reserved_lanes_to_bound(
     tmp_path: Path,
 ) -> None:
     store = OpportunityPerceptionStore(tmp_path / "state.db")
@@ -675,13 +712,22 @@ async def test_stuck_real_clob_threads_cannot_block_timeout_facts_or_lower_lanes
             group_id,
             tokens=(f"{group_id}-yes-1", f"{group_id}-yes-2"),
         )
-        for group_id in ("high-1", "high-2", "normal-1", "explore-1")
+        for group_id in (
+            "high-1",
+            "high-2",
+            "high-3",
+            "high-4",
+            "normal-1",
+            "explore-1",
+        )
     }
     for revision in revisions.values():
         store.publish_group_revision(revision)
     for group_id, priority in (
         ("high-1", "high"),
         ("high-2", "high"),
+        ("high-3", "high"),
+        ("high-4", "high"),
         ("normal-1", "normal"),
         ("explore-1", "explore"),
     ):
@@ -705,6 +751,8 @@ async def test_stuck_real_clob_threads_cannot_block_timeout_facts_or_lower_lanes
     release_high = threading.Event()
     all_high_started = threading.Event()
     high_started_count = 0
+    lower_started_at: float | None = None
+    high_count_when_lower_started: int | None = None
     high_started_lock = threading.Lock()
     high_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="test-high-clob")
     lower_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-lower-clob")
@@ -718,13 +766,19 @@ async def test_stuck_real_clob_threads_cannot_block_timeout_facts_or_lower_lanes
             assert projection == "top"
 
             def fetch():
+                nonlocal high_count_when_lower_started
                 nonlocal high_started_count
+                nonlocal lower_started_at
                 if self.blocking:
                     with high_started_lock:
                         high_started_count += 1
                         if high_started_count == 2:
                             all_high_started.set()
                     assert release_high.wait(timeout=2)
+                else:
+                    lower_started_at = time.monotonic()
+                    with high_started_lock:
+                        high_count_when_lower_started = high_started_count
                 return books(
                     (token_ids[0], "0.40", "10"),
                     (token_ids[1], "0.50", "8"),
@@ -757,9 +811,11 @@ async def test_stuck_real_clob_threads_cannot_block_timeout_facts_or_lower_lanes
         candidate_group_ids=lambda: tuple(revisions),
         runtime=runtime,
         clock_ms=lambda: 2_000,
-        cycle_max_groups=4,
+        cycle_max_groups=6,
         reserved_non_high_slots=2,
         group_timeout_s=0.02,
+        high_burst_groups=1,
+        lower_lane_max_wait_s=0.05,
         close_callbacks=(
             lambda: closed.append("closed"),
         ),
@@ -771,11 +827,21 @@ async def test_stuck_real_clob_threads_cannot_block_timeout_facts_or_lower_lanes
 
     assert elapsed < 0.3
     assert all_high_started.is_set()
+    assert lower_started_at is not None
+    assert lower_started_at - started_at < 0.05
+    assert high_count_when_lower_started == 1
     assert store.latest_candidate_watch_fact("high-1").reason == "candidate-group-timeout"
     assert store.latest_candidate_watch_fact("high-2").reason == "candidate-group-timeout"
+    assert store.latest_candidate_watch_fact("high-3").reason == "candidate-group-timeout"
+    assert store.latest_candidate_watch_fact("high-4").reason == "candidate-group-timeout"
     assert store.latest_candidate_watch_fact("normal-1").last_result == "watching"
     assert store.latest_candidate_watch_fact("explore-1").last_result == "watching"
-    assert runtime.snapshot().degraded_group_ids == ("high-1", "high-2")
+    assert runtime.snapshot().degraded_group_ids == (
+        "high-1",
+        "high-2",
+        "high-3",
+        "high-4",
+    )
 
     stop_event = asyncio.Event()
     stop_event.set()
@@ -808,6 +874,15 @@ def test_interval_controller_rejects_non_finite_or_impossible_freshness(
         {"group_timeout_s": float("inf")},
         {"poll_interval_s": float("nan")},
         {"cycle_max_groups": 2, "reserved_non_high_slots": 2},
+        {
+            "group_timeout_s": 40,
+            "high_burst_groups": 3,
+            "lower_lane_max_wait_s": 120,
+        },
+        {
+            "cycle_max_groups": 12,
+            "reserved_non_high_slots": 2,
+        },
     ],
 )
 def test_scheduler_rejects_non_finite_or_silently_reduced_inputs(

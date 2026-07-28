@@ -120,8 +120,10 @@ def test_candidate_watcher_controller_settings_are_explicit_and_off_by_default()
     assert settings.candidate_explore_interval_s == 300
     assert settings.candidate_quote_hard_stale_s == 90
     assert settings.candidate_cycle_max_groups == 12
-    assert settings.candidate_reserved_non_high_slots == 2
+    assert settings.candidate_reserved_non_high_slots == 3
     assert settings.candidate_group_timeout_s == 30
+    assert settings.candidate_high_burst_groups == 1
+    assert settings.candidate_lower_lane_max_wait_s == 120
     assert settings.candidate_supervisor_retry_s == 1
     assert settings.candidate_scheduler_poll_s == 1
     assert settings.candidate_high_clob_workers == 2
@@ -141,11 +143,41 @@ def test_candidate_watcher_controller_settings_are_explicit_and_off_by_default()
             "candidate_cycle_max_groups": 2,
             "candidate_reserved_non_high_slots": 2,
         },
+        {
+            "candidate_cycle_max_groups": 12,
+            "candidate_reserved_non_high_slots": 2,
+        },
+        {
+            "candidate_high_burst_groups": 3,
+            "candidate_high_clob_workers": 3,
+            "candidate_group_timeout_s": 40,
+            "candidate_lower_lane_max_wait_s": 120,
+        },
+        {"candidate_lower_lane_max_wait_s": 120.001},
+        {
+            "candidate_high_burst_groups": 3,
+            "candidate_high_clob_workers": 2,
+        },
     ],
 )
 def test_candidate_controller_settings_reject_invalid_relationships(kwargs) -> None:
     with pytest.raises(ValueError):
         Settings(**kwargs)
+
+
+def test_candidate_controller_accepts_strictly_sub_boundary_high_burst() -> None:
+    settings = Settings(
+        candidate_high_burst_groups=3,
+        candidate_high_clob_workers=3,
+        candidate_group_timeout_s=39.999,
+        candidate_lower_lane_max_wait_s=120,
+    )
+
+    assert (
+        settings.candidate_high_burst_groups
+        * settings.candidate_group_timeout_s
+        < settings.candidate_lower_lane_max_wait_s
+    )
 
 
 def test_fly_enables_worker_at_120_seconds() -> None:
