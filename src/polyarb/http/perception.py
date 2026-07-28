@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import re
 import sqlite3
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -24,6 +26,7 @@ _GROUP_PAGE_HISTORY_CAP = 10_000
 _LEGS_JSON_MAX_BYTES = 65_536
 _TIMEOUT_S = 1.0
 _BUSY_TIMEOUT_MS = 250
+_READ_SQL_DEADLINE_S = 0.8
 _INCIDENT_EDGES = {
     "detected": {"classified"},
     "classified": {"contained", "escalated"},
@@ -52,6 +55,54 @@ _INLINE_SECRET_RE = re.compile(
     r"(?i)(?:password|passwd|secret|api[_-]?key|token|authorization|cookie|session)"
     r"\s*[:=]\s*[^\s,;&]+|(?:bearer|basic)\s+[a-z0-9._~+/=-]+"
 )
+_READ_EXECUTION: contextvars.ContextVar[_ReadExecution | None] = contextvars.ContextVar(
+    "perception_read_execution",
+    default=None,
+)
+
+
+class _ReadExecution:
+    """One absolute request deadline plus every SQLite handle it owns."""
+
+    def __init__(self, deadline_monotonic: float) -> None:
+        self.deadline_monotonic = deadline_monotonic
+        self._lock = threading.Lock()
+        self._connections: list[sqlite3.Connection] = []
+
+    def register(self, con: sqlite3.Connection) -> None:
+        with self._lock:
+            self._connections.append(con)
+
+    def interrupt(self) -> None:
+        with self._lock:
+            connections = tuple(self._connections)
+        for con in connections:
+            try:
+                con.interrupt()
+            except sqlite3.Error:
+                pass
+
+    def check(self) -> None:
+        if time.monotonic() >= self.deadline_monotonic:
+            raise TimeoutError("perception-read-deadline")
+
+
+def _check_read_deadline() -> None:
+    execution = _READ_EXECUTION.get()
+    if execution is not None:
+        execution.check()
+
+
+def _read_store(db_path: Path) -> OpportunityPerceptionStore:
+    execution = _READ_EXECUTION.get()
+    return OpportunityPerceptionStore(
+        db_path,
+        read_only=True,
+        busy_timeout_ms=_BUSY_TIMEOUT_MS,
+        deadline_monotonic=(
+            None if execution is None else execution.deadline_monotonic
+        ),
+    )
 
 
 def _validate_recovery_batch(
@@ -64,11 +115,7 @@ def _validate_recovery_batch(
     """Validate all verified incidents with fixed-count bulk reads."""
     if not proofs:
         return
-    store = OpportunityPerceptionStore(
-        db_path,
-        read_only=True,
-        busy_timeout_ms=_BUSY_TIMEOUT_MS,
-    )
+    store = _read_store(db_path)
     scopes = {scope for scope, *_ in proofs}
     candidate_receipts: dict[str, sqlite3.Row] = {}
     if any(scope == "candidate" or scope.startswith("candidate:") for scope in scopes):
@@ -119,6 +166,7 @@ def _validate_recovery_batch(
             ).fetchall()
         }
     for scope, recovery_at, verified_at, recovery, verification in proofs:
+        _check_read_deadline()
         valid = False
         if scope == "candidate" or scope.startswith("candidate:"):
             group_id = verification.get("group_id")
@@ -225,6 +273,7 @@ def _safe_evidence(value: Any, *, depth: int = 0) -> Any:
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
+    execution = _READ_EXECUTION.get()
     con = sqlite3.connect(
         f"file:{db_path.resolve()}?mode=ro",
         uri=True,
@@ -234,6 +283,12 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
     con.execute("PRAGMA query_only=ON")
+    if execution is not None:
+        execution.register(con)
+        con.set_progress_handler(
+            lambda: 1 if time.monotonic() >= execution.deadline_monotonic else 0,
+            1_000,
+        )
     return con
 
 
@@ -302,6 +357,40 @@ def _validate_revision(row: sqlite3.Row) -> dict[str, Any]:
         "source_cursor": str(row["source_cursor"]),
         "leg_count": len(legs),
     }
+
+
+def _validate_group_history(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    previous_by_group: dict[str, dict[str, Any]] = {}
+    allowed_transitions = {
+        "discovered": {"certified", "invalidated", "closed"},
+        "certified": {"certified", "stale", "invalidated", "closed"},
+        "stale": {"certified", "stale", "invalidated", "closed"},
+        "invalidated": {"certified", "invalidated", "closed"},
+        "closed": {"closed"},
+    }
+    for row in rows:
+        _check_read_deadline()
+        item = _validate_revision(row)
+        previous = previous_by_group.get(item["group_id"])
+        if (
+            (previous is None and item["revision"] != 1)
+            or (
+                previous is not None
+                and (
+                    item["event_id"] != previous["event_id"]
+                    or item["revision"] != previous["revision"] + 1
+                    or item["started_at_ms"] < previous["started_at_ms"]
+                    or item["observed_at_ms"] < previous["observed_at_ms"]
+                    or item["status"]
+                    not in allowed_transitions[previous["status"]]
+                )
+            )
+        ):
+            raise ValueError("invalid-group-history")
+        previous_by_group[item["group_id"]] = item
+        items.append(item)
+    return items
 
 
 def _read_incident_history(con: sqlite3.Connection, db_path: Path) -> list[dict[str, Any]]:
@@ -392,11 +481,9 @@ def _status(db_path: Path) -> dict[str, Any]:
             for item in incidents
         ):
             raise ValueError("candidate-worker-unavailable")
-        count = OpportunityPerceptionStore(
-            db_path,
-            read_only=True,
-            busy_timeout_ms=_BUSY_TIMEOUT_MS,
-        ).validated_candidate_opportunity_count(_connection=con)
+        count = _read_store(db_path).validated_candidate_opportunity_count(
+            _connection=con
+        )
         con.execute("COMMIT")
         return {
             "status": "available",
@@ -474,12 +561,7 @@ def _groups(db_path: Path, limit: int, after: str) -> dict[str, Any]:
             f"WHERE id IN ({history_marks}) ORDER BY group_id,revision",
             history_ids,
         ).fetchall()
-        prior: dict[str, int] = {}
-        for row in histories:
-            item = _validate_revision(row)
-            if item["group_id"] in prior and item["revision"] <= prior[item["group_id"]]:
-                raise ValueError("invalid-group-history")
-            prior[item["group_id"]] = item["revision"]
+        _validate_group_history(histories)
         con.execute("COMMIT")
         return {
             "status": "available",
@@ -539,10 +621,7 @@ def _history(
             f"WHERE id IN ({marks}) ORDER BY revision",
             ids,
         ).fetchall()
-        items = [_validate_revision(row) for row in rows]
-        for prior, item in zip(items, items[1:], strict=False):
-            if item["revision"] <= prior["revision"]:
-                raise ValueError("invalid-group-history")
+        items = _validate_group_history(rows)
         con.execute("COMMIT")
         eligible = [
             item
@@ -593,11 +672,9 @@ def _discovery(db_path: Path) -> dict[str, Any]:
             bounds[8]
         ) > 8_388_608 or int(bounds[9]) > _LEGS_JSON_MAX_BYTES:
             raise ValueError("discovery-read-bound-exceeded")
-        status = OpportunityPerceptionStore(
-            db_path,
-            read_only=True,
-            busy_timeout_ms=_BUSY_TIMEOUT_MS,
-        ).discovery_status(int(time.time() * 1_000), _connection=con)
+        status = _read_store(db_path).discovery_status(
+            int(time.time() * 1_000), _connection=con
+        )
         con.execute("COMMIT")
     except BaseException:
         if con.in_transaction:
@@ -667,11 +744,7 @@ def _reconciliation(db_path: Path) -> dict[str, Any]:
                 int(value) > _LEGS_JSON_MAX_BYTES for value in bounds[7:]
             ):
                 raise ValueError("reconciliation-read-bound-exceeded")
-        window = OpportunityPerceptionStore(
-            db_path,
-            read_only=True,
-            busy_timeout_ms=_BUSY_TIMEOUT_MS,
-        ).current_reconciliation(_connection=con)
+        window = _read_store(db_path).current_reconciliation(_connection=con)
         con.execute("COMMIT")
     except BaseException:
         if con.in_transaction:
@@ -710,8 +783,23 @@ def _incidents(db_path: Path, limit: int) -> dict[str, Any]:
 
 
 async def _serve(request: Request, reader: Callable[[], dict[str, Any]]) -> JSONResponse:
+    execution = _ReadExecution(time.monotonic() + _READ_SQL_DEADLINE_S)
+    token = _READ_EXECUTION.set(execution)
+    task = asyncio.create_task(asyncio.to_thread(reader))
+    _READ_EXECUTION.reset(token)
     try:
-        body = await asyncio.wait_for(asyncio.to_thread(reader), timeout=_TIMEOUT_S)
+        try:
+            body = await asyncio.wait_for(asyncio.shield(task), timeout=_TIMEOUT_S)
+        except TimeoutError:
+            execution.interrupt()
+            # All production readers and nested validators share the absolute
+            # SQLite/Python deadline. Awaiting convergence here prevents a
+            # timed-out request from leaving a live reader thread/connection.
+            try:
+                await task
+            except (TimeoutError, sqlite3.Error, ValueError):
+                pass
+            raise
         if len(
             json.dumps(
                 body,

@@ -453,6 +453,7 @@ class DiscoveryRunner:
                     require_resource_decision=self._worker._require_resource_decision,
                 )
                 delay_s = self._interval_s
+                successful_checkpoint = False
                 try:
                     result = await self._worker.run_batch()
                     await asyncio.to_thread(
@@ -475,6 +476,7 @@ class DiscoveryRunner:
                         if not math.isfinite(duty) or not 0.1 <= duty <= 4.0:
                             raise ValueError("invalid-discovery-duty-multiplier")
                         delay_s = self._interval_s / duty
+                    successful_checkpoint = not result.yielded
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -482,7 +484,7 @@ class DiscoveryRunner:
                         "discovery batch failed "
                         f"kind={type(error).__name__}"
                     )
-                if requested_nonce is not None:
+                if requested_nonce is not None and successful_checkpoint:
                     await asyncio.to_thread(
                         self._store.consume_operator_wakeup,
                         "discovery",

@@ -576,6 +576,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_operator_queue (
   queued_at_ms INTEGER,
   consumed_at_ms INTEGER,
   request_nonce TEXT,
+  request_auth_hash TEXT,
   last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0),
   last_receipt_hash TEXT
 );
@@ -588,6 +589,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_operator_queue_receipts (
     ('queued','coalesced','consumed','cancelled')),
   occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
   auth_nonce TEXT NOT NULL,
+  auth_receipt_hash TEXT NOT NULL,
   previous_hash TEXT,
   receipt_hash TEXT NOT NULL,
   UNIQUE(component,sequence),

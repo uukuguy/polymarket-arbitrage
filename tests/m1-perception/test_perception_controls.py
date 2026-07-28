@@ -6,7 +6,13 @@ import sqlite3
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
+import pytest
+
+from polyarb.perception import store as perception_store
+from polyarb.perception.discovery import DiscoveryRunner
+from polyarb.perception.reconciliation import ReconciliationRunner
 from polyarb.perception.store import OpportunityPerceptionStore
 
 _SECRET = "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
@@ -68,6 +74,21 @@ def test_perception_controls_require_fresh_body_bound_hmac(http_test_client) -> 
         ).status_code
         == 401
     )
+
+
+def test_perception_control_rejects_oversized_body_before_auth_persistence(
+    http_test_client,
+) -> None:
+    response = _signed(
+        http_test_client,
+        "/control/perception/discovery",
+        body=b"x" * 65_537,
+    )
+    assert response.status_code == 413
+    with sqlite3.connect(http_test_client.app.state.sqlite_store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_operator_auth_nonces"
+        ).fetchone() == (0,)
 
 
 def test_perception_control_queues_once_and_replay_is_rejected(
@@ -163,6 +184,289 @@ def test_operator_queue_deadline_rolls_back_before_return(tmp_path) -> None:
         assert con.execute("SELECT COUNT(*) FROM neg_risk_operator_queue_receipts").fetchone() == (
             0,
         )
+
+
+def test_operator_auth_and_queue_history_have_fail_closed_capacity_bounds(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db", busy_timeout_ms=250)
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.executemany(
+            "INSERT INTO neg_risk_operator_auth_nonces("
+            "nonce,request_method,request_path,request_timestamp_s,body_hash,"
+            "accepted_at_ms,auth_hash) VALUES(?, 'POST',"
+            "'/control/perception/discovery',1,?,1000,'invalid')",
+            (
+                (f"nonce-{index}", "0" * 64)
+                for index in range(10_001)
+            ),
+        )
+    with sqlite3.connect(store.db_path) as con, pytest.raises(
+        ValueError,
+        match="operator-auth-history-capacity-exceeded",
+    ):
+        con.row_factory = sqlite3.Row
+        store._validated_operator_auth(con)
+
+
+def _replace_with_task6_legacy_operator_schema(
+    db_path,
+    *,
+    receipt_action: str = "queued",
+) -> None:
+    with sqlite3.connect(db_path) as con:
+        con.executescript(
+            """
+            DROP TABLE neg_risk_operator_queue_receipts;
+            DROP TABLE neg_risk_operator_queue;
+            DROP TABLE neg_risk_operator_auth_nonces;
+            CREATE TABLE neg_risk_operator_auth_nonces (
+              nonce TEXT PRIMARY KEY,
+              request_path TEXT NOT NULL,
+              request_timestamp_s INTEGER NOT NULL,
+              accepted_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE neg_risk_operator_queue (
+              component TEXT PRIMARY KEY,
+              queued INTEGER NOT NULL,
+              queued_at_ms INTEGER,
+              consumed_at_ms INTEGER,
+              request_nonce TEXT
+            );
+            CREATE TABLE neg_risk_operator_queue_receipts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              component TEXT NOT NULL,
+              action TEXT NOT NULL,
+              occurred_at_ms INTEGER NOT NULL,
+              request_nonce TEXT,
+              UNIQUE(component,action,request_nonce)
+            );
+            INSERT INTO neg_risk_operator_auth_nonces
+              VALUES('legacy-nonce','/control/perception/discovery',1,1000);
+            INSERT INTO neg_risk_operator_queue
+              VALUES('discovery',1,1000,NULL,'legacy-nonce');
+            """
+        )
+        con.execute(
+            "INSERT INTO neg_risk_operator_queue_receipts("
+            "component,action,occurred_at_ms,request_nonce) VALUES(?,?,?,?)",
+            ("discovery", receipt_action, 1_000, "legacy-nonce"),
+        )
+
+
+def test_task6_legacy_operator_queue_migrates_atomically_and_idempotently(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    _replace_with_task6_legacy_operator_schema(store.db_path)
+
+    store.init_schema()
+    store.init_schema()
+
+    assert store.pending_operator_wakeup(
+        "discovery",
+        now_ms=1_000,
+    ) == "legacy-nonce"
+    with sqlite3.connect(store.db_path) as con:
+        auth = con.execute(
+            "SELECT request_method,body_hash,auth_hash "
+            "FROM neg_risk_operator_auth_nonces"
+        ).fetchone()
+        receipt = con.execute(
+            "SELECT sequence,auth_nonce,previous_hash,receipt_hash "
+            "FROM neg_risk_operator_queue_receipts"
+        ).fetchone()
+        queue = con.execute(
+            "SELECT last_sequence,last_receipt_hash "
+            "FROM neg_risk_operator_queue WHERE component='discovery'"
+        ).fetchone()
+    assert auth[0] == "POST"
+    assert auth[1] == hashlib.sha256(b"{}").hexdigest()
+    assert all(value is not None for value in (*auth, receipt[0], receipt[1], receipt[3]))
+    assert receipt[0] == queue[0] == 1
+    assert receipt[3] == queue[1]
+
+
+def test_v1_hash_chain_with_multiple_receipts_upgrades_without_rewriting_history(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db", busy_timeout_ms=250)
+    store.init_schema()
+    for nonce, accepted_at_ms in (("first", 1_000), ("second", 2_000)):
+        store.accept_operator_auth(
+            nonce=nonce,
+            request_method="POST",
+            request_path="/control/perception/discovery",
+            request_timestamp_s=accepted_at_ms // 1_000,
+            body_hash=hashlib.sha256(b"{}").hexdigest(),
+            accepted_at_ms=accepted_at_ms,
+            deadline_monotonic=time.monotonic() + 1,
+        )
+        store.queue_operator_wakeup(
+            "discovery",
+            request_nonce=nonce,
+            occurred_at_ms=accepted_at_ms,
+            deadline_monotonic=time.monotonic() + 1,
+        )
+    with sqlite3.connect(store.db_path) as con:
+        con.row_factory = sqlite3.Row
+        previous_hash = None
+        for row in con.execute(
+            "SELECT * FROM neg_risk_operator_queue_receipts ORDER BY sequence"
+        ).fetchall():
+            receipt_hash = perception_store.operator_queue_receipt_hash(
+                component=row["component"],
+                sequence=row["sequence"],
+                action=row["action"],
+                occurred_at_ms=row["occurred_at_ms"],
+                auth_nonce=row["auth_nonce"],
+                previous_hash=previous_hash,
+            )
+            con.execute(
+                "UPDATE neg_risk_operator_queue_receipts "
+                "SET previous_hash=?,receipt_hash=? WHERE id=?",
+                (previous_hash, receipt_hash, row["id"]),
+            )
+            previous_hash = receipt_hash
+        con.execute(
+            "UPDATE neg_risk_operator_queue SET last_receipt_hash=?",
+            (previous_hash,),
+        )
+        con.execute(
+            "ALTER TABLE neg_risk_operator_queue_receipts "
+            "DROP COLUMN auth_receipt_hash"
+        )
+        con.execute(
+            "ALTER TABLE neg_risk_operator_queue DROP COLUMN request_auth_hash"
+        )
+
+    store.init_schema()
+    assert store.pending_operator_wakeup(
+        "discovery",
+        now_ms=2_000,
+    ) == "first"
+
+
+def test_invalid_task6_legacy_operator_queue_rolls_back_entire_migration(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    _replace_with_task6_legacy_operator_schema(
+        store.db_path,
+        receipt_action="consumed",
+    )
+
+    with pytest.raises(ValueError, match="invalid-legacy-operator-queue"):
+        store.init_schema()
+
+    with sqlite3.connect(store.db_path) as con:
+        columns = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(neg_risk_operator_auth_nonces)"
+            )
+        }
+    assert "request_method" not in columns
+
+
+def test_expired_auth_nonce_is_pruned_without_losing_queue_proof(tmp_path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db", busy_timeout_ms=250)
+    store.init_schema()
+    store.accept_operator_auth(
+        nonce="old-nonce",
+        request_method="POST",
+        request_path="/control/perception/discovery",
+        request_timestamp_s=1,
+        body_hash=hashlib.sha256(b"{}").hexdigest(),
+        accepted_at_ms=1_000,
+        deadline_monotonic=time.monotonic() + 1,
+    )
+    store.queue_operator_wakeup(
+        "discovery",
+        request_nonce="old-nonce",
+        occurred_at_ms=1_000,
+        deadline_monotonic=time.monotonic() + 1,
+    )
+    store.accept_operator_auth(
+        nonce="new-nonce",
+        request_method="POST",
+        request_path="/control/perception/discovery",
+        request_timestamp_s=302,
+        body_hash=hashlib.sha256(b"{}").hexdigest(),
+        accepted_at_ms=302_000,
+        deadline_monotonic=time.monotonic() + 1,
+    )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT nonce FROM neg_risk_operator_auth_nonces ORDER BY nonce"
+        ).fetchall() == [("new-nonce",)]
+    assert store.pending_operator_wakeup(
+        "discovery",
+        now_ms=302_000,
+    ) == "old-nonce"
+
+
+def test_control_auth_and_queue_share_one_absolute_response_deadline(
+    http_test_client,
+    daemon_settings_for_test,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    http_test_client.app.state.settings = daemon_settings_for_test.model_copy(
+        update={"opportunity_discovery_enabled": True}
+    )
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    now_s = int(time.time())
+    accepted_at_ms = now_s * 1_000
+    body_hash = hashlib.sha256(b"{}").hexdigest()
+    rows = []
+    for index in range(1_800):
+        nonce = f"history-{index}"
+        auth_hash = perception_store.operator_auth_receipt_hash(
+            nonce=nonce,
+            request_method="POST",
+            request_path="/control/perception/discovery",
+            request_timestamp_s=now_s,
+            body_hash=body_hash,
+            accepted_at_ms=accepted_at_ms,
+        )
+        rows.append(
+            (
+                nonce,
+                "POST",
+                "/control/perception/discovery",
+                now_s,
+                body_hash,
+                accepted_at_ms,
+                auth_hash,
+            )
+        )
+    with sqlite3.connect(db_path) as con:
+        con.executemany(
+            "INSERT INTO neg_risk_operator_auth_nonces VALUES(?,?,?,?,?,?,?)",
+            rows,
+        )
+
+    original_hash = perception_store.operator_auth_receipt_hash
+
+    def slow_hash(**kwargs):
+        time.sleep(0.0002)
+        return original_hash(**kwargs)
+
+    monkeypatch.setattr(perception_store, "operator_auth_receipt_hash", slow_hash)
+    started = time.monotonic()
+    response = _signed(http_test_client, "/control/perception/discovery")
+    elapsed = time.monotonic() - started
+
+    assert response.status_code == 409
+    assert elapsed <= 1.1
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_operator_queue"
+        ).fetchone() == (0,)
 
 
 def test_perception_queue_contains_only_control_evidence(
@@ -292,3 +596,107 @@ def test_peek_is_crash_safe_and_terminal_consume_is_exactly_once(
         occurred_at_ms=now_ms,
         expected_nonce=nonce,
     )
+
+
+class _RunnerStore:
+    def __init__(self, nonce: str) -> None:
+        self.nonce = nonce
+        self.consumed: list[tuple[str, str | None]] = []
+
+    def pending_operator_wakeup(self, component, **_kwargs):
+        return self.nonce
+
+    def consume_operator_wakeup(self, component, *, expected_nonce=None, **_kwargs):
+        self.consumed.append((component, expected_nonce))
+        return True
+
+    def record_producer_heartbeat(self, *_args, **_kwargs):
+        return None
+
+
+class _RunnerGamma:
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_discovery_runner_preserves_nonce_after_failed_or_yielded_attempt() -> None:
+    for result in (RuntimeError("failed"), SimpleNamespace(finished_at_ms=1, yielded=True)):
+        stop = __import__("asyncio").Event()
+        store = _RunnerStore("discovery-nonce")
+
+        class Worker:
+            _require_resource_decision = False
+
+            async def run_batch(self):
+                stop.set()
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+
+        await DiscoveryRunner(
+            worker=Worker(),
+            gamma=_RunnerGamma(),
+            interval_s=1,
+            store=store,
+        ).run(stop)
+        assert store.consumed == []
+
+
+@pytest.mark.asyncio
+async def test_discovery_runner_consumes_exact_nonce_after_successful_checkpoint() -> None:
+    stop = __import__("asyncio").Event()
+    store = _RunnerStore("discovery-nonce")
+
+    class Worker:
+        _require_resource_decision = False
+
+        async def run_batch(self):
+            stop.set()
+            return SimpleNamespace(finished_at_ms=1, yielded=False)
+
+    await DiscoveryRunner(
+        worker=Worker(),
+        gamma=_RunnerGamma(),
+        interval_s=1,
+        store=store,
+    ).run(stop)
+    assert store.consumed == [("discovery", "discovery-nonce")]
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_runner_preserves_nonce_after_failed_window() -> None:
+    stop = __import__("asyncio").Event()
+    store = _RunnerStore("reconciliation-nonce")
+
+    class Worker:
+        async def run_batch(self):
+            stop.set()
+            return SimpleNamespace(finished_at_ms=1, failed=True)
+
+    await ReconciliationRunner(
+        worker=Worker(),
+        gamma=_RunnerGamma(),
+        interval_s=1,
+        store=store,
+    ).run(stop)
+    assert store.consumed == []
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_runner_consumes_exact_nonce_after_successful_checkpoint() -> None:
+    stop = __import__("asyncio").Event()
+    store = _RunnerStore("reconciliation-nonce")
+
+    class Worker:
+        async def run_batch(self):
+            stop.set()
+            return SimpleNamespace(finished_at_ms=1, failed=False)
+
+    await ReconciliationRunner(
+        worker=Worker(),
+        gamma=_RunnerGamma(),
+        interval_s=1,
+        store=store,
+    ).run(stop)
+    assert store.consumed == [("reconciliation", "reconciliation-nonce")]

@@ -54,6 +54,8 @@ from starlette.responses import JSONResponse
 
 from polyarb.daemon.scheduler import SchedulerState
 
+_PERCEPTION_CONTROL_BODY_MAX_BYTES = 65_536
+
 
 async def control_auth_middleware(request: Request, call_next: Any, *, secret: str) -> Any:
     """HMAC-of-body auth gate for /control/*; bypass everything else.
@@ -83,7 +85,29 @@ async def control_auth_middleware(request: Request, call_next: Any, *, secret: s
     if received_sig.startswith("sha256="):
         received_sig = received_sig[len("sha256=") :]
 
-    body = await request.body()
+    if request.url.path.startswith("/control/perception/"):
+        request.state.perception_control_deadline = time.monotonic() + 0.9
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                return JSONResponse({"error": "invalid content length"}, status_code=400)
+            if (
+                declared_length < 0
+                or declared_length > _PERCEPTION_CONTROL_BODY_MAX_BYTES
+            ):
+                return JSONResponse({"error": "request body too large"}, status_code=413)
+        chunks: list[bytes] = []
+        body_size = 0
+        async for chunk in request.stream():
+            body_size += len(chunk)
+            if body_size > _PERCEPTION_CONTROL_BODY_MAX_BYTES:
+                return JSONResponse({"error": "request body too large"}, status_code=413)
+            chunks.append(chunk)
+        body = b"".join(chunks)
+    else:
+        body = await request.body()
     if request.url.path.startswith("/control/perception/"):
         timestamp = request.headers.get("X-Perception-Timestamp", "")
         nonce = request.headers.get("X-Perception-Nonce", "")
@@ -127,7 +151,7 @@ async def control_auth_middleware(request: Request, call_next: Any, *, secret: s
                 busy_timeout_ms=250,
             )
             accepted_at_ms = int(time.time() * 1_000)
-            deadline = time.monotonic() + 0.8
+            deadline = request.state.perception_control_deadline
             auth_task = asyncio.create_task(
                 asyncio.to_thread(
                     auth_store.accept_operator_auth,
@@ -141,10 +165,13 @@ async def control_auth_middleware(request: Request, call_next: Any, *, secret: s
                 )
             )
             try:
-                await asyncio.wait_for(asyncio.shield(auth_task), timeout=1.0)
+                await asyncio.wait_for(
+                    asyncio.shield(auth_task),
+                    timeout=max(0.001, deadline - time.monotonic() + 0.05),
+                )
             except TimeoutError:
                 try:
-                    await auth_task
+                    await asyncio.wait_for(asyncio.shield(auth_task), timeout=0.05)
                 except (TimeoutError, sqlite3.Error, ValueError):
                     pass
                 return JSONResponse(
@@ -283,7 +310,7 @@ async def _queue_perception_component(request: Request, component: str) -> JSONR
         request.app.state.sqlite_store.db_path,
         busy_timeout_ms=250,
     )
-    deadline = time.monotonic() + 0.8
+    deadline = request.state.perception_control_deadline
     task = asyncio.create_task(
         asyncio.to_thread(
             store.queue_operator_wakeup,
@@ -303,7 +330,7 @@ async def _queue_perception_component(request: Request, component: str) -> JSONR
     try:
         queued = await asyncio.wait_for(
             asyncio.shield(task),
-            timeout=1.0,
+            timeout=max(0.001, deadline - time.monotonic() + 0.05),
         )
     except RuntimeError as error:
         reason = (
@@ -314,7 +341,7 @@ async def _queue_perception_component(request: Request, component: str) -> JSONR
         return JSONResponse({"status": "unavailable", "reason": reason}, status_code=409)
     except TimeoutError:
         try:
-            await task
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.05)
         except (TimeoutError, sqlite3.Error, ValueError):
             pass
         return JSONResponse(

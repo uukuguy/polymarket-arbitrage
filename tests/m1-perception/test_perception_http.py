@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 
+import pytest
+
+from polyarb.http import perception
 from polyarb.perception.models import (
     GroupLeg,
     GroupQuoteBatch,
@@ -217,3 +221,152 @@ def test_groups_remain_available_with_bounded_multi_revision_page(
     response = http_test_client.get("/perception/groups?limit=100")
     assert response.status_code == 200
     assert len(response.json()["items"]) == 100
+
+
+def test_slow_read_is_interrupted_and_worker_converges_before_response(
+    http_test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    finished = threading.Event()
+
+    def deliberately_slow_status(_db_path):
+        con = perception._connect(db_path)
+        try:
+            con.execute(
+                "WITH RECURSIVE counter(value) AS ("
+                "SELECT 1 UNION ALL SELECT value + 1 FROM counter "
+                "WHERE value < 10000000"
+                ") SELECT sum(value) FROM counter"
+            ).fetchone()
+            return {"status": "unexpected"}
+        finally:
+            con.close()
+            finished.set()
+
+    monkeypatch.setattr(perception, "_status", deliberately_slow_status)
+    started = time.monotonic()
+    response = http_test_client.get("/perception/status")
+    elapsed = time.monotonic() - started
+    converged_before_response = finished.is_set()
+    finished.wait(5)
+
+    assert response.status_code == 503
+    assert elapsed <= 1.1
+    assert converged_before_response
+
+
+@pytest.mark.parametrize(
+    ("group_revision", "started_at_ms", "quoted_at_ms", "failure_reason", "legs_json"),
+    (
+        (999, 5, 6, "upstream", "[]"),
+        (1, 9, 1, "upstream", "[]"),
+        (1, 5, 6, None, "[]"),
+        (1, 5, 6, "upstream", "not-json"),
+    ),
+)
+def test_status_replays_failed_quote_contract(
+    http_test_client,
+    group_revision,
+    started_at_ms,
+    quoted_at_ms,
+    failure_reason,
+    legs_json,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    _seed_candidate_authority(db_path)
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO neg_risk_group_quote_batches("
+            "id,group_id,group_revision,membership_hash,started_at_ms,"
+            "quoted_at_ms,status,failure_reason,legs_json"
+            ") SELECT 'failed','g-1',?,membership_hash,?,?,'failed',?,? "
+            "FROM neg_risk_group_revisions WHERE group_id='g-1'",
+            (
+                group_revision,
+                started_at_ms,
+                quoted_at_ms,
+                failure_reason,
+                legs_json,
+            ),
+        )
+    assert http_test_client.get("/perception/status").status_code == 503
+
+
+def test_status_rejects_superseded_quote_without_exact_revision_authority(
+    http_test_client,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    _seed_candidate_authority(db_path)
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO neg_risk_group_quote_batches("
+            "id,group_id,group_revision,membership_hash,started_at_ms,"
+            "quoted_at_ms,status,failure_reason,legs_json"
+            ") SELECT 'superseded','g-1',999,membership_hash,3,4,"
+            "'superseded',NULL,legs_json FROM neg_risk_group_quote_batches "
+            "WHERE id='q-1'"
+        )
+    assert http_test_client.get("/perception/status").status_code == 503
+
+
+@pytest.mark.parametrize(
+    ("membership_hash", "quote_batch_id", "reason"),
+    (
+        ("ghost", None, "unavailable"),
+        (None, "ghost", "unavailable"),
+        (None, None, None),
+    ),
+)
+def test_status_replays_unavailable_candidate_fact_contract(
+    http_test_client,
+    membership_hash,
+    quote_batch_id,
+    reason,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO neg_risk_candidate_watch_facts("
+            "group_id,membership_hash,quote_batch_id,observed_at_ms,last_result,"
+            "reason,bundle_cost,gross_edge_bps,max_bundle_size,priority_class,"
+            "consecutive_failures,effective_interval_s,schedule_reason,next_due_at_ms"
+            ") VALUES('ghost',?,?,1,'unavailable',?,NULL,NULL,NULL,"
+            "'normal',1,1,'failure',2)",
+            (membership_hash, quote_batch_id, reason),
+        )
+    assert http_test_client.get("/perception/status").status_code == 503
+
+
+@pytest.mark.parametrize(
+    ("event_id", "revision", "started_at_ms", "observed_at_ms"),
+    (
+        ("event-b", 2, 50, 50),
+        ("e-1", 3, 101, 101),
+    ),
+)
+def test_status_rejects_non_contiguous_or_identity_changing_group_history(
+    http_test_client,
+    event_id,
+    revision,
+    started_at_ms,
+    observed_at_ms,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    _seed_candidate_authority(db_path)
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO neg_risk_group_revisions("
+            "group_id,event_id,revision,membership_hash,started_at_ms,"
+            "observed_at_ms,source_cursor,status,legs_json"
+            ") SELECT group_id,?, ?,membership_hash,?,?,source_cursor,"
+            "'invalidated',legs_json FROM neg_risk_group_revisions "
+            "WHERE group_id='g-1' AND revision=1",
+            (event_id, revision, started_at_ms, observed_at_ms),
+        )
+    for path in (
+        "/perception/status",
+        "/perception/groups?limit=10",
+        "/perception/groups/g-1/history?limit=10",
+    ):
+        assert http_test_client.get(path).status_code == 503

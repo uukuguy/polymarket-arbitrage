@@ -183,6 +183,7 @@ class ReconciliationRunner:
                     now_ms=int(time.time() * 1_000),
                     require_resource_decision=self._require_resource_decision,
                 )
+                successful_checkpoint = False
                 try:
                     decision = (
                         await asyncio.to_thread(
@@ -207,11 +208,12 @@ class ReconciliationRunner:
                             "reconciliation",
                             observed_at_ms=result.finished_at_ms,
                         )
+                        successful_checkpoint = not result.failed
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
                     logger.warning(f"reconciliation batch failed kind={type(error).__name__}")
-                if requested_nonce is not None:
+                if requested_nonce is not None and successful_checkpoint:
                     await asyncio.to_thread(
                         self._store.consume_operator_wakeup,
                         "reconciliation",
