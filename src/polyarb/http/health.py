@@ -90,6 +90,65 @@ class ArchiveHealth:
     last_success_age_seconds: float | None
 
 
+@dataclass(frozen=True)
+class ReconciliationHealth:
+    """Exact durable checkpoint state for background Full Reconciliation."""
+
+    progress: str
+    window_id: str | None
+    pages_completed: int
+    next_cursor: str | None
+    checkpoint_age_seconds: float | None
+    receipt_consistent: bool
+
+
+def read_reconciliation_health(path: Path, now_ms: int) -> ReconciliationHealth:
+    """Read the latest window and its actual last page receipt in one snapshot."""
+    empty = ReconciliationHealth("idle", None, 0, None, None, True)
+    unavailable = ReconciliationHealth("unavailable", None, 0, None, None, False)
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25)
+    except sqlite3.Error:
+        return unavailable
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("BEGIN")
+        window = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_windows "
+            "ORDER BY started_at_ms DESC,id DESC LIMIT 1"
+        ).fetchone()
+        if window is None:
+            con.execute("COMMIT")
+            return empty
+        receipt = con.execute(
+            "SELECT batch_sequence,next_cursor,finished_at_ms "
+            "FROM neg_risk_reconciliation_batches WHERE window_id=? "
+            "ORDER BY batch_sequence DESC LIMIT 1",
+            (window["id"],),
+        ).fetchone()
+        con.execute("COMMIT")
+    except sqlite3.Error:
+        return unavailable
+    finally:
+        con.close()
+    pages_completed = int(window["pages_completed"])
+    next_cursor = None if window["next_cursor"] is None else str(window["next_cursor"])
+    consistent = (pages_completed == 0 and receipt is None) or (
+        receipt is not None
+        and int(receipt["batch_sequence"]) == pages_completed
+        and receipt["next_cursor"] == window["next_cursor"]
+        and int(receipt["finished_at_ms"]) == int(window["checkpoint_at_ms"])
+    )
+    return ReconciliationHealth(
+        progress=str(window["status"]),
+        window_id=str(window["id"]),
+        pages_completed=pages_completed,
+        next_cursor=next_cursor,
+        checkpoint_age_seconds=max(0.0, (now_ms - int(window["checkpoint_at_ms"])) / 1000),
+        receipt_consistent=consistent,
+    )
+
+
 def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
     """Read durable market-truth health without certifying diagnostic rows."""
     empty = MarketTruthHealth(
@@ -137,11 +196,7 @@ def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
     latest_id, published, completed, market_items, event_items = latest
     coverage_complete = completed == 1 and published == 1
     complete_id = complete[0] if complete is not None else None
-    complete_age = (
-        max(0.0, now_s - complete[1] / 1000.0)
-        if complete is not None
-        else None
-    )
+    complete_age = max(0.0, now_s - complete[1] / 1000.0) if complete is not None else None
     return MarketTruthHealth(
         coverage_status="pass" if coverage_complete else "fail",
         coverage_value="complete" if coverage_complete else "incomplete-source",
@@ -225,6 +280,49 @@ def _build_health_checks(
     """
     checks: dict[str, list[dict[str, Any]]] = {}
     overall = "pass"
+
+    # Full Reconciliation is calibration evidence, never Candidate availability.
+    # Its scoped checks read the same checkpoint rows the worker mutates but do
+    # not feed `overall`; Task 5 owns incident escalation for a stalled window.
+    reconciliation_enabled = bool(getattr(settings, "opportunity_reconciliation_enabled", False))
+    reconciliation = read_reconciliation_health(store.db_path, int(now_s * 1_000))
+    progress_value = reconciliation.progress if reconciliation_enabled else "disabled"
+    progress_status = (
+        "warn"
+        if reconciliation_enabled
+        and (reconciliation.progress == "idle" or not reconciliation.receipt_consistent)
+        else "pass"
+    )
+    checks["perception:reconciliation_progress"] = [
+        {
+            "componentId": "perception-reconciliation",
+            "componentType": "component",
+            "observedValue": progress_value,
+            "status": progress_status,
+            "output": (
+                f"window_id={reconciliation.window_id} "
+                f"pages_completed={reconciliation.pages_completed} "
+                f"receipt_consistent={reconciliation.receipt_consistent}"
+            ),
+            "time": _utc_now_iso(),
+        }
+    ]
+    checkpoint_age = reconciliation.checkpoint_age_seconds if reconciliation_enabled else None
+    checkpoint_warn_s = float(getattr(settings, "reconciliation_checkpoint_warn_s", 900.0))
+    checkpoint_status = (
+        "warn" if checkpoint_age is not None and checkpoint_age > checkpoint_warn_s else "pass"
+    )
+    checks["perception:reconciliation_checkpoint_age_seconds"] = [
+        {
+            "componentId": "perception-reconciliation",
+            "componentType": "datastore",
+            "observedValue": (None if checkpoint_age is None else round(checkpoint_age, 1)),
+            "observedUnit": "s",
+            "status": checkpoint_status,
+            "output": f"next_cursor={reconciliation.next_cursor}",
+            "time": _utc_now_iso(),
+        }
+    ]
 
     # ── Check 0: authoritative market-truth coverage ──────────────────────
     market_truth = read_market_truth_health(store.db_path, now_s)
@@ -449,9 +547,7 @@ def _build_health_checks(
 
     scheduler_state = store.get_scheduler_state()
     failure_counter = (
-        int(scheduler_state.get("failure_counter", 0))
-        if scheduler_state is not None
-        else 0
+        int(scheduler_state.get("failure_counter", 0)) if scheduler_state is not None else 0
     )
     from polyarb.daemon.scheduler import SnapshotScheduler
 
@@ -534,9 +630,7 @@ def _build_health_checks(
         )
 
         runtime_snapshot = (
-            quote_worker_runtime.snapshot()
-            if quote_worker_runtime is not None
-            else None
+            quote_worker_runtime.snapshot() if quote_worker_runtime is not None else None
         )
         quote_run = (
             quote_worker_runtime.certified_projection()

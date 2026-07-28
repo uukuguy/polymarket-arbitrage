@@ -303,6 +303,17 @@ class SnapshotScheduler:
     def effective_cadence_s(self) -> int:
         return self._effective_cadence_s
 
+    @property
+    def legacy_reconciliation_enabled(self) -> bool:
+        """Whether the universe-sized legacy Structure loop may run."""
+        return bool(
+            getattr(
+                self._settings,
+                "legacy_structure_reconciliation_enabled",
+                False,
+            )
+        )
+
     def _restore_effective_schedule(self) -> None:
         """Restore or derive one bounded schedule from durable attempt truth."""
         try:

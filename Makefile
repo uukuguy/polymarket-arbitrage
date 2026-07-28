@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -59,6 +59,15 @@ watch-opportunity-history:
 perception-discovery-status:
 	@test -n "$(db_path)" || (echo "usage: make perception-discovery-status db_path=/path/to/state.db" >&2; exit 2)
 	@uv run python -m polyarb.cli_discovery --db-path "$(db_path)"
+
+## reconcile-market-map: Advance exactly one bounded Full Reconciliation page.
+reconcile-market-map:
+	@uv run python -m polyarb.cli_reconciliation run $(if $(db_path),--db-path "$(db_path)",)
+
+## reconciliation-status: Read the durable Full Reconciliation checkpoint; usage db_path=/path/state.db.
+reconciliation-status:
+	@test -n "$(db_path)" || (echo "usage: make reconciliation-status db_path=/path/to/state.db" >&2; exit 2)
+	@uv run python -m polyarb.cli_reconciliation status --db-path "$(db_path)"
 
 .PHONY: docs-m1-check
 

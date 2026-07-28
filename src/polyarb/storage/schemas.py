@@ -420,6 +420,56 @@ CREATE INDEX IF NOT EXISTS idx_neg_risk_candidate_admission_identity
   ON neg_risk_candidate_admissions(
     group_id,event_id,membership_hash,promoted_at_ms);
 
+-- Full Reconciliation is a checkpointed calibration window. Page receipts,
+-- staging samples, cursor advancement, completion and final diff publication
+-- are durable facts; incomplete windows never touch online group authority.
+CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_windows (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK(status IN ('open','complete','applied')),
+  next_cursor TEXT,
+  started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+  checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+  finished_at_ms INTEGER,
+  pages_completed INTEGER NOT NULL CHECK(pages_completed >= 0),
+  events_seen INTEGER NOT NULL CHECK(events_seen >= 0),
+  groups_staged INTEGER NOT NULL CHECK(groups_staged >= 0),
+  rejected_count INTEGER NOT NULL CHECK(rejected_count >= 0),
+  added_count INTEGER,
+  changed_count INTEGER,
+  closed_count INTEGER,
+  unchanged_count INTEGER,
+  applied_rejected_count INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  window_id TEXT NOT NULL REFERENCES neg_risk_reconciliation_windows(id),
+  batch_sequence INTEGER NOT NULL CHECK(batch_sequence >= 1),
+  requested_cursor TEXT,
+  next_cursor TEXT,
+  completed INTEGER NOT NULL CHECK(completed IN (0,1)),
+  started_at_ms INTEGER NOT NULL,
+  finished_at_ms INTEGER NOT NULL,
+  page_event_count INTEGER NOT NULL CHECK(page_event_count >= 0),
+  groups_staged INTEGER NOT NULL CHECK(groups_staged >= 0),
+  rejected_count INTEGER NOT NULL CHECK(rejected_count >= 0),
+  UNIQUE(window_id,batch_sequence)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_staging (
+  window_id TEXT NOT NULL REFERENCES neg_risk_reconciliation_windows(id),
+  group_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  membership_hash TEXT NOT NULL,
+  quality TEXT NOT NULL CHECK(quality IN
+    ('complete-supported','complete-unsupported','incomplete-source')),
+  reason TEXT,
+  legs_json TEXT,
+  observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+  source_cursor TEXT,
+  PRIMARY KEY(window_id,group_id)
+);
+
 -- Phase 1.1 T2: append-only translation cache.
 -- Invariants:
 --  * never DELETE FROM (cumulative across snapshots)

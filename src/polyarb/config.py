@@ -114,6 +114,17 @@ class Settings(BaseSettings):
         default=60.0, gt=0, le=60, allow_inf_nan=False
     )
     discovery_degraded_probe_every_cycles: int = Field(default=10, ge=2)
+    # Slice D calibration. Both the bounded reconciler and the former
+    # universe-sized Structure scheduler remain dark until qualification.
+    opportunity_reconciliation_enabled: bool = False
+    reconciliation_page_limit: int = Field(default=100, ge=1, le=100)
+    reconciliation_interval_s: float = Field(
+        default=60.0, gt=0, allow_inf_nan=False
+    )
+    reconciliation_checkpoint_warn_s: float = Field(
+        default=900.0, gt=0, allow_inf_nan=False
+    )
+    legacy_structure_reconciliation_enabled: bool = False
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 

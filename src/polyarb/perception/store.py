@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -36,6 +37,41 @@ DiscoveryQuality = Literal[
     "complete-unsupported",
     "incomplete-source",
 ]
+
+
+class ReconciliationIncompleteError(RuntimeError):
+    """Raised when an incomplete calibration window is asked to publish."""
+
+
+@dataclass(frozen=True)
+class ReconciliationWindow:
+    id: str
+    status: Literal["open", "complete", "applied"]
+    next_cursor: str | None
+    started_at_ms: int
+    checkpoint_at_ms: int
+    finished_at_ms: int | None
+    pages_completed: int
+    events_seen: int
+    groups_staged: int
+    rejected_count: int
+    added_count: int | None
+    changed_count: int | None
+    closed_count: int | None
+    unchanged_count: int | None
+    applied_rejected_count: int | None
+
+
+@dataclass(frozen=True)
+class ReconciliationDiff:
+    window_id: str
+    added: int
+    changed: int
+    closed: int
+    unchanged: int
+    rejected: int
+    started_at_ms: int
+    finished_at_ms: int
 
 
 @dataclass(frozen=True)
@@ -105,11 +141,7 @@ class DiscoveryAdmissionProof:
             self.poll_interval_ms
             + self.selection_budget_ms
             + self.effective_capacity * self.attempt_start_write_budget_ms
-            + (
-                self.high_burst_groups
-                + self.effective_capacity
-                - 1
-            )
+            + (self.high_burst_groups + self.effective_capacity - 1)
             * (self.group_timeout_ms + self.terminal_write_budget_ms)
         )
 
@@ -277,14 +309,9 @@ class OpportunityPerceptionStore:
                 ),
             )
             for table, column, definition in migrations:
-                existing = {
-                    str(row["name"])
-                    for row in con.execute(f"PRAGMA table_info({table})")
-                }
+                existing = {str(row["name"]) for row in con.execute(f"PRAGMA table_info({table})")}
                 if column not in existing:
-                    con.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-                    )
+                    con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             sweep_id = 1
             batch_sequence = 0
             previous_completed = False
@@ -434,9 +461,7 @@ class OpportunityPerceptionStore:
                 and outstanding > 0
                 and self._proof_timing(existing) != self._proof_timing(proof)
             ):
-                raise ValueError(
-                    "discovery-admission-timing-change-with-outstanding-work"
-                )
+                raise ValueError("discovery-admission-timing-change-with-outstanding-work")
             self._persist_admission_proof(con, proof=proof, now_ms=now_ms)
             con.execute(
                 "UPDATE neg_risk_group_schedule SET "
@@ -519,9 +544,7 @@ class OpportunityPerceptionStore:
                 "SELECT next_cursor,completed FROM neg_risk_discovery_state WHERE id=1"
             ).fetchone()
             expected_cursor = (
-                None
-                if state is None or bool(state["completed"])
-                else state["next_cursor"]
+                None if state is None or bool(state["completed"]) else state["next_cursor"]
             )
             if requested_cursor != expected_cursor:
                 raise ValueError("discovery-cursor-race")
@@ -540,11 +563,7 @@ class OpportunityPerceptionStore:
             configured = con.execute(
                 "SELECT * FROM neg_risk_discovery_admission_state WHERE id=1"
             ).fetchone()
-            if (
-                configured is None
-                or self._admission_proof_from_row(configured)
-                != admission_proof
-            ):
+            if configured is None or self._admission_proof_from_row(configured) != admission_proof:
                 raise ValueError("discovery-admission-proof-not-configured")
 
             for candidate in candidates:
@@ -554,9 +573,7 @@ class OpportunityPerceptionStore:
                     source_cursor=requested_cursor,
                     started_at_ms=started_at_ms,
                     finished_at_ms=finished_at_ms,
-                    candidate_max_wait_ms=(
-                        admission_proof.candidate_max_wait_ms
-                    ),
+                    candidate_max_wait_ms=(admission_proof.candidate_max_wait_ms),
                 )
                 con.execute(
                     "INSERT INTO neg_risk_coverage_samples("
@@ -570,19 +587,23 @@ class OpportunityPerceptionStore:
                     ),
                 )
             self._admit_waiting_candidates(con, now_ms=finished_at_ms)
-            promoted = [
-                (
-                    Decimal(str(row["priority_score"])),
-                    str(row["group_id"]),
-                )
-                for row in con.execute(
-                    "SELECT group_id,priority_score "
-                    "FROM neg_risk_group_schedule "
-                    "WHERE promoted_at_ms IS NOT NULL AND group_id IN "
-                    f"({','.join('?' for _ in candidates)})",
-                    tuple(candidate.group_id for candidate in candidates),
-                ).fetchall()
-            ] if candidates else []
+            promoted = (
+                [
+                    (
+                        Decimal(str(row["priority_score"])),
+                        str(row["group_id"]),
+                    )
+                    for row in con.execute(
+                        "SELECT group_id,priority_score "
+                        "FROM neg_risk_group_schedule "
+                        "WHERE promoted_at_ms IS NOT NULL AND group_id IN "
+                        f"({','.join('?' for _ in candidates)})",
+                        tuple(candidate.group_id for candidate in candidates),
+                    ).fetchall()
+                ]
+                if candidates
+                else []
+            )
             promoted.sort(key=lambda item: (-item[0], item[1]))
             promoted_ids = {group_id for _, group_id in promoted}
             receipt = con.execute(
@@ -725,9 +746,7 @@ class OpportunityPerceptionStore:
             terminal_write_budget_ms=int(row["terminal_write_budget_ms"]),
             high_burst_groups=int(row["high_burst_groups"]),
             reserved_non_high_slots=int(row["reserved_non_high_slots"]),
-            attempt_start_write_budget_ms=int(
-                row["attempt_start_write_budget_ms"]
-            ),
+            attempt_start_write_budget_ms=int(row["attempt_start_write_budget_ms"]),
         )
 
     @staticmethod
@@ -910,10 +929,7 @@ class OpportunityPerceptionStore:
         if prior is not None and prior["event_id"] != candidate.event_id:
             raise ValueError("discovery-group-event-identity-conflict")
         current_authority = self._current_group_row(con, candidate.group_id)
-        if (
-            current_authority is not None
-            and current_authority["event_id"] != candidate.event_id
-        ):
+        if current_authority is not None and current_authority["event_id"] != candidate.event_id:
             raise ValueError("discovery-group-event-identity-conflict")
         last_fact = con.execute(
             "SELECT observed_at_ms,gross_edge_bps "
@@ -922,15 +938,14 @@ class OpportunityPerceptionStore:
             (candidate.group_id,),
         ).fetchone()
         first_discovered_at_ms = (
-            finished_at_ms
-            if prior is None
-            else int(prior["first_discovered_at_ms"])
+            finished_at_ms if prior is None else int(prior["first_discovered_at_ms"])
         )
         last_visited_at_ms = (
             int(last_fact["observed_at_ms"])
             if last_fact is not None
             else (
-                None if prior is None or prior["last_visited_at_ms"] is None
+                None
+                if prior is None or prior["last_visited_at_ms"] is None
                 else int(prior["last_visited_at_ms"])
             )
         )
@@ -959,22 +974,16 @@ class OpportunityPerceptionStore:
         else:
             priority_class = "explore"
 
-        can_promote = (
-            candidate.quality == "complete-supported"
-            and candidate.legs is not None
-        )
+        can_promote = candidate.quality == "complete-supported" and candidate.legs is not None
         promoted_at_ms = (
             int(prior["promoted_at_ms"])
-            if can_promote
-            and prior is not None
-            and prior["promoted_at_ms"] is not None
+            if can_promote and prior is not None and prior["promoted_at_ms"] is not None
             else None
         )
         promotion_eligible_at_ms = (
             (
                 int(prior["promotion_eligible_at_ms"])
-                if prior is not None
-                and prior["promotion_eligible_at_ms"] is not None
+                if prior is not None and prior["promotion_eligible_at_ms"] is not None
                 else finished_at_ms
             )
             if can_promote
@@ -1222,9 +1231,7 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             con.execute("BEGIN")
-            state = con.execute(
-                "SELECT * FROM neg_risk_discovery_state WHERE id=1"
-            ).fetchone()
+            state = con.execute("SELECT * FROM neg_risk_discovery_state WHERE id=1").fetchone()
             schedules = con.execute(
                 "SELECT * FROM neg_risk_group_schedule ORDER BY group_id"
             ).fetchall()
@@ -1259,23 +1266,18 @@ class OpportunityPerceptionStore:
                     " GROUP BY group_id,event_id,membership_hash"
                 ).fetchall()
             }
-            batches = con.execute(
-                "SELECT * FROM neg_risk_discovery_batches ORDER BY id"
-            ).fetchall()
+            batches = con.execute("SELECT * FROM neg_risk_discovery_batches ORDER BY id").fetchall()
             latest_batch = batches[-1] if batches else None
             batch_samples = con.execute(
-                "SELECT * FROM neg_risk_discovery_batch_samples "
-                "ORDER BY batch_id,group_id"
+                "SELECT * FROM neg_risk_discovery_batch_samples ORDER BY batch_id,group_id"
             ).fetchall()
             schedule_evidence = con.execute(
-                "SELECT * FROM neg_risk_discovery_schedule_evidence "
-                "ORDER BY batch_id,group_id"
+                "SELECT * FROM neg_risk_discovery_schedule_evidence ORDER BY batch_id,group_id"
             ).fetchall()
             latest_samples = [
                 row
                 for row in batch_samples
-                if latest_batch is not None
-                and int(row["batch_id"]) == int(latest_batch["id"])
+                if latest_batch is not None and int(row["batch_id"]) == int(latest_batch["id"])
             ]
             load_row = con.execute(
                 "SELECT degraded_streak,last_reason,last_decision,"
@@ -1288,8 +1290,7 @@ class OpportunityPerceptionStore:
             fact_group_ids = {
                 str(row["group_id"])
                 for row in con.execute(
-                    "SELECT DISTINCT group_id "
-                    "FROM neg_risk_candidate_watch_facts"
+                    "SELECT DISTINCT group_id FROM neg_risk_candidate_watch_facts"
                 ).fetchall()
             }
             breach_fact_evidence = {
@@ -1334,9 +1335,7 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
         queue = {"high": 0, "normal": 0, "explore": 0}
-        queue.update(
-            {str(row["priority_class"]): int(row["depth"]) for row in queue_rows}
-        )
+        queue.update({str(row["priority_class"]): int(row["depth"]) for row in queue_rows})
         oldest_age = (
             None
             if oldest is None or oldest["oldest"] is None
@@ -1344,16 +1343,11 @@ class OpportunityPerceptionStore:
         )
         return DiscoveryStatus(
             next_cursor=(
-                None if state is None or state["next_cursor"] is None
-                else str(state["next_cursor"])
+                None if state is None or state["next_cursor"] is None else str(state["next_cursor"])
             ),
             completed=False if state is None else bool(state["completed"]),
-            last_started_at_ms=(
-                None if state is None else int(state["last_started_at_ms"])
-            ),
-            last_finished_at_ms=(
-                None if state is None else int(state["last_finished_at_ms"])
-            ),
+            last_started_at_ms=(None if state is None else int(state["last_started_at_ms"])),
+            last_finished_at_ms=(None if state is None else int(state["last_finished_at_ms"])),
             page_event_count=0 if state is None else int(state["page_event_count"]),
             groups_seen=0 if state is None else int(state["groups_seen"]),
             promoted_count=0 if state is None else int(state["promoted_count"]),
@@ -1365,40 +1359,30 @@ class OpportunityPerceptionStore:
                 if load_row is None
                 else DiscoveryLoadState(
                     int(load_row["degraded_streak"]),
-                    (
-                        None
-                        if load_row["last_reason"] is None
-                        else str(load_row["last_reason"])
-                    ),
+                    (None if load_row["last_reason"] is None else str(load_row["last_reason"])),
                     load_row["last_decision"],
                     int(load_row["probe_every_cycles"]),
                     int(load_row["updated_at_ms"]),
                 )
             ),
             admission_proof=(
-                None
-                if admission_row is None
-                else self._admission_proof_from_row(admission_row)
+                None if admission_row is None else self._admission_proof_from_row(admission_row)
             ),
             promotion_queue_depth=sum(
                 1
                 for row in schedules
-                if row["quality"] == "complete-supported"
-                and row["promoted_at_ms"] is None
+                if row["quality"] == "complete-supported" and row["promoted_at_ms"] is None
             ),
             outstanding_admitted_count=sum(
                 1
                 for row in schedules
-                if row["promoted_at_ms"] is not None
-                and str(row["group_id"]) not in fact_group_ids
+                if row["promoted_at_ms"] is not None and str(row["group_id"]) not in fact_group_ids
             ),
             candidate_attempt_start_count=len(attempt_starts),
             candidate_start_deadline_breach_count=sum(
                 int(row["deadline_breached"]) for row in attempt_starts
             ),
-            candidate_start_ready=not any(
-                bool(row["deadline_breached"]) for row in attempt_starts
-            ),
+            candidate_start_ready=not any(bool(row["deadline_breached"]) for row in attempt_starts),
         )
 
     @staticmethod
@@ -1437,9 +1421,7 @@ class OpportunityPerceptionStore:
                     else Decimal("0")
                 ),
                 liquidity_weighted_fraction=(
-                    visited_weight / total_weight
-                    if total_weight > 0
-                    else Decimal("0")
+                    visited_weight / total_weight if total_weight > 0 else Decimal("0")
                 ),
             )
         return CoverageWindows(
@@ -1474,24 +1456,18 @@ class OpportunityPerceptionStore:
             decision = load_row["last_decision"]
             modulus = int(load_row["probe_every_cycles"])
             expected_decision = (
-                "fresh"
-                if reason is None
-                else ("probe" if streak % modulus == 0 else "yield")
+                "fresh" if reason is None else ("probe" if streak % modulus == 0 else "yield")
             )
             if (
                 int(load_row["updated_at_ms"]) < 0
                 or modulus < 2
                 or decision != expected_decision
-                or (
-                    decision == "fresh"
-                    and (streak != 0 or reason is not None)
-                )
+                or (decision == "fresh" and (streak != 0 or reason is not None))
                 or (
                     decision in {"yield", "probe"}
                     and (
                         streak <= 0
-                        or reason
-                        not in {"candidate-quote-missing", "candidate-quote-stale"}
+                        or reason not in {"candidate-quote-missing", "candidate-quote-stale"}
                     )
                 )
             ):
@@ -1499,12 +1475,9 @@ class OpportunityPerceptionStore:
         previous: sqlite3.Row | None = None
         samples_by_batch: dict[int, list[sqlite3.Row]] = {}
         for sample in batch_samples:
-            samples_by_batch.setdefault(int(sample["batch_id"]), []).append(
-                sample
-            )
+            samples_by_batch.setdefault(int(sample["batch_id"]), []).append(sample)
         evidence_by_key = {
-            (int(row["batch_id"]), str(row["group_id"])): row
-            for row in schedule_evidence
+            (int(row["batch_id"]), str(row["group_id"])): row for row in schedule_evidence
         }
         for batch in batches:
             counts = (
@@ -1515,8 +1488,7 @@ class OpportunityPerceptionStore:
             if (
                 int(batch["sweep_id"]) < 1
                 or int(batch["batch_sequence"]) < 1
-                or bool(batch["completed"])
-                != (batch["next_cursor"] is None)
+                or bool(batch["completed"]) != (batch["next_cursor"] is None)
                 or int(batch["started_at_ms"]) < 0
                 or int(batch["finished_at_ms"]) < 0
                 or int(batch["started_at_ms"]) > int(batch["finished_at_ms"])
@@ -1524,40 +1496,31 @@ class OpportunityPerceptionStore:
             ):
                 raise ValueError("invalid-discovery-batch-receipt")
             if previous is None:
-                if (
-                    int(batch["sweep_id"]) != 1
-                    or int(batch["batch_sequence"]) != 1
-                ):
+                if int(batch["sweep_id"]) != 1 or int(batch["batch_sequence"]) != 1:
                     raise ValueError("invalid-discovery-batch-sequence")
             elif bool(previous["completed"]):
                 if (
                     batch["requested_cursor"] is not None
-                    or int(batch["sweep_id"])
-                    != int(previous["sweep_id"]) + 1
+                    or int(batch["sweep_id"]) != int(previous["sweep_id"]) + 1
                     or int(batch["batch_sequence"]) != 1
                 ):
                     raise ValueError("invalid-discovery-sweep-transition")
             elif (
                 batch["requested_cursor"] != previous["next_cursor"]
                 or int(batch["sweep_id"]) != int(previous["sweep_id"])
-                or int(batch["batch_sequence"])
-                != int(previous["batch_sequence"]) + 1
+                or int(batch["batch_sequence"]) != int(previous["batch_sequence"]) + 1
             ):
                 raise ValueError("invalid-discovery-cursor-receipt-chain")
             samples = samples_by_batch.pop(int(batch["id"]), [])
-            if (
-                len(samples) != int(batch["groups_seen"])
-                or sum(int(row["promoted"]) for row in samples)
-                != int(batch["promoted_count"])
-            ):
+            if len(samples) != int(batch["groups_seen"]) or sum(
+                int(row["promoted"]) for row in samples
+            ) != int(batch["promoted_count"]):
                 raise ValueError("invalid-discovery-historical-sample-count")
             for sample in samples:
                 try:
                     weight = Decimal(str(sample["liquidity_weight"]))
                 except Exception as error:
-                    raise ValueError(
-                        "invalid-discovery-historical-sample"
-                    ) from error
+                    raise ValueError("invalid-discovery-historical-sample") from error
                 quality = sample["quality"]
                 reason = sample["reason"]
                 identity = (
@@ -1586,22 +1549,12 @@ class OpportunityPerceptionStore:
                         quality == "complete-supported"
                         and (
                             identity not in revision_identities
-                            or revision_identities[identity]
-                            > int(batch["finished_at_ms"])
+                            or revision_identities[identity] > int(batch["finished_at_ms"])
                         )
                     )
-                    or (
-                        bool(sample["promoted"])
-                        and quality != "complete-supported"
-                    )
-                    or (
-                        quality == "complete-supported"
-                        and reason is not None
-                    )
-                    or (
-                        quality != "complete-supported"
-                        and (reason is None or not str(reason))
-                    )
+                    or (bool(sample["promoted"]) and quality != "complete-supported")
+                    or (quality == "complete-supported" and reason is not None)
+                    or (quality != "complete-supported" and (reason is None or not str(reason)))
                     or evidence is None
                     or any(
                         evidence[name] != sample[name]
@@ -1613,8 +1566,7 @@ class OpportunityPerceptionStore:
                             "promoted",
                         )
                     )
-                    or int(evidence["effective_at_ms"])
-                    != int(batch["finished_at_ms"])
+                    or int(evidence["effective_at_ms"]) != int(batch["finished_at_ms"])
                 ):
                     raise ValueError("invalid-discovery-historical-sample")
             previous = batch
@@ -1629,9 +1581,7 @@ class OpportunityPerceptionStore:
                 str(admission["event_id"]),
                 str(admission["membership_hash"]),
             )
-            proof = OpportunityPerceptionStore._admission_proof_from_row(
-                admission
-            )
+            proof = OpportunityPerceptionStore._admission_proof_from_row(admission)
             proof.validate()
             promoted_at_ms = int(admission["promoted_at_ms"])
             deadline = int(admission["candidate_start_deadline_at_ms"])
@@ -1639,14 +1589,11 @@ class OpportunityPerceptionStore:
                 identity not in revision_identities
                 or revision_identities[identity] > promoted_at_ms
                 or deadline != promoted_at_ms + proof.candidate_max_wait_ms
-                or admission["effective_start_bound_ms"]
-                != proof.effective_start_bound_ms
+                or admission["effective_start_bound_ms"] != proof.effective_start_bound_ms
                 or int(admission["recorded_at_ms"]) < promoted_at_ms
             ):
                 raise ValueError("invalid-candidate-admission-receipt")
-            admission_keys.add(
-                (*identity, promoted_at_ms, deadline)
-            )
+            admission_keys.add((*identity, promoted_at_ms, deadline))
         for attempt in attempt_starts:
             identity = (
                 str(attempt["group_id"]),
@@ -1664,15 +1611,11 @@ class OpportunityPerceptionStore:
                     int(attempt["candidate_start_deadline_at_ms"]),
                 )
                 not in admission_keys
-                or int(attempt["started_at_ms"])
-                < int(attempt["promoted_at_ms"])
+                or int(attempt["started_at_ms"]) < int(attempt["promoted_at_ms"])
                 or int(attempt["candidate_start_deadline_at_ms"])
-                != int(attempt["promoted_at_ms"])
-                + int(attempt["candidate_max_wait_ms"])
-                or bool(attempt["deadline_breached"]) != (
-                int(attempt["started_at_ms"])
-                > int(attempt["candidate_start_deadline_at_ms"])
-                )
+                != int(attempt["promoted_at_ms"]) + int(attempt["candidate_max_wait_ms"])
+                or bool(attempt["deadline_breached"])
+                != (int(attempt["started_at_ms"]) > int(attempt["candidate_start_deadline_at_ms"]))
                 or (
                     bool(attempt["deadline_breached"])
                     and (
@@ -1685,11 +1628,7 @@ class OpportunityPerceptionStore:
                 raise ValueError("invalid-candidate-attempt-start-receipt")
         admission_proof: DiscoveryAdmissionProof | None = None
         if admission_row is not None:
-            admission_proof = (
-                OpportunityPerceptionStore._admission_proof_from_row(
-                    admission_row
-                )
-            )
+            admission_proof = OpportunityPerceptionStore._admission_proof_from_row(admission_row)
             admission_proof.validate()
             if (
                 admission_row["effective_start_bound_ms"]
@@ -1783,8 +1722,7 @@ class OpportunityPerceptionStore:
                     row["promotion_eligible_at_ms"] is None
                     or row["promotion_queue_deadline_at_ms"] is None
                     or int(row["promotion_queue_deadline_at_ms"])
-                    != int(row["promotion_eligible_at_ms"])
-                    + admission_proof.candidate_max_wait_ms
+                    != int(row["promotion_eligible_at_ms"]) + admission_proof.candidate_max_wait_ms
                 )
             ):
                 raise ValueError("invalid-discovery-promotion-queue-deadline")
@@ -1804,9 +1742,7 @@ class OpportunityPerceptionStore:
                             or row["candidate_start_deadline_at_ms"] is None
                             or (
                                 str(row["group_id"]) not in fact_group_ids
-                                and int(
-                                    row["candidate_start_deadline_at_ms"]
-                                )
+                                and int(row["candidate_start_deadline_at_ms"])
                                 != int(row["promoted_at_ms"])
                                 + admission_proof.candidate_max_wait_ms
                             )
@@ -1821,43 +1757,34 @@ class OpportunityPerceptionStore:
                         revision is None
                         or revision["status"] != "certified"
                         or revision["event_id"] != row["event_id"]
-                        or revision["membership_hash"]
-                        != row["membership_hash"]
+                        or revision["membership_hash"] != row["membership_hash"]
                         or (
                             admission_proof is not None
                             and (
                                 row["promotion_eligible_at_ms"] is None
                                 or row["promotion_queue_deadline_at_ms"] is None
-                                or row["candidate_start_deadline_at_ms"]
-                                is not None
+                                or row["candidate_start_deadline_at_ms"] is not None
                             )
                         )
                     ):
-                        raise ValueError(
-                            "invalid-discovery-queued-promotion-authority"
-                        )
+                        raise ValueError("invalid-discovery-queued-promotion-authority")
                 elif revision is not None and (
-                    revision["event_id"] != row["event_id"]
-                    or revision["status"] != "invalidated"
+                    revision["event_id"] != row["event_id"] or revision["status"] != "invalidated"
                 ):
                     raise ValueError("invalid-discovery-unpromoted-authority")
             if (
-                int(row["first_discovered_at_ms"])
-                > int(row["last_discovered_at_ms"])
+                int(row["first_discovered_at_ms"]) > int(row["last_discovered_at_ms"])
                 or (
                     row["last_visited_at_ms"] is not None
-                    and int(row["last_visited_at_ms"])
-                    > int(row["last_discovered_at_ms"])
+                    and int(row["last_visited_at_ms"]) > int(row["last_discovered_at_ms"])
                 )
                 or (
                     row["promoted_at_ms"] is not None
                     and (
-                        int(row["promoted_at_ms"])
-                        < int(row["first_discovered_at_ms"])
+                        int(row["promoted_at_ms"]) < int(row["first_discovered_at_ms"])
                         or (
                             row["promotion_eligible_at_ms"] is not None
-                            and int(row["promotion_eligible_at_ms"])
-                            > int(row["promoted_at_ms"])
+                            and int(row["promotion_eligible_at_ms"]) > int(row["promoted_at_ms"])
                         )
                     )
                 )
@@ -1889,8 +1816,7 @@ class OpportunityPerceptionStore:
             outstanding = sum(
                 1
                 for row in schedules
-                if row["promoted_at_ms"] is not None
-                and str(row["group_id"]) not in fact_group_ids
+                if row["promoted_at_ms"] is not None and str(row["group_id"]) not in fact_group_ids
             )
             if outstanding > admission_proof.effective_capacity:
                 raise ValueError("discovery-admission-capacity-exceeded")
@@ -1898,9 +1824,7 @@ class OpportunityPerceptionStore:
             if (
                 window.visited_groups > coverage.known_groups
                 or not Decimal("0") <= window.raw_fraction <= Decimal("1")
-                or not Decimal("0")
-                <= window.liquidity_weighted_fraction
-                <= Decimal("1")
+                or not Decimal("0") <= window.liquidity_weighted_fraction <= Decimal("1")
             ):
                 raise ValueError("invalid-discovery-coverage")
 
@@ -1938,17 +1862,11 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
         ages = [
-            now_ms - int(row["quoted_at_ms"])
-            for row in rows
-            if row["quoted_at_ms"] is not None
+            now_ms - int(row["quoted_at_ms"]) for row in rows if row["quoted_at_ms"] is not None
         ]
         missing = len(rows) - len(ages)
         ages.sort()
-        p95 = (
-            None
-            if not ages
-            else ages[max(0, math.ceil(len(ages) * 0.95) - 1)]
-        )
+        p95 = None if not ages else ages[max(0, math.ceil(len(ages) * 0.95) - 1)]
         return DurableCandidateFreshness(
             candidate_count=len(rows),
             quote_p95_age_ms=p95,
@@ -1975,13 +1893,9 @@ class OpportunityPerceptionStore:
             first_discovered_at_ms=int(row["first_discovered_at_ms"]),
             last_discovered_at_ms=int(row["last_discovered_at_ms"]),
             last_visited_at_ms=(
-                None if row["last_visited_at_ms"] is None
-                else int(row["last_visited_at_ms"])
+                None if row["last_visited_at_ms"] is None else int(row["last_visited_at_ms"])
             ),
-            promoted_at_ms=(
-                None if row["promoted_at_ms"] is None
-                else int(row["promoted_at_ms"])
-            ),
+            promoted_at_ms=(None if row["promoted_at_ms"] is None else int(row["promoted_at_ms"])),
             promotion_eligible_at_ms=(
                 None
                 if row["promotion_eligible_at_ms"] is None
@@ -1999,14 +1913,328 @@ class OpportunityPerceptionStore:
             ),
         )
 
+    def begin_reconciliation(self, *, started_at_ms: int) -> ReconciliationWindow:
+        if started_at_ms < 0:
+            raise ValueError("invalid-reconciliation-start")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            existing = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_windows "
+                "WHERE status IN ('open','complete') ORDER BY started_at_ms DESC LIMIT 1"
+            ).fetchone()
+            if existing is not None:
+                con.execute("COMMIT")
+                return self._reconciliation_window_from_row(existing)
+            window_id = uuid.uuid4().hex
+            con.execute(
+                "INSERT INTO neg_risk_reconciliation_windows("
+                "id,status,next_cursor,started_at_ms,checkpoint_at_ms,"
+                "pages_completed,events_seen,groups_staged,rejected_count"
+                ") VALUES (?,'open',NULL,?,?,0,0,0,0)",
+                (window_id, started_at_ms, started_at_ms),
+            )
+            row = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            con.execute("COMMIT")
+            return self._reconciliation_window_from_row(row)
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def current_reconciliation(self) -> ReconciliationWindow | None:
+        con = self._connect()
+        try:
+            con.execute("BEGIN")
+            row = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_windows "
+                "ORDER BY started_at_ms DESC,id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                con.execute("COMMIT")
+                return None
+            receipts = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_batches "
+                "WHERE window_id=? ORDER BY batch_sequence",
+                (row["id"],),
+            ).fetchall()
+            staged = con.execute(
+                "SELECT COUNT(*) AS count FROM neg_risk_reconciliation_staging WHERE window_id=?",
+                (row["id"],),
+            ).fetchone()
+            self._validate_reconciliation_snapshot(row, receipts, int(staged["count"]))
+            result = self._reconciliation_window_from_row(row)
+            con.execute("COMMIT")
+            return result
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def stage_reconciliation_group(
+        self,
+        window_id: str,
+        revision: GroupRevision,
+        *,
+        quality: DiscoveryQuality,
+        reason: str | None,
+    ) -> None:
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT status FROM neg_risk_reconciliation_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            if row is None or row["status"] != "open":
+                raise ValueError("reconciliation-window-not-open")
+            self._stage_reconciliation_sample(
+                con,
+                window_id=window_id,
+                group_id=revision.group_id,
+                event_id=revision.event_id,
+                membership_hash=revision.membership_hash,
+                quality=quality,
+                reason=reason,
+                legs=revision.legs,
+                observed_at_ms=revision.observed_at_ms,
+                source_cursor=revision.source_cursor,
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def publish_reconciliation_batch(
+        self,
+        *,
+        window_id: str,
+        requested_cursor: str | None,
+        next_cursor: str | None,
+        completed: bool,
+        started_at_ms: int,
+        finished_at_ms: int,
+        page_event_count: int,
+        candidates: tuple[DiscoveryScheduleCandidate, ...],
+    ) -> ReconciliationWindow:
+        """Atomically stage one page, receipt it, and advance its checkpoint."""
+        if started_at_ms > finished_at_ms:
+            raise ValueError("invalid-reconciliation-timestamp-order")
+        if completed != (next_cursor is None):
+            raise ValueError("invalid-reconciliation-completion-cursor")
+        if completed and page_event_count != 0:
+            raise ValueError("reconciliation-terminal-page-must-be-empty")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            window = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            if window is None or window["status"] != "open":
+                raise ValueError("reconciliation-window-not-open")
+            if window["next_cursor"] != requested_cursor:
+                raise ValueError("reconciliation-cursor-race")
+            if started_at_ms < int(window["checkpoint_at_ms"]):
+                raise ValueError("reconciliation-clock-regression")
+            existing_ids = {
+                str(row["group_id"])
+                for row in con.execute(
+                    "SELECT group_id FROM neg_risk_reconciliation_staging WHERE window_id=?",
+                    (window_id,),
+                ).fetchall()
+            }
+            page_ids: set[str] = set()
+            for candidate in candidates:
+                if candidate.group_id in existing_ids or candidate.group_id in page_ids:
+                    raise ValueError("duplicate-reconciliation-group")
+                page_ids.add(candidate.group_id)
+                self._stage_reconciliation_sample(
+                    con,
+                    window_id=window_id,
+                    group_id=candidate.group_id,
+                    event_id=candidate.event_id,
+                    membership_hash=candidate.membership_hash,
+                    quality=candidate.quality,
+                    reason=candidate.reason,
+                    legs=candidate.legs,
+                    observed_at_ms=finished_at_ms,
+                    source_cursor=requested_cursor,
+                )
+            rejected = sum(candidate.quality != "complete-supported" for candidate in candidates)
+            sequence = int(window["pages_completed"]) + 1
+            con.execute(
+                "INSERT INTO neg_risk_reconciliation_batches("
+                "window_id,batch_sequence,requested_cursor,next_cursor,completed,"
+                "started_at_ms,finished_at_ms,page_event_count,groups_staged,"
+                "rejected_count) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    window_id,
+                    sequence,
+                    requested_cursor,
+                    next_cursor,
+                    int(completed),
+                    started_at_ms,
+                    finished_at_ms,
+                    page_event_count,
+                    len(candidates),
+                    rejected,
+                ),
+            )
+            con.execute(
+                "UPDATE neg_risk_reconciliation_windows SET "
+                "status=?,next_cursor=?,checkpoint_at_ms=?,finished_at_ms=?,"
+                "pages_completed=pages_completed+1,events_seen=events_seen+?,"
+                "groups_staged=groups_staged+?,rejected_count=rejected_count+? "
+                "WHERE id=?",
+                (
+                    "complete" if completed else "open",
+                    next_cursor,
+                    finished_at_ms,
+                    finished_at_ms if completed else None,
+                    page_event_count,
+                    len(candidates),
+                    rejected,
+                    window_id,
+                ),
+            )
+            updated = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            con.execute("COMMIT")
+            return self._reconciliation_window_from_row(updated)
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def apply_reconciliation_diff(self, window_id: str) -> ReconciliationDiff:
+        """Atomically publish one completed calibration without clobbering hot state."""
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            window = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            if window is None:
+                raise ValueError("reconciliation-window-not-found")
+            if window["status"] == "open":
+                raise ReconciliationIncompleteError("reconciliation-window-incomplete")
+            finished_at_ms = int(window["finished_at_ms"])
+            if window["status"] == "applied":
+                result = self._reconciliation_diff_from_row(window)
+                con.execute("COMMIT")
+                return result
+
+            staged = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_staging WHERE window_id=? ORDER BY group_id",
+                (window_id,),
+            ).fetchall()
+            staged_ids = {str(row["group_id"]) for row in staged}
+            added = changed = closed = unchanged = 0
+            rejected = int(window["rejected_count"])
+            for row in staged:
+                if row["quality"] != "complete-supported":
+                    continue
+                legs = self._group_legs_from_json(str(row["legs_json"]))
+                if GroupRevision.membership_digest(legs) != row["membership_hash"]:
+                    raise ValueError("reconciliation-staging-identity-mismatch")
+                current = self._current_group_row(con, str(row["group_id"]))
+                if current is not None and int(current["observed_at_ms"]) > int(
+                    row["observed_at_ms"]
+                ):
+                    unchanged += 1
+                    continue
+                if (
+                    current is not None
+                    and current["status"] == "certified"
+                    and current["event_id"] == row["event_id"]
+                    and current["membership_hash"] == row["membership_hash"]
+                ):
+                    unchanged += 1
+                    continue
+                revision = GroupRevision.certified(
+                    group_id=str(row["group_id"]),
+                    event_id=str(row["event_id"]),
+                    revision=1 if current is None else int(current["revision"]) + 1,
+                    started_at_ms=int(row["observed_at_ms"]),
+                    observed_at_ms=int(row["observed_at_ms"]),
+                    source_cursor=(
+                        "" if row["source_cursor"] is None else str(row["source_cursor"])
+                    ),
+                    legs=legs,
+                )
+                self._insert_group_revision(con, revision, current)
+                if current is None:
+                    added += 1
+                else:
+                    changed += 1
+
+            current_rows = con.execute(
+                "SELECT r.* FROM neg_risk_group_revisions r "
+                "JOIN (SELECT group_id,MAX(revision) revision "
+                "FROM neg_risk_group_revisions GROUP BY group_id) latest "
+                "ON latest.group_id=r.group_id AND latest.revision=r.revision "
+                "WHERE r.status='certified'"
+            ).fetchall()
+            for current in current_rows:
+                group_id = str(current["group_id"])
+                if group_id in staged_ids or int(current["observed_at_ms"]) > int(
+                    window["started_at_ms"]
+                ):
+                    continue
+                revision = GroupRevision(
+                    group_id=group_id,
+                    event_id=str(current["event_id"]),
+                    revision=int(current["revision"]) + 1,
+                    membership_hash=str(current["membership_hash"]),
+                    started_at_ms=int(window["started_at_ms"]),
+                    observed_at_ms=finished_at_ms,
+                    source_cursor="reconciliation-closure",
+                    status="closed",
+                    legs=self._group_legs_from_json(str(current["legs_json"])),
+                )
+                self._insert_group_revision(con, revision, current)
+                closed += 1
+            con.execute(
+                "UPDATE neg_risk_reconciliation_windows SET status='applied',"
+                "added_count=?,changed_count=?,closed_count=?,unchanged_count=?,"
+                "applied_rejected_count=? WHERE id=?",
+                (added, changed, closed, unchanged, rejected, window_id),
+            )
+            applied = con.execute(
+                "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            result = self._reconciliation_diff_from_row(applied)
+            con.execute("COMMIT")
+            return result
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
     def publish_group_revision(self, revision: GroupRevision) -> GroupRevision:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
-            if (
-                GroupRevision.membership_digest(revision.legs)
-                != revision.membership_hash
-            ):
+            if GroupRevision.membership_digest(revision.legs) != revision.membership_hash:
                 raise ValueError("membership-hash-mismatch")
             if revision.status == "certified":
                 validated = GroupRevision.certified(
@@ -2024,33 +2252,7 @@ class OpportunityPerceptionStore:
             if current_row is not None and revision.revision <= current_row["revision"]:
                 raise ValueError("group-revision-not-monotonic")
 
-            con.execute(
-                "INSERT INTO neg_risk_group_revisions("
-                "group_id,event_id,revision,membership_hash,started_at_ms,"
-                "observed_at_ms,source_cursor,status,legs_json"
-                ") VALUES (?,?,?,?,?,?,?,?,?)",
-                (
-                    revision.group_id,
-                    revision.event_id,
-                    revision.revision,
-                    revision.membership_hash,
-                    revision.started_at_ms,
-                    revision.observed_at_ms,
-                    revision.source_cursor,
-                    revision.status,
-                    self._group_legs_json(revision.legs),
-                ),
-            )
-            if (
-                current_row is not None
-                and current_row["membership_hash"] != revision.membership_hash
-            ):
-                con.execute(
-                    "UPDATE neg_risk_group_quote_batches "
-                    "SET status='superseded' "
-                    "WHERE group_id=? AND status='complete'",
-                    (revision.group_id,),
-                )
+            self._insert_group_revision(con, revision, current_row)
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
@@ -2234,8 +2436,7 @@ class OpportunityPerceptionStore:
                 group_ids,
             ).fetchall()
             schedule_rows = con.execute(
-                "SELECT * FROM neg_risk_group_schedule "
-                f"WHERE group_id IN ({placeholders})",
+                f"SELECT * FROM neg_risk_group_schedule WHERE group_id IN ({placeholders})",
                 group_ids,
             ).fetchall()
             con.execute("COMMIT")
@@ -2246,12 +2447,10 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
         facts = {
-            str(row["group_id"]): self._candidate_watch_fact_from_row(row)
-            for row in fact_rows
+            str(row["group_id"]): self._candidate_watch_fact_from_row(row) for row in fact_rows
         }
         schedules = {
-            str(row["group_id"]): self._group_schedule_from_row(row)
-            for row in schedule_rows
+            str(row["group_id"]): self._group_schedule_from_row(row) for row in schedule_rows
         }
         return tuple(
             CandidateSchedulingSnapshotItem(
@@ -2296,13 +2495,10 @@ class OpportunityPerceptionStore:
                 raise ValueError("candidate-attempt-start-authority-mismatch")
             deadline = admission.candidate_start_deadline_at_ms
             proof = con.execute(
-                "SELECT candidate_max_wait_ms "
-                "FROM neg_risk_discovery_admission_state WHERE id=1"
+                "SELECT candidate_max_wait_ms FROM neg_risk_discovery_admission_state WHERE id=1"
             ).fetchone()
-            if (
-                proof is None
-                or deadline
-                != admission.promoted_at_ms + int(proof["candidate_max_wait_ms"])
+            if proof is None or deadline != admission.promoted_at_ms + int(
+                proof["candidate_max_wait_ms"]
             ):
                 raise ValueError("candidate-attempt-start-deadline-mismatch")
             candidate_max_wait_ms = int(proof["candidate_max_wait_ms"])
@@ -2412,9 +2608,7 @@ class OpportunityPerceptionStore:
 
     def _connect(self) -> sqlite3.Connection:
         target = (
-            f"file:{self._db_path.resolve()}?mode=ro"
-            if self._read_only
-            else str(self._db_path)
+            f"file:{self._db_path.resolve()}?mode=ro" if self._read_only else str(self._db_path)
         )
         con = sqlite3.connect(
             target,
@@ -2465,9 +2659,7 @@ class OpportunityPerceptionStore:
             leg.yes_token_id for leg in current.legs
         ):
             raise ValueError("quote-leg-identity-mismatch")
-        if any(
-            leg.membership_hash != current.membership_hash for leg in batch.legs
-        ):
+        if any(leg.membership_hash != current.membership_hash for leg in batch.legs):
             raise ValueError("membership-hash-mismatch")
         con.execute(
             "INSERT INTO neg_risk_group_quote_batches("
@@ -2548,9 +2740,7 @@ class OpportunityPerceptionStore:
         )
 
     @staticmethod
-    def _current_group_row(
-        con: sqlite3.Connection, group_id: str
-    ) -> sqlite3.Row | None:
+    def _current_group_row(con: sqlite3.Connection, group_id: str) -> sqlite3.Row | None:
         return con.execute(
             "SELECT * FROM neg_risk_group_revisions "
             "WHERE group_id=? ORDER BY revision DESC LIMIT 1",
@@ -2599,12 +2789,211 @@ class OpportunityPerceptionStore:
         ).fetchone()
 
     @staticmethod
+    def _insert_group_revision(
+        con: sqlite3.Connection,
+        revision: GroupRevision,
+        current_row: sqlite3.Row | None,
+    ) -> None:
+        con.execute(
+            "INSERT INTO neg_risk_group_revisions("
+            "group_id,event_id,revision,membership_hash,started_at_ms,"
+            "observed_at_ms,source_cursor,status,legs_json"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                revision.group_id,
+                revision.event_id,
+                revision.revision,
+                revision.membership_hash,
+                revision.started_at_ms,
+                revision.observed_at_ms,
+                revision.source_cursor,
+                revision.status,
+                OpportunityPerceptionStore._group_legs_json(revision.legs),
+            ),
+        )
+        if current_row is not None and (
+            current_row["membership_hash"] != revision.membership_hash
+            or revision.status != "certified"
+        ):
+            con.execute(
+                "UPDATE neg_risk_group_quote_batches SET status='superseded' "
+                "WHERE group_id=? AND status='complete'",
+                (revision.group_id,),
+            )
+
+    @staticmethod
+    def _stage_reconciliation_sample(
+        con: sqlite3.Connection,
+        *,
+        window_id: str,
+        group_id: str,
+        event_id: str,
+        membership_hash: str,
+        quality: DiscoveryQuality,
+        reason: str | None,
+        legs: tuple[GroupLeg, ...] | None,
+        observed_at_ms: int,
+        source_cursor: str | None,
+    ) -> None:
+        if quality == "complete-supported":
+            if legs is None:
+                raise ValueError("reconciliation-supported-group-missing-legs")
+            if GroupRevision.membership_digest(legs) != membership_hash:
+                raise ValueError("reconciliation-staging-identity-mismatch")
+        elif legs is not None:
+            raise ValueError("reconciliation-rejected-group-has-legs")
+        con.execute(
+            "INSERT INTO neg_risk_reconciliation_staging("
+            "window_id,group_id,event_id,membership_hash,quality,reason,"
+            "legs_json,observed_at_ms,source_cursor) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                window_id,
+                group_id,
+                event_id,
+                membership_hash,
+                quality,
+                reason,
+                (None if legs is None else OpportunityPerceptionStore._group_legs_json(legs)),
+                observed_at_ms,
+                source_cursor,
+            ),
+        )
+
+    @staticmethod
+    def _reconciliation_window_from_row(
+        row: sqlite3.Row,
+    ) -> ReconciliationWindow:
+        return ReconciliationWindow(
+            id=str(row["id"]),
+            status=row["status"],
+            next_cursor=(None if row["next_cursor"] is None else str(row["next_cursor"])),
+            started_at_ms=int(row["started_at_ms"]),
+            checkpoint_at_ms=int(row["checkpoint_at_ms"]),
+            finished_at_ms=(None if row["finished_at_ms"] is None else int(row["finished_at_ms"])),
+            pages_completed=int(row["pages_completed"]),
+            events_seen=int(row["events_seen"]),
+            groups_staged=int(row["groups_staged"]),
+            rejected_count=int(row["rejected_count"]),
+            added_count=(None if row["added_count"] is None else int(row["added_count"])),
+            changed_count=(None if row["changed_count"] is None else int(row["changed_count"])),
+            closed_count=(None if row["closed_count"] is None else int(row["closed_count"])),
+            unchanged_count=(
+                None if row["unchanged_count"] is None else int(row["unchanged_count"])
+            ),
+            applied_rejected_count=(
+                None
+                if row["applied_rejected_count"] is None
+                else int(row["applied_rejected_count"])
+            ),
+        )
+
+    @staticmethod
+    def _validate_reconciliation_snapshot(
+        row: sqlite3.Row,
+        receipts: list[sqlite3.Row],
+        staged_count: int,
+    ) -> None:
+        status = str(row["status"])
+        pages = int(row["pages_completed"])
+        started = int(row["started_at_ms"])
+        checkpoint = int(row["checkpoint_at_ms"])
+        finished = row["finished_at_ms"]
+        if (
+            status not in {"open", "complete", "applied"}
+            or pages != len(receipts)
+            or checkpoint < started
+            or staged_count != int(row["groups_staged"])
+            or sum(int(item["page_event_count"]) for item in receipts) != int(row["events_seen"])
+            or sum(int(item["groups_staged"]) for item in receipts) != int(row["groups_staged"])
+            or sum(int(item["rejected_count"]) for item in receipts) != int(row["rejected_count"])
+        ):
+            raise ValueError("invalid-reconciliation-window")
+        if pages == 0:
+            if (
+                status != "open"
+                or row["next_cursor"] is not None
+                or finished is not None
+                or checkpoint != started
+            ):
+                raise ValueError("invalid-reconciliation-empty-window")
+            return
+        diff_counts = (
+            row["added_count"],
+            row["changed_count"],
+            row["closed_count"],
+            row["unchanged_count"],
+            row["applied_rejected_count"],
+        )
+        present = [value is not None for value in diff_counts]
+        if (
+            any(present) != all(present)
+            or (status == "applied") != all(present)
+            or any(value is not None and int(value) < 0 for value in diff_counts)
+        ):
+            raise ValueError("invalid-reconciliation-diff-counts")
+        for sequence, receipt in enumerate(receipts, start=1):
+            if (
+                int(receipt["batch_sequence"]) != sequence
+                or int(receipt["started_at_ms"]) > int(receipt["finished_at_ms"])
+                or bool(receipt["completed"]) != (receipt["next_cursor"] is None)
+                or (
+                    sequence > 1
+                    and receipt["requested_cursor"] != receipts[sequence - 2]["next_cursor"]
+                )
+            ):
+                raise ValueError("invalid-reconciliation-receipt-chain")
+        latest = receipts[-1]
+        if (
+            latest["next_cursor"] != row["next_cursor"]
+            or int(latest["finished_at_ms"]) != checkpoint
+            or (status in {"complete", "applied"}) != bool(latest["completed"])
+            or (
+                status in {"complete", "applied"}
+                and (
+                    finished is None
+                    or int(finished) != checkpoint
+                    or int(latest["page_event_count"]) != 0
+                )
+            )
+            or (status == "open" and finished is not None)
+        ):
+            raise ValueError("invalid-reconciliation-checkpoint")
+
+    @staticmethod
+    def _reconciliation_diff_from_row(row: sqlite3.Row) -> ReconciliationDiff:
+        if row["finished_at_ms"] is None:
+            raise ValueError("reconciliation-missing-finish")
+        values = (
+            row["added_count"],
+            row["changed_count"],
+            row["closed_count"],
+            row["unchanged_count"],
+            row["applied_rejected_count"],
+        )
+        if any(value is None for value in values):
+            raise ValueError("reconciliation-missing-diff")
+        return ReconciliationDiff(
+            window_id=str(row["id"]),
+            added=int(values[0]),
+            changed=int(values[1]),
+            closed=int(values[2]),
+            unchanged=int(values[3]),
+            rejected=int(values[4]),
+            started_at_ms=int(row["started_at_ms"]),
+            finished_at_ms=int(row["finished_at_ms"]),
+        )
+
+    @staticmethod
+    def _group_legs_from_json(value: str) -> tuple[GroupLeg, ...]:
+        decoded = json.loads(value)
+        if not isinstance(decoded, list):
+            raise ValueError("invalid-group-legs-json")
+        return tuple(GroupLeg(*leg) for leg in decoded)
+
+    @staticmethod
     def _group_legs_json(legs: tuple[GroupLeg, ...]) -> str:
         return json.dumps(
-            [
-                [leg.market_id, leg.condition_id, leg.yes_token_id, leg.title]
-                for leg in legs
-            ],
+            [[leg.market_id, leg.condition_id, leg.yes_token_id, leg.title] for leg in legs],
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -2627,9 +3016,7 @@ class OpportunityPerceptionStore:
         )
 
     @staticmethod
-    def _group_from_row(
-        row: sqlite3.Row, *, prefix: str = ""
-    ) -> GroupRevision:
+    def _group_from_row(row: sqlite3.Row, *, prefix: str = "") -> GroupRevision:
         return GroupRevision(
             group_id=row[f"{prefix}group_id"],
             event_id=row[f"{prefix}event_id"],
@@ -2639,15 +3026,11 @@ class OpportunityPerceptionStore:
             observed_at_ms=row[f"{prefix}observed_at_ms"],
             source_cursor=row[f"{prefix}source_cursor"],
             status=row[f"{prefix}status"],
-            legs=tuple(
-                GroupLeg(*leg) for leg in json.loads(row[f"{prefix}legs_json"])
-            ),
+            legs=tuple(GroupLeg(*leg) for leg in json.loads(row[f"{prefix}legs_json"])),
         )
 
     @staticmethod
-    def _quote_batch_from_row(
-        row: sqlite3.Row, *, prefix: str = ""
-    ) -> GroupQuoteBatch:
+    def _quote_batch_from_row(row: sqlite3.Row, *, prefix: str = "") -> GroupQuoteBatch:
         return GroupQuoteBatch(
             group_id=row[f"{prefix}group_id"],
             membership_hash=row[f"{prefix}membership_hash"],
@@ -2656,10 +3039,7 @@ class OpportunityPerceptionStore:
             quoted_at_ms=row[f"{prefix}quoted_at_ms"],
             status=row[f"{prefix}status"],
             failure_reason=row[f"{prefix}failure_reason"],
-            legs=tuple(
-                GroupQuoteLeg(*leg)
-                for leg in json.loads(row[f"{prefix}legs_json"])
-            ),
+            legs=tuple(GroupQuoteLeg(*leg) for leg in json.loads(row[f"{prefix}legs_json"])),
         )
 
     @classmethod
@@ -2673,10 +3053,7 @@ class OpportunityPerceptionStore:
             group = cls._group_from_row(row, prefix=prefix)
             if group.status not in _GROUP_STATUSES:
                 return None
-            if (
-                GroupRevision.membership_digest(group.legs)
-                != group.membership_hash
-            ):
+            if GroupRevision.membership_digest(group.legs) != group.membership_hash:
                 return None
             if group.started_at_ms > group.observed_at_ms:
                 return None

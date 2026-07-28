@@ -52,6 +52,10 @@ from polyarb.perception.discovery import (
     build_production_discovery,
     compose_candidate_group_ids,
 )
+from polyarb.perception.reconciliation import (
+    ReconciliationRunner,
+    build_production_reconciliation,
+)
 from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -88,6 +92,25 @@ def _start_discovery(
     if discovery is None:
         return None
     return asyncio.create_task(discovery.run(stop_event))
+
+
+def _start_reconciliation(
+    reconciliation: ReconciliationRunner | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if reconciliation is None:
+        return None
+    return asyncio.create_task(reconciliation.run(stop_event))
+
+
+def _start_legacy_structure_scheduler(
+    scheduler: SnapshotScheduler,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if not scheduler.legacy_reconciliation_enabled:
+        logger.info("legacy Structure reconciliation disabled")
+        return None
+    return asyncio.create_task(scheduler.run(stop_event))
 
 
 async def main() -> int:
@@ -141,6 +164,11 @@ async def main() -> int:
         if settings.opportunity_discovery_enabled
         else None
     )
+    reconciliation = (
+        build_production_reconciliation(settings)
+        if settings.opportunity_reconciliation_enabled
+        else None
+    )
     quote_worker = build_production_quote_worker(
         settings,
         opportunity_watcher=focused_watcher,
@@ -189,11 +217,12 @@ async def main() -> int:
         await asyncio.sleep(0.1)
     logger.info(f"daemon running: http server on :{settings.http_port}, starting scheduler")
 
-    scheduler_task = asyncio.create_task(scheduler.run(stop_event))
+    scheduler_task = _start_legacy_structure_scheduler(scheduler, stop_event)
     quote_worker_task = _start_quote_worker(quote_worker, stop_event)
     focused_watcher_task = _start_opportunity_watcher(focused_watcher, stop_event)
     candidate_watcher_task = _start_candidate_watcher(candidate_watcher, stop_event)
     discovery_task = _start_discovery(discovery, stop_event)
+    reconciliation_task = _start_reconciliation(reconciliation, stop_event)
 
     await stop_event.wait()
     logger.info("stop_event set, shutting down server")
@@ -203,12 +232,15 @@ async def main() -> int:
     # tick (e.g. ~minutes-long snapshot waiting on Gamma HTTP) is interrupted
     # within ~1s rather than waiting for the current await to return. The
     # scheduler re-raises CancelledError out of _tick() per F-04 contract.
-    scheduler_task.cancel()
+    if scheduler_task is not None:
+        scheduler_task.cancel()
     focused_watcher_task.cancel()
     if candidate_watcher_task is not None:
         candidate_watcher_task.cancel()
     if discovery_task is not None:
         discovery_task.cancel()
+    if reconciliation_task is not None:
+        reconciliation_task.cancel()
     if quote_worker_task is not None:
         quote_worker_task.cancel()
 
@@ -218,7 +250,7 @@ async def main() -> int:
         await asyncio.wait_for(
             asyncio.gather(
                 server_task,
-                scheduler_task,
+                *([scheduler_task] if scheduler_task is not None else []),
                 focused_watcher_task,
                 *([quote_worker_task] if quote_worker_task is not None else []),
                 *(
@@ -227,6 +259,11 @@ async def main() -> int:
                     else []
                 ),
                 *([discovery_task] if discovery_task is not None else []),
+                *(
+                    [reconciliation_task]
+                    if reconciliation_task is not None
+                    else []
+                ),
                 return_exceptions=True,
             ),
             timeout=5.0,
