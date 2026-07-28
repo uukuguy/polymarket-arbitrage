@@ -562,9 +562,12 @@ CREATE INDEX IF NOT EXISTS idx_neg_risk_incident_scope
 -- Authentication nonces are durable so replay protection survives restarts.
 CREATE TABLE IF NOT EXISTS neg_risk_operator_auth_nonces (
   nonce TEXT PRIMARY KEY,
+  request_method TEXT NOT NULL CHECK(request_method = 'POST'),
   request_path TEXT NOT NULL,
   request_timestamp_s INTEGER NOT NULL CHECK(request_timestamp_s >= 0),
-  accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0)
+  body_hash TEXT NOT NULL,
+  accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0),
+  auth_hash TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS neg_risk_operator_queue (
@@ -572,16 +575,23 @@ CREATE TABLE IF NOT EXISTS neg_risk_operator_queue (
   queued INTEGER NOT NULL CHECK(queued IN (0,1)),
   queued_at_ms INTEGER,
   consumed_at_ms INTEGER,
-  request_nonce TEXT
+  request_nonce TEXT,
+  last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0),
+  last_receipt_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS neg_risk_operator_queue_receipts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   component TEXT NOT NULL CHECK(component IN ('discovery','reconciliation')),
-  action TEXT NOT NULL CHECK(action IN ('queued','coalesced','consumed')),
+  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+  action TEXT NOT NULL CHECK(action IN
+    ('queued','coalesced','consumed','cancelled')),
   occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
-  request_nonce TEXT,
-  UNIQUE(component,action,request_nonce)
+  auth_nonce TEXT NOT NULL,
+  previous_hash TEXT,
+  receipt_hash TEXT NOT NULL,
+  UNIQUE(component,sequence),
+  UNIQUE(component,action,auth_nonce)
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_operator_queue_receipts_component
   ON neg_risk_operator_queue_receipts(component,id);

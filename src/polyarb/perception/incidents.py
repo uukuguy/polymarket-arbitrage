@@ -242,11 +242,26 @@ class IncidentManager:
             ):
                 return False
             try:
-                group = self._store.current_group(group_id)
-                quote = self._store.current_quote_batch(
+                current_group_row = self._store._current_group_row(con, group_id)
+                group = (
+                    None
+                    if current_group_row is None
+                    else self._store._validated_group_from_row(current_group_row)
+                )
+                current_quote_row = self._store._current_quote_row(
+                    con,
                     group_id,
-                    now_ms=verification_at_ms,
-                    max_age_ms=max(1, verification_at_ms + 1),
+                    verification_at_ms,
+                    max(1, verification_at_ms + 1),
+                )
+                quote = (
+                    None
+                    if current_quote_row is None or group is None
+                    else self._store._validated_quote_from_row(
+                        current_quote_row,
+                        group,
+                        prefix="quote_",
+                    )
                 )
             except (sqlite3.Error, TypeError, ValueError):
                 return False
@@ -326,7 +341,10 @@ class IncidentManager:
             ):
                 return False
             try:
-                self._store.discovery_status(row["finished_at_ms"])
+                self._store.discovery_status(
+                    row["finished_at_ms"],
+                    _connection=con,
+                )
             except (sqlite3.Error, TypeError, ValueError):
                 return False
             return bool(row["completed"] or row["next_cursor"] != row["requested_cursor"])
@@ -336,7 +354,7 @@ class IncidentManager:
                 (verification_evidence.get("window_id"),),
             ).fetchone()
             try:
-                validated = self._store.current_reconciliation()
+                validated = self._store.current_reconciliation(_connection=con)
             except (sqlite3.Error, TypeError, ValueError):
                 return False
             return bool(

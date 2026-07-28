@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
-import math
+import re
 import sqlite3
 import time
 from collections.abc import Callable
@@ -16,20 +15,13 @@ from urllib.parse import unquote
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from polyarb.perception.incidents import Incident, IncidentManager
-from polyarb.perception.models import (
-    GroupLeg,
-    GroupQuoteBatch,
-    GroupQuoteLeg,
-    GroupRevision,
-)
-from polyarb.perception.store import (
-    OpportunityPerceptionStore,
-    candidate_success_receipt_hash,
-)
+from polyarb.perception.models import GroupLeg, GroupRevision
+from polyarb.perception.store import OpportunityPerceptionStore
 
 _MAX_LIMIT = 500
 _HISTORY_CAP = 500
+_GROUP_PAGE_HISTORY_CAP = 10_000
+_LEGS_JSON_MAX_BYTES = 65_536
 _TIMEOUT_S = 1.0
 _BUSY_TIMEOUT_MS = 250
 _INCIDENT_EDGES = {
@@ -40,28 +32,194 @@ _INCIDENT_EDGES = {
     "verified": set(),
     "escalated": {"recovering"},
 }
-_SECRET_KEYS = {"secret", "password", "token", "authorization", "dsn", "traceback", "path"}
+_SECRET_KEYS = {
+    "secret",
+    "password",
+    "passwd",
+    "token",
+    "authorization",
+    "auth",
+    "api_key",
+    "apikey",
+    "cookie",
+    "session",
+    "credential",
+    "dsn",
+    "traceback",
+    "path",
+}
+_INLINE_SECRET_RE = re.compile(
+    r"(?i)(?:password|passwd|secret|api[_-]?key|token|authorization|cookie|session)"
+    r"\s*[:=]\s*[^\s,;&]+|(?:bearer|basic)\s+[a-z0-9._~+/=-]+"
+)
+
+
+def _validate_recovery_batch(
+    con: sqlite3.Connection,
+    db_path: Path,
+    proofs: list[
+        tuple[str, int, int, dict[str, Any], dict[str, Any]]
+    ],
+) -> None:
+    """Validate all verified incidents with fixed-count bulk reads."""
+    if not proofs:
+        return
+    store = OpportunityPerceptionStore(
+        db_path,
+        read_only=True,
+        busy_timeout_ms=_BUSY_TIMEOUT_MS,
+    )
+    scopes = {scope for scope, *_ in proofs}
+    candidate_receipts: dict[str, sqlite3.Row] = {}
+    if any(scope == "candidate" or scope.startswith("candidate:") for scope in scopes):
+        store.validated_candidate_opportunity_count(_connection=con)
+        candidate_receipts = {
+            str(row["quote_batch_id"]): row
+            for row in con.execute(
+                "SELECT * FROM neg_risk_candidate_success_receipts"
+            ).fetchall()
+        }
+    discovery_batches: dict[int, sqlite3.Row] = {}
+    latest_discovery_id: int | None = None
+    if "discovery" in scopes:
+        discovery_rows = con.execute(
+            "SELECT * FROM neg_risk_discovery_batches ORDER BY id"
+        ).fetchall()
+        discovery_batches = {int(row["id"]): row for row in discovery_rows}
+        latest_discovery_id = None if not discovery_rows else int(discovery_rows[-1]["id"])
+        if discovery_rows:
+            store.discovery_status(
+                max(int(row["finished_at_ms"]) for row in discovery_rows),
+                _connection=con,
+            )
+    windows: dict[str, sqlite3.Row] = {}
+    current_window = None
+    if "reconciliation" in scopes:
+        window_rows = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_windows ORDER BY rowid"
+        ).fetchall()
+        windows = {str(row["id"]): row for row in window_rows}
+        current_window = store.current_reconciliation(_connection=con)
+    probes: dict[tuple[str, str], sqlite3.Row] = {}
+    if "http" in scopes:
+        for row in con.execute(
+            "SELECT rowid probe_row_id,* FROM neg_risk_http_probe_receipts ORDER BY id"
+        ).fetchall():
+            probes[(str(row["release_id"]), str(row["probe_nonce"]))] = row
+    resource_rows: dict[int, sqlite3.Row] = {}
+    resource_decision = None
+    if "resource" in scopes:
+        from polyarb.perception.resource_controller import validate_resource_history
+
+        resource_decision = validate_resource_history(con)
+        resource_rows = {
+            int(row["id"]): row
+            for row in con.execute(
+                "SELECT * FROM neg_risk_resource_decisions"
+            ).fetchall()
+        }
+    for scope, recovery_at, verified_at, recovery, verification in proofs:
+        valid = False
+        if scope == "candidate" or scope.startswith("candidate:"):
+            group_id = verification.get("group_id")
+            receipt = candidate_receipts.get(str(verification.get("quote_batch_id")))
+            anchor = recovery.get("candidate_success_receipt_row_id")
+            valid = bool(
+                isinstance(group_id, str)
+                and group_id
+                and (
+                    not scope.startswith("candidate:")
+                    or group_id == scope.split(":", 1)[1]
+                )
+                and type(anchor) is int
+                and receipt is not None
+                and int(receipt["id"]) > anchor
+                and receipt["group_id"] == group_id
+                and receipt["membership_hash"] == verification.get("membership_hash")
+                and receipt["quote_batch_id"] == verification.get("quote_batch_id")
+                and recovery_at <= int(receipt["observed_at_ms"]) <= verified_at
+            )
+        elif scope == "discovery":
+            batch_id = verification.get("batch_id")
+            row = (
+                discovery_batches.get(batch_id)
+                if type(batch_id) is int
+                else None
+            )
+            valid = bool(
+                row is not None
+                and int(row["id"]) == latest_discovery_id
+                and recovery_at < int(row["finished_at_ms"]) <= verified_at
+                and (row["completed"] or row["next_cursor"] != row["requested_cursor"])
+            )
+        elif scope == "reconciliation":
+            row = windows.get(str(verification.get("window_id")))
+            valid = bool(
+                row is not None
+                and current_window is not None
+                and current_window.id == row["id"]
+                and recovery_at < int(row["checkpoint_at_ms"]) <= verified_at
+                and int(row["pages_completed"])
+                > int(recovery.get("pages_completed", -1))
+            )
+        elif scope == "http":
+            release = recovery.get("release_id")
+            nonce = recovery.get("probe_nonce")
+            anchor = recovery.get("http_probe_row_id")
+            row = probes.get((str(release), str(nonce)))
+            valid = bool(
+                isinstance(release, str)
+                and isinstance(nonce, str)
+                and type(anchor) is int
+                and row is not None
+                and row["probe_row_id"] > anchor
+                and row["responsive"]
+                and row["observed_release_id"] == release
+                and verification.get("release_id") == release
+                and verification.get("probe_nonce") == nonce
+                and recovery_at <= row["started_at_ms"]
+                and row["finished_at_ms"] <= verified_at
+                and row["finished_at_ms"] - row["started_at_ms"] <= 2_000
+            )
+        elif scope == "resource":
+            row_id = verification.get("decision_id")
+            row = resource_rows.get(row_id) if type(row_id) is int else None
+            valid = bool(
+                row is not None
+                and resource_decision is not None
+                and resource_decision.sequence == row["sequence"]
+                and resource_decision.decided_at_ms == row["decided_at_ms"]
+                and recovery_at < row["decided_at_ms"] <= verified_at
+            )
+        if not valid:
+            raise ValueError("invalid-incident-recovery-proof")
 
 
 def _safe_evidence(value: Any, *, depth: int = 0) -> Any:
     if depth > 5:
         return "[redacted]"
     if isinstance(value, dict):
-        return {
-            str(key): (
+        result: dict[str, Any] = {}
+        for key, item in list(value.items())[:100]:
+            rendered_key = str(key)[:128]
+            normalized = rendered_key.lower().replace("-", "_")
+            result[rendered_key] = (
                 "[redacted]"
-                if any(marker in str(key).lower() for marker in _SECRET_KEYS)
+                if any(marker in normalized for marker in _SECRET_KEYS)
                 else _safe_evidence(item, depth=depth + 1)
             )
-            for key, item in value.items()
-        }
+        return result
     if isinstance(value, list):
         return [_safe_evidence(item, depth=depth + 1) for item in value[:100]]
-    if isinstance(value, str) and (
-        "://" in value or value.lower().startswith(("bearer ", "sha256:", "/users/", "/home/"))
-    ):
-        return "[redacted]"
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, str):
+        if (
+            "://" in value
+            or _INLINE_SECRET_RE.search(value)
+            or value.lower().startswith(("bearer ", "basic ", "sha256:", "/users/", "/home/"))
+        ):
+            return "[redacted]"
+        return value[:1_024]
+    if value is None or isinstance(value, (int, float, bool)):
         return value
     return "[redacted]"
 
@@ -112,6 +270,20 @@ def _validate_revision(row: sqlite3.Row) -> dict[str, Any]:
         if (
             not row["group_id"]
             or not row["event_id"]
+            or len(str(row["group_id"])) > 256
+            or len(str(row["event_id"])) > 256
+            or len(str(row["source_cursor"])) > 2_048
+            or len(legs) > 500
+            or any(
+                max(
+                    len(leg.market_id),
+                    len(leg.condition_id),
+                    len(leg.yes_token_id),
+                    len(leg.title),
+                )
+                > 512
+                for leg in legs
+            )
             or int(row["revision"]) < 1
             or int(row["started_at_ms"]) > int(row["observed_at_ms"])
             or GroupRevision.membership_digest(legs) != str(row["membership_hash"])
@@ -134,7 +306,18 @@ def _validate_revision(row: sqlite3.Row) -> dict[str, Any]:
 
 def _read_incident_history(con: sqlite3.Connection, db_path: Path) -> list[dict[str, Any]]:
     count = int(con.execute("SELECT COUNT(*) FROM neg_risk_incident_events").fetchone()[0])
-    if count > _HISTORY_CAP:
+    evidence_size = con.execute(
+        "SELECT COALESCE(MAX(length(evidence_json)),0),"
+        "COALESCE(SUM(length(evidence_json)),0) "
+        "FROM neg_risk_incident_events"
+    ).fetchone()
+    max_evidence = int(evidence_size[0])
+    total_evidence = int(evidence_size[1])
+    if (
+        count > _HISTORY_CAP
+        or max_evidence > 4_096
+        or total_evidence > 1_048_576
+    ):
         raise ValueError("incident-history-too-large")
     rows = con.execute(
         "SELECT incident_id,sequence,scope,kind,state,occurred_at_ms,evidence_json "
@@ -143,7 +326,7 @@ def _read_incident_history(con: sqlite3.Connection, db_path: Path) -> list[dict[
     ).fetchall()
     previous: dict[str, dict[str, Any]] = {}
     recovering: dict[str, tuple[int, dict[str, Any]]] = {}
-    manager = IncidentManager(OpportunityPerceptionStore(db_path, read_only=True))
+    proofs: list[tuple[str, int, int, dict[str, Any], dict[str, Any]]] = []
     for row in rows:
         try:
             evidence = json.loads(row["evidence_json"])
@@ -180,27 +363,21 @@ def _read_incident_history(con: sqlite3.Connection, db_path: Path) -> list[dict[
                 )
             if item["state"] == "verified":
                 recovery = recovering.get(item["incident_id"])
-                incident = Incident(
-                    id=item["incident_id"],
-                    sequence=item["sequence"],
-                    scope=item["scope"],
-                    kind=item["kind"],
-                    state="verified",
-                    occurred_at_ms=item["occurred_at_ms"],
-                    evidence=evidence,
-                )
-                if recovery is None or not manager._has_recovery_proof(
-                    con,
-                    incident,
-                    recovery_started_at_ms=recovery[0],
-                    verification_at_ms=item["occurred_at_ms"],
-                    recovery_evidence=recovery[1],
-                    verification_evidence=evidence,
-                ):
+                if recovery is None:
                     raise ValueError
+                proofs.append(
+                    (
+                        item["scope"],
+                        recovery[0],
+                        item["occurred_at_ms"],
+                        recovery[1],
+                        evidence,
+                    )
+                )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("invalid-incident-history") from error
         previous[item["incident_id"]] = item
+    _validate_recovery_batch(con, db_path, proofs)
     return list(previous.values())
 
 
@@ -215,97 +392,12 @@ def _status(db_path: Path) -> dict[str, Any]:
             for item in incidents
         ):
             raise ValueError("candidate-worker-unavailable")
-        fact_count = int(
-            con.execute(
-                "SELECT COUNT(*) FROM (SELECT group_id FROM "
-                "neg_risk_candidate_watch_facts GROUP BY group_id)"
-            ).fetchone()[0]
-        )
-        if fact_count > _MAX_LIMIT:
-            raise ValueError("opportunity-output-too-large")
-        rows = con.execute(
-            "WITH latest_fact AS (SELECT f.* FROM neg_risk_candidate_watch_facts f "
-            "JOIN (SELECT group_id,MAX(id) id FROM neg_risk_candidate_watch_facts "
-            "GROUP BY group_id) x ON x.id=f.id), current_group AS ("
-            "SELECT r.* FROM neg_risk_group_revisions r JOIN "
-            "(SELECT group_id,MAX(revision) revision FROM neg_risk_group_revisions "
-            "GROUP BY group_id) x ON x.group_id=r.group_id AND x.revision=r.revision) "
-            "SELECT f.*,g.id group_revision_row_id,g.event_id,g.status group_status,"
-            "g.legs_json group_legs_json,r.transaction_id,r.quote_batch_row_id,"
-            "r.receipt_hash,q.rowid joined_quote_row_id,q.status quote_status,"
-            "q.started_at_ms quote_started_at_ms,q.quoted_at_ms,q.legs_json quote_legs_json "
-            "FROM latest_fact f LEFT JOIN current_group g ON g.group_id=f.group_id "
-            "AND g.membership_hash=f.membership_hash "
-            "LEFT JOIN neg_risk_candidate_success_receipts r "
-            "ON r.candidate_fact_row_id=f.id "
-            "LEFT JOIN neg_risk_group_quote_batches q ON q.id=f.quote_batch_id "
-            "ORDER BY f.group_id LIMIT 501"
-        ).fetchall()
-        if len(rows) > _MAX_LIMIT:
-            raise ValueError("opportunity-output-too-large")
-        opportunity_count = 0
-        for row in rows:
-            result = str(row["last_result"])
-            if (
-                result not in {"watching", "no-edge", "unavailable"}
-                or int(row["observed_at_ms"]) < 0
-                or int(row["next_due_at_ms"]) < int(row["observed_at_ms"])
-                or not math.isfinite(float(row["effective_interval_s"]))
-                or float(row["effective_interval_s"]) <= 0
-            ):
-                raise ValueError("invalid-opportunity-fact")
-            if result in {"watching", "no-edge"}:
-                numeric = ("bundle_cost", "gross_edge_bps", "max_bundle_size")
-                if (
-                    row["group_revision_row_id"] is None
-                    or row["group_status"] != "certified"
-                    or row["transaction_id"] is None
-                    or row["quote_status"] != "complete"
-                    or int(row["quote_batch_row_id"]) != int(row["joined_quote_row_id"])
-                    or not all(
-                        row[key] is not None and math.isfinite(float(row[key])) for key in numeric
-                    )
-                ):
-                    raise ValueError("invalid-opportunity-fact")
-                quote_legs_raw = json.loads(row["quote_legs_json"])
-                quote_legs = tuple(
-                    GroupQuoteLeg(
-                        yes_token_id=str(item[0]),
-                        membership_hash=str(row["membership_hash"]),
-                        best_ask_price=float(item[2]),
-                        best_ask_size=float(item[3]),
-                        terminal_state=str(item[4]),
-                    )
-                    for item in quote_legs_raw
-                    if isinstance(item, list) and len(item) == 5
-                )
-                if len(quote_legs) != len(quote_legs_raw):
-                    raise ValueError("invalid-opportunity-fact")
-                GroupQuoteBatch.complete(
-                    group_id=str(row["group_id"]),
-                    membership_hash=str(row["membership_hash"]),
-                    quote_batch_id=str(row["quote_batch_id"]),
-                    started_at_ms=int(row["quote_started_at_ms"]),
-                    quoted_at_ms=int(row["quoted_at_ms"]),
-                    legs=quote_legs,
-                )
-                expected_hash = candidate_success_receipt_hash(
-                    transaction_id=str(row["transaction_id"]),
-                    group_id=str(row["group_id"]),
-                    event_id=str(row["event_id"]),
-                    membership_hash=str(row["membership_hash"]),
-                    quote_batch_id=str(row["quote_batch_id"]),
-                    group_revision_row_id=int(row["group_revision_row_id"]),
-                    quote_batch_row_id=int(row["quote_batch_row_id"]),
-                    candidate_fact_row_id=int(row["id"]),
-                    observed_at_ms=int(row["observed_at_ms"]),
-                )
-                if not hmac.compare_digest(str(row["receipt_hash"]), expected_hash):
-                    raise ValueError("invalid-opportunity-fact")
-                if result == "watching" and float(row["gross_edge_bps"]) > 0:
-                    opportunity_count += 1
+        count = OpportunityPerceptionStore(
+            db_path,
+            read_only=True,
+            busy_timeout_ms=_BUSY_TIMEOUT_MS,
+        ).validated_candidate_opportunity_count(_connection=con)
         con.execute("COMMIT")
-        count = opportunity_count
         return {
             "status": "available",
             "opportunities": {
@@ -319,20 +411,42 @@ def _status(db_path: Path) -> dict[str, Any]:
         con.close()
 
 
-def _groups(db_path: Path, limit: int) -> dict[str, Any]:
+def _groups(db_path: Path, limit: int, after: str) -> dict[str, Any]:
     con = _connect(db_path)
     try:
-        current = con.execute(
-            "SELECT r.* FROM neg_risk_group_revisions r JOIN "
+        con.execute("BEGIN")
+        current_meta = con.execute(
+            "SELECT r.id,r.group_id,length(r.legs_json) AS legs_bytes "
+            "FROM neg_risk_group_revisions r JOIN "
             "(SELECT group_id,MAX(revision) revision FROM neg_risk_group_revisions "
             "GROUP BY group_id) x ON x.group_id=r.group_id AND x.revision=r.revision "
-            "ORDER BY r.group_id LIMIT ?",
-            (limit,),
+            "WHERE r.group_id>? ORDER BY r.group_id LIMIT ?",
+            (after, limit + 1),
         ).fetchall()
-        if not current:
-            return {"status": "available", "items": [], "limit": limit}
-        placeholders = ",".join("?" for _ in current)
-        group_ids = tuple(str(row["group_id"]) for row in current)
+        if not current_meta:
+            con.execute("COMMIT")
+            return {
+                "status": "available",
+                "items": [],
+                "limit": limit,
+                "next_after": None,
+            }
+        if any(
+            int(row["legs_bytes"] or 0) > _LEGS_JSON_MAX_BYTES
+            for row in current_meta
+        ):
+            raise ValueError("group-legs-json-too-large")
+        has_more = len(current_meta) > limit
+        current_meta = current_meta[:limit]
+        current_ids = tuple(int(row["id"]) for row in current_meta)
+        current_marks = ",".join("?" for _ in current_ids)
+        current = con.execute(
+            f"SELECT * FROM neg_risk_group_revisions "  # noqa: S608
+            f"WHERE id IN ({current_marks}) ORDER BY group_id",
+            current_ids,
+        ).fetchall()
+        group_ids = tuple(str(row["group_id"]) for row in current_meta)
+        placeholders = ",".join("?" for _ in group_ids)
         count = int(
             con.execute(
                 f"SELECT COUNT(*) FROM neg_risk_group_revisions "  # noqa: S608
@@ -340,12 +454,25 @@ def _groups(db_path: Path, limit: int) -> dict[str, Any]:
                 group_ids,
             ).fetchone()[0]
         )
-        if count > _HISTORY_CAP:
+        if count > _GROUP_PAGE_HISTORY_CAP:
             raise ValueError("group-history-too-large")
+        history_meta = con.execute(
+            f"SELECT id,length(legs_json) AS legs_bytes "  # noqa: S608
+            f"FROM neg_risk_group_revisions WHERE group_id IN ({placeholders}) "
+            "ORDER BY group_id,revision LIMIT ?",
+            (*group_ids, _GROUP_PAGE_HISTORY_CAP + 1),
+        ).fetchall()
+        if any(
+            int(row["legs_bytes"] or 0) > _LEGS_JSON_MAX_BYTES
+            for row in history_meta
+        ) or sum(int(row["legs_bytes"] or 0) for row in history_meta) > 8_388_608:
+            raise ValueError("group-legs-json-too-large")
+        history_ids = tuple(int(row["id"]) for row in history_meta)
+        history_marks = ",".join("?" for _ in history_ids)
         histories = con.execute(
             f"SELECT * FROM neg_risk_group_revisions "  # noqa: S608
-            f"WHERE group_id IN ({placeholders}) ORDER BY group_id,revision LIMIT ?",
-            (*group_ids, _HISTORY_CAP + 1),
+            f"WHERE id IN ({history_marks}) ORDER BY group_id,revision",
+            history_ids,
         ).fetchall()
         prior: dict[str, int] = {}
         for row in histories:
@@ -353,40 +480,89 @@ def _groups(db_path: Path, limit: int) -> dict[str, Any]:
             if item["group_id"] in prior and item["revision"] <= prior[item["group_id"]]:
                 raise ValueError("invalid-group-history")
             prior[item["group_id"]] = item["revision"]
+        con.execute("COMMIT")
         return {
             "status": "available",
             "items": [_validate_revision(row) for row in current],
             "limit": limit,
+            "next_after": (
+                str(current_meta[-1]["group_id"]) if has_more else None
+            ),
         }
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
     finally:
         con.close()
 
 
-def _history(db_path: Path, group_id: str, limit: int) -> dict[str, Any]:
+def _history(
+    db_path: Path,
+    group_id: str,
+    limit: int,
+    before_revision: int | None,
+) -> dict[str, Any]:
     con = _connect(db_path)
     try:
+        con.execute("BEGIN")
         count = int(
             con.execute(
                 "SELECT COUNT(*) FROM neg_risk_group_revisions WHERE group_id=?",
                 (group_id,),
             ).fetchone()[0]
         )
-        if count > _HISTORY_CAP:
+        if count > _GROUP_PAGE_HISTORY_CAP:
             raise ValueError("group-history-too-large")
+        meta = con.execute(
+            "SELECT id,length(legs_json) AS legs_bytes "
+            "FROM neg_risk_group_revisions WHERE group_id=? "
+            "ORDER BY revision LIMIT ?",
+            (group_id, _GROUP_PAGE_HISTORY_CAP + 1),
+        ).fetchall()
+        if any(
+            int(row["legs_bytes"] or 0) > _LEGS_JSON_MAX_BYTES for row in meta
+        ) or sum(int(row["legs_bytes"] or 0) for row in meta) > 8_388_608:
+            raise ValueError("group-legs-json-too-large")
+        if not meta:
+            return {
+                "status": "available",
+                "group_id": group_id,
+                "items": [],
+                "limit": limit,
+                "next_before_revision": None,
+            }
+        ids = tuple(int(row["id"]) for row in meta)
+        marks = ",".join("?" for _ in ids)
         rows = con.execute(
-            "SELECT * FROM neg_risk_group_revisions WHERE group_id=? ORDER BY revision LIMIT ?",
-            (group_id, _HISTORY_CAP + 1),
+            f"SELECT * FROM neg_risk_group_revisions "  # noqa: S608
+            f"WHERE id IN ({marks}) ORDER BY revision",
+            ids,
         ).fetchall()
         items = [_validate_revision(row) for row in rows]
         for prior, item in zip(items, items[1:], strict=False):
             if item["revision"] <= prior["revision"]:
                 raise ValueError("invalid-group-history")
+        con.execute("COMMIT")
+        eligible = [
+            item
+            for item in reversed(items)
+            if before_revision is None or item["revision"] < before_revision
+        ]
+        page = eligible[:limit]
         return {
             "status": "available",
             "group_id": group_id,
-            "items": list(reversed(items))[:limit],
+            "items": page,
             "limit": limit,
+            "next_before_revision": (
+                page[-1]["revision"] if len(eligible) > limit else None
+            ),
         }
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
     finally:
         con.close()
 
@@ -394,15 +570,41 @@ def _history(db_path: Path, group_id: str, limit: int) -> dict[str, Any]:
 def _discovery(db_path: Path) -> dict[str, Any]:
     con = _connect(db_path)
     try:
+        con.execute("BEGIN")
         if con.execute("SELECT 1 FROM neg_risk_discovery_state WHERE id=1").fetchone() is None:
+            con.execute("COMMIT")
             return {"status": "available", "discovery": None}
+        bounds = con.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM neg_risk_group_schedule),"
+            "(SELECT COUNT(*) FROM neg_risk_group_revisions),"
+            "(SELECT COUNT(*) FROM neg_risk_discovery_batches),"
+            "(SELECT COUNT(*) FROM neg_risk_discovery_batch_samples),"
+            "(SELECT COUNT(*) FROM neg_risk_discovery_schedule_evidence),"
+            "(SELECT COUNT(*) FROM neg_risk_candidate_attempt_starts),"
+            "(SELECT COUNT(*) FROM neg_risk_candidate_admissions),"
+            "(SELECT COUNT(*) FROM neg_risk_coverage_samples),"
+            "(SELECT COALESCE(SUM(length(legs_json)),0) "
+            " FROM neg_risk_group_revisions),"
+            "(SELECT COALESCE(MAX(length(legs_json)),0) "
+            " FROM neg_risk_group_revisions)"
+        ).fetchone()
+        if any(int(value) > 50_000 for value in bounds[:8]) or int(
+            bounds[8]
+        ) > 8_388_608 or int(bounds[9]) > _LEGS_JSON_MAX_BYTES:
+            raise ValueError("discovery-read-bound-exceeded")
+        status = OpportunityPerceptionStore(
+            db_path,
+            read_only=True,
+            busy_timeout_ms=_BUSY_TIMEOUT_MS,
+        ).discovery_status(int(time.time() * 1_000), _connection=con)
+        con.execute("COMMIT")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
     finally:
         con.close()
-    status = OpportunityPerceptionStore(
-        db_path,
-        read_only=True,
-        busy_timeout_ms=_BUSY_TIMEOUT_MS,
-    ).discovery_status(int(time.time() * 1_000))
     return {
         "status": "available",
         "discovery": {
@@ -423,11 +625,60 @@ def _discovery(db_path: Path) -> dict[str, Any]:
 
 
 def _reconciliation(db_path: Path) -> dict[str, Any]:
-    window = OpportunityPerceptionStore(
-        db_path,
-        read_only=True,
-        busy_timeout_ms=_BUSY_TIMEOUT_MS,
-    ).current_reconciliation()
+    con = _connect(db_path)
+    try:
+        con.execute("BEGIN")
+        latest = con.execute(
+            "SELECT id FROM neg_risk_reconciliation_windows "
+            "ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if latest is not None:
+            window_id = str(latest["id"])
+            bounds = con.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM neg_risk_reconciliation_batches "
+                " WHERE window_id=?),"
+                "(SELECT COUNT(*) FROM neg_risk_reconciliation_staging "
+                " WHERE window_id=?),"
+                "(SELECT COUNT(*) FROM neg_risk_reconciliation_baseline "
+                " WHERE window_id=?),"
+                "(SELECT COUNT(*) FROM neg_risk_reconciliation_batch_samples "
+                " WHERE batch_id IN (SELECT id FROM "
+                " neg_risk_reconciliation_batches WHERE window_id=?)),"
+                "(SELECT COUNT(*) FROM neg_risk_reconciliation_diff_evidence "
+                " WHERE window_id=?),"
+                "(SELECT COALESCE(SUM(length(legs_json)),0) "
+                " FROM neg_risk_reconciliation_staging WHERE window_id=?),"
+                "(SELECT COALESCE(SUM(length(legs_json)),0) "
+                " FROM neg_risk_reconciliation_batch_samples "
+                " WHERE batch_id IN (SELECT id FROM "
+                " neg_risk_reconciliation_batches WHERE window_id=?)),"
+                "(SELECT COALESCE(MAX(length(legs_json)),0) "
+                " FROM neg_risk_reconciliation_staging WHERE window_id=?),"
+                "(SELECT COALESCE(MAX(length(legs_json)),0) "
+                " FROM neg_risk_reconciliation_batch_samples "
+                " WHERE batch_id IN (SELECT id FROM "
+                " neg_risk_reconciliation_batches WHERE window_id=?))",
+                (window_id,) * 9,
+            ).fetchone()
+            if any(int(value) > 50_000 for value in bounds[:5]) or any(
+                int(value) > 8_388_608 for value in bounds[5:]
+            ) or any(
+                int(value) > _LEGS_JSON_MAX_BYTES for value in bounds[7:]
+            ):
+                raise ValueError("reconciliation-read-bound-exceeded")
+        window = OpportunityPerceptionStore(
+            db_path,
+            read_only=True,
+            busy_timeout_ms=_BUSY_TIMEOUT_MS,
+        ).current_reconciliation(_connection=con)
+        con.execute("COMMIT")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
     if window is None:
         return {"status": "available", "reconciliation": None}
     return {
@@ -461,6 +712,15 @@ def _incidents(db_path: Path, limit: int) -> dict[str, Any]:
 async def _serve(request: Request, reader: Callable[[], dict[str, Any]]) -> JSONResponse:
     try:
         body = await asyncio.wait_for(asyncio.to_thread(reader), timeout=_TIMEOUT_S)
+        if len(
+            json.dumps(
+                body,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ) > 1_048_576:
+            raise ValueError("response-output-too-large")
         return JSONResponse(body)
     except ValueError as error:
         if str(error) == "limit-must-be-an-integer-from-1-to-500":
@@ -501,8 +761,14 @@ async def perception_groups(request: Request) -> JSONResponse:
         limit = _limit(request)
     except ValueError as error:
         return JSONResponse({"status": "invalid-request", "reason": str(error)}, status_code=400)
+    after = request.query_params.get("after", "")
+    if len(after) > 256 or "\x00" in after:
+        return JSONResponse(
+            {"status": "invalid-request", "reason": "invalid-after-cursor"},
+            status_code=400,
+        )
     db_path = Path(request.app.state.sqlite_store.db_path)
-    return await _serve(request, lambda: _groups(db_path, limit))
+    return await _serve(request, lambda: _groups(db_path, limit, after))
 
 
 async def perception_group_history(request: Request) -> JSONResponse:
@@ -516,8 +782,30 @@ async def perception_group_history(request: Request) -> JSONResponse:
             {"status": "invalid-request", "reason": "invalid-group-id"},
             status_code=400,
         )
+    raw_before = request.query_params.get("before_revision")
+    try:
+        before_revision = None if raw_before is None else int(raw_before)
+        if (
+            before_revision is not None
+            and (
+                before_revision < 1
+                or str(before_revision) != raw_before
+            )
+        ):
+            raise ValueError
+    except ValueError:
+        return JSONResponse(
+            {
+                "status": "invalid-request",
+                "reason": "before-revision-must-be-a-positive-integer",
+            },
+            status_code=400,
+        )
     db_path = Path(request.app.state.sqlite_store.db_path)
-    return await _serve(request, lambda: _history(db_path, group_id, limit))
+    return await _serve(
+        request,
+        lambda: _history(db_path, group_id, limit, before_revision),
+    )
 
 
 async def perception_discovery(request: Request) -> JSONResponse:

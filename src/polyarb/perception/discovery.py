@@ -446,10 +446,11 @@ class DiscoveryRunner:
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
             while not stop_event.is_set():
-                await asyncio.to_thread(
-                    self._store.consume_operator_wakeup,
+                requested_nonce = await asyncio.to_thread(
+                    self._store.pending_operator_wakeup,
                     "discovery",
-                    occurred_at_ms=int(time.time() * 1_000),
+                    now_ms=int(time.time() * 1_000),
+                    require_resource_decision=self._worker._require_resource_decision,
                 )
                 delay_s = self._interval_s
                 try:
@@ -481,13 +482,22 @@ class DiscoveryRunner:
                         "discovery batch failed "
                         f"kind={type(error).__name__}"
                     )
-                deadline = time.monotonic() + delay_s
-                while not stop_event.is_set() and time.monotonic() < deadline:
-                    if await asyncio.to_thread(
+                if requested_nonce is not None:
+                    await asyncio.to_thread(
                         self._store.consume_operator_wakeup,
                         "discovery",
                         occurred_at_ms=int(time.time() * 1_000),
-                    ):
+                        expected_nonce=requested_nonce,
+                        require_resource_decision=self._worker._require_resource_decision,
+                    )
+                deadline = time.monotonic() + delay_s
+                while not stop_event.is_set() and time.monotonic() < deadline:
+                    if await asyncio.to_thread(
+                        self._store.pending_operator_wakeup,
+                        "discovery",
+                        now_ms=int(time.time() * 1_000),
+                        require_resource_decision=self._worker._require_resource_decision,
+                    ) is not None:
                         break
                     try:
                         await asyncio.wait_for(

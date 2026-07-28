@@ -78,6 +78,54 @@ def candidate_success_receipt_hash(
     return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
 
 
+def operator_auth_receipt_hash(
+    *,
+    nonce: str,
+    request_method: str,
+    request_path: str,
+    request_timestamp_s: int,
+    body_hash: str,
+    accepted_at_ms: int,
+) -> str:
+    payload = json.dumps(
+        {
+            "accepted_at_ms": accepted_at_ms,
+            "body_hash": body_hash,
+            "nonce": nonce,
+            "request_method": request_method,
+            "request_path": request_path,
+            "request_timestamp_s": request_timestamp_s,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(b"polyarb-operator-auth-v1\0" + payload.encode()).hexdigest()
+
+
+def operator_queue_receipt_hash(
+    *,
+    component: str,
+    sequence: int,
+    action: str,
+    occurred_at_ms: int,
+    auth_nonce: str,
+    previous_hash: str | None,
+) -> str:
+    payload = json.dumps(
+        {
+            "action": action,
+            "auth_nonce": auth_nonce,
+            "component": component,
+            "occurred_at_ms": occurred_at_ms,
+            "previous_hash": previous_hash,
+            "sequence": sequence,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(b"polyarb-operator-queue-v1\0" + payload.encode()).hexdigest()
+
+
 class ReconciliationIncompleteError(RuntimeError):
     """Raised when an incomplete calibration window is asked to publish."""
 
@@ -500,6 +548,33 @@ class OpportunityPerceptionStore:
                 is not None
             )
             con.executescript(DDL)
+            additive_operator_columns = {
+                "neg_risk_operator_auth_nonces": {
+                    "request_method": "TEXT",
+                    "body_hash": "TEXT",
+                    "auth_hash": "TEXT",
+                },
+                "neg_risk_operator_queue": {
+                    "last_sequence": "INTEGER",
+                    "last_receipt_hash": "TEXT",
+                },
+                "neg_risk_operator_queue_receipts": {
+                    "sequence": "INTEGER",
+                    "auth_nonce": "TEXT",
+                    "previous_hash": "TEXT",
+                    "receipt_hash": "TEXT",
+                },
+            }
+            for table, additions in additive_operator_columns.items():
+                columns = {
+                    str(row["name"])
+                    for row in con.execute(f"PRAGMA table_info({table})")
+                }
+                for name, declaration in additions.items():
+                    if name not in columns:
+                        con.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {name} {declaration}"
+                        )
             receipt_columns = {
                 str(row["name"])
                 for row in con.execute(
@@ -1653,10 +1728,17 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
 
-    def discovery_status(self, now_ms: int) -> DiscoveryStatus:
-        con = self._connect()
+    def discovery_status(
+        self,
+        now_ms: int,
+        *,
+        _connection: sqlite3.Connection | None = None,
+    ) -> DiscoveryStatus:
+        owns_connection = _connection is None
+        con = self._connect() if _connection is None else _connection
         try:
-            con.execute("BEGIN")
+            if owns_connection:
+                con.execute("BEGIN")
             state = con.execute("SELECT * FROM neg_risk_discovery_state WHERE id=1").fetchone()
             schedules = con.execute(
                 "SELECT * FROM neg_risk_group_schedule ORDER BY group_id"
@@ -1753,13 +1835,15 @@ class OpportunityPerceptionStore:
                 admissions=admissions,
                 coverage=coverage,
             )
-            con.execute("COMMIT")
+            if owns_connection:
+                con.execute("COMMIT")
         except BaseException:
-            if con.in_transaction:
+            if owns_connection and con.in_transaction:
                 con.execute("ROLLBACK")
             raise
         finally:
-            con.close()
+            if owns_connection:
+                con.close()
         queue = {"high": 0, "normal": 0, "explore": 0}
         queue.update({str(row["priority_class"]): int(row["depth"]) for row in queue_rows})
         oldest_age = (
@@ -2299,6 +2383,177 @@ class OpportunityPerceptionStore:
             missing_quote_count=missing,
         )
 
+    def validated_candidate_opportunity_count(
+        self,
+        *,
+        _connection: sqlite3.Connection | None = None,
+    ) -> int:
+        """Replay the complete Candidate authority chain in one read snapshot."""
+        owns_connection = _connection is None
+        con = self._connect() if _connection is None else _connection
+        try:
+            if owns_connection:
+                con.execute("BEGIN")
+            sizes = con.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM neg_risk_group_revisions),"
+                "(SELECT COUNT(*) FROM neg_risk_group_quote_batches),"
+                "(SELECT COUNT(*) FROM neg_risk_candidate_watch_facts),"
+                "(SELECT COUNT(*) FROM neg_risk_candidate_success_receipts),"
+                "(SELECT COALESCE(MAX(length(legs_json)),0) "
+                " FROM neg_risk_group_revisions),"
+                "(SELECT COALESCE(MAX(length(legs_json)),0) "
+                " FROM neg_risk_group_quote_batches),"
+                "(SELECT COALESCE(SUM(length(legs_json)),0) "
+                " FROM neg_risk_group_revisions),"
+                "(SELECT COALESCE(SUM(length(legs_json)),0) "
+                " FROM neg_risk_group_quote_batches)"
+            ).fetchone()
+            if (
+                any(int(value) > 10_000 for value in sizes[:4])
+                or int(sizes[4]) > 65_536
+                or int(sizes[5]) > 65_536
+                or int(sizes[6]) > 8_388_608
+                or int(sizes[7]) > 8_388_608
+            ):
+                raise ValueError("candidate-authority-bound-exceeded")
+            group_rows = con.execute(
+                "SELECT * FROM neg_risk_group_revisions ORDER BY group_id,revision"
+            ).fetchall()
+            quote_rows = con.execute(
+                "SELECT rowid,* FROM neg_risk_group_quote_batches ORDER BY rowid"
+            ).fetchall()
+            fact_rows = con.execute(
+                "SELECT * FROM neg_risk_candidate_watch_facts ORDER BY id"
+            ).fetchall()
+            receipt_rows = con.execute(
+                "SELECT * FROM neg_risk_candidate_success_receipts ORDER BY id"
+            ).fetchall()
+            groups_by_id: dict[int, tuple[sqlite3.Row, GroupRevision]] = {}
+            groups_by_revision: dict[tuple[str, int], GroupRevision] = {}
+            current_groups: dict[str, GroupRevision] = {}
+            for row in group_rows:
+                group = self._validated_group_from_row(row)
+                if group is None:
+                    raise ValueError("invalid-candidate-group-history")
+                key = (group.group_id, group.revision)
+                if key in groups_by_revision:
+                    raise ValueError("invalid-candidate-group-history")
+                groups_by_id[int(row["id"])] = (row, group)
+                groups_by_revision[key] = group
+                current_groups[group.group_id] = group
+            quotes_by_id: dict[str, tuple[sqlite3.Row, GroupQuoteBatch]] = {}
+            quotes_by_rowid: dict[int, tuple[sqlite3.Row, GroupQuoteBatch]] = {}
+            for row in quote_rows:
+                if row["status"] != "complete":
+                    if (
+                        row["status"] not in {"failed", "superseded"}
+                        or not isinstance(row["failure_reason"], (str, type(None)))
+                    ):
+                        raise ValueError("invalid-candidate-quote-history")
+                    continue
+                group = groups_by_revision.get(
+                    (str(row["group_id"]), int(row["group_revision"]))
+                )
+                if group is None:
+                    raise ValueError("invalid-candidate-quote-history")
+                quote = self._validated_quote_from_row(row, group)
+                if quote is None:
+                    raise ValueError("invalid-candidate-quote-history")
+                quotes_by_id[quote.quote_batch_id] = (row, quote)
+                quotes_by_rowid[int(row["rowid"])] = (row, quote)
+            facts_by_id: dict[int, sqlite3.Row] = {}
+            latest_fact: dict[str, sqlite3.Row] = {}
+            for row in fact_rows:
+                result = str(row["last_result"])
+                success = result in {"watching", "no-edge"}
+                numeric = ("bundle_cost", "gross_edge_bps", "max_bundle_size")
+                if (
+                    result not in {"watching", "no-edge", "unavailable"}
+                    or row["priority_class"] not in {"high", "normal", "explore"}
+                    or int(row["observed_at_ms"]) < 0
+                    or int(row["next_due_at_ms"]) < int(row["observed_at_ms"])
+                    or not math.isfinite(float(row["effective_interval_s"]))
+                    or float(row["effective_interval_s"]) <= 0
+                    or (
+                        success
+                        and (
+                            not all(
+                                row[name] is not None
+                                and math.isfinite(float(row[name]))
+                                for name in numeric
+                            )
+                            or row["quote_batch_id"] not in quotes_by_id
+                        )
+                    )
+                ):
+                    raise ValueError("invalid-candidate-fact-history")
+                facts_by_id[int(row["id"])] = row
+                latest_fact[str(row["group_id"])] = row
+            receipt_fact_ids: set[int] = set()
+            for receipt in receipt_rows:
+                group_pair = groups_by_id.get(int(receipt["group_revision_row_id"]))
+                quote_pair = quotes_by_rowid.get(int(receipt["quote_batch_row_id"]))
+                fact = facts_by_id.get(int(receipt["candidate_fact_row_id"]))
+                expected_hash = candidate_success_receipt_hash(
+                    transaction_id=receipt["transaction_id"],
+                    group_id=receipt["group_id"],
+                    event_id=receipt["event_id"],
+                    membership_hash=receipt["membership_hash"],
+                    quote_batch_id=receipt["quote_batch_id"],
+                    group_revision_row_id=receipt["group_revision_row_id"],
+                    quote_batch_row_id=receipt["quote_batch_row_id"],
+                    candidate_fact_row_id=receipt["candidate_fact_row_id"],
+                    observed_at_ms=receipt["observed_at_ms"],
+                )
+                if (
+                    group_pair is None
+                    or quote_pair is None
+                    or fact is None
+                    or not hmac.compare_digest(str(receipt["receipt_hash"]), expected_hash)
+                ):
+                    raise ValueError("invalid-candidate-success-receipt")
+                group_row, group = group_pair
+                quote_row, quote = quote_pair
+                if (
+                    receipt["group_id"] != group.group_id
+                    or receipt["event_id"] != group.event_id
+                    or receipt["membership_hash"] != group.membership_hash
+                    or receipt["quote_batch_id"] != quote.quote_batch_id
+                    or quote_row["group_revision"] != group_row["revision"]
+                    or fact["group_id"] != group.group_id
+                    or fact["membership_hash"] != group.membership_hash
+                    or fact["quote_batch_id"] != quote.quote_batch_id
+                    or fact["observed_at_ms"] != quote.quoted_at_ms
+                    or receipt["observed_at_ms"] != quote.quoted_at_ms
+                ):
+                    raise ValueError("invalid-candidate-success-receipt")
+                receipt_fact_ids.add(int(fact["id"]))
+            if any(
+                row["last_result"] in {"watching", "no-edge"}
+                and int(row["id"]) not in receipt_fact_ids
+                for row in fact_rows
+            ):
+                raise ValueError("missing-candidate-success-receipt")
+            count = sum(
+                row["last_result"] == "watching"
+                and float(row["gross_edge_bps"]) > 0
+                and current_groups.get(group_id) is not None
+                and current_groups[group_id].status == "certified"
+                and row["membership_hash"] == current_groups[group_id].membership_hash
+                for group_id, row in latest_fact.items()
+            )
+            if owns_connection:
+                con.execute("COMMIT")
+            return count
+        except BaseException:
+            if owns_connection and con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            if owns_connection:
+                con.close()
+
     @staticmethod
     def _group_schedule_from_row(row: sqlite3.Row) -> GroupSchedule:
         return GroupSchedule(
@@ -2413,15 +2668,22 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
 
-    def current_reconciliation(self) -> ReconciliationWindow | None:
-        con = self._connect()
+    def current_reconciliation(
+        self,
+        *,
+        _connection: sqlite3.Connection | None = None,
+    ) -> ReconciliationWindow | None:
+        owns_connection = _connection is None
+        con = self._connect() if _connection is None else _connection
         try:
-            con.execute("BEGIN")
+            if owns_connection:
+                con.execute("BEGIN")
             row = con.execute(
                 "SELECT * FROM neg_risk_reconciliation_windows ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
             if row is None:
-                con.execute("COMMIT")
+                if owns_connection:
+                    con.execute("COMMIT")
                 return None
             receipts = con.execute(
                 "SELECT * FROM neg_risk_reconciliation_batches "
@@ -2460,14 +2722,16 @@ class OpportunityPerceptionStore:
                 result_revisions,
             )
             result = self._reconciliation_window_from_row(row)
-            con.execute("COMMIT")
+            if owns_connection:
+                con.execute("COMMIT")
             return result
         except BaseException:
-            if con.in_transaction:
+            if owns_connection and con.in_transaction:
                 con.execute("ROLLBACK")
             raise
         finally:
-            con.close()
+            if owns_connection:
+                con.close()
 
     def stage_reconciliation_group(
         self,
@@ -3776,12 +4040,279 @@ class OpportunityPerceptionStore:
 
         return IncidentManager(self).open_incidents()
 
+    @staticmethod
+    def _validated_operator_auth(
+        con: sqlite3.Connection,
+    ) -> dict[str, sqlite3.Row]:
+        rows = con.execute(
+            "SELECT * FROM neg_risk_operator_auth_nonces ORDER BY accepted_at_ms,nonce"
+        ).fetchall()
+        result: dict[str, sqlite3.Row] = {}
+        for row in rows:
+            nonce = row["nonce"]
+            if (
+                not isinstance(nonce, str)
+                or not nonce
+                or nonce in result
+                or row["request_method"] != "POST"
+                or not isinstance(row["request_path"], str)
+                or not str(row["request_path"]).startswith("/control/perception/")
+                or type(row["request_timestamp_s"]) is not int
+                or type(row["accepted_at_ms"]) is not int
+                or abs(
+                    int(row["accepted_at_ms"])
+                    - int(row["request_timestamp_s"]) * 1_000
+                )
+                > 300_999
+                or not isinstance(row["body_hash"], str)
+                or len(row["body_hash"]) != 64
+            ):
+                raise ValueError("invalid-operator-auth-history")
+            expected = operator_auth_receipt_hash(
+                nonce=nonce,
+                request_method=row["request_method"],
+                request_path=row["request_path"],
+                request_timestamp_s=row["request_timestamp_s"],
+                body_hash=row["body_hash"],
+                accepted_at_ms=row["accepted_at_ms"],
+            )
+            if not hmac.compare_digest(str(row["auth_hash"]), expected):
+                raise ValueError("invalid-operator-auth-history")
+            result[nonce] = row
+        return result
+
+    @classmethod
+    def _validated_operator_queue(
+        cls,
+        con: sqlite3.Connection,
+        component: Literal["discovery", "reconciliation"],
+    ) -> tuple[bool, str | None, int, str | None]:
+        auth = cls._validated_operator_auth(con)
+        rows = con.execute(
+            "SELECT * FROM neg_risk_operator_queue_receipts "
+            "WHERE component=? ORDER BY sequence",
+            (component,),
+        ).fetchall()
+        queued = False
+        queued_nonce: str | None = None
+        queued_at_ms: int | None = None
+        consumed_at_ms: int | None = None
+        previous_hash: str | None = None
+        for expected_sequence, row in enumerate(rows, 1):
+            action = str(row["action"])
+            nonce = str(row["auth_nonce"])
+            auth_row = auth.get(nonce)
+            expected_hash = operator_queue_receipt_hash(
+                component=component,
+                sequence=expected_sequence,
+                action=action,
+                occurred_at_ms=row["occurred_at_ms"],
+                auth_nonce=nonce,
+                previous_hash=previous_hash,
+            )
+            if (
+                row["sequence"] != expected_sequence
+                or auth_row is None
+                or auth_row["request_path"] != f"/control/perception/{component}"
+                or row["previous_hash"] != previous_hash
+                or not hmac.compare_digest(str(row["receipt_hash"]), expected_hash)
+                or type(row["occurred_at_ms"]) is not int
+                or row["occurred_at_ms"] < auth_row["accepted_at_ms"]
+                or (
+                    expected_sequence > 1
+                    and row["occurred_at_ms"] < rows[expected_sequence - 2]["occurred_at_ms"]
+                )
+                or (action == "queued" and queued)
+                or (action == "coalesced" and not queued)
+                or (action in {"consumed", "cancelled"} and (not queued or nonce != queued_nonce))
+                or action not in {"queued", "coalesced", "consumed", "cancelled"}
+            ):
+                raise ValueError("invalid-operator-queue-history")
+            if action == "queued":
+                queued = True
+                queued_nonce = nonce
+                queued_at_ms = row["occurred_at_ms"]
+                consumed_at_ms = None
+            elif action in {"consumed", "cancelled"}:
+                queued = False
+                consumed_at_ms = row["occurred_at_ms"]
+            previous_hash = str(row["receipt_hash"])
+        materialized = con.execute(
+            "SELECT * FROM neg_risk_operator_queue WHERE component=?",
+            (component,),
+        ).fetchone()
+        if materialized is None:
+            if rows:
+                raise ValueError("invalid-operator-queue-materialization")
+        elif (
+            bool(materialized["queued"]) != queued
+            or materialized["request_nonce"] != queued_nonce
+            or materialized["queued_at_ms"] != queued_at_ms
+            or materialized["consumed_at_ms"] != consumed_at_ms
+            or materialized["last_sequence"] != len(rows)
+            or materialized["last_receipt_hash"] != previous_hash
+        ):
+            raise ValueError("invalid-operator-queue-materialization")
+        return queued, queued_nonce, len(rows), previous_hash
+
+    def accept_operator_auth(
+        self,
+        *,
+        nonce: str,
+        request_method: str,
+        request_path: str,
+        request_timestamp_s: int,
+        body_hash: str,
+        accepted_at_ms: int,
+        deadline_monotonic: float,
+    ) -> None:
+        con = self._connect()
+        try:
+            if time.monotonic() >= deadline_monotonic:
+                raise TimeoutError("operator-auth-deadline")
+            con.execute("BEGIN IMMEDIATE")
+            self._validated_operator_auth(con)
+            auth_hash = operator_auth_receipt_hash(
+                nonce=nonce,
+                request_method=request_method,
+                request_path=request_path,
+                request_timestamp_s=request_timestamp_s,
+                body_hash=body_hash,
+                accepted_at_ms=accepted_at_ms,
+            )
+            con.execute(
+                "INSERT INTO neg_risk_operator_auth_nonces("
+                "nonce,request_method,request_path,request_timestamp_s,"
+                "body_hash,accepted_at_ms,auth_hash) VALUES(?,?,?,?,?,?,?)",
+                (
+                    nonce,
+                    request_method,
+                    request_path,
+                    request_timestamp_s,
+                    body_hash,
+                    accepted_at_ms,
+                    auth_hash,
+                ),
+            )
+            if time.monotonic() >= deadline_monotonic:
+                raise TimeoutError("operator-auth-deadline")
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def _validate_component_control_permission(
+        self,
+        con: sqlite3.Connection,
+        component: Literal["discovery", "reconciliation"],
+        *,
+        now_ms: int,
+        require_resource_decision: bool = False,
+    ) -> None:
+        from polyarb.perception.incidents import Incident, IncidentManager
+        from polyarb.perception.resource_controller import validate_resource_history
+
+        rows = con.execute(
+            "SELECT * FROM neg_risk_incident_events ORDER BY incident_id,sequence"
+        ).fetchall()
+        histories: dict[str, list[Incident]] = {}
+        for row in rows:
+            try:
+                evidence = json.loads(row["evidence_json"])
+                event = Incident(
+                    id=str(row["incident_id"]),
+                    sequence=int(row["sequence"]),
+                    scope=str(row["scope"]),
+                    kind=str(row["kind"]),
+                    state=row["state"],
+                    occurred_at_ms=int(row["occurred_at_ms"]),
+                    evidence=evidence,
+                )
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                raise ValueError("invalid-incident-history") from error
+            histories.setdefault(event.id, []).append(event)
+        allowed = {
+            "detected": {"classified"},
+            "classified": {"contained", "escalated"},
+            "contained": {"recovering", "escalated"},
+            "recovering": {"verified", "contained", "escalated"},
+            "verified": set(),
+            "escalated": {"recovering"},
+        }
+        manager = IncidentManager(self)
+        for history in histories.values():
+            first = history[0]
+            recovery: Incident | None = None
+            for index, event in enumerate(history):
+                if (
+                    event.sequence != index + 1
+                    or event.scope != first.scope
+                    or event.kind != first.kind
+                    or (index == 0 and event.state != "detected")
+                    or (
+                        index > 0
+                        and event.state not in allowed[history[index - 1].state]
+                    )
+                    or (
+                        index > 0
+                        and event.occurred_at_ms < history[index - 1].occurred_at_ms
+                    )
+                ):
+                    raise ValueError("invalid-incident-history")
+                if event.state == "recovering":
+                    recovery = event
+                if event.state == "verified" and (
+                    recovery is None
+                    or not manager._has_recovery_proof(
+                        con,
+                        event,
+                        recovery_started_at_ms=recovery.occurred_at_ms,
+                        verification_at_ms=event.occurred_at_ms,
+                        recovery_evidence=recovery.evidence,
+                        verification_evidence=event.evidence,
+                    )
+                ):
+                    raise ValueError("invalid-incident-recovery-proof")
+            if first.scope == component and history[-1].state != "verified":
+                raise RuntimeError("component-incident-active")
+        decision = validate_resource_history(con)
+        producer = validate_producer_history(con, component, now_ms=now_ms)
+        heartbeat = con.execute(
+            "SELECT state FROM neg_risk_producer_heartbeats "
+            "WHERE component=? ORDER BY attempt DESC,sequence DESC LIMIT 1",
+            (component,),
+        ).fetchone()
+        if (
+            (
+                component == "reconciliation"
+                and decision is not None
+                and not decision.reconciliation_enabled
+            )
+            or (
+                require_resource_decision
+                and (
+                    decision is None
+                    or decision.valid_until_ms < now_ms
+                )
+            )
+            or producer.state
+            not in {"never-started", "starting", "running"}
+            or (heartbeat is not None and heartbeat["state"] == "paused")
+        ):
+            raise RuntimeError("component-paused")
+
     def queue_operator_wakeup(
         self,
         component: Literal["discovery", "reconciliation"],
         *,
         request_nonce: str,
         occurred_at_ms: int,
+        deadline_monotonic: float | None = None,
+        _before_commit: Callable[[], None] | None = None,
+        require_resource_decision: bool = False,
     ) -> bool:
         """Coalesce one authenticated wake-up without invoking a producer."""
         if (
@@ -3790,67 +4321,109 @@ class OpportunityPerceptionStore:
             or occurred_at_ms < 0
         ):
             raise ValueError("invalid-operator-wakeup")
+        deadline = (
+            time.monotonic() + 0.8
+            if deadline_monotonic is None
+            else deadline_monotonic
+        )
+
+        def check_deadline() -> None:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("operator-wakeup-deadline")
+
+        check_deadline()
         con = self._connect()
         try:
+            check_deadline()
             con.execute("BEGIN IMMEDIATE")
-            rows = con.execute(
-                "SELECT incident_id,sequence,scope,kind,state,occurred_at_ms "
-                "FROM neg_risk_incident_events ORDER BY incident_id,sequence"
-            ).fetchall()
-            previous: dict[str, sqlite3.Row] = {}
-            allowed = {
-                "detected": {"classified"},
-                "classified": {"contained", "escalated"},
-                "contained": {"recovering", "escalated"},
-                "recovering": {"verified", "contained", "escalated"},
-                "verified": set(),
-                "escalated": {"recovering"},
-            }
-            for row in rows:
-                prior = previous.get(str(row["incident_id"]))
-                if (
-                    prior is None and (int(row["sequence"]) != 1 or row["state"] != "detected")
-                ) or (
-                    prior is not None
-                    and (
-                        int(row["sequence"]) != int(prior["sequence"]) + 1
-                        or row["scope"] != prior["scope"]
-                        or row["kind"] != prior["kind"]
-                        or row["state"] not in allowed[str(prior["state"])]
-                        or int(row["occurred_at_ms"]) < int(prior["occurred_at_ms"])
-                    )
-                ):
-                    raise ValueError("invalid-incident-history")
-                previous[str(row["incident_id"])] = row
-            if any(
-                str(row["scope"]) == component and str(row["state"]) in {"escalated"}
-                for row in previous.values()
+            check_deadline()
+            queued_before, queued_nonce, sequence_before, previous_hash = (
+                self._validated_operator_queue(con, component)
+            )
+            auth = self._validated_operator_auth(con)
+            auth_row = auth.get(request_nonce)
+            if (
+                auth_row is None
+                or auth_row["request_path"] != f"/control/perception/{component}"
             ):
-                raise RuntimeError("component-escalated")
-            current = con.execute(
-                "SELECT queued FROM neg_risk_operator_queue WHERE component=?",
+                raise ValueError("invalid-operator-request-authority")
+            prior_receipt = con.execute(
+                "SELECT occurred_at_ms FROM neg_risk_operator_queue_receipts "
+                "WHERE component=? ORDER BY sequence DESC LIMIT 1",
                 (component,),
             ).fetchone()
-            queued = current is None or not bool(current["queued"])
+            write_at_ms = max(
+                occurred_at_ms,
+                int(time.time() * 1_000),
+                int(auth_row["accepted_at_ms"]),
+                (
+                    0
+                    if prior_receipt is None
+                    else int(prior_receipt["occurred_at_ms"])
+                ),
+            )
+            self._validate_component_control_permission(
+                con,
+                component,
+                now_ms=write_at_ms,
+                require_resource_decision=require_resource_decision,
+            )
+            check_deadline()
+            queued = not queued_before
+            action = "queued" if queued else "coalesced"
+            sequence = sequence_before + 1
+            receipt_hash = operator_queue_receipt_hash(
+                component=component,
+                sequence=sequence,
+                action=action,
+                occurred_at_ms=write_at_ms,
+                auth_nonce=request_nonce,
+                previous_hash=previous_hash,
+            )
             if queued:
                 con.execute(
                     "INSERT INTO neg_risk_operator_queue("
-                    "component,queued,queued_at_ms,consumed_at_ms,request_nonce"
-                    ") VALUES(?,1,?,NULL,?) ON CONFLICT(component) DO UPDATE SET "
+                    "component,queued,queued_at_ms,consumed_at_ms,request_nonce,"
+                    "last_sequence,last_receipt_hash"
+                    ") VALUES(?,1,?,NULL,?,?,?) ON CONFLICT(component) DO UPDATE SET "
                     "queued=1,queued_at_ms=excluded.queued_at_ms,"
-                    "consumed_at_ms=NULL,request_nonce=excluded.request_nonce",
-                    (component, occurred_at_ms, request_nonce),
+                    "consumed_at_ms=NULL,request_nonce=excluded.request_nonce,"
+                    "last_sequence=excluded.last_sequence,"
+                    "last_receipt_hash=excluded.last_receipt_hash",
+                    (
+                        component,
+                        write_at_ms,
+                        request_nonce,
+                        sequence,
+                        receipt_hash,
+                    ),
                 )
+            else:
+                if queued_nonce is None:
+                    raise ValueError("invalid-operator-queue-materialization")
+                con.execute(
+                    "UPDATE neg_risk_operator_queue SET last_sequence=?,"
+                    "last_receipt_hash=? WHERE component=?",
+                    (sequence, receipt_hash, component),
+                )
+            check_deadline()
             con.execute(
                 "INSERT INTO neg_risk_operator_queue_receipts("
-                "component,action,occurred_at_ms,request_nonce) VALUES(?,?,?,?)",
+                "component,sequence,action,occurred_at_ms,auth_nonce,"
+                "previous_hash,receipt_hash) VALUES(?,?,?,?,?,?,?)",
                 (
                     component,
-                    "queued" if queued else "coalesced",
-                    occurred_at_ms,
+                    sequence,
+                    action,
+                    write_at_ms,
                     request_nonce,
+                    previous_hash,
+                    receipt_hash,
                 ),
             )
+            if _before_commit is not None:
+                _before_commit()
+            check_deadline()
             con.execute("COMMIT")
             return queued
         except BaseException:
@@ -3865,6 +4438,8 @@ class OpportunityPerceptionStore:
         component: Literal["discovery", "reconciliation"],
         *,
         occurred_at_ms: int,
+        expected_nonce: str | None = None,
+        require_resource_decision: bool = False,
     ) -> bool:
         """Atomically claim a queued hint; serial producer loops call this."""
         if component not in {"discovery", "reconciliation"} or occurred_at_ms < 0:
@@ -3872,25 +4447,106 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
-            row = con.execute(
-                "SELECT queued,request_nonce FROM neg_risk_operator_queue WHERE component=?",
-                (component,),
-            ).fetchone()
-            if row is None or not bool(row["queued"]):
+            queued, queued_nonce, sequence_before, previous_hash = (
+                self._validated_operator_queue(con, component)
+            )
+            if not queued or queued_nonce is None:
                 con.execute("COMMIT")
                 return False
+            if expected_nonce is not None and queued_nonce != expected_nonce:
+                con.execute("COMMIT")
+                return False
+            prior_receipt = con.execute(
+                "SELECT occurred_at_ms FROM neg_risk_operator_queue_receipts "
+                "WHERE component=? ORDER BY sequence DESC LIMIT 1",
+                (component,),
+            ).fetchone()
+            write_at_ms = max(
+                occurred_at_ms,
+                int(time.time() * 1_000),
+                (
+                    0
+                    if prior_receipt is None
+                    else int(prior_receipt["occurred_at_ms"])
+                ),
+            )
+            try:
+                self._validate_component_control_permission(
+                    con,
+                    component,
+                    now_ms=write_at_ms,
+                    require_resource_decision=require_resource_decision,
+                )
+            except RuntimeError:
+                con.execute("COMMIT")
+                return False
+            sequence = sequence_before + 1
+            receipt_hash = operator_queue_receipt_hash(
+                component=component,
+                sequence=sequence,
+                action="consumed",
+                occurred_at_ms=write_at_ms,
+                auth_nonce=queued_nonce,
+                previous_hash=previous_hash,
+            )
             con.execute(
-                "UPDATE neg_risk_operator_queue SET queued=0,consumed_at_ms=? "
+                "UPDATE neg_risk_operator_queue SET queued=0,consumed_at_ms=?,"
+                "last_sequence=?,last_receipt_hash=? "
                 "WHERE component=? AND queued=1",
-                (occurred_at_ms, component),
+                (write_at_ms, sequence, receipt_hash, component),
             )
             con.execute(
                 "INSERT INTO neg_risk_operator_queue_receipts("
-                "component,action,occurred_at_ms,request_nonce) VALUES(?,?,?,?)",
-                (component, "consumed", occurred_at_ms, str(row["request_nonce"])),
+                "component,sequence,action,occurred_at_ms,auth_nonce,"
+                "previous_hash,receipt_hash) VALUES(?,?,?,?,?,?,?)",
+                (
+                    component,
+                    sequence,
+                    "consumed",
+                    write_at_ms,
+                    queued_nonce,
+                    previous_hash,
+                    receipt_hash,
+                ),
             )
             con.execute("COMMIT")
             return True
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def pending_operator_wakeup(
+        self,
+        component: Literal["discovery", "reconciliation"],
+        *,
+        now_ms: int,
+        require_resource_decision: bool = False,
+    ) -> str | None:
+        """Return the exact runnable queued nonce without consuming it."""
+        if component not in {"discovery", "reconciliation"} or now_ms < 0:
+            raise ValueError("invalid-operator-wakeup")
+        con = self._connect()
+        try:
+            con.execute("BEGIN")
+            queued, nonce, _, _ = self._validated_operator_queue(con, component)
+            if not queued or nonce is None:
+                con.execute("COMMIT")
+                return None
+            try:
+                self._validate_component_control_permission(
+                    con,
+                    component,
+                    now_ms=now_ms,
+                    require_resource_decision=require_resource_decision,
+                )
+            except RuntimeError:
+                con.execute("COMMIT")
+                return None
+            con.execute("COMMIT")
+            return nonce
         except BaseException:
             if con.in_transaction:
                 con.execute("ROLLBACK")

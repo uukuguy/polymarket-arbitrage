@@ -177,10 +177,11 @@ class ReconciliationRunner:
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
             while not stop_event.is_set():
-                await asyncio.to_thread(
-                    self._store.consume_operator_wakeup,
+                requested_nonce = await asyncio.to_thread(
+                    self._store.pending_operator_wakeup,
                     "reconciliation",
-                    occurred_at_ms=int(time.time() * 1_000),
+                    now_ms=int(time.time() * 1_000),
+                    require_resource_decision=self._require_resource_decision,
                 )
                 try:
                     decision = (
@@ -210,13 +211,22 @@ class ReconciliationRunner:
                     raise
                 except Exception as error:
                     logger.warning(f"reconciliation batch failed kind={type(error).__name__}")
-                deadline = time.monotonic() + self._interval_s
-                while not stop_event.is_set() and time.monotonic() < deadline:
-                    if await asyncio.to_thread(
+                if requested_nonce is not None:
+                    await asyncio.to_thread(
                         self._store.consume_operator_wakeup,
                         "reconciliation",
                         occurred_at_ms=int(time.time() * 1_000),
-                    ):
+                        expected_nonce=requested_nonce,
+                        require_resource_decision=self._require_resource_decision,
+                    )
+                deadline = time.monotonic() + self._interval_s
+                while not stop_event.is_set() and time.monotonic() < deadline:
+                    if await asyncio.to_thread(
+                        self._store.pending_operator_wakeup,
+                        "reconciliation",
+                        now_ms=int(time.time() * 1_000),
+                        require_resource_decision=self._require_resource_decision,
+                    ) is not None:
                         break
                     try:
                         await asyncio.wait_for(

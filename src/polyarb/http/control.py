@@ -41,6 +41,7 @@ Sync vs async (per RESEARCH Pitfall 4):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import sqlite3
@@ -119,28 +120,43 @@ async def control_auth_middleware(request: Request, call_next: Any, *, secret: s
     if request.url.path.startswith("/control/perception/"):
         try:
             db_path = request.app.state.sqlite_store.db_path
-            con = sqlite3.connect(db_path, timeout=0.25, isolation_level=None)
+            from polyarb.perception.store import OpportunityPerceptionStore
+
+            auth_store = OpportunityPerceptionStore(
+                db_path,
+                busy_timeout_ms=250,
+            )
+            accepted_at_ms = int(time.time() * 1_000)
+            deadline = time.monotonic() + 0.8
+            auth_task = asyncio.create_task(
+                asyncio.to_thread(
+                    auth_store.accept_operator_auth,
+                    nonce=nonce,
+                    request_method=request.method,
+                    request_path=request.url.path,
+                    request_timestamp_s=timestamp_s,
+                    body_hash=hashlib.sha256(body).hexdigest(),
+                    accepted_at_ms=accepted_at_ms,
+                    deadline_monotonic=deadline,
+                )
+            )
             try:
-                con.execute("PRAGMA busy_timeout=250")
-                con.execute("BEGIN IMMEDIATE")
-                con.execute(
-                    "DELETE FROM neg_risk_operator_auth_nonces WHERE nonce IN ("
-                    "SELECT nonce FROM neg_risk_operator_auth_nonces "
-                    "WHERE accepted_at_ms<? ORDER BY accepted_at_ms LIMIT 500)",
-                    ((int(time.time()) - 600) * 1_000,),
+                await asyncio.wait_for(asyncio.shield(auth_task), timeout=1.0)
+            except TimeoutError:
+                try:
+                    await auth_task
+                except (TimeoutError, sqlite3.Error, ValueError):
+                    pass
+                return JSONResponse(
+                    {
+                        "status": "unavailable",
+                        "reason": "control-auth-store-unavailable",
+                    },
+                    status_code=409,
                 )
-                con.execute(
-                    "INSERT INTO neg_risk_operator_auth_nonces("
-                    "nonce,request_path,request_timestamp_s,accepted_at_ms"
-                    ") VALUES(?,?,?,?)",
-                    (nonce, request.url.path, timestamp_s, int(time.time() * 1_000)),
-                )
-                con.execute("COMMIT")
-            finally:
-                con.close()
         except sqlite3.IntegrityError:
             return JSONResponse({"error": "invalid control authentication"}, status_code=401)
-        except sqlite3.Error:
+        except (sqlite3.Error, ValueError):
             return JSONResponse(
                 {"status": "unavailable", "reason": "control-auth-store-unavailable"},
                 status_code=409,
@@ -250,8 +266,6 @@ async def queue_perception_reconciliation(request: Request) -> JSONResponse:
 
 async def _queue_perception_component(request: Request, component: str) -> JSONResponse:
     """Persist one coalescing wake-up; never invoke or revive a producer."""
-    import asyncio
-
     from polyarb.perception.store import OpportunityPerceptionStore
 
     enabled_flag = (
@@ -269,24 +283,45 @@ async def _queue_perception_component(request: Request, component: str) -> JSONR
         request.app.state.sqlite_store.db_path,
         busy_timeout_ms=250,
     )
+    deadline = time.monotonic() + 0.8
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            store.queue_operator_wakeup,
+            component,
+            request_nonce=nonce,
+            occurred_at_ms=int(time.time() * 1_000),
+            deadline_monotonic=deadline,
+            require_resource_decision=bool(
+                getattr(
+                    request.app.state.settings,
+                    "opportunity_resource_controller_enabled",
+                    False,
+                )
+            ),
+        )
+    )
     try:
         queued = await asyncio.wait_for(
-            asyncio.to_thread(
-                store.queue_operator_wakeup,
-                component,
-                request_nonce=nonce,
-                occurred_at_ms=int(time.time() * 1_000),
-            ),
+            asyncio.shield(task),
             timeout=1.0,
         )
     except RuntimeError as error:
         reason = (
-            "component-escalated"
-            if str(error) == "component-escalated"
+            "component-incident-active"
+            if str(error) == "component-incident-active"
             else "component-unavailable"
         )
         return JSONResponse({"status": "unavailable", "reason": reason}, status_code=409)
-    except (TimeoutError, sqlite3.Error, ValueError):
+    except TimeoutError:
+        try:
+            await task
+        except (TimeoutError, sqlite3.Error, ValueError):
+            pass
+        return JSONResponse(
+            {"status": "unavailable", "reason": "component-unavailable"},
+            status_code=409,
+        )
+    except (sqlite3.Error, ValueError):
         return JSONResponse(
             {"status": "unavailable", "reason": "component-unavailable"},
             status_code=409,

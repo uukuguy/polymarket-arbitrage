@@ -3,6 +3,63 @@ from __future__ import annotations
 import sqlite3
 import time
 
+from polyarb.perception.models import (
+    GroupLeg,
+    GroupQuoteBatch,
+    GroupQuoteLeg,
+    GroupRevision,
+)
+from polyarb.perception.store import OpportunityPerceptionStore
+
+
+def _seed_candidate_authority(db_path) -> None:
+    store = OpportunityPerceptionStore(db_path)
+    legs = (
+        GroupLeg("m-1", "c-1", "yes-1", "One"),
+        GroupLeg("m-2", "c-2", "yes-2", "Two"),
+    )
+    revision = GroupRevision.certified(
+        group_id="g-1",
+        event_id="e-1",
+        revision=1,
+        started_at_ms=1,
+        observed_at_ms=2,
+        source_cursor="cursor",
+        legs=legs,
+    )
+    store.publish_group_revision(revision)
+    batch = GroupQuoteBatch.complete(
+        group_id="g-1",
+        membership_hash=revision.membership_hash,
+        quote_batch_id="q-1",
+        started_at_ms=3,
+        quoted_at_ms=4,
+        legs=tuple(
+            GroupQuoteLeg(
+                leg.yes_token_id,
+                revision.membership_hash,
+                0.4,
+                10.0,
+                "executable",
+            )
+            for leg in legs
+        ),
+    )
+    store.publish_candidate_success(
+        batch,
+        observed_at_ms=4,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.8,
+        gross_edge_bps=2_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="edge",
+        next_due_at_ms=15_004,
+    )
+
 
 def test_perception_routes_exist_and_limits_are_validated(http_test_client) -> None:
     assert http_test_client.get("/perception/status").status_code == 200
@@ -76,3 +133,87 @@ def test_discovery_reconciliation_and_incidents_use_stable_envelopes(
         "items": [],
         "limit": 5,
     }
+
+
+def test_incidents_recursively_redact_legacy_secret_shapes(http_test_client) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    evidence = (
+        '{"outer":{"API_KEY":"hunter2","authorization":"Bearer abc123",'
+        '"db":"postgresql://user:hunter2@db.invalid/x?password=hunter2",'
+        '"note":"password=hunter2","cookie":"session=hunter2"}}'
+    )
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO neg_risk_incident_events("
+            "incident_id,sequence,scope,kind,state,occurred_at_ms,evidence_json"
+            ") VALUES('secret',1,'discovery','worker-failure','detected',1,?)",
+            (evidence,),
+        )
+    response = http_test_client.get("/perception/incidents")
+    assert response.status_code == 200
+    rendered = response.text.lower()
+    for secret in ("hunter2", "abc123", "postgresql://", "bearer "):
+        assert secret not in rendered
+    assert "[redacted]" in rendered
+
+
+def test_status_rejects_forged_candidate_receipt_rowid(http_test_client) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    _seed_candidate_authority(db_path)
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_candidate_success_receipts "
+            "SET group_revision_row_id=999"
+        )
+    assert http_test_client.get("/perception/status").status_code == 503
+
+
+def test_status_rejects_quote_leg_membership_forgery(http_test_client) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    _seed_candidate_authority(db_path)
+    with sqlite3.connect(db_path) as con:
+        legs = con.execute(
+            "SELECT legs_json FROM neg_risk_group_quote_batches WHERE id='q-1'"
+        ).fetchone()[0]
+        con.execute(
+            "UPDATE neg_risk_group_quote_batches SET legs_json=? WHERE id='q-1'",
+            (legs.replace('"yes-1","', '"yes-1","forged-'),),
+        )
+    assert http_test_client.get("/perception/status").status_code == 503
+
+
+def test_groups_remain_available_with_bounded_multi_revision_page(
+    http_test_client,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    legs = (
+        GroupLeg("m-1", "c-1", "yes-1", "One"),
+        GroupLeg("m-2", "c-2", "yes-2", "Two"),
+    )
+    membership_hash = GroupRevision.membership_digest(legs)
+    legs_json = '[["m-1","c-1","yes-1","One"],["m-2","c-2","yes-2","Two"]]'
+    with sqlite3.connect(db_path) as con:
+        con.executemany(
+            "INSERT INTO neg_risk_group_revisions("
+            "group_id,event_id,revision,membership_hash,started_at_ms,"
+            "observed_at_ms,source_cursor,status,legs_json) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                (
+                    f"g-{group:03d}",
+                    f"e-{group:03d}",
+                    revision,
+                    membership_hash,
+                    revision,
+                    revision,
+                    f"c-{revision}",
+                    "certified",
+                    legs_json,
+                )
+                for group in range(100)
+                for revision in range(1, 7)
+            ),
+        )
+    response = http_test_client.get("/perception/groups?limit=100")
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 100
