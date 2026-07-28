@@ -711,6 +711,7 @@ logs-tail-axiom:
 # ─────────────────────────────────────────────────────────────────────────────
 
 .PHONY: dashboard-dev dashboard-build dashboard-typecheck dashboard-deploy smoke-l2-dashboard
+.PHONY: smoke-perception-dashboard
 
 ## dashboard-dev: 本地起 dashboard (next dev :3000)
 dashboard-dev:
@@ -760,6 +761,24 @@ smoke-l2-dashboard:
 	  fi; \
 	done; \
 	exit $$rc
+
+## smoke-perception-dashboard: Read-only HTTP reachability for the Dashboard /perception route
+## Usage: make smoke-perception-dashboard
+##        DASHBOARD_URL=http://localhost:3000 make smoke-perception-dashboard
+## Accepts the application page (200) or the canonical Vercel Auth redirects
+## (302/307). It does not follow redirects and does not claim data freshness.
+smoke-perception-dashboard:
+	@DASHBOARD_URL="$${DASHBOARD_URL:-https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app}"; \
+	URL="$${DASHBOARD_URL%/}/perception"; \
+	echo ">> smoke-perception-dashboard — GET $$URL"; \
+	code=$$(curl --disable --connect-timeout 3 --max-time 10 --retry 0 -sS -o /dev/null -w "%{http_code}" "$$URL") || { \
+	  echo "  /perception: transport FAIL"; \
+	  exit 1; \
+	}; \
+	case "$$code" in \
+	  200|302|307) echo "  /perception: $$code reachable" ;; \
+	  *) echo "  /perception: $$code FAIL"; exit 1 ;; \
+	esac
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 07 — 7-day production soak monitoring (Better Stack driven)

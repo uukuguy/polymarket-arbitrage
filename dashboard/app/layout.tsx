@@ -39,6 +39,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <a href="/scan" style={{ color: "#9ec5fe" }}>
             /scan
           </a>
+          <a href="/perception" style={{ color: "#9ec5fe" }}>
+            /perception
+          </a>
         </nav>
         {children}
       </body>

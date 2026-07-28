@@ -54,6 +54,7 @@ M1_MAKE_TARGETS = {
     "dashboard-dev",
     "smoke-l2-dashboard",
     "smoke-l3-dashboard",
+    "smoke-perception-dashboard",
     "polywatch-healthz-dry",
     "polywatch-healthz",
     "polywatch-resident-status",
@@ -114,6 +115,8 @@ M1_DASHBOARD_PAGES = {
     "dashboard/app/asset/[id]/tob/page.tsx",
     "dashboard/app/asset/[id]/trades/page.tsx",
     "dashboard/app/l3/[asset_id]/page.tsx",
+    "dashboard/app/perception/page.tsx",
+    "dashboard/app/perception/[group_id]/page.tsx",
 }
 M1_MIGRATION_RE = re.compile(
     r"\b(?:markets|snapshots|market_candidates|l2_top_of_books|l2_trades|"
@@ -130,6 +133,12 @@ REQUIRED_MARKERS = {
     ("route", "/candidates", "dashboard/app/candidates/page.tsx"),
     ("route", "/signals", "dashboard/app/signals/page.tsx"),
     ("route", "/l3/[asset_id]", "dashboard/app/l3/[asset_id]/page.tsx"),
+    ("route", "/perception", "dashboard/app/perception/page.tsx"),
+    (
+        "route",
+        "/perception/[group_id]",
+        "dashboard/app/perception/[group_id]/page.tsx",
+    ),
 }
 SYNC_LOG_RE = re.compile(
     r"^- `(?P<date>\d{4}-\d{2}-\d{2}) \| (?P<change>[^|`]+) \| "
