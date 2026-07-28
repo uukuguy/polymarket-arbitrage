@@ -100,62 +100,7 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
-            validated = GroupQuoteBatch.complete(
-                group_id=batch.group_id,
-                membership_hash=batch.membership_hash,
-                quote_batch_id=batch.quote_batch_id,
-                started_at_ms=batch.started_at_ms,
-                quoted_at_ms=batch.quoted_at_ms,
-                legs=batch.legs,
-            )
-            if batch != validated:
-                raise ValueError("quote-batch-not-complete")
-            current_row = self._current_group_row(con, batch.group_id)
-            if current_row is None:
-                membership_owner = con.execute(
-                    "SELECT group_id FROM neg_risk_group_revisions "
-                    "WHERE membership_hash=? AND status='certified' "
-                    "ORDER BY revision DESC LIMIT 1",
-                    (batch.membership_hash,),
-                ).fetchone()
-                if membership_owner is not None:
-                    raise ValueError("group-identity-mismatch")
-                raise ValueError("certified-group-not-found")
-            if current_row["status"] != "certified":
-                raise ValueError("certified-group-not-found")
-
-            current = self._validated_group_from_row(current_row)
-            if current is None:
-                raise ValueError("certified-group-invalid")
-            if batch.group_id != current.group_id:
-                raise ValueError("group-identity-mismatch")
-            if batch.membership_hash != current.membership_hash:
-                raise ValueError("membership-hash-mismatch")
-            if tuple(leg.yes_token_id for leg in batch.legs) != tuple(
-                leg.yes_token_id for leg in current.legs
-            ):
-                raise ValueError("quote-leg-identity-mismatch")
-            if any(
-                leg.membership_hash != current.membership_hash for leg in batch.legs
-            ):
-                raise ValueError("membership-hash-mismatch")
-            con.execute(
-                "INSERT INTO neg_risk_group_quote_batches("
-                "id,group_id,group_revision,membership_hash,started_at_ms,"
-                "quoted_at_ms,status,failure_reason,legs_json"
-                ") VALUES (?,?,?,?,?,?,?,?,?)",
-                (
-                    batch.quote_batch_id,
-                    batch.group_id,
-                    current.revision,
-                    batch.membership_hash,
-                    batch.started_at_ms,
-                    batch.quoted_at_ms,
-                    batch.status,
-                    batch.failure_reason,
-                    self._quote_legs_json(batch.legs),
-                ),
-            )
+            self._insert_validated_quote_batch(con, batch)
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
@@ -164,6 +109,55 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
         return batch
+
+    def publish_candidate_success(
+        self,
+        batch: GroupQuoteBatch,
+        *,
+        observed_at_ms: int,
+        last_result: CandidateResult,
+        reason: str | None,
+        bundle_cost: float,
+        gross_edge_bps: float,
+        max_bundle_size: float,
+        priority_class: CandidatePriority,
+        consecutive_failures: int,
+        effective_interval_s: float,
+        schedule_reason: str,
+        next_due_at_ms: int,
+    ) -> CandidateWatchFact:
+        """Atomically publish a complete batch and its positive terminal fact."""
+        if last_result not in {"watching", "no-edge"}:
+            raise ValueError("candidate-success-result-required")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            self._insert_validated_quote_batch(con, batch)
+            fact = self._insert_candidate_watch_fact(
+                con,
+                group_id=batch.group_id,
+                membership_hash=batch.membership_hash,
+                quote_batch_id=batch.quote_batch_id,
+                observed_at_ms=observed_at_ms,
+                last_result=last_result,
+                reason=reason,
+                bundle_cost=bundle_cost,
+                gross_edge_bps=gross_edge_bps,
+                max_bundle_size=max_bundle_size,
+                priority_class=priority_class,
+                consecutive_failures=consecutive_failures,
+                effective_interval_s=effective_interval_s,
+                schedule_reason=schedule_reason,
+                next_due_at_ms=next_due_at_ms,
+            )
+            con.execute("COMMIT")
+            return fact
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
 
     def current_group(self, group_id: str) -> GroupRevision | None:
         con = self._connect()
@@ -212,49 +206,25 @@ class OpportunityPerceptionStore:
         """Append one and only one terminal scheduling fact for a completed run."""
         con = self._connect()
         try:
-            cursor = con.execute(
-                "INSERT INTO neg_risk_candidate_watch_facts("
-                "group_id,membership_hash,quote_batch_id,observed_at_ms,last_result,"
-                "reason,bundle_cost,gross_edge_bps,max_bundle_size,priority_class,"
-                "consecutive_failures,effective_interval_s,schedule_reason,next_due_at_ms"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    group_id,
-                    membership_hash,
-                    quote_batch_id,
-                    observed_at_ms,
-                    last_result,
-                    reason,
-                    bundle_cost,
-                    gross_edge_bps,
-                    max_bundle_size,
-                    priority_class,
-                    consecutive_failures,
-                    effective_interval_s,
-                    schedule_reason,
-                    next_due_at_ms,
-                ),
+            return self._insert_candidate_watch_fact(
+                con,
+                group_id=group_id,
+                membership_hash=membership_hash,
+                quote_batch_id=quote_batch_id,
+                observed_at_ms=observed_at_ms,
+                last_result=last_result,
+                reason=reason,
+                bundle_cost=bundle_cost,
+                gross_edge_bps=gross_edge_bps,
+                max_bundle_size=max_bundle_size,
+                priority_class=priority_class,
+                consecutive_failures=consecutive_failures,
+                effective_interval_s=effective_interval_s,
+                schedule_reason=schedule_reason,
+                next_due_at_ms=next_due_at_ms,
             )
-            row_id = int(cursor.lastrowid)
         finally:
             con.close()
-        return CandidateWatchFact(
-            id=row_id,
-            group_id=group_id,
-            membership_hash=membership_hash,
-            quote_batch_id=quote_batch_id,
-            observed_at_ms=observed_at_ms,
-            last_result=last_result,
-            reason=reason,
-            bundle_cost=bundle_cost,
-            gross_edge_bps=gross_edge_bps,
-            max_bundle_size=max_bundle_size,
-            priority_class=priority_class,
-            consecutive_failures=consecutive_failures,
-            effective_interval_s=effective_interval_s,
-            schedule_reason=schedule_reason,
-            next_due_at_ms=next_due_at_ms,
-        )
 
     def candidate_watch_facts(self, group_id: str) -> tuple[CandidateWatchFact, ...]:
         con = self._connect()
@@ -321,6 +291,127 @@ class OpportunityPerceptionStore:
         con.row_factory = sqlite3.Row
         con.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         return con
+
+    def _insert_validated_quote_batch(
+        self,
+        con: sqlite3.Connection,
+        batch: GroupQuoteBatch,
+    ) -> None:
+        validated = GroupQuoteBatch.complete(
+            group_id=batch.group_id,
+            membership_hash=batch.membership_hash,
+            quote_batch_id=batch.quote_batch_id,
+            started_at_ms=batch.started_at_ms,
+            quoted_at_ms=batch.quoted_at_ms,
+            legs=batch.legs,
+        )
+        if batch != validated:
+            raise ValueError("quote-batch-not-complete")
+        current_row = self._current_group_row(con, batch.group_id)
+        if current_row is None:
+            membership_owner = con.execute(
+                "SELECT group_id FROM neg_risk_group_revisions "
+                "WHERE membership_hash=? AND status='certified' "
+                "ORDER BY revision DESC LIMIT 1",
+                (batch.membership_hash,),
+            ).fetchone()
+            if membership_owner is not None:
+                raise ValueError("group-identity-mismatch")
+            raise ValueError("certified-group-not-found")
+        if current_row["status"] != "certified":
+            raise ValueError("certified-group-not-found")
+        current = self._validated_group_from_row(current_row)
+        if current is None:
+            raise ValueError("certified-group-invalid")
+        if batch.group_id != current.group_id:
+            raise ValueError("group-identity-mismatch")
+        if batch.membership_hash != current.membership_hash:
+            raise ValueError("membership-hash-mismatch")
+        if tuple(leg.yes_token_id for leg in batch.legs) != tuple(
+            leg.yes_token_id for leg in current.legs
+        ):
+            raise ValueError("quote-leg-identity-mismatch")
+        if any(
+            leg.membership_hash != current.membership_hash for leg in batch.legs
+        ):
+            raise ValueError("membership-hash-mismatch")
+        con.execute(
+            "INSERT INTO neg_risk_group_quote_batches("
+            "id,group_id,group_revision,membership_hash,started_at_ms,"
+            "quoted_at_ms,status,failure_reason,legs_json"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                batch.quote_batch_id,
+                batch.group_id,
+                current.revision,
+                batch.membership_hash,
+                batch.started_at_ms,
+                batch.quoted_at_ms,
+                batch.status,
+                batch.failure_reason,
+                self._quote_legs_json(batch.legs),
+            ),
+        )
+
+    @staticmethod
+    def _insert_candidate_watch_fact(
+        con: sqlite3.Connection,
+        *,
+        group_id: str,
+        membership_hash: str | None,
+        quote_batch_id: str | None,
+        observed_at_ms: int,
+        last_result: CandidateResult,
+        reason: str | None,
+        bundle_cost: float | None,
+        gross_edge_bps: float | None,
+        max_bundle_size: float | None,
+        priority_class: CandidatePriority,
+        consecutive_failures: int,
+        effective_interval_s: float,
+        schedule_reason: str,
+        next_due_at_ms: int,
+    ) -> CandidateWatchFact:
+        cursor = con.execute(
+            "INSERT INTO neg_risk_candidate_watch_facts("
+            "group_id,membership_hash,quote_batch_id,observed_at_ms,last_result,"
+            "reason,bundle_cost,gross_edge_bps,max_bundle_size,priority_class,"
+            "consecutive_failures,effective_interval_s,schedule_reason,next_due_at_ms"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                group_id,
+                membership_hash,
+                quote_batch_id,
+                observed_at_ms,
+                last_result,
+                reason,
+                bundle_cost,
+                gross_edge_bps,
+                max_bundle_size,
+                priority_class,
+                consecutive_failures,
+                effective_interval_s,
+                schedule_reason,
+                next_due_at_ms,
+            ),
+        )
+        return CandidateWatchFact(
+            id=int(cursor.lastrowid),
+            group_id=group_id,
+            membership_hash=membership_hash,
+            quote_batch_id=quote_batch_id,
+            observed_at_ms=observed_at_ms,
+            last_result=last_result,
+            reason=reason,
+            bundle_cost=bundle_cost,
+            gross_edge_bps=gross_edge_bps,
+            max_bundle_size=max_bundle_size,
+            priority_class=priority_class,
+            consecutive_failures=consecutive_failures,
+            effective_interval_s=effective_interval_s,
+            schedule_reason=schedule_reason,
+            next_due_at_ms=next_due_at_ms,
+        )
 
     @staticmethod
     def _current_group_row(

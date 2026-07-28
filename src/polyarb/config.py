@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     candidate_normal_interval_s: float = Field(default=60.0, gt=0)
     candidate_explore_interval_s: float = Field(default=300.0, gt=0)
     candidate_quote_hard_stale_s: float = Field(default=90.0, gt=0)
+    candidate_cycle_max_groups: int = Field(default=12, ge=2)
+    candidate_reserved_non_high_slots: int = Field(default=2, ge=1)
+    candidate_group_timeout_s: float = Field(default=30.0, gt=0)
+    candidate_supervisor_retry_s: float = Field(default=1.0, gt=0)
+    candidate_scheduler_poll_s: float = Field(default=1.0, gt=0)
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 

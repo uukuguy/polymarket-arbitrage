@@ -17,6 +17,16 @@
   fact and injected that runtime into the HTTP app state for Task 6.
 - Added feature-flagged sibling-task wiring. The flag is off by default; the
   legacy Quote worker, focused watcher, and opportunity read path remain intact.
+- Independent review remediation made Quote-batch publication and its positive
+  terminal fact one transaction, with a final current-membership revalidation.
+- Started terminal writes complete under cancellation and converge runtime from
+  the returned durable fact before cancellation is re-raised.
+- The scheduler contains/retries cycle failures with observable supervisor
+  failure/recovery state rather than silently dying.
+- Per-cycle bounds, reserved normal/explore slots, and configurable per-group
+  timeout provide real anti-starvation while retaining high-lane priority.
+- Failure backoff clamps the exponent before calculation, including arbitrarily
+  large durable failure counts.
 
 ## Safety and Scope
 
@@ -45,8 +55,22 @@ uv run pytest tests/perception/test_group_structure.py \
 GREEN: all focused and legacy-path tests passed
 ```
 
+Independent-review RED → GREEN additions cover:
+
+- membership supersession between the second Structure read and SQLite commit;
+- rollback when the positive-fact insert fails after the batch insert begins;
+- cancellation after both positive and unavailable commits;
+- supervisor retry and recovery after a cycle-source exception;
+- stuck high-priority work with bounded normal/explore progress;
+- one reserved slot rotating fairly across both lower lanes; and
+- a durable failure count of 100000 clamping and persisting without overflow.
+
+The final proportional suite contains 155 passing tests across Task 1/Task 2,
+legacy focused collection, opportunity ledger, quote store, watcher, and daemon wiring.
+
 ## Review Notes
 
 Self-review caught and corrected a misplaced runtime keyword in daemon wiring
-before final verification. The independent Task 2 review gate remains owned by
-the parent rollout workflow after this commit.
+before final verification. The first independent review returned four Important
+findings; deterministic race/cancellation/supervision/overflow/fairness tests now
+cover their fixes. Re-review remains owned by the parent rollout workflow.

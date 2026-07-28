@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from loguru import logger
 
@@ -16,6 +17,7 @@ from polyarb.perception.models import (
     CandidatePriority,
     CandidateResult,
     CandidateWatchFact,
+    GroupQuoteBatch,
     GroupRevision,
 )
 from polyarb.perception.store import OpportunityPerceptionStore
@@ -68,6 +70,10 @@ class CandidateWatcherSnapshot:
     priority_class: CandidatePriority | None
     effective_interval_s: float | None
     schedule_reason: str | None
+    supervisor_failure_count: int
+    supervisor_recovery_count: int
+    supervisor_state: Literal["running", "degraded"]
+    last_supervisor_error_kind: str | None
 
 
 class CandidateWatcherRuntime:
@@ -85,6 +91,10 @@ class CandidateWatcherRuntime:
             priority_class=None,
             effective_interval_s=None,
             schedule_reason=None,
+            supervisor_failure_count=0,
+            supervisor_recovery_count=0,
+            supervisor_state="running",
+            last_supervisor_error_kind=None,
         )
 
     def record(self, fact: CandidateWatchFact) -> None:
@@ -101,10 +111,34 @@ class CandidateWatcherRuntime:
             priority_class=fact.priority_class,
             effective_interval_s=fact.effective_interval_s,
             schedule_reason=fact.schedule_reason,
+            supervisor_failure_count=previous.supervisor_failure_count,
+            supervisor_recovery_count=previous.supervisor_recovery_count,
+            supervisor_state=previous.supervisor_state,
+            last_supervisor_error_kind=previous.last_supervisor_error_kind,
         )
 
     def snapshot(self) -> CandidateWatcherSnapshot:
         return self._snapshot
+
+    def record_supervisor_failure(self, error: BaseException) -> None:
+        previous = self._snapshot
+        self._snapshot = replace(
+            previous,
+            supervisor_failure_count=previous.supervisor_failure_count + 1,
+            supervisor_state="degraded",
+            last_supervisor_error_kind=type(error).__name__,
+        )
+
+    def record_supervisor_recovery(self) -> None:
+        previous = self._snapshot
+        if previous.supervisor_state != "degraded":
+            return
+        self._snapshot = replace(
+            previous,
+            supervisor_recovery_count=previous.supervisor_recovery_count + 1,
+            supervisor_state="running",
+            last_supervisor_error_kind=None,
+        )
 
 
 @dataclass(frozen=True)
@@ -127,15 +161,24 @@ class IntervalController:
             "normal": self.normal_interval_s,
             "explore": self.explore_interval_s,
         }[priority]
-        interval = base * (2**consecutive_failures)
+        failure_cap = (
+            max(self.explore_interval_s, self.quote_hard_stale_s)
+            if priority == "explore"
+            else self.quote_hard_stale_s
+        )
+        if consecutive_failures <= 0:
+            interval = base
+        elif base >= failure_cap:
+            interval = failure_cap
+        else:
+            capped_exponent = min(
+                consecutive_failures,
+                max(0, math.ceil(math.log2(failure_cap / base))),
+            )
+            interval = min(base * (2**capped_exponent), failure_cap)
         if consecutive_failures == 0:
             reason = f"{priority}-cadence"
         else:
-            failure_cap = (
-                max(self.explore_interval_s, self.quote_hard_stale_s)
-                if priority == "explore"
-                else self.quote_hard_stale_s
-            )
             if interval >= failure_cap:
                 interval = failure_cap
                 reason = "failure-backoff-capped-by-hard-stale"
@@ -222,7 +265,6 @@ class CandidateWatcher:
                 started_at_ms=started_at_ms,
                 quoted_at_ms=observed_at_ms,
             )
-            await asyncio.to_thread(self._store.publish_quote_batch, batch)
             bundle_cost = sum(
                 (Decimal(str(leg.best_ask_price)) for leg in batch.legs),
                 Decimal(0),
@@ -244,6 +286,7 @@ class CandidateWatcher:
                 max_bundle_size=min(leg.best_ask_size for leg in batch.legs),
                 priority=priority,
                 consecutive_failures=0,
+                batch=batch,
             )
         except asyncio.CancelledError:
             raise
@@ -336,6 +379,7 @@ class CandidateWatcher:
         max_bundle_size: float | None,
         priority: CandidatePriority,
         consecutive_failures: int,
+        batch: GroupQuoteBatch | None = None,
     ) -> CandidateObservation:
         transition = self._interval_controller.transition(
             priority=priority,
@@ -343,11 +387,7 @@ class CandidateWatcher:
             observed_at_ms=observed_at_ms,
             last_result=status,
         )
-        fact = await asyncio.to_thread(
-            self._store.record_candidate_watch_fact,
-            group_id=group_id,
-            membership_hash=membership_hash,
-            quote_batch_id=quote_batch_id,
+        terminal_fields = dict(
             observed_at_ms=observed_at_ms,
             last_result=status,
             reason=reason,
@@ -360,7 +400,20 @@ class CandidateWatcher:
             schedule_reason=transition.reason,
             next_due_at_ms=transition.next_due_at_ms,
         )
-        self._runtime.record(fact)
+        if batch is not None:
+            await self._commit_terminal_fact(
+                self._store.publish_candidate_success,
+                batch,
+                **terminal_fields,
+            )
+        else:
+            await self._commit_terminal_fact(
+                self._store.record_candidate_watch_fact,
+                group_id=group_id,
+                membership_hash=membership_hash,
+                quote_batch_id=quote_batch_id,
+                **terminal_fields,
+            )
         return CandidateObservation(
             group_id=group_id,
             membership_hash=membership_hash,
@@ -376,6 +429,37 @@ class CandidateWatcher:
             effective_interval_s=transition.effective_interval_s,
             next_due_at_ms=transition.next_due_at_ms,
             schedule_reason=transition.reason,
+        )
+
+    async def _commit_terminal_fact(
+        self,
+        writer: Callable[..., CandidateWatchFact],
+        *args: Any,
+        **kwargs: Any,
+    ) -> CandidateWatchFact:
+        """Finish a started SQLite commit before propagating cancellation."""
+        task = asyncio.create_task(
+            asyncio.to_thread(writer, *args, **kwargs)
+        )
+        try:
+            fact = await asyncio.shield(task)
+        except asyncio.CancelledError as cancellation:
+            try:
+                fact = await task
+            except BaseException as error:
+                raise cancellation from error
+            self._runtime.record(fact)
+            raise
+        self._runtime.record(fact)
+        return fact
+
+    async def record_timeout(self, group_id: str) -> None:
+        """Persist an explicit unavailable transition for a bounded group timeout."""
+        await self._record_unavailable(
+            group_id=group_id,
+            before=None,
+            observed_at_ms=self._clock_ms(),
+            reason="candidate-group-timeout",
         )
 
 
@@ -395,6 +479,10 @@ class CandidateWatcherScheduler:
         runtime: CandidateWatcherRuntime,
         clock_ms: Callable[[], int] | None = None,
         poll_interval_s: float = 1.0,
+        supervisor_retry_s: float = 1.0,
+        cycle_max_groups: int = 12,
+        reserved_non_high_slots: int = 2,
+        group_timeout_s: float = 30.0,
     ) -> None:
         self._watcher = watcher
         self._store = store
@@ -402,6 +490,22 @@ class CandidateWatcherScheduler:
         self._runtime = runtime
         self._clock_ms = clock_ms or _wall_clock_ms
         self._poll_interval_s = poll_interval_s
+        self._supervisor_retry_s = supervisor_retry_s
+        self._cycle_max_groups = cycle_max_groups
+        self._reserved_non_high_slots = min(
+            reserved_non_high_slots,
+            cycle_max_groups - 1,
+        )
+        self._group_timeout_s = group_timeout_s
+        self._reserved_lane_cursor = 0
+        if (
+            poll_interval_s <= 0
+            or supervisor_retry_s <= 0
+            or cycle_max_groups < 2
+            or reserved_non_high_slots <= 0
+            or group_timeout_s <= 0
+        ):
+            raise ValueError("invalid-candidate-scheduler-controller-input")
 
     @property
     def runtime(self) -> CandidateWatcherRuntime:
@@ -421,16 +525,79 @@ class CandidateWatcherScheduler:
                 due.append((0, 0, group_id))
             elif fact.next_due_at_ms <= now_ms:
                 due.append((rank[fact.priority_class], fact.next_due_at_ms, group_id))
-        for _, _, group_id in sorted(due):
-            await self._watcher.run_once(group_id)
+        for _, _, group_id in self._select_cycle(due):
+            before_count = self._runtime.snapshot().attempt_count
+            try:
+                await asyncio.wait_for(
+                    self._watcher.run_once(group_id),
+                    timeout=self._group_timeout_s,
+                )
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError as error:
+                self._runtime.record_supervisor_failure(error)
+                if self._runtime.snapshot().attempt_count == before_count:
+                    await self._watcher.record_timeout(group_id)
+                logger.warning(f"candidate group timed out group_id={group_id}")
+            except Exception as error:
+                self._runtime.record_supervisor_failure(error)
+                logger.warning(
+                    "candidate group task failed "
+                    f"group_id={group_id} kind={type(error).__name__}"
+                )
+            else:
+                self._runtime.record_supervisor_recovery()
+
+    def _select_cycle(
+        self,
+        due: list[tuple[int, int, str]],
+    ) -> tuple[tuple[int, int, str], ...]:
+        ordered = sorted(due, key=lambda item: (item[1], item[0], item[2]))
+        high = [item for item in ordered if item[0] == 0]
+        normal = [item for item in ordered if item[0] == 1]
+        explore = [item for item in ordered if item[0] == 2]
+        reserved: list[tuple[int, int, str]] = []
+        lanes = [normal, explore]
+        lane_index = self._reserved_lane_cursor
+        while len(reserved) < self._reserved_non_high_slots and any(lanes):
+            for offset in range(len(lanes)):
+                lane = lanes[(lane_index + offset) % len(lanes)]
+                if lane and len(reserved) < self._reserved_non_high_slots:
+                    reserved.append(lane.pop(0))
+            lane_index = (lane_index + 1) % len(lanes)
+        self._reserved_lane_cursor = (
+            self._reserved_lane_cursor + 1
+        ) % len(lanes)
+        remaining = self._cycle_max_groups - len(reserved)
+        selected = high[:remaining]
+        remaining -= len(selected)
+        if remaining:
+            selected.extend((normal + explore)[:remaining])
+        # Hot candidates retain execution priority, but reserved lower-lane
+        # work is guaranteed into this bounded cycle.
+        return tuple(sorted(selected, key=lambda item: (item[0], item[1], item[2])) + reserved)
 
     async def run(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
-            await self.run_due_once()
+            delay_s = self._poll_interval_s
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=self._poll_interval_s)
+                await self.run_due_once()
+                self._runtime.record_supervisor_recovery()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                delay_s = self._supervisor_retry_s
+                self._runtime.record_supervisor_failure(error)
+                logger.warning(
+                    "candidate scheduler cycle failed "
+                    f"kind={type(error).__name__}"
+                )
+            if stop_event.is_set():
+                break
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay_s)
             except TimeoutError:
-                continue
+                pass
 
 
 def _wall_clock_ms() -> int:
@@ -467,4 +634,9 @@ def build_production_candidate_watcher(
         store=store,
         candidate_group_ids=candidate_group_ids,
         runtime=runtime,
+        poll_interval_s=settings.candidate_scheduler_poll_s,
+        supervisor_retry_s=settings.candidate_supervisor_retry_s,
+        cycle_max_groups=settings.candidate_cycle_max_groups,
+        reserved_non_high_slots=settings.candidate_reserved_non_high_slots,
+        group_timeout_s=settings.candidate_group_timeout_s,
     )

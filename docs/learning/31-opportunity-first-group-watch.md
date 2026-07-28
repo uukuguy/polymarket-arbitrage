@@ -22,9 +22,10 @@ Candidate Watcher 因此只处理一个已经认证的 neg-risk 组：
 | 文件 | 责任 |
 |---|---|
 | `src/polyarb/perception/group_structure.py:15` | 异步读取一个当前 `certified` 组；同步 SQLite 读取放进线程 |
-| `src/polyarb/perception/candidate_watcher.py:199` | 执行 before → books → after 的按组认证 |
+| `src/polyarb/perception/candidate_watcher.py:243` | 执行 before → books → after 的按组认证 |
 | `src/polyarb/routing/focused_quote_collector.py:195` | 把一组 top books 规范成同一 `quote_batch_id` 的完整批次 |
-| `src/polyarb/perception/store.py:194` | 追加一次终态事实和调度决定 |
+| `src/polyarb/perception/store.py:113` | 同事务发布成功 Quote batch 与 positive fact |
+| `src/polyarb/perception/store.py:188` | 追加 unavailable 终态事实和调度决定 |
 | `src/polyarb/daemon/main.py:94` | 以默认关闭的 feature flag 启动兄弟任务 |
 
 ## 关键代码
@@ -42,14 +43,26 @@ if after.membership_hash != before.membership_hash:
     return await self._record_unavailable(...)
 ```
 
-见 `src/polyarb/perception/candidate_watcher.py:204-217`。随后
-`publish_quote_batch()` 还会在 SQLite 写事务里重读当前组，所以在 `after` 读取和
-写入之间再次换版，也会 fail closed。
+随后 `publish_candidate_success()` 会在同一个 `BEGIN IMMEDIATE` 事务里重读当前组、
+插入完整 Quote batch、再插入 positive terminal fact 后一起提交。因此在 `after`
+读取和写入之间再次换版时，batch 和 positive fact 都不会出现；不会留下“报价已失效，
+但盯盘结果仍为 watching”的裂缝。
 
 调度决定不是隐藏的 sleep 常量。`priority_class`、`effective_interval_s`、
 `schedule_reason` 和 `next_due_at_ms` 与每次终态一起持久化，见
-`src/polyarb/perception/store.py:194-257`。重启后 scheduler 继续按数据库中的
+`src/polyarb/perception/store.py:113` 与 `src/polyarb/perception/store.py:188`。
+重启后 scheduler 继续按数据库中的
 到期时间排序；相同到期条件下 high 先于 normal，再先于 explore。
+
+`asyncio.to_thread()` 被取消时，线程里的 SQLite 写不会自动停止。Candidate Watcher
+因此 shield 已开始的写任务：收到取消后仍等待数据库任务返回，用返回的 durable fact
+收敛 runtime，然后重新抛出 `CancelledError`。这避免关机或 per-group timeout 恰好撞上
+COMMIT 时出现“数据库已写、runtime 永远没看见”。
+
+Scheduler 每轮只处理配置的最大组数，并为 normal/explore 保留槽位；high 仍先执行，
+但每个组有独立 timeout，所以一个卡住的 high 只能消耗有界时间。枚举候选或读取
+durable due state 的异常由 loop supervisor 记录、退避并重试，成功下一轮会记录 recovery，
+不会让 main 继续活着而 watcher task 已静默死亡。
 
 ## 设计取舍
 
@@ -57,6 +70,10 @@ if after.membership_hash != before.membership_hash:
   全市场 `collect_quotes_in_subprocess()`。
 - **失败不降级优先级**：high 候选一次失败后仍是 high，只进行有上限的退避；
   否则最值得盯的组反而会因瞬时错误掉入五分钟慢车道。
+- **优先不等于垄断**：每轮保留 normal/explore 槽位，并用 per-group timeout 限制
+  卡住的 high。这样 freshness priority 与 age-based anti-starvation 同时成立。
+- **退避先封顶再指数**：先由 `cap/base` 算出最大有效翻倍次数，再做 `2**n`；
+  即使 durable failure count 是 100000，也只得到配置 cap，不会先发生数值溢出。
 - **旧链仍保留**：本 slice 没有替换原机会 API。新 worker 默认关闭，待后续
   Discovery、API、Dashboard 与故障资格门完成后才允许生产切换。
 - **观察者边界**：这里只读 Gamma/CLOB 事实并写本地证据，不含钱包、签名、余额或下单。
@@ -68,6 +85,7 @@ if after.membership_hash != before.membership_hash:
 3. high 候选连续失败三次后，为什么需要有上限退避，而不能直接改成 explore？
 4. 全市场 Structure 仍在采集时，一个已认证组能否继续被盯盘？依据是什么？
 5. feature flag 打开是否等于生产切换已经完成？还缺哪些后续质量门？
+6. 为什么 `asyncio.to_thread()` 外层 task 被取消，不代表 SQLite 线程里的 COMMIT 被取消？
 
 ## FAQ 增量
 
@@ -75,3 +93,9 @@ if after.membership_hash != before.membership_hash:
 
 不承诺。Candidate Watcher 优化的是已发现候选的新鲜度。新组如何进入候选集合由滚动
 Discovery 和周期 Reconciliation 提供统计覆盖，不能把有限资源系统描述成零遗漏。
+
+### 现在打开 feature flag，为什么仍可能看到 `group-not-certified`？
+
+Task 2 暂时用 legacy active masters 作为 seed，但新 group-revision authority 不会凭空
+拥有这些组。Task 3 必须把滚动 Discovery 的 promotion source 与 Candidate Watcher
+组合起来或替换临时 seed。Task 3 完成前打开 flag 只适合受控验证，不是生产切换。
