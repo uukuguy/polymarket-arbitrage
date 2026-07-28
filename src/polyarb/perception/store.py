@@ -54,6 +54,17 @@ _ACTUAL_CANDIDATE_AUTHORITY_SQL = (
     "SELECT 1 FROM neg_risk_candidate_watch_facts f "
     "WHERE f.group_id=c.group_id))"
 )
+_LIVE_CANDIDATE_GROUP_IDS_SQL = (
+    "WITH current AS ("
+    "SELECT r.* FROM neg_risk_group_revisions r JOIN ("
+    "SELECT group_id,MAX(revision) AS revision "
+    "FROM neg_risk_group_revisions GROUP BY group_id"
+    ") latest ON latest.group_id=r.group_id AND latest.revision=r.revision"
+    ") SELECT c.group_id FROM current c "
+    "LEFT JOIN neg_risk_group_schedule s ON s.group_id=c.group_id "
+    "WHERE c.status='certified' AND "
+    f"{_ACTUAL_CANDIDATE_AUTHORITY_SQL}"
+)
 
 DiscoveryQuality = Literal[
     "complete-supported",
@@ -3348,8 +3359,9 @@ class OpportunityPerceptionStore:
         through_quote, through_fact, through_receipt = (int(value) for value in through)
 
         # Retain the physical rows needed by ordinary readers and by the next
-        # suffix replay: current group, latest fact, its success tuple, and the
-        # latest complete quote for each group.  Everything else is summarized.
+        # suffix replay only for current Candidate authority. Historical groups
+        # whose latest revision revoked certification are already committed by
+        # prefix_digest and must not make the live seed grow without bound.
         before_counts = {
             "groups": 0,
             "quotes": int(
@@ -3393,24 +3405,33 @@ class OpportunityPerceptionStore:
 
         con.execute(
             "DELETE FROM neg_risk_candidate_success_receipts "
-            "WHERE id<=? AND candidate_fact_row_id NOT IN ("
-            "SELECT MAX(id) FROM neg_risk_candidate_watch_facts GROUP BY group_id)",
+            "WHERE id<=? AND (group_id NOT IN ("
+            f"{_LIVE_CANDIDATE_GROUP_IDS_SQL}"
+            ") OR candidate_fact_row_id NOT IN ("
+            "SELECT MAX(id) FROM neg_risk_candidate_watch_facts "
+            "GROUP BY group_id))",
             (through_receipt,),
         )
         con.execute(
             "DELETE FROM neg_risk_group_quote_batches WHERE rowid<=? "
-            "AND id NOT IN (SELECT quote_batch_id "
+            "AND (group_id NOT IN ("
+            f"{_LIVE_CANDIDATE_GROUP_IDS_SQL}"
+            ") OR (id NOT IN (SELECT quote_batch_id "
             "FROM neg_risk_candidate_watch_facts WHERE id IN ("
             "SELECT MAX(id) FROM neg_risk_candidate_watch_facts GROUP BY group_id) "
             "AND quote_batch_id IS NOT NULL) "
             "AND rowid NOT IN (SELECT MAX(rowid) "
-            "FROM neg_risk_group_quote_batches WHERE status='complete' GROUP BY group_id)",
+            "FROM neg_risk_group_quote_batches "
+            "WHERE status='complete' GROUP BY group_id)))",
             (through_quote,),
         )
         con.execute(
             "DELETE FROM neg_risk_candidate_watch_facts "
-            "WHERE id<=? AND id NOT IN ("
-            "SELECT MAX(id) FROM neg_risk_candidate_watch_facts GROUP BY group_id)",
+            "WHERE id<=? AND (group_id NOT IN ("
+            f"{_LIVE_CANDIDATE_GROUP_IDS_SQL}"
+            ") OR id NOT IN ("
+            "SELECT MAX(id) FROM neg_risk_candidate_watch_facts "
+            "GROUP BY group_id))",
             (through_fact,),
         )
         seeds = self._candidate_seed_payload(

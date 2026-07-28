@@ -228,6 +228,127 @@ def test_candidate_authority_compacts_before_quote_bytes_hit_hard_bound(
         ).fetchone()[0] == 1
 
 
+def test_candidate_authority_evicts_inactive_distinct_groups_without_losing_watch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        2,
+    )
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_UNCOMPACTED_MAX_ROWS",
+        4,
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+
+    active = revision(group_id="active", revision=1, token_suffix="active")
+    store.publish_group_revision(active)
+    active_batch = batch_for(
+        active,
+        quote_batch_id="active-watch",
+        quoted_at_ms=3_100,
+    )
+    store.publish_candidate_success(
+        active_batch,
+        observed_at_ms=active_batch.quoted_at_ms,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.9,
+        gross_edge_bps=1_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="active-watch",
+        next_due_at_ms=active_batch.quoted_at_ms + 15_000,
+    )
+
+    for sequence in range(8):
+        group = revision(
+            group_id=f"inactive-{sequence}",
+            revision=1,
+            token_suffix=f"inactive-{sequence}",
+            observed_at_ms=4_000 + sequence * 10,
+        )
+        store.publish_group_revision(group)
+        quote = batch_for(
+            group,
+            quote_batch_id=f"inactive-watch-{sequence}",
+            quoted_at_ms=4_001 + sequence * 10,
+        )
+        store.publish_candidate_success(
+            quote,
+            observed_at_ms=quote.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="inactive-watch",
+            next_due_at_ms=quote.quoted_at_ms + 15_000,
+        )
+        store.publish_group_revision(
+            replace(
+                group,
+                revision=2,
+                observed_at_ms=quote.quoted_at_ms + 1,
+                source_cursor=f"closed-{sequence}",
+                status="closed",
+            )
+        )
+
+    refreshed_active_batch = batch_for(
+        active,
+        quote_batch_id="active-watch-final",
+        quoted_at_ms=5_000,
+    )
+    store.publish_candidate_success(
+        refreshed_active_batch,
+        observed_at_ms=refreshed_active_batch.quoted_at_ms,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.9,
+        gross_edge_bps=1_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="active-watch-final",
+        next_due_at_ms=refreshed_active_batch.quoted_at_ms + 15_000,
+    )
+
+    assert store.validated_candidate_opportunity_count() == 1
+    current = store.current_quote_batch(
+        active.group_id,
+        now_ms=10_000,
+        max_age_ms=60_000,
+    )
+    assert current is not None
+    assert tuple(leg.yes_token_id for leg in current.legs) == tuple(
+        leg.yes_token_id for leg in active.legs
+    )
+    with sqlite3.connect(store.db_path) as con:
+        retained_group_ids = {
+            row[0]
+            for row in con.execute(
+                "SELECT group_id FROM neg_risk_candidate_watch_facts "
+                "UNION SELECT group_id FROM neg_risk_group_quote_batches "
+                "UNION SELECT group_id FROM neg_risk_candidate_success_receipts"
+            )
+        }
+        assert retained_group_ids == {active.group_id}
+        seeds = con.execute(
+            "SELECT seeds_json FROM neg_risk_candidate_authority_checkpoints"
+        ).fetchone()
+    assert seeds is not None
+    assert active.group_id in str(seeds[0])
+
+
 def test_candidate_authority_checkpoint_and_suffix_tampering_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
