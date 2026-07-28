@@ -1,0 +1,72 @@
+"""Read-only operator status for bounded opportunity Discovery."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+import time
+from collections.abc import Sequence
+from decimal import Decimal
+from pathlib import Path
+
+from polyarb.perception.store import OpportunityPerceptionStore
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="perception-discovery-status")
+    parser.add_argument("--db-path", type=Path, required=True)
+    parser.add_argument("--now-ms", type=int)
+    return parser
+
+
+def _decimal(value: Decimal) -> str:
+    return format(value, "f")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    now_ms = args.now_ms if args.now_ms is not None else int(time.time() * 1_000)
+    try:
+        if now_ms < 0:
+            raise ValueError("invalid-now")
+        store = OpportunityPerceptionStore(args.db_path, read_only=True)
+        status = store.discovery_status(now_ms)
+    except (OSError, sqlite3.DatabaseError, ValueError) as error:
+        print(
+            f"invalid discovery state: {type(error).__name__}",
+            file=sys.stderr,
+        )
+        return 2
+
+    payload = {
+        "cursor": status.next_cursor,
+        "completed": status.completed,
+        "last_batch": {
+            "started_at_ms": status.last_started_at_ms,
+            "finished_at_ms": status.last_finished_at_ms,
+            "page_event_count": status.page_event_count,
+            "groups_seen": status.groups_seen,
+            "promoted_count": status.promoted_count,
+        },
+        "queue_depth_by_class": status.queue_depth_by_class,
+        "oldest_visit_age_ms": status.oldest_visit_age_ms,
+        "known_groups": status.coverage.known_groups,
+        "coverage": {
+            str(minutes): {
+                "visited_groups": window.visited_groups,
+                "raw_fraction": _decimal(window.raw_fraction),
+                "liquidity_weighted_fraction": _decimal(
+                    window.liquidity_weighted_fraction
+                ),
+            }
+            for minutes, window in status.coverage.by_minutes.items()
+        },
+    }
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

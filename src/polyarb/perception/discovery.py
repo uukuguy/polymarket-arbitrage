@@ -1,0 +1,372 @@
+"""One-page rolling Discovery with atomic certification and promotion."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from typing import Protocol
+
+from loguru import logger
+
+from polyarb.clients.gamma_client import EventPage
+from polyarb.perception.models import GroupLeg, GroupRevision
+from polyarb.perception.store import (
+    DiscoveryScheduleCandidate,
+    OpportunityPerceptionStore,
+)
+from polyarb.snapshot.normalizer import normalize_events, normalize_market
+
+
+class DiscoveryGamma(Protocol):
+    async def fetch_active_event_page(
+        self,
+        cursor: str | None,
+        limit: int,
+    ) -> EventPage: ...
+
+
+@dataclass(frozen=True)
+class CandidateFreshness:
+    candidate_count: int
+    quote_p95_age_ms: int | None
+
+
+@dataclass(frozen=True)
+class DiscoveryLoadController:
+    candidate_hard_stale_ms: int
+
+    def __post_init__(self) -> None:
+        if self.candidate_hard_stale_ms <= 0:
+            raise ValueError("discovery-stale-threshold-must-be-positive")
+
+    def yield_reason(self, freshness: CandidateFreshness) -> str | None:
+        if (
+            freshness.candidate_count > 0
+            and freshness.quote_p95_age_ms is not None
+            and freshness.quote_p95_age_ms >= self.candidate_hard_stale_ms
+        ):
+            return "candidate-quote-stale"
+        return None
+
+
+@dataclass(frozen=True)
+class DiscoveryBatchResult:
+    requested_cursor: str | None
+    next_cursor: str | None
+    completed: bool
+    page_event_count: int
+    groups_seen: int
+    promoted_group_ids: tuple[str, ...]
+    started_at_ms: int
+    finished_at_ms: int
+    yielded: bool = False
+    yield_reason: str | None = None
+
+
+class CandidateGroupIds(Protocol):
+    def __call__(self) -> Sequence[str]: ...
+
+
+def compose_candidate_group_ids(
+    legacy_source: CandidateGroupIds,
+    store: OpportunityPerceptionStore,
+) -> CandidateGroupIds:
+    """Keep every legacy seed and append durable Discovery promotions."""
+
+    def source() -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys((*legacy_source(), *store.promoted_group_ids()))
+        )
+
+    return source
+
+
+class DiscoveryWorker:
+    def __init__(
+        self,
+        *,
+        gamma: DiscoveryGamma,
+        store: OpportunityPerceptionStore,
+        page_limit: int = 100,
+        load_controller: DiscoveryLoadController | None = None,
+        candidate_freshness: Callable[[], CandidateFreshness] | None = None,
+        clock_ms: Callable[[], int] | None = None,
+    ) -> None:
+        if not 1 <= page_limit <= 100:
+            raise ValueError("discovery-page-limit-must-be-within-1..100")
+        if (load_controller is None) != (candidate_freshness is None):
+            raise ValueError("discovery-load-controller-inputs-must-be-paired")
+        self._gamma = gamma
+        self._store = store
+        self._page_limit = page_limit
+        self._load_controller = load_controller
+        self._candidate_freshness = candidate_freshness
+        self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
+
+    async def run_batch(self) -> DiscoveryBatchResult:
+        if self._load_controller is not None:
+            assert self._candidate_freshness is not None
+            freshness = await asyncio.to_thread(self._candidate_freshness)
+            reason = self._load_controller.yield_reason(freshness)
+            if reason is not None:
+                now_ms = self._clock_ms()
+                cursor = await asyncio.to_thread(self._store.discovery_cursor)
+                return DiscoveryBatchResult(
+                    requested_cursor=cursor,
+                    next_cursor=cursor,
+                    completed=False,
+                    page_event_count=0,
+                    groups_seen=0,
+                    promoted_group_ids=(),
+                    started_at_ms=now_ms,
+                    finished_at_ms=now_ms,
+                    yielded=True,
+                    yield_reason=reason,
+                )
+
+        requested_cursor = await asyncio.to_thread(self._store.discovery_cursor)
+        page = await self._gamma.fetch_active_event_page(
+            requested_cursor,
+            self._page_limit,
+        )
+        if page.requested_cursor != requested_cursor:
+            raise ValueError("discovery-page-cursor-mismatch")
+        candidates = await asyncio.to_thread(self._normalize_page, page)
+        promoted = await self._commit_batch(page, candidates)
+        return DiscoveryBatchResult(
+            requested_cursor=requested_cursor,
+            next_cursor=page.next_cursor,
+            completed=page.completed,
+            page_event_count=len(page.events),
+            groups_seen=len(candidates),
+            promoted_group_ids=promoted,
+            started_at_ms=page.started_at_ms,
+            finished_at_ms=page.finished_at_ms,
+        )
+
+    async def _commit_batch(
+        self,
+        page: EventPage,
+        candidates: tuple[DiscoveryScheduleCandidate, ...],
+    ) -> tuple[str, ...]:
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self._store.publish_discovery_batch,
+                requested_cursor=page.requested_cursor,
+                next_cursor=page.next_cursor,
+                completed=page.completed,
+                started_at_ms=page.started_at_ms,
+                finished_at_ms=page.finished_at_ms,
+                page_event_count=len(page.events),
+                candidates=candidates,
+            )
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as error:
+                if cancellation is None:
+                    cancellation = error
+                continue
+            except BaseException as error:
+                if cancellation is not None:
+                    raise cancellation from error
+                raise
+        if cancellation is not None:
+            raise cancellation
+        return result
+
+    @staticmethod
+    def _normalize_page(
+        page: EventPage,
+    ) -> tuple[DiscoveryScheduleCandidate, ...]:
+        raw_events = list(page.events)
+        event_rows, _, _, _, truths = normalize_events(raw_events)
+        rows_by_event = {str(row["id"]): row for row in event_rows}
+        raw_by_event = {str(event["id"]): event for event in raw_events}
+        activity_ranks = _rank_by_event(event_rows, "volume_usd")
+        liquidity_ranks = _rank_by_event(event_rows, "liquidity_usd")
+        candidates: list[DiscoveryScheduleCandidate] = []
+        seen_group_ids: set[str] = set()
+        for truth in truths:
+            if truth.group_id in seen_group_ids:
+                raise ValueError("duplicate-discovery-group")
+            seen_group_ids.add(truth.group_id)
+            row = rows_by_event[truth.event_id]
+            raw = raw_by_event[truth.event_id]
+            quality = truth.quality
+            reason = truth.reason
+            legs: tuple[GroupLeg, ...] | None = None
+            if quality == "complete-supported":
+                legs = _certified_legs(raw, truth.group_id)
+                if legs is None:
+                    quality = "incomplete-source"
+                    reason = "group-leg-identity-incomplete"
+            membership_hash = (
+                GroupRevision.membership_digest(legs)
+                if legs is not None
+                else truth.membership_hash
+            )
+            liquidity_weight = _decimal_or_zero(row.get("liquidity_usd"))
+            candidates.append(
+                DiscoveryScheduleCandidate(
+                    event_id=truth.event_id,
+                    group_id=truth.group_id,
+                    membership_hash=membership_hash,
+                    quality=quality,
+                    reason=reason,
+                    activity_rank=activity_ranks[truth.event_id],
+                    liquidity_rank=liquidity_ranks[truth.event_id],
+                    liquidity_weight=liquidity_weight,
+                    legs=legs,
+                )
+            )
+        candidates.sort(key=lambda item: item.group_id)
+        return tuple(candidates)
+
+
+def _certified_legs(raw_event: dict, group_id: str) -> tuple[GroupLeg, ...] | None:
+    markets = raw_event.get("markets")
+    event_id = raw_event.get("id")
+    if not isinstance(markets, list) or not isinstance(event_id, str):
+        return None
+    legs: list[GroupLeg] = []
+    for raw_market in markets:
+        if not isinstance(raw_market, dict):
+            return None
+        if (
+            raw_market.get("active") is not True
+            or raw_market.get("closed") is True
+            or raw_market.get("negRiskOther") is True
+        ):
+            continue
+        enriched = {
+            **raw_market,
+            "negRisk": True,
+            "negRiskMarketID": group_id,
+        }
+        normalized = normalize_market(
+            enriched,
+            {str(raw_market.get("id")): event_id},
+        )
+        if normalized is None:
+            return None
+        market_id = normalized.get("market_id")
+        condition_id = normalized.get("condition_id")
+        yes_token_id = normalized.get("yes_token_id")
+        title = raw_market.get("groupItemTitle") or normalized.get("question")
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (market_id, condition_id, yes_token_id, title)
+        ):
+            return None
+        legs.append(
+            GroupLeg(
+                market_id=market_id,
+                condition_id=condition_id,
+                yes_token_id=yes_token_id,
+                title=title,
+            )
+        )
+    if len(legs) < 2:
+        return None
+    return tuple(legs)
+
+
+def _decimal_or_zero(value: object) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+    return result if result.is_finite() and result >= 0 else Decimal("0")
+
+
+def _rank_by_event(rows: list[dict], field: str) -> dict[str, Decimal]:
+    values = {
+        str(row["id"]): _decimal_or_zero(row.get(field))
+        for row in rows
+    }
+    denominator = Decimal(max(1, len(values)))
+    return {
+        event_id: (
+            Decimal(sum(other <= value for other in values.values()))
+            / denominator
+            * Decimal("100")
+        )
+        for event_id, value in values.items()
+    }
+
+
+class DiscoveryRunner:
+    """Contain one bounded batch failure and preserve restartable cursor state."""
+
+    def __init__(
+        self,
+        *,
+        worker: DiscoveryWorker,
+        gamma: object,
+        interval_s: float,
+    ) -> None:
+        if interval_s <= 0:
+            raise ValueError("discovery-interval-must-be-positive")
+        self._worker = worker
+        self._gamma = gamma
+        self._interval_s = interval_s
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        try:
+            while not stop_event.is_set():
+                try:
+                    await self._worker.run_batch()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.warning(
+                        "discovery batch failed "
+                        f"kind={type(error).__name__}"
+                    )
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(),
+                        timeout=self._interval_s,
+                    )
+                except TimeoutError:
+                    pass
+        finally:
+            close = getattr(self._gamma, "aclose", None)
+            if close is not None:
+                await close()
+
+
+def build_production_discovery(
+    settings: object,
+    *,
+    candidate_freshness: Callable[[], CandidateFreshness],
+) -> DiscoveryRunner:
+    """Build the opt-in bounded producer without changing legacy paths."""
+    from polyarb.clients.gamma_client import GammaClient
+
+    gamma = GammaClient(settings)
+    store = OpportunityPerceptionStore(settings.db_path)
+    store.init_schema()
+    worker = DiscoveryWorker(
+        gamma=gamma,
+        store=store,
+        page_limit=settings.discovery_page_limit,
+        load_controller=DiscoveryLoadController(
+            candidate_hard_stale_ms=int(
+                settings.candidate_quote_hard_stale_s * 1_000
+            )
+        ),
+        candidate_freshness=candidate_freshness,
+    )
+    return DiscoveryRunner(
+        worker=worker,
+        gamma=gamma,
+        interval_s=settings.discovery_interval_s,
+    )

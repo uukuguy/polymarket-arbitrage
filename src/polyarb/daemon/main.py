@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 
 import uvicorn
 from loguru import logger
@@ -45,6 +46,13 @@ from polyarb.perception.candidate_watcher import (
     CandidateWatcherScheduler,
     build_production_candidate_watcher,
 )
+from polyarb.perception.discovery import (
+    CandidateFreshness,
+    DiscoveryRunner,
+    build_production_discovery,
+    compose_candidate_group_ids,
+)
+from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -73,6 +81,15 @@ def _start_candidate_watcher(
     return asyncio.create_task(watcher.run(stop_event))
 
 
+def _start_discovery(
+    discovery: DiscoveryRunner | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if discovery is None:
+        return None
+    return asyncio.create_task(discovery.run(stop_event))
+
+
 async def main() -> int:
     # MUST be first — sets up JSON stdout sink + InterceptHandler
     init_logging()
@@ -91,12 +108,39 @@ async def main() -> int:
 
     scheduler = SnapshotScheduler(settings=settings, sqlite_store=sqlite_store)
     focused_watcher = build_focused_opportunity_watcher(settings)
+    perception_store = OpportunityPerceptionStore(settings.db_path)
+    perception_store.init_schema()
+    candidate_group_ids = compose_candidate_group_ids(
+        focused_watcher.candidate_group_ids,
+        perception_store,
+    )
     candidate_watcher = (
         build_production_candidate_watcher(
             settings,
-            candidate_group_ids=focused_watcher.candidate_group_ids,
+            candidate_group_ids=candidate_group_ids,
         )
         if settings.opportunity_first_watcher_enabled
+        else None
+    )
+    discovery = (
+        build_production_discovery(
+            settings,
+            candidate_freshness=lambda: CandidateFreshness(
+                candidate_count=len(candidate_group_ids()),
+                quote_p95_age_ms=(
+                    None
+                    if candidate_watcher is None
+                    or candidate_watcher.runtime.snapshot().last_observed_at_ms
+                    is None
+                    else max(
+                        0,
+                        int(time.time() * 1_000)
+                        - candidate_watcher.runtime.snapshot().last_observed_at_ms,
+                    )
+                ),
+            ),
+        )
+        if settings.opportunity_discovery_enabled
         else None
     )
     quote_worker = build_production_quote_worker(
@@ -151,6 +195,7 @@ async def main() -> int:
     quote_worker_task = _start_quote_worker(quote_worker, stop_event)
     focused_watcher_task = _start_opportunity_watcher(focused_watcher, stop_event)
     candidate_watcher_task = _start_candidate_watcher(candidate_watcher, stop_event)
+    discovery_task = _start_discovery(discovery, stop_event)
 
     await stop_event.wait()
     logger.info("stop_event set, shutting down server")
@@ -164,6 +209,8 @@ async def main() -> int:
     focused_watcher_task.cancel()
     if candidate_watcher_task is not None:
         candidate_watcher_task.cancel()
+    if discovery_task is not None:
+        discovery_task.cancel()
     if quote_worker_task is not None:
         quote_worker_task.cancel()
 
@@ -181,6 +228,7 @@ async def main() -> int:
                     if candidate_watcher_task is not None
                     else []
                 ),
+                *([discovery_task] if discovery_task is not None else []),
                 return_exceptions=True,
             ),
             timeout=5.0,

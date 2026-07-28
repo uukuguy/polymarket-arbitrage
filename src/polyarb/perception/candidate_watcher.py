@@ -636,7 +636,24 @@ class CandidateWatcherScheduler:
                 group_id,
             )
             if fact is None:
-                due.append((0, 0, group_id))
+                schedule = await asyncio.to_thread(
+                    self._store.group_schedule,
+                    group_id,
+                )
+                if schedule is None:
+                    due.append((0, 0, group_id))
+                else:
+                    # Discovery persists Decimal score evidence.  Until the
+                    # first Candidate terminal fact exists, preserve that
+                    # ordering instead of falling back to lexical group ID.
+                    score_order = -int(schedule.priority_score * 1_000)
+                    due.append(
+                        (
+                            rank[schedule.priority_class],
+                            score_order,
+                            group_id,
+                        )
+                    )
             elif fact.next_due_at_ms <= now_ms:
                 due.append((rank[fact.priority_class], fact.next_due_at_ms, group_id))
         priority_by_rank: dict[int, CandidatePriority] = {

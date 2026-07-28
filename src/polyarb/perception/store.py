@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 from polyarb.perception.models import (
     CandidatePriority,
@@ -15,18 +18,91 @@ from polyarb.perception.models import (
     GroupQuoteLeg,
     GroupRevision,
 )
+from polyarb.perception.priority import GroupScheduleInput, priority_components
 from polyarb.storage.schemas import DDL
 
 _BUSY_TIMEOUT_MS = 5_000
 _GROUP_STATUSES = {"discovered", "certified", "stale", "invalidated", "closed"}
 
+DiscoveryQuality = Literal[
+    "complete-supported",
+    "complete-unsupported",
+    "incomplete-source",
+]
+
+
+@dataclass(frozen=True)
+class DiscoveryScheduleCandidate:
+    event_id: str
+    group_id: str
+    membership_hash: str
+    quality: DiscoveryQuality
+    reason: str | None
+    activity_rank: Decimal
+    liquidity_rank: Decimal
+    liquidity_weight: Decimal
+    legs: tuple[GroupLeg, ...] | None
+
+
+@dataclass(frozen=True)
+class GroupSchedule:
+    group_id: str
+    event_id: str
+    membership_hash: str
+    quality: DiscoveryQuality
+    reason: str | None
+    gross_edge_bps: Decimal
+    activity_rank: Decimal
+    liquidity_rank: Decimal
+    change_rank: Decimal
+    age_rank: Decimal
+    priority_score: Decimal
+    priority_reason: str
+    priority_class: CandidatePriority
+    liquidity_weight: Decimal
+    first_discovered_at_ms: int
+    last_discovered_at_ms: int
+    last_visited_at_ms: int | None
+    promoted_at_ms: int | None
+
+
+@dataclass(frozen=True)
+class CoverageWindow:
+    minutes: int
+    visited_groups: int
+    raw_fraction: Decimal
+    liquidity_weighted_fraction: Decimal
+
+
+@dataclass(frozen=True)
+class CoverageWindows:
+    known_groups: int
+    total_liquidity_weight: Decimal
+    by_minutes: dict[int, CoverageWindow]
+
+
+@dataclass(frozen=True)
+class DiscoveryStatus:
+    next_cursor: str | None
+    completed: bool
+    last_started_at_ms: int | None
+    last_finished_at_ms: int | None
+    page_event_count: int
+    groups_seen: int
+    promoted_count: int
+    queue_depth_by_class: dict[str, int]
+    oldest_visit_age_ms: int | None
+    coverage: CoverageWindows
+
 
 class OpportunityPerceptionStore:
     """Transactional opportunity-first perception read model."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, read_only: bool = False) -> None:
         self._db_path = Path(db_path)
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._read_only = read_only
+        if not read_only:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def init_schema(self) -> None:
         con = self._connect()
@@ -34,6 +110,428 @@ class OpportunityPerceptionStore:
             con.executescript(DDL)
         finally:
             con.close()
+
+    def discovery_cursor(self) -> str | None:
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT next_cursor,completed FROM neg_risk_discovery_state WHERE id=1"
+            ).fetchone()
+        finally:
+            con.close()
+        if row is None or bool(row["completed"]):
+            return None
+        return None if row["next_cursor"] is None else str(row["next_cursor"])
+
+    def publish_discovery_batch(
+        self,
+        *,
+        requested_cursor: str | None,
+        next_cursor: str | None,
+        completed: bool,
+        started_at_ms: int,
+        finished_at_ms: int,
+        page_event_count: int,
+        candidates: tuple[DiscoveryScheduleCandidate, ...],
+    ) -> tuple[str, ...]:
+        """Atomically certify, schedule, sample, promote, and advance a page."""
+        if started_at_ms > finished_at_ms:
+            raise ValueError("invalid-discovery-timestamp-order")
+        if completed != (next_cursor is None):
+            raise ValueError("invalid-discovery-completion-cursor")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            state = con.execute(
+                "SELECT next_cursor,completed FROM neg_risk_discovery_state WHERE id=1"
+            ).fetchone()
+            expected_cursor = (
+                None
+                if state is None or bool(state["completed"])
+                else state["next_cursor"]
+            )
+            if requested_cursor != expected_cursor:
+                raise ValueError("discovery-cursor-race")
+
+            promoted: list[tuple[Decimal, str]] = []
+            for candidate in candidates:
+                schedule = self._insert_discovery_schedule(
+                    con,
+                    candidate=candidate,
+                    source_cursor=requested_cursor,
+                    started_at_ms=started_at_ms,
+                    finished_at_ms=finished_at_ms,
+                )
+                con.execute(
+                    "INSERT INTO neg_risk_coverage_samples("
+                    "sampled_at_ms,group_id,source_cursor,liquidity_weight"
+                    ") VALUES (?,?,?,?)",
+                    (
+                        finished_at_ms,
+                        candidate.group_id,
+                        requested_cursor,
+                        str(candidate.liquidity_weight),
+                    ),
+                )
+                if schedule.promoted_at_ms is not None:
+                    promoted.append((schedule.priority_score, schedule.group_id))
+
+            promoted.sort(key=lambda item: (-item[0], item[1]))
+            con.execute(
+                "INSERT INTO neg_risk_discovery_state("
+                "id,next_cursor,completed,last_started_at_ms,last_finished_at_ms,"
+                "page_event_count,groups_seen,promoted_count"
+                ") VALUES (1,?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "next_cursor=excluded.next_cursor,completed=excluded.completed,"
+                "last_started_at_ms=excluded.last_started_at_ms,"
+                "last_finished_at_ms=excluded.last_finished_at_ms,"
+                "page_event_count=excluded.page_event_count,"
+                "groups_seen=excluded.groups_seen,"
+                "promoted_count=excluded.promoted_count",
+                (
+                    next_cursor,
+                    int(completed),
+                    started_at_ms,
+                    finished_at_ms,
+                    page_event_count,
+                    len(candidates),
+                    len(promoted),
+                ),
+            )
+            con.execute("COMMIT")
+            return tuple(group_id for _, group_id in promoted)
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def _insert_discovery_schedule(
+        self,
+        con: sqlite3.Connection,
+        *,
+        candidate: DiscoveryScheduleCandidate,
+        source_cursor: str | None,
+        started_at_ms: int,
+        finished_at_ms: int,
+    ) -> GroupSchedule:
+        prior = con.execute(
+            "SELECT * FROM neg_risk_group_schedule WHERE group_id=?",
+            (candidate.group_id,),
+        ).fetchone()
+        last_fact = con.execute(
+            "SELECT observed_at_ms,gross_edge_bps "
+            "FROM neg_risk_candidate_watch_facts WHERE group_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (candidate.group_id,),
+        ).fetchone()
+        first_discovered_at_ms = (
+            finished_at_ms
+            if prior is None
+            else int(prior["first_discovered_at_ms"])
+        )
+        last_visited_at_ms = (
+            int(last_fact["observed_at_ms"])
+            if last_fact is not None
+            else (
+                None if prior is None or prior["last_visited_at_ms"] is None
+                else int(prior["last_visited_at_ms"])
+            )
+        )
+        gross_edge_bps = (
+            Decimal("0")
+            if last_fact is None or last_fact["gross_edge_bps"] is None
+            else Decimal(str(last_fact["gross_edge_bps"]))
+        )
+        changed = prior is None or prior["membership_hash"] != candidate.membership_hash
+        components = priority_components(
+            GroupScheduleInput(
+                group_id=candidate.group_id,
+                gross_edge_bps=gross_edge_bps,
+                activity_rank=candidate.activity_rank,
+                liquidity_rank=candidate.liquidity_rank,
+                change_rank=Decimal("100") if changed else Decimal("0"),
+                last_visited_at_ms=last_visited_at_ms,
+                first_discovered_at_ms=first_discovered_at_ms,
+            ),
+            now_ms=finished_at_ms,
+        )
+        if changed:
+            priority_class: CandidatePriority = "high"
+        elif components.score >= Decimal("25"):
+            priority_class = "normal"
+        else:
+            priority_class = "explore"
+
+        can_promote = (
+            candidate.quality == "complete-supported"
+            and candidate.legs is not None
+        )
+        promoted_at_ms = (
+            finished_at_ms
+            if can_promote and (prior is None or prior["promoted_at_ms"] is None)
+            else (
+                int(prior["promoted_at_ms"])
+                if can_promote and prior is not None
+                else None
+            )
+        )
+        if can_promote:
+            self._certify_discovered_group(
+                con,
+                candidate=candidate,
+                source_cursor=source_cursor,
+                started_at_ms=started_at_ms,
+                finished_at_ms=finished_at_ms,
+            )
+
+        con.execute(
+            "INSERT INTO neg_risk_group_schedule("
+            "group_id,event_id,membership_hash,quality,reason,gross_edge_bps,"
+            "activity_rank,liquidity_rank,change_rank,age_rank,priority_score,"
+            "priority_reason,priority_class,liquidity_weight,"
+            "first_discovered_at_ms,last_discovered_at_ms,last_visited_at_ms,"
+            "promoted_at_ms"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(group_id) DO UPDATE SET "
+            "event_id=excluded.event_id,membership_hash=excluded.membership_hash,"
+            "quality=excluded.quality,reason=excluded.reason,"
+            "gross_edge_bps=excluded.gross_edge_bps,"
+            "activity_rank=excluded.activity_rank,"
+            "liquidity_rank=excluded.liquidity_rank,"
+            "change_rank=excluded.change_rank,age_rank=excluded.age_rank,"
+            "priority_score=excluded.priority_score,"
+            "priority_reason=excluded.priority_reason,"
+            "priority_class=excluded.priority_class,"
+            "liquidity_weight=excluded.liquidity_weight,"
+            "last_discovered_at_ms=excluded.last_discovered_at_ms,"
+            "last_visited_at_ms=excluded.last_visited_at_ms,"
+            "promoted_at_ms=excluded.promoted_at_ms",
+            (
+                candidate.group_id,
+                candidate.event_id,
+                candidate.membership_hash,
+                candidate.quality,
+                candidate.reason,
+                str(components.gross_edge_bps),
+                str(components.activity_rank),
+                str(components.liquidity_rank),
+                str(components.change_rank),
+                str(components.age_rank),
+                str(components.score),
+                components.reason,
+                priority_class,
+                str(candidate.liquidity_weight),
+                first_discovered_at_ms,
+                finished_at_ms,
+                last_visited_at_ms,
+                promoted_at_ms,
+            ),
+        )
+        return self._group_schedule_from_row(
+            con.execute(
+                "SELECT * FROM neg_risk_group_schedule WHERE group_id=?",
+                (candidate.group_id,),
+            ).fetchone()
+        )
+
+    def _certify_discovered_group(
+        self,
+        con: sqlite3.Connection,
+        *,
+        candidate: DiscoveryScheduleCandidate,
+        source_cursor: str | None,
+        started_at_ms: int,
+        finished_at_ms: int,
+    ) -> None:
+        assert candidate.legs is not None
+        current = self._current_group_row(con, candidate.group_id)
+        if (
+            current is not None
+            and current["status"] == "certified"
+            and current["membership_hash"] == candidate.membership_hash
+        ):
+            return
+        revision_number = 1 if current is None else int(current["revision"]) + 1
+        revision = GroupRevision.certified(
+            group_id=candidate.group_id,
+            event_id=candidate.event_id,
+            revision=revision_number,
+            started_at_ms=started_at_ms,
+            observed_at_ms=finished_at_ms,
+            source_cursor=source_cursor or "<start>",
+            legs=candidate.legs,
+        )
+        if revision.membership_hash != candidate.membership_hash:
+            raise ValueError("discovery-membership-hash-mismatch")
+        con.execute(
+            "INSERT INTO neg_risk_group_revisions("
+            "group_id,event_id,revision,membership_hash,started_at_ms,"
+            "observed_at_ms,source_cursor,status,legs_json"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                revision.group_id,
+                revision.event_id,
+                revision.revision,
+                revision.membership_hash,
+                revision.started_at_ms,
+                revision.observed_at_ms,
+                revision.source_cursor,
+                revision.status,
+                self._group_legs_json(revision.legs),
+            ),
+        )
+        if current is not None and current["membership_hash"] != revision.membership_hash:
+            con.execute(
+                "UPDATE neg_risk_group_quote_batches SET status='superseded' "
+                "WHERE group_id=? AND status='complete'",
+                (revision.group_id,),
+            )
+
+    def group_schedule(self, group_id: str) -> GroupSchedule | None:
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT * FROM neg_risk_group_schedule WHERE group_id=?",
+                (group_id,),
+            ).fetchone()
+        finally:
+            con.close()
+        return None if row is None else self._group_schedule_from_row(row)
+
+    def promoted_group_ids(self) -> tuple[str, ...]:
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT group_id FROM neg_risk_group_schedule "
+                "WHERE promoted_at_ms IS NOT NULL "
+                "ORDER BY CAST(priority_score AS REAL) DESC,group_id"
+            ).fetchall()
+        finally:
+            con.close()
+        return tuple(str(row["group_id"]) for row in rows)
+
+    def coverage_windows(self, now_ms: int) -> CoverageWindows:
+        con = self._connect()
+        try:
+            totals = con.execute(
+                "SELECT COUNT(*) AS groups_count,"
+                "COALESCE(SUM(CAST(liquidity_weight AS REAL)),0) AS total_weight "
+                "FROM neg_risk_group_schedule"
+            ).fetchone()
+            known_groups = int(totals["groups_count"])
+            total_weight = Decimal(str(totals["total_weight"]))
+            windows: dict[int, CoverageWindow] = {}
+            for minutes in (15, 30, 60):
+                row = con.execute(
+                    "WITH visited AS ("
+                    "SELECT DISTINCT group_id FROM neg_risk_coverage_samples "
+                    "WHERE sampled_at_ms>=? AND sampled_at_ms<=?"
+                    ") SELECT COUNT(*) AS visited_groups,"
+                    "COALESCE(SUM(CAST(s.liquidity_weight AS REAL)),0) AS visited_weight "
+                    "FROM neg_risk_group_schedule s JOIN visited v USING(group_id)",
+                    (now_ms - minutes * 60_000, now_ms),
+                ).fetchone()
+                visited_groups = int(row["visited_groups"])
+                visited_weight = Decimal(str(row["visited_weight"]))
+                windows[minutes] = CoverageWindow(
+                    minutes=minutes,
+                    visited_groups=visited_groups,
+                    raw_fraction=(
+                        Decimal(visited_groups) / Decimal(known_groups)
+                        if known_groups
+                        else Decimal("0")
+                    ),
+                    liquidity_weighted_fraction=(
+                        visited_weight / total_weight
+                        if total_weight > 0
+                        else Decimal("0")
+                    ),
+                )
+        finally:
+            con.close()
+        return CoverageWindows(
+            known_groups=known_groups,
+            total_liquidity_weight=total_weight,
+            by_minutes=windows,
+        )
+
+    def discovery_status(self, now_ms: int) -> DiscoveryStatus:
+        con = self._connect()
+        try:
+            state = con.execute(
+                "SELECT * FROM neg_risk_discovery_state WHERE id=1"
+            ).fetchone()
+            queue_rows = con.execute(
+                "SELECT priority_class,COUNT(*) AS depth "
+                "FROM neg_risk_group_schedule WHERE promoted_at_ms IS NOT NULL "
+                "GROUP BY priority_class"
+            ).fetchall()
+            oldest = con.execute(
+                "SELECT MIN(COALESCE(last_visited_at_ms,first_discovered_at_ms)) "
+                "AS oldest FROM neg_risk_group_schedule"
+            ).fetchone()
+        finally:
+            con.close()
+        queue = {"high": 0, "normal": 0, "explore": 0}
+        queue.update(
+            {str(row["priority_class"]): int(row["depth"]) for row in queue_rows}
+        )
+        oldest_age = (
+            None
+            if oldest is None or oldest["oldest"] is None
+            else max(0, now_ms - int(oldest["oldest"]))
+        )
+        return DiscoveryStatus(
+            next_cursor=(
+                None if state is None or state["next_cursor"] is None
+                else str(state["next_cursor"])
+            ),
+            completed=False if state is None else bool(state["completed"]),
+            last_started_at_ms=(
+                None if state is None else int(state["last_started_at_ms"])
+            ),
+            last_finished_at_ms=(
+                None if state is None else int(state["last_finished_at_ms"])
+            ),
+            page_event_count=0 if state is None else int(state["page_event_count"]),
+            groups_seen=0 if state is None else int(state["groups_seen"]),
+            promoted_count=0 if state is None else int(state["promoted_count"]),
+            queue_depth_by_class=queue,
+            oldest_visit_age_ms=oldest_age,
+            coverage=self.coverage_windows(now_ms),
+        )
+
+    @staticmethod
+    def _group_schedule_from_row(row: sqlite3.Row) -> GroupSchedule:
+        return GroupSchedule(
+            group_id=str(row["group_id"]),
+            event_id=str(row["event_id"]),
+            membership_hash=str(row["membership_hash"]),
+            quality=row["quality"],
+            reason=None if row["reason"] is None else str(row["reason"]),
+            gross_edge_bps=Decimal(str(row["gross_edge_bps"])),
+            activity_rank=Decimal(str(row["activity_rank"])),
+            liquidity_rank=Decimal(str(row["liquidity_rank"])),
+            change_rank=Decimal(str(row["change_rank"])),
+            age_rank=Decimal(str(row["age_rank"])),
+            priority_score=Decimal(str(row["priority_score"])),
+            priority_reason=str(row["priority_reason"]),
+            priority_class=row["priority_class"],
+            liquidity_weight=Decimal(str(row["liquidity_weight"])),
+            first_discovered_at_ms=int(row["first_discovered_at_ms"]),
+            last_discovered_at_ms=int(row["last_discovered_at_ms"]),
+            last_visited_at_ms=(
+                None if row["last_visited_at_ms"] is None
+                else int(row["last_visited_at_ms"])
+            ),
+            promoted_at_ms=(
+                None if row["promoted_at_ms"] is None
+                else int(row["promoted_at_ms"])
+            ),
+        )
 
     def publish_group_revision(self, revision: GroupRevision) -> GroupRevision:
         con = self._connect()
@@ -283,8 +781,14 @@ class OpportunityPerceptionStore:
         )
 
     def _connect(self) -> sqlite3.Connection:
+        target = (
+            f"file:{self._db_path.resolve()}?mode=ro"
+            if self._read_only
+            else str(self._db_path)
+        )
         con = sqlite3.connect(
-            self._db_path,
+            target,
+            uri=self._read_only,
             isolation_level=None,
             timeout=_BUSY_TIMEOUT_MS / 1_000,
         )

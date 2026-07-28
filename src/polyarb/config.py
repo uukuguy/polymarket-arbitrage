@@ -92,6 +92,13 @@ class Settings(BaseSettings):
     )
     candidate_high_clob_workers: int = Field(default=2, ge=1)
     candidate_lower_clob_workers: int = Field(default=1, ge=1)
+    # Slice C remains dark until production qualification. Each run fetches
+    # exactly one bounded Gamma event page and persists its opaque cursor.
+    opportunity_discovery_enabled: bool = False
+    discovery_page_limit: int = Field(default=100, ge=1, le=100)
+    discovery_interval_s: float = Field(
+        default=30.0, gt=0, allow_inf_nan=False
+    )
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 

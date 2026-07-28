@@ -255,6 +255,54 @@ CREATE TABLE IF NOT EXISTS neg_risk_candidate_watch_facts (
 CREATE INDEX IF NOT EXISTS idx_neg_risk_candidate_watch_due
   ON neg_risk_candidate_watch_facts(group_id, id DESC, next_due_at_ms);
 
+-- Bounded Discovery publishes its cursor and every fact derived from one
+-- Gamma page in one SQLite transaction.  The cursor is an opaque token.
+CREATE TABLE IF NOT EXISTS neg_risk_discovery_state (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  next_cursor TEXT,
+  completed INTEGER NOT NULL CHECK(completed IN (0,1)),
+  last_started_at_ms INTEGER NOT NULL,
+  last_finished_at_ms INTEGER NOT NULL,
+  page_event_count INTEGER NOT NULL CHECK(page_event_count >= 0),
+  groups_seen INTEGER NOT NULL CHECK(groups_seen >= 0),
+  promoted_count INTEGER NOT NULL CHECK(promoted_count >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_group_schedule (
+  group_id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL,
+  membership_hash TEXT NOT NULL,
+  quality TEXT NOT NULL CHECK(quality IN
+    ('complete-supported','complete-unsupported','incomplete-source')),
+  reason TEXT,
+  gross_edge_bps TEXT NOT NULL,
+  activity_rank TEXT NOT NULL,
+  liquidity_rank TEXT NOT NULL,
+  change_rank TEXT NOT NULL,
+  age_rank TEXT NOT NULL,
+  priority_score TEXT NOT NULL,
+  priority_reason TEXT NOT NULL,
+  priority_class TEXT NOT NULL CHECK(priority_class IN
+    ('high','normal','explore')),
+  liquidity_weight TEXT NOT NULL,
+  first_discovered_at_ms INTEGER NOT NULL,
+  last_discovered_at_ms INTEGER NOT NULL,
+  last_visited_at_ms INTEGER,
+  promoted_at_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_group_schedule_priority
+  ON neg_risk_group_schedule(promoted_at_ms, priority_class, group_id);
+
+CREATE TABLE IF NOT EXISTS neg_risk_coverage_samples (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sampled_at_ms INTEGER NOT NULL,
+  group_id TEXT NOT NULL,
+  source_cursor TEXT,
+  liquidity_weight TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_coverage_samples_window
+  ON neg_risk_coverage_samples(sampled_at_ms, group_id);
+
 -- Phase 1.1 T2: append-only translation cache.
 -- Invariants:
 --  * never DELETE FROM (cumulative across snapshots)

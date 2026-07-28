@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -54,6 +54,11 @@ watch-opportunities:
 watch-opportunity-history:
 	@test -n "$(opportunity_id)" || (echo "usage: make watch-opportunity-history opportunity_id=<id>" >&2; exit 2)
 	@curl --disable --request GET -fsS "https://polyarb-l1.fly.dev/arbitrage/opportunities/$(opportunity_id)/history" | python -m json.tool
+
+## perception-discovery-status: Read bounded local Discovery cursor/queue/15-30-60m coverage; usage db_path=/path/state.db.
+perception-discovery-status:
+	@test -n "$(db_path)" || (echo "usage: make perception-discovery-status db_path=/path/to/state.db" >&2; exit 2)
+	@uv run python -m polyarb.cli_discovery --db-path "$(db_path)"
 
 .PHONY: docs-m1-check
 

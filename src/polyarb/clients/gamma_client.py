@@ -67,6 +67,22 @@ class PaginationResult:
     final_cursor: str | None
 
 
+@dataclass(frozen=True)
+class EventPage:
+    """One bounded Gamma event page with its opaque durable continuation."""
+
+    events: tuple[dict, ...]
+    requested_cursor: str | None
+    next_cursor: str | None
+    completed: bool
+    started_at_ms: int
+    finished_at_ms: int
+
+    @property
+    def event_ids(self) -> tuple[str, ...]:
+        return tuple(str(event["id"]) for event in self.events)
+
+
 @dataclass
 class PaginationCoverage:
     source: str
@@ -437,6 +453,39 @@ class GammaClient:
                 ]
             yield raw
 
+    async def fetch_active_event_page(
+        self,
+        cursor: str | None,
+        limit: int,
+    ) -> EventPage:
+        """Fetch exactly one validated keyset page.
+
+        The continuation is an opaque upstream token.  This method never loops
+        and therefore cannot silently become a universe-sized operation.
+        """
+        if type(limit) is not int or not 1 <= limit <= self.PAGE_LIMIT:
+            raise PaginationIntegrityError(
+                f"/events/keyset page limit must be within 1..{self.PAGE_LIMIT}"
+            )
+        started_at_ms = int(time.time() * 1_000)
+        items, next_cursor, completed, finished_at_ms = await self._fetch_keyset_page(
+            path="/events/keyset",
+            array_key="events",
+            params={"active": "true", "closed": "false"},
+            keep_fields=self._EVENT_KEEP,
+            cursor=cursor,
+            limit=limit,
+        )
+        events = tuple(self._project_event(item) for item in items)
+        return EventPage(
+            events=events,
+            requested_cursor=cursor,
+            next_cursor=next_cursor,
+            completed=completed,
+            started_at_ms=started_at_ms,
+            finished_at_ms=finished_at_ms,
+        )
+
     async def fetch_all_active_events(self) -> list[dict]:
         """Backward-compat: collect ``iter_active_events`` into a list.
 
@@ -465,40 +514,97 @@ class GammaClient:
             f"Gamma: starting streaming fetch of {coverage.source} (page_limit={self.PAGE_LIMIT})"
         )
         while True:
-            request_params = {**params, "limit": str(self.PAGE_LIMIT)}
-            if cursor is not None:
-                request_params["after_cursor"] = cursor
-            payload = await self._get(path, request_params)
-            if not isinstance(payload, dict) or not isinstance(payload.get(array_key), list):
-                raise PaginationIntegrityError(f"{path} keyset response has invalid shape")
+            projected_items, next_cursor, completed, _ = await self._fetch_keyset_page(
+                path=path,
+                array_key=array_key,
+                params=params,
+                keep_fields=keep_fields,
+                cursor=cursor,
+                limit=self.PAGE_LIMIT,
+            )
             pages += 1
-            page_fetched_at_ms = int(time.time() * 1000)
-            for raw in payload[array_key]:
-                if not isinstance(raw, dict):
-                    continue
-                raw["_page_fetched_at_ms"] = page_fetched_at_ms
-                projected = {key: value for key, value in raw.items() if key in keep_fields}
-                if projected.get("active") is True and projected.get("closed") is not True:
-                    items += 1
-                    yield projected
+            for projected in projected_items:
+                items += 1
+                yield projected
             await asyncio.sleep(0)
             if pages == 1 or pages % progress_every == 0:
                 logger.info(
                     f"Gamma: {coverage.source} page {pages} fetched "
                     f"({items} {coverage.source} so far)"
                 )
-            next_cursor = payload.get("next_cursor")
-            if next_cursor in (None, ""):
+            if completed:
                 coverage.result = PaginationResult(items, pages, True, None)
                 logger.info(
                     f"Gamma streamed {items} active {coverage.source} in {pages} pages (final)"
                 )
                 return
-            if not isinstance(next_cursor, str) or next_cursor in seen:
+            if next_cursor in seen:
                 coverage.result = PaginationResult(items, pages, False, cursor)
                 raise PaginationIntegrityError(f"{path} repeated cursor")
+            assert next_cursor is not None
             seen.add(next_cursor)
             cursor = next_cursor
             if pages >= self.MAX_PAGES:
                 coverage.result = PaginationResult(items, pages, False, cursor)
                 raise PaginationIntegrityError(f"{path} exceeded {self.MAX_PAGES} pages")
+
+    async def _fetch_keyset_page(
+        self,
+        *,
+        path: str,
+        array_key: str,
+        params: dict[str, str],
+        keep_fields: frozenset[str],
+        cursor: str | None,
+        limit: int,
+    ) -> tuple[tuple[dict, ...], str | None, bool, int]:
+        """Shared shape/cursor validation for bounded and streaming callers."""
+        request_params = {**params, "limit": str(limit)}
+        if cursor is not None:
+            request_params["after_cursor"] = cursor
+        payload = await self._get(path, request_params)
+        if not isinstance(payload, dict) or not isinstance(payload.get(array_key), list):
+            raise PaginationIntegrityError(f"{path} keyset response has invalid shape")
+        page_fetched_at_ms = int(time.time() * 1_000)
+        projected_items: list[dict] = []
+        for raw in payload[array_key]:
+            if not isinstance(raw, dict):
+                continue
+            raw = {**raw, "_page_fetched_at_ms": page_fetched_at_ms}
+            projected = {
+                key: value for key, value in raw.items() if key in keep_fields
+            }
+            if projected.get("active") is True and projected.get("closed") is not True:
+                projected_items.append(projected)
+        next_cursor = payload.get("next_cursor")
+        if next_cursor in (None, ""):
+            return tuple(projected_items), None, True, page_fetched_at_ms
+        if not isinstance(next_cursor, str):
+            raise PaginationIntegrityError(f"{path} invalid cursor")
+        if next_cursor == cursor:
+            raise PaginationIntegrityError(f"{path} repeated cursor")
+        return tuple(projected_items), next_cursor, False, page_fetched_at_ms
+
+    @staticmethod
+    def _project_event(raw: dict) -> dict:
+        projected = dict(raw)
+        markets = projected.get("markets")
+        if isinstance(markets, list):
+            projected["markets"] = [
+                (
+                    {
+                        "id": market.get("id"),
+                        "conditionId": market.get("conditionId"),
+                        "clobTokenIds": market.get("clobTokenIds"),
+                        "question": market.get("question"),
+                        "active": market.get("active"),
+                        "closed": market.get("closed"),
+                        "negRiskOther": market.get("negRiskOther"),
+                        "groupItemTitle": market.get("groupItemTitle"),
+                    }
+                    if isinstance(market, dict)
+                    else market
+                )
+                for market in markets
+            ]
+        return projected
