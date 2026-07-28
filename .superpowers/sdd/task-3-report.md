@@ -5,95 +5,106 @@ Status: DONE
 ## Scope
 
 Task 3 only: bounded Discovery, durable group identity, certified scheduling,
-capacity-proven Candidate admission, priority/freshness/load control, rolling
-coverage, validated read-only status, and default-off daemon wiring. No Task 4,
-deployment, production enablement, public Dashboard/API, or trading.
+capacity-proven Candidate admission, actual-candidate freshness, bounded bulk
+selection, durable start/deadline evidence, complete receipt-chain validation,
+and default-off wiring. No Task 4, deployment, public Dashboard/API, process
+isolation, or trading.
 
 ## Commit Chain
 
-- `046cef1` — initial bounded Discovery implementation.
-- `83515f9` — first authority/freshness/status hardening.
-- `436c389` — second continuity/receipt/load-control hardening.
-- Current commit — third re-review remediation described below.
+- `046cef1` — initial bounded Discovery.
+- `83515f9` — authority/freshness/status hardening.
+- `436c389` — continuity/receipt/load-control hardening.
+- `bcc30db` — first-sight identity and capacity admission.
+- Current commit — final re-review remediation below.
 
-## Third Re-review RED → GREEN
+## Final Re-review RED → GREEN
 
-### 1. Identity binds at first sight
+### 1. Actual Candidate authority
 
-The durable schedule is now the first `group_id → event_id` identity anchor,
-including incomplete or unsupported source truth that has no certified
-revision. A later complete observation under another event rejects the whole
-page before any cursor, schedule, coverage, or revision becomes durable.
-Recovery under the original event certifies normally.
+The durable Candidate set is now every current certified group that either has
+a Candidate fact or is capacity-admitted. A watched group is not dropped merely
+because its Discovery schedule is unpromoted. Never-watched excess queue rows
+remain excluded, and an unavailable fact cannot refresh matching Quote age.
+The composed source uses this same authority, so freshness and execution cannot
+disagree.
 
-### 2. Promotion carries a real ≤60-second service proof
+### 2. Complete ≤60-second start proof
 
-`discovery_candidate_max_wait_s` defaults to 60 and cannot exceed 60. Settings
-derive the effective outstanding factless capacity from:
+Settings derive factless admission capacity from conservative ceil-ms budgets:
 
 ```text
 poll
-+ high_burst_groups * group_timeout
-+ (capacity - 1) * group_timeout
-<= candidate_max_wait
++ bounded source/bulk selection
++ attempt-start SQLite busy/write
++ (high_burst + capacity - 1)
+   * (group_timeout + timeout-terminal-write budget)
+<= 60 seconds
 ```
 
-The capacity also cannot exceed Task 2's reserved lower-lane slots. With
-production defaults, the effective capacity is one.
+The default proof is capacity 1 with a 47-second worst-case start bound. Source
+enumeration and the single bulk facts/schedules read run on a dedicated
+one-thread executor with a six-second controller budget and a 500-ID hard cap.
+No per-group SQLite reads remain in selection.
 
-Complete-supported groups are certified immediately but enter a durable
-promotion queue with eligibility and queue-deadline evidence. Only the
-capacity-proven set receives admitted/promoted and Candidate-start deadline
-timestamps. The scheduler runs a genuine high burst first and then admitted
-promotions from reserved lower capacity; promotions are never relabelled
-global high. Excess groups remain certified and unpromoted, ordered by queue
-deadline, score, then group ID across restart.
+Immediately before an admitted watcher call, one `BEGIN IMMEDIATE` transaction
+records an immutable attempt-start timestamp against the persisted deadline.
+A delayed/restarted scheduler does not call the watcher: it records
+`candidate-start-deadline-breached` as an unavailable Candidate fact, frees the
+factless slot, atomically admits the next queue row, and leaves status non-ready.
+The normal path proves start receipt ≤ deadline. Existing cancellation-safe
+terminal writes remain intact.
 
-A Candidate terminal fact and admission of the next queued group share one
-`BEGIN IMMEDIATE` transaction. Queued-unpromoted groups are excluded from the
-Candidate freshness p95/missing set, while admitted Discovery groups and
-non-Discovery Candidate authority remain included.
+The mathematical boundary covers source selection, SQLite busy/write, group
+timeout, and timeout-terminal-write budgets. Killing a stuck process or sync SDK
+thread is explicitly deferred to Task 5 process isolation.
 
-### 3. Status proves load phase and the whole cursor chain
+### 3. Complete historical receipt proof
 
-Every durable load-control row now stores its configured probe modulus. Status
-accepts `probe` exactly when `streak % modulus == 0`, requires `yield`
-otherwise, and proves fresh reset semantics.
+Status reads one SQLite snapshot and requires the first receipt to be sweep 1,
+sequence 1. Every historical receipt must have nonnegative ordered timestamps,
+`promoted_count <= groups_seen <= page_event_count`, exact sample and promotion
+counts, valid cursor continuity, and exact sweep/sequence transitions. Orphan
+samples, corrupt old receipts, and a forged first sweep fail safely with CLI
+exit 2 and no path/traceback leakage.
 
-Every immutable batch receipt stores sweep ID and within-sweep sequence. One
-read transaction validates every historical transition:
+Attempt-start receipts are also checked so `deadline_breached` is true exactly
+when `started_at > persisted_deadline`.
 
-- a nonterminal batch's `next_cursor` equals the next receipt's
-  `requested_cursor`;
-- a terminal `None` starts the next sweep with explicit `requested_cursor=None`;
-- sweep and sequence numbers advance exactly;
-- latest state still matches the latest receipt and per-group samples.
+### 4. Policy-free migration, explicit active configuration
 
-The same snapshot validates admission proof arithmetic, admitted factless
-count, persisted eligibility/queue/admitted/start deadlines, current certified
-event/membership authority, recomputed priority evidence, and coverage bounds.
-CLI failures remain bounded exit 2 without traceback or database-path leakage.
+Generic `init_schema()` now performs only additive/idempotent column/table work
+and historical receipt sequence derivation. It does not seed capacity, fill
+policy deadlines, or demote rows.
+
+Active Discovery/Candidate wiring explicitly calls
+`configure_discovery_admission(proof)`. That transaction persists the real
+Settings proof, fills queue/deadline evidence, retains every fact-backed
+Candidate, deterministically keeps the top configured factless promotions,
+demotes only excess factless legacy rows, and admits queue capacity. Repeated
+configuration is idempotent. Timing-policy changes are rejected while factless
+work is outstanding; capacity-only changes reconcile safely.
 
 ## TDD Evidence
 
-Observed RED failures included:
+Observed RED:
 
-- incomplete `e1/g1` followed by complete `e2/g1` committed instead of failing;
-- no persisted probe modulus or receipt sweep/sequence columns;
-- no admission-capacity API, so every supported group promoted immediately;
-- queued certified groups polluted durable freshness;
-- status did not reject a wrong-streak probe or broken historical cursor link.
+- watched current-certified/unpromoted group absent from source and freshness;
+- 200 IDs caused sequential per-group reads and a slow source had no bound;
+- late restart called the watcher without durable deadline evidence;
+- old receipt count/time corruption passed status;
+- generic schema initialization seeded capacity 1 and demoted before Settings.
 
-Focused GREEN:
+Focused final-review suite:
 
 ```text
-64 passed
+105 passed
 ```
 
-Task 3 + Task 1/2 + Gamma/routing/daemon proportional GREEN:
+Task 3 + Task 1/2 + Gamma/routing/daemon proportional suite:
 
 ```text
-276 passed
+289 passed
 ```
 
 Additional gates:
@@ -102,15 +113,11 @@ Additional gates:
 - `git diff --check`: pass;
 - `make docs-m1-check`: pass;
 - `make planning-status`: no drift;
-- valid `make perception-discovery-status db_path=...`: exit 0.
+- active configured `make perception-discovery-status` fixture: exit 0.
 
-## Compatibility and Boundaries
+## Remaining Boundaries
 
-`init_schema()` performs idempotent migration for the new schedule, receipt,
-and load columns; derives sweep/sequence for historical receipts; seeds the
-conservative one-slot/60-second proof; fills legacy deadline evidence; and
-demotes excess legacy factless promotions deterministically.
-
-Rolling coverage and degraded probing remain statistical, not zero-miss
-claims. The feature remains default-off and undeployed. M1 remains
-observer-only: no wallet, signing, balances, order submission, or funds.
+Default effective capacity is intentionally conservative at one. Deadline
+breach readiness is local Task 3 evidence for a later health/acceptance gate;
+this task does not add Task 4 incidents or Task 5 process isolation. Feature
+flags remain off and nothing is deployed. M1 remains observer-only.

@@ -5,6 +5,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+import pytest
+
 from polyarb.cli_discovery import main
 from polyarb.perception.store import OpportunityPerceptionStore
 
@@ -26,11 +28,12 @@ def test_status_is_read_only_and_low_coverage_is_success(
         "normal": 0,
     }
     assert payload["load_control"]["probe_every_cycles"] == 10
-    assert payload["admission_control"]["effective_capacity"] == 1
-    assert payload["admission_control"]["candidate_max_wait_ms"] == 60_000
-    assert payload["admission_control"]["effective_start_bound_ms"] == 31_000
-    assert payload["admission_control"]["promotion_queue_depth"] == 0
-    assert payload["admission_control"]["outstanding_admitted_count"] == 0
+    assert payload["admission_control"] is None
+    assert payload["candidate_start_control"] == {
+        "attempt_start_count": 0,
+        "deadline_breach_count": 0,
+        "ready": True,
+    }
 
 
 def test_status_rejects_missing_or_invalid_state_without_creating_db(
@@ -159,6 +162,49 @@ def test_status_rejects_broken_historical_cursor_receipt_chain(
             "page_event_count,groups_seen,promoted_count"
             ") VALUES (1,'c-3',0,30,40,0,0,0)"
         )
+
+    assert main(["--db-path", str(db_path)]) == 2
+    captured = capsys.readouterr()
+    assert str(db_path) not in captured.err
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "first_receipt_update",
+    [
+        "UPDATE neg_risk_discovery_batches SET sweep_id=7 WHERE id=1",
+        "UPDATE neg_risk_discovery_batches SET groups_seen=1 WHERE id=1",
+        "UPDATE neg_risk_discovery_batches SET promoted_count=1 WHERE id=1",
+        "UPDATE neg_risk_discovery_batches SET started_at_ms=-1 WHERE id=1",
+    ],
+)
+def test_status_rejects_corrupt_non_latest_receipt_and_first_sweep(
+    tmp_path: Path,
+    capsys,
+    first_receipt_update: str,
+) -> None:
+    db_path = tmp_path / "state.db"
+    OpportunityPerceptionStore(db_path).init_schema()
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO neg_risk_discovery_batches("
+            "sweep_id,batch_sequence,requested_cursor,next_cursor,completed,"
+            "started_at_ms,finished_at_ms,page_event_count,groups_seen,promoted_count"
+            ") VALUES (1,1,'c-1','c-2',0,10,20,0,0,0)"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_discovery_batches("
+            "sweep_id,batch_sequence,requested_cursor,next_cursor,completed,"
+            "started_at_ms,finished_at_ms,page_event_count,groups_seen,promoted_count"
+            ") VALUES (1,2,'c-2','c-3',0,30,40,0,0,0)"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_discovery_state("
+            "id,next_cursor,completed,last_started_at_ms,last_finished_at_ms,"
+            "page_event_count,groups_seen,promoted_count"
+            ") VALUES (1,'c-3',0,30,40,0,0,0)"
+        )
+        con.execute(first_receipt_update)
 
     assert main(["--db-path", str(db_path)]) == 2
     captured = capsys.readouterr()

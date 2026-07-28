@@ -26,7 +26,10 @@ from polyarb.perception.group_structure import (
     GroupStructureUnavailableError,
 )
 from polyarb.perception.models import GroupQuoteBatch, GroupQuoteLeg
-from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.store import (
+    DiscoveryAdmissionProof,
+    OpportunityPerceptionStore,
+)
 
 
 def _event(
@@ -721,6 +724,66 @@ async def test_queued_unpromoted_groups_do_not_degrade_admitted_freshness(
 
 
 @pytest.mark.asyncio
+async def test_watched_certified_group_remains_actual_candidate_when_unpromoted(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(
+                _event(event_id="e-1", group_id="g-admitted", liquidity="300"),
+                _event(event_id="e-2", group_id="g-watched", liquidity="100"),
+            )
+        ),
+        store=store,
+        promotion_admission_capacity=1,
+    ).run_batch()
+    watched = store.current_group("g-watched")
+    _publish_quote(store, "g-watched", quoted_at_ms=10_100)
+    store.record_candidate_watch_fact(
+        group_id="g-watched",
+        membership_hash=watched.membership_hash,
+        quote_batch_id="qb-g-watched-10100",
+        observed_at_ms=10_100,
+        last_result="no-edge",
+        reason=None,
+        bundle_cost=1.0,
+        gross_edge_bps=0.0,
+        max_bundle_size=1.0,
+        priority_class="normal",
+        consecutive_failures=0,
+        effective_interval_s=60,
+        schedule_reason="normal-cadence",
+        next_due_at_ms=70_100,
+    )
+
+    source = compose_candidate_group_ids(lambda: (), store)
+    before = store.candidate_freshness_snapshot(now_ms=20_000)
+    store.record_candidate_watch_fact(
+        group_id="g-watched",
+        membership_hash=watched.membership_hash,
+        quote_batch_id=None,
+        observed_at_ms=20_001,
+        last_result="unavailable",
+        reason="fixture-unavailable",
+        bundle_cost=None,
+        gross_edge_bps=None,
+        max_bundle_size=None,
+        priority_class="normal",
+        consecutive_failures=1,
+        effective_interval_s=60,
+        schedule_reason="bounded-failure-backoff",
+        next_due_at_ms=80_001,
+    )
+    after = store.candidate_freshness_snapshot(now_ms=20_000)
+
+    assert source() == ("g-admitted", "g-watched")
+    assert before.candidate_count == 2
+    assert before.missing_quote_count == 1
+    assert after.quote_p95_age_ms == before.quote_p95_age_ms
+
+
+@pytest.mark.asyncio
 async def test_degraded_duty_cycle_persists_probe_phase_across_restart(
     tmp_path: Path,
 ) -> None:
@@ -853,7 +916,6 @@ async def test_promotion_admission_is_capacity_bounded_and_backfills_after_fact(
     admitted = store.group_schedule("g-high")
     assert admitted.promoted_at_ms == 10_000
     assert admitted.candidate_start_deadline_at_ms == 70_000
-
     calls: list[tuple[str, int]] = []
     now = 10_001
 
@@ -864,14 +926,16 @@ async def test_promotion_admission_is_capacity_bounded_and_backfills_after_fact(
     scheduler = CandidateWatcherScheduler(
         watcher=Watcher(),
         store=store,
-        candidate_group_ids=lambda: ("hot-existing", *store.promoted_group_ids()),
+        candidate_group_ids=lambda: (
+            "hot-existing",
+            *store.actual_candidate_group_ids(),
+        ),
         runtime=CandidateWatcherRuntime(),
         clock_ms=lambda: now,
         cycle_max_groups=3,
         reserved_non_high_slots=1,
         discovery_candidate_max_wait_s=60,
     )
-
     await scheduler.run_due_once()
 
     assert calls == [("hot-existing", now), ("g-high", now)]
@@ -904,6 +968,82 @@ async def test_promotion_admission_is_capacity_bounded_and_backfills_after_fact(
 
 
 @pytest.mark.asyncio
+async def test_admitted_attempt_start_is_durable_and_within_deadline(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+    ).run_batch()
+    calls: list[str] = []
+
+    class Watcher:
+        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
+            calls.append(group_id)
+
+    scheduler = CandidateWatcherScheduler(
+        watcher=Watcher(),
+        store=store,
+        candidate_group_ids=lambda: store.actual_candidate_group_ids(),
+        runtime=CandidateWatcherRuntime(),
+        clock_ms=lambda: 20_000,
+    )
+
+    await scheduler.run_due_once()
+
+    status = store.discovery_status(now_ms=20_001)
+    assert calls == ["g-1"]
+    assert status.candidate_attempt_start_count == 1
+    assert status.candidate_start_deadline_breach_count == 0
+    assert status.candidate_start_ready is True
+
+
+@pytest.mark.asyncio
+async def test_restart_after_candidate_start_deadline_records_breach_not_call(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+    ).run_batch()
+    calls: list[str] = []
+
+    class Watcher:
+        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
+            calls.append(group_id)
+
+    restarted = CandidateWatcherScheduler(
+        watcher=Watcher(),
+        store=OpportunityPerceptionStore(tmp_path / "state.db"),
+        candidate_group_ids=lambda: ("g-1",),
+        runtime=CandidateWatcherRuntime(),
+        clock_ms=lambda: 70_001,
+    )
+
+    await restarted.run_due_once()
+
+    fact = store.latest_candidate_watch_fact("g-1")
+    status = store.discovery_status(now_ms=70_002)
+    assert calls == []
+    assert fact.last_result == "unavailable"
+    assert fact.reason == "candidate-start-deadline-breached"
+    assert status.candidate_start_deadline_breach_count == 1
+    assert status.candidate_start_ready is False
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute(
+            "UPDATE neg_risk_candidate_attempt_starts "
+            "SET deadline_breached=0"
+        )
+    assert discovery_status_main(
+        ["--db-path", str(tmp_path / "state.db")]
+    ) == 2
+    assert "Traceback" not in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
 async def test_discovery_never_promotes_without_capacity_proof(
     tmp_path: Path,
 ) -> None:
@@ -920,6 +1060,49 @@ async def test_discovery_never_promotes_without_capacity_proof(
     assert store.current_group("g-1").status == "certified"
     assert store.group_schedule("g-1").promoted_at_ms is None
     assert store.promoted_group_ids() == ()
+
+
+@pytest.mark.asyncio
+async def test_generic_init_preserves_legacy_promotions_until_explicit_config(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(
+                _event(event_id="e-1", group_id="g-low", liquidity="100"),
+                _event(event_id="e-2", group_id="g-mid", liquidity="200"),
+                _event(event_id="e-3", group_id="g-high", liquidity="300"),
+            )
+        ),
+        store=store,
+        promotion_admission_capacity=3,
+        candidate_group_timeout_s=10,
+    ).run_batch()
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute("DELETE FROM neg_risk_discovery_admission_state")
+
+    OpportunityPerceptionStore(tmp_path / "state.db").init_schema()
+
+    assert store.promoted_group_ids() == ("g-high", "g-mid", "g-low")
+    assert store.discovery_admission_proof() is None
+
+    proof = DiscoveryAdmissionProof(
+        effective_capacity=2,
+        candidate_max_wait_ms=60_000,
+        selection_budget_ms=6_000,
+        poll_interval_ms=1_000,
+        group_timeout_ms=10_000,
+        terminal_write_budget_ms=5_000,
+        high_burst_groups=1,
+        reserved_non_high_slots=3,
+    )
+    store.configure_discovery_admission(proof, now_ms=20_000)
+    store.configure_discovery_admission(proof, now_ms=20_000)
+
+    assert store.promoted_group_ids() == ("g-high", "g-mid")
+    assert store.group_schedule("g-low").promoted_at_ms is None
+    assert store.discovery_admission_proof() == proof
 
 
 @pytest.mark.asyncio
@@ -987,7 +1170,7 @@ async def test_unadmitted_factless_group_never_bypasses_capacity(
             store=OpportunityPerceptionStore(tmp_path / "state.db"),
             candidate_group_ids=lambda: ("z-new", "a-old"),
             runtime=CandidateWatcherRuntime(),
-            clock_ms=lambda: 1_000_000,
+            clock_ms=lambda: 20_000,
             cycle_max_groups=2,
             reserved_non_high_slots=1,
             discovery_candidate_max_wait_s=60,

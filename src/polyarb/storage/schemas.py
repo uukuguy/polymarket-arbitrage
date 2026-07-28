@@ -343,13 +343,27 @@ CREATE TABLE IF NOT EXISTS neg_risk_discovery_admission_state (
   effective_capacity INTEGER NOT NULL CHECK(effective_capacity >= 0),
   candidate_max_wait_ms INTEGER NOT NULL CHECK(
     candidate_max_wait_ms > 0 AND candidate_max_wait_ms <= 60000),
+  selection_budget_ms INTEGER NOT NULL CHECK(selection_budget_ms > 0),
   poll_interval_ms INTEGER NOT NULL CHECK(poll_interval_ms > 0),
   group_timeout_ms INTEGER NOT NULL CHECK(group_timeout_ms > 0),
+  terminal_write_budget_ms INTEGER NOT NULL CHECK(
+    terminal_write_budget_ms >= 5000),
   high_burst_groups INTEGER NOT NULL CHECK(high_burst_groups > 0),
   reserved_non_high_slots INTEGER NOT NULL CHECK(reserved_non_high_slots > 0),
   effective_start_bound_ms INTEGER,
   updated_at_ms INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS neg_risk_candidate_attempt_starts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id TEXT NOT NULL,
+  started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+  candidate_start_deadline_at_ms INTEGER NOT NULL CHECK(
+    candidate_start_deadline_at_ms >= 0),
+  deadline_breached INTEGER NOT NULL CHECK(deadline_breached IN (0,1))
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_candidate_attempt_start_group
+  ON neg_risk_candidate_attempt_starts(group_id,id);
 
 -- Phase 1.1 T2: append-only translation cache.
 -- Invariants:

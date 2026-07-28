@@ -21,7 +21,11 @@ from polyarb.perception.models import (
     GroupQuoteBatch,
     GroupRevision,
 )
-from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.store import (
+    CandidateSchedulingSnapshotItem,
+    DiscoveryAdmissionProof,
+    OpportunityPerceptionStore,
+)
 from polyarb.routing.focused_quote_collector import (
     BooksReader,
     QuoteCollectionIntegrityError,
@@ -585,6 +589,9 @@ class CandidateWatcherScheduler:
         high_burst_groups: int = 1,
         lower_lane_max_wait_s: float = 120.0,
         discovery_candidate_max_wait_s: float = 60.0,
+        selection_budget_s: float = 6.0,
+        source_max_groups: int = 500,
+        terminal_write_budget_s: float = 5.0,
         close_callbacks: Sequence[Callable[[], None]] = (),
     ) -> None:
         self._watcher = watcher
@@ -600,6 +607,17 @@ class CandidateWatcherScheduler:
         self._high_burst_groups = high_burst_groups
         self._lower_lane_max_wait_s = lower_lane_max_wait_s
         self._discovery_candidate_max_wait_s = discovery_candidate_max_wait_s
+        self._selection_budget_s = selection_budget_s
+        self._source_max_groups = source_max_groups
+        self._terminal_write_budget_s = terminal_write_budget_s
+        self._selection_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="candidate-selection",
+        )
+        self._control_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="candidate-control-write",
+        )
         self._reserved_lane_cursor = 0
         self._close_callbacks = tuple(close_callbacks)
         self._closed = False
@@ -623,7 +641,14 @@ class CandidateWatcherScheduler:
             or not math.isfinite(discovery_candidate_max_wait_s)
             or discovery_candidate_max_wait_s <= 0
             or discovery_candidate_max_wait_s > 60
+            or not math.isfinite(selection_budget_s)
+            or selection_budget_s <= 0
+            or source_max_groups <= 0
+            or not math.isfinite(terminal_write_budget_s)
+            or terminal_write_budget_s < 5
         ):
+            self._selection_executor.shutdown(wait=False, cancel_futures=True)
+            self._control_executor.shutdown(wait=False, cancel_futures=True)
             raise ValueError("invalid-candidate-scheduler-controller-input")
 
     @property
@@ -631,21 +656,23 @@ class CandidateWatcherScheduler:
         return self._runtime
 
     async def run_due_once(self) -> None:
-        group_ids = tuple(await asyncio.to_thread(self._candidate_group_ids))
+        loop = asyncio.get_running_loop()
+        selection = await asyncio.wait_for(
+            loop.run_in_executor(
+                self._selection_executor,
+                self._load_selection_snapshot,
+            ),
+            timeout=self._selection_budget_s,
+        )
         now_ms = self._clock_ms()
         due: list[tuple[int, int, str]] = []
         admitted_group_ids: set[str] = set()
         rank = {"high": 0, "normal": 1, "explore": 2}
-        for group_id in group_ids:
-            fact = await asyncio.to_thread(
-                self._store.latest_candidate_watch_fact,
-                group_id,
-            )
+        for item in selection:
+            group_id = item.group_id
+            fact = item.fact
             if fact is None:
-                schedule = await asyncio.to_thread(
-                    self._store.group_schedule,
-                    group_id,
-                )
+                schedule = item.schedule
                 if schedule is None:
                     due.append((0, 0, group_id))
                 else:
@@ -680,6 +707,21 @@ class CandidateWatcherScheduler:
             due,
             admitted_group_ids=admitted_group_ids,
         ):
+            if group_id in admitted_group_ids:
+                allowed = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        self._control_executor,
+                        lambda selected_group_id=group_id: (
+                            self._store.record_candidate_attempt_start(
+                                group_id=selected_group_id,
+                                clock_ms=self._clock_ms,
+                            )
+                        ),
+                    ),
+                    timeout=self._terminal_write_budget_s,
+                )
+                if not allowed:
+                    continue
             before_count = self._runtime.snapshot().attempt_count
             try:
                 await asyncio.wait_for(
@@ -694,7 +736,10 @@ class CandidateWatcherScheduler:
             except TimeoutError as error:
                 self._runtime.record_group_failure(group_id, error)
                 if self._runtime.snapshot().attempt_count == before_count:
-                    await self._watcher.record_timeout(group_id)
+                    await asyncio.wait_for(
+                        self._watcher.record_timeout(group_id),
+                        timeout=self._terminal_write_budget_s,
+                    )
                 logger.warning(f"candidate group timed out group_id={group_id}")
             except Exception as error:
                 self._runtime.record_group_failure(group_id, error)
@@ -704,6 +749,14 @@ class CandidateWatcherScheduler:
                 )
             else:
                 self._runtime.record_group_success(group_id)
+
+    def _load_selection_snapshot(
+        self,
+    ) -> tuple[CandidateSchedulingSnapshotItem, ...]:
+        group_ids = tuple(dict.fromkeys(self._candidate_group_ids()))
+        if len(group_ids) > self._source_max_groups:
+            raise ValueError("candidate-source-exceeds-bounded-snapshot")
+        return self._store.candidate_scheduling_snapshot(group_ids)
 
     def _select_cycle(
         self,
@@ -785,6 +838,8 @@ class CandidateWatcherScheduler:
         if self._closed:
             return
         self._closed = True
+        self._selection_executor.shutdown(wait=False, cancel_futures=True)
+        self._control_executor.shutdown(wait=False, cancel_futures=True)
         for callback in self._close_callbacks:
             try:
                 callback()
@@ -810,6 +865,33 @@ def build_production_candidate_watcher(
 
     store = OpportunityPerceptionStore(settings.db_path)
     store.init_schema()
+    store.configure_discovery_admission(
+        DiscoveryAdmissionProof(
+            effective_capacity=(
+                settings.discovery_effective_admission_capacity
+            ),
+            candidate_max_wait_ms=int(
+                settings.discovery_candidate_max_wait_s * 1_000
+            ),
+            selection_budget_ms=math.ceil(
+                settings.candidate_selection_budget_s * 1_000
+            ),
+            poll_interval_ms=math.ceil(
+                settings.candidate_scheduler_poll_s * 1_000
+            ),
+            group_timeout_ms=math.ceil(
+                settings.candidate_group_timeout_s * 1_000
+            ),
+            terminal_write_budget_ms=math.ceil(
+                settings.candidate_terminal_write_budget_s * 1_000
+            ),
+            high_burst_groups=settings.candidate_high_burst_groups,
+            reserved_non_high_slots=(
+                settings.candidate_reserved_non_high_slots
+            ),
+        ),
+        now_ms=_wall_clock_ms(),
+    )
     runtime = CandidateWatcherRuntime()
     executors = CandidateClobExecutors(
         high_workers=settings.candidate_high_clob_workers,
@@ -847,6 +929,11 @@ def build_production_candidate_watcher(
             lower_lane_max_wait_s=settings.candidate_lower_lane_max_wait_s,
             discovery_candidate_max_wait_s=(
                 settings.discovery_candidate_max_wait_s
+            ),
+            selection_budget_s=settings.candidate_selection_budget_s,
+            source_max_groups=settings.candidate_source_max_groups,
+            terminal_write_budget_s=(
+                settings.candidate_terminal_write_budget_s
             ),
             close_callbacks=(executors.close,),
         )

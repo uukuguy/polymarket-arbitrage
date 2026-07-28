@@ -899,3 +899,60 @@ def test_scheduler_rejects_non_finite_or_silently_reduced_inputs(
             runtime=CandidateWatcherRuntime(),
             **kwargs,
         )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_bounds_slow_candidate_source_on_isolated_executor(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+
+    def slow_source() -> tuple[str, ...]:
+        time.sleep(0.1)
+        return ("g-1",)
+
+    scheduler = CandidateWatcherScheduler(
+        watcher=object(),
+        store=store,
+        candidate_group_ids=slow_source,
+        runtime=CandidateWatcherRuntime(),
+        selection_budget_s=0.01,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError):
+        await scheduler.run_due_once()
+
+    assert time.monotonic() - started < 0.08
+    scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_reads_many_candidates_in_one_bounded_store_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    calls: list[str] = []
+
+    class Watcher:
+        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
+            calls.append(group_id)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("per-group read is forbidden")
+
+    monkeypatch.setattr(store, "latest_candidate_watch_fact", forbidden)
+    scheduler = CandidateWatcherScheduler(
+        watcher=Watcher(),
+        store=store,
+        candidate_group_ids=lambda: tuple(f"g-{index:03}" for index in range(200)),
+        runtime=CandidateWatcherRuntime(),
+        source_max_groups=250,
+    )
+
+    await scheduler.run_due_once()
+
+    assert len(calls) == 12

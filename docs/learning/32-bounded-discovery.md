@@ -104,18 +104,26 @@ inputs/anchors 用同一 Decimal 函数重算 score/reason。`group_id` 从 sche
 
 ## 设计取舍
 
-- Candidate freshness 是“实际进入 Candidate source 的 current certified groups”
-  与 matching complete Quote 的一次 durable snapshot。已认证但仍在 promotion queue
-  的组不在分母中，不能提前制造 missing-Quote 降级。任一真实 Candidate 缺 Quote或
+- Candidate freshness 是“已有 durable Candidate fact 的 current certified groups
+  + capacity-admitted promotions”与 matching complete Quote 的一次 durable snapshot。
+  已认证但从未 watch、仍在 promotion queue 的组不在分母中，不能提前制造
+  missing-Quote 降级；已有 fact 的组不会因 rediscovery 时 `promoted_at=NULL` 被丢掉。
+  unavailable fact 也不会刷新 Quote age。任一真实 Candidate 缺 Quote 或
   p95 接近 hard-stale 时，Discovery 在 Gamma 前 yield。
 - degraded 不会永久锁死 Discovery。每次 yield/probe 相位写入 durable load state；
   N-1 个 degraded cycle 后只放行一个仍然有界的页面，其余容量继续留给 Candidate。
   modulus 与 decision 一起持久化并接受 status 校验；重启不能重置或加速相位，
   fresh recovery 明确把 streak 归零。
 - complete-supported 先认证并进入 durable promotion queue，不等于立即 promotion。
-  admission capacity 由 `poll + high_burst × timeout + (capacity-1) × timeout ≤ 60s`
-  证明；默认参数只允许一个 factless promotion。Candidate 终态事实与 admit-next
-  在同一事务完成，排队顺序为 deadline、score、group ID，重启不改变。
+  admission capacity 由 `poll + bounded selection + attempt-start SQLite write +
+  (high burst + prior admitted slots) × (group timeout + terminal-write budget) ≤ 60s`
+  证明；所有毫秒预算向上取整，默认有效上界 47 秒、只允许一个 factless promotion。
+  source 枚举和 facts/schedules 使用一个专用单线程 executor 与一次 bulk SQLite
+  snapshot。Candidate 终态事实与 admit-next 在同一事务完成。
+- admitted group 真正调用 watcher 前先原子写 attempt-start receipt。晚于持久化 deadline
+  时不再静默执行，而是写 `candidate-start-deadline-breached/unavailable`，status
+  保持 non-ready。进程级强杀/隔离仍属于 Task 5，本层证明的是线程、SQLite busy 和
+  每组 timeout 的数学上界。
 - promotion source 是 legacy seed 与 Discovery promotion 的稳定去重并集，不会因接入
   新 producer 丢掉当前 hot candidates。
 - feature flag 默认关闭；本 slice 只完成生产代码路径，不等于已经完成部署和切换。

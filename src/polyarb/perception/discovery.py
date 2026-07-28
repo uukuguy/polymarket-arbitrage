@@ -78,22 +78,31 @@ class CandidateGroupIds(Protocol):
 def effective_promotion_admission_capacity(
     *,
     candidate_max_wait_s: float,
+    selection_budget_s: float,
     poll_interval_s: float,
     group_timeout_s: float,
+    terminal_write_budget_s: float,
     high_burst_groups: int,
     reserved_non_high_slots: int,
 ) -> int:
     candidate_max_wait_ms = int(candidate_max_wait_s * 1_000)
     poll_interval_ms = math.ceil(poll_interval_s * 1_000)
+    selection_budget_ms = math.ceil(selection_budget_s * 1_000)
     group_timeout_ms = math.ceil(group_timeout_s * 1_000)
+    terminal_write_budget_ms = math.ceil(terminal_write_budget_s * 1_000)
     residual_ms = (
         candidate_max_wait_ms
         - poll_interval_ms
-        - high_burst_groups * group_timeout_ms
+        - selection_budget_ms
+        - terminal_write_budget_ms
+        - high_burst_groups
+        * (group_timeout_ms + terminal_write_budget_ms)
     )
     if residual_ms < 0:
         return 0
-    time_capacity = residual_ms // group_timeout_ms + 1
+    time_capacity = (
+        residual_ms // (group_timeout_ms + terminal_write_budget_ms) + 1
+    )
     return min(reserved_non_high_slots, time_capacity)
 
 
@@ -105,7 +114,9 @@ def compose_candidate_group_ids(
 
     def source() -> tuple[str, ...]:
         return tuple(
-            dict.fromkeys((*legacy_source(), *store.promoted_group_ids()))
+            dict.fromkeys(
+                (*legacy_source(), *store.actual_candidate_group_ids())
+            )
         )
 
     return source
@@ -123,8 +134,10 @@ class DiscoveryWorker:
         degraded_probe_every_cycles: int = 10,
         promotion_admission_capacity: int | None = None,
         candidate_max_wait_s: float = 60.0,
+        candidate_selection_budget_s: float = 6.0,
         candidate_poll_interval_s: float = 1.0,
         candidate_group_timeout_s: float = 30.0,
+        candidate_terminal_write_budget_s: float = 5.0,
         candidate_high_burst_groups: int = 1,
         candidate_reserved_non_high_slots: int = 3,
         clock_ms: Callable[[], int] | None = None,
@@ -137,8 +150,10 @@ class DiscoveryWorker:
             raise ValueError("discovery-probe-period-must-be-at-least-two")
         computed_capacity = effective_promotion_admission_capacity(
             candidate_max_wait_s=candidate_max_wait_s,
+            selection_budget_s=candidate_selection_budget_s,
             poll_interval_s=candidate_poll_interval_s,
             group_timeout_s=candidate_group_timeout_s,
+            terminal_write_budget_s=candidate_terminal_write_budget_s,
             high_burst_groups=candidate_high_burst_groups,
             reserved_non_high_slots=candidate_reserved_non_high_slots,
         )
@@ -150,8 +165,14 @@ class DiscoveryWorker:
         self._admission_proof = DiscoveryAdmissionProof(
             effective_capacity=effective_capacity,
             candidate_max_wait_ms=int(candidate_max_wait_s * 1_000),
+            selection_budget_ms=math.ceil(
+                candidate_selection_budget_s * 1_000
+            ),
             poll_interval_ms=math.ceil(candidate_poll_interval_s * 1_000),
             group_timeout_ms=math.ceil(candidate_group_timeout_s * 1_000),
+            terminal_write_budget_ms=math.ceil(
+                candidate_terminal_write_budget_s * 1_000
+            ),
             high_burst_groups=candidate_high_burst_groups,
             reserved_non_high_slots=candidate_reserved_non_high_slots,
         )
@@ -165,6 +186,10 @@ class DiscoveryWorker:
         self._candidate_freshness = candidate_freshness
         self._degraded_probe_every_cycles = degraded_probe_every_cycles
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
+        self._store.configure_discovery_admission(
+            self._admission_proof,
+            now_ms=self._clock_ms(),
+        )
 
     async def run_batch(self) -> DiscoveryBatchResult:
         if self._load_controller is not None:
@@ -436,8 +461,12 @@ def build_production_discovery(
             settings.discovery_effective_admission_capacity
         ),
         candidate_max_wait_s=settings.discovery_candidate_max_wait_s,
+        candidate_selection_budget_s=settings.candidate_selection_budget_s,
         candidate_poll_interval_s=settings.candidate_scheduler_poll_s,
         candidate_group_timeout_s=settings.candidate_group_timeout_s,
+        candidate_terminal_write_budget_s=(
+            settings.candidate_terminal_write_budget_s
+        ),
         candidate_high_burst_groups=settings.candidate_high_burst_groups,
         candidate_reserved_non_high_slots=(
             settings.candidate_reserved_non_high_slots

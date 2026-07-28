@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     candidate_scheduler_poll_s: float = Field(
         default=1.0, gt=0, allow_inf_nan=False
     )
+    candidate_selection_budget_s: float = Field(
+        default=6.0, gt=0, allow_inf_nan=False
+    )
+    candidate_source_max_groups: int = Field(default=500, ge=1, le=500)
+    candidate_terminal_write_budget_s: float = Field(
+        default=5.0, ge=5.0, allow_inf_nan=False
+    )
     candidate_high_clob_workers: int = Field(default=2, ge=1)
     candidate_lower_clob_workers: int = Field(default=1, ge=1)
     # Slice C remains dark until production qualification. Each run fetches
@@ -398,20 +405,48 @@ class Settings(BaseSettings):
     @property
     def discovery_effective_admission_capacity(self) -> int:
         max_wait_ms = int(self.discovery_candidate_max_wait_s * 1_000)
+        selection_ms = math.ceil(self.candidate_selection_budget_s * 1_000)
         poll_ms = math.ceil(self.candidate_scheduler_poll_s * 1_000)
         timeout_ms = math.ceil(self.candidate_group_timeout_s * 1_000)
+        terminal_ms = math.ceil(
+            self.candidate_terminal_write_budget_s * 1_000
+        )
         residual_ms = (
             max_wait_ms
             - poll_ms
+            - selection_ms
+            - terminal_ms
             - self.candidate_high_burst_groups
-            * timeout_ms
+            * (timeout_ms + terminal_ms)
         )
         if residual_ms < 0:
             return 0
-        time_capacity = residual_ms // timeout_ms + 1
+        time_capacity = residual_ms // (timeout_ms + terminal_ms) + 1
         return min(
             self.candidate_reserved_non_high_slots,
             time_capacity,
+        )
+
+    @property
+    def discovery_effective_start_bound_ms(self) -> int | None:
+        capacity = self.discovery_effective_admission_capacity
+        if capacity <= 0:
+            return None
+        return (
+            math.ceil(self.candidate_scheduler_poll_s * 1_000)
+            + math.ceil(self.candidate_selection_budget_s * 1_000)
+            + math.ceil(self.candidate_terminal_write_budget_s * 1_000)
+            + (
+                self.candidate_high_burst_groups
+                + capacity
+                - 1
+            )
+            * (
+                math.ceil(self.candidate_group_timeout_s * 1_000)
+                + math.ceil(
+                    self.candidate_terminal_write_budget_s * 1_000
+                )
+            )
         )
 
     @field_validator("db_path", "parquet_root", "cache_root")

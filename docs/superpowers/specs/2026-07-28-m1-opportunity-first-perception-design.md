@@ -77,11 +77,16 @@ the bounded high CLOB worker capacity, so queued high calls cannot consume the
 lower-lane wait budget.
 
 Discovery certification does not imply immediate Candidate admission. The
-outstanding factless promotion capacity is derived from the stricter bound
-`poll + high_burst * group_timeout + (capacity - 1) * group_timeout <= 60s`
-and cannot exceed the reserved lower-lane slots. Excess certified groups remain
-durably queued and do not enter Candidate freshness until a terminal fact frees
-capacity and atomically admits the next deadline/score-ordered group.
+outstanding factless promotion capacity is derived from the stricter bound:
+`poll + bounded_selection + attempt_start_sqlite +
+(high_burst + capacity - 1) * (group_timeout + terminal_write) <= 60s`.
+Every duration is conservatively rounded up to milliseconds, and capacity
+cannot exceed the reserved lower-lane slots. Source enumeration runs on one
+isolated bounded executor and facts/schedules are read in one bulk SQLite
+snapshot. Excess certified groups remain durably queued; groups with prior
+Candidate facts remain actual candidates even when unpromoted. Before an
+admitted watcher call, an immutable start receipt proves the deadline or
+records an unavailable breach. Process-level kill isolation remains Task 5.
 
 ## 4. Group-Level Data Contract
 

@@ -68,11 +68,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "candidate_max_wait_ms": (
                     status.admission_proof.candidate_max_wait_ms
                 ),
+                "selection_budget_ms": (
+                    status.admission_proof.selection_budget_ms
+                ),
                 "effective_start_bound_ms": (
                     status.admission_proof.effective_start_bound_ms
                 ),
                 "poll_interval_ms": status.admission_proof.poll_interval_ms,
                 "group_timeout_ms": status.admission_proof.group_timeout_ms,
+                "terminal_write_budget_ms": (
+                    status.admission_proof.terminal_write_budget_ms
+                ),
                 "high_burst_groups": (
                     status.admission_proof.high_burst_groups
                 ),
@@ -85,6 +91,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
             }
         ),
+        "candidate_start_control": {
+            "attempt_start_count": status.candidate_attempt_start_count,
+            "deadline_breach_count": (
+                status.candidate_start_deadline_breach_count
+            ),
+            "ready": status.candidate_start_ready,
+        },
         "known_groups": status.coverage.known_groups,
         "coverage": {
             str(minutes): {

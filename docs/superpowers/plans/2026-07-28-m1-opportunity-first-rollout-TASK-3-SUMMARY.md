@@ -18,9 +18,9 @@
   finishes one started commit before propagating cancellation.
 - Review remediation revokes prior certified/Quote authority in the same page
   transaction when new truth is incomplete, unsupported, or identity-incomplete.
-- Candidate freshness now comes from one durable snapshot of actual admitted
-  Candidate authority and exact matching complete batches; queued-unpromoted
-  certified groups cannot create premature missing-Quote degradation.
+- Candidate freshness now comes from one durable snapshot of current certified
+  groups with prior Candidate facts plus admitted promotions. Never-watched
+  queued groups stay excluded; unavailable facts cannot refresh Quote age.
 - Status now uses one validated read transaction for cursor, schedule,
   promotion/revision, Decimal/rank, count, time, and coverage chains.
 - Event pages reject malformed members rather than making their cursor durable;
@@ -29,10 +29,18 @@
   and Candidate start deadline. A timing-derived outstanding capacity ensures
   every promoted factless group can start within the configured ≤60-second
   bound; excess certified groups remain durably unpromoted.
+- Scheduler selection uses a dedicated one-thread controller and one bounded
+  bulk facts/schedules snapshot. The proof includes selection, attempt-start
+  SQLite busy, group timeout, and terminal-write budgets with ceil-ms math.
+- Every admitted first call writes an immutable attempt-start receipt. Late
+  restart writes unavailable/deadline-breach evidence instead of silently
+  starting, and status remains non-ready for the later acceptance gate.
 - Persisted degraded duty-cycle state yields N-1 Candidate-priority cycles and
   then permits one bounded Discovery page without restart reset.
 - Immutable batch receipts and per-group sample/promotion proofs bind latest
   status counts to exact writer facts; stored scores/reasons are recomputed.
+- Status validates every historical receipt/sample link, count inequality,
+  timestamp, first sweep, cursor transition, and sweep sequence—not only latest.
 - Factless/overdue promotions use reserved lower-lane capacity after a genuine
   Candidate high burst; they never become global high.
 - Group authority binds `event_id` as well as membership; attempted event
@@ -112,6 +120,15 @@ modulus; complete sweep/sequence/requested-cursor receipt-chain validation.
 
 FINAL GREEN AFTER THIRD RE-REVIEW:
 276 passed
+
+FINAL RE-REVIEW RED → GREEN:
+actual fact-backed Candidate source/freshness; isolated bounded bulk selection;
+complete 60-second formula and durable start/breach receipts; full historical
+receipt/sample proof; additive-only generic migration plus explicit configured
+legacy reconciliation.
+
+FINAL GREEN:
+289 passed
 
 uv run ruff check <changed Python/test files>
 All checks passed!
