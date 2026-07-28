@@ -106,6 +106,109 @@ def test_perception_status_distinguishes_available_zero_from_corrupt_evidence(
     assert str(db_path) not in response.text
 
 
+def test_status_and_current_opportunities_expose_authenticated_candidate_state(
+    http_test_client,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    _seed_candidate_authority(db_path)
+
+    status = http_test_client.get("/perception/status")
+    opportunities = http_test_client.get(
+        "/perception/opportunities?limit=1&after_group_id="
+    )
+
+    assert status.status_code == 200
+    status_body = status.json()
+    assert type(status_body["server_time_ms"]) is int
+    assert status_body["server_time_ms"] >= 0
+    assert status_body["current_candidate_group_count"] == 1
+    assert status_body["candidate_state_counts"] == {
+        "watching": 1,
+        "no-edge": 0,
+        "unavailable": 0,
+    }
+    assert status_body["candidate_authority_hash"].startswith("sha256:")
+    assert opportunities.status_code == 200
+    opportunities_body = opportunities.json()
+    assert opportunities_body.pop("server_time_ms") >= 0
+    assert (
+        opportunities_body.pop("candidate_authority_hash")
+        == status_body["candidate_authority_hash"]
+    )
+    assert opportunities_body.pop("current_opportunity_count") == 1
+    assert opportunities_body == {
+        "status": "available",
+        "items": [
+            {
+                "group_id": "g-1",
+                "event_id": "e-1",
+                "group_revision": 1,
+                "membership_hash": (
+                    OpportunityPerceptionStore(db_path)
+                    .current_opportunities(after_group_id="", limit=1)[0][0]
+                    .membership_hash
+                ),
+                "quote_batch_id": "q-1",
+                "fact_id": 1,
+                "bundle_cost": 0.8,
+                "gross_edge_bps": 2_000.0,
+                "max_bundle_size": 10.0,
+                "structure_observed_at_ms": 2,
+                "quote_started_at_ms": 3,
+                "quote_quoted_at_ms": 4,
+            }
+        ],
+        "limit": 1,
+        "next_after_group_id": None,
+    }
+
+
+def test_status_uses_bounded_current_projection_not_full_candidate_replay(
+    http_test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        OpportunityPerceptionStore,
+        "validated_candidate_opportunity_count",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("status-must-not-run-full-candidate-replay")
+        ),
+    )
+
+    response = http_test_client.get("/perception/status")
+
+    assert response.status_code == 200
+    assert response.json()["current_candidate_group_count"] == 0
+
+
+def test_current_opportunity_cursor_is_bounded_and_invalid_evidence_fails_closed(
+    http_test_client,
+) -> None:
+    for path in (
+        "/perception/opportunities?limit=0",
+        "/perception/opportunities?limit=501",
+        "/perception/opportunities?after_group_id=%00",
+        "/perception/opportunities?after_group_id=" + "x" * 257,
+    ):
+        response = http_test_client.get(path)
+        assert response.status_code == 400
+
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    _seed_candidate_authority(db_path)
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_candidate_current_authority "
+            "SET canonical_json='{}' WHERE group_id='g-1'"
+        )
+
+    response = http_test_client.get("/perception/opportunities?limit=100")
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "reason": "durable-evidence-invalid",
+    }
+
+
 def test_group_history_is_bounded_and_corruption_fails_closed(http_test_client) -> None:
     db_path = http_test_client.app.state.sqlite_store.db_path
     now = int(time.time() * 1000)

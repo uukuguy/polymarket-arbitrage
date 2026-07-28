@@ -31,6 +31,7 @@ def test_typed_reader_uses_only_task6_public_get_contracts() -> None:
 
     for endpoint in (
         "/perception/status",
+        "/perception/opportunities?limit=",
         "/perception/groups?limit=",
         "/perception/discovery",
         "/perception/reconciliation",
@@ -108,6 +109,12 @@ def test_overview_contains_operator_perception_and_incident_vocabulary() -> None
         "unavailable",
         "invalidated",
         "Current opportunities",
+        "Global Candidate state",
+        "Bounded Structure page",
+        "Showing",
+        "No edge",
+        "Bundle cost",
+        "Max bundle size",
         "Structure age",
         "Quote age",
         "Raw coverage",
@@ -201,6 +208,24 @@ def test_overview_labels_bounded_group_counts_and_filters_verified_incidents() -
     assert "next_after" in overview
     assert 'incident.state !== "verified"' in overview
     assert "Latest incident states" in overview
+
+
+def test_overview_binds_candidate_envelopes_before_rendering() -> None:
+    reader = _source("dashboard/lib/perception.ts")
+    types = _source("dashboard/lib/types.ts")
+    compact_reader = " ".join(reader.split())
+
+    assert "candidate_authority_hash" in reader
+    assert "candidate_authority_hash" in types
+    assert "candidateEnvelopesAgree" in reader
+    assert (
+        "status.candidate_authority_hash === "
+        "currentOpportunities.candidate_authority_hash"
+    ) in compact_reader
+    assert (
+        "status.opportunities.count === "
+        "currentOpportunities.current_opportunity_count"
+    ) in compact_reader
 
 
 def test_root_navigation_links_to_perception_overview() -> None:

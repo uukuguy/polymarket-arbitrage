@@ -26,6 +26,13 @@ function fmtOptionalCount(value: number | null): string {
   return value == null ? "pending" : String(value);
 }
 
+function fmtAge(serverTimeMs: number, observedAtMs: number): string {
+  const seconds = Math.max(0, serverTimeMs - observedAtMs) / 1000;
+  return seconds < 60
+    ? `${seconds.toFixed(1)}s`
+    : `${(seconds / 60).toFixed(1)}m`;
+}
+
 function countStatus(
   statuses: PerceptionGroupStatus[],
   status: PerceptionGroupStatus,
@@ -63,14 +70,22 @@ export default async function PerceptionOverviewPage() {
     );
   }
 
-  const { status, groups, discovery, reconciliation, incidents } = overview.data;
+  const {
+    status,
+    currentOpportunities,
+    groups,
+    discovery,
+    reconciliation,
+    incidents,
+  } = overview.data;
   const groupStatuses = groups.items.map((group) => group.status);
-  const opportunities = status.opportunities;
+  const opportunityStatus = status.opportunities;
   const openIncidents = incidents.items.filter(
     (incident) => incident.state !== "verified",
   );
   const validZero =
-    opportunities.status === "available" && opportunities.count === 0;
+    opportunityStatus.status === "available" &&
+    opportunityStatus.count === 0;
 
   return (
     <main style={{ padding: 24, maxWidth: 1280, margin: "0 auto" }}>
@@ -80,38 +95,57 @@ export default async function PerceptionOverviewPage() {
         is labelled; it is never converted to zero.
       </p>
 
-      <section
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-          gap: 12,
-          margin: "20px 0",
-        }}
-      >
-        <div style={panel}>
-          <div style={muted}>watching</div>
-          <NotExposed />
+      <section style={{ margin: "20px 0" }}>
+        <h2>Global Candidate state</h2>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+            gap: 12,
+          }}
+        >
+          <div style={panel}>
+            <div style={muted}>watching</div>
+            <strong>{status.candidate_state_counts.watching}</strong>
+          </div>
+          <div style={panel}>
+            <div style={muted}>No edge</div>
+            <strong>{status.candidate_state_counts["no-edge"]}</strong>
+          </div>
+          <div style={panel}>
+            <div style={muted}>unavailable</div>
+            <strong>{status.candidate_state_counts.unavailable}</strong>
+          </div>
         </div>
-        <div style={panel}>
-          <div style={muted}>stale (returned bounded page)</div>
-          <strong>{countStatus(groupStatuses, "stale")}</strong>
-        </div>
-        <div style={panel}>
-          <div style={muted}>unavailable</div>
-          <NotExposed>not exposed per group</NotExposed>
-        </div>
-        <div style={panel}>
-          <div style={muted}>invalidated (returned bounded page)</div>
-          <strong>{countStatus(groupStatuses, "invalidated")}</strong>
+        <h2>Bounded Structure page</h2>
+        <p style={muted}>
+          These Structure status counts cover only the returned groups page,
+          never the full market universe.
+        </p>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+            gap: 12,
+          }}
+        >
+          <div style={panel}>
+            <div style={muted}>stale</div>
+            <strong>{countStatus(groupStatuses, "stale")}</strong>
+          </div>
+          <div style={panel}>
+            <div style={muted}>invalidated</div>
+            <strong>{countStatus(groupStatuses, "invalidated")}</strong>
+          </div>
         </div>
       </section>
 
       <section style={{ ...panel, marginBottom: 12 }}>
         <h2 style={{ marginTop: 0 }}>Current opportunities</h2>
-        {opportunities.status === "available" ? (
+        {opportunityStatus.status === "available" ? (
           <>
             <div style={{ fontSize: 30, fontWeight: 700 }}>
-              {opportunities.count}
+              {opportunityStatus.count}
             </div>
             {validZero && (
               <p style={{ color: "#9bc79b" }}>No certified edge right now.</p>
@@ -119,26 +153,58 @@ export default async function PerceptionOverviewPage() {
           </>
         ) : (
           <p style={{ color: "#ffd47a" }}>
-            unavailable — {opportunities.reason}. Unavailable is not zero
+            unavailable — {opportunityStatus.reason}. Unavailable is not zero
             opportunities.
           </p>
         )}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-            gap: 10,
-          }}
-        >
-          {["Certified edge", "Capacity", "Structure age", "Quote age"].map(
-            (label) => (
-              <div key={label}>
-                <div style={muted}>{label}</div>
-                <NotExposed />
-              </div>
-            ),
-          )}
-        </div>
+        <p style={muted}>
+          Showing {currentOpportunities.items.length} of{" "}
+          {currentOpportunities.current_opportunity_count} authenticated current
+          opportunities.
+        </p>
+        {currentOpportunities.next_after_group_id !== null && (
+          <p style={{ color: "#ffd47a" }}>
+            More current opportunities exist after this bounded page.
+          </p>
+        )}
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
+              <th style={{ padding: 8 }}>Group</th>
+              <th style={{ padding: 8 }}>Certified edge (bps)</th>
+              <th style={{ padding: 8 }}>Bundle cost</th>
+              <th style={{ padding: 8 }}>Max bundle size</th>
+              <th style={{ padding: 8 }}>Structure age</th>
+              <th style={{ padding: 8 }}>Quote age</th>
+            </tr>
+          </thead>
+          <tbody>
+            {currentOpportunities.items.map((item) => (
+              <tr key={item.group_id} style={{ borderBottom: "1px solid #222" }}>
+                <td style={{ padding: 8 }}>{item.group_id}</td>
+                <td style={{ padding: 8 }}>
+                  {item.gross_edge_bps.toFixed(1)}
+                </td>
+                <td style={{ padding: 8 }}>{item.bundle_cost.toFixed(4)}</td>
+                <td style={{ padding: 8 }}>
+                  {item.max_bundle_size.toFixed(2)}
+                </td>
+                <td style={{ padding: 8 }}>
+                  {fmtAge(
+                    status.server_time_ms,
+                    item.structure_observed_at_ms,
+                  )}
+                </td>
+                <td style={{ padding: 8 }}>
+                  {fmtAge(status.server_time_ms, item.quote_quoted_at_ms)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {currentOpportunities.items.length === 0 && (
+          <p style={muted}>No authenticated current opportunity rows.</p>
+        )}
       </section>
 
       <section style={{ ...panel, marginBottom: 12 }}>
@@ -315,8 +381,8 @@ export default async function PerceptionOverviewPage() {
         <h2 style={{ marginTop: 0 }}>Observed groups (returned bounded page)</h2>
         {groups.next_after !== null && (
           <p style={{ color: "#ffd47a" }}>
-            More groups exist after this page; status counts shown above are
-            not global totals.
+            More groups exist after this page; the Structure stale/invalidated
+            counts above are not global totals.
           </p>
         )}
         {groups.items.map((group) => (

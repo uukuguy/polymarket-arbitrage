@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 
 import {
+  candidateEnvelopesAgree,
+  isCurrentOpportunitiesEnvelope,
   isDiscoveryEnvelope,
   isReconciliationEnvelope,
+  isStatusEnvelope,
 } from "../../dashboard/lib/perception.ts";
 
 const coverageWindow = {
@@ -81,11 +84,143 @@ const validReconciliation = {
     applied_rejected_count: 0,
   },
 };
+const validStatus = {
+  status: "available",
+  server_time_ms: 10,
+  candidate_authority_hash: `sha256:${"a".repeat(64)}`,
+  current_candidate_group_count: 3,
+  candidate_state_counts: {
+    watching: 1,
+    "no-edge": 1,
+    unavailable: 1,
+  },
+  opportunities: {
+    status: "available",
+    count: 1,
+    reason: "certified-edge",
+  },
+  open_incident_count: 0,
+};
+const validCurrentOpportunities = {
+  status: "available",
+  server_time_ms: 10,
+  candidate_authority_hash: `sha256:${"a".repeat(64)}`,
+  current_opportunity_count: 1,
+  items: [
+    {
+      group_id: "g-1",
+      event_id: "e-1",
+      group_revision: 1,
+      membership_hash: "membership",
+      quote_batch_id: "q-1",
+      fact_id: 1,
+      bundle_cost: 0.8,
+      gross_edge_bps: 2_000,
+      max_bundle_size: 10,
+      structure_observed_at_ms: 2,
+      quote_started_at_ms: 3,
+      quote_quoted_at_ms: 4,
+    },
+  ],
+  limit: 1,
+  next_after_group_id: null,
+};
 
 const clone = (value) => structuredClone(value);
 
 assert.equal(isDiscoveryEnvelope(validDiscovery), true);
 assert.equal(isReconciliationEnvelope(validReconciliation), true);
+assert.equal(isStatusEnvelope(validStatus), true);
+assert.equal(
+  isCurrentOpportunitiesEnvelope(validCurrentOpportunities),
+  true,
+);
+assert.equal(
+  candidateEnvelopesAgree(validStatus, validCurrentOpportunities),
+  true,
+);
+{
+  const current = clone(validCurrentOpportunities);
+  current.candidate_authority_hash = `sha256:${"b".repeat(64)}`;
+  assert.equal(
+    candidateEnvelopesAgree(validStatus, current),
+    false,
+    "candidate hashes must bind both envelopes",
+  );
+}
+{
+  const current = clone(validCurrentOpportunities);
+  current.current_opportunity_count = 2;
+  current.next_after_group_id = "g-1";
+  assert.equal(
+    candidateEnvelopesAgree(validStatus, current),
+    false,
+    "global opportunity counts must agree",
+  );
+}
+{
+  const current = clone(validCurrentOpportunities);
+  current.current_opportunity_count = 2;
+  assert.equal(
+    candidateEnvelopesAgree(
+      { ...validStatus, opportunities: { ...validStatus.opportunities, count: 2 } },
+      current,
+    ),
+    false,
+    "truncated first page requires a cursor",
+  );
+}
+
+for (const field of ["watching", "no-edge", "unavailable"]) {
+  const negative = clone(validStatus);
+  negative.candidate_state_counts[field] = -1;
+  assert.equal(isStatusEnvelope(negative), false, `${field}<0 must fail`);
+  const fractional = clone(validStatus);
+  fractional.candidate_state_counts[field] = 0.5;
+  assert.equal(isStatusEnvelope(fractional), false, `${field} must be integer`);
+}
+{
+  const body = clone(validStatus);
+  body.current_candidate_group_count = 4;
+  assert.equal(isStatusEnvelope(body), false, "state counts must sum to current");
+}
+{
+  const body = clone(validStatus);
+  body.opportunities.count = 2;
+  assert.equal(isStatusEnvelope(body), false, "edges cannot exceed watching");
+}
+for (const [field, value] of [
+  ["bundle_cost", 0],
+  ["gross_edge_bps", -1],
+  ["max_bundle_size", Infinity],
+  ["fact_id", 0.5],
+]) {
+  const body = clone(validCurrentOpportunities);
+  body.items[0][field] = value;
+  assert.equal(
+    isCurrentOpportunitiesEnvelope(body),
+    false,
+    `${field} malformed must fail`,
+  );
+}
+{
+  const body = clone(validCurrentOpportunities);
+  body.items[0].quote_started_at_ms = 5;
+  assert.equal(
+    isCurrentOpportunitiesEnvelope(body),
+    false,
+    "quote timestamps must be ordered",
+  );
+}
+{
+  const body = clone(validCurrentOpportunities);
+  body.next_after_group_id = "wrong";
+  assert.equal(
+    isCurrentOpportunitiesEnvelope(body),
+    false,
+    "cursor must bind to final row",
+  );
+}
 
 for (const field of [
   "candidate_max_wait_ms",

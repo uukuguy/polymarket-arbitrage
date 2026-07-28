@@ -83,6 +83,11 @@ CREATE TABLE neg_risk_candidate_current_aggregate (
 )
 """
 
+CANDIDATE_CURRENT_OPPORTUNITY_INDEX_DDL = """
+CREATE INDEX idx_neg_risk_candidate_current_opportunity_page
+  ON neg_risk_candidate_current_authority(opportunity, group_id)
+"""
+
 CANDIDATE_CURRENT_AGGREGATE_DDL = """
 CREATE TABLE neg_risk_candidate_current_aggregate (
   id INTEGER PRIMARY KEY CHECK(id = 1),
@@ -764,6 +769,8 @@ CREATE TABLE IF NOT EXISTS neg_risk_candidate_current_aggregate (
   unavailable_count INTEGER NOT NULL CHECK(unavailable_count >= 0),
   aggregate_digest TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_neg_risk_candidate_current_opportunity_page
+  ON neg_risk_candidate_current_authority(opportunity, group_id);
 
 -- Full Reconciliation is a checkpointed calibration window. Page receipts,
 -- staging samples, cursor advancement, completion and final diff publication

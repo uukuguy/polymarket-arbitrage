@@ -51,6 +51,7 @@ from polyarb.http.perception import (
     perception_group_history,
     perception_groups,
     perception_incidents,
+    perception_opportunities,
     perception_reconciliation,
     perception_status,
 )
@@ -114,6 +115,11 @@ def create_app(
         Route("/market-map", market_map, methods=["GET"]),
         Route("/opportunity-watch/status", opportunity_watch_status, methods=["GET"]),
         Route("/perception/status", perception_status, methods=["GET"]),
+        Route(
+            "/perception/opportunities",
+            perception_opportunities,
+            methods=["GET"],
+        ),
         Route("/perception/groups", perception_groups, methods=["GET"]),
         Route(
             "/perception/groups/{group_id:path}/history",

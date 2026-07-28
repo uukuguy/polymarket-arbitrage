@@ -92,8 +92,41 @@ export interface PerceptionOpportunityStatus {
 
 export interface PerceptionStatusEnvelope {
   status: "available";
+  server_time_ms: number;
+  candidate_authority_hash: string;
+  current_candidate_group_count: number;
+  candidate_state_counts: {
+    watching: number;
+    "no-edge": number;
+    unavailable: number;
+  };
   opportunities: PerceptionOpportunityStatus;
   open_incident_count: number;
+}
+
+export interface PerceptionCurrentOpportunity {
+  group_id: string;
+  event_id: string;
+  group_revision: number;
+  membership_hash: string;
+  quote_batch_id: string;
+  fact_id: number;
+  bundle_cost: number;
+  gross_edge_bps: number;
+  max_bundle_size: number;
+  structure_observed_at_ms: number;
+  quote_started_at_ms: number;
+  quote_quoted_at_ms: number;
+}
+
+export interface PerceptionCurrentOpportunitiesEnvelope {
+  status: "available";
+  server_time_ms: number;
+  candidate_authority_hash: string;
+  current_opportunity_count: number;
+  items: PerceptionCurrentOpportunity[];
+  limit: number;
+  next_after_group_id: string | null;
 }
 
 export interface PerceptionGroupRevision {
@@ -227,6 +260,7 @@ export interface PerceptionIncidentsEnvelope {
 
 export interface PerceptionOverview {
   status: PerceptionStatusEnvelope;
+  currentOpportunities: PerceptionCurrentOpportunitiesEnvelope;
   groups: PerceptionGroupsEnvelope;
   discovery: PerceptionDiscoveryEnvelope;
   reconciliation: PerceptionReconciliationEnvelope;

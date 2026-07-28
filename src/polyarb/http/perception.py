@@ -484,12 +484,17 @@ def _status(db_path: Path) -> dict[str, Any]:
             for item in incidents
         ):
             raise ValueError("candidate-worker-unavailable")
-        count = _read_store(db_path).validated_candidate_opportunity_count(
+        summary = _read_store(db_path).candidate_current_summary(
             _connection=con
         )
+        count = summary.opportunity_count
         con.execute("COMMIT")
         return {
             "status": "available",
+            "server_time_ms": int(time.time() * 1_000),
+            "candidate_authority_hash": summary.authority_hash,
+            "current_candidate_group_count": summary.current_group_count,
+            "candidate_state_counts": summary.state_counts,
             "opportunities": {
                 "status": "available",
                 "count": count,
@@ -499,6 +504,55 @@ def _status(db_path: Path) -> dict[str, Any]:
         }
     finally:
         con.close()
+
+
+def _opportunities(
+    db_path: Path,
+    limit: int,
+    after_group_id: str,
+) -> dict[str, Any]:
+    con = _connect(db_path)
+    try:
+        con.execute("BEGIN")
+        store = _read_store(db_path)
+        summary = store.candidate_current_summary(_connection=con)
+        items, next_after = store.current_opportunities(
+            after_group_id=after_group_id,
+            limit=limit,
+            _connection=con,
+        )
+        con.execute("COMMIT")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+    return {
+        "status": "available",
+        "server_time_ms": int(time.time() * 1_000),
+        "candidate_authority_hash": summary.authority_hash,
+        "current_opportunity_count": summary.opportunity_count,
+        "items": [
+            {
+                "group_id": item.group_id,
+                "event_id": item.event_id,
+                "group_revision": item.group_revision,
+                "membership_hash": item.membership_hash,
+                "quote_batch_id": item.quote_batch_id,
+                "fact_id": item.fact_id,
+                "bundle_cost": float(item.bundle_cost),
+                "gross_edge_bps": float(item.gross_edge_bps),
+                "max_bundle_size": float(item.max_bundle_size),
+                "structure_observed_at_ms": item.structure_observed_at_ms,
+                "quote_started_at_ms": item.quote_started_at_ms,
+                "quote_quoted_at_ms": item.quote_quoted_at_ms,
+            }
+            for item in items
+        ],
+        "limit": limit,
+        "next_after_group_id": next_after,
+    }
 
 
 def _groups(db_path: Path, limit: int, after: str) -> dict[str, Any]:
@@ -856,6 +910,30 @@ async def perception_groups(request: Request) -> JSONResponse:
         )
     db_path = Path(request.app.state.sqlite_store.db_path)
     return await _serve(request, lambda: _groups(db_path, limit, after))
+
+
+async def perception_opportunities(request: Request) -> JSONResponse:
+    try:
+        limit = _limit(request)
+    except ValueError as error:
+        return JSONResponse(
+            {"status": "invalid-request", "reason": str(error)},
+            status_code=400,
+        )
+    after_group_id = request.query_params.get("after_group_id", "")
+    if len(after_group_id) > 256 or "\x00" in after_group_id:
+        return JSONResponse(
+            {
+                "status": "invalid-request",
+                "reason": "invalid-after-group-id-cursor",
+            },
+            status_code=400,
+        )
+    db_path = Path(request.app.state.sqlite_store.db_path)
+    return await _serve(
+        request,
+        lambda: _opportunities(db_path, limit, after_group_id),
+    )
 
 
 async def perception_group_history(request: Request) -> JSONResponse:

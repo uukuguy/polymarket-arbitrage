@@ -1,4 +1,5 @@
 import type {
+  PerceptionCurrentOpportunitiesEnvelope,
   PerceptionDiscoveryEnvelope,
   PerceptionGroupDetail,
   PerceptionGroupHistoryEnvelope,
@@ -13,6 +14,7 @@ import type {
 const PERCEPTION_BASE_URL =
   process.env.POLYARB_L1_URL ?? "https://polyarb-l1.fly.dev";
 const GROUP_LIMIT = 100;
+const OPPORTUNITY_LIMIT = 100;
 const INCIDENT_LIMIT = 500;
 const HISTORY_LIMIT = 100;
 
@@ -22,6 +24,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringOrNull(value: unknown): value is string | null {
   return typeof value === "string" || value === null;
+}
+
+function isSha256(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^sha256:[0-9a-f]{64}$/.test(value)
+  );
 }
 
 function isNumberOrNull(value: unknown): value is number | null {
@@ -127,15 +136,91 @@ function isGroupRevision(value: unknown): boolean {
   );
 }
 
-function isStatusEnvelope(value: unknown): value is PerceptionStatusEnvelope {
+export function isStatusEnvelope(
+  value: unknown,
+): value is PerceptionStatusEnvelope {
   if (!isRecord(value) || value.status !== "available") return false;
   const opportunities = value.opportunities;
+  const stateCounts = value.candidate_state_counts;
+  if (
+    !isRecord(stateCounts) ||
+    !isNonNegativeInteger(stateCounts.watching) ||
+    !isNonNegativeInteger(stateCounts["no-edge"]) ||
+    !isNonNegativeInteger(stateCounts.unavailable) ||
+    !isNonNegativeInteger(value.current_candidate_group_count) ||
+    stateCounts.watching +
+      stateCounts["no-edge"] +
+      stateCounts.unavailable !==
+      value.current_candidate_group_count
+  ) {
+    return false;
+  }
   return (
     isRecord(opportunities) &&
     ["available", "unavailable"].includes(String(opportunities.status)) &&
-    isNumberOrNull(opportunities.count) &&
+    isNonNegativeIntegerOrNull(opportunities.count) &&
     typeof opportunities.reason === "string" &&
-    typeof value.open_incident_count === "number"
+    (opportunities.count === null ||
+      opportunities.count <= stateCounts.watching) &&
+    isNonNegativeInteger(value.server_time_ms) &&
+    isSha256(value.candidate_authority_hash) &&
+    isNonNegativeInteger(value.open_incident_count)
+  );
+}
+
+export function isCurrentOpportunitiesEnvelope(
+  value: unknown,
+): value is PerceptionCurrentOpportunitiesEnvelope {
+  if (
+    !isRecord(value) ||
+    value.status !== "available" ||
+    !isNonNegativeInteger(value.server_time_ms) ||
+    !isSha256(value.candidate_authority_hash) ||
+    !isNonNegativeInteger(value.current_opportunity_count) ||
+    !Array.isArray(value.items) ||
+    !isPositiveInteger(value.limit) ||
+    value.limit > 500 ||
+    value.items.length > value.limit ||
+    value.items.length > value.current_opportunity_count ||
+    !isStringOrNull(value.next_after_group_id)
+  ) {
+    return false;
+  }
+  let previousGroupId = "";
+  for (const item of value.items) {
+    if (
+      !isRecord(item) ||
+      typeof item.group_id !== "string" ||
+      !item.group_id ||
+      item.group_id <= previousGroupId ||
+      typeof item.event_id !== "string" ||
+      !item.event_id ||
+      !isPositiveInteger(item.group_revision) ||
+      typeof item.membership_hash !== "string" ||
+      !item.membership_hash ||
+      typeof item.quote_batch_id !== "string" ||
+      !item.quote_batch_id ||
+      !isPositiveInteger(item.fact_id) ||
+      !isNonNegativeNumber(item.bundle_cost) ||
+      item.bundle_cost === 0 ||
+      !isNonNegativeNumber(item.gross_edge_bps) ||
+      item.gross_edge_bps === 0 ||
+      !isNonNegativeNumber(item.max_bundle_size) ||
+      item.max_bundle_size === 0 ||
+      !isNonNegativeInteger(item.structure_observed_at_ms) ||
+      !isNonNegativeInteger(item.quote_started_at_ms) ||
+      !isNonNegativeInteger(item.quote_quoted_at_ms) ||
+      item.quote_started_at_ms > item.quote_quoted_at_ms
+    ) {
+      return false;
+    }
+    previousGroupId = item.group_id;
+  }
+  return (
+    value.next_after_group_id === null ||
+    (value.items.length === value.limit &&
+      value.items.length > 0 &&
+      value.next_after_group_id === previousGroupId)
   );
 }
 
@@ -345,17 +430,45 @@ function unavailable(error: unknown): PerceptionReadResult<never> {
   };
 }
 
+export function candidateEnvelopesAgree(
+  status: PerceptionStatusEnvelope,
+  currentOpportunities: PerceptionCurrentOpportunitiesEnvelope,
+): boolean {
+  return (
+    status.candidate_authority_hash ===
+      currentOpportunities.candidate_authority_hash &&
+    status.opportunities.status === "available" &&
+    status.opportunities.count ===
+      currentOpportunities.current_opportunity_count &&
+    (currentOpportunities.current_opportunity_count >
+      currentOpportunities.items.length) ===
+      (currentOpportunities.next_after_group_id !== null)
+  );
+}
+
 export async function readPerceptionOverview(): Promise<
   PerceptionReadResult<PerceptionOverview>
 > {
   const signal = AbortSignal.timeout(3000);
   try {
-    const [status, groups, discovery, reconciliation, incidents] =
+    const [
+      status,
+      currentOpportunities,
+      groups,
+      discovery,
+      reconciliation,
+      incidents,
+    ] =
       await Promise.all([
         fetchAvailable<PerceptionStatusEnvelope>(
           "/perception/status",
           signal,
           isStatusEnvelope,
+        ),
+        fetchAvailable<PerceptionCurrentOpportunitiesEnvelope>(
+          `/perception/opportunities?limit=${OPPORTUNITY_LIMIT}`,
+          signal,
+          isCurrentOpportunitiesEnvelope,
         ),
         fetchAvailable<PerceptionGroupsEnvelope>(
           `/perception/groups?limit=${GROUP_LIMIT}`,
@@ -378,9 +491,19 @@ export async function readPerceptionOverview(): Promise<
           isIncidentsEnvelope,
         ),
       ]);
+    if (!candidateEnvelopesAgree(status, currentOpportunities)) {
+      throw new Error("candidate read snapshots changed");
+    }
     return {
       status: "available",
-      data: { status, groups, discovery, reconciliation, incidents },
+      data: {
+        status,
+        currentOpportunities,
+        groups,
+        discovery,
+        reconciliation,
+        incidents,
+      },
     };
   } catch (error) {
     return unavailable(error);

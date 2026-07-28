@@ -32,6 +32,7 @@ from polyarb.storage.schemas import (
     A527_OWNER_MUTATION_GUARD_DDL,
     CANDIDATE_CURRENT_AGGREGATE_DDL,
     CANDIDATE_CURRENT_AGGREGATE_TRIGGER_DDL,
+    CANDIDATE_CURRENT_OPPORTUNITY_INDEX_DDL,
     DDL,
     OWNER_JOURNAL_TRIGGER_NAMES,
     OWNER_MUTATION_GUARD_DDL,
@@ -563,6 +564,7 @@ class CandidateCurrentSummary:
     current_group_count: int
     opportunity_count: int
     state_counts: dict[str, int]
+    authority_hash: str
 
 
 @dataclass(frozen=True)
@@ -1666,6 +1668,10 @@ class OpportunityPerceptionStore:
                     "DROP TABLE neg_risk_candidate_current_aggregate_v3"
                 )
                 historical_con.execute(
+                    "DROP INDEX "
+                    "idx_neg_risk_candidate_current_opportunity_page"
+                )
+                historical_con.execute(
                     "DROP TABLE neg_risk_owner_mutation_guard"
                 )
                 historical_con.execute(guard_ddl)
@@ -1893,10 +1899,60 @@ class OpportunityPerceptionStore:
                     (row["quote_batch_id"],),
                 ).fetchone()
             )
-            if group is None or fact is None:
+            latest_group = self._current_group_row(
+                con,
+                str(row["group_id"]),
+            )
+            latest_fact = con.execute(
+                "SELECT * FROM neg_risk_candidate_watch_facts "
+                "WHERE group_id=? ORDER BY id DESC LIMIT 1",
+                (row["group_id"],),
+            ).fetchone()
+            if (
+                group is None
+                or fact is None
+                or latest_group is None
+                or latest_fact is None
+                or int(latest_group["id"]) != int(group["id"])
+                or latest_group["status"] != "certified"
+                or int(latest_fact["id"]) != int(fact["id"])
+                or fact["group_id"] != group["group_id"]
+                or row["group_id"] != group["group_id"]
+            ):
                 raise ValueError("invalid-candidate-current-authority")
             last_result = str(fact["last_result"])
             if last_result not in state_counts:
+                raise ValueError("invalid-candidate-current-authority")
+            success = last_result in {"watching", "no-edge"}
+            numeric_fields = (
+                "bundle_cost",
+                "gross_edge_bps",
+                "max_bundle_size",
+            )
+            if (
+                success
+                and (
+                    quote is None
+                    or quote["status"] != "complete"
+                    or quote["group_id"] != group["group_id"]
+                    or int(quote["group_revision"]) != int(group["revision"])
+                    or quote["membership_hash"] != group["membership_hash"]
+                    or fact["membership_hash"] != group["membership_hash"]
+                    or fact["observed_at_ms"] != quote["quoted_at_ms"]
+                    or any(
+                        fact[name] is None
+                        or not math.isfinite(float(fact[name]))
+                        for name in numeric_fields
+                    )
+                )
+            ) or (
+                last_result == "unavailable"
+                and (
+                    quote is not None
+                    or fact["quote_batch_id"] is not None
+                    or any(fact[name] is not None for name in numeric_fields)
+                )
+            ):
                 raise ValueError("invalid-candidate-current-authority")
             opportunity = int(
                 last_result == "watching"
@@ -1944,6 +2000,8 @@ class OpportunityPerceptionStore:
                 or row["quote_batch_id"] != fact["quote_batch_id"]
                 or row["last_result"] != last_result
                 or int(row["opportunity"]) != opportunity
+                or row["legs_json"]
+                != (None if quote is None else quote["legs_json"])
                 or row["canonical_json"] != v2_canonical
                 or row["row_hash"] != v2_hash
             ):
@@ -2106,6 +2164,7 @@ class OpportunityPerceptionStore:
             ),
         )
         con.execute("DROP TABLE neg_risk_owner_mutation_guard_v2")
+        con.execute(CANDIDATE_CURRENT_OPPORTUNITY_INDEX_DDL)
         if self._owner_manifest_state(con) != "current":
             raise ValueError("invalid-owner-authority-manifest")
         self._assert_owner_journal_clean(con)
@@ -5828,13 +5887,24 @@ class OpportunityPerceptionStore:
             if owns_connection:
                 con.execute("BEGIN")
             self._assert_owner_journal_clean(con)
-            self._validated_candidate_checkpoint(con)
+            guard = con.execute(
+                "SELECT candidate_aggregate_hash FROM "
+                "neg_risk_owner_mutation_guard WHERE id=1"
+            ).fetchone()
             row = con.execute(
                 "SELECT current_group_count,opportunity_count,watching_count,"
                 "no_edge_count,unavailable_count,aggregate_digest "
                 "FROM neg_risk_candidate_current_aggregate WHERE id=1"
             ).fetchone()
-            if row is None:
+            if (
+                row is None
+                or guard is None
+                or not isinstance(guard["candidate_aggregate_hash"], str)
+                or not str(guard["candidate_aggregate_hash"]).startswith(
+                    "sha256:"
+                )
+                or len(str(guard["candidate_aggregate_hash"])) != 71
+            ):
                 raise ValueError("invalid-candidate-current-aggregate")
             current_group_count = int(row["current_group_count"])
             opportunity_count = int(row["opportunity_count"])
@@ -5857,6 +5927,7 @@ class OpportunityPerceptionStore:
                 current_group_count=current_group_count,
                 opportunity_count=opportunity_count,
                 state_counts=state_counts,
+                authority_hash=str(guard["candidate_aggregate_hash"]),
             )
         except BaseException:
             if owns_connection and con.in_transaction:

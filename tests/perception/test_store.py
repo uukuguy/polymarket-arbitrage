@@ -277,6 +277,9 @@ def _downgrade_owner_v3_fixture_to_v2(
             ),
         )
         con.execute("DROP TABLE neg_risk_candidate_current_aggregate_v3")
+        con.execute(
+            "DROP INDEX idx_neg_risk_candidate_current_opportunity_page"
+        )
         old_guard = con.execute(
             "SELECT consumed_journal_id,consumed_hash,retained_base_id,"
             "retained_base_hash,discovery_aggregate_hash,migration_state "
@@ -354,6 +357,38 @@ def test_existing_v2_owner_authority_migrates_atomically_to_v3(
     assert next_after is None
 
 
+def test_candidate_summary_is_constant_projection_read_and_opportunity_page_is_indexed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+
+    monkeypatch.setattr(
+        store,
+        "_validated_candidate_checkpoint",
+        lambda _con: (_ for _ in ()).throw(
+            AssertionError("summary-must-not-replay-checkpoint")
+        ),
+    )
+    assert store.candidate_current_summary().current_group_count == 0
+    with store._connect() as con:
+        plan = tuple(
+            str(row["detail"])
+            for row in con.execute(
+                "EXPLAIN QUERY PLAN "
+                "SELECT * FROM neg_risk_candidate_current_authority "
+                "WHERE opportunity=1 AND group_id>? "
+                "ORDER BY group_id LIMIT ?",
+                ("", 101),
+            )
+        )
+    assert any(
+        "idx_neg_risk_candidate_current_opportunity_page" in detail
+        for detail in plan
+    )
+
+
 def test_corrupt_v2_owner_authority_rolls_back_as_exact_v2(
     tmp_path: Path,
 ) -> None:
@@ -400,6 +435,109 @@ def test_corrupt_v2_owner_authority_rolls_back_as_exact_v2(
         ).fetchone()
     assert "watching_count" not in columns
     assert tuple(guard) == (2, "complete")
+
+
+def test_coherent_but_stale_v2_current_row_is_not_migrated(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-stale-v2", revision=1, token_suffix="stale")
+    store.publish_group_revision(group)
+    for sequence in range(2):
+        quote = batch_for(
+            group,
+            quote_batch_id=f"stale-v2-{sequence}",
+            quoted_at_ms=3_100 + sequence,
+        )
+        store.publish_candidate_success(
+            quote,
+            observed_at_ms=quote.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.8,
+            gross_edge_bps=2_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="stale-v2",
+            next_due_at_ms=quote.quoted_at_ms + 15_000,
+        )
+    _downgrade_owner_v3_fixture_to_v2(store)
+    trigger_names = tuple(
+        name
+        for name in OWNER_JOURNAL_TRIGGER_NAMES
+        if (
+            "candidate_current_authority" in name
+            or "candidate_current_aggregate" in name
+        )
+    )
+    with store._connect() as con:
+        for name in trigger_names:
+            con.execute(f'DROP TRIGGER "{name}"')
+        fact = con.execute(
+            "SELECT * FROM neg_risk_candidate_watch_facts "
+            "WHERE group_id=? ORDER BY id LIMIT 1",
+            (group.group_id,),
+        ).fetchone()
+        quote = con.execute(
+            "SELECT * FROM neg_risk_group_quote_batches WHERE id=?",
+            (fact["quote_batch_id"],),
+        ).fetchone()
+        payload = {
+            "event_id": group.event_id,
+            "fact_id": int(fact["id"]),
+            "group_id": group.group_id,
+            "group_revision": group.revision,
+            "last_result": "watching",
+            "legs": json.loads(str(quote["legs_json"])),
+            "membership_hash": group.membership_hash,
+            "opportunity": 1,
+            "quote_started_at_ms": int(quote["started_at_ms"]),
+            "quote_quoted_at_ms": int(quote["quoted_at_ms"]),
+            "quote_batch_id": fact["quote_batch_id"],
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        row_hash = (
+            "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+        )
+        con.execute(
+            "UPDATE neg_risk_candidate_current_authority SET "
+            "quote_batch_id=?,fact_id=?,legs_json=?,canonical_json=?,"
+            "row_hash=? WHERE group_id=?",
+            (
+                fact["quote_batch_id"],
+                fact["id"],
+                quote["legs_json"],
+                canonical,
+                row_hash,
+                group.group_id,
+            ),
+        )
+        con.execute(
+            "UPDATE neg_risk_candidate_current_aggregate "
+            "SET aggregate_digest=? WHERE id=1",
+            (row_hash.removeprefix("sha256:"),),
+        )
+        candidate_hash, _ = store._owner_aggregate_hashes_v2(con)
+        con.execute(
+            "UPDATE neg_risk_owner_mutation_guard "
+            "SET candidate_aggregate_hash=? WHERE id=1",
+            (candidate_hash,),
+        )
+        con.executescript(V2_OWNER_JOURNAL_TRIGGER_DDL)
+
+    with pytest.raises(
+        ValueError,
+        match="invalid-candidate-current-authority",
+    ):
+        store.init_schema()
 
 
 def test_v2_owner_migration_deadline_rolls_back_as_exact_v2(

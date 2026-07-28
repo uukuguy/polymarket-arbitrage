@@ -67,6 +67,7 @@ M1_MAKE_TARGETS = {
     "dashboard-deploy",
     "unpause-prod",
     "perception-status",
+    "perception-opportunities",
     "perception-groups",
     "perception-incidents",
     "queue-discovery",

@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-groups perception-incidents queue-discovery queue-reconciliation
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-opportunities perception-groups perception-incidents queue-discovery queue-reconciliation
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -80,6 +80,10 @@ PERCEPTION_CURL = curl --disable --connect-timeout 3 --max-time 10 --retry 0 -fs
 ## perception-status: Cloud read-only opportunity-first status; valid zero is distinct from unavailable.
 perception-status:
 	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/status" | python -m json.tool
+
+## perception-opportunities: Cloud read-only authenticated current opportunities; optional limit=1..500 and after_group_id=.
+perception-opportunities:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/opportunities?limit=$(or $(limit),100)&after_group_id=$(after_group_id)" | python -m json.tool
 
 ## perception-groups: Cloud read-only certified group list; optional limit=1..500.
 perception-groups:
