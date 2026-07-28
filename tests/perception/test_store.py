@@ -367,3 +367,44 @@ def test_same_hash_revocation_is_observed_before_atomic_quote_read(
 
     assert not worker.is_alive()
     assert outcome == [None]
+
+
+class TracingQuoteReadStore(OpportunityPerceptionStore):
+    def __init__(self, db_path: Path) -> None:
+        super().__init__(db_path)
+        self.statements: list[str] = []
+
+    def _connect(self) -> sqlite3.Connection:
+        con = super()._connect()
+        con.set_trace_callback(self.statements.append)
+        return con
+
+
+def test_quote_authority_uses_one_statement_for_group_and_quote(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    publisher = OpportunityPerceptionStore(db_path)
+    publisher.init_schema()
+    group = revision(group_id="g-1", revision=1, token_suffix="a")
+    quote = batch_for(group, quote_batch_id="qb-1")
+    publisher.publish_group_revision(group)
+    publisher.publish_quote_batch(quote)
+    reader = TracingQuoteReadStore(db_path)
+
+    assert reader.current_quote_batch(
+        "g-1", now_ms=3_200, max_age_ms=1_000
+    ) == quote
+
+    authority_reads = [
+        statement
+        for statement in reader.statements
+        if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+        and (
+            "neg_risk_group_revisions" in statement
+            or "neg_risk_group_quote_batches" in statement
+        )
+    ]
+    assert len(authority_reads) == 1
+    assert "neg_risk_group_revisions" in authority_reads[0]
+    assert "neg_risk_group_quote_batches" in authority_reads[0]

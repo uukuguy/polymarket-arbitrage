@@ -20,6 +20,8 @@
   deserialization, so corrupt ordered legs cannot become authoritative.
 - Current group status and quote authority are selected in one joined SQLite
   statement, eliminating the split-read revocation window.
+- A SQL-trace regression counts only authoritative perception-table reads and
+  mutation-proves that a two-statement group/quote implementation is rejected.
 
 ## Safety Boundaries
 
@@ -41,7 +43,7 @@ RED: ModuleNotFoundError: No module named 'polyarb.perception.store'
 uv run pytest tests/perception/test_models.py tests/perception/test_store.py \
   tests/routing/test_opportunity_ledger.py \
   tests/routing/test_neg_risk_quote_store.py -q
-108 passed
+109 passed
 
 uv run ruff check src/polyarb/perception tests/perception
 All checks passed!
