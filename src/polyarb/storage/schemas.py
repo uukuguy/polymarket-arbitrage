@@ -599,6 +599,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_producer_receipts (
   exit_code INTEGER,
   stdout_tail TEXT NOT NULL,
   stderr_tail TEXT NOT NULL,
+  output_hash TEXT NOT NULL,
   supervisor_run_id TEXT NOT NULL,
   child_nonce TEXT NOT NULL DEFAULT '',
   auth_domain TEXT NOT NULL,

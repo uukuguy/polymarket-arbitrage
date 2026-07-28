@@ -306,6 +306,25 @@ def _valid_producer_receipt_outcome(outcome: object, exit_code: object) -> bool:
     return False
 
 
+def _valid_producer_receipt_tail(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return len(value.encode("utf-8")) <= 16_384
+    except UnicodeEncodeError:
+        return False
+
+
+def _producer_receipt_output_hash(stdout_tail: str, stderr_tail: str) -> str:
+    material = json.dumps(
+        {"stderr_tail": stderr_tail, "stdout_tail": stdout_tail},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(b"polyarb-producer-output-v1\0" + material).hexdigest()
+
+
 def validate_producer_history(
     con: sqlite3.Connection,
     component: str,
@@ -386,6 +405,13 @@ def validate_producer_history(
             or not _valid_producer_receipt_outcome(
                 receipt["outcome"],
                 receipt["exit_code"],
+            )
+            or not _valid_producer_receipt_tail(receipt["stdout_tail"])
+            or not _valid_producer_receipt_tail(receipt["stderr_tail"])
+            or receipt["output_hash"]
+            != _producer_receipt_output_hash(
+                receipt["stdout_tail"],
+                receipt["stderr_tail"],
             )
         ):
             raise ValueError("invalid-producer-history")
@@ -609,6 +635,11 @@ class OpportunityPerceptionStore:
                 (
                     "neg_risk_producer_receipts",
                     "child_auth_hash",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_producer_receipts",
+                    "output_hash",
                     "TEXT",
                 ),
                 (
@@ -3292,8 +3323,8 @@ class OpportunityPerceptionStore:
             or receipt.started_at_ms < 0
             or receipt.finished_at_ms < receipt.started_at_ms
             or receipt.outcome not in {"success", "nonzero", "timeout", "cancelled", "spawn-error"}
-            or len(receipt.stdout_tail.encode()) > 16_384
-            or len(receipt.stderr_tail.encode()) > 16_384
+            or not _valid_producer_receipt_tail(receipt.stdout_tail)
+            or not _valid_producer_receipt_tail(receipt.stderr_tail)
             or not receipt.supervisor_run_id
             or (
                 receipt.child_auth_hash is not None
@@ -3323,8 +3354,9 @@ class OpportunityPerceptionStore:
             con.execute(
                 "INSERT INTO neg_risk_producer_receipts("
                 "component,attempt,started_at_ms,finished_at_ms,outcome,"
-                "exit_code,stdout_tail,stderr_tail,supervisor_run_id,child_nonce,"
-                "auth_domain,child_auth_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "exit_code,stdout_tail,stderr_tail,output_hash,supervisor_run_id,"
+                "child_nonce,auth_domain,child_auth_hash"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     receipt.component,
                     receipt.attempt,
@@ -3334,6 +3366,10 @@ class OpportunityPerceptionStore:
                     receipt.exit_code,
                     receipt.stdout_tail,
                     receipt.stderr_tail,
+                    _producer_receipt_output_hash(
+                        receipt.stdout_tail,
+                        receipt.stderr_tail,
+                    ),
                     receipt.supervisor_run_id,
                     "",
                     _HEARTBEAT_AUTH_DOMAIN,

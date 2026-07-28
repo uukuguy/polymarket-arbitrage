@@ -56,6 +56,9 @@ wallet, signing, balances, orders or real-money execution.
    `timeout/cancelled/spawn-error=None`. Exit code zero is still unexpected
    producer disappearance. Restart count and exponential backoff are bounded;
    retry exhaustion durably escalates.
+   Receipt output tails must remain UTF-8 encodable strings of at most 16 KiB;
+   a writer-time integrity hash makes SQLite affinity conversions and later
+   output mutation detectable during full-history replay.
 8. `perception:open_incidents`, per-producer liveness and
    `perception:resource_mode` read and validate
    the exact same SQLite mutations. Candidate/HTTP incidents can fail overall
@@ -66,9 +69,9 @@ wallet, signing, balances, orders or real-money execution.
 ## Verification
 
 ```text
-Focused lifecycle/resource/supervisor: 192 pass
-Proportional perception + strict health + daemon wiring/shutdown: 310 pass
-Full repository: 2619 collected, 2617 pass (1 expected xfail, 1 skip)
+Focused lifecycle/resource/supervisor: 198 pass
+Proportional perception + strict health + daemon wiring/shutdown: 316 pass
+Full repository: 2625 collected, 2623 pass (1 expected xfail, 1 skip)
 Ruff changed scope: pass
 compileall: pass
 make docs-m1-check: pass

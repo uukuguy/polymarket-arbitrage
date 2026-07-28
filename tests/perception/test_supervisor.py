@@ -298,6 +298,88 @@ def test_liveness_rejects_success_receipt_with_nonzero_exit_code(tmp_path) -> No
 
 
 @pytest.mark.parametrize(
+    "tamper_sql",
+    (
+        "stdout_tail=zeroblob(20000)",
+        "stderr_tail=42",
+    ),
+)
+def test_liveness_rejects_non_text_or_oversized_historical_tails(
+    tmp_path,
+    tamper_sql,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.reserve_producer_attempt(
+        "candidate",
+        supervisor_run_id="run-1",
+        started_at_ms=1_000,
+    )
+    store.record_producer_receipt(
+        ProducerReceipt(
+            component="candidate",
+            attempt=1,
+            started_at_ms=1_000,
+            finished_at_ms=1_010,
+            outcome="success",
+            exit_code=0,
+            stdout_tail="",
+            stderr_tail="",
+            supervisor_run_id="run-1",
+            child_auth_hash=None,
+        )
+    )
+    healthy = read_producer_liveness_health(
+        store.db_path,
+        "candidate",
+        now_ms=2_000,
+        stall_timeout_ms=2_000,
+    )
+    assert healthy.evidence_consistent is True
+    with store._connect() as con:
+        con.execute(
+            f"UPDATE neg_risk_producer_receipts SET {tamper_sql} "
+            "WHERE component='candidate' AND attempt=1"
+        )
+
+    corrupt = read_producer_liveness_health(
+        store.db_path,
+        "candidate",
+        now_ms=2_000,
+        stall_timeout_ms=2_000,
+    )
+    assert corrupt.state == "unavailable"
+    assert corrupt.evidence_consistent is False
+
+
+@pytest.mark.parametrize("tail", (b"", 42, None, "€" * 5_462))
+def test_receipt_writer_rejects_non_text_or_oversized_tails(tmp_path, tail) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.reserve_producer_attempt(
+        "candidate",
+        supervisor_run_id="run-1",
+        started_at_ms=1_000,
+    )
+
+    with pytest.raises(ValueError, match="invalid-producer-receipt"):
+        store.record_producer_receipt(
+            ProducerReceipt(
+                component="candidate",
+                attempt=1,
+                started_at_ms=1_000,
+                finished_at_ms=1_010,
+                outcome="success",
+                exit_code=0,
+                stdout_tail=tail,
+                stderr_tail="",
+                supervisor_run_id="run-1",
+                child_auth_hash=None,
+            )
+        )
+
+
+@pytest.mark.parametrize(
     ("outcome", "exit_code", "consistent"),
     (
         ("success", 0, True),

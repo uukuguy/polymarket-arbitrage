@@ -23,12 +23,13 @@ Stalls receive terminate→grace→kill; restart uses bounded exponential backof
 and escalates at the configured limit. Only a child-authenticated heartbeat
 whose count, sequence and timestamp all strictly advance can extend the stall
 deadline; read failures and status-marker changes cannot. Receipt history
-enforces the exact outcome/exit-code matrix. One component's receipt/incident
-does not alter another component. Strict health reads the same durable facts
-via `perception:open_incidents` and `perception:resource_mode`.
+enforces the exact outcome/exit-code matrix plus string/UTF-8/16 KiB output
+tail bounds and integrity hashes. One component's receipt/incident does not
+alter another component. Strict health reads the same durable facts via
+`perception:open_incidents` and `perception:resource_mode`.
 
 Verification: focused lifecycle/resource/subprocess fault tests and
-proportional perception/health/daemon regressions passed; 2,617 repository
+proportional perception/health/daemon regressions passed; 2,623 repository
 tests passed (one expected xfail and one skip). Ruff, compileall,
 `make docs-m1-check`, `git diff --check` and `make planning-status` passed.
 `python:3.12-slim` directly proved Python 3.12, asyncio subprocess,
