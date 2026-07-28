@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
 import time
 from collections.abc import Sequence
@@ -33,7 +32,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError("invalid-now")
         store = OpportunityPerceptionStore(args.db_path, read_only=True)
         status = store.discovery_status(now_ms)
-    except (OSError, sqlite3.DatabaseError, ValueError) as error:
+    except Exception as error:
         print(
             f"invalid discovery state: {type(error).__name__}",
             file=sys.stderr,
@@ -52,6 +51,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
         "queue_depth_by_class": status.queue_depth_by_class,
         "oldest_visit_age_ms": status.oldest_visit_age_ms,
+        "load_control": {
+            "degraded_streak": status.load_state.degraded_streak,
+            "last_reason": status.load_state.last_reason,
+            "last_decision": status.load_state.last_decision,
+            "updated_at_ms": status.load_state.updated_at_ms,
+        },
         "known_groups": status.coverage.known_groups,
         "coverage": {
             str(minutes): {

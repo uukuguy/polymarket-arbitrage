@@ -60,9 +60,10 @@ score = (
 五个输入、输出和 reason 都以 Decimal 文本持久化。rank 限于 0..100，`age_rank`
 封顶为可比较的 200。真正的 starvation 保证来自配置的 durable maximum-wait：
 第一次 Candidate 采集前，scheduler 每轮用 `first_discovered_at_ms` 与当前时间重算
-overdue；超过 deadline 的组必定排在未 overdue 新组前，同为 overdue 按 deadline
-排序。重启只重读相同 anchors，结果确定；第一次终态后由 Candidate durable due time
-接管。
+overdue。factless/overdue promotion 永远走 normal/explore reserved capacity：每轮先
+服务真正有 Candidate fact 的 high burst，再给有限 overdue 槽，剩余 high 不被探索
+backlog 挤掉；同为 overdue 按 deadline 排序。重启只重读相同 anchors，结果确定；
+第一次终态后由 Candidate durable due time 接管。
 
 ## 原子性和取消
 
@@ -93,12 +94,20 @@ promotion、current revision 和 coverage，并验证 cursor/completed、时间�
 Decimal/rank、枚举及 promotion→current certified membership。并发 writer 不能让
 一份报告混合提交前后的事实，直接改坏数据库也不会被渲染成正常状态。
 
+每个页面还写 immutable batch receipt 与逐组 sample/promotion proof。status 将 latest
+state 的 page/groups/promotions/cursor/timestamps 与 receipt 逐字段比对，并从持久化
+inputs/anchors 用同一 Decimal 函数重算 score/reason。`group_id` authority 同时绑定
+`event_id`；同 group/hash 却换 event 会整页回滚。
+
 ## 设计取舍
 
 - Candidate freshness 是所有 current certified groups 与 matching complete Quote 的
   一次 durable snapshot。任一缺 Quote 或 p95 接近 hard-stale 时，Discovery 在 Gamma
   前 yield；recent unavailable fact 不刷新 Quote age，一个忙碌组也不能掩盖 sibling。
   没有 durable certified authority 时允许探索冷启动，legacy ID 不制造死锁。
+- degraded 不会永久锁死 Discovery。每次 yield/probe 相位写入 durable load state；
+  N-1 个 degraded cycle 后只放行一个仍然有界的页面，其余容量继续留给 Candidate。
+  重启不能重置或加速相位，fresh recovery 明确把 streak 归零。
 - promotion source 是 legacy seed 与 Discovery promotion 的稳定去重并集，不会因接入
   新 producer 丢掉当前 hot candidates。
 - feature flag 默认关闭；本 slice 只完成生产代码路径，不等于已经完成部署和切换。

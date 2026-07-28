@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from polyarb.cli_discovery import main as discovery_status_main
 from polyarb.clients.gamma_client import EventPage
 from polyarb.perception.candidate_watcher import (
     CandidateWatcherRuntime,
@@ -260,6 +261,40 @@ async def test_duplicate_group_identity_in_one_page_fails_batch_closed(
 
 
 @pytest.mark.asyncio
+async def test_same_group_and_membership_cannot_migrate_event_identity(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+    ).run_batch()
+    before = store.current_group("g-1")
+    schedule_before = store.group_schedule("g-1")
+    migrated = _event(event_id="e-2", group_id="g-1")
+    worker = DiscoveryWorker(
+        gamma=FakeGamma(
+            EventPage(
+                events=(migrated,),
+                requested_cursor="c-2",
+                next_cursor="c-3",
+                completed=False,
+                started_at_ms=20_000,
+                finished_at_ms=20_100,
+            )
+        ),
+        store=store,
+    )
+
+    with pytest.raises(ValueError, match="event-identity-conflict"):
+        await worker.run_batch()
+
+    assert store.discovery_cursor() == "c-2"
+    assert store.current_group("g-1") == before
+    assert store.group_schedule("g-1") == schedule_before
+
+
+@pytest.mark.asyncio
 async def test_restart_uses_durable_cursor_and_terminal_page_restarts_sweep(
     tmp_path: Path,
 ) -> None:
@@ -467,6 +502,40 @@ async def test_coverage_windows_use_exact_discovery_samples_and_liquidity_weight
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "UPDATE neg_risk_discovery_state SET groups_seen=999",
+        "UPDATE neg_risk_group_schedule SET priority_score='999'",
+        "UPDATE neg_risk_group_schedule SET first_discovered_at_ms=999999",
+        "UPDATE neg_risk_group_schedule SET activity_rank='NaN'",
+        "UPDATE neg_risk_group_schedule SET promoted_at_ms=NULL",
+        "INSERT INTO neg_risk_discovery_load_state("
+        "id,degraded_streak,last_reason,last_decision,updated_at_ms"
+        ") VALUES (1,1,'candidate-quote-stale','fresh',1)",
+    ],
+)
+async def test_status_rejects_direct_semantic_corruption_without_leak(
+    tmp_path: Path,
+    capsys,
+    corruption: str,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+    ).run_batch()
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as con:
+        con.execute(corruption)
+
+    assert discovery_status_main(["--db-path", str(db_path)]) == 2
+    captured = capsys.readouterr()
+    assert str(db_path) not in captured.err
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.asyncio
 async def test_durable_candidate_freshness_covers_all_promoted_certified_groups(
     tmp_path: Path,
 ) -> None:
@@ -544,6 +613,55 @@ async def test_missing_durable_quote_yields_discovery_but_empty_set_does_not(
     assert controller.yield_reason(
         CandidateFreshness(candidate_count=0, quote_p95_age_ms=None)
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_degraded_duty_cycle_persists_probe_phase_across_restart(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    gamma = FakeGamma(_page(_event(event_id="e-1", group_id="g-1")))
+
+    def freshness() -> CandidateFreshness:
+        return CandidateFreshness(
+            candidate_count=1,
+            quote_p95_age_ms=None,
+            missing_quote_count=1,
+        )
+
+    first = DiscoveryWorker(
+        gamma=gamma,
+        store=store,
+        load_controller=DiscoveryLoadController(candidate_hard_stale_ms=90_000),
+        candidate_freshness=freshness,
+        degraded_probe_every_cycles=3,
+    )
+    assert (await first.run_batch()).yielded is True
+    assert (await first.run_batch()).yielded is True
+    restarted = DiscoveryWorker(
+        gamma=gamma,
+        store=OpportunityPerceptionStore(tmp_path / "state.db"),
+        load_controller=DiscoveryLoadController(candidate_hard_stale_ms=90_000),
+        candidate_freshness=freshness,
+        degraded_probe_every_cycles=3,
+    )
+
+    result = await restarted.run_batch()
+
+    assert result.yielded is False
+    assert gamma.calls == [("c-1", 100)]
+    assert store.discovery_load_state().degraded_streak == 3
+    assert store.discovery_load_state().last_decision == "probe"
+    recovered = store.record_discovery_load_decision(
+        degraded_reason=None,
+        probe_every_cycles=3,
+        now_ms=20_000,
+    )
+    assert recovered.degraded_streak == 0
+    assert recovered.last_decision == "fresh"
+    assert OpportunityPerceptionStore(
+        tmp_path / "state.db"
+    ).discovery_load_state() == recovered
 
 
 def test_candidate_source_composes_legacy_seed_with_discovery_promotions(
@@ -645,6 +763,38 @@ async def test_overdue_factless_promotion_beats_repeatedly_new_higher_score(
     await scheduler().run_due_once()
 
     assert calls == ["a-old", "z-new", "a-old", "z-new"]
+
+
+def test_overdue_promotions_use_only_reserved_capacity_after_genuine_high(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    scheduler = CandidateWatcherScheduler(
+        watcher=object(),
+        store=store,
+        candidate_group_ids=lambda: (),
+        runtime=CandidateWatcherRuntime(),
+        cycle_max_groups=5,
+        reserved_non_high_slots=2,
+    )
+    due = [
+        (0, 100, "hot-1"),
+        (0, 101, "hot-2"),
+        (0, 102, "hot-3"),
+    ] + [
+        (1, -(10**18) + index, f"overdue-{index}")
+        for index in range(5)
+    ]
+
+    selected = scheduler._select_cycle(due)
+
+    assert selected[0][2] == "hot-1"
+    assert sum(item[2].startswith("overdue") for item in selected) == 2
+    assert {item[2] for item in selected if item[2].startswith("hot")} == {
+        "hot-1",
+        "hot-2",
+        "hot-3",
+    }
 
 
 @pytest.mark.asyncio

@@ -303,6 +303,35 @@ CREATE TABLE IF NOT EXISTS neg_risk_coverage_samples (
 CREATE INDEX IF NOT EXISTS idx_neg_risk_coverage_samples_window
   ON neg_risk_coverage_samples(sampled_at_ms, group_id);
 
+CREATE TABLE IF NOT EXISTS neg_risk_discovery_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  requested_cursor TEXT,
+  next_cursor TEXT,
+  completed INTEGER NOT NULL CHECK(completed IN (0,1)),
+  started_at_ms INTEGER NOT NULL,
+  finished_at_ms INTEGER NOT NULL,
+  page_event_count INTEGER NOT NULL CHECK(page_event_count >= 0),
+  groups_seen INTEGER NOT NULL CHECK(groups_seen >= 0),
+  promoted_count INTEGER NOT NULL CHECK(promoted_count >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_discovery_batch_samples (
+  batch_id INTEGER NOT NULL,
+  group_id TEXT NOT NULL,
+  liquidity_weight TEXT NOT NULL,
+  promoted INTEGER NOT NULL CHECK(promoted IN (0,1)),
+  PRIMARY KEY(batch_id, group_id)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_discovery_load_state (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  degraded_streak INTEGER NOT NULL CHECK(degraded_streak >= 0),
+  last_reason TEXT,
+  last_decision TEXT NOT NULL CHECK(last_decision IN
+    ('fresh','yield','probe')),
+  updated_at_ms INTEGER NOT NULL
+);
+
 -- Phase 1.1 T2: append-only translation cache.
 -- Invariants:
 --  * never DELETE FROM (cumulative across snapshots)

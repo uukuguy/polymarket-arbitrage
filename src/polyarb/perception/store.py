@@ -94,6 +94,7 @@ class DiscoveryStatus:
     queue_depth_by_class: dict[str, int]
     oldest_visit_age_ms: int | None
     coverage: CoverageWindows
+    load_state: DiscoveryLoadState
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,14 @@ class DurableCandidateFreshness:
     candidate_count: int
     quote_p95_age_ms: int | None
     missing_quote_count: int
+
+
+@dataclass(frozen=True)
+class DiscoveryLoadState:
+    degraded_streak: int
+    last_reason: str | None
+    last_decision: Literal["fresh", "yield", "probe"]
+    updated_at_ms: int
 
 
 class OpportunityPerceptionStore:
@@ -130,6 +139,64 @@ class OpportunityPerceptionStore:
         if row is None or bool(row["completed"]):
             return None
         return None if row["next_cursor"] is None else str(row["next_cursor"])
+
+    def record_discovery_load_decision(
+        self,
+        *,
+        degraded_reason: str | None,
+        probe_every_cycles: int,
+        now_ms: int,
+    ) -> DiscoveryLoadState:
+        if probe_every_cycles < 2:
+            raise ValueError("discovery-probe-period-must-be-at-least-two")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT degraded_streak FROM neg_risk_discovery_load_state WHERE id=1"
+            ).fetchone()
+            if degraded_reason is None:
+                streak = 0
+                decision = "fresh"
+            else:
+                streak = (0 if row is None else int(row["degraded_streak"])) + 1
+                decision = "probe" if streak % probe_every_cycles == 0 else "yield"
+            con.execute(
+                "INSERT INTO neg_risk_discovery_load_state("
+                "id,degraded_streak,last_reason,last_decision,updated_at_ms"
+                ") VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "degraded_streak=excluded.degraded_streak,"
+                "last_reason=excluded.last_reason,"
+                "last_decision=excluded.last_decision,"
+                "updated_at_ms=excluded.updated_at_ms",
+                (streak, degraded_reason, decision, now_ms),
+            )
+            con.execute("COMMIT")
+            return DiscoveryLoadState(streak, degraded_reason, decision, now_ms)
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def discovery_load_state(self) -> DiscoveryLoadState:
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT degraded_streak,last_reason,last_decision,updated_at_ms "
+                "FROM neg_risk_discovery_load_state WHERE id=1"
+            ).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            return DiscoveryLoadState(0, None, "fresh", 0)
+        return DiscoveryLoadState(
+            int(row["degraded_streak"]),
+            None if row["last_reason"] is None else str(row["last_reason"]),
+            row["last_decision"],
+            int(row["updated_at_ms"]),
+        )
 
     def publish_discovery_batch(
         self,
@@ -185,6 +252,38 @@ class OpportunityPerceptionStore:
                     promoted.append((schedule.priority_score, schedule.group_id))
 
             promoted.sort(key=lambda item: (-item[0], item[1]))
+            promoted_ids = {group_id for _, group_id in promoted}
+            receipt = con.execute(
+                "INSERT INTO neg_risk_discovery_batches("
+                "requested_cursor,next_cursor,completed,started_at_ms,"
+                "finished_at_ms,page_event_count,groups_seen,promoted_count"
+                ") VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    requested_cursor,
+                    next_cursor,
+                    int(completed),
+                    started_at_ms,
+                    finished_at_ms,
+                    page_event_count,
+                    len(candidates),
+                    len(promoted),
+                ),
+            )
+            batch_id = int(receipt.lastrowid)
+            con.executemany(
+                "INSERT INTO neg_risk_discovery_batch_samples("
+                "batch_id,group_id,liquidity_weight,promoted"
+                ") VALUES (?,?,?,?)",
+                [
+                    (
+                        batch_id,
+                        candidate.group_id,
+                        str(candidate.liquidity_weight),
+                        int(candidate.group_id in promoted_ids),
+                    )
+                    for candidate in candidates
+                ],
+            )
             con.execute(
                 "INSERT INTO neg_risk_discovery_state("
                 "id,next_cursor,completed,last_started_at_ms,last_finished_at_ms,"
@@ -229,6 +328,12 @@ class OpportunityPerceptionStore:
             "SELECT * FROM neg_risk_group_schedule WHERE group_id=?",
             (candidate.group_id,),
         ).fetchone()
+        current_authority = self._current_group_row(con, candidate.group_id)
+        if (
+            current_authority is not None
+            and current_authority["event_id"] != candidate.event_id
+        ):
+            raise ValueError("discovery-group-event-identity-conflict")
         last_fact = con.execute(
             "SELECT observed_at_ms,gross_edge_bps "
             "FROM neg_risk_candidate_watch_facts WHERE group_id=? "
@@ -510,11 +615,30 @@ class OpportunityPerceptionStore:
                     ") c ON c.group_id=r.group_id AND c.revision=r.revision"
                 ).fetchall()
             }
+            latest_batch = con.execute(
+                "SELECT * FROM neg_risk_discovery_batches ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            latest_samples = (
+                []
+                if latest_batch is None
+                else con.execute(
+                    "SELECT * FROM neg_risk_discovery_batch_samples "
+                    "WHERE batch_id=? ORDER BY group_id",
+                    (latest_batch["id"],),
+                ).fetchall()
+            )
+            load_row = con.execute(
+                "SELECT degraded_streak,last_reason,last_decision,updated_at_ms "
+                "FROM neg_risk_discovery_load_state WHERE id=1"
+            ).fetchone()
             coverage = self._coverage_windows_in_snapshot(con, now_ms)
             self._validate_discovery_snapshot(
                 state=state,
                 schedules=schedules,
                 current_revisions=current_revisions,
+                latest_batch=latest_batch,
+                latest_samples=latest_samples,
+                load_row=load_row,
                 coverage=coverage,
             )
             con.execute("COMMIT")
@@ -551,6 +675,20 @@ class OpportunityPerceptionStore:
             queue_depth_by_class=queue,
             oldest_visit_age_ms=oldest_age,
             coverage=coverage,
+            load_state=(
+                DiscoveryLoadState(0, None, "fresh", 0)
+                if load_row is None
+                else DiscoveryLoadState(
+                    int(load_row["degraded_streak"]),
+                    (
+                        None
+                        if load_row["last_reason"] is None
+                        else str(load_row["last_reason"])
+                    ),
+                    load_row["last_decision"],
+                    int(load_row["updated_at_ms"]),
+                )
+            ),
         )
 
     @staticmethod
@@ -569,8 +707,10 @@ class OpportunityPerceptionStore:
         for minutes in (15, 30, 60):
             row = con.execute(
                 "WITH visited AS ("
-                "SELECT DISTINCT group_id FROM neg_risk_coverage_samples "
-                "WHERE sampled_at_ms>=? AND sampled_at_ms<=?"
+                "SELECT DISTINCT bs.group_id "
+                "FROM neg_risk_discovery_batch_samples bs "
+                "JOIN neg_risk_discovery_batches b ON b.id=bs.batch_id "
+                "WHERE b.finished_at_ms>=? AND b.finished_at_ms<=?"
                 ") SELECT COUNT(*) AS visited_groups,"
                 "COALESCE(SUM(CAST(s.liquidity_weight AS REAL)),0) AS visited_weight "
                 "FROM neg_risk_group_schedule s JOIN visited v USING(group_id)",
@@ -604,8 +744,31 @@ class OpportunityPerceptionStore:
         state: sqlite3.Row | None,
         schedules: list[sqlite3.Row],
         current_revisions: dict[str, sqlite3.Row],
+        latest_batch: sqlite3.Row | None,
+        latest_samples: list[sqlite3.Row],
+        load_row: sqlite3.Row | None,
         coverage: CoverageWindows,
     ) -> None:
+        if load_row is not None:
+            streak = int(load_row["degraded_streak"])
+            reason = load_row["last_reason"]
+            decision = load_row["last_decision"]
+            if (
+                int(load_row["updated_at_ms"]) < 0
+                or (
+                    decision == "fresh"
+                    and (streak != 0 or reason is not None)
+                )
+                or (
+                    decision in {"yield", "probe"}
+                    and (
+                        streak <= 0
+                        or reason
+                        not in {"candidate-quote-missing", "candidate-quote-stale"}
+                    )
+                )
+            ):
+                raise ValueError("invalid-discovery-load-state")
         if state is not None:
             completed = bool(state["completed"])
             if completed != (state["next_cursor"] is None):
@@ -619,6 +782,54 @@ class OpportunityPerceptionStore:
             )
             if any(value < 0 for value in counts) or counts[2] > counts[1]:
                 raise ValueError("invalid-discovery-state-counts")
+            if latest_batch is None:
+                raise ValueError("missing-discovery-batch-receipt")
+            state_fields = (
+                "next_cursor",
+                "completed",
+                "last_started_at_ms",
+                "last_finished_at_ms",
+                "page_event_count",
+                "groups_seen",
+                "promoted_count",
+            )
+            receipt_fields = (
+                "next_cursor",
+                "completed",
+                "started_at_ms",
+                "finished_at_ms",
+                "page_event_count",
+                "groups_seen",
+                "promoted_count",
+            )
+            if any(
+                state[state_name] != latest_batch[receipt_name]
+                for state_name, receipt_name in zip(
+                    state_fields,
+                    receipt_fields,
+                    strict=True,
+                )
+            ):
+                raise ValueError("discovery-state-receipt-mismatch")
+            if len(latest_samples) != int(latest_batch["groups_seen"]):
+                raise ValueError("discovery-receipt-sample-count-mismatch")
+            if sum(int(row["promoted"]) for row in latest_samples) != int(
+                latest_batch["promoted_count"]
+            ):
+                raise ValueError("discovery-receipt-promotion-count-mismatch")
+        elif latest_batch is not None or latest_samples:
+            raise ValueError("orphan-discovery-batch-receipt")
+        schedules_by_id = {str(row["group_id"]): row for row in schedules}
+        for sample in latest_samples:
+            schedule = schedules_by_id.get(str(sample["group_id"]))
+            if (
+                schedule is None
+                or Decimal(str(sample["liquidity_weight"]))
+                != Decimal(str(schedule["liquidity_weight"]))
+                or bool(sample["promoted"])
+                != (schedule["promoted_at_ms"] is not None)
+            ):
+                raise ValueError("invalid-discovery-receipt-sample")
         for row in schedules:
             decimals = {
                 name: Decimal(str(row[name]))
@@ -655,9 +866,59 @@ class OpportunityPerceptionStore:
                     row["quality"] != "complete-supported"
                     or revision is None
                     or revision["status"] != "certified"
+                    or revision["event_id"] != row["event_id"]
                     or revision["membership_hash"] != row["membership_hash"]
                 ):
                     raise ValueError("invalid-discovery-promotion-authority")
+            else:
+                revision = current_revisions.get(str(row["group_id"]))
+                if row["quality"] == "complete-supported":
+                    raise ValueError("supported-discovery-schedule-not-promoted")
+                if revision is not None and (
+                    revision["event_id"] != row["event_id"]
+                    or (
+                        revision["status"] != "invalidated"
+                    )
+                ):
+                    raise ValueError("invalid-discovery-unpromoted-authority")
+            if (
+                int(row["first_discovered_at_ms"])
+                > int(row["last_discovered_at_ms"])
+                or (
+                    row["last_visited_at_ms"] is not None
+                    and int(row["last_visited_at_ms"])
+                    > int(row["last_discovered_at_ms"])
+                )
+                or (
+                    row["promoted_at_ms"] is not None
+                    and not int(row["first_discovered_at_ms"])
+                    <= int(row["promoted_at_ms"])
+                    <= int(row["last_discovered_at_ms"])
+                )
+            ):
+                raise ValueError("invalid-discovery-schedule-time")
+            expected = priority_components(
+                GroupScheduleInput(
+                    group_id=str(row["group_id"]),
+                    gross_edge_bps=decimals["gross_edge_bps"],
+                    activity_rank=decimals["activity_rank"],
+                    liquidity_rank=decimals["liquidity_rank"],
+                    change_rank=decimals["change_rank"],
+                    last_visited_at_ms=(
+                        None
+                        if row["last_visited_at_ms"] is None
+                        else int(row["last_visited_at_ms"])
+                    ),
+                    first_discovered_at_ms=int(row["first_discovered_at_ms"]),
+                ),
+                now_ms=int(row["last_discovered_at_ms"]),
+            )
+            if (
+                decimals["age_rank"] != expected.age_rank
+                or decimals["priority_score"] != expected.score
+                or row["priority_reason"] != expected.reason
+            ):
+                raise ValueError("invalid-discovery-schedule-score")
         for window in coverage.by_minutes.values():
             if (
                 window.visited_groups > coverage.known_groups

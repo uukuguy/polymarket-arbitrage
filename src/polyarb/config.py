@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     discovery_candidate_max_wait_s: float = Field(
         default=600.0, gt=0, allow_inf_nan=False
     )
+    discovery_degraded_probe_every_cycles: int = Field(default=10, ge=2)
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 

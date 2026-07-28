@@ -96,17 +96,21 @@ class DiscoveryWorker:
         page_limit: int = 100,
         load_controller: DiscoveryLoadController | None = None,
         candidate_freshness: Callable[[], CandidateFreshness] | None = None,
+        degraded_probe_every_cycles: int = 10,
         clock_ms: Callable[[], int] | None = None,
     ) -> None:
         if not 1 <= page_limit <= 100:
             raise ValueError("discovery-page-limit-must-be-within-1..100")
         if (load_controller is None) != (candidate_freshness is None):
             raise ValueError("discovery-load-controller-inputs-must-be-paired")
+        if degraded_probe_every_cycles < 2:
+            raise ValueError("discovery-probe-period-must-be-at-least-two")
         self._gamma = gamma
         self._store = store
         self._page_limit = page_limit
         self._load_controller = load_controller
         self._candidate_freshness = candidate_freshness
+        self._degraded_probe_every_cycles = degraded_probe_every_cycles
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
 
     async def run_batch(self) -> DiscoveryBatchResult:
@@ -114,8 +118,14 @@ class DiscoveryWorker:
             assert self._candidate_freshness is not None
             freshness = await asyncio.to_thread(self._candidate_freshness)
             reason = self._load_controller.yield_reason(freshness)
-            if reason is not None:
-                now_ms = self._clock_ms()
+            now_ms = self._clock_ms()
+            load_state = await asyncio.to_thread(
+                self._store.record_discovery_load_decision,
+                degraded_reason=reason,
+                probe_every_cycles=self._degraded_probe_every_cycles,
+                now_ms=now_ms,
+            )
+            if reason is not None and load_state.last_decision == "yield":
                 cursor = await asyncio.to_thread(self._store.discovery_cursor)
                 return DiscoveryBatchResult(
                     requested_cursor=cursor,
@@ -367,6 +377,7 @@ def build_production_discovery(
             )
         ),
         candidate_freshness=candidate_freshness,
+        degraded_probe_every_cycles=settings.discovery_degraded_probe_every_cycles,
     )
     return DiscoveryRunner(
         worker=worker,

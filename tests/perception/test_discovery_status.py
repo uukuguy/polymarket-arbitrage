@@ -71,6 +71,30 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
             "page_event_count,groups_seen,promoted_count"
             ") VALUES (1,'c-2',0,10,20,1,1,0)"
         )
+        receipt = con.execute(
+            "INSERT INTO neg_risk_discovery_batches("
+            "requested_cursor,next_cursor,completed,started_at_ms,finished_at_ms,"
+            "page_event_count,groups_seen,promoted_count"
+            ") VALUES ('c-1','c-2',0,10,20,1,1,0)"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_discovery_batch_samples("
+            "batch_id,group_id,liquidity_weight,promoted"
+            ") VALUES (?,'g-1','0',0)",
+            (receipt.lastrowid,),
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_schedule("
+            "group_id,event_id,membership_hash,quality,reason,gross_edge_bps,"
+            "activity_rank,liquidity_rank,change_rank,age_rank,priority_score,"
+            "priority_reason,priority_class,liquidity_weight,"
+            "first_discovered_at_ms,last_discovered_at_ms,last_visited_at_ms,"
+            "promoted_at_ms"
+            ") VALUES ("
+            "'g-1','e-1','h','incomplete-source','fixture','0','0','0','0',"
+            "'0','0','weighted-edge-activity-liquidity-change-age:"
+            "0.35,0.20,0.15,0.15,0.15','explore','0',20,20,NULL,NULL)"
+        )
     original = OpportunityPerceptionStore._coverage_windows_in_snapshot
     writer_done = threading.Event()
 

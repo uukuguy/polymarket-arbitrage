@@ -26,6 +26,14 @@
   legacy market-stream compatibility remains unchanged.
 - Runtime anti-starvation uses a configurable maximum-wait deadline recomputed
   from persisted anchors on every selection and after restart.
+- Persisted degraded duty-cycle state yields N-1 Candidate-priority cycles and
+  then permits one bounded Discovery page without restart reset.
+- Immutable batch receipts and per-group sample/promotion proofs bind latest
+  status counts to exact writer facts; stored scores/reasons are recomputed.
+- Factless/overdue promotions use reserved lower-lane capacity after a genuine
+  Candidate high burst; they never become global high.
+- Group authority binds `event_id` as well as membership; attempted event
+  migration rejects and rolls back the whole page.
 - Composed durable Discovery promotions with the legacy candidate seed; no
   current hot candidate is dropped. Before a first Candidate fact exists, its
   scheduler consumes the persisted Discovery score/class.
@@ -82,6 +90,14 @@ runtime overdue ordering.
 
 FINAL GREEN — Task 3 + proportional regression:
 257 passed
+
+SECOND RE-REVIEW RED → GREEN:
+persisted degraded N-cycle probe phase; overdue reserved-lane isolation;
+immutable batch receipts plus score/authority/count corruption matrix; exact
+event identity conflict rollback.
+
+FINAL GREEN AFTER SECOND RE-REVIEW:
+266 passed
 
 uv run ruff check <changed Python/test files>
 All checks passed!

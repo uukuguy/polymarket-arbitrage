@@ -661,7 +661,11 @@ class CandidateWatcherScheduler:
                     )
                     due.append(
                         (
-                            0 if overdue else rank[schedule.priority_class],
+                            (
+                                1
+                                if overdue
+                                else max(1, rank[schedule.priority_class])
+                            ),
                             score_order,
                             group_id,
                         )
