@@ -1,6 +1,6 @@
 # Task 6 Implementer Report
 
-Status: REVIEW REMEDIATION COMPLETE — awaiting independent re-review
+Status: CONTINUITY REMEDIATION COMPLETE — awaiting independent re-review
 
 ## Scope
 
@@ -19,11 +19,16 @@ wallet, signing, balances, orders, or real-money execution.
    Every endpoint reads one SQLite snapshot; page/history JSON and response
    bytes are bounded before serialization, and group/history endpoints expose
    stable cursors.
-2. Status replays every Group revision, every complete/failed/superseded Quote,
-   every Candidate fact, and every success receipt before counting an edge.
+2. Status validates every retained Group revision, complete/failed/superseded
+   Quote, Candidate fact, and success receipt before counting an edge.
    Group event identity is immutable; revisions and timestamps are contiguous
    and monotonic; Quote/fact state-specific fields and as-of authority are
-   exact.
+   exact. Once the live Quote/fact/receipt suffix crosses 8,000 rows, a fully
+   validated prefix is atomically replaced by a versioned rolling checkpoint
+   that binds its cumulative digest and the retained per-group seed rows.
+   Validation then checks the checkpoint and replays a bounded suffix. A
+   10,010-success continuity test, checkpoint/suffix tampering, membership
+   supersede across the boundary, and delete-failure rollback all pass.
    Valid count zero is `available/no-certified-edge`; corrupt Candidate or
    incident evidence is HTTP 503 `unavailable`.
 3. Group list/history validate the same event/revision/time/status transition
@@ -32,7 +37,8 @@ wallet, signing, balances, orders, or real-money execution.
    Incidents validate lifecycle ordering plus Task 5 component-specific
    recovery proof. Returned incident evidence is size/depth bounded and
    recursively redacted.
-4. New controls reject bodies above 64 KiB before auth persistence and bind
+4. New controls reject bodies above 64 KiB before auth persistence, apply the
+   same absolute deadline while streaming a slow-drip body, and bind
    timestamp, nonce, method, exact path and exact body under
    HMAC-SHA256 with constant-time comparison. Authentication acceptance is an
    append-only, hash-chained durable receipt; missing, stale, tampered,
@@ -46,7 +52,9 @@ wallet, signing, balances, orders, or real-money execution.
    expired-resource, unavailable, or corrupt state is refused with 409.
    Queue materialization and its hashed queued/coalesced receipt commit in one
    bounded `BEGIN IMMEDIATE` transaction. They cannot mutate market facts or
-   call a producer. Auth and queue scans have explicit 10,000-row hard bounds.
+   call a producer. Expired auth rows are pruned before validation, and each
+   component's fully validated queue prefix rolls into a versioned checkpoint
+   at 8,000 rows while retaining a bounded 1,000-receipt suffix.
    Legacy Task 6 schemas are validated and upgraded to the same proof chain in
    one idempotent transaction; an invalid legacy chain rolls back the ALTERs.
 6. Discovery and Reconciliation serial loops first peek the exact queued
@@ -63,9 +71,9 @@ wallet, signing, balances, orders, or real-money execution.
 
 ```text
 Initial RED: 8 expected failures (404/auth/Make contracts)
-Two review-remediation rounds: all Important findings covered by adversarial tests
+Four review-remediation rounds: all Important findings covered by adversarial tests
 Focused API/control: 41 pass
-Proportional perception/health/wiring/Make suite: 343 pass
+Candidate/control/HTTP regression: pass
 Full repository: 2618 collected; 2616 pass, 1 expected xfail, 1 skip
 Collection audit: 0eb4031 2586 -> 6717e48 2596 -> current 2618
 Ruff changed scope: pass

@@ -100,11 +100,20 @@ async def control_auth_middleware(request: Request, call_next: Any, *, secret: s
                 return JSONResponse({"error": "request body too large"}, status_code=413)
         chunks: list[bytes] = []
         body_size = 0
-        async for chunk in request.stream():
-            body_size += len(chunk)
-            if body_size > _PERCEPTION_CONTROL_BODY_MAX_BYTES:
-                return JSONResponse({"error": "request body too large"}, status_code=413)
-            chunks.append(chunk)
+        try:
+            async with asyncio.timeout_at(
+                request.state.perception_control_deadline
+            ):
+                async for chunk in request.stream():
+                    body_size += len(chunk)
+                    if body_size > _PERCEPTION_CONTROL_BODY_MAX_BYTES:
+                        return JSONResponse(
+                            {"error": "request body too large"},
+                            status_code=413,
+                        )
+                    chunks.append(chunk)
+        except TimeoutError:
+            return JSONResponse({"error": "request body timeout"}, status_code=408)
         body = b"".join(chunks)
     else:
         body = await request.body()

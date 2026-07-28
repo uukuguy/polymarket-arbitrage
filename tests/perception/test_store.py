@@ -138,6 +138,268 @@ def test_only_atomic_candidate_publish_creates_success_receipt(tmp_path: Path) -
     assert receipts == [(atomic_batch.quote_batch_id, fact.id)]
 
 
+def test_candidate_authority_rolls_checkpoint_beyond_daily_history_bound(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-1", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+
+    for sequence in range(10_010):
+        quoted_at_ms = 3_100 + sequence
+        batch = batch_for(
+            group,
+            quote_batch_id=f"qb-{sequence}",
+            quoted_at_ms=quoted_at_ms,
+        )
+        store.publish_candidate_success(
+            batch,
+            observed_at_ms=quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="continuous",
+            next_due_at_ms=quoted_at_ms + 15_000,
+        )
+
+    assert store.validated_candidate_opportunity_count() == 1
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_candidate_authority_checkpoints"
+        ).fetchone() == (1,)
+        for table in (
+            "neg_risk_group_quote_batches",
+            "neg_risk_candidate_watch_facts",
+            "neg_risk_candidate_success_receipts",
+        ):
+            assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] < 3_000
+
+
+def test_candidate_authority_checkpoint_and_suffix_tampering_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        2,
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-1", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    for sequence in range(4):
+        batch = batch_for(
+            group,
+            quote_batch_id=f"qb-{sequence}",
+            quoted_at_ms=3_100 + sequence,
+        )
+        store.publish_candidate_success(
+            batch,
+            observed_at_ms=batch.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="continuous",
+            next_due_at_ms=batch.quoted_at_ms + 15_000,
+        )
+    assert store.validated_candidate_opportunity_count() == 1
+
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_candidate_authority_checkpoints "
+            "SET checkpoint_hash='sha256:tampered'"
+        )
+    with pytest.raises(ValueError, match="invalid-candidate-authority-checkpoint"):
+        store.validated_candidate_opportunity_count()
+
+    suffix_store = OpportunityPerceptionStore(tmp_path / "suffix.db")
+    suffix_store.init_schema()
+    suffix_store.publish_group_revision(group)
+    for sequence in range(4):
+        batch = batch_for(
+            group,
+            quote_batch_id=f"suffix-{sequence}",
+            quoted_at_ms=4_100 + sequence,
+        )
+        suffix_store.publish_candidate_success(
+            batch,
+            observed_at_ms=batch.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="continuous",
+            next_due_at_ms=batch.quoted_at_ms + 15_000,
+        )
+    with sqlite3.connect(suffix_store.db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_candidate_success_receipts "
+            "SET receipt_hash='sha256:tampered' WHERE id=("
+            "SELECT MAX(id) FROM neg_risk_candidate_success_receipts)"
+        )
+    with pytest.raises(ValueError, match="invalid-candidate-success-receipt"):
+        suffix_store.validated_candidate_opportunity_count()
+
+
+def test_candidate_checkpoint_compaction_rolls_back_on_delete_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        2,
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-1", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    for sequence in range(2):
+        batch = batch_for(group, quote_batch_id=f"qb-{sequence}", quoted_at_ms=3_100 + sequence)
+        store.publish_candidate_success(
+            batch,
+            observed_at_ms=batch.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="continuous",
+            next_due_at_ms=batch.quoted_at_ms + 15_000,
+        )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "CREATE TRIGGER reject_candidate_compaction BEFORE DELETE "
+            "ON neg_risk_group_quote_batches BEGIN "
+            "SELECT RAISE(ABORT,'reject compaction'); END"
+        )
+    third = batch_for(group, quote_batch_id="qb-2", quoted_at_ms=3_102)
+    with pytest.raises(sqlite3.IntegrityError, match="reject compaction"):
+        store.publish_candidate_success(
+            third,
+            observed_at_ms=third.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="continuous",
+            next_due_at_ms=third.quoted_at_ms + 15_000,
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_candidate_authority_checkpoints"
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_candidate_success_receipts"
+        ).fetchone() == (2,)
+    assert store.validated_candidate_opportunity_count() == 1
+
+
+def test_candidate_checkpoint_tracks_group_supersede_across_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        2,
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    first = revision(group_id="g-1", revision=1, token_suffix="a")
+    store.publish_group_revision(first)
+    for sequence in range(3):
+        batch = batch_for(first, quote_batch_id=f"qb-{sequence}", quoted_at_ms=3_100 + sequence)
+        store.publish_candidate_success(
+            batch,
+            observed_at_ms=batch.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="continuous",
+            next_due_at_ms=batch.quoted_at_ms + 15_000,
+        )
+
+    changed = revision(
+        group_id="g-1",
+        revision=2,
+        token_suffix="b",
+        observed_at_ms=4_000,
+    )
+    store.publish_group_revision(changed)
+    store.record_candidate_watch_fact(
+        group_id=changed.group_id,
+        membership_hash=changed.membership_hash,
+        quote_batch_id=None,
+        observed_at_ms=4_001,
+        last_result="unavailable",
+        reason="membership-changed",
+        bundle_cost=None,
+        gross_edge_bps=None,
+        max_bundle_size=None,
+        priority_class="high",
+        consecutive_failures=1,
+        effective_interval_s=15,
+        schedule_reason="retry",
+        next_due_at_ms=19_001,
+    )
+    assert store.validated_candidate_opportunity_count() == 0
+
+
+def test_candidate_checkpoint_compacts_group_only_revision_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        2,
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    for revision_number in range(1, 4):
+        store.publish_group_revision(
+            revision(
+                group_id="g-1",
+                revision=revision_number,
+                token_suffix="a",
+                observed_at_ms=1_000 + revision_number,
+            )
+        )
+
+    assert store.validated_candidate_opportunity_count() == 0
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM neg_risk_group_revisions").fetchone() == (1,)
+        assert con.execute(
+            "SELECT compacted_group_rows "
+            "FROM neg_risk_candidate_authority_checkpoints"
+        ).fetchone() == (2,)
+
+
 def test_membership_change_invalidates_previous_quote_atomically(
     tmp_path: Path,
 ) -> None:

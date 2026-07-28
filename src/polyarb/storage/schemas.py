@@ -274,6 +274,28 @@ CREATE TABLE IF NOT EXISTS neg_risk_candidate_success_receipts (
 CREATE INDEX IF NOT EXISTS idx_neg_risk_candidate_success_receipts_group
   ON neg_risk_candidate_success_receipts(group_id,id DESC);
 
+-- Rolling, fail-closed authority checkpoint.  The checkpoint binds the
+-- retained per-group seed rows after an atomically verified history prefix is
+-- compacted, so Candidate validation can replay a bounded live suffix.
+CREATE TABLE IF NOT EXISTS neg_risk_candidate_authority_checkpoints (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  domain TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  through_group_revision_id INTEGER NOT NULL CHECK(through_group_revision_id >= 0),
+  through_quote_rowid INTEGER NOT NULL CHECK(through_quote_rowid >= 0),
+  through_fact_id INTEGER NOT NULL CHECK(through_fact_id >= 0),
+  through_receipt_id INTEGER NOT NULL CHECK(through_receipt_id >= 0),
+  compacted_group_rows INTEGER NOT NULL CHECK(compacted_group_rows >= 0),
+  compacted_quote_rows INTEGER NOT NULL CHECK(compacted_quote_rows >= 0),
+  compacted_fact_rows INTEGER NOT NULL CHECK(compacted_fact_rows >= 0),
+  compacted_receipt_rows INTEGER NOT NULL CHECK(compacted_receipt_rows >= 0),
+  prefix_digest TEXT NOT NULL,
+  seeds_json TEXT NOT NULL,
+  seeds_digest TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL
+);
+
 -- Bounded Discovery publishes its cursor and every fact derived from one
 -- Gamma page in one SQLite transaction.  The cursor is an opaque token.
 CREATE TABLE IF NOT EXISTS neg_risk_discovery_state (
@@ -597,6 +619,21 @@ CREATE TABLE IF NOT EXISTS neg_risk_operator_queue_receipts (
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_operator_queue_receipts_component
   ON neg_risk_operator_queue_receipts(component,id);
+
+CREATE TABLE IF NOT EXISTS neg_risk_operator_queue_checkpoints (
+  component TEXT PRIMARY KEY CHECK(component IN ('discovery','reconciliation')),
+  domain TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  through_sequence INTEGER NOT NULL CHECK(through_sequence >= 1),
+  through_receipt_hash TEXT NOT NULL,
+  last_occurred_at_ms INTEGER NOT NULL CHECK(last_occurred_at_ms >= 0),
+  queued INTEGER NOT NULL CHECK(queued IN (0,1)),
+  queued_at_ms INTEGER,
+  consumed_at_ms INTEGER,
+  request_nonce TEXT,
+  request_auth_hash TEXT,
+  checkpoint_hash TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS neg_risk_http_probe_receipts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

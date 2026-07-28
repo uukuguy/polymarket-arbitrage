@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import sqlite3
@@ -9,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
+from starlette.requests import Request
 
 from polyarb.perception import store as perception_store
 from polyarb.perception.discovery import DiscoveryRunner
@@ -467,6 +469,164 @@ def test_control_auth_and_queue_share_one_absolute_response_deadline(
         assert con.execute(
             "SELECT COUNT(*) FROM neg_risk_operator_queue"
         ).fetchone() == (0,)
+
+
+def _seed_large_operator_queue(store: OpportunityPerceptionStore, count: int) -> str:
+    auth_hash = "a" * 64
+    previous_hash = None
+    rows = []
+    for sequence in range(1, count + 1):
+        nonce = "queued-nonce" if sequence == 1 else f"coalesced-{sequence}"
+        action = "queued" if sequence == 1 else "coalesced"
+        receipt_hash = perception_store.operator_queue_receipt_hash(
+            component="discovery",
+            sequence=sequence,
+            action=action,
+            occurred_at_ms=sequence,
+            auth_nonce=nonce,
+            auth_receipt_hash=auth_hash,
+            previous_hash=previous_hash,
+        )
+        rows.append(
+            (
+                "discovery",
+                sequence,
+                action,
+                sequence,
+                nonce,
+                auth_hash,
+                previous_hash,
+                receipt_hash,
+            )
+        )
+        previous_hash = receipt_hash
+    with sqlite3.connect(store.db_path) as con:
+        con.executemany(
+            "INSERT INTO neg_risk_operator_queue_receipts("
+            "component,sequence,action,occurred_at_ms,auth_nonce,"
+            "auth_receipt_hash,previous_hash,receipt_hash) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        con.execute(
+            "INSERT INTO neg_risk_operator_queue("
+            "component,queued,queued_at_ms,consumed_at_ms,request_nonce,"
+            "request_auth_hash,last_sequence,last_receipt_hash"
+            ") VALUES('discovery',1,1,NULL,'queued-nonce',?,?,?)",
+            (auth_hash, count, previous_hash),
+        )
+    return previous_hash
+
+
+def test_queue_history_rolls_checkpoint_and_consumes_across_boundary(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db", busy_timeout_ms=250)
+    store.init_schema()
+    _seed_large_operator_queue(store, 10_001)
+
+    assert store.pending_operator_wakeup(
+        "discovery",
+        now_ms=10_001,
+    ) == "queued-nonce"
+    with sqlite3.connect(store.db_path) as con:
+        checkpoint = con.execute(
+            "SELECT through_sequence,queued,request_nonce "
+            "FROM neg_risk_operator_queue_checkpoints "
+            "WHERE component='discovery'"
+        ).fetchone()
+        suffix_count = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_operator_queue_receipts "
+            "WHERE component='discovery'"
+        ).fetchone()[0]
+    assert checkpoint == (9_001, 1, "queued-nonce")
+    assert suffix_count == 1_000
+    assert store.consume_operator_wakeup(
+        "discovery",
+        occurred_at_ms=10_002,
+        expected_nonce="queued-nonce",
+    )
+    assert not store.consume_operator_wakeup(
+        "discovery",
+        occurred_at_ms=10_003,
+        expected_nonce="queued-nonce",
+    )
+
+
+def test_checkpoint_tampering_fails_closed(tmp_path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db", busy_timeout_ms=250)
+    store.init_schema()
+    _seed_large_operator_queue(store, 10_001)
+    assert store.pending_operator_wakeup("discovery", now_ms=10_001)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_operator_queue_checkpoints "
+            "SET checkpoint_hash='forged' WHERE component='discovery'"
+        )
+    with pytest.raises(ValueError, match="invalid-operator-queue-checkpoint"):
+        store.pending_operator_wakeup("discovery", now_ms=10_002)
+
+
+def test_checkpoint_write_and_prefix_delete_are_atomic(tmp_path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db", busy_timeout_ms=250)
+    store.init_schema()
+    _seed_large_operator_queue(store, 10_001)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "CREATE TRIGGER reject_operator_prefix_delete "
+            "BEFORE DELETE ON neg_risk_operator_queue_receipts "
+            "BEGIN SELECT RAISE(ABORT,'injected-checkpoint-crash'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="injected-checkpoint-crash"):
+        store.pending_operator_wakeup("discovery", now_ms=10_001)
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_operator_queue_checkpoints"
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_operator_queue_receipts"
+        ).fetchone() == (10_001,)
+
+
+@pytest.mark.asyncio
+async def test_slow_drip_body_obeys_control_absolute_deadline() -> None:
+    chunks = [
+        {"type": "http.request", "body": b"{", "more_body": True},
+        {"type": "http.request", "body": b"}", "more_body": False},
+    ]
+
+    async def receive():
+        await asyncio.sleep(0.5)
+        return chunks.pop(0)
+
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/control/perception/discovery",
+            "raw_path": b"/control/perception/discovery",
+            "query_string": b"",
+            "headers": [(b"x-signature", b"sha256=invalid")],
+            "client": ("test", 1),
+            "server": ("test", 80),
+        },
+        receive,
+    )
+    started = time.monotonic()
+    response = await __import__(
+        "polyarb.http.control",
+        fromlist=["control_auth_middleware"],
+    ).control_auth_middleware(
+        request,
+        lambda _request: None,
+        secret=_SECRET,
+    )
+    elapsed = time.monotonic() - started
+
+    assert response.status_code == 408
+    assert elapsed <= 1.05
 
 
 def test_perception_queue_contains_only_control_evidence(

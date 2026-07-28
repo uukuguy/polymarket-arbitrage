@@ -31,7 +31,13 @@ from polyarb.storage.schemas import DDL
 
 _BUSY_TIMEOUT_MS = 5_000
 _OPERATOR_AUTH_HISTORY_MAX_ROWS = 10_000
-_OPERATOR_QUEUE_HISTORY_MAX_ROWS = 10_000
+_OPERATOR_QUEUE_COMPACT_HIGH_ROWS = 8_000
+_OPERATOR_QUEUE_COMPACT_LOW_ROWS = 1_000
+_OPERATOR_QUEUE_UNCOMPACTED_MAX_ROWS = 20_000
+_CANDIDATE_AUTHORITY_DOMAIN = "polyarb-candidate-authority-checkpoint-v1"
+_CANDIDATE_AUTHORITY_VERSION = 1
+_CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS = 8_000
+_CANDIDATE_AUTHORITY_UNCOMPACTED_MAX_ROWS = 20_000
 _HEARTBEAT_AUTH_DOMAIN = "polyarb-producer-heartbeat-v1"
 _CHILD_HEARTBEAT_PREIMAGES: dict[tuple[str, str, int], str] = {}
 _GROUP_STATUSES = {"discovered", "certified", "stale", "invalidated", "closed"}
@@ -72,6 +78,46 @@ def candidate_success_receipt_hash(
             "quote_batch_id": quote_batch_id,
             "quote_batch_row_id": quote_batch_row_id,
             "transaction_id": transaction_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+
+def candidate_authority_checkpoint_hash(
+    *,
+    domain: str,
+    version: int,
+    generation: int,
+    through_group_revision_id: int,
+    through_quote_rowid: int,
+    through_fact_id: int,
+    through_receipt_id: int,
+    compacted_group_rows: int,
+    compacted_quote_rows: int,
+    compacted_fact_rows: int,
+    compacted_receipt_rows: int,
+    prefix_digest: str,
+    seeds_digest: str,
+) -> str:
+    """Bind one rolling Candidate authority prefix and its retained seeds."""
+    payload = json.dumps(
+        {
+            "compacted_fact_rows": compacted_fact_rows,
+            "compacted_group_rows": compacted_group_rows,
+            "compacted_quote_rows": compacted_quote_rows,
+            "compacted_receipt_rows": compacted_receipt_rows,
+            "domain": domain,
+            "generation": generation,
+            "prefix_digest": prefix_digest,
+            "seeds_digest": seeds_digest,
+            "through_fact_id": through_fact_id,
+            "through_group_revision_id": through_group_revision_id,
+            "through_quote_rowid": through_quote_rowid,
+            "through_receipt_id": through_receipt_id,
+            "version": version,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -137,6 +183,40 @@ def operator_queue_receipt_hash(
         else b"polyarb-operator-queue-v2\0"
     )
     return hashlib.sha256(domain + payload.encode()).hexdigest()
+
+
+def operator_queue_checkpoint_hash(
+    *,
+    component: str,
+    through_sequence: int,
+    through_receipt_hash: str,
+    last_occurred_at_ms: int,
+    queued: bool,
+    queued_at_ms: int | None,
+    consumed_at_ms: int | None,
+    request_nonce: str | None,
+    request_auth_hash: str | None,
+) -> str:
+    payload = json.dumps(
+        {
+            "component": component,
+            "consumed_at_ms": consumed_at_ms,
+            "domain": "polyarb-operator-queue-checkpoint",
+            "last_occurred_at_ms": last_occurred_at_ms,
+            "queued": queued,
+            "queued_at_ms": queued_at_ms,
+            "request_auth_hash": request_auth_hash,
+            "request_nonce": request_nonce,
+            "through_receipt_hash": through_receipt_hash,
+            "through_sequence": through_sequence,
+            "version": 1,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(
+        b"polyarb-operator-queue-checkpoint-v1\0" + payload.encode()
+    ).hexdigest()
 
 
 class ReconciliationIncompleteError(RuntimeError):
@@ -1641,6 +1721,7 @@ class OpportunityPerceptionStore:
         finished_at_ms: int,
         candidate_max_wait_ms: int,
     ) -> GroupSchedule:
+        candidate_checkpoint = self._validated_candidate_checkpoint(con)
         prior = con.execute(
             "SELECT * FROM neg_risk_group_schedule WHERE group_id=?",
             (candidate.group_id,),
@@ -1789,6 +1870,9 @@ class OpportunityPerceptionStore:
                 candidate_start_deadline_at_ms,
             ),
         )
+        if candidate_checkpoint is not None:
+            self._refresh_candidate_checkpoint(con, candidate_checkpoint)
+        self._compact_candidate_authority(con)
         return self._group_schedule_from_row(
             con.execute(
                 "SELECT * FROM neg_risk_group_schedule WHERE group_id=?",
@@ -2610,6 +2694,351 @@ class OpportunityPerceptionStore:
             missing_quote_count=missing,
         )
 
+    @staticmethod
+    def _candidate_seed_payload(
+        con: sqlite3.Connection,
+        *,
+        through_group_revision_id: int,
+        through_quote_rowid: int,
+        through_fact_id: int,
+        through_receipt_id: int,
+    ) -> dict[str, list[dict[str, object]]]:
+        def records(query: str, parameter: int) -> list[dict[str, object]]:
+            return [dict(row) for row in con.execute(query, (parameter,)).fetchall()]
+
+        return {
+            "facts": records(
+                "SELECT * FROM neg_risk_candidate_watch_facts "
+                "WHERE id<=? ORDER BY id",
+                through_fact_id,
+            ),
+            "groups": records(
+                "SELECT * FROM neg_risk_group_revisions WHERE id<=? ORDER BY id",
+                through_group_revision_id,
+            ),
+            "quotes": records(
+                "SELECT rowid,* FROM neg_risk_group_quote_batches "
+                "WHERE rowid<=? ORDER BY rowid",
+                through_quote_rowid,
+            ),
+            "receipts": records(
+                "SELECT * FROM neg_risk_candidate_success_receipts "
+                "WHERE id<=? ORDER BY id",
+                through_receipt_id,
+            ),
+        }
+
+    def _validated_candidate_checkpoint(
+        self,
+        con: sqlite3.Connection,
+    ) -> sqlite3.Row | None:
+        row = con.execute(
+            "SELECT * FROM neg_risk_candidate_authority_checkpoints WHERE id=1"
+        ).fetchone()
+        if row is None:
+            return None
+        self._check_deadline("candidate-authority-deadline")
+        if (
+            row["domain"] != _CANDIDATE_AUTHORITY_DOMAIN
+            or int(row["version"]) != _CANDIDATE_AUTHORITY_VERSION
+            or int(row["generation"]) <= 0
+            or any(
+                int(row[name]) < 0
+                for name in (
+                    "through_group_revision_id",
+                    "through_quote_rowid",
+                    "through_fact_id",
+                    "through_receipt_id",
+                    "compacted_group_rows",
+                    "compacted_quote_rows",
+                    "compacted_fact_rows",
+                    "compacted_receipt_rows",
+                )
+            )
+            or len(str(row["seeds_json"]).encode("utf-8")) > 33_554_432
+        ):
+            raise ValueError("invalid-candidate-authority-checkpoint")
+        try:
+            parsed_seeds = json.loads(str(row["seeds_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("invalid-candidate-authority-checkpoint")
+        canonical_seeds = json.dumps(
+            parsed_seeds,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        seeds_digest = f"sha256:{hashlib.sha256(canonical_seeds.encode()).hexdigest()}"
+        expected_hash = candidate_authority_checkpoint_hash(
+            domain=str(row["domain"]),
+            version=int(row["version"]),
+            generation=int(row["generation"]),
+            through_group_revision_id=int(row["through_group_revision_id"]),
+            through_quote_rowid=int(row["through_quote_rowid"]),
+            through_fact_id=int(row["through_fact_id"]),
+            through_receipt_id=int(row["through_receipt_id"]),
+            compacted_group_rows=int(row["compacted_group_rows"]),
+            compacted_quote_rows=int(row["compacted_quote_rows"]),
+            compacted_fact_rows=int(row["compacted_fact_rows"]),
+            compacted_receipt_rows=int(row["compacted_receipt_rows"]),
+            prefix_digest=str(row["prefix_digest"]),
+            seeds_digest=str(row["seeds_digest"]),
+        )
+        actual_seeds = self._candidate_seed_payload(
+            con,
+            through_group_revision_id=int(row["through_group_revision_id"]),
+            through_quote_rowid=int(row["through_quote_rowid"]),
+            through_fact_id=int(row["through_fact_id"]),
+            through_receipt_id=int(row["through_receipt_id"]),
+        )
+        if (
+            canonical_seeds != str(row["seeds_json"])
+            or not hmac.compare_digest(str(row["seeds_digest"]), seeds_digest)
+            or not hmac.compare_digest(str(row["checkpoint_hash"]), expected_hash)
+            or actual_seeds != parsed_seeds
+        ):
+            raise ValueError("invalid-candidate-authority-checkpoint")
+        return row
+
+    def _refresh_candidate_checkpoint(
+        self,
+        con: sqlite3.Connection,
+        validated_checkpoint: sqlite3.Row,
+    ) -> None:
+        """Rebind retained seeds after an authorized in-transaction mutation."""
+        through_group = int(validated_checkpoint["through_group_revision_id"])
+        through_quote = int(validated_checkpoint["through_quote_rowid"])
+        through_fact = int(validated_checkpoint["through_fact_id"])
+        through_receipt = int(validated_checkpoint["through_receipt_id"])
+        seeds = self._candidate_seed_payload(
+            con,
+            through_group_revision_id=through_group,
+            through_quote_rowid=through_quote,
+            through_fact_id=through_fact,
+            through_receipt_id=through_receipt,
+        )
+        seeds_json = json.dumps(
+            seeds,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        seeds_digest = f"sha256:{hashlib.sha256(seeds_json.encode()).hexdigest()}"
+        generation = int(validated_checkpoint["generation"]) + 1
+        checkpoint_hash = candidate_authority_checkpoint_hash(
+            domain=str(validated_checkpoint["domain"]),
+            version=int(validated_checkpoint["version"]),
+            generation=generation,
+            through_group_revision_id=through_group,
+            through_quote_rowid=through_quote,
+            through_fact_id=through_fact,
+            through_receipt_id=through_receipt,
+            compacted_group_rows=int(validated_checkpoint["compacted_group_rows"]),
+            compacted_quote_rows=int(validated_checkpoint["compacted_quote_rows"]),
+            compacted_fact_rows=int(validated_checkpoint["compacted_fact_rows"]),
+            compacted_receipt_rows=int(validated_checkpoint["compacted_receipt_rows"]),
+            prefix_digest=str(validated_checkpoint["prefix_digest"]),
+            seeds_digest=seeds_digest,
+        )
+        con.execute(
+            "UPDATE neg_risk_candidate_authority_checkpoints SET "
+            "generation=?,seeds_json=?,seeds_digest=?,checkpoint_hash=? WHERE id=1",
+            (generation, seeds_json, seeds_digest, checkpoint_hash),
+        )
+
+    def _compact_candidate_authority(self, con: sqlite3.Connection) -> None:
+        counts = con.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM neg_risk_group_revisions),"
+            "(SELECT COUNT(*) FROM neg_risk_group_quote_batches),"
+            "(SELECT COUNT(*) FROM neg_risk_candidate_watch_facts),"
+            "(SELECT COUNT(*) FROM neg_risk_candidate_success_receipts)"
+        ).fetchone()
+        if max(int(value) for value in counts) <= _CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS:
+            return
+
+        # No prefix is discarded until the complete pre-compaction authority
+        # chain has passed the same fail-closed validator used by /status.
+        self.validated_candidate_opportunity_count(_connection=con)
+        previous = self._validated_candidate_checkpoint(con)
+        through = con.execute(
+            "SELECT "
+            "(SELECT COALESCE(MAX(id),0) FROM neg_risk_group_revisions),"
+            "(SELECT COALESCE(MAX(rowid),0) FROM neg_risk_group_quote_batches),"
+            "(SELECT COALESCE(MAX(id),0) FROM neg_risk_candidate_watch_facts),"
+            "(SELECT COALESCE(MAX(id),0) "
+            " FROM neg_risk_candidate_success_receipts)"
+        ).fetchone()
+        through_group, through_quote, through_fact, through_receipt = (
+            int(value) for value in through
+        )
+
+        # Retain the physical rows needed by ordinary readers and by the next
+        # suffix replay: current group, latest fact, its success tuple, and the
+        # latest complete quote for each group.  Everything else is summarized.
+        before_counts = {
+            "groups": int(
+                con.execute(
+                    "SELECT COUNT(*) FROM neg_risk_group_revisions WHERE id<=?",
+                    (through_group,),
+                ).fetchone()[0]
+            ),
+            "quotes": int(
+                con.execute(
+                    "SELECT COUNT(*) FROM neg_risk_group_quote_batches WHERE rowid<=?",
+                    (through_quote,),
+                ).fetchone()[0]
+            ),
+            "facts": int(
+                con.execute(
+                    "SELECT COUNT(*) FROM neg_risk_candidate_watch_facts WHERE id<=?",
+                    (through_fact,),
+                ).fetchone()[0]
+            ),
+            "receipts": int(
+                con.execute(
+                    "SELECT COUNT(*) FROM neg_risk_candidate_success_receipts WHERE id<=?",
+                    (through_receipt,),
+                ).fetchone()[0]
+            ),
+        }
+        prefix_payload = {
+            "previous_prefix_digest": (
+                None if previous is None else str(previous["prefix_digest"])
+            ),
+            "rows": self._candidate_seed_payload(
+                con,
+                through_group_revision_id=through_group,
+                through_quote_rowid=through_quote,
+                through_fact_id=through_fact,
+                through_receipt_id=through_receipt,
+            ),
+        }
+        prefix_json = json.dumps(
+            prefix_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        prefix_digest = f"sha256:{hashlib.sha256(prefix_json.encode()).hexdigest()}"
+
+        con.execute(
+            "DELETE FROM neg_risk_candidate_success_receipts "
+            "WHERE id<=? AND candidate_fact_row_id NOT IN ("
+            "SELECT MAX(id) FROM neg_risk_candidate_watch_facts GROUP BY group_id)",
+            (through_receipt,),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_group_quote_batches WHERE rowid<=? "
+            "AND id NOT IN (SELECT quote_batch_id "
+            "FROM neg_risk_candidate_watch_facts WHERE id IN ("
+            "SELECT MAX(id) FROM neg_risk_candidate_watch_facts GROUP BY group_id) "
+            "AND quote_batch_id IS NOT NULL) "
+            "AND rowid NOT IN (SELECT MAX(rowid) "
+            "FROM neg_risk_group_quote_batches WHERE status='complete' GROUP BY group_id)",
+            (through_quote,),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_candidate_watch_facts "
+            "WHERE id<=? AND id NOT IN ("
+            "SELECT MAX(id) FROM neg_risk_candidate_watch_facts GROUP BY group_id)",
+            (through_fact,),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_group_revisions "
+            "WHERE id<=? AND id NOT IN ("
+            "SELECT MAX(id) FROM neg_risk_group_revisions GROUP BY group_id)",
+            (through_group,),
+        )
+
+        seeds = self._candidate_seed_payload(
+            con,
+            through_group_revision_id=through_group,
+            through_quote_rowid=through_quote,
+            through_fact_id=through_fact,
+            through_receipt_id=through_receipt,
+        )
+        seeds_json = json.dumps(
+            seeds,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        seeds_digest = f"sha256:{hashlib.sha256(seeds_json.encode()).hexdigest()}"
+        after_counts = {name: len(rows) for name, rows in seeds.items()}
+        compacted_columns = {
+            "groups": "compacted_group_rows",
+            "quotes": "compacted_quote_rows",
+            "facts": "compacted_fact_rows",
+            "receipts": "compacted_receipt_rows",
+        }
+        prior_compacted = {
+            name: 0 if previous is None else int(previous[column])
+            for name, column in compacted_columns.items()
+        }
+        compacted = {
+            name: prior_compacted[name] + before_counts[name] - after_counts[name]
+            for name in before_counts
+        }
+        generation = 1 if previous is None else int(previous["generation"]) + 1
+        checkpoint_hash = candidate_authority_checkpoint_hash(
+            domain=_CANDIDATE_AUTHORITY_DOMAIN,
+            version=_CANDIDATE_AUTHORITY_VERSION,
+            generation=generation,
+            through_group_revision_id=through_group,
+            through_quote_rowid=through_quote,
+            through_fact_id=through_fact,
+            through_receipt_id=through_receipt,
+            compacted_group_rows=compacted["groups"],
+            compacted_quote_rows=compacted["quotes"],
+            compacted_fact_rows=compacted["facts"],
+            compacted_receipt_rows=compacted["receipts"],
+            prefix_digest=prefix_digest,
+            seeds_digest=seeds_digest,
+        )
+        con.execute(
+            "INSERT INTO neg_risk_candidate_authority_checkpoints("
+            "id,domain,version,generation,through_group_revision_id,"
+            "through_quote_rowid,through_fact_id,through_receipt_id,"
+            "compacted_group_rows,compacted_quote_rows,compacted_fact_rows,"
+            "compacted_receipt_rows,prefix_digest,seeds_json,seeds_digest,"
+            "checkpoint_hash) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "domain=excluded.domain,version=excluded.version,"
+            "generation=excluded.generation,"
+            "through_group_revision_id=excluded.through_group_revision_id,"
+            "through_quote_rowid=excluded.through_quote_rowid,"
+            "through_fact_id=excluded.through_fact_id,"
+            "through_receipt_id=excluded.through_receipt_id,"
+            "compacted_group_rows=excluded.compacted_group_rows,"
+            "compacted_quote_rows=excluded.compacted_quote_rows,"
+            "compacted_fact_rows=excluded.compacted_fact_rows,"
+            "compacted_receipt_rows=excluded.compacted_receipt_rows,"
+            "prefix_digest=excluded.prefix_digest,seeds_json=excluded.seeds_json,"
+            "seeds_digest=excluded.seeds_digest,"
+            "checkpoint_hash=excluded.checkpoint_hash",
+            (
+                _CANDIDATE_AUTHORITY_DOMAIN,
+                _CANDIDATE_AUTHORITY_VERSION,
+                generation,
+                through_group,
+                through_quote,
+                through_fact,
+                through_receipt,
+                compacted["groups"],
+                compacted["quotes"],
+                compacted["facts"],
+                compacted["receipts"],
+                prefix_digest,
+                seeds_json,
+                seeds_digest,
+                checkpoint_hash,
+            ),
+        )
+        # The checkpoint and prefix deletes share the caller's transaction.
+        # A final replay catches implementation drift before commit.
+        self.validated_candidate_opportunity_count(_connection=con)
+
     def validated_candidate_opportunity_count(
         self,
         *,
@@ -2621,6 +3050,7 @@ class OpportunityPerceptionStore:
         try:
             if owns_connection:
                 con.execute("BEGIN")
+            checkpoint = self._validated_candidate_checkpoint(con)
             sizes = con.execute(
                 "SELECT "
                 "(SELECT COUNT(*) FROM neg_risk_group_revisions),"
@@ -2637,7 +3067,10 @@ class OpportunityPerceptionStore:
                 " FROM neg_risk_group_quote_batches)"
             ).fetchone()
             if (
-                any(int(value) > 10_000 for value in sizes[:4])
+                any(
+                    int(value) > _CANDIDATE_AUTHORITY_UNCOMPACTED_MAX_ROWS
+                    for value in sizes[:4]
+                )
                 or int(sizes[4]) > 65_536
                 or int(sizes[5]) > 65_536
                 or int(sizes[6]) > 8_388_608
@@ -2670,6 +3103,10 @@ class OpportunityPerceptionStore:
                     raise ValueError("invalid-candidate-group-history")
                 history = group_history.setdefault(group.group_id, [])
                 previous = history[-1] if history else None
+                checkpoint_seed = (
+                    checkpoint is not None
+                    and int(row["id"]) <= int(checkpoint["through_group_revision_id"])
+                )
                 allowed_transitions = {
                     "discovered": {"certified", "invalidated", "closed"},
                     "certified": {"certified", "stale", "invalidated", "closed"},
@@ -2678,7 +3115,7 @@ class OpportunityPerceptionStore:
                     "closed": {"closed"},
                 }
                 if (
-                    (previous is None and group.revision != 1)
+                    (previous is None and group.revision != 1 and not checkpoint_seed)
                     or (
                         previous is not None
                         and (
@@ -2697,6 +3134,7 @@ class OpportunityPerceptionStore:
                 current_groups[group.group_id] = group
             quotes_by_id: dict[str, tuple[sqlite3.Row, GroupQuoteBatch]] = {}
             quotes_by_rowid: dict[int, tuple[sqlite3.Row, GroupQuoteBatch]] = {}
+            complete_quote_ids: set[str] = set()
             for row in quote_rows:
                 self._check_deadline("candidate-authority-deadline")
                 group = groups_by_revision.get(
@@ -2759,9 +3197,10 @@ class OpportunityPerceptionStore:
                     and group.revision >= current.revision
                 ):
                     raise ValueError("invalid-candidate-quote-history")
+                quotes_by_id[quote.quote_batch_id] = (row, quote)
+                quotes_by_rowid[int(row["rowid"])] = (row, quote)
                 if quote.status == "complete":
-                    quotes_by_id[quote.quote_batch_id] = (row, quote)
-                    quotes_by_rowid[int(row["rowid"])] = (row, quote)
+                    complete_quote_ids.add(quote.quote_batch_id)
             facts_by_id: dict[int, sqlite3.Row] = {}
             latest_fact: dict[str, sqlite3.Row] = {}
             previous_fact_at: dict[str, int] = {}
@@ -2868,6 +3307,7 @@ class OpportunityPerceptionStore:
             count = sum(
                 row["last_result"] == "watching"
                 and float(row["gross_edge_bps"]) > 0
+                and row["quote_batch_id"] in complete_quote_ids
                 and current_groups.get(group_id) is not None
                 and current_groups[group_id].status == "certified"
                 and row["membership_hash"] == current_groups[group_id].membership_hash
@@ -3507,6 +3947,7 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
+            candidate_checkpoint = self._validated_candidate_checkpoint(con)
             if GroupRevision.membership_digest(revision.legs) != revision.membership_hash:
                 raise ValueError("membership-hash-mismatch")
             if revision.status == "certified":
@@ -3526,6 +3967,9 @@ class OpportunityPerceptionStore:
                 raise ValueError("group-revision-not-monotonic")
 
             self._insert_group_revision(con, revision, current_row)
+            if candidate_checkpoint is not None:
+                self._refresh_candidate_checkpoint(con, candidate_checkpoint)
+            self._compact_candidate_authority(con)
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
@@ -3540,6 +3984,7 @@ class OpportunityPerceptionStore:
         try:
             con.execute("BEGIN IMMEDIATE")
             self._insert_validated_quote_batch(con, batch)
+            self._compact_candidate_authority(con)
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
@@ -3628,6 +4073,7 @@ class OpportunityPerceptionStore:
                 ),
             )
             self._admit_waiting_candidates(con, now_ms=observed_at_ms)
+            self._compact_candidate_authority(con)
             con.execute("COMMIT")
             return fact
         except BaseException:
@@ -3703,6 +4149,7 @@ class OpportunityPerceptionStore:
                 next_due_at_ms=next_due_at_ms,
             )
             self._admit_waiting_candidates(con, now_ms=observed_at_ms)
+            self._compact_candidate_authority(con)
             con.execute("COMMIT")
             return fact
         except BaseException:
@@ -4426,6 +4873,62 @@ class OpportunityPerceptionStore:
         return result
 
     @classmethod
+    def _validated_operator_checkpoint(
+        cls,
+        con: sqlite3.Connection,
+        component: Literal["discovery", "reconciliation"],
+    ) -> dict[str, object]:
+        row = con.execute(
+            "SELECT * FROM neg_risk_operator_queue_checkpoints WHERE component=?",
+            (component,),
+        ).fetchone()
+        if row is None:
+            return {
+                "through_sequence": 0,
+                "through_receipt_hash": None,
+                "last_occurred_at_ms": None,
+                "queued": False,
+                "queued_at_ms": None,
+                "consumed_at_ms": None,
+                "request_nonce": None,
+                "request_auth_hash": None,
+            }
+        expected_hash = operator_queue_checkpoint_hash(
+            component=component,
+            through_sequence=int(row["through_sequence"]),
+            through_receipt_hash=str(row["through_receipt_hash"]),
+            last_occurred_at_ms=int(row["last_occurred_at_ms"]),
+            queued=bool(row["queued"]),
+            queued_at_ms=row["queued_at_ms"],
+            consumed_at_ms=row["consumed_at_ms"],
+            request_nonce=row["request_nonce"],
+            request_auth_hash=row["request_auth_hash"],
+        )
+        if (
+            row["domain"] != "polyarb-operator-queue-checkpoint"
+            or row["version"] != 1
+            or int(row["through_sequence"]) < 1
+            or len(str(row["through_receipt_hash"])) != 64
+            or (
+                row["request_nonce"] is None
+                or row["request_auth_hash"] is None
+            )
+            or len(str(row["request_auth_hash"])) != 64
+            or not hmac.compare_digest(str(row["checkpoint_hash"]), expected_hash)
+        ):
+            raise ValueError("invalid-operator-queue-checkpoint")
+        return {
+            "through_sequence": int(row["through_sequence"]),
+            "through_receipt_hash": str(row["through_receipt_hash"]),
+            "last_occurred_at_ms": int(row["last_occurred_at_ms"]),
+            "queued": bool(row["queued"]),
+            "queued_at_ms": row["queued_at_ms"],
+            "consumed_at_ms": row["consumed_at_ms"],
+            "request_nonce": str(row["request_nonce"]),
+            "request_auth_hash": str(row["request_auth_hash"]),
+        }
+
+    @classmethod
     def _validated_operator_queue(
         cls,
         con: sqlite3.Connection,
@@ -4433,20 +4936,23 @@ class OpportunityPerceptionStore:
         *,
         deadline_monotonic: float | None = None,
     ) -> tuple[bool, str | None, str | None, int, str | None]:
+        checkpoint = cls._validated_operator_checkpoint(con, component)
         rows = con.execute(
             "SELECT * FROM neg_risk_operator_queue_receipts "
             "WHERE component=? ORDER BY sequence LIMIT ?",
-            (component, _OPERATOR_QUEUE_HISTORY_MAX_ROWS + 1),
+            (component, _OPERATOR_QUEUE_UNCOMPACTED_MAX_ROWS + 1),
         ).fetchall()
-        if len(rows) > _OPERATOR_QUEUE_HISTORY_MAX_ROWS:
+        if len(rows) > _OPERATOR_QUEUE_UNCOMPACTED_MAX_ROWS:
             raise ValueError("operator-queue-history-capacity-exceeded")
-        queued = False
-        queued_nonce: str | None = None
-        queued_auth_hash: str | None = None
-        queued_at_ms: int | None = None
-        consumed_at_ms: int | None = None
-        previous_hash: str | None = None
-        for expected_sequence, row in enumerate(rows, 1):
+        queued = bool(checkpoint["queued"])
+        queued_nonce = checkpoint["request_nonce"]
+        queued_auth_hash = checkpoint["request_auth_hash"]
+        queued_at_ms = checkpoint["queued_at_ms"]
+        consumed_at_ms = checkpoint["consumed_at_ms"]
+        previous_hash = checkpoint["through_receipt_hash"]
+        previous_occurred_at_ms = checkpoint["last_occurred_at_ms"]
+        sequence_base = int(checkpoint["through_sequence"])
+        for expected_sequence, row in enumerate(rows, sequence_base + 1):
             if (
                 deadline_monotonic is not None
                 and time.monotonic() >= deadline_monotonic
@@ -4471,8 +4977,8 @@ class OpportunityPerceptionStore:
                 or not hmac.compare_digest(str(row["receipt_hash"]), expected_hash)
                 or type(row["occurred_at_ms"]) is not int
                 or (
-                    expected_sequence > 1
-                    and row["occurred_at_ms"] < rows[expected_sequence - 2]["occurred_at_ms"]
+                    previous_occurred_at_ms is not None
+                    and row["occurred_at_ms"] < previous_occurred_at_ms
                 )
                 or (action == "queued" and queued)
                 or (action == "coalesced" and not queued)
@@ -4490,6 +4996,7 @@ class OpportunityPerceptionStore:
                 queued = False
                 consumed_at_ms = row["occurred_at_ms"]
             previous_hash = str(row["receipt_hash"])
+            previous_occurred_at_ms = int(row["occurred_at_ms"])
         materialized = con.execute(
             "SELECT * FROM neg_risk_operator_queue WHERE component=?",
             (component,),
@@ -4503,11 +5010,129 @@ class OpportunityPerceptionStore:
             or materialized["request_auth_hash"] != queued_auth_hash
             or materialized["queued_at_ms"] != queued_at_ms
             or materialized["consumed_at_ms"] != consumed_at_ms
-            or materialized["last_sequence"] != len(rows)
+            or materialized["last_sequence"] != sequence_base + len(rows)
             or materialized["last_receipt_hash"] != previous_hash
         ):
             raise ValueError("invalid-operator-queue-materialization")
-        return queued, queued_nonce, queued_auth_hash, len(rows), previous_hash
+        return (
+            queued,
+            queued_nonce,
+            queued_auth_hash,
+            sequence_base + len(rows),
+            previous_hash,
+        )
+
+    @classmethod
+    def _compact_operator_queue(
+        cls,
+        con: sqlite3.Connection,
+        component: Literal["discovery", "reconciliation"],
+        *,
+        deadline_monotonic: float,
+    ) -> tuple[bool, str | None, str | None, int, str | None]:
+        validated = cls._validated_operator_queue(
+            con,
+            component,
+            deadline_monotonic=deadline_monotonic,
+        )
+        suffix_count = int(
+            con.execute(
+                "SELECT COUNT(*) FROM neg_risk_operator_queue_receipts "
+                "WHERE component=?",
+                (component,),
+            ).fetchone()[0]
+        )
+        if suffix_count <= _OPERATOR_QUEUE_COMPACT_HIGH_ROWS:
+            return validated
+        checkpoint = cls._validated_operator_checkpoint(con, component)
+        compact_count = suffix_count - _OPERATOR_QUEUE_COMPACT_LOW_ROWS
+        prefix = con.execute(
+            "SELECT * FROM neg_risk_operator_queue_receipts "
+            "WHERE component=? ORDER BY sequence LIMIT ?",
+            (component, compact_count),
+        ).fetchall()
+        queued = bool(checkpoint["queued"])
+        queued_nonce = checkpoint["request_nonce"]
+        queued_auth_hash = checkpoint["request_auth_hash"]
+        queued_at_ms = checkpoint["queued_at_ms"]
+        consumed_at_ms = checkpoint["consumed_at_ms"]
+        through_sequence = int(checkpoint["through_sequence"])
+        through_hash = checkpoint["through_receipt_hash"]
+        last_occurred_at_ms = checkpoint["last_occurred_at_ms"]
+        for row in prefix:
+            if time.monotonic() >= deadline_monotonic:
+                raise TimeoutError("operator-queue-deadline")
+            action = str(row["action"])
+            if action == "queued":
+                queued = True
+                queued_nonce = str(row["auth_nonce"])
+                queued_auth_hash = str(row["auth_receipt_hash"])
+                queued_at_ms = int(row["occurred_at_ms"])
+                consumed_at_ms = None
+            elif action in {"consumed", "cancelled"}:
+                queued = False
+                consumed_at_ms = int(row["occurred_at_ms"])
+            through_sequence = int(row["sequence"])
+            through_hash = str(row["receipt_hash"])
+            last_occurred_at_ms = int(row["occurred_at_ms"])
+        if (
+            through_sequence < 1
+            or through_hash is None
+            or last_occurred_at_ms is None
+            or queued_nonce is None
+            or queued_auth_hash is None
+        ):
+            raise ValueError("invalid-operator-queue-checkpoint")
+        checkpoint_hash = operator_queue_checkpoint_hash(
+            component=component,
+            through_sequence=through_sequence,
+            through_receipt_hash=through_hash,
+            last_occurred_at_ms=last_occurred_at_ms,
+            queued=queued,
+            queued_at_ms=queued_at_ms,
+            consumed_at_ms=consumed_at_ms,
+            request_nonce=queued_nonce,
+            request_auth_hash=queued_auth_hash,
+        )
+        con.execute(
+            "INSERT INTO neg_risk_operator_queue_checkpoints("
+            "component,domain,version,through_sequence,through_receipt_hash,"
+            "last_occurred_at_ms,queued,queued_at_ms,consumed_at_ms,"
+            "request_nonce,request_auth_hash,checkpoint_hash"
+            ") VALUES(?, 'polyarb-operator-queue-checkpoint',1,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(component) DO UPDATE SET "
+            "domain=excluded.domain,version=excluded.version,"
+            "through_sequence=excluded.through_sequence,"
+            "through_receipt_hash=excluded.through_receipt_hash,"
+            "last_occurred_at_ms=excluded.last_occurred_at_ms,"
+            "queued=excluded.queued,queued_at_ms=excluded.queued_at_ms,"
+            "consumed_at_ms=excluded.consumed_at_ms,"
+            "request_nonce=excluded.request_nonce,"
+            "request_auth_hash=excluded.request_auth_hash,"
+            "checkpoint_hash=excluded.checkpoint_hash",
+            (
+                component,
+                through_sequence,
+                through_hash,
+                last_occurred_at_ms,
+                int(queued),
+                queued_at_ms,
+                consumed_at_ms,
+                queued_nonce,
+                queued_auth_hash,
+                checkpoint_hash,
+            ),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_operator_queue_receipts "
+            "WHERE component=? AND sequence<=?",
+            (component, through_sequence),
+        )
+        return cls._validated_operator_queue(
+            con,
+            component,
+            deadline_monotonic=deadline_monotonic,
+        )
 
     def accept_operator_auth(
         self,
@@ -4525,21 +5150,25 @@ class OpportunityPerceptionStore:
             if time.monotonic() >= deadline_monotonic:
                 raise TimeoutError("operator-auth-deadline")
             con.execute("BEGIN IMMEDIATE")
-            self._validated_operator_auth(
-                con,
-                deadline_monotonic=deadline_monotonic,
-            )
-            for component in ("discovery", "reconciliation"):
-                self._validated_operator_queue(
-                    con,
-                    component,
-                    deadline_monotonic=deadline_monotonic,
-                )
+            # Request timestamps older than this boundary are rejected by the
+            # HMAC middleware before SQLite. Queue receipts retain the accepted
+            # auth proof, so expired active nonce rows can be pruned before the
+            # replay-window capacity check without weakening queue history.
             con.execute(
                 "DELETE FROM neg_risk_operator_auth_nonces "
                 "WHERE accepted_at_ms<?",
                 (accepted_at_ms - 300_999,),
             )
+            self._validated_operator_auth(
+                con,
+                deadline_monotonic=deadline_monotonic,
+            )
+            for component in ("discovery", "reconciliation"):
+                self._compact_operator_queue(
+                    con,
+                    component,
+                    deadline_monotonic=deadline_monotonic,
+                )
             auth_hash = operator_auth_receipt_hash(
                 nonce=nonce,
                 request_method=request_method,
@@ -4712,7 +5341,7 @@ class OpportunityPerceptionStore:
                 sequence_before,
                 previous_hash,
             ) = (
-                self._validated_operator_queue(
+                self._compact_operator_queue(
                     con,
                     component,
                     deadline_monotonic=deadline,
@@ -4845,7 +5474,7 @@ class OpportunityPerceptionStore:
                 sequence_before,
                 previous_hash,
             ) = (
-                self._validated_operator_queue(
+                self._compact_operator_queue(
                     con,
                     component,
                     deadline_monotonic=deadline,
@@ -4935,8 +5564,8 @@ class OpportunityPerceptionStore:
         deadline = time.monotonic() + 0.8
         con = self._connect(deadline_monotonic=deadline)
         try:
-            con.execute("BEGIN")
-            queued, nonce, _, _, _ = self._validated_operator_queue(
+            con.execute("BEGIN IMMEDIATE")
+            queued, nonce, _, _, _ = self._compact_operator_queue(
                 con,
                 component,
                 deadline_monotonic=deadline,

@@ -7,10 +7,12 @@ without adding producer or trading authority.
   unavailable worker/evidence chains.
 - SQLite reads are read-only, busy-bounded, execution-bounded, output-bounded,
   use one snapshot per response, and reuse the existing full-history
-  validators. One absolute deadline interrupts SQLite and Python replay work
-  and waits for worker/connection convergence. Candidate status checks the full
-  Group/Quote/fact/receipt state and as-of authority before counting an
-  opportunity.
+  validators. One absolute deadline interrupts SQLite, Python replay, and
+  slow-drip request-body work and waits for worker/connection convergence.
+  Candidate status checks exact Group/Quote/fact/receipt state and as-of
+  authority before counting an opportunity. A versioned rolling checkpoint
+  binds each fully validated compacted prefix and retained per-group seed,
+  keeping the replay suffix bounded during sustained 15-second sampling.
 - Discovery and Reconciliation controls are timestamp/nonce/path/body-bound,
   replay-resistant, append-only hash chained, atomically coalesced, and
   consumed only after terminal producer evidence by the existing serial loops.
@@ -18,15 +20,18 @@ without adding producer or trading authority.
   authority, and corrupt history all fail closed without consuming the queue.
   A shared auth+queue deadline prevents late commits; bounded active nonces are
   safely pruned after their replay window because queue receipts retain their
-  accepted auth proof. Legacy Task 6 schemas migrate atomically and
-  idempotently only after their old chain validates.
+  accepted auth proof. Fully validated queue prefixes roll atomically into
+  per-component checkpoints instead of eventually reaching a permanent hard
+  cap. Legacy Task 6 schemas migrate atomically and idempotently only after
+  their old chain validates.
 - Five Make targets and the living M1 manual provide the supported cloud
   workflow.
 
 Verification: 2616 of 2618 repository tests passed (one expected xfail, one
 skip); the committed Task 6 baseline collected 2586, the first remediation
 collected 2596, and the formal remediation collected 2618. All 41 focused
-API/control tests and the 343-test proportional regression passed;
+API/control tests, 10,010-success Candidate continuity, tamper and atomic
+rollback tests passed;
 Ruff, compileall, docs, planning status, and diff checks passed.
 
 No deployment or trading capability was introduced. Task 7 remains the
