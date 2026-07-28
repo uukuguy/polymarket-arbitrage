@@ -432,6 +432,88 @@ async def test_incomplete_and_unsupported_membership_fail_closed(
     assert result.promoted_group_ids == ()
     assert store.group_schedule("g-1").quality == "complete-unsupported"
     assert store.promoted_group_ids() == ()
+    assert store.current_group("g-1") is None
+    assert store.discovery_status(now_ms=10_001).groups_seen == 1
+
+
+@pytest.mark.asyncio
+async def test_incomplete_first_sample_without_revision_is_valid_history(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(_event(event_id="e-1", group_id="g-1", valid=False))
+        ),
+        store=store,
+    ).run_batch()
+
+    assert store.current_group("g-1") is None
+    assert store.group_schedule("g-1").quality == "incomplete-source"
+    assert store.discovery_status(now_ms=10_001).groups_seen == 1
+
+
+@pytest.mark.asyncio
+async def test_status_rejects_attempt_without_real_admission_as_of_identity(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+    ).run_batch()
+    revision = store.current_group("g-1")
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute(
+            "INSERT INTO neg_risk_candidate_admissions("
+            "group_id,event_id,membership_hash,promoted_at_ms,"
+            "candidate_start_deadline_at_ms,effective_capacity,"
+            "candidate_max_wait_ms,selection_budget_ms,poll_interval_ms,"
+            "group_timeout_ms,terminal_write_budget_ms,"
+            "attempt_start_write_budget_ms,high_burst_groups,"
+            "reserved_non_high_slots,effective_start_bound_ms,recorded_at_ms"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "g-1",
+                "e-1",
+                revision.membership_hash,
+                1,
+                60_001,
+                1,
+                60_000,
+                6_000,
+                1_000,
+                30_000,
+                5_000,
+                5_000,
+                1,
+                3,
+                47_000,
+                2,
+            ),
+        )
+        con.execute(
+            "INSERT INTO neg_risk_candidate_attempt_starts("
+            "group_id,event_id,membership_hash,promoted_at_ms,"
+            "candidate_max_wait_ms,started_at_ms,"
+            "candidate_start_deadline_at_ms,deadline_breached"
+            ") VALUES (?,?,?,?,?,?,?,0)",
+            (
+                "g-1",
+                "e-1",
+                revision.membership_hash,
+                1,
+                60_000,
+                2,
+                60_001,
+            ),
+        )
+
+    assert discovery_status_main(
+        ["--db-path", str(tmp_path / "state.db"), "--now-ms", "10001"]
+    ) == 2
+    assert "invalid discovery state" in capsys.readouterr().err
 
 
 @pytest.mark.asyncio
@@ -1008,6 +1090,16 @@ async def test_promotion_admission_is_capacity_bounded_and_backfills_after_fact(
     assert next_admitted.promoted_at_ms == 20_000
     assert next_admitted.candidate_start_deadline_at_ms == 80_000
     assert store.group_schedule("g-low").promoted_at_ms is None
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        audits = con.execute(
+            "SELECT group_id,promoted_at_ms,candidate_start_deadline_at_ms "
+            "FROM neg_risk_candidate_admissions ORDER BY promoted_at_ms,group_id"
+        ).fetchall()
+    assert audits == [
+        ("g-high", 10_000, 70_000),
+        ("g-mid", 20_000, 80_000),
+    ]
+    assert store.discovery_status(now_ms=20_001).candidate_start_ready is True
 
 
 @pytest.mark.asyncio
@@ -1165,12 +1257,22 @@ async def test_generic_init_preserves_legacy_promotions_until_explicit_config(
         candidate_group_timeout_s=7,
     ).run_batch()
     with sqlite3.connect(tmp_path / "state.db") as con:
+        audit_count_before_init = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_candidate_admissions"
+        ).fetchone()[0]
         con.execute("DELETE FROM neg_risk_discovery_admission_state")
 
     OpportunityPerceptionStore(tmp_path / "state.db").init_schema()
 
     assert store.promoted_group_ids() == ("g-high", "g-mid", "g-low")
     assert store.discovery_admission_proof() is None
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        assert (
+            con.execute(
+                "SELECT COUNT(*) FROM neg_risk_candidate_admissions"
+            ).fetchone()[0]
+            == audit_count_before_init
+        )
 
     proof = DiscoveryAdmissionProof(
         effective_capacity=2,

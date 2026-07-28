@@ -89,6 +89,11 @@ pre-Discovery bootstrap authorities remain independent of schedule rows. The wat
 first durable operation validates the exact admission identity and records an
 immutable start receipt; a late entry records unavailable and admits the next
 group in that same transaction without touching Structure or books.
+Admission itself appends an immutable audit in the schedule transaction,
+including the exact identity, promotion/deadline, and full capacity proof.
+Status requires attempt receipts to exact-join that audit and requires the
+certified revision to predate promotion. Incomplete or unsupported discovery
+samples are valid without a revision; complete-supported samples are not.
 
 ## 4. Group-Level Data Contract
 

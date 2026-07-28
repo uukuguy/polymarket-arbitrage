@@ -125,6 +125,13 @@ inputs/anchors 用同一 Decimal 函数重算 score/reason。`group_id` 从 sche
   时不再静默执行，而是写 `candidate-start-deadline-breached/unavailable`，status
   保持 non-ready。进程级强杀/隔离仍属于 Task 5，本层证明的是线程、SQLite busy 和
   每组 timeout 的数学上界。
+- 每次 admission 还会在同一事务追加 immutable audit，保存
+  group/event/membership/promotion/deadline 与完整 capacity proof。attempt receipt
+  必须 exact join 这条 audit，并证明对应 certified revision 在 promotion 时已存在；
+  receipt 不能靠自己内部的 `deadline=promotion+60s` 冒充真实 admission。
+- historical sample 按语义校验：`complete-supported` 必须有 batch 完成前的精确
+  certified revision；合法 `incomplete-source` / `complete-unsupported` 首次发现
+  本来就没有 revision，但仍必须 non-promoted、身份字段非空、reason 合法且计数闭合。
 - promotion source 和 freshness 共享 current certified +（独立 bootstrap authority、
   Candidate fact 或 admitted promotion）权威谓词；legacy seed 只保序，不能绕过或
   复活失效 authority。
