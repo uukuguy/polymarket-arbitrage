@@ -265,7 +265,10 @@ async def _queue_perception_component(request: Request, component: str) -> JSONR
             status_code=409,
         )
     nonce = request.headers["X-Perception-Nonce"]
-    store = OpportunityPerceptionStore(request.app.state.sqlite_store.db_path)
+    store = OpportunityPerceptionStore(
+        request.app.state.sqlite_store.db_path,
+        busy_timeout_ms=250,
+    )
     try:
         queued = await asyncio.wait_for(
             asyncio.to_thread(
