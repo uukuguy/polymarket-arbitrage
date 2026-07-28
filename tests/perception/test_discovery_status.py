@@ -74,6 +74,15 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
     store.init_schema()
     with sqlite3.connect(db_path) as con:
         con.execute("PRAGMA journal_mode=WAL")
+        for trigger in (
+            "trg_owner_group_revisions_insert",
+            "trg_owner_group_revisions_update",
+            "trg_owner_group_revisions_delete",
+            "trg_owner_group_schedule_insert",
+            "trg_owner_group_schedule_update",
+            "trg_owner_group_schedule_delete",
+        ):
+            con.execute(f"DROP TRIGGER {trigger}")
         con.execute(
             "INSERT INTO neg_risk_discovery_state("
             "id,next_cursor,completed,last_started_at_ms,last_finished_at_ms,"
@@ -119,6 +128,9 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
             "'0','0','weighted-edge-activity-liquidity-change-age:"
             "0.35,0.20,0.15,0.15,0.15','explore','0',20,20,NULL,NULL)"
         )
+        con.execute("DELETE FROM neg_risk_discovery_status_projection")
+        con.execute("DELETE FROM neg_risk_discovery_group_projection")
+    store.init_schema()
     original = OpportunityPerceptionStore._coverage_windows_in_snapshot
     writer_done = threading.Event()
 

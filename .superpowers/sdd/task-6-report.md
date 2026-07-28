@@ -1,6 +1,6 @@
 # Task 6 Implementer Report
 
-Status: AUTHORITY CONTINUITY REMEDIATION COMPLETE — awaiting independent re-review
+Status: AUTHORITY CONTINUITY REMEDIATION COMPLETE — verification green
 
 ## Scope
 
@@ -8,6 +8,34 @@ Task 6 only: bounded read-only perception APIs, replay-resistant HMAC operator
 wake-ups, durable coalescing queue evidence, real serial producer consumption,
 cloud Make entries, and manual synchronization. No Dashboard, deployment,
 wallet, signing, balances, orders, or real-money execution.
+
+## Current-authority schema and invariants
+
+1. Discovery and Candidate current authority are materialized per group. Each
+   row stores canonical current identity/state fields plus a canonical row
+   hash; no status path deserializes or iterates a singleton all-groups blob.
+2. One O(1) aggregate row stores only counters, queue depths, attempt/breach
+   totals, current Candidate opportunity count, and a commutative aggregate
+   digest of the per-group row hashes. Oldest schedule age is read through an
+   indexed `ORDER BY ... LIMIT 1`, never a lifecycle aggregate.
+3. Canonical triggers append every INSERT/UPDATE/DELETE on Group revisions,
+   schedules, Candidate facts, admissions, attempts, and their materialized
+   dependencies to an owner mutation journal with table/op/key and canonical
+   old/new fields. A legal writer declares and consumes only its expected
+   deltas while advancing a guard cursor/hash in the same transaction.
+4. Any direct SQL mutation leaves an unconsumed journal event. Status,
+   initialization, and every later legal writer fail closed before mutation;
+   no projection refresh may consume, overwrite, or “wash clean” that event.
+   Initialization may full-validate/bootstrap only when journal, guard, and
+   projection are all absent as one legacy state.
+5. Initialization verifies canonical trigger SQL. Missing or drifted triggers
+   fail closed, or are recreated only after safe full validation; `IF NOT
+   EXISTS` is not accepted as proof that trigger semantics are current.
+6. Candidate historical Quote/fact/receipt rows may compact into a bounded
+   suffix even when active group cardinality exceeds the suffix limit. Current
+   per-group authority remains complete; the aggregate count/digest stays
+   exact. Reconciliation close/change revokes or synchronizes schedule,
+   admission, per-group projection, and aggregate authority in one transaction.
 
 ## Truth chain
 
@@ -90,13 +118,15 @@ wallet, signing, balances, orders, or real-money execution.
 
 ```text
 Initial RED: 8 expected failures (404/auth/Make contracts)
-Four review-remediation rounds: all Important findings covered by adversarial tests
-Focused API/control: 41 pass
-Candidate/control/HTTP regression: pass
-Discovery status/checkpoint regression: 62 pass
-Perception package: 238 pass
-Full repository: 2654 collected; 2652 pass, 1 expected xfail, 1 skip
-Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> 2642 -> current 2654
+Six review-remediation rounds: all Important findings covered by adversarial tests
+Canonical owner mutation matrix: 7 tables x INSERT/UPDATE/DELETE; 21 direct-tamper cases fail closed
+Canonical trigger matrix: 21 missing-trigger recreations plus 21 drift cases
+Candidate continuity: 10,010 legal writes; bounded journal and raw suffix; active cardinality may exceed suffix limit
+Discovery hot path: incremental per-group projection; no full schedule/fact scan or all-groups JSON parse
+Reconciliation close/change: schedule, admission authority, projection and aggregate synchronize in one transaction
+Perception package: 307 pass
+Full repository: 2723 collected; 2721 pass, 1 expected xfail, 1 skip
+Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> 2642 -> 2654 -> current 2723
 Ruff changed scope: pass
 compileall: pass
 make docs-m1-check: pass

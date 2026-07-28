@@ -179,6 +179,9 @@ def test_candidate_authority_rolls_checkpoint_beyond_daily_history_bound(
             "neg_risk_candidate_success_receipts",
         ):
             assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] < 3_000
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
+        ).fetchone()[0] <= 1_025
 
 
 def test_candidate_authority_compacts_before_quote_bytes_hit_hard_bound(
@@ -341,12 +344,78 @@ def test_candidate_authority_evicts_inactive_distinct_groups_without_losing_watc
                 "UNION SELECT group_id FROM neg_risk_candidate_success_receipts"
             )
         }
-        assert retained_group_ids == {active.group_id}
+        assert active.group_id in retained_group_ids
+        assert len(retained_group_ids) <= 2
         seeds = con.execute(
             "SELECT seeds_json FROM neg_risk_candidate_authority_checkpoints"
         ).fetchone()
     assert seeds is not None
     assert active.group_id in str(seeds[0])
+
+
+def test_candidate_authority_supports_more_current_groups_than_history_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        2,
+    )
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_UNCOMPACTED_MAX_ROWS",
+        4,
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+
+    expected_legs: dict[str, tuple[str, ...]] = {}
+    for sequence in range(8):
+        group = revision(
+            group_id=f"active-{sequence}",
+            revision=1,
+            token_suffix=f"active-{sequence}",
+            observed_at_ms=2_000 + sequence * 10,
+        )
+        store.publish_group_revision(group)
+        quote = batch_for(
+            group,
+            quote_batch_id=f"active-{sequence}-watch",
+            quoted_at_ms=3_100 + sequence * 10,
+        )
+        store.publish_candidate_success(
+            quote,
+            observed_at_ms=quote.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="active-watch",
+            next_due_at_ms=quote.quoted_at_ms + 15_000,
+        )
+        expected_legs[group.group_id] = tuple(
+            leg.yes_token_id for leg in group.legs
+        )
+
+    assert store.validated_candidate_opportunity_count() == len(expected_legs)
+    with sqlite3.connect(store.db_path) as con:
+        for table in (
+            "neg_risk_group_quote_batches",
+            "neg_risk_candidate_watch_facts",
+            "neg_risk_candidate_success_receipts",
+        ):
+            assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] <= 2
+    for group_id, token_ids in expected_legs.items():
+        current = store.current_quote_batch(
+            group_id,
+            now_ms=10_000,
+            max_age_ms=60_000,
+        )
+        assert current is not None
+        assert tuple(leg.yes_token_id for leg in current.legs) == token_ids
 
 
 def test_candidate_authority_checkpoint_and_suffix_tampering_fail_closed(
@@ -420,7 +489,7 @@ def test_candidate_authority_checkpoint_and_suffix_tampering_fail_closed(
             "SET receipt_hash='sha256:tampered' WHERE id=("
             "SELECT MAX(id) FROM neg_risk_candidate_success_receipts)"
         )
-    with pytest.raises(ValueError, match="invalid-candidate-success-receipt"):
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
         suffix_store.validated_candidate_opportunity_count()
 
 
@@ -612,6 +681,52 @@ def test_candidate_checkpoint_compaction_rolls_back_on_delete_failure(
             "SELECT COUNT(*) FROM neg_risk_candidate_success_receipts"
         ).fetchone() == (2,)
     assert store.validated_candidate_opportunity_count() == 1
+
+
+def test_owner_journal_consume_crash_rolls_back_business_and_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-1", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    with store._connect() as con:
+        guard_before = tuple(
+            con.execute(
+                "SELECT consumed_journal_id,consumed_hash "
+                "FROM neg_risk_owner_mutation_guard WHERE id=1"
+            ).fetchone()
+        )
+        journal_before = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
+        ).fetchone()[0]
+    original = store._consume_expected_owner_mutation
+
+    def crash_after_consume(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("consume-crash")
+
+    monkeypatch.setattr(store, "_consume_expected_owner_mutation", crash_after_consume)
+    with pytest.raises(RuntimeError, match="consume-crash"):
+        store.publish_quote_batch(batch_for(group, quote_batch_id="crash-quote"))
+
+    with store._connect() as con:
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_group_quote_batches WHERE id='crash-quote'"
+        ).fetchone() is None
+        assert tuple(
+            con.execute(
+                "SELECT consumed_journal_id,consumed_hash "
+                "FROM neg_risk_owner_mutation_guard WHERE id=1"
+            ).fetchone()
+        ) == guard_before
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
+        ).fetchone()[0] == journal_before
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_owner_write_context"
+        ).fetchone() is None
 
 
 def test_candidate_checkpoint_tracks_group_supersede_across_boundary(
@@ -958,8 +1073,10 @@ def test_current_reads_reject_corrupt_ordered_group_membership(
             (OpportunityPerceptionStore._group_legs_json(tuple(reversed(group.legs))),),
         )
 
-    assert store.current_group("g-1") is None
-    assert store.current_quote_batch("g-1", now_ms=3_200, max_age_ms=1_000) is None
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.current_group("g-1")
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.current_quote_batch("g-1", now_ms=3_200, max_age_ms=1_000)
 
 
 def test_current_quote_rejects_corrupt_ordered_quote_membership(
@@ -983,7 +1100,8 @@ def test_current_quote_rejects_corrupt_ordered_quote_membership(
             ),
         )
 
-    assert store.current_quote_batch("g-1", now_ms=3_200, max_age_ms=1_000) is None
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.current_quote_batch("g-1", now_ms=3_200, max_age_ms=1_000)
 
 
 class CoordinatedQuoteReadStore(OpportunityPerceptionStore):

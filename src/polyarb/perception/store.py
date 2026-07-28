@@ -27,7 +27,7 @@ from polyarb.perception.models import (
     GroupRevision,
 )
 from polyarb.perception.priority import GroupScheduleInput, priority_components
-from polyarb.storage.schemas import DDL
+from polyarb.storage.schemas import DDL, OWNER_JOURNAL_TRIGGER_NAMES
 
 _BUSY_TIMEOUT_MS = 5_000
 _OPERATOR_AUTH_HISTORY_MAX_ROWS = 10_000
@@ -46,6 +46,7 @@ _DISCOVERY_AUTHORITY_COMPACT_LOW_ROWS = 1_000
 _DISCOVERY_AUTHORITY_UNCOMPACTED_MAX_ROWS = 20_000
 _DISCOVERY_STATUS_PROJECTION_DOMAIN = "polyarb-discovery-status-projection-v1"
 _DISCOVERY_STATUS_PROJECTION_VERSION = 1
+_OWNER_MUTATION_JOURNAL_RETAIN_ROWS = 1_024
 _RECONCILIATION_AUTHORITY_DOMAIN = "polyarb-reconciliation-authority-checkpoint-v1"
 _RECONCILIATION_AUTHORITY_VERSION = 1
 _HEARTBEAT_AUTH_DOMAIN = "polyarb-producer-heartbeat-v1"
@@ -933,9 +934,273 @@ class OpportunityPerceptionStore:
                 ),
             )
 
+    @staticmethod
+    def _owner_mutation_event_hash(
+        *,
+        previous_hash: str | None,
+        journal_id: int,
+        writer_token: str,
+        table_name: str,
+        operation: str,
+        row_key: str,
+        old_json: str | None,
+        new_json: str | None,
+    ) -> str:
+        payload = json.dumps(
+            {
+                "id": journal_id,
+                "new": None if new_json is None else json.loads(new_json),
+                "old": None if old_json is None else json.loads(old_json),
+                "operation": operation,
+                "previous_hash": previous_hash,
+                "row_key": row_key,
+                "table_name": table_name,
+                "writer_token": writer_token,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+    @staticmethod
+    def _assert_owner_journal_clean(con: sqlite3.Connection) -> None:
+        context = con.execute(
+            "SELECT 1 FROM neg_risk_owner_write_context WHERE id=1"
+        ).fetchone()
+        guard = con.execute(
+            "SELECT consumed_journal_id,consumed_hash "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        if context is not None or guard is None:
+            raise ValueError("pending-owner-mutation")
+        pending = con.execute(
+            "SELECT 1 FROM neg_risk_owner_mutation_journal "
+            "WHERE id>? ORDER BY id LIMIT 1",
+            (int(guard["consumed_journal_id"]),),
+        ).fetchone()
+        if pending is not None:
+            raise ValueError("pending-owner-mutation")
+
+    @staticmethod
+    def _validate_owner_trigger_sql(con: sqlite3.Connection) -> None:
+        names = OWNER_JOURNAL_TRIGGER_NAMES
+        expected_con = sqlite3.connect(":memory:")
+        try:
+            expected_con.executescript(DDL)
+            expected = {
+                str(name): " ".join(str(sql).split())
+                for name, sql in expected_con.execute(
+                    "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+                    "AND name IN (" + ",".join("?" for _ in names) + ")",
+                    names,
+                )
+            }
+        finally:
+            expected_con.close()
+        actual = {
+            str(row["name"]): " ".join(str(row["sql"]).split())
+            for row in con.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='trigger' "
+                "AND name IN (" + ",".join("?" for _ in names) + ")",
+                names,
+            )
+        }
+        if actual != expected:
+            raise ValueError("owner-trigger-sql-drift")
+
+    def _begin_expected_owner_mutation(
+        self,
+        con: sqlite3.Connection,
+        *,
+        table_name: str,
+        operation: str,
+        row_key: str,
+    ) -> str:
+        self._assert_owner_journal_clean(con)
+        token = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO neg_risk_owner_write_context("
+            "id,writer_token,table_name,operation,row_key) VALUES(1,?,?,?,?)",
+            (token, table_name, operation, row_key),
+        )
+        return token
+
+    def _consume_expected_owner_mutation(
+        self,
+        con: sqlite3.Connection,
+        *,
+        writer_token: str,
+        table_name: str,
+        operation: str,
+        row_key: str,
+    ) -> None:
+        guard = con.execute(
+            "SELECT consumed_journal_id,consumed_hash "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        if guard is None:
+            raise ValueError("pending-owner-mutation")
+        rows = con.execute(
+            "SELECT * FROM neg_risk_owner_mutation_journal "
+            "WHERE id>? ORDER BY id LIMIT 2",
+            (int(guard["consumed_journal_id"]),),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ValueError("unexpected-owner-mutation-delta")
+        row = rows[0]
+        if (
+            row["writer_token"] != writer_token
+            or row["table_name"] != table_name
+            or row["operation"] != operation
+            or row["row_key"] != row_key
+        ):
+            raise ValueError("unexpected-owner-mutation-delta")
+        event_hash = self._owner_mutation_event_hash(
+            previous_hash=guard["consumed_hash"],
+            journal_id=int(row["id"]),
+            writer_token=writer_token,
+            table_name=table_name,
+            operation=operation,
+            row_key=row_key,
+            old_json=row["old_json"],
+            new_json=row["new_json"],
+        )
+        con.execute(
+            "UPDATE neg_risk_owner_mutation_journal SET "
+            "previous_hash=?,event_hash=? WHERE id=?",
+            (guard["consumed_hash"], event_hash, int(row["id"])),
+        )
+        con.execute(
+            "UPDATE neg_risk_owner_mutation_guard SET "
+            "consumed_journal_id=?,consumed_hash=? WHERE id=1",
+            (int(row["id"]), event_hash),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_owner_write_context "
+            "WHERE id=1 AND writer_token=?",
+            (writer_token,),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_owner_mutation_journal WHERE id<?",
+            (max(0, int(row["id"]) - _OWNER_MUTATION_JOURNAL_RETAIN_ROWS),),
+        )
+        self._assert_owner_journal_clean(con)
+
+    def _consume_expected_owner_mutations(
+        self,
+        con: sqlite3.Connection,
+        *,
+        writer_token: str,
+        table_name: str,
+        operation: str,
+        expected_row_keys: list[str],
+    ) -> None:
+        guard = con.execute(
+            "SELECT consumed_journal_id,consumed_hash "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        if guard is None:
+            raise ValueError("pending-owner-mutation")
+        rows = con.execute(
+            "SELECT * FROM neg_risk_owner_mutation_journal "
+            "WHERE id>? ORDER BY id",
+            (int(guard["consumed_journal_id"]),),
+        ).fetchall()
+        if (
+            len(rows) != len(expected_row_keys)
+            or sorted(str(row["row_key"]) for row in rows)
+            != sorted(expected_row_keys)
+            or any(
+                row["writer_token"] != writer_token
+                or row["table_name"] != table_name
+                or row["operation"] != operation
+                for row in rows
+            )
+        ):
+            raise ValueError("unexpected-owner-mutation-delta")
+        previous_hash = guard["consumed_hash"]
+        last_id = int(guard["consumed_journal_id"])
+        for row in rows:
+            event_hash = self._owner_mutation_event_hash(
+                previous_hash=previous_hash,
+                journal_id=int(row["id"]),
+                writer_token=writer_token,
+                table_name=table_name,
+                operation=operation,
+                row_key=str(row["row_key"]),
+                old_json=row["old_json"],
+                new_json=row["new_json"],
+            )
+            con.execute(
+                "UPDATE neg_risk_owner_mutation_journal SET "
+                "previous_hash=?,event_hash=? WHERE id=?",
+                (previous_hash, event_hash, int(row["id"])),
+            )
+            previous_hash = event_hash
+            last_id = int(row["id"])
+        con.execute(
+            "UPDATE neg_risk_owner_mutation_guard SET "
+            "consumed_journal_id=?,consumed_hash=? WHERE id=1",
+            (last_id, previous_hash),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_owner_write_context "
+            "WHERE id=1 AND writer_token=?",
+            (writer_token,),
+        )
+        con.execute(
+            "DELETE FROM neg_risk_owner_mutation_journal WHERE id<?",
+            (max(0, last_id - _OWNER_MUTATION_JOURNAL_RETAIN_ROWS),),
+        )
+        self._assert_owner_journal_clean(con)
+
+    def _execute_expected_owner_bulk(
+        self,
+        con: sqlite3.Connection,
+        *,
+        table_name: str,
+        operation: str,
+        row_keys: list[str],
+        sql: str,
+        parameters: tuple[object, ...],
+    ) -> None:
+        if not row_keys:
+            return
+        token = self._begin_expected_owner_mutation(
+            con,
+            table_name=table_name,
+            operation=operation,
+            row_key="*",
+        )
+        con.execute(sql, parameters)
+        self._consume_expected_owner_mutations(
+            con,
+            writer_token=token,
+            table_name=table_name,
+            operation=operation,
+            expected_row_keys=row_keys,
+        )
+
     def init_schema(self) -> None:
         con = self._connect()
         try:
+            owner_component_names = {
+                "neg_risk_owner_mutation_journal",
+                "neg_risk_owner_mutation_guard",
+                "neg_risk_candidate_current_authority",
+            }
+            existing_owner_components = {
+                str(row["name"])
+                for row in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN (?,?,?)",
+                    tuple(sorted(owner_component_names)),
+                )
+            }
+            if existing_owner_components and existing_owner_components != owner_component_names:
+                raise ValueError("partial-owner-authority-schema")
+            legacy_owner_bootstrap = not existing_owner_components
             schedule_evidence_existed = (
                 con.execute(
                     "SELECT 1 FROM sqlite_master "
@@ -945,7 +1210,31 @@ class OpportunityPerceptionStore:
                 is not None
             )
             con.executescript(DDL)
+            self._validate_owner_trigger_sql(con)
             con.execute("BEGIN IMMEDIATE")
+            guard = con.execute(
+                "SELECT consumed_journal_id FROM neg_risk_owner_mutation_guard "
+                "WHERE id=1"
+            ).fetchone()
+            journal_count = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
+                ).fetchone()[0]
+            )
+            if guard is None:
+                if journal_count:
+                    raise ValueError("pending-owner-mutation")
+                con.execute(
+                    "INSERT INTO neg_risk_owner_mutation_guard("
+                    "id,consumed_journal_id,consumed_hash) VALUES(1,0,NULL)"
+                )
+            self._assert_owner_journal_clean(con)
+            con.execute(
+                "INSERT OR IGNORE INTO neg_risk_candidate_current_aggregate("
+                "id,current_group_count,opportunity_count,aggregate_digest"
+                ") VALUES(1,0,0,?)",
+                ("0" * 64,),
+            )
             additive_operator_columns = {
                 "neg_risk_operator_auth_nonces": {
                     "request_method": "TEXT",
@@ -1100,6 +1389,46 @@ class OpportunityPerceptionStore:
                     "neg_risk_reconciliation_batches",
                     "duplicate_count",
                     "INTEGER NOT NULL DEFAULT 0",
+                ),
+                (
+                    "neg_risk_candidate_current_authority",
+                    "opportunity",
+                    "INTEGER NOT NULL DEFAULT 0",
+                ),
+                (
+                    "neg_risk_candidate_current_authority",
+                    "canonical_json",
+                    "TEXT NOT NULL DEFAULT '{}'",
+                ),
+                (
+                    "neg_risk_discovery_status_projection",
+                    "owner_journal_id",
+                    "INTEGER NOT NULL DEFAULT 0",
+                ),
+                (
+                    "neg_risk_discovery_group_projection",
+                    "visit_anchor_ms",
+                    "INTEGER",
+                ),
+                *(
+                    (
+                        "neg_risk_discovery_status_projection",
+                        name,
+                        "INTEGER NOT NULL DEFAULT 0",
+                    )
+                    for name in (
+                        "group_count",
+                        "queue_high",
+                        "queue_normal",
+                        "queue_explore",
+                        "promotion_queue_depth",
+                        "outstanding_admitted_count",
+                    )
+                ),
+                (
+                    "neg_risk_discovery_status_projection",
+                    "total_liquidity_weight",
+                    "REAL NOT NULL DEFAULT 0",
                 ),
                 (
                     "neg_risk_resource_decisions",
@@ -1312,6 +1641,15 @@ class OpportunityPerceptionStore:
                     con,
                     window_id,
                 )
+            if legacy_owner_bootstrap:
+                for row in con.execute(
+                    "SELECT DISTINCT group_id "
+                    "FROM neg_risk_candidate_watch_facts ORDER BY group_id"
+                ).fetchall():
+                    self._sync_candidate_current_authority(
+                        con,
+                        str(row["group_id"]),
+                    )
             self._refresh_discovery_status_projection(con)
             con.execute("COMMIT")
         except BaseException:
@@ -1345,6 +1683,7 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
+            self._assert_owner_journal_clean(con)
             row = con.execute(
                 "SELECT degraded_streak FROM neg_risk_discovery_load_state WHERE id=1"
             ).fetchone()
@@ -1436,14 +1775,27 @@ class OpportunityPerceptionStore:
             ):
                 raise ValueError("discovery-admission-timing-change-with-outstanding-work")
             self._persist_admission_proof(con, proof=proof, now_ms=now_ms)
-            con.execute(
+            supported_keys = [
+                str(row["group_id"])
+                for row in con.execute(
+                    "SELECT group_id FROM neg_risk_group_schedule "
+                    "WHERE quality='complete-supported' ORDER BY group_id"
+                )
+            ]
+            self._execute_expected_owner_bulk(
+                con,
+                table_name="neg_risk_group_schedule",
+                operation="UPDATE",
+                row_keys=supported_keys,
+                sql=(
                 "UPDATE neg_risk_group_schedule SET "
                 "promotion_eligible_at_ms=COALESCE("
                 "promotion_eligible_at_ms,first_discovered_at_ms),"
                 "promotion_queue_deadline_at_ms=COALESCE("
                 "promotion_eligible_at_ms,first_discovered_at_ms)+? "
-                "WHERE quality='complete-supported'",
-                (proof.candidate_max_wait_ms,),
+                "WHERE quality='complete-supported'"
+                ),
+                parameters=(proof.candidate_max_wait_ms,),
             )
             factless = con.execute(
                 "SELECT s.group_id FROM neg_risk_group_schedule s "
@@ -1454,17 +1806,37 @@ class OpportunityPerceptionStore:
                 "CAST(s.priority_score AS REAL) DESC,s.group_id"
             ).fetchall()
             for row in factless[proof.effective_capacity :]:
-                con.execute(
-                    "UPDATE neg_risk_group_schedule SET promoted_at_ms=NULL,"
-                    "candidate_start_deadline_at_ms=NULL WHERE group_id=?",
-                    (str(row["group_id"]),),
+                self._execute_expected_owner_bulk(
+                    con,
+                    table_name="neg_risk_group_schedule",
+                    operation="UPDATE",
+                    row_keys=[str(row["group_id"])],
+                    sql=(
+                        "UPDATE neg_risk_group_schedule SET promoted_at_ms=NULL,"
+                        "candidate_start_deadline_at_ms=NULL WHERE group_id=?"
+                    ),
+                    parameters=(str(row["group_id"]),),
                 )
-            con.execute(
+            missing_deadline_keys = [
+                str(row["group_id"])
+                for row in con.execute(
+                    "SELECT group_id FROM neg_risk_group_schedule "
+                    "WHERE promoted_at_ms IS NOT NULL "
+                    "AND candidate_start_deadline_at_ms IS NULL ORDER BY group_id"
+                )
+            ]
+            self._execute_expected_owner_bulk(
+                con,
+                table_name="neg_risk_group_schedule",
+                operation="UPDATE",
+                row_keys=missing_deadline_keys,
+                sql=(
                 "UPDATE neg_risk_group_schedule SET "
                 "candidate_start_deadline_at_ms=promoted_at_ms+? "
                 "WHERE promoted_at_ms IS NOT NULL "
-                "AND candidate_start_deadline_at_ms IS NULL",
-                (proof.candidate_max_wait_ms,),
+                "AND candidate_start_deadline_at_ms IS NULL"
+                ),
+                parameters=(proof.candidate_max_wait_ms,),
             )
             self._record_existing_candidate_admissions(
                 con,
@@ -1713,7 +2085,6 @@ class OpportunityPerceptionStore:
                 now_ms,
             ),
         )
-
     @staticmethod
     def _admission_proof_from_row(
         row: sqlite3.Row,
@@ -1754,8 +2125,8 @@ class OpportunityPerceptionStore:
             int(proof["high_burst_groups"]),
         )
 
-    @staticmethod
     def _record_candidate_admission(
+        self,
         con: sqlite3.Connection,
         *,
         schedule: sqlite3.Row,
@@ -1779,6 +2150,19 @@ class OpportunityPerceptionStore:
             or deadline != promoted_at_ms + candidate_max_wait_ms
         ):
             raise ValueError("invalid-candidate-admission-authority")
+        exists = con.execute(
+            "SELECT 1 FROM neg_risk_candidate_admissions "
+            "WHERE group_id=? AND promoted_at_ms=?",
+            (str(schedule["group_id"]), promoted_at_ms),
+        ).fetchone()
+        if exists is not None:
+            return
+        token = self._begin_expected_owner_mutation(
+            con,
+            table_name="neg_risk_candidate_admissions",
+            operation="INSERT",
+            row_key=str(schedule["group_id"]),
+        )
         con.execute(
             "INSERT OR IGNORE INTO neg_risk_candidate_admissions("
             "group_id,event_id,membership_hash,promoted_at_ms,"
@@ -1807,10 +2191,16 @@ class OpportunityPerceptionStore:
                 recorded_at_ms,
             ),
         )
+        self._consume_expected_owner_mutation(
+            con,
+            writer_token=token,
+            table_name="neg_risk_candidate_admissions",
+            operation="INSERT",
+            row_key=str(schedule["group_id"]),
+        )
 
-    @classmethod
     def _record_existing_candidate_admissions(
-        cls,
+        self,
         con: sqlite3.Connection,
         *,
         proof_row: sqlite3.Row,
@@ -1825,15 +2215,15 @@ class OpportunityPerceptionStore:
             "WHERE f.group_id=s.group_id)"
         ).fetchall()
         for schedule in schedules:
-            cls._record_candidate_admission(
+            self._record_candidate_admission(
                 con,
                 schedule=schedule,
                 proof_row=proof_row,
                 recorded_at_ms=recorded_at_ms,
             )
 
-    @staticmethod
     def _admit_waiting_candidates(
+        self,
         con: sqlite3.Connection,
         *,
         now_ms: int,
@@ -1877,16 +2267,29 @@ class OpportunityPerceptionStore:
         candidate_max_wait_ms = int(proof_row["candidate_max_wait_ms"])
         for row in queued:
             group_id = str(row["group_id"])
+            token = self._begin_expected_owner_mutation(
+                con,
+                table_name="neg_risk_group_schedule",
+                operation="UPDATE",
+                row_key=group_id,
+            )
             con.execute(
                 "UPDATE neg_risk_group_schedule SET promoted_at_ms=?,"
                 "candidate_start_deadline_at_ms=? WHERE group_id=?",
                 (now_ms, now_ms + candidate_max_wait_ms, group_id),
             )
+            self._consume_expected_owner_mutation(
+                con,
+                writer_token=token,
+                table_name="neg_risk_group_schedule",
+                operation="UPDATE",
+                row_key=group_id,
+            )
             schedule = con.execute(
                 "SELECT * FROM neg_risk_group_schedule WHERE group_id=?",
                 (group_id,),
             ).fetchone()
-            OpportunityPerceptionStore._record_candidate_admission(
+            self._record_candidate_admission(
                 con,
                 schedule=schedule,
                 proof_row=proof_row,
@@ -2000,6 +2403,13 @@ class OpportunityPerceptionStore:
                 finished_at_ms=finished_at_ms,
             )
 
+        schedule_operation = "INSERT" if prior is None else "UPDATE"
+        token = self._begin_expected_owner_mutation(
+            con,
+            table_name="neg_risk_group_schedule",
+            operation=schedule_operation,
+            row_key=candidate.group_id,
+        )
         con.execute(
             "INSERT INTO neg_risk_group_schedule("
             "group_id,event_id,membership_hash,quality,reason,gross_edge_bps,"
@@ -2052,6 +2462,13 @@ class OpportunityPerceptionStore:
                 candidate_start_deadline_at_ms,
             ),
         )
+        self._consume_expected_owner_mutation(
+            con,
+            writer_token=token,
+            table_name="neg_risk_group_schedule",
+            operation=schedule_operation,
+            row_key=candidate.group_id,
+        )
         if candidate_checkpoint is not None:
             self._refresh_candidate_checkpoint(con, candidate_checkpoint)
         self._compact_candidate_authority(con)
@@ -2091,29 +2508,8 @@ class OpportunityPerceptionStore:
         )
         if revision.membership_hash != candidate.membership_hash:
             raise ValueError("discovery-membership-hash-mismatch")
-        con.execute(
-            "INSERT INTO neg_risk_group_revisions("
-            "group_id,event_id,revision,membership_hash,started_at_ms,"
-            "observed_at_ms,source_cursor,status,legs_json"
-            ") VALUES (?,?,?,?,?,?,?,?,?)",
-            (
-                revision.group_id,
-                revision.event_id,
-                revision.revision,
-                revision.membership_hash,
-                revision.started_at_ms,
-                revision.observed_at_ms,
-                revision.source_cursor,
-                revision.status,
-                self._group_legs_json(revision.legs),
-            ),
-        )
-        if current is not None and current["membership_hash"] != revision.membership_hash:
-            con.execute(
-                "UPDATE neg_risk_group_quote_batches SET status='superseded' "
-                "WHERE group_id=? AND status='complete'",
-                (revision.group_id,),
-            )
+        self._insert_group_revision(con, revision, current)
+        self._sync_candidate_current_authority(con, revision.group_id)
 
     def _revoke_discovered_group(
         self,
@@ -2131,27 +2527,57 @@ class OpportunityPerceptionStore:
         prior = self._validated_group_from_row(current)
         if prior is None:
             raise ValueError("certified-group-invalid")
-        con.execute(
-            "INSERT INTO neg_risk_group_revisions("
-            "group_id,event_id,revision,membership_hash,started_at_ms,"
-            "observed_at_ms,source_cursor,status,legs_json"
-            ") VALUES (?,?,?,?,?,?,?,?,?)",
-            (
-                prior.group_id,
-                prior.event_id,
-                prior.revision + 1,
-                prior.membership_hash,
-                started_at_ms,
-                finished_at_ms,
-                source_cursor or "<start>",
-                "invalidated",
-                self._group_legs_json(prior.legs),
-            ),
+        revision = replace(
+            prior,
+            revision=prior.revision + 1,
+            started_at_ms=started_at_ms,
+            observed_at_ms=finished_at_ms,
+            source_cursor=source_cursor or "<start>",
+            status="invalidated",
+        )
+        self._insert_group_revision(con, revision, current)
+        self._sync_candidate_current_authority(con, group_id)
+
+    def _sync_reconciliation_schedule(
+        self,
+        con: sqlite3.Connection,
+        *,
+        revision: GroupRevision,
+        closed: bool,
+    ) -> None:
+        schedule = con.execute(
+            "SELECT 1 FROM neg_risk_group_schedule WHERE group_id=?",
+            (revision.group_id,),
+        ).fetchone()
+        if schedule is None:
+            return
+        token = self._begin_expected_owner_mutation(
+            con,
+            table_name="neg_risk_group_schedule",
+            operation="UPDATE",
+            row_key=revision.group_id,
         )
         con.execute(
-            "UPDATE neg_risk_group_quote_batches SET status='superseded' "
-            "WHERE group_id=? AND status='complete'",
-            (group_id,),
+            "UPDATE neg_risk_group_schedule SET event_id=?,membership_hash=?,"
+            "quality=?,reason=?,"
+            "promoted_at_ms=NULL,promotion_eligible_at_ms=?,"
+            "promotion_queue_deadline_at_ms=NULL,"
+            "candidate_start_deadline_at_ms=NULL WHERE group_id=?",
+            (
+                revision.event_id,
+                revision.membership_hash,
+                "incomplete-source" if closed else "complete-supported",
+                "reconciliation-closed" if closed else None,
+                None if closed else revision.observed_at_ms,
+                revision.group_id,
+            ),
+        )
+        self._consume_expected_owner_mutation(
+            con,
+            writer_token=token,
+            table_name="neg_risk_group_schedule",
+            operation="UPDATE",
+            row_key=revision.group_id,
         )
 
     def group_schedule(self, group_id: str) -> GroupSchedule | None:
@@ -2482,20 +2908,95 @@ class OpportunityPerceptionStore:
     def _refresh_discovery_status_projection(con: sqlite3.Connection) -> None:
         """Atomically materialize current Discovery identity and audit counters."""
         previous = con.execute(
-            "SELECT generation FROM neg_risk_discovery_status_projection WHERE id=1"
+            "SELECT * FROM neg_risk_discovery_status_projection WHERE id=1"
         ).fetchone()
-        schedule_rows = con.execute(
-            "SELECT * FROM neg_risk_group_schedule ORDER BY group_id"
-        ).fetchall()
-        fact_group_ids = {
-            str(row["group_id"])
-            for row in con.execute(
-                "SELECT DISTINCT group_id FROM neg_risk_candidate_watch_facts"
-            ).fetchall()
-        }
-        groups: list[dict[str, object]] = []
-        for schedule in schedule_rows:
-            group_id = str(schedule["group_id"])
+        owner_guard = con.execute(
+            "SELECT consumed_journal_id FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        owner_journal_id = int(owner_guard["consumed_journal_id"])
+        if previous is None:
+            changed_group_ids = {
+                str(row["group_id"])
+                for row in con.execute(
+                    "SELECT group_id FROM neg_risk_group_schedule"
+                )
+            }
+            digest_value = 0
+            aggregates = {
+                "group_count": 0,
+                "queue_high": 0,
+                "queue_normal": 0,
+                "queue_explore": 0,
+                "promotion_queue_depth": 0,
+                "outstanding_admitted_count": 0,
+                "total_liquidity_weight": 0.0,
+            }
+        else:
+            changed_group_ids = {
+                str(row["row_key"])
+                for row in con.execute(
+                    "SELECT row_key FROM neg_risk_owner_mutation_journal "
+                    "WHERE id>? AND id<=? AND table_name IN ("
+                    "'neg_risk_group_revisions','neg_risk_group_schedule',"
+                    "'neg_risk_candidate_watch_facts',"
+                    "'neg_risk_candidate_admissions',"
+                    "'neg_risk_candidate_attempt_starts')",
+                    (int(previous["owner_journal_id"]), owner_journal_id),
+                )
+            }
+            digest_value = int(
+                str(previous["projection_digest"]).removeprefix("sha256:"), 16
+            )
+            aggregates = {name: int(previous[name]) for name in (
+                "group_count", "queue_high", "queue_normal", "queue_explore",
+                "promotion_queue_depth", "outstanding_admitted_count",
+            )}
+            aggregates["total_liquidity_weight"] = float(
+                previous["total_liquidity_weight"]
+            )
+
+        def apply_contribution(payload: dict[str, object], sign: int) -> None:
+            schedule_payload = payload["schedule"]
+            assert isinstance(schedule_payload, dict)
+            aggregates["group_count"] += sign
+            aggregates["total_liquidity_weight"] += sign * float(
+                schedule_payload["liquidity_weight"]
+            )
+            promoted = schedule_payload["promoted_at_ms"] is not None
+            if promoted:
+                aggregates[f"queue_{schedule_payload['priority_class']}"] += sign
+            if (
+                schedule_payload["quality"] == "complete-supported"
+                and not promoted
+            ):
+                aggregates["promotion_queue_depth"] += sign
+            if promoted and not bool(payload["has_candidate_fact"]):
+                aggregates["outstanding_admitted_count"] += sign
+
+        for group_id in sorted(changed_group_ids):
+            prior_projection = con.execute(
+                "SELECT payload_json,row_hash FROM neg_risk_discovery_group_projection "
+                "WHERE group_id=?",
+                (group_id,),
+            ).fetchone()
+            if prior_projection is not None:
+                apply_contribution(
+                    json.loads(str(prior_projection["payload_json"])),
+                    -1,
+                )
+                digest_value ^= int(
+                    str(prior_projection["row_hash"]).removeprefix("sha256:"), 16
+                )
+            schedule = con.execute(
+                "SELECT * FROM neg_risk_group_schedule WHERE group_id=?",
+                (group_id,),
+            ).fetchone()
+            if schedule is None:
+                con.execute(
+                    "DELETE FROM neg_risk_discovery_group_projection WHERE group_id=?",
+                    (group_id,),
+                )
+                continue
             current = con.execute(
                 "SELECT * FROM neg_risk_group_revisions WHERE group_id=? "
                 "ORDER BY revision DESC LIMIT 1",
@@ -2531,24 +3032,44 @@ class OpportunityPerceptionStore:
                     ),
                 ).fetchone()
                 admission = None if admission_row is None else dict(admission_row)
-            groups.append(
+            payload_json = json.dumps(
                 {
                     "admission": admission,
                     "current": None if current is None else dict(current),
                     "first_certified_observed_at_ms": first_observed,
                     "group_id": group_id,
-                    "has_candidate_fact": group_id in fact_group_ids,
-                }
+                    "has_candidate_fact": con.execute(
+                        "SELECT 1 FROM neg_risk_candidate_current_authority "
+                        "WHERE group_id=? LIMIT 1",
+                        (group_id,),
+                    ).fetchone()
+                    is not None,
+                    "schedule": dict(schedule),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
             )
-        groups_json = json.dumps(
-            groups,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        projection_digest = (
-            f"sha256:{hashlib.sha256(groups_json.encode()).hexdigest()}"
-        )
+            row_hash = f"sha256:{hashlib.sha256(payload_json.encode()).hexdigest()}"
+            apply_contribution(json.loads(payload_json), 1)
+            digest_value ^= int(row_hash.removeprefix("sha256:"), 16)
+            con.execute(
+                "INSERT INTO neg_risk_discovery_group_projection("
+                "group_id,visit_anchor_ms,payload_json,row_hash) VALUES(?,?,?,?) "
+                "ON CONFLICT(group_id) DO UPDATE SET "
+                "visit_anchor_ms=excluded.visit_anchor_ms,"
+                "payload_json=excluded.payload_json,row_hash=excluded.row_hash",
+                (
+                    group_id,
+                    schedule["last_visited_at_ms"]
+                    if schedule["last_visited_at_ms"] is not None
+                    else schedule["first_discovered_at_ms"],
+                    payload_json,
+                    row_hash,
+                ),
+            )
+        groups_json = "[]"
+        projection_digest = f"sha256:{digest_value:064x}"
         guard = con.execute(
             "SELECT * FROM neg_risk_discovery_status_raw_guard WHERE id=1"
         ).fetchone()
@@ -2590,18 +3111,26 @@ class OpportunityPerceptionStore:
         )
         con.execute(
             "INSERT INTO neg_risk_discovery_status_projection("
-            "id,domain,version,generation,raw_authority_seq,groups_json,"
+            "id,domain,version,generation,raw_authority_seq,owner_journal_id,groups_json,"
             "candidate_attempt_start_count,"
-            "candidate_start_deadline_breach_count,projection_digest,"
-            "checkpoint_hash) VALUES(1,?,?,?,?,?,?,?,?,?) "
+            "candidate_start_deadline_breach_count,group_count,queue_high,"
+            "queue_normal,queue_explore,promotion_queue_depth,"
+            "outstanding_admitted_count,total_liquidity_weight,projection_digest,"
+            "checkpoint_hash) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET domain=excluded.domain,"
             "version=excluded.version,generation=excluded.generation,"
             "raw_authority_seq=excluded.raw_authority_seq,"
+            "owner_journal_id=excluded.owner_journal_id,"
             "groups_json=excluded.groups_json,"
             "candidate_attempt_start_count="
             "excluded.candidate_attempt_start_count,"
             "candidate_start_deadline_breach_count="
             "excluded.candidate_start_deadline_breach_count,"
+            "group_count=excluded.group_count,queue_high=excluded.queue_high,"
+            "queue_normal=excluded.queue_normal,queue_explore=excluded.queue_explore,"
+            "promotion_queue_depth=excluded.promotion_queue_depth,"
+            "outstanding_admitted_count=excluded.outstanding_admitted_count,"
+            "total_liquidity_weight=excluded.total_liquidity_weight,"
             "projection_digest=excluded.projection_digest,"
             "checkpoint_hash=excluded.checkpoint_hash",
             (
@@ -2609,9 +3138,17 @@ class OpportunityPerceptionStore:
                 _DISCOVERY_STATUS_PROJECTION_VERSION,
                 generation,
                 raw_authority_seq,
+                owner_journal_id,
                 groups_json,
                 attempt_count,
                 breach_count,
+                aggregates["group_count"],
+                aggregates["queue_high"],
+                aggregates["queue_normal"],
+                aggregates["queue_explore"],
+                aggregates["promotion_queue_depth"],
+                aggregates["outstanding_admitted_count"],
+                aggregates["total_liquidity_weight"],
                 projection_digest,
                 checkpoint_hash,
             ),
@@ -2633,16 +3170,20 @@ class OpportunityPerceptionStore:
         if row is None:
             raise ValueError("missing-discovery-status-projection")
         try:
-            groups = json.loads(str(row["groups_json"]))
-            canonical = json.dumps(
-                groups,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            projection_digest = (
-                f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
-            )
+            projection_rows = con.execute(
+                "SELECT payload_json,row_hash "
+                "FROM neg_risk_discovery_group_projection"
+            ).fetchall()
+            groups = [json.loads(str(item["payload_json"])) for item in projection_rows]
+            digest_value = 0
+            for item in projection_rows:
+                expected_row_hash = (
+                    f"sha256:{hashlib.sha256(str(item['payload_json']).encode()).hexdigest()}"
+                )
+                if not hmac.compare_digest(str(item["row_hash"]), expected_row_hash):
+                    raise ValueError
+                digest_value ^= int(expected_row_hash.removeprefix("sha256:"), 16)
+            projection_digest = f"sha256:{digest_value:064x}"
             expected_hash = discovery_status_projection_hash(
                 domain=str(row["domain"]),
                 version=int(row["version"]),
@@ -2662,7 +3203,7 @@ class OpportunityPerceptionStore:
                 or int(row["generation"]) <= 0
                 or int(row["raw_authority_seq"]) < 0
                 or not isinstance(groups, list)
-                or canonical != str(row["groups_json"])
+                or str(row["groups_json"]) != "[]"
                 or not hmac.compare_digest(
                     str(row["projection_digest"]),
                     projection_digest,
@@ -2751,6 +3292,7 @@ class OpportunityPerceptionStore:
             if owns_connection:
                 con.execute("BEGIN")
             self._check_deadline("discovery-status-deadline")
+            self._assert_owner_journal_clean(con)
             checkpoint = self._validated_discovery_checkpoint(con)
             through_batch_id = 0 if checkpoint is None else int(
                 checkpoint[0]["through_batch_id"]
@@ -2764,25 +3306,55 @@ class OpportunityPerceptionStore:
             if suffix_count > _DISCOVERY_AUTHORITY_UNCOMPACTED_MAX_ROWS:
                 raise ValueError("discovery-authority-bound-exceeded")
             state = con.execute("SELECT * FROM neg_risk_discovery_state WHERE id=1").fetchone()
-            schedules = con.execute(
-                "SELECT * FROM neg_risk_group_schedule ORDER BY group_id"
-            ).fetchall()
-            queue_rows = con.execute(
-                "SELECT priority_class,COUNT(*) AS depth "
-                "FROM neg_risk_group_schedule WHERE promoted_at_ms IS NOT NULL "
-                "GROUP BY priority_class"
-            ).fetchall()
-            oldest = con.execute(
-                "SELECT MIN(COALESCE(last_visited_at_ms,first_discovered_at_ms)) "
-                "AS oldest FROM neg_risk_group_schedule"
+            projection = con.execute(
+                "SELECT * FROM neg_risk_discovery_status_projection WHERE id=1"
             ).fetchone()
-            (
-                current_revisions,
-                revision_identities,
-                admissions,
-                fact_group_ids,
-                candidate_counters,
-            ) = self._validated_discovery_status_projection(con)
+            raw_guard = con.execute(
+                "SELECT * FROM neg_risk_discovery_status_raw_guard WHERE id=1"
+            ).fetchone()
+            if projection is None or raw_guard is None:
+                raise ValueError("missing-discovery-status-projection")
+            expected_projection_hash = discovery_status_projection_hash(
+                domain=str(projection["domain"]),
+                version=int(projection["version"]),
+                generation=int(projection["generation"]),
+                raw_authority_seq=int(projection["raw_authority_seq"]),
+                candidate_attempt_start_count=int(
+                    projection["candidate_attempt_start_count"]
+                ),
+                candidate_start_deadline_breach_count=int(
+                    projection["candidate_start_deadline_breach_count"]
+                ),
+                projection_digest=str(projection["projection_digest"]),
+            )
+            if (
+                projection["domain"] != _DISCOVERY_STATUS_PROJECTION_DOMAIN
+                or int(projection["version"]) != _DISCOVERY_STATUS_PROJECTION_VERSION
+                or not hmac.compare_digest(
+                    str(projection["checkpoint_hash"]),
+                    expected_projection_hash,
+                )
+                or int(projection["raw_authority_seq"])
+                != int(raw_guard["authority_seq"])
+            ):
+                raise ValueError("invalid-discovery-status-projection")
+            candidate_counters = {
+                "attempts": int(projection["candidate_attempt_start_count"]),
+                "breaches": int(
+                    projection["candidate_start_deadline_breach_count"]
+                ),
+            }
+            queue = {
+                priority: int(projection[f"queue_{priority}"])
+                for priority in ("high", "normal", "explore")
+            }
+            oldest = con.execute(
+                "SELECT visit_anchor_ms AS oldest "
+                "FROM neg_risk_discovery_group_projection "
+                "WHERE visit_anchor_ms IS NOT NULL "
+                "ORDER BY visit_anchor_ms,group_id LIMIT 1"
+            ).fetchone()
+            revision_identities: dict[tuple[str, str, str], int] = {}
             suffix_batches = con.execute(
                 "SELECT * FROM neg_risk_discovery_batches WHERE id>? ORDER BY id",
                 (through_batch_id,),
@@ -2850,11 +3422,15 @@ class OpportunityPerceptionStore:
                 now_ms,
                 checkpoint=(None if checkpoint is None else checkpoint[1]),
                 through_batch_id=through_batch_id,
+                known_groups_override=int(projection["group_count"]),
+                total_weight_override=Decimal(
+                    str(projection["total_liquidity_weight"])
+                ),
             )
             self._validate_discovery_snapshot(
                 state=state,
-                schedules=schedules,
-                current_revisions=current_revisions,
+                schedules=[],
+                current_revisions={},
                 revision_identities=revision_identities,
                 batches=batches,
                 batch_samples=batch_samples,
@@ -2863,10 +3439,10 @@ class OpportunityPerceptionStore:
                 latest_samples=latest_samples,
                 load_row=load_row,
                 admission_row=admission_row,
-                fact_group_ids=fact_group_ids,
+                fact_group_ids=set(),
                 breach_fact_evidence=set(),
                 attempt_starts=[],
-                admissions=admissions,
+                admissions=[],
                 coverage=coverage,
                 checkpointed_prefix=checkpoint is not None,
                 deadline_check=lambda: self._check_deadline(
@@ -2882,8 +3458,6 @@ class OpportunityPerceptionStore:
         finally:
             if owns_connection:
                 con.close()
-        queue = {"high": 0, "normal": 0, "explore": 0}
-        queue.update({str(row["priority_class"]): int(row["depth"]) for row in queue_rows})
         oldest_age = (
             None
             if oldest is None or oldest["oldest"] is None
@@ -2916,15 +3490,9 @@ class OpportunityPerceptionStore:
             admission_proof=(
                 None if admission_row is None else self._admission_proof_from_row(admission_row)
             ),
-            promotion_queue_depth=sum(
-                1
-                for row in schedules
-                if row["quality"] == "complete-supported" and row["promoted_at_ms"] is None
-            ),
-            outstanding_admitted_count=sum(
-                1
-                for row in schedules
-                if row["promoted_at_ms"] is not None and str(row["group_id"]) not in fact_group_ids
+            promotion_queue_depth=int(projection["promotion_queue_depth"]),
+            outstanding_admitted_count=int(
+                projection["outstanding_admitted_count"]
             ),
             candidate_attempt_start_count=candidate_counters["attempts"],
             candidate_start_deadline_breach_count=candidate_counters["breaches"],
@@ -2938,14 +3506,20 @@ class OpportunityPerceptionStore:
         *,
         checkpoint: dict[str, object] | None = None,
         through_batch_id: int = 0,
+        known_groups_override: int | None = None,
+        total_weight_override: Decimal | None = None,
     ) -> CoverageWindows:
-        totals = con.execute(
-            "SELECT COUNT(*) AS groups_count,"
-            "COALESCE(SUM(CAST(liquidity_weight AS REAL)),0) AS total_weight "
-            "FROM neg_risk_group_schedule"
-        ).fetchone()
-        known_groups = int(totals["groups_count"])
-        total_weight = Decimal(str(totals["total_weight"]))
+        if known_groups_override is None or total_weight_override is None:
+            totals = con.execute(
+                "SELECT COUNT(*) AS groups_count,"
+                "COALESCE(SUM(CAST(liquidity_weight AS REAL)),0) AS total_weight "
+                "FROM neg_risk_group_schedule"
+            ).fetchone()
+            known_groups = int(totals["groups_count"])
+            total_weight = Decimal(str(totals["total_weight"]))
+        else:
+            known_groups = known_groups_override
+            total_weight = total_weight_override
         windows: dict[int, CoverageWindow] = {}
         for minutes in (15, 30, 60):
             lower = now_ms - minutes * 60_000
@@ -3349,7 +3923,8 @@ class OpportunityPerceptionStore:
                     ):
                         raise ValueError("invalid-discovery-queued-promotion-authority")
                 elif revision is not None and (
-                    revision["event_id"] != row["event_id"] or revision["status"] != "invalidated"
+                    revision["event_id"] != row["event_id"]
+                    or revision["status"] not in {"invalidated", "closed"}
                 ):
                     raise ValueError("invalid-discovery-unpromoted-authority")
             if (
@@ -3680,37 +4255,93 @@ class OpportunityPerceptionStore:
         )
         prefix_digest = f"sha256:{hashlib.sha256(prefix_json.encode()).hexdigest()}"
 
-        con.execute(
-            "DELETE FROM neg_risk_candidate_success_receipts "
-            "WHERE id<=? AND (group_id NOT IN ("
-            f"{_LIVE_CANDIDATE_GROUP_IDS_SQL}"
-            ") OR candidate_fact_row_id NOT IN ("
-            "SELECT MAX(id) FROM neg_risk_candidate_watch_facts "
-            "GROUP BY group_id))",
-            (through_receipt,),
-        )
-        con.execute(
-            "DELETE FROM neg_risk_group_quote_batches WHERE rowid<=? "
-            "AND (group_id NOT IN ("
-            f"{_LIVE_CANDIDATE_GROUP_IDS_SQL}"
-            ") OR (id NOT IN (SELECT quote_batch_id "
-            "FROM neg_risk_candidate_watch_facts WHERE id IN ("
-            "SELECT MAX(id) FROM neg_risk_candidate_watch_facts GROUP BY group_id) "
-            "AND quote_batch_id IS NOT NULL) "
-            "AND rowid NOT IN (SELECT MAX(rowid) "
-            "FROM neg_risk_group_quote_batches "
-            "WHERE status='complete' GROUP BY group_id)))",
-            (through_quote,),
-        )
-        con.execute(
-            "DELETE FROM neg_risk_candidate_watch_facts "
-            "WHERE id<=? AND (group_id NOT IN ("
-            f"{_LIVE_CANDIDATE_GROUP_IDS_SQL}"
-            ") OR id NOT IN ("
-            "SELECT MAX(id) FROM neg_risk_candidate_watch_facts "
-            "GROUP BY group_id))",
-            (through_fact,),
-        )
+        receipt_delete_predicate = "WHERE id<?"
+        deleted_receipt_groups = [
+            str(row["group_id"])
+            for row in con.execute(
+                "SELECT group_id FROM neg_risk_candidate_success_receipts "
+                + receipt_delete_predicate
+                + " ORDER BY id",
+                (through_receipt,),
+            )
+        ]
+        if deleted_receipt_groups:
+            token = self._begin_expected_owner_mutation(
+                con,
+                table_name="neg_risk_candidate_success_receipts",
+                operation="DELETE",
+                row_key="*",
+            )
+            con.execute(
+                "DELETE FROM neg_risk_candidate_success_receipts "
+                + receipt_delete_predicate,
+                (through_receipt,),
+            )
+            self._consume_expected_owner_mutations(
+                con,
+                writer_token=token,
+                table_name="neg_risk_candidate_success_receipts",
+                operation="DELETE",
+                expected_row_keys=deleted_receipt_groups,
+            )
+        quote_delete_predicate = "WHERE rowid<?"
+        deleted_quote_groups = [
+            str(row["group_id"])
+            for row in con.execute(
+                "SELECT group_id FROM neg_risk_group_quote_batches "
+                + quote_delete_predicate
+                + " ORDER BY rowid",
+                (through_quote,),
+            )
+        ]
+        if deleted_quote_groups:
+            token = self._begin_expected_owner_mutation(
+                con,
+                table_name="neg_risk_group_quote_batches",
+                operation="DELETE",
+                row_key="*",
+            )
+            con.execute(
+                "DELETE FROM neg_risk_group_quote_batches "
+                + quote_delete_predicate,
+                (through_quote,),
+            )
+            self._consume_expected_owner_mutations(
+                con,
+                writer_token=token,
+                table_name="neg_risk_group_quote_batches",
+                operation="DELETE",
+                expected_row_keys=deleted_quote_groups,
+            )
+        fact_delete_predicate = "WHERE id<?"
+        deleted_fact_group_ids = [
+            str(row["group_id"])
+            for row in con.execute(
+                "SELECT group_id FROM neg_risk_candidate_watch_facts "
+                + fact_delete_predicate
+                + " ORDER BY id",
+                (through_fact,),
+            ).fetchall()
+        ]
+        if deleted_fact_group_ids:
+            writer_token = self._begin_expected_owner_mutation(
+                con,
+                table_name="neg_risk_candidate_watch_facts",
+                operation="DELETE",
+                row_key="*",
+            )
+            con.execute(
+                "DELETE FROM neg_risk_candidate_watch_facts "
+                + fact_delete_predicate,
+                (through_fact,),
+            )
+            self._consume_expected_owner_mutations(
+                con,
+                writer_token=writer_token,
+                table_name="neg_risk_candidate_watch_facts",
+                operation="DELETE",
+                expected_row_keys=deleted_fact_group_ids,
+            )
         seeds = self._candidate_seed_payload(
             con,
             through_group_revision_id=through_group,
@@ -3810,12 +4441,35 @@ class OpportunityPerceptionStore:
         try:
             if owns_connection:
                 con.execute("BEGIN")
+                self._assert_owner_journal_clean(con)
+                self._validated_candidate_checkpoint(con)
+                aggregate = con.execute(
+                    "SELECT current_group_count,opportunity_count,aggregate_digest "
+                    "FROM neg_risk_candidate_current_aggregate WHERE id=1"
+                ).fetchone()
+                if (
+                    aggregate is None
+                    or int(aggregate["current_group_count"]) < 0
+                    or int(aggregate["opportunity_count"]) < 0
+                    or int(aggregate["opportunity_count"])
+                    > int(aggregate["current_group_count"])
+                    or len(str(aggregate["aggregate_digest"])) != 64
+                ):
+                    raise ValueError("invalid-candidate-current-aggregate")
+                con.execute("COMMIT")
+                return int(aggregate["opportunity_count"])
             checkpoint = self._validated_candidate_checkpoint(con)
             sizes = con.execute(
                 "SELECT "
                 "(SELECT COUNT(*) FROM neg_risk_group_quote_batches),"
                 "(SELECT COUNT(*) FROM neg_risk_candidate_watch_facts),"
                 "(SELECT COUNT(*) FROM neg_risk_candidate_success_receipts),"
+                "(SELECT COUNT(DISTINCT group_id) "
+                " FROM neg_risk_group_quote_batches),"
+                "(SELECT COUNT(DISTINCT group_id) "
+                " FROM neg_risk_candidate_watch_facts),"
+                "(SELECT COUNT(DISTINCT group_id) "
+                " FROM neg_risk_candidate_success_receipts),"
                 "(SELECT COALESCE(MAX(length(legs_json)),0) "
                 " FROM neg_risk_group_quote_batches),"
                 "(SELECT COALESCE(SUM(length(legs_json)),0) "
@@ -3823,11 +4477,12 @@ class OpportunityPerceptionStore:
             ).fetchone()
             if (
                 any(
-                    int(value) > _CANDIDATE_AUTHORITY_UNCOMPACTED_MAX_ROWS
-                    for value in sizes[:3]
+                    int(total) - int(current)
+                    > _CANDIDATE_AUTHORITY_UNCOMPACTED_MAX_ROWS
+                    for total, current in zip(sizes[:3], sizes[3:6], strict=True)
                 )
-                or int(sizes[3]) > 65_536
-                or int(sizes[4]) > 8_388_608
+                or int(sizes[6]) > 65_536
+                or int(sizes[7]) > 8_388_608
             ):
                 raise ValueError("candidate-authority-bound-exceeded")
             quote_rows = con.execute(
@@ -5134,12 +5789,18 @@ class OpportunityPerceptionStore:
                     legs=legs,
                 )
                 self._insert_group_revision(con, revision, current)
+                self._sync_candidate_current_authority(con, group_id)
                 if current is None:
                     action = "added"
                     added += 1
                 else:
                     action = "changed"
                     changed += 1
+                    self._sync_reconciliation_schedule(
+                        con,
+                        revision=revision,
+                        closed=False,
+                    )
                 result = self._current_group_row(con, group_id)
                 self._insert_reconciliation_diff_evidence(
                     con,
@@ -5173,6 +5834,12 @@ class OpportunityPerceptionStore:
                     legs=self._group_legs_from_json(str(current["legs_json"])),
                 )
                 self._insert_group_revision(con, revision, current)
+                self._sync_candidate_current_authority(con, group_id)
+                self._sync_reconciliation_schedule(
+                    con,
+                    revision=revision,
+                    closed=True,
+                )
                 result = self._current_group_row(con, group_id)
                 self._insert_reconciliation_diff_evidence(
                     con,
@@ -5263,6 +5930,7 @@ class OpportunityPerceptionStore:
                 raise ValueError("group-revision-not-monotonic")
 
             self._insert_group_revision(con, revision, current_row)
+            self._sync_candidate_current_authority(con, revision.group_id)
             if candidate_checkpoint is not None:
                 self._refresh_candidate_checkpoint(con, candidate_checkpoint)
             self._refresh_discovery_status_projection(con)
@@ -5352,6 +6020,12 @@ class OpportunityPerceptionStore:
                 candidate_fact_row_id=fact.id,
                 observed_at_ms=observed_at_ms,
             )
+            writer_token = self._begin_expected_owner_mutation(
+                con,
+                table_name="neg_risk_candidate_success_receipts",
+                operation="INSERT",
+                row_key=batch.group_id,
+            )
             con.execute(
                 "INSERT INTO neg_risk_candidate_success_receipts("
                 "transaction_id,group_id,event_id,membership_hash,quote_batch_id,"
@@ -5371,6 +6045,13 @@ class OpportunityPerceptionStore:
                     receipt_hash,
                 ),
             )
+            self._consume_expected_owner_mutation(
+                con,
+                writer_token=writer_token,
+                table_name="neg_risk_candidate_success_receipts",
+                operation="INSERT",
+                row_key=batch.group_id,
+            )
             self._admit_waiting_candidates(con, now_ms=observed_at_ms)
             self._refresh_discovery_status_projection(con)
             self._compact_candidate_authority(con)
@@ -5386,6 +6067,7 @@ class OpportunityPerceptionStore:
     def current_group(self, group_id: str) -> GroupRevision | None:
         con = self._connect()
         try:
+            self._assert_owner_journal_clean(con)
             row = self._current_group_row(con, group_id)
             return None if row is None else self._validated_group_from_row(row)
         finally:
@@ -5399,9 +6081,37 @@ class OpportunityPerceptionStore:
     ) -> GroupQuoteBatch | None:
         con = self._connect()
         try:
+            self._assert_owner_journal_clean(con)
             row = self._current_quote_row(con, group_id, now_ms, max_age_ms)
             if row is None:
-                return None
+                authority = con.execute(
+                    "SELECT * FROM neg_risk_candidate_current_authority "
+                    "WHERE group_id=?",
+                    (group_id,),
+                ).fetchone()
+                if authority is None or authority["quote_batch_id"] is None:
+                    return None
+                canonical = json.loads(str(authority["canonical_json"]))
+                quoted_at_ms = canonical["quote_quoted_at_ms"]
+                started_at_ms = canonical["quote_started_at_ms"]
+                if (
+                    quoted_at_ms is None
+                    or started_at_ms is None
+                    or int(quoted_at_ms) > now_ms
+                    or int(quoted_at_ms) < now_ms - max_age_ms
+                ):
+                    return None
+                return GroupQuoteBatch.complete(
+                    group_id=group_id,
+                    membership_hash=str(authority["membership_hash"]),
+                    quote_batch_id=str(authority["quote_batch_id"]),
+                    started_at_ms=int(started_at_ms),
+                    quoted_at_ms=int(quoted_at_ms),
+                    legs=tuple(
+                        GroupQuoteLeg(*leg)
+                        for leg in json.loads(str(authority["legs_json"]))
+                    ),
+                )
             group = self._validated_group_from_row(row, prefix="group_")
             if group is None or group.status != "certified":
                 return None
@@ -5579,6 +6289,12 @@ class OpportunityPerceptionStore:
             if admission_receipt is None:
                 raise ValueError("candidate-attempt-start-without-admission-audit")
             breached = started_at_ms > deadline
+            token = self._begin_expected_owner_mutation(
+                con,
+                table_name="neg_risk_candidate_attempt_starts",
+                operation="INSERT",
+                row_key=admission.group_id,
+            )
             con.execute(
                 "INSERT INTO neg_risk_candidate_attempt_starts("
                 "group_id,event_id,membership_hash,promoted_at_ms,"
@@ -5595,6 +6311,13 @@ class OpportunityPerceptionStore:
                     deadline,
                     int(breached),
                 ),
+            )
+            self._consume_expected_owner_mutation(
+                con,
+                writer_token=token,
+                table_name="neg_risk_candidate_attempt_starts",
+                operation="INSERT",
+                row_key=admission.group_id,
             )
             fact: CandidateWatchFact | None = None
             if breached:
@@ -6966,6 +7689,12 @@ class OpportunityPerceptionStore:
             raise ValueError("quote-leg-identity-mismatch")
         if any(leg.membership_hash != current.membership_hash for leg in batch.legs):
             raise ValueError("membership-hash-mismatch")
+        writer_token = self._begin_expected_owner_mutation(
+            con,
+            table_name="neg_risk_group_quote_batches",
+            operation="INSERT",
+            row_key=batch.group_id,
+        )
         con.execute(
             "INSERT INTO neg_risk_group_quote_batches("
             "id,group_id,group_revision,membership_hash,started_at_ms,"
@@ -6983,9 +7712,16 @@ class OpportunityPerceptionStore:
                 self._quote_legs_json(batch.legs),
             ),
         )
+        self._consume_expected_owner_mutation(
+            con,
+            writer_token=writer_token,
+            table_name="neg_risk_group_quote_batches",
+            operation="INSERT",
+            row_key=batch.group_id,
+        )
 
-    @staticmethod
     def _insert_candidate_watch_fact(
+        self,
         con: sqlite3.Connection,
         *,
         group_id: str,
@@ -7003,6 +7739,12 @@ class OpportunityPerceptionStore:
         schedule_reason: str,
         next_due_at_ms: int,
     ) -> CandidateWatchFact:
+        writer_token = self._begin_expected_owner_mutation(
+            con,
+            table_name="neg_risk_candidate_watch_facts",
+            operation="INSERT",
+            row_key=group_id,
+        )
         cursor = con.execute(
             "INSERT INTO neg_risk_candidate_watch_facts("
             "group_id,membership_hash,quote_batch_id,observed_at_ms,last_result,"
@@ -7026,6 +7768,14 @@ class OpportunityPerceptionStore:
                 next_due_at_ms,
             ),
         )
+        self._consume_expected_owner_mutation(
+            con,
+            writer_token=writer_token,
+            table_name="neg_risk_candidate_watch_facts",
+            operation="INSERT",
+            row_key=group_id,
+        )
+        self._sync_candidate_current_authority(con, group_id)
         return CandidateWatchFact(
             id=int(cursor.lastrowid),
             group_id=group_id,
@@ -7042,6 +7792,120 @@ class OpportunityPerceptionStore:
             effective_interval_s=effective_interval_s,
             schedule_reason=schedule_reason,
             next_due_at_ms=next_due_at_ms,
+        )
+
+    @staticmethod
+    def _xor_candidate_digest(digest: str, *row_hashes: str | None) -> str:
+        value = int(digest, 16)
+        for row_hash in row_hashes:
+            if row_hash is not None:
+                value ^= int(row_hash.removeprefix("sha256:"), 16)
+        return f"{value:064x}"
+
+    def _sync_candidate_current_authority(
+        self,
+        con: sqlite3.Connection,
+        group_id: str,
+    ) -> None:
+        old = con.execute(
+            "SELECT row_hash,opportunity FROM neg_risk_candidate_current_authority "
+            "WHERE group_id=?",
+            (group_id,),
+        ).fetchone()
+        group = self._current_group_row(con, group_id)
+        fact = con.execute(
+            "SELECT * FROM neg_risk_candidate_watch_facts WHERE group_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (group_id,),
+        ).fetchone()
+        new_hash: str | None = None
+        opportunity = 0
+        if group is None or group["status"] != "certified" or fact is None:
+            con.execute(
+                "DELETE FROM neg_risk_candidate_current_authority WHERE group_id=?",
+                (group_id,),
+            )
+        else:
+            quote = None
+            if fact["quote_batch_id"] is not None:
+                quote = con.execute(
+                    "SELECT * FROM neg_risk_group_quote_batches WHERE id=?",
+                    (fact["quote_batch_id"],),
+                ).fetchone()
+            opportunity = int(
+                fact["last_result"] == "watching"
+                and fact["gross_edge_bps"] is not None
+                and float(fact["gross_edge_bps"]) > 0
+                and quote is not None
+                and quote["status"] == "complete"
+                and quote["membership_hash"] == group["membership_hash"]
+                and fact["membership_hash"] == group["membership_hash"]
+            )
+            canonical = json.dumps(
+                {
+                    "event_id": str(group["event_id"]),
+                    "fact_id": int(fact["id"]),
+                    "group_id": group_id,
+                    "group_revision": int(group["revision"]),
+                    "last_result": str(fact["last_result"]),
+                    "legs": None if quote is None else json.loads(str(quote["legs_json"])),
+                    "membership_hash": str(group["membership_hash"]),
+                    "opportunity": opportunity,
+                    "quote_started_at_ms": (
+                        None if quote is None else int(quote["started_at_ms"])
+                    ),
+                    "quote_quoted_at_ms": (
+                        None if quote is None else int(quote["quoted_at_ms"])
+                    ),
+                    "quote_batch_id": fact["quote_batch_id"],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            new_hash = f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+            con.execute(
+                "INSERT INTO neg_risk_candidate_current_authority("
+                "group_id,event_id,membership_hash,group_revision,quote_batch_id,"
+                "fact_id,last_result,opportunity,legs_json,canonical_json,row_hash"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(group_id) DO UPDATE SET "
+                "event_id=excluded.event_id,membership_hash=excluded.membership_hash,"
+                "group_revision=excluded.group_revision,"
+                "quote_batch_id=excluded.quote_batch_id,fact_id=excluded.fact_id,"
+                "last_result=excluded.last_result,opportunity=excluded.opportunity,"
+                "legs_json=excluded.legs_json,canonical_json=excluded.canonical_json,"
+                "row_hash=excluded.row_hash",
+                (
+                    group_id,
+                    group["event_id"],
+                    group["membership_hash"],
+                    group["revision"],
+                    fact["quote_batch_id"],
+                    fact["id"],
+                    fact["last_result"],
+                    opportunity,
+                    None if quote is None else quote["legs_json"],
+                    canonical,
+                    new_hash,
+                ),
+            )
+        aggregate = con.execute(
+            "SELECT * FROM neg_risk_candidate_current_aggregate WHERE id=1"
+        ).fetchone()
+        if aggregate is None:
+            raise ValueError("invalid-candidate-current-aggregate")
+        old_hash = None if old is None else str(old["row_hash"])
+        con.execute(
+            "UPDATE neg_risk_candidate_current_aggregate SET "
+            "current_group_count=current_group_count+?,"
+            "opportunity_count=opportunity_count+?,aggregate_digest=? WHERE id=1",
+            (
+                int(new_hash is not None) - int(old is not None),
+                opportunity - (0 if old is None else int(old["opportunity"])),
+                self._xor_candidate_digest(
+                    str(aggregate["aggregate_digest"]), old_hash, new_hash
+                ),
+            ),
         )
 
     @staticmethod
@@ -7093,12 +7957,18 @@ class OpportunityPerceptionStore:
             (group_id, now_ms, now_ms - max_age_ms),
         ).fetchone()
 
-    @staticmethod
     def _insert_group_revision(
+        self,
         con: sqlite3.Connection,
         revision: GroupRevision,
         current_row: sqlite3.Row | None,
     ) -> None:
+        writer_token = self._begin_expected_owner_mutation(
+            con,
+            table_name="neg_risk_group_revisions",
+            operation="INSERT",
+            row_key=revision.group_id,
+        )
         con.execute(
             "INSERT INTO neg_risk_group_revisions("
             "group_id,event_id,revision,membership_hash,started_at_ms,"
@@ -7116,14 +7986,44 @@ class OpportunityPerceptionStore:
                 OpportunityPerceptionStore._group_legs_json(revision.legs),
             ),
         )
+        self._consume_expected_owner_mutation(
+            con,
+            writer_token=writer_token,
+            table_name="neg_risk_group_revisions",
+            operation="INSERT",
+            row_key=revision.group_id,
+        )
         if current_row is not None and (
             current_row["membership_hash"] != revision.membership_hash
             or revision.status != "certified"
         ):
+            quote_ids = [
+                str(row["id"])
+                for row in con.execute(
+                    "SELECT id FROM neg_risk_group_quote_batches "
+                    "WHERE group_id=? AND status='complete' ORDER BY id",
+                    (revision.group_id,),
+                )
+            ]
+            if not quote_ids:
+                return
+            writer_token = self._begin_expected_owner_mutation(
+                con,
+                table_name="neg_risk_group_quote_batches",
+                operation="UPDATE",
+                row_key="*",
+            )
             con.execute(
                 "UPDATE neg_risk_group_quote_batches SET status='superseded' "
                 "WHERE group_id=? AND status='complete'",
                 (revision.group_id,),
+            )
+            self._consume_expected_owner_mutations(
+                con,
+                writer_token=writer_token,
+                table_name="neg_risk_group_quote_batches",
+                operation="UPDATE",
+                expected_row_keys=[revision.group_id] * len(quote_ids),
             )
 
     @staticmethod

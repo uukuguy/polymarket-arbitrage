@@ -484,14 +484,31 @@ CREATE TABLE IF NOT EXISTS neg_risk_discovery_status_projection (
   version INTEGER NOT NULL,
   generation INTEGER NOT NULL CHECK(generation > 0),
   raw_authority_seq INTEGER NOT NULL CHECK(raw_authority_seq >= 0),
+  owner_journal_id INTEGER NOT NULL DEFAULT 0 CHECK(owner_journal_id >= 0),
   groups_json TEXT NOT NULL,
   candidate_attempt_start_count INTEGER NOT NULL CHECK(
     candidate_attempt_start_count >= 0),
   candidate_start_deadline_breach_count INTEGER NOT NULL CHECK(
     candidate_start_deadline_breach_count >= 0),
+  group_count INTEGER NOT NULL DEFAULT 0,
+  queue_high INTEGER NOT NULL DEFAULT 0,
+  queue_normal INTEGER NOT NULL DEFAULT 0,
+  queue_explore INTEGER NOT NULL DEFAULT 0,
+  promotion_queue_depth INTEGER NOT NULL DEFAULT 0,
+  outstanding_admitted_count INTEGER NOT NULL DEFAULT 0,
+  total_liquidity_weight REAL NOT NULL DEFAULT 0,
   projection_digest TEXT NOT NULL,
   checkpoint_hash TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS neg_risk_discovery_group_projection (
+  group_id TEXT PRIMARY KEY,
+  visit_anchor_ms INTEGER,
+  payload_json TEXT NOT NULL,
+  row_hash TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_discovery_projection_oldest
+  ON neg_risk_discovery_group_projection(visit_anchor_ms,group_id);
 
 CREATE TABLE IF NOT EXISTS neg_risk_discovery_status_raw_guard (
   id INTEGER PRIMARY KEY CHECK(id = 1),
@@ -544,6 +561,131 @@ AFTER DELETE ON neg_risk_candidate_attempt_starts BEGIN
       candidate_start_deadline_breach_count-OLD.deadline_breached
   WHERE id=1;
 END;
+
+CREATE TABLE IF NOT EXISTS neg_risk_owner_write_context (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  writer_token TEXT NOT NULL,
+  table_name TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK(operation IN ('INSERT','UPDATE','DELETE')),
+  row_key TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_owner_mutation_journal (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  writer_token TEXT,
+  table_name TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK(operation IN ('INSERT','UPDATE','DELETE')),
+  row_key TEXT NOT NULL,
+  old_json TEXT,
+  new_json TEXT,
+  previous_hash TEXT,
+  event_hash TEXT
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_owner_mutation_guard (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  consumed_journal_id INTEGER NOT NULL CHECK(consumed_journal_id >= 0),
+  consumed_hash TEXT
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_owner_candidate_fact_insert
+AFTER INSERT ON neg_risk_candidate_watch_facts BEGIN
+  INSERT INTO neg_risk_owner_mutation_journal(
+    writer_token,table_name,operation,row_key,old_json,new_json)
+  VALUES(
+    (SELECT writer_token FROM neg_risk_owner_write_context WHERE id=1),
+    'neg_risk_candidate_watch_facts','INSERT',NEW.group_id,NULL,
+    json_object(
+      'id',NEW.id,'group_id',NEW.group_id,
+      'membership_hash',NEW.membership_hash,
+      'quote_batch_id',NEW.quote_batch_id,
+      'observed_at_ms',NEW.observed_at_ms,'last_result',NEW.last_result,
+      'reason',NEW.reason,'bundle_cost',NEW.bundle_cost,
+      'gross_edge_bps',NEW.gross_edge_bps,
+      'max_bundle_size',NEW.max_bundle_size,
+      'priority_class',NEW.priority_class,
+      'consecutive_failures',NEW.consecutive_failures,
+      'effective_interval_s',NEW.effective_interval_s,
+      'schedule_reason',NEW.schedule_reason,
+      'next_due_at_ms',NEW.next_due_at_ms));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_owner_candidate_fact_update
+AFTER UPDATE ON neg_risk_candidate_watch_facts BEGIN
+  INSERT INTO neg_risk_owner_mutation_journal(
+    writer_token,table_name,operation,row_key,old_json,new_json)
+  VALUES(
+    (SELECT writer_token FROM neg_risk_owner_write_context WHERE id=1),
+    'neg_risk_candidate_watch_facts','UPDATE',NEW.group_id,
+    json_object(
+      'id',OLD.id,'group_id',OLD.group_id,
+      'membership_hash',OLD.membership_hash,
+      'quote_batch_id',OLD.quote_batch_id,
+      'observed_at_ms',OLD.observed_at_ms,'last_result',OLD.last_result,
+      'reason',OLD.reason,'bundle_cost',OLD.bundle_cost,
+      'gross_edge_bps',OLD.gross_edge_bps,
+      'max_bundle_size',OLD.max_bundle_size,
+      'priority_class',OLD.priority_class,
+      'consecutive_failures',OLD.consecutive_failures,
+      'effective_interval_s',OLD.effective_interval_s,
+      'schedule_reason',OLD.schedule_reason,
+      'next_due_at_ms',OLD.next_due_at_ms),
+    json_object(
+      'id',NEW.id,'group_id',NEW.group_id,
+      'membership_hash',NEW.membership_hash,
+      'quote_batch_id',NEW.quote_batch_id,
+      'observed_at_ms',NEW.observed_at_ms,'last_result',NEW.last_result,
+      'reason',NEW.reason,'bundle_cost',NEW.bundle_cost,
+      'gross_edge_bps',NEW.gross_edge_bps,
+      'max_bundle_size',NEW.max_bundle_size,
+      'priority_class',NEW.priority_class,
+      'consecutive_failures',NEW.consecutive_failures,
+      'effective_interval_s',NEW.effective_interval_s,
+      'schedule_reason',NEW.schedule_reason,
+      'next_due_at_ms',NEW.next_due_at_ms));
+END;
+CREATE TRIGGER IF NOT EXISTS trg_owner_candidate_fact_delete
+AFTER DELETE ON neg_risk_candidate_watch_facts BEGIN
+  INSERT INTO neg_risk_owner_mutation_journal(
+    writer_token,table_name,operation,row_key,old_json,new_json)
+  VALUES(
+    (SELECT writer_token FROM neg_risk_owner_write_context WHERE id=1),
+    'neg_risk_candidate_watch_facts','DELETE',OLD.group_id,
+    json_object(
+      'id',OLD.id,'group_id',OLD.group_id,
+      'membership_hash',OLD.membership_hash,
+      'quote_batch_id',OLD.quote_batch_id,
+      'observed_at_ms',OLD.observed_at_ms,'last_result',OLD.last_result,
+      'reason',OLD.reason,'bundle_cost',OLD.bundle_cost,
+      'gross_edge_bps',OLD.gross_edge_bps,
+      'max_bundle_size',OLD.max_bundle_size,
+      'priority_class',OLD.priority_class,
+      'consecutive_failures',OLD.consecutive_failures,
+      'effective_interval_s',OLD.effective_interval_s,
+      'schedule_reason',OLD.schedule_reason,
+      'next_due_at_ms',OLD.next_due_at_ms),NULL);
+END;
+
+CREATE TABLE IF NOT EXISTS neg_risk_candidate_current_authority (
+  group_id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL,
+  membership_hash TEXT NOT NULL,
+  group_revision INTEGER NOT NULL CHECK(group_revision > 0),
+  quote_batch_id TEXT,
+  fact_id INTEGER NOT NULL CHECK(fact_id > 0),
+  last_result TEXT NOT NULL CHECK(last_result IN
+    ('watching','no-edge','unavailable')),
+  opportunity INTEGER NOT NULL CHECK(opportunity IN (0,1)),
+  legs_json TEXT,
+  canonical_json TEXT NOT NULL,
+  row_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_candidate_current_aggregate (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  current_group_count INTEGER NOT NULL CHECK(current_group_count >= 0),
+  opportunity_count INTEGER NOT NULL CHECK(opportunity_count >= 0),
+  aggregate_digest TEXT NOT NULL
+);
 
 -- Full Reconciliation is a checkpointed calibration window. Page receipts,
 -- staging samples, cursor advancement, completion and final diff publication
@@ -971,6 +1113,87 @@ CREATE TABLE IF NOT EXISTS neg_risk_opportunity_notification_attempts (
 CREATE INDEX IF NOT EXISTS idx_neg_risk_opportunity_notification_attempts_replay
   ON neg_risk_opportunity_notification_attempts(notification_id, attempted_at_ms, id);
 """
+
+OWNER_JOURNAL_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "neg_risk_group_revisions": (
+        "id", "group_id", "event_id", "revision", "membership_hash",
+        "started_at_ms", "observed_at_ms", "source_cursor", "status", "legs_json",
+    ),
+    "neg_risk_group_schedule": (
+        "group_id", "event_id", "membership_hash", "quality", "reason",
+        "gross_edge_bps", "activity_rank", "liquidity_rank", "change_rank",
+        "age_rank", "priority_score", "priority_reason", "priority_class",
+        "liquidity_weight", "first_discovered_at_ms", "last_discovered_at_ms",
+        "last_visited_at_ms", "promoted_at_ms", "promotion_eligible_at_ms",
+        "promotion_queue_deadline_at_ms", "candidate_start_deadline_at_ms",
+    ),
+    "neg_risk_group_quote_batches": (
+        "id", "group_id", "group_revision", "membership_hash", "started_at_ms",
+        "quoted_at_ms", "status", "failure_reason", "legs_json",
+    ),
+    "neg_risk_candidate_success_receipts": (
+        "id", "transaction_id", "group_id", "event_id", "membership_hash",
+        "quote_batch_id", "group_revision_row_id", "quote_batch_row_id",
+        "candidate_fact_row_id", "observed_at_ms", "receipt_hash",
+    ),
+    "neg_risk_candidate_admissions": (
+        "id", "group_id", "event_id", "membership_hash", "promoted_at_ms",
+        "candidate_start_deadline_at_ms", "effective_capacity",
+        "candidate_max_wait_ms", "selection_budget_ms", "poll_interval_ms",
+        "group_timeout_ms", "terminal_write_budget_ms",
+        "attempt_start_write_budget_ms", "high_burst_groups",
+        "reserved_non_high_slots", "effective_start_bound_ms", "recorded_at_ms",
+    ),
+    "neg_risk_candidate_attempt_starts": (
+        "id", "group_id", "event_id", "membership_hash", "promoted_at_ms",
+        "candidate_max_wait_ms", "started_at_ms",
+        "candidate_start_deadline_at_ms", "deadline_breached",
+    ),
+}
+
+
+def _owner_journal_triggers() -> tuple[str, tuple[str, ...]]:
+    statements: list[str] = []
+    names: list[str] = [
+        "trg_owner_candidate_fact_insert",
+        "trg_owner_candidate_fact_update",
+        "trg_owner_candidate_fact_delete",
+    ]
+    for table, columns in OWNER_JOURNAL_TABLE_COLUMNS.items():
+        short = table.removeprefix("neg_risk_")
+        for operation, alias in (
+            ("INSERT", "NEW"),
+            ("UPDATE", "NEW"),
+            ("DELETE", "OLD"),
+        ):
+            name = f"trg_owner_{short}_{operation.lower()}"
+            names.append(name)
+            old_json = (
+                "NULL"
+                if operation == "INSERT"
+                else "json_object("
+                + ",".join(f"'{column}',OLD.{column}" for column in columns)
+                + ")"
+            )
+            new_json = (
+                "NULL"
+                if operation == "DELETE"
+                else "json_object("
+                + ",".join(f"'{column}',NEW.{column}" for column in columns)
+                + ")"
+            )
+            statements.append(
+                f"CREATE TRIGGER IF NOT EXISTS {name} AFTER {operation} ON {table} "
+                "BEGIN INSERT INTO neg_risk_owner_mutation_journal("
+                "writer_token,table_name,operation,row_key,old_json,new_json) VALUES("
+                "(SELECT writer_token FROM neg_risk_owner_write_context WHERE id=1),"
+                f"'{table}','{operation}',{alias}.group_id,{old_json},{new_json}); END;"
+            )
+    return "\n".join(statements), tuple(names)
+
+
+_OWNER_TRIGGER_DDL, OWNER_JOURNAL_TRIGGER_NAMES = _owner_journal_triggers()
+DDL += "\n" + _OWNER_TRIGGER_DDL
 
 # Order MUST match the DDL `CREATE TABLE markets(...)` declaration
 # AND the placeholders in MARKETS_INSERT_SQL.

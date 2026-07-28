@@ -223,11 +223,13 @@ def http_test_client(daemon_settings_for_test: Settings) -> Any:
     from starlette.testclient import TestClient
 
     from polyarb.http.app import create_app
+    from polyarb.perception.store import OpportunityPerceptionStore
     from polyarb.storage.sqlite_store import SQLiteStore
 
     # Ensure DB schema is initialized (some tests insert data before calling this)
     sqlite_store = SQLiteStore(daemon_settings_for_test.db_path)
     sqlite_store.init_schema()
+    OpportunityPerceptionStore(daemon_settings_for_test.db_path).init_schema()
 
     mock_scheduler = MagicMock()
     app = create_app(
@@ -243,10 +245,12 @@ def make_http_test_client(settings: Settings) -> Any:
     from starlette.testclient import TestClient
 
     from polyarb.http.app import create_app
+    from polyarb.perception.store import OpportunityPerceptionStore
     from polyarb.storage.sqlite_store import SQLiteStore
 
     sqlite_store = SQLiteStore(settings.db_path)
     sqlite_store.init_schema()
+    OpportunityPerceptionStore(settings.db_path).init_schema()
     mock_scheduler = MagicMock()
     app = create_app(
         scheduler=mock_scheduler,

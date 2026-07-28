@@ -38,6 +38,7 @@ from polyarb.perception.store import (
     DiscoveryAdmissionProof,
     OpportunityPerceptionStore,
 )
+from polyarb.storage.schemas import OWNER_JOURNAL_TRIGGER_NAMES
 
 
 def _event(
@@ -345,6 +346,294 @@ def test_discovery_status_projection_honors_deadline(tmp_path: Path) -> None:
 
     with pytest.raises(TimeoutError, match="discovery-status-deadline"):
         expired.discovery_status(now_ms=1)
+
+
+@pytest.mark.asyncio
+async def test_ghost_fact_mutation_blocks_unrelated_legal_writer(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+    ).run_batch()
+    group = store.current_group("g-1")
+    assert group is not None
+    store.record_candidate_watch_fact(
+        group_id=group.group_id,
+        membership_hash=group.membership_hash,
+        quote_batch_id=None,
+        observed_at_ms=10_001,
+        last_result="unavailable",
+        reason="fixture",
+        bundle_cost=None,
+        gross_edge_bps=None,
+        max_bundle_size=None,
+        priority_class="normal",
+        consecutive_failures=1,
+        effective_interval_s=60,
+        schedule_reason="fixture",
+        next_due_at_ms=70_001,
+    )
+    with store._connect() as con:
+        con.execute(
+            "UPDATE neg_risk_candidate_watch_facts SET next_due_at_ms=0 "
+            "WHERE group_id='g-1'"
+        )
+
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.record_discovery_load_decision(
+            degraded_reason=None,
+            probe_every_cycles=10,
+            now_ms=10_002,
+        )
+    assert store.discovery_load_state().updated_at_ms == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("table", "operation"),
+    [
+        (table, operation)
+        for table in (
+            "neg_risk_group_revisions",
+            "neg_risk_group_schedule",
+            "neg_risk_group_quote_batches",
+            "neg_risk_candidate_watch_facts",
+            "neg_risk_candidate_success_receipts",
+            "neg_risk_candidate_admissions",
+            "neg_risk_candidate_attempt_starts",
+        )
+        for operation in ("INSERT", "UPDATE", "DELETE")
+    ],
+)
+async def test_owner_raw_mutations_remain_pending_and_cannot_be_washed(
+    tmp_path: Path,
+    table: str,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+        clock_ms=lambda: 10_000,
+    ).run_batch()
+    group = store.current_group("g-1")
+    schedule = store.group_schedule("g-1")
+    assert group is not None and schedule is not None
+    admission = store_module.CandidateAdmissionContext(
+        group_id=group.group_id,
+        event_id=group.event_id,
+        membership_hash=group.membership_hash,
+        promoted_at_ms=int(schedule.promoted_at_ms),
+        candidate_start_deadline_at_ms=int(schedule.candidate_start_deadline_at_ms),
+    )
+    store.record_candidate_attempt_start(
+        admission=admission,
+        clock_ms=lambda: int(schedule.promoted_at_ms),
+    )
+    quote = GroupQuoteBatch.complete(
+        group_id=group.group_id,
+        membership_hash=group.membership_hash,
+        quote_batch_id="owner-tamper-quote",
+        started_at_ms=10_001,
+        quoted_at_ms=10_002,
+        legs=tuple(
+            GroupQuoteLeg(
+                leg.yes_token_id,
+                group.membership_hash,
+                0.4,
+                10,
+                "executable",
+            )
+            for leg in group.legs
+        ),
+    )
+    store.publish_candidate_success(
+        quote,
+        observed_at_ms=quote.quoted_at_ms,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.8,
+        gross_edge_bps=2_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="fixture",
+        next_due_at_ms=25_002,
+    )
+    update_columns = {
+        "neg_risk_group_revisions": "source_cursor",
+        "neg_risk_group_schedule": "reason",
+        "neg_risk_group_quote_batches": "failure_reason",
+        "neg_risk_candidate_watch_facts": "next_due_at_ms",
+        "neg_risk_candidate_success_receipts": "receipt_hash",
+        "neg_risk_candidate_admissions": "recorded_at_ms",
+        "neg_risk_candidate_attempt_starts": "started_at_ms",
+    }
+    with store._connect() as con:
+        if operation == "INSERT":
+            row = dict(con.execute(f"SELECT * FROM {table} LIMIT 1").fetchone())
+            row.pop("id", None)
+            if table in {"neg_risk_group_revisions", "neg_risk_group_schedule",
+                         "neg_risk_candidate_admissions"}:
+                row["group_id"] = str(row["group_id"]) + "-ghost"
+            if table == "neg_risk_group_quote_batches":
+                row["id"] = "owner-tamper-quote-ghost"
+            if table == "neg_risk_candidate_success_receipts":
+                row["transaction_id"] = "owner-tamper-transaction-ghost"
+                row["quote_batch_id"] = "owner-tamper-receipt-ghost"
+                row["candidate_fact_row_id"] = int(row["candidate_fact_row_id"]) + 1_000_000
+            columns = tuple(row)
+            con.execute(
+                f"INSERT INTO {table}({','.join(columns)}) "
+                f"VALUES({','.join('?' for _ in columns)})",
+                tuple(row[column] for column in columns),
+            )
+        elif operation == "UPDATE":
+            column = update_columns[table]
+            value = 0 if column.endswith("_ms") else "owner-tampered"
+            con.execute(
+                f"UPDATE {table} SET {column}=? "
+                f"WHERE rowid=(SELECT MIN(rowid) FROM {table})",
+                (value,),
+            )
+        else:
+            con.execute(
+                f"DELETE FROM {table} WHERE rowid=(SELECT MIN(rowid) FROM {table})"
+            )
+
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.discovery_status(now_ms=10_003)
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.record_discovery_load_decision(
+            degraded_reason=None,
+            probe_every_cycles=10,
+            now_ms=10_003,
+        )
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
+        store.init_schema()
+
+
+@pytest.mark.parametrize("trigger_name", OWNER_JOURNAL_TRIGGER_NAMES)
+@pytest.mark.parametrize("mode", ("missing", "drift"))
+def test_owner_trigger_missing_or_drift_fails_init(
+    tmp_path: Path,
+    trigger_name: str,
+    mode: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        sql = str(
+            con.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger_name,),
+            ).fetchone()[0]
+        )
+        tokens = sql.split()
+        operation = tokens[tokens.index("AFTER") + 1]
+        table = tokens[tokens.index("ON") + 1]
+        con.execute(f"DROP TRIGGER {trigger_name}")
+        if mode == "drift":
+            con.execute(
+                f"CREATE TRIGGER {trigger_name} AFTER {operation} ON {table} "
+                "BEGIN SELECT 1; END"
+            )
+
+    if mode == "missing":
+        store.init_schema()
+        with store._connect() as con:
+            restored = con.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger_name,),
+            ).fetchone()
+        assert restored is not None
+    else:
+        with pytest.raises(ValueError, match="owner-trigger-sql-drift"):
+            store.init_schema()
+
+
+def test_partial_owner_authority_schema_fails_init(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "CREATE TABLE neg_risk_owner_mutation_journal(id INTEGER PRIMARY KEY)"
+        )
+
+    with pytest.raises(ValueError, match="partial-owner-authority-schema"):
+        OpportunityPerceptionStore(db_path).init_schema()
+
+
+@pytest.mark.asyncio
+async def test_single_group_terminal_write_does_not_scan_all_projection_groups(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(
+                *(
+                    _event(event_id=f"e-{sequence}", group_id=f"g-{sequence}")
+                    for sequence in range(20)
+                )
+            )
+        ),
+        store=store,
+    ).run_batch()
+    statements: list[str] = []
+    with store._connect() as traced:
+        traced.set_trace_callback(statements.append)
+        traced.execute("BEGIN IMMEDIATE")
+        group = store._current_group_row(traced, "g-0")
+        assert group is not None
+        store._insert_candidate_watch_fact(
+            traced,
+            group_id="g-0",
+            membership_hash=str(group["membership_hash"]),
+            quote_batch_id=None,
+            observed_at_ms=20_000,
+            last_result="unavailable",
+            reason="trace",
+            bundle_cost=None,
+            gross_edge_bps=None,
+            max_bundle_size=None,
+            priority_class="normal",
+            consecutive_failures=1,
+            effective_interval_s=60,
+            schedule_reason="trace",
+            next_due_at_ms=80_000,
+        )
+        store._refresh_discovery_status_projection(traced)
+        traced.execute("ROLLBACK")
+        terminal_statements = list(statements)
+        statements.clear()
+        store.discovery_status(now_ms=20_001, _connection=traced)
+        status_statements = list(statements)
+
+    normalized = [
+        " ".join(statement.split()).lower()
+        for statement in terminal_statements
+    ]
+    assert not any(
+        "from neg_risk_group_schedule order by group_id" in statement
+        for statement in normalized
+    )
+    assert not any(
+        "select distinct group_id from neg_risk_candidate_watch_facts" in statement
+        for statement in normalized
+    )
+    status_normalized = [
+        " ".join(statement.split()).lower()
+        for statement in status_statements
+    ]
+    assert not any(
+        "from neg_risk_group_schedule order by group_id" in statement
+        or "select * from neg_risk_discovery_group_projection" in statement
+        or "groups_json" in statement
+        for statement in status_normalized
+    )
 
 
 def test_discovery_checkpoint_segments_one_long_sweep_and_terminal_commits(

@@ -26,6 +26,7 @@ from polyarb.perception.reconciliation import (
     ReconciliationWorker as _ReconciliationWorker,
 )
 from polyarb.perception.store import (
+    DiscoveryAdmissionProof,
     OpportunityPerceptionStore,
     ReconciliationUnprovableError,
 )
@@ -108,6 +109,19 @@ def _store(path: Path) -> OpportunityPerceptionStore:
     store = OpportunityPerceptionStore(path)
     store.init_schema()
     return store
+
+
+def _admission_proof() -> DiscoveryAdmissionProof:
+    return DiscoveryAdmissionProof(
+        effective_capacity=2,
+        candidate_max_wait_ms=60_000,
+        selection_budget_ms=6_000,
+        poll_interval_ms=1_000,
+        group_timeout_ms=10_000,
+        terminal_write_budget_ms=5_000,
+        high_burst_groups=1,
+        reserved_non_high_slots=2,
+    )
 
 
 @pytest.mark.asyncio
@@ -371,6 +385,52 @@ def _seed_candidate_checkpoint(
             next_due_at_ms=quoted_at_ms + 15_000,
         )
     return group
+
+
+def test_reconciliation_close_revokes_discovery_promotion_atomically(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path / "state.db")
+    proof = _admission_proof()
+    store.configure_discovery_admission(proof, now_ms=0)
+    page = _page(
+        _event("e-1", "g-1"),
+        requested=None,
+        next_cursor=None,
+        started=1_000,
+        finished=1_010,
+    )
+    store.publish_discovery_batch(
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=1_000,
+        finished_at_ms=1_010,
+        page_event_count=1,
+        candidates=DiscoveryWorker._normalize_page(page),
+        admission_proof=proof,
+    )
+    assert store.group_schedule("g-1").promoted_at_ms is not None
+
+    window = store.begin_reconciliation(started_at_ms=2_000)
+    store.publish_reconciliation_batch(
+        window_id=window.id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=2_000,
+        finished_at_ms=2_010,
+        page_event_count=0,
+        candidates=(),
+    )
+    store.apply_reconciliation_diff(window.id)
+
+    schedule = store.group_schedule("g-1")
+    assert schedule is not None
+    assert schedule.promoted_at_ms is None
+    assert schedule.candidate_start_deadline_at_ms is None
+    assert store.current_group("g-1").status == "closed"
+    assert store.discovery_status(now_ms=2_011).candidate_start_ready is True
 
 
 def test_reconciliation_checkpoint_bounds_latest_window_page_history_reads(

@@ -298,11 +298,10 @@ async def test_positive_fact_failure_rolls_back_quote_batch(tmp_path: Path) -> N
     revision = certified_group()
 
     class FactFailingStore(OpportunityPerceptionStore):
-        @staticmethod
-        def _insert_candidate_watch_fact(con, **kwargs):
+        def _insert_candidate_watch_fact(self, con, **kwargs):
             if kwargs["quote_batch_id"] is not None:
                 raise RuntimeError("injected-positive-fact-failure")
-            return OpportunityPerceptionStore._insert_candidate_watch_fact(
+            return super()._insert_candidate_watch_fact(
                 con,
                 **kwargs,
             )
