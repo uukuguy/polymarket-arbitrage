@@ -8,6 +8,9 @@
 
 - Production release `109ce48…` persists terminal `snapshot_attempts` with `elapsed_ms` and `last_stage`.
 - The latest recovered attempt failed at `gamma-events`: 240s child deadline, 332,241ms terminal parent elapsed.
+- The durable history already contains 11 successful terminal attempts. Legacy
+  rows lack `elapsed_ms`, but their `finished_at_ms - started_at_ms` duration
+  is valid bootstrap evidence; the observed upper tail is approximately 236s.
 - `make snapshot-attempt-status` reads the local worktree DB and is therefore not a production operator interface.
 - Structure is currently configured at 300s and Quote at 120s; a controller must preserve non-overlap rather than assume those values remain valid.
 
@@ -63,3 +66,11 @@ The scheduler reads effective values before launching a child and before its nex
 ## Execution order
 
 `Task 1 → Task 2 → Task 3 → Task 4`. Task 1 can ship independently as immediate production visibility; Tasks 2–3 must each receive TDD, independent review, a plan SUMMARY, and a learning-note update before the next task.
+
+## 2026-07-28 priority override — execute Structure controller before Dashboard
+
+The requested production order is now: **Task 3 controller implementation →
+Task 4 production evidence loop → Task 1 history API → Task 2 Dashboard**.
+Do not begin Dashboard work while the scheduler repeatedly times out. The
+controller bootstraps from legacy terminal durations when `elapsed_ms` is NULL;
+the existing 11 successes satisfy its 10-success bootstrap threshold.
