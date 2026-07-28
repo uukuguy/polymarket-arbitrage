@@ -584,7 +584,7 @@ class CandidateWatcherScheduler:
         group_timeout_s: float = 30.0,
         high_burst_groups: int = 1,
         lower_lane_max_wait_s: float = 120.0,
-        discovery_candidate_max_wait_s: float = 600.0,
+        discovery_candidate_max_wait_s: float = 60.0,
         close_callbacks: Sequence[Callable[[], None]] = (),
     ) -> None:
         self._watcher = watcher
@@ -622,6 +622,7 @@ class CandidateWatcherScheduler:
             or high_burst_groups * group_timeout_s >= lower_lane_max_wait_s
             or not math.isfinite(discovery_candidate_max_wait_s)
             or discovery_candidate_max_wait_s <= 0
+            or discovery_candidate_max_wait_s > 60
         ):
             raise ValueError("invalid-candidate-scheduler-controller-input")
 
@@ -633,6 +634,7 @@ class CandidateWatcherScheduler:
         group_ids = tuple(await asyncio.to_thread(self._candidate_group_ids))
         now_ms = self._clock_ms()
         due: list[tuple[int, int, str]] = []
+        admitted_group_ids: set[str] = set()
         rank = {"high": 0, "normal": 1, "explore": 2}
         for group_id in group_ids:
             fact = await asyncio.to_thread(
@@ -650,22 +652,19 @@ class CandidateWatcherScheduler:
                     # Discovery persists Decimal score evidence.  Until the
                     # first Candidate terminal fact exists, preserve that
                     # ordering instead of falling back to lexical group ID.
-                    overdue_at_ms = schedule.first_discovered_at_ms + int(
-                        self._discovery_candidate_max_wait_s * 1_000
-                    )
-                    overdue = now_ms >= overdue_at_ms
+                    if (
+                        schedule.promoted_at_ms is None
+                        or schedule.candidate_start_deadline_at_ms is None
+                    ):
+                        continue
+                    admitted_group_ids.add(group_id)
                     score_order = (
-                        -(10**18) + overdue_at_ms
-                        if overdue
-                        else -int(schedule.priority_score * 1_000)
+                        schedule.candidate_start_deadline_at_ms * 1_000_000
+                        - int(schedule.priority_score * 1_000)
                     )
                     due.append(
                         (
-                            (
-                                1
-                                if overdue
-                                else max(1, rank[schedule.priority_class])
-                            ),
+                            max(1, rank[schedule.priority_class]),
                             score_order,
                             group_id,
                         )
@@ -677,7 +676,10 @@ class CandidateWatcherScheduler:
             1: "normal",
             2: "explore",
         }
-        for rank_value, _, group_id in self._select_cycle(due):
+        for rank_value, _, group_id in self._select_cycle(
+            due,
+            admitted_group_ids=admitted_group_ids,
+        ):
             before_count = self._runtime.snapshot().attempt_count
             try:
                 await asyncio.wait_for(
@@ -706,12 +708,26 @@ class CandidateWatcherScheduler:
     def _select_cycle(
         self,
         due: list[tuple[int, int, str]],
+        *,
+        admitted_group_ids: set[str] | None = None,
     ) -> tuple[tuple[int, int, str], ...]:
+        admitted_group_ids = admitted_group_ids or set()
         ordered = sorted(due, key=lambda item: (item[1], item[0], item[2]))
         high = [item for item in ordered if item[0] == 0]
-        normal = [item for item in ordered if item[0] == 1]
-        explore = [item for item in ordered if item[0] == 2]
-        reserved: list[tuple[int, int, str]] = []
+        admissions = [
+            item for item in ordered if item[2] in admitted_group_ids
+        ][: self._reserved_non_high_slots]
+        normal = [
+            item
+            for item in ordered
+            if item[0] == 1 and item[2] not in admitted_group_ids
+        ]
+        explore = [
+            item
+            for item in ordered
+            if item[0] == 2 and item[2] not in admitted_group_ids
+        ]
+        reserved: list[tuple[int, int, str]] = list(admissions)
         lanes = [normal, explore]
         lane_index = self._reserved_lane_cursor
         while len(reserved) < self._reserved_non_high_slots and any(lanes):
@@ -727,9 +743,9 @@ class CandidateWatcherScheduler:
         selected_high = high[:remaining]
         remaining -= len(selected_high)
         selected_lower = (normal + explore)[:remaining] if remaining else []
-        # At least one hot candidate gets first service. Reserved lower-lane
-        # work then runs before any queue-only high can consume another timeout
-        # budget. Remaining selected work retains priority order afterwards.
+        # At least one genuine hot candidate gets first service. Capacity-
+        # admitted Discovery groups then start from the reserved lower lane
+        # before any other call can consume their proven deadline budget.
         high_burst = selected_high[: self._high_burst_groups]
         tail = selected_high[self._high_burst_groups :] + selected_lower
         return tuple(

@@ -55,8 +55,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             "degraded_streak": status.load_state.degraded_streak,
             "last_reason": status.load_state.last_reason,
             "last_decision": status.load_state.last_decision,
+            "probe_every_cycles": status.load_state.probe_every_cycles,
             "updated_at_ms": status.load_state.updated_at_ms,
         },
+        "admission_control": (
+            None
+            if status.admission_proof is None
+            else {
+                "effective_capacity": (
+                    status.admission_proof.effective_capacity
+                ),
+                "candidate_max_wait_ms": (
+                    status.admission_proof.candidate_max_wait_ms
+                ),
+                "effective_start_bound_ms": (
+                    status.admission_proof.effective_start_bound_ms
+                ),
+                "poll_interval_ms": status.admission_proof.poll_interval_ms,
+                "group_timeout_ms": status.admission_proof.group_timeout_ms,
+                "high_burst_groups": (
+                    status.admission_proof.high_burst_groups
+                ),
+                "reserved_non_high_slots": (
+                    status.admission_proof.reserved_non_high_slots
+                ),
+                "promotion_queue_depth": status.promotion_queue_depth,
+                "outstanding_admitted_count": (
+                    status.outstanding_admitted_count
+                ),
+            }
+        ),
         "known_groups": status.coverage.known_groups,
         "coverage": {
             str(minutes): {

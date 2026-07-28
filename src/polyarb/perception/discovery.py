@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from loguru import logger
 from polyarb.clients.gamma_client import EventPage
 from polyarb.perception.models import GroupLeg, GroupRevision
 from polyarb.perception.store import (
+    DiscoveryAdmissionProof,
     DiscoveryScheduleCandidate,
     OpportunityPerceptionStore,
 )
@@ -73,6 +75,28 @@ class CandidateGroupIds(Protocol):
     def __call__(self) -> Sequence[str]: ...
 
 
+def effective_promotion_admission_capacity(
+    *,
+    candidate_max_wait_s: float,
+    poll_interval_s: float,
+    group_timeout_s: float,
+    high_burst_groups: int,
+    reserved_non_high_slots: int,
+) -> int:
+    candidate_max_wait_ms = int(candidate_max_wait_s * 1_000)
+    poll_interval_ms = math.ceil(poll_interval_s * 1_000)
+    group_timeout_ms = math.ceil(group_timeout_s * 1_000)
+    residual_ms = (
+        candidate_max_wait_ms
+        - poll_interval_ms
+        - high_burst_groups * group_timeout_ms
+    )
+    if residual_ms < 0:
+        return 0
+    time_capacity = residual_ms // group_timeout_ms + 1
+    return min(reserved_non_high_slots, time_capacity)
+
+
 def compose_candidate_group_ids(
     legacy_source: CandidateGroupIds,
     store: OpportunityPerceptionStore,
@@ -97,6 +121,12 @@ class DiscoveryWorker:
         load_controller: DiscoveryLoadController | None = None,
         candidate_freshness: Callable[[], CandidateFreshness] | None = None,
         degraded_probe_every_cycles: int = 10,
+        promotion_admission_capacity: int | None = None,
+        candidate_max_wait_s: float = 60.0,
+        candidate_poll_interval_s: float = 1.0,
+        candidate_group_timeout_s: float = 30.0,
+        candidate_high_burst_groups: int = 1,
+        candidate_reserved_non_high_slots: int = 3,
         clock_ms: Callable[[], int] | None = None,
     ) -> None:
         if not 1 <= page_limit <= 100:
@@ -105,6 +135,29 @@ class DiscoveryWorker:
             raise ValueError("discovery-load-controller-inputs-must-be-paired")
         if degraded_probe_every_cycles < 2:
             raise ValueError("discovery-probe-period-must-be-at-least-two")
+        computed_capacity = effective_promotion_admission_capacity(
+            candidate_max_wait_s=candidate_max_wait_s,
+            poll_interval_s=candidate_poll_interval_s,
+            group_timeout_s=candidate_group_timeout_s,
+            high_burst_groups=candidate_high_burst_groups,
+            reserved_non_high_slots=candidate_reserved_non_high_slots,
+        )
+        effective_capacity = (
+            computed_capacity
+            if promotion_admission_capacity is None
+            else promotion_admission_capacity
+        )
+        self._admission_proof = DiscoveryAdmissionProof(
+            effective_capacity=effective_capacity,
+            candidate_max_wait_ms=int(candidate_max_wait_s * 1_000),
+            poll_interval_ms=math.ceil(candidate_poll_interval_s * 1_000),
+            group_timeout_ms=math.ceil(candidate_group_timeout_s * 1_000),
+            high_burst_groups=candidate_high_burst_groups,
+            reserved_non_high_slots=candidate_reserved_non_high_slots,
+        )
+        self._admission_proof.validate()
+        if effective_capacity > computed_capacity:
+            raise ValueError("discovery-admission-capacity-exceeds-proof")
         self._gamma = gamma
         self._store = store
         self._page_limit = page_limit
@@ -175,6 +228,7 @@ class DiscoveryWorker:
                 finished_at_ms=page.finished_at_ms,
                 page_event_count=len(page.events),
                 candidates=candidates,
+                admission_proof=self._admission_proof,
             )
         )
         cancellation: asyncio.CancelledError | None = None
@@ -378,6 +432,16 @@ def build_production_discovery(
         ),
         candidate_freshness=candidate_freshness,
         degraded_probe_every_cycles=settings.discovery_degraded_probe_every_cycles,
+        promotion_admission_capacity=(
+            settings.discovery_effective_admission_capacity
+        ),
+        candidate_max_wait_s=settings.discovery_candidate_max_wait_s,
+        candidate_poll_interval_s=settings.candidate_scheduler_poll_s,
+        candidate_group_timeout_s=settings.candidate_group_timeout_s,
+        candidate_high_burst_groups=settings.candidate_high_burst_groups,
+        candidate_reserved_non_high_slots=(
+            settings.candidate_reserved_non_high_slots
+        ),
     )
     return DiscoveryRunner(
         worker=worker,

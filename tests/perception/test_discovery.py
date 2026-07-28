@@ -172,14 +172,16 @@ async def test_discovery_commits_rows_promotions_coverage_and_cursor_atomically(
     result = await worker.run_batch()
 
     assert result.groups_seen == 2
-    assert result.promoted_group_ids == ("g-2", "g-1")
+    assert result.promoted_group_ids == ("g-2",)
     assert store.discovery_cursor() == "c-2"
     assert store.group_schedule("g-1").last_discovered_at_ms == result.finished_at_ms
     assert store.current_group("g-1").status == "certified"
     assert tuple(
         leg.yes_token_id for leg in store.current_group("g-1").legs
     ) == ("g-1-yes1", "g-1-yes2")
-    assert store.promoted_group_ids() == ("g-2", "g-1")
+    assert store.promoted_group_ids() == ("g-2",)
+    assert store.current_group("g-1").status == "certified"
+    assert store.group_schedule("g-1").promoted_at_ms is None
     coverage = store.coverage_windows(now_ms=10_000)
     assert coverage.by_minutes[15].raw_fraction == Decimal("1")
     assert coverage.by_minutes[15].liquidity_weighted_fraction == Decimal("1")
@@ -295,6 +297,77 @@ async def test_same_group_and_membership_cannot_migrate_event_identity(
 
 
 @pytest.mark.asyncio
+async def test_incomplete_first_sight_binds_event_identity_for_later_recovery(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(_event(event_id="e-1", group_id="g-1", valid=False))
+        ),
+        store=store,
+    ).run_batch()
+    schedule_before = store.group_schedule("g-1")
+
+    conflicting = DiscoveryWorker(
+        gamma=FakeGamma(
+            EventPage(
+                events=(
+                    _event(event_id="e-3", group_id="a-new"),
+                    _event(event_id="e-2", group_id="g-1"),
+                ),
+                requested_cursor="c-2",
+                next_cursor="c-3",
+                completed=False,
+                started_at_ms=20_000,
+                finished_at_ms=20_100,
+            )
+        ),
+        store=store,
+    )
+
+    with pytest.raises(ValueError, match="event-identity-conflict"):
+        await conflicting.run_batch()
+
+    assert store.discovery_cursor() == "c-2"
+    assert store.group_schedule("g-1") == schedule_before
+    assert store.current_group("g-1") is None
+    assert store.group_schedule("a-new") is None
+    assert store.current_group("a-new") is None
+
+
+@pytest.mark.asyncio
+async def test_incomplete_first_sight_recovers_under_same_event_identity(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(_event(event_id="e-1", group_id="g-1", valid=False))
+        ),
+        store=store,
+    ).run_batch()
+
+    recovered = await DiscoveryWorker(
+        gamma=FakeGamma(
+            EventPage(
+                events=(_event(event_id="e-1", group_id="g-1"),),
+                requested_cursor="c-2",
+                next_cursor="c-3",
+                completed=False,
+                started_at_ms=20_000,
+                finished_at_ms=20_100,
+            )
+        ),
+        store=store,
+    ).run_batch()
+
+    assert recovered.promoted_group_ids == ("g-1",)
+    assert store.group_schedule("g-1").event_id == "e-1"
+    assert store.current_group("g-1").event_id == "e-1"
+
+
+@pytest.mark.asyncio
 async def test_restart_uses_durable_cursor_and_terminal_page_restarts_sweep(
     tmp_path: Path,
 ) -> None:
@@ -325,6 +398,9 @@ async def test_restart_uses_durable_cursor_and_terminal_page_restarts_sweep(
     assert terminal_gamma.calls == [("c-1", 100)]
     assert restart_gamma.calls == [(None, 100)]
     assert store.discovery_cursor() == "new-cursor"
+    assert discovery_status_main(
+        ["--db-path", str(tmp_path / "state.db"), "--now-ms", "20000"]
+    ) == 0
 
 
 @pytest.mark.asyncio
@@ -511,8 +587,11 @@ async def test_coverage_windows_use_exact_discovery_samples_and_liquidity_weight
         "UPDATE neg_risk_group_schedule SET activity_rank='NaN'",
         "UPDATE neg_risk_group_schedule SET promoted_at_ms=NULL",
         "INSERT INTO neg_risk_discovery_load_state("
-        "id,degraded_streak,last_reason,last_decision,updated_at_ms"
-        ") VALUES (1,1,'candidate-quote-stale','fresh',1)",
+        "id,degraded_streak,last_reason,last_decision,probe_every_cycles,updated_at_ms"
+        ") VALUES (1,1,'candidate-quote-stale','fresh',3,1)",
+        "INSERT INTO neg_risk_discovery_load_state("
+        "id,degraded_streak,last_reason,last_decision,probe_every_cycles,updated_at_ms"
+        ") VALUES (1,2,'candidate-quote-stale','probe',3,1)",
     ],
 )
 async def test_status_rejects_direct_semantic_corruption_without_leak(
@@ -548,6 +627,8 @@ async def test_durable_candidate_freshness_covers_all_promoted_certified_groups(
             )
         ),
         store=store,
+        promotion_admission_capacity=2,
+        candidate_group_timeout_s=10,
     ).run_batch()
     _publish_quote(store, "g-fresh", quoted_at_ms=99_000)
     _publish_quote(store, "g-stale", quoted_at_ms=10_000)
@@ -616,6 +697,30 @@ async def test_missing_durable_quote_yields_discovery_but_empty_set_does_not(
 
 
 @pytest.mark.asyncio
+async def test_queued_unpromoted_groups_do_not_degrade_admitted_freshness(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(
+                _event(event_id="e-1", group_id="g-admitted", liquidity="300"),
+                _event(event_id="e-2", group_id="g-queued", liquidity="100"),
+            )
+        ),
+        store=store,
+        promotion_admission_capacity=1,
+    ).run_batch()
+    _publish_quote(store, "g-admitted", quoted_at_ms=99_000)
+
+    snapshot = store.candidate_freshness_snapshot(now_ms=100_000)
+
+    assert store.promoted_group_ids() == ("g-admitted",)
+    assert snapshot.candidate_count == 1
+    assert snapshot.missing_quote_count == 0
+
+
+@pytest.mark.asyncio
 async def test_degraded_duty_cycle_persists_probe_phase_across_restart(
     tmp_path: Path,
 ) -> None:
@@ -652,6 +757,7 @@ async def test_degraded_duty_cycle_persists_probe_phase_across_restart(
     assert gamma.calls == [("c-1", 100)]
     assert store.discovery_load_state().degraded_streak == 3
     assert store.discovery_load_state().last_decision == "probe"
+    assert store.discovery_load_state().probe_every_cycles == 3
     recovered = store.record_discovery_load_decision(
         degraded_reason=None,
         probe_every_cycles=3,
@@ -659,6 +765,7 @@ async def test_degraded_duty_cycle_persists_probe_phase_across_restart(
     )
     assert recovered.degraded_streak == 0
     assert recovered.last_decision == "fresh"
+    assert recovered.probe_every_cycles == 3
     assert OpportunityPerceptionStore(
         tmp_path / "state.db"
     ).discovery_load_state() == recovered
@@ -696,6 +803,8 @@ async def test_new_promotions_enter_candidate_scheduler_in_discovery_score_order
         ),
         store=store,
         clock_ms=lambda: 10_000,
+        promotion_admission_capacity=2,
+        candidate_group_timeout_s=10,
     ).run_batch()
     calls: list[str] = []
 
@@ -709,8 +818,9 @@ async def test_new_promotions_enter_candidate_scheduler_in_discovery_score_order
         candidate_group_ids=lambda: store.promoted_group_ids(),
         runtime=CandidateWatcherRuntime(),
         clock_ms=lambda: 10_000,
-        cycle_max_groups=2,
-        reserved_non_high_slots=1,
+        cycle_max_groups=3,
+        reserved_non_high_slots=2,
+        group_timeout_s=10,
     )
 
     await scheduler.run_due_once()
@@ -719,7 +829,131 @@ async def test_new_promotions_enter_candidate_scheduler_in_discovery_score_order
 
 
 @pytest.mark.asyncio
-async def test_overdue_factless_promotion_beats_repeatedly_new_higher_score(
+async def test_promotion_admission_is_capacity_bounded_and_backfills_after_fact(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    result = await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(
+                _event(event_id="e-1", group_id="g-low", liquidity="100"),
+                _event(event_id="e-2", group_id="g-mid", liquidity="200"),
+                _event(event_id="e-3", group_id="g-high", liquidity="300"),
+            )
+        ),
+        store=store,
+        promotion_admission_capacity=1,
+        candidate_max_wait_s=60,
+    ).run_batch()
+
+    assert result.promoted_group_ids == ("g-high",)
+    assert store.promoted_group_ids() == ("g-high",)
+    assert store.group_schedule("g-mid").promoted_at_ms is None
+    assert store.group_schedule("g-low").promoted_at_ms is None
+    admitted = store.group_schedule("g-high")
+    assert admitted.promoted_at_ms == 10_000
+    assert admitted.candidate_start_deadline_at_ms == 70_000
+
+    calls: list[tuple[str, int]] = []
+    now = 10_001
+
+    class Watcher:
+        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
+            calls.append((group_id, now))
+
+    scheduler = CandidateWatcherScheduler(
+        watcher=Watcher(),
+        store=store,
+        candidate_group_ids=lambda: ("hot-existing", *store.promoted_group_ids()),
+        runtime=CandidateWatcherRuntime(),
+        clock_ms=lambda: now,
+        cycle_max_groups=3,
+        reserved_non_high_slots=1,
+        discovery_candidate_max_wait_s=60,
+    )
+
+    await scheduler.run_due_once()
+
+    assert calls == [("hot-existing", now), ("g-high", now)]
+    assert calls[1][1] <= admitted.candidate_start_deadline_at_ms
+
+    store.record_candidate_watch_fact(
+        group_id="g-high",
+        membership_hash=store.current_group("g-high").membership_hash,
+        quote_batch_id=None,
+        observed_at_ms=20_000,
+        last_result="no-edge",
+        reason=None,
+        bundle_cost=1.0,
+        gross_edge_bps=0.0,
+        max_bundle_size=1.0,
+        priority_class="normal",
+        consecutive_failures=0,
+        effective_interval_s=60,
+        schedule_reason="normal-cadence",
+        next_due_at_ms=80_000,
+    )
+
+    assert store.promoted_group_ids() == ("g-high", "g-mid")
+    next_admitted = OpportunityPerceptionStore(
+        tmp_path / "state.db"
+    ).group_schedule("g-mid")
+    assert next_admitted.promoted_at_ms == 20_000
+    assert next_admitted.candidate_start_deadline_at_ms == 80_000
+    assert store.group_schedule("g-low").promoted_at_ms is None
+
+
+@pytest.mark.asyncio
+async def test_discovery_never_promotes_without_capacity_proof(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+
+    result = await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+        promotion_admission_capacity=0,
+        candidate_max_wait_s=60,
+    ).run_batch()
+
+    assert result.promoted_group_ids == ()
+    assert store.current_group("g-1").status == "certified"
+    assert store.group_schedule("g-1").promoted_at_ms is None
+    assert store.promoted_group_ids() == ()
+
+
+@pytest.mark.asyncio
+async def test_status_rejects_admission_beyond_proven_capacity(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(
+                _event(event_id="e-1", group_id="g-high", liquidity="300"),
+                _event(event_id="e-2", group_id="g-low", liquidity="100"),
+            )
+        ),
+        store=store,
+        promotion_admission_capacity=1,
+    ).run_batch()
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute(
+            "UPDATE neg_risk_group_schedule SET promoted_at_ms=10000,"
+            "candidate_start_deadline_at_ms=70000 WHERE group_id='g-low'"
+        )
+
+    assert discovery_status_main(
+        ["--db-path", str(tmp_path / "state.db")]
+    ) == 2
+    captured = capsys.readouterr()
+    assert str(tmp_path / "state.db") not in captured.err
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.asyncio
+async def test_unadmitted_factless_group_never_bypasses_capacity(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -756,13 +990,13 @@ async def test_overdue_factless_promotion_beats_repeatedly_new_higher_score(
             clock_ms=lambda: 1_000_000,
             cycle_max_groups=2,
             reserved_non_high_slots=1,
-            discovery_candidate_max_wait_s=500,
+            discovery_candidate_max_wait_s=60,
         )
 
     await scheduler().run_due_once()
     await scheduler().run_due_once()
 
-    assert calls == ["a-old", "z-new", "a-old", "z-new"]
+    assert calls == ["z-new", "z-new"]
 
 
 def test_overdue_promotions_use_only_reserved_capacity_after_genuine_high(

@@ -128,6 +128,8 @@ def test_candidate_watcher_controller_settings_are_explicit_and_off_by_default()
     assert settings.candidate_scheduler_poll_s == 1
     assert settings.candidate_high_clob_workers == 2
     assert settings.candidate_lower_clob_workers == 1
+    assert settings.discovery_candidate_max_wait_s == 60
+    assert settings.discovery_effective_admission_capacity == 1
 
 
 @pytest.mark.parametrize(
@@ -154,6 +156,14 @@ def test_candidate_watcher_controller_settings_are_explicit_and_off_by_default()
             "candidate_lower_lane_max_wait_s": 120,
         },
         {"candidate_lower_lane_max_wait_s": 120.001},
+        {"discovery_candidate_max_wait_s": 60.001},
+        {
+            "candidate_group_timeout_s": 30,
+            "candidate_high_burst_groups": 2,
+            "candidate_high_clob_workers": 2,
+            "candidate_scheduler_poll_s": 1,
+            "discovery_candidate_max_wait_s": 60,
+        },
         {
             "candidate_high_burst_groups": 3,
             "candidate_high_clob_workers": 2,
@@ -169,7 +179,7 @@ def test_candidate_controller_accepts_strictly_sub_boundary_high_burst() -> None
     settings = Settings(
         candidate_high_burst_groups=3,
         candidate_high_clob_workers=3,
-        candidate_group_timeout_s=39.999,
+        candidate_group_timeout_s=19,
         candidate_lower_lane_max_wait_s=120,
     )
 

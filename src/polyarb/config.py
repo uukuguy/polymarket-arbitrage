@@ -25,6 +25,7 @@ Phase 02 Plan 02 additions:
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 from typing import Literal
@@ -100,7 +101,7 @@ class Settings(BaseSettings):
         default=30.0, gt=0, allow_inf_nan=False
     )
     discovery_candidate_max_wait_s: float = Field(
-        default=600.0, gt=0, allow_inf_nan=False
+        default=60.0, gt=0, le=60, allow_inf_nan=False
     )
     discovery_degraded_probe_every_cycles: int = Field(default=10, ge=2)
     market_map_max_age_s: int = Field(default=1800, gt=0)
@@ -375,6 +376,10 @@ class Settings(BaseSettings):
                 "candidate high burst timeout budget must stay below "
                 "candidate_lower_lane_max_wait_s"
             )
+        if self.discovery_effective_admission_capacity <= 0:
+            raise ValueError(
+                "candidate timing leaves no proven Discovery promotion capacity"
+            )
         # Auto-enable Supabase mirror if both URL + service key are set
         # Phase 03.1-02: same secrets gate l2_mirror_enabled (L2 daemon uses the
         # same Supabase project for the L2 dashboard mirror).
@@ -389,6 +394,25 @@ class Settings(BaseSettings):
         ):
             object.__setattr__(self, "r2_enabled", True)
         return self
+
+    @property
+    def discovery_effective_admission_capacity(self) -> int:
+        max_wait_ms = int(self.discovery_candidate_max_wait_s * 1_000)
+        poll_ms = math.ceil(self.candidate_scheduler_poll_s * 1_000)
+        timeout_ms = math.ceil(self.candidate_group_timeout_s * 1_000)
+        residual_ms = (
+            max_wait_ms
+            - poll_ms
+            - self.candidate_high_burst_groups
+            * timeout_ms
+        )
+        if residual_ms < 0:
+            return 0
+        time_capacity = residual_ms // timeout_ms + 1
+        return min(
+            self.candidate_reserved_non_high_slots,
+            time_capacity,
+        )
 
     @field_validator("db_path", "parquet_root", "cache_root")
     @classmethod

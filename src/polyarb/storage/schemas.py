@@ -288,7 +288,10 @@ CREATE TABLE IF NOT EXISTS neg_risk_group_schedule (
   first_discovered_at_ms INTEGER NOT NULL,
   last_discovered_at_ms INTEGER NOT NULL,
   last_visited_at_ms INTEGER,
-  promoted_at_ms INTEGER
+  promoted_at_ms INTEGER,
+  promotion_eligible_at_ms INTEGER,
+  promotion_queue_deadline_at_ms INTEGER,
+  candidate_start_deadline_at_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_group_schedule_priority
   ON neg_risk_group_schedule(promoted_at_ms, priority_class, group_id);
@@ -305,6 +308,8 @@ CREATE INDEX IF NOT EXISTS idx_neg_risk_coverage_samples_window
 
 CREATE TABLE IF NOT EXISTS neg_risk_discovery_batches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sweep_id INTEGER NOT NULL CHECK(sweep_id >= 1),
+  batch_sequence INTEGER NOT NULL CHECK(batch_sequence >= 1),
   requested_cursor TEXT,
   next_cursor TEXT,
   completed INTEGER NOT NULL CHECK(completed IN (0,1)),
@@ -329,6 +334,20 @@ CREATE TABLE IF NOT EXISTS neg_risk_discovery_load_state (
   last_reason TEXT,
   last_decision TEXT NOT NULL CHECK(last_decision IN
     ('fresh','yield','probe')),
+  probe_every_cycles INTEGER NOT NULL CHECK(probe_every_cycles >= 2),
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_discovery_admission_state (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  effective_capacity INTEGER NOT NULL CHECK(effective_capacity >= 0),
+  candidate_max_wait_ms INTEGER NOT NULL CHECK(
+    candidate_max_wait_ms > 0 AND candidate_max_wait_ms <= 60000),
+  poll_interval_ms INTEGER NOT NULL CHECK(poll_interval_ms > 0),
+  group_timeout_ms INTEGER NOT NULL CHECK(group_timeout_ms > 0),
+  high_burst_groups INTEGER NOT NULL CHECK(high_burst_groups > 0),
+  reserved_non_high_slots INTEGER NOT NULL CHECK(reserved_non_high_slots > 0),
+  effective_start_bound_ms INTEGER,
   updated_at_ms INTEGER NOT NULL
 );
 

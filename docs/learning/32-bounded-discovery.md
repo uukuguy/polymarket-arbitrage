@@ -89,25 +89,33 @@ backlog 挤掉；同为 overdue 按 deadline 排序。重启只重读相同 anch
 `active-known coverage`。覆盖低仍返回 0，因为这是业务事实，不是命令故障；数据库
 不存在、不可读或 schema 无效才返回非零。
 
-status 在一个 SQLite read transaction 中一起读取 cursor、batch、schedule、
-promotion、current revision 和 coverage，并验证 cursor/completed、时间、计数、
-Decimal/rank、枚举及 promotion→current certified membership。并发 writer 不能让
-一份报告混合提交前后的事实，直接改坏数据库也不会被渲染成正常状态。
+status 在一个 SQLite read transaction 中一起读取 cursor、全部 batch receipt、
+schedule、promotion admission、current revision、load-control modulus 和 coverage。
+它验证每个 `requested_cursor → next_cursor`、terminal 后新 sweep、时间、计数、
+Decimal/rank、枚举、promotion→current certified membership，以及
+`probe iff streak % modulus == 0`。并发 writer 不能让一份报告混合提交前后的事实，
+直接改坏数据库也不会被渲染成正常状态。
 
 每个页面还写 immutable batch receipt 与逐组 sample/promotion proof。status 将 latest
 state 的 page/groups/promotions/cursor/timestamps 与 receipt 逐字段比对，并从持久化
-inputs/anchors 用同一 Decimal 函数重算 score/reason。`group_id` authority 同时绑定
-`event_id`；同 group/hash 却换 event 会整页回滚。
+inputs/anchors 用同一 Decimal 函数重算 score/reason。`group_id` 从 schedule 首次出现
+就绑定 `event_id`，不必等到 certified authority；同 group/hash 却换 event 会整页
+回滚。
 
 ## 设计取舍
 
-- Candidate freshness 是所有 current certified groups 与 matching complete Quote 的
-  一次 durable snapshot。任一缺 Quote 或 p95 接近 hard-stale 时，Discovery 在 Gamma
-  前 yield；recent unavailable fact 不刷新 Quote age，一个忙碌组也不能掩盖 sibling。
-  没有 durable certified authority 时允许探索冷启动，legacy ID 不制造死锁。
+- Candidate freshness 是“实际进入 Candidate source 的 current certified groups”
+  与 matching complete Quote 的一次 durable snapshot。已认证但仍在 promotion queue
+  的组不在分母中，不能提前制造 missing-Quote 降级。任一真实 Candidate 缺 Quote或
+  p95 接近 hard-stale 时，Discovery 在 Gamma 前 yield。
 - degraded 不会永久锁死 Discovery。每次 yield/probe 相位写入 durable load state；
   N-1 个 degraded cycle 后只放行一个仍然有界的页面，其余容量继续留给 Candidate。
-  重启不能重置或加速相位，fresh recovery 明确把 streak 归零。
+  modulus 与 decision 一起持久化并接受 status 校验；重启不能重置或加速相位，
+  fresh recovery 明确把 streak 归零。
+- complete-supported 先认证并进入 durable promotion queue，不等于立即 promotion。
+  admission capacity 由 `poll + high_burst × timeout + (capacity-1) × timeout ≤ 60s`
+  证明；默认参数只允许一个 factless promotion。Candidate 终态事实与 admit-next
+  在同一事务完成，排队顺序为 deadline、score、group ID，重启不改变。
 - promotion source 是 legacy seed 与 Discovery promotion 的稳定去重并集，不会因接入
   新 producer 丢掉当前 hot candidates。
 - feature flag 默认关闭；本 slice 只完成生产代码路径，不等于已经完成部署和切换。

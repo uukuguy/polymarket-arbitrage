@@ -18,14 +18,17 @@
   finishes one started commit before propagating cancellation.
 - Review remediation revokes prior certified/Quote authority in the same page
   transaction when new truth is incomplete, unsupported, or identity-incomplete.
-- Candidate freshness now comes from one durable full-set snapshot of current
-  certified groups and exact matching complete batches; missing Quote degrades.
+- Candidate freshness now comes from one durable snapshot of actual admitted
+  Candidate authority and exact matching complete batches; queued-unpromoted
+  certified groups cannot create premature missing-Quote degradation.
 - Status now uses one validated read transaction for cursor, schedule,
   promotion/revision, Decimal/rank, count, time, and coverage chains.
 - Event pages reject malformed members rather than making their cursor durable;
   legacy market-stream compatibility remains unchanged.
-- Runtime anti-starvation uses a configurable maximum-wait deadline recomputed
-  from persisted anchors on every selection and after restart.
+- Promotion admission persists eligibility, queue deadline, admitted timestamp,
+  and Candidate start deadline. A timing-derived outstanding capacity ensures
+  every promoted factless group can start within the configured ≤60-second
+  bound; excess certified groups remain durably unpromoted.
 - Persisted degraded duty-cycle state yields N-1 Candidate-priority cycles and
   then permits one bounded Discovery page without restart reset.
 - Immutable batch receipts and per-group sample/promotion proofs bind latest
@@ -34,6 +37,9 @@
   Candidate high burst; they never become global high.
 - Group authority binds `event_id` as well as membership; attempted event
   migration rejects and rolls back the whole page.
+- The first schedule sighting binds `group_id → event_id`, including incomplete
+  source truth before any certified revision exists. Same-event recovery is
+  allowed; cross-event recovery rolls the whole page back.
 - Composed durable Discovery promotions with the legacy candidate seed; no
   current hot candidate is dropped. Before a first Candidate fact exists, its
   scheduler consumes the persisted Discovery score/class.
@@ -98,6 +104,14 @@ event identity conflict rollback.
 
 FINAL GREEN AFTER SECOND RE-REVIEW:
 266 passed
+
+THIRD RE-REVIEW RED → GREEN:
+first-sight event identity; capacity-proven ≤60s promotion admission with
+terminal-fact admit-next and queued freshness isolation; persisted probe
+modulus; complete sweep/sequence/requested-cursor receipt-chain validation.
+
+FINAL GREEN AFTER THIRD RE-REVIEW:
+276 passed
 
 uv run ruff check <changed Python/test files>
 All checks passed!

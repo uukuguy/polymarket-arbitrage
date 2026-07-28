@@ -76,6 +76,13 @@ the 120-second production acceptance boundary. The high burst cannot exceed
 the bounded high CLOB worker capacity, so queued high calls cannot consume the
 lower-lane wait budget.
 
+Discovery certification does not imply immediate Candidate admission. The
+outstanding factless promotion capacity is derived from the stricter bound
+`poll + high_burst * group_timeout + (capacity - 1) * group_timeout <= 60s`
+and cannot exceed the reserved lower-lane slots. Excess certified groups remain
+durably queued and do not enter Candidate freshness until a terminal fact frees
+capacity and atomically admits the next deadline/score-ordered group.
+
 ## 4. Group-Level Data Contract
 
 The unit of online certification is one neg-risk group.

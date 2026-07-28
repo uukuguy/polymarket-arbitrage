@@ -25,6 +25,12 @@ def test_status_is_read_only_and_low_coverage_is_success(
         "high": 0,
         "normal": 0,
     }
+    assert payload["load_control"]["probe_every_cycles"] == 10
+    assert payload["admission_control"]["effective_capacity"] == 1
+    assert payload["admission_control"]["candidate_max_wait_ms"] == 60_000
+    assert payload["admission_control"]["effective_start_bound_ms"] == 31_000
+    assert payload["admission_control"]["promotion_queue_depth"] == 0
+    assert payload["admission_control"]["outstanding_admitted_count"] == 0
 
 
 def test_status_rejects_missing_or_invalid_state_without_creating_db(
@@ -73,9 +79,10 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
         )
         receipt = con.execute(
             "INSERT INTO neg_risk_discovery_batches("
-            "requested_cursor,next_cursor,completed,started_at_ms,finished_at_ms,"
+            "sweep_id,batch_sequence,requested_cursor,next_cursor,completed,"
+            "started_at_ms,finished_at_ms,"
             "page_event_count,groups_seen,promoted_count"
-            ") VALUES ('c-1','c-2',0,10,20,1,1,0)"
+            ") VALUES (1,1,'c-1','c-2',0,10,20,1,1,0)"
         )
         con.execute(
             "INSERT INTO neg_risk_discovery_batch_samples("
@@ -125,3 +132,35 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
         assert con.execute(
             "SELECT groups_seen FROM neg_risk_discovery_state"
         ).fetchone()[0] == 99
+
+
+def test_status_rejects_broken_historical_cursor_receipt_chain(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "state.db"
+    OpportunityPerceptionStore(db_path).init_schema()
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO neg_risk_discovery_batches("
+            "sweep_id,batch_sequence,requested_cursor,next_cursor,completed,"
+            "started_at_ms,finished_at_ms,page_event_count,groups_seen,promoted_count"
+            ") VALUES (1,1,'c-1','c-2',0,10,20,0,0,0)"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_discovery_batches("
+            "sweep_id,batch_sequence,requested_cursor,next_cursor,completed,"
+            "started_at_ms,finished_at_ms,page_event_count,groups_seen,promoted_count"
+            ") VALUES (1,2,'broken','c-3',0,30,40,0,0,0)"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_discovery_state("
+            "id,next_cursor,completed,last_started_at_ms,last_finished_at_ms,"
+            "page_event_count,groups_seen,promoted_count"
+            ") VALUES (1,'c-3',0,30,40,0,0,0)"
+        )
+
+    assert main(["--db-path", str(db_path)]) == 2
+    captured = capsys.readouterr()
+    assert str(db_path) not in captured.err
+    assert "Traceback" not in captured.err
