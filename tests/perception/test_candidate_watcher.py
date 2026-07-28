@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
+import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from polyarb.perception.candidate_watcher import (
     IntervalController,
     next_interval_s,
 )
+from polyarb.perception.group_structure import GroupStructureReader
 from polyarb.perception.models import GroupLeg, GroupRevision
 from polyarb.perception.store import OpportunityPerceptionStore
 
@@ -253,6 +256,10 @@ async def test_cancellation_after_atomic_commit_converges_runtime_before_reraise
 
     task = asyncio.create_task(candidate.run_once("g-1"))
     assert await asyncio.to_thread(committed.wait, 2)
+    # First cancellation models the scheduler's group timeout; the second
+    # models daemon shutdown while the non-cancellable DB thread is returning.
+    task.cancel()
+    await asyncio.sleep(0)
     task.cancel()
     release.set()
     with pytest.raises(asyncio.CancelledError):
@@ -262,6 +269,49 @@ async def test_cancellation_after_atomic_commit_converges_runtime_before_reraise
     snapshot = runtime.snapshot()
     assert snapshot.attempt_count == 1
     assert snapshot.last_result == "watching"
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_does_not_swallow_writer_error_or_cancellation(
+    tmp_path: Path,
+) -> None:
+    revision = certified_group()
+    entered = threading.Event()
+    release = threading.Event()
+
+    class FailingStore(OpportunityPerceptionStore):
+        def publish_candidate_success(self, batch, **kwargs):
+            entered.set()
+            assert release.wait(timeout=2)
+            raise RuntimeError("writer-failed-after-cancellation")
+
+    store = FailingStore(tmp_path / "state.db")
+    store.init_schema()
+    store.publish_group_revision(revision)
+    runtime = CandidateWatcherRuntime()
+    candidate = CandidateWatcher(
+        structure_reader=SequenceStructureReader([revision, revision]),
+        books_reader=FakeBooksReader(
+            books(("yes-1", "0.40", "10"), ("yes-2", "0.50", "8"))
+        ),
+        store=store,
+        runtime=runtime,
+        interval_controller=IntervalController(),
+        clock_ms=iter((2_000, 2_100)).__next__,
+    )
+
+    task = asyncio.create_task(candidate.run_once("g-1"))
+    assert await asyncio.to_thread(entered.wait, 2)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await task
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert runtime.snapshot().attempt_count == 0
+    assert store.candidate_watch_facts("g-1") == ()
 
 
 @pytest.mark.asyncio
@@ -399,7 +449,7 @@ async def test_scheduler_uses_durable_due_time_and_prioritizes_high(
     calls: list[str] = []
 
     class StubWatcher:
-        async def run_once(self, group_id: str):
+        async def run_once(self, group_id: str, **_kwargs):
             calls.append(group_id)
 
     store.record_candidate_watch_fact(
@@ -484,6 +534,46 @@ async def test_scheduler_supervises_cycle_failure_and_recovers_without_dying(
 
 
 @pytest.mark.asyncio
+async def test_unrelated_group_success_does_not_recover_failed_group_boundary(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    runtime = CandidateWatcherRuntime()
+    failed_once = True
+
+    class StubWatcher:
+        async def run_once(self, group_id: str, **_kwargs):
+            nonlocal failed_once
+            if group_id == "failed" and failed_once:
+                failed_once = False
+                raise RuntimeError("failed-group")
+
+        async def record_timeout(self, group_id: str) -> None:
+            raise AssertionError(group_id)
+
+    scheduler = CandidateWatcherScheduler(
+        watcher=StubWatcher(),
+        store=store,
+        candidate_group_ids=lambda: ("failed", "other"),
+        runtime=runtime,
+        cycle_max_groups=2,
+        reserved_non_high_slots=1,
+    )
+
+    await scheduler.run_due_once()
+    after_unrelated_success = runtime.snapshot()
+    assert after_unrelated_success.degraded_group_ids == ("failed",)
+    assert after_unrelated_success.group_failure_count == 1
+    assert after_unrelated_success.group_recovery_count == 0
+
+    await scheduler.run_due_once()
+    recovered = runtime.snapshot()
+    assert recovered.degraded_group_ids == ()
+    assert recovered.group_recovery_count == 1
+
+
+@pytest.mark.asyncio
 async def test_reserved_slots_prevent_stuck_high_candidates_from_starving_lower_lanes(
     tmp_path: Path,
 ) -> None:
@@ -493,7 +583,7 @@ async def test_reserved_slots_prevent_stuck_high_candidates_from_starving_lower_
     calls: list[str] = []
 
     class StubWatcher:
-        async def run_once(self, group_id: str):
+        async def run_once(self, group_id: str, **_kwargs):
             calls.append(group_id)
             if group_id.startswith("high"):
                 await asyncio.Event().wait()
@@ -572,3 +662,165 @@ def test_single_reserved_slot_rotates_between_normal_and_explore(
 
     assert {item[2] for item in first} == {"high", "normal"}
     assert {item[2] for item in second} == {"high", "explore"}
+
+
+@pytest.mark.asyncio
+async def test_stuck_real_clob_threads_cannot_block_timeout_facts_or_lower_lanes(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    revisions = {
+        group_id: certified_group(
+            group_id,
+            tokens=(f"{group_id}-yes-1", f"{group_id}-yes-2"),
+        )
+        for group_id in ("high-1", "high-2", "normal-1", "explore-1")
+    }
+    for revision in revisions.values():
+        store.publish_group_revision(revision)
+    for group_id, priority in (
+        ("high-1", "high"),
+        ("high-2", "high"),
+        ("normal-1", "normal"),
+        ("explore-1", "explore"),
+    ):
+        store.record_candidate_watch_fact(
+            group_id=group_id,
+            membership_hash=revisions[group_id].membership_hash,
+            quote_batch_id=None,
+            observed_at_ms=1_000,
+            last_result="unavailable",
+            reason="fixture",
+            bundle_cost=None,
+            gross_edge_bps=None,
+            max_bundle_size=None,
+            priority_class=priority,
+            consecutive_failures=1,
+            effective_interval_s=1,
+            schedule_reason="fixture-due",
+            next_due_at_ms=2_000,
+        )
+
+    release_high = threading.Event()
+    all_high_started = threading.Event()
+    high_started_count = 0
+    high_started_lock = threading.Lock()
+    high_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="test-high-clob")
+    lower_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-lower-clob")
+
+    class ExecutorReader:
+        def __init__(self, executor, *, blocking: bool) -> None:
+            self.executor = executor
+            self.blocking = blocking
+
+        async def get_books(self, token_ids, *, projection="full"):
+            assert projection == "top"
+
+            def fetch():
+                nonlocal high_started_count
+                if self.blocking:
+                    with high_started_lock:
+                        high_started_count += 1
+                        if high_started_count == 2:
+                            all_high_started.set()
+                    assert release_high.wait(timeout=2)
+                return books(
+                    (token_ids[0], "0.40", "10"),
+                    (token_ids[1], "0.50", "8"),
+                )
+
+            return await asyncio.get_running_loop().run_in_executor(
+                self.executor,
+                fetch,
+            )
+
+    runtime = CandidateWatcherRuntime()
+    candidate = CandidateWatcher(
+        structure_reader=GroupStructureReader(store),
+        books_reader=ExecutorReader(high_pool, blocking=True),
+        lower_priority_books_reader=ExecutorReader(lower_pool, blocking=False),
+        store=store,
+        runtime=runtime,
+        interval_controller=IntervalController(
+            high_interval_s=0.01,
+            normal_interval_s=0.01,
+            explore_interval_s=0.01,
+            quote_hard_stale_s=0.05,
+        ),
+        clock_ms=lambda: 3_000,
+    )
+    closed: list[str] = []
+    scheduler = CandidateWatcherScheduler(
+        watcher=candidate,
+        store=store,
+        candidate_group_ids=lambda: tuple(revisions),
+        runtime=runtime,
+        clock_ms=lambda: 2_000,
+        cycle_max_groups=4,
+        reserved_non_high_slots=2,
+        group_timeout_s=0.02,
+        close_callbacks=(
+            lambda: closed.append("closed"),
+        ),
+    )
+
+    started_at = time.monotonic()
+    await asyncio.wait_for(scheduler.run_due_once(), timeout=0.5)
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.3
+    assert all_high_started.is_set()
+    assert store.latest_candidate_watch_fact("high-1").reason == "candidate-group-timeout"
+    assert store.latest_candidate_watch_fact("high-2").reason == "candidate-group-timeout"
+    assert store.latest_candidate_watch_fact("normal-1").last_result == "watching"
+    assert store.latest_candidate_watch_fact("explore-1").last_result == "watching"
+    assert runtime.snapshot().degraded_group_ids == ("high-1", "high-2")
+
+    stop_event = asyncio.Event()
+    stop_event.set()
+    await scheduler.run(stop_event)
+    assert closed == ["closed"]
+    release_high.set()
+    await asyncio.to_thread(high_pool.shutdown, True, cancel_futures=True)
+    await asyncio.to_thread(lower_pool.shutdown, True, cancel_futures=True)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"high_interval_s": float("inf")},
+        {"normal_interval_s": float("nan")},
+        {"quote_hard_stale_s": float("inf")},
+        {"high_interval_s": 91, "quote_hard_stale_s": 90},
+    ],
+)
+def test_interval_controller_rejects_non_finite_or_impossible_freshness(
+    kwargs: dict[str, float],
+) -> None:
+    with pytest.raises(ValueError):
+        IntervalController(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"group_timeout_s": float("inf")},
+        {"poll_interval_s": float("nan")},
+        {"cycle_max_groups": 2, "reserved_non_high_slots": 2},
+    ],
+)
+def test_scheduler_rejects_non_finite_or_silently_reduced_inputs(
+    tmp_path: Path,
+    kwargs: dict[str, float | int],
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with pytest.raises(ValueError):
+        CandidateWatcherScheduler(
+            watcher=object(),
+            store=store,
+            candidate_group_ids=lambda: (),
+            runtime=CandidateWatcherRuntime(),
+            **kwargs,
+        )

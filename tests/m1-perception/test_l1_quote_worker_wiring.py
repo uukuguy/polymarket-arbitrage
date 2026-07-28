@@ -124,6 +124,28 @@ def test_candidate_watcher_controller_settings_are_explicit_and_off_by_default()
     assert settings.candidate_group_timeout_s == 30
     assert settings.candidate_supervisor_retry_s == 1
     assert settings.candidate_scheduler_poll_s == 1
+    assert settings.candidate_high_clob_workers == 2
+    assert settings.candidate_lower_clob_workers == 1
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"candidate_high_interval_s": float("inf")},
+        {"candidate_group_timeout_s": float("nan")},
+        {
+            "candidate_high_interval_s": 91,
+            "candidate_quote_hard_stale_s": 90,
+        },
+        {
+            "candidate_cycle_max_groups": 2,
+            "candidate_reserved_non_high_slots": 2,
+        },
+    ],
+)
+def test_candidate_controller_settings_reject_invalid_relationships(kwargs) -> None:
+    with pytest.raises(ValueError):
+        Settings(**kwargs)
 
 
 def test_fly_enables_worker_at_120_seconds() -> None:

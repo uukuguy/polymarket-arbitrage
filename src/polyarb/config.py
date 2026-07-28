@@ -58,15 +58,31 @@ class Settings(BaseSettings):
     # production qualification gate. These are controller inputs, not hidden
     # timing constants.
     opportunity_first_watcher_enabled: bool = False
-    candidate_high_interval_s: float = Field(default=15.0, gt=0)
-    candidate_normal_interval_s: float = Field(default=60.0, gt=0)
-    candidate_explore_interval_s: float = Field(default=300.0, gt=0)
-    candidate_quote_hard_stale_s: float = Field(default=90.0, gt=0)
+    candidate_high_interval_s: float = Field(
+        default=15.0, gt=0, allow_inf_nan=False
+    )
+    candidate_normal_interval_s: float = Field(
+        default=60.0, gt=0, allow_inf_nan=False
+    )
+    candidate_explore_interval_s: float = Field(
+        default=300.0, gt=0, allow_inf_nan=False
+    )
+    candidate_quote_hard_stale_s: float = Field(
+        default=90.0, gt=0, allow_inf_nan=False
+    )
     candidate_cycle_max_groups: int = Field(default=12, ge=2)
     candidate_reserved_non_high_slots: int = Field(default=2, ge=1)
-    candidate_group_timeout_s: float = Field(default=30.0, gt=0)
-    candidate_supervisor_retry_s: float = Field(default=1.0, gt=0)
-    candidate_scheduler_poll_s: float = Field(default=1.0, gt=0)
+    candidate_group_timeout_s: float = Field(
+        default=30.0, gt=0, allow_inf_nan=False
+    )
+    candidate_supervisor_retry_s: float = Field(
+        default=1.0, gt=0, allow_inf_nan=False
+    )
+    candidate_scheduler_poll_s: float = Field(
+        default=1.0, gt=0, allow_inf_nan=False
+    )
+    candidate_high_clob_workers: int = Field(default=2, ge=1)
+    candidate_lower_clob_workers: int = Field(default=1, ge=1)
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 
@@ -293,6 +309,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "POLYARB_SCAN_SHARED_SECRET must be set in production. "
                 "To run tests or local dev without a secret, set POLYARB_ALLOW_EMPTY_SECRET=1."
+            )
+        if self.candidate_high_interval_s > self.candidate_quote_hard_stale_s:
+            raise ValueError(
+                "candidate_high_interval_s must not exceed "
+                "candidate_quote_hard_stale_s"
+            )
+        if (
+            self.candidate_reserved_non_high_slots
+            >= self.candidate_cycle_max_groups
+        ):
+            raise ValueError(
+                "candidate_reserved_non_high_slots must be less than "
+                "candidate_cycle_max_groups"
             )
         # Auto-enable Supabase mirror if both URL + service key are set
         # Phase 03.1-02: same secrets gate l2_mirror_enabled (L2 daemon uses the

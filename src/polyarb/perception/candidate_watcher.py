@@ -6,6 +6,7 @@ import asyncio
 import math
 import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Literal, Protocol
@@ -74,6 +75,10 @@ class CandidateWatcherSnapshot:
     supervisor_recovery_count: int
     supervisor_state: Literal["running", "degraded"]
     last_supervisor_error_kind: str | None
+    group_failure_count: int
+    group_recovery_count: int
+    degraded_group_ids: tuple[str, ...]
+    last_group_error_kind: str | None
 
 
 class CandidateWatcherRuntime:
@@ -95,7 +100,12 @@ class CandidateWatcherRuntime:
             supervisor_recovery_count=0,
             supervisor_state="running",
             last_supervisor_error_kind=None,
+            group_failure_count=0,
+            group_recovery_count=0,
+            degraded_group_ids=(),
+            last_group_error_kind=None,
         )
+        self._group_errors: dict[str, str] = {}
 
     def record(self, fact: CandidateWatchFact) -> None:
         previous = self._snapshot
@@ -115,6 +125,10 @@ class CandidateWatcherRuntime:
             supervisor_recovery_count=previous.supervisor_recovery_count,
             supervisor_state=previous.supervisor_state,
             last_supervisor_error_kind=previous.last_supervisor_error_kind,
+            group_failure_count=previous.group_failure_count,
+            group_recovery_count=previous.group_recovery_count,
+            degraded_group_ids=previous.degraded_group_ids,
+            last_group_error_kind=previous.last_group_error_kind,
         )
 
     def snapshot(self) -> CandidateWatcherSnapshot:
@@ -140,6 +154,32 @@ class CandidateWatcherRuntime:
             last_supervisor_error_kind=None,
         )
 
+    def record_group_failure(self, group_id: str, error: BaseException) -> None:
+        self._group_errors[group_id] = type(error).__name__
+        previous = self._snapshot
+        self._snapshot = replace(
+            previous,
+            group_failure_count=previous.group_failure_count + 1,
+            degraded_group_ids=tuple(sorted(self._group_errors)),
+            last_group_error_kind=type(error).__name__,
+        )
+
+    def record_group_success(self, group_id: str) -> None:
+        if group_id not in self._group_errors:
+            return
+        del self._group_errors[group_id]
+        previous = self._snapshot
+        self._snapshot = replace(
+            previous,
+            group_recovery_count=previous.group_recovery_count + 1,
+            degraded_group_ids=tuple(sorted(self._group_errors)),
+            last_group_error_kind=(
+                self._group_errors[next(reversed(self._group_errors))]
+                if self._group_errors
+                else None
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class IntervalController:
@@ -147,6 +187,18 @@ class IntervalController:
     normal_interval_s: float = 60.0
     explore_interval_s: float = 300.0
     quote_hard_stale_s: float = 90.0
+
+    def __post_init__(self) -> None:
+        values = (
+            self.high_interval_s,
+            self.normal_interval_s,
+            self.explore_interval_s,
+            self.quote_hard_stale_s,
+        )
+        if any(not math.isfinite(value) or value <= 0 for value in values):
+            raise ValueError("candidate-intervals-must-be-positive-finite")
+        if self.high_interval_s > self.quote_hard_stale_s:
+            raise ValueError("candidate-high-interval-exceeds-hard-stale")
 
     def transition(
         self,
@@ -226,6 +278,7 @@ class CandidateWatcher:
         *,
         structure_reader: StructureReader,
         books_reader: BooksReader,
+        lower_priority_books_reader: BooksReader | None = None,
         store: OpportunityPerceptionStore,
         runtime: CandidateWatcherRuntime,
         interval_controller: IntervalController,
@@ -234,19 +287,32 @@ class CandidateWatcher:
     ) -> None:
         self._structure_reader = structure_reader
         self._books_reader = books_reader
+        self._lower_priority_books_reader = (
+            lower_priority_books_reader or books_reader
+        )
         self._store = store
         self._runtime = runtime
         self._interval_controller = interval_controller
         self._clock_ms = clock_ms or _wall_clock_ms
         self._min_edge_bps = Decimal(str(min_edge_bps))
 
-    async def run_once(self, group_id: str) -> CandidateObservation:
+    async def run_once(
+        self,
+        group_id: str,
+        *,
+        priority_hint: CandidatePriority = "high",
+    ) -> CandidateObservation:
         started_at_ms = self._clock_ms()
         observed_at_ms: int | None = None
         before: GroupRevision | None = None
         try:
             before = await self._structure_reader.read_group(group_id)
-            books = await self._books_reader.get_books(
+            books_reader = (
+                self._books_reader
+                if priority_hint == "high"
+                else self._lower_priority_books_reader
+            )
+            books = await books_reader.get_books(
                 [leg.yes_token_id for leg in before.legs],
                 projection="top",
             )
@@ -441,16 +507,22 @@ class CandidateWatcher:
         task = asyncio.create_task(
             asyncio.to_thread(writer, *args, **kwargs)
         )
-        try:
-            fact = await asyncio.shield(task)
-        except asyncio.CancelledError as cancellation:
+        cancellation: asyncio.CancelledError | None = None
+        while True:
             try:
-                fact = await task
+                fact = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as error:
+                if cancellation is None:
+                    cancellation = error
+                continue
             except BaseException as error:
-                raise cancellation from error
-            self._runtime.record(fact)
-            raise
+                if cancellation is not None:
+                    raise cancellation from error
+                raise
         self._runtime.record(fact)
+        if cancellation is not None:
+            raise cancellation
         return fact
 
     async def record_timeout(self, group_id: str) -> None:
@@ -465,6 +537,33 @@ class CandidateWatcher:
 
 class CandidateGroupIds(Protocol):
     def __call__(self) -> Sequence[str]: ...
+
+
+class CandidateClobExecutors:
+    """Bounded, lane-isolated pools for the sync CLOB SDK."""
+
+    def __init__(self, *, high_workers: int, lower_workers: int) -> None:
+        if high_workers <= 0 or lower_workers <= 0:
+            raise ValueError("candidate-clob-workers-must-be-positive")
+        self.high = ThreadPoolExecutor(
+            max_workers=high_workers,
+            thread_name_prefix="candidate-high-clob",
+        )
+        self.lower = ThreadPoolExecutor(
+            max_workers=lower_workers,
+            thread_name_prefix="candidate-lower-clob",
+        )
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        # Running sync SDK calls cannot be killed by Future.cancel(). Do not
+        # block daemon shutdown on them; cap their number by pool size and
+        # cancel every call that has not started.
+        self.high.shutdown(wait=False, cancel_futures=True)
+        self.lower.shutdown(wait=False, cancel_futures=True)
 
 
 class CandidateWatcherScheduler:
@@ -483,6 +582,7 @@ class CandidateWatcherScheduler:
         cycle_max_groups: int = 12,
         reserved_non_high_slots: int = 2,
         group_timeout_s: float = 30.0,
+        close_callbacks: Sequence[Callable[[], None]] = (),
     ) -> None:
         self._watcher = watcher
         self._store = store
@@ -492,17 +592,20 @@ class CandidateWatcherScheduler:
         self._poll_interval_s = poll_interval_s
         self._supervisor_retry_s = supervisor_retry_s
         self._cycle_max_groups = cycle_max_groups
-        self._reserved_non_high_slots = min(
-            reserved_non_high_slots,
-            cycle_max_groups - 1,
-        )
+        self._reserved_non_high_slots = reserved_non_high_slots
         self._group_timeout_s = group_timeout_s
         self._reserved_lane_cursor = 0
+        self._close_callbacks = tuple(close_callbacks)
+        self._closed = False
         if (
-            poll_interval_s <= 0
+            not math.isfinite(poll_interval_s)
+            or poll_interval_s <= 0
+            or not math.isfinite(supervisor_retry_s)
             or supervisor_retry_s <= 0
             or cycle_max_groups < 2
             or reserved_non_high_slots <= 0
+            or reserved_non_high_slots >= cycle_max_groups
+            or not math.isfinite(group_timeout_s)
             or group_timeout_s <= 0
         ):
             raise ValueError("invalid-candidate-scheduler-controller-input")
@@ -525,28 +628,36 @@ class CandidateWatcherScheduler:
                 due.append((0, 0, group_id))
             elif fact.next_due_at_ms <= now_ms:
                 due.append((rank[fact.priority_class], fact.next_due_at_ms, group_id))
-        for _, _, group_id in self._select_cycle(due):
+        priority_by_rank: dict[int, CandidatePriority] = {
+            0: "high",
+            1: "normal",
+            2: "explore",
+        }
+        for rank_value, _, group_id in self._select_cycle(due):
             before_count = self._runtime.snapshot().attempt_count
             try:
                 await asyncio.wait_for(
-                    self._watcher.run_once(group_id),
+                    self._watcher.run_once(
+                        group_id,
+                        priority_hint=priority_by_rank[rank_value],
+                    ),
                     timeout=self._group_timeout_s,
                 )
             except asyncio.CancelledError:
                 raise
             except TimeoutError as error:
-                self._runtime.record_supervisor_failure(error)
+                self._runtime.record_group_failure(group_id, error)
                 if self._runtime.snapshot().attempt_count == before_count:
                     await self._watcher.record_timeout(group_id)
                 logger.warning(f"candidate group timed out group_id={group_id}")
             except Exception as error:
-                self._runtime.record_supervisor_failure(error)
+                self._runtime.record_group_failure(group_id, error)
                 logger.warning(
                     "candidate group task failed "
                     f"group_id={group_id} kind={type(error).__name__}"
                 )
             else:
-                self._runtime.record_supervisor_recovery()
+                self._runtime.record_group_success(group_id)
 
     def _select_cycle(
         self,
@@ -578,26 +689,44 @@ class CandidateWatcherScheduler:
         return tuple(sorted(selected, key=lambda item: (item[0], item[1], item[2])) + reserved)
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        while not stop_event.is_set():
-            delay_s = self._poll_interval_s
+        try:
+            while not stop_event.is_set():
+                delay_s = self._poll_interval_s
+                try:
+                    await self.run_due_once()
+                    # Only the source/enumeration boundary is recovered here.
+                    # Per-group recovery is recorded by the same group succeeding.
+                    self._runtime.record_supervisor_recovery()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    delay_s = self._supervisor_retry_s
+                    self._runtime.record_supervisor_failure(error)
+                    logger.warning(
+                        "candidate scheduler cycle failed "
+                        f"kind={type(error).__name__}"
+                    )
+                if stop_event.is_set():
+                    break
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=delay_s)
+                except TimeoutError:
+                    pass
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for callback in self._close_callbacks:
             try:
-                await self.run_due_once()
-                self._runtime.record_supervisor_recovery()
-            except asyncio.CancelledError:
-                raise
+                callback()
             except Exception as error:
-                delay_s = self._supervisor_retry_s
-                self._runtime.record_supervisor_failure(error)
                 logger.warning(
-                    "candidate scheduler cycle failed "
+                    "candidate scheduler close callback failed "
                     f"kind={type(error).__name__}"
                 )
-            if stop_event.is_set():
-                break
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=delay_s)
-            except TimeoutError:
-                pass
 
 
 def _wall_clock_ms() -> int:
@@ -616,27 +745,40 @@ def build_production_candidate_watcher(
     store = OpportunityPerceptionStore(settings.db_path)
     store.init_schema()
     runtime = CandidateWatcherRuntime()
-    watcher = CandidateWatcher(
-        structure_reader=GroupStructureReader(store),
-        books_reader=ClobReaderClient(settings),
-        store=store,
-        runtime=runtime,
-        interval_controller=IntervalController(
-            high_interval_s=settings.candidate_high_interval_s,
-            normal_interval_s=settings.candidate_normal_interval_s,
-            explore_interval_s=settings.candidate_explore_interval_s,
-            quote_hard_stale_s=settings.candidate_quote_hard_stale_s,
-        ),
-        min_edge_bps=settings.neg_risk_observe_min_edge_bps,
+    executors = CandidateClobExecutors(
+        high_workers=settings.candidate_high_clob_workers,
+        lower_workers=settings.candidate_lower_clob_workers,
     )
-    return CandidateWatcherScheduler(
-        watcher=watcher,
-        store=store,
-        candidate_group_ids=candidate_group_ids,
-        runtime=runtime,
-        poll_interval_s=settings.candidate_scheduler_poll_s,
-        supervisor_retry_s=settings.candidate_supervisor_retry_s,
-        cycle_max_groups=settings.candidate_cycle_max_groups,
-        reserved_non_high_slots=settings.candidate_reserved_non_high_slots,
-        group_timeout_s=settings.candidate_group_timeout_s,
-    )
+    try:
+        watcher = CandidateWatcher(
+            structure_reader=GroupStructureReader(store),
+            books_reader=ClobReaderClient(settings, executor=executors.high),
+            lower_priority_books_reader=ClobReaderClient(
+                settings,
+                executor=executors.lower,
+            ),
+            store=store,
+            runtime=runtime,
+            interval_controller=IntervalController(
+                high_interval_s=settings.candidate_high_interval_s,
+                normal_interval_s=settings.candidate_normal_interval_s,
+                explore_interval_s=settings.candidate_explore_interval_s,
+                quote_hard_stale_s=settings.candidate_quote_hard_stale_s,
+            ),
+            min_edge_bps=settings.neg_risk_observe_min_edge_bps,
+        )
+        return CandidateWatcherScheduler(
+            watcher=watcher,
+            store=store,
+            candidate_group_ids=candidate_group_ids,
+            runtime=runtime,
+            poll_interval_s=settings.candidate_scheduler_poll_s,
+            supervisor_retry_s=settings.candidate_supervisor_retry_s,
+            cycle_max_groups=settings.candidate_cycle_max_groups,
+            reserved_non_high_slots=settings.candidate_reserved_non_high_slots,
+            group_timeout_s=settings.candidate_group_timeout_s,
+            close_callbacks=(executors.close,),
+        )
+    except BaseException:
+        executors.close()
+        raise

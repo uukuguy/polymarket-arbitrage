@@ -55,14 +55,22 @@ if after.membership_hash != before.membership_hash:
 到期时间排序；相同到期条件下 high 先于 normal，再先于 explore。
 
 `asyncio.to_thread()` 被取消时，线程里的 SQLite 写不会自动停止。Candidate Watcher
-因此 shield 已开始的写任务：收到取消后仍等待数据库任务返回，用返回的 durable fact
-收敛 runtime，然后重新抛出 `CancelledError`。这避免关机或 per-group timeout 恰好撞上
-COMMIT 时出现“数据库已写、runtime 永远没看见”。
+因此 shield 已开始的写任务；即使父 task 在 COMMIT 期间被连续取消多次，也始终只
+shield 同一个 writer task，直到它返回 durable fact。成功时 runtime 只收敛一次，再
+重新抛出第一次 `CancelledError`；writer 失败时，第一次取消仍是外层语义，写错误保留为
+cause。这避免关机或 per-group timeout 撞上 COMMIT 时出现“数据库已写、runtime 永远
+没看见”，也不会因第二次取消打断收敛。
 
 Scheduler 每轮只处理配置的最大组数，并为 normal/explore 保留槽位；high 仍先执行，
-但每个组有独立 timeout，所以一个卡住的 high 只能消耗有界时间。枚举候选或读取
-durable due state 的异常由 loop supervisor 记录、退避并重试，成功下一轮会记录 recovery，
-不会让 main 继续活着而 watcher task 已静默死亡。
+但每个组有独立 timeout。由于 py-clob-client 是同步 SDK，取消 asyncio task 无法杀死
+已经运行的 SDK 线程；生产 builder 因而把 high 和 normal/explore 放入两个独立的有界
+线程池。卡住的 high 最多占用配置的 high worker 数，不会耗尽默认 executor，也不会
+阻止 lower lane 继续采集。shutdown 会取消尚未开始的 future，但运行中的 SDK 调用只能
+依靠 HTTP timeout 返回；容量边界由 worker 数保证。
+
+枚举候选或读取 durable due state 的异常属于 source/cycle boundary，由 loop supervisor
+记录、退避并在下一次 cycle 成功时恢复。单组 timeout/异常则独立记录 degraded group；
+只有同一个 group 后续成功才能清除它。另一个组成功不会制造虚假的 recovery。
 
 ## 设计取舍
 
@@ -74,6 +82,11 @@ durable due state 的异常由 loop supervisor 记录、退避并重试，成功
   卡住的 high。这样 freshness priority 与 age-based anti-starvation 同时成立。
 - **退避先封顶再指数**：先由 `cap/base` 算出最大有效翻倍次数，再做 `2**n`；
   即使 durable failure count 是 100000，也只得到配置 cap，不会先发生数值溢出。
+- **配置先拒绝不可能的控制器**：所有秒数必须为正有限数，high cadence 不得超过
+  hard-stale；保留槽必须满足 `1 <= reserved < cycle_max_groups`。normal/explore cadence
+  可以高于 high 的 hard-stale，因为它们是低优先级基准周期，不是 high freshness SLA。
+- **隔离资源而非假装可取消**：high/lower CLOB worker 分池；SQLite、Structure 读取仍走
+  默认 executor。线程池 shutdown 不承诺中止已经进入同步 SDK 的调用。
 - **旧链仍保留**：本 slice 没有替换原机会 API。新 worker 默认关闭，待后续
   Discovery、API、Dashboard 与故障资格门完成后才允许生产切换。
 - **观察者边界**：这里只读 Gamma/CLOB 事实并写本地证据，不含钱包、签名、余额或下单。
@@ -86,6 +99,8 @@ durable due state 的异常由 loop supervisor 记录、退避并重试，成功
 4. 全市场 Structure 仍在采集时，一个已认证组能否继续被盯盘？依据是什么？
 5. feature flag 打开是否等于生产切换已经完成？还缺哪些后续质量门？
 6. 为什么 `asyncio.to_thread()` 外层 task 被取消，不代表 SQLite 线程里的 COMMIT 被取消？
+7. 为什么另一个组成功不能清除当前组的 degraded 状态？
+8. 为什么 per-group timeout 仍需独立 CLOB executor，而不是只包一层 `wait_for()`？
 
 ## FAQ 增量
 

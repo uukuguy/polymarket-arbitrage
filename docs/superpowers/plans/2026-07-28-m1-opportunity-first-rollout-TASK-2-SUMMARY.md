@@ -27,6 +27,17 @@
   timeout provide real anti-starvation while retaining high-lane priority.
 - Failure backoff clamps the exponent before calculation, including arbitrarily
   large durable failure counts.
+- Re-review remediation makes the terminal-write cancellation barrier tolerate
+  repeated cancellation without ever awaiting the writer unshielded. The first
+  cancellation remains authoritative and a writer error is retained as its cause.
+- Source/cycle supervision and per-group containment now have separate evidence:
+  a degraded group recovers only when that same group later succeeds.
+- Sync CLOB calls run in separate bounded high and lower-priority executors.
+  Stuck high calls cannot exhaust the default executor or prevent lower-lane
+  progress; scheduler shutdown cancels queued calls and does not pretend it can
+  kill already-running SDK threads.
+- Settings and constructors reject non-finite controller values, a high cadence
+  beyond hard-stale, and reserved slots greater than or equal to cycle capacity.
 
 ## Safety and Scope
 
@@ -65,12 +76,26 @@ Independent-review RED → GREEN additions cover:
 - one reserved slot rotating fairly across both lower lanes; and
 - a durable failure count of 100000 clamping and persisting without overflow.
 
-The final proportional suite contains 155 passing tests across Task 1/Task 2,
-legacy focused collection, opportunity ledger, quote store, watcher, and daemon wiring.
+Second re-review RED → GREEN additions cover:
+
+- two cancellation requests during one successful terminal commit and during a
+  writer failure, with exactly-once runtime convergence and preserved cause;
+- same-group recovery attribution despite unrelated group success;
+- two genuinely blocked high-lane sync calls while normal/explore work completes
+  through an independent bounded pool, followed by idempotent lifecycle close;
+- injected executor ownership in `ClobReaderClient`; and
+- finite/relational validation at Settings, interval-controller, and scheduler
+  construction boundaries.
+
+Final verification passed 54 focused tests and 177 proportional Task 1/Task 2
+plus legacy regression tests. Changed-file Ruff and `git diff --check` also
+passed.
 
 ## Review Notes
 
 Self-review caught and corrected a misplaced runtime keyword in daemon wiring
 before final verification. The first independent review returned four Important
 findings; deterministic race/cancellation/supervision/overflow/fairness tests now
-cover their fixes. Re-review remains owned by the parent rollout workflow.
+cover their fixes. The second re-review identified four deeper continuity
+boundaries, which are covered by the repeated-cancellation, evidence-attribution,
+real executor-saturation, and finite-controller tests above.

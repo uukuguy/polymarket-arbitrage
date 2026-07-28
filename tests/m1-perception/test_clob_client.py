@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -141,6 +143,28 @@ async def test_propagates_sdk_exceptions() -> None:
     with patch.object(client._client, "get_order_books", side_effect=RuntimeError("boom")):
         with pytest.raises(RuntimeError, match="boom"):
             await client.get_books(["t1"])
+
+
+async def test_injected_executor_owns_sync_sdk_call() -> None:
+    executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="candidate-dedicated-clob",
+    )
+    try:
+        client = ClobReaderClient(Settings(), executor=executor)
+        thread_names: list[str] = []
+
+        def fetch(_params):
+            thread_names.append(threading.current_thread().name)
+            return []
+
+        with patch.object(client._client, "get_order_books", side_effect=fetch):
+            await client.get_books(["t1"])
+
+        assert thread_names
+        assert thread_names[0].startswith("candidate-dedicated-clob")
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 async def test_get_books_top_projection_discards_full_depth_per_chunk() -> None:

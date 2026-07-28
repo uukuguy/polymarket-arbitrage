@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from concurrent.futures import Executor
 from typing import Any, Literal
 
 from aiolimiter import AsyncLimiter
@@ -107,11 +108,26 @@ class ClobReaderClient:
     No network I/O happens until a method is called.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        executor: Executor | None = None,
+    ) -> None:
         self._settings = settings
         # L0 read-only: only host needed. NO key/creds/chain_id (tested in T5).
         self._client = ClobClient(settings.clob_url)
         self._limiter = AsyncLimiter(settings.clob_batch_rate_per_10s, 10)
+        self._executor = executor
+
+    async def _run_sync(self, function: Any, *args: Any) -> Any:
+        if self._executor is None:
+            return await asyncio.to_thread(function, *args)
+        return await asyncio.get_running_loop().run_in_executor(
+            self._executor,
+            function,
+            *args,
+        )
 
     async def get_books(
         self,
@@ -165,7 +181,7 @@ class ClobReaderClient:
                 return (raw_books if cache is not None else None), projected
 
             async with self._limiter:
-                raw_books, books = await asyncio.to_thread(fetch_chunk)
+                raw_books, books = await self._run_sync(fetch_chunk)
             if cache is not None and raw_books is not None:
                 cache.save_books_chunk(i, raw_books)
             out.extend(books)
@@ -213,7 +229,7 @@ class ClobReaderClient:
                     continue
                 params = [BookParams(token_id=t, side=side) for t in chunk]
                 async with self._limiter:
-                    page = await asyncio.to_thread(self._client.get_prices, params)
+                    page = await self._run_sync(self._client.get_prices, params)
                 # CLOB get_prices returns dict-of-token-id; merge via update.
                 # If a future SDK version returns a list, callers see TypeError
                 # immediately rather than silent data loss.
