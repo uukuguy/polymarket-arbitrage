@@ -137,6 +137,7 @@ class CandidateCurrentSummary:
     current_group_count: int
     opportunity_count: int
     state_counts: dict[str, int]
+    authority_hash: str
 
 def current_opportunities(
     self, *, after_group_id: str, limit: int,
@@ -148,8 +149,9 @@ def candidate_current_summary(
 ) -> CandidateCurrentSummary: ...
 ```
 
-Both methods first validate the candidate checkpoint/current authority and
-aggregate digest. Opportunity rows must join the exact authority `fact_id`,
+Both methods validate the bounded owner journal/root and aggregate digest;
+the full Candidate checkpoint replay remains an explicit audit path rather
+than part of the real-time O(1) summary. Opportunity rows must bind the exact authority `fact_id`,
 `quote_batch_id`, and current group revision; identity mismatch fails closed.
 State counts cover `watching`, `no-edge`, and `unavailable`; add these counters
 to `neg_risk_candidate_current_aggregate` and update them atomically inside
@@ -165,27 +167,29 @@ partial-manifest cases are tested.
 **HTTP contract**
 
 - `GET /perception/opportunities?after_group_id=&limit=100`
-- Response: `{status, server_time_ms, items, limit, next_after_group_id}`.
+- Response: `{status, server_time_ms, candidate_authority_hash,
+  current_opportunity_count, items, limit, next_after_group_id}`.
 - Extend `/perception/status` with `server_time_ms`, candidate state counts,
-  and current candidate group count. Do not add global structure counts.
+  current candidate group count, and the same candidate authority hash. Do not
+  add global structure counts.
 
-- [ ] Write store tests for exact fact/quote/revision binding, deterministic
+- [x] Write store tests for exact fact/quote/revision binding, deterministic
       keyset pagination, aggregate/count agreement, tampering, valid zero,
       additive migration of an existing DB, and exact owner-manifest bootstrap
       after the new aggregate columns are installed.
-- [ ] Write HTTP tests for bounds, cursor validation, timeout/503, response cap,
+- [x] Write HTTP tests for bounds, cursor validation, timeout/503, response cap,
       and server-side ages derivable from `server_time_ms`.
-- [ ] Run focused tests and capture RED.
-- [ ] Implement fixed-query-count and fixed-page-size authenticated store
+- [x] Run focused tests and capture RED.
+- [x] Implement fixed-query-count and fixed-page-size authenticated store
       readers. Aggregate validation is O(1), and the opportunity query examines
       at most `limit + 1` authority rows. Never use the legacy Polywatch
       JSON/outbox as opportunity authority.
-- [ ] Add the route and strict Dashboard envelope validators.
-- [ ] Render the current opportunity table/cards with edge bps, bundle cost,
+- [x] Add the route and strict Dashboard envelope validators.
+- [x] Render the current opportunity table/cards with edge bps, bundle cost,
       max executable bundle size, Structure age, Quote age, and link to the
       group timeline. Render real global watching/no-edge/unavailable counts
       and retain honest bounded-page labels for structure states.
-- [ ] Run:
+- [x] Run:
 
   ```bash
   uv run pytest tests/perception/test_store.py \
@@ -194,7 +198,7 @@ partial-manifest cases are tested.
   make dashboard-typecheck
   ```
 
-- [ ] Commit:
+- [x] Commit:
 
   ```bash
   git commit -m "feat(m1): publish authenticated current opportunities"
