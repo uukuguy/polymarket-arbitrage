@@ -22,7 +22,6 @@ from polyarb.perception.store import OpportunityPerceptionStore
 
 _MAX_LIMIT = 500
 _HISTORY_CAP = 500
-_GROUP_PAGE_HISTORY_CAP = 10_000
 _LEGS_JSON_MAX_BYTES = 65_536
 _TIMEOUT_S = 1.0
 _BUSY_TIMEOUT_MS = 250
@@ -359,7 +358,11 @@ def _validate_revision(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _validate_group_history(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+def _validate_group_history(
+    rows: list[sqlite3.Row],
+    *,
+    allow_prefix: bool = False,
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     previous_by_group: dict[str, dict[str, Any]] = {}
     allowed_transitions = {
@@ -374,7 +377,7 @@ def _validate_group_history(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
         item = _validate_revision(row)
         previous = previous_by_group.get(item["group_id"])
         if (
-            (previous is None and item["revision"] != 1)
+            (previous is None and item["revision"] != 1 and not allow_prefix)
             or (
                 previous is not None
                 and (
@@ -532,36 +535,21 @@ def _groups(db_path: Path, limit: int, after: str) -> dict[str, Any]:
             f"WHERE id IN ({current_marks}) ORDER BY group_id",
             current_ids,
         ).fetchall()
-        group_ids = tuple(str(row["group_id"]) for row in current_meta)
-        placeholders = ",".join("?" for _ in group_ids)
-        count = int(
-            con.execute(
-                f"SELECT COUNT(*) FROM neg_risk_group_revisions "  # noqa: S608
-                f"WHERE group_id IN ({placeholders})",
-                group_ids,
-            ).fetchone()[0]
-        )
-        if count > _GROUP_PAGE_HISTORY_CAP:
-            raise ValueError("group-history-too-large")
-        history_meta = con.execute(
-            f"SELECT id,length(legs_json) AS legs_bytes "  # noqa: S608
-            f"FROM neg_risk_group_revisions WHERE group_id IN ({placeholders}) "
-            "ORDER BY group_id,revision LIMIT ?",
-            (*group_ids, _GROUP_PAGE_HISTORY_CAP + 1),
-        ).fetchall()
-        if any(
-            int(row["legs_bytes"] or 0) > _LEGS_JSON_MAX_BYTES
-            for row in history_meta
-        ) or sum(int(row["legs_bytes"] or 0) for row in history_meta) > 8_388_608:
-            raise ValueError("group-legs-json-too-large")
-        history_ids = tuple(int(row["id"]) for row in history_meta)
-        history_marks = ",".join("?" for _ in history_ids)
-        histories = con.execute(
-            f"SELECT * FROM neg_risk_group_revisions "  # noqa: S608
-            f"WHERE id IN ({history_marks}) ORDER BY group_id,revision",
-            history_ids,
-        ).fetchall()
-        _validate_group_history(histories)
+        for row in current:
+            revision = int(row["revision"])
+            previous = (
+                None
+                if revision == 1
+                else con.execute(
+                    "SELECT * FROM neg_risk_group_revisions "
+                    "WHERE group_id=? AND revision=?",
+                    (row["group_id"], revision - 1),
+                ).fetchone()
+            )
+            if revision > 1 and previous is None:
+                raise ValueError("invalid-group-history")
+            chain = [row] if previous is None else [previous, row]
+            _validate_group_history(chain, allow_prefix=previous is not None)
         con.execute("COMMIT")
         return {
             "status": "available",
@@ -588,25 +576,19 @@ def _history(
     con = _connect(db_path)
     try:
         con.execute("BEGIN")
-        count = int(
-            con.execute(
-                "SELECT COUNT(*) FROM neg_risk_group_revisions WHERE group_id=?",
-                (group_id,),
-            ).fetchone()[0]
+        upper_revision = (
+            9_223_372_036_854_775_807
+            if before_revision is None
+            else before_revision
         )
-        if count > _GROUP_PAGE_HISTORY_CAP:
-            raise ValueError("group-history-too-large")
-        meta = con.execute(
-            "SELECT id,length(legs_json) AS legs_bytes "
-            "FROM neg_risk_group_revisions WHERE group_id=? "
-            "ORDER BY revision LIMIT ?",
-            (group_id, _GROUP_PAGE_HISTORY_CAP + 1),
+        rows = con.execute(
+            "SELECT * FROM neg_risk_group_revisions "
+            "WHERE group_id=? AND revision<? "
+            "ORDER BY revision DESC LIMIT ?",
+            (group_id, upper_revision, limit + 1),
         ).fetchall()
-        if any(
-            int(row["legs_bytes"] or 0) > _LEGS_JSON_MAX_BYTES for row in meta
-        ) or sum(int(row["legs_bytes"] or 0) for row in meta) > 8_388_608:
-            raise ValueError("group-legs-json-too-large")
-        if not meta:
+        if not rows:
+            con.execute("COMMIT")
             return {
                 "status": "available",
                 "group_id": group_id,
@@ -614,28 +596,36 @@ def _history(
                 "limit": limit,
                 "next_before_revision": None,
             }
-        ids = tuple(int(row["id"]) for row in meta)
-        marks = ",".join("?" for _ in ids)
-        rows = con.execute(
-            f"SELECT * FROM neg_risk_group_revisions "  # noqa: S608
-            f"WHERE id IN ({marks}) ORDER BY revision",
-            ids,
-        ).fetchall()
-        items = _validate_group_history(rows)
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        oldest_revision = int(page_rows[-1]["revision"])
+        anchor = (
+            None
+            if oldest_revision == 1
+            else con.execute(
+                "SELECT * FROM neg_risk_group_revisions "
+                "WHERE group_id=? AND revision=?",
+                (group_id, oldest_revision - 1),
+            ).fetchone()
+        )
+        if oldest_revision > 1 and anchor is None:
+            raise ValueError("invalid-group-history")
+        ascending = list(reversed(page_rows))
+        chain = ascending if anchor is None else [anchor, *ascending]
+        validated = _validate_group_history(
+            chain,
+            allow_prefix=anchor is not None,
+        )
+        items = validated if anchor is None else validated[1:]
+        items.reverse()
         con.execute("COMMIT")
-        eligible = [
-            item
-            for item in reversed(items)
-            if before_revision is None or item["revision"] < before_revision
-        ]
-        page = eligible[:limit]
         return {
             "status": "available",
             "group_id": group_id,
-            "items": page,
+            "items": items,
             "limit": limit,
             "next_before_revision": (
-                page[-1]["revision"] if len(eligible) > limit else None
+                items[-1]["revision"] if has_more else None
             ),
         }
     except BaseException:
@@ -653,25 +643,6 @@ def _discovery(db_path: Path) -> dict[str, Any]:
         if con.execute("SELECT 1 FROM neg_risk_discovery_state WHERE id=1").fetchone() is None:
             con.execute("COMMIT")
             return {"status": "available", "discovery": None}
-        bounds = con.execute(
-            "SELECT "
-            "(SELECT COUNT(*) FROM neg_risk_group_schedule),"
-            "(SELECT COUNT(*) FROM neg_risk_group_revisions),"
-            "(SELECT COUNT(*) FROM neg_risk_discovery_batches),"
-            "(SELECT COUNT(*) FROM neg_risk_discovery_batch_samples),"
-            "(SELECT COUNT(*) FROM neg_risk_discovery_schedule_evidence),"
-            "(SELECT COUNT(*) FROM neg_risk_candidate_attempt_starts),"
-            "(SELECT COUNT(*) FROM neg_risk_candidate_admissions),"
-            "(SELECT COUNT(*) FROM neg_risk_coverage_samples),"
-            "(SELECT COALESCE(SUM(length(legs_json)),0) "
-            " FROM neg_risk_group_revisions),"
-            "(SELECT COALESCE(MAX(length(legs_json)),0) "
-            " FROM neg_risk_group_revisions)"
-        ).fetchone()
-        if any(int(value) > 50_000 for value in bounds[:8]) or int(
-            bounds[8]
-        ) > 8_388_608 or int(bounds[9]) > _LEGS_JSON_MAX_BYTES:
-            raise ValueError("discovery-read-bound-exceeded")
         status = _read_store(db_path).discovery_status(
             int(time.time() * 1_000), _connection=con
         )
@@ -705,45 +676,6 @@ def _reconciliation(db_path: Path) -> dict[str, Any]:
     con = _connect(db_path)
     try:
         con.execute("BEGIN")
-        latest = con.execute(
-            "SELECT id FROM neg_risk_reconciliation_windows "
-            "ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-        if latest is not None:
-            window_id = str(latest["id"])
-            bounds = con.execute(
-                "SELECT "
-                "(SELECT COUNT(*) FROM neg_risk_reconciliation_batches "
-                " WHERE window_id=?),"
-                "(SELECT COUNT(*) FROM neg_risk_reconciliation_staging "
-                " WHERE window_id=?),"
-                "(SELECT COUNT(*) FROM neg_risk_reconciliation_baseline "
-                " WHERE window_id=?),"
-                "(SELECT COUNT(*) FROM neg_risk_reconciliation_batch_samples "
-                " WHERE batch_id IN (SELECT id FROM "
-                " neg_risk_reconciliation_batches WHERE window_id=?)),"
-                "(SELECT COUNT(*) FROM neg_risk_reconciliation_diff_evidence "
-                " WHERE window_id=?),"
-                "(SELECT COALESCE(SUM(length(legs_json)),0) "
-                " FROM neg_risk_reconciliation_staging WHERE window_id=?),"
-                "(SELECT COALESCE(SUM(length(legs_json)),0) "
-                " FROM neg_risk_reconciliation_batch_samples "
-                " WHERE batch_id IN (SELECT id FROM "
-                " neg_risk_reconciliation_batches WHERE window_id=?)),"
-                "(SELECT COALESCE(MAX(length(legs_json)),0) "
-                " FROM neg_risk_reconciliation_staging WHERE window_id=?),"
-                "(SELECT COALESCE(MAX(length(legs_json)),0) "
-                " FROM neg_risk_reconciliation_batch_samples "
-                " WHERE batch_id IN (SELECT id FROM "
-                " neg_risk_reconciliation_batches WHERE window_id=?))",
-                (window_id,) * 9,
-            ).fetchone()
-            if any(int(value) > 50_000 for value in bounds[:5]) or any(
-                int(value) > 8_388_608 for value in bounds[5:]
-            ) or any(
-                int(value) > _LEGS_JSON_MAX_BYTES for value in bounds[7:]
-            ):
-                raise ValueError("reconciliation-read-bound-exceeded")
         window = _read_store(db_path).current_reconciliation(_connection=con)
         con.execute("COMMIT")
     except BaseException:

@@ -37,6 +37,7 @@ _OPERATOR_QUEUE_UNCOMPACTED_MAX_ROWS = 20_000
 _CANDIDATE_AUTHORITY_DOMAIN = "polyarb-candidate-authority-checkpoint-v1"
 _CANDIDATE_AUTHORITY_VERSION = 1
 _CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS = 8_000
+_CANDIDATE_AUTHORITY_COMPACT_HIGH_BYTES = 4_194_304
 _CANDIDATE_AUTHORITY_UNCOMPACTED_MAX_ROWS = 20_000
 _HEARTBEAT_AUTH_DOMAIN = "polyarb-producer-heartbeat-v1"
 _CHILD_HEARTBEAT_PREIMAGES: dict[tuple[str, str, int], str] = {}
@@ -2851,9 +2852,15 @@ class OpportunityPerceptionStore:
             "SELECT "
             "(SELECT COUNT(*) FROM neg_risk_group_quote_batches),"
             "(SELECT COUNT(*) FROM neg_risk_candidate_watch_facts),"
-            "(SELECT COUNT(*) FROM neg_risk_candidate_success_receipts)"
+            "(SELECT COUNT(*) FROM neg_risk_candidate_success_receipts),"
+            "(SELECT COALESCE(SUM(length(legs_json)),0) "
+            " FROM neg_risk_group_quote_batches)"
         ).fetchone()
-        if max(int(value) for value in counts) <= _CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS:
+        if (
+            max(int(value) for value in counts[:3])
+            <= _CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS
+            and int(counts[3]) <= _CANDIDATE_AUTHORITY_COMPACT_HIGH_BYTES
+        ):
             return
 
         # No prefix is discarded until the complete pre-compaction authority
@@ -3038,33 +3045,23 @@ class OpportunityPerceptionStore:
             checkpoint = self._validated_candidate_checkpoint(con)
             sizes = con.execute(
                 "SELECT "
-                "(SELECT COUNT(*) FROM neg_risk_group_revisions),"
                 "(SELECT COUNT(*) FROM neg_risk_group_quote_batches),"
                 "(SELECT COUNT(*) FROM neg_risk_candidate_watch_facts),"
                 "(SELECT COUNT(*) FROM neg_risk_candidate_success_receipts),"
                 "(SELECT COALESCE(MAX(length(legs_json)),0) "
-                " FROM neg_risk_group_revisions),"
-                "(SELECT COALESCE(MAX(length(legs_json)),0) "
                 " FROM neg_risk_group_quote_batches),"
-                "(SELECT COALESCE(SUM(length(legs_json)),0) "
-                " FROM neg_risk_group_revisions),"
                 "(SELECT COALESCE(SUM(length(legs_json)),0) "
                 " FROM neg_risk_group_quote_batches)"
             ).fetchone()
             if (
                 any(
                     int(value) > _CANDIDATE_AUTHORITY_UNCOMPACTED_MAX_ROWS
-                    for value in sizes[:4]
+                    for value in sizes[:3]
                 )
-                or int(sizes[4]) > 65_536
-                or int(sizes[5]) > 65_536
-                or int(sizes[6]) > 8_388_608
-                or int(sizes[7]) > 8_388_608
+                or int(sizes[3]) > 65_536
+                or int(sizes[4]) > 8_388_608
             ):
                 raise ValueError("candidate-authority-bound-exceeded")
-            group_rows = con.execute(
-                "SELECT * FROM neg_risk_group_revisions ORDER BY group_id,revision"
-            ).fetchall()
             quote_rows = con.execute(
                 "SELECT rowid,* FROM neg_risk_group_quote_batches ORDER BY rowid"
             ).fetchall()
@@ -3074,6 +3071,48 @@ class OpportunityPerceptionStore:
             receipt_rows = con.execute(
                 "SELECT * FROM neg_risk_candidate_success_receipts ORDER BY id"
             ).fetchall()
+            candidate_group_ids = sorted(
+                {
+                    str(row["group_id"])
+                    for row in (*quote_rows, *fact_rows, *receipt_rows)
+                }
+            )
+            candidate_group_anchor_ids: set[int] = set()
+            if candidate_group_ids:
+                minimum_times: dict[str, int] = {}
+                for row in (*quote_rows, *fact_rows):
+                    group_id = str(row["group_id"])
+                    observed_at_ms = int(
+                        row[
+                            "quoted_at_ms"
+                            if "quoted_at_ms" in row.keys()
+                            else "observed_at_ms"
+                        ]
+                    )
+                    minimum_times[group_id] = min(
+                        observed_at_ms,
+                        minimum_times.get(group_id, observed_at_ms),
+                    )
+                group_rows = []
+                for group_id in candidate_group_ids:
+                    anchor = con.execute(
+                        "SELECT * FROM neg_risk_group_revisions "
+                        "WHERE group_id=? AND observed_at_ms<=? "
+                        "ORDER BY observed_at_ms DESC,revision DESC LIMIT 1",
+                        (group_id, minimum_times.get(group_id, 0)),
+                    ).fetchone()
+                    if anchor is None:
+                        raise ValueError("invalid-candidate-group-history")
+                    candidate_group_anchor_ids.add(int(anchor["id"]))
+                    group_rows.extend(
+                        con.execute(
+                            "SELECT * FROM neg_risk_group_revisions "
+                            "WHERE group_id=? AND revision>=? ORDER BY revision",
+                            (group_id, int(anchor["revision"])),
+                        ).fetchall()
+                    )
+            else:
+                group_rows = []
             groups_by_id: dict[int, tuple[sqlite3.Row, GroupRevision]] = {}
             groups_by_revision: dict[tuple[str, int], GroupRevision] = {}
             group_history: dict[str, list[GroupRevision]] = {}
@@ -3092,6 +3131,7 @@ class OpportunityPerceptionStore:
                     checkpoint is not None
                     and int(row["id"]) <= int(checkpoint["through_group_revision_id"])
                 )
+                bounded_anchor = int(row["id"]) in candidate_group_anchor_ids
                 allowed_transitions = {
                     "discovered": {"certified", "invalidated", "closed"},
                     "certified": {"certified", "stale", "invalidated", "closed"},
@@ -3100,7 +3140,12 @@ class OpportunityPerceptionStore:
                     "closed": {"closed"},
                 }
                 if (
-                    (previous is None and group.revision != 1 and not checkpoint_seed)
+                    (
+                        previous is None
+                        and group.revision != 1
+                        and not checkpoint_seed
+                        and not bounded_anchor
+                    )
                     or (
                         previous is not None
                         and (

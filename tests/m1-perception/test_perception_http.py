@@ -13,7 +13,7 @@ from polyarb.perception.models import (
     GroupQuoteLeg,
     GroupRevision,
 )
-from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.store import DiscoveryAdmissionProof, OpportunityPerceptionStore
 
 
 def _seed_candidate_authority(db_path) -> None:
@@ -121,6 +121,48 @@ def test_group_history_is_bounded_and_corruption_fails_closed(http_test_client) 
     assert response.json()["status"] == "unavailable"
 
 
+def test_group_reads_page_safely_beyond_total_history_bound(
+    http_test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = OpportunityPerceptionStore(
+        http_test_client.app.state.sqlite_store.db_path
+    )
+    legs = (
+        GroupLeg("m-1", "c-1", "yes-1", "One"),
+        GroupLeg("m-2", "c-2", "yes-2", "Two"),
+    )
+    for revision_number in range(1, 4):
+        store.publish_group_revision(
+            GroupRevision.certified(
+                group_id="long-history",
+                event_id="event-1",
+                revision=revision_number,
+                started_at_ms=revision_number,
+                observed_at_ms=revision_number,
+                source_cursor=f"cursor-{revision_number}",
+                legs=legs,
+            )
+        )
+
+    groups = http_test_client.get("/perception/groups?limit=10")
+    assert groups.status_code == 200
+    assert groups.json()["items"][0]["revision"] == 3
+    latest = http_test_client.get(
+        "/perception/groups/long-history/history?limit=2"
+    )
+    assert latest.status_code == 200
+    assert [item["revision"] for item in latest.json()["items"]] == [3, 2]
+    assert latest.json()["next_before_revision"] == 2
+    oldest = http_test_client.get(
+        "/perception/groups/long-history/history"
+        "?limit=2&before_revision=2"
+    )
+    assert oldest.status_code == 200
+    assert [item["revision"] for item in oldest.json()["items"]] == [1]
+    assert oldest.json()["next_before_revision"] is None
+
+
 def test_discovery_reconciliation_and_incidents_use_stable_envelopes(
     http_test_client,
 ) -> None:
@@ -137,6 +179,44 @@ def test_discovery_reconciliation_and_incidents_use_stable_envelopes(
         "items": [],
         "limit": 5,
     }
+
+
+def test_discovery_status_does_not_permanently_fail_on_old_receipt_volume(
+    http_test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = OpportunityPerceptionStore(
+        http_test_client.app.state.sqlite_store.db_path
+    )
+    store.configure_discovery_admission(
+        DiscoveryAdmissionProof(
+            effective_capacity=2,
+            candidate_max_wait_ms=60_000,
+            selection_budget_ms=6_000,
+            poll_interval_ms=1_000,
+            group_timeout_ms=10_000,
+            terminal_write_budget_ms=5_000,
+            high_burst_groups=1,
+            reserved_non_high_slots=3,
+        ),
+        now_ms=1,
+    )
+    for sweep in range(1, 4):
+        store.publish_discovery_batch(
+            requested_cursor=None,
+            next_cursor=None,
+            completed=True,
+            started_at_ms=sweep,
+            finished_at_ms=sweep,
+            page_event_count=0,
+            candidates=(),
+            admission_proof=store.discovery_admission_proof(),
+        )
+
+    response = http_test_client.get("/perception/discovery")
+    assert response.status_code == 200
+    assert response.json()["discovery"]["completed"] is True
+    assert response.json()["discovery"]["groups_seen"] == 0
 
 
 def test_incidents_recursively_redact_legacy_secret_shapes(http_test_client) -> None:

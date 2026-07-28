@@ -181,6 +181,53 @@ def test_candidate_authority_rolls_checkpoint_beyond_daily_history_bound(
             assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] < 3_000
 
 
+def test_candidate_authority_compacts_before_quote_bytes_hit_hard_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        100,
+    )
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_BYTES",
+        1,
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-1", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    for sequence in range(3):
+        batch = batch_for(
+            group,
+            quote_batch_id=f"bytes-{sequence}",
+            quoted_at_ms=3_100 + sequence,
+        )
+        store.publish_candidate_success(
+            batch,
+            observed_at_ms=batch.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="byte-watermark",
+            next_due_at_ms=batch.quoted_at_ms + 15_000,
+        )
+
+    assert store.validated_candidate_opportunity_count() == 1
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT generation FROM neg_risk_candidate_authority_checkpoints"
+        ).fetchone()[0] >= 1
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_group_quote_batches"
+        ).fetchone()[0] == 1
+
+
 def test_candidate_authority_checkpoint_and_suffix_tampering_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -507,6 +554,10 @@ def test_candidate_checkpoint_does_not_own_group_only_revision_history(
 ) -> None:
     monkeypatch.setattr(
         "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        2,
+    )
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_UNCOMPACTED_MAX_ROWS",
         2,
     )
     store = OpportunityPerceptionStore(tmp_path / "state.db")
