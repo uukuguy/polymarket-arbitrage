@@ -134,6 +134,7 @@ class Settings(BaseSettings):
     resource_hot_quote_age_s: float = Field(default=20.0, gt=0, allow_inf_nan=False)
     resource_cooldown_s: float = Field(default=30.0, ge=0, allow_inf_nan=False)
     resource_sample_interval_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    resource_decision_ttl_s: float = Field(default=15.0, gt=0, allow_inf_nan=False)
     http_recovery_probe_interval_s: float = Field(
         default=15.0, gt=0, allow_inf_nan=False
     )
@@ -424,6 +425,10 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "opportunity resource controller requires producer supervisor"
+            )
+        if self.resource_decision_ttl_s <= self.resource_sample_interval_s:
+            raise ValueError(
+                "resource_decision_ttl_s must exceed resource_sample_interval_s"
             )
         # Auto-enable Supabase mirror if both URL + service key are set
         # Phase 03.1-02: same secrets gate l2_mirror_enabled (L2 daemon uses the

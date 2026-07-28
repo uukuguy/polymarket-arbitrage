@@ -179,3 +179,38 @@ def test_run_loop_inner_sleep_at_most_1s_per_iter() -> None:
     )
     # And the loop must reference stop_event so cancellation works
     assert "stop_event" in src
+
+
+@pytest.mark.asyncio
+async def test_http_startup_failure_is_durable_and_cleans_server_task(tmp_path: Path) -> None:
+    from polyarb.daemon.main import _abort_http_startup, _wait_for_http_startup
+    from polyarb.perception.incidents import IncidentManager
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    class FailedServer:
+        started = False
+        should_exit = False
+
+        async def serve(self) -> None:
+            raise OSError("address already in use")
+
+    server = FailedServer()
+    server_task = asyncio.create_task(server.serve())
+    with pytest.raises(RuntimeError, match="http-server-startup-failed") as caught:
+        await _wait_for_http_startup(server, server_task, timeout_s=0.2)
+
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    await _abort_http_startup(
+        server,
+        server_task,
+        IncidentManager(store),
+        caught.value,
+    )
+
+    incident = store.open_incidents()[0]
+    assert incident.scope == "http"
+    assert incident.kind == "startup-failure"
+    assert incident.state == "escalated"
+    assert server.should_exit is True
+    assert server_task.done()

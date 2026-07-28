@@ -289,6 +289,7 @@ class CandidateWatcher:
         interval_controller: IntervalController,
         clock_ms: Callable[[], int] | None = None,
         min_edge_bps: float = 100.0,
+        require_resource_decision: bool = False,
     ) -> None:
         self._structure_reader = structure_reader
         self._books_reader = books_reader
@@ -300,6 +301,7 @@ class CandidateWatcher:
         self._interval_controller = interval_controller
         self._clock_ms = clock_ms or _wall_clock_ms
         self._min_edge_bps = Decimal(str(min_edge_bps))
+        self._require_resource_decision = require_resource_decision
 
     async def run_once(
         self,
@@ -480,7 +482,10 @@ class CandidateWatcher:
             observed_at_ms=observed_at_ms,
             last_result=status,
         )
-        decision = self._store.latest_resource_decision()
+        decision = self._store.latest_resource_decision(
+            now_ms=observed_at_ms,
+            required=self._require_resource_decision,
+        )
         if decision is not None and priority != "high":
             multiplier = float(decision["normal_candidate_interval_multiplier"])
             interval_s = min(120.0, transition.effective_interval_s * multiplier)
@@ -975,6 +980,9 @@ def build_production_candidate_watcher(
                 quote_hard_stale_s=settings.candidate_quote_hard_stale_s,
             ),
             min_edge_bps=settings.neg_risk_observe_min_edge_bps,
+            require_resource_decision=(
+                settings.opportunity_resource_controller_enabled
+            ),
         )
         return CandidateWatcherScheduler(
             watcher=watcher,

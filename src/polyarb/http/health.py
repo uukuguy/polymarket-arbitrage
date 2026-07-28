@@ -111,13 +111,118 @@ class PerceptionRecoveryHealth:
     evidence_consistent: bool
 
 
-def read_perception_recovery_health(path: Path) -> PerceptionRecoveryHealth:
+@dataclass(frozen=True)
+class ProducerLivenessHealth:
+    state: str
+    age_seconds: float | None
+    evidence_consistent: bool
+
+
+def read_producer_liveness_health(
+    path: Path,
+    component: str,
+    *,
+    now_ms: int,
+    stall_timeout_ms: int,
+) -> ProducerLivenessHealth:
+    unavailable = ProducerLivenessHealth("unavailable", None, False)
+    if (
+        component not in {"candidate", "discovery", "reconciliation"}
+        or type(now_ms) is not int
+        or now_ms < 0
+        or type(stall_timeout_ms) is not int
+        or stall_timeout_ms <= 0
+    ):
+        return unavailable
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25)
+        con.row_factory = sqlite3.Row
+        try:
+            start = con.execute(
+                "SELECT * FROM neg_risk_producer_child_starts "
+                "WHERE component=? ORDER BY id DESC LIMIT 1",
+                (component,),
+            ).fetchone()
+            if start is None:
+                return ProducerLivenessHealth("never-started", None, True)
+            values = (
+                start["supervisor_run_id"],
+                start["child_nonce"],
+            )
+            if (
+                not all(isinstance(value, str) and value for value in values)
+                or type(start["attempt"]) is not int
+                or start["attempt"] < 1
+                or type(start["started_at_ms"]) is not int
+                or not 0 <= start["started_at_ms"] <= now_ms
+            ):
+                return unavailable
+            identity = (
+                component,
+                start["supervisor_run_id"],
+                start["child_nonce"],
+            )
+            receipts = con.execute(
+                "SELECT * FROM neg_risk_producer_receipts "
+                "WHERE component=? AND supervisor_run_id=? AND child_nonce=?",
+                identity,
+            ).fetchall()
+            if len(receipts) > 1:
+                return unavailable
+            heartbeats = con.execute(
+                "SELECT * FROM neg_risk_producer_heartbeats "
+                "WHERE component=? AND supervisor_run_id=? AND child_nonce=? "
+                "ORDER BY sequence",
+                identity,
+            ).fetchall()
+            previous_at_ms = start["started_at_ms"]
+            for sequence, heartbeat in enumerate(heartbeats, start=1):
+                if (
+                    heartbeat["sequence"] != sequence
+                    or type(heartbeat["observed_at_ms"]) is not int
+                    or not previous_at_ms <= heartbeat["observed_at_ms"] <= now_ms
+                ):
+                    return unavailable
+                previous_at_ms = heartbeat["observed_at_ms"]
+            if receipts:
+                receipt = receipts[0]
+                if (
+                    receipt["attempt"] != start["attempt"]
+                    or receipt["started_at_ms"] != start["started_at_ms"]
+                    or type(receipt["finished_at_ms"]) is not int
+                    or not start["started_at_ms"] <= receipt["finished_at_ms"] <= now_ms
+                ):
+                    return unavailable
+                outcome = str(receipt["outcome"])
+                state = "unexpected-exit" if outcome == "success" else outcome
+                return ProducerLivenessHealth(
+                    state,
+                    (now_ms - receipt["finished_at_ms"]) / 1_000,
+                    True,
+                )
+            age_ms = now_ms - previous_at_ms
+            state = (
+                "stalled"
+                if age_ms > stall_timeout_ms
+                else ("running" if heartbeats else "starting")
+            )
+            return ProducerLivenessHealth(state, age_ms / 1_000, True)
+        finally:
+            con.close()
+    except (sqlite3.Error, TypeError, ValueError):
+        return unavailable
+
+
+def read_perception_recovery_health(
+    path: Path,
+    *,
+    now_ms: int | None = None,
+) -> PerceptionRecoveryHealth:
     unavailable = PerceptionRecoveryHealth(None, (), "unavailable", None, False)
     try:
         from polyarb.perception.incidents import IncidentManager
         from polyarb.perception.resource_controller import (
-            ResourceDecision,
-            ResourceSample,
+            validate_resource_history,
         )
         from polyarb.perception.store import OpportunityPerceptionStore
 
@@ -127,37 +232,15 @@ def read_perception_recovery_health(path: Path) -> PerceptionRecoveryHealth:
         con.row_factory = sqlite3.Row
         try:
             con.execute("BEGIN")
-            rows = con.execute(
-                "SELECT d.*,s.observed_at_ms,s.sample_json "
-                "FROM neg_risk_resource_decisions d "
-                "JOIN neg_risk_resource_samples s ON s.id=d.sample_id "
-                "ORDER BY d.id"
-            ).fetchall()
-            counts = con.execute(
-                "SELECT (SELECT COUNT(*) FROM neg_risk_resource_samples),"
-                "(SELECT COUNT(*) FROM neg_risk_resource_decisions)"
-            ).fetchone()
-            if counts[0] != counts[1] or len(rows) != counts[0]:
-                return unavailable
-            if not rows:
+            decision = validate_resource_history(con)
+            if decision is None:
                 mode, reason = "idle", None
             else:
-                import json
-
-                previous_decided_at_ms = -1
-                for row in rows:
-                    sample = ResourceSample(**json.loads(row["sample_json"]))
-                    sample.validate()
-                    decision = ResourceDecision(**json.loads(row["decision_json"]))
-                    if (
-                        decision.mode != row["mode"]
-                        or decision.reason != row["reason"]
-                        or decision.decided_at_ms != row["decided_at_ms"]
-                        or sample.observed_at_ms != row["observed_at_ms"]
-                        or decision.decided_at_ms < previous_decided_at_ms
-                    ):
-                        return unavailable
-                    previous_decided_at_ms = decision.decided_at_ms
+                if now_ms is not None and (
+                    now_ms < decision.decided_at_ms
+                    or now_ms > decision.valid_until_ms
+                ):
+                    return unavailable
                 mode, reason = decision.mode, decision.reason
             con.commit()
         finally:
@@ -329,7 +412,10 @@ def _build_health_checks(
 
     recovery_enabled = bool(getattr(settings, "opportunity_producer_supervisor_enabled", False))
     resource_enabled = bool(getattr(settings, "opportunity_resource_controller_enabled", False))
-    recovery = read_perception_recovery_health(store.db_path)
+    recovery = read_perception_recovery_health(
+        store.db_path,
+        now_ms=int(now_s * 1_000),
+    )
     incident_status = "pass"
     if recovery_enabled:
         if not recovery.evidence_consistent:
@@ -359,6 +445,47 @@ def _build_health_checks(
             "time": _utc_now_iso(),
         }
     ]
+    liveness_components = ["candidate"]
+    if bool(getattr(settings, "opportunity_discovery_enabled", False)):
+        liveness_components.append("discovery")
+    if bool(getattr(settings, "opportunity_reconciliation_enabled", False)):
+        liveness_components.append("reconciliation")
+    stall_timeout_ms = int(
+        float(getattr(settings, "producer_stall_timeout_s", 180.0)) * 1_000
+    )
+    for component in liveness_components:
+        liveness = read_producer_liveness_health(
+            store.db_path,
+            component,
+            now_ms=int(now_s * 1_000),
+            stall_timeout_ms=stall_timeout_ms,
+        )
+        unhealthy = (
+            not liveness.evidence_consistent
+            or liveness.state
+            not in {"starting", "running"}
+        )
+        liveness_status = (
+            ("fail" if component == "candidate" else "warn")
+            if recovery_enabled and unhealthy
+            else "pass"
+        )
+        overall = _severity(overall, liveness_status)
+        checks[f"perception:{component}_producer_liveness"] = [
+            {
+                "componentId": f"perception-{component}-producer",
+                "componentType": "component",
+                "observedValue": (
+                    liveness.state if recovery_enabled else "disabled"
+                ),
+                "status": liveness_status,
+                "output": (
+                    f"age_seconds={liveness.age_seconds} "
+                    f"evidence_consistent={liveness.evidence_consistent}"
+                ),
+                "time": _utc_now_iso(),
+            }
+        ]
     resource_status = "pass"
     if resource_enabled and (
         not recovery.evidence_consistent

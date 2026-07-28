@@ -1,6 +1,6 @@
 # Task 5 Implementer Report
 
-Status: DONE — pending independent review
+Status: DONE — independent review findings repaired; pending re-review
 
 ## Scope
 
@@ -15,17 +15,22 @@ wallet, signing, balances, orders or real-money execution.
    scope/kind; transitions serialize under `BEGIN IMMEDIATE`, replay exact
    sequence/scope/kind/time and reject invalid lifecycle edges.
 2. `verified` re-reads real producer tables. Candidate binds group, current
-   certified membership and complete Quote batch; Discovery validates its
+   certified membership, complete Quote batch and atomic candidate fact strictly
+   beyond recovery row anchors; Discovery validates its
    complete cursor history and latest advancing batch; Reconciliation validates
-   the current exact window/checkpoint; HTTP binds a responsive <=2s probe to
-   the expected release. All evidence must postdate recovery.
-3. Resource samples reject nonfinite/negative values and production decisions
-   re-check actual durable Candidate count/p95/missing Quote and producer
-   incident state. Every sample and decision is append-only and history-valid.
+   the current exact window/checkpoint. HTTP proof can only be written by the
+   bounded loopback probe, which disables proxies and binds the actual JSON
+   release ID plus recovery nonce and row anchor. All evidence must postdate
+   recovery.
+3. Resource samples reject nonfinite/negative values. Every decision replays the
+   complete append-only sample/decision chain, exact policy version, sequence,
+   source sample, inputs, transition anchor and TTL before runtime or health can
+   consume it. Corrupt, stale or forged decisions fail closed.
 4. Shedding order is Reconciliation off, Discovery batch/duty down, normal
    Candidate slower. High Candidate and HTTP multipliers stay 1. Empty
-   Candidate expands Discovery but persists `health_claimed=false`. Cooldown
-   prevents an immediate protect→normal flap.
+   Candidate expands Discovery but persists `health_claimed=false`. Discovery
+   pressure alone cannot slow Candidate. Cooldown is anchored only to an actual
+   mode transition, and the persisted duty multiplier drives real runner delay.
 5. Enabling isolation prevents Candidate, Discovery, Reconciliation and legacy
    in-process producer tasks from executing in HTTP. The only production child
    argv values are `PRODUCER_COMMANDS`; tests inject commands through a private
@@ -33,19 +38,25 @@ wallet, signing, balances, orders or real-money execution.
 6. stdout/stderr are drained continuously, tail-bounded to <=16 KiB and common
    credential forms are redacted. Timeout and cancellation always terminate,
    wait for grace, then kill if needed before a terminal receipt is committed.
-7. Only producer-written durable heartbeat progress extends a stall deadline.
-   A parent timer cannot make a wedged child appear alive. Restart count and
-   exponential backoff are bounded; retry exhaustion durably escalates.
-8. `perception:open_incidents` and `perception:resource_mode` read and validate
+7. Only heartbeat progress bound to the exact current supervisor run and child
+   nonce extends a stall deadline. Current-child starts and terminal receipts
+   feed strict liveness health; parent/old-child heartbeats cannot keep a wedged
+   child alive, and exit code zero is still unexpected producer disappearance.
+   Restart count and exponential backoff are bounded; retry exhaustion durably
+   escalates.
+8. `perception:open_incidents`, per-producer liveness and
+   `perception:resource_mode` read and validate
    the exact same SQLite mutations. Candidate/HTTP incidents can fail overall
-   strict health; background incidents remain scoped warnings.
+   strict health; background incidents remain scoped warnings. Uvicorn bind,
+   early task exit or readiness timeout creates a durable escalated HTTP incident,
+   cleans the server task and returns nonzero before any producer starts.
 
 ## Verification
 
 ```text
-Focused lifecycle/resource/supervisor: pass
+Focused lifecycle/resource/supervisor: 176 pass
 Proportional perception + strict health + daemon wiring/shutdown: pass
-Full repository: 2525 collected, 100% pass (1 expected xfail, 1 skip)
+Full repository: 2590 collected, 100% pass (1 expected xfail, 1 skip)
 Ruff changed scope: pass
 compileall: pass
 make docs-m1-check: pass

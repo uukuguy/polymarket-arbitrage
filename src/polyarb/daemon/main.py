@@ -25,7 +25,7 @@ import asyncio
 import signal
 import sys
 import time
-import urllib.request
+import uuid
 
 import uvicorn
 from loguru import logger
@@ -53,6 +53,7 @@ from polyarb.perception.discovery import (
     build_production_discovery,
     compose_candidate_group_ids,
 )
+from polyarb.perception.http_probe import BoundedHttpProbeWriter
 from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.reconciliation import (
     ReconciliationRunner,
@@ -111,6 +112,55 @@ def _start_reconciliation(
     return asyncio.create_task(reconciliation.run(stop_event))
 
 
+async def _wait_for_http_startup(server, server_task, *, timeout_s: float = 10.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while not server.started:
+        if server_task.done():
+            if server_task.cancelled():
+                raise RuntimeError("http-server-startup-failed:cancelled")
+            error = server_task.exception()
+            detail = "exited" if error is None else type(error).__name__
+            raise RuntimeError(f"http-server-startup-failed:{detail}") from error
+        if asyncio.get_running_loop().time() >= deadline:
+            raise RuntimeError("http-server-startup-failed:readiness-timeout")
+        await asyncio.sleep(0.05)
+
+
+async def _abort_http_startup(
+    server,
+    server_task,
+    incidents: IncidentManager,
+    error: BaseException,
+) -> None:
+    incident = incidents.detect(
+        "http",
+        "startup-failure",
+        {"error_kind": type(error).__name__},
+    )
+    if incident.state == "detected":
+        incident = incidents.transition(
+            incident.id,
+            "classified",
+            {"class": "http-startup"},
+        )
+    if incident.state == "classified":
+        incident = incidents.transition(
+            incident.id,
+            "contained",
+            {"producers_started": False},
+        )
+    if incident.state in {"contained", "recovering"}:
+        incidents.transition(
+            incident.id,
+            "escalated",
+            {"requires_process_restart": True},
+        )
+    server.should_exit = True
+    if not server_task.done():
+        server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+
+
 def _start_supervised_producers(
     settings,
     store: OpportunityPerceptionStore,
@@ -155,6 +205,7 @@ async def _run_resource_controller(
         store,
         hot_quote_age_ms=int(settings.resource_hot_quote_age_s * 1_000),
         cooldown_ms=int(settings.resource_cooldown_s * 1_000),
+        decision_ttl_ms=int(settings.resource_decision_ttl_s * 1_000),
     )
     previous_limit = settings.discovery_page_limit
     incident_manager = IncidentManager(store)
@@ -224,37 +275,44 @@ async def _run_http_recovery_probe(
 ) -> None:
     url = f"http://127.0.0.1:{settings.http_port}/healthz"
     manager = IncidentManager(store)
+    writer = BoundedHttpProbeWriter(store, timeout_s=2.0)
     while not stop_event.is_set():
-        started_at_ms = int(time.time() * 1_000)
-
-        def probe() -> bool:
-            try:
-                with urllib.request.urlopen(url, timeout=2.0) as response:
-                    return response.status == 200
-            except OSError:
-                return False
-
-        responsive = await asyncio.to_thread(probe)
-        await asyncio.to_thread(
-            store.record_http_probe,
-            release_id=settings.release_id,
-            started_at_ms=started_at_ms,
-            finished_at_ms=int(time.time() * 1_000),
-            responsive=responsive,
+        incidents = await asyncio.to_thread(manager.open_incidents)
+        recovering = next(
+            (
+                incident
+                for incident in incidents
+                if incident.scope == "http" and incident.state == "recovering"
+            ),
+            None,
         )
-        if responsive:
-            incidents = await asyncio.to_thread(manager.open_incidents)
-            for incident in incidents:
-                if incident.scope == "http" and incident.state == "recovering":
-                    try:
-                        await asyncio.to_thread(
-                            manager.transition,
-                            incident.id,
-                            "verified",
-                            {"release_id": settings.release_id},
-                        )
-                    except ValueError:
-                        pass
+        probe_nonce = (
+            recovering.evidence.get("probe_nonce")
+            if recovering is not None
+            else uuid.uuid4().hex
+        )
+        if not isinstance(probe_nonce, str) or not probe_nonce:
+            probe_nonce = uuid.uuid4().hex
+        result = await asyncio.to_thread(
+            writer.probe,
+            url,
+            expected_release_id=settings.release_id,
+            probe_nonce=probe_nonce,
+        )
+        if result.responsive:
+            if recovering is not None:
+                try:
+                    await asyncio.to_thread(
+                        manager.transition,
+                        recovering.id,
+                        "verified",
+                        {
+                            "release_id": settings.release_id,
+                            "probe_nonce": probe_nonce,
+                        },
+                    )
+                except ValueError:
+                    pass
         else:
             incident = await asyncio.to_thread(
                 manager.detect,
@@ -281,7 +339,10 @@ async def _run_http_recovery_probe(
                     manager.transition,
                     incident.id,
                     "recovering",
-                    {"release_id": settings.release_id},
+                    {
+                        "release_id": settings.release_id,
+                        "probe_nonce": uuid.uuid4().hex,
+                    },
                 )
         try:
             await asyncio.wait_for(
@@ -398,15 +459,20 @@ async def main() -> int:
 
     server_task = asyncio.create_task(server.serve())
 
-    # Wait for uvicorn to be ready before starting the scheduler.
-    # server.started is set once uvicorn binds its socket and begins
-    # accepting connections. Without this gate, the scheduler's first
-    # tick can monopolize the event loop for minutes and Fly's health
-    # check never sees a live port.
-    for _ in range(100):
-        if server.started:
-            break
-        await asyncio.sleep(0.1)
+    # A bound and accepting HTTP socket is the startup commit point. Producer
+    # work must not begin if uvicorn exits, fails to bind, or never becomes
+    # ready.
+    try:
+        await _wait_for_http_startup(server, server_task, timeout_s=10.0)
+    except RuntimeError as error:
+        await _abort_http_startup(
+            server,
+            server_task,
+            IncidentManager(perception_store),
+            error,
+        )
+        logger.error("daemon HTTP startup failed; producers were not started")
+        return 1
     logger.info(f"daemon running: http server on :{settings.http_port}, starting scheduler")
 
     scheduler_task = (

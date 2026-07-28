@@ -544,7 +544,9 @@ CREATE TABLE IF NOT EXISTS neg_risk_http_probe_receipts (
   release_id TEXT NOT NULL,
   started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
   finished_at_ms INTEGER NOT NULL CHECK(finished_at_ms >= started_at_ms),
-  responsive INTEGER NOT NULL CHECK(responsive IN (0,1))
+  responsive INTEGER NOT NULL CHECK(responsive IN (0,1)),
+  observed_release_id TEXT,
+  probe_nonce TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS neg_risk_resource_samples (
@@ -560,7 +562,10 @@ CREATE TABLE IF NOT EXISTS neg_risk_resource_decisions (
   mode TEXT NOT NULL CHECK(mode IN
     ('normal','protect-hot-path','empty-candidate-exploration')),
   reason TEXT NOT NULL,
-  decision_json TEXT NOT NULL
+  policy_version TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+  decision_json TEXT NOT NULL,
+  UNIQUE(sequence)
 );
 
 CREATE TABLE IF NOT EXISTS neg_risk_producer_receipts (
@@ -575,6 +580,20 @@ CREATE TABLE IF NOT EXISTS neg_risk_producer_receipts (
   exit_code INTEGER,
   stdout_tail TEXT NOT NULL,
   stderr_tail TEXT NOT NULL,
+  supervisor_run_id TEXT NOT NULL,
+  child_nonce TEXT NOT NULL,
+  UNIQUE(component,attempt)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_producer_child_starts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  component TEXT NOT NULL CHECK(component IN
+    ('candidate','discovery','reconciliation')),
+  supervisor_run_id TEXT NOT NULL,
+  child_nonce TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK(attempt >= 1),
+  started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+  UNIQUE(component,supervisor_run_id,child_nonce),
   UNIQUE(component,attempt)
 );
 
@@ -582,8 +601,12 @@ CREATE TABLE IF NOT EXISTS neg_risk_producer_heartbeats (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   component TEXT NOT NULL CHECK(component IN
     ('candidate','discovery','reconciliation')),
+  supervisor_run_id TEXT NOT NULL,
+  child_nonce TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK(sequence >= 1),
   observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
-  state TEXT NOT NULL CHECK(state IN ('progress','yielded','paused'))
+  state TEXT NOT NULL CHECK(state IN ('progress','yielded','paused')),
+  UNIQUE(component,supervisor_run_id,child_nonce,sequence)
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_producer_heartbeat_component
   ON neg_risk_producer_heartbeats(component,id);

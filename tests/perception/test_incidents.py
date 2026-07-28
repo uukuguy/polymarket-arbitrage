@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import sqlite3
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from polyarb.http.health import read_perception_recovery_health
+from polyarb.perception.http_probe import BoundedHttpProbeWriter
 from polyarb.perception.incidents import (
     IncidentManager,
     InvalidIncidentTransitionError,
@@ -35,18 +39,30 @@ def _publish_quote(store, *, quoted_at_ms: int = 4_000):
         ),
     )
     store.publish_group_revision(revision)
-    store.publish_quote_batch(
-        GroupQuoteBatch.complete(
-            group_id="g-1",
-            membership_hash=revision.membership_hash,
-            quote_batch_id="qb-1",
-            started_at_ms=quoted_at_ms - 100,
-            quoted_at_ms=quoted_at_ms,
-            legs=(
-                GroupQuoteLeg("t-1", revision.membership_hash, 0.4, 10, "executable"),
-                GroupQuoteLeg("t-2", revision.membership_hash, 0.5, 10, "executable"),
-            ),
-        )
+    batch = GroupQuoteBatch.complete(
+        group_id="g-1",
+        membership_hash=revision.membership_hash,
+        quote_batch_id="qb-1",
+        started_at_ms=quoted_at_ms - 100,
+        quoted_at_ms=quoted_at_ms,
+        legs=(
+            GroupQuoteLeg("t-1", revision.membership_hash, 0.4, 10, "executable"),
+            GroupQuoteLeg("t-2", revision.membership_hash, 0.5, 10, "executable"),
+        ),
+    )
+    store.publish_candidate_success(
+        batch,
+        observed_at_ms=quoted_at_ms,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.9,
+        gross_edge_bps=1_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="test",
+        next_due_at_ms=quoted_at_ms + 15_000,
     )
     return revision
 
@@ -115,28 +131,69 @@ def test_concurrent_transition_uses_latest_append_only_state(tmp_path) -> None:
 
 def test_http_verification_requires_expected_release_and_bounded_probe(tmp_path) -> None:
     store = _store(tmp_path)
-    now = [2_000]
-    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    manager = IncidentManager(store)
     incident = manager.detect("http", "unresponsive", {"release_id": "r-2"})
     manager.transition(incident.id, "classified", {})
     manager.transition(incident.id, "contained", {})
-    manager.transition(incident.id, "recovering", {"release_id": "r-2"})
-    store.record_http_probe(
-        release_id="r-wrong",
-        started_at_ms=2_100,
-        finished_at_ms=2_120,
-        responsive=True,
+    manager.transition(
+        incident.id,
+        "recovering",
+        {"release_id": "r-2", "probe_nonce": "recovery-nonce"},
     )
-    now[0] = 2_300
-    with pytest.raises(RecoveryEvidenceRequiredError):
-        manager.transition(incident.id, "verified", {"release_id": "r-2"})
-    store.record_http_probe(
-        release_id="r-2",
-        started_at_ms=2_200,
-        finished_at_ms=2_250,
-        responsive=True,
-    )
-    assert manager.transition(incident.id, "verified", {"release_id": "r-2"}).state == "verified"
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = b'{"releaseId":"r-2"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        writer = BoundedHttpProbeWriter(store, timeout_s=2.0)
+        wrong = writer.probe(
+            f"http://127.0.0.1:{server.server_port}/healthz",
+            expected_release_id="r-wrong",
+            probe_nonce="wrong-nonce",
+        )
+        assert wrong.responsive is False
+        with pytest.raises(RecoveryEvidenceRequiredError):
+            manager.transition(
+                incident.id,
+                "verified",
+                {"release_id": "r-2", "probe_nonce": "recovery-nonce"},
+            )
+        valid = writer.probe(
+            f"http://127.0.0.1:{server.server_port}/healthz",
+            expected_release_id="r-2",
+            probe_nonce="recovery-nonce",
+        )
+        assert valid.responsive is True
+        assert (
+            manager.transition(
+                incident.id,
+                "verified",
+                {"release_id": "r-2", "probe_nonce": "recovery-nonce"},
+            ).state
+            == "verified"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    with pytest.raises(PermissionError):
+        store.record_http_probe(
+            release_id="r-2",
+            started_at_ms=1,
+            finished_at_ms=2,
+            responsive=True,
+        )
 
 
 def test_health_fails_closed_when_old_resource_evidence_is_rewritten(tmp_path) -> None:
@@ -191,3 +248,50 @@ def test_resource_incident_requires_post_recovery_durable_decision(tmp_path) -> 
         ).state
         == "verified"
     )
+
+
+def test_historical_non_object_incident_evidence_fails_closed(tmp_path) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    incident = manager.detect("discovery", "timeout", {"cursor": "c-1"})
+    manager.transition(incident.id, "classified", {})
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_incident_events SET evidence_json='[]' "
+            "WHERE incident_id=? AND sequence=1",
+            (incident.id,),
+        )
+    with pytest.raises(ValueError, match="invalid-incident"):
+        manager.open_incidents()
+    assert read_perception_recovery_health(store.db_path).evidence_consistent is False
+
+
+def test_candidate_recovery_rejects_malformed_complete_quote_row(tmp_path) -> None:
+    store = _store(tmp_path)
+    now = [2_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    incident = manager.detect("candidate:g-1", "clob-timeout", {})
+    manager.transition(incident.id, "classified", {})
+    manager.transition(incident.id, "contained", {})
+    manager.transition(incident.id, "recovering", {"retry": 1})
+    revision = _publish_quote(store, quoted_at_ms=2_100)
+    with sqlite3.connect(store.db_path) as con:
+        malformed = [
+            ["wrong-token", revision.membership_hash, 0.4, 10.0, "executable"],
+            ["t-2", revision.membership_hash, 0.5, 10.0, "executable"],
+        ]
+        con.execute(
+            "UPDATE neg_risk_group_quote_batches SET legs_json=? WHERE id='qb-1'",
+            (json.dumps(malformed),),
+        )
+    now[0] = 2_200
+    with pytest.raises(RecoveryEvidenceRequiredError):
+        manager.transition(
+            incident.id,
+            "verified",
+            {
+                "quote_batch_id": "qb-1",
+                "group_id": "g-1",
+                "membership_hash": revision.membership_hash,
+            },
+        )

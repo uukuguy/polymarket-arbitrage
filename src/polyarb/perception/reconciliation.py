@@ -164,6 +164,7 @@ class ReconciliationRunner:
         gamma: object,
         interval_s: float,
         store: OpportunityPerceptionStore | None = None,
+        require_resource_decision: bool = False,
     ) -> None:
         if interval_s <= 0:
             raise ValueError("reconciliation-interval-must-be-positive")
@@ -171,13 +172,16 @@ class ReconciliationRunner:
         self._store = store or worker._store
         self._gamma = gamma
         self._interval_s = interval_s
+        self._require_resource_decision = require_resource_decision
 
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
             while not stop_event.is_set():
                 try:
                     decision = await asyncio.to_thread(
-                        self._store.latest_resource_decision
+                        self._store.latest_resource_decision,
+                        now_ms=int(time.time() * 1_000),
+                        required=self._require_resource_decision,
                     )
                     if decision is not None and not decision["reconciliation_enabled"]:
                         await asyncio.to_thread(
@@ -223,6 +227,9 @@ def build_production_reconciliation(settings: object) -> ReconciliationRunner:
         gamma=gamma,
         interval_s=settings.reconciliation_interval_s,
         store=store,
+        require_resource_decision=(
+            settings.opportunity_resource_controller_enabled
+        ),
     )
 
 

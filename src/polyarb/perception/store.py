@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -243,6 +244,8 @@ class ProducerReceipt:
     exit_code: int | None
     stdout_tail: str
     stderr_tail: str
+    supervisor_run_id: str
+    child_nonce: str
 
 
 class OpportunityPerceptionStore:
@@ -371,6 +374,51 @@ class OpportunityPerceptionStore:
                     "neg_risk_reconciliation_batches",
                     "duplicate_count",
                     "INTEGER NOT NULL DEFAULT 0",
+                ),
+                (
+                    "neg_risk_resource_decisions",
+                    "policy_version",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_resource_decisions",
+                    "sequence",
+                    "INTEGER",
+                ),
+                (
+                    "neg_risk_producer_heartbeats",
+                    "supervisor_run_id",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_producer_heartbeats",
+                    "child_nonce",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_producer_heartbeats",
+                    "sequence",
+                    "INTEGER",
+                ),
+                (
+                    "neg_risk_producer_receipts",
+                    "supervisor_run_id",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_producer_receipts",
+                    "child_nonce",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_http_probe_receipts",
+                    "observed_release_id",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_http_probe_receipts",
+                    "probe_nonce",
+                    "TEXT",
                 ),
             )
             for table, column, definition in migrations:
@@ -2929,15 +2977,40 @@ class OpportunityPerceptionStore:
         finished_at_ms: int,
         responsive: bool,
     ) -> None:
-        if not release_id or started_at_ms < 0 or finished_at_ms < started_at_ms:
+        raise PermissionError("authenticated-http-probe-writer-required")
+
+    def _record_http_probe_result(self, result, *, _authority: object) -> None:
+        from polyarb.perception.http_probe import _HTTP_PROBE_WRITE_AUTHORITY
+
+        if _authority is not _HTTP_PROBE_WRITE_AUTHORITY:
+            raise PermissionError("authenticated-http-probe-writer-required")
+        if (
+            not result.expected_release_id
+            or not result.probe_nonce
+            or result.started_at_ms < 0
+            or result.finished_at_ms < result.started_at_ms
+            or result.finished_at_ms - result.started_at_ms > 2_000
+            or type(result.responsive) is not bool
+            or (
+                result.responsive
+                and result.observed_release_id != result.expected_release_id
+            )
+        ):
             raise ValueError("invalid-http-probe")
         con = self._connect()
         try:
             con.execute(
                 "INSERT INTO neg_risk_http_probe_receipts("
-                "release_id,started_at_ms,finished_at_ms,responsive"
-                ") VALUES(?,?,?,?)",
-                (release_id, started_at_ms, finished_at_ms, int(responsive)),
+                "release_id,started_at_ms,finished_at_ms,responsive,"
+                "observed_release_id,probe_nonce) VALUES(?,?,?,?,?,?)",
+                (
+                    result.expected_release_id,
+                    result.started_at_ms,
+                    result.finished_at_ms,
+                    int(result.responsive),
+                    result.observed_release_id,
+                    result.probe_nonce,
+                ),
             )
             con.commit()
         finally:
@@ -2952,6 +3025,8 @@ class OpportunityPerceptionStore:
             or receipt.outcome not in {"success", "nonzero", "timeout", "cancelled", "spawn-error"}
             or len(receipt.stdout_tail.encode()) > 16_384
             or len(receipt.stderr_tail.encode()) > 16_384
+            or not receipt.supervisor_run_id
+            or not receipt.child_nonce
         ):
             raise ValueError("invalid-producer-receipt")
         con = self._connect()
@@ -2959,7 +3034,8 @@ class OpportunityPerceptionStore:
             con.execute(
                 "INSERT INTO neg_risk_producer_receipts("
                 "component,attempt,started_at_ms,finished_at_ms,outcome,"
-                "exit_code,stdout_tail,stderr_tail) VALUES(?,?,?,?,?,?,?,?)",
+                "exit_code,stdout_tail,stderr_tail,supervisor_run_id,child_nonce"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     receipt.component,
                     receipt.attempt,
@@ -2969,6 +3045,8 @@ class OpportunityPerceptionStore:
                     receipt.exit_code,
                     receipt.stdout_tail,
                     receipt.stderr_tail,
+                    receipt.supervisor_run_id,
+                    receipt.child_nonce,
                 ),
             )
             con.commit()
@@ -2994,6 +3072,8 @@ class OpportunityPerceptionStore:
                     exit_code=row["exit_code"],
                     stdout_tail=row["stdout_tail"],
                     stderr_tail=row["stderr_tail"],
+                    supervisor_run_id=row["supervisor_run_id"],
+                    child_nonce=row["child_nonce"],
                 )
                 for row in rows
             )
@@ -3004,23 +3084,78 @@ class OpportunityPerceptionStore:
         receipts = self.producer_receipts(component)
         return receipts[-1].outcome if receipts else "never-started"
 
-    def record_producer_heartbeat(
-        self, component: str, *, observed_at_ms: int, state: str = "progress"
+    def record_producer_child_start(
+        self,
+        component: str,
+        *,
+        supervisor_run_id: str,
+        child_nonce: str,
+        attempt: int,
+        started_at_ms: int,
     ) -> None:
+        if (
+            component not in {"candidate", "discovery", "reconciliation"}
+            or not supervisor_run_id
+            or not child_nonce
+            or attempt < 1
+            or started_at_ms < 0
+        ):
+            raise ValueError("invalid-producer-child-start")
+        con = self._connect()
+        try:
+            con.execute(
+                "INSERT INTO neg_risk_producer_child_starts("
+                "component,supervisor_run_id,child_nonce,attempt,started_at_ms"
+                ") VALUES(?,?,?,?,?)",
+                (component, supervisor_run_id, child_nonce, attempt, started_at_ms),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def record_producer_heartbeat(
+        self,
+        component: str,
+        *,
+        observed_at_ms: int,
+        state: str = "progress",
+        supervisor_run_id: str | None = None,
+        child_nonce: str | None = None,
+    ) -> int:
+        run_id = supervisor_run_id or os.environ.get(
+            "POLYARB_PRODUCER_SUPERVISOR_RUN_ID", "in-process"
+        )
+        nonce = child_nonce or os.environ.get(
+            "POLYARB_PRODUCER_CHILD_NONCE", "in-process"
+        )
         if (
             component not in {"candidate", "discovery", "reconciliation"}
             or observed_at_ms < 0
             or state not in {"progress", "yielded", "paused"}
+            or not run_id
+            or not nonce
         ):
             raise ValueError("invalid-producer-heartbeat")
         con = self._connect()
         try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT MAX(sequence) FROM neg_risk_producer_heartbeats "
+                "WHERE component=? AND supervisor_run_id=? AND child_nonce=?",
+                (component, run_id, nonce),
+            ).fetchone()
+            sequence = 1 if row[0] is None else int(row[0]) + 1
             con.execute(
                 "INSERT INTO neg_risk_producer_heartbeats("
-                "component,observed_at_ms,state) VALUES(?,?,?)",
-                (component, observed_at_ms, state),
+                "component,supervisor_run_id,child_nonce,sequence,"
+                "observed_at_ms,state) VALUES(?,?,?,?,?,?)",
+                (component, run_id, nonce, sequence, observed_at_ms, state),
             )
             con.commit()
+            return sequence
+        except BaseException:
+            con.rollback()
+            raise
         finally:
             con.close()
 
@@ -3038,31 +3173,46 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
 
-    def latest_resource_decision(self) -> dict | None:
+    def latest_resource_decision(
+        self,
+        *,
+        now_ms: int | None = None,
+        required: bool = False,
+    ) -> dict | None:
         con = self._connect()
         try:
-            row = con.execute(
-                "SELECT mode,reason,decided_at_ms,decision_json "
-                "FROM neg_risk_resource_decisions ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if row is None:
+            from polyarb.perception.resource_controller import (
+                validate_resource_history,
+            )
+
+            decision = validate_resource_history(con)
+            if decision is None:
+                if required:
+                    raise ValueError("resource-decision-required")
                 return None
-            decision = json.loads(row["decision_json"])
-            if (
-                decision.get("mode") != row["mode"]
-                or decision.get("reason") != row["reason"]
-                or decision.get("decided_at_ms") != row["decided_at_ms"]
+            if now_ms is not None and (
+                type(now_ms) is not int
+                or now_ms < decision.decided_at_ms
+                or now_ms > decision.valid_until_ms
             ):
-                raise ValueError("invalid-resource-decision")
-            return decision
+                raise ValueError("stale-resource-decision")
+            return asdict(decision)
         finally:
             con.close()
 
     def latest_resource_decision_id(self) -> int | None:
         con = self._connect()
         try:
+            from polyarb.perception.resource_controller import (
+                validate_resource_history,
+            )
+
+            decision = validate_resource_history(con)
+            if decision is None:
+                return None
             row = con.execute(
-                "SELECT id FROM neg_risk_resource_decisions ORDER BY id DESC LIMIT 1"
+                "SELECT id FROM neg_risk_resource_decisions WHERE sequence=?",
+                (decision.sequence,),
             ).fetchone()
             return None if row is None else int(row["id"])
         finally:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.resource_controller import ResourceController, ResourceSample
 from polyarb.perception.store import OpportunityPerceptionStore
 
@@ -81,3 +82,85 @@ def test_default_controller_rejects_forged_candidate_authority(tmp_path) -> None
         previous_discovery_batch_limit=50,
     )
     assert controller.decide(actual).reason == "empty-candidate-exploration"
+
+
+def test_runtime_replays_all_resource_evidence_before_applying_latest(tmp_path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    controller = ResourceController(store, clock_ms=lambda: 2_000)
+    sample = controller.capture_sample(
+        reconciliation_running=False,
+        previous_discovery_batch_limit=50,
+    )
+    controller.decide(sample)
+    controller.decide(sample)
+    with store._connect() as con:
+        con.execute("UPDATE neg_risk_resource_samples SET sample_json='[]' WHERE id=1")
+    with pytest.raises(ValueError, match="invalid-resource"):
+        store.latest_resource_decision()
+
+
+def test_resource_history_rejects_stale_sequence_and_sample_mismatch(tmp_path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    controller = ResourceController(store, clock_ms=lambda: 2_000)
+    sample = controller.capture_sample(
+        reconciliation_running=False,
+        previous_discovery_batch_limit=50,
+    )
+    controller.decide(sample)
+    controller.decide(sample)
+    with store._connect() as con:
+        con.execute("UPDATE neg_risk_resource_decisions SET sample_id=1 WHERE id=2")
+    with pytest.raises(ValueError, match="invalid-resource"):
+        store.latest_resource_decision()
+
+
+def test_repeated_samples_do_not_extend_hysteresis_transition_anchor(tmp_path) -> None:
+    now = [2_000]
+    controller = _controller(tmp_path, lambda: now[0])
+    controller.decide(_sample(candidate_quote_p95_ms=25_000))
+    for observed in (2_200, 2_400, 2_600, 2_800):
+        now[0] = observed
+        assert (
+            controller.decide(_sample(candidate_quote_p95_ms=5_000, observed_at_ms=observed)).mode
+            == "protect-hot-path"
+        )
+    now[0] = 3_100
+    assert (
+        controller.decide(_sample(candidate_quote_p95_ms=5_000, observed_at_ms=3_100)).mode
+        == "normal"
+    )
+
+
+def test_discovery_incident_does_not_slow_normal_candidate(tmp_path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    manager = IncidentManager(store, clock_ms=lambda: 2_000)
+    incident = manager.detect("discovery", "child-timeout", {})
+    manager.transition(incident.id, "classified", {})
+    controller = ResourceController(store, clock_ms=lambda: 2_000)
+    sample = controller.capture_sample(
+        reconciliation_running=False,
+        previous_discovery_batch_limit=50,
+    )
+    decision = controller.decide(sample)
+    assert decision.normal_candidate_interval_multiplier == 1.0
+    assert decision.mode == "empty-candidate-exploration"
+
+
+def test_expired_resource_decision_fails_closed_at_runtime(tmp_path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    controller = ResourceController(
+        store,
+        clock_ms=lambda: 2_000,
+        decision_ttl_ms=500,
+    )
+    sample = controller.capture_sample(
+        reconciliation_running=False,
+        previous_discovery_batch_limit=50,
+    )
+    controller.decide(sample)
+    with pytest.raises(ValueError, match="stale-resource-decision"):
+        store.latest_resource_decision(now_ms=2_501, required=True)

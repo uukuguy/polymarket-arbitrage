@@ -115,6 +115,29 @@ class IncidentManager:
             if row is None or state not in ALLOWED[row["state"]]:
                 raise InvalidIncidentTransitionError("invalid-incident-transition")
             latest = self._from_row(row)
+            if state == "recovering" and (
+                latest.scope == "candidate"
+                or latest.scope.startswith("candidate:")
+            ):
+                evidence = {
+                    **evidence,
+                    "quote_row_id": con.execute(
+                        "SELECT COALESCE(MAX(rowid),0) "
+                        "FROM neg_risk_group_quote_batches"
+                    ).fetchone()[0],
+                    "candidate_fact_row_id": con.execute(
+                        "SELECT COALESCE(MAX(rowid),0) "
+                        "FROM neg_risk_candidate_watch_facts"
+                    ).fetchone()[0],
+                }
+            if state == "recovering" and latest.scope == "http":
+                evidence = {
+                    **evidence,
+                    "http_probe_row_id": con.execute(
+                        "SELECT COALESCE(MAX(rowid),0) "
+                        "FROM neg_risk_http_probe_receipts"
+                    ).fetchone()[0],
+                }
             if state == "verified":
                 recovery = con.execute(
                     "SELECT * FROM neg_risk_incident_events "
@@ -217,20 +240,54 @@ class IncidentManager:
                 or (scope.startswith("candidate:") and group_id != scope.split(":", 1)[1])
             ):
                 return False
+            try:
+                group = self._store.current_group(group_id)
+                quote = self._store.current_quote_batch(
+                    group_id,
+                    now_ms=verification_at_ms,
+                    max_age_ms=max(1, verification_at_ms + 1),
+                )
+            except (sqlite3.Error, TypeError, ValueError):
+                return False
+            if group is None or quote is None:
+                return False
+            quote_anchor = recovery_evidence.get("quote_row_id")
+            fact_anchor = recovery_evidence.get("candidate_fact_row_id")
+            if (
+                type(quote_anchor) is not int
+                or quote_anchor < 0
+                or type(fact_anchor) is not int
+                or fact_anchor < 0
+            ):
+                return False
+            quote_row = con.execute(
+                "SELECT rowid FROM neg_risk_group_quote_batches WHERE id=?",
+                (quote.quote_batch_id,),
+            ).fetchone()
             row = con.execute(
-                "SELECT q.id,q.membership_hash,q.quoted_at_ms,c.event_id,c.status "
-                "FROM neg_risk_group_quote_batches q "
-                "JOIN neg_risk_group_revisions c ON "
-                "c.group_id=q.group_id AND c.revision=q.group_revision "
-                "WHERE q.id=? AND q.group_id=? AND q.status='complete'",
-                (verification_evidence.get("quote_batch_id"), group_id),
+                "SELECT rowid AS candidate_fact_row_id,* "
+                "FROM neg_risk_candidate_watch_facts "
+                "WHERE group_id=? AND membership_hash=? AND quote_batch_id=? "
+                "AND last_result IN ('watching','no-edge') "
+                "AND observed_at_ms=? ORDER BY id DESC LIMIT 1",
+                (
+                    group_id,
+                    quote.membership_hash,
+                    quote.quote_batch_id,
+                    quote.quoted_at_ms,
+                ),
             ).fetchone()
             return bool(
                 row
-                and row["quoted_at_ms"] > recovery_started_at_ms
-                and row["quoted_at_ms"] <= verification_at_ms
-                and row["status"] == "certified"
-                and row["membership_hash"] == verification_evidence.get("membership_hash")
+                and quote_row
+                and group.status == "certified"
+                and quote.quote_batch_id == verification_evidence.get("quote_batch_id")
+                and quote_row["rowid"] > quote_anchor
+                and row["candidate_fact_row_id"] > fact_anchor
+                and quote.quoted_at_ms >= recovery_started_at_ms
+                and quote.quoted_at_ms <= verification_at_ms
+                and group.membership_hash == quote.membership_hash
+                and quote.membership_hash == verification_evidence.get("membership_hash")
             )
         if scope == "discovery":
             row = con.execute(
@@ -269,16 +326,31 @@ class IncidentManager:
             )
         if scope == "http":
             release_id = recovery_evidence.get("release_id")
-            if verification_evidence.get("release_id") != release_id:
+            probe_nonce = recovery_evidence.get("probe_nonce")
+            probe_anchor = recovery_evidence.get("http_probe_row_id")
+            if (
+                not isinstance(release_id, str)
+                or not release_id
+                or not isinstance(probe_nonce, str)
+                or not probe_nonce
+                or type(probe_anchor) is not int
+                or probe_anchor < 0
+                or verification_evidence.get("release_id") != release_id
+                or verification_evidence.get("probe_nonce") != probe_nonce
+            ):
                 return False
             row = con.execute(
-                "SELECT * FROM neg_risk_http_probe_receipts "
-                "WHERE release_id=? AND started_at_ms>? AND responsive=1 "
+                "SELECT rowid AS probe_row_id,* "
+                "FROM neg_risk_http_probe_receipts "
+                "WHERE release_id=? AND probe_nonce=? AND responsive=1 "
                 "ORDER BY id DESC LIMIT 1",
-                (release_id, recovery_started_at_ms),
+                (release_id, probe_nonce),
             ).fetchone()
             return bool(
                 row
+                and row["probe_row_id"] > probe_anchor
+                and row["observed_release_id"] == release_id
+                and row["started_at_ms"] >= recovery_started_at_ms
                 and row["finished_at_ms"] <= verification_at_ms
                 and row["finished_at_ms"] - row["started_at_ms"] <= 2_000
             )
@@ -294,13 +366,17 @@ class IncidentManager:
             ):
                 return False
             try:
-                decision = json.loads(row["decision_json"])
-            except (TypeError, ValueError):
+                from polyarb.perception.resource_controller import (
+                    validate_resource_history,
+                )
+
+                decision = validate_resource_history(con)
+            except (sqlite3.Error, TypeError, ValueError):
                 return False
             return bool(
-                decision.get("mode") == row["mode"]
-                and decision.get("reason") == row["reason"]
-                and decision.get("decided_at_ms") == row["decided_at_ms"]
+                decision is not None
+                and decision.sequence == row["sequence"]
+                and decision.decided_at_ms == row["decided_at_ms"]
             )
         return False
 
@@ -321,6 +397,29 @@ class IncidentManager:
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> Incident:
+        try:
+            evidence = json.loads(row["evidence_json"])
+            values = (
+                row["incident_id"],
+                row["scope"],
+                row["kind"],
+                row["state"],
+            )
+            if (
+                not all(isinstance(value, str) and value for value in values)
+                or row["state"] not in ALLOWED
+                or type(row["sequence"]) is not int
+                or row["sequence"] < 1
+                or type(row["occurred_at_ms"]) is not int
+                or row["occurred_at_ms"] < 0
+                or not isinstance(evidence, dict)
+                or not all(isinstance(key, str) for key in evidence)
+            ):
+                raise ValueError
+            # Re-encoding rejects NaN/Infinity and non-JSON semantic values.
+            json.dumps(evidence, allow_nan=False)
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
+            raise ValueError("invalid-incident-evidence-history") from error
         return Incident(
             id=row["incident_id"],
             sequence=row["sequence"],
@@ -328,7 +427,7 @@ class IncidentManager:
             kind=row["kind"],
             state=row["state"],
             occurred_at_ms=row["occurred_at_ms"],
-            evidence=json.loads(row["evidence_json"]),
+            evidence=evidence,
         )
 
 

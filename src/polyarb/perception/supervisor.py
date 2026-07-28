@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sqlite3
 import sys
 import time
+import urllib.parse
+import uuid
 from dataclasses import dataclass
 
 from polyarb.perception.incidents import (
@@ -37,10 +40,17 @@ PRODUCER_COMMANDS = {
     ),
 }
 
-_SECRET_RE = re.compile(
-    r"(?i)(authorization:\s*bearer\s+|(?:token|secret|password|api[_-]?key)=)"
-    r"[^\s]+"
+_AUTH_RE = re.compile(r"(?i)(authorization\s*:\s*(?:bearer|basic)\s+)[^\s\\]+")
+_COOKIE_RE = re.compile(r"(?i)(cookie\s*:)[^\r\n\\]*")
+_JSON_SECRET_RE = re.compile(
+    r'(?i)("(?:token|secret|password|api[_-]?key|authorization|cookie)"\s*:\s*")'
+    r'[^"]*(")'
 )
+_KEY_VALUE_RE = re.compile(
+    r"(?i)((?:^|[?&;\s])(?:token|secret|password|api[_-]?key|authorization|cookie)"
+    r"\s*=\s*)[^&;\s\\]+"
+)
+_URI_USERINFO_RE = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@")
 
 
 @dataclass(frozen=True)
@@ -82,6 +92,7 @@ class ProducerSupervisor:
 
     async def run(self, spec: ProducerSpec, stop_event: asyncio.Event) -> None:
         attempt = len(self._store.producer_receipts(spec.component))
+        supervisor_run_id = uuid.uuid4().hex
         incident: Incident | None = None
         retries = 0
         while not stop_event.is_set():
@@ -92,11 +103,23 @@ class ProducerSupervisor:
             stderr_task = None
             outcome = "spawn-error"
             exit_code = None
+            child_nonce = uuid.uuid4().hex
             try:
+                child_env = os.environ.copy()
+                child_env["POLYARB_PRODUCER_SUPERVISOR_RUN_ID"] = supervisor_run_id
+                child_env["POLYARB_PRODUCER_CHILD_NONCE"] = child_nonce
                 process = await asyncio.create_subprocess_exec(
                     *self._commands[spec.component],
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=child_env,
+                )
+                self._store.record_producer_child_start(
+                    spec.component,
+                    supervisor_run_id=supervisor_run_id,
+                    child_nonce=child_nonce,
+                    attempt=attempt,
+                    started_at_ms=started_at_ms,
                 )
                 assert process.stdout is not None and process.stderr is not None
                 stdout_task = asyncio.create_task(
@@ -111,6 +134,8 @@ class ProducerSupervisor:
                     spec.timeout_s,
                     spec.component,
                     incident,
+                    supervisor_run_id,
+                    child_nonce,
                 )
                 if signal == "stop":
                     outcome = "cancelled"
@@ -128,8 +153,8 @@ class ProducerSupervisor:
             except OSError:
                 outcome = "spawn-error"
             finally:
-                stdout = await asyncio.shield(stdout_task) if stdout_task is not None else b""
-                stderr = await asyncio.shield(stderr_task) if stderr_task is not None else b""
+                stdout = await self._drain_result(stdout_task)
+                stderr = await self._drain_result(stderr_task)
                 self._store.record_producer_receipt(
                     ProducerReceipt(
                         component=spec.component,
@@ -140,18 +165,18 @@ class ProducerSupervisor:
                         exit_code=exit_code,
                         stdout_tail=self._safe_text(stdout),
                         stderr_tail=self._safe_text(stderr),
+                        supervisor_run_id=supervisor_run_id,
+                        child_nonce=child_nonce,
                     )
                 )
 
-            if outcome in {"success", "cancelled"}:
-                if outcome == "success" and incident is not None:
-                    self._attempt_verify(incident)
+            if outcome == "cancelled":
                 return
 
             incident = self._record_failure(
                 incident,
                 component=spec.component,
-                outcome=outcome,
+                outcome=("unexpected-exit" if outcome == "success" else outcome),
                 attempt=attempt,
             )
             if retries >= spec.max_restarts:
@@ -169,10 +194,19 @@ class ProducerSupervisor:
             except TimeoutError:
                 pass
 
-    async def _wait(self, process, stop_event, timeout_s, component, incident):
+    async def _wait(
+        self,
+        process,
+        stop_event,
+        timeout_s,
+        component,
+        incident,
+        supervisor_run_id,
+        child_nonce,
+    ):
         wait_task = asyncio.create_task(process.wait())
         stop_task = asyncio.create_task(stop_event.wait())
-        marker = self._progress_marker(component)
+        marker = self._progress_marker(component, supervisor_run_id, child_nonce)
         deadline = time.monotonic() + timeout_s
         try:
             while True:
@@ -188,7 +222,7 @@ class ProducerSupervisor:
                     return wait_task.result(), "exit"
                 if stop_task in done and stop_task.result():
                     return None, "stop"
-                current = self._progress_marker(component)
+                current = self._progress_marker(component, supervisor_run_id, child_nonce)
                 if current != marker:
                     marker = current
                     deadline = time.monotonic() + timeout_s
@@ -200,21 +234,12 @@ class ProducerSupervisor:
                     task.cancel()
             await asyncio.gather(wait_task, stop_task, return_exceptions=True)
 
-    def _progress_marker(self, component: str) -> tuple:
-        queries = {
-            "candidate": (
-                "SELECT COALESCE(MAX(id),0) FROM neg_risk_producer_heartbeats WHERE component=?",
-                ("candidate",),
-            ),
-            "discovery": (
-                "SELECT COALESCE(MAX(id),0) FROM neg_risk_producer_heartbeats WHERE component=?",
-                ("discovery",),
-            ),
-            "reconciliation": (
-                "SELECT COALESCE(MAX(id),0) FROM neg_risk_producer_heartbeats WHERE component=?",
-                ("reconciliation",),
-            ),
-        }
+    def _progress_marker(
+        self,
+        component: str,
+        supervisor_run_id: str,
+        child_nonce: str,
+    ) -> tuple:
         try:
             con = sqlite3.connect(
                 f"file:{self._store.db_path}?mode=ro",
@@ -222,7 +247,16 @@ class ProducerSupervisor:
                 timeout=0.25,
             )
             try:
-                return tuple(con.execute(*queries[component]).fetchone())
+                row = con.execute(
+                    "SELECT COUNT(*),COALESCE(MAX(sequence),0),"
+                    "COALESCE(MAX(observed_at_ms),0) "
+                    "FROM neg_risk_producer_heartbeats "
+                    "WHERE component=? AND supervisor_run_id=? AND child_nonce=?",
+                    (component, supervisor_run_id, child_nonce),
+                ).fetchone()
+                if row[0] != row[1]:
+                    return ("invalid-sequence",)
+                return tuple(row)
             finally:
                 con.close()
         except sqlite3.Error:
@@ -249,8 +283,27 @@ class ProducerSupervisor:
         return bytes(tail)
 
     @staticmethod
+    async def _drain_result(task: asyncio.Task[bytes] | None) -> bytes:
+        if task is None:
+            return b""
+        try:
+            return await asyncio.shield(task)
+        except Exception:
+            return b"[output-read-error]"
+
+    @staticmethod
     def _safe_text(value: bytes) -> str:
-        return _SECRET_RE.sub(r"\1[REDACTED]", value.decode("utf-8", "replace"))
+        text = value.decode("utf-8", "replace")
+        # Decode percent-encoding before matching so `token%3Dsecret` cannot
+        # bypass the same policy. A second pass covers encoded percent signs.
+        for _ in range(2):
+            text = urllib.parse.unquote(text)
+        text = _URI_USERINFO_RE.sub(r"\1[REDACTED]@", text)
+        text = _AUTH_RE.sub(r"\1[REDACTED]", text)
+        text = _COOKIE_RE.sub(r"\1 [REDACTED]", text)
+        text = _JSON_SECRET_RE.sub(r"\1[REDACTED]\2", text)
+        redacted = _KEY_VALUE_RE.sub(r"\1[REDACTED]", text)
+        return redacted.encode("utf-8")[:16_384].decode("utf-8", "ignore")
 
     def _record_failure(
         self,

@@ -152,6 +152,7 @@ class DiscoveryWorker:
         candidate_high_burst_groups: int = 1,
         candidate_reserved_non_high_slots: int = 3,
         clock_ms: Callable[[], int] | None = None,
+        require_resource_decision: bool = False,
     ) -> None:
         if not 1 <= page_limit <= 100:
             raise ValueError("discovery-page-limit-must-be-within-1..100")
@@ -201,6 +202,7 @@ class DiscoveryWorker:
         self._candidate_freshness = candidate_freshness
         self._degraded_probe_every_cycles = degraded_probe_every_cycles
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
+        self._require_resource_decision = require_resource_decision
         self._store.configure_discovery_admission(
             self._admission_proof,
             now_ms=self._clock_ms(),
@@ -235,7 +237,9 @@ class DiscoveryWorker:
 
         requested_cursor = await asyncio.to_thread(self._store.discovery_cursor)
         resource_decision = await asyncio.to_thread(
-            self._store.latest_resource_decision
+            self._store.latest_resource_decision,
+            now_ms=self._clock_ms(),
+            required=self._require_resource_decision,
         )
         page_limit = (
             self._page_limit
@@ -438,6 +442,7 @@ class DiscoveryRunner:
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
             while not stop_event.is_set():
+                delay_s = self._interval_s
                 try:
                     result = await self._worker.run_batch()
                     await asyncio.to_thread(
@@ -446,6 +451,16 @@ class DiscoveryRunner:
                         observed_at_ms=result.finished_at_ms,
                         state="yielded" if result.yielded else "progress",
                     )
+                    decision = await asyncio.to_thread(
+                        self._store.latest_resource_decision,
+                        now_ms=int(time.time() * 1_000),
+                        required=self._worker._require_resource_decision,
+                    )
+                    if decision is not None:
+                        duty = float(decision["discovery_duty_multiplier"])
+                        if not math.isfinite(duty) or not 0.1 <= duty <= 4.0:
+                            raise ValueError("invalid-discovery-duty-multiplier")
+                        delay_s = self._interval_s / duty
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -456,7 +471,7 @@ class DiscoveryRunner:
                 try:
                     await asyncio.wait_for(
                         stop_event.wait(),
-                        timeout=self._interval_s,
+                        timeout=delay_s,
                     )
                 except TimeoutError:
                     pass
@@ -504,6 +519,9 @@ def build_production_discovery(
         candidate_high_burst_groups=settings.candidate_high_burst_groups,
         candidate_reserved_non_high_slots=(
             settings.candidate_reserved_non_high_slots
+        ),
+        require_resource_decision=(
+            settings.opportunity_resource_controller_enabled
         ),
     )
     return DiscoveryRunner(
