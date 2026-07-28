@@ -446,6 +446,11 @@ class DiscoveryRunner:
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
             while not stop_event.is_set():
+                await asyncio.to_thread(
+                    self._store.consume_operator_wakeup,
+                    "discovery",
+                    occurred_at_ms=int(time.time() * 1_000),
+                )
                 delay_s = self._interval_s
                 try:
                     result = await self._worker.run_batch()
@@ -476,13 +481,21 @@ class DiscoveryRunner:
                         "discovery batch failed "
                         f"kind={type(error).__name__}"
                     )
-                try:
-                    await asyncio.wait_for(
-                        stop_event.wait(),
-                        timeout=delay_s,
-                    )
-                except TimeoutError:
-                    pass
+                deadline = time.monotonic() + delay_s
+                while not stop_event.is_set() and time.monotonic() < deadline:
+                    if await asyncio.to_thread(
+                        self._store.consume_operator_wakeup,
+                        "discovery",
+                        occurred_at_ms=int(time.time() * 1_000),
+                    ):
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            stop_event.wait(),
+                            timeout=min(1.0, max(0.0, deadline - time.monotonic())),
+                        )
+                    except TimeoutError:
+                        pass
         finally:
             close = getattr(self._gamma, "aclose", None)
             if close is not None:

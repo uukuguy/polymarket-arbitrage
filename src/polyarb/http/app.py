@@ -35,6 +35,8 @@ from polyarb.http.control import (
     build_market_map,
     control_status,
     pause,
+    queue_perception_discovery,
+    queue_perception_reconciliation,
     scan_neg_risk_map,
     unpause,
 )
@@ -43,6 +45,14 @@ from polyarb.http.market_map import (
     market_map,
     opportunity_history,
     opportunity_watch_status,
+)
+from polyarb.http.perception import (
+    perception_discovery,
+    perception_group_history,
+    perception_groups,
+    perception_incidents,
+    perception_reconciliation,
+    perception_status,
 )
 from polyarb.http.scan import scan, scan_auth_middleware
 
@@ -103,9 +113,29 @@ def create_app(
         ),
         Route("/market-map", market_map, methods=["GET"]),
         Route("/opportunity-watch/status", opportunity_watch_status, methods=["GET"]),
+        Route("/perception/status", perception_status, methods=["GET"]),
+        Route("/perception/groups", perception_groups, methods=["GET"]),
+        Route(
+            "/perception/groups/{group_id:path}/history",
+            perception_group_history,
+            methods=["GET"],
+        ),
+        Route("/perception/discovery", perception_discovery, methods=["GET"]),
+        Route("/perception/reconciliation", perception_reconciliation, methods=["GET"]),
+        Route("/perception/incidents", perception_incidents, methods=["GET"]),
         Route("/scan", scan, methods=["POST"]),
         Route("/control/market-map/build", build_market_map, methods=["POST"]),
         Route("/control/neg-risk/scan", scan_neg_risk_map, methods=["POST"]),
+        Route(
+            "/control/perception/discovery",
+            queue_perception_discovery,
+            methods=["POST"],
+        ),
+        Route(
+            "/control/perception/reconciliation",
+            queue_perception_reconciliation,
+            methods=["POST"],
+        ),
         Route("/control/unpause", unpause, methods=["POST"]),  # D-03 Phase 02.1
         Route("/control/pause", pause, methods=["POST"]),  # stub 501, Phase 03+ 填实现
         Route("/control/status", control_status, methods=["GET"]),  # stub 501, Phase 03+ 填实现

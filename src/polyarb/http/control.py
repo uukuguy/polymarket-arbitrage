@@ -43,6 +43,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import sqlite3
+import time
 from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -81,11 +83,68 @@ async def control_auth_middleware(request: Request, call_next: Any, *, secret: s
         received_sig = received_sig[len("sha256=") :]
 
     body = await request.body()
-    expected_sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    if request.url.path.startswith("/control/perception/"):
+        timestamp = request.headers.get("X-Perception-Timestamp", "")
+        nonce = request.headers.get("X-Perception-Nonce", "")
+        try:
+            timestamp_s = int(timestamp)
+        except ValueError:
+            return JSONResponse({"error": "invalid control authentication"}, status_code=401)
+        if (
+            str(timestamp_s) != timestamp
+            or abs(int(time.time()) - timestamp_s) > 300
+            or not 16 <= len(nonce) <= 128
+            or not nonce.isalnum()
+        ):
+            return JSONResponse({"error": "invalid control authentication"}, status_code=401)
+        canonical = b"\n".join(
+            (
+                timestamp.encode(),
+                nonce.encode(),
+                request.method.encode(),
+                request.url.path.encode(),
+                body,
+            )
+        )
+        expected_sig = hmac.new(
+            secret.encode("utf-8"), canonical, hashlib.sha256
+        ).hexdigest()
+    else:
+        expected_sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
 
     # Constant-time compare — T-02.1-8-01 / T-02.1-8-03 mitigation.
     if not hmac.compare_digest(received_sig, expected_sig):
         return JSONResponse({"error": "invalid X-Signature"}, status_code=401)
+
+    if request.url.path.startswith("/control/perception/"):
+        try:
+            db_path = request.app.state.sqlite_store.db_path
+            con = sqlite3.connect(db_path, timeout=0.25, isolation_level=None)
+            try:
+                con.execute("PRAGMA busy_timeout=250")
+                con.execute("BEGIN IMMEDIATE")
+                con.execute(
+                    "DELETE FROM neg_risk_operator_auth_nonces WHERE nonce IN ("
+                    "SELECT nonce FROM neg_risk_operator_auth_nonces "
+                    "WHERE accepted_at_ms<? ORDER BY accepted_at_ms LIMIT 500)",
+                    ((int(time.time()) - 600) * 1_000,),
+                )
+                con.execute(
+                    "INSERT INTO neg_risk_operator_auth_nonces("
+                    "nonce,request_path,request_timestamp_s,accepted_at_ms"
+                    ") VALUES(?,?,?,?)",
+                    (nonce, request.url.path, timestamp_s, int(time.time() * 1_000)),
+                )
+                con.execute("COMMIT")
+            finally:
+                con.close()
+        except sqlite3.IntegrityError:
+            return JSONResponse({"error": "invalid control authentication"}, status_code=401)
+        except sqlite3.Error:
+            return JSONResponse(
+                {"status": "unavailable", "reason": "control-auth-store-unavailable"},
+                status_code=409,
+            )
 
     # Re-inject body for downstream handler (handlers may or may not read it,
     # but ASGI semantics require the consumed body to be re-presented).
@@ -175,6 +234,60 @@ async def scan_neg_risk_map(request: Request) -> JSONResponse:
     if worker is None:
         return JSONResponse({"error": "unavailable"}, status_code=409)
     queued = worker.request_now()
+    return JSONResponse(
+        {"status": "queued" if queued else "already_queued"},
+        status_code=202 if queued else 200,
+    )
+
+
+async def queue_perception_discovery(request: Request) -> JSONResponse:
+    return await _queue_perception_component(request, "discovery")
+
+
+async def queue_perception_reconciliation(request: Request) -> JSONResponse:
+    return await _queue_perception_component(request, "reconciliation")
+
+
+async def _queue_perception_component(request: Request, component: str) -> JSONResponse:
+    """Persist one coalescing wake-up; never invoke or revive a producer."""
+    import asyncio
+
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    enabled_flag = (
+        "opportunity_discovery_enabled"
+        if component == "discovery"
+        else "opportunity_reconciliation_enabled"
+    )
+    if not bool(getattr(request.app.state.settings, enabled_flag, False)):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "component-disabled"},
+            status_code=409,
+        )
+    nonce = request.headers["X-Perception-Nonce"]
+    store = OpportunityPerceptionStore(request.app.state.sqlite_store.db_path)
+    try:
+        queued = await asyncio.wait_for(
+            asyncio.to_thread(
+                store.queue_operator_wakeup,
+                component,
+                request_nonce=nonce,
+                occurred_at_ms=int(time.time() * 1_000),
+            ),
+            timeout=1.0,
+        )
+    except RuntimeError as error:
+        reason = (
+            "component-escalated"
+            if str(error) == "component-escalated"
+            else "component-unavailable"
+        )
+        return JSONResponse({"status": "unavailable", "reason": reason}, status_code=409)
+    except (TimeoutError, sqlite3.Error, ValueError):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "component-unavailable"},
+            status_code=409,
+        )
     return JSONResponse(
         {"status": "queued" if queued else "already_queued"},
         status_code=202 if queued else 200,

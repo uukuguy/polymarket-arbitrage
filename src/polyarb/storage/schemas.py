@@ -558,6 +558,34 @@ CREATE TABLE IF NOT EXISTS neg_risk_incident_events (
 CREATE INDEX IF NOT EXISTS idx_neg_risk_incident_scope
   ON neg_risk_incident_events(scope,kind,id);
 
+-- Operator controls are wake-up hints for already-enabled bounded producers.
+-- Authentication nonces are durable so replay protection survives restarts.
+CREATE TABLE IF NOT EXISTS neg_risk_operator_auth_nonces (
+  nonce TEXT PRIMARY KEY,
+  request_path TEXT NOT NULL,
+  request_timestamp_s INTEGER NOT NULL CHECK(request_timestamp_s >= 0),
+  accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_operator_queue (
+  component TEXT PRIMARY KEY CHECK(component IN ('discovery','reconciliation')),
+  queued INTEGER NOT NULL CHECK(queued IN (0,1)),
+  queued_at_ms INTEGER,
+  consumed_at_ms INTEGER,
+  request_nonce TEXT
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_operator_queue_receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  component TEXT NOT NULL CHECK(component IN ('discovery','reconciliation')),
+  action TEXT NOT NULL CHECK(action IN ('queued','coalesced','consumed')),
+  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+  request_nonce TEXT,
+  UNIQUE(component,action,request_nonce)
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_operator_queue_receipts_component
+  ON neg_risk_operator_queue_receipts(component,id);
+
 CREATE TABLE IF NOT EXISTS neg_risk_http_probe_receipts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   release_id TEXT NOT NULL,

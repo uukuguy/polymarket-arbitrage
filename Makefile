@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-groups perception-incidents queue-discovery queue-reconciliation
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -73,6 +73,31 @@ reconciliation-status:
 run-perception-worker:
 	@case "$(component)" in candidate|discovery|reconciliation) ;; *) echo "usage: make run-perception-worker component=candidate|discovery|reconciliation" >&2; exit 2;; esac
 	@uv run python -m polyarb.perception.worker_cli "$(component)"
+
+POLYARB_PERCEPTION_URL ?= https://polyarb-l1.fly.dev
+PERCEPTION_CURL = curl --disable --connect-timeout 3 --max-time 10 --retry 0 -fsS
+
+## perception-status: Cloud read-only opportunity-first status; valid zero is distinct from unavailable.
+perception-status:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/status" | python -m json.tool
+
+## perception-groups: Cloud read-only certified group list; optional limit=1..500.
+perception-groups:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/groups?limit=$(or $(limit),100)" | python -m json.tool
+
+## perception-incidents: Cloud read-only durable incident lifecycle list; optional limit=1..500.
+perception-incidents:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/incidents?limit=$(or $(limit),100)" | python -m json.tool
+
+## queue-discovery: HMAC-authenticated cloud wake-up for the enabled bounded Discovery loop.
+queue-discovery:
+	@test -n "$$POLYARB_SCAN_SHARED_SECRET" || (echo "POLYARB_SCAN_SHARED_SECRET is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_perception queue-discovery --base-url "$(POLYARB_PERCEPTION_URL)"
+
+## queue-reconciliation: HMAC-authenticated cloud wake-up for the enabled bounded Reconciliation loop.
+queue-reconciliation:
+	@test -n "$$POLYARB_SCAN_SHARED_SECRET" || (echo "POLYARB_SCAN_SHARED_SECRET is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_perception queue-reconciliation --base-url "$(POLYARB_PERCEPTION_URL)"
 
 .PHONY: docs-m1-check
 

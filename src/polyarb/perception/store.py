@@ -9,6 +9,7 @@ import math
 import os
 import secrets
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -468,9 +469,18 @@ def validate_producer_history(
 class OpportunityPerceptionStore:
     """Transactional opportunity-first perception read model."""
 
-    def __init__(self, db_path: Path, *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        read_only: bool = False,
+        busy_timeout_ms: int = _BUSY_TIMEOUT_MS,
+    ) -> None:
+        if not 1 <= busy_timeout_ms <= _BUSY_TIMEOUT_MS:
+            raise ValueError("invalid-busy-timeout")
         self._db_path = Path(db_path)
         self._read_only = read_only
+        self._busy_timeout_ms = busy_timeout_ms
         if not read_only:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -3766,6 +3776,128 @@ class OpportunityPerceptionStore:
 
         return IncidentManager(self).open_incidents()
 
+    def queue_operator_wakeup(
+        self,
+        component: Literal["discovery", "reconciliation"],
+        *,
+        request_nonce: str,
+        occurred_at_ms: int,
+    ) -> bool:
+        """Coalesce one authenticated wake-up without invoking a producer."""
+        if (
+            component not in {"discovery", "reconciliation"}
+            or not request_nonce
+            or occurred_at_ms < 0
+        ):
+            raise ValueError("invalid-operator-wakeup")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            rows = con.execute(
+                "SELECT incident_id,sequence,scope,kind,state,occurred_at_ms "
+                "FROM neg_risk_incident_events ORDER BY incident_id,sequence"
+            ).fetchall()
+            previous: dict[str, sqlite3.Row] = {}
+            allowed = {
+                "detected": {"classified"},
+                "classified": {"contained", "escalated"},
+                "contained": {"recovering", "escalated"},
+                "recovering": {"verified", "contained", "escalated"},
+                "verified": set(),
+                "escalated": {"recovering"},
+            }
+            for row in rows:
+                prior = previous.get(str(row["incident_id"]))
+                if (
+                    prior is None and (int(row["sequence"]) != 1 or row["state"] != "detected")
+                ) or (
+                    prior is not None
+                    and (
+                        int(row["sequence"]) != int(prior["sequence"]) + 1
+                        or row["scope"] != prior["scope"]
+                        or row["kind"] != prior["kind"]
+                        or row["state"] not in allowed[str(prior["state"])]
+                        or int(row["occurred_at_ms"]) < int(prior["occurred_at_ms"])
+                    )
+                ):
+                    raise ValueError("invalid-incident-history")
+                previous[str(row["incident_id"])] = row
+            if any(
+                str(row["scope"]) == component and str(row["state"]) in {"escalated"}
+                for row in previous.values()
+            ):
+                raise RuntimeError("component-escalated")
+            current = con.execute(
+                "SELECT queued FROM neg_risk_operator_queue WHERE component=?",
+                (component,),
+            ).fetchone()
+            queued = current is None or not bool(current["queued"])
+            if queued:
+                con.execute(
+                    "INSERT INTO neg_risk_operator_queue("
+                    "component,queued,queued_at_ms,consumed_at_ms,request_nonce"
+                    ") VALUES(?,1,?,NULL,?) ON CONFLICT(component) DO UPDATE SET "
+                    "queued=1,queued_at_ms=excluded.queued_at_ms,"
+                    "consumed_at_ms=NULL,request_nonce=excluded.request_nonce",
+                    (component, occurred_at_ms, request_nonce),
+                )
+            con.execute(
+                "INSERT INTO neg_risk_operator_queue_receipts("
+                "component,action,occurred_at_ms,request_nonce) VALUES(?,?,?,?)",
+                (
+                    component,
+                    "queued" if queued else "coalesced",
+                    occurred_at_ms,
+                    request_nonce,
+                ),
+            )
+            con.execute("COMMIT")
+            return queued
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def consume_operator_wakeup(
+        self,
+        component: Literal["discovery", "reconciliation"],
+        *,
+        occurred_at_ms: int,
+    ) -> bool:
+        """Atomically claim a queued hint; serial producer loops call this."""
+        if component not in {"discovery", "reconciliation"} or occurred_at_ms < 0:
+            raise ValueError("invalid-operator-wakeup")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT queued,request_nonce FROM neg_risk_operator_queue WHERE component=?",
+                (component,),
+            ).fetchone()
+            if row is None or not bool(row["queued"]):
+                con.execute("COMMIT")
+                return False
+            con.execute(
+                "UPDATE neg_risk_operator_queue SET queued=0,consumed_at_ms=? "
+                "WHERE component=? AND queued=1",
+                (occurred_at_ms, component),
+            )
+            con.execute(
+                "INSERT INTO neg_risk_operator_queue_receipts("
+                "component,action,occurred_at_ms,request_nonce) VALUES(?,?,?,?)",
+                (component, "consumed", occurred_at_ms, str(row["request_nonce"])),
+            )
+            con.execute("COMMIT")
+            return True
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
     def _connect(self) -> sqlite3.Connection:
         target = (
             f"file:{self._db_path.resolve()}?mode=ro" if self._read_only else str(self._db_path)
@@ -3774,10 +3906,16 @@ class OpportunityPerceptionStore:
             target,
             uri=self._read_only,
             isolation_level=None,
-            timeout=_BUSY_TIMEOUT_MS / 1_000,
+            timeout=self._busy_timeout_ms / 1_000,
         )
         con.row_factory = sqlite3.Row
-        con.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        con.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
+        if self._busy_timeout_ms < _BUSY_TIMEOUT_MS:
+            deadline = time.monotonic() + 0.8
+            con.set_progress_handler(
+                lambda: 1 if time.monotonic() >= deadline else 0,
+                1_000,
+            )
         return con
 
     def _insert_validated_quote_batch(

@@ -6,7 +6,9 @@ import argparse
 import hashlib
 import hmac
 import os
+import secrets
 import sys
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -14,6 +16,8 @@ _DEFAULT_BASE_URL = "https://polyarb-l1.fly.dev"
 _ROUTES = {
     "build-market-map": "/control/market-map/build",
     "scan-neg-risk-map": "/control/neg-risk/scan",
+    "queue-discovery": "/control/perception/discovery",
+    "queue-reconciliation": "/control/perception/reconciliation",
 }
 
 
@@ -31,12 +35,32 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: POLYARB_SCAN_SHARED_SECRET is required for cloud controls", file=sys.stderr)
         return 2
     body = b"{}"
-    signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    path = _ROUTES[args.command]
+    headers = {"Content-Type": "application/json"}
+    if args.command.startswith("queue-"):
+        timestamp = str(int(time.time()))
+        nonce = secrets.token_hex(16)
+        canonical = b"\n".join(
+            (timestamp.encode(), nonce.encode(), b"POST", path.encode(), body)
+        )
+        signature = hmac.new(
+            secret.encode("utf-8"), canonical, hashlib.sha256
+        ).hexdigest()
+        headers.update(
+            {
+                "X-Perception-Timestamp": timestamp,
+                "X-Perception-Nonce": nonce,
+                "X-Signature": f"sha256={signature}",
+            }
+        )
+    else:
+        signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        headers["X-Signature"] = signature
     request = Request(
-        f"{args.base_url.rstrip('/')}{_ROUTES[args.command]}",
+        f"{args.base_url.rstrip('/')}{path}",
         data=body,
         method="POST",
-        headers={"Content-Type": "application/json", "X-Signature": signature},
+        headers=headers,
     )
     try:
         with urlopen(request, timeout=15) as response:  # noqa: S310 - fixed configured daemon URL

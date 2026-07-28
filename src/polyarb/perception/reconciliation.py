@@ -177,6 +177,11 @@ class ReconciliationRunner:
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
             while not stop_event.is_set():
+                await asyncio.to_thread(
+                    self._store.consume_operator_wakeup,
+                    "reconciliation",
+                    occurred_at_ms=int(time.time() * 1_000),
+                )
                 try:
                     decision = (
                         await asyncio.to_thread(
@@ -205,10 +210,21 @@ class ReconciliationRunner:
                     raise
                 except Exception as error:
                     logger.warning(f"reconciliation batch failed kind={type(error).__name__}")
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=self._interval_s)
-                except TimeoutError:
-                    pass
+                deadline = time.monotonic() + self._interval_s
+                while not stop_event.is_set() and time.monotonic() < deadline:
+                    if await asyncio.to_thread(
+                        self._store.consume_operator_wakeup,
+                        "reconciliation",
+                        occurred_at_ms=int(time.time() * 1_000),
+                    ):
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            stop_event.wait(),
+                            timeout=min(1.0, max(0.0, deadline - time.monotonic())),
+                        )
+                    except TimeoutError:
+                        pass
         finally:
             close = getattr(self._gamma, "aclose", None)
             if close is not None:
