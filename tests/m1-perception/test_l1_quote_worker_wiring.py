@@ -29,6 +29,44 @@ def test_create_app_exposes_quote_worker_runtime(tmp_path) -> None:
     assert app.state.quote_worker_runtime is runtime
 
 
+def test_create_app_exposes_candidate_watcher_runtime(tmp_path) -> None:
+    settings = Settings(db_path=tmp_path / "state.db")
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    runtime = object()
+
+    app = create_app(
+        scheduler=MagicMock(),
+        sqlite_store=store,
+        settings=settings,
+        candidate_watcher_runtime=runtime,
+    )
+
+    assert app.state.candidate_watcher_runtime is runtime
+
+
+async def test_candidate_start_helper_is_disabled_by_default_and_cancellable() -> None:
+    from polyarb.daemon.main import _start_candidate_watcher
+
+    stop_event = asyncio.Event()
+    assert _start_candidate_watcher(None, stop_event) is None
+
+    entered = asyncio.Event()
+
+    async def run(_stop_event: asyncio.Event) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    scheduler = MagicMock()
+    scheduler.run = AsyncMock(side_effect=run)
+    task = _start_candidate_watcher(scheduler, stop_event)
+    assert task is not None
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    result = await asyncio.gather(task, return_exceptions=True)
+    assert isinstance(result[0], asyncio.CancelledError)
+
+
 async def test_l1_start_helper_runs_quote_worker_and_task_is_cancellable() -> None:
     from polyarb.daemon.main import _start_quote_worker
 
@@ -61,6 +99,26 @@ def test_l1_main_owns_quote_worker_shutdown() -> None:
     assert "_start_quote_worker(quote_worker, stop_event)" in source
     assert "quote_worker_task.cancel()" in source
     assert "quote_worker_task" in source.partition("asyncio.gather(")[2]
+
+
+def test_l1_main_feature_flags_candidate_watcher_as_sibling_task() -> None:
+    from polyarb.daemon import main
+
+    source = inspect.getsource(main.main)
+    assert "settings.opportunity_first_watcher_enabled" in source
+    assert "_start_candidate_watcher(candidate_watcher, stop_event)" in source
+    assert "candidate_watcher_task.cancel()" in source
+    assert "candidate_watcher_runtime=" in source
+
+
+def test_candidate_watcher_controller_settings_are_explicit_and_off_by_default() -> None:
+    settings = Settings()
+
+    assert settings.opportunity_first_watcher_enabled is False
+    assert settings.candidate_high_interval_s == 15
+    assert settings.candidate_normal_interval_s == 60
+    assert settings.candidate_explore_interval_s == 300
+    assert settings.candidate_quote_hard_stale_s == 90
 
 
 def test_fly_enables_worker_at_120_seconds() -> None:

@@ -219,6 +219,11 @@ class OpportunityWatcher:
             last_notification_error_kind=self._last_notification_error_kind,
         )
 
+    def candidate_group_ids(self) -> tuple[str, ...]:
+        """Seed Slice B from durable legacy masters until Discovery owns promotion."""
+        masters = self._ledger.active_masters()
+        return tuple(dict.fromkeys(master.group_id for master in masters))
+
     def _observe_min_edge_bps(self) -> float:
         # Task 5 promotes this production default into Settings.  Retaining it
         # here keeps Task 3 compatible with the current Settings contract.

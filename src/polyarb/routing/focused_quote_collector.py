@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from polyarb.perception.models import (
+    GroupQuoteBatch,
+    GroupQuoteLeg,
+    GroupRevision,
+)
 from polyarb.routing.neg_risk_quote_collector import (
     BooksReader,
     QuoteCollectionIntegrityError,
@@ -185,6 +191,55 @@ class SqliteStructureMembershipReader:
             membership_hash=str(truth[3]),
             legs=legs,
         )
+
+
+def build_complete_group_quote_batch(
+    revision: GroupRevision,
+    books: Sequence[Any],
+    *,
+    started_at_ms: int,
+    quoted_at_ms: int,
+    quote_batch_id: str | None = None,
+) -> GroupQuoteBatch:
+    """Normalize one ordered group's top books into an atomic all-leg batch."""
+    universe_legs = tuple(
+        UniverseLeg(
+            neg_risk_market_id=revision.group_id,
+            market_id=leg.market_id,
+            condition_id=leg.condition_id,
+            slug=leg.title,
+            yes_token_id=leg.yes_token_id,
+            event_id=revision.event_id,
+            membership_hash=revision.membership_hash,
+        )
+        for leg in revision.legs
+    )
+    token_ids = [leg.yes_token_id for leg in revision.legs]
+    _, quotes = _build_terminal_quotes(books, token_ids, universe_legs)
+    if any(
+        quote.terminal_state != "executable"
+        or quote.best_ask_price is None
+        or quote.best_ask_size is None
+        for quote in quotes
+    ):
+        raise QuoteCollectionIntegrityError()
+    return GroupQuoteBatch.complete(
+        group_id=revision.group_id,
+        membership_hash=revision.membership_hash,
+        quote_batch_id=quote_batch_id or uuid.uuid4().hex,
+        started_at_ms=started_at_ms,
+        quoted_at_ms=quoted_at_ms,
+        legs=tuple(
+            GroupQuoteLeg(
+                yes_token_id=quote.yes_token_id,
+                membership_hash=revision.membership_hash,
+                best_ask_price=float(quote.best_ask_price),
+                best_ask_size=float(quote.best_ask_size),
+                terminal_state=quote.terminal_state,
+            )
+            for quote in quotes
+        ),
+    )
 
 
 async def collect_focused_observation(

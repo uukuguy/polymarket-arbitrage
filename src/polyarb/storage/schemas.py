@@ -231,6 +231,30 @@ CREATE INDEX IF NOT EXISTS idx_neg_risk_group_quote_batches_current
     group_id, membership_hash, status, quoted_at_ms DESC
   );
 
+-- Opportunity-first Candidate Watcher terminal facts. Each run writes exactly
+-- one row, including the controller decision that determines its next visit.
+CREATE TABLE IF NOT EXISTS neg_risk_candidate_watch_facts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id TEXT NOT NULL,
+  membership_hash TEXT,
+  quote_batch_id TEXT,
+  observed_at_ms INTEGER NOT NULL,
+  last_result TEXT NOT NULL CHECK(last_result IN
+    ('watching','no-edge','unavailable')),
+  reason TEXT,
+  bundle_cost REAL,
+  gross_edge_bps REAL,
+  max_bundle_size REAL,
+  priority_class TEXT NOT NULL CHECK(priority_class IN
+    ('high','normal','explore')),
+  consecutive_failures INTEGER NOT NULL CHECK(consecutive_failures >= 0),
+  effective_interval_s REAL NOT NULL CHECK(effective_interval_s > 0),
+  schedule_reason TEXT NOT NULL,
+  next_due_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_candidate_watch_due
+  ON neg_risk_candidate_watch_facts(group_id, id DESC, next_due_at_ms);
+
 -- Phase 1.1 T2: append-only translation cache.
 -- Invariants:
 --  * never DELETE FROM (cumulative across snapshots)

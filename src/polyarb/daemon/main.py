@@ -41,6 +41,10 @@ from polyarb.daemon.scheduler import SnapshotScheduler
 from polyarb.http.app import create_app
 from polyarb.observability.logging import init_logging
 from polyarb.observability.sentry import init_sentry
+from polyarb.perception.candidate_watcher import (
+    CandidateWatcherScheduler,
+    build_production_candidate_watcher,
+)
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -57,6 +61,15 @@ def _start_opportunity_watcher(
     watcher: OpportunityWatcher,
     stop_event: asyncio.Event,
 ) -> asyncio.Task[None]:
+    return asyncio.create_task(watcher.run(stop_event))
+
+
+def _start_candidate_watcher(
+    watcher: CandidateWatcherScheduler | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if watcher is None:
+        return None
     return asyncio.create_task(watcher.run(stop_event))
 
 
@@ -78,6 +91,14 @@ async def main() -> int:
 
     scheduler = SnapshotScheduler(settings=settings, sqlite_store=sqlite_store)
     focused_watcher = build_focused_opportunity_watcher(settings)
+    candidate_watcher = (
+        build_production_candidate_watcher(
+            settings,
+            candidate_group_ids=focused_watcher.candidate_group_ids,
+        )
+        if settings.opportunity_first_watcher_enabled
+        else None
+    )
     quote_worker = build_production_quote_worker(
         settings,
         opportunity_watcher=focused_watcher,
@@ -89,6 +110,9 @@ async def main() -> int:
         quote_worker_runtime=quote_worker.runtime if quote_worker is not None else None,
         quote_worker=quote_worker,
         opportunity_watcher=focused_watcher,
+        candidate_watcher_runtime=(
+            candidate_watcher.runtime if candidate_watcher is not None else None
+        ),
     )
 
     config = uvicorn.Config(
@@ -126,6 +150,7 @@ async def main() -> int:
     scheduler_task = asyncio.create_task(scheduler.run(stop_event))
     quote_worker_task = _start_quote_worker(quote_worker, stop_event)
     focused_watcher_task = _start_opportunity_watcher(focused_watcher, stop_event)
+    candidate_watcher_task = _start_candidate_watcher(candidate_watcher, stop_event)
 
     await stop_event.wait()
     logger.info("stop_event set, shutting down server")
@@ -137,6 +162,8 @@ async def main() -> int:
     # scheduler re-raises CancelledError out of _tick() per F-04 contract.
     scheduler_task.cancel()
     focused_watcher_task.cancel()
+    if candidate_watcher_task is not None:
+        candidate_watcher_task.cancel()
     if quote_worker_task is not None:
         quote_worker_task.cancel()
 
@@ -149,6 +176,11 @@ async def main() -> int:
                 scheduler_task,
                 focused_watcher_task,
                 *([quote_worker_task] if quote_worker_task is not None else []),
+                *(
+                    [candidate_watcher_task]
+                    if candidate_watcher_task is not None
+                    else []
+                ),
                 return_exceptions=True,
             ),
             timeout=5.0,

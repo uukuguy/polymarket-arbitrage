@@ -9,6 +9,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+CandidatePriority = Literal["high", "normal", "explore"]
+CandidateResult = Literal["watching", "no-edge", "unavailable"]
+
 
 @dataclass(frozen=True)
 class GroupLeg:
@@ -128,3 +131,24 @@ class GroupQuoteBatch:
             failure_reason=None,
             legs=normalized_legs,
         )
+
+
+@dataclass(frozen=True)
+class CandidateWatchFact:
+    """One durable terminal outcome and its next scheduling decision."""
+
+    id: int
+    group_id: str
+    membership_hash: str | None
+    quote_batch_id: str | None
+    observed_at_ms: int
+    last_result: CandidateResult
+    reason: str | None
+    bundle_cost: float | None
+    gross_edge_bps: float | None
+    max_bundle_size: float | None
+    priority_class: CandidatePriority
+    consecutive_failures: int
+    effective_interval_s: float
+    schedule_reason: str
+    next_due_at_ms: int

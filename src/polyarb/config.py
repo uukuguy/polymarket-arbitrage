@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     neg_risk_quote_interval_s: int = Field(default=120, gt=0, le=240)
     neg_risk_observe_min_edge_bps: float = Field(default=100.0, ge=0)
     neg_risk_focused_interval_s: float = Field(default=15.0, gt=0)
+    # Opportunity-first Slice B is additive and remains opt-in until its
+    # production qualification gate. These are controller inputs, not hidden
+    # timing constants.
+    opportunity_first_watcher_enabled: bool = False
+    candidate_high_interval_s: float = Field(default=15.0, gt=0)
+    candidate_normal_interval_s: float = Field(default=60.0, gt=0)
+    candidate_explore_interval_s: float = Field(default=300.0, gt=0)
+    candidate_quote_hard_stale_s: float = Field(default=90.0, gt=0)
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 

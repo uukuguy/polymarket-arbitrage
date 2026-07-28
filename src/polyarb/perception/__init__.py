@@ -13,6 +13,9 @@ from polyarb.perception.market_truth import (
     membership_hash,
 )
 from polyarb.perception.models import (
+    CandidatePriority,
+    CandidateResult,
+    CandidateWatchFact,
     GroupLeg,
     GroupQuoteBatch,
     GroupQuoteLeg,
@@ -22,6 +25,9 @@ from polyarb.perception.store import OpportunityPerceptionStore
 
 __all__ = [
     "CONFLICTING_EVENT_MEMBERSHIP_REASON",
+    "CandidatePriority",
+    "CandidateResult",
+    "CandidateWatchFact",
     "EventMember",
     "GroupLeg",
     "GroupQuoteBatch",

@@ -7,6 +7,9 @@ import sqlite3
 from pathlib import Path
 
 from polyarb.perception.models import (
+    CandidatePriority,
+    CandidateResult,
+    CandidateWatchFact,
     GroupLeg,
     GroupQuoteBatch,
     GroupQuoteLeg,
@@ -187,6 +190,127 @@ class OpportunityPerceptionStore:
             return self._validated_quote_from_row(row, group, prefix="quote_")
         finally:
             con.close()
+
+    def record_candidate_watch_fact(
+        self,
+        *,
+        group_id: str,
+        membership_hash: str | None,
+        quote_batch_id: str | None,
+        observed_at_ms: int,
+        last_result: CandidateResult,
+        reason: str | None,
+        bundle_cost: float | None,
+        gross_edge_bps: float | None,
+        max_bundle_size: float | None,
+        priority_class: CandidatePriority,
+        consecutive_failures: int,
+        effective_interval_s: float,
+        schedule_reason: str,
+        next_due_at_ms: int,
+    ) -> CandidateWatchFact:
+        """Append one and only one terminal scheduling fact for a completed run."""
+        con = self._connect()
+        try:
+            cursor = con.execute(
+                "INSERT INTO neg_risk_candidate_watch_facts("
+                "group_id,membership_hash,quote_batch_id,observed_at_ms,last_result,"
+                "reason,bundle_cost,gross_edge_bps,max_bundle_size,priority_class,"
+                "consecutive_failures,effective_interval_s,schedule_reason,next_due_at_ms"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    group_id,
+                    membership_hash,
+                    quote_batch_id,
+                    observed_at_ms,
+                    last_result,
+                    reason,
+                    bundle_cost,
+                    gross_edge_bps,
+                    max_bundle_size,
+                    priority_class,
+                    consecutive_failures,
+                    effective_interval_s,
+                    schedule_reason,
+                    next_due_at_ms,
+                ),
+            )
+            row_id = int(cursor.lastrowid)
+        finally:
+            con.close()
+        return CandidateWatchFact(
+            id=row_id,
+            group_id=group_id,
+            membership_hash=membership_hash,
+            quote_batch_id=quote_batch_id,
+            observed_at_ms=observed_at_ms,
+            last_result=last_result,
+            reason=reason,
+            bundle_cost=bundle_cost,
+            gross_edge_bps=gross_edge_bps,
+            max_bundle_size=max_bundle_size,
+            priority_class=priority_class,
+            consecutive_failures=consecutive_failures,
+            effective_interval_s=effective_interval_s,
+            schedule_reason=schedule_reason,
+            next_due_at_ms=next_due_at_ms,
+        )
+
+    def candidate_watch_facts(self, group_id: str) -> tuple[CandidateWatchFact, ...]:
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT id,group_id,membership_hash,quote_batch_id,observed_at_ms,"
+                "last_result,reason,bundle_cost,gross_edge_bps,max_bundle_size,"
+                "priority_class,consecutive_failures,effective_interval_s,"
+                "schedule_reason,next_due_at_ms "
+                "FROM neg_risk_candidate_watch_facts WHERE group_id=? ORDER BY id",
+                (group_id,),
+            ).fetchall()
+        finally:
+            con.close()
+        return tuple(self._candidate_watch_fact_from_row(row) for row in rows)
+
+    def latest_candidate_watch_fact(
+        self,
+        group_id: str,
+    ) -> CandidateWatchFact | None:
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT id,group_id,membership_hash,quote_batch_id,observed_at_ms,"
+                "last_result,reason,bundle_cost,gross_edge_bps,max_bundle_size,"
+                "priority_class,consecutive_failures,effective_interval_s,"
+                "schedule_reason,next_due_at_ms "
+                "FROM neg_risk_candidate_watch_facts WHERE group_id=? "
+                "ORDER BY id DESC LIMIT 1",
+                (group_id,),
+            ).fetchone()
+        finally:
+            con.close()
+        return None if row is None else self._candidate_watch_fact_from_row(row)
+
+    @staticmethod
+    def _candidate_watch_fact_from_row(
+        row: sqlite3.Row,
+    ) -> CandidateWatchFact:
+        return CandidateWatchFact(
+            id=int(row[0]),
+            group_id=str(row[1]),
+            membership_hash=None if row[2] is None else str(row[2]),
+            quote_batch_id=None if row[3] is None else str(row[3]),
+            observed_at_ms=int(row[4]),
+            last_result=row[5],
+            reason=None if row[6] is None else str(row[6]),
+            bundle_cost=None if row[7] is None else float(row[7]),
+            gross_edge_bps=None if row[8] is None else float(row[8]),
+            max_bundle_size=None if row[9] is None else float(row[9]),
+            priority_class=row[10],
+            consecutive_failures=int(row[11]),
+            effective_interval_s=float(row[12]),
+            schedule_reason=str(row[13]),
+            next_due_at_ms=int(row[14]),
+        )
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(

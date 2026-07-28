@@ -71,6 +71,7 @@ def create_app(
     quote_worker_runtime: Any | None = None,
     quote_worker: Any | None = None,
     opportunity_watcher: Any | None = None,
+    candidate_watcher_runtime: Any | None = None,
 ) -> Starlette:
     """Factory: build Starlette app with /health + /scan routes.
 
@@ -119,5 +120,9 @@ def create_app(
     app.state.quote_worker_runtime = quote_worker_runtime
     app.state.quote_worker = quote_worker
     app.state.opportunity_watcher = opportunity_watcher
+    # Slice B stores the exact runtime object mutated by Candidate Watcher.
+    # Public HTTP exposure belongs to Task 6; keeping it on app.state now
+    # preserves chain-truth without adding a premature route.
+    app.state.candidate_watcher_runtime = candidate_watcher_runtime
 
     return app
