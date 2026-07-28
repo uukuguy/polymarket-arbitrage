@@ -61,7 +61,22 @@ function isCoverageWindow(value: unknown): value is {
   );
 }
 
-function isAdmissionProof(value: unknown): boolean {
+type AdmissionProofContract = {
+  effective_capacity: number;
+  candidate_max_wait_ms: number;
+  selection_budget_ms: number;
+  poll_interval_ms: number;
+  group_timeout_ms: number;
+  terminal_write_budget_ms: number;
+  attempt_start_write_budget_ms: number;
+  high_burst_groups: number;
+  reserved_non_high_slots: number;
+  effective_start_bound_ms: number | null;
+};
+
+function isAdmissionProof(
+  value: unknown,
+): value is AdmissionProofContract | null {
   if (value === null) return true;
   if (
     !isRecord(value) ||
@@ -165,6 +180,9 @@ export function isDiscoveryEnvelope(
   const windows = isRecord(coverage) ? coverage.by_minutes : null;
   const loadState = isRecord(discovery) ? discovery.load_state : null;
   const queue = isRecord(discovery) ? discovery.queue_depth_by_class : null;
+  const admissionProof = isRecord(discovery)
+    ? discovery.admission_proof
+    : undefined;
   return (
     isRecord(discovery) &&
     isStringOrNull(discovery.next_cursor) &&
@@ -186,7 +204,8 @@ export function isDiscoveryEnvelope(
     isNonNegativeInteger(discovery.candidate_start_deadline_breach_count) &&
     discovery.candidate_start_deadline_breach_count <=
       discovery.candidate_attempt_start_count &&
-    typeof discovery.candidate_start_ready === "boolean" &&
+    discovery.candidate_start_ready ===
+      (discovery.candidate_start_deadline_breach_count === 0) &&
     isRecord(coverage) &&
     isNonNegativeInteger(coverage.known_groups) &&
     isNonNegativeNumber(coverage.total_liquidity_weight) &&
@@ -204,7 +223,11 @@ export function isDiscoveryEnvelope(
     isPositiveInteger(loadState.probe_every_cycles) &&
     loadState.probe_every_cycles >= 2 &&
     isNonNegativeInteger(loadState.updated_at_ms) &&
-    isAdmissionProof(discovery.admission_proof)
+    isAdmissionProof(admissionProof) &&
+    (admissionProof === null
+      ? discovery.outstanding_admitted_count === 0
+      : discovery.outstanding_admitted_count <=
+        admissionProof.effective_capacity)
   );
 }
 
@@ -214,6 +237,19 @@ export function isReconciliationEnvelope(
   if (!isRecord(value) || value.status !== "available") return false;
   if (value.reconciliation === null) return true;
   const reconciliation = value.reconciliation;
+  const diffCounts = isRecord(reconciliation)
+    ? [
+        reconciliation.added_count,
+        reconciliation.changed_count,
+        reconciliation.closed_count,
+        reconciliation.unchanged_count,
+        reconciliation.applied_rejected_count,
+      ]
+    : [];
+  const allDiffsPresent =
+    diffCounts.length === 5 && diffCounts.every((item) => item !== null);
+  const allDiffsAbsent =
+    diffCounts.length === 5 && diffCounts.every((item) => item === null);
   return (
     isRecord(reconciliation) &&
     typeof reconciliation.id === "string" &&
@@ -239,7 +275,9 @@ export function isReconciliationEnvelope(
     isNonNegativeIntegerOrNull(reconciliation.changed_count) &&
     isNonNegativeIntegerOrNull(reconciliation.closed_count) &&
     isNonNegativeIntegerOrNull(reconciliation.unchanged_count) &&
-    isNonNegativeIntegerOrNull(reconciliation.applied_rejected_count)
+    isNonNegativeIntegerOrNull(reconciliation.applied_rejected_count) &&
+    (allDiffsPresent || allDiffsAbsent) &&
+    (reconciliation.status === "applied") === allDiffsPresent
   );
 }
 

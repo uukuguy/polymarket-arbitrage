@@ -117,6 +117,24 @@ for (const field of [
 }
 {
   const body = clone(validDiscovery);
+  body.discovery.candidate_start_deadline_breach_count = 1;
+  assert.equal(
+    isDiscoveryEnvelope(body),
+    false,
+    "candidate readiness must reflect deadline breaches",
+  );
+}
+{
+  const body = clone(validDiscovery);
+  body.discovery.outstanding_admitted_count = 3;
+  assert.equal(
+    isDiscoveryEnvelope(body),
+    false,
+    "outstanding admissions cannot exceed capacity",
+  );
+}
+{
+  const body = clone(validDiscovery);
   body.discovery.coverage.by_minutes[15].visited_groups = 3;
   assert.equal(isDiscoveryEnvelope(body), false, "visits cannot exceed known groups");
 }
@@ -142,5 +160,37 @@ for (const field of [
     isReconciliationEnvelope(fractional),
     false,
     `${field} must be integer`,
+  );
+}
+
+{
+  const partial = clone(validReconciliation);
+  partial.reconciliation.added_count = null;
+  assert.equal(isReconciliationEnvelope(partial), false, "diffs are all-or-none");
+}
+{
+  const unapplied = clone(validReconciliation);
+  unapplied.reconciliation.status = "complete";
+  assert.equal(
+    isReconciliationEnvelope(unapplied),
+    false,
+    "only applied windows expose diff counts",
+  );
+}
+{
+  const appliedWithoutDiff = clone(validReconciliation);
+  for (const field of [
+    "added_count",
+    "changed_count",
+    "closed_count",
+    "unchanged_count",
+    "applied_rejected_count",
+  ]) {
+    appliedWithoutDiff.reconciliation[field] = null;
+  }
+  assert.equal(
+    isReconciliationEnvelope(appliedWithoutDiff),
+    false,
+    "applied windows require every diff count",
   );
 }
