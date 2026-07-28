@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from polyarb.http.health import read_market_truth_health
+from polyarb.http.market_map import durable_opportunity_ids
 from polyarb.routing.neg_risk_quote_store import QuoteUniverseUnavailableError
 from polyarb.routing.opportunity_scanner import (
     QUOTE_SLA_SECONDS,
@@ -101,6 +102,14 @@ async def opportunities(request: Request) -> JSONResponse:
                 now_s=time.time(),
             )
         )
+        durable_ids = await asyncio.wait_for(
+            asyncio.to_thread(
+                durable_opportunity_ids,
+                request.app.state.sqlite_store.db_path,
+                {item.group_id for item in selected},
+            ),
+            timeout=_SOURCE_TRUTH_READ_TIMEOUT_S,
+        )
     except (QuoteUniverseUnavailableError, QuoteRunUnavailableError):
         return JSONResponse(
             {"error": "verified market universe unavailable"},
@@ -129,6 +138,8 @@ async def opportunities(request: Request) -> JSONResponse:
             "opportunities": [
                 {
                     **item.to_dict(),
+                    "opportunity_id": durable_ids.get(item.group_id),
+                    "execution_status": "not-verified",
                     "snapshot_age_seconds": universe_age_seconds,
                     "quote_age_seconds": quote_age_seconds,
                     "universe_age_seconds": universe_age_seconds,

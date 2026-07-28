@@ -315,7 +315,16 @@ async def collect_quotes_in_subprocess(
                 process.kill()
             except ProcessLookupError:
                 pass
-            await asyncio.shield(communicate_task)
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(communicate_task),
+                    timeout=terminate_timeout_s,
+                )
+            except TimeoutError:
+                # ``kill`` is authoritative for a real child, but never let a
+                # wedged pipe reader prevent daemon cancellation forever.
+                communicate_task.cancel()
+                await asyncio.gather(communicate_task, return_exceptions=True)
         raise
 
     if process.returncode != 0:
@@ -418,10 +427,45 @@ class QuoteWorker:
         self._monotonic = monotonic
         self._release_projection_memory = release_projection_memory
         self.runtime = runtime or QuoteWorkerRuntime()
+        self._request_now_event = asyncio.Event()
 
     @property
     def interval_s(self) -> float:
         return self._interval_s
+
+    def request_now(self) -> bool:
+        """Queue one normal collection in the worker's existing single loop."""
+        if self._request_now_event.is_set():
+            return False
+        self._request_now_event.set()
+        return True
+
+    async def _wait_for_next_attempt(self, stop_event: asyncio.Event, delay_s: float) -> bool:
+        """Preserve the testable stop seam while allowing one coalesced wake-up."""
+        if self._request_now_event.is_set():
+            self._request_now_event.clear()
+            return False
+        stop_task = asyncio.create_task(self._wait_for_stop(stop_event, delay_s))
+        request_task = asyncio.create_task(self._request_now_event.wait())
+        try:
+            done, pending = await asyncio.wait(
+                (stop_task, request_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if stop_task in done and stop_task.result():
+                return True
+            if request_task in done and request_task.result():
+                self._request_now_event.clear()
+            return False
+        except asyncio.CancelledError:
+            stop_task.cancel()
+            request_task.cancel()
+            await asyncio.gather(stop_task, request_task, return_exceptions=True)
+            raise
 
     async def run(self, stop_event: asyncio.Event) -> None:
         async def cleanup_after_cancellation() -> None:
@@ -544,7 +588,7 @@ class QuoteWorker:
                     self._release_projection_memory()
                 elapsed_s = max(0.0, self._monotonic() - attempt_started)
                 delay_s = 0.0 if retry_immediately else max(0.0, self._interval_s - elapsed_s)
-                if await self._wait_for_stop(stop_event, delay_s):
+                if await self._wait_for_next_attempt(stop_event, delay_s):
                     break
         finally:
             self.runtime.mark_stopped()

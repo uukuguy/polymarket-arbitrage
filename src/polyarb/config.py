@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # opts in; production cadence stays below the hard 300-second feed SLA.
     neg_risk_quote_worker_enabled: bool = False
     neg_risk_quote_interval_s: int = Field(default=120, gt=0, le=240)
+    neg_risk_observe_min_edge_bps: float = Field(default=100.0, ge=0)
+    neg_risk_focused_interval_s: float = Field(default=15.0, gt=0)
+    market_map_max_age_s: int = Field(default=1800, gt=0)
+    neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 
     liquidity_threshold_usd: float = 1000.0
 

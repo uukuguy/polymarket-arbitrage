@@ -286,6 +286,7 @@ class SnapshotScheduler:
         # Restore state from DB (test_counter_persists_across_restart)
         self._failure_counter = 0
         self.state = SchedulerState.RUNNING
+        self._request_now_event = asyncio.Event()
         self._restore_state()
 
     def _restore_state(self) -> None:
@@ -512,6 +513,46 @@ class SnapshotScheduler:
         self._persist_counter()
         logger.info("scheduler unpaused manually, failure_counter reset to 0")
 
+    def request_now(self) -> bool:
+        """Wake the single scheduler loop for one normal tick, if available.
+
+        This never calls ``_run_snapshot`` directly.  A paused scheduler is a
+        safety boundary, and a set event records one pending request while an
+        existing child owns the producer.
+        """
+        if self.state == SchedulerState.PAUSED or self._request_now_event.is_set():
+            return False
+        self._request_now_event.set()
+        return True
+
+    async def _wait_for_next_tick(self, stop_event: asyncio.Event, delay_s: float) -> bool:
+        """Wait for stop, cadence, or one coalesced requested normal cycle."""
+        if self._request_now_event.is_set():
+            self._request_now_event.clear()
+            return False
+        stop_task = asyncio.create_task(stop_event.wait())
+        request_task = asyncio.create_task(self._request_now_event.wait())
+        try:
+            done, pending = await asyncio.wait(
+                (stop_task, request_task),
+                timeout=delay_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if stop_task in done and stop_task.result():
+                return True
+            if request_task in done and request_task.result():
+                self._request_now_event.clear()
+            return False
+        except asyncio.CancelledError:
+            stop_task.cancel()
+            request_task.cancel()
+            await asyncio.gather(stop_task, request_task, return_exceptions=True)
+            raise
+
     async def run(self, stop_event: asyncio.Event) -> None:
         """Long-running scheduler loop (Plan 02 placeholder).
 
@@ -532,30 +573,15 @@ class SnapshotScheduler:
             # check sees a live /health before the first Gamma fetch ties up
             # the event loop for 30-120s. Use wait_for(stop_event) so SIGINT
             # during startup delay is still <1s responsive.
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=10)
+            if await self._wait_for_next_tick(stop_event, 10):
                 # stop_event was set during delay — exit immediately
                 logger.info("scheduler: stop_event during startup delay, exiting")
                 return
-            except TimeoutError:
-                pass  # normal: 10s elapsed, proceed to first tick
 
             while not stop_event.is_set():
                 await self._tick()
-                # Wait for interval, checking stop_event at 1s granularity.
-                # F-04: 10s → 1s. Wave 5 chaos test gates on <1s shutdown.
-                elapsed = 0.0
-                while elapsed < interval_s and not stop_event.is_set():
-                    step = min(1.0, interval_s - elapsed)
-                    try:
-                        # Use wait_for(stop_event.wait, ...) so an external
-                        # task.cancel() lands immediately rather than after
-                        # the 1s sleep completes.
-                        await asyncio.wait_for(stop_event.wait(), timeout=step)
-                        # stop_event fired during the wait — exit inner loop
-                        break
-                    except TimeoutError:
-                        elapsed += step
+                if await self._wait_for_next_tick(stop_event, interval_s):
+                    break
         except asyncio.CancelledError:
             # F-04: graceful cancellation path. main.py may cancel this task
             # explicitly to interrupt an in-flight tick.

@@ -84,6 +84,8 @@ def test_opportunity_endpoint_returns_explicit_gross_basis(http_test_client, mon
             {
                 "group_id": "group-1",
                 "gross_edge_bps": 250.0,
+                "opportunity_id": None,
+                "execution_status": "not-verified",
                 "snapshot_age_seconds": 0.0,
                 "quote_age_seconds": 0.0,
                 "universe_age_seconds": 0.0,

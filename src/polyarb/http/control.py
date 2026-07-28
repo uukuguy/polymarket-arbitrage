@@ -155,6 +155,32 @@ async def unpause(request: Request) -> JSONResponse:
     )
 
 
+async def build_market_map(request: Request) -> JSONResponse:
+    """Queue one normal Structure cycle without reviving a PAUSED scheduler."""
+    scheduler = getattr(request.app.state, "scheduler", None)
+    state = getattr(scheduler, "state", None)
+    state_value = getattr(state, "value", state)
+    if scheduler is None or state_value == SchedulerState.PAUSED.value:
+        return JSONResponse({"error": "unavailable"}, status_code=409)
+    queued = scheduler.request_now()
+    return JSONResponse(
+        {"status": "queued" if queued else "already_queued"},
+        status_code=202 if queued else 200,
+    )
+
+
+async def scan_neg_risk_map(request: Request) -> JSONResponse:
+    """Queue one normal global Quote cycle; disabled workers remain unavailable."""
+    worker = getattr(request.app.state, "quote_worker", None)
+    if worker is None:
+        return JSONResponse({"error": "unavailable"}, status_code=409)
+    queued = worker.request_now()
+    return JSONResponse(
+        {"status": "queued" if queued else "already_queued"},
+        status_code=202 if queued else 200,
+    )
+
+
 async def pause(request: Request) -> JSONResponse:
     """POST /control/pause — stub (Phase 02.1 D-07 strict scope).
 

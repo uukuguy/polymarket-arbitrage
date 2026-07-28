@@ -32,11 +32,18 @@ from starlette.routing import Route
 from polyarb.http.arbitrage import opportunities
 from polyarb.http.control import (
     ControlAuthMiddleware,
+    build_market_map,
     control_status,
     pause,
+    scan_neg_risk_map,
     unpause,
 )
 from polyarb.http.health import health, healthz
+from polyarb.http.market_map import (
+    market_map,
+    opportunity_history,
+    opportunity_watch_status,
+)
 from polyarb.http.scan import scan, scan_auth_middleware
 
 
@@ -62,6 +69,8 @@ def create_app(
     sqlite_store: Any,
     settings: Any,
     quote_worker_runtime: Any | None = None,
+    quote_worker: Any | None = None,
+    opportunity_watcher: Any | None = None,
 ) -> Starlette:
     """Factory: build Starlette app with /health + /scan routes.
 
@@ -86,7 +95,16 @@ def create_app(
         # D-05 Phase 02.1: Fly probe target (always 200).
         Route("/healthz", healthz, methods=["GET"]),
         Route("/arbitrage/opportunities", opportunities, methods=["GET"]),
+        Route(
+            "/arbitrage/opportunities/{opportunity_id}/history",
+            opportunity_history,
+            methods=["GET"],
+        ),
+        Route("/market-map", market_map, methods=["GET"]),
+        Route("/opportunity-watch/status", opportunity_watch_status, methods=["GET"]),
         Route("/scan", scan, methods=["POST"]),
+        Route("/control/market-map/build", build_market_map, methods=["POST"]),
+        Route("/control/neg-risk/scan", scan_neg_risk_map, methods=["POST"]),
         Route("/control/unpause", unpause, methods=["POST"]),  # D-03 Phase 02.1
         Route("/control/pause", pause, methods=["POST"]),  # stub 501, Phase 03+ 填实现
         Route("/control/status", control_status, methods=["GET"]),  # stub 501, Phase 03+ 填实现
@@ -99,5 +117,7 @@ def create_app(
     app.state.sqlite_store = sqlite_store
     app.state.settings = settings
     app.state.quote_worker_runtime = quote_worker_runtime
+    app.state.quote_worker = quote_worker
+    app.state.opportunity_watcher = opportunity_watcher
 
     return app

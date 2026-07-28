@@ -20,6 +20,10 @@ primary_region = "ams"
   POLYARB_SCHEDULER_INTERVAL_S = "300"
   POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED = "true"
   POLYARB_NEG_RISK_QUOTE_INTERVAL_S = "120"
+  POLYARB_NEG_RISK_OBSERVE_MIN_EDGE_BPS = "100"
+  POLYARB_NEG_RISK_FOCUSED_INTERVAL_S = "15"
+  POLYARB_MARKET_MAP_MAX_AGE_S = "1800"
+  POLYARB_NEG_RISK_OPPORTUNITY_RETENTION_DAYS = "30"
 
 # Two process groups — daemon (long-running HTTP+scheduler) + cron (Supercronic)
 # Set count via: flyctl scale count app=1 cron=1

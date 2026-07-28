@@ -35,6 +35,19 @@ def test_help_lists_durable_arbitrage_commands() -> None:
     assert "scan-arb-live:" in result.stdout
 
 
+def test_opportunity_targets_are_discoverable_and_cloud_only() -> None:
+    for target in (
+        "build-market-map",
+        "inspect-market-map",
+        "scan-neg-risk-map",
+        "watch-opportunities-status",
+        "watch-opportunities",
+        "watch-opportunity-history",
+    ):
+        assert f"{target}:" in _make("help").stdout
+        assert "data/state.db" not in _make_recipe(target)
+
+
 def test_scan_l3_seed_make_entry_is_discoverable_and_exact() -> None:
     recipe = _make_recipe("scan-l3-seed")
     help_result = _make("help")

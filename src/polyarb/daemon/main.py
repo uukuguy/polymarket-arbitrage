@@ -84,6 +84,8 @@ async def main() -> int:
         sqlite_store=sqlite_store,
         settings=settings,
         quote_worker_runtime=quote_worker.runtime if quote_worker is not None else None,
+        quote_worker=quote_worker,
+        opportunity_watcher=focused_watcher,
     )
 
     config = uvicorn.Config(

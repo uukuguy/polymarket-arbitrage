@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -25,6 +25,35 @@ help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed -E 's/^## /  /' | sort
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M1 opportunity watcher cloud controls — no local SQLite, wallet, or orders.
+# ─────────────────────────────────────────────────────────────────────────────
+
+## build-market-map: Cloud HMAC control: queue one normal Structure map cycle; no order or scheduler bypass.
+build-market-map:
+	@uv run python -m polyarb.cli_perception build-market-map
+
+## inspect-market-map: Cloud read-only GET of the current Structure map; no local SQLite or order activity. Optional event_id=.
+inspect-market-map:
+	@curl --disable --request GET -fsS "https://polyarb-l1.fly.dev/market-map$(if $(strip $(event_id)),?event_id=$(event_id),)" | python -m json.tool
+
+## scan-neg-risk-map: Cloud HMAC control: queue one normal global Quote scan; no order activity.
+scan-neg-risk-map:
+	@uv run python -m polyarb.cli_perception scan-neg-risk-map
+
+## watch-opportunities-status: Cloud read-only watcher state; no local SQLite or order activity.
+watch-opportunities-status:
+	@curl --disable --request GET -fsS "https://polyarb-l1.fly.dev/opportunity-watch/status" | python -m json.tool
+
+## watch-opportunities: Cloud read-only observer opportunities (gross only, no order). Optional min_edge_bps= and limit=.
+watch-opportunities:
+	@curl --disable --request GET -fsS "https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=$(or $(min_edge_bps),0)$(if $(strip $(limit)),\&limit=$(limit),)" | python -m json.tool
+
+## watch-opportunity-history: Cloud read-only observer replay; requires opportunity_id= and never places an order.
+watch-opportunity-history:
+	@test -n "$(opportunity_id)" || (echo "usage: make watch-opportunity-history opportunity_id=<id>" >&2; exit 2)
+	@curl --disable --request GET -fsS "https://polyarb-l1.fly.dev/arbitrage/opportunities/$(opportunity_id)/history" | python -m json.tool
 
 .PHONY: docs-m1-check
 
