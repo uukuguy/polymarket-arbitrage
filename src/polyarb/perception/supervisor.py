@@ -245,11 +245,17 @@ class ProducerSupervisor:
                 if stop_task in done and stop_task.result():
                     return None, "stop"
                 current = self._progress_marker(component, supervisor_run_id, attempt)
-                if current != marker:
+                if self._heartbeat_progress_advanced(marker, current):
                     marker = current
                     deadline = time.monotonic() + timeout_s
                     if incident is not None:
                         self._attempt_verify(incident)
+                elif self._valid_progress_marker(current) and not self._valid_progress_marker(
+                    marker
+                ):
+                    # A recovered read establishes a baseline. Read failure/recovery
+                    # is observability state, not child-authenticated progress.
+                    marker = current
         finally:
             for task in (wait_task, stop_task):
                 if not task.done():
@@ -288,6 +294,26 @@ class ProducerSupervisor:
                 con.close()
         except (sqlite3.Error, TypeError, ValueError):
             return ("unavailable",)
+
+    @staticmethod
+    def _valid_progress_marker(marker: tuple) -> bool:
+        return (
+            len(marker) == 3
+            and all(type(value) is int for value in marker)
+            and marker[0] >= 0
+            and marker[1] >= 0
+            and marker[2] >= 0
+        )
+
+    @classmethod
+    def _heartbeat_progress_advanced(cls, previous: tuple, current: tuple) -> bool:
+        return bool(
+            cls._valid_progress_marker(previous)
+            and cls._valid_progress_marker(current)
+            and current[0] > previous[0]
+            and current[1] > previous[1]
+            and current[2] > previous[2]
+        )
 
     @staticmethod
     async def _terminate(process, grace_s: float) -> None:

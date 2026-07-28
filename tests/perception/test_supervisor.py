@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 
 import pytest
 
@@ -101,6 +102,39 @@ async def test_unexpected_zero_exit_restarts_then_escalates(tmp_path) -> None:
     )
     assert liveness.state == "unexpected-exit"
     assert liveness.evidence_consistent is True
+
+
+@pytest.mark.asyncio
+async def test_progress_read_flapping_never_extends_stall_deadline(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, supervisor = _supervisor(
+        tmp_path,
+        component="candidate",
+        command=(sys.executable, "-c", "import time; time.sleep(0.39)"),
+    )
+    reads = 0
+
+    def flapping_marker(component, supervisor_run_id, attempt):
+        nonlocal reads
+        reads += 1
+        return (0, 0, 0) if reads % 2 else ("unavailable",)
+
+    monkeypatch.setattr(supervisor, "_progress_marker", flapping_marker)
+    started = time.monotonic()
+    await supervisor.run(
+        ProducerSpec(
+            component="candidate",
+            timeout_s=0.08,
+            terminate_grace_s=0.05,
+            max_restarts=0,
+        ),
+        asyncio.Event(),
+    )
+
+    assert store.producer_receipts("candidate")[0].outcome == "timeout"
+    assert time.monotonic() - started < 0.25
 
 
 @pytest.mark.asyncio
@@ -223,6 +257,98 @@ def test_liveness_replays_and_rejects_corrupt_old_attempt(tmp_path) -> None:
     )
     assert health.state == "unavailable"
     assert health.evidence_consistent is False
+
+
+def test_liveness_rejects_success_receipt_with_nonzero_exit_code(tmp_path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.reserve_producer_attempt(
+        "candidate",
+        supervisor_run_id="run-1",
+        started_at_ms=1_000,
+    )
+    store.record_producer_receipt(
+        ProducerReceipt(
+            component="candidate",
+            attempt=1,
+            started_at_ms=1_000,
+            finished_at_ms=1_010,
+            outcome="success",
+            exit_code=0,
+            stdout_tail="",
+            stderr_tail="",
+            supervisor_run_id="run-1",
+            child_auth_hash=None,
+        )
+    )
+    with store._connect() as con:
+        con.execute(
+            "UPDATE neg_risk_producer_receipts SET exit_code=9 "
+            "WHERE component='candidate' AND attempt=1"
+        )
+
+    health = read_producer_liveness_health(
+        store.db_path,
+        "candidate",
+        now_ms=2_000,
+        stall_timeout_ms=2_000,
+    )
+    assert health.state == "unavailable"
+    assert health.evidence_consistent is False
+
+
+@pytest.mark.parametrize(
+    ("outcome", "exit_code", "consistent"),
+    (
+        ("success", 0, True),
+        ("nonzero", 9, True),
+        ("timeout", None, True),
+        ("cancelled", None, True),
+        ("spawn-error", None, True),
+        ("success", 9, False),
+        ("nonzero", 0, False),
+        ("nonzero", None, False),
+        ("timeout", 0, False),
+        ("cancelled", 0, False),
+        ("spawn-error", 0, False),
+    ),
+)
+def test_liveness_enforces_exact_outcome_exit_code_matrix(
+    tmp_path,
+    outcome,
+    exit_code,
+    consistent,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.reserve_producer_attempt(
+        "candidate",
+        supervisor_run_id="run-1",
+        started_at_ms=1_000,
+    )
+    store.record_producer_receipt(
+        ProducerReceipt(
+            component="candidate",
+            attempt=1,
+            started_at_ms=1_000,
+            finished_at_ms=1_010,
+            outcome=outcome,
+            exit_code=exit_code,
+            stdout_tail="",
+            stderr_tail="",
+            supervisor_run_id="run-1",
+            child_auth_hash=None,
+        )
+    )
+
+    health = read_producer_liveness_health(
+        store.db_path,
+        "candidate",
+        now_ms=2_000,
+        stall_timeout_ms=2_000,
+    )
+    assert health.evidence_consistent is consistent
+    assert (health.state != "unavailable") is consistent
 
 
 @pytest.mark.asyncio

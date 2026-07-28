@@ -3,10 +3,11 @@
 Implemented the default-off Slice E control plane. Incidents are append-only,
 deduplicated by active scope/kind and constrained to the approved lifecycle.
 `verified` requires a component-specific writer mutation after recovery began:
-an exact complete Candidate Quote batch, an advancing validated Discovery
-batch, an advancing validated Reconciliation checkpoint, or a bounded HTTP
-probe bound to the expected release. Historical lifecycle and resource
-evidence is replay-validated; corrupt or orphaned rows fail closed.
+an atomic Candidate success receipt binding the exact certified group, Quote
+batch and terminal fact, an advancing validated Discovery batch, an advancing
+validated Reconciliation checkpoint, or a bounded HTTP probe bound to the
+expected release. Historical lifecycle and resource evidence is
+replay-validated; corrupt or orphaned rows fail closed.
 
 The durable resource controller reads actual Candidate freshness/count and
 producer incident state. It pauses Reconciliation first, reduces Discovery
@@ -19,12 +20,15 @@ Opportunity-first producers move out of the HTTP process when isolation is
 enabled. The supervisor uses the exact shell-free commands, bounded/redacted
 stdout/stderr tails, durable child receipts and producer-written heartbeats.
 Stalls receive terminate→grace→kill; restart uses bounded exponential backoff
-and escalates at the configured limit. One component's receipt/incident does
-not alter another component. Strict health reads the same durable facts via
-`perception:open_incidents` and `perception:resource_mode`.
+and escalates at the configured limit. Only a child-authenticated heartbeat
+whose count, sequence and timestamp all strictly advance can extend the stall
+deadline; read failures and status-marker changes cannot. Receipt history
+enforces the exact outcome/exit-code matrix. One component's receipt/incident
+does not alter another component. Strict health reads the same durable facts
+via `perception:open_incidents` and `perception:resource_mode`.
 
 Verification: focused lifecycle/resource/subprocess fault tests and
-proportional perception/health/daemon regressions passed; all 2,525 repository
+proportional perception/health/daemon regressions passed; 2,617 repository
 tests passed (one expected xfail and one skip). Ruff, compileall,
 `make docs-m1-check`, `git diff --check` and `make planning-status` passed.
 `python:3.12-slim` directly proved Python 3.12, asyncio subprocess,
@@ -32,4 +36,3 @@ terminate and kill primitives. The registry-specific L2 image check could not
 pull its private Fly digest locally and is recorded as an external evidence
 gap; no unavailable slim-image tools are used. No deployment or trading
 behavior was added.
-

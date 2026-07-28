@@ -296,6 +296,16 @@ class ProducerHistoryState:
     terminal_at_ms: int | None
 
 
+def _valid_producer_receipt_outcome(outcome: object, exit_code: object) -> bool:
+    if outcome == "success":
+        return type(exit_code) is int and exit_code == 0
+    if outcome == "nonzero":
+        return type(exit_code) is int and exit_code != 0
+    if outcome in {"timeout", "cancelled", "spawn-error"}:
+        return exit_code is None
+    return False
+
+
 def validate_producer_history(
     con: sqlite3.Connection,
     component: str,
@@ -373,6 +383,10 @@ def validate_producer_history(
             or receipt["started_at_ms"] != start["started_at_ms"]
             or type(receipt["finished_at_ms"]) is not int
             or not start["started_at_ms"] <= receipt["finished_at_ms"] <= now_ms
+            or not _valid_producer_receipt_outcome(
+                receipt["outcome"],
+                receipt["exit_code"],
+            )
         ):
             raise ValueError("invalid-producer-history")
         attempt_heartbeats = heartbeat_by_attempt.get(attempt, [])

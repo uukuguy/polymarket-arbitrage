@@ -50,9 +50,12 @@ wallet, signing, balances, orders or real-money execution.
    Attempts are reserved transactionally before spawn; restart reconciliation
    closes abandoned reservations as `spawn-error` before allocating the next
    attempt. Liveness replays the full historical start/heartbeat/receipt chain,
-   so old corruption fails closed. Exit code zero is still unexpected producer
-   disappearance. Restart count and exponential backoff are bounded; retry
-   exhaustion durably escalates.
+   so old corruption fails closed. Read errors or marker status changes never
+   extend the deadline; heartbeat count, sequence and timestamp must all
+   strictly advance. Receipt replay enforces `success=0`, `nonzero!=0`, and
+   `timeout/cancelled/spawn-error=None`. Exit code zero is still unexpected
+   producer disappearance. Restart count and exponential backoff are bounded;
+   retry exhaustion durably escalates.
 8. `perception:open_incidents`, per-producer liveness and
    `perception:resource_mode` read and validate
    the exact same SQLite mutations. Candidate/HTTP incidents can fail overall
@@ -63,13 +66,13 @@ wallet, signing, balances, orders or real-money execution.
 ## Verification
 
 ```text
-Focused lifecycle/resource/supervisor: 176 pass
-Proportional perception + strict health + daemon wiring/shutdown: pass
-Full repository: 2606 collected, 2604 pass (1 expected xfail, 1 skip)
+Focused lifecycle/resource/supervisor: 192 pass
+Proportional perception + strict health + daemon wiring/shutdown: 310 pass
+Full repository: 2619 collected, 2617 pass (1 expected xfail, 1 skip)
 Ruff changed scope: pass
 compileall: pass
 make docs-m1-check: pass
-git diff --check against review baseline 087246c: pass
+git diff --check against review baseline 114f30e and working diff: pass
 make planning-status: 82 plans, no drift
 git hooksPath: .githooks
 python:3.12-slim subprocess primitives: 3.12.13 True True True
