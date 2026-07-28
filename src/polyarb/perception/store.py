@@ -27,7 +27,12 @@ from polyarb.perception.models import (
     GroupRevision,
 )
 from polyarb.perception.priority import GroupScheduleInput, priority_components
-from polyarb.storage.schemas import DDL, OWNER_JOURNAL_TRIGGER_NAMES
+from polyarb.storage.schemas import (
+    A527_OWNER_MUTATION_GUARD_DDL,
+    DDL,
+    OWNER_JOURNAL_TRIGGER_NAMES,
+    OWNER_MUTATION_GUARD_DDL,
+)
 
 _BUSY_TIMEOUT_MS = 5_000
 _OPERATOR_AUTH_HISTORY_MAX_ROWS = 10_000
@@ -49,6 +54,15 @@ _DISCOVERY_STATUS_PROJECTION_VERSION = 1
 _OWNER_MUTATION_JOURNAL_RETAIN_ROWS = 128
 _OWNER_MUTATION_LEGACY_MAX_ROWS = 1_025
 _OWNER_AUTHORITY_VERSION = 2
+_OWNER_TABLE_NAMES = (
+    "neg_risk_owner_write_context",
+    "neg_risk_owner_mutation_journal",
+    "neg_risk_owner_mutation_guard",
+    "neg_risk_candidate_current_authority",
+    "neg_risk_candidate_current_aggregate",
+    "neg_risk_discovery_status_projection",
+    "neg_risk_discovery_group_projection",
+)
 _RECONCILIATION_AUTHORITY_DOMAIN = "polyarb-reconciliation-authority-checkpoint-v1"
 _RECONCILIATION_AUTHORITY_VERSION = 1
 _HEARTBEAT_AUTH_DOMAIN = "polyarb-producer-heartbeat-v1"
@@ -1393,16 +1407,124 @@ class OpportunityPerceptionStore:
         )
 
     @staticmethod
-    def _owner_manifest_state(con: sqlite3.Connection) -> str:
-        owner_tables = {
-            "neg_risk_owner_write_context",
-            "neg_risk_owner_mutation_journal",
-            "neg_risk_owner_mutation_guard",
-            "neg_risk_candidate_current_authority",
-            "neg_risk_candidate_current_aggregate",
-            "neg_risk_discovery_status_projection",
-            "neg_risk_discovery_group_projection",
-        }
+    def _normalized_schema_sql(sql: str) -> str:
+        return " ".join(sql.split())
+
+    @staticmethod
+    def _quoted_identifier(identifier: str) -> str:
+        return '"' + identifier.replace('"', '""') + '"'
+
+    @classmethod
+    def _owner_table_fingerprints(
+        cls,
+        con: sqlite3.Connection,
+    ) -> dict[str, tuple[str, tuple[tuple[object, ...], ...]]]:
+        fingerprints = {}
+        for table_name in _OWNER_TABLE_NAMES:
+            schema_row = con.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+            if schema_row is None or schema_row["sql"] is None:
+                raise ValueError("invalid-owner-authority-manifest")
+            quoted_table = cls._quoted_identifier(table_name)
+            columns = tuple(
+                (
+                    int(row["cid"]),
+                    str(row["name"]),
+                    str(row["type"]),
+                    int(row["notnull"]),
+                    row["dflt_value"],
+                    int(row["pk"]),
+                )
+                for row in con.execute(f"PRAGMA table_xinfo({quoted_table})")
+            )
+            fingerprints[table_name] = (
+                cls._normalized_schema_sql(str(schema_row["sql"])),
+                columns,
+            )
+        return fingerprints
+
+    @classmethod
+    def _owner_index_fingerprints(
+        cls,
+        con: sqlite3.Connection,
+    ) -> dict[str, tuple[object, ...]]:
+        placeholders = ",".join("?" for _ in _OWNER_TABLE_NAMES)
+        index_rows = con.execute(
+            "SELECT name,tbl_name,sql FROM sqlite_master "
+            f"WHERE type='index' AND sql IS NOT NULL AND tbl_name IN ({placeholders}) "
+            "ORDER BY name",
+            _OWNER_TABLE_NAMES,
+        ).fetchall()
+        fingerprints: dict[str, tuple[object, ...]] = {}
+        for schema_row in index_rows:
+            index_name = str(schema_row["name"])
+            table_name = str(schema_row["tbl_name"])
+            quoted_table = cls._quoted_identifier(table_name)
+            list_row = next(
+                (
+                    row
+                    for row in con.execute(f"PRAGMA index_list({quoted_table})")
+                    if str(row["name"]) == index_name
+                ),
+                None,
+            )
+            if list_row is None:
+                raise ValueError("invalid-owner-authority-manifest")
+            quoted_index = cls._quoted_identifier(index_name)
+            columns = tuple(
+                (
+                    int(row["seqno"]),
+                    int(row["cid"]),
+                    None if row["name"] is None else str(row["name"]),
+                    None if row["coll"] is None else str(row["coll"]),
+                    int(row["desc"]),
+                    int(row["key"]),
+                )
+                for row in con.execute(f"PRAGMA index_xinfo({quoted_index})")
+            )
+            fingerprints[index_name] = (
+                table_name,
+                cls._normalized_schema_sql(str(schema_row["sql"])),
+                int(list_row["unique"]),
+                str(list_row["origin"]),
+                int(list_row["partial"]),
+                columns,
+            )
+        return fingerprints
+
+    @classmethod
+    def _expected_owner_manifests(
+        cls,
+    ) -> tuple[
+        tuple[dict[str, tuple[object, ...]], dict[str, tuple[object, ...]]],
+        tuple[dict[str, tuple[object, ...]], dict[str, tuple[object, ...]]],
+    ]:
+        current_con = sqlite3.connect(":memory:")
+        current_con.row_factory = sqlite3.Row
+        legacy_con = sqlite3.connect(":memory:")
+        legacy_con.row_factory = sqlite3.Row
+        try:
+            current_con.executescript(DDL)
+            current_tables = cls._owner_table_fingerprints(current_con)
+            current_indexes = cls._owner_index_fingerprints(current_con)
+            legacy_con.executescript(DDL)
+            legacy_con.execute("DROP TABLE neg_risk_owner_mutation_guard")
+            legacy_con.executescript(A527_OWNER_MUTATION_GUARD_DDL)
+            legacy_tables = cls._owner_table_fingerprints(legacy_con)
+            legacy_indexes = cls._owner_index_fingerprints(legacy_con)
+        finally:
+            legacy_con.close()
+            current_con.close()
+        return (
+            (current_tables, current_indexes),
+            (legacy_tables, legacy_indexes),
+        )
+
+    @classmethod
+    def _owner_manifest_state(cls, con: sqlite3.Connection) -> str:
+        owner_tables = set(_OWNER_TABLE_NAMES)
         present_tables = {
             str(row["name"])
             for row in con.execute(
@@ -1429,48 +1551,18 @@ class OpportunityPerceptionStore:
         if present_tables != owner_tables or present_triggers != expected_triggers:
             raise ValueError("invalid-owner-authority-manifest")
 
-        expected_con = sqlite3.connect(":memory:")
-        try:
-            expected_con.executescript(DDL)
-            expected_columns = {
-                table: {
-                    str(row[1])
-                    for row in expected_con.execute(f"PRAGMA table_info({table})")
-                }
-                for table in owner_tables
-            }
-        finally:
-            expected_con.close()
-        actual_columns = {
-            table: {
-                str(row["name"])
-                for row in con.execute(f"PRAGMA table_info({table})")
-            }
-            for table in owner_tables
-        }
-        if actual_columns == expected_columns:
+        current_manifest, legacy_manifest = cls._expected_owner_manifests()
+        actual_manifest = (
+            cls._owner_table_fingerprints(con),
+            cls._owner_index_fingerprints(con),
+        )
+        if actual_manifest == current_manifest:
             return "current"
-        legacy_columns = {
-            table: set(columns)
-            for table, columns in expected_columns.items()
-        }
-        legacy_columns["neg_risk_owner_mutation_guard"] -= {
-            "authority_version",
-            "migration_state",
-        }
-        if actual_columns == legacy_columns:
+        if actual_manifest == legacy_manifest:
             return "a527"
         raise ValueError("invalid-owner-authority-manifest")
 
     def _migrate_a527_owner_guard(self, con: sqlite3.Connection) -> None:
-        con.execute(
-            "ALTER TABLE neg_risk_owner_mutation_guard "
-            "ADD COLUMN authority_version INTEGER"
-        )
-        con.execute(
-            "ALTER TABLE neg_risk_owner_mutation_guard "
-            "ADD COLUMN migration_state TEXT"
-        )
         guard = con.execute(
             "SELECT consumed_journal_id,consumed_hash,retained_base_id,"
             "retained_base_hash FROM neg_risk_owner_mutation_guard WHERE id=1"
@@ -1488,10 +1580,22 @@ class OpportunityPerceptionStore:
         )
         self._refresh_owner_aggregate_hashes(con)
         con.execute(
-            "UPDATE neg_risk_owner_mutation_guard SET "
-            "authority_version=?,migration_state='complete' WHERE id=1",
+            "ALTER TABLE neg_risk_owner_mutation_guard "
+            "RENAME TO neg_risk_owner_mutation_guard_a527"
+        )
+        con.execute(OWNER_MUTATION_GUARD_DDL)
+        con.execute(
+            "INSERT INTO neg_risk_owner_mutation_guard("
+            "id,consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash,authority_version,migration_state"
+            ") SELECT id,consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash,?,'complete' "
+            "FROM neg_risk_owner_mutation_guard_a527",
             (_OWNER_AUTHORITY_VERSION,),
         )
+        con.execute("DROP TABLE neg_risk_owner_mutation_guard_a527")
         self._assert_owner_journal_clean(con)
 
     def init_schema(self) -> None:

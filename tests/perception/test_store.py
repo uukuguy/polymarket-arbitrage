@@ -358,6 +358,141 @@ def test_unknown_or_partial_owner_manifest_fails_before_ddl(
             }
 
 
+@pytest.mark.parametrize(
+    "drift",
+    ("type", "notnull", "default", "pk", "check", "order"),
+)
+def test_owner_table_schema_fingerprint_rejects_semantic_drift(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        canonical_sql = str(
+            con.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' "
+                "AND name='neg_risk_owner_mutation_guard'"
+            ).fetchone()[0]
+        )
+        replacements = {
+            "type": ("authority_version INTEGER", "authority_version TEXT"),
+            "notnull": (
+                "migration_state TEXT NOT NULL",
+                "migration_state TEXT",
+            ),
+            "default": (
+                "retained_base_id INTEGER NOT NULL DEFAULT 0",
+                "retained_base_id INTEGER NOT NULL DEFAULT 1",
+            ),
+            "pk": (
+                "id INTEGER PRIMARY KEY CHECK(id = 1)",
+                "id INTEGER CHECK(id = 1)",
+            ),
+            "check": (
+                "CHECK(authority_version = 2)",
+                "CHECK(authority_version >= 2)",
+            ),
+            "order": (
+                "candidate_aggregate_hash TEXT,\n  discovery_aggregate_hash TEXT",
+                "discovery_aggregate_hash TEXT,\n  candidate_aggregate_hash TEXT",
+            ),
+        }
+        old, new = replacements[drift]
+        drift_sql = canonical_sql.replace(old, new)
+        assert drift_sql != canonical_sql
+        columns = tuple(
+            str(row["name"])
+            for row in con.execute(
+                "PRAGMA table_info(neg_risk_owner_mutation_guard)"
+            )
+        )
+        con.execute(
+            "ALTER TABLE neg_risk_owner_mutation_guard "
+            "RENAME TO neg_risk_owner_mutation_guard_backup"
+        )
+        con.execute(drift_sql)
+        con.execute(
+            "INSERT INTO neg_risk_owner_mutation_guard("
+            f"{','.join(columns)}) SELECT {','.join(columns)} "
+            "FROM neg_risk_owner_mutation_guard_backup"
+        )
+        con.execute("DROP TABLE neg_risk_owner_mutation_guard_backup")
+
+    with pytest.raises(ValueError, match="invalid-owner-authority-manifest"):
+        store.init_schema()
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ("missing", "rename", "wrong-columns", "unique", "partial"),
+)
+def test_owner_index_manifest_rejects_semantic_drift(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    index_name = "idx_neg_risk_discovery_projection_oldest"
+    with store._connect() as con:
+        con.execute(f"DROP INDEX {index_name}")
+        if drift != "missing":
+            replacement = {
+                "rename": (
+                    "idx_neg_risk_discovery_projection_oldest_renamed",
+                    "(visit_anchor_ms,group_id)",
+                    "",
+                ),
+                "wrong-columns": (
+                    index_name,
+                    "(row_hash,group_id)",
+                    "",
+                ),
+                "unique": (
+                    index_name,
+                    "(visit_anchor_ms,group_id)",
+                    "UNIQUE ",
+                ),
+                "partial": (
+                    index_name,
+                    "(visit_anchor_ms,group_id) "
+                    "WHERE visit_anchor_ms IS NOT NULL",
+                    "",
+                ),
+            }[drift]
+            name, columns, qualifier = replacement
+            con.execute(
+                f"CREATE {qualifier}INDEX {name} "
+                f"ON neg_risk_discovery_group_projection{columns}"
+            )
+
+    with pytest.raises(ValueError, match="invalid-owner-authority-manifest"):
+        store.init_schema()
+
+
+def test_discovery_oldest_projection_query_uses_canonical_index(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        plan = tuple(
+            str(row["detail"])
+            for row in con.execute(
+                "EXPLAIN QUERY PLAN SELECT visit_anchor_ms AS oldest "
+                "FROM neg_risk_discovery_group_projection "
+                "WHERE visit_anchor_ms IS NOT NULL "
+                "ORDER BY visit_anchor_ms,group_id LIMIT 1"
+            )
+        )
+
+    assert any(
+        "idx_neg_risk_discovery_projection_oldest" in detail
+        for detail in plan
+    )
+    assert all("TEMP B-TREE" not in detail for detail in plan)
+
+
 def _drop_v2_guard_columns(con: sqlite3.Connection) -> None:
     columns = {
         str(row["name"])
@@ -411,6 +546,9 @@ def test_a527_owner_window_migrates_atomically_to_v2(
         ).fetchone()[0] > 128
         _drop_v2_guard_columns(con)
 
+    store.init_schema()
+    # The migration must produce the exact current fingerprint, not merely
+    # values that survive the first transaction.
     store.init_schema()
 
     with store._connect() as con:

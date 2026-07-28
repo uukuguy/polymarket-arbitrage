@@ -54,12 +54,17 @@ wallet, signing, balances, orders, or real-money execution.
 10. The guard is an explicit v2 authority with `migration_state=complete`.
     Candidate and Discovery authenticated hashes are mandatory in that state;
     NULL or incomplete guard state is never treated as bootstrap authority.
-11. Initialization classifies the complete owner table/column/trigger manifest
-    before DDL. Only an empty manifest, current v2, or the exact known a527
-    manifest is accepted. A527 windows up to 1,025 retained events are fully
-    replayed under `BEGIN IMMEDIATE`, pruned to 128, rooted, versioned, and
-    revalidated atomically. Partial, unknown, corrupt, timed-out, or racing
-    migrations cannot leave a half-upgraded schema.
+11. Initialization fingerprints the complete owner table/index/trigger
+    manifest before DDL. Tables bind normalized canonical `sqlite_master` DDL
+    and ordered `table_xinfo`; explicit indexes bind canonical DDL,
+    unique/origin/partial flags, and ordered `index_xinfo`. Only an empty
+    manifest, exact current v2, or the explicitly encoded known a527 manifest
+    is accepted. A527 windows up to 1,025 retained events are fully replayed
+    under `BEGIN IMMEDIATE`, pruned to 128, rooted, and rebuilt into the
+    canonical constrained v2 guard atomically. Partial, unknown, semantically
+    drifted, corrupt, timed-out, or racing migrations cannot leave a
+    half-upgraded schema. The oldest-group query uses the canonical projection
+    index without a temporary B-tree.
 
 ## Truth chain
 
@@ -149,10 +154,10 @@ Canonical trigger matrix: 33 missing-trigger manifest failures plus 33 SQL drift
 Candidate continuity: 10,010 legal writes in 60.62s; 128-row authenticated journal window and bounded raw suffix
 Discovery hot path: incremental per-group projection; no full schedule/fact scan or all-groups JSON parse
 Reconciliation close/change: schedule, admission authority, projection and aggregate synchronize in one transaction
-Manifest closure: deleted-pending sequence 9; guard NULL 6; manifest 3; a527 success/rollback/deadline/concurrency 4
-Perception package: 371 pass
-Full repository: 2787 collected; 2785 pass, 1 expected xfail, 1 skip
-Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> 2642 -> 2654 -> 2723 -> 2765 -> current 2787
+Manifest closure: deleted-pending sequence 9; guard NULL 6; manifest 3; a527 success/rollback/deadline/concurrency 4; exact table fingerprints 6; explicit index fingerprints 5; canonical oldest-query plan 1
+Perception package: 383 pass
+Full repository: 2799 collected; 2797 pass, 1 expected xfail, 1 skip
+Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> 2642 -> 2654 -> 2723 -> 2765 -> 2787 -> current 2799
 Ruff changed scope: pass
 compileall: pass
 make docs-m1-check: pass

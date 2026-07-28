@@ -43,6 +43,37 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+# Exact pre-v2 owner guard accepted for the one supported a527 migration.
+# Keep this as an explicit historical contract: startup migration must not
+# depend on a git checkout or infer an old schema by subtracting columns.
+A527_OWNER_MUTATION_GUARD_DDL = """
+CREATE TABLE neg_risk_owner_mutation_guard (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  consumed_journal_id INTEGER NOT NULL CHECK(consumed_journal_id >= 0),
+  consumed_hash TEXT,
+  retained_base_id INTEGER NOT NULL DEFAULT 0 CHECK(retained_base_id >= 0),
+  retained_base_hash TEXT,
+  candidate_aggregate_hash TEXT,
+  discovery_aggregate_hash TEXT)
+"""
+
+# Canonical v2 DDL is also explicit so the a527 migration can rebuild the
+# table atomically with every constraint, rather than merely appending two
+# nullable columns via ALTER TABLE.
+OWNER_MUTATION_GUARD_DDL = """
+CREATE TABLE neg_risk_owner_mutation_guard (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  consumed_journal_id INTEGER NOT NULL CHECK(consumed_journal_id >= 0),
+  consumed_hash TEXT,
+  retained_base_id INTEGER NOT NULL DEFAULT 0 CHECK(retained_base_id >= 0),
+  retained_base_hash TEXT,
+  candidate_aggregate_hash TEXT,
+  discovery_aggregate_hash TEXT,
+  authority_version INTEGER NOT NULL CHECK(authority_version = 2),
+  migration_state TEXT NOT NULL CHECK(migration_state IN ('building','complete'))
+)
+"""
+
 DDL = """
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
