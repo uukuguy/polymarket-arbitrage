@@ -52,5 +52,24 @@ make planning-status
 no drift detected
 ```
 
-Production copied-database migration and later rollout gates are not claimed by
-this Task 1 summary.
+## Slice A → B Production-Clone Gate
+
+The volume-owning `polyarb-l1` machine was opened read-only and its live
+`/data/state.db` schema plus up to 200 recent rows per legacy table were copied
+into a compact SQLite clone. The source database was not migrated or stopped.
+The clone retained all 20 production legacy table definitions and 2,530
+representative rows.
+
+Running `OpportunityPerceptionStore.init_schema()` against a fresh copy proved:
+
+```text
+legacy_tables_unchanged=20
+legacy_rows_unchanged=2530
+new_tables=neg_risk_group_quote_batches,neg_risk_group_revisions
+quick_check=ok
+```
+
+The pre/post fingerprint also covered `SQLiteStore.get_latest_snapshot()` and
+`NegRiskQuoteStore.latest_universe()`. Their results were byte-for-byte stable.
+This closes the copied-production-database compatibility gate before Slice B.
+Later rollout and deployment gates remain open.
