@@ -15,6 +15,7 @@ from polyarb.perception.models import (
 from polyarb.storage.schemas import DDL
 
 _BUSY_TIMEOUT_MS = 5_000
+_GROUP_STATUSES = {"discovered", "certified", "stale", "invalidated", "closed"}
 
 
 class OpportunityPerceptionStore:
@@ -120,7 +121,9 @@ class OpportunityPerceptionStore:
             if current_row["status"] != "certified":
                 raise ValueError("certified-group-not-found")
 
-            current = self._group_from_row(current_row)
+            current = self._validated_group_from_row(current_row)
+            if current is None:
+                raise ValueError("certified-group-invalid")
             if batch.group_id != current.group_id:
                 raise ValueError("group-identity-mismatch")
             if batch.membership_hash != current.membership_hash:
@@ -163,7 +166,7 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             row = self._current_group_row(con, group_id)
-            return None if row is None else self._group_from_row(row)
+            return None if row is None else self._validated_group_from_row(row)
         finally:
             con.close()
 
@@ -175,22 +178,13 @@ class OpportunityPerceptionStore:
     ) -> GroupQuoteBatch | None:
         con = self._connect()
         try:
-            current_row = self._current_group_row(con, group_id)
-            if current_row is None or current_row["status"] != "certified":
+            row = self._current_quote_row(con, group_id, now_ms, max_age_ms)
+            if row is None:
                 return None
-            row = con.execute(
-                "SELECT * FROM neg_risk_group_quote_batches "
-                "WHERE group_id=? AND membership_hash=? AND status='complete' "
-                "AND quoted_at_ms<=? AND quoted_at_ms>=? "
-                "ORDER BY quoted_at_ms DESC,id DESC LIMIT 1",
-                (
-                    group_id,
-                    current_row["membership_hash"],
-                    now_ms,
-                    now_ms - max_age_ms,
-                ),
-            ).fetchone()
-            return None if row is None else self._quote_batch_from_row(row)
+            group = self._validated_group_from_row(row, prefix="group_")
+            if group is None or group.status != "certified":
+                return None
+            return self._validated_quote_from_row(row, group, prefix="quote_")
         finally:
             con.close()
 
@@ -212,6 +206,47 @@ class OpportunityPerceptionStore:
             "SELECT * FROM neg_risk_group_revisions "
             "WHERE group_id=? ORDER BY revision DESC LIMIT 1",
             (group_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _current_quote_row(
+        con: sqlite3.Connection,
+        group_id: str,
+        now_ms: int,
+        max_age_ms: int,
+    ) -> sqlite3.Row | None:
+        return con.execute(
+            "WITH current_group AS ("
+            "SELECT group_id,event_id,revision,membership_hash,started_at_ms,"
+            "observed_at_ms,source_cursor,status,legs_json "
+            "FROM neg_risk_group_revisions "
+            "WHERE group_id=? ORDER BY revision DESC LIMIT 1"
+            ") "
+            "SELECT "
+            "g.group_id AS group_group_id,"
+            "g.event_id AS group_event_id,"
+            "g.revision AS group_revision,"
+            "g.membership_hash AS group_membership_hash,"
+            "g.started_at_ms AS group_started_at_ms,"
+            "g.observed_at_ms AS group_observed_at_ms,"
+            "g.source_cursor AS group_source_cursor,"
+            "g.status AS group_status,"
+            "g.legs_json AS group_legs_json,"
+            "q.id AS quote_id,"
+            "q.group_id AS quote_group_id,"
+            "q.membership_hash AS quote_membership_hash,"
+            "q.started_at_ms AS quote_started_at_ms,"
+            "q.quoted_at_ms AS quote_quoted_at_ms,"
+            "q.status AS quote_status,"
+            "q.failure_reason AS quote_failure_reason,"
+            "q.legs_json AS quote_legs_json "
+            "FROM current_group g "
+            "JOIN neg_risk_group_quote_batches q "
+            "ON q.group_id=g.group_id AND q.membership_hash=g.membership_hash "
+            "WHERE g.status='certified' AND q.status='complete' "
+            "AND q.quoted_at_ms<=? AND q.quoted_at_ms>=? "
+            "ORDER BY q.quoted_at_ms DESC,q.id DESC LIMIT 1",
+            (group_id, now_ms, now_ms - max_age_ms),
         ).fetchone()
 
     @staticmethod
@@ -243,30 +278,103 @@ class OpportunityPerceptionStore:
         )
 
     @staticmethod
-    def _group_from_row(row: sqlite3.Row) -> GroupRevision:
+    def _group_from_row(
+        row: sqlite3.Row, *, prefix: str = ""
+    ) -> GroupRevision:
         return GroupRevision(
-            group_id=row["group_id"],
-            event_id=row["event_id"],
-            revision=row["revision"],
-            membership_hash=row["membership_hash"],
-            started_at_ms=row["started_at_ms"],
-            observed_at_ms=row["observed_at_ms"],
-            source_cursor=row["source_cursor"],
-            status=row["status"],
-            legs=tuple(GroupLeg(*leg) for leg in json.loads(row["legs_json"])),
+            group_id=row[f"{prefix}group_id"],
+            event_id=row[f"{prefix}event_id"],
+            revision=row[f"{prefix}revision"],
+            membership_hash=row[f"{prefix}membership_hash"],
+            started_at_ms=row[f"{prefix}started_at_ms"],
+            observed_at_ms=row[f"{prefix}observed_at_ms"],
+            source_cursor=row[f"{prefix}source_cursor"],
+            status=row[f"{prefix}status"],
+            legs=tuple(
+                GroupLeg(*leg) for leg in json.loads(row[f"{prefix}legs_json"])
+            ),
         )
 
     @staticmethod
-    def _quote_batch_from_row(row: sqlite3.Row) -> GroupQuoteBatch:
+    def _quote_batch_from_row(
+        row: sqlite3.Row, *, prefix: str = ""
+    ) -> GroupQuoteBatch:
         return GroupQuoteBatch(
-            group_id=row["group_id"],
-            membership_hash=row["membership_hash"],
-            quote_batch_id=row["id"],
-            started_at_ms=row["started_at_ms"],
-            quoted_at_ms=row["quoted_at_ms"],
-            status=row["status"],
-            failure_reason=row["failure_reason"],
+            group_id=row[f"{prefix}group_id"],
+            membership_hash=row[f"{prefix}membership_hash"],
+            quote_batch_id=row[f"{prefix}id"],
+            started_at_ms=row[f"{prefix}started_at_ms"],
+            quoted_at_ms=row[f"{prefix}quoted_at_ms"],
+            status=row[f"{prefix}status"],
+            failure_reason=row[f"{prefix}failure_reason"],
             legs=tuple(
-                GroupQuoteLeg(*leg) for leg in json.loads(row["legs_json"])
+                GroupQuoteLeg(*leg)
+                for leg in json.loads(row[f"{prefix}legs_json"])
             ),
         )
+
+    @classmethod
+    def _validated_group_from_row(
+        cls,
+        row: sqlite3.Row,
+        *,
+        prefix: str = "",
+    ) -> GroupRevision | None:
+        try:
+            group = cls._group_from_row(row, prefix=prefix)
+            if group.status not in _GROUP_STATUSES:
+                return None
+            if (
+                GroupRevision.membership_digest(group.legs)
+                != group.membership_hash
+            ):
+                return None
+            if group.started_at_ms > group.observed_at_ms:
+                return None
+            if group.status == "certified":
+                validated = GroupRevision.certified(
+                    group_id=group.group_id,
+                    event_id=group.event_id,
+                    revision=group.revision,
+                    started_at_ms=group.started_at_ms,
+                    observed_at_ms=group.observed_at_ms,
+                    source_cursor=group.source_cursor,
+                    legs=group.legs,
+                )
+                if group != validated:
+                    return None
+            return group
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _validated_quote_from_row(
+        cls,
+        row: sqlite3.Row,
+        group: GroupRevision,
+        *,
+        prefix: str = "",
+    ) -> GroupQuoteBatch | None:
+        try:
+            quote = cls._quote_batch_from_row(row, prefix=prefix)
+            validated = GroupQuoteBatch.complete(
+                group_id=quote.group_id,
+                membership_hash=quote.membership_hash,
+                quote_batch_id=quote.quote_batch_id,
+                started_at_ms=quote.started_at_ms,
+                quoted_at_ms=quote.quoted_at_ms,
+                legs=quote.legs,
+            )
+            if quote != validated:
+                return None
+            if quote.group_id != group.group_id:
+                return None
+            if quote.membership_hash != group.membership_hash:
+                return None
+            if tuple(leg.yes_token_id for leg in quote.legs) != tuple(
+                leg.yes_token_id for leg in group.legs
+            ):
+                return None
+            return quote
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None

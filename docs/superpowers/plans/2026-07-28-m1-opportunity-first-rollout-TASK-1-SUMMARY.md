@@ -16,6 +16,10 @@
   and requires the exact ordered all-leg token identity.
 - Current-batch reads fail closed for stale, future, superseded, non-certified, or
   mismatched membership state.
+- Certified groups and complete quote batches are revalidated after
+  deserialization, so corrupt ordered legs cannot become authoritative.
+- Current group status and quote authority are selected in one joined SQLite
+  statement, eliminating the split-read revocation window.
 
 ## Safety Boundaries
 
@@ -37,7 +41,7 @@ RED: ModuleNotFoundError: No module named 'polyarb.perception.store'
 uv run pytest tests/perception/test_models.py tests/perception/test_store.py \
   tests/routing/test_opportunity_ledger.py \
   tests/routing/test_neg_risk_quote_store.py -q
-105 passed
+108 passed
 
 uv run ruff check src/polyarb/perception tests/perception
 All checks passed!

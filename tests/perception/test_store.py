@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -256,3 +257,113 @@ def test_publish_certified_revision_revalidates_model_invariants(
         store.publish_group_revision(forged)
 
     assert store.current_group("g-1") is None
+
+
+def test_current_reads_reject_corrupt_ordered_group_membership(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = OpportunityPerceptionStore(db_path)
+    store.init_schema()
+    group = revision(group_id="g-1", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    store.publish_quote_batch(batch_for(group, quote_batch_id="qb-1"))
+
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_group_revisions SET legs_json=? "
+            "WHERE group_id='g-1' AND revision=1",
+            (OpportunityPerceptionStore._group_legs_json(tuple(reversed(group.legs))),),
+        )
+
+    assert store.current_group("g-1") is None
+    assert store.current_quote_batch("g-1", now_ms=3_200, max_age_ms=1_000) is None
+
+
+def test_current_quote_rejects_corrupt_ordered_quote_membership(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = OpportunityPerceptionStore(db_path)
+    store.init_schema()
+    group = revision(group_id="g-1", revision=1, token_suffix="a")
+    quote = batch_for(group, quote_batch_id="qb-1")
+    store.publish_group_revision(group)
+    store.publish_quote_batch(quote)
+
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_group_quote_batches SET legs_json=? WHERE id='qb-1'",
+            (
+                OpportunityPerceptionStore._quote_legs_json(
+                    tuple(reversed(quote.legs))
+                ),
+            ),
+        )
+
+    assert store.current_quote_batch("g-1", now_ms=3_200, max_age_ms=1_000) is None
+
+
+class CoordinatedQuoteReadStore(OpportunityPerceptionStore):
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        query_ready: threading.Event,
+        revision_published: threading.Event,
+    ) -> None:
+        super().__init__(db_path)
+        self._query_ready = query_ready
+        self._revision_published = revision_published
+
+    def _current_quote_row(
+        self,
+        con: sqlite3.Connection,
+        group_id: str,
+        now_ms: int,
+        max_age_ms: int,
+    ) -> sqlite3.Row | None:
+        self._query_ready.set()
+        assert self._revision_published.wait(timeout=1)
+        return super()._current_quote_row(con, group_id, now_ms, max_age_ms)
+
+
+def test_same_hash_revocation_is_observed_before_atomic_quote_read(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    publisher = OpportunityPerceptionStore(db_path)
+    publisher.init_schema()
+    certified = revision(group_id="g-1", revision=1, token_suffix="a")
+    publisher.publish_group_revision(certified)
+    publisher.publish_quote_batch(batch_for(certified, quote_batch_id="qb-1"))
+    query_ready = threading.Event()
+    revision_published = threading.Event()
+    reader = CoordinatedQuoteReadStore(
+        db_path,
+        query_ready=query_ready,
+        revision_published=revision_published,
+    )
+    outcome: list[GroupQuoteBatch | None] = []
+
+    worker = threading.Thread(
+        target=lambda: outcome.append(
+            reader.current_quote_batch("g-1", now_ms=3_200, max_age_ms=1_000)
+        )
+    )
+    worker.start()
+    assert query_ready.wait(timeout=1)
+    publisher.publish_group_revision(
+        replace(
+            certified,
+            revision=2,
+            observed_at_ms=2_500,
+            source_cursor="cursor-2",
+            status="stale",
+        )
+    )
+    revision_published.set()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert outcome == [None]
