@@ -31,6 +31,7 @@ from polyarb.perception.priority import GroupScheduleInput, priority_components
 from polyarb.storage.schemas import (
     A527_OWNER_MUTATION_GUARD_DDL,
     DDL,
+    OWNER_JOURNAL_TRIGGER_NAMES,
     OWNER_MUTATION_GUARD_DDL,
     OWNER_TRIGGER_TABLES,
 )
@@ -55,6 +56,10 @@ _DISCOVERY_STATUS_PROJECTION_VERSION = 1
 _OWNER_MUTATION_JOURNAL_RETAIN_ROWS = 128
 _OWNER_MUTATION_LEGACY_MAX_ROWS = 1_025
 _OWNER_AUTHORITY_VERSION = 2
+_CANONICAL_OWNER_TRIGGER_NAMES = frozenset(OWNER_JOURNAL_TRIGGER_NAMES)
+_OWNER_WRITE_ACTIONS = frozenset(
+    (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE)
+)
 _OWNER_TABLE_NAMES = (
     "neg_risk_owner_write_context",
     "neg_risk_owner_mutation_journal",
@@ -1393,18 +1398,24 @@ class OpportunityPerceptionStore:
     def _owner_trigger_fingerprints(
         cls,
         con: sqlite3.Connection,
-    ) -> tuple[tuple[str, str, str], ...]:
+    ) -> tuple[tuple[str, str, str, str], ...]:
         placeholders = ",".join("?" for _ in OWNER_TRIGGER_TABLES)
         return tuple(
             sorted(
                 (
+                    schema_name,
                     str(row["name"]),
                     str(row["tbl_name"]),
                     cls._normalized_schema_sql(str(row["sql"])),
                 )
+                for schema_name, catalog in (
+                    ("main", "main.sqlite_master"),
+                    ("temp", "sqlite_temp_master"),
+                )
                 for row in con.execute(
-                    "SELECT name,tbl_name,sql FROM sqlite_master "
-                    f"WHERE type='trigger' AND tbl_name IN ({placeholders})",
+                    "SELECT name,tbl_name,sql FROM "
+                    f"{catalog} WHERE type='trigger' "
+                    f"AND tbl_name IN ({placeholders})",
                     OWNER_TRIGGER_TABLES,
                 )
             )
@@ -1414,7 +1425,7 @@ class OpportunityPerceptionStore:
     @lru_cache(maxsize=1)
     def _expected_owner_trigger_fingerprints(
         cls,
-    ) -> tuple[tuple[str, str, str], ...]:
+    ) -> tuple[tuple[str, str, str, str], ...]:
         expected_con = sqlite3.connect(":memory:")
         expected_con.row_factory = sqlite3.Row
         try:
@@ -1430,14 +1441,49 @@ class OpportunityPerceptionStore:
         if actual == expected:
             return
         expected_identities = {
-            (name, table_name) for name, table_name, _sql in expected
+            (schema_name, name, table_name)
+            for schema_name, name, table_name, _sql in expected
         }
         actual_identities = {
-            (name, table_name) for name, table_name, _sql in actual
+            (schema_name, name, table_name)
+            for schema_name, name, table_name, _sql in actual
         }
         if actual_identities == expected_identities:
             raise ValueError("owner-trigger-sql-drift")
         raise ValueError("invalid-owner-authority-manifest")
+
+    @staticmethod
+    def _owner_write_authorizer(
+        action: int,
+        table_name: str | None,
+        _column_name: str | None,
+        _database_name: str | None,
+        source: str | None,
+    ) -> int:
+        if (
+            action == sqlite3.SQLITE_CREATE_TEMP_TRIGGER
+            and table_name in _CANONICAL_OWNER_TRIGGER_NAMES
+        ):
+            return sqlite3.SQLITE_DENY
+        if (
+            action in _OWNER_WRITE_ACTIONS
+            and table_name in OWNER_TRIGGER_TABLES
+            and source is not None
+            and source not in _CANONICAL_OWNER_TRIGGER_NAMES
+        ):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    @classmethod
+    def _install_owner_write_authorizer(cls, con: sqlite3.Connection) -> None:
+        placeholders = ",".join("?" for _ in OWNER_JOURNAL_TRIGGER_NAMES)
+        if con.execute(
+            "SELECT 1 FROM sqlite_temp_master WHERE type='trigger' "
+            f"AND name IN ({placeholders}) LIMIT 1",
+            OWNER_JOURNAL_TRIGGER_NAMES,
+        ).fetchone() is not None:
+            raise ValueError("invalid-owner-authority-manifest")
+        con.set_authorizer(cls._owner_write_authorizer)
 
     @staticmethod
     def _quoted_identifier(identifier: str) -> str:
@@ -3805,6 +3851,7 @@ class OpportunityPerceptionStore:
     ) -> DiscoveryStatus:
         owns_connection = _connection is None
         con = self._connect() if _connection is None else _connection
+        self._install_owner_write_authorizer(con)
         try:
             if owns_connection:
                 con.execute("BEGIN")
@@ -4955,6 +5002,7 @@ class OpportunityPerceptionStore:
         """Replay the complete Candidate authority chain in one read snapshot."""
         owns_connection = _connection is None
         con = self._connect() if _connection is None else _connection
+        self._install_owner_write_authorizer(con)
         try:
             if owns_connection:
                 con.execute("BEGIN")
@@ -5824,6 +5872,7 @@ class OpportunityPerceptionStore:
     ) -> ReconciliationWindow | None:
         owns_connection = _connection is None
         con = self._connect() if _connection is None else _connection
+        self._install_owner_write_authorizer(con)
         try:
             if owns_connection:
                 con.execute("BEGIN")
@@ -8157,6 +8206,7 @@ class OpportunityPerceptionStore:
             timeout=self._busy_timeout_ms / 1_000,
         )
         con.row_factory = sqlite3.Row
+        self._install_owner_write_authorizer(con)
         con.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
         deadline = (
             deadline_monotonic

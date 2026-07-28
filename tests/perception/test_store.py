@@ -15,7 +15,10 @@ from polyarb.perception.models import (
     GroupRevision,
 )
 from polyarb.perception.store import OpportunityPerceptionStore
-from polyarb.storage.schemas import OWNER_TRIGGER_TABLES
+from polyarb.storage.schemas import (
+    OWNER_JOURNAL_TRIGGER_NAMES,
+    OWNER_TRIGGER_TABLES,
+)
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -359,20 +362,38 @@ def test_unknown_or_partial_owner_manifest_fails_before_ddl(
             }
 
 
+@pytest.mark.parametrize("trigger_schema", ("main", "temp"))
 @pytest.mark.parametrize("table_name", OWNER_TRIGGER_TABLES)
 @pytest.mark.parametrize("surface", ("read", "init", "next-writer"))
 def test_arbitrary_name_trigger_on_owner_table_fails_closed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trigger_schema: str,
     table_name: str,
     surface: str,
 ) -> None:
     store = OpportunityPerceptionStore(tmp_path / "state.db")
     store.init_schema()
-    with store._connect() as con:
-        con.execute(
-            "CREATE TRIGGER arbitrary_extra_authority_trigger "
-            f"AFTER INSERT ON {table_name} BEGIN SELECT 1; END"
-        )
+    trigger_sql = (
+        f"CREATE {'TEMP ' if trigger_schema == 'temp' else ''}"
+        "TRIGGER arbitrary_extra_authority_trigger "
+        f"AFTER INSERT ON {table_name} BEGIN SELECT 1; END"
+    )
+    if trigger_schema == "main":
+        with store._connect() as con:
+            con.execute(trigger_sql)
+    else:
+        original_connect = store._connect
+
+        def connect_with_temp_trigger(
+            *args: object,
+            **kwargs: object,
+        ) -> sqlite3.Connection:
+            con = original_connect(*args, **kwargs)
+            con.execute(trigger_sql)
+            return con
+
+        monkeypatch.setattr(store, "_connect", connect_with_temp_trigger)
 
     with pytest.raises(ValueError, match="invalid-owner-authority-manifest"):
         if surface == "read":
@@ -385,6 +406,246 @@ def test_arbitrary_name_trigger_on_owner_table_fails_closed(
                 probe_every_cycles=10,
                 now_ms=5_000,
             )
+
+
+_PROTECTED_TRIGGER_MUTATIONS = (
+    (
+        "raw",
+        "UPDATE neg_risk_group_revisions SET source_cursor=source_cursor",
+    ),
+    (
+        "derived",
+        "UPDATE neg_risk_candidate_current_aggregate "
+        "SET current_group_count=current_group_count",
+    ),
+    (
+        "journal",
+        "DELETE FROM neg_risk_owner_mutation_journal WHERE 0",
+    ),
+    (
+        "guard",
+        "UPDATE neg_risk_owner_mutation_guard "
+        "SET consumed_journal_id=consumed_journal_id",
+    ),
+    (
+        "context",
+        "DELETE FROM neg_risk_owner_write_context WHERE 0",
+    ),
+)
+
+
+@pytest.mark.parametrize("trigger_schema", ("main", "temp"))
+@pytest.mark.parametrize(
+    ("protected_class", "protected_mutation"),
+    _PROTECTED_TRIGGER_MUTATIONS,
+)
+def test_non_owner_trigger_cannot_write_protected_owner_table(
+    tmp_path: Path,
+    trigger_schema: str,
+    protected_class: str,
+    protected_mutation: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        con.execute("CREATE TABLE unrelated_trigger_source(id INTEGER)")
+        con.execute(
+            f"CREATE {'TEMP ' if trigger_schema == 'temp' else ''}"
+            f"TRIGGER arbitrary_{protected_class}_writer "
+            "AFTER INSERT ON unrelated_trigger_source BEGIN "
+            f"{protected_mutation}; END"
+        )
+        con.execute("BEGIN")
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            con.execute("INSERT INTO unrelated_trigger_source VALUES(1)")
+        con.execute("ROLLBACK")
+        assert con.execute(
+            "SELECT COUNT(*) FROM unrelated_trigger_source"
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("trigger_schema", ("main", "temp"))
+@pytest.mark.parametrize("effect", ("select", "log"))
+def test_non_owner_benign_trigger_remains_allowed(
+    tmp_path: Path,
+    trigger_schema: str,
+    effect: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        con.execute("CREATE TABLE unrelated_trigger_source(id INTEGER)")
+        con.execute("CREATE TABLE unrelated_trigger_log(id INTEGER)")
+        body = (
+            "SELECT NEW.id"
+            if effect == "select"
+            else "INSERT INTO unrelated_trigger_log VALUES(NEW.id)"
+        )
+        con.execute(
+            f"CREATE {'TEMP ' if trigger_schema == 'temp' else ''}"
+            "TRIGGER benign_unrelated_trigger "
+            "AFTER INSERT ON unrelated_trigger_source BEGIN "
+            f"{body}; END"
+        )
+        con.execute("BEGIN")
+        con.execute("INSERT INTO unrelated_trigger_source VALUES(1)")
+        con.execute("COMMIT")
+        assert con.execute(
+            "SELECT COUNT(*) FROM unrelated_trigger_source"
+        ).fetchone()[0] == 1
+        assert con.execute(
+            "SELECT COUNT(*) FROM unrelated_trigger_log"
+        ).fetchone()[0] == (1 if effect == "log" else 0)
+
+
+@pytest.mark.parametrize(
+    "read_entry",
+    ("candidate", "discovery", "reconciliation"),
+)
+def test_internal_read_connection_installs_owner_write_authorizer(
+    tmp_path: Path,
+    read_entry: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    con = sqlite3.connect(store.db_path, isolation_level=None)
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("CREATE TABLE unrelated_trigger_source(id INTEGER)")
+        con.execute(
+            "CREATE TRIGGER indirect_guard_writer "
+            "AFTER INSERT ON unrelated_trigger_source BEGIN "
+            "UPDATE neg_risk_owner_mutation_guard "
+            "SET consumed_journal_id=consumed_journal_id; END"
+        )
+        if read_entry == "candidate":
+            store.validated_candidate_opportunity_count(_connection=con)
+        elif read_entry == "discovery":
+            store.discovery_status(now_ms=5_000, _connection=con)
+        else:
+            assert store.current_reconciliation(_connection=con) is None
+
+        con.execute("BEGIN")
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            con.execute("INSERT INTO unrelated_trigger_source VALUES(1)")
+        con.execute("ROLLBACK")
+    finally:
+        con.close()
+
+
+def test_internal_connection_rejects_existing_temp_canonical_trigger_shadow(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    con = sqlite3.connect(store.db_path, isolation_level=None)
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("CREATE TABLE unrelated_trigger_source(id INTEGER)")
+        con.execute(
+            f"CREATE TEMP TRIGGER {OWNER_JOURNAL_TRIGGER_NAMES[0]} "
+            "AFTER INSERT ON unrelated_trigger_source BEGIN "
+            "UPDATE neg_risk_owner_mutation_guard "
+            "SET consumed_journal_id=consumed_journal_id; END"
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="invalid-owner-authority-manifest",
+        ):
+            store.current_reconciliation(_connection=con)
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("trigger_name", OWNER_JOURNAL_TRIGGER_NAMES)
+def test_store_connection_rejects_temp_canonical_trigger_shadow(
+    tmp_path: Path,
+    trigger_name: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        con.execute("CREATE TABLE unrelated_trigger_source(id INTEGER)")
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            con.execute(
+                f"CREATE TEMP TRIGGER {trigger_name} "
+                "AFTER INSERT ON unrelated_trigger_source BEGIN SELECT 1; END"
+            )
+
+
+@pytest.mark.parametrize("trigger_schema", ("main", "temp"))
+def test_non_owner_indirect_owner_write_rolls_back_store_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trigger_schema: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    trigger_sql = (
+        f"CREATE {'TEMP ' if trigger_schema == 'temp' else ''}"
+        "TRIGGER indirect_load_state_owner_writer "
+        "AFTER INSERT ON neg_risk_discovery_load_state BEGIN "
+        "UPDATE neg_risk_owner_mutation_guard "
+        "SET consumed_journal_id=consumed_journal_id; END"
+    )
+    if trigger_schema == "main":
+        with store._connect() as con:
+            con.execute(trigger_sql)
+    else:
+        original_connect = store._connect
+
+        def connect_with_temp_trigger(
+            *args: object,
+            **kwargs: object,
+        ) -> sqlite3.Connection:
+            con = original_connect(*args, **kwargs)
+            con.execute(trigger_sql)
+            return con
+
+        monkeypatch.setattr(store, "_connect", connect_with_temp_trigger)
+
+    with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+        store.record_discovery_load_decision(
+            degraded_reason=None,
+            probe_every_cycles=10,
+            now_ms=5_000,
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_discovery_load_state"
+        ).fetchone()[0] == 0
+
+
+def test_sqlite_authorizer_exposes_main_and_temp_trigger_source() -> None:
+    for trigger_schema in ("main", "temp"):
+        con = sqlite3.connect(":memory:")
+        try:
+            con.execute("CREATE TABLE protected(id INTEGER)")
+            con.execute("CREATE TABLE source(id INTEGER)")
+            observed_sources: list[str | None] = []
+
+            def authorizer(
+                action: int,
+                table_name: str | None,
+                _column_name: str | None,
+                _database: str | None,
+                source: str | None,
+            ) -> int:
+                if action == sqlite3.SQLITE_INSERT and table_name == "protected":
+                    observed_sources.append(source)
+                return sqlite3.SQLITE_OK
+
+            con.set_authorizer(authorizer)
+            con.execute(
+                f"CREATE {'TEMP ' if trigger_schema == 'temp' else ''}"
+                "TRIGGER source_probe AFTER INSERT ON source BEGIN "
+                "INSERT INTO protected VALUES(NEW.id); END"
+            )
+            con.execute("INSERT INTO source VALUES(1)")
+            assert observed_sources == ["source_probe"]
+        finally:
+            con.close()
 
 
 def test_trigger_on_non_owner_table_does_not_change_owner_manifest(
@@ -1840,6 +2101,7 @@ def test_quote_authority_uses_one_statement_for_group_and_quote(
         for statement in reader.statements
         if statement.lstrip().upper().startswith(("SELECT", "WITH"))
         and "sqlite_master" not in statement
+        and "sqlite_temp_master" not in statement
         and (
             "neg_risk_group_revisions" in statement
             or "neg_risk_group_quote_batches" in statement

@@ -60,14 +60,22 @@ wallet, signing, balances, orders, or real-money execution.
     unique/origin/partial flags, and ordered `index_xinfo`. Trigger discovery
     is scoped by all 14 raw, derived, and internal owner attachment tables—not
     by a trusted name prefix—and binds the exact canonical
-    `(name,tbl_name,normalized SQL)` set on initialization, reads, and next
-    writes. Only an empty manifest, exact current v2, or the explicitly encoded
-    known a527 manifest is accepted. A527 windows up to 1,025 retained events
-    are fully replayed under `BEGIN IMMEDIATE`, pruned to 128, rooted, and
-    rebuilt into the canonical constrained v2 guard atomically. Partial,
-    unknown, semantically drifted, corrupt, timed-out, or racing migrations
-    cannot leave a half-upgraded schema. The oldest-group query uses the
-    canonical projection index without a temporary B-tree.
+    `(schema,name,tbl_name,normalized SQL)` set from both `main.sqlite_master`
+    and `sqlite_temp_master` on initialization, reads, and next writes. Only
+    main-schema canonical triggers are accepted; any temp trigger attached to
+    an owner table fails closed. Every store connection also installs a SQLite
+    authorizer: a non-canonical main or temp trigger cannot write any of the 14
+    protected owner, journal, guard, or context tables, while direct writes
+    remain subject to the authenticated journal and unrelated benign triggers
+    remain allowed. Existing or newly created temp shadows of the 33 canonical
+    owner trigger names are rejected. Only an empty manifest, exact current
+    v2, or the explicitly encoded known a527 manifest is accepted. A527
+    windows up to 1,025 retained events are fully replayed under
+    `BEGIN IMMEDIATE`, pruned to 128, rooted, and rebuilt into the canonical
+    constrained v2 guard atomically. Partial, unknown, semantically drifted,
+    corrupt, timed-out, or racing migrations cannot leave a half-upgraded
+    schema. The oldest-group query uses the canonical projection index without
+    a temporary B-tree.
 
 ## Truth chain
 
@@ -158,10 +166,11 @@ Candidate continuity: 10,010 legal writes in 60.62s; 128-row authenticated journ
 Discovery hot path: incremental per-group projection; no full schedule/fact scan or all-groups JSON parse
 Reconciliation close/change: schedule, admission authority, projection and aggregate synchronize in one transaction
 Manifest closure: deleted-pending sequence 9; guard NULL 6; manifest 3; a527 success/rollback/deadline/concurrency 4; exact table fingerprints 6; explicit index fingerprints 5; canonical oldest-query plan 1
-Trigger attachment closure: arbitrary-name extra trigger on 14 owner tables x read/init/next-writer 42; unrelated non-owner trigger 1; prior canonical missing/SQL drift matrix 66
-Perception package: 426 pass
-Full repository: 2842 collected; 2840 pass, 1 expected xfail, 1 skip
-Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> 2642 -> 2654 -> 2723 -> 2765 -> 2787 -> 2799 -> current 2842
+Trigger attachment closure: arbitrary-name main/temp trigger on 14 owner tables x read/init/next-writer 84; unrelated non-owner manifest trigger 1; prior canonical missing/SQL drift matrix 66
+Trigger execution closure: main/temp indirect writes across raw/derived/journal/guard/context 10; store-writer rollback 2; internal-connection installation 3; canonical temp shadows 34; benign select/log 4; authorizer source probe 1
+Perception package: 522 pass
+Full repository: 2938 collected; 2936 pass, 1 expected xfail, 1 skip
+Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> 2642 -> 2654 -> 2723 -> 2765 -> 2787 -> 2799 -> 2842 -> current 2938
 Ruff changed scope: pass
 compileall: pass
 make docs-m1-check: pass
