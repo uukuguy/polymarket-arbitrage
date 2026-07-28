@@ -57,7 +57,45 @@ CREATE TABLE neg_risk_owner_mutation_guard (
   discovery_aggregate_hash TEXT)
 """
 
-# Canonical v2 DDL is also explicit so the a527 migration can rebuild the
+# Frozen v2 owner contracts.  These strings are deliberately independent of
+# the current schema so startup can authenticate an installed v2 database
+# before performing any DDL.
+V2_OWNER_MUTATION_GUARD_DDL = """
+CREATE TABLE neg_risk_owner_mutation_guard (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  consumed_journal_id INTEGER NOT NULL CHECK(consumed_journal_id >= 0),
+  consumed_hash TEXT,
+  retained_base_id INTEGER NOT NULL DEFAULT 0 CHECK(retained_base_id >= 0),
+  retained_base_hash TEXT,
+  candidate_aggregate_hash TEXT,
+  discovery_aggregate_hash TEXT,
+  authority_version INTEGER NOT NULL CHECK(authority_version = 2),
+  migration_state TEXT NOT NULL CHECK(migration_state IN ('building','complete'))
+)
+"""
+
+V2_CANDIDATE_CURRENT_AGGREGATE_DDL = """
+CREATE TABLE neg_risk_candidate_current_aggregate (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  current_group_count INTEGER NOT NULL CHECK(current_group_count >= 0),
+  opportunity_count INTEGER NOT NULL CHECK(opportunity_count >= 0),
+  aggregate_digest TEXT NOT NULL
+)
+"""
+
+CANDIDATE_CURRENT_AGGREGATE_DDL = """
+CREATE TABLE neg_risk_candidate_current_aggregate (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  current_group_count INTEGER NOT NULL CHECK(current_group_count >= 0),
+  opportunity_count INTEGER NOT NULL CHECK(opportunity_count >= 0),
+  watching_count INTEGER NOT NULL CHECK(watching_count >= 0),
+  no_edge_count INTEGER NOT NULL CHECK(no_edge_count >= 0),
+  unavailable_count INTEGER NOT NULL CHECK(unavailable_count >= 0),
+  aggregate_digest TEXT NOT NULL
+)
+"""
+
+# Canonical v3 DDL is also explicit so supported migrations can rebuild the
 # table atomically with every constraint, rather than merely appending two
 # nullable columns via ALTER TABLE.
 OWNER_MUTATION_GUARD_DDL = """
@@ -69,7 +107,7 @@ CREATE TABLE neg_risk_owner_mutation_guard (
   retained_base_hash TEXT,
   candidate_aggregate_hash TEXT,
   discovery_aggregate_hash TEXT,
-  authority_version INTEGER NOT NULL CHECK(authority_version = 2),
+  authority_version INTEGER NOT NULL CHECK(authority_version = 3),
   migration_state TEXT NOT NULL CHECK(migration_state IN ('building','complete'))
 )
 """
@@ -621,7 +659,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_owner_mutation_guard (
   retained_base_hash TEXT,
   candidate_aggregate_hash TEXT,
   discovery_aggregate_hash TEXT,
-  authority_version INTEGER NOT NULL CHECK(authority_version = 2),
+  authority_version INTEGER NOT NULL CHECK(authority_version = 3),
   migration_state TEXT NOT NULL CHECK(migration_state IN ('building','complete'))
 );
 
@@ -721,6 +759,9 @@ CREATE TABLE IF NOT EXISTS neg_risk_candidate_current_aggregate (
   id INTEGER PRIMARY KEY CHECK(id = 1),
   current_group_count INTEGER NOT NULL CHECK(current_group_count >= 0),
   opportunity_count INTEGER NOT NULL CHECK(opportunity_count >= 0),
+  watching_count INTEGER NOT NULL CHECK(watching_count >= 0),
+  no_edge_count INTEGER NOT NULL CHECK(no_edge_count >= 0),
+  unavailable_count INTEGER NOT NULL CHECK(unavailable_count >= 0),
   aggregate_digest TEXT NOT NULL
 );
 
@@ -1192,7 +1233,8 @@ OWNER_JOURNAL_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "canonical_json", "row_hash",
     ),
     "neg_risk_candidate_current_aggregate": (
-        "id", "current_group_count", "opportunity_count", "aggregate_digest",
+        "id", "current_group_count", "opportunity_count", "watching_count",
+        "no_edge_count", "unavailable_count", "aggregate_digest",
     ),
     "neg_risk_discovery_status_projection": (
         "id", "domain", "version", "generation", "raw_authority_seq",
@@ -1235,14 +1277,16 @@ OWNER_TRIGGER_TABLES: tuple[str, ...] = (
 )
 
 
-def _owner_journal_triggers() -> tuple[str, tuple[str, ...]]:
+def _owner_journal_triggers(
+    table_columns: dict[str, tuple[str, ...]] = OWNER_JOURNAL_TABLE_COLUMNS,
+) -> tuple[str, tuple[str, ...]]:
     statements: list[str] = []
     names: list[str] = [
         "trg_owner_candidate_fact_insert",
         "trg_owner_candidate_fact_update",
         "trg_owner_candidate_fact_delete",
     ]
-    for table, columns in OWNER_JOURNAL_TABLE_COLUMNS.items():
+    for table, columns in table_columns.items():
         short = table.removeprefix("neg_risk_")
         for operation, alias in (
             ("INSERT", "NEW"),
@@ -1280,6 +1324,28 @@ def _owner_journal_triggers() -> tuple[str, tuple[str, ...]]:
 
 
 _OWNER_TRIGGER_DDL, OWNER_JOURNAL_TRIGGER_NAMES = _owner_journal_triggers()
+OWNER_JOURNAL_TRIGGER_DDL = _OWNER_TRIGGER_DDL
+(
+    CANDIDATE_CURRENT_AGGREGATE_TRIGGER_DDL,
+    _,
+) = _owner_journal_triggers(
+    {
+        "neg_risk_candidate_current_aggregate":
+            OWNER_JOURNAL_TABLE_COLUMNS[
+                "neg_risk_candidate_current_aggregate"
+            ]
+    }
+)
+_V2_OWNER_JOURNAL_TABLE_COLUMNS = dict(OWNER_JOURNAL_TABLE_COLUMNS)
+_V2_OWNER_JOURNAL_TABLE_COLUMNS["neg_risk_candidate_current_aggregate"] = (
+    "id",
+    "current_group_count",
+    "opportunity_count",
+    "aggregate_digest",
+)
+V2_OWNER_JOURNAL_TRIGGER_DDL, _ = _owner_journal_triggers(
+    _V2_OWNER_JOURNAL_TABLE_COLUMNS
+)
 DDL += "\n" + _OWNER_TRIGGER_DDL
 
 # Order MUST match the DDL `CREATE TABLE markets(...)` declaration

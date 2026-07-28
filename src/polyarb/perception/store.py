@@ -30,10 +30,15 @@ from polyarb.perception.models import (
 from polyarb.perception.priority import GroupScheduleInput, priority_components
 from polyarb.storage.schemas import (
     A527_OWNER_MUTATION_GUARD_DDL,
+    CANDIDATE_CURRENT_AGGREGATE_DDL,
+    CANDIDATE_CURRENT_AGGREGATE_TRIGGER_DDL,
     DDL,
     OWNER_JOURNAL_TRIGGER_NAMES,
     OWNER_MUTATION_GUARD_DDL,
     OWNER_TRIGGER_TABLES,
+    V2_CANDIDATE_CURRENT_AGGREGATE_DDL,
+    V2_OWNER_JOURNAL_TRIGGER_DDL,
+    V2_OWNER_MUTATION_GUARD_DDL,
 )
 
 _BUSY_TIMEOUT_MS = 5_000
@@ -55,7 +60,7 @@ _DISCOVERY_STATUS_PROJECTION_DOMAIN = "polyarb-discovery-status-projection-v1"
 _DISCOVERY_STATUS_PROJECTION_VERSION = 1
 _OWNER_MUTATION_JOURNAL_RETAIN_ROWS = 128
 _OWNER_MUTATION_LEGACY_MAX_ROWS = 1_025
-_OWNER_AUTHORITY_VERSION = 2
+_OWNER_AUTHORITY_VERSION = 3
 _CANONICAL_OWNER_TRIGGER_NAMES = frozenset(OWNER_JOURNAL_TRIGGER_NAMES)
 _OWNER_WRITE_ACTIONS = frozenset(
     (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE)
@@ -535,6 +540,29 @@ class DurableCandidateFreshness:
     candidate_count: int
     quote_p95_age_ms: int | None
     missing_quote_count: int
+
+
+@dataclass(frozen=True)
+class CurrentOpportunity:
+    group_id: str
+    event_id: str
+    group_revision: int
+    membership_hash: str
+    quote_batch_id: str
+    fact_id: int
+    bundle_cost: Decimal
+    gross_edge_bps: Decimal
+    max_bundle_size: Decimal
+    structure_observed_at_ms: int
+    quote_started_at_ms: int
+    quote_quoted_at_ms: int
+
+
+@dataclass(frozen=True)
+class CandidateCurrentSummary:
+    current_group_count: int
+    opportunity_count: int
+    state_counts: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -1110,6 +1138,40 @@ class OpportunityPerceptionStore:
     @staticmethod
     def _owner_aggregate_hashes(con: sqlite3.Connection) -> tuple[str, str]:
         candidate = con.execute(
+            "SELECT current_group_count,opportunity_count,watching_count,"
+            "no_edge_count,unavailable_count,aggregate_digest "
+            "FROM neg_risk_candidate_current_aggregate WHERE id=1"
+        ).fetchone()
+        discovery = con.execute(
+            "SELECT generation,raw_authority_seq,owner_journal_id,group_count,"
+            "queue_high,queue_normal,queue_explore,promotion_queue_depth,"
+            "outstanding_admitted_count,total_liquidity_weight,"
+            "projection_digest,checkpoint_hash "
+            "FROM neg_risk_discovery_status_projection WHERE id=1"
+        ).fetchone()
+
+        def digest(domain: str, row: sqlite3.Row | None) -> str:
+            payload = json.dumps(
+                {
+                    "domain": domain,
+                    "row": None if row is None else dict(row),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+        return (
+            digest("polyarb.owner.candidate-aggregate.v2", candidate),
+            digest("polyarb.owner.discovery-aggregate.v1", discovery),
+        )
+
+    @staticmethod
+    def _owner_aggregate_hashes_v2(
+        con: sqlite3.Connection,
+    ) -> tuple[str, str]:
+        candidate = con.execute(
             "SELECT current_group_count,opportunity_count,aggregate_digest "
             "FROM neg_risk_candidate_current_aggregate WHERE id=1"
         ).fetchone()
@@ -1573,29 +1635,58 @@ class OpportunityPerceptionStore:
     def _expected_owner_manifests(
         cls,
     ) -> tuple[
-        tuple[dict[str, tuple[object, ...]], dict[str, tuple[object, ...]]],
-        tuple[dict[str, tuple[object, ...]], dict[str, tuple[object, ...]]],
+        tuple[object, ...],
+        tuple[object, ...],
+        tuple[object, ...],
     ]:
         current_con = sqlite3.connect(":memory:")
         current_con.row_factory = sqlite3.Row
-        legacy_con = sqlite3.connect(":memory:")
-        legacy_con.row_factory = sqlite3.Row
+        v2_con = sqlite3.connect(":memory:")
+        v2_con.row_factory = sqlite3.Row
+        a527_con = sqlite3.connect(":memory:")
+        a527_con.row_factory = sqlite3.Row
         try:
             current_con.executescript(DDL)
-            current_tables = cls._owner_table_fingerprints(current_con)
-            current_indexes = cls._owner_index_fingerprints(current_con)
-            legacy_con.executescript(DDL)
-            legacy_con.execute("DROP TABLE neg_risk_owner_mutation_guard")
-            legacy_con.executescript(A527_OWNER_MUTATION_GUARD_DDL)
-            legacy_tables = cls._owner_table_fingerprints(legacy_con)
-            legacy_indexes = cls._owner_index_fingerprints(legacy_con)
+            for historical_con, guard_ddl in (
+                (v2_con, V2_OWNER_MUTATION_GUARD_DDL),
+                (a527_con, A527_OWNER_MUTATION_GUARD_DDL),
+            ):
+                historical_con.executescript(DDL)
+                for name in OWNER_JOURNAL_TRIGGER_NAMES:
+                    if "candidate_current_aggregate" in name:
+                        historical_con.execute(
+                            f'DROP TRIGGER "{name}"'
+                        )
+                historical_con.execute(
+                    "ALTER TABLE neg_risk_candidate_current_aggregate "
+                    "RENAME TO neg_risk_candidate_current_aggregate_v3"
+                )
+                historical_con.execute(V2_CANDIDATE_CURRENT_AGGREGATE_DDL)
+                historical_con.execute(
+                    "DROP TABLE neg_risk_candidate_current_aggregate_v3"
+                )
+                historical_con.execute(
+                    "DROP TABLE neg_risk_owner_mutation_guard"
+                )
+                historical_con.execute(guard_ddl)
+                historical_con.executescript(V2_OWNER_JOURNAL_TRIGGER_DDL)
+
+            def manifest(con: sqlite3.Connection) -> tuple[object, ...]:
+                return (
+                    cls._owner_table_fingerprints(con),
+                    cls._owner_index_fingerprints(con),
+                    cls._owner_trigger_fingerprints(con),
+                )
+            manifests = (
+                manifest(current_con),
+                manifest(v2_con),
+                manifest(a527_con),
+            )
         finally:
-            legacy_con.close()
+            a527_con.close()
+            v2_con.close()
             current_con.close()
-        return (
-            (current_tables, current_indexes),
-            (legacy_tables, legacy_indexes),
-        )
+        return manifests
 
     @classmethod
     def _owner_manifest_state(cls, con: sqlite3.Connection) -> str:
@@ -1618,25 +1709,51 @@ class OpportunityPerceptionStore:
             return "fresh"
         if present_tables != owner_tables:
             raise ValueError("invalid-owner-authority-manifest")
-        cls._assert_owner_trigger_manifest(con)
-
-        current_manifest, legacy_manifest = cls._expected_owner_manifests()
+        current_manifest, v2_manifest, a527_manifest = (
+            cls._expected_owner_manifests()
+        )
         actual_manifest = (
             cls._owner_table_fingerprints(con),
             cls._owner_index_fingerprints(con),
+            cls._owner_trigger_fingerprints(con),
         )
         if actual_manifest == current_manifest:
             return "current"
-        if actual_manifest == legacy_manifest:
+        if actual_manifest == v2_manifest:
+            return "v2"
+        if actual_manifest == a527_manifest:
             return "a527"
+        actual_triggers = actual_manifest[2]
+        for expected_manifest in (
+            current_manifest,
+            v2_manifest,
+            a527_manifest,
+        ):
+            if actual_manifest[:2] != expected_manifest[:2]:
+                continue
+            expected_triggers = expected_manifest[2]
+            if {
+                (schema_name, name, table_name)
+                for schema_name, name, table_name, _sql in actual_triggers
+            } == {
+                (schema_name, name, table_name)
+                for schema_name, name, table_name, _sql in expected_triggers
+            }:
+                raise ValueError("owner-trigger-sql-drift")
         raise ValueError("invalid-owner-authority-manifest")
 
     def _migrate_a527_owner_guard(self, con: sqlite3.Connection) -> None:
         guard = con.execute(
             "SELECT consumed_journal_id,consumed_hash,retained_base_id,"
-            "retained_base_hash FROM neg_risk_owner_mutation_guard WHERE id=1"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
         ).fetchone()
-        if guard is None:
+        if (
+            guard is None
+            or guard["candidate_aggregate_hash"] is None
+            or guard["discovery_aggregate_hash"] is None
+        ):
             raise ValueError("invalid-owner-guard-state")
         self._validate_owner_journal_chain(
             con,
@@ -1647,12 +1764,30 @@ class OpportunityPerceptionStore:
             con,
             consumed_journal_id=int(guard["consumed_journal_id"]),
         )
-        self._refresh_owner_aggregate_hashes(con)
+        guard = con.execute(
+            "SELECT consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        candidate_hash, discovery_hash = self._owner_aggregate_hashes_v2(con)
+        if (
+            guard is None
+            or not hmac.compare_digest(
+                str(guard["candidate_aggregate_hash"]),
+                candidate_hash,
+            )
+            or not hmac.compare_digest(
+                str(guard["discovery_aggregate_hash"]),
+                discovery_hash,
+            )
+        ):
+            raise ValueError("invalid-owner-aggregate-authority")
         con.execute(
             "ALTER TABLE neg_risk_owner_mutation_guard "
             "RENAME TO neg_risk_owner_mutation_guard_a527"
         )
-        con.execute(OWNER_MUTATION_GUARD_DDL)
+        con.execute(V2_OWNER_MUTATION_GUARD_DDL)
         con.execute(
             "INSERT INTO neg_risk_owner_mutation_guard("
             "id,consumed_journal_id,consumed_hash,retained_base_id,"
@@ -1660,17 +1795,337 @@ class OpportunityPerceptionStore:
             "discovery_aggregate_hash,authority_version,migration_state"
             ") SELECT id,consumed_journal_id,consumed_hash,retained_base_id,"
             "retained_base_hash,candidate_aggregate_hash,"
-            "discovery_aggregate_hash,?,'complete' "
+            "discovery_aggregate_hash,2,'complete' "
             "FROM neg_risk_owner_mutation_guard_a527",
-            (_OWNER_AUTHORITY_VERSION,),
         )
         con.execute("DROP TABLE neg_risk_owner_mutation_guard_a527")
+        if self._owner_manifest_state(con) != "v2":
+            raise ValueError("invalid-owner-authority-manifest")
+        self._assert_v2_owner_journal_clean(con)
+
+    @classmethod
+    def _assert_v2_owner_journal_clean(
+        cls,
+        con: sqlite3.Connection,
+    ) -> sqlite3.Row:
+        guard = con.execute(
+            "SELECT consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash,authority_version,migration_state "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        if (
+            guard is None
+            or int(guard["authority_version"]) != 2
+            or guard["migration_state"] != "complete"
+            or guard["candidate_aggregate_hash"] is None
+            or guard["discovery_aggregate_hash"] is None
+        ):
+            raise ValueError("invalid-owner-guard-state")
+        cls._validate_owner_journal_chain(
+            con,
+            guard=guard,
+            max_rows=_OWNER_MUTATION_JOURNAL_RETAIN_ROWS,
+        )
+        candidate_hash, discovery_hash = cls._owner_aggregate_hashes_v2(con)
+        if not hmac.compare_digest(
+            str(guard["candidate_aggregate_hash"]),
+            candidate_hash,
+        ) or not hmac.compare_digest(
+            str(guard["discovery_aggregate_hash"]),
+            discovery_hash,
+        ):
+            raise ValueError("invalid-owner-aggregate-authority")
+        return guard
+
+    @staticmethod
+    def _execute_trigger_ddl(
+        con: sqlite3.Connection,
+        ddl: str,
+    ) -> None:
+        for fragment in ddl.split("; END;"):
+            statement = fragment.strip()
+            if statement:
+                con.execute(statement + "; END;")
+
+    def _migrate_v2_owner_authority(self, con: sqlite3.Connection) -> None:
+        if self._owner_manifest_state(con) != "v2":
+            raise ValueError("invalid-owner-authority-manifest")
+        self._assert_v2_owner_journal_clean(con)
+        replay_opportunity_count = self.validated_candidate_opportunity_count(
+            _connection=con
+        )
+        rows = con.execute(
+            "SELECT * FROM neg_risk_candidate_current_authority "
+            "ORDER BY group_id"
+        ).fetchall()
+        aggregate = con.execute(
+            "SELECT current_group_count,opportunity_count,aggregate_digest "
+            "FROM neg_risk_candidate_current_aggregate WHERE id=1"
+        ).fetchone()
+        if aggregate is None:
+            raise ValueError("invalid-candidate-current-aggregate")
+
+        migrated_rows: list[tuple[str, str, str]] = []
+        state_counts = {
+            "watching": 0,
+            "no-edge": 0,
+            "unavailable": 0,
+        }
+        opportunity_count = 0
+        aggregate_digest = 0
+        for row in rows:
+            self._check_deadline("owner-v2-v3-migration-deadline")
+            group = con.execute(
+                "SELECT * FROM neg_risk_group_revisions "
+                "WHERE group_id=? AND revision=?",
+                (row["group_id"], row["group_revision"]),
+            ).fetchone()
+            fact = con.execute(
+                "SELECT * FROM neg_risk_candidate_watch_facts WHERE id=?",
+                (row["fact_id"],),
+            ).fetchone()
+            quote = (
+                None
+                if row["quote_batch_id"] is None
+                else con.execute(
+                    "SELECT * FROM neg_risk_group_quote_batches WHERE id=?",
+                    (row["quote_batch_id"],),
+                ).fetchone()
+            )
+            if group is None or fact is None:
+                raise ValueError("invalid-candidate-current-authority")
+            last_result = str(fact["last_result"])
+            if last_result not in state_counts:
+                raise ValueError("invalid-candidate-current-authority")
+            opportunity = int(
+                last_result == "watching"
+                and fact["gross_edge_bps"] is not None
+                and float(fact["gross_edge_bps"]) > 0
+                and quote is not None
+                and quote["status"] == "complete"
+                and quote["membership_hash"] == group["membership_hash"]
+                and fact["membership_hash"] == group["membership_hash"]
+            )
+            v2_payload = {
+                "event_id": str(group["event_id"]),
+                "fact_id": int(fact["id"]),
+                "group_id": str(group["group_id"]),
+                "group_revision": int(group["revision"]),
+                "last_result": last_result,
+                "legs": (
+                    None
+                    if quote is None
+                    else json.loads(str(quote["legs_json"]))
+                ),
+                "membership_hash": str(group["membership_hash"]),
+                "opportunity": opportunity,
+                "quote_started_at_ms": (
+                    None if quote is None else int(quote["started_at_ms"])
+                ),
+                "quote_quoted_at_ms": (
+                    None if quote is None else int(quote["quoted_at_ms"])
+                ),
+                "quote_batch_id": fact["quote_batch_id"],
+            }
+            v2_canonical = json.dumps(
+                v2_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            v2_hash = (
+                "sha256:"
+                + hashlib.sha256(v2_canonical.encode()).hexdigest()
+            )
+            if (
+                row["event_id"] != group["event_id"]
+                or row["membership_hash"] != group["membership_hash"]
+                or row["quote_batch_id"] != fact["quote_batch_id"]
+                or row["last_result"] != last_result
+                or int(row["opportunity"]) != opportunity
+                or row["canonical_json"] != v2_canonical
+                or row["row_hash"] != v2_hash
+            ):
+                raise ValueError("invalid-candidate-current-authority")
+            v3_payload = {
+                **v2_payload,
+                "bundle_cost": fact["bundle_cost"],
+                "fact_observed_at_ms": int(fact["observed_at_ms"]),
+                "gross_edge_bps": fact["gross_edge_bps"],
+                "max_bundle_size": fact["max_bundle_size"],
+                "structure_observed_at_ms": int(group["observed_at_ms"]),
+            }
+            v3_canonical = json.dumps(
+                v3_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            v3_hash = (
+                "sha256:"
+                + hashlib.sha256(v3_canonical.encode()).hexdigest()
+            )
+            migrated_rows.append(
+                (str(row["group_id"]), v3_canonical, v3_hash)
+            )
+            state_counts[last_result] += 1
+            opportunity_count += opportunity
+            aggregate_digest ^= int(v3_hash.removeprefix("sha256:"), 16)
+
+        old_digest = 0
+        for row in rows:
+            old_digest ^= int(str(row["row_hash"]).removeprefix("sha256:"), 16)
+        if (
+            int(aggregate["current_group_count"]) != len(rows)
+            or int(aggregate["opportunity_count"]) != opportunity_count
+            or int(aggregate["opportunity_count"]) != replay_opportunity_count
+            or str(aggregate["aggregate_digest"]) != f"{old_digest:064x}"
+        ):
+            raise ValueError("invalid-candidate-current-aggregate")
+
+        writer_token = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO neg_risk_owner_write_context("
+            "id,writer_token,table_name,operation,row_key"
+            ") VALUES(1,?,'owner-v2-v3-migration','UPDATE','*')",
+            (writer_token,),
+        )
+        expected_events: list[tuple[str, str, str]] = []
+        for group_id, canonical, row_hash in migrated_rows:
+            con.execute(
+                "UPDATE neg_risk_candidate_current_authority "
+                "SET canonical_json=?,row_hash=? WHERE group_id=?",
+                (canonical, row_hash, group_id),
+            )
+            expected_events.append(
+                (
+                    "neg_risk_candidate_current_authority",
+                    "UPDATE",
+                    group_id,
+                )
+            )
+        new_digest = f"{aggregate_digest:064x}"
+        con.execute(
+            "UPDATE neg_risk_candidate_current_aggregate SET "
+            "current_group_count=?,opportunity_count=?,aggregate_digest=? "
+            "WHERE id=1",
+            (len(rows), opportunity_count, new_digest),
+        )
+        expected_events.append(
+            (
+                "neg_risk_candidate_current_aggregate",
+                "UPDATE",
+                "1",
+            )
+        )
+        self._consume_expected_owner_events(
+            con,
+            writer_token=writer_token,
+            expected_events=expected_events,
+            finalize=False,
+        )
+        con.execute(
+            "DELETE FROM neg_risk_owner_write_context "
+            "WHERE id=1 AND writer_token=?",
+            (writer_token,),
+        )
+        consumed = con.execute(
+            "SELECT consumed_journal_id FROM "
+            "neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        if consumed is None:
+            raise ValueError("invalid-owner-guard-state")
+        self._prune_owner_mutation_journal(
+            con,
+            consumed_journal_id=int(consumed["consumed_journal_id"]),
+        )
+        guard = con.execute(
+            "SELECT consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,discovery_aggregate_hash "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        if guard is None:
+            raise ValueError("invalid-owner-guard-state")
+
+        aggregate_trigger_names = (
+            name
+            for name in OWNER_JOURNAL_TRIGGER_NAMES
+            if "candidate_current_aggregate" in name
+        )
+        for name in aggregate_trigger_names:
+            con.execute(f'DROP TRIGGER "{name}"')
+        con.execute(
+            "ALTER TABLE neg_risk_candidate_current_aggregate "
+            "RENAME TO neg_risk_candidate_current_aggregate_v2"
+        )
+        con.execute(CANDIDATE_CURRENT_AGGREGATE_DDL)
+        con.execute(
+            "INSERT INTO neg_risk_candidate_current_aggregate("
+            "id,current_group_count,opportunity_count,watching_count,"
+            "no_edge_count,unavailable_count,aggregate_digest"
+            ") VALUES(1,?,?,?,?,?,?)",
+            (
+                len(rows),
+                opportunity_count,
+                state_counts["watching"],
+                state_counts["no-edge"],
+                state_counts["unavailable"],
+                new_digest,
+            ),
+        )
+        con.execute("DROP TABLE neg_risk_candidate_current_aggregate_v2")
+        self._execute_trigger_ddl(
+            con,
+            CANDIDATE_CURRENT_AGGREGATE_TRIGGER_DDL,
+        )
+        con.execute(
+            "ALTER TABLE neg_risk_owner_mutation_guard "
+            "RENAME TO neg_risk_owner_mutation_guard_v2"
+        )
+        con.execute(OWNER_MUTATION_GUARD_DDL)
+        candidate_hash, discovery_hash = self._owner_aggregate_hashes(con)
+        if not hmac.compare_digest(
+            str(guard["discovery_aggregate_hash"]),
+            discovery_hash,
+        ):
+            raise ValueError("invalid-owner-aggregate-authority")
+        con.execute(
+            "INSERT INTO neg_risk_owner_mutation_guard("
+            "id,consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash,authority_version,migration_state"
+            ") VALUES(1,?,?,?,?,?,?,3,'complete')",
+            (
+                guard["consumed_journal_id"],
+                guard["consumed_hash"],
+                guard["retained_base_id"],
+                guard["retained_base_hash"],
+                candidate_hash,
+                discovery_hash,
+            ),
+        )
+        con.execute("DROP TABLE neg_risk_owner_mutation_guard_v2")
+        if self._owner_manifest_state(con) != "current":
+            raise ValueError("invalid-owner-authority-manifest")
         self._assert_owner_journal_clean(con)
 
     def init_schema(self) -> None:
         con = self._connect()
         try:
             owner_manifest_state = self._owner_manifest_state(con)
+            if owner_manifest_state in {"a527", "v2"}:
+                con.execute("BEGIN IMMEDIATE")
+                locked_state = self._owner_manifest_state(con)
+                if locked_state == "a527":
+                    self._migrate_a527_owner_guard(con)
+                    locked_state = "v2"
+                if locked_state == "v2":
+                    self._migrate_v2_owner_authority(con)
+                elif locked_state != "current":
+                    raise ValueError("invalid-owner-authority-manifest")
+                con.execute("COMMIT")
+                owner_manifest_state = "current"
             legacy_owner_bootstrap = owner_manifest_state == "fresh"
             schedule_evidence_existed = (
                 con.execute(
@@ -1728,8 +2183,9 @@ class OpportunityPerceptionStore:
                 )
                 con.execute(
                     "INSERT INTO neg_risk_candidate_current_aggregate("
-                    "id,current_group_count,opportunity_count,aggregate_digest"
-                    ") VALUES(1,0,0,?)",
+                    "id,current_group_count,opportunity_count,watching_count,"
+                    "no_edge_count,unavailable_count,aggregate_digest"
+                    ") VALUES(1,0,0,0,0,0,?)",
                     ("0" * 64,),
                 )
                 self._consume_expected_owner_mutation(
@@ -5009,7 +5465,8 @@ class OpportunityPerceptionStore:
                 self._assert_owner_journal_clean(con)
                 self._validated_candidate_checkpoint(con)
                 aggregate = con.execute(
-                    "SELECT current_group_count,opportunity_count,aggregate_digest "
+                    "SELECT current_group_count,opportunity_count,watching_count,"
+                    "no_edge_count,unavailable_count,aggregate_digest "
                     "FROM neg_risk_candidate_current_aggregate WHERE id=1"
                 ).fetchone()
                 if (
@@ -5018,6 +5475,23 @@ class OpportunityPerceptionStore:
                     or int(aggregate["opportunity_count"]) < 0
                     or int(aggregate["opportunity_count"])
                     > int(aggregate["current_group_count"])
+                    or any(
+                        int(aggregate[column]) < 0
+                        for column in (
+                            "watching_count",
+                            "no_edge_count",
+                            "unavailable_count",
+                        )
+                    )
+                    or sum(
+                        int(aggregate[column])
+                        for column in (
+                            "watching_count",
+                            "no_edge_count",
+                            "unavailable_count",
+                        )
+                    )
+                    != int(aggregate["current_group_count"])
                     or len(str(aggregate["aggregate_digest"])) != 64
                 ):
                     raise ValueError("invalid-candidate-current-aggregate")
@@ -5334,6 +5808,167 @@ class OpportunityPerceptionStore:
             if owns_connection:
                 con.execute("COMMIT")
             return count
+        except BaseException:
+            if owns_connection and con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            if owns_connection:
+                con.close()
+
+    def candidate_current_summary(
+        self,
+        *,
+        _connection: sqlite3.Connection | None = None,
+    ) -> CandidateCurrentSummary:
+        owns_connection = _connection is None
+        con = self._connect() if _connection is None else _connection
+        self._install_owner_write_authorizer(con)
+        try:
+            if owns_connection:
+                con.execute("BEGIN")
+            self._assert_owner_journal_clean(con)
+            self._validated_candidate_checkpoint(con)
+            row = con.execute(
+                "SELECT current_group_count,opportunity_count,watching_count,"
+                "no_edge_count,unavailable_count,aggregate_digest "
+                "FROM neg_risk_candidate_current_aggregate WHERE id=1"
+            ).fetchone()
+            if row is None:
+                raise ValueError("invalid-candidate-current-aggregate")
+            current_group_count = int(row["current_group_count"])
+            opportunity_count = int(row["opportunity_count"])
+            state_counts = {
+                "watching": int(row["watching_count"]),
+                "no-edge": int(row["no_edge_count"]),
+                "unavailable": int(row["unavailable_count"]),
+            }
+            if (
+                current_group_count < 0
+                or not 0 <= opportunity_count <= state_counts["watching"]
+                or any(count < 0 for count in state_counts.values())
+                or sum(state_counts.values()) != current_group_count
+                or len(str(row["aggregate_digest"])) != 64
+            ):
+                raise ValueError("invalid-candidate-current-aggregate")
+            if owns_connection:
+                con.execute("COMMIT")
+            return CandidateCurrentSummary(
+                current_group_count=current_group_count,
+                opportunity_count=opportunity_count,
+                state_counts=state_counts,
+            )
+        except BaseException:
+            if owns_connection and con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            if owns_connection:
+                con.close()
+
+    def current_opportunities(
+        self,
+        *,
+        after_group_id: str,
+        limit: int,
+        _connection: sqlite3.Connection | None = None,
+    ) -> tuple[tuple[CurrentOpportunity, ...], str | None]:
+        if (
+            not 1 <= limit <= 500
+            or len(after_group_id) > 256
+            or "\x00" in after_group_id
+        ):
+            raise ValueError("invalid-current-opportunity-page")
+        owns_connection = _connection is None
+        con = self._connect() if _connection is None else _connection
+        self._install_owner_write_authorizer(con)
+        try:
+            if owns_connection:
+                con.execute("BEGIN")
+            summary = self.candidate_current_summary(_connection=con)
+            rows = con.execute(
+                "SELECT * FROM neg_risk_candidate_current_authority "
+                "WHERE opportunity=1 AND group_id>? ORDER BY group_id LIMIT ?",
+                (after_group_id, limit + 1),
+            ).fetchall()
+            has_more = len(rows) > limit
+            page_rows = rows[:limit]
+            items: list[CurrentOpportunity] = []
+            for row in page_rows:
+                self._check_deadline("candidate-current-read-deadline")
+                try:
+                    canonical_text = str(row["canonical_json"])
+                    canonical = json.loads(canonical_text)
+                    expected_hash = (
+                        "sha256:"
+                        + hashlib.sha256(canonical_text.encode()).hexdigest()
+                    )
+                    bundle_cost = Decimal(str(canonical["bundle_cost"]))
+                    gross_edge_bps = Decimal(str(canonical["gross_edge_bps"]))
+                    max_bundle_size = Decimal(str(canonical["max_bundle_size"]))
+                    item = CurrentOpportunity(
+                        group_id=str(row["group_id"]),
+                        event_id=str(row["event_id"]),
+                        group_revision=int(row["group_revision"]),
+                        membership_hash=str(row["membership_hash"]),
+                        quote_batch_id=str(row["quote_batch_id"]),
+                        fact_id=int(row["fact_id"]),
+                        bundle_cost=bundle_cost,
+                        gross_edge_bps=gross_edge_bps,
+                        max_bundle_size=max_bundle_size,
+                        structure_observed_at_ms=int(
+                            canonical["structure_observed_at_ms"]
+                        ),
+                        quote_started_at_ms=int(
+                            canonical["quote_started_at_ms"]
+                        ),
+                        quote_quoted_at_ms=int(canonical["quote_quoted_at_ms"]),
+                    )
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                ) as error:
+                    raise ValueError("invalid-candidate-current-authority") from error
+                if (
+                    not isinstance(canonical, dict)
+                    or row["row_hash"] != expected_hash
+                    or canonical.get("group_id") != item.group_id
+                    or canonical.get("event_id") != item.event_id
+                    or canonical.get("group_revision") != item.group_revision
+                    or canonical.get("membership_hash") != item.membership_hash
+                    or canonical.get("quote_batch_id") != item.quote_batch_id
+                    or canonical.get("fact_id") != item.fact_id
+                    or canonical.get("last_result") != "watching"
+                    or canonical.get("opportunity") != 1
+                    or not all(
+                        value.is_finite()
+                        for value in (
+                            item.bundle_cost,
+                            item.gross_edge_bps,
+                            item.max_bundle_size,
+                        )
+                    )
+                    or item.bundle_cost <= 0
+                    or item.gross_edge_bps <= 0
+                    or item.max_bundle_size <= 0
+                    or item.group_revision <= 0
+                    or item.structure_observed_at_ms < 0
+                    or not (
+                        0
+                        <= item.quote_started_at_ms
+                        <= item.quote_quoted_at_ms
+                    )
+                ):
+                    raise ValueError("invalid-candidate-current-authority")
+                items.append(item)
+            if len(items) > summary.opportunity_count:
+                raise ValueError("invalid-candidate-current-aggregate")
+            next_after = items[-1].group_id if has_more else None
+            if owns_connection:
+                con.execute("COMMIT")
+            return tuple(items), next_after
         except BaseException:
             if owns_connection and con.in_transaction:
                 con.execute("ROLLBACK")
@@ -8404,7 +9039,8 @@ class OpportunityPerceptionStore:
         finalize: bool = True,
     ) -> None:
         old = con.execute(
-            "SELECT row_hash,opportunity FROM neg_risk_candidate_current_authority "
+            "SELECT row_hash,opportunity,last_result "
+            "FROM neg_risk_candidate_current_authority "
             "WHERE group_id=?",
             (group_id,),
         ).fetchone()
@@ -8457,9 +9093,14 @@ class OpportunityPerceptionStore:
                 {
                     "event_id": str(group["event_id"]),
                     "fact_id": int(fact["id"]),
+                    "fact_observed_at_ms": int(fact["observed_at_ms"]),
                     "group_id": group_id,
                     "group_revision": int(group["revision"]),
+                    "structure_observed_at_ms": int(group["observed_at_ms"]),
                     "last_result": str(fact["last_result"]),
+                    "bundle_cost": fact["bundle_cost"],
+                    "gross_edge_bps": fact["gross_edge_bps"],
+                    "max_bundle_size": fact["max_bundle_size"],
                     "legs": None if quote is None else json.loads(str(quote["legs_json"])),
                     "membership_hash": str(group["membership_hash"]),
                     "opportunity": opportunity,
@@ -8514,13 +9155,26 @@ class OpportunityPerceptionStore:
         if aggregate is None:
             raise ValueError("invalid-candidate-current-aggregate")
         old_hash = None if old is None else str(old["row_hash"])
+        old_result = None if old is None else str(old["last_result"])
+        new_result = None if new_hash is None else str(fact["last_result"])
+
+        def state_delta(state: str) -> int:
+            return int(new_result == state) - int(old_result == state)
+
         con.execute(
             "UPDATE neg_risk_candidate_current_aggregate SET "
             "current_group_count=current_group_count+?,"
-            "opportunity_count=opportunity_count+?,aggregate_digest=? WHERE id=1",
+            "opportunity_count=opportunity_count+?,"
+            "watching_count=watching_count+?,"
+            "no_edge_count=no_edge_count+?,"
+            "unavailable_count=unavailable_count+?,"
+            "aggregate_digest=? WHERE id=1",
             (
                 int(new_hash is not None) - int(old is not None),
                 opportunity - (0 if old is None else int(old["opportunity"])),
+                state_delta("watching"),
+                state_delta("no-edge"),
+                state_delta("unavailable"),
                 self._xor_candidate_digest(
                     str(aggregate["aggregate_digest"]), old_hash, new_hash
                 ),

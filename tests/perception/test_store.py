@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import threading
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,9 @@ from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.storage.schemas import (
     OWNER_JOURNAL_TRIGGER_NAMES,
     OWNER_TRIGGER_TABLES,
+    V2_CANDIDATE_CURRENT_AGGREGATE_DDL,
+    V2_OWNER_JOURNAL_TRIGGER_DDL,
+    V2_OWNER_MUTATION_GUARD_DDL,
 )
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -76,6 +82,460 @@ def batch_for(
             for index, leg in enumerate(group.legs)
         ),
     )
+
+
+def _publish_candidate_result(
+    store: OpportunityPerceptionStore,
+    *,
+    group_id: str,
+    result: str,
+    gross_edge_bps: float | None,
+    quoted_at_ms: int,
+) -> GroupRevision:
+    group = revision(
+        group_id=group_id,
+        revision=1,
+        token_suffix=group_id,
+        observed_at_ms=quoted_at_ms - 1_000,
+    )
+    store.publish_group_revision(group)
+    if result == "unavailable":
+        store.record_candidate_watch_fact(
+            group_id=group_id,
+            membership_hash=group.membership_hash,
+            quote_batch_id=None,
+            observed_at_ms=quoted_at_ms,
+            last_result="unavailable",
+            reason="quote-unavailable",
+            bundle_cost=None,
+            gross_edge_bps=None,
+            max_bundle_size=None,
+            priority_class="normal",
+            consecutive_failures=1,
+            effective_interval_s=30,
+            schedule_reason="retry",
+            next_due_at_ms=quoted_at_ms + 30_000,
+        )
+        return group
+    batch = batch_for(
+        group,
+        quote_batch_id=f"qb-{group_id}",
+        quoted_at_ms=quoted_at_ms,
+    )
+    store.publish_candidate_success(
+        batch,
+        observed_at_ms=quoted_at_ms,
+        last_result=result,
+        reason=None,
+        bundle_cost=0.9,
+        gross_edge_bps=gross_edge_bps,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="current",
+        next_due_at_ms=quoted_at_ms + 15_000,
+    )
+    return group
+
+
+def test_current_opportunities_and_summary_are_authenticated_and_page_bounded(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    first = _publish_candidate_result(
+        store,
+        group_id="g-a",
+        result="watching",
+        gross_edge_bps=1_000,
+        quoted_at_ms=3_100,
+    )
+    _publish_candidate_result(
+        store,
+        group_id="g-b",
+        result="watching",
+        gross_edge_bps=500,
+        quoted_at_ms=3_200,
+    )
+    _publish_candidate_result(
+        store,
+        group_id="g-c",
+        result="no-edge",
+        gross_edge_bps=0,
+        quoted_at_ms=3_300,
+    )
+    _publish_candidate_result(
+        store,
+        group_id="g-d",
+        result="unavailable",
+        gross_edge_bps=None,
+        quoted_at_ms=3_400,
+    )
+
+    page, next_after = store.current_opportunities(
+        after_group_id="",
+        limit=1,
+    )
+    summary = store.candidate_current_summary()
+
+    assert len(page) == 1
+    assert page[0].group_id == "g-a"
+    assert page[0].event_id == first.event_id
+    assert page[0].group_revision == 1
+    assert page[0].membership_hash == first.membership_hash
+    assert page[0].quote_batch_id == "qb-g-a"
+    assert page[0].bundle_cost == Decimal("0.9")
+    assert page[0].gross_edge_bps == Decimal("1000.0")
+    assert page[0].max_bundle_size == Decimal("10.0")
+    assert page[0].structure_observed_at_ms == 2_100
+    assert page[0].quote_started_at_ms == 3_000
+    assert page[0].quote_quoted_at_ms == 3_100
+    assert next_after == "g-a"
+    second_page, final_after = store.current_opportunities(
+        after_group_id=next_after,
+        limit=1,
+    )
+    assert [item.group_id for item in second_page] == ["g-b"]
+    assert final_after is None
+    assert summary.current_group_count == 4
+    assert summary.opportunity_count == 2
+    assert summary.state_counts == {
+        "watching": 2,
+        "no-edge": 1,
+        "unavailable": 1,
+    }
+
+
+def _downgrade_owner_v3_fixture_to_v2(
+    store: OpportunityPerceptionStore,
+) -> None:
+    aggregate_trigger_names = tuple(
+        name
+        for name in OWNER_JOURNAL_TRIGGER_NAMES
+        if "candidate_current_aggregate" in name
+    )
+    migration_trigger_names = tuple(
+        name
+        for name in OWNER_JOURNAL_TRIGGER_NAMES
+        if (
+            "candidate_current_aggregate" in name
+            or "candidate_current_authority" in name
+        )
+    )
+    with store._connect() as con:
+        con.execute("BEGIN IMMEDIATE")
+        for name in migration_trigger_names:
+            con.execute(f'DROP TRIGGER "{name}"')
+        row_hashes: list[str] = []
+        for row in con.execute(
+            "SELECT group_id,canonical_json FROM "
+            "neg_risk_candidate_current_authority ORDER BY group_id"
+        ).fetchall():
+            canonical = json.loads(str(row["canonical_json"]))
+            for field in (
+                "bundle_cost",
+                "fact_observed_at_ms",
+                "gross_edge_bps",
+                "max_bundle_size",
+                "structure_observed_at_ms",
+            ):
+                canonical.pop(field)
+            canonical_json = json.dumps(
+                canonical,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            row_hash = f"sha256:{hashlib.sha256(canonical_json.encode()).hexdigest()}"
+            con.execute(
+                "UPDATE neg_risk_candidate_current_authority "
+                "SET canonical_json=?,row_hash=? WHERE group_id=?",
+                (canonical_json, row_hash, row["group_id"]),
+            )
+            row_hashes.append(row_hash)
+        aggregate_digest = 0
+        for row_hash in row_hashes:
+            aggregate_digest ^= int(row_hash.removeprefix("sha256:"), 16)
+        aggregate = con.execute(
+            "SELECT current_group_count,opportunity_count "
+            "FROM neg_risk_candidate_current_aggregate WHERE id=1"
+        ).fetchone()
+        con.execute(
+            "ALTER TABLE neg_risk_candidate_current_aggregate "
+            "RENAME TO neg_risk_candidate_current_aggregate_v3"
+        )
+        con.execute(V2_CANDIDATE_CURRENT_AGGREGATE_DDL)
+        con.execute(
+            "INSERT INTO neg_risk_candidate_current_aggregate("
+            "id,current_group_count,opportunity_count,aggregate_digest"
+            ") VALUES(1,?,?,?)",
+            (
+                aggregate["current_group_count"],
+                aggregate["opportunity_count"],
+                f"{aggregate_digest:064x}",
+            ),
+        )
+        con.execute("DROP TABLE neg_risk_candidate_current_aggregate_v3")
+        old_guard = con.execute(
+            "SELECT consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,discovery_aggregate_hash,migration_state "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        con.execute("DROP TABLE neg_risk_owner_mutation_guard")
+        con.execute(V2_OWNER_MUTATION_GUARD_DDL)
+        candidate_hash, _ = store._owner_aggregate_hashes_v2(con)
+        con.execute(
+            "INSERT INTO neg_risk_owner_mutation_guard("
+            "id,consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash,authority_version,migration_state"
+            ") VALUES(1,?,?,?,?,?,?,2,?)",
+            (
+                old_guard["consumed_journal_id"],
+                old_guard["consumed_hash"],
+                old_guard["retained_base_id"],
+                old_guard["retained_base_hash"],
+                candidate_hash,
+                old_guard["discovery_aggregate_hash"],
+                old_guard["migration_state"],
+            ),
+        )
+        con.execute("COMMIT")
+        con.executescript(V2_OWNER_JOURNAL_TRIGGER_DDL)
+    assert aggregate_trigger_names
+
+
+def test_existing_v2_owner_authority_migrates_atomically_to_v3(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    _publish_candidate_result(
+        store,
+        group_id="g-migrate",
+        result="watching",
+        gross_edge_bps=1_000,
+        quoted_at_ms=3_100,
+    )
+    _downgrade_owner_v3_fixture_to_v2(store)
+
+    store.init_schema()
+    store.init_schema()
+
+    with store._connect() as con:
+        columns = {
+            str(row["name"])
+            for row in con.execute(
+                "PRAGMA table_info(neg_risk_candidate_current_aggregate)"
+            )
+        }
+        guard = con.execute(
+            "SELECT authority_version,migration_state "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+    assert {
+        "watching_count",
+        "no_edge_count",
+        "unavailable_count",
+    } <= columns
+    assert tuple(guard) == (3, "complete")
+    assert store.candidate_current_summary().state_counts == {
+        "watching": 1,
+        "no-edge": 0,
+        "unavailable": 0,
+    }
+    opportunities, next_after = store.current_opportunities(
+        after_group_id="",
+        limit=100,
+    )
+    assert len(opportunities) == 1
+    assert opportunities[0].gross_edge_bps == Decimal("1000.0")
+    assert next_after is None
+
+
+def test_corrupt_v2_owner_authority_rolls_back_as_exact_v2(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    _publish_candidate_result(
+        store,
+        group_id="g-corrupt-v2",
+        result="watching",
+        gross_edge_bps=1_000,
+        quoted_at_ms=3_100,
+    )
+    _downgrade_owner_v3_fixture_to_v2(store)
+    current_trigger_names = tuple(
+        name
+        for name in OWNER_JOURNAL_TRIGGER_NAMES
+        if "candidate_current_authority" in name
+    )
+    with store._connect() as con:
+        for name in current_trigger_names:
+            con.execute(f'DROP TRIGGER "{name}"')
+        con.execute(
+            "UPDATE neg_risk_candidate_current_authority "
+            "SET canonical_json='{}' WHERE group_id='g-corrupt-v2'"
+        )
+        con.executescript(V2_OWNER_JOURNAL_TRIGGER_DDL)
+
+    with pytest.raises(
+        ValueError,
+        match="invalid-candidate-current-authority",
+    ):
+        store.init_schema()
+
+    with store._connect() as con:
+        columns = {
+            str(row["name"])
+            for row in con.execute(
+                "PRAGMA table_info(neg_risk_candidate_current_aggregate)"
+            )
+        }
+        guard = con.execute(
+            "SELECT authority_version,migration_state "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+    assert "watching_count" not in columns
+    assert tuple(guard) == (2, "complete")
+
+
+def test_v2_owner_migration_deadline_rolls_back_as_exact_v2(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = OpportunityPerceptionStore(db_path)
+    store.init_schema()
+    _publish_candidate_result(
+        store,
+        group_id="g-deadline-v2",
+        result="watching",
+        gross_edge_bps=1_000,
+        quoted_at_ms=3_100,
+    )
+    _downgrade_owner_v3_fixture_to_v2(store)
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        OpportunityPerceptionStore(
+            db_path,
+            deadline_monotonic=0,
+        ).init_schema()
+
+    with store._connect() as con:
+        columns = {
+            str(row["name"])
+            for row in con.execute(
+                "PRAGMA table_info(neg_risk_candidate_current_aggregate)"
+            )
+        }
+        version = con.execute(
+            "SELECT authority_version FROM "
+            "neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()[0]
+    assert "watching_count" not in columns
+    assert version == 2
+
+
+def test_concurrent_v2_owner_migrations_converge_to_one_v3(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = OpportunityPerceptionStore(db_path)
+    store.init_schema()
+    _publish_candidate_result(
+        store,
+        group_id="g-race-v2",
+        result="watching",
+        gross_edge_bps=1_000,
+        quoted_at_ms=3_100,
+    )
+    _downgrade_owner_v3_fixture_to_v2(store)
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def migrate() -> None:
+        try:
+            barrier.wait(timeout=2)
+            OpportunityPerceptionStore(db_path).init_schema()
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=migrate) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    with store._connect() as con:
+        guard = con.execute(
+            "SELECT authority_version,migration_state "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+    assert tuple(guard) == (3, "complete")
+
+
+def test_v2_owner_migration_backfills_from_compacted_retained_seed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        100,
+    )
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_BYTES",
+        1,
+    )
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-seed-v2", revision=1, token_suffix="seed")
+    store.publish_group_revision(group)
+    for sequence in range(3):
+        quote = batch_for(
+            group,
+            quote_batch_id=f"seed-v2-{sequence}",
+            quoted_at_ms=3_100 + sequence,
+        )
+        store.publish_candidate_success(
+            quote,
+            observed_at_ms=quote.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=(0.8, 0.81, 0.82)[sequence],
+            gross_edge_bps=2_000 - sequence,
+            max_bundle_size=10 + sequence,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="seed-v2",
+            next_due_at_ms=quote.quoted_at_ms + 15_000,
+        )
+    with store._connect() as con:
+        assert con.execute(
+            "SELECT generation FROM "
+            "neg_risk_candidate_authority_checkpoints WHERE id=1"
+        ).fetchone() is not None
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_group_quote_batches"
+        ).fetchone()[0] == 1
+    _downgrade_owner_v3_fixture_to_v2(store)
+
+    store.init_schema()
+
+    opportunities, next_after = store.current_opportunities(
+        after_group_id="",
+        limit=100,
+    )
+    assert next_after is None
+    assert len(opportunities) == 1
+    assert opportunities[0].quote_batch_id == "seed-v2-2"
+    assert opportunities[0].bundle_cost == Decimal("0.82")
+    assert opportunities[0].gross_edge_bps == Decimal("1998.0")
+    assert opportunities[0].max_bundle_size == Decimal("12.0")
 
 
 def test_sqlite_schema_initialization_adds_perception_tables(tmp_path: Path) -> None:
@@ -700,8 +1160,8 @@ def test_owner_table_schema_fingerprint_rejects_semantic_drift(
                 "id INTEGER CHECK(id = 1)",
             ),
             "check": (
-                "CHECK(authority_version = 2)",
-                "CHECK(authority_version >= 2)",
+                "CHECK(authority_version = 3)",
+                "CHECK(authority_version >= 3)",
             ),
             "order": (
                 "candidate_aggregate_hash TEXT,\n  discovery_aggregate_hash TEXT",
@@ -841,7 +1301,7 @@ def _grow_a527_owner_window(
     monkeypatch.setattr(store_module, "_OWNER_MUTATION_JOURNAL_RETAIN_ROWS", 128)
 
 
-def test_a527_owner_window_migrates_atomically_to_v2(
+def test_a527_owner_window_migrates_atomically_to_v3(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -850,6 +1310,7 @@ def test_a527_owner_window_migrates_atomically_to_v2(
     group = revision(group_id="g-a527", revision=1, token_suffix="a")
     store.publish_group_revision(group)
     _grow_a527_owner_window(store, group, monkeypatch)
+    _downgrade_owner_v3_fixture_to_v2(store)
     with store._connect() as con:
         assert con.execute(
             "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
@@ -866,7 +1327,7 @@ def test_a527_owner_window_migrates_atomically_to_v2(
             "SELECT authority_version,migration_state,candidate_aggregate_hash,"
             "discovery_aggregate_hash FROM neg_risk_owner_mutation_guard WHERE id=1"
         ).fetchone()
-        assert tuple(guard[:2]) == (2, "complete")
+        assert tuple(guard[:2]) == (3, "complete")
         assert guard["candidate_aggregate_hash"] is not None
         assert guard["discovery_aggregate_hash"] is not None
         assert con.execute(
@@ -883,6 +1344,7 @@ def test_invalid_a527_owner_window_migration_rolls_back_schema(
     group = revision(group_id="g-a527-bad", revision=1, token_suffix="a")
     store.publish_group_revision(group)
     _grow_a527_owner_window(store, group, monkeypatch)
+    _downgrade_owner_v3_fixture_to_v2(store)
     with store._connect() as con:
         _drop_v2_guard_columns(con)
         con.execute(
@@ -914,6 +1376,7 @@ def test_a527_owner_migration_honors_sqlite_deadline(
     group = revision(group_id="g-a527-deadline", revision=1, token_suffix="a")
     store.publish_group_revision(group)
     _grow_a527_owner_window(store, group, monkeypatch)
+    _downgrade_owner_v3_fixture_to_v2(store)
     with store._connect() as con:
         _drop_v2_guard_columns(con)
 
@@ -932,7 +1395,7 @@ def test_a527_owner_migration_honors_sqlite_deadline(
     assert "migration_state" not in columns
 
 
-def test_concurrent_a527_owner_migrations_converge_to_one_v2_guard(
+def test_concurrent_a527_owner_migrations_converge_to_one_v3_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -942,6 +1405,7 @@ def test_concurrent_a527_owner_migrations_converge_to_one_v2_guard(
     group = revision(group_id="g-a527-race", revision=1, token_suffix="a")
     store.publish_group_revision(group)
     _grow_a527_owner_window(store, group, monkeypatch)
+    _downgrade_owner_v3_fixture_to_v2(store)
     with store._connect() as con:
         _drop_v2_guard_columns(con)
     barrier = threading.Barrier(2)
@@ -966,7 +1430,7 @@ def test_concurrent_a527_owner_migrations_converge_to_one_v2_guard(
             "SELECT authority_version,migration_state "
             "FROM neg_risk_owner_mutation_guard WHERE id=1"
         ).fetchone()
-        assert tuple(guard) == (2, "complete")
+        assert tuple(guard) == (3, "complete")
         assert con.execute(
             "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
         ).fetchone()[0] <= 128
