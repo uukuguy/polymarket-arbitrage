@@ -642,6 +642,40 @@ async def test_scheduler_supervises_cycle_failure_and_recovers_without_dying(
 
 
 @pytest.mark.asyncio
+async def test_candidate_resource_disabled_never_reads_decision(tmp_path: Path) -> None:
+    class Store(OpportunityPerceptionStore):
+        def latest_resource_decision(self, **_kwargs):
+            raise AssertionError("disabled candidate consumed resource decision")
+
+    store = Store(tmp_path / "state.db")
+    store.init_schema()
+    watcher = CandidateWatcher(
+        structure_reader=object(),
+        books_reader=object(),
+        store=store,
+        runtime=CandidateWatcherRuntime(),
+        interval_controller=IntervalController(),
+        require_resource_decision=False,
+    )
+
+    observation = await watcher._record(
+        group_id="g-disabled",
+        membership_hash=None,
+        quote_batch_id=None,
+        observed_at_ms=2_000,
+        status="unavailable",
+        reason="fixture",
+        bundle_cost=None,
+        gross_edge_bps=None,
+        max_bundle_size=None,
+        priority="normal",
+        consecutive_failures=1,
+    )
+
+    assert observation.group_id == "g-disabled"
+
+
+@pytest.mark.asyncio
 async def test_unrelated_group_success_does_not_recover_failed_group_boundary(
     tmp_path: Path,
 ) -> None:

@@ -9,7 +9,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.store import (
+    OpportunityPerceptionStore,
+    candidate_success_receipt_hash,
+)
 
 IncidentState = Literal[
     "detected", "classified", "contained", "recovering", "verified", "escalated"
@@ -115,19 +118,17 @@ class IncidentManager:
             if row is None or state not in ALLOWED[row["state"]]:
                 raise InvalidIncidentTransitionError("invalid-incident-transition")
             latest = self._from_row(row)
+            if now_ms < latest.occurred_at_ms:
+                raise InvalidIncidentTransitionError("incident-clock-regression")
             if state == "recovering" and (
                 latest.scope == "candidate"
                 or latest.scope.startswith("candidate:")
             ):
                 evidence = {
                     **evidence,
-                    "quote_row_id": con.execute(
-                        "SELECT COALESCE(MAX(rowid),0) "
-                        "FROM neg_risk_group_quote_batches"
-                    ).fetchone()[0],
-                    "candidate_fact_row_id": con.execute(
-                        "SELECT COALESCE(MAX(rowid),0) "
-                        "FROM neg_risk_candidate_watch_facts"
+                    "candidate_success_receipt_row_id": con.execute(
+                        "SELECT COALESCE(MAX(id),0) "
+                        "FROM neg_risk_candidate_success_receipts"
                     ).fetchone()[0],
                 }
             if state == "recovering" and latest.scope == "http":
@@ -251,39 +252,61 @@ class IncidentManager:
                 return False
             if group is None or quote is None:
                 return False
-            quote_anchor = recovery_evidence.get("quote_row_id")
-            fact_anchor = recovery_evidence.get("candidate_fact_row_id")
-            if (
-                type(quote_anchor) is not int
-                or quote_anchor < 0
-                or type(fact_anchor) is not int
-                or fact_anchor < 0
-            ):
+            receipt_anchor = recovery_evidence.get("candidate_success_receipt_row_id")
+            if type(receipt_anchor) is not int or receipt_anchor < 0:
                 return False
-            quote_row = con.execute(
-                "SELECT rowid FROM neg_risk_group_quote_batches WHERE id=?",
+            receipt = con.execute(
+                "SELECT * FROM neg_risk_candidate_success_receipts "
+                "WHERE quote_batch_id=?",
                 (quote.quote_batch_id,),
             ).fetchone()
-            row = con.execute(
-                "SELECT rowid AS candidate_fact_row_id,* "
-                "FROM neg_risk_candidate_watch_facts "
-                "WHERE group_id=? AND membership_hash=? AND quote_batch_id=? "
-                "AND last_result IN ('watching','no-edge') "
-                "AND observed_at_ms=? ORDER BY id DESC LIMIT 1",
-                (
-                    group_id,
-                    quote.membership_hash,
-                    quote.quote_batch_id,
-                    quote.quoted_at_ms,
-                ),
+            if receipt is None:
+                return False
+            quote_row = con.execute(
+                "SELECT rowid,* FROM neg_risk_group_quote_batches WHERE id=?",
+                (receipt["quote_batch_id"],),
             ).fetchone()
+            row = con.execute(
+                "SELECT * FROM neg_risk_candidate_watch_facts WHERE id=?",
+                (receipt["candidate_fact_row_id"],),
+            ).fetchone()
+            group_row = con.execute(
+                "SELECT * FROM neg_risk_group_revisions WHERE id=?",
+                (receipt["group_revision_row_id"],),
+            ).fetchone()
+            expected_hash = candidate_success_receipt_hash(
+                transaction_id=receipt["transaction_id"],
+                group_id=receipt["group_id"],
+                event_id=receipt["event_id"],
+                membership_hash=receipt["membership_hash"],
+                quote_batch_id=receipt["quote_batch_id"],
+                group_revision_row_id=receipt["group_revision_row_id"],
+                quote_batch_row_id=receipt["quote_batch_row_id"],
+                candidate_fact_row_id=receipt["candidate_fact_row_id"],
+                observed_at_ms=receipt["observed_at_ms"],
+            )
             return bool(
                 row
                 and quote_row
+                and group_row
                 and group.status == "certified"
+                and receipt["id"] > receipt_anchor
+                and receipt["receipt_hash"] == expected_hash
+                and receipt["group_id"] == group_id
+                and receipt["event_id"] == group.event_id
+                and receipt["membership_hash"] == group.membership_hash
+                and receipt["group_revision_row_id"] == group_row["id"]
+                and receipt["quote_batch_row_id"] == quote_row["rowid"]
+                and group_row["group_id"] == group.group_id
+                and group_row["revision"] == group.revision
+                and group_row["membership_hash"] == group.membership_hash
                 and quote.quote_batch_id == verification_evidence.get("quote_batch_id")
-                and quote_row["rowid"] > quote_anchor
-                and row["candidate_fact_row_id"] > fact_anchor
+                and row["group_id"] == group_id
+                and row["membership_hash"] == quote.membership_hash
+                and row["quote_batch_id"] == quote.quote_batch_id
+                and row["last_result"] in ("watching", "no-edge")
+                and row["observed_at_ms"] == quote.quoted_at_ms
+                and receipt["observed_at_ms"] == quote.quoted_at_ms
                 and quote.quoted_at_ms >= recovery_started_at_ms
                 and quote.quoted_at_ms <= verification_at_ms
                 and group.membership_hash == quote.membership_hash

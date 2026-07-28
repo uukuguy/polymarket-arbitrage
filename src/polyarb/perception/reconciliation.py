@@ -178,10 +178,14 @@ class ReconciliationRunner:
         try:
             while not stop_event.is_set():
                 try:
-                    decision = await asyncio.to_thread(
-                        self._store.latest_resource_decision,
-                        now_ms=int(time.time() * 1_000),
-                        required=self._require_resource_decision,
+                    decision = (
+                        await asyncio.to_thread(
+                            self._store.latest_resource_decision,
+                            now_ms=int(time.time() * 1_000),
+                            required=True,
+                        )
+                        if self._require_resource_decision
+                        else None
                     )
                     if decision is not None and not decision["reconciliation_enabled"]:
                         await asyncio.to_thread(

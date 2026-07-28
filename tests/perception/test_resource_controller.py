@@ -97,7 +97,7 @@ def test_runtime_replays_all_resource_evidence_before_applying_latest(tmp_path) 
     with store._connect() as con:
         con.execute("UPDATE neg_risk_resource_samples SET sample_json='[]' WHERE id=1")
     with pytest.raises(ValueError, match="invalid-resource"):
-        store.latest_resource_decision()
+        store.latest_resource_decision(required=True)
 
 
 def test_resource_history_rejects_stale_sequence_and_sample_mismatch(tmp_path) -> None:
@@ -113,7 +113,7 @@ def test_resource_history_rejects_stale_sequence_and_sample_mismatch(tmp_path) -
     with store._connect() as con:
         con.execute("UPDATE neg_risk_resource_decisions SET sample_id=1 WHERE id=2")
     with pytest.raises(ValueError, match="invalid-resource"):
-        store.latest_resource_decision()
+        store.latest_resource_decision(required=True)
 
 
 def test_repeated_samples_do_not_extend_hysteresis_transition_anchor(tmp_path) -> None:
@@ -164,3 +164,15 @@ def test_expired_resource_decision_fails_closed_at_runtime(tmp_path) -> None:
     controller.decide(sample)
     with pytest.raises(ValueError, match="stale-resource-decision"):
         store.latest_resource_decision(now_ms=2_501, required=True)
+
+
+def test_disabled_resource_consumer_does_not_parse_corrupt_history(tmp_path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        con.execute(
+            "INSERT INTO neg_risk_resource_samples(observed_at_ms,sample_json) "
+            "VALUES(1,'not-json')"
+        )
+
+    assert store.latest_resource_decision(now_ms=2_000, required=False) is None

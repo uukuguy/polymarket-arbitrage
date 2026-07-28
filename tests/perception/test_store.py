@@ -87,6 +87,55 @@ def test_sqlite_schema_initialization_adds_perception_tables(tmp_path: Path) -> 
         }
     assert "neg_risk_group_revisions" in tables
     assert "neg_risk_group_quote_batches" in tables
+    assert "neg_risk_candidate_success_receipts" in tables
+
+
+def test_only_atomic_candidate_publish_creates_success_receipt(tmp_path: Path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-1", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    split_batch = batch_for(group, quote_batch_id="qb-split")
+    store.publish_quote_batch(split_batch)
+    store.record_candidate_watch_fact(
+        group_id=group.group_id,
+        membership_hash=group.membership_hash,
+        quote_batch_id=split_batch.quote_batch_id,
+        observed_at_ms=split_batch.quoted_at_ms,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.9,
+        gross_edge_bps=1_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="split",
+        next_due_at_ms=split_batch.quoted_at_ms + 15_000,
+    )
+
+    atomic_batch = batch_for(group, quote_batch_id="qb-atomic", quoted_at_ms=3_200)
+    fact = store.publish_candidate_success(
+        atomic_batch,
+        observed_at_ms=atomic_batch.quoted_at_ms,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.9,
+        gross_edge_bps=1_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="atomic",
+        next_due_at_ms=atomic_batch.quoted_at_ms + 15_000,
+    )
+
+    with sqlite3.connect(store.db_path) as con:
+        receipts = con.execute(
+            "SELECT quote_batch_id,candidate_fact_row_id "
+            "FROM neg_risk_candidate_success_receipts"
+        ).fetchall()
+    assert receipts == [(atomic_batch.quote_batch_id, fact.id)]
 
 
 def test_membership_change_invalidates_previous_quote_atomically(

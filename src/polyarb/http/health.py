@@ -135,77 +135,28 @@ def read_producer_liveness_health(
     ):
         return unavailable
     try:
+        from polyarb.perception.store import validate_producer_history
+
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25)
         con.row_factory = sqlite3.Row
         try:
-            start = con.execute(
-                "SELECT * FROM neg_risk_producer_child_starts "
-                "WHERE component=? ORDER BY id DESC LIMIT 1",
-                (component,),
-            ).fetchone()
-            if start is None:
+            history = validate_producer_history(con, component, now_ms=now_ms)
+            if history.state == "never-started":
                 return ProducerLivenessHealth("never-started", None, True)
-            values = (
-                start["supervisor_run_id"],
-                start["child_nonce"],
-            )
-            if (
-                not all(isinstance(value, str) and value for value in values)
-                or type(start["attempt"]) is not int
-                or start["attempt"] < 1
-                or type(start["started_at_ms"]) is not int
-                or not 0 <= start["started_at_ms"] <= now_ms
-            ):
-                return unavailable
-            identity = (
-                component,
-                start["supervisor_run_id"],
-                start["child_nonce"],
-            )
-            receipts = con.execute(
-                "SELECT * FROM neg_risk_producer_receipts "
-                "WHERE component=? AND supervisor_run_id=? AND child_nonce=?",
-                identity,
-            ).fetchall()
-            if len(receipts) > 1:
-                return unavailable
-            heartbeats = con.execute(
-                "SELECT * FROM neg_risk_producer_heartbeats "
-                "WHERE component=? AND supervisor_run_id=? AND child_nonce=? "
-                "ORDER BY sequence",
-                identity,
-            ).fetchall()
-            previous_at_ms = start["started_at_ms"]
-            for sequence, heartbeat in enumerate(heartbeats, start=1):
-                if (
-                    heartbeat["sequence"] != sequence
-                    or type(heartbeat["observed_at_ms"]) is not int
-                    or not previous_at_ms <= heartbeat["observed_at_ms"] <= now_ms
-                ):
-                    return unavailable
-                previous_at_ms = heartbeat["observed_at_ms"]
-            if receipts:
-                receipt = receipts[0]
-                if (
-                    receipt["attempt"] != start["attempt"]
-                    or receipt["started_at_ms"] != start["started_at_ms"]
-                    or type(receipt["finished_at_ms"]) is not int
-                    or not start["started_at_ms"] <= receipt["finished_at_ms"] <= now_ms
-                ):
-                    return unavailable
-                outcome = str(receipt["outcome"])
-                state = "unexpected-exit" if outcome == "success" else outcome
-                return ProducerLivenessHealth(
-                    state,
-                    (now_ms - receipt["finished_at_ms"]) / 1_000,
-                    True,
+            anchor_ms = (
+                history.terminal_at_ms
+                if history.terminal_at_ms is not None
+                else (
+                    history.last_progress_at_ms
+                    if history.last_progress_at_ms is not None
+                    else history.latest_started_at_ms
                 )
-            age_ms = now_ms - previous_at_ms
-            state = (
-                "stalled"
-                if age_ms > stall_timeout_ms
-                else ("running" if heartbeats else "starting")
             )
+            assert anchor_ms is not None
+            age_ms = now_ms - anchor_ms
+            state = history.state
+            if state in {"starting", "running"} and age_ms > stall_timeout_ms:
+                state = "stalled"
             return ProducerLivenessHealth(state, age_ms / 1_000, True)
         finally:
             con.close()
@@ -217,6 +168,7 @@ def read_perception_recovery_health(
     path: Path,
     *,
     now_ms: int | None = None,
+    include_resource: bool = True,
 ) -> PerceptionRecoveryHealth:
     unavailable = PerceptionRecoveryHealth(None, (), "unavailable", None, False)
     try:
@@ -228,23 +180,25 @@ def read_perception_recovery_health(
 
         store = OpportunityPerceptionStore(path, read_only=True)
         incidents = IncidentManager(store).open_incidents()
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25)
-        con.row_factory = sqlite3.Row
-        try:
-            con.execute("BEGIN")
-            decision = validate_resource_history(con)
-            if decision is None:
-                mode, reason = "idle", None
-            else:
-                if now_ms is not None and (
-                    now_ms < decision.decided_at_ms
-                    or now_ms > decision.valid_until_ms
-                ):
-                    return unavailable
-                mode, reason = decision.mode, decision.reason
-            con.commit()
-        finally:
-            con.close()
+        mode, reason = "disabled", None
+        if include_resource:
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25)
+            con.row_factory = sqlite3.Row
+            try:
+                con.execute("BEGIN")
+                decision = validate_resource_history(con)
+                if decision is None:
+                    mode, reason = "idle", None
+                else:
+                    if now_ms is not None and (
+                        now_ms < decision.decided_at_ms
+                        or now_ms > decision.valid_until_ms
+                    ):
+                        return unavailable
+                    mode, reason = decision.mode, decision.reason
+                con.commit()
+            finally:
+                con.close()
         return PerceptionRecoveryHealth(
             len(incidents),
             tuple(sorted(incident.scope for incident in incidents)),
@@ -415,6 +369,7 @@ def _build_health_checks(
     recovery = read_perception_recovery_health(
         store.db_path,
         now_ms=int(now_s * 1_000),
+        include_resource=resource_enabled,
     )
     incident_status = "pass"
     if recovery_enabled:
@@ -445,7 +400,9 @@ def _build_health_checks(
             "time": _utc_now_iso(),
         }
     ]
-    liveness_components = ["candidate"]
+    liveness_components = []
+    if bool(getattr(settings, "opportunity_first_watcher_enabled", False)):
+        liveness_components.append("candidate")
     if bool(getattr(settings, "opportunity_discovery_enabled", False)):
         liveness_components.append("discovery")
     if bool(getattr(settings, "opportunity_reconciliation_enabled", False)):

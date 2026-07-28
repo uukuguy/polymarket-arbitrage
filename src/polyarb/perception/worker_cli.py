@@ -44,6 +44,7 @@ async def run_component(component: str, settings) -> None:
 
     store = OpportunityPerceptionStore(settings.db_path)
     store.init_schema()
+    store.claim_producer_heartbeat_authority(component)
     if component == "candidate":
         focused = build_focused_opportunity_watcher(settings)
         source = compose_candidate_group_ids(focused.candidate_group_ids, store)

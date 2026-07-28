@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from polyarb.http.health import read_producer_liveness_health
 from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.models import GroupLeg, GroupRevision
-from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.store import OpportunityPerceptionStore, ProducerReceipt
 from polyarb.perception.supervisor import (
     PRODUCER_COMMANDS,
     ProducerSpec,
@@ -114,6 +115,7 @@ async def test_health_binds_liveness_to_latest_exact_child(tmp_path) -> None:
                 "import time\n"
                 "from polyarb.perception.store import OpportunityPerceptionStore\n"
                 f"s=OpportunityPerceptionStore({str(tmp_path / 'state.db')!r})\n"
+                "s.claim_producer_heartbeat_authority('candidate')\n"
                 "now=int(time.time()*1000)\n"
                 "s.record_producer_heartbeat('candidate',observed_at_ms=now)\n"
                 "time.sleep(5)\n"
@@ -140,6 +142,144 @@ async def test_health_binds_liveness_to_latest_exact_child(tmp_path) -> None:
     assert liveness.evidence_consistent is True
     stop.set()
     await task
+
+
+@pytest.mark.asyncio
+async def test_parent_cannot_forge_heartbeat_from_database_hash(tmp_path) -> None:
+    store, supervisor = _supervisor(
+        tmp_path,
+        component="candidate",
+        command=(
+            sys.executable,
+            "-c",
+            (
+                "import time\n"
+                "from polyarb.perception.store import OpportunityPerceptionStore\n"
+                f"s=OpportunityPerceptionStore({str(tmp_path / 'state.db')!r})\n"
+                "s.claim_producer_heartbeat_authority('candidate')\n"
+                "s.record_producer_heartbeat("
+                "'candidate',observed_at_ms=int(time.time()*1000))\n"
+                "time.sleep(5)\n"
+            ),
+        ),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        supervisor.run(ProducerSpec(component="candidate", timeout_s=2), stop)
+    )
+    await asyncio.sleep(1.0)
+    with store._connect() as con:
+        row = con.execute(
+            "SELECT supervisor_run_id,attempt,child_auth_hash "
+            "FROM neg_risk_producer_child_starts WHERE component='candidate'"
+        ).fetchone()
+    assert row["child_auth_hash"]
+    with pytest.raises(PermissionError, match="heartbeat-authority"):
+        store.record_producer_heartbeat(
+            "candidate",
+            observed_at_ms=int(asyncio.get_running_loop().time() * 1_000),
+            supervisor_run_id=row["supervisor_run_id"],
+            attempt=row["attempt"],
+            _preimage=row["child_auth_hash"],
+        )
+    stop.set()
+    await task
+
+
+def test_liveness_replays_and_rejects_corrupt_old_attempt(tmp_path) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    for attempt in (1, 2):
+        store.reserve_producer_attempt(
+            "candidate",
+            supervisor_run_id=f"run-{attempt}",
+            started_at_ms=attempt * 1_000,
+        )
+        store.record_producer_receipt(
+            ProducerReceipt(
+                component="candidate",
+                attempt=attempt,
+                started_at_ms=attempt * 1_000,
+                finished_at_ms=attempt * 1_000 + 10,
+                outcome="success",
+                exit_code=0,
+                stdout_tail="",
+                stderr_tail="",
+                supervisor_run_id=f"run-{attempt}",
+                child_auth_hash=None,
+            )
+        )
+    with store._connect() as con:
+        con.execute(
+            "UPDATE neg_risk_producer_child_starts "
+            "SET auth_domain='forged' WHERE attempt=1"
+        )
+
+    health = read_producer_liveness_health(
+        store.db_path,
+        "candidate",
+        now_ms=3_000,
+        stall_timeout_ms=2_000,
+    )
+    assert health.state == "unavailable"
+    assert health.evidence_consistent is False
+
+
+@pytest.mark.asyncio
+async def test_restart_converges_abandoned_reservation_before_new_child(tmp_path) -> None:
+    marker = tmp_path / "child.pid"
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    assert (
+        store.reserve_producer_attempt(
+            "candidate",
+            supervisor_run_id="crashed-supervisor",
+            started_at_ms=1,
+        )
+        == 1
+    )
+    script = (
+        "import os,time\n"
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(10)\n"
+    )
+    supervisor = ProducerSupervisor(
+        store=store,
+        incidents=IncidentManager(store),
+        _test_commands={
+            **PRODUCER_COMMANDS,
+            "candidate": (sys.executable, "-c", script),
+        },
+    )
+    stop = asyncio.Event()
+
+    async def cancel_child() -> None:
+        while not marker.exists():
+            await asyncio.sleep(0.01)
+        stop.set()
+
+    await asyncio.gather(
+        supervisor.run(
+            ProducerSpec(
+                component="candidate",
+                timeout_s=2,
+                terminate_grace_s=0.05,
+            ),
+            stop,
+        ),
+        cancel_child(),
+    )
+
+    receipts = store.producer_receipts("candidate")
+    assert [(item.attempt, item.outcome) for item in receipts] == [
+        (1, "spawn-error"),
+        (2, "cancelled"),
+    ]
+    assert "abandoned-reservation" in receipts[0].stderr_tail
+    pid = int(marker.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 @pytest.mark.asyncio
@@ -217,6 +357,29 @@ async def test_redaction_covers_uri_json_headers_cookies_and_percent_encoding(
         "cookie-secret",
         "percent-secret",
     ):
+        assert secret not in output
+
+
+@pytest.mark.asyncio
+async def test_redaction_covers_prefixed_and_suffixed_project_secret_keys(tmp_path) -> None:
+    secrets = (
+        "POLYARB_SUPABASE_SERVICE_KEY=service-value",
+        "POLYARB_TELEGRAM_BOT_TOKEN=telegram-value",
+        '{"R2_SECRET_ACCESS_KEY":"r2-value"}',
+        "https://example.test/?OPENAI_API_KEY=openai-value",
+    )
+    script = "print(" + repr("\n".join(secrets)) + "); raise SystemExit(3)"
+    store, supervisor = _supervisor(
+        tmp_path,
+        component="candidate",
+        command=(sys.executable, "-c", script),
+    )
+    await supervisor.run(
+        ProducerSpec(component="candidate", timeout_s=2, max_restarts=0),
+        asyncio.Event(),
+    )
+    output = store.producer_receipts("candidate")[0].stdout_tail
+    for secret in ("service-value", "telegram-value", "r2-value", "openai-value"):
         assert secret not in output
 
 
@@ -335,6 +498,7 @@ async def test_restart_verifies_only_from_post_recovery_candidate_writer(tmp_pat
         "if not marker.exists():\n"
         " marker.touch(); raise SystemExit(7)\n"
         f"s=OpportunityPerceptionStore(Path({str(store.db_path)!r}))\n"
+        "s.claim_producer_heartbeat_authority('candidate')\n"
         f"h={revision.membership_hash!r}\n"
         "now=int(time.time()*1000)\n"
         "b=GroupQuoteBatch.complete("

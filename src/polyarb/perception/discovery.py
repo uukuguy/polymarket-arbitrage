@@ -236,10 +236,14 @@ class DiscoveryWorker:
                 )
 
         requested_cursor = await asyncio.to_thread(self._store.discovery_cursor)
-        resource_decision = await asyncio.to_thread(
-            self._store.latest_resource_decision,
-            now_ms=self._clock_ms(),
-            required=self._require_resource_decision,
+        resource_decision = (
+            await asyncio.to_thread(
+                self._store.latest_resource_decision,
+                now_ms=self._clock_ms(),
+                required=True,
+            )
+            if self._require_resource_decision
+            else None
         )
         page_limit = (
             self._page_limit
@@ -451,10 +455,14 @@ class DiscoveryRunner:
                         observed_at_ms=result.finished_at_ms,
                         state="yielded" if result.yielded else "progress",
                     )
-                    decision = await asyncio.to_thread(
-                        self._store.latest_resource_decision,
-                        now_ms=int(time.time() * 1_000),
-                        required=self._worker._require_resource_decision,
+                    decision = (
+                        await asyncio.to_thread(
+                            self._store.latest_resource_decision,
+                            now_ms=int(time.time() * 1_000),
+                            required=True,
+                        )
+                        if self._worker._require_resource_decision
+                        else None
                     )
                     if decision is not None:
                         duty = float(decision["discovery_duty_multiplier"])

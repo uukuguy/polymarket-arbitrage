@@ -17,7 +17,11 @@ from polyarb.perception.incidents import (
     IncidentManager,
     RecoveryEvidenceRequiredError,
 )
-from polyarb.perception.store import OpportunityPerceptionStore, ProducerReceipt
+from polyarb.perception.store import (
+    OpportunityPerceptionStore,
+    ProducerReceipt,
+    validate_producer_history,
+)
 
 PRODUCER_COMMANDS = {
     "candidate": (
@@ -42,13 +46,15 @@ PRODUCER_COMMANDS = {
 
 _AUTH_RE = re.compile(r"(?i)(authorization\s*:\s*(?:bearer|basic)\s+)[^\s\\]+")
 _COOKIE_RE = re.compile(r"(?i)(cookie\s*:)[^\r\n\\]*")
+_SENSITIVE_KEY = (
+    r"[a-z0-9_.-]*(?:token|secret|password|api[_-]?key|authorization|cookie|"
+    r"service[_-]?key|access[_-]?key)[a-z0-9_.-]*"
+)
 _JSON_SECRET_RE = re.compile(
-    r'(?i)("(?:token|secret|password|api[_-]?key|authorization|cookie)"\s*:\s*")'
-    r'[^"]*(")'
+    rf'(?i)("{_SENSITIVE_KEY}"\s*:\s*")' r'[^"]*(")'
 )
 _KEY_VALUE_RE = re.compile(
-    r"(?i)((?:^|[?&;\s])(?:token|secret|password|api[_-]?key|authorization|cookie)"
-    r"\s*=\s*)[^&;\s\\]+"
+    rf"(?i)((?:^|[?&;\s]){_SENSITIVE_KEY}\s*=\s*)[^&;\s\\]+"
 )
 _URI_USERINFO_RE = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@")
 
@@ -91,35 +97,43 @@ class ProducerSupervisor:
         self._commands = PRODUCER_COMMANDS if _test_commands is None else _test_commands
 
     async def run(self, spec: ProducerSpec, stop_event: asyncio.Event) -> None:
-        attempt = len(self._store.producer_receipts(spec.component))
         supervisor_run_id = uuid.uuid4().hex
         incident: Incident | None = None
         retries = 0
+        abandoned = self._store.reconcile_abandoned_producer_attempts(
+            spec.component,
+            finished_at_ms=self._clock_ms(),
+        )
+        for attempt in abandoned:
+            incident = self._record_failure(
+                incident,
+                component=spec.component,
+                outcome="abandoned",
+                attempt=attempt,
+            )
+        if incident is not None:
+            self._begin_recovery(incident, retries=0)
         while not stop_event.is_set():
-            attempt += 1
             started_at_ms = self._clock_ms()
+            attempt = self._store.reserve_producer_attempt(
+                spec.component,
+                supervisor_run_id=supervisor_run_id,
+                started_at_ms=started_at_ms,
+            )
             process = None
             stdout_task = None
             stderr_task = None
             outcome = "spawn-error"
             exit_code = None
-            child_nonce = uuid.uuid4().hex
             try:
                 child_env = os.environ.copy()
                 child_env["POLYARB_PRODUCER_SUPERVISOR_RUN_ID"] = supervisor_run_id
-                child_env["POLYARB_PRODUCER_CHILD_NONCE"] = child_nonce
+                child_env["POLYARB_PRODUCER_ATTEMPT"] = str(attempt)
                 process = await asyncio.create_subprocess_exec(
                     *self._commands[spec.component],
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=child_env,
-                )
-                self._store.record_producer_child_start(
-                    spec.component,
-                    supervisor_run_id=supervisor_run_id,
-                    child_nonce=child_nonce,
-                    attempt=attempt,
-                    started_at_ms=started_at_ms,
                 )
                 assert process.stdout is not None and process.stderr is not None
                 stdout_task = asyncio.create_task(
@@ -135,7 +149,7 @@ class ProducerSupervisor:
                     spec.component,
                     incident,
                     supervisor_run_id,
-                    child_nonce,
+                    attempt,
                 )
                 if signal == "stop":
                     outcome = "cancelled"
@@ -152,6 +166,10 @@ class ProducerSupervisor:
                 raise
             except OSError:
                 outcome = "spawn-error"
+            except Exception:
+                outcome = "spawn-error"
+                if process is not None:
+                    await self._terminate(process, spec.terminate_grace_s)
             finally:
                 stdout = await self._drain_result(stdout_task)
                 stderr = await self._drain_result(stderr_task)
@@ -166,7 +184,11 @@ class ProducerSupervisor:
                         stdout_tail=self._safe_text(stdout),
                         stderr_tail=self._safe_text(stderr),
                         supervisor_run_id=supervisor_run_id,
-                        child_nonce=child_nonce,
+                        child_auth_hash=self._store.producer_attempt_auth_hash(
+                            spec.component,
+                            supervisor_run_id,
+                            attempt,
+                        ),
                     )
                 )
 
@@ -202,11 +224,11 @@ class ProducerSupervisor:
         component,
         incident,
         supervisor_run_id,
-        child_nonce,
+        attempt,
     ):
         wait_task = asyncio.create_task(process.wait())
         stop_task = asyncio.create_task(stop_event.wait())
-        marker = self._progress_marker(component, supervisor_run_id, child_nonce)
+        marker = self._progress_marker(component, supervisor_run_id, attempt)
         deadline = time.monotonic() + timeout_s
         try:
             while True:
@@ -222,7 +244,7 @@ class ProducerSupervisor:
                     return wait_task.result(), "exit"
                 if stop_task in done and stop_task.result():
                     return None, "stop"
-                current = self._progress_marker(component, supervisor_run_id, child_nonce)
+                current = self._progress_marker(component, supervisor_run_id, attempt)
                 if current != marker:
                     marker = current
                     deadline = time.monotonic() + timeout_s
@@ -238,7 +260,7 @@ class ProducerSupervisor:
         self,
         component: str,
         supervisor_run_id: str,
-        child_nonce: str,
+        attempt: int,
     ) -> tuple:
         try:
             con = sqlite3.connect(
@@ -247,19 +269,24 @@ class ProducerSupervisor:
                 timeout=0.25,
             )
             try:
-                row = con.execute(
-                    "SELECT COUNT(*),COALESCE(MAX(sequence),0),"
-                    "COALESCE(MAX(observed_at_ms),0) "
-                    "FROM neg_risk_producer_heartbeats "
-                    "WHERE component=? AND supervisor_run_id=? AND child_nonce=?",
-                    (component, supervisor_run_id, child_nonce),
-                ).fetchone()
-                if row[0] != row[1]:
+                history = validate_producer_history(
+                    con,
+                    component,
+                    now_ms=self._clock_ms(),
+                )
+                if (
+                    history.supervisor_run_id != supervisor_run_id
+                    or history.latest_attempt != attempt
+                ):
                     return ("invalid-sequence",)
-                return tuple(row)
+                return (
+                    history.heartbeat_count,
+                    history.heartbeat_sequence,
+                    history.last_progress_at_ms or 0,
+                )
             finally:
                 con.close()
-        except sqlite3.Error:
+        except (sqlite3.Error, TypeError, ValueError):
             return ("unavailable",)
 
     @staticmethod
@@ -368,16 +395,17 @@ class ProducerSupervisor:
         try:
             if scope == "candidate":
                 row = con.execute(
-                    "SELECT q.id,q.group_id,q.membership_hash "
-                    "FROM neg_risk_group_quote_batches q "
-                    "WHERE q.status='complete' ORDER BY q.quoted_at_ms DESC,q.id "
-                    "DESC LIMIT 1"
+                    "SELECT id,transaction_id,quote_batch_id,group_id,membership_hash "
+                    "FROM neg_risk_candidate_success_receipts "
+                    "ORDER BY id DESC LIMIT 1"
                 ).fetchone()
                 return (
                     {}
                     if row is None
                     else {
-                        "quote_batch_id": row["id"],
+                        "candidate_success_receipt_id": row["id"],
+                        "transaction_id": row["transaction_id"],
+                        "quote_batch_id": row["quote_batch_id"],
                         "group_id": row["group_id"],
                         "membership_hash": row["membership_hash"],
                     }

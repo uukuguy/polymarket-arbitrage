@@ -193,6 +193,32 @@ async def test_discovery_commits_rows_promotions_coverage_and_cursor_atomically(
 
 
 @pytest.mark.asyncio
+async def test_discovery_resource_disabled_never_reads_decision(tmp_path: Path) -> None:
+    class Store(OpportunityPerceptionStore):
+        def latest_resource_decision(self, **_kwargs):
+            raise AssertionError("disabled discovery consumed resource decision")
+
+    store = Store(tmp_path / "state.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO neg_risk_discovery_state("
+            "id,next_cursor,completed,last_started_at_ms,last_finished_at_ms,"
+            "page_event_count,groups_seen,promoted_count"
+            ") VALUES (1,'c-1',0,0,0,0,0,0)"
+        )
+    gamma = FakeGamma(_page(_event(event_id="e-1", group_id="g-1")))
+    result = await DiscoveryWorker(
+        gamma=gamma,
+        store=store,
+        clock_ms=lambda: 10_000,
+        require_resource_decision=False,
+    ).run_batch()
+
+    assert result.groups_seen == 1
+
+
+@pytest.mark.asyncio
 async def test_discovery_rollback_never_advances_cursor_on_write_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

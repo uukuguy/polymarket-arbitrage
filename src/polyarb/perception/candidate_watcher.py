@@ -482,9 +482,13 @@ class CandidateWatcher:
             observed_at_ms=observed_at_ms,
             last_result=status,
         )
-        decision = self._store.latest_resource_decision(
-            now_ms=observed_at_ms,
-            required=self._require_resource_decision,
+        decision = (
+            self._store.latest_resource_decision(
+                now_ms=observed_at_ms,
+                required=True,
+            )
+            if self._require_resource_decision
+            else None
         )
         if decision is not None and priority != "high":
             multiplier = float(decision["normal_candidate_interval_multiplier"])

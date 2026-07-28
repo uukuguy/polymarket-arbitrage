@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +15,7 @@ from polyarb.perception.discovery import DiscoveryWorker
 from polyarb.perception.models import GroupLeg, GroupRevision
 from polyarb.perception.reconciliation import (
     ReconciliationIncompleteError,
+    ReconciliationRunner,
 )
 from polyarb.perception.reconciliation import (
     ReconciliationWorker as _ReconciliationWorker,
@@ -100,6 +103,41 @@ def _store(path: Path) -> OpportunityPerceptionStore:
     store = OpportunityPerceptionStore(path)
     store.init_schema()
     return store
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_resource_disabled_never_reads_decision(tmp_path: Path) -> None:
+    decision_reads = 0
+    stop = asyncio.Event()
+
+    class Store(OpportunityPerceptionStore):
+        def latest_resource_decision(self, **_kwargs):
+            nonlocal decision_reads
+            decision_reads += 1
+            stop.set()
+            return None
+
+    class Worker:
+        async def run_batch(self):
+            stop.set()
+            return SimpleNamespace(finished_at_ms=2_000)
+
+    class Gamma:
+        async def aclose(self) -> None:
+            return None
+
+    store = Store(tmp_path / "state.db")
+    store.init_schema()
+    runner = ReconciliationRunner(
+        worker=Worker(),
+        gamma=Gamma(),
+        interval_s=0.01,
+        store=store,
+        require_resource_decision=False,
+    )
+
+    await runner.run(stop)
+    assert decision_reads == 0
 
 
 def test_reconciliation_schema_upgrades_original_task4_tables_additively(

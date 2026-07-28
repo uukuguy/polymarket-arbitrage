@@ -255,6 +255,25 @@ CREATE TABLE IF NOT EXISTS neg_risk_candidate_watch_facts (
 CREATE INDEX IF NOT EXISTS idx_neg_risk_candidate_watch_due
   ON neg_risk_candidate_watch_facts(group_id, id DESC, next_due_at_ms);
 
+-- Cryptographically bound receipt emitted only by publish_candidate_success()
+-- in the same transaction as its complete quote batch and terminal fact.
+CREATE TABLE IF NOT EXISTS neg_risk_candidate_success_receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  transaction_id TEXT NOT NULL UNIQUE,
+  group_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  membership_hash TEXT NOT NULL,
+  quote_batch_id TEXT NOT NULL UNIQUE,
+  group_revision_row_id INTEGER NOT NULL,
+  quote_batch_row_id INTEGER NOT NULL,
+  candidate_fact_row_id INTEGER NOT NULL UNIQUE,
+  observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+  receipt_hash TEXT NOT NULL,
+  UNIQUE(group_revision_row_id,quote_batch_row_id,candidate_fact_row_id)
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_candidate_success_receipts_group
+  ON neg_risk_candidate_success_receipts(group_id,id DESC);
+
 -- Bounded Discovery publishes its cursor and every fact derived from one
 -- Gamma page in one SQLite transaction.  The cursor is an opaque token.
 CREATE TABLE IF NOT EXISTS neg_risk_discovery_state (
@@ -581,7 +600,9 @@ CREATE TABLE IF NOT EXISTS neg_risk_producer_receipts (
   stdout_tail TEXT NOT NULL,
   stderr_tail TEXT NOT NULL,
   supervisor_run_id TEXT NOT NULL,
-  child_nonce TEXT NOT NULL,
+  child_nonce TEXT NOT NULL DEFAULT '',
+  auth_domain TEXT NOT NULL,
+  child_auth_hash TEXT,
   UNIQUE(component,attempt)
 );
 
@@ -590,10 +611,13 @@ CREATE TABLE IF NOT EXISTS neg_risk_producer_child_starts (
   component TEXT NOT NULL CHECK(component IN
     ('candidate','discovery','reconciliation')),
   supervisor_run_id TEXT NOT NULL,
-  child_nonce TEXT NOT NULL,
+  child_nonce TEXT NOT NULL DEFAULT '',
   attempt INTEGER NOT NULL CHECK(attempt >= 1),
   started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
-  UNIQUE(component,supervisor_run_id,child_nonce),
+  auth_domain TEXT NOT NULL,
+  child_auth_hash TEXT,
+  claimed_at_ms INTEGER,
+  UNIQUE(component,supervisor_run_id,attempt),
   UNIQUE(component,attempt)
 );
 
@@ -602,11 +626,14 @@ CREATE TABLE IF NOT EXISTS neg_risk_producer_heartbeats (
   component TEXT NOT NULL CHECK(component IN
     ('candidate','discovery','reconciliation')),
   supervisor_run_id TEXT NOT NULL,
-  child_nonce TEXT NOT NULL,
+  child_nonce TEXT NOT NULL DEFAULT '',
+  attempt INTEGER NOT NULL CHECK(attempt >= 1),
+  auth_domain TEXT NOT NULL,
+  child_auth_hash TEXT NOT NULL,
   sequence INTEGER NOT NULL CHECK(sequence >= 1),
   observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
   state TEXT NOT NULL CHECK(state IN ('progress','yielded','paused')),
-  UNIQUE(component,supervisor_run_id,child_nonce,sequence)
+  UNIQUE(component,supervisor_run_id,attempt,sequence)
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_producer_heartbeat_component
   ON neg_risk_producer_heartbeats(component,id);

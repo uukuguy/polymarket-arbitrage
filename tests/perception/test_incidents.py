@@ -97,6 +97,70 @@ def test_incident_cannot_close_without_post_recovery_writer_evidence(tmp_path) -
     assert verified.state == "verified"
 
 
+def test_candidate_recovery_rejects_split_quote_and_fact_writes(tmp_path) -> None:
+    store = _store(tmp_path)
+    now = [2_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    incident = manager.detect("candidate:g-1", "clob-timeout", {})
+    manager.transition(incident.id, "classified", {})
+    manager.transition(incident.id, "contained", {})
+    manager.transition(incident.id, "recovering", {"retry": 1})
+
+    revision = GroupRevision.certified(
+        group_id="g-1",
+        event_id="e-1",
+        revision=1,
+        started_at_ms=500,
+        observed_at_ms=1_000,
+        source_cursor="c-1",
+        legs=(
+            GroupLeg("m-1", "c-1", "t-1", "one"),
+            GroupLeg("m-2", "c-2", "t-2", "two"),
+        ),
+    )
+    store.publish_group_revision(revision)
+    batch = GroupQuoteBatch.complete(
+        group_id="g-1",
+        membership_hash=revision.membership_hash,
+        quote_batch_id="qb-split",
+        started_at_ms=2_050,
+        quoted_at_ms=2_100,
+        legs=(
+            GroupQuoteLeg("t-1", revision.membership_hash, 0.4, 10, "executable"),
+            GroupQuoteLeg("t-2", revision.membership_hash, 0.5, 10, "executable"),
+        ),
+    )
+    store.publish_quote_batch(batch)
+    store.record_candidate_watch_fact(
+        group_id="g-1",
+        membership_hash=revision.membership_hash,
+        quote_batch_id=batch.quote_batch_id,
+        observed_at_ms=batch.quoted_at_ms,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.9,
+        gross_edge_bps=1_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="split",
+        next_due_at_ms=17_100,
+    )
+    now[0] = 2_200
+
+    with pytest.raises(RecoveryEvidenceRequiredError):
+        manager.transition(
+            incident.id,
+            "verified",
+            {
+                "quote_batch_id": batch.quote_batch_id,
+                "group_id": "g-1",
+                "membership_hash": revision.membership_hash,
+            },
+        )
+
+
 def test_detect_is_idempotent_and_terminal_incident_does_not_reopen(tmp_path) -> None:
     manager = IncidentManager(_store(tmp_path), clock_ms=lambda: 1_000)
     first = manager.detect("discovery", "timeout", {"cursor": "c-1"})
@@ -127,6 +191,23 @@ def test_concurrent_transition_uses_latest_append_only_state(tmp_path) -> None:
             (incident.id,),
         ).fetchone()[0]
     assert count == 3
+
+
+def test_transition_rejects_clock_regression_without_appending(tmp_path) -> None:
+    store = _store(tmp_path)
+    now = [2_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    incident = manager.detect("discovery", "timeout", {})
+    now[0] = 1_000
+
+    with pytest.raises(InvalidIncidentTransitionError, match="incident-clock-regression"):
+        manager.transition(incident.id, "classified", {})
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_events WHERE incident_id=?",
+            (incident.id,),
+        ).fetchone()[0] == 1
 
 
 def test_http_verification_requires_expected_release_and_bounded_probe(tmp_path) -> None:

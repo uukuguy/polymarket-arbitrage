@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
+import secrets
 import sqlite3
 import uuid
 from collections.abc import Callable
@@ -27,6 +29,8 @@ from polyarb.perception.priority import GroupScheduleInput, priority_components
 from polyarb.storage.schemas import DDL
 
 _BUSY_TIMEOUT_MS = 5_000
+_HEARTBEAT_AUTH_DOMAIN = "polyarb-producer-heartbeat-v1"
+_CHILD_HEARTBEAT_PREIMAGES: dict[tuple[str, str, int], str] = {}
 _GROUP_STATUSES = {"discovered", "certified", "stale", "invalidated", "closed"}
 _ACTUAL_CANDIDATE_AUTHORITY_SQL = (
     "(s.group_id IS NULL OR s.promoted_at_ms IS NOT NULL OR EXISTS ("
@@ -39,6 +43,38 @@ DiscoveryQuality = Literal[
     "complete-unsupported",
     "incomplete-source",
 ]
+
+
+def candidate_success_receipt_hash(
+    *,
+    transaction_id: str,
+    group_id: str,
+    event_id: str,
+    membership_hash: str,
+    quote_batch_id: str,
+    group_revision_row_id: int,
+    quote_batch_row_id: int,
+    candidate_fact_row_id: int,
+    observed_at_ms: int,
+) -> str:
+    """Return the canonical integrity hash for an atomic candidate success."""
+    payload = json.dumps(
+        {
+            "candidate_fact_row_id": candidate_fact_row_id,
+            "event_id": event_id,
+            "group_id": group_id,
+            "group_revision_row_id": group_revision_row_id,
+            "membership_hash": membership_hash,
+            "observed_at_ms": observed_at_ms,
+            "quote_batch_id": quote_batch_id,
+            "quote_batch_row_id": quote_batch_row_id,
+            "transaction_id": transaction_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
 
 
 class ReconciliationIncompleteError(RuntimeError):
@@ -245,7 +281,148 @@ class ProducerReceipt:
     stdout_tail: str
     stderr_tail: str
     supervisor_run_id: str
-    child_nonce: str
+    child_auth_hash: str | None
+
+
+@dataclass(frozen=True)
+class ProducerHistoryState:
+    state: str
+    latest_attempt: int | None
+    supervisor_run_id: str | None
+    latest_started_at_ms: int | None
+    heartbeat_count: int
+    heartbeat_sequence: int
+    last_progress_at_ms: int | None
+    terminal_at_ms: int | None
+
+
+def validate_producer_history(
+    con: sqlite3.Connection,
+    component: str,
+    *,
+    now_ms: int,
+) -> ProducerHistoryState:
+    if component not in {"candidate", "discovery", "reconciliation"}:
+        raise ValueError("invalid-producer-component")
+    con.row_factory = sqlite3.Row
+    starts = con.execute(
+        "SELECT * FROM neg_risk_producer_child_starts "
+        "WHERE component=? ORDER BY attempt",
+        (component,),
+    ).fetchall()
+    receipts = con.execute(
+        "SELECT * FROM neg_risk_producer_receipts "
+        "WHERE component=? ORDER BY attempt",
+        (component,),
+    ).fetchall()
+    heartbeats = con.execute(
+        "SELECT * FROM neg_risk_producer_heartbeats "
+        "WHERE component=? ORDER BY attempt,sequence",
+        (component,),
+    ).fetchall()
+    if not starts:
+        if receipts or heartbeats:
+            raise ValueError("invalid-producer-history")
+        return ProducerHistoryState(
+            "never-started", None, None, None, 0, 0, None, None
+        )
+    receipt_by_attempt: dict[int, sqlite3.Row] = {}
+    for receipt in receipts:
+        attempt = receipt["attempt"]
+        if type(attempt) is not int or attempt in receipt_by_attempt:
+            raise ValueError("invalid-producer-history")
+        receipt_by_attempt[attempt] = receipt
+    heartbeat_by_attempt: dict[int, list[sqlite3.Row]] = {}
+    for heartbeat in heartbeats:
+        attempt = heartbeat["attempt"]
+        if type(attempt) is not int:
+            raise ValueError("invalid-producer-history")
+        heartbeat_by_attempt.setdefault(attempt, []).append(heartbeat)
+
+    for expected_attempt, start in enumerate(starts, start=1):
+        attempt = start["attempt"]
+        auth_hash = start["child_auth_hash"]
+        claimed_at_ms = start["claimed_at_ms"]
+        if (
+            attempt != expected_attempt
+            or not isinstance(start["supervisor_run_id"], str)
+            or not start["supervisor_run_id"]
+            or start["auth_domain"] != _HEARTBEAT_AUTH_DOMAIN
+            or type(start["started_at_ms"]) is not int
+            or not 0 <= start["started_at_ms"] <= now_ms
+            or (
+                auth_hash is not None
+                and (
+                    not isinstance(auth_hash, str)
+                    or len(auth_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in auth_hash)
+                    or type(claimed_at_ms) is not int
+                    or not start["started_at_ms"] <= claimed_at_ms <= now_ms
+                )
+            )
+            or (auth_hash is None and claimed_at_ms is not None)
+        ):
+            raise ValueError("invalid-producer-history")
+        receipt = receipt_by_attempt.get(attempt)
+        if attempt < len(starts) and receipt is None:
+            raise ValueError("invalid-producer-history")
+        if receipt is not None and (
+            receipt["supervisor_run_id"] != start["supervisor_run_id"]
+            or receipt["auth_domain"] != _HEARTBEAT_AUTH_DOMAIN
+            or receipt["child_auth_hash"] != auth_hash
+            or receipt["started_at_ms"] != start["started_at_ms"]
+            or type(receipt["finished_at_ms"]) is not int
+            or not start["started_at_ms"] <= receipt["finished_at_ms"] <= now_ms
+        ):
+            raise ValueError("invalid-producer-history")
+        attempt_heartbeats = heartbeat_by_attempt.get(attempt, [])
+        if attempt_heartbeats and auth_hash is None:
+            raise ValueError("invalid-producer-history")
+        previous_at_ms = (
+            start["started_at_ms"] if claimed_at_ms is None else claimed_at_ms
+        )
+        terminal_at_ms = now_ms if receipt is None else receipt["finished_at_ms"]
+        for expected_sequence, heartbeat in enumerate(attempt_heartbeats, start=1):
+            if (
+                heartbeat["supervisor_run_id"] != start["supervisor_run_id"]
+                or heartbeat["auth_domain"] != _HEARTBEAT_AUTH_DOMAIN
+                or heartbeat["child_auth_hash"] != auth_hash
+                or heartbeat["sequence"] != expected_sequence
+                or type(heartbeat["observed_at_ms"]) is not int
+                or not previous_at_ms <= heartbeat["observed_at_ms"] <= terminal_at_ms
+            ):
+                raise ValueError("invalid-producer-history")
+            previous_at_ms = heartbeat["observed_at_ms"]
+    if set(receipt_by_attempt) - {row["attempt"] for row in starts}:
+        raise ValueError("invalid-producer-history")
+    if set(heartbeat_by_attempt) - {row["attempt"] for row in starts}:
+        raise ValueError("invalid-producer-history")
+
+    latest = starts[-1]
+    latest_receipt = receipt_by_attempt.get(latest["attempt"])
+    latest_heartbeats = heartbeat_by_attempt.get(latest["attempt"], [])
+    last_progress_at_ms = (
+        latest_heartbeats[-1]["observed_at_ms"] if latest_heartbeats else None
+    )
+    if latest_receipt is None:
+        state = "running" if latest_heartbeats else "starting"
+        terminal_at_ms = None
+    else:
+        outcome = str(latest_receipt["outcome"])
+        state = "unexpected-exit" if outcome == "success" else outcome
+        terminal_at_ms = latest_receipt["finished_at_ms"]
+    return ProducerHistoryState(
+        state=state,
+        latest_attempt=latest["attempt"],
+        supervisor_run_id=latest["supervisor_run_id"],
+        latest_started_at_ms=latest["started_at_ms"],
+        heartbeat_count=len(latest_heartbeats),
+        heartbeat_sequence=(
+            latest_heartbeats[-1]["sequence"] if latest_heartbeats else 0
+        ),
+        last_progress_at_ms=last_progress_at_ms,
+        terminal_at_ms=terminal_at_ms,
+    )
 
 
 class OpportunityPerceptionStore:
@@ -408,6 +585,46 @@ class OpportunityPerceptionStore:
                 (
                     "neg_risk_producer_receipts",
                     "child_nonce",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_producer_receipts",
+                    "auth_domain",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_producer_receipts",
+                    "child_auth_hash",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_producer_child_starts",
+                    "auth_domain",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_producer_child_starts",
+                    "child_auth_hash",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_producer_child_starts",
+                    "claimed_at_ms",
+                    "INTEGER",
+                ),
+                (
+                    "neg_risk_producer_heartbeats",
+                    "attempt",
+                    "INTEGER",
+                ),
+                (
+                    "neg_risk_producer_heartbeats",
+                    "auth_domain",
+                    "TEXT",
+                ),
+                (
+                    "neg_risk_producer_heartbeats",
+                    "child_auth_hash",
                     "TEXT",
                 ),
                 (
@@ -2679,6 +2896,44 @@ class OpportunityPerceptionStore:
                 schedule_reason=schedule_reason,
                 next_due_at_ms=next_due_at_ms,
             )
+            group_row = self._current_group_row(con, batch.group_id)
+            quote_row = con.execute(
+                "SELECT rowid FROM neg_risk_group_quote_batches WHERE id=?",
+                (batch.quote_batch_id,),
+            ).fetchone()
+            if group_row is None or quote_row is None:
+                raise ValueError("candidate-success-authority-unavailable")
+            transaction_id = str(uuid.uuid4())
+            receipt_hash = candidate_success_receipt_hash(
+                transaction_id=transaction_id,
+                group_id=batch.group_id,
+                event_id=str(group_row["event_id"]),
+                membership_hash=batch.membership_hash,
+                quote_batch_id=batch.quote_batch_id,
+                group_revision_row_id=int(group_row["id"]),
+                quote_batch_row_id=int(quote_row["rowid"]),
+                candidate_fact_row_id=fact.id,
+                observed_at_ms=observed_at_ms,
+            )
+            con.execute(
+                "INSERT INTO neg_risk_candidate_success_receipts("
+                "transaction_id,group_id,event_id,membership_hash,quote_batch_id,"
+                "group_revision_row_id,quote_batch_row_id,candidate_fact_row_id,"
+                "observed_at_ms,receipt_hash"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    transaction_id,
+                    batch.group_id,
+                    group_row["event_id"],
+                    batch.membership_hash,
+                    batch.quote_batch_id,
+                    group_row["id"],
+                    quote_row["rowid"],
+                    fact.id,
+                    observed_at_ms,
+                    receipt_hash,
+                ),
+            )
             self._admit_waiting_candidates(con, now_ms=observed_at_ms)
             con.execute("COMMIT")
             return fact
@@ -3026,16 +3281,36 @@ class OpportunityPerceptionStore:
             or len(receipt.stdout_tail.encode()) > 16_384
             or len(receipt.stderr_tail.encode()) > 16_384
             or not receipt.supervisor_run_id
-            or not receipt.child_nonce
+            or (
+                receipt.child_auth_hash is not None
+                and (
+                    len(receipt.child_auth_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in receipt.child_auth_hash)
+                )
+            )
         ):
             raise ValueError("invalid-producer-receipt")
         con = self._connect()
         try:
+            con.execute("BEGIN IMMEDIATE")
+            start = con.execute(
+                "SELECT * FROM neg_risk_producer_child_starts "
+                "WHERE component=? AND attempt=?",
+                (receipt.component, receipt.attempt),
+            ).fetchone()
+            if (
+                start is None
+                or start["supervisor_run_id"] != receipt.supervisor_run_id
+                or start["started_at_ms"] != receipt.started_at_ms
+                or start["auth_domain"] != _HEARTBEAT_AUTH_DOMAIN
+                or start["child_auth_hash"] != receipt.child_auth_hash
+            ):
+                raise ValueError("producer-receipt-reservation-mismatch")
             con.execute(
                 "INSERT INTO neg_risk_producer_receipts("
                 "component,attempt,started_at_ms,finished_at_ms,outcome,"
-                "exit_code,stdout_tail,stderr_tail,supervisor_run_id,child_nonce"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "exit_code,stdout_tail,stderr_tail,supervisor_run_id,child_nonce,"
+                "auth_domain,child_auth_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     receipt.component,
                     receipt.attempt,
@@ -3046,10 +3321,15 @@ class OpportunityPerceptionStore:
                     receipt.stdout_tail,
                     receipt.stderr_tail,
                     receipt.supervisor_run_id,
-                    receipt.child_nonce,
+                    "",
+                    _HEARTBEAT_AUTH_DOMAIN,
+                    receipt.child_auth_hash,
                 ),
             )
             con.commit()
+        except BaseException:
+            con.rollback()
+            raise
         finally:
             con.close()
 
@@ -3073,7 +3353,7 @@ class OpportunityPerceptionStore:
                     stdout_tail=row["stdout_tail"],
                     stderr_tail=row["stderr_tail"],
                     supervisor_run_id=row["supervisor_run_id"],
-                    child_nonce=row["child_nonce"],
+                    child_auth_hash=row["child_auth_hash"],
                 )
                 for row in rows
             )
@@ -3084,32 +3364,169 @@ class OpportunityPerceptionStore:
         receipts = self.producer_receipts(component)
         return receipts[-1].outcome if receipts else "never-started"
 
-    def record_producer_child_start(
+    def reserve_producer_attempt(
         self,
         component: str,
         *,
         supervisor_run_id: str,
-        child_nonce: str,
-        attempt: int,
         started_at_ms: int,
-    ) -> None:
+    ) -> int:
         if (
             component not in {"candidate", "discovery", "reconciliation"}
             or not supervisor_run_id
-            or not child_nonce
-            or attempt < 1
             or started_at_ms < 0
         ):
-            raise ValueError("invalid-producer-child-start")
+            raise ValueError("invalid-producer-attempt-reservation")
         con = self._connect()
         try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT MAX(attempt) FROM ("
+                "SELECT attempt FROM neg_risk_producer_child_starts WHERE component=? "
+                "UNION ALL SELECT attempt FROM neg_risk_producer_receipts WHERE component=?"
+                ")",
+                (component, component),
+            ).fetchone()
+            attempt = 1 if row[0] is None else int(row[0]) + 1
             con.execute(
                 "INSERT INTO neg_risk_producer_child_starts("
-                "component,supervisor_run_id,child_nonce,attempt,started_at_ms"
-                ") VALUES(?,?,?,?,?)",
-                (component, supervisor_run_id, child_nonce, attempt, started_at_ms),
+                "component,supervisor_run_id,child_nonce,attempt,started_at_ms,"
+                "auth_domain,child_auth_hash,claimed_at_ms"
+                ") VALUES(?,?,?,?,?,?,NULL,NULL)",
+                (
+                    component,
+                    supervisor_run_id,
+                    "",
+                    attempt,
+                    started_at_ms,
+                    _HEARTBEAT_AUTH_DOMAIN,
+                ),
             )
             con.commit()
+            return attempt
+        except BaseException:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
+    @staticmethod
+    def _producer_auth_hash(
+        component: str,
+        supervisor_run_id: str,
+        attempt: int,
+        preimage: str,
+    ) -> str:
+        material = "\x00".join(
+            (
+                _HEARTBEAT_AUTH_DOMAIN,
+                component,
+                supervisor_run_id,
+                str(attempt),
+                preimage,
+            )
+        )
+        return hashlib.sha256(material.encode()).hexdigest()
+
+    def claim_producer_heartbeat_authority(self, component: str) -> str:
+        run_id = os.environ.get("POLYARB_PRODUCER_SUPERVISOR_RUN_ID", "")
+        attempt_text = os.environ.get("POLYARB_PRODUCER_ATTEMPT", "")
+        if (
+            component not in {"candidate", "discovery", "reconciliation"}
+            or not run_id
+            or not attempt_text.isdigit()
+        ):
+            raise PermissionError("producer-heartbeat-authority-required")
+        attempt = int(attempt_text)
+        preimage = secrets.token_urlsafe(32)
+        auth_hash = self._producer_auth_hash(component, run_id, attempt, preimage)
+        claimed_at_ms = int(__import__("time").time() * 1_000)
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            changed = con.execute(
+                "UPDATE neg_risk_producer_child_starts "
+                "SET child_auth_hash=?,claimed_at_ms=? "
+                "WHERE component=? AND supervisor_run_id=? AND attempt=? "
+                "AND auth_domain=? AND child_auth_hash IS NULL",
+                (
+                    auth_hash,
+                    claimed_at_ms,
+                    component,
+                    run_id,
+                    attempt,
+                    _HEARTBEAT_AUTH_DOMAIN,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise PermissionError("producer-heartbeat-authority-claim-rejected")
+            con.commit()
+        except BaseException:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+        _CHILD_HEARTBEAT_PREIMAGES[(component, run_id, attempt)] = preimage
+        return auth_hash
+
+    def reconcile_abandoned_producer_attempts(
+        self,
+        component: str,
+        *,
+        finished_at_ms: int,
+    ) -> tuple[int, ...]:
+        if component not in {"candidate", "discovery", "reconciliation"}:
+            raise ValueError("invalid-producer-component")
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT s.* FROM neg_risk_producer_child_starts s "
+                "LEFT JOIN neg_risk_producer_receipts r "
+                "ON r.component=s.component AND r.attempt=s.attempt "
+                "WHERE s.component=? AND r.id IS NULL ORDER BY s.attempt",
+                (component,),
+            ).fetchall()
+        finally:
+            con.close()
+        for row in rows:
+            self.record_producer_receipt(
+                ProducerReceipt(
+                    component=component,
+                    attempt=row["attempt"],
+                    started_at_ms=row["started_at_ms"],
+                    finished_at_ms=max(finished_at_ms, row["started_at_ms"]),
+                    outcome="spawn-error",
+                    exit_code=None,
+                    stdout_tail="",
+                    stderr_tail="abandoned-reservation:supervisor-crash",
+                    supervisor_run_id=row["supervisor_run_id"],
+                    child_auth_hash=row["child_auth_hash"],
+                )
+            )
+        return tuple(int(row["attempt"]) for row in rows)
+
+    def producer_attempt_auth_hash(
+        self,
+        component: str,
+        supervisor_run_id: str,
+        attempt: int,
+    ) -> str | None:
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT child_auth_hash FROM neg_risk_producer_child_starts "
+                "WHERE component=? AND supervisor_run_id=? AND attempt=? "
+                "AND auth_domain=?",
+                (
+                    component,
+                    supervisor_run_id,
+                    attempt,
+                    _HEARTBEAT_AUTH_DOMAIN,
+                ),
+            ).fetchone()
+            if row is None:
+                raise ValueError("producer-attempt-reservation-missing")
+            return row["child_auth_hash"]
         finally:
             con.close()
 
@@ -3120,36 +3537,67 @@ class OpportunityPerceptionStore:
         observed_at_ms: int,
         state: str = "progress",
         supervisor_run_id: str | None = None,
-        child_nonce: str | None = None,
+        attempt: int | None = None,
+        _preimage: str | None = None,
     ) -> int:
-        run_id = supervisor_run_id or os.environ.get(
-            "POLYARB_PRODUCER_SUPERVISOR_RUN_ID", "in-process"
-        )
-        nonce = child_nonce or os.environ.get(
-            "POLYARB_PRODUCER_CHILD_NONCE", "in-process"
+        run_id = supervisor_run_id or os.environ.get("POLYARB_PRODUCER_SUPERVISOR_RUN_ID", "")
+        attempt_value = attempt
+        if attempt_value is None:
+            raw_attempt = os.environ.get("POLYARB_PRODUCER_ATTEMPT", "")
+            attempt_value = int(raw_attempt) if raw_attempt.isdigit() else None
+        if not run_id or attempt_value is None:
+            # Unsupervised mode does not publish liveness evidence.
+            return 0
+        preimage = _preimage or _CHILD_HEARTBEAT_PREIMAGES.get(
+            (component, run_id, attempt_value)
         )
         if (
             component not in {"candidate", "discovery", "reconciliation"}
             or observed_at_ms < 0
             or state not in {"progress", "yielded", "paused"}
-            or not run_id
-            or not nonce
+            or not preimage
         ):
-            raise ValueError("invalid-producer-heartbeat")
+            raise PermissionError("producer-heartbeat-authority-required")
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
+            start = con.execute(
+                "SELECT * FROM neg_risk_producer_child_starts "
+                "WHERE component=? AND supervisor_run_id=? AND attempt=?",
+                (component, run_id, attempt_value),
+            ).fetchone()
+            computed_hash = self._producer_auth_hash(
+                component, run_id, attempt_value, preimage
+            )
+            if (
+                start is None
+                or start["auth_domain"] != _HEARTBEAT_AUTH_DOMAIN
+                or not isinstance(start["child_auth_hash"], str)
+                or not hmac.compare_digest(start["child_auth_hash"], computed_hash)
+            ):
+                raise PermissionError("producer-heartbeat-authority-rejected")
             row = con.execute(
                 "SELECT MAX(sequence) FROM neg_risk_producer_heartbeats "
-                "WHERE component=? AND supervisor_run_id=? AND child_nonce=?",
-                (component, run_id, nonce),
+                "WHERE component=? AND supervisor_run_id=? AND attempt=?",
+                (component, run_id, attempt_value),
             ).fetchone()
             sequence = 1 if row[0] is None else int(row[0]) + 1
             con.execute(
                 "INSERT INTO neg_risk_producer_heartbeats("
-                "component,supervisor_run_id,child_nonce,sequence,"
-                "observed_at_ms,state) VALUES(?,?,?,?,?,?)",
-                (component, run_id, nonce, sequence, observed_at_ms, state),
+                "component,supervisor_run_id,child_nonce,attempt,auth_domain,"
+                "child_auth_hash,sequence,observed_at_ms,state"
+                ") VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    component,
+                    run_id,
+                    "",
+                    attempt_value,
+                    _HEARTBEAT_AUTH_DOMAIN,
+                    computed_hash,
+                    sequence,
+                    observed_at_ms,
+                    state,
+                ),
             )
             con.commit()
             return sequence
@@ -3179,6 +3627,10 @@ class OpportunityPerceptionStore:
         now_ms: int | None = None,
         required: bool = False,
     ) -> dict | None:
+        # `required=False` is the disabled capability boundary: callers do not
+        # parse, validate, or consume any resource-controller history.
+        if not required:
+            return None
         con = self._connect()
         try:
             from polyarb.perception.resource_controller import (

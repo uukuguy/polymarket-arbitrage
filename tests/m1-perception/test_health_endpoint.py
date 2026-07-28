@@ -538,6 +538,76 @@ def test_health_reports_persisted_degraded_structure_status(
     assert check["status"] == "warn"
 
 
+def test_resource_disabled_health_ignores_corrupt_resource_chain(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=int(time.time() * 1000) - 1_000,
+    )
+    perception = OpportunityPerceptionStore(daemon_settings_for_test.db_path)
+    perception.init_schema()
+    with perception._connect() as con:
+        con.execute(
+            "INSERT INTO neg_risk_resource_samples(observed_at_ms,sample_json) "
+            "VALUES(1,'not-json')"
+        )
+    daemon_settings_for_test.opportunity_producer_supervisor_enabled = True
+    daemon_settings_for_test.opportunity_first_watcher_enabled = False
+    daemon_settings_for_test.opportunity_discovery_enabled = False
+    daemon_settings_for_test.opportunity_reconciliation_enabled = False
+    daemon_settings_for_test.opportunity_resource_controller_enabled = False
+
+    response = http_test_client.get("/health")
+
+    assert response.status_code == 200
+    checks = response.json()["checks"]
+    assert checks["perception:open_incidents"][0]["status"] == "pass"
+    assert checks["perception:resource_mode"][0]["observedValue"] == "disabled"
+    assert not any(key.endswith("_producer_liveness") for key in checks)
+
+
+@pytest.mark.parametrize(
+    ("candidate", "discovery", "reconciliation", "expected"),
+    [
+        (True, False, False, {"candidate"}),
+        (False, True, False, {"discovery"}),
+        (False, False, True, {"reconciliation"}),
+        (True, True, True, {"candidate", "discovery", "reconciliation"}),
+    ],
+)
+def test_health_only_adds_liveness_for_enabled_producers(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+    candidate: bool,
+    discovery: bool,
+    reconciliation: bool,
+    expected: set[str],
+) -> None:
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=int(time.time() * 1000) - 1_000,
+    )
+    OpportunityPerceptionStore(daemon_settings_for_test.db_path).init_schema()
+    daemon_settings_for_test.opportunity_producer_supervisor_enabled = True
+    daemon_settings_for_test.opportunity_first_watcher_enabled = candidate
+    daemon_settings_for_test.opportunity_discovery_enabled = discovery
+    daemon_settings_for_test.opportunity_reconciliation_enabled = reconciliation
+
+    checks = http_test_client.get("/health").json()["checks"]
+    actual = {
+        component
+        for component in ("candidate", "discovery", "reconciliation")
+        if f"perception:{component}_producer_liveness" in checks
+    }
+    assert actual == expected
+
+
 # ---------------------------------------------------------------------------
 # Plan 02.1-03 — /healthz Fly-friendly probe (D-05 / D-06)
 #
