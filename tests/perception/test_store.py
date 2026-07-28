@@ -256,6 +256,136 @@ def test_candidate_authority_checkpoint_and_suffix_tampering_fail_closed(
         suffix_store.validated_candidate_opportunity_count()
 
 
+def _seed_tampered_candidate_checkpoint(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[OpportunityPerceptionStore, GroupRevision]:
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        2,
+    )
+    store = OpportunityPerceptionStore(db_path)
+    store.init_schema()
+    group = revision(group_id="g-1", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    for sequence in range(3):
+        batch = batch_for(
+            group,
+            quote_batch_id=f"seed-{sequence}",
+            quoted_at_ms=3_100 + sequence,
+        )
+        store.publish_candidate_success(
+            batch,
+            observed_at_ms=batch.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="seed",
+            next_due_at_ms=batch.quoted_at_ms + 15_000,
+        )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_candidate_authority_checkpoints "
+            "SET checkpoint_hash='sha256:tampered'"
+        )
+    return store, group
+
+
+def test_tampered_candidate_checkpoint_blocks_quote_writer_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, group = _seed_tampered_candidate_checkpoint(
+        tmp_path / "quote.db",
+        monkeypatch,
+    )
+    with pytest.raises(ValueError, match="invalid-candidate-authority-checkpoint"):
+        store.publish_quote_batch(
+            batch_for(group, quote_batch_id="blocked-quote", quoted_at_ms=4_000)
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_group_quote_batches "
+            "WHERE id='blocked-quote'"
+        ).fetchone() == (0,)
+
+
+def test_tampered_candidate_checkpoint_blocks_success_writer_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, group = _seed_tampered_candidate_checkpoint(
+        tmp_path / "success.db",
+        monkeypatch,
+    )
+    blocked = batch_for(
+        group,
+        quote_batch_id="blocked-success",
+        quoted_at_ms=4_000,
+    )
+    with pytest.raises(ValueError, match="invalid-candidate-authority-checkpoint"):
+        store.publish_candidate_success(
+            blocked,
+            observed_at_ms=blocked.quoted_at_ms,
+            last_result="watching",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="blocked",
+            next_due_at_ms=19_000,
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_group_quote_batches "
+            "WHERE id='blocked-success'"
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_candidate_watch_facts "
+            "WHERE schedule_reason='blocked'"
+        ).fetchone() == (0,)
+
+
+def test_tampered_candidate_checkpoint_blocks_fact_writer_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, group = _seed_tampered_candidate_checkpoint(
+        tmp_path / "fact.db",
+        monkeypatch,
+    )
+    with pytest.raises(ValueError, match="invalid-candidate-authority-checkpoint"):
+        store.record_candidate_watch_fact(
+            group_id=group.group_id,
+            membership_hash=group.membership_hash,
+            quote_batch_id=None,
+            observed_at_ms=4_000,
+            last_result="unavailable",
+            reason="blocked",
+            bundle_cost=None,
+            gross_edge_bps=None,
+            max_bundle_size=None,
+            priority_class="high",
+            consecutive_failures=1,
+            effective_interval_s=15,
+            schedule_reason="blocked",
+            next_due_at_ms=19_000,
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_candidate_watch_facts "
+            "WHERE schedule_reason='blocked'"
+        ).fetchone() == (0,)
+
+
 def test_candidate_checkpoint_compaction_rolls_back_on_delete_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

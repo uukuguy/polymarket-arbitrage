@@ -3983,6 +3983,7 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
+            self._validated_candidate_checkpoint(con)
             self._insert_validated_quote_batch(con, batch)
             self._compact_candidate_authority(con)
             con.execute("COMMIT")
@@ -4016,6 +4017,7 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
+            self._validated_candidate_checkpoint(con)
             self._insert_validated_quote_batch(con, batch)
             fact = self._insert_candidate_watch_fact(
                 con,
@@ -4131,6 +4133,7 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
+            self._validated_candidate_checkpoint(con)
             fact = self._insert_candidate_watch_fact(
                 con,
                 group_id=group_id,
