@@ -584,6 +584,7 @@ class CandidateWatcherScheduler:
         group_timeout_s: float = 30.0,
         high_burst_groups: int = 1,
         lower_lane_max_wait_s: float = 120.0,
+        discovery_candidate_max_wait_s: float = 600.0,
         close_callbacks: Sequence[Callable[[], None]] = (),
     ) -> None:
         self._watcher = watcher
@@ -598,6 +599,7 @@ class CandidateWatcherScheduler:
         self._group_timeout_s = group_timeout_s
         self._high_burst_groups = high_burst_groups
         self._lower_lane_max_wait_s = lower_lane_max_wait_s
+        self._discovery_candidate_max_wait_s = discovery_candidate_max_wait_s
         self._reserved_lane_cursor = 0
         self._close_callbacks = tuple(close_callbacks)
         self._closed = False
@@ -618,6 +620,8 @@ class CandidateWatcherScheduler:
             or lower_lane_max_wait_s <= 0
             or lower_lane_max_wait_s > 120
             or high_burst_groups * group_timeout_s >= lower_lane_max_wait_s
+            or not math.isfinite(discovery_candidate_max_wait_s)
+            or discovery_candidate_max_wait_s <= 0
         ):
             raise ValueError("invalid-candidate-scheduler-controller-input")
 
@@ -646,10 +650,18 @@ class CandidateWatcherScheduler:
                     # Discovery persists Decimal score evidence.  Until the
                     # first Candidate terminal fact exists, preserve that
                     # ordering instead of falling back to lexical group ID.
-                    score_order = -int(schedule.priority_score * 1_000)
+                    overdue_at_ms = schedule.first_discovered_at_ms + int(
+                        self._discovery_candidate_max_wait_s * 1_000
+                    )
+                    overdue = now_ms >= overdue_at_ms
+                    score_order = (
+                        -(10**18) + overdue_at_ms
+                        if overdue
+                        else -int(schedule.priority_score * 1_000)
+                    )
                     due.append(
                         (
-                            rank[schedule.priority_class],
+                            0 if overdue else rank[schedule.priority_class],
                             score_order,
                             group_id,
                         )
@@ -813,6 +825,9 @@ def build_production_candidate_watcher(
             group_timeout_s=settings.candidate_group_timeout_s,
             high_burst_groups=settings.candidate_high_burst_groups,
             lower_lane_max_wait_s=settings.candidate_lower_lane_max_wait_s,
+            discovery_candidate_max_wait_s=(
+                settings.discovery_candidate_max_wait_s
+            ),
             close_callbacks=(executors.close,),
         )
     except BaseException:

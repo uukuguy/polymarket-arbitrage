@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     discovery_interval_s: float = Field(
         default=30.0, gt=0, allow_inf_nan=False
     )
+    discovery_candidate_max_wait_s: float = Field(
+        default=600.0, gt=0, allow_inf_nan=False
+    )
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 

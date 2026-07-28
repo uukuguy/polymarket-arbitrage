@@ -10,12 +10,22 @@
   active named leg. A group is promoted only after a real certified revision
   contains every market ID, condition ID, Yes token, and title.
 - Added deterministic Decimal priority with persisted edge/activity/liquidity/
-  change/age inputs, explicit weights, output, and reason. Unbounded elapsed-age
-  rank provides eventual anti-starvation.
+  change/age inputs, explicit weights, output, and reason. Bounded score age plus
+  a durable maximum-wait deadline provides runtime anti-starvation.
 - Added one `BEGIN IMMEDIATE` publication boundary for certified revisions,
   group schedules, promotions, per-group coverage samples, and the next cursor.
 - Added restart-safe terminal-cursor semantics and a cancellation barrier that
   finishes one started commit before propagating cancellation.
+- Review remediation revokes prior certified/Quote authority in the same page
+  transaction when new truth is incomplete, unsupported, or identity-incomplete.
+- Candidate freshness now comes from one durable full-set snapshot of current
+  certified groups and exact matching complete batches; missing Quote degrades.
+- Status now uses one validated read transaction for cursor, schedule,
+  promotion/revision, Decimal/rank, count, time, and coverage chains.
+- Event pages reject malformed members rather than making their cursor durable;
+  legacy market-stream compatibility remains unchanged.
+- Runtime anti-starvation uses a configurable maximum-wait deadline recomputed
+  from persisted anchors on every selection and after restart.
 - Composed durable Discovery promotions with the legacy candidate seed; no
   current hot candidate is dropped. Before a first Candidate fact exists, its
   scheduler consumes the persisted Discovery score/class.
@@ -64,6 +74,14 @@ GREEN — Task 3 focused:
 
 GREEN — Task 1/2 + Gamma/legacy proportional regression:
 241 passed
+
+REVIEW RED → GREEN:
+authority revocation/rollback; full-set freshness/missing/bootstrap/restart;
+malformed event members; corrupt/concurrent status snapshot; bounded ranks and
+runtime overdue ordering.
+
+FINAL GREEN — Task 3 + proportional regression:
+257 passed
 
 uv run ruff check <changed Python/test files>
 All checks passed!

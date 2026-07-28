@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from polyarb.perception.priority import GroupScheduleInput, priority_score
 
 
@@ -55,3 +57,26 @@ def test_never_visited_group_receives_age_from_first_discovery() -> None:
     )
 
     assert priority_score(item, now_ms=61_000) == Decimal("0.15")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("activity_rank", Decimal("-1")),
+        ("liquidity_rank", Decimal("101")),
+        ("change_rank", Decimal("NaN")),
+        ("gross_edge_bps", Decimal("Infinity")),
+    ],
+)
+def test_priority_inputs_reject_invalid_or_unbounded_ranks(field, value) -> None:
+    kwargs = {
+        "group_id": "g-1",
+        "gross_edge_bps": Decimal("0"),
+        "activity_rank": Decimal("0"),
+        "liquidity_rank": Decimal("0"),
+        "change_rank": Decimal("0"),
+        "last_visited_at_ms": None,
+    }
+    kwargs[field] = value
+    with pytest.raises(ValueError, match="priority"):
+        GroupScheduleInput(**kwargs)

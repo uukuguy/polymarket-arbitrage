@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
@@ -93,6 +94,13 @@ class DiscoveryStatus:
     queue_depth_by_class: dict[str, int]
     oldest_visit_age_ms: int | None
     coverage: CoverageWindows
+
+
+@dataclass(frozen=True)
+class DurableCandidateFreshness:
+    candidate_count: int
+    quote_p95_age_ms: int | None
+    missing_quote_count: int
 
 
 class OpportunityPerceptionStore:
@@ -286,6 +294,14 @@ class OpportunityPerceptionStore:
                 started_at_ms=started_at_ms,
                 finished_at_ms=finished_at_ms,
             )
+        else:
+            self._revoke_discovered_group(
+                con,
+                group_id=candidate.group_id,
+                source_cursor=source_cursor,
+                started_at_ms=started_at_ms,
+                finished_at_ms=finished_at_ms,
+            )
 
         con.execute(
             "INSERT INTO neg_risk_group_schedule("
@@ -390,6 +406,45 @@ class OpportunityPerceptionStore:
                 (revision.group_id,),
             )
 
+    def _revoke_discovered_group(
+        self,
+        con: sqlite3.Connection,
+        *,
+        group_id: str,
+        source_cursor: str | None,
+        started_at_ms: int,
+        finished_at_ms: int,
+    ) -> None:
+        """Revoke old authority without fabricating newly unknowable identity."""
+        current = self._current_group_row(con, group_id)
+        if current is None or current["status"] != "certified":
+            return
+        prior = self._validated_group_from_row(current)
+        if prior is None:
+            raise ValueError("certified-group-invalid")
+        con.execute(
+            "INSERT INTO neg_risk_group_revisions("
+            "group_id,event_id,revision,membership_hash,started_at_ms,"
+            "observed_at_ms,source_cursor,status,legs_json"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                prior.group_id,
+                prior.event_id,
+                prior.revision + 1,
+                prior.membership_hash,
+                started_at_ms,
+                finished_at_ms,
+                source_cursor or "<start>",
+                "invalidated",
+                self._group_legs_json(prior.legs),
+            ),
+        )
+        con.execute(
+            "UPDATE neg_risk_group_quote_batches SET status='superseded' "
+            "WHERE group_id=? AND status='complete'",
+            (group_id,),
+        )
+
     def group_schedule(self, group_id: str) -> GroupSchedule | None:
         con = self._connect()
         try:
@@ -416,54 +471,27 @@ class OpportunityPerceptionStore:
     def coverage_windows(self, now_ms: int) -> CoverageWindows:
         con = self._connect()
         try:
-            totals = con.execute(
-                "SELECT COUNT(*) AS groups_count,"
-                "COALESCE(SUM(CAST(liquidity_weight AS REAL)),0) AS total_weight "
-                "FROM neg_risk_group_schedule"
-            ).fetchone()
-            known_groups = int(totals["groups_count"])
-            total_weight = Decimal(str(totals["total_weight"]))
-            windows: dict[int, CoverageWindow] = {}
-            for minutes in (15, 30, 60):
-                row = con.execute(
-                    "WITH visited AS ("
-                    "SELECT DISTINCT group_id FROM neg_risk_coverage_samples "
-                    "WHERE sampled_at_ms>=? AND sampled_at_ms<=?"
-                    ") SELECT COUNT(*) AS visited_groups,"
-                    "COALESCE(SUM(CAST(s.liquidity_weight AS REAL)),0) AS visited_weight "
-                    "FROM neg_risk_group_schedule s JOIN visited v USING(group_id)",
-                    (now_ms - minutes * 60_000, now_ms),
-                ).fetchone()
-                visited_groups = int(row["visited_groups"])
-                visited_weight = Decimal(str(row["visited_weight"]))
-                windows[minutes] = CoverageWindow(
-                    minutes=minutes,
-                    visited_groups=visited_groups,
-                    raw_fraction=(
-                        Decimal(visited_groups) / Decimal(known_groups)
-                        if known_groups
-                        else Decimal("0")
-                    ),
-                    liquidity_weighted_fraction=(
-                        visited_weight / total_weight
-                        if total_weight > 0
-                        else Decimal("0")
-                    ),
-                )
+            con.execute("BEGIN")
+            result = self._coverage_windows_in_snapshot(con, now_ms)
+            con.execute("COMMIT")
+            return result
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
         finally:
             con.close()
-        return CoverageWindows(
-            known_groups=known_groups,
-            total_liquidity_weight=total_weight,
-            by_minutes=windows,
-        )
 
     def discovery_status(self, now_ms: int) -> DiscoveryStatus:
         con = self._connect()
         try:
+            con.execute("BEGIN")
             state = con.execute(
                 "SELECT * FROM neg_risk_discovery_state WHERE id=1"
             ).fetchone()
+            schedules = con.execute(
+                "SELECT * FROM neg_risk_group_schedule ORDER BY group_id"
+            ).fetchall()
             queue_rows = con.execute(
                 "SELECT priority_class,COUNT(*) AS depth "
                 "FROM neg_risk_group_schedule WHERE promoted_at_ms IS NOT NULL "
@@ -473,6 +501,27 @@ class OpportunityPerceptionStore:
                 "SELECT MIN(COALESCE(last_visited_at_ms,first_discovered_at_ms)) "
                 "AS oldest FROM neg_risk_group_schedule"
             ).fetchone()
+            current_revisions = {
+                str(row["group_id"]): row
+                for row in con.execute(
+                    "SELECT r.* FROM neg_risk_group_revisions r JOIN ("
+                    "SELECT group_id,MAX(revision) AS revision "
+                    "FROM neg_risk_group_revisions GROUP BY group_id"
+                    ") c ON c.group_id=r.group_id AND c.revision=r.revision"
+                ).fetchall()
+            }
+            coverage = self._coverage_windows_in_snapshot(con, now_ms)
+            self._validate_discovery_snapshot(
+                state=state,
+                schedules=schedules,
+                current_revisions=current_revisions,
+                coverage=coverage,
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
         finally:
             con.close()
         queue = {"high": 0, "normal": 0, "explore": 0}
@@ -501,7 +550,170 @@ class OpportunityPerceptionStore:
             promoted_count=0 if state is None else int(state["promoted_count"]),
             queue_depth_by_class=queue,
             oldest_visit_age_ms=oldest_age,
-            coverage=self.coverage_windows(now_ms),
+            coverage=coverage,
+        )
+
+    @staticmethod
+    def _coverage_windows_in_snapshot(
+        con: sqlite3.Connection,
+        now_ms: int,
+    ) -> CoverageWindows:
+        totals = con.execute(
+            "SELECT COUNT(*) AS groups_count,"
+            "COALESCE(SUM(CAST(liquidity_weight AS REAL)),0) AS total_weight "
+            "FROM neg_risk_group_schedule"
+        ).fetchone()
+        known_groups = int(totals["groups_count"])
+        total_weight = Decimal(str(totals["total_weight"]))
+        windows: dict[int, CoverageWindow] = {}
+        for minutes in (15, 30, 60):
+            row = con.execute(
+                "WITH visited AS ("
+                "SELECT DISTINCT group_id FROM neg_risk_coverage_samples "
+                "WHERE sampled_at_ms>=? AND sampled_at_ms<=?"
+                ") SELECT COUNT(*) AS visited_groups,"
+                "COALESCE(SUM(CAST(s.liquidity_weight AS REAL)),0) AS visited_weight "
+                "FROM neg_risk_group_schedule s JOIN visited v USING(group_id)",
+                (now_ms - minutes * 60_000, now_ms),
+            ).fetchone()
+            visited_groups = int(row["visited_groups"])
+            visited_weight = Decimal(str(row["visited_weight"]))
+            windows[minutes] = CoverageWindow(
+                minutes=minutes,
+                visited_groups=visited_groups,
+                raw_fraction=(
+                    Decimal(visited_groups) / Decimal(known_groups)
+                    if known_groups
+                    else Decimal("0")
+                ),
+                liquidity_weighted_fraction=(
+                    visited_weight / total_weight
+                    if total_weight > 0
+                    else Decimal("0")
+                ),
+            )
+        return CoverageWindows(
+            known_groups=known_groups,
+            total_liquidity_weight=total_weight,
+            by_minutes=windows,
+        )
+
+    @staticmethod
+    def _validate_discovery_snapshot(
+        *,
+        state: sqlite3.Row | None,
+        schedules: list[sqlite3.Row],
+        current_revisions: dict[str, sqlite3.Row],
+        coverage: CoverageWindows,
+    ) -> None:
+        if state is not None:
+            completed = bool(state["completed"])
+            if completed != (state["next_cursor"] is None):
+                raise ValueError("invalid-discovery-state-cursor")
+            if int(state["last_started_at_ms"]) > int(state["last_finished_at_ms"]):
+                raise ValueError("invalid-discovery-state-time")
+            counts = (
+                int(state["page_event_count"]),
+                int(state["groups_seen"]),
+                int(state["promoted_count"]),
+            )
+            if any(value < 0 for value in counts) or counts[2] > counts[1]:
+                raise ValueError("invalid-discovery-state-counts")
+        for row in schedules:
+            decimals = {
+                name: Decimal(str(row[name]))
+                for name in (
+                    "gross_edge_bps",
+                    "activity_rank",
+                    "liquidity_rank",
+                    "change_rank",
+                    "age_rank",
+                    "priority_score",
+                    "liquidity_weight",
+                )
+            }
+            if any(not value.is_finite() for value in decimals.values()):
+                raise ValueError("invalid-discovery-schedule-decimal")
+            if any(
+                not Decimal("0") <= decimals[name] <= Decimal("100")
+                for name in ("activity_rank", "liquidity_rank", "change_rank")
+            ):
+                raise ValueError("invalid-discovery-schedule-rank")
+            if not Decimal("0") <= decimals["age_rank"] <= Decimal("200"):
+                raise ValueError("invalid-discovery-schedule-age")
+            if decimals["liquidity_weight"] < 0:
+                raise ValueError("invalid-discovery-schedule-weight")
+            if row["quality"] not in {
+                "complete-supported",
+                "complete-unsupported",
+                "incomplete-source",
+            } or row["priority_class"] not in {"high", "normal", "explore"}:
+                raise ValueError("invalid-discovery-schedule-enum")
+            if row["promoted_at_ms"] is not None:
+                revision = current_revisions.get(str(row["group_id"]))
+                if (
+                    row["quality"] != "complete-supported"
+                    or revision is None
+                    or revision["status"] != "certified"
+                    or revision["membership_hash"] != row["membership_hash"]
+                ):
+                    raise ValueError("invalid-discovery-promotion-authority")
+        for window in coverage.by_minutes.values():
+            if (
+                window.visited_groups > coverage.known_groups
+                or not Decimal("0") <= window.raw_fraction <= Decimal("1")
+                or not Decimal("0")
+                <= window.liquidity_weighted_fraction
+                <= Decimal("1")
+            ):
+                raise ValueError("invalid-discovery-coverage")
+
+    def candidate_freshness_snapshot(
+        self,
+        *,
+        now_ms: int,
+    ) -> DurableCandidateFreshness:
+        """Read the full current certified set and matching Quote authority once."""
+        con = self._connect()
+        try:
+            con.execute("BEGIN")
+            rows = con.execute(
+                "WITH current AS ("
+                "SELECT r.* FROM neg_risk_group_revisions r JOIN ("
+                "SELECT group_id,MAX(revision) AS revision "
+                "FROM neg_risk_group_revisions GROUP BY group_id"
+                ") c ON c.group_id=r.group_id AND c.revision=r.revision"
+                ") SELECT c.group_id,c.membership_hash,"
+                "(SELECT MAX(q.quoted_at_ms) FROM neg_risk_group_quote_batches q "
+                " WHERE q.group_id=c.group_id "
+                " AND q.membership_hash=c.membership_hash "
+                " AND q.status='complete' AND q.quoted_at_ms<=?) AS quoted_at_ms "
+                "FROM current c WHERE c.status='certified' ORDER BY c.group_id",
+                (now_ms,),
+            ).fetchall()
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+        ages = [
+            now_ms - int(row["quoted_at_ms"])
+            for row in rows
+            if row["quoted_at_ms"] is not None
+        ]
+        missing = len(rows) - len(ages)
+        ages.sort()
+        p95 = (
+            None
+            if not ages
+            else ages[max(0, math.ceil(len(ages) * 0.95) - 1)]
+        )
+        return DurableCandidateFreshness(
+            candidate_count=len(rows),
+            quote_p95_age_ms=p95,
+            missing_quote_count=missing,
         )
 
     @staticmethod

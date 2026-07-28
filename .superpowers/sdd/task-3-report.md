@@ -4,63 +4,57 @@ Status: DONE
 
 ## Scope
 
-Implemented only rollout Task 3: bounded Discovery, real group certification,
-promotion, priority, rolling coverage, candidate-source composition, default-off
-daemon wiring, and the local read-only status command. No Reconciliation,
-incident system, public API/Dashboard, deployment, production enablement, or
-trading behavior was added.
+Implemented and independently reviewed rollout Task 3 only: bounded Discovery,
+real group certification/revocation, promotion, priority, rolling coverage,
+durable full-set Candidate freshness, default-off daemon wiring, and local
+read-only status. No Reconciliation, incident system, public API/Dashboard,
+deployment, production enablement, wallet, signing, balance, or orders.
 
-## RED → GREEN
+## Original RED → GREEN
 
-- Gamma page RED: `GammaClient` lacked `fetch_active_event_page`.
-- Priority/Discovery RED: modules and `EventPage` did not exist.
-- Status RED: `polyarb.cli_discovery` did not exist.
-- Scheduler integration RED: first Candidate work ignored Discovery score and
-  sorted lexical IDs.
-- Duplicate-group RED: one page could write the same group twice.
-- Final Task 3 focused tests: 20 passed.
-- Task 1/2, Gamma streaming, routing, daemon and legacy proportional regression:
-  241 passed.
+- Missing bounded Gamma page, priority/Discovery modules, and status CLI.
+- Candidate scheduler initially discarded Discovery score for factless groups.
+- Duplicate group identity could be written twice from one page.
+- Original Task 3 focused: 20 passed; proportional regression: 241 passed.
+- Commit: `046cef1fea9d4fe8bcf3d65ca7a0983c748a91c6`.
 
-## Files
+## Independent Review Remediation
 
-- `src/polyarb/clients/gamma_client.py`
-- `src/polyarb/perception/priority.py`
-- `src/polyarb/perception/discovery.py`
-- `src/polyarb/perception/store.py`
-- `src/polyarb/perception/candidate_watcher.py`
-- `src/polyarb/storage/schemas.py`
-- `src/polyarb/config.py`
-- `src/polyarb/daemon/main.py`
-- `src/polyarb/cli_discovery.py`
-- `Makefile`
-- `tests/clients/test_gamma_discovery_page.py`
-- `tests/perception/test_priority.py`
-- `tests/perception/test_discovery.py`
-- `tests/perception/test_discovery_status.py`
-- `docs/learning/32-bounded-discovery.md`
-- `docs/learning/00-INDEX.md`
-- `docs/M1-市场感知平台使用手册.md`
-- `docs/superpowers/plans/2026-07-28-m1-opportunity-first-rollout-TASK-3-SUMMARY.md`
+1. **Authority revocation:** RED proved unsupported rediscovery left prior
+   certified revision/Quote usable. GREEN adds a monotonic `invalidated`
+   revision using prior honest identity, supersedes Quote authority, removes
+   promotion, and advances cursor atomically. Injected post-revocation failure
+   rolls all facts and cursor back.
+2. **Durable freshness:** RED covered fresh+stale siblings, recent unavailable
+   fact, missing Quote, restart, and empty bootstrap. GREEN uses one durable read
+   of every current certified group and exact matching complete batch. Missing
+   Quote degrades; zero certified authority permits Discovery bootstrap.
+3. **Page fail-closed:** RED covered non-object member, missing ID, invalid
+   state, and active+closed contradiction. GREEN rejects malformed event pages
+   before cursor publication while retaining legacy market-stream behavior.
+4. **Status chain-truth:** RED covered impossible completed/cursor/time state.
+   GREEN reads cursor/batch/schedules/promotions/current revisions/coverage in
+   one SQLite transaction and validates counts, timestamps, finite Decimals,
+   rank bounds, enums, authority links, and coverage bounds. WAL concurrent
+   writer test proves one read snapshot.
+5. **Runtime anti-starvation:** RED covered invalid ranks and a factless old
+   promotion losing to repeatedly new higher-base work. GREEN bounds rank/age
+   inputs and recomputes a configurable durable maximum-wait deadline from
+   persisted anchors on every cycle and restart.
 
-## Verification
+## Final Verification
 
-- Task 3 focused: pass.
-- Task 1/2 and legacy proportional regression: pass.
-- Valid fixture `make perception-discovery-status`: exit 0 with bounded JSON.
-- `make docs-m1-check`: `M1 manual contract: OK`.
+- Task 3 + Task 1/2 + Gamma/routing/daemon proportional suite: 257 passed.
 - Changed-file Ruff: pass.
 - `git diff --check`: pass.
+- `make docs-m1-check`: pass.
+- Valid fixture `make perception-discovery-status`: exit 0, bounded JSON.
+- `make planning-status`: no drift.
 
-## Self-review / Concerns
+## Review Concerns Resolved / Remaining Boundary
 
-- The bounded event page may receive a structurally supported group whose nested
-  markets omit condition/token identity. That group is persisted as
-  `incomplete-source` and not promoted; no identity is fabricated.
-- `EventPage` is a frozen dataclass, while its projected payload dictionaries
-  remain ordinary mappings for compatibility with the existing normalizers.
-- Rolling coverage denominator is the current known schedule, not an unknowable
-  true-universe count. Documentation and output deliberately call it
-  active-known/statistical coverage.
-- Feature remains dark. Production rollout and resource qualification belong to
-  later tasks.
+- Incomplete new identity never fabricates legs; the revocation revision names
+  the prior honest identity being withdrawn while schedule stores new rejection
+  truth.
+- Coverage remains active-known/statistical and never claims zero miss.
+- Feature flags remain default-off; production qualification is later work.

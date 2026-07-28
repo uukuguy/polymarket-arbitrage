@@ -569,7 +569,25 @@ class GammaClient:
         projected_items: list[dict] = []
         for raw in payload[array_key]:
             if not isinstance(raw, dict):
+                if array_key == "events":
+                    raise PaginationIntegrityError(
+                        f"{path} keyset member is not an object"
+                    )
                 continue
+            if array_key == "events":
+                identity = raw.get("id")
+                if (
+                    type(identity) is not str
+                    or not identity
+                    or identity != identity.strip()
+                ):
+                    raise PaginationIntegrityError(
+                        f"{path} keyset member has invalid identity"
+                    )
+                if raw.get("active") is not True or raw.get("closed") is not False:
+                    raise PaginationIntegrityError(
+                        f"{path} keyset member has invalid state"
+                    )
             raw = {**raw, "_page_fetched_at_ms": page_fetched_at_ms}
             projected = {
                 key: value for key, value in raw.items() if key in keep_fields

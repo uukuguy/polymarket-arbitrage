@@ -11,6 +11,7 @@ LIQUIDITY_WEIGHT = Decimal("0.15")
 CHANGE_WEIGHT = Decimal("0.15")
 AGE_WEIGHT = Decimal("0.15")
 MILLISECONDS_PER_MINUTE = Decimal("60000")
+MAX_AGE_RANK = Decimal("200")
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,17 @@ class GroupScheduleInput:
     change_rank: Decimal
     last_visited_at_ms: int | None
     first_discovered_at_ms: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.gross_edge_bps.is_finite():
+            raise ValueError("priority-edge-must-be-finite")
+        for value in (
+            self.activity_rank,
+            self.liquidity_rank,
+            self.change_rank,
+        ):
+            if not value.is_finite() or not Decimal("0") <= value <= Decimal("100"):
+                raise ValueError("priority-rank-must-be-within-0..100")
 
 
 @dataclass(frozen=True)
@@ -51,7 +63,10 @@ def priority_components(
         if value.last_visited_at_ms is not None
         else value.first_discovered_at_ms
     )
-    age_rank = Decimal(max(0, now_ms - age_anchor_ms)) / MILLISECONDS_PER_MINUTE
+    age_rank = min(
+        MAX_AGE_RANK,
+        Decimal(max(0, now_ms - age_anchor_ms)) / MILLISECONDS_PER_MINUTE,
+    )
     score = (
         value.gross_edge_bps * EDGE_WEIGHT
         + value.activity_rank * ACTIVITY_WEIGHT

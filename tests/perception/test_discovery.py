@@ -20,6 +20,11 @@ from polyarb.perception.discovery import (
     DiscoveryWorker,
     compose_candidate_group_ids,
 )
+from polyarb.perception.group_structure import (
+    GroupStructureReader,
+    GroupStructureUnavailableError,
+)
+from polyarb.perception.models import GroupQuoteBatch, GroupQuoteLeg
 from polyarb.perception.store import OpportunityPerceptionStore
 
 
@@ -115,6 +120,34 @@ def _store(tmp_path: Path) -> OpportunityPerceptionStore:
             ") VALUES (1,'c-1',0,0,0,0,0,0)"
         )
     return store
+
+
+def _publish_quote(
+    store: OpportunityPerceptionStore,
+    group_id: str,
+    *,
+    quoted_at_ms: int,
+) -> None:
+    group = store.current_group(group_id)
+    store.publish_quote_batch(
+        GroupQuoteBatch.complete(
+            group_id=group_id,
+            membership_hash=group.membership_hash,
+            quote_batch_id=f"qb-{group_id}-{quoted_at_ms}",
+            started_at_ms=quoted_at_ms - 1,
+            quoted_at_ms=quoted_at_ms,
+            legs=tuple(
+                GroupQuoteLeg(
+                    leg.yes_token_id,
+                    group.membership_hash,
+                    0.4,
+                    10,
+                    "executable",
+                )
+                for leg in group.legs
+            ),
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -286,6 +319,111 @@ async def test_incomplete_and_unsupported_membership_fail_closed(
 
 
 @pytest.mark.asyncio
+async def test_incomplete_rediscovery_revokes_prior_group_and_quote_authority(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+    ).run_batch()
+    group = store.current_group("g-1")
+    quote = GroupQuoteBatch.complete(
+        group_id="g-1",
+        membership_hash=group.membership_hash,
+        quote_batch_id="qb-1",
+        started_at_ms=10_001,
+        quoted_at_ms=10_002,
+        legs=tuple(
+            GroupQuoteLeg(
+                leg.yes_token_id,
+                group.membership_hash,
+                0.4,
+                10,
+                "executable",
+            )
+            for leg in group.legs
+        ),
+    )
+    store.publish_quote_batch(quote)
+    worker = DiscoveryWorker(
+        gamma=FakeGamma(
+            EventPage(
+                events=(
+                    _event(
+                        event_id="e-1",
+                        group_id="g-1",
+                        augmented=True,
+                    ),
+                ),
+                requested_cursor="c-2",
+                next_cursor="c-3",
+                completed=False,
+                started_at_ms=20_000,
+                finished_at_ms=20_100,
+            )
+        ),
+        store=store,
+    )
+
+    await worker.run_batch()
+
+    assert store.discovery_cursor() == "c-3"
+    assert store.group_schedule("g-1").quality == "complete-unsupported"
+    assert store.promoted_group_ids() == ()
+    assert store.current_group("g-1").status == "invalidated"
+    assert store.current_quote_batch("g-1", 20_100, 60_000) is None
+    with pytest.raises(GroupStructureUnavailableError):
+        await GroupStructureReader(store).read_group("g-1")
+
+
+@pytest.mark.asyncio
+async def test_failed_revocation_batch_rolls_back_authority_and_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+    ).run_batch()
+    _publish_quote(store, "g-1", quoted_at_ms=10_100)
+    original = store._insert_discovery_schedule
+
+    def fail_after_revocation(*args, **kwargs):
+        original(*args, **kwargs)
+        raise sqlite3.OperationalError("injected-revocation")
+
+    monkeypatch.setattr(store, "_insert_discovery_schedule", fail_after_revocation)
+    worker = DiscoveryWorker(
+        gamma=FakeGamma(
+            EventPage(
+                events=(
+                    _event(
+                        event_id="e-1",
+                        group_id="g-1",
+                        augmented=True,
+                    ),
+                ),
+                requested_cursor="c-2",
+                next_cursor="c-3",
+                completed=False,
+                started_at_ms=20_000,
+                finished_at_ms=20_100,
+            )
+        ),
+        store=store,
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="injected-revocation"):
+        await worker.run_batch()
+
+    assert store.discovery_cursor() == "c-2"
+    assert store.current_group("g-1").status == "certified"
+    assert store.current_quote_batch("g-1", 20_100, 60_000) is not None
+
+
+@pytest.mark.asyncio
 async def test_coverage_windows_use_exact_discovery_samples_and_liquidity_weights(
     tmp_path: Path,
 ) -> None:
@@ -326,6 +464,86 @@ async def test_coverage_windows_use_exact_discovery_samples_and_liquidity_weight
     assert coverage.by_minutes[15].liquidity_weighted_fraction == Decimal("0.75")
     assert coverage.by_minutes[30].raw_fraction == Decimal("1")
     assert coverage.by_minutes[60].raw_fraction == Decimal("1")
+
+
+@pytest.mark.asyncio
+async def test_durable_candidate_freshness_covers_all_promoted_certified_groups(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(
+                _event(event_id="e-1", group_id="g-fresh"),
+                _event(event_id="e-2", group_id="g-stale"),
+            )
+        ),
+        store=store,
+    ).run_batch()
+    _publish_quote(store, "g-fresh", quoted_at_ms=99_000)
+    _publish_quote(store, "g-stale", quoted_at_ms=10_000)
+    stale = store.current_group("g-stale")
+    store.record_candidate_watch_fact(
+        group_id="g-stale",
+        membership_hash=stale.membership_hash,
+        quote_batch_id=None,
+        observed_at_ms=99_500,
+        last_result="unavailable",
+        reason="fixture",
+        bundle_cost=None,
+        gross_edge_bps=None,
+        max_bundle_size=None,
+        priority_class="high",
+        consecutive_failures=1,
+        effective_interval_s=1,
+        schedule_reason="fixture",
+        next_due_at_ms=100_500,
+    )
+
+    snapshot = store.candidate_freshness_snapshot(now_ms=100_000)
+    restarted = OpportunityPerceptionStore(tmp_path / "state.db")
+
+    assert snapshot.candidate_count == 2
+    assert snapshot.missing_quote_count == 0
+    assert snapshot.quote_p95_age_ms == 90_000
+    assert restarted.candidate_freshness_snapshot(now_ms=100_000) == snapshot
+
+
+def test_empty_durable_candidate_set_allows_discovery_bootstrap(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    snapshot = store.candidate_freshness_snapshot(now_ms=100_000)
+
+    assert snapshot.candidate_count == 0
+    assert snapshot.missing_quote_count == 0
+    assert snapshot.quote_p95_age_ms is None
+
+
+@pytest.mark.asyncio
+async def test_missing_durable_quote_yields_discovery_but_empty_set_does_not(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(_page(_event(event_id="e-1", group_id="g-1"))),
+        store=store,
+    ).run_batch()
+    snapshot = store.candidate_freshness_snapshot(now_ms=100_000)
+    controller = DiscoveryLoadController(candidate_hard_stale_ms=90_000)
+
+    assert snapshot.missing_quote_count == 1
+    assert controller.yield_reason(
+        CandidateFreshness(
+            candidate_count=snapshot.candidate_count,
+            quote_p95_age_ms=snapshot.quote_p95_age_ms,
+            missing_quote_count=snapshot.missing_quote_count,
+        )
+    ) == "candidate-quote-missing"
+    assert controller.yield_reason(
+        CandidateFreshness(candidate_count=0, quote_p95_age_ms=None)
+    ) is None
 
 
 def test_candidate_source_composes_legacy_seed_with_discovery_promotions(
@@ -380,6 +598,53 @@ async def test_new_promotions_enter_candidate_scheduler_in_discovery_score_order
     await scheduler.run_due_once()
 
     assert calls == ["z-high", "a-low"]
+
+
+@pytest.mark.asyncio
+async def test_overdue_factless_promotion_beats_repeatedly_new_higher_score(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await DiscoveryWorker(
+        gamma=FakeGamma(
+            _page(
+                _event(event_id="e-1", group_id="a-old", liquidity="1"),
+                _event(event_id="e-2", group_id="z-new", liquidity="999"),
+            )
+        ),
+        store=store,
+    ).run_batch()
+    with sqlite3.connect(tmp_path / "state.db") as con:
+        con.execute(
+            "UPDATE neg_risk_group_schedule SET first_discovered_at_ms=0,"
+            "priority_score='0' WHERE group_id='a-old'"
+        )
+        con.execute(
+            "UPDATE neg_risk_group_schedule SET first_discovered_at_ms=999000,"
+            "priority_score='999' WHERE group_id='z-new'"
+        )
+    calls: list[str] = []
+
+    class Watcher:
+        async def run_once(self, group_id: str, *, priority_hint: str) -> None:
+            calls.append(group_id)
+
+    def scheduler() -> CandidateWatcherScheduler:
+        return CandidateWatcherScheduler(
+            watcher=Watcher(),
+            store=OpportunityPerceptionStore(tmp_path / "state.db"),
+            candidate_group_ids=lambda: ("z-new", "a-old"),
+            runtime=CandidateWatcherRuntime(),
+            clock_ms=lambda: 1_000_000,
+            cycle_max_groups=2,
+            reserved_non_high_slots=1,
+            discovery_candidate_max_wait_s=500,
+        )
+
+    await scheduler().run_due_once()
+    await scheduler().run_due_once()
+
+    assert calls == ["a-old", "z-new", "a-old", "z-new"]
 
 
 @pytest.mark.asyncio

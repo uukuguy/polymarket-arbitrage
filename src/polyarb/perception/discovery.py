@@ -32,6 +32,7 @@ class DiscoveryGamma(Protocol):
 class CandidateFreshness:
     candidate_count: int
     quote_p95_age_ms: int | None
+    missing_quote_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,8 @@ class DiscoveryLoadController:
             raise ValueError("discovery-stale-threshold-must-be-positive")
 
     def yield_reason(self, freshness: CandidateFreshness) -> str | None:
+        if freshness.candidate_count > 0 and freshness.missing_quote_count > 0:
+            return "candidate-quote-missing"
         if (
             freshness.candidate_count > 0
             and freshness.quote_p95_age_ms is not None

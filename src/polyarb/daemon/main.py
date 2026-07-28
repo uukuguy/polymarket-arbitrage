@@ -122,23 +122,21 @@ async def main() -> int:
         if settings.opportunity_first_watcher_enabled
         else None
     )
+
+    def _candidate_freshness() -> CandidateFreshness:
+        snapshot = perception_store.candidate_freshness_snapshot(
+            now_ms=int(time.time() * 1_000)
+        )
+        return CandidateFreshness(
+            candidate_count=snapshot.candidate_count,
+            quote_p95_age_ms=snapshot.quote_p95_age_ms,
+            missing_quote_count=snapshot.missing_quote_count,
+        )
+
     discovery = (
         build_production_discovery(
             settings,
-            candidate_freshness=lambda: CandidateFreshness(
-                candidate_count=len(candidate_group_ids()),
-                quote_p95_age_ms=(
-                    None
-                    if candidate_watcher is None
-                    or candidate_watcher.runtime.snapshot().last_observed_at_ms
-                    is None
-                    else max(
-                        0,
-                        int(time.time() * 1_000)
-                        - candidate_watcher.runtime.snapshot().last_observed_at_ms,
-                    )
-                ),
-            ),
+            candidate_freshness=_candidate_freshness,
         )
         if settings.opportunity_discovery_enabled
         else None

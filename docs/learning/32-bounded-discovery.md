@@ -17,6 +17,11 @@ opaque cursor
 事务失败时 cursor 不动；进程重启后重读 cursor。页面结束只代表一轮扫描到尾，下一轮
 从头开始。15/30/60 分钟覆盖度描述滚动时间窗，不承诺任何新组都不漏。
 
+反向变化也是 authority：曾经 certified 的组若新页面变成 incomplete/unsupported，
+同一事务会追加单调 `invalidated` revision 并 supersede 旧 Quote。新身份不可知时，
+revision 保留上次诚实 legs/hash 作为“被撤销对象”；schedule 保存本次新
+quality/hash/reason。保留旧身份证据不等于继续授权。
+
 ## 代码地图
 
 | 文件 | 责任 |
@@ -52,10 +57,12 @@ score = (
 )
 ```
 
-五个输入、输出和 reason 都以 Decimal 文本持久化。`age_rank` 是距上次 visit 的分钟数，
-不封顶；因此任何持续被推迟、但仍有效的组最终会超过有限的新近分数。第一次 Candidate
-采集前，scheduler 直接消费这个持久化 score；第一次终态后再由 Candidate 自己的
-durable due time 接管。
+五个输入、输出和 reason 都以 Decimal 文本持久化。rank 限于 0..100，`age_rank`
+封顶为可比较的 200。真正的 starvation 保证来自配置的 durable maximum-wait：
+第一次 Candidate 采集前，scheduler 每轮用 `first_discovered_at_ms` 与当前时间重算
+overdue；超过 deadline 的组必定排在未 overdue 新组前，同为 overdue 按 deadline
+排序。重启只重读相同 anchors，结果确定；第一次终态后由 Candidate durable due time
+接管。
 
 ## 原子性和取消
 
@@ -81,10 +88,17 @@ durable due time 接管。
 `active-known coverage`。覆盖低仍返回 0，因为这是业务事实，不是命令故障；数据库
 不存在、不可读或 schema 无效才返回非零。
 
+status 在一个 SQLite read transaction 中一起读取 cursor、batch、schedule、
+promotion、current revision 和 coverage，并验证 cursor/completed、时间、计数、
+Decimal/rank、枚举及 promotion→current certified membership。并发 writer 不能让
+一份报告混合提交前后的事实，直接改坏数据库也不会被渲染成正常状态。
+
 ## 设计取舍
 
-- Candidate freshness 接近 hard-stale 时，Discovery 在发 Gamma 请求前主动 yield；
-  没有候选时允许探索扩张。
+- Candidate freshness 是所有 current certified groups 与 matching complete Quote 的
+  一次 durable snapshot。任一缺 Quote 或 p95 接近 hard-stale 时，Discovery 在 Gamma
+  前 yield；recent unavailable fact 不刷新 Quote age，一个忙碌组也不能掩盖 sibling。
+  没有 durable certified authority 时允许探索冷启动，legacy ID 不制造死锁。
 - promotion source 是 legacy seed 与 Discovery promotion 的稳定去重并集，不会因接入
   新 producer 丢掉当前 hot candidates。
 - feature flag 默认关闭；本 slice 只完成生产代码路径，不等于已经完成部署和切换。

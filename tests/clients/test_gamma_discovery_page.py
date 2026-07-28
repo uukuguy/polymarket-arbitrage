@@ -96,3 +96,31 @@ async def test_fetch_event_page_marks_terminal_page_without_inventing_cursor(
     assert page.events == ()
     assert page.next_cursor is None
     assert page.completed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "member",
+    [
+        "not-a-dict",
+        {"active": True, "closed": False},
+        {"id": "e-1", "active": "true", "closed": False},
+        {"id": "e-1", "active": True, "closed": True},
+    ],
+)
+async def test_fetch_event_page_rejects_malformed_members(
+    respx_mock,
+    member,
+) -> None:
+    respx_mock.get("https://gamma-api.polymarket.com/events/keyset").mock(
+        return_value=httpx.Response(
+            200,
+            json={"events": [member], "next_cursor": "c-2"},
+        )
+    )
+    gamma = _gamma()
+    try:
+        with pytest.raises(PaginationIntegrityError, match="member"):
+            await gamma.fetch_active_event_page(cursor="c-1", limit=1)
+    finally:
+        await gamma.aclose()
