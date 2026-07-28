@@ -379,6 +379,102 @@ def test_receipt_writer_rejects_non_text_or_oversized_tails(tmp_path, tail) -> N
         )
 
 
+def test_output_hash_migration_backfills_legacy_receipt_and_is_idempotent(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.reserve_producer_attempt(
+        "candidate",
+        supervisor_run_id="run-1",
+        started_at_ms=1_000,
+    )
+    store.record_producer_receipt(
+        ProducerReceipt(
+            component="candidate",
+            attempt=1,
+            started_at_ms=1_000,
+            finished_at_ms=1_010,
+            outcome="success",
+            exit_code=0,
+            stdout_tail="",
+            stderr_tail="",
+            supervisor_run_id="run-1",
+            child_auth_hash=None,
+        )
+    )
+    with store._connect() as con:
+        con.execute("ALTER TABLE neg_risk_producer_receipts DROP COLUMN output_hash")
+
+    store.init_schema()
+    store.init_schema()
+
+    with store._connect() as con:
+        output_hash = con.execute(
+            "SELECT output_hash FROM neg_risk_producer_receipts "
+            "WHERE component='candidate' AND attempt=1"
+        ).fetchone()[0]
+    assert isinstance(output_hash, str)
+    assert len(output_hash) == 64
+    health = read_producer_liveness_health(
+        store.db_path,
+        "candidate",
+        now_ms=2_000,
+        stall_timeout_ms=2_000,
+    )
+    assert health.evidence_consistent is True
+    supervisor = ProducerSupervisor(store=store, incidents=IncidentManager(store))
+    assert supervisor._progress_marker("candidate", "run-1", 1) == (0, 0, 0)
+
+
+def test_output_hash_migration_rejects_invalid_legacy_tail_without_partial_write(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    for attempt in (1, 2):
+        store.reserve_producer_attempt(
+            "candidate",
+            supervisor_run_id=f"run-{attempt}",
+            started_at_ms=attempt * 1_000,
+        )
+        store.record_producer_receipt(
+            ProducerReceipt(
+                component="candidate",
+                attempt=attempt,
+                started_at_ms=attempt * 1_000,
+                finished_at_ms=attempt * 1_000 + 10,
+                outcome="success",
+                exit_code=0,
+                stdout_tail="",
+                stderr_tail="",
+                supervisor_run_id=f"run-{attempt}",
+                child_auth_hash=None,
+            )
+        )
+    with store._connect() as con:
+        con.execute("ALTER TABLE neg_risk_producer_receipts DROP COLUMN output_hash")
+        con.execute(
+            "UPDATE neg_risk_producer_receipts SET stdout_tail=zeroblob(20000) "
+            "WHERE attempt=2"
+        )
+
+    with pytest.raises(ValueError, match="invalid-producer-receipt-output-migration"):
+        store.init_schema()
+
+    with store._connect() as con:
+        columns = {
+            row["name"]
+            for row in con.execute("PRAGMA table_info(neg_risk_producer_receipts)")
+        }
+        rows = con.execute(
+            "SELECT attempt,stdout_tail FROM neg_risk_producer_receipts ORDER BY attempt"
+        ).fetchall()
+    assert "output_hash" not in columns
+    assert rows[0]["stdout_tail"] == ""
+    assert isinstance(rows[1]["stdout_tail"], bytes)
+
+
 @pytest.mark.parametrize(
     ("outcome", "exit_code", "consistent"),
     (

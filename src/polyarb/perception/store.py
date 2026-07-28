@@ -490,6 +490,14 @@ class OpportunityPerceptionStore:
                 is not None
             )
             con.executescript(DDL)
+            receipt_columns = {
+                str(row["name"])
+                for row in con.execute(
+                    "PRAGMA table_info(neg_risk_producer_receipts)"
+                )
+            }
+            output_hash_needs_backfill = "output_hash" not in receipt_columns
+            con.execute("BEGIN IMMEDIATE")
             migrations = (
                 (
                     "neg_risk_group_schedule",
@@ -687,6 +695,34 @@ class OpportunityPerceptionStore:
                 existing = {str(row["name"]) for row in con.execute(f"PRAGMA table_info({table})")}
                 if column not in existing:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            if output_hash_needs_backfill:
+                receipt_hashes: list[tuple[str, int]] = []
+                for row in con.execute(
+                    "SELECT id,stdout_tail,stderr_tail "
+                    "FROM neg_risk_producer_receipts ORDER BY id"
+                ).fetchall():
+                    if not (
+                        _valid_producer_receipt_tail(row["stdout_tail"])
+                        and _valid_producer_receipt_tail(row["stderr_tail"])
+                    ):
+                        raise ValueError(
+                            "invalid-producer-receipt-output-migration"
+                        )
+                    receipt_hashes.append(
+                        (
+                            _producer_receipt_output_hash(
+                                row["stdout_tail"],
+                                row["stderr_tail"],
+                            ),
+                            int(row["id"]),
+                        )
+                    )
+                for output_hash, receipt_id in receipt_hashes:
+                    con.execute(
+                        "UPDATE neg_risk_producer_receipts SET output_hash=? "
+                        "WHERE id=? AND output_hash IS NULL",
+                        (output_hash, receipt_id),
+                    )
             sweep_id = 1
             batch_sequence = 0
             previous_completed = False
@@ -720,6 +756,11 @@ class OpportunityPerceptionStore:
                     "AND bs.membership_hash IS NOT NULL "
                     "AND bs.quality IS NOT NULL"
                 )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
         finally:
             con.close()
 
