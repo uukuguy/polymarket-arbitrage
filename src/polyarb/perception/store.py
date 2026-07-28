@@ -47,6 +47,8 @@ _DISCOVERY_AUTHORITY_UNCOMPACTED_MAX_ROWS = 20_000
 _DISCOVERY_STATUS_PROJECTION_DOMAIN = "polyarb-discovery-status-projection-v1"
 _DISCOVERY_STATUS_PROJECTION_VERSION = 1
 _OWNER_MUTATION_JOURNAL_RETAIN_ROWS = 128
+_OWNER_MUTATION_LEGACY_MAX_ROWS = 1_025
+_OWNER_AUTHORITY_VERSION = 2
 _RECONCILIATION_AUTHORITY_DOMAIN = "polyarb-reconciliation-authority-checkpoint-v1"
 _RECONCILIATION_AUTHORITY_VERSION = 1
 _HEARTBEAT_AUTH_DOMAIN = "polyarb-producer-heartbeat-v1"
@@ -965,16 +967,48 @@ class OpportunityPerceptionStore:
 
     @classmethod
     def _assert_owner_journal_clean(cls, con: sqlite3.Connection) -> None:
-        context = con.execute(
-            "SELECT 1 FROM neg_risk_owner_write_context WHERE id=1"
-        ).fetchone()
         guard = con.execute(
             "SELECT consumed_journal_id,consumed_hash,"
             "retained_base_id,retained_base_hash,"
-            "candidate_aggregate_hash,discovery_aggregate_hash "
+            "candidate_aggregate_hash,discovery_aggregate_hash,"
+            "authority_version,migration_state "
             "FROM neg_risk_owner_mutation_guard WHERE id=1"
         ).fetchone()
-        if context is not None or guard is None:
+        if (
+            guard is None
+            or int(guard["authority_version"]) != _OWNER_AUTHORITY_VERSION
+            or guard["migration_state"] != "complete"
+            or guard["candidate_aggregate_hash"] is None
+            or guard["discovery_aggregate_hash"] is None
+        ):
+            raise ValueError("invalid-owner-guard-state")
+        cls._validate_owner_journal_chain(
+            con,
+            guard=guard,
+            max_rows=_OWNER_MUTATION_JOURNAL_RETAIN_ROWS,
+        )
+        candidate_hash, discovery_hash = cls._owner_aggregate_hashes(con)
+        if not hmac.compare_digest(
+            str(guard["candidate_aggregate_hash"]),
+            candidate_hash,
+        ) or not hmac.compare_digest(
+            str(guard["discovery_aggregate_hash"]),
+            discovery_hash,
+        ):
+            raise ValueError("invalid-owner-aggregate-authority")
+
+    @classmethod
+    def _validate_owner_journal_chain(
+        cls,
+        con: sqlite3.Connection,
+        *,
+        guard: sqlite3.Row,
+        max_rows: int,
+    ) -> None:
+        context = con.execute(
+            "SELECT 1 FROM neg_risk_owner_write_context WHERE id=1"
+        ).fetchone()
+        if context is not None:
             raise ValueError("pending-owner-mutation")
         consumed_id = int(guard["consumed_journal_id"])
         base_id = int(guard["retained_base_id"])
@@ -987,16 +1021,37 @@ class OpportunityPerceptionStore:
         ).fetchone()
         if pending is not None:
             raise ValueError("pending-owner-mutation")
+        sequence = con.execute(
+            "SELECT seq FROM sqlite_sequence "
+            "WHERE name='neg_risk_owner_mutation_journal'"
+        ).fetchone()
+        sequence_id = 0 if sequence is None else int(sequence["seq"])
+        max_row = con.execute(
+            "SELECT MAX(id) AS max_id FROM neg_risk_owner_mutation_journal"
+        ).fetchone()
+        max_id = None if max_row["max_id"] is None else int(max_row["max_id"])
+        if (
+            sequence_id != consumed_id
+            or (
+                consumed_id > base_id
+                and max_id != consumed_id
+            )
+            or (
+                consumed_id == base_id
+                and max_id is not None
+            )
+        ):
+            raise ValueError("invalid-owner-mutation-sequence")
         rows = con.execute(
             "SELECT * FROM neg_risk_owner_mutation_journal "
             "WHERE id>? AND id<=? ORDER BY id LIMIT ?",
             (
                 base_id,
                 consumed_id,
-                _OWNER_MUTATION_JOURNAL_RETAIN_ROWS + 1,
+                max_rows + 1,
             ),
         ).fetchall()
-        if len(rows) > _OWNER_MUTATION_JOURNAL_RETAIN_ROWS:
+        if len(rows) > max_rows:
             raise ValueError("invalid-owner-mutation-chain")
         if consumed_id == base_id:
             if rows or guard["consumed_hash"] != guard["retained_base_hash"]:
@@ -1030,17 +1085,6 @@ class OpportunityPerceptionStore:
                 previous_hash = expected_hash
             if previous_id != consumed_id or previous_hash != guard["consumed_hash"]:
                 raise ValueError("invalid-owner-mutation-chain")
-        candidate_hash, discovery_hash = cls._owner_aggregate_hashes(con)
-        stored_candidate = guard["candidate_aggregate_hash"]
-        stored_discovery = guard["discovery_aggregate_hash"]
-        if (
-            stored_candidate is not None
-            and not hmac.compare_digest(str(stored_candidate), candidate_hash)
-        ) or (
-            stored_discovery is not None
-            and not hmac.compare_digest(str(stored_discovery), discovery_hash)
-        ):
-            raise ValueError("invalid-owner-aggregate-authority")
 
     @staticmethod
     def _owner_aggregate_hashes(con: sqlite3.Connection) -> tuple[str, str]:
@@ -1348,25 +1392,113 @@ class OpportunityPerceptionStore:
             writer_token=token,
         )
 
+    @staticmethod
+    def _owner_manifest_state(con: sqlite3.Connection) -> str:
+        owner_tables = {
+            "neg_risk_owner_write_context",
+            "neg_risk_owner_mutation_journal",
+            "neg_risk_owner_mutation_guard",
+            "neg_risk_candidate_current_authority",
+            "neg_risk_candidate_current_aggregate",
+            "neg_risk_discovery_status_projection",
+            "neg_risk_discovery_group_projection",
+        }
+        present_tables = {
+            str(row["name"])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND ("
+                "name LIKE 'neg_risk_owner_%' OR name IN (?,?,?,?))",
+                (
+                    "neg_risk_candidate_current_authority",
+                    "neg_risk_candidate_current_aggregate",
+                    "neg_risk_discovery_status_projection",
+                    "neg_risk_discovery_group_projection",
+                ),
+            )
+        }
+        present_triggers = {
+            str(row["name"])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND name LIKE 'trg_owner_%'"
+            )
+        }
+        expected_triggers = set(OWNER_JOURNAL_TRIGGER_NAMES)
+        if not present_tables and not present_triggers:
+            return "fresh"
+        if present_tables != owner_tables or present_triggers != expected_triggers:
+            raise ValueError("invalid-owner-authority-manifest")
+
+        expected_con = sqlite3.connect(":memory:")
+        try:
+            expected_con.executescript(DDL)
+            expected_columns = {
+                table: {
+                    str(row[1])
+                    for row in expected_con.execute(f"PRAGMA table_info({table})")
+                }
+                for table in owner_tables
+            }
+        finally:
+            expected_con.close()
+        actual_columns = {
+            table: {
+                str(row["name"])
+                for row in con.execute(f"PRAGMA table_info({table})")
+            }
+            for table in owner_tables
+        }
+        if actual_columns == expected_columns:
+            return "current"
+        legacy_columns = {
+            table: set(columns)
+            for table, columns in expected_columns.items()
+        }
+        legacy_columns["neg_risk_owner_mutation_guard"] -= {
+            "authority_version",
+            "migration_state",
+        }
+        if actual_columns == legacy_columns:
+            return "a527"
+        raise ValueError("invalid-owner-authority-manifest")
+
+    def _migrate_a527_owner_guard(self, con: sqlite3.Connection) -> None:
+        con.execute(
+            "ALTER TABLE neg_risk_owner_mutation_guard "
+            "ADD COLUMN authority_version INTEGER"
+        )
+        con.execute(
+            "ALTER TABLE neg_risk_owner_mutation_guard "
+            "ADD COLUMN migration_state TEXT"
+        )
+        guard = con.execute(
+            "SELECT consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        if guard is None:
+            raise ValueError("invalid-owner-guard-state")
+        self._validate_owner_journal_chain(
+            con,
+            guard=guard,
+            max_rows=_OWNER_MUTATION_LEGACY_MAX_ROWS,
+        )
+        self._prune_owner_mutation_journal(
+            con,
+            consumed_journal_id=int(guard["consumed_journal_id"]),
+        )
+        self._refresh_owner_aggregate_hashes(con)
+        con.execute(
+            "UPDATE neg_risk_owner_mutation_guard SET "
+            "authority_version=?,migration_state='complete' WHERE id=1",
+            (_OWNER_AUTHORITY_VERSION,),
+        )
+        self._assert_owner_journal_clean(con)
+
     def init_schema(self) -> None:
         con = self._connect()
         try:
-            owner_component_names = {
-                "neg_risk_owner_mutation_journal",
-                "neg_risk_owner_mutation_guard",
-                "neg_risk_candidate_current_authority",
-            }
-            existing_owner_components = {
-                str(row["name"])
-                for row in con.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' "
-                    "AND name IN (?,?,?)",
-                    tuple(sorted(owner_component_names)),
-                )
-            }
-            if existing_owner_components and existing_owner_components != owner_component_names:
-                raise ValueError("partial-owner-authority-schema")
-            legacy_owner_bootstrap = not existing_owner_components
+            owner_manifest_state = self._owner_manifest_state(con)
+            legacy_owner_bootstrap = owner_manifest_state == "fresh"
             schedule_evidence_existed = (
                 con.execute(
                     "SELECT 1 FROM sqlite_master "
@@ -1378,23 +1510,15 @@ class OpportunityPerceptionStore:
             con.executescript(DDL)
             self._validate_owner_trigger_sql(con)
             con.execute("BEGIN IMMEDIATE")
-            guard_columns = {
-                str(row["name"])
-                for row in con.execute(
-                    "PRAGMA table_info(neg_risk_owner_mutation_guard)"
-                )
-            }
-            for column, definition in (
-                ("retained_base_id", "INTEGER NOT NULL DEFAULT 0"),
-                ("retained_base_hash", "TEXT"),
-                ("candidate_aggregate_hash", "TEXT"),
-                ("discovery_aggregate_hash", "TEXT"),
+            locked_manifest_state = self._owner_manifest_state(con)
+            if (
+                owner_manifest_state == "a527"
+                and locked_manifest_state not in {"a527", "current"}
             ):
-                if column not in guard_columns:
-                    con.execute(
-                        "ALTER TABLE neg_risk_owner_mutation_guard "
-                        f"ADD COLUMN {column} {definition}"
-                    )
+                raise ValueError("invalid-owner-authority-manifest")
+            owner_manifest_state = locked_manifest_state
+            if owner_manifest_state == "a527":
+                self._migrate_a527_owner_guard(con)
             guard = con.execute(
                 "SELECT consumed_journal_id FROM neg_risk_owner_mutation_guard "
                 "WHERE id=1"
@@ -1410,30 +1534,14 @@ class OpportunityPerceptionStore:
                 con.execute(
                     "INSERT INTO neg_risk_owner_mutation_guard("
                     "id,consumed_journal_id,consumed_hash,retained_base_id,"
-                    "retained_base_hash) VALUES(1,0,NULL,0,NULL)"
+                    "retained_base_hash,candidate_aggregate_hash,"
+                    "discovery_aggregate_hash,authority_version,migration_state"
+                    ") VALUES(1,0,NULL,0,NULL,?,?,?,'complete')",
+                    (
+                        *self._owner_aggregate_hashes(con),
+                        _OWNER_AUTHORITY_VERSION,
+                    ),
                 )
-            else:
-                retained_base = con.execute(
-                    "SELECT retained_base_id FROM neg_risk_owner_mutation_guard "
-                    "WHERE id=1"
-                ).fetchone()
-                first_retained = con.execute(
-                    "SELECT id,previous_hash FROM neg_risk_owner_mutation_journal "
-                    "ORDER BY id LIMIT 1"
-                ).fetchone()
-                if (
-                    int(retained_base["retained_base_id"]) == 0
-                    and first_retained is not None
-                    and int(first_retained["id"]) > 1
-                ):
-                    con.execute(
-                        "UPDATE neg_risk_owner_mutation_guard SET "
-                        "retained_base_id=?,retained_base_hash=? WHERE id=1",
-                        (
-                            int(first_retained["id"]) - 1,
-                            first_retained["previous_hash"],
-                        ),
-                    )
             self._assert_owner_journal_clean(con)
             aggregate_exists = con.execute(
                 "SELECT 1 FROM neg_risk_candidate_current_aggregate WHERE id=1"

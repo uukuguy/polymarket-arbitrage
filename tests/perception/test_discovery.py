@@ -656,17 +656,13 @@ def test_owner_trigger_missing_or_drift_fails_init(
                 "BEGIN SELECT 1; END"
             )
 
-    if mode == "missing":
+    error = (
+        "invalid-owner-authority-manifest"
+        if mode == "missing"
+        else "owner-trigger-sql-drift"
+    )
+    with pytest.raises(ValueError, match=error):
         store.init_schema()
-        with store._connect() as con:
-            restored = con.execute(
-                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
-                (trigger_name,),
-            ).fetchone()
-        assert restored is not None
-    else:
-        with pytest.raises(ValueError, match="owner-trigger-sql-drift"):
-            store.init_schema()
 
 
 def test_partial_owner_authority_schema_fails_init(tmp_path: Path) -> None:
@@ -676,7 +672,7 @@ def test_partial_owner_authority_schema_fails_init(tmp_path: Path) -> None:
             "CREATE TABLE neg_risk_owner_mutation_journal(id INTEGER PRIMARY KEY)"
         )
 
-    with pytest.raises(ValueError, match="partial-owner-authority-schema"):
+    with pytest.raises(ValueError, match="invalid-owner-authority-manifest"):
         OpportunityPerceptionStore(db_path).init_schema()
 
 

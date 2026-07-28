@@ -46,15 +46,26 @@ without adding producer or trading authority.
   and next writer fully replays the retained 128-event chain, including its
   base and consumed tail; changed hashes, deleted tails, broken links, direct
   derived mutations, and later attempted writes all fail closed.
+- Clean state also binds SQLite's AUTOINCREMENT sequence to the consumed guard
+  id, so deleting a pending journal event cannot hide it. The v2 guard requires
+  `migration_state=complete` and non-NULL Candidate/Discovery roots.
+  Initialization snapshots the complete owner tables, columns, and canonical
+  trigger set before DDL: only empty, current v2, and the exact a527 manifest
+  are accepted. A527 retained windows up to 1,025 events migrate under one
+  write lock by full replay, atomic base advancement/prune to 128, root
+  derivation, versioning, and new-validator replay. Unknown/partial manifests,
+  corrupt tails, deadline interruption, and concurrent migration cannot be
+  washed or partially upgraded.
 - Five Make targets and the living M1 manual provide the supported cloud
   workflow.
 
-Verification: 2763 of 2765 repository tests passed (one expected xfail, one
+Verification: 2785 of 2787 repository tests passed (one expected xfail, one
 skip); the committed Task 6 baseline collected 2586 and successive authority
-remediations collected 2596, 2618, 2642, 2654, 2723, and 2765. All 41 focused
+remediations collected 2596, 2618, 2642, 2654, 2723, 2765, and 2787. All 41 focused
 API/control tests, 10,010-success Candidate continuity (60.62 seconds with the
-128-event proof window), 349 perception tests, raw/derived mutation, retained
-hash/tail/link tamper, concurrent-writer, deadline, and atomic rollback tests passed;
+128-event proof window), 371 perception tests, raw/derived mutation, deleted
+pending sequence, retained hash/tail/link tamper, v2 guard, manifest,
+concurrent-writer/migration, deadline, and atomic rollback tests passed;
 Ruff, compileall, docs, planning status, and diff checks passed.
 
 No deployment or trading capability was introduced. Task 7 remains the

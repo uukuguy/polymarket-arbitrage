@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import polyarb.perception.store as store_module
 from polyarb.perception.models import (
     GroupLeg,
     GroupQuoteBatch,
@@ -236,6 +237,291 @@ def test_concurrent_candidate_writers_leave_owner_chain_clean(tmp_path: Path) ->
     assert errors == []
     assert len(store.candidate_watch_facts(group.group_id)) == 2
     assert store.validated_candidate_opportunity_count() == 0
+
+
+@pytest.mark.parametrize(
+    "layer",
+    ("raw", "candidate-derived", "discovery-derived"),
+)
+@pytest.mark.parametrize("surface", ("read", "init", "next-writer"))
+def test_deleted_pending_owner_event_is_detected_by_sqlite_sequence(
+    tmp_path: Path,
+    layer: str,
+    surface: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-sequence", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    mutation = {
+        "raw": (
+            "UPDATE neg_risk_group_revisions SET source_cursor='ghost' "
+            "WHERE group_id='g-sequence'"
+        ),
+        "candidate-derived": (
+            "UPDATE neg_risk_candidate_current_aggregate "
+            "SET current_group_count=current_group_count+1 WHERE id=1"
+        ),
+        "discovery-derived": (
+            "UPDATE neg_risk_discovery_status_projection "
+            "SET generation=generation+1 WHERE id=1"
+        ),
+    }[layer]
+    with store._connect() as con:
+        con.execute(mutation)
+        con.execute(
+            "DELETE FROM neg_risk_owner_mutation_journal WHERE id>("
+            "SELECT consumed_journal_id FROM neg_risk_owner_mutation_guard WHERE id=1)"
+        )
+
+    with pytest.raises(ValueError, match="invalid-owner-mutation-sequence"):
+        if surface == "read":
+            store.current_group(group.group_id)
+        elif surface == "init":
+            store.init_schema()
+        else:
+            store.record_discovery_load_decision(
+                degraded_reason=None,
+                probe_every_cycles=10,
+                now_ms=5_000,
+            )
+
+
+@pytest.mark.parametrize(
+    "column",
+    ("candidate_aggregate_hash", "discovery_aggregate_hash"),
+)
+@pytest.mark.parametrize("surface", ("read", "init", "next-writer"))
+def test_completed_owner_guard_rejects_null_authenticated_hash(
+    tmp_path: Path,
+    column: str,
+    surface: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        con.execute(
+            f"UPDATE neg_risk_owner_mutation_guard SET {column}=NULL WHERE id=1"
+        )
+
+    with pytest.raises(ValueError, match="invalid-owner-guard-state"):
+        if surface == "read":
+            store.validated_candidate_opportunity_count()
+        elif surface == "init":
+            store.init_schema()
+        else:
+            store.record_discovery_load_decision(
+                degraded_reason=None,
+                probe_every_cycles=10,
+                now_ms=5_000,
+            )
+
+
+@pytest.mark.parametrize("mutation", ("trigger-subset", "table-subset", "unknown"))
+def test_unknown_or_partial_owner_manifest_fails_before_ddl(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    with store._connect() as con:
+        if mutation == "trigger-subset":
+            con.execute("DROP TRIGGER trg_owner_group_revisions_insert")
+        elif mutation == "table-subset":
+            con.execute("DROP TABLE neg_risk_candidate_current_authority")
+        else:
+            con.execute(
+                "ALTER TABLE neg_risk_owner_mutation_guard "
+                "ADD COLUMN unknown_owner_state TEXT"
+            )
+
+    with pytest.raises(ValueError, match="invalid-owner-authority-manifest"):
+        store.init_schema()
+
+    with store._connect() as con:
+        if mutation == "trigger-subset":
+            assert con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                "AND name='trg_owner_group_revisions_insert'"
+            ).fetchone() is None
+        elif mutation == "table-subset":
+            assert con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='neg_risk_candidate_current_authority'"
+            ).fetchone() is None
+        else:
+            assert "unknown_owner_state" in {
+                str(row["name"])
+                for row in con.execute(
+                    "PRAGMA table_info(neg_risk_owner_mutation_guard)"
+                )
+            }
+
+
+def _drop_v2_guard_columns(con: sqlite3.Connection) -> None:
+    columns = {
+        str(row["name"])
+        for row in con.execute("PRAGMA table_info(neg_risk_owner_mutation_guard)")
+    }
+    for column in ("migration_state", "authority_version"):
+        if column in columns:
+            con.execute(
+                f"ALTER TABLE neg_risk_owner_mutation_guard DROP COLUMN {column}"
+            )
+
+
+def _grow_a527_owner_window(
+    store: OpportunityPerceptionStore,
+    group: GroupRevision,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "_OWNER_MUTATION_JOURNAL_RETAIN_ROWS", 256)
+    for sequence in range(50):
+        store.record_candidate_watch_fact(
+            group_id=group.group_id,
+            membership_hash=group.membership_hash,
+            quote_batch_id=None,
+            observed_at_ms=4_000 + sequence,
+            last_result="unavailable",
+            reason="a527-window",
+            bundle_cost=None,
+            gross_edge_bps=None,
+            max_bundle_size=None,
+            priority_class="normal",
+            consecutive_failures=sequence,
+            effective_interval_s=60,
+            schedule_reason="a527-window",
+            next_due_at_ms=64_000 + sequence,
+        )
+    monkeypatch.setattr(store_module, "_OWNER_MUTATION_JOURNAL_RETAIN_ROWS", 128)
+
+
+def test_a527_owner_window_migrates_atomically_to_v2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-a527", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    _grow_a527_owner_window(store, group, monkeypatch)
+    with store._connect() as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
+        ).fetchone()[0] > 128
+        _drop_v2_guard_columns(con)
+
+    store.init_schema()
+
+    with store._connect() as con:
+        guard = con.execute(
+            "SELECT authority_version,migration_state,candidate_aggregate_hash,"
+            "discovery_aggregate_hash FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        assert tuple(guard[:2]) == (2, "complete")
+        assert guard["candidate_aggregate_hash"] is not None
+        assert guard["discovery_aggregate_hash"] is not None
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
+        ).fetchone()[0] <= 128
+
+
+def test_invalid_a527_owner_window_migration_rolls_back_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="g-a527-bad", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    _grow_a527_owner_window(store, group, monkeypatch)
+    with store._connect() as con:
+        _drop_v2_guard_columns(con)
+        con.execute(
+            "UPDATE neg_risk_owner_mutation_journal SET event_hash='tampered' "
+            "WHERE id=(SELECT MIN(id) FROM neg_risk_owner_mutation_journal)"
+        )
+
+    with pytest.raises(ValueError, match="invalid-owner-mutation-chain"):
+        store.init_schema()
+
+    with store._connect() as con:
+        columns = {
+            str(row["name"])
+            for row in con.execute(
+                "PRAGMA table_info(neg_risk_owner_mutation_guard)"
+            )
+        }
+    assert "authority_version" not in columns
+    assert "migration_state" not in columns
+
+
+def test_a527_owner_migration_honors_sqlite_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = OpportunityPerceptionStore(db_path)
+    store.init_schema()
+    group = revision(group_id="g-a527-deadline", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    _grow_a527_owner_window(store, group, monkeypatch)
+    with store._connect() as con:
+        _drop_v2_guard_columns(con)
+
+    expired = OpportunityPerceptionStore(db_path, deadline_monotonic=0)
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        expired.init_schema()
+
+    with store._connect() as con:
+        columns = {
+            str(row["name"])
+            for row in con.execute(
+                "PRAGMA table_info(neg_risk_owner_mutation_guard)"
+            )
+        }
+    assert "authority_version" not in columns
+    assert "migration_state" not in columns
+
+
+def test_concurrent_a527_owner_migrations_converge_to_one_v2_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = OpportunityPerceptionStore(db_path)
+    store.init_schema()
+    group = revision(group_id="g-a527-race", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    _grow_a527_owner_window(store, group, monkeypatch)
+    with store._connect() as con:
+        _drop_v2_guard_columns(con)
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def migrate() -> None:
+        try:
+            barrier.wait(timeout=2)
+            OpportunityPerceptionStore(db_path).init_schema()
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=migrate) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert errors == []
+    with store._connect() as con:
+        guard = con.execute(
+            "SELECT authority_version,migration_state "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        assert tuple(guard) == (2, "complete")
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
+        ).fetchone()[0] <= 128
 
 
 def test_candidate_authority_rolls_checkpoint_beyond_daily_history_bound(
@@ -879,7 +1165,10 @@ def test_retained_owner_journal_tamper_fails_closed(
     with store._connect() as con:
         con.execute(tamper_sql)
 
-    with pytest.raises(ValueError, match="invalid-owner-mutation-chain"):
+    with pytest.raises(
+        ValueError,
+        match="invalid-owner-mutation-(?:chain|sequence)",
+    ):
         store.validated_candidate_opportunity_count()
 
 

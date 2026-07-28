@@ -589,7 +589,9 @@ CREATE TABLE IF NOT EXISTS neg_risk_owner_mutation_guard (
   retained_base_id INTEGER NOT NULL DEFAULT 0 CHECK(retained_base_id >= 0),
   retained_base_hash TEXT,
   candidate_aggregate_hash TEXT,
-  discovery_aggregate_hash TEXT
+  discovery_aggregate_hash TEXT,
+  authority_version INTEGER NOT NULL CHECK(authority_version = 2),
+  migration_state TEXT NOT NULL CHECK(migration_state IN ('building','complete'))
 );
 
 CREATE TRIGGER IF NOT EXISTS trg_owner_candidate_fact_insert

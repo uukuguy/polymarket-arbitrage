@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from polyarb.cli_discovery import main
-from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.store import DiscoveryAdmissionProof, OpportunityPerceptionStore
 
 
 def test_status_is_read_only_and_low_coverage_is_success(
@@ -72,75 +72,29 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
     db_path = tmp_path / "state.db"
     store = OpportunityPerceptionStore(db_path)
     store.init_schema()
+    proof = DiscoveryAdmissionProof(
+        effective_capacity=2,
+        candidate_max_wait_ms=60_000,
+        selection_budget_ms=6_000,
+        poll_interval_ms=1_000,
+        group_timeout_ms=10_000,
+        terminal_write_budget_ms=5_000,
+        high_burst_groups=1,
+        reserved_non_high_slots=2,
+    )
+    store.configure_discovery_admission(proof, now_ms=0)
+    store.publish_discovery_batch(
+        requested_cursor=None,
+        next_cursor="c-2",
+        completed=False,
+        started_at_ms=10,
+        finished_at_ms=20,
+        page_event_count=1,
+        candidates=(),
+        admission_proof=proof,
+    )
     with sqlite3.connect(db_path) as con:
         con.execute("PRAGMA journal_mode=WAL")
-        for trigger in (
-            "trg_owner_group_revisions_insert",
-            "trg_owner_group_revisions_update",
-            "trg_owner_group_revisions_delete",
-            "trg_owner_group_schedule_insert",
-            "trg_owner_group_schedule_update",
-            "trg_owner_group_schedule_delete",
-            "trg_owner_discovery_status_projection_insert",
-            "trg_owner_discovery_status_projection_update",
-            "trg_owner_discovery_status_projection_delete",
-            "trg_owner_discovery_group_projection_insert",
-            "trg_owner_discovery_group_projection_update",
-            "trg_owner_discovery_group_projection_delete",
-        ):
-            con.execute(f"DROP TRIGGER {trigger}")
-        con.execute(
-            "INSERT INTO neg_risk_discovery_state("
-            "id,next_cursor,completed,last_started_at_ms,last_finished_at_ms,"
-            "page_event_count,groups_seen,promoted_count"
-            ") VALUES (1,'c-2',0,10,20,1,1,0)"
-        )
-        receipt = con.execute(
-            "INSERT INTO neg_risk_discovery_batches("
-            "sweep_id,batch_sequence,requested_cursor,next_cursor,completed,"
-            "started_at_ms,finished_at_ms,"
-            "page_event_count,groups_seen,promoted_count"
-            ") VALUES (1,1,'c-1','c-2',0,10,20,1,1,0)"
-        )
-        con.execute(
-            "INSERT INTO neg_risk_discovery_batch_samples("
-            "batch_id,group_id,event_id,membership_hash,quality,reason,"
-            "liquidity_weight,promoted"
-            ") VALUES (?,'g-1','e-1','h','incomplete-source','fixture','0',0)",
-            (receipt.lastrowid,),
-        )
-        con.execute(
-            "INSERT INTO neg_risk_discovery_schedule_evidence("
-            "batch_id,group_id,event_id,membership_hash,quality,reason,"
-            "promoted,effective_at_ms"
-            ") VALUES (?,'g-1','e-1','h','incomplete-source','fixture',0,20)",
-            (receipt.lastrowid,),
-        )
-        con.execute(
-            "INSERT INTO neg_risk_group_revisions("
-            "group_id,event_id,revision,membership_hash,started_at_ms,"
-            "observed_at_ms,source_cursor,status,legs_json"
-            ") VALUES ('g-1','e-1',1,'h',10,20,'c-1','invalidated','[]')"
-        )
-        con.execute(
-            "INSERT INTO neg_risk_group_schedule("
-            "group_id,event_id,membership_hash,quality,reason,gross_edge_bps,"
-            "activity_rank,liquidity_rank,change_rank,age_rank,priority_score,"
-            "priority_reason,priority_class,liquidity_weight,"
-            "first_discovered_at_ms,last_discovered_at_ms,last_visited_at_ms,"
-            "promoted_at_ms"
-            ") VALUES ("
-            "'g-1','e-1','h','incomplete-source','fixture','0','0','0','0',"
-            "'0','0','weighted-edge-activity-liquidity-change-age:"
-            "0.35,0.20,0.15,0.15,0.15','explore','0',20,20,NULL,NULL)"
-        )
-        con.execute("DELETE FROM neg_risk_discovery_status_projection")
-        con.execute("DELETE FROM neg_risk_discovery_group_projection")
-        con.execute(
-            "UPDATE neg_risk_owner_mutation_guard "
-            "SET discovery_aggregate_hash=NULL WHERE id=1"
-        )
-    store.init_schema()
     original = OpportunityPerceptionStore._coverage_windows_in_snapshot
     writer_done = threading.Event()
 
@@ -166,7 +120,7 @@ def test_status_uses_one_read_snapshot_during_concurrent_commit(
 
     status = store.discovery_status(now_ms=100)
 
-    assert status.groups_seen == 1
+    assert status.groups_seen == 0
     with sqlite3.connect(db_path) as con:
         assert con.execute(
             "SELECT groups_seen FROM neg_risk_discovery_state"

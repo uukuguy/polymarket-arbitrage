@@ -1,6 +1,6 @@
 # Task 6 Implementer Report
 
-Status: AUTHORITY INTEGRITY CLOSURE COMPLETE — verification green
+Status: AUTHORITY MANIFEST CLOSURE COMPLETE — verification green
 
 ## Scope
 
@@ -47,6 +47,19 @@ wallet, signing, balances, orders, or real-money execution.
    requires the final id/hash to equal the consumed guard tail. Pruning advances
    the base atomically; a changed event, missing tail, or broken link fails
    closed.
+9. A clean journal additionally requires SQLite's AUTOINCREMENT sequence and
+   retained MAX/tail to equal the guard's consumed id. Deleting an unconsumed
+   event therefore cannot erase evidence: `sqlite_sequence` remains ahead and
+   read, initialization, and the next writer all fail closed.
+10. The guard is an explicit v2 authority with `migration_state=complete`.
+    Candidate and Discovery authenticated hashes are mandatory in that state;
+    NULL or incomplete guard state is never treated as bootstrap authority.
+11. Initialization classifies the complete owner table/column/trigger manifest
+    before DDL. Only an empty manifest, current v2, or the exact known a527
+    manifest is accepted. A527 windows up to 1,025 retained events are fully
+    replayed under `BEGIN IMMEDIATE`, pruned to 128, rooted, versioned, and
+    revalidated atomically. Partial, unknown, corrupt, timed-out, or racing
+    migrations cannot leave a half-upgraded schema.
 
 ## Truth chain
 
@@ -129,16 +142,17 @@ wallet, signing, balances, orders, or real-money execution.
 
 ```text
 Initial RED: 8 expected failures (404/auth/Make contracts)
-Seven review-remediation rounds: all Important findings covered by adversarial tests
+Eight review-remediation rounds: all Important findings covered by adversarial tests
 Canonical owner mutation matrix: 7 tables x INSERT/UPDATE/DELETE; 21 direct-tamper cases fail closed
 Derived authority matrix: 10 feasible direct I/U/D mutations fail closed; singleton INSERT is schema-impossible
-Canonical trigger matrix: 33 missing-trigger recreations plus 33 drift cases
+Canonical trigger matrix: 33 missing-trigger manifest failures plus 33 SQL drift cases
 Candidate continuity: 10,010 legal writes in 60.62s; 128-row authenticated journal window and bounded raw suffix
 Discovery hot path: incremental per-group projection; no full schedule/fact scan or all-groups JSON parse
 Reconciliation close/change: schedule, admission authority, projection and aggregate synchronize in one transaction
-Perception package: 349 pass
-Full repository: 2765 collected; 2763 pass, 1 expected xfail, 1 skip
-Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> 2642 -> 2654 -> 2723 -> current 2765
+Manifest closure: deleted-pending sequence 9; guard NULL 6; manifest 3; a527 success/rollback/deadline/concurrency 4
+Perception package: 371 pass
+Full repository: 2787 collected; 2785 pass, 1 expected xfail, 1 skip
+Collection audit: 0eb4031 2586 -> 6717e48 2596 -> 2618 -> 2642 -> 2654 -> 2723 -> 2765 -> current 2787
 Ruff changed scope: pass
 compileall: pass
 make docs-m1-check: pass
