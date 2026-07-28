@@ -40,6 +40,10 @@ from polyarb.storage.schemas import (
     V2_CANDIDATE_CURRENT_AGGREGATE_DDL,
     V2_OWNER_JOURNAL_TRIGGER_DDL,
     V2_OWNER_MUTATION_GUARD_DDL,
+    V3_OWNER_JOURNAL_TRIGGER_NAMES,
+    V3_OWNER_MUTATION_GUARD_DDL,
+    V4_EVIDENCE_OWNER_DDL,
+    V4_EVIDENCE_OWNER_JOURNAL_TRIGGER_DDL,
 )
 
 _BUSY_TIMEOUT_MS = 5_000
@@ -61,7 +65,7 @@ _DISCOVERY_STATUS_PROJECTION_DOMAIN = "polyarb-discovery-status-projection-v1"
 _DISCOVERY_STATUS_PROJECTION_VERSION = 1
 _OWNER_MUTATION_JOURNAL_RETAIN_ROWS = 128
 _OWNER_MUTATION_LEGACY_MAX_ROWS = 1_025
-_OWNER_AUTHORITY_VERSION = 3
+_OWNER_AUTHORITY_VERSION = 4
 _CANONICAL_OWNER_TRIGGER_NAMES = frozenset(OWNER_JOURNAL_TRIGGER_NAMES)
 _OWNER_WRITE_ACTIONS = frozenset(
     (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE)
@@ -74,7 +78,16 @@ _OWNER_TABLE_NAMES = (
     "neg_risk_candidate_current_aggregate",
     "neg_risk_discovery_status_projection",
     "neg_risk_discovery_group_projection",
+    "neg_risk_incident_authority_checkpoint",
+    "neg_risk_incident_open_authority",
+    "neg_risk_incident_open_aggregate",
+    "neg_risk_incident_scope_floors",
+    "neg_risk_incident_replay_anchors",
+    "neg_risk_resource_authority_checkpoint",
+    "neg_risk_evidence_failures",
 )
+_V3_OWNER_TABLE_NAMES = _OWNER_TABLE_NAMES[:7]
+_V4_EVIDENCE_OWNER_TABLE_NAMES = _OWNER_TABLE_NAMES[7:]
 _RECONCILIATION_AUTHORITY_DOMAIN = "polyarb-reconciliation-authority-checkpoint-v1"
 _RECONCILIATION_AUTHORITY_VERSION = 1
 _HEARTBEAT_AUTH_DOMAIN = "polyarb-producer-heartbeat-v1"
@@ -1557,9 +1570,10 @@ class OpportunityPerceptionStore:
     def _owner_table_fingerprints(
         cls,
         con: sqlite3.Connection,
+        table_names: tuple[str, ...] = _OWNER_TABLE_NAMES,
     ) -> dict[str, tuple[str, tuple[tuple[object, ...], ...]]]:
         fingerprints = {}
-        for table_name in _OWNER_TABLE_NAMES:
+        for table_name in table_names:
             schema_row = con.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
                 (table_name,),
@@ -1588,13 +1602,14 @@ class OpportunityPerceptionStore:
     def _owner_index_fingerprints(
         cls,
         con: sqlite3.Connection,
+        table_names: tuple[str, ...] = _OWNER_TABLE_NAMES,
     ) -> dict[str, tuple[object, ...]]:
-        placeholders = ",".join("?" for _ in _OWNER_TABLE_NAMES)
+        placeholders = ",".join("?" for _ in table_names)
         index_rows = con.execute(
             "SELECT name,tbl_name,sql FROM sqlite_master "
             f"WHERE type='index' AND sql IS NOT NULL AND tbl_name IN ({placeholders}) "
             "ORDER BY name",
-            _OWNER_TABLE_NAMES,
+            table_names,
         ).fetchall()
         fingerprints: dict[str, tuple[object, ...]] = {}
         for schema_row in index_rows:
@@ -1640,21 +1655,38 @@ class OpportunityPerceptionStore:
         tuple[object, ...],
         tuple[object, ...],
         tuple[object, ...],
+        tuple[object, ...],
     ]:
         current_con = sqlite3.connect(":memory:")
         current_con.row_factory = sqlite3.Row
+        v3_con = sqlite3.connect(":memory:")
+        v3_con.row_factory = sqlite3.Row
         v2_con = sqlite3.connect(":memory:")
         v2_con.row_factory = sqlite3.Row
         a527_con = sqlite3.connect(":memory:")
         a527_con.row_factory = sqlite3.Row
         try:
             current_con.executescript(DDL)
+
+            def downgrade_to_v3(con: sqlite3.Connection) -> None:
+                con.executescript(DDL)
+                for name in (
+                    set(OWNER_JOURNAL_TRIGGER_NAMES)
+                    - set(V3_OWNER_JOURNAL_TRIGGER_NAMES)
+                ):
+                    con.execute(f'DROP TRIGGER "{name}"')
+                for table_name in reversed(_V4_EVIDENCE_OWNER_TABLE_NAMES):
+                    con.execute(f'DROP TABLE "{table_name}"')
+                con.execute("DROP TABLE neg_risk_owner_mutation_guard")
+                con.execute(V3_OWNER_MUTATION_GUARD_DDL)
+
+            downgrade_to_v3(v3_con)
             for historical_con, guard_ddl in (
                 (v2_con, V2_OWNER_MUTATION_GUARD_DDL),
                 (a527_con, A527_OWNER_MUTATION_GUARD_DDL),
             ):
-                historical_con.executescript(DDL)
-                for name in OWNER_JOURNAL_TRIGGER_NAMES:
+                downgrade_to_v3(historical_con)
+                for name in V3_OWNER_JOURNAL_TRIGGER_NAMES:
                     if "candidate_current_aggregate" in name:
                         historical_con.execute(
                             f'DROP TRIGGER "{name}"'
@@ -1677,54 +1709,63 @@ class OpportunityPerceptionStore:
                 historical_con.execute(guard_ddl)
                 historical_con.executescript(V2_OWNER_JOURNAL_TRIGGER_DDL)
 
-            def manifest(con: sqlite3.Connection) -> tuple[object, ...]:
+            def manifest(
+                con: sqlite3.Connection,
+                table_names: tuple[str, ...],
+            ) -> tuple[object, ...]:
                 return (
-                    cls._owner_table_fingerprints(con),
-                    cls._owner_index_fingerprints(con),
+                    cls._owner_table_fingerprints(con, table_names),
+                    cls._owner_index_fingerprints(con, table_names),
                     cls._owner_trigger_fingerprints(con),
                 )
             manifests = (
-                manifest(current_con),
-                manifest(v2_con),
-                manifest(a527_con),
+                manifest(current_con, _OWNER_TABLE_NAMES),
+                manifest(v3_con, _V3_OWNER_TABLE_NAMES),
+                manifest(v2_con, _V3_OWNER_TABLE_NAMES),
+                manifest(a527_con, _V3_OWNER_TABLE_NAMES),
             )
         finally:
             a527_con.close()
             v2_con.close()
+            v3_con.close()
             current_con.close()
         return manifests
 
     @classmethod
     def _owner_manifest_state(cls, con: sqlite3.Connection) -> str:
         owner_tables = set(_OWNER_TABLE_NAMES)
+        v3_owner_tables = set(_V3_OWNER_TABLE_NAMES)
+        placeholders = ",".join("?" for _ in owner_tables)
         present_tables = {
             str(row["name"])
             for row in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND ("
-                "name LIKE 'neg_risk_owner_%' OR name IN (?,?,?,?))",
-                (
-                    "neg_risk_candidate_current_authority",
-                    "neg_risk_candidate_current_aggregate",
-                    "neg_risk_discovery_status_projection",
-                    "neg_risk_discovery_group_projection",
-                ),
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                f"AND name IN ({placeholders})",
+                tuple(owner_tables),
             )
         }
         present_triggers = cls._owner_trigger_fingerprints(con)
         if not present_tables and not present_triggers:
             return "fresh"
-        if present_tables != owner_tables:
+        if present_tables not in (owner_tables, v3_owner_tables):
             raise ValueError("invalid-owner-authority-manifest")
-        current_manifest, v2_manifest, a527_manifest = (
+        current_manifest, v3_manifest, v2_manifest, a527_manifest = (
             cls._expected_owner_manifests()
         )
+        table_names = (
+            _OWNER_TABLE_NAMES
+            if present_tables == owner_tables
+            else _V3_OWNER_TABLE_NAMES
+        )
         actual_manifest = (
-            cls._owner_table_fingerprints(con),
-            cls._owner_index_fingerprints(con),
+            cls._owner_table_fingerprints(con, table_names),
+            cls._owner_index_fingerprints(con, table_names),
             cls._owner_trigger_fingerprints(con),
         )
         if actual_manifest == current_manifest:
             return "current"
+        if actual_manifest == v3_manifest:
+            return "v3"
         if actual_manifest == v2_manifest:
             return "v2"
         if actual_manifest == a527_manifest:
@@ -1732,6 +1773,7 @@ class OpportunityPerceptionStore:
         actual_triggers = actual_manifest[2]
         for expected_manifest in (
             current_manifest,
+            v3_manifest,
             v2_manifest,
             a527_manifest,
         ):
@@ -2141,7 +2183,7 @@ class OpportunityPerceptionStore:
             "ALTER TABLE neg_risk_owner_mutation_guard "
             "RENAME TO neg_risk_owner_mutation_guard_v2"
         )
-        con.execute(OWNER_MUTATION_GUARD_DDL)
+        con.execute(V3_OWNER_MUTATION_GUARD_DDL)
         candidate_hash, discovery_hash = self._owner_aggregate_hashes(con)
         if not hmac.compare_digest(
             str(guard["discovery_aggregate_hash"]),
@@ -2165,6 +2207,81 @@ class OpportunityPerceptionStore:
         )
         con.execute("DROP TABLE neg_risk_owner_mutation_guard_v2")
         con.execute(CANDIDATE_CURRENT_OPPORTUNITY_INDEX_DDL)
+        if self._owner_manifest_state(con) != "v3":
+            raise ValueError("invalid-owner-authority-manifest")
+        self._assert_v3_owner_journal_clean(con)
+
+    @classmethod
+    def _assert_v3_owner_journal_clean(
+        cls,
+        con: sqlite3.Connection,
+    ) -> sqlite3.Row:
+        if cls._owner_manifest_state(con) != "v3":
+            raise ValueError("invalid-owner-authority-manifest")
+        guard = con.execute(
+            "SELECT consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash,authority_version,migration_state "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        if (
+            guard is None
+            or int(guard["authority_version"]) != 3
+            or guard["migration_state"] != "complete"
+            or guard["candidate_aggregate_hash"] is None
+            or guard["discovery_aggregate_hash"] is None
+        ):
+            raise ValueError("invalid-owner-guard-state")
+        cls._validate_owner_journal_chain(
+            con,
+            guard=guard,
+            max_rows=_OWNER_MUTATION_JOURNAL_RETAIN_ROWS,
+        )
+        candidate_hash, discovery_hash = cls._owner_aggregate_hashes(con)
+        if not hmac.compare_digest(
+            str(guard["candidate_aggregate_hash"]),
+            candidate_hash,
+        ) or not hmac.compare_digest(
+            str(guard["discovery_aggregate_hash"]),
+            discovery_hash,
+        ):
+            raise ValueError("invalid-owner-aggregate-authority")
+        return guard
+
+    def _migrate_v3_owner_authority(self, con: sqlite3.Connection) -> None:
+        guard = self._assert_v3_owner_journal_clean(con)
+        self._check_deadline("owner-v3-v4-migration-deadline")
+        for statement in V4_EVIDENCE_OWNER_DDL.split(";"):
+            if statement.strip():
+                con.execute(statement)
+        from polyarb.perception.incidents import IncidentManager
+
+        IncidentManager(self)._bootstrap_v4_authority(con)
+        self._execute_trigger_ddl(
+            con,
+            V4_EVIDENCE_OWNER_JOURNAL_TRIGGER_DDL,
+        )
+        con.execute(
+            "ALTER TABLE neg_risk_owner_mutation_guard "
+            "RENAME TO neg_risk_owner_mutation_guard_v3"
+        )
+        con.execute(OWNER_MUTATION_GUARD_DDL)
+        con.execute(
+            "INSERT INTO neg_risk_owner_mutation_guard("
+            "id,consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash,authority_version,migration_state"
+            ") VALUES(1,?,?,?,?,?,?,4,'complete')",
+            (
+                guard["consumed_journal_id"],
+                guard["consumed_hash"],
+                guard["retained_base_id"],
+                guard["retained_base_hash"],
+                guard["candidate_aggregate_hash"],
+                guard["discovery_aggregate_hash"],
+            ),
+        )
+        con.execute("DROP TABLE neg_risk_owner_mutation_guard_v3")
         if self._owner_manifest_state(con) != "current":
             raise ValueError("invalid-owner-authority-manifest")
         self._assert_owner_journal_clean(con)
@@ -2173,7 +2290,7 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             owner_manifest_state = self._owner_manifest_state(con)
-            if owner_manifest_state in {"a527", "v2"}:
+            if owner_manifest_state in {"a527", "v2", "v3"}:
                 con.execute("BEGIN IMMEDIATE")
                 locked_state = self._owner_manifest_state(con)
                 if locked_state == "a527":
@@ -2181,6 +2298,9 @@ class OpportunityPerceptionStore:
                     locked_state = "v2"
                 if locked_state == "v2":
                     self._migrate_v2_owner_authority(con)
+                    locked_state = "v3"
+                if locked_state == "v3":
+                    self._migrate_v3_owner_authority(con)
                 elif locked_state != "current":
                     raise ValueError("invalid-owner-authority-manifest")
                 con.execute("COMMIT")

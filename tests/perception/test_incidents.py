@@ -347,6 +347,215 @@ def test_historical_non_object_incident_evidence_fails_closed(tmp_path) -> None:
     assert read_perception_recovery_health(store.db_path).evidence_consistent is False
 
 
+def test_incident_writer_compacts_suffix_and_preserves_open_authority(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+
+    for sequence in range(600):
+        now[0] += 1
+        manager.detect(
+            f"candidate:bounded-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+
+    open_incidents = manager.open_incidents()
+    assert len(open_incidents) == 600
+    assert {incident.scope for incident in open_incidents} == {
+        f"candidate:bounded-{sequence}" for sequence in range(600)
+    }
+    with sqlite3.connect(store.db_path) as con:
+        con.row_factory = sqlite3.Row
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_events"
+        ).fetchone()[0] <= 512
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_replay_anchors"
+        ).fetchone()[0] <= 256
+        assert con.execute(
+            "SELECT open_count FROM neg_risk_incident_open_aggregate "
+            "WHERE id=1"
+        ).fetchone()["open_count"] == 600
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_open_authority"
+        ).fetchone()[0] == 600
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_scope_floors"
+        ).fetchone()[0] > 0
+        assert con.execute(
+            "SELECT generation FROM "
+            "neg_risk_incident_authority_checkpoint WHERE id=1"
+        ).fetchone()["generation"] >= 1
+
+
+def test_open_incident_can_transition_after_latest_event_is_compacted(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    target = manager.detect("candidate:compacted-target", "clob-timeout", {})
+    for sequence in range(600):
+        now[0] += 1
+        manager.detect(
+            f"candidate:compaction-pressure-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_incident_events WHERE incident_id=?",
+            (target.id,),
+        ).fetchone() is None
+
+    now[0] += 1
+    transitioned = manager.transition(target.id, "classified", {"operator": "auto"})
+
+    assert transitioned.sequence == 2
+    assert transitioned.state == "classified"
+    with sqlite3.connect(store.db_path) as con:
+        anchor = con.execute(
+            "SELECT sequence,state FROM neg_risk_incident_replay_anchors "
+            "WHERE incident_id=?",
+            (target.id,),
+        ).fetchone()
+    assert anchor == (1, "detected")
+    assert {
+        incident.id: incident.state for incident in manager.open_incidents()
+    }[target.id] == "classified"
+
+
+def test_detect_remains_idempotent_after_open_event_is_compacted(tmp_path) -> None:
+    store = _store(tmp_path)
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    target = manager.detect("discovery", "compacted-timeout", {"attempt": 1})
+    for sequence in range(600):
+        now[0] += 1
+        manager.detect(
+            f"candidate:idempotency-pressure-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+
+    duplicate = manager.detect(
+        "discovery",
+        "compacted-timeout",
+        {"attempt": 2},
+    )
+
+    assert duplicate.id == target.id
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_open_authority "
+            "WHERE scope='discovery' AND kind='compacted-timeout'"
+        ).fetchone()[0] == 1
+
+
+def test_repeated_compaction_removes_or_advances_replay_anchors(tmp_path) -> None:
+    store = _store(tmp_path)
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    target = manager.detect("candidate:repeated-target", "clob-timeout", {})
+    for sequence in range(600):
+        now[0] += 1
+        manager.detect(
+            f"candidate:first-wave-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+    now[0] += 1
+    manager.transition(target.id, "classified", {})
+    for sequence in range(600):
+        now[0] += 1
+        manager.detect(
+            f"candidate:second-wave-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+
+    open_by_id = {incident.id: incident for incident in manager.open_incidents()}
+
+    assert open_by_id[target.id].state == "classified"
+    with sqlite3.connect(store.db_path) as con:
+        retained = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_events WHERE incident_id=?",
+            (target.id,),
+        ).fetchone()[0]
+        anchors = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_replay_anchors "
+            "WHERE incident_id=?",
+            (target.id,),
+        ).fetchone()[0]
+    assert anchors == (1 if retained else 0)
+
+
+def test_compaction_creates_anchor_when_history_crosses_new_floor(tmp_path) -> None:
+    store = _store(tmp_path)
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    for sequence in range(256):
+        now[0] += 1
+        manager.detect(
+            f"candidate:floor-prefix-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+    now[0] += 1
+    target = manager.detect("candidate:cross-floor", "clob-timeout", {})
+    now[0] += 1
+    manager.transition(target.id, "classified", {})
+    for sequence in range(255):
+        now[0] += 1
+        manager.detect(
+            f"candidate:floor-suffix-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+
+    open_by_id = {incident.id: incident for incident in manager.open_incidents()}
+
+    assert open_by_id[target.id].state == "classified"
+    with sqlite3.connect(store.db_path) as con:
+        anchor = con.execute(
+            "SELECT sequence,state FROM neg_risk_incident_replay_anchors "
+            "WHERE incident_id=?",
+            (target.id,),
+        ).fetchone()
+    assert anchor == (1, "detected")
+
+
+def test_checkpoint_content_tamper_fails_closed_after_trigger_is_restored(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    for sequence in range(513):
+        manager.detect(
+            f"candidate:checkpoint-tamper-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+    trigger_name = "trg_owner_incident_authority_checkpoint_update"
+    with sqlite3.connect(store.db_path) as con:
+        trigger_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger_name,),
+        ).fetchone()[0]
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "UPDATE neg_risk_incident_authority_checkpoint "
+            "SET prefix_hash='sha256:forged'"
+        )
+        con.execute(trigger_sql)
+
+    with pytest.raises(ValueError, match="invalid-incident-checkpoint"):
+        manager.open_incidents()
+
+
 def test_candidate_recovery_rejects_malformed_complete_quote_row(tmp_path) -> None:
     store = _store(tmp_path)
     now = [2_000]

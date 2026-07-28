@@ -100,10 +100,8 @@ CREATE TABLE neg_risk_candidate_current_aggregate (
 )
 """
 
-# Canonical v3 DDL is also explicit so supported migrations can rebuild the
-# table atomically with every constraint, rather than merely appending two
-# nullable columns via ALTER TABLE.
-OWNER_MUTATION_GUARD_DDL = """
+# Frozen v3 owner guard accepted for the supported v3 -> v4 migration.
+V3_OWNER_MUTATION_GUARD_DDL = """
 CREATE TABLE neg_risk_owner_mutation_guard (
   id INTEGER PRIMARY KEY CHECK(id = 1),
   consumed_journal_id INTEGER NOT NULL CHECK(consumed_journal_id >= 0),
@@ -114,6 +112,95 @@ CREATE TABLE neg_risk_owner_mutation_guard (
   discovery_aggregate_hash TEXT,
   authority_version INTEGER NOT NULL CHECK(authority_version = 3),
   migration_state TEXT NOT NULL CHECK(migration_state IN ('building','complete'))
+)
+"""
+
+# Canonical v4 guard. Incident/resource bounded-evidence authorities join the
+# exact owner manifest in this version.
+OWNER_MUTATION_GUARD_DDL = """
+CREATE TABLE neg_risk_owner_mutation_guard (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  consumed_journal_id INTEGER NOT NULL CHECK(consumed_journal_id >= 0),
+  consumed_hash TEXT,
+  retained_base_id INTEGER NOT NULL DEFAULT 0 CHECK(retained_base_id >= 0),
+  retained_base_hash TEXT,
+  candidate_aggregate_hash TEXT,
+  discovery_aggregate_hash TEXT,
+  authority_version INTEGER NOT NULL CHECK(authority_version = 4),
+  migration_state TEXT NOT NULL CHECK(migration_state IN ('building','complete'))
+)
+"""
+
+V4_EVIDENCE_OWNER_DDL = """
+CREATE TABLE neg_risk_incident_authority_checkpoint (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  generation INTEGER NOT NULL CHECK(generation >= 1),
+  through_event_id INTEGER NOT NULL CHECK(through_event_id >= 0),
+  compacted_event_count INTEGER NOT NULL CHECK(compacted_event_count >= 0),
+  prefix_hash TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL
+);
+CREATE TABLE neg_risk_incident_open_authority (
+  incident_id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+  scope TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN
+    ('detected','classified','contained','recovering','escalated')),
+  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+  evidence_json TEXT NOT NULL,
+  recovery_occurred_at_ms INTEGER,
+  recovery_evidence_json TEXT,
+  row_hash TEXT NOT NULL
+);
+CREATE INDEX idx_neg_risk_incident_open_page
+  ON neg_risk_incident_open_authority(occurred_at_ms DESC,incident_id DESC);
+CREATE INDEX idx_neg_risk_incident_open_scope_kind
+  ON neg_risk_incident_open_authority(
+    scope,kind,occurred_at_ms DESC,incident_id DESC);
+CREATE TABLE neg_risk_incident_open_aggregate (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  open_count INTEGER NOT NULL CHECK(open_count >= 0),
+  aggregate_digest TEXT NOT NULL
+);
+CREATE TABLE neg_risk_incident_scope_floors (
+  scope TEXT PRIMARY KEY,
+  through_event_id INTEGER NOT NULL CHECK(through_event_id > 0),
+  compacted_event_count INTEGER NOT NULL CHECK(compacted_event_count > 0),
+  floor_hash TEXT NOT NULL
+);
+CREATE TABLE neg_risk_incident_replay_anchors (
+  incident_id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+  scope TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  state TEXT NOT NULL,
+  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+  evidence_json TEXT NOT NULL,
+  recovery_occurred_at_ms INTEGER,
+  recovery_evidence_json TEXT,
+  row_hash TEXT NOT NULL
+);
+CREATE TABLE neg_risk_resource_authority_checkpoint (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  generation INTEGER NOT NULL CHECK(generation >= 1),
+  through_sample_id INTEGER NOT NULL CHECK(through_sample_id >= 0),
+  through_decision_id INTEGER NOT NULL CHECK(through_decision_id >= 0),
+  through_sequence INTEGER NOT NULL CHECK(through_sequence >= 0),
+  compacted_sample_count INTEGER NOT NULL CHECK(compacted_sample_count >= 0),
+  compacted_decision_count INTEGER NOT NULL CHECK(compacted_decision_count >= 0),
+  prefix_digest TEXT NOT NULL,
+  last_decision_json TEXT,
+  last_decision_digest TEXT,
+  checkpoint_hash TEXT NOT NULL
+);
+CREATE TABLE neg_risk_evidence_failures (
+  component TEXT PRIMARY KEY CHECK(component IN ('incident','resource')),
+  failed_at_ms INTEGER NOT NULL CHECK(failed_at_ms >= 0),
+  reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 64),
+  recovered_at_ms INTEGER
+    CHECK(recovered_at_ms IS NULL OR recovered_at_ms >= failed_at_ms),
+  row_hash TEXT NOT NULL
 )
 """
 
@@ -664,7 +751,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_owner_mutation_guard (
   retained_base_hash TEXT,
   candidate_aggregate_hash TEXT,
   discovery_aggregate_hash TEXT,
-  authority_version INTEGER NOT NULL CHECK(authority_version = 3),
+  authority_version INTEGER NOT NULL CHECK(authority_version = 4),
   migration_state TEXT NOT NULL CHECK(migration_state IN ('building','complete'))
 );
 
@@ -905,6 +992,85 @@ CREATE TABLE IF NOT EXISTS neg_risk_incident_events (
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_incident_scope
   ON neg_risk_incident_events(scope,kind,id);
+
+CREATE TABLE IF NOT EXISTS neg_risk_incident_authority_checkpoint (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  generation INTEGER NOT NULL CHECK(generation >= 1),
+  through_event_id INTEGER NOT NULL CHECK(through_event_id >= 0),
+  compacted_event_count INTEGER NOT NULL CHECK(compacted_event_count >= 0),
+  prefix_hash TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_incident_open_authority (
+  incident_id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+  scope TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN
+    ('detected','classified','contained','recovering','escalated')),
+  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+  evidence_json TEXT NOT NULL,
+  recovery_occurred_at_ms INTEGER,
+  recovery_evidence_json TEXT,
+  row_hash TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_incident_open_page
+  ON neg_risk_incident_open_authority(occurred_at_ms DESC,incident_id DESC);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_incident_open_scope_kind
+  ON neg_risk_incident_open_authority(
+    scope,kind,occurred_at_ms DESC,incident_id DESC);
+
+CREATE TABLE IF NOT EXISTS neg_risk_incident_open_aggregate (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  open_count INTEGER NOT NULL CHECK(open_count >= 0),
+  aggregate_digest TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_incident_scope_floors (
+  scope TEXT PRIMARY KEY,
+  through_event_id INTEGER NOT NULL CHECK(through_event_id > 0),
+  compacted_event_count INTEGER NOT NULL CHECK(compacted_event_count > 0),
+  floor_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_incident_replay_anchors (
+  incident_id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+  scope TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  state TEXT NOT NULL,
+  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+  evidence_json TEXT NOT NULL,
+  recovery_occurred_at_ms INTEGER,
+  recovery_evidence_json TEXT,
+  row_hash TEXT NOT NULL
+);
+
+-- Created by the v3 -> v4 owner migration so Task 4 can compact resource
+-- evidence without another authority-version transition.
+CREATE TABLE IF NOT EXISTS neg_risk_resource_authority_checkpoint (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  generation INTEGER NOT NULL CHECK(generation >= 1),
+  through_sample_id INTEGER NOT NULL CHECK(through_sample_id >= 0),
+  through_decision_id INTEGER NOT NULL CHECK(through_decision_id >= 0),
+  through_sequence INTEGER NOT NULL CHECK(through_sequence >= 0),
+  compacted_sample_count INTEGER NOT NULL CHECK(compacted_sample_count >= 0),
+  compacted_decision_count INTEGER NOT NULL CHECK(compacted_decision_count >= 0),
+  prefix_digest TEXT NOT NULL,
+  last_decision_json TEXT,
+  last_decision_digest TEXT,
+  checkpoint_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_evidence_failures (
+  component TEXT PRIMARY KEY CHECK(component IN ('incident','resource')),
+  failed_at_ms INTEGER NOT NULL CHECK(failed_at_ms >= 0),
+  reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 64),
+  recovered_at_ms INTEGER
+    CHECK(recovered_at_ms IS NULL OR recovered_at_ms >= failed_at_ms),
+  row_hash TEXT NOT NULL
+);
 
 -- Operator controls are wake-up hints for already-enabled bounded producers.
 -- Authentication nonces are durable so replay protection survives restarts.
@@ -1254,11 +1420,47 @@ OWNER_JOURNAL_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "neg_risk_discovery_group_projection": (
         "group_id", "visit_anchor_ms", "payload_json", "row_hash",
     ),
+    "neg_risk_incident_authority_checkpoint": (
+        "id", "generation", "through_event_id", "compacted_event_count",
+        "prefix_hash", "checkpoint_hash",
+    ),
+    "neg_risk_incident_open_authority": (
+        "incident_id", "sequence", "scope", "kind", "state",
+        "occurred_at_ms", "evidence_json", "recovery_occurred_at_ms",
+        "recovery_evidence_json", "row_hash",
+    ),
+    "neg_risk_incident_open_aggregate": (
+        "id", "open_count", "aggregate_digest",
+    ),
+    "neg_risk_incident_scope_floors": (
+        "scope", "through_event_id", "compacted_event_count", "floor_hash",
+    ),
+    "neg_risk_incident_replay_anchors": (
+        "incident_id", "sequence", "scope", "kind", "state",
+        "occurred_at_ms", "evidence_json", "recovery_occurred_at_ms",
+        "recovery_evidence_json", "row_hash",
+    ),
+    "neg_risk_resource_authority_checkpoint": (
+        "id", "generation", "through_sample_id", "through_decision_id",
+        "through_sequence", "compacted_sample_count",
+        "compacted_decision_count", "prefix_digest", "last_decision_json",
+        "last_decision_digest", "checkpoint_hash",
+    ),
+    "neg_risk_evidence_failures": (
+        "component", "failed_at_ms", "reason", "recovered_at_ms", "row_hash",
+    ),
 }
 
 OWNER_JOURNAL_TABLE_ROW_KEYS: dict[str, str] = {
     "neg_risk_candidate_current_aggregate": "CAST({alias}.id AS TEXT)",
     "neg_risk_discovery_status_projection": "CAST({alias}.id AS TEXT)",
+    "neg_risk_incident_authority_checkpoint": "CAST({alias}.id AS TEXT)",
+    "neg_risk_incident_open_authority": "{alias}.incident_id",
+    "neg_risk_incident_open_aggregate": "CAST({alias}.id AS TEXT)",
+    "neg_risk_incident_scope_floors": "{alias}.scope",
+    "neg_risk_incident_replay_anchors": "{alias}.incident_id",
+    "neg_risk_resource_authority_checkpoint": "CAST({alias}.id AS TEXT)",
+    "neg_risk_evidence_failures": "{alias}.component",
 }
 
 # Complete attachment scope for authority-sensitive triggers. This includes
@@ -1278,6 +1480,13 @@ OWNER_TRIGGER_TABLES: tuple[str, ...] = (
     "neg_risk_candidate_current_aggregate",
     "neg_risk_discovery_status_projection",
     "neg_risk_discovery_group_projection",
+    "neg_risk_incident_authority_checkpoint",
+    "neg_risk_incident_open_authority",
+    "neg_risk_incident_open_aggregate",
+    "neg_risk_incident_scope_floors",
+    "neg_risk_incident_replay_anchors",
+    "neg_risk_resource_authority_checkpoint",
+    "neg_risk_evidence_failures",
     "neg_risk_owner_mutation_journal",
     "neg_risk_owner_mutation_guard",
     "neg_risk_owner_write_context",
@@ -1332,6 +1541,29 @@ def _owner_journal_triggers(
 
 _OWNER_TRIGGER_DDL, OWNER_JOURNAL_TRIGGER_NAMES = _owner_journal_triggers()
 OWNER_JOURNAL_TRIGGER_DDL = _OWNER_TRIGGER_DDL
+_V4_EVIDENCE_OWNER_TABLES = {
+    "neg_risk_incident_authority_checkpoint",
+    "neg_risk_incident_open_authority",
+    "neg_risk_incident_open_aggregate",
+    "neg_risk_incident_scope_floors",
+    "neg_risk_incident_replay_anchors",
+    "neg_risk_resource_authority_checkpoint",
+    "neg_risk_evidence_failures",
+}
+_V3_OWNER_JOURNAL_TABLE_COLUMNS = {
+    table: columns
+    for table, columns in OWNER_JOURNAL_TABLE_COLUMNS.items()
+    if table not in _V4_EVIDENCE_OWNER_TABLES
+}
+V3_OWNER_JOURNAL_TRIGGER_DDL, V3_OWNER_JOURNAL_TRIGGER_NAMES = (
+    _owner_journal_triggers(_V3_OWNER_JOURNAL_TABLE_COLUMNS)
+)
+V4_EVIDENCE_OWNER_JOURNAL_TRIGGER_DDL, _ = _owner_journal_triggers(
+    {
+        table: OWNER_JOURNAL_TABLE_COLUMNS[table]
+        for table in _V4_EVIDENCE_OWNER_TABLES
+    }
+)
 (
     CANDIDATE_CURRENT_AGGREGATE_TRIGGER_DDL,
     _,
@@ -1343,7 +1575,7 @@ OWNER_JOURNAL_TRIGGER_DDL = _OWNER_TRIGGER_DDL
             ]
     }
 )
-_V2_OWNER_JOURNAL_TABLE_COLUMNS = dict(OWNER_JOURNAL_TABLE_COLUMNS)
+_V2_OWNER_JOURNAL_TABLE_COLUMNS = dict(_V3_OWNER_JOURNAL_TABLE_COLUMNS)
 _V2_OWNER_JOURNAL_TABLE_COLUMNS["neg_risk_candidate_current_aggregate"] = (
     "id",
     "current_group_count",
