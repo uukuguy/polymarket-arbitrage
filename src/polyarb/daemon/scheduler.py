@@ -41,6 +41,7 @@ from enum import StrEnum
 
 from loguru import logger
 
+from polyarb.daemon.structure_schedule import derive_structure_schedule
 from polyarb.validator.category import SnapshotStatus
 
 
@@ -288,6 +289,88 @@ class SnapshotScheduler:
         self.state = SchedulerState.RUNNING
         self._request_now_event = asyncio.Event()
         self._restore_state()
+        self._effective_timeout_s = int(SNAPSHOT_SUBPROCESS_TIMEOUT_S)
+        self._effective_cadence_s = int(
+            getattr(settings, "scheduler_interval_s", 300)
+        )
+        self._restore_effective_schedule()
+
+    @property
+    def effective_timeout_s(self) -> int:
+        return self._effective_timeout_s
+
+    @property
+    def effective_cadence_s(self) -> int:
+        return self._effective_cadence_s
+
+    def _restore_effective_schedule(self) -> None:
+        """Restore or derive one bounded schedule from durable attempt truth."""
+        try:
+            latest_adjustment = (
+                self._sqlite_store.get_latest_structure_schedule_adjustment()
+            )
+            if latest_adjustment is not None:
+                self._effective_timeout_s = int(latest_adjustment["timeout_s"])
+                self._effective_cadence_s = int(latest_adjustment["cadence_s"])
+
+            attempts = self._sqlite_store.get_snapshot_attempts(limit=30)
+            if not attempts:
+                return
+            source_attempt_id = max(int(row["id"]) for row in attempts)
+            latest_source_id = (
+                int(latest_adjustment["source_attempt_id"])
+                if latest_adjustment is not None
+                else None
+            )
+            if latest_source_id == source_attempt_id:
+                return
+
+            attempts_since_adjustment = (
+                max(0, source_attempt_id - latest_source_id)
+                if latest_source_id is not None
+                else 3
+            )
+            decision = derive_structure_schedule(
+                attempts,
+                configured_timeout_s=int(SNAPSHOT_SUBPROCESS_TIMEOUT_S),
+                configured_cadence_s=int(
+                    getattr(self._settings, "scheduler_interval_s", 300)
+                ),
+                previous_timeout_s=self._effective_timeout_s,
+                previous_cadence_s=self._effective_cadence_s,
+                attempts_since_adjustment=attempts_since_adjustment,
+            )
+            changed = (
+                decision.timeout_s != self._effective_timeout_s
+                or decision.cadence_s != self._effective_cadence_s
+            )
+            if not changed:
+                return
+            previous_timeout_s = self._effective_timeout_s
+            previous_cadence_s = self._effective_cadence_s
+            self._sqlite_store.append_structure_schedule_adjustment(
+                source_attempt_id=source_attempt_id,
+                decided_at_ms=int(time.time() * 1_000),
+                success_sample_count=decision.success_sample_count,
+                success_p95_s=decision.success_p95_s,
+                previous_timeout_s=previous_timeout_s,
+                previous_cadence_s=previous_cadence_s,
+                timeout_s=decision.timeout_s,
+                cadence_s=decision.cadence_s,
+                reason=decision.reason,
+            )
+            self._effective_timeout_s = decision.timeout_s
+            self._effective_cadence_s = decision.cadence_s
+            logger.info(
+                "structure schedule adjusted "
+                f"timeout_s={decision.timeout_s} cadence_s={decision.cadence_s} "
+                f"reason={decision.reason} source_attempt_id={source_attempt_id}"
+            )
+        except Exception as error:  # noqa: BLE001 - static config remains safe fallback
+            logger.warning(
+                "could not restore adaptive structure schedule "
+                f"kind={type(error).__name__}"
+            )
 
     def _restore_state(self) -> None:
         """Read scheduler_state from SQLite and restore counter + state."""
@@ -324,7 +407,7 @@ class SnapshotScheduler:
         This method is injectable — tests replace it with AsyncMock.
         Real prod wires it to the orchestrator in Plan 04.
         """
-        return await run_snapshot_in_subprocess()
+        return await run_snapshot_in_subprocess(timeout_s=self._effective_timeout_s)
 
     async def _on_paused(self) -> None:
         """Alert hook called when scheduler transitions to PAUSED state.
@@ -496,6 +579,7 @@ class SnapshotScheduler:
 
         # Persist counter before pause check
         self._persist_counter()
+        self._restore_effective_schedule()
 
         # Transition to PAUSED if threshold reached
         if self._failure_counter >= self.FAILURE_THRESHOLD:
@@ -565,8 +649,11 @@ class SnapshotScheduler:
         asyncio.wait_for on stop_event so cancellation interrupts the wait
         immediately rather than after the next 1s tick.
         """
-        interval_s = self._settings.scheduler_interval_s
-        logger.info(f"scheduler loop started, tick interval={interval_s}s")
+        logger.info(
+            "scheduler loop started, "
+            f"tick interval={self._effective_cadence_s}s "
+            f"snapshot timeout={self._effective_timeout_s}s"
+        )
 
         try:
             # Delay first tick 10s so uvicorn fully starts and Fly's health
@@ -580,7 +667,10 @@ class SnapshotScheduler:
 
             while not stop_event.is_set():
                 await self._tick()
-                if await self._wait_for_next_tick(stop_event, interval_s):
+                if await self._wait_for_next_tick(
+                    stop_event,
+                    self._effective_cadence_s,
+                ):
                     break
         except asyncio.CancelledError:
             # F-04: graceful cancellation path. main.py may cancel this task

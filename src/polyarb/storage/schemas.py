@@ -485,6 +485,23 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_attempts_started_at_ms
 ON snapshot_attempts(started_at_ms DESC);
 """
 
+STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS structure_schedule_adjustments (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_attempt_id    INTEGER NOT NULL UNIQUE REFERENCES snapshot_attempts(id),
+    decided_at_ms        INTEGER NOT NULL,
+    success_sample_count INTEGER NOT NULL,
+    success_p95_s        INTEGER,
+    previous_timeout_s   INTEGER NOT NULL,
+    previous_cadence_s   INTEGER NOT NULL,
+    timeout_s            INTEGER NOT NULL,
+    cadence_s            INTEGER NOT NULL,
+    reason               TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_structure_schedule_adjustments_decided_at
+ON structure_schedule_adjustments(decided_at_ms DESC);
+"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 03.1 Plan 01: l2_mirror_state singleton table (GAP-2 + GAP-3)
 #

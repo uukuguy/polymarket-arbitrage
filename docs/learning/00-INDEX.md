@@ -41,6 +41,7 @@
 | 26 | [M1 数据层与失败事实](26-M1数据层与失败事实.md) | 为什么“旧快照仍新鲜”不能掩盖新 OOM / published truth 与 scheduler attempt 的边界 / 为什么 L2 不应阻塞 L1 recovery |
 | 27 | [Structure 与 Archive：把市场成员关系从历史归档中救出来](27-Structure与Archive分层.md) | 为什么 Gamma 结构、可交易报价和历史文件不能绑成同一项作业 / Archive 失败为何不能拖垮 M2 |
 | 29 | [Structure Snapshot 阶段诊断：超时先定位，再决定实验](29-structure-snapshot-stage-diagnostics.md) | 如何把 `gamma-markets` timeout 与健康完成区分开 / stage、elapsed 的证据链 / 为什么诊断不能自动触发调参 |
+| 30 | [Structure 动态时钟](30-structure-adaptive-schedule.md) | 成功时长 p95 如何控制 timeout/cadence / timeout 立即退避与普通冷却 / 重启幂等 / health chain-truth |
 
 ## Phase 02.1 教学增量（2026-05）
 

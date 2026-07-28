@@ -361,6 +361,44 @@ def _build_health_checks(
         ]
 
     # ── Check 2.5: parent-observed scheduler attempt truth ───────────────
+    from polyarb.daemon.scheduler import SNAPSHOT_SUBPROCESS_TIMEOUT_S
+
+    schedule_adjustment = store.get_latest_structure_schedule_adjustment()
+    configured_timeout_s = int(SNAPSHOT_SUBPROCESS_TIMEOUT_S)
+    configured_cadence_s = int(settings.scheduler_interval_s)
+    if schedule_adjustment is None:
+        effective_timeout_s = configured_timeout_s
+        effective_cadence_s = configured_cadence_s
+        schedule_value = "configured"
+        success_sample_count = 0
+        success_p95_s: object = None
+        schedule_reason = "configured"
+    else:
+        effective_timeout_s = int(schedule_adjustment["timeout_s"])
+        effective_cadence_s = int(schedule_adjustment["cadence_s"])
+        schedule_value = "adaptive"
+        success_sample_count = int(schedule_adjustment["success_sample_count"])
+        success_p95_s = schedule_adjustment["success_p95_s"]
+        schedule_reason = str(schedule_adjustment["reason"])
+
+    checks["snapshot:schedule"] = [
+        {
+            "componentId": "snapshot-scheduler",
+            "componentType": "component",
+            "observedValue": schedule_value,
+            "status": "pass",
+            "output": (
+                f"configured_timeout_s={configured_timeout_s} "
+                f"effective_timeout_s={effective_timeout_s} "
+                f"configured_cadence_s={configured_cadence_s} "
+                f"effective_cadence_s={effective_cadence_s} "
+                f"success_samples={success_sample_count} "
+                f"success_p95_s={success_p95_s} reason={schedule_reason}"
+            ),
+            "time": _utc_now_iso(),
+        }
+    ]
+
     latest_attempt = store.get_latest_snapshot_attempt()
     if latest_attempt is None:
         attempt_value = "never-started"
@@ -385,13 +423,11 @@ def _build_health_checks(
         if attempt_value in {"failed", "cancelled"}:
             attempt_status = "warn" if truth_age_status == "pass" else "fail"
         elif attempt_value == "running":
-            from polyarb.daemon.scheduler import SNAPSHOT_SUBPROCESS_TIMEOUT_S
-
             attempt_age_s = max(
                 0.0,
                 now_s - int(latest_attempt["started_at_ms"]) / 1000.0,
             )
-            if attempt_age_s > SNAPSHOT_SUBPROCESS_TIMEOUT_S:
+            if attempt_age_s > effective_timeout_s:
                 attempt_status = "fail"
                 attempt_output = "snapshot-subprocess-timeout-exceeded"
             else:

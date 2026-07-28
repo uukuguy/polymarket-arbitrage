@@ -42,7 +42,7 @@ def _insert_snapshot(
     event_count: int = 20,
     failure_source: str | None = None,
     failure_reason: str | None = None,
-) -> None:
+) -> int:
     """Insert a minimal snapshots row so get_latest_snapshot has data."""
     from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -90,6 +90,7 @@ def _insert_snapshot(
         con.commit()
     finally:
         con.close()
+    return int(snapshot_id)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +334,55 @@ def test_health_omits_stage_for_historical_attempt_without_diagnostics(
 
     assert attempt["output"] == "snapshot-status-failed"
     assert "stage=" not in attempt["output"]
+
+
+def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """Adaptive timeout is the running-attempt health deadline."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1000)
+    snapshot_id = _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=now_ms - 2_000,
+    )
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    source_attempt_id = store.begin_snapshot_attempt(started_at_ms=now_ms - 300_000)
+    store.finish_snapshot_attempt(
+        attempt_id=source_attempt_id,
+        outcome="succeeded",
+        finished_at_ms=now_ms - 50_000,
+        snapshot_id=snapshot_id,
+        failure_kind=None,
+    )
+    store.append_structure_schedule_adjustment(
+        source_attempt_id=source_attempt_id,
+        decided_at_ms=now_ms - 40_000,
+        success_sample_count=10,
+        success_p95_s=236,
+        previous_timeout_s=240,
+        previous_cadence_s=300,
+        timeout_s=288,
+        cadence_s=348,
+        reason="timeout-backoff",
+    )
+    store.begin_snapshot_attempt(started_at_ms=now_ms - 250_000)
+
+    response = http_test_client.get("/health")
+
+    checks = response.json()["checks"]
+    assert checks["snapshot:latest_attempt"][0]["observedValue"] == "running"
+    assert checks["snapshot:latest_attempt"][0]["status"] == "pass"
+    schedule = checks["snapshot:schedule"][0]
+    assert schedule["observedValue"] == "adaptive"
+    assert schedule["status"] == "pass"
+    assert schedule["output"] == (
+        "configured_timeout_s=240 effective_timeout_s=288 "
+        "configured_cadence_s=3600 effective_cadence_s=348 "
+        "success_samples=10 success_p95_s=236 reason=timeout-backoff"
+    )
 
 
 def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(

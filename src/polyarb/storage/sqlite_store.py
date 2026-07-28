@@ -37,6 +37,7 @@ from polyarb.storage.schemas import (
     MARKETS_INSERT_SQL,
     SCHEDULER_STATE_DDL,
     SNAPSHOT_ATTEMPTS_DDL,
+    STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL,
 )
 from polyarb.validator.category import Category, Issue, SnapshotStatus
 from polyarb.validator.layers import determine_snapshot_status
@@ -403,6 +404,7 @@ class SQLiteStore:
             con.executescript(SCHEDULER_STATE_DDL)
             # Parent-observed outcomes for isolated scheduler snapshot children.
             con.executescript(SNAPSHOT_ATTEMPTS_DDL)
+            con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)
             # Phase 03.1 Plan 01: l2_mirror_state singleton (GAP-2 + GAP-3)
             con.executescript(L2_MIRROR_STATE_DDL)
 
@@ -1021,6 +1023,113 @@ class SQLiteStore:
                 "last_stage": row[6],
                 "elapsed_ms": row[7],
             }
+        finally:
+            con.close()
+
+    def get_snapshot_attempts(self, *, limit: int = 30) -> list[dict[str, object]]:
+        """Read bounded newest scheduler attempt evidence for timing policy."""
+        bounded_limit = max(1, min(int(limit), 100))
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            return []
+        try:
+            rows = con.execute(
+                "SELECT id,started_at_ms,finished_at_ms,outcome,snapshot_id,"
+                "failure_kind,last_stage,elapsed_ms "
+                "FROM snapshot_attempts ORDER BY id DESC LIMIT ?",
+                (bounded_limit,),
+            ).fetchall()
+            keys = (
+                "id",
+                "started_at_ms",
+                "finished_at_ms",
+                "outcome",
+                "snapshot_id",
+                "failure_kind",
+                "last_stage",
+                "elapsed_ms",
+            )
+            return [dict(zip(keys, row, strict=True)) for row in rows]
+        finally:
+            con.close()
+
+    def append_structure_schedule_adjustment(
+        self,
+        *,
+        source_attempt_id: int,
+        decided_at_ms: int,
+        success_sample_count: int,
+        success_p95_s: int | None,
+        previous_timeout_s: int,
+        previous_cadence_s: int,
+        timeout_s: int,
+        cadence_s: int,
+        reason: str,
+    ) -> None:
+        """Append one auditable effective-schedule change exactly once."""
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.execute(
+                "INSERT INTO structure_schedule_adjustments("
+                "source_attempt_id,decided_at_ms,success_sample_count,success_p95_s,"
+                "previous_timeout_s,previous_cadence_s,timeout_s,cadence_s,reason"
+                ") VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    source_attempt_id,
+                    decided_at_ms,
+                    success_sample_count,
+                    success_p95_s,
+                    previous_timeout_s,
+                    previous_cadence_s,
+                    timeout_s,
+                    cadence_s,
+                    reason,
+                ),
+            )
+        finally:
+            con.close()
+
+    def get_latest_structure_schedule_adjustment(
+        self,
+    ) -> dict[str, object] | None:
+        """Read the newest persisted effective Structure schedule."""
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            return None
+        try:
+            row = con.execute(
+                "SELECT source_attempt_id,success_sample_count,success_p95_s,"
+                "previous_timeout_s,previous_cadence_s,timeout_s,cadence_s,reason "
+                "FROM structure_schedule_adjustments ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            keys = (
+                "source_attempt_id",
+                "success_sample_count",
+                "success_p95_s",
+                "previous_timeout_s",
+                "previous_cadence_s",
+                "timeout_s",
+                "cadence_s",
+                "reason",
+            )
+            return dict(zip(keys, row, strict=True))
+        finally:
+            con.close()
+
+    def count_structure_schedule_adjustments(self) -> int:
+        """Return the append-only adjustment count for invariant checks."""
+        con = sqlite3.connect(self._db_path)
+        try:
+            row = con.execute(
+                "SELECT COUNT(*) FROM structure_schedule_adjustments"
+            ).fetchone()
+            return int(row[0]) if row is not None else 0
         finally:
             con.close()
 
