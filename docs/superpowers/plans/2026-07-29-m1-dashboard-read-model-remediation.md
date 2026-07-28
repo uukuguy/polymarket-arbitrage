@@ -44,8 +44,10 @@ React 19, TypeScript, Make.
 - Modify: `dashboard/lib/perception.ts`
 - Modify: `dashboard/lib/types.ts`
 - Modify: `dashboard/app/perception/page.tsx`
+- Modify: `docs/M1-市场感知平台使用手册.md`
 - Modify: `tests/m1-perception/test_perception_http.py`
 - Modify: `tests/m1-perception/test_dashboard_perception_contract.py`
+- Create: `tests/m1-perception/perception_contract_cases.mjs`
 
 **Public contract**
 

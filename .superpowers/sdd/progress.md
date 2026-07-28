@@ -41,4 +41,13 @@ Baseline: `00bac7b`
 - Task 7: pending
 - Task 8: pending
 
+Task 7 read-model remediation:
+
+- Task 1: complete (commits 8ba84cb..b9b5afa, review clean; 37 focused contracts)
+- Task 2: pending
+- Task 3: pending
+- Task 4: pending
+- Task 5: pending
+- Task 6: pending
+
 Minor review findings to revisit in final whole-branch review: none.
