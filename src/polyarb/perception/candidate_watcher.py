@@ -480,6 +480,20 @@ class CandidateWatcher:
             observed_at_ms=observed_at_ms,
             last_result=status,
         )
+        decision = self._store.latest_resource_decision()
+        if decision is not None and priority != "high":
+            multiplier = float(decision["normal_candidate_interval_multiplier"])
+            interval_s = min(120.0, transition.effective_interval_s * multiplier)
+            transition = replace(
+                transition,
+                effective_interval_s=interval_s,
+                next_due_at_ms=observed_at_ms + int(interval_s * 1_000),
+                reason=(
+                    f"{transition.reason}:resource-{decision['mode']}"
+                    if multiplier != 1.0
+                    else transition.reason
+                ),
+            )
         terminal_fields = dict(
             observed_at_ms=observed_at_ms,
             last_result=status,
@@ -856,6 +870,11 @@ class CandidateWatcherScheduler:
                 delay_s = self._poll_interval_s
                 try:
                     await self.run_due_once()
+                    await asyncio.to_thread(
+                        self._store.record_producer_heartbeat,
+                        "candidate",
+                        observed_at_ms=self._clock_ms(),
+                    )
                     # Only the source/enumeration boundary is recovered here.
                     # Per-group recovery is recorded by the same group succeeding.
                     self._runtime.record_supervisor_recovery()

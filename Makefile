@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -68,6 +68,11 @@ reconcile-market-map:
 reconciliation-status:
 	@test -n "$(db_path)" || (echo "usage: make reconciliation-status db_path=/path/to/state.db" >&2; exit 2)
 	@uv run python -m polyarb.cli_reconciliation status --db-path "$(db_path)"
+
+## run-perception-worker: Run one isolated supervised producer; usage component=candidate|discovery|reconciliation.
+run-perception-worker:
+	@case "$(component)" in candidate|discovery|reconciliation) ;; *) echo "usage: make run-perception-worker component=candidate|discovery|reconciliation" >&2; exit 2;; esac
+	@uv run python -m polyarb.perception.worker_cli "$(component)"
 
 .PHONY: docs-m1-check
 

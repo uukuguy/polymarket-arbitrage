@@ -45,6 +45,7 @@
 | 31 | [Opportunity-first 按组盯盘](31-opportunity-first-group-watch.md) | 为什么在线正确性边界是一个完整组 / before→books→after 如何阻止混腿 / 候选失败为何不降级优先级 / durable due time 如何跨重启 |
 | 32 | [Bounded Discovery](32-bounded-discovery.md) | opaque cursor 与页面事务 / promotion 前的真实组认证 / Decimal priority 与 age anti-starvation / 15-30-60 分钟统计覆盖 |
 | 33 | [Checkpointed Full Reconciliation](33-checkpointed-reconciliation.md) | 慢地图如何分页续跑 / terminal completion proof / 原子 diff / 并发 Discovery 与 closure authority |
+| 34 | [M1 异常恢复](34-M1异常恢复.md) | append-only incident / writer-side recovery proof / resource shedding 与 cooldown / shell-free producer isolation |
 
 ## Phase 02.1 教学增量（2026-05）
 

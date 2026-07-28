@@ -233,6 +233,18 @@ class DiscoveryLoadState:
     updated_at_ms: int
 
 
+@dataclass(frozen=True)
+class ProducerReceipt:
+    component: str
+    attempt: int
+    started_at_ms: int
+    finished_at_ms: int
+    outcome: str
+    exit_code: int | None
+    stdout_tail: str
+    stderr_tail: str
+
+
 class OpportunityPerceptionStore:
     """Transactional opportunity-first perception read model."""
 
@@ -241,6 +253,10 @@ class OpportunityPerceptionStore:
         self._read_only = read_only
         if not read_only:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
 
     def init_schema(self) -> None:
         con = self._connect()
@@ -2904,6 +2920,158 @@ class OpportunityPerceptionStore:
             schedule_reason=str(row[13]),
             next_due_at_ms=int(row[14]),
         )
+
+    def record_http_probe(
+        self,
+        *,
+        release_id: str,
+        started_at_ms: int,
+        finished_at_ms: int,
+        responsive: bool,
+    ) -> None:
+        if not release_id or started_at_ms < 0 or finished_at_ms < started_at_ms:
+            raise ValueError("invalid-http-probe")
+        con = self._connect()
+        try:
+            con.execute(
+                "INSERT INTO neg_risk_http_probe_receipts("
+                "release_id,started_at_ms,finished_at_ms,responsive"
+                ") VALUES(?,?,?,?)",
+                (release_id, started_at_ms, finished_at_ms, int(responsive)),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def record_producer_receipt(self, receipt: ProducerReceipt) -> None:
+        if (
+            receipt.component not in {"candidate", "discovery", "reconciliation"}
+            or receipt.attempt < 1
+            or receipt.started_at_ms < 0
+            or receipt.finished_at_ms < receipt.started_at_ms
+            or receipt.outcome not in {"success", "nonzero", "timeout", "cancelled", "spawn-error"}
+            or len(receipt.stdout_tail.encode()) > 16_384
+            or len(receipt.stderr_tail.encode()) > 16_384
+        ):
+            raise ValueError("invalid-producer-receipt")
+        con = self._connect()
+        try:
+            con.execute(
+                "INSERT INTO neg_risk_producer_receipts("
+                "component,attempt,started_at_ms,finished_at_ms,outcome,"
+                "exit_code,stdout_tail,stderr_tail) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    receipt.component,
+                    receipt.attempt,
+                    receipt.started_at_ms,
+                    receipt.finished_at_ms,
+                    receipt.outcome,
+                    receipt.exit_code,
+                    receipt.stdout_tail,
+                    receipt.stderr_tail,
+                ),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def producer_receipts(self, component: str) -> tuple[ProducerReceipt, ...]:
+        if component not in {"candidate", "discovery", "reconciliation"}:
+            raise ValueError("invalid-producer-component")
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT * FROM neg_risk_producer_receipts WHERE component=? ORDER BY attempt",
+                (component,),
+            ).fetchall()
+            return tuple(
+                ProducerReceipt(
+                    component=row["component"],
+                    attempt=row["attempt"],
+                    started_at_ms=row["started_at_ms"],
+                    finished_at_ms=row["finished_at_ms"],
+                    outcome=row["outcome"],
+                    exit_code=row["exit_code"],
+                    stdout_tail=row["stdout_tail"],
+                    stderr_tail=row["stderr_tail"],
+                )
+                for row in rows
+            )
+        finally:
+            con.close()
+
+    def producer_state(self, component: str) -> str:
+        receipts = self.producer_receipts(component)
+        return receipts[-1].outcome if receipts else "never-started"
+
+    def record_producer_heartbeat(
+        self, component: str, *, observed_at_ms: int, state: str = "progress"
+    ) -> None:
+        if (
+            component not in {"candidate", "discovery", "reconciliation"}
+            or observed_at_ms < 0
+            or state not in {"progress", "yielded", "paused"}
+        ):
+            raise ValueError("invalid-producer-heartbeat")
+        con = self._connect()
+        try:
+            con.execute(
+                "INSERT INTO neg_risk_producer_heartbeats("
+                "component,observed_at_ms,state) VALUES(?,?,?)",
+                (component, observed_at_ms, state),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def latest_producer_heartbeat_ms(self, component: str) -> int | None:
+        if component not in {"candidate", "discovery", "reconciliation"}:
+            raise ValueError("invalid-producer-component")
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT observed_at_ms FROM neg_risk_producer_heartbeats "
+                "WHERE component=? ORDER BY id DESC LIMIT 1",
+                (component,),
+            ).fetchone()
+            return None if row is None else int(row["observed_at_ms"])
+        finally:
+            con.close()
+
+    def latest_resource_decision(self) -> dict | None:
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT mode,reason,decided_at_ms,decision_json "
+                "FROM neg_risk_resource_decisions ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            decision = json.loads(row["decision_json"])
+            if (
+                decision.get("mode") != row["mode"]
+                or decision.get("reason") != row["reason"]
+                or decision.get("decided_at_ms") != row["decided_at_ms"]
+            ):
+                raise ValueError("invalid-resource-decision")
+            return decision
+        finally:
+            con.close()
+
+    def latest_resource_decision_id(self) -> int | None:
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT id FROM neg_risk_resource_decisions ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            return None if row is None else int(row["id"])
+        finally:
+            con.close()
+
+    def open_incidents(self):
+        from polyarb.perception.incidents import IncidentManager
+
+        return IncidentManager(self).open_incidents()
 
     def _connect(self) -> sqlite3.Connection:
         target = (

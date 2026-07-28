@@ -124,6 +124,19 @@ class Settings(BaseSettings):
     reconciliation_checkpoint_warn_s: float = Field(
         default=900.0, gt=0, allow_inf_nan=False
     )
+    opportunity_producer_supervisor_enabled: bool = False
+    opportunity_resource_controller_enabled: bool = False
+    producer_stall_timeout_s: float = Field(default=180.0, gt=0, allow_inf_nan=False)
+    producer_terminate_grace_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    producer_max_restarts: int = Field(default=3, ge=0, le=10)
+    producer_backoff_initial_s: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    producer_backoff_max_s: float = Field(default=30.0, ge=0, allow_inf_nan=False)
+    resource_hot_quote_age_s: float = Field(default=20.0, gt=0, allow_inf_nan=False)
+    resource_cooldown_s: float = Field(default=30.0, ge=0, allow_inf_nan=False)
+    resource_sample_interval_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    http_recovery_probe_interval_s: float = Field(
+        default=15.0, gt=0, allow_inf_nan=False
+    )
     legacy_structure_reconciliation_enabled: bool = False
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
@@ -400,6 +413,17 @@ class Settings(BaseSettings):
         if self.discovery_effective_admission_capacity <= 0:
             raise ValueError(
                 "candidate timing leaves no proven Discovery promotion capacity"
+            )
+        if self.producer_backoff_max_s < self.producer_backoff_initial_s:
+            raise ValueError(
+                "producer_backoff_max_s must be >= producer_backoff_initial_s"
+            )
+        if (
+            self.opportunity_resource_controller_enabled
+            and not self.opportunity_producer_supervisor_enabled
+        ):
+            raise ValueError(
+                "opportunity resource controller requires producer supervisor"
             )
         # Auto-enable Supabase mirror if both URL + service key are set
         # Phase 03.1-02: same secrets gate l2_mirror_enabled (L2 daemon uses the

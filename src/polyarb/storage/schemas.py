@@ -522,6 +522,72 @@ CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_diff_evidence (
   PRIMARY KEY(window_id,group_id,action)
 );
 
+-- Slice E: every incident transition, load-control input/output and supervised
+-- child termination is an append-only durable fact.
+CREATE TABLE IF NOT EXISTS neg_risk_incident_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  incident_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+  scope TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN
+    ('detected','classified','contained','recovering','verified','escalated')),
+  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+  evidence_json TEXT NOT NULL,
+  UNIQUE(incident_id,sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_incident_scope
+  ON neg_risk_incident_events(scope,kind,id);
+
+CREATE TABLE IF NOT EXISTS neg_risk_http_probe_receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  release_id TEXT NOT NULL,
+  started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+  finished_at_ms INTEGER NOT NULL CHECK(finished_at_ms >= started_at_ms),
+  responsive INTEGER NOT NULL CHECK(responsive IN (0,1))
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_resource_samples (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+  sample_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_resource_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sample_id INTEGER NOT NULL REFERENCES neg_risk_resource_samples(id),
+  decided_at_ms INTEGER NOT NULL CHECK(decided_at_ms >= 0),
+  mode TEXT NOT NULL CHECK(mode IN
+    ('normal','protect-hot-path','empty-candidate-exploration')),
+  reason TEXT NOT NULL,
+  decision_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_producer_receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  component TEXT NOT NULL CHECK(component IN
+    ('candidate','discovery','reconciliation')),
+  attempt INTEGER NOT NULL CHECK(attempt >= 1),
+  started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+  finished_at_ms INTEGER NOT NULL CHECK(finished_at_ms >= started_at_ms),
+  outcome TEXT NOT NULL CHECK(outcome IN
+    ('success','nonzero','timeout','cancelled','spawn-error')),
+  exit_code INTEGER,
+  stdout_tail TEXT NOT NULL,
+  stderr_tail TEXT NOT NULL,
+  UNIQUE(component,attempt)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_producer_heartbeats (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  component TEXT NOT NULL CHECK(component IN
+    ('candidate','discovery','reconciliation')),
+  observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+  state TEXT NOT NULL CHECK(state IN ('progress','yielded','paused'))
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_producer_heartbeat_component
+  ON neg_risk_producer_heartbeats(component,id);
+
 -- Phase 1.1 T2: append-only translation cache.
 -- Invariants:
 --  * never DELETE FROM (cumulative across snapshots)

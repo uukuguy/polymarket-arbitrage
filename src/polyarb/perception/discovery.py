@@ -234,9 +234,17 @@ class DiscoveryWorker:
                 )
 
         requested_cursor = await asyncio.to_thread(self._store.discovery_cursor)
+        resource_decision = await asyncio.to_thread(
+            self._store.latest_resource_decision
+        )
+        page_limit = (
+            self._page_limit
+            if resource_decision is None
+            else min(100, int(resource_decision["discovery_batch_limit"]))
+        )
         page = await self._gamma.fetch_active_event_page(
             requested_cursor,
-            self._page_limit,
+            page_limit,
         )
         if page.requested_cursor != requested_cursor:
             raise ValueError("discovery-page-cursor-mismatch")
@@ -418,10 +426,12 @@ class DiscoveryRunner:
         worker: DiscoveryWorker,
         gamma: object,
         interval_s: float,
+        store: OpportunityPerceptionStore | None = None,
     ) -> None:
         if interval_s <= 0:
             raise ValueError("discovery-interval-must-be-positive")
         self._worker = worker
+        self._store = store or worker._store
         self._gamma = gamma
         self._interval_s = interval_s
 
@@ -429,7 +439,13 @@ class DiscoveryRunner:
         try:
             while not stop_event.is_set():
                 try:
-                    await self._worker.run_batch()
+                    result = await self._worker.run_batch()
+                    await asyncio.to_thread(
+                        self._store.record_producer_heartbeat,
+                        "discovery",
+                        observed_at_ms=result.finished_at_ms,
+                        state="yielded" if result.yielded else "progress",
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -494,4 +510,5 @@ def build_production_discovery(
         worker=worker,
         gamma=gamma,
         interval_s=settings.discovery_interval_s,
+        store=store,
     )

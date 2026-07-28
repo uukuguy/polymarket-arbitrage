@@ -102,6 +102,77 @@ class ReconciliationHealth:
     receipt_consistent: bool
 
 
+@dataclass(frozen=True)
+class PerceptionRecoveryHealth:
+    open_count: int | None
+    scopes: tuple[str, ...]
+    resource_mode: str
+    resource_reason: str | None
+    evidence_consistent: bool
+
+
+def read_perception_recovery_health(path: Path) -> PerceptionRecoveryHealth:
+    unavailable = PerceptionRecoveryHealth(None, (), "unavailable", None, False)
+    try:
+        from polyarb.perception.incidents import IncidentManager
+        from polyarb.perception.resource_controller import (
+            ResourceDecision,
+            ResourceSample,
+        )
+        from polyarb.perception.store import OpportunityPerceptionStore
+
+        store = OpportunityPerceptionStore(path, read_only=True)
+        incidents = IncidentManager(store).open_incidents()
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25)
+        con.row_factory = sqlite3.Row
+        try:
+            con.execute("BEGIN")
+            rows = con.execute(
+                "SELECT d.*,s.observed_at_ms,s.sample_json "
+                "FROM neg_risk_resource_decisions d "
+                "JOIN neg_risk_resource_samples s ON s.id=d.sample_id "
+                "ORDER BY d.id"
+            ).fetchall()
+            counts = con.execute(
+                "SELECT (SELECT COUNT(*) FROM neg_risk_resource_samples),"
+                "(SELECT COUNT(*) FROM neg_risk_resource_decisions)"
+            ).fetchone()
+            if counts[0] != counts[1] or len(rows) != counts[0]:
+                return unavailable
+            if not rows:
+                mode, reason = "idle", None
+            else:
+                import json
+
+                previous_decided_at_ms = -1
+                for row in rows:
+                    sample = ResourceSample(**json.loads(row["sample_json"]))
+                    sample.validate()
+                    decision = ResourceDecision(**json.loads(row["decision_json"]))
+                    if (
+                        decision.mode != row["mode"]
+                        or decision.reason != row["reason"]
+                        or decision.decided_at_ms != row["decided_at_ms"]
+                        or sample.observed_at_ms != row["observed_at_ms"]
+                        or decision.decided_at_ms < previous_decided_at_ms
+                    ):
+                        return unavailable
+                    previous_decided_at_ms = decision.decided_at_ms
+                mode, reason = decision.mode, decision.reason
+            con.commit()
+        finally:
+            con.close()
+        return PerceptionRecoveryHealth(
+            len(incidents),
+            tuple(sorted(incident.scope for incident in incidents)),
+            mode,
+            reason,
+            True,
+        )
+    except (sqlite3.Error, TypeError, ValueError, KeyError):
+        return unavailable
+
+
 def read_reconciliation_health(path: Path, now_ms: int) -> ReconciliationHealth:
     """Read and validate the exact window/receipt/staging/baseline snapshot."""
     empty = ReconciliationHealth("idle", None, 0, None, None, True)
@@ -255,6 +326,57 @@ def _build_health_checks(
     """
     checks: dict[str, list[dict[str, Any]]] = {}
     overall = "pass"
+
+    recovery_enabled = bool(getattr(settings, "opportunity_producer_supervisor_enabled", False))
+    resource_enabled = bool(getattr(settings, "opportunity_resource_controller_enabled", False))
+    recovery = read_perception_recovery_health(store.db_path)
+    incident_status = "pass"
+    if recovery_enabled:
+        if not recovery.evidence_consistent:
+            incident_status = "fail"
+        elif recovery.open_count:
+            incident_status = (
+                "fail"
+                if any(
+                    scope == "candidate" or scope == "http" or scope.startswith("candidate:")
+                    for scope in recovery.scopes
+                )
+                else "warn"
+            )
+    overall = _severity(overall, incident_status)
+    checks["perception:open_incidents"] = [
+        {
+            "componentId": "perception-recovery",
+            "componentType": "component",
+            "observedValue": (recovery.open_count if recovery_enabled else 0),
+            "status": incident_status,
+            "output": (
+                f"scopes={','.join(recovery.scopes)} "
+                f"evidence_consistent={recovery.evidence_consistent}"
+                if recovery_enabled
+                else "disabled"
+            ),
+            "time": _utc_now_iso(),
+        }
+    ]
+    resource_status = "pass"
+    if resource_enabled and (
+        not recovery.evidence_consistent
+        or recovery.resource_mode
+        in {"unavailable", "idle", "protect-hot-path", "empty-candidate-exploration"}
+    ):
+        resource_status = "fail" if recovery.resource_mode in {"unavailable", "idle"} else "warn"
+    overall = _severity(overall, resource_status)
+    checks["perception:resource_mode"] = [
+        {
+            "componentId": "perception-resource-controller",
+            "componentType": "component",
+            "observedValue": (recovery.resource_mode if resource_enabled else "disabled"),
+            "status": resource_status,
+            "output": f"reason={recovery.resource_reason}",
+            "time": _utc_now_iso(),
+        }
+    ]
 
     # Full Reconciliation is calibration evidence, never Candidate availability.
     # Its scoped checks read the same checkpoint rows the worker mutates but do
