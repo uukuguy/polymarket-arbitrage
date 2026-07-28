@@ -89,7 +89,7 @@ React 19, TypeScript, Make.
   make dashboard-typecheck
   ```
 
-- [ ] Commit:
+- [x] Commit:
 
   ```bash
   git commit -m "feat(m1): expose perception progress evidence"

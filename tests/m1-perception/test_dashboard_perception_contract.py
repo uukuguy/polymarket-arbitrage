@@ -145,8 +145,26 @@ def test_dashboard_validates_and_renders_progress_evidence() -> None:
         assert field in types
         assert field in overview
 
-    assert "<NotExposed />" not in overview.split("<h2 style={{ marginTop: 0 }}>Coverage windows</h2>", 1)[1].split("</section>", 1)[0]
+    coverage_panel = overview.split(
+        "<h2 style={{ marginTop: 0 }}>Coverage windows</h2>", 1
+    )[1].split("</section>", 1)[0]
+    assert "<NotExposed />" not in coverage_panel
     assert "Historical duration distribution is not tracked" in overview
+
+
+def test_nested_contract_validators_fail_closed() -> None:
+    result = subprocess.run(
+        [
+            "node",
+            "--no-warnings",
+            "tests/m1-perception/perception_contract_cases.mjs",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_group_page_builds_one_timestamped_operator_timeline() -> None:

@@ -32,14 +32,30 @@ function isNonNegativeNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+function isNonNegativeInteger(value: unknown): value is number {
+  return isNonNegativeNumber(value) && Number.isInteger(value);
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return isNonNegativeInteger(value) && value > 0;
+}
+
+function isNonNegativeIntegerOrNull(value: unknown): value is number | null {
+  return value === null || isNonNegativeInteger(value);
+}
+
 function isFraction(value: unknown): value is number {
   return isNonNegativeNumber(value) && value <= 1;
 }
 
-function isCoverageWindow(value: unknown): boolean {
+function isCoverageWindow(value: unknown): value is {
+  visited_groups: number;
+  raw_fraction: number;
+  liquidity_weighted_fraction: number;
+} {
   return (
     isRecord(value) &&
-    isNonNegativeNumber(value.visited_groups) &&
+    isNonNegativeInteger(value.visited_groups) &&
     isFraction(value.raw_fraction) &&
     isFraction(value.liquidity_weighted_fraction)
   );
@@ -47,19 +63,35 @@ function isCoverageWindow(value: unknown): boolean {
 
 function isAdmissionProof(value: unknown): boolean {
   if (value === null) return true;
+  if (
+    !isRecord(value) ||
+    !isNonNegativeInteger(value.effective_capacity) ||
+    !isPositiveInteger(value.candidate_max_wait_ms) ||
+    value.candidate_max_wait_ms > 60_000 ||
+    !isPositiveInteger(value.selection_budget_ms) ||
+    !isPositiveInteger(value.poll_interval_ms) ||
+    !isPositiveInteger(value.group_timeout_ms) ||
+    !isNonNegativeInteger(value.terminal_write_budget_ms) ||
+    value.terminal_write_budget_ms < 5_000 ||
+    !isNonNegativeInteger(value.attempt_start_write_budget_ms) ||
+    value.attempt_start_write_budget_ms < 5_000 ||
+    !isPositiveInteger(value.high_burst_groups) ||
+    !isPositiveInteger(value.reserved_non_high_slots) ||
+    value.effective_capacity > value.reserved_non_high_slots
+  ) {
+    return false;
+  }
+  const expectedBound =
+    value.effective_capacity === 0
+      ? null
+      : value.poll_interval_ms +
+        value.selection_budget_ms +
+        value.effective_capacity * value.attempt_start_write_budget_ms +
+        (value.high_burst_groups + value.effective_capacity - 1) *
+          (value.group_timeout_ms + value.terminal_write_budget_ms);
   return (
-    isRecord(value) &&
-    isNonNegativeNumber(value.effective_capacity) &&
-    isNonNegativeNumber(value.candidate_max_wait_ms) &&
-    isNonNegativeNumber(value.selection_budget_ms) &&
-    isNonNegativeNumber(value.poll_interval_ms) &&
-    isNonNegativeNumber(value.group_timeout_ms) &&
-    isNonNegativeNumber(value.terminal_write_budget_ms) &&
-    isNonNegativeNumber(value.attempt_start_write_budget_ms) &&
-    isNonNegativeNumber(value.high_burst_groups) &&
-    isNonNegativeNumber(value.reserved_non_high_slots) &&
-    (value.effective_start_bound_ms === null ||
-      isNonNegativeNumber(value.effective_start_bound_ms))
+    value.effective_start_bound_ms === expectedBound &&
+    (expectedBound === null || expectedBound <= value.candidate_max_wait_ms)
   );
 }
 
@@ -123,7 +155,7 @@ function isGroupHistoryEnvelope(
   );
 }
 
-function isDiscoveryEnvelope(
+export function isDiscoveryEnvelope(
   value: unknown,
 ): value is PerceptionDiscoveryEnvelope {
   if (!isRecord(value) || value.status !== "available") return false;
@@ -132,43 +164,51 @@ function isDiscoveryEnvelope(
   const coverage = isRecord(discovery) ? discovery.coverage : null;
   const windows = isRecord(coverage) ? coverage.by_minutes : null;
   const loadState = isRecord(discovery) ? discovery.load_state : null;
+  const queue = isRecord(discovery) ? discovery.queue_depth_by_class : null;
   return (
     isRecord(discovery) &&
     isStringOrNull(discovery.next_cursor) &&
     typeof discovery.completed === "boolean" &&
     isNumberOrNull(discovery.last_started_at_ms) &&
     isNumberOrNull(discovery.last_finished_at_ms) &&
-    typeof discovery.page_event_count === "number" &&
-    typeof discovery.groups_seen === "number" &&
-    typeof discovery.promoted_count === "number" &&
-    isRecord(discovery.queue_depth_by_class) &&
-    Object.values(discovery.queue_depth_by_class).every(
-      (depth) => typeof depth === "number",
-    ) &&
-    isNumberOrNull(discovery.oldest_visit_age_ms) &&
-    typeof discovery.promotion_queue_depth === "number" &&
-    typeof discovery.outstanding_admitted_count === "number" &&
-    isNonNegativeNumber(discovery.candidate_attempt_start_count) &&
-    isNonNegativeNumber(discovery.candidate_start_deadline_breach_count) &&
+    isNonNegativeInteger(discovery.page_event_count) &&
+    isNonNegativeInteger(discovery.groups_seen) &&
+    discovery.groups_seen <= discovery.page_event_count &&
+    isNonNegativeInteger(discovery.promoted_count) &&
+    discovery.promoted_count <= discovery.groups_seen &&
+    isRecord(queue) &&
+    Object.keys(queue).sort().join(",") === "explore,high,normal" &&
+    Object.values(queue).every(isNonNegativeInteger) &&
+    isNonNegativeIntegerOrNull(discovery.oldest_visit_age_ms) &&
+    isNonNegativeInteger(discovery.promotion_queue_depth) &&
+    isNonNegativeInteger(discovery.outstanding_admitted_count) &&
+    isNonNegativeInteger(discovery.candidate_attempt_start_count) &&
+    isNonNegativeInteger(discovery.candidate_start_deadline_breach_count) &&
+    discovery.candidate_start_deadline_breach_count <=
+      discovery.candidate_attempt_start_count &&
     typeof discovery.candidate_start_ready === "boolean" &&
     isRecord(coverage) &&
-    isNonNegativeNumber(coverage.known_groups) &&
+    isNonNegativeInteger(coverage.known_groups) &&
     isNonNegativeNumber(coverage.total_liquidity_weight) &&
     isRecord(windows) &&
     isCoverageWindow(windows["15"]) &&
+    windows["15"].visited_groups <= coverage.known_groups &&
     isCoverageWindow(windows["30"]) &&
+    windows["30"].visited_groups <= coverage.known_groups &&
     isCoverageWindow(windows["60"]) &&
+    windows["60"].visited_groups <= coverage.known_groups &&
     isRecord(loadState) &&
-    isNonNegativeNumber(loadState.degraded_streak) &&
+    isNonNegativeInteger(loadState.degraded_streak) &&
     isStringOrNull(loadState.last_reason) &&
     ["fresh", "yield", "probe"].includes(String(loadState.last_decision)) &&
-    isNonNegativeNumber(loadState.probe_every_cycles) &&
-    isNonNegativeNumber(loadState.updated_at_ms) &&
+    isPositiveInteger(loadState.probe_every_cycles) &&
+    loadState.probe_every_cycles >= 2 &&
+    isNonNegativeInteger(loadState.updated_at_ms) &&
     isAdmissionProof(discovery.admission_proof)
   );
 }
 
-function isReconciliationEnvelope(
+export function isReconciliationEnvelope(
   value: unknown,
 ): value is PerceptionReconciliationEnvelope {
   if (!isRecord(value) || value.status !== "available") return false;
@@ -182,21 +222,24 @@ function isReconciliationEnvelope(
     ) &&
     isStringOrNull(reconciliation.failure_reason) &&
     isStringOrNull(reconciliation.next_cursor) &&
-    typeof reconciliation.started_at_ms === "number" &&
-    typeof reconciliation.checkpoint_at_ms === "number" &&
-    isNumberOrNull(reconciliation.finished_at_ms) &&
-    typeof reconciliation.pages_completed === "number" &&
-    typeof reconciliation.events_seen === "number" &&
-    typeof reconciliation.groups_staged === "number" &&
-    typeof reconciliation.rejected_count === "number" &&
-    isNonNegativeNumber(reconciliation.duration_ms) &&
-    isNonNegativeNumber(reconciliation.observations_count) &&
-    isNonNegativeNumber(reconciliation.baseline_count) &&
-    isNumberOrNull(reconciliation.added_count) &&
-    isNumberOrNull(reconciliation.changed_count) &&
-    isNumberOrNull(reconciliation.closed_count) &&
-    isNumberOrNull(reconciliation.unchanged_count) &&
-    isNumberOrNull(reconciliation.applied_rejected_count)
+    isNonNegativeInteger(reconciliation.started_at_ms) &&
+    isNonNegativeInteger(reconciliation.checkpoint_at_ms) &&
+    reconciliation.checkpoint_at_ms >= reconciliation.started_at_ms &&
+    isNonNegativeIntegerOrNull(reconciliation.finished_at_ms) &&
+    (reconciliation.finished_at_ms === null ||
+      reconciliation.finished_at_ms >= reconciliation.started_at_ms) &&
+    isNonNegativeInteger(reconciliation.pages_completed) &&
+    isNonNegativeInteger(reconciliation.events_seen) &&
+    isNonNegativeInteger(reconciliation.groups_staged) &&
+    isNonNegativeInteger(reconciliation.rejected_count) &&
+    isNonNegativeInteger(reconciliation.duration_ms) &&
+    isNonNegativeInteger(reconciliation.observations_count) &&
+    isNonNegativeInteger(reconciliation.baseline_count) &&
+    isNonNegativeIntegerOrNull(reconciliation.added_count) &&
+    isNonNegativeIntegerOrNull(reconciliation.changed_count) &&
+    isNonNegativeIntegerOrNull(reconciliation.closed_count) &&
+    isNonNegativeIntegerOrNull(reconciliation.unchanged_count) &&
+    isNonNegativeIntegerOrNull(reconciliation.applied_rejected_count)
   );
 }
 
