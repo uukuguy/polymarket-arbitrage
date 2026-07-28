@@ -29,6 +29,7 @@ def _status(store: OpportunityPerceptionStore) -> dict:
         return {"status": "idle"}
     payload = {
         "status": window.status,
+        "failure_reason": window.failure_reason,
         "window_id": window.id,
         "next_cursor": window.next_cursor,
         "started_at_ms": window.started_at_ms,
@@ -38,6 +39,8 @@ def _status(store: OpportunityPerceptionStore) -> dict:
         "events_seen": window.events_seen,
         "groups_staged": window.groups_staged,
         "rejected_count": window.rejected_count,
+        "observations_count": window.observations_count,
+        "baseline_count": window.baseline_count,
     }
     if window.status == "applied":
         payload["diff"] = {

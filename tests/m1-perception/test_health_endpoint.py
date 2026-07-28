@@ -257,7 +257,7 @@ def test_reconciliation_health_reads_checkpoint_without_gating_hot_path(
     with sqlite3.connect(path) as con:
         con.execute(
             "UPDATE neg_risk_reconciliation_windows SET next_cursor='c-2',"
-            "checkpoint_at_ms=2_000,pages_completed=1,events_seen=100 "
+            "checkpoint_at_ms=2_000,pages_completed=1 "
             "WHERE id=?",
             (window.id,),
         )
@@ -265,7 +265,7 @@ def test_reconciliation_health_reads_checkpoint_without_gating_hot_path(
             "INSERT INTO neg_risk_reconciliation_batches("
             "window_id,batch_sequence,requested_cursor,next_cursor,completed,"
             "started_at_ms,finished_at_ms,page_event_count,groups_staged,"
-            "rejected_count) VALUES (?,1,NULL,'c-2',0,1000,2000,100,5,1)",
+            "rejected_count) VALUES (?,1,NULL,'c-2',0,1000,2000,0,0,0)",
             (window.id,),
         )
 
@@ -276,6 +276,54 @@ def test_reconciliation_health_reads_checkpoint_without_gating_hot_path(
     assert result.next_cursor == "c-2"
     assert result.checkpoint_age_seconds == 3.0
     assert result.receipt_consistent is True
+
+
+def test_reconciliation_health_rejects_forged_early_cursor_and_bad_numbers(
+    tmp_path: Path,
+) -> None:
+    from polyarb.http.health import read_reconciliation_health
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    path = tmp_path / "state.db"
+    store = OpportunityPerceptionStore(path)
+    store.init_schema()
+    window = store.begin_reconciliation(started_at_ms=1_000)
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "UPDATE neg_risk_reconciliation_windows SET status='complete',"
+            "checkpoint_at_ms=3000,finished_at_ms=3000,pages_completed=2 "
+            "WHERE id=?",
+            (window.id,),
+        )
+        con.executemany(
+            "INSERT INTO neg_risk_reconciliation_batches("
+            "window_id,batch_sequence,requested_cursor,next_cursor,completed,"
+            "started_at_ms,finished_at_ms,page_event_count,groups_staged,"
+            "rejected_count) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [
+                (window.id, 1, None, "c-2", 0, 1000, 2000, 0, 0, 0),
+                (window.id, 2, "c-2", None, 1, 2000, 3000, 0, 0, 0),
+            ],
+        )
+        con.execute(
+            "UPDATE neg_risk_reconciliation_batches "
+            "SET requested_cursor='forged' "
+            "WHERE window_id=? AND batch_sequence=1",
+            (window.id,),
+        )
+
+    forged = read_reconciliation_health(path, now_ms=4_000)
+    assert forged.progress == "unavailable"
+    assert forged.receipt_consistent is False
+
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "UPDATE neg_risk_reconciliation_windows SET pages_completed='bad' WHERE id=?",
+            (window.id,),
+        )
+    corrupt = read_reconciliation_health(path, now_ms=4_000)
+    assert corrupt.progress == "unavailable"
+    assert corrupt.receipt_consistent is False
 
 
 def test_health_exposes_latest_attempt_and_last_complete_truth_separately(

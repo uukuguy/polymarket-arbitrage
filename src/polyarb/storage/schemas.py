@@ -426,6 +426,7 @@ CREATE INDEX IF NOT EXISTS idx_neg_risk_candidate_admission_identity
 CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_windows (
   id TEXT PRIMARY KEY,
   status TEXT NOT NULL CHECK(status IN ('open','complete','applied')),
+  failure_reason TEXT,
   next_cursor TEXT,
   started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
   checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
@@ -434,6 +435,8 @@ CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_windows (
   events_seen INTEGER NOT NULL CHECK(events_seen >= 0),
   groups_staged INTEGER NOT NULL CHECK(groups_staged >= 0),
   rejected_count INTEGER NOT NULL CHECK(rejected_count >= 0),
+  observations_count INTEGER NOT NULL CHECK(observations_count >= 0),
+  baseline_count INTEGER NOT NULL CHECK(baseline_count >= 0),
   added_count INTEGER,
   changed_count INTEGER,
   closed_count INTEGER,
@@ -452,6 +455,10 @@ CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_batches (
   finished_at_ms INTEGER NOT NULL,
   page_event_count INTEGER NOT NULL CHECK(page_event_count >= 0),
   groups_staged INTEGER NOT NULL CHECK(groups_staged >= 0),
+  observed_count INTEGER NOT NULL DEFAULT 0 CHECK(observed_count >= 0),
+  unique_count INTEGER NOT NULL DEFAULT 0 CHECK(unique_count >= 0),
+  update_count INTEGER NOT NULL DEFAULT 0 CHECK(update_count >= 0),
+  duplicate_count INTEGER NOT NULL DEFAULT 0 CHECK(duplicate_count >= 0),
   rejected_count INTEGER NOT NULL CHECK(rejected_count >= 0),
   UNIQUE(window_id,batch_sequence)
 );
@@ -468,6 +475,32 @@ CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_staging (
   observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
   source_cursor TEXT,
   PRIMARY KEY(window_id,group_id)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_baseline (
+  window_id TEXT NOT NULL REFERENCES neg_risk_reconciliation_windows(id),
+  group_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision >= 1),
+  membership_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status = 'certified'),
+  PRIMARY KEY(window_id,group_id)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_reconciliation_batch_samples (
+  batch_id INTEGER NOT NULL REFERENCES neg_risk_reconciliation_batches(id),
+  group_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  membership_hash TEXT NOT NULL,
+  quality TEXT NOT NULL CHECK(quality IN
+    ('complete-supported','complete-unsupported','incomplete-source')),
+  reason TEXT,
+  legs_json TEXT,
+  observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+  source_cursor TEXT,
+  materialization TEXT NOT NULL CHECK(materialization IN
+    ('unique','updated','duplicate')),
+  PRIMARY KEY(batch_id,group_id)
 );
 
 -- Phase 1.1 T2: append-only translation cache.

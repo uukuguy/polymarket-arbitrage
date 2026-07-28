@@ -103,49 +103,24 @@ class ReconciliationHealth:
 
 
 def read_reconciliation_health(path: Path, now_ms: int) -> ReconciliationHealth:
-    """Read the latest window and its actual last page receipt in one snapshot."""
+    """Read and validate the exact window/receipt/staging/baseline snapshot."""
     empty = ReconciliationHealth("idle", None, 0, None, None, True)
     unavailable = ReconciliationHealth("unavailable", None, 0, None, None, False)
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25)
-    except sqlite3.Error:
-        return unavailable
-    con.row_factory = sqlite3.Row
-    try:
-        con.execute("BEGIN")
-        window = con.execute(
-            "SELECT * FROM neg_risk_reconciliation_windows "
-            "ORDER BY started_at_ms DESC,id DESC LIMIT 1"
-        ).fetchone()
+        from polyarb.perception.store import OpportunityPerceptionStore
+
+        window = OpportunityPerceptionStore(path, read_only=True).current_reconciliation()
         if window is None:
-            con.execute("COMMIT")
             return empty
-        receipt = con.execute(
-            "SELECT batch_sequence,next_cursor,finished_at_ms "
-            "FROM neg_risk_reconciliation_batches WHERE window_id=? "
-            "ORDER BY batch_sequence DESC LIMIT 1",
-            (window["id"],),
-        ).fetchone()
-        con.execute("COMMIT")
-    except sqlite3.Error:
+    except (sqlite3.Error, TypeError, ValueError):
         return unavailable
-    finally:
-        con.close()
-    pages_completed = int(window["pages_completed"])
-    next_cursor = None if window["next_cursor"] is None else str(window["next_cursor"])
-    consistent = (pages_completed == 0 and receipt is None) or (
-        receipt is not None
-        and int(receipt["batch_sequence"]) == pages_completed
-        and receipt["next_cursor"] == window["next_cursor"]
-        and int(receipt["finished_at_ms"]) == int(window["checkpoint_at_ms"])
-    )
     return ReconciliationHealth(
-        progress=str(window["status"]),
-        window_id=str(window["id"]),
-        pages_completed=pages_completed,
-        next_cursor=next_cursor,
-        checkpoint_age_seconds=max(0.0, (now_ms - int(window["checkpoint_at_ms"])) / 1000),
-        receipt_consistent=consistent,
+        progress=window.status,
+        window_id=window.id,
+        pages_completed=window.pages_completed,
+        next_cursor=window.next_cursor,
+        checkpoint_age_seconds=max(0.0, (now_ms - window.checkpoint_at_ms) / 1000),
+        receipt_consistent=True,
     )
 
 
@@ -290,7 +265,10 @@ def _build_health_checks(
     progress_status = (
         "warn"
         if reconciliation_enabled
-        and (reconciliation.progress == "idle" or not reconciliation.receipt_consistent)
+        and (
+            reconciliation.progress in {"idle", "failed", "unavailable"}
+            or not reconciliation.receipt_consistent
+        )
         else "pass"
     )
     checks["perception:reconciliation_progress"] = [

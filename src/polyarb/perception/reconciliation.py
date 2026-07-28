@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -33,6 +35,8 @@ class ReconciliationBatchResult:
     started_at_ms: int
     finished_at_ms: int
     diff: ReconciliationDiff | None
+    failed: bool = False
+    failure_reason: str | None = None
 
 
 class ReconciliationWorker:
@@ -44,17 +48,24 @@ class ReconciliationWorker:
         gamma: ReconciliationGamma,
         store: OpportunityPerceptionStore,
         page_limit: int = 100,
+        clock_ms: Callable[[], int] | None = None,
     ) -> None:
         if not 1 <= page_limit <= 100:
             raise ValueError("reconciliation-page-limit-must-be-within-1..100")
         self._gamma = gamma
         self._store = store
         self._page_limit = page_limit
+        self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
 
     async def run_batch(self) -> ReconciliationBatchResult:
         window = await asyncio.to_thread(self._store.current_reconciliation)
-        if window is not None and window.status == "applied":
+        if window is not None and window.status in {"applied", "failed"}:
             window = None
+        if window is None:
+            window = await asyncio.to_thread(
+                self._store.begin_reconciliation,
+                started_at_ms=self._clock_ms(),
+            )
         if window is not None and window.status == "complete":
             diff = await asyncio.to_thread(self._store.apply_reconciliation_diff, window.id)
             return ReconciliationBatchResult(
@@ -69,18 +80,28 @@ class ReconciliationWorker:
                 finished_at_ms=window.finished_at_ms or window.checkpoint_at_ms,
                 diff=diff,
             )
-        requested_cursor = None if window is None else window.next_cursor
+        requested_cursor = window.next_cursor
         page = await self._gamma.fetch_active_event_page(requested_cursor, self._page_limit)
         if page.requested_cursor != requested_cursor:
             raise ValueError("reconciliation-page-cursor-mismatch")
         candidates = await asyncio.to_thread(DiscoveryWorker._normalize_page, page)
-        if window is None:
-            window = await asyncio.to_thread(
-                self._store.begin_reconciliation,
-                started_at_ms=page.started_at_ms,
-            )
         committed = await self._commit_page(window.id, page, candidates)
         diff = None
+        if committed.status == "failed":
+            return ReconciliationBatchResult(
+                window_id=committed.id,
+                requested_cursor=requested_cursor,
+                next_cursor=committed.next_cursor,
+                completed=False,
+                page_event_count=len(page.events),
+                groups_staged=0,
+                rejected_count=0,
+                started_at_ms=page.started_at_ms,
+                finished_at_ms=page.finished_at_ms,
+                diff=None,
+                failed=True,
+                failure_reason=committed.failure_reason,
+            )
         if committed.status == "complete":
             diff = await asyncio.to_thread(self._store.apply_reconciliation_diff, committed.id)
         return ReconciliationBatchResult(

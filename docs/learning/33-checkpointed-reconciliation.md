@@ -7,6 +7,7 @@ Candidate Watcher 负责“现在值得盯的完整组”；Full Reconciliation 
 
 ```text
 window(open)
+  + exact certified baseline（窗口开始事务）
   -> page staging + batch receipt + opaque cursor（一个事务）
   -> ... 重启后继续 cursor
   -> terminal empty page => window(complete)
@@ -43,13 +44,23 @@ terminal receipt 后、diff 前死亡，数据库诚实停在 `complete`；重�
 
 ## 并发 Discovery 为什么不会被旧地图覆盖
 
-每条 staging 带自己的 `observed_at_ms`。apply 时如果 current revision 比 staging 新，
-就计为 `unchanged`，不回写旧身份。closure 更保守：只关闭窗口开始前已经存在、且整个
-完整窗口从未观察到的 certified group。
+窗口开始事务把当时每个 current certified group 的
+`group/event/revision/membership/status` 写入 append-only baseline。apply 不再比较容易
+同毫秒或时钟回拨的时间戳：只有 current 仍精确等于 baseline 时，staging 才能 change；
+baseline 外后来出现的 online group，以及 baseline 后发生过任何 revision/status 变化的
+group，都由 hot online authority 胜出。closure 也只遍历 baseline，且 current 必须仍
+精确匹配。
 
-不完整或 unsupported 的 group 也会以 rejected staging 留下 group ID。它不能发布新
-authority，但会阻止“没看见所以关闭”的误判。也就是说，不知道新身份时保留旧事实，
-而不是制造 closure。
+不完整或 unsupported 的 group 也会以 rejected staging 留下证据。只有其
+`group_id + event_id` 能绑定 baseline 时才抑制 closure；伪造同 group 的 attacker event
+不能替任意旧 event 续命。
+
+跨页再次看见同 group 不会卡住 cursor。每页把所有 observation 写入 append-only
+batch samples：相同事实记 `duplicate` 且不改 materialized staging，变化记 `updated`
+并采用 latest-wins，首次出现记 `unique`。receipt 分别记录
+observed/unique/update/duplicate/rejected，状态读取会重放样本证明最终 staging。
+若 opaque cursor 指回当前或任一历史 cursor，窗口原子变为 `failed/cursor-loop`，
+绝不 apply；下一轮创建新窗口从头恢复。
 
 ## 运维入口
 
@@ -67,8 +78,9 @@ make reconciliation-status db_path=/path/to/state.db
 
 `/health` 的 `perception:reconciliation_progress` 与
 `perception:reconciliation_checkpoint_age_seconds` 直接读取 window 和最后一条 batch
-receipt。它们是 scoped evidence，不参与 Candidate/整体 availability；Task 5 才负责把
-stalled checkpoint 变成独立 incident。
+receipt，并复用 store 对完整 receipt/sample/staging/baseline 链的同一验证。损坏状态
+显示 unavailable，而不是抛出或伪装 idle。它们是 scoped evidence，不参与
+Candidate/整体 availability；Task 5 才负责把 stalled checkpoint 变成独立 incident。
 
 ## 设计取舍
 
