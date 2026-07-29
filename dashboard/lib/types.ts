@@ -156,6 +156,107 @@ export interface PerceptionGroupHistoryEnvelope {
   next_before_revision: number | null;
 }
 
+interface PerceptionTimelineBase {
+  stable_id: number;
+  occurred_at_ms: number;
+}
+
+export interface PerceptionMembershipTimelineItem
+  extends PerceptionTimelineBase {
+  class: "membership_revision";
+  group_id: string;
+  event_id: string;
+  revision: number;
+  membership_hash: string;
+  status: PerceptionGroupStatus;
+  leg_count: number;
+  source_cursor: string;
+}
+
+export interface PerceptionQuoteTimelineItem extends PerceptionTimelineBase {
+  class: "quote_batch";
+  quote_batch_id: string;
+  group_revision: number;
+  membership_hash: string;
+  status: "complete" | "failed" | "superseded";
+  failure_reason: string | null;
+  leg_count: number;
+  duration_ms: number;
+}
+
+export interface PerceptionOpportunityTimelineState {
+  last_result: "watching" | "no-edge" | "unavailable";
+  opportunity: boolean;
+}
+
+export interface PerceptionOpportunityTimelineItem
+  extends PerceptionTimelineBase {
+  class: "opportunity_transition";
+  from: PerceptionOpportunityTimelineState | null;
+  to: PerceptionOpportunityTimelineState;
+  reason: string | null;
+  quote_batch_id: string | null;
+  gross_edge_bps: number | null;
+}
+
+export interface PerceptionIncidentTimelineItem extends PerceptionTimelineBase {
+  class: "incident_event";
+  incident_id: string;
+  sequence: number;
+  scope: string;
+  kind: string;
+  state:
+    | "detected"
+    | "classified"
+    | "contained"
+    | "recovering"
+    | "verified"
+    | "escalated";
+  evidence: Record<string, unknown>;
+}
+
+export type PerceptionGroupTimelineItem =
+  | PerceptionMembershipTimelineItem
+  | PerceptionQuoteTimelineItem
+  | PerceptionOpportunityTimelineItem
+  | PerceptionIncidentTimelineItem;
+
+export interface PerceptionGroupTimelineEnvelope {
+  status: "available";
+  group_id: string;
+  items: PerceptionGroupTimelineItem[];
+  limit: number;
+  next_before: string | null;
+  history_floor: {
+    membership: {
+      scope: "global";
+      through_id: number;
+      compacted_count: number;
+    };
+    quote: {
+      scope: "global";
+      through_id: number;
+      compacted_count: number;
+    };
+    opportunity: {
+      scope: "global";
+      through_id: number;
+      source_rows_compacted: number;
+    };
+    incident: {
+      scope: string;
+      through_id: number;
+      compacted_count: number;
+    };
+  };
+  history_complete: {
+    membership: boolean;
+    quote: boolean;
+    opportunity: boolean;
+    incident: boolean;
+  };
+}
+
 export interface PerceptionDiscoveryStatus {
   next_cursor: string | null;
   completed: boolean;
@@ -341,6 +442,5 @@ export interface PerceptionOverview {
 }
 
 export interface PerceptionGroupDetail {
-  history: PerceptionGroupHistoryEnvelope;
-  incidents: PerceptionIncidentsEnvelope;
+  timeline: PerceptionGroupTimelineEnvelope;
 }

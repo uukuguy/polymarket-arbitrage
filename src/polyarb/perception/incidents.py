@@ -491,11 +491,18 @@ class IncidentManager:
         *,
         limit: int,
         before_event_id: int | None = None,
+        before_order_key: tuple[int, int] | None = None,
         _connection: sqlite3.Connection | None = None,
     ) -> IncidentScopeHistoryPage:
         if not group_id or not 1 <= limit <= 500:
             raise ValueError("invalid-group-incident-history-request")
         if before_event_id is not None and before_event_id <= 0:
+            raise ValueError("invalid-group-incident-history-request")
+        if before_order_key is not None and (
+            before_order_key[0] < 0 or before_order_key[1] <= 0
+        ):
+            raise ValueError("invalid-group-incident-history-request")
+        if before_event_id is not None and before_order_key is not None:
             raise ValueError("invalid-group-incident-history-request")
         scope = f"candidate:{group_id}"
         con = _connection or self._connect(read_only=True)
@@ -506,12 +513,24 @@ class IncidentManager:
             self._validate_evidence_failure(con, require_resolved=True)
             where = "scope=? "
             parameters: tuple[Any, ...] = (scope,)
-            if before_event_id is not None:
+            if before_order_key is not None:
+                before_ms, before_id = before_order_key
+                where += (
+                    "AND (occurred_at_ms<? OR "
+                    "(occurred_at_ms=? AND id<?)) "
+                )
+                parameters = (scope, before_ms, before_ms, before_id)
+            elif before_event_id is not None:
                 where += "AND id<? "
                 parameters = (scope, before_event_id)
+            order_by = (
+                "occurred_at_ms DESC,id DESC"
+                if before_order_key is not None
+                else "id DESC"
+            )
             rows = con.execute(
                 "SELECT * FROM neg_risk_incident_events "
-                f"WHERE {where}ORDER BY id DESC LIMIT ?",
+                f"WHERE {where}ORDER BY {order_by} LIMIT ?",
                 (*parameters, limit + 1),
             ).fetchall()
             page_rows = rows[:limit]

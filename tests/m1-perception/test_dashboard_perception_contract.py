@@ -38,7 +38,7 @@ def test_typed_reader_uses_only_task6_public_get_contracts() -> None:
         "/perception/incidents?limit=",
         "/perception/resources?limit=",
         "/perception/groups/",
-        "/history?limit=",
+        "/timeline?limit=",
     ):
         assert endpoint in reader
 
@@ -84,7 +84,8 @@ def test_reader_accepts_failed_reconciliation_and_binds_history_group() -> None:
     assert '"failed"' in reader
     assert "expectedGroupId" in reader
     assert "item.group_id === expectedGroupId" in reader
-    assert "next_before_revision" in history
+    assert "next_before" in history
+    assert "history_complete" in history
     assert "bounded page" in history
 
 
@@ -207,6 +208,8 @@ def test_nested_contract_validators_fail_closed() -> None:
 
 def test_group_page_builds_one_timestamped_operator_timeline() -> None:
     history = _source("dashboard/app/perception/[group_id]/page.tsx")
+    reader = _source("dashboard/lib/perception.ts")
+    types = _source("dashboard/lib/types.ts")
 
     for phrase in (
         "Group timeline",
@@ -218,7 +221,22 @@ def test_group_page_builds_one_timestamped_operator_timeline() -> None:
         ".sort(",
     ):
         assert phrase in history
-    assert "encodeURIComponent" in _source("dashboard/lib/perception.ts")
+    for class_name in (
+        "membership_revision",
+        "quote_batch",
+        "opportunity_transition",
+        "incident_event",
+    ):
+        assert class_name in reader
+        assert class_name in types
+    assert "/timeline?limit=" in reader
+    assert "/history?limit=" not in reader
+    assert "/incidents?limit=" not in reader.split(
+        "export async function readPerceptionGroupHistory", 1
+    )[1]
+    assert "history_complete" in history
+    assert "history_floor" in history
+    assert "encodeURIComponent" in reader
 
 
 def test_group_page_decodes_route_identity_before_reader_reencodes_it() -> None:
@@ -228,7 +246,8 @@ def test_group_page_decodes_route_identity_before_reader_reencodes_it() -> None:
     assert history.count("decodeURIComponent") == 1
     assert "catch" in history
     assert "return encodedGroupId" in history
-    assert "belongsToGroup(incident, groupId)" in history
+    assert "belongsToGroup" not in history
+    assert "candidate:${expectedGroupId}" in reader
     assert "encodeURIComponent(groupId)" in reader
 
 

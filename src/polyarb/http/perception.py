@@ -869,6 +869,188 @@ def _decode_incident_cursor(value: str | None) -> tuple[int, str] | None:
     return decoded[0], decoded[1]
 
 
+def _encode_group_timeline_cursor(
+    group_id: str,
+    value: tuple[int, int, int],
+) -> str:
+    payload = json.dumps(
+        [1, group_id, value[0], value[1], value[2]],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_group_timeline_cursor(
+    value: str | None,
+    *,
+    group_id: str,
+) -> tuple[int, int, int] | None:
+    if value is None:
+        return None
+    if not value or len(value) > 512 or "=" in value:
+        raise ValueError("invalid-group-timeline-cursor")
+    try:
+        payload = base64.b64decode(
+            value + "=" * (-len(value) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        decoded = json.loads(payload)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("invalid-group-timeline-cursor")
+    if (
+        not isinstance(decoded, list)
+        or len(decoded) != 5
+        or decoded[0] != 1
+        or decoded[1] != group_id
+        or type(decoded[2]) is not int
+        or decoded[2] < 0
+        or type(decoded[3]) is not int
+        or decoded[3] not in range(4)
+        or type(decoded[4]) is not int
+        or decoded[4] <= 0
+    ):
+        raise ValueError("invalid-group-timeline-cursor")
+    result = (decoded[2], decoded[3], decoded[4])
+    if _encode_group_timeline_cursor(group_id, result) != value:
+        raise ValueError("invalid-group-timeline-cursor")
+    return result
+
+
+def _timeline(
+    db_path: Path,
+    group_id: str,
+    limit: int,
+    before: tuple[int, int, int] | None,
+) -> dict[str, Any]:
+    from polyarb.perception.incidents import IncidentManager
+
+    con = _connect(db_path)
+    try:
+        con.execute("BEGIN")
+        store = _read_store(db_path)
+        sources = store.validated_group_timeline_sources(
+            group_id,
+            limit=limit,
+            before=before,
+            _connection=con,
+        )
+        incident_before: tuple[int, int] | None = None
+        incident_include_equal_ms = False
+        if before is not None:
+            if before[1] == 3:
+                incident_before = (before[0], before[2])
+            else:
+                incident_before = (before[0] + 1, 1)
+                incident_include_equal_ms = True
+        incident_page = IncidentManager(store).group_incident_history(
+            group_id,
+            limit=limit,
+            before_order_key=incident_before,
+            _connection=con,
+        )
+        con.execute("COMMIT")
+
+        class_names = (
+            "membership_revision",
+            "quote_batch",
+            "opportunity_transition",
+        )
+        merged: list[dict[str, Any]] = []
+        for class_order, source_name in enumerate(
+            ("membership", "quote", "opportunity")
+        ):
+            for source_item in sources[source_name]:
+                merged.append(
+                    {
+                        "class": class_names[class_order],
+                        "class_order": class_order,
+                        **source_item,
+                    }
+                )
+        for event in incident_page.items:
+            if (
+                before is not None
+                and incident_include_equal_ms
+                and event.incident.occurred_at_ms > before[0]
+            ):
+                continue
+            merged.append(
+                {
+                    "class": "incident_event",
+                    "class_order": 3,
+                    "stable_id": event.event_id,
+                    "occurred_at_ms": event.incident.occurred_at_ms,
+                    "incident_id": event.incident.id,
+                    "sequence": event.incident.sequence,
+                    "scope": event.incident.scope,
+                    "kind": event.incident.kind,
+                    "state": event.incident.state,
+                    "evidence": _safe_evidence(event.incident.evidence),
+                }
+            )
+        merged.sort(
+            key=lambda item: (
+                -int(item["occurred_at_ms"]),
+                int(item["class_order"]),
+                -int(item["stable_id"]),
+            )
+        )
+        page_items = merged[:limit]
+        candidate_has_more = any(
+            len(sources[name]) > limit
+            for name in ("membership", "quote", "opportunity")
+        )
+        has_more = (
+            len(merged) > limit
+            or candidate_has_more
+            or incident_page.next_before_event_id is not None
+        )
+        next_before = (
+            None
+            if not has_more or not page_items
+            else _encode_group_timeline_cursor(
+                group_id,
+                (
+                    int(page_items[-1]["occurred_at_ms"]),
+                    int(page_items[-1]["class_order"]),
+                    int(page_items[-1]["stable_id"]),
+                ),
+            )
+        )
+        for item in page_items:
+            item.pop("class_order")
+        incident_floor = {
+            "scope": f"candidate:{group_id}",
+            "through_id": incident_page.floor_event_id or 0,
+            "compacted_count": incident_page.floor_compacted_count or 0,
+        }
+        floors = {**sources["history_floor"], "incident": incident_floor}
+        return {
+            "status": "available",
+            "group_id": group_id,
+            "items": page_items,
+            "limit": limit,
+            "next_before": next_before,
+            "history_floor": floors,
+            "history_complete": {
+                "membership": floors["membership"]["compacted_count"] == 0,
+                "quote": floors["quote"]["compacted_count"] == 0,
+                "opportunity": (
+                    floors["opportunity"]["source_rows_compacted"] == 0
+                ),
+                "incident": incident_floor["compacted_count"] == 0,
+            },
+        }
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+
+
 def _incidents(
     db_path: Path,
     limit: int,
@@ -1136,6 +1318,37 @@ async def perception_group_history(request: Request) -> JSONResponse:
     return await _serve(
         request,
         lambda: _history(db_path, group_id, limit, before_revision),
+    )
+
+
+async def perception_group_timeline(request: Request) -> JSONResponse:
+    try:
+        limit = _limit(request)
+    except ValueError as error:
+        return JSONResponse(
+            {"status": "invalid-request", "reason": str(error)},
+            status_code=400,
+        )
+    group_id = unquote(str(request.path_params["group_id"]))
+    if not group_id or len(group_id) > 256 or "\x00" in group_id:
+        return JSONResponse(
+            {"status": "invalid-request", "reason": "invalid-group-id"},
+            status_code=400,
+        )
+    try:
+        before = _decode_group_timeline_cursor(
+            request.query_params.get("before"),
+            group_id=group_id,
+        )
+    except ValueError as error:
+        return JSONResponse(
+            {"status": "invalid-request", "reason": str(error)},
+            status_code=400,
+        )
+    db_path = Path(request.app.state.sqlite_store.db_path)
+    return await _serve(
+        request,
+        lambda: _timeline(db_path, group_id, limit, before),
     )
 
 

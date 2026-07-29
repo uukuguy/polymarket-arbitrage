@@ -3,6 +3,7 @@ import type {
   PerceptionDiscoveryEnvelope,
   PerceptionGroupDetail,
   PerceptionGroupHistoryEnvelope,
+  PerceptionGroupTimelineEnvelope,
   PerceptionGroupsEnvelope,
   PerceptionIncidentsEnvelope,
   PerceptionOverview,
@@ -256,6 +257,187 @@ function isGroupHistoryEnvelope(
     ) &&
     typeof value.limit === "number" &&
     isNumberOrNull(value.next_before_revision)
+  );
+}
+
+const TIMELINE_CLASS_ORDER = {
+  membership_revision: 0,
+  quote_batch: 1,
+  opportunity_transition: 2,
+  incident_event: 3,
+} as const;
+
+function isTimelineState(
+  value: unknown,
+): value is { last_result: string; opportunity: boolean } {
+  return (
+    isRecord(value) &&
+    ["watching", "no-edge", "unavailable"].includes(
+      String(value.last_result),
+    ) &&
+    typeof value.opportunity === "boolean" &&
+    (value.opportunity === false || value.last_result === "watching")
+  );
+}
+
+function isTimelineItem(value: unknown, expectedGroupId: string): boolean {
+  if (
+    !isRecord(value) ||
+    !isPositiveInteger(value.stable_id) ||
+    !isNonNegativeInteger(value.occurred_at_ms) ||
+    !Object.hasOwn(TIMELINE_CLASS_ORDER, String(value.class))
+  ) {
+    return false;
+  }
+  if (value.class === "membership_revision") {
+    return (
+      value.group_id === expectedGroupId &&
+      typeof value.event_id === "string" &&
+      value.event_id.length > 0 &&
+      isPositiveInteger(value.revision) &&
+      typeof value.membership_hash === "string" &&
+      value.membership_hash.length > 0 &&
+      ["discovered", "certified", "stale", "invalidated", "closed"].includes(
+        String(value.status),
+      ) &&
+      isNonNegativeInteger(value.leg_count) &&
+      typeof value.source_cursor === "string"
+    );
+  }
+  if (value.class === "quote_batch") {
+    return (
+      typeof value.quote_batch_id === "string" &&
+      value.quote_batch_id.length > 0 &&
+      isPositiveInteger(value.group_revision) &&
+      typeof value.membership_hash === "string" &&
+      value.membership_hash.length > 0 &&
+      ["complete", "failed", "superseded"].includes(String(value.status)) &&
+      isStringOrNull(value.failure_reason) &&
+      isNonNegativeInteger(value.leg_count) &&
+      isNonNegativeInteger(value.duration_ms) &&
+      (value.status === "failed"
+        ? typeof value.failure_reason === "string" &&
+          value.failure_reason.length > 0 &&
+          value.leg_count === 0
+        : value.failure_reason === null)
+    );
+  }
+  if (value.class === "opportunity_transition") {
+    const fromValid = value.from === null || isTimelineState(value.from);
+    const toValid = isTimelineState(value.to);
+    return (
+      fromValid &&
+      toValid &&
+      isStringOrNull(value.reason) &&
+      isStringOrNull(value.quote_batch_id) &&
+      (value.gross_edge_bps === null ||
+        typeof value.gross_edge_bps === "number") &&
+      (value.from === null ||
+        (isRecord(value.from) &&
+          isRecord(value.to) &&
+          (value.from.last_result !== value.to.last_result ||
+            value.from.opportunity !== value.to.opportunity)))
+    );
+  }
+  return (
+    typeof value.incident_id === "string" &&
+    value.incident_id.length > 0 &&
+    isPositiveInteger(value.sequence) &&
+    value.scope === `candidate:${expectedGroupId}` &&
+    typeof value.kind === "string" &&
+    value.kind.length > 0 &&
+    [
+      "detected",
+      "classified",
+      "contained",
+      "recovering",
+      "verified",
+      "escalated",
+    ].includes(String(value.state)) &&
+    isRecord(value.evidence)
+  );
+}
+
+function isGroupTimelineEnvelope(
+  value: unknown,
+  expectedGroupId: string,
+): value is PerceptionGroupTimelineEnvelope {
+  if (
+    !isRecord(value) ||
+    value.status !== "available" ||
+    value.group_id !== expectedGroupId ||
+    !Array.isArray(value.items) ||
+    !isPositiveInteger(value.limit) ||
+    value.limit > 500 ||
+    value.items.length > value.limit ||
+    !isStringOrNull(value.next_before) ||
+    !isRecord(value.history_floor) ||
+    !isRecord(value.history_complete) ||
+    Object.keys(value.history_floor).sort().join(",") !==
+      "incident,membership,opportunity,quote" ||
+    Object.keys(value.history_complete).sort().join(",") !==
+      "incident,membership,opportunity,quote"
+  ) {
+    return false;
+  }
+  const floor = value.history_floor;
+  const complete = value.history_complete;
+  const membershipFloor = floor.membership;
+  const quoteFloor = floor.quote;
+  const incidentFloor = floor.incident;
+  for (const item of [membershipFloor, quoteFloor, incidentFloor]) {
+    if (
+      !isRecord(item) ||
+      !isNonNegativeInteger(item.through_id) ||
+      !isNonNegativeInteger(item.compacted_count)
+    ) {
+      return false;
+    }
+  }
+  if (
+    !isRecord(membershipFloor) ||
+    !isRecord(quoteFloor) ||
+    !isRecord(incidentFloor) ||
+    membershipFloor.scope !== "global" ||
+    quoteFloor.scope !== "global" ||
+    !isRecord(floor.opportunity) ||
+    floor.opportunity.scope !== "global" ||
+    !isNonNegativeInteger(floor.opportunity.through_id) ||
+    !isNonNegativeInteger(floor.opportunity.source_rows_compacted) ||
+    incidentFloor.scope !== `candidate:${expectedGroupId}` ||
+    complete.membership !== (membershipFloor.compacted_count === 0) ||
+    complete.quote !== (quoteFloor.compacted_count === 0) ||
+    complete.opportunity !==
+      (floor.opportunity.source_rows_compacted === 0) ||
+    complete.incident !== (incidentFloor.compacted_count === 0)
+  ) {
+    return false;
+  }
+  let previous: Record<string, unknown> | null = null;
+  for (const item of value.items) {
+    if (!isTimelineItem(item, expectedGroupId) || !isRecord(item)) return false;
+    if (previous !== null) {
+      const priorClass =
+        TIMELINE_CLASS_ORDER[
+          previous.class as keyof typeof TIMELINE_CLASS_ORDER
+        ];
+      const itemClass =
+        TIMELINE_CLASS_ORDER[item.class as keyof typeof TIMELINE_CLASS_ORDER];
+      if (
+        Number(item.occurred_at_ms) > Number(previous.occurred_at_ms) ||
+        (item.occurred_at_ms === previous.occurred_at_ms &&
+          (itemClass < priorClass ||
+            (itemClass === priorClass &&
+              Number(item.stable_id) >= Number(previous.stable_id))))
+      ) {
+        return false;
+      }
+    }
+    previous = item;
+  }
+  return (
+    value.next_before === null ||
+    (value.items.length === value.limit && value.items.length > 0)
   );
 }
 
@@ -671,22 +853,15 @@ export async function readPerceptionGroupHistory(
   const signal = AbortSignal.timeout(3000);
   const encodedGroupId = encodeURIComponent(groupId);
   try {
-    const [history, incidents] = await Promise.all([
-      fetchAvailable<PerceptionGroupHistoryEnvelope>(
-        `/perception/groups/${encodedGroupId}/history?limit=${HISTORY_LIMIT}`,
-        signal,
-        (value): value is PerceptionGroupHistoryEnvelope =>
-          isGroupHistoryEnvelope(value, groupId),
-      ),
-      fetchAvailable<PerceptionIncidentsEnvelope>(
-        `/perception/incidents?limit=${INCIDENT_LIMIT}`,
-        signal,
-        isIncidentsEnvelope,
-      ),
-    ]);
+    const timeline = await fetchAvailable<PerceptionGroupTimelineEnvelope>(
+      `/perception/groups/${encodedGroupId}/timeline?limit=${HISTORY_LIMIT}`,
+      signal,
+      (value): value is PerceptionGroupTimelineEnvelope =>
+        isGroupTimelineEnvelope(value, groupId),
+    );
     return {
       status: "available",
-      data: { history, incidents },
+      data: { timeline },
     };
   } catch (error) {
     return unavailable(error);

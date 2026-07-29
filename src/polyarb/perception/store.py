@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from polyarb.perception.models import (
     CandidatePriority,
@@ -5408,6 +5408,25 @@ class OpportunityPerceptionStore:
             parsed_seeds = json.loads(str(row["seeds_json"]))
         except (TypeError, ValueError, json.JSONDecodeError):
             raise ValueError("invalid-candidate-authority-checkpoint")
+        raw_seed_names = {"facts", "groups", "quotes", "receipts"}
+        if (
+            not isinstance(parsed_seeds, dict)
+            or not raw_seed_names.issubset(parsed_seeds)
+            or set(parsed_seeds) - raw_seed_names - {"timeline_states"}
+        ):
+            raise ValueError("invalid-candidate-authority-checkpoint")
+        timeline_states = parsed_seeds.get("timeline_states", {})
+        if not isinstance(timeline_states, dict) or any(
+            not isinstance(group_id, str)
+            or not group_id
+            or not isinstance(state, dict)
+            or set(state) != {"last_result", "opportunity"}
+            or state["last_result"] not in {"watching", "no-edge", "unavailable"}
+            or type(state["opportunity"]) is not bool
+            or (state["opportunity"] and state["last_result"] != "watching")
+            for group_id, state in timeline_states.items()
+        ):
+            raise ValueError("invalid-candidate-authority-checkpoint")
         canonical_seeds = json.dumps(
             parsed_seeds,
             ensure_ascii=False,
@@ -5437,11 +5456,14 @@ class OpportunityPerceptionStore:
             through_fact_id=int(row["through_fact_id"]),
             through_receipt_id=int(row["through_receipt_id"]),
         )
+        parsed_raw_seeds = {
+            name: parsed_seeds[name] for name in raw_seed_names
+        }
         if (
             canonical_seeds != str(row["seeds_json"])
             or not hmac.compare_digest(str(row["seeds_digest"]), seeds_digest)
             or not hmac.compare_digest(str(row["checkpoint_hash"]), expected_hash)
-            or actual_seeds != parsed_seeds
+            or actual_seeds != parsed_raw_seeds
         ):
             raise ValueError("invalid-candidate-authority-checkpoint")
         return row
@@ -5463,6 +5485,9 @@ class OpportunityPerceptionStore:
             through_fact_id=through_fact,
             through_receipt_id=through_receipt,
         )
+        previous_seeds = json.loads(str(validated_checkpoint["seeds_json"]))
+        if "timeline_states" in previous_seeds:
+            seeds["timeline_states"] = previous_seeds["timeline_states"]
         seeds_json = json.dumps(
             seeds,
             ensure_ascii=False,
@@ -5661,6 +5686,18 @@ class OpportunityPerceptionStore:
             through_fact_id=through_fact,
             through_receipt_id=through_receipt,
         )
+        self.candidate_current_summary(_connection=con)
+        timeline_states = {
+            str(row["group_id"]): {
+                "last_result": str(row["last_result"]),
+                "opportunity": bool(row["opportunity"]),
+            }
+            for row in con.execute(
+                "SELECT group_id,last_result,opportunity "
+                "FROM neg_risk_candidate_current_authority ORDER BY group_id"
+            ).fetchall()
+        }
+        seeds["timeline_states"] = timeline_states
         seeds_json = json.dumps(
             seeds,
             ensure_ascii=False,
@@ -5668,7 +5705,10 @@ class OpportunityPerceptionStore:
             sort_keys=True,
         )
         seeds_digest = f"sha256:{hashlib.sha256(seeds_json.encode()).hexdigest()}"
-        after_counts = {name: len(rows) for name, rows in seeds.items()}
+        after_counts = {
+            name: len(seeds[name])
+            for name in ("groups", "quotes", "facts", "receipts")
+        }
         compacted_columns = {
             "groups": "compacted_group_rows",
             "quotes": "compacted_quote_rows",
@@ -7691,6 +7731,265 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
         return tuple(self._candidate_watch_fact_from_row(row) for row in rows)
+
+    def validated_group_timeline_sources(
+        self,
+        group_id: str,
+        *,
+        limit: int,
+        before: tuple[int, int, int] | None = None,
+        _connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        """Read three authenticated Candidate timeline sources with fixed caps.
+
+        Incident history is owned by IncidentManager and is deliberately read
+        separately in the caller's same transaction.
+        """
+        if not group_id or not 1 <= limit <= 500:
+            raise ValueError("invalid-group-timeline-request")
+        if before is not None and (
+            len(before) != 3
+            or before[0] < 0
+            or before[1] not in range(4)
+            or before[2] <= 0
+        ):
+            raise ValueError("invalid-group-timeline-request")
+        owns_connection = _connection is None
+        con = self._connect() if _connection is None else _connection
+        try:
+            if owns_connection:
+                con.execute("BEGIN")
+            self._assert_owner_journal_clean(con)
+            # This authenticates the rolling checkpoint, its retained seeds,
+            # the complete bounded suffix, receipts, and current projection.
+            self.validated_candidate_opportunity_count(_connection=con)
+            checkpoint = self._validated_candidate_checkpoint(con)
+
+            def cursor_sql(
+                occurred_column: str,
+                id_column: str,
+                class_order: int,
+            ) -> tuple[str, tuple[int, ...]]:
+                if before is None:
+                    return "", ()
+                before_ms, before_class, before_id = before
+                if class_order < before_class:
+                    return f"AND {occurred_column}<? ", (before_ms,)
+                if class_order > before_class:
+                    return f"AND {occurred_column}<=? ", (before_ms,)
+                return (
+                    f"AND ({occurred_column}<? OR "
+                    f"({occurred_column}=? AND {id_column}<?)) ",
+                    (before_ms, before_ms, before_id),
+                )
+
+            membership_cursor, membership_parameters = cursor_sql(
+                "observed_at_ms", "id", 0
+            )
+            membership_rows = con.execute(
+                "SELECT * FROM neg_risk_group_revisions WHERE group_id=? "
+                f"{membership_cursor}"
+                "ORDER BY observed_at_ms DESC,id DESC LIMIT ?",
+                (group_id, *membership_parameters, limit + 1),
+            ).fetchall()
+            memberships: list[dict[str, Any]] = []
+            for row in membership_rows:
+                revision = self._validated_group_from_row(row)
+                if revision is None or revision.group_id != group_id:
+                    raise ValueError("invalid-candidate-group-history")
+                memberships.append(
+                    {
+                        "stable_id": int(row["id"]),
+                        "occurred_at_ms": revision.observed_at_ms,
+                        "group_id": revision.group_id,
+                        "event_id": revision.event_id,
+                        "revision": revision.revision,
+                        "membership_hash": revision.membership_hash,
+                        "status": revision.status,
+                        "leg_count": len(revision.legs),
+                        "source_cursor": revision.source_cursor,
+                    }
+                )
+
+            quote_cursor, quote_parameters = cursor_sql(
+                "quoted_at_ms", "rowid", 1
+            )
+            quote_rows = con.execute(
+                "SELECT rowid,* FROM neg_risk_group_quote_batches "
+                "WHERE group_id=? "
+                f"{quote_cursor}"
+                "ORDER BY quoted_at_ms DESC,rowid DESC LIMIT ?",
+                (group_id, *quote_parameters, limit + 1),
+            ).fetchall()
+            quotes: list[dict[str, Any]] = []
+            for row in quote_rows:
+                try:
+                    quote = self._quote_batch_from_row(row)
+                except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    raise ValueError("invalid-candidate-quote-history")
+                if quote.group_id != group_id:
+                    raise ValueError("invalid-candidate-quote-history")
+                quotes.append(
+                    {
+                        "stable_id": int(row["rowid"]),
+                        "occurred_at_ms": quote.quoted_at_ms,
+                        "quote_batch_id": quote.quote_batch_id,
+                        "group_revision": int(row["group_revision"]),
+                        "membership_hash": quote.membership_hash,
+                        "status": quote.status,
+                        "failure_reason": quote.failure_reason,
+                        "leg_count": len(quote.legs),
+                        "duration_ms": quote.quoted_at_ms - quote.started_at_ms,
+                    }
+                )
+
+            fact_floor = (
+                0
+                if checkpoint is None
+                or int(checkpoint["compacted_fact_rows"]) == 0
+                else int(checkpoint["through_fact_id"])
+            )
+            checkpoint_timeline_states = (
+                {}
+                if checkpoint is None
+                else json.loads(str(checkpoint["seeds_json"])).get(
+                    "timeline_states",
+                    {},
+                )
+            )
+            checkpoint_state = checkpoint_timeline_states.get(group_id)
+            seed_result = (
+                None
+                if checkpoint_state is None
+                else str(checkpoint_state["last_result"])
+            )
+            seed_opportunity = (
+                None
+                if checkpoint_state is None
+                else int(bool(checkpoint_state["opportunity"]))
+            )
+            allow_initial = int(
+                checkpoint is None
+                or int(checkpoint["compacted_fact_rows"]) == 0
+            )
+            fact_cursor, fact_parameters = cursor_sql(
+                "observed_at_ms", "id", 2
+            )
+            fact_rows = con.execute(
+                "WITH fact_states AS ("
+                "SELECT *,"
+                "CASE WHEN last_result='watching' AND gross_edge_bps>0 "
+                "THEN 1 ELSE 0 END AS opportunity,"
+                "LAG(last_result) OVER (PARTITION BY group_id ORDER BY id) "
+                "AS previous_result,"
+                "LAG(CASE WHEN last_result='watching' AND gross_edge_bps>0 "
+                "THEN 1 ELSE 0 END) "
+                "OVER (PARTITION BY group_id ORDER BY id) AS previous_opportunity "
+                "FROM neg_risk_candidate_watch_facts"
+                "), resolved AS ("
+                "SELECT *,"
+                "CASE WHEN previous_result IS NULL THEN ? "
+                "ELSE previous_result END AS effective_previous_result,"
+                "CASE WHEN previous_result IS NULL THEN ? "
+                "ELSE previous_opportunity END AS effective_previous_opportunity "
+                "FROM fact_states WHERE group_id=?"
+                ") SELECT * FROM resolved WHERE id>? "
+                "AND ((effective_previous_result IS NULL AND ?=1) "
+                "OR effective_previous_result!=last_result "
+                "OR effective_previous_opportunity!=opportunity) "
+                f"{fact_cursor}"
+                "ORDER BY observed_at_ms DESC,id DESC LIMIT ?",
+                (
+                    seed_result,
+                    seed_opportunity,
+                    group_id,
+                    fact_floor,
+                    allow_initial,
+                    *fact_parameters,
+                    limit + 1,
+                ),
+            ).fetchall()
+            opportunities = [
+                {
+                    "stable_id": int(row["id"]),
+                    "occurred_at_ms": int(row["observed_at_ms"]),
+                    "from": (
+                        None
+                        if row["effective_previous_result"] is None
+                        else {
+                            "last_result": str(row["effective_previous_result"]),
+                            "opportunity": bool(
+                                row["effective_previous_opportunity"]
+                            ),
+                        }
+                    ),
+                    "to": {
+                        "last_result": str(row["last_result"]),
+                        "opportunity": bool(row["opportunity"]),
+                    },
+                    "reason": row["reason"],
+                    "quote_batch_id": row["quote_batch_id"],
+                    "gross_edge_bps": row["gross_edge_bps"],
+                }
+                for row in fact_rows
+            ]
+
+            floor = {
+                "membership": {
+                    "scope": "global",
+                    "through_id": (
+                        0
+                        if checkpoint is None
+                        else int(checkpoint["through_group_revision_id"])
+                    ),
+                    "compacted_count": (
+                        0
+                        if checkpoint is None
+                        else int(checkpoint["compacted_group_rows"])
+                    ),
+                },
+                "quote": {
+                    "scope": "global",
+                    "through_id": (
+                        0
+                        if checkpoint is None
+                        else int(checkpoint["through_quote_rowid"])
+                    ),
+                    "compacted_count": (
+                        0
+                        if checkpoint is None
+                        else int(checkpoint["compacted_quote_rows"])
+                    ),
+                },
+                "opportunity": {
+                    "scope": "global",
+                    "through_id": (
+                        0
+                        if checkpoint is None
+                        else int(checkpoint["through_fact_id"])
+                    ),
+                    "source_rows_compacted": (
+                        0
+                        if checkpoint is None
+                        else int(checkpoint["compacted_fact_rows"])
+                    ),
+                },
+            }
+            if owns_connection:
+                con.execute("COMMIT")
+            return {
+                "membership": memberships,
+                "quote": quotes,
+                "opportunity": opportunities,
+                "history_floor": floor,
+            }
+        except BaseException:
+            if owns_connection and con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            if owns_connection:
+                con.close()
 
     def candidate_scheduling_snapshot(
         self,

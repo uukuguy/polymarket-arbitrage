@@ -1921,6 +1921,57 @@ def test_candidate_authority_rolls_checkpoint_beyond_daily_history_bound(
         ).fetchone()[0] <= 1_025
 
 
+def test_group_timeline_candidate_sources_use_limit_plus_one(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    group = revision(group_id="timeline-bound", revision=1, token_suffix="a")
+    store.publish_group_revision(group)
+    for sequence in range(4):
+        quoted_at_ms = 3_100 + sequence
+        store.publish_candidate_success(
+            batch_for(
+                group,
+                quote_batch_id=f"timeline-q-{sequence}",
+                quoted_at_ms=quoted_at_ms,
+            ),
+            observed_at_ms=quoted_at_ms,
+            last_result="watching" if sequence % 2 == 0 else "no-edge",
+            reason=None,
+            bundle_cost=0.9,
+            gross_edge_bps=1_000 if sequence % 2 == 0 else 0,
+            max_bundle_size=10,
+            priority_class="high",
+            consecutive_failures=0,
+            effective_interval_s=15,
+            schedule_reason="timeline-bound",
+            next_due_at_ms=quoted_at_ms + 15_000,
+        )
+
+    statements: list[str] = []
+    with store._connect() as con:
+        con.set_trace_callback(statements.append)
+        sources = store.validated_group_timeline_sources(
+            "timeline-bound",
+            limit=2,
+            _connection=con,
+        )
+
+    assert len(sources["membership"]) <= 3
+    assert len(sources["quote"]) == 3
+    assert len(sources["opportunity"]) == 3
+    bounded_queries = [
+        statement
+        for statement in statements
+        if (
+            "ORDER BY observed_at_ms DESC,id DESC LIMIT 3" in statement
+            or "ORDER BY quoted_at_ms DESC,rowid DESC LIMIT 3" in statement
+        )
+    ]
+    assert len(bounded_queries) == 3
+
+
 def test_candidate_authority_compacts_before_quote_bytes_hit_hard_bound(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

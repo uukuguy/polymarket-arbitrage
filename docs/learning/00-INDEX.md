@@ -49,6 +49,7 @@
 | 35 | [认证当前机会读模型](35-认证当前机会读模型.md) | current-authority 行绑定 / O(1) candidate 状态计数 / bounded keyset 机会页 / v2→v3 原子迁移 |
 | 36 | [有界 Incident 权威](36-有界Incident权威.md) | prefix checkpoint / open authority / replay anchor / failure breadcrumb |
 | 37 | [有界资源决策权威](37-有界资源决策权威.md) | deterministic policy replay / 512→256 compaction / suffix tail binding / resource evidence health |
+| 38 | [四类证据时间线](38-四类证据时间线.md) | 单事务四源合并 / canonical group 游标 / opportunity 转换 / per-group checkpoint seed / 保守与精确 history floor |
 
 ## Phase 02.1 教学增量（2026-05）
 

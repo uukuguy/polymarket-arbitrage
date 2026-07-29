@@ -70,6 +70,102 @@ def _seed_candidate_authority(db_path) -> None:
     )
 
 
+def _seed_equal_timestamp_group_timeline(db_path) -> None:
+    store = OpportunityPerceptionStore(db_path)
+    legs = (
+        GroupLeg("m-1", "c-1", "yes-1", "One"),
+        GroupLeg("m-2", "c-2", "yes-2", "Two"),
+    )
+    revision = GroupRevision.certified(
+        group_id="g-1",
+        event_id="e-1",
+        revision=1,
+        started_at_ms=1,
+        observed_at_ms=4,
+        source_cursor="cursor",
+        legs=legs,
+    )
+    store.publish_group_revision(revision)
+    batch = GroupQuoteBatch.complete(
+        group_id="g-1",
+        membership_hash=revision.membership_hash,
+        quote_batch_id="q-1",
+        started_at_ms=3,
+        quoted_at_ms=4,
+        legs=tuple(
+            GroupQuoteLeg(
+                leg.yes_token_id,
+                revision.membership_hash,
+                0.4,
+                10.0,
+                "executable",
+            )
+            for leg in legs
+        ),
+    )
+    store.publish_candidate_success(
+        batch,
+        observed_at_ms=4,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.8,
+        gross_edge_bps=2_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="edge",
+        next_due_at_ms=15_004,
+    )
+    IncidentManager(store, clock_ms=lambda: 4).detect(
+        "candidate:g-1",
+        "worker-failure",
+        {"group_id": "g-1"},
+    )
+
+
+def _publish_timeline_success(
+    store: OpportunityPerceptionStore,
+    revision: GroupRevision,
+    *,
+    quote_batch_id: str,
+    observed_at_ms: int,
+    last_result: str,
+) -> None:
+    edge = 2_000 if last_result == "watching" else 0
+    batch = GroupQuoteBatch.complete(
+        group_id=revision.group_id,
+        membership_hash=revision.membership_hash,
+        quote_batch_id=quote_batch_id,
+        started_at_ms=observed_at_ms - 1,
+        quoted_at_ms=observed_at_ms,
+        legs=tuple(
+            GroupQuoteLeg(
+                leg.yes_token_id,
+                revision.membership_hash,
+                0.4,
+                10.0,
+                "executable",
+            )
+            for leg in revision.legs
+        ),
+    )
+    store.publish_candidate_success(
+        batch,
+        observed_at_ms=observed_at_ms,
+        last_result=last_result,
+        reason=None,
+        bundle_cost=0.8,
+        gross_edge_bps=edge,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="timeline-test",
+        next_due_at_ms=observed_at_ms + 15_000,
+    )
+
+
 def test_perception_routes_exist_and_limits_are_validated(http_test_client) -> None:
     assert http_test_client.get("/perception/status").status_code == 200
     for path in (
@@ -78,6 +174,7 @@ def test_perception_routes_exist_and_limits_are_validated(http_test_client) -> N
         "/perception/groups?limit=1%20OR%201",
         "/perception/incidents?limit=-1",
         "/perception/resources?limit=0",
+        "/perception/groups/g-1/timeline?limit=0",
     ):
         response = http_test_client.get(path)
         assert response.status_code == 400
@@ -166,6 +263,215 @@ def test_status_and_current_opportunities_expose_authenticated_candidate_state(
         ],
         "limit": 1,
         "next_after_group_id": None,
+        }
+
+
+def test_group_timeline_merges_four_classes_with_stable_equal_time_cursor(
+    http_test_client,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    _seed_equal_timestamp_group_timeline(db_path)
+
+    first = http_test_client.get("/perception/groups/g-1/timeline?limit=2")
+
+    assert first.status_code == 200
+    body = first.json()
+    assert [item["class"] for item in body["items"]] == [
+        "membership_revision",
+        "quote_batch",
+    ]
+    assert all(item["occurred_at_ms"] == 4 for item in body["items"])
+    assert body["next_before"]
+    assert body["history_complete"] == {
+        "membership": True,
+        "quote": True,
+        "opportunity": True,
+        "incident": True,
+    }
+
+    second = http_test_client.get(
+        "/perception/groups/g-1/timeline",
+        params={"limit": 2, "before": body["next_before"]},
+    )
+
+    assert second.status_code == 200
+    assert [item["class"] for item in second.json()["items"]] == [
+        "opportunity_transition",
+        "incident_event",
+    ]
+    assert second.json()["next_before"] is None
+
+
+def test_group_timeline_cursor_is_canonical_and_bound_to_group_identity(
+    http_test_client,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    _seed_equal_timestamp_group_timeline(db_path)
+    cursor = http_test_client.get(
+        "/perception/groups/g-1/timeline?limit=1"
+    ).json()["next_before"]
+
+    wrong_group = http_test_client.get(
+        "/perception/groups/g-2/timeline",
+        params={"limit": 1, "before": cursor},
+    )
+    padded = http_test_client.get(
+        "/perception/groups/g-1/timeline",
+        params={"limit": 1, "before": cursor + "="},
+    )
+
+    assert wrong_group.status_code == 400
+    assert wrong_group.json()["reason"] == "invalid-group-timeline-cursor"
+    assert padded.status_code == 400
+    assert padded.json()["reason"] == "invalid-group-timeline-cursor"
+
+
+def test_group_timeline_represents_transition_across_candidate_floor(
+    http_test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    store = OpportunityPerceptionStore(db_path)
+    revision_a = GroupRevision.certified(
+        group_id="g-a",
+        event_id="e-a",
+        revision=1,
+        started_at_ms=1,
+        observed_at_ms=2,
+        source_cursor="a",
+        legs=(
+            GroupLeg("m-a1", "c-a1", "yes-a1", "A1"),
+            GroupLeg("m-a2", "c-a2", "yes-a2", "A2"),
+        ),
+    )
+    store.publish_group_revision(revision_a)
+    revision_b = GroupRevision.certified(
+        group_id="g-b",
+        event_id="e-b",
+        revision=1,
+        started_at_ms=1,
+        observed_at_ms=3,
+        source_cursor="b",
+        legs=(
+            GroupLeg("m-b1", "c-b1", "yes-b1", "B1"),
+            GroupLeg("m-b2", "c-b2", "yes-b2", "B2"),
+        ),
+    )
+    store.publish_group_revision(revision_b)
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        1,
+    )
+    _publish_timeline_success(
+        store,
+        revision_a,
+        quote_batch_id="q-a1",
+        observed_at_ms=4,
+        last_result="watching",
+    )
+    _publish_timeline_success(
+        store,
+        revision_b,
+        quote_batch_id="q-b1",
+        observed_at_ms=5,
+        last_result="watching",
+    )
+    monkeypatch.setattr(
+        "polyarb.perception.store._CANDIDATE_AUTHORITY_COMPACT_HIGH_ROWS",
+        10_000,
+    )
+    _publish_timeline_success(
+        store,
+        revision_a,
+        quote_batch_id="q-a2",
+        observed_at_ms=6,
+        last_result="no-edge",
+    )
+
+    body_a = http_test_client.get(
+        "/perception/groups/g-a/timeline?limit=100"
+    ).json()
+    transition = next(
+        item
+        for item in body_a["items"]
+        if item["class"] == "opportunity_transition"
+    )
+    assert transition["from"] == {
+        "last_result": "watching",
+        "opportunity": True,
+    }
+    assert transition["to"] == {
+        "last_result": "no-edge",
+        "opportunity": False,
+    }
+    assert {
+        item["quote_batch_id"]
+        for item in body_a["items"]
+        if item["class"] == "quote_batch"
+    } == {"q-a2"}
+    assert body_a["history_complete"] == {
+        "membership": True,
+        "quote": False,
+        "opportunity": False,
+        "incident": True,
+    }
+
+    body_b = http_test_client.get(
+        "/perception/groups/g-b/timeline?limit=100"
+    ).json()
+    assert body_b["history_complete"]["quote"] is False
+    assert body_b["history_complete"]["opportunity"] is False
+    assert body_b["history_floor"]["quote"]["scope"] == "global"
+    assert body_b["history_floor"]["incident"] == {
+        "scope": "candidate:g-b",
+        "through_id": 0,
+        "compacted_count": 0,
+    }
+
+
+def test_group_timeline_enforces_shared_deadline_and_response_cap(
+    http_test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    finished = threading.Event()
+
+    def slow_timeline(*_args):
+        con = perception._connect(db_path)
+        try:
+            con.execute(
+                "WITH RECURSIVE counter(value) AS ("
+                "SELECT 1 UNION ALL SELECT value + 1 FROM counter "
+                "WHERE value < 10000000"
+                ") SELECT sum(value) FROM counter"
+            ).fetchone()
+            return {"status": "unexpected"}
+        finally:
+            con.close()
+            finished.set()
+
+    monkeypatch.setattr(perception, "_timeline", slow_timeline)
+    started = time.monotonic()
+    response = http_test_client.get(
+        "/perception/groups/g-1/timeline?limit=2"
+    )
+
+    assert response.status_code == 503
+    assert time.monotonic() - started <= 1.1
+    assert finished.is_set()
+
+    monkeypatch.setattr(
+        perception,
+        "_timeline",
+        lambda *_args: {"status": "available", "oversized": "x" * 1_048_576},
+    )
+    response = http_test_client.get(
+        "/perception/groups/g-1/timeline?limit=2"
+    )
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "reason": "durable-evidence-invalid",
     }
 
 
