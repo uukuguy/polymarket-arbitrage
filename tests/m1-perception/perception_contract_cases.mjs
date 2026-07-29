@@ -5,6 +5,7 @@ import {
   isCurrentOpportunitiesEnvelope,
   isDiscoveryEnvelope,
   isReconciliationEnvelope,
+  isResourcesEnvelope,
   isStatusEnvelope,
 } from "../../dashboard/lib/perception.ts";
 
@@ -125,6 +126,49 @@ const validCurrentOpportunities = {
   limit: 1,
   next_after_group_id: null,
 };
+const validResourceDecision = {
+  mode: "normal",
+  reason: "candidate-hot-path-fresh",
+  reconciliation_enabled: true,
+  discovery_batch_limit: 50,
+  discovery_duty_multiplier: 1,
+  normal_candidate_interval_multiplier: 1,
+  high_candidate_interval_multiplier: 1,
+  http_preserved: true,
+  health_claimed: true,
+  previous_discovery_batch_limit: 50,
+  decided_at_ms: 2_000,
+  policy_version: "opportunity-resource-v1",
+  sequence: 1,
+  source_sample_id: 1,
+  hot_quote_age_ms: 20_000,
+  cooldown_ms: 30_000,
+  decision_ttl_ms: 15_000,
+  valid_until_ms: 17_000,
+  mode_changed_at_ms: 2_000,
+};
+const validResources = {
+  status: "available",
+  current: validResourceDecision,
+  items: [
+    {
+      sample: {
+        candidate_count: 2,
+        candidate_quote_p95_ms: 5_000,
+        candidate_missing_quote_count: 0,
+        candidate_worker_ok: true,
+        discovery_worker_ok: true,
+        reconciliation_running: true,
+        previous_discovery_batch_limit: 50,
+        observed_at_ms: 2_000,
+      },
+      decision: validResourceDecision,
+    },
+  ],
+  limit: 100,
+  next_before_sequence: null,
+  history_floor: null,
+};
 
 const clone = (value) => structuredClone(value);
 
@@ -135,6 +179,7 @@ assert.equal(
   isCurrentOpportunitiesEnvelope(validCurrentOpportunities),
   true,
 );
+assert.equal(isResourcesEnvelope(validResources), true);
 assert.equal(
   candidateEnvelopesAgree(validStatus, validCurrentOpportunities),
   true,
@@ -210,6 +255,37 @@ for (const [field, value] of [
     isCurrentOpportunitiesEnvelope(body),
     false,
     "quote timestamps must be ordered",
+  );
+}
+for (const mutate of [
+  (body) => {
+    body.current.valid_until_ms += 1;
+  },
+  (body) => {
+    body.items[0].sample.candidate_missing_quote_count = 3;
+  },
+  (body) => {
+    body.items[0].decision = {
+      ...body.items[0].decision,
+      sequence: 2,
+    };
+  },
+  (body) => {
+    body.next_before_sequence = 1;
+  },
+  (body) => {
+    body.current.reason = "forged-reason";
+  },
+  (body) => {
+    body.current.policy_version = "opportunity-resource-v2";
+  },
+]) {
+  const body = clone(validResources);
+  mutate(body);
+  assert.equal(
+    isResourcesEnvelope(body),
+    false,
+    "malformed resource authority must fail",
   );
 }
 {

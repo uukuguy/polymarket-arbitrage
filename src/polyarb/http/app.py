@@ -53,6 +53,7 @@ from polyarb.http.perception import (
     perception_incidents,
     perception_opportunities,
     perception_reconciliation,
+    perception_resources,
     perception_status,
 )
 from polyarb.http.scan import scan, scan_auth_middleware
@@ -129,6 +130,7 @@ def create_app(
         Route("/perception/discovery", perception_discovery, methods=["GET"]),
         Route("/perception/reconciliation", perception_reconciliation, methods=["GET"]),
         Route("/perception/incidents", perception_incidents, methods=["GET"]),
+        Route("/perception/resources", perception_resources, methods=["GET"]),
         Route("/scan", scan, methods=["POST"]),
         Route("/control/market-map/build", build_market_map, methods=["POST"]),
         Route("/control/neg-risk/scan", scan_neg_risk_map, methods=["POST"]),

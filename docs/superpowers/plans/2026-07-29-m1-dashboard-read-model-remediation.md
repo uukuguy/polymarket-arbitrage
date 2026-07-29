@@ -364,8 +364,10 @@ partial-manifest cases are tested.
 **Authority design**
 
 - Add a single resource checkpoint containing through sequence/row IDs,
-  compacted counts, prefix digest, last decision JSON/digest, and checkpoint
-  hash.
+  compacted counts, prefix digest, compacted-floor decision JSON, current
+  suffix-tail digest, and checkpoint hash. The tail digest is owner-journaled
+  on every successful decision so deleting an un-compacted terminal pair is
+  detectable; the floor JSON remains the deterministic replay anchor.
 - Compact only after the full pre-compaction replay validates. Retain the
   checkpoint anchor plus a bounded suffix; current validation starts from the
   authenticated anchor and replays the suffix with the existing deterministic
@@ -379,24 +381,24 @@ partial-manifest cases are tested.
 - `GET /perception/resources?before_sequence=&limit=100` returns current
   decision plus bounded recent decision/sample pairs and history floor.
 
-- [ ] Write RED tests for checkpoint creation, replay equivalence, tampered
+- [x] Write RED tests for checkpoint creation, replay equivalence, tampered
       anchor/hash/suffix, crash before/after checkpoint publication, repeated
       compaction, 2,000 appended decisions, concurrent high-water writers,
       rollback/retry, v4 restart, and bounded validation cost (at most 1,024
       suffix pairs per public read).
-- [ ] Add schema/hash helpers, owner-authority manifest/trigger coverage, and
+- [x] Add schema/hash helpers, owner-authority manifest/trigger coverage, and
       writer-triggered compact/replay without changing policy behavior.
-- [ ] Add the bounded HTTP endpoint and strict Dashboard reader.
-- [ ] Render current mode, reason, policy age/TTL, hot-path freshness inputs,
+- [x] Add the bounded HTTP endpoint and strict Dashboard reader.
+- [x] Render current mode, reason, policy age/TTL, hot-path freshness inputs,
       and recent mode transitions.
-- [ ] Add `/health` `resource_evidence` chain truth: it calls the same bounded
+- [x] Add `/health` `resource_evidence` chain truth: it calls the same bounded
       validator, has no new config gate, success advances checkpoint/suffix
       atomically, and validation failure rolls back. It also reads the separate
       unresolved breadcrumb. Tests cover both suffix corruption and
       hard-limit rollback/breadcrumb.
-- [ ] Make `/perception/resources` read the same keyed current breadcrumb and
+- [x] Make `/perception/resources` read the same keyed current breadcrumb and
       return unavailable while the resource row is unresolved.
-- [ ] Run:
+- [x] Run:
 
   ```bash
   uv run pytest tests/perception/test_resource_controller.py \
@@ -406,7 +408,7 @@ partial-manifest cases are tested.
   make dashboard-typecheck
   ```
 
-- [ ] Commit:
+- [x] Commit:
 
   ```bash
   git commit -m "feat(m1): bound resource decision evidence"

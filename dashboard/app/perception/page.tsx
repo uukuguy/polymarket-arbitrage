@@ -84,11 +84,23 @@ export default async function PerceptionOverviewPage() {
     discovery,
     reconciliation,
     incidents,
+    resources,
   } = overview.data;
   const groupStatuses = groups.items.map((group) => group.status);
   const opportunityStatus = status.opportunities;
   const openIncidents = incidents.items.filter(
     (incident) => incident.state !== "verified",
+  );
+  const currentResourceSample =
+    resources.current === null
+      ? null
+      : (resources.items.find(
+          (item) => item.decision.sequence === resources.current?.sequence,
+        )?.sample ?? null);
+  const resourceTransitions = resources.items.filter(
+    (item, index) =>
+      index === resources.items.length - 1 ||
+      item.decision.mode !== resources.items[index + 1].decision.mode,
   );
   const validZero =
     opportunityStatus.status === "available" &&
@@ -353,7 +365,77 @@ export default async function PerceptionOverviewPage() {
 
       <section style={{ ...panel, marginBottom: 12 }}>
         <h2 style={{ marginTop: 0 }}>Resource mode</h2>
-        <NotExposed />
+        {resources.current === null ? (
+          <p style={muted}>No resource decision has been recorded.</p>
+        ) : (
+          <>
+            <p>
+              <strong>{resources.current.mode}</strong> ·{" "}
+              {resources.current.reason}
+            </p>
+            <p>
+              Policy age{" "}
+              {fmtDurationMs(
+                Math.max(0, Date.now() - resources.current.decided_at_ms),
+              )}{" "}
+              · TTL remaining{" "}
+              {fmtDurationMs(
+                Math.max(0, resources.current.valid_until_ms - Date.now()),
+              )}
+            </p>
+            <p style={muted}>
+              discovery batch {resources.current.discovery_batch_limit} · duty{" "}
+              {resources.current.discovery_duty_multiplier} · reconciliation{" "}
+              {resources.current.reconciliation_enabled ? "enabled" : "shed"} ·
+              policy TTL{" "}
+              {fmtDurationMs(resources.current.decision_ttl_ms)} · mode changed{" "}
+              {fmtTime(resources.current.mode_changed_at_ms)}
+            </p>
+            {currentResourceSample !== null && (
+              <p style={muted}>
+                hot-path inputs: candidates{" "}
+                {currentResourceSample.candidate_count} · quote p95{" "}
+                {currentResourceSample.candidate_quote_p95_ms === null
+                  ? "not observed"
+                  : fmtDurationMs(
+                      currentResourceSample.candidate_quote_p95_ms,
+                    )}{" "}
+                ·
+                missing quotes{" "}
+                {currentResourceSample.candidate_missing_quote_count} ·
+                candidate worker{" "}
+                {currentResourceSample.candidate_worker_ok ? "ok" : "failed"} ·
+                discovery worker{" "}
+                {currentResourceSample.discovery_worker_ok ? "ok" : "failed"} ·
+                reconciliation running{" "}
+                {currentResourceSample.reconciliation_running ? "yes" : "no"}
+              </p>
+            )}
+            <h3>Recent mode transitions</h3>
+            {resourceTransitions.map((item) => (
+              <div
+                key={item.decision.sequence}
+                style={{ borderTop: "1px solid #292929", padding: "6px 0" }}
+              >
+                #{item.decision.sequence} {item.decision.mode} ·{" "}
+                {fmtTime(item.decision.decided_at_ms)}
+              </div>
+            ))}
+            {resources.next_before_sequence !== null && (
+              <p style={{ color: "#ffd47a" }}>
+                More resource decisions exist before sequence{" "}
+                {resources.next_before_sequence}.
+              </p>
+            )}
+            {resources.history_floor !== null && (
+              <p style={muted}>
+                history compacted through sequence{" "}
+                {resources.history_floor.through_sequence} (
+                {resources.history_floor.compacted_decision_count} decisions)
+              </p>
+            )}
+          </>
+        )}
       </section>
 
       <section style={panel}>

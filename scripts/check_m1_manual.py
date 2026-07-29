@@ -70,6 +70,7 @@ M1_MAKE_TARGETS = {
     "perception-opportunities",
     "perception-groups",
     "perception-incidents",
+    "perception-resources",
     "queue-discovery",
     "queue-reconciliation",
     "chaos-l2-baseline",

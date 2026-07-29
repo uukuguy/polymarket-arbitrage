@@ -8,6 +8,9 @@ import type {
   PerceptionOverview,
   PerceptionReadResult,
   PerceptionReconciliationEnvelope,
+  PerceptionResourceDecision,
+  PerceptionResourceSample,
+  PerceptionResourcesEnvelope,
   PerceptionStatusEnvelope,
 } from "@/lib/types";
 
@@ -16,6 +19,7 @@ const PERCEPTION_BASE_URL =
 const GROUP_LIMIT = 100;
 const OPPORTUNITY_LIMIT = 100;
 const INCIDENT_LIMIT = 500;
+const RESOURCE_LIMIT = 100;
 const HISTORY_LIMIT = 100;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -419,6 +423,120 @@ function isIncidentsEnvelope(
   );
 }
 
+function isResourceSample(value: unknown): value is PerceptionResourceSample {
+  if (!isRecord(value)) return false;
+  return (
+    isNonNegativeInteger(value.candidate_count) &&
+    isNumberOrNull(value.candidate_quote_p95_ms) &&
+    (value.candidate_quote_p95_ms === null ||
+      value.candidate_quote_p95_ms >= 0) &&
+    isNonNegativeInteger(value.candidate_missing_quote_count) &&
+    value.candidate_missing_quote_count <= value.candidate_count &&
+    typeof value.candidate_worker_ok === "boolean" &&
+    typeof value.discovery_worker_ok === "boolean" &&
+    typeof value.reconciliation_running === "boolean" &&
+    isPositiveInteger(value.previous_discovery_batch_limit) &&
+    value.previous_discovery_batch_limit <= 100 &&
+    isNonNegativeInteger(value.observed_at_ms)
+  );
+}
+
+function isResourceDecision(
+  value: unknown,
+): value is PerceptionResourceDecision {
+  if (!isRecord(value)) return false;
+  return (
+    ["normal", "protect-hot-path", "empty-candidate-exploration"].includes(
+      String(value.mode),
+    ) &&
+    [
+      "candidate-hot-path-pressure",
+      "empty-candidate-exploration",
+      "candidate-hot-path-fresh",
+      "hysteresis-cooldown",
+    ].includes(String(value.reason)) &&
+    typeof value.reconciliation_enabled === "boolean" &&
+    isPositiveInteger(value.discovery_batch_limit) &&
+    value.discovery_batch_limit <= 100 &&
+    isNonNegativeNumber(value.discovery_duty_multiplier) &&
+    isNonNegativeNumber(value.normal_candidate_interval_multiplier) &&
+    isNonNegativeNumber(value.high_candidate_interval_multiplier) &&
+    value.http_preserved === true &&
+    typeof value.health_claimed === "boolean" &&
+    isPositiveInteger(value.previous_discovery_batch_limit) &&
+    value.previous_discovery_batch_limit <= 100 &&
+    isNonNegativeInteger(value.decided_at_ms) &&
+    value.policy_version === "opportunity-resource-v1" &&
+    isPositiveInteger(value.sequence) &&
+    isPositiveInteger(value.source_sample_id) &&
+    isPositiveInteger(value.hot_quote_age_ms) &&
+    isNonNegativeInteger(value.cooldown_ms) &&
+    isPositiveInteger(value.decision_ttl_ms) &&
+    isNonNegativeInteger(value.valid_until_ms) &&
+    value.valid_until_ms === value.decided_at_ms + value.decision_ttl_ms &&
+    isNonNegativeInteger(value.mode_changed_at_ms) &&
+    value.mode_changed_at_ms <= value.decided_at_ms
+  );
+}
+
+export function isResourcesEnvelope(
+  value: unknown,
+): value is PerceptionResourcesEnvelope {
+  if (
+    !isRecord(value) ||
+    value.status !== "available" ||
+    (value.current !== null && !isResourceDecision(value.current)) ||
+    !Array.isArray(value.items) ||
+    !isPositiveInteger(value.limit) ||
+    value.limit > 500 ||
+    (value.next_before_sequence !== null &&
+      !isPositiveInteger(value.next_before_sequence)) ||
+    !(
+      value.history_floor === null ||
+      (isRecord(value.history_floor) &&
+        isPositiveInteger(value.history_floor.through_sample_id) &&
+        isPositiveInteger(value.history_floor.through_decision_id) &&
+        isPositiveInteger(value.history_floor.through_sequence) &&
+        value.history_floor.compacted_sample_count ===
+          value.history_floor.through_sequence &&
+        value.history_floor.compacted_decision_count ===
+          value.history_floor.through_sequence)
+    )
+  ) {
+    return false;
+  }
+  let previousSequence: number | null = null;
+  for (const item of value.items) {
+    if (
+      !isRecord(item) ||
+      !isResourceSample(item.sample) ||
+      !isResourceDecision(item.decision) ||
+      !isRecord(item.sample) ||
+      !isRecord(item.decision) ||
+      item.sample.observed_at_ms > item.decision.decided_at_ms ||
+      (previousSequence !== null &&
+        item.decision.sequence >= previousSequence)
+    ) {
+      return false;
+    }
+    previousSequence = item.decision.sequence as number;
+  }
+  if (
+    value.items.length > value.limit ||
+    (value.current === null && value.items.length !== 0) ||
+    (value.current !== null &&
+      value.items.length > 0 &&
+      value.current.sequence < value.items[0].decision.sequence) ||
+    (value.next_before_sequence !== null &&
+      (value.items.length !== value.limit ||
+        value.next_before_sequence !==
+          value.items[value.items.length - 1].decision.sequence))
+  ) {
+    return false;
+  }
+  return true;
+}
+
 async function fetchAvailable<T>(
   path: string,
   signal: AbortSignal,
@@ -479,6 +597,7 @@ export async function readPerceptionOverview(): Promise<
       discovery,
       reconciliation,
       incidents,
+      resources,
     ] =
       await Promise.all([
         fetchAvailable<PerceptionStatusEnvelope>(
@@ -511,9 +630,23 @@ export async function readPerceptionOverview(): Promise<
           signal,
           isIncidentsEnvelope,
         ),
+        fetchAvailable<PerceptionResourcesEnvelope>(
+          `/perception/resources?limit=${RESOURCE_LIMIT}`,
+          signal,
+          isResourcesEnvelope,
+        ),
       ]);
     if (!candidateEnvelopesAgree(status, currentOpportunities)) {
       throw new Error("candidate read snapshots changed");
+    }
+    if (
+      (resources.current === null && resources.items.length !== 0) ||
+      (resources.current !== null &&
+        (resources.items.length === 0 ||
+          resources.current.sequence !==
+            resources.items[0].decision.sequence))
+    ) {
+      throw new Error("resource read snapshot changed");
     }
     return {
       status: "available",
@@ -524,6 +657,7 @@ export async function readPerceptionOverview(): Promise<
         discovery,
         reconciliation,
         incidents,
+        resources,
       },
     };
   } catch (error) {

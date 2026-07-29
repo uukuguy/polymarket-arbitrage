@@ -12,6 +12,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -956,6 +957,50 @@ def _incidents(
         con.close()
 
 
+def _resources(
+    db_path: Path,
+    limit: int,
+    before_sequence: int | None,
+) -> dict[str, Any]:
+    from polyarb.perception.resource_controller import (
+        resource_history_page,
+        validate_resource_evidence_failure,
+    )
+
+    store = _read_store(db_path)
+    con = _connect(db_path)
+    try:
+        con.execute("BEGIN")
+        store._assert_owner_journal_clean(con)
+        validate_resource_evidence_failure(con, require_resolved=True)
+        page = resource_history_page(
+            con,
+            limit=limit,
+            before_sequence=before_sequence,
+        )
+        con.execute("COMMIT")
+        return {
+            "status": "available",
+            "current": None if page.current is None else asdict(page.current),
+            "items": [
+                {
+                    "sample": asdict(item.sample),
+                    "decision": asdict(item.decision),
+                }
+                for item in page.items
+            ],
+            "limit": limit,
+            "next_before_sequence": page.next_before_sequence,
+            "history_floor": (
+                None
+                if page.history_floor is None
+                else asdict(page.history_floor)
+            ),
+        }
+    finally:
+        con.close()
+
+
 async def _serve(request: Request, reader: Callable[[], dict[str, Any]]) -> JSONResponse:
     execution = _ReadExecution(time.monotonic() + _READ_SQL_DEADLINE_S)
     token = _READ_EXECUTION.set(execution)
@@ -1112,3 +1157,37 @@ async def perception_incidents(request: Request) -> JSONResponse:
         return JSONResponse({"status": "invalid-request", "reason": str(error)}, status_code=400)
     db_path = Path(request.app.state.sqlite_store.db_path)
     return await _serve(request, lambda: _incidents(db_path, limit, before))
+
+
+async def perception_resources(request: Request) -> JSONResponse:
+    try:
+        limit = _limit(request)
+    except ValueError as error:
+        return JSONResponse(
+            {"status": "invalid-request", "reason": str(error)},
+            status_code=400,
+        )
+    try:
+        raw_before = request.query_params.get("before_sequence")
+        before_sequence = None if raw_before is None else int(raw_before, 10)
+        if (
+            before_sequence is not None
+            and (
+                before_sequence <= 0
+                or str(before_sequence) != raw_before
+            )
+        ):
+            raise ValueError
+    except ValueError:
+        return JSONResponse(
+            {
+                "status": "invalid-request",
+                "reason": "before-sequence-must-be-a-positive-integer",
+            },
+            status_code=400,
+        )
+    db_path = Path(request.app.state.sqlite_store.db_path)
+    return await _serve(
+        request,
+        lambda: _resources(db_path, limit, before_sequence),
+    )

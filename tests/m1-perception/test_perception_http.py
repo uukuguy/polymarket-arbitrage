@@ -14,6 +14,10 @@ from polyarb.perception.models import (
     GroupQuoteLeg,
     GroupRevision,
 )
+from polyarb.perception.resource_controller import (
+    ResourceController,
+    ResourceSample,
+)
 from polyarb.perception.store import DiscoveryAdmissionProof, OpportunityPerceptionStore
 
 
@@ -73,6 +77,7 @@ def test_perception_routes_exist_and_limits_are_validated(http_test_client) -> N
         "/perception/groups?limit=501",
         "/perception/groups?limit=1%20OR%201",
         "/perception/incidents?limit=-1",
+        "/perception/resources?limit=0",
     ):
         response = http_test_client.get(path)
         assert response.status_code == 400
@@ -285,6 +290,72 @@ def test_discovery_reconciliation_and_incidents_use_stable_envelopes(
         "open_count": 0,
         "next_before": None,
     }
+    assert http_test_client.get("/perception/resources?limit=5").json() == {
+        "status": "available",
+        "current": None,
+        "items": [],
+        "limit": 5,
+        "next_before_sequence": None,
+        "history_floor": None,
+    }
+
+
+def test_resource_endpoint_returns_current_and_keyset_history(
+    http_test_client,
+) -> None:
+    store = OpportunityPerceptionStore(
+        http_test_client.app.state.sqlite_store.db_path
+    )
+    now = [2_000]
+    controller = ResourceController(
+        store,
+        clock_ms=lambda: now[0],
+        cooldown_ms=0,
+        _verify_store_authority=False,
+    )
+    samples = (
+        ResourceSample(0, None, 0, True, True, False, 50, 2_000),
+        ResourceSample(2, 25_000, 0, True, True, True, 50, 2_001),
+        ResourceSample(2, 5_000, 0, True, True, True, 50, 2_002),
+    )
+    for sample in samples:
+        now[0] = sample.observed_at_ms
+        controller.decide(sample)
+
+    first = http_test_client.get("/perception/resources?limit=2")
+
+    assert first.status_code == 200
+    body = first.json()
+    assert body["current"]["sequence"] == 3
+    assert body["current"]["mode"] == "normal"
+    assert [item["decision"]["sequence"] for item in body["items"]] == [3, 2]
+    assert body["items"][0]["sample"]["candidate_quote_p95_ms"] == 5_000
+    assert body["next_before_sequence"] == 2
+    assert body["history_floor"] is None
+
+    second = http_test_client.get(
+        "/perception/resources?limit=2&before_sequence=2"
+    )
+    assert second.status_code == 200
+    assert [
+        item["decision"]["sequence"] for item in second.json()["items"]
+    ] == [1]
+    assert second.json()["next_before_sequence"] is None
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "01", "abc"])
+def test_resource_endpoint_rejects_invalid_sequence_cursor(
+    http_test_client,
+    value: str,
+) -> None:
+    response = http_test_client.get(
+        "/perception/resources",
+        params={"before_sequence": value},
+    )
+    assert response.status_code == 400
+    assert response.json()["reason"] == (
+        "before-sequence-must-be-a-positive-integer"
+    )
 
 
 def test_incident_endpoint_pages_more_than_legacy_history_cap(

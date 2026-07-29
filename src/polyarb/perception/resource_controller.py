@@ -76,6 +76,29 @@ class ResourceDecision:
 
 
 @dataclass(frozen=True)
+class ResourceHistoryItem:
+    sample: ResourceSample
+    decision: ResourceDecision
+
+
+@dataclass(frozen=True)
+class ResourceHistoryFloor:
+    through_sample_id: int
+    through_decision_id: int
+    through_sequence: int
+    compacted_sample_count: int
+    compacted_decision_count: int
+
+
+@dataclass(frozen=True)
+class ResourceHistoryPage:
+    current: ResourceDecision | None
+    items: tuple[ResourceHistoryItem, ...]
+    next_before_sequence: int | None
+    history_floor: ResourceHistoryFloor | None
+
+
+@dataclass(frozen=True)
 class _ResourceAuthorityState:
     checkpoint: sqlite3.Row | None
     floor_decision: ResourceDecision | None
@@ -414,7 +437,72 @@ def _validate_resource_authority(
 
 
 def validate_resource_history(con: sqlite3.Connection) -> ResourceDecision | None:
+    validate_resource_evidence_failure(con, require_resolved=True)
     return _validate_resource_authority(con).current_decision
+
+
+def resource_history_page(
+    con: sqlite3.Connection,
+    *,
+    limit: int,
+    before_sequence: int | None = None,
+) -> ResourceHistoryPage:
+    if (
+        not 1 <= limit <= 500
+        or (
+            before_sequence is not None
+            and (type(before_sequence) is not int or before_sequence <= 0)
+        )
+    ):
+        raise ValueError("invalid-resource-history-page")
+    state = _validate_resource_authority(con)
+    matching = tuple(
+        row
+        for row in reversed(state.suffix_rows)
+        if before_sequence is None or int(row["sequence"]) < before_sequence
+    )
+    page_rows = matching[: limit + 1]
+    items = []
+    for row in page_rows[:limit]:
+        try:
+            sample_raw = json.loads(str(row["sample_json"]))
+            decision_raw = json.loads(str(row["decision_json"]))
+            if not isinstance(sample_raw, dict) or not isinstance(
+                decision_raw,
+                dict,
+            ):
+                raise ValueError
+            items.append(
+                ResourceHistoryItem(
+                    sample=ResourceSample(**sample_raw),
+                    decision=ResourceDecision(**decision_raw),
+                )
+            )
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
+            raise ValueError("invalid-resource-history") from error
+    checkpoint = state.checkpoint
+    return ResourceHistoryPage(
+        current=state.current_decision,
+        items=tuple(items),
+        next_before_sequence=(
+            None
+            if len(page_rows) <= limit
+            else int(page_rows[limit - 1]["sequence"])
+        ),
+        history_floor=(
+            None
+            if checkpoint is None or int(checkpoint["through_sequence"]) == 0
+            else ResourceHistoryFloor(
+                through_sample_id=int(checkpoint["through_sample_id"]),
+                through_decision_id=int(checkpoint["through_decision_id"]),
+                through_sequence=int(checkpoint["through_sequence"]),
+                compacted_sample_count=int(checkpoint["compacted_sample_count"]),
+                compacted_decision_count=int(
+                    checkpoint["compacted_decision_count"]
+                ),
+            )
+        ),
+    )
 
 
 def validate_resource_evidence_failure(
@@ -811,7 +899,11 @@ __all__ = [
     "RESOURCE_POLICY_VERSION",
     "ResourceController",
     "ResourceDecision",
+    "ResourceHistoryFloor",
+    "ResourceHistoryItem",
+    "ResourceHistoryPage",
     "ResourceSample",
+    "resource_history_page",
     "validate_resource_evidence_failure",
     "validate_resource_history",
 ]

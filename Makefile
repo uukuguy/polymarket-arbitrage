@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-opportunities perception-groups perception-incidents queue-discovery queue-reconciliation
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-opportunities perception-groups perception-incidents perception-resources queue-discovery queue-reconciliation
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -92,6 +92,10 @@ perception-groups:
 ## perception-incidents: Cloud read-only open incident page; optional limit=1..500 and opaque before cursor.
 perception-incidents:
 	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/incidents?limit=$(or $(limit),100)$(if $(before),&before=$(before),)" | python -m json.tool
+
+## perception-resources: Cloud read-only resource decision history; optional limit=1..500 and before_sequence=.
+perception-resources:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/resources?limit=$(or $(limit),100)$(if $(before_sequence),&before_sequence=$(before_sequence),)" | python -m json.tool
 
 ## queue-discovery: HMAC-authenticated cloud wake-up for the enabled bounded Discovery loop.
 queue-discovery:

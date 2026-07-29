@@ -429,3 +429,24 @@ def test_resource_hard_limit_records_breadcrumb_and_next_writer_recovers(
             "SELECT * FROM neg_risk_evidence_failures WHERE component='resource'"
         ).fetchone()
         assert failure["recovered_at_ms"] == 2_002
+
+
+def test_unresolved_resource_breadcrumb_blocks_component_control(tmp_path) -> None:
+    controller = _controller(tmp_path, lambda: 2_000)
+    controller.decide(_sample())
+    resource_module._record_resource_evidence_failure(
+        controller._store,
+        2_001,
+    )
+
+    with controller._store._connect() as con:
+        with pytest.raises(
+            ValueError,
+            match="unresolved-resource-evidence-failure",
+        ):
+            controller._store._validate_component_control_permission(
+                con,
+                "discovery",
+                now_ms=2_001,
+                require_resource_decision=True,
+            )

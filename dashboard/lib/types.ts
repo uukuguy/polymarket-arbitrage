@@ -277,6 +277,59 @@ export interface PerceptionIncidentsEnvelope {
   next_before: string | null;
 }
 
+export interface PerceptionResourceSample {
+  candidate_count: number;
+  candidate_quote_p95_ms: number | null;
+  candidate_missing_quote_count: number;
+  candidate_worker_ok: boolean;
+  discovery_worker_ok: boolean;
+  reconciliation_running: boolean;
+  previous_discovery_batch_limit: number;
+  observed_at_ms: number;
+}
+
+export interface PerceptionResourceDecision {
+  mode: "normal" | "protect-hot-path" | "empty-candidate-exploration";
+  reason: string;
+  reconciliation_enabled: boolean;
+  discovery_batch_limit: number;
+  discovery_duty_multiplier: number;
+  normal_candidate_interval_multiplier: number;
+  high_candidate_interval_multiplier: number;
+  http_preserved: boolean;
+  health_claimed: boolean;
+  previous_discovery_batch_limit: number;
+  decided_at_ms: number;
+  policy_version: string;
+  sequence: number;
+  source_sample_id: number;
+  hot_quote_age_ms: number;
+  cooldown_ms: number;
+  decision_ttl_ms: number;
+  valid_until_ms: number;
+  mode_changed_at_ms: number;
+}
+
+export interface PerceptionResourceHistoryItem {
+  sample: PerceptionResourceSample;
+  decision: PerceptionResourceDecision;
+}
+
+export interface PerceptionResourcesEnvelope {
+  status: "available";
+  current: PerceptionResourceDecision | null;
+  items: PerceptionResourceHistoryItem[];
+  limit: number;
+  next_before_sequence: number | null;
+  history_floor: {
+    through_sample_id: number;
+    through_decision_id: number;
+    through_sequence: number;
+    compacted_sample_count: number;
+    compacted_decision_count: number;
+  } | null;
+}
+
 export interface PerceptionOverview {
   status: PerceptionStatusEnvelope;
   currentOpportunities: PerceptionCurrentOpportunitiesEnvelope;
@@ -284,6 +337,7 @@ export interface PerceptionOverview {
   discovery: PerceptionDiscoveryEnvelope;
   reconciliation: PerceptionReconciliationEnvelope;
   incidents: PerceptionIncidentsEnvelope;
+  resources: PerceptionResourcesEnvelope;
 }
 
 export interface PerceptionGroupDetail {

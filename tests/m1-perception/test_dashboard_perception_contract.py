@@ -36,6 +36,7 @@ def test_typed_reader_uses_only_task6_public_get_contracts() -> None:
         "/perception/discovery",
         "/perception/reconciliation",
         "/perception/incidents?limit=",
+        "/perception/resources?limit=",
         "/perception/groups/",
         "/history?limit=",
     ):
@@ -66,6 +67,7 @@ def test_typed_reader_validates_nested_json_before_returning_available() -> None
         "isDiscoveryEnvelope",
         "isReconciliationEnvelope",
         "isIncidentsEnvelope",
+        "isResourcesEnvelope",
         "isGroupHistoryEnvelope",
     ):
         assert validator in reader
@@ -128,6 +130,35 @@ def test_overview_contains_operator_perception_and_incident_vocabulary() -> None
         "Open incidents",
     ):
         assert phrase in overview
+
+
+def test_dashboard_validates_and_renders_bounded_resource_history() -> None:
+    reader = _source("dashboard/lib/perception.ts")
+    types = _source("dashboard/lib/types.ts")
+    overview = _source("dashboard/app/perception/page.tsx")
+
+    for field in (
+        "candidate_quote_p95_ms",
+        "candidate_missing_quote_count",
+        "discovery_worker_ok",
+        "reconciliation_running",
+        "decision_ttl_ms",
+        "valid_until_ms",
+        "mode_changed_at_ms",
+        "next_before_sequence",
+        "history_floor",
+    ):
+        assert field in reader
+        assert field in types
+        assert field in overview
+    resource_panel = overview.split(
+        '<h2 style={{ marginTop: 0 }}>Resource mode</h2>',
+        1,
+    )[1].split("</section>", 1)[0]
+    assert "<NotExposed />" not in resource_panel
+    assert "Policy age" in resource_panel
+    assert "TTL remaining" in resource_panel
+    assert "Recent mode transitions" in resource_panel
 
 
 def test_dashboard_validates_and_renders_progress_evidence() -> None:
