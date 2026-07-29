@@ -835,7 +835,11 @@ async def test_discovery_runner_consumes_exact_nonce_after_successful_checkpoint
 
         async def run_batch(self):
             stop.set()
-            return SimpleNamespace(finished_at_ms=1, yielded=False)
+            return SimpleNamespace(
+                finished_at_ms=1,
+                yielded=False,
+                batch_id=None,
+            )
 
     await DiscoveryRunner(
         worker=Worker(),
