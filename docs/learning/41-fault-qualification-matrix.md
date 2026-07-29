@@ -57,6 +57,8 @@ exact runtime baseline
 
 ### 为什么现在所有 execute 都拒绝？
 
-矩阵契约和生产注入能力是两个独立交付物。先冻结 fault、cleanup、writer 和证据结构，
-再逐个实现 adapter，能避免临时 SSH 命令绕过原子化与可恢复性要求。拒绝发生在创建
-证据目录和网络请求之前，因此“接口已经存在”不会被误解为“生产 mutation 已获授权”。
+除 `candidate-exit` 外的 execute 仍拒绝。矩阵契约和生产注入能力是两个独立交付物。
+先冻结 fault、cleanup、writer 和证据结构，再逐个实现 adapter，能避免临时 SSH 命令
+绕过原子化与可恢复性要求。Candidate 是第一个完整模板：clean baseline → exact
+machine/boot/PID intent → SIGTERM → recent Incident discovery → exact terminal history
+→ Candidate writer receipt → clean post-window。接口可执行仍不等于生产 mutation 已获授权。

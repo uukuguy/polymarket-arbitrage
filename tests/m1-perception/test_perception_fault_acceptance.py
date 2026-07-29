@@ -68,6 +68,17 @@ def test_production_fault_scope_requires_and_accepts_exact_runtime_identity() ->
     release = "a" * 40
     evidence = fixture_evidence(
         scope="production-fault",
+        incidents=[
+            {
+                "component": "candidate",
+                "incident_id": "b" * 32,
+                "state": "verified",
+                "recovery_writer_receipt": {
+                    "component": "candidate",
+                    "receipt_row_id": 41,
+                },
+            }
+        ],
         release_id=release,
         machine_id="85e647c4eed598",
         boot_id="6d62de9e-4587-4c4a-bb4f-cf4f261ac0c2",
@@ -229,6 +240,22 @@ def test_verified_incident_receipt_must_match_incident_component() -> None:
 
 def test_malformed_incident_entry_fails_closed() -> None:
     verdict = acceptance.evaluate(fixture_evidence(incidents=["not-an-object"]))
+
+    assert verdict.status == "FAIL"
+    assert "invalid-incidents" in verdict.reasons
+
+
+@pytest.mark.parametrize("incident_id", ["", "A" * 32, "g" * 32, "a" * 31])
+def test_malformed_durable_incident_identity_fails_closed(
+    incident_id: str,
+) -> None:
+    evidence = fixture_evidence()
+    incidents = evidence["incidents"]
+    assert isinstance(incidents, list)
+    assert isinstance(incidents[0], dict)
+    incidents[0]["incident_id"] = incident_id
+
+    verdict = acceptance.evaluate(evidence)
 
     assert verdict.status == "FAIL"
     assert "invalid-incidents" in verdict.reasons

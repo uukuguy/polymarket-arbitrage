@@ -74,15 +74,19 @@ make qualify-perception-prod-readonly expected_release=<40-char-sha>
 The command performs only HTTPS GET requests to `/healthz`,
 `/perception/discovery`, `/perception/reconciliation`,
 `/perception/resources?limit=1`, and `/perception/incidents?limit=100`.
+It also reads `/perception/qualification`, which explicitly counts
+cross-membership Quote batches and expired collecting leases after validating
+the perception authority.
 It requires at least five samples with one unchanged `releaseId`, `machineId`,
 and UUID `bootId`, then preserves `evidence.json` and `verdict.json` under a
 new timestamped directory in `output/perception-qualification/`.
 
 This baseline intentionally omits any metric the public read models cannot
-prove. In particular, MTTD, containment, cross-membership Quote count, and
-orphan collecting-run count require later fault-specific evidence. Their
-absence produces a FAIL verdict rather than a default zero. An open Incident
-also fails the final stability gate.
+prove. In particular, MTTD and containment require later fault-specific
+evidence. Their absence produces a FAIL verdict rather than a default zero.
+Cross-membership and orphan counters are explicit current observations; the
+fault adapter must compare the same runtime before and after injection. An open
+Incident also fails the final stability gate.
 
 ## Fault plan matrix
 
@@ -123,10 +127,14 @@ make chaos-perception-gamma-timeout \
   evidence_dir=<new-path>
 ```
 
-The current executor rejects every such request with
+All targets except `candidate-exit` currently reject such requests with
 `adapter-not-implemented` before creating the evidence directory or making a
-network request. A target becomes executable only after its adapter, cleanup,
-chain-truth health surface, and end-to-end test are reviewed.
+network request. The Candidate adapter first passes the image gate and a
+five-sample clean baseline, then binds one machine/boot/PID, writes immutable
+intent, sends the exact SIGTERM, discovers the new Incident from the bounded
+recent ledger, verifies its exact terminal history/writer receipt, and takes a
+second five-sample clean window. A target becomes executable only after the
+same adapter, cleanup, chain-truth health surface, and end-to-end review.
 
 ## Recovery verdict
 
@@ -152,6 +160,12 @@ validates the incident checkpoint and retained suffix before returning at most
 or a null `recovery_writer_receipt` fails qualification. This avoids SSH
 database reads and keeps the same terminal proof visible to the operator and
 Dashboard/API consumers.
+
+To avoid racing a fast recovery, Candidate qualification discovers the ID via
+`GET /perception/incidents/recent?scope=candidate&after_ms=<injection>&limit=10`.
+That endpoint returns the latest retained state per matching Incident even
+after it left the open list. More than one new `child-nonzero` ID is ambiguous
+and fails the experiment.
 
 For `candidate-exit`, the image-safe primitive is
 `python -m polyarb.perception.chaos_primitive`. Its read-only `locate` command

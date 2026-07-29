@@ -21,6 +21,7 @@ _READ_PATHS = (
     ("/perception/reconciliation", "reconciliation"),
     ("/perception/resources?limit=1", "resources"),
     ("/perception/incidents?limit=100", "incidents"),
+    ("/perception/qualification", "qualification"),
 )
 _MAX_RESPONSE_BYTES = 1_048_576
 
@@ -105,6 +106,7 @@ def build_evidence(
             "reconciliation",
             "resources",
             "incidents",
+            "qualification",
         ):
             envelope = _mapping(
                 sample.get(envelope_name),
@@ -177,6 +179,10 @@ def build_evidence(
     if reconciliation_status not in {"open", "complete", "applied"}:
         raise ValueError("reconciliation-status-invalid")
     incidents = _mapping(latest["incidents"], "incident-evidence-invalid")
+    qualification = _mapping(
+        latest["qualification"],
+        "qualification-evidence-invalid",
+    )
 
     result: dict[str, object] = {
         "evidence_schema_version": 1,
@@ -225,6 +231,14 @@ def build_evidence(
         "open_incident_count": _integer(
             incidents.get("open_count"),
             "open-incident-count-missing",
+        ),
+        "cross_membership_quote_batches": _integer(
+            qualification.get("cross_membership_quote_batches"),
+            "cross-membership-quote-batches-missing",
+        ),
+        "orphan_collecting_runs": _integer(
+            qualification.get("orphan_collecting_runs"),
+            "orphan-collecting-runs-missing",
         ),
         "incidents": [],
         "source_rounds": list(normalized_rounds),

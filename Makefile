@@ -896,7 +896,9 @@ $(PERCEPTION_CHAOS_TARGETS): chaos-perception-%:
 	  --fault "$*" \
 	  --expected-release "$(expected_release)" \
 	  --authorization "$(authorization)" \
-	  --evidence-dir "$(evidence_dir)"
+	  --evidence-dir "$(evidence_dir)" \
+	  --base-url "$(POLYARB_PERCEPTION_URL)" \
+	  --timeout-s "$(or $(timeout_s),120)"
 
 ## verify-perception-recovery: Evaluate immutable production-fault evidence against exact release and all SLA/writer gates.
 ## Usage: make verify-perception-recovery evidence=<json> output=<new-verdict-json> expected_release=<40-char-sha>

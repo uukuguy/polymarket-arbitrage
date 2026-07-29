@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+import scripts.perception_chaos as chaos
+import scripts.perception_fault_acceptance as acceptance
+
 ROOT = Path(__file__).parents[2]
 SCRIPT = ROOT / "scripts/perception_chaos.py"
 FAULT_IDS = (
@@ -46,7 +49,7 @@ def test_every_fault_has_a_complete_readonly_plan(fault_id: str) -> None:
     assert plan["cleanup"]
     assert plan["required_tools"] == ["python"]
     assert plan["image_check"] == "make chaos-l2-fly-image-check"
-    assert plan["execute_supported"] is False
+    assert plan["execute_supported"] is (fault_id == "candidate-exit")
 
 
 def test_execute_fails_before_mutation_when_adapter_is_not_ready(tmp_path: Path) -> None:
@@ -73,6 +76,179 @@ def test_execute_fails_before_mutation_when_adapter_is_not_ready(tmp_path: Path)
     assert result.returncode == 2
     assert "adapter-not-implemented" in result.stderr
     assert not (tmp_path / "evidence").exists()
+
+
+def test_candidate_exit_plan_matches_sigterm_supervisor_outcome() -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan", "--fault", "candidate-exit"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["expected_incident_kind"] == "child-nonzero"
+
+
+def test_candidate_exit_adapter_preserves_complete_release_bound_evidence(
+    tmp_path: Path,
+) -> None:
+    release = "a" * 40
+    commands: list[tuple[str, ...]] = []
+
+    def command(argv):
+        argv = tuple(argv)
+        commands.append(argv)
+        if argv[0] == "make":
+            return subprocess.CompletedProcess(argv, 0, "PASS\n", "")
+        if "locate --component candidate" in argv[-1]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                '{"action":"locate","component":"candidate","pid":41,"ppid":1}\n',
+                "",
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            '{"action":"sigterm","component":"candidate","pid":41,"ppid":1}\n',
+            "",
+        )
+
+    history = {
+        "status": "available",
+        "incident_id": "b" * 32,
+        "history_complete": True,
+        "recovery_writer_receipt": {
+            "component": "candidate",
+            "receipt_row_id": 77,
+        },
+        "items": [
+            {"state": "detected", "occurred_at_ms": 1_100},
+            {"state": "classified", "occurred_at_ms": 1_150},
+            {"state": "contained", "occurred_at_ms": 1_200},
+            {"state": "recovering", "occurred_at_ms": 1_250},
+            {"state": "verified", "occurred_at_ms": 1_300},
+        ],
+    }
+
+    def fetch_json(_base_url: str, path: str):
+        if path.startswith("/perception/incidents/recent"):
+            return (
+                {
+                    "status": "available",
+                    "items": [
+                        {
+                            "incident_id": "b" * 32,
+                            "kind": "child-nonzero",
+                            "state": "verified",
+                        }
+                    ],
+                },
+                0.1,
+            )
+        assert path == f"/perception/incidents/{'b' * 32}/history"
+        return history, 0.1
+
+    rounds = iter(
+        [
+            [{"sample": "pre"}] * 5,
+            [{"sample": "post"}] * 5,
+        ]
+    )
+
+    def collect_rounds(*_args, **_kwargs):
+        return next(rounds)
+
+    def build_evidence(samples, *, expected_release):
+        assert expected_release == release
+        return {
+            "evidence_schema_version": 1,
+            "scope": "production-readonly",
+            "app_id": "polyarb-l1",
+            "release_id": release,
+            "machine_id": "machine-1",
+            "boot_id": "12345678-1234-4234-9234-123456789abc",
+            "window_started_at_ms": 900,
+            "window_ended_at_ms": 1_400,
+            "sample_count": len(samples),
+            "http_p95_s": 0.1,
+            "candidate_quote_p95_s": 15,
+            "candidate_stale_before_s": 90,
+            "normal_quote_stale_before_s": 120,
+            "liquidity_weighted_active_known_coverage": 0.95,
+            "coverage_window_s": 900,
+            "oldest_known_group_visit_s": 3_600,
+            "promotion_to_watch_s": 30,
+            "reconciliation_complete": True,
+            "reconciliation_advancing": False,
+            "reconciliation_closure_s": 3_600,
+            "cross_membership_quote_batches": 0,
+            "orphan_collecting_runs": 0,
+            "open_incident_count": 0,
+            "incidents": [],
+        }
+
+    evidence_dir = tmp_path / "candidate-exit"
+    evidence = chaos.execute_candidate_exit(
+        base_url="https://example.test",
+        expected_release=release,
+        authorization=f"fault:candidate-exit:{release}",
+        evidence_dir=evidence_dir,
+        timeout_s=10,
+        command=command,
+        fetch_json=fetch_json,
+        collect_rounds=collect_rounds,
+        build_evidence=build_evidence,
+        clock_ms=lambda: 1_000,
+        monotonic=lambda: 0,
+        sleeper=lambda _seconds: None,
+    )
+
+    assert json.loads((evidence_dir / "intent.json").read_text())["pid"] == 41
+    assert json.loads((evidence_dir / "evidence.json").read_text()) == evidence
+    assert evidence["mttd_s"] == 0.1
+    assert evidence["containment_s"] == 0.1
+    assert acceptance.evaluate(
+        evidence,
+        required_scope="production-fault",
+        expected_release=release,
+    ).status == "PASS"
+    assert commands[0] == ("make", "chaos-l2-fly-image-check", "required=python")
+    assert all(isinstance(command_argv, tuple) for command_argv in commands)
+
+
+def test_candidate_exit_adapter_refuses_dirty_baseline_before_mutation(
+    tmp_path: Path,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def command(argv):
+        commands.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, "PASS\n", "")
+
+    with pytest.raises(chaos.AdapterFailedError, match="baseline-open-incident"):
+        chaos.execute_candidate_exit(
+            base_url="https://example.test",
+            expected_release="a" * 40,
+            authorization=f"fault:candidate-exit:{'a' * 40}",
+            evidence_dir=tmp_path / "must-not-exist",
+            timeout_s=10,
+            command=command,
+            collect_rounds=lambda *_args, **_kwargs: [{}] * 5,
+            build_evidence=lambda *_args, **_kwargs: {
+                "machine_id": "machine-1",
+                "boot_id": "12345678-1234-4234-9234-123456789abc",
+                "open_incident_count": 1,
+                "cross_membership_quote_batches": 0,
+                "orphan_collecting_runs": 0,
+            },
+            sleeper=lambda _seconds: None,
+        )
+
+    assert commands == [("make", "chaos-l2-fly-image-check", "required=python")]
+    assert not (tmp_path / "must-not-exist").exists()
 
 
 @pytest.mark.parametrize("fault_id", FAULT_IDS)
@@ -120,3 +296,25 @@ def test_make_exposes_release_bound_recovery_verifier() -> None:
     assert "perception_fault_acceptance.py" in result.stdout
     assert "--require-scope production-fault" in result.stdout
     assert f'--expected-release \"{"a" * 40}\"' in result.stdout
+
+
+def test_candidate_make_execute_binds_canonical_https_origin() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "chaos-perception-candidate-exit",
+            "mode=execute",
+            f"expected_release={'a' * 40}",
+            f"authorization=fault:candidate-exit:{'a' * 40}",
+            "evidence_dir=output/candidate-exit",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '--base-url "https://polyarb-l1.fly.dev"' in result.stdout
+    assert '--timeout-s "120"' in result.stdout

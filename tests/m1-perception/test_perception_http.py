@@ -712,6 +712,128 @@ def test_incident_history_endpoint_returns_not_found_without_guessing(
     }
 
 
+def test_recent_incident_endpoint_discovers_latest_state_after_open_removal(
+    http_test_client,
+) -> None:
+    store = OpportunityPerceptionStore(
+        http_test_client.app.state.sqlite_store.db_path
+    )
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    incident = manager.detect("candidate", "child-nonzero", {"attempt": 1})
+    now[0] += 1
+    manager.transition(incident.id, "classified", {})
+
+    response = http_test_client.get(
+        "/perception/incidents/recent",
+        params={"scope": "candidate", "after_ms": "999", "limit": "5"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "available",
+        "scope": "candidate",
+        "after_ms": 999,
+        "limit": 5,
+        "items": [
+            {
+                "incident_id": incident.id,
+                "sequence": 2,
+                "kind": "child-nonzero",
+                "state": "classified",
+                "occurred_at_ms": 1_001,
+                "evidence": {},
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("params", "reason"),
+    [
+        ({"scope": "", "after_ms": "1"}, "invalid-incident-scope"),
+        ({"scope": "candidate", "after_ms": "-1"}, "invalid-after-ms"),
+        ({"scope": "candidate", "after_ms": "01"}, "invalid-after-ms"),
+    ],
+)
+def test_recent_incident_endpoint_rejects_ambiguous_query(
+    http_test_client,
+    params: dict[str, str],
+    reason: str,
+) -> None:
+    response = http_test_client.get("/perception/incidents/recent", params=params)
+
+    assert response.status_code == 400
+    assert response.json()["reason"] == reason
+
+
+def test_qualification_endpoint_exposes_explicit_zero_counters(
+    http_test_client,
+) -> None:
+    response = http_test_client.get("/perception/qualification")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "available",
+        "cross_membership_quote_batches": 0,
+        "orphan_collecting_runs": 0,
+    }
+
+
+def test_qualification_endpoint_counts_mismatch_and_expired_collecting_lease(
+    http_test_client,
+) -> None:
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    with sqlite3.connect(db_path) as con:
+        complete = con.execute(
+            "INSERT INTO neg_risk_quote_runs("
+            "universe_snapshot_id,universe_taken_at_ms,universe_hash,"
+            "source_truth_hash,quoted_at_ms,requested_token_count,"
+            "successful_response_count,lease_expires_at_ms,status,completed_at_ms"
+            ") VALUES(1,1,'u','s',1,1,1,1,'complete',2)"
+        ).lastrowid
+        con.execute(
+            "INSERT INTO neg_risk_quote_run_legs("
+            "quote_run_id,neg_risk_market_id,event_id,membership_hash,"
+            "market_id,condition_id,slug,yes_token_id"
+            ") VALUES(?,?,?,?,?,?,?,?)",
+            (complete, "g-1", "e-1", "membership-a", "m-1", "c-1", "slug", "t-1"),
+        )
+        con.execute(
+            "INSERT INTO neg_risk_quotes("
+            "quote_run_id,neg_risk_market_id,event_id,membership_hash,"
+            "market_id,condition_id,slug,yes_token_id,terminal_state,"
+            "best_ask_price,best_ask_size"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                complete,
+                "g-1",
+                "e-1",
+                "membership-b",
+                "m-1",
+                "c-1",
+                "slug",
+                "t-1",
+                "executable",
+                0.4,
+                10,
+            ),
+        )
+        con.execute(
+            "INSERT INTO neg_risk_quote_runs("
+            "universe_snapshot_id,universe_taken_at_ms,universe_hash,"
+            "source_truth_hash,quoted_at_ms,requested_token_count,"
+            "successful_response_count,lease_expires_at_ms,status"
+            ") VALUES(1,1,'u','s',1,0,0,1,'collecting')"
+        )
+
+    response = http_test_client.get("/perception/qualification")
+
+    assert response.status_code == 200
+    assert response.json()["cross_membership_quote_batches"] == 1
+    assert response.json()["orphan_collecting_runs"] == 1
+
+
 def test_resource_endpoint_returns_current_and_keyset_history(
     http_test_client,
 ) -> None:

@@ -242,6 +242,14 @@ def evaluate(
             state = incident.get("state")
             incident_id = incident.get("incident_id")
             component = incident.get("component")
+            valid_incident_id = (
+                isinstance(incident_id, int)
+                and not isinstance(incident_id, bool)
+                and incident_id > 0
+            ) or (
+                isinstance(incident_id, str)
+                and re.fullmatch(r"[0-9a-f]{32}", incident_id) is not None
+            )
             if (
                 state
                 not in {
@@ -252,9 +260,7 @@ def evaluate(
                     "verified",
                     "escalated",
                 }
-                or not isinstance(incident_id, int)
-                or isinstance(incident_id, bool)
-                or incident_id <= 0
+                or not valid_incident_id
                 or not isinstance(component, str)
                 or not component
             ):

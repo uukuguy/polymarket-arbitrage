@@ -67,6 +67,11 @@ def _round(
             "items": [],
             "open_count": 0,
         },
+        "qualification": {
+            "status": "available",
+            "cross_membership_quote_batches": 0,
+            "orphan_collecting_runs": 0,
+        },
     }
 
 
@@ -98,8 +103,8 @@ def test_builder_binds_identity_and_derives_only_observed_metrics() -> None:
     assert "reconciliation_closure_s" not in evidence
     assert "mttd_s" not in evidence
     assert "containment_s" not in evidence
-    assert "cross_membership_quote_batches" not in evidence
-    assert "orphan_collecting_runs" not in evidence
+    assert evidence["cross_membership_quote_batches"] == 0
+    assert evidence["orphan_collecting_runs"] == 0
 
 
 def test_builder_rejects_identity_change_mid_window() -> None:
@@ -124,6 +129,7 @@ def test_collect_rounds_uses_only_bounded_get_surfaces() -> None:
         "/perception/reconciliation": template["reconciliation"],
         "/perception/resources?limit=1": template["resources"],
         "/perception/incidents?limit=100": template["incidents"],
+        "/perception/qualification": template["qualification"],
     }
     calls: list[str] = []
 
@@ -143,7 +149,7 @@ def test_collect_rounds_uses_only_bounded_get_surfaces() -> None:
 
     assert len(rounds) == 5
     assert calls == list(by_path) * 5
-    assert all(len(sample["latencies_s"]) == 5 for sample in rounds)
+    assert all(len(sample["latencies_s"]) == 6 for sample in rounds)
 
 
 def test_cli_rejects_non_https_remote_url(tmp_path: Path) -> None:

@@ -1197,6 +1197,114 @@ def _incident_history(db_path: Path, incident_id: str) -> dict[str, Any]:
         con.close()
 
 
+def _recent_incidents(
+    db_path: Path,
+    *,
+    scope: str,
+    after_ms: int,
+    limit: int,
+) -> dict[str, Any]:
+    from polyarb.perception.incidents import IncidentManager
+
+    con = _connect(db_path)
+    try:
+        con.execute("BEGIN")
+        items = IncidentManager(_read_store(db_path)).recent_incidents(
+            scope,
+            after_ms=after_ms,
+            limit=limit,
+            _connection=con,
+        )
+        con.execute("COMMIT")
+        return {
+            "status": "available",
+            "scope": scope,
+            "after_ms": after_ms,
+            "limit": limit,
+            "items": [
+                {
+                    "incident_id": item.id,
+                    "sequence": item.sequence,
+                    "kind": item.kind,
+                    "state": item.state,
+                    "occurred_at_ms": item.occurred_at_ms,
+                    "evidence": _safe_evidence(item.evidence),
+                }
+                for item in items
+            ],
+        }
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+
+
+def _qualification(db_path: Path) -> dict[str, Any]:
+    con = _connect(db_path)
+    try:
+        con.execute("BEGIN")
+        store = _read_store(db_path)
+        store.candidate_current_summary(_connection=con)
+        candidate_mismatches = int(
+            con.execute(
+                "SELECT COUNT(*) FROM neg_risk_candidate_success_receipts r "
+                "LEFT JOIN neg_risk_group_revisions g "
+                "ON g.id=r.group_revision_row_id "
+                "LEFT JOIN neg_risk_group_quote_batches q "
+                "ON q.rowid=r.quote_batch_row_id AND q.id=r.quote_batch_id "
+                "LEFT JOIN neg_risk_candidate_watch_facts f "
+                "ON f.id=r.candidate_fact_row_id "
+                "WHERE g.id IS NULL OR q.rowid IS NULL OR f.id IS NULL "
+                "OR r.group_id!=g.group_id OR r.group_id!=q.group_id "
+                "OR r.group_id!=f.group_id "
+                "OR r.membership_hash!=g.membership_hash "
+                "OR r.membership_hash!=q.membership_hash "
+                "OR r.membership_hash!=f.membership_hash "
+                "OR q.group_revision!=g.revision "
+                "OR f.quote_batch_id!=q.id"
+            ).fetchone()[0]
+        )
+        legacy_mismatches = int(
+            con.execute(
+                "SELECT COUNT(DISTINCT l.quote_run_id) "
+                "FROM neg_risk_quote_run_legs l "
+                "JOIN neg_risk_quotes q "
+                "ON q.quote_run_id=l.quote_run_id "
+                "AND q.yes_token_id=l.yes_token_id "
+                "WHERE trim(l.event_id)='' OR trim(l.membership_hash)='' "
+                "OR trim(q.event_id)='' OR trim(q.membership_hash)='' "
+                "OR q.event_id!=l.event_id "
+                "OR q.membership_hash!=l.membership_hash "
+                "OR q.neg_risk_market_id!=l.neg_risk_market_id "
+                "OR q.market_id!=l.market_id "
+                "OR q.condition_id!=l.condition_id"
+            ).fetchone()[0]
+        )
+        orphan_collecting = int(
+            con.execute(
+                "SELECT COUNT(*) FROM neg_risk_quote_runs "
+                "WHERE status='collecting' AND lease_expires_at_ms<=?",
+                (int(time.time() * 1_000),),
+            ).fetchone()[0]
+        )
+        con.execute("COMMIT")
+        return {
+            "status": "available",
+            "cross_membership_quote_batches": (
+                candidate_mismatches + legacy_mismatches
+            ),
+            "orphan_collecting_runs": orphan_collecting,
+        }
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+
+
 def _resources(
     db_path: Path,
     limit: int,
@@ -1453,6 +1561,50 @@ async def perception_incident_history(request: Request) -> JSONResponse:
         request,
         lambda: _incident_history(db_path, incident_id),
     )
+
+
+async def perception_recent_incidents(request: Request) -> JSONResponse:
+    scope = request.query_params.get("scope", "")
+    if (
+        re.fullmatch(r"[a-z][a-z0-9:_-]{0,127}", scope) is None
+        or "\x00" in scope
+    ):
+        return JSONResponse(
+            {"status": "invalid-request", "reason": "invalid-incident-scope"},
+            status_code=400,
+        )
+    raw_after = request.query_params.get("after_ms", "")
+    try:
+        after_ms = int(raw_after, 10)
+        if after_ms < 0 or str(after_ms) != raw_after:
+            raise ValueError
+    except ValueError:
+        return JSONResponse(
+            {"status": "invalid-request", "reason": "invalid-after-ms"},
+            status_code=400,
+        )
+    try:
+        limit = _limit(request)
+    except ValueError as error:
+        return JSONResponse(
+            {"status": "invalid-request", "reason": str(error)},
+            status_code=400,
+        )
+    db_path = Path(request.app.state.sqlite_store.db_path)
+    return await _serve(
+        request,
+        lambda: _recent_incidents(
+            db_path,
+            scope=scope,
+            after_ms=after_ms,
+            limit=limit,
+        ),
+    )
+
+
+async def perception_qualification(request: Request) -> JSONResponse:
+    db_path = Path(request.app.state.sqlite_store.db_path)
+    return await _serve(request, lambda: _qualification(db_path))
 
 
 async def perception_resources(request: Request) -> JSONResponse:

@@ -621,6 +621,42 @@ class IncidentManager:
             if _connection is None:
                 con.close()
 
+    def recent_incidents(
+        self,
+        scope: str,
+        *,
+        after_ms: int,
+        limit: int,
+        _connection: sqlite3.Connection | None = None,
+    ) -> tuple[Incident, ...]:
+        if (
+            not scope
+            or len(scope) > 128
+            or after_ms < 0
+            or not 1 <= limit <= 500
+        ):
+            raise ValueError("invalid-recent-incident-request")
+        con = _connection or self._connect(read_only=True)
+        try:
+            self._store._assert_owner_journal_clean(con)
+            self._validate_checkpoint(con)
+            self._validate_bounded_suffix(con)
+            self._validate_evidence_failure(con, require_resolved=True)
+            rows = con.execute(
+                "SELECT e.* FROM neg_risk_incident_events e JOIN ("
+                "SELECT incident_id,MAX(sequence) AS latest_sequence "
+                "FROM neg_risk_incident_events "
+                "WHERE scope=? AND occurred_at_ms>=? GROUP BY incident_id"
+                ") latest ON latest.incident_id=e.incident_id "
+                "AND latest.latest_sequence=e.sequence "
+                "ORDER BY e.occurred_at_ms DESC,e.incident_id DESC LIMIT ?",
+                (scope, after_ms, limit),
+            ).fetchall()
+            return tuple(self._from_row(row) for row in rows)
+        finally:
+            if _connection is None:
+                con.close()
+
     def _validated_open_count(self, con: sqlite3.Connection) -> int:
         return int(self._validated_open_aggregate(con)["open_count"])
 

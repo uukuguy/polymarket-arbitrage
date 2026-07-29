@@ -112,7 +112,10 @@ def _complete_run(settings: Settings, *, age_s: float) -> None:
 
 def _quote_check(settings: Settings, *, runtime=None):
     store = SQLiteStore(settings.db_path)
-    store.init_schema()
+    # Production initializes once before serving health.  Keep setup outside
+    # the latency assertion when this fixture already created the database.
+    if not settings.db_path.exists():
+        store.init_schema()
     if settings.neg_risk_quote_worker_enabled and runtime is None:
         runtime = QuoteWorkerRuntime()
         projection = NegRiskQuoteStore(settings.db_path).latest_complete_projection()
