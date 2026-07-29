@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from py_clob_client.exceptions import PolyApiException
 
 from polyarb.perception.candidate_watcher import (
     CandidateWatcher,
@@ -477,6 +479,109 @@ async def test_incomplete_book_batch_records_one_terminal_fact(tmp_path: Path) -
     assert result.reason == "incomplete-quotes"
     assert store.current_quote_batch("g-1", now_ms=2_100, max_age_ms=1_000) is None
     assert len(store.candidate_watch_facts("g-1")) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_leg_incident_closes_only_after_same_group_success(
+    tmp_path: Path,
+) -> None:
+    revision = certified_group()
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.publish_group_revision(revision)
+    failed_at_ms = int(time.time() * 1_000)
+    failed = CandidateWatcher(
+        structure_reader=SequenceStructureReader([revision, revision]),
+        books_reader=FakeBooksReader(books(("yes-1", "0.40", "10"))),
+        store=store,
+        runtime=CandidateWatcherRuntime(),
+        interval_controller=IntervalController(),
+        clock_ms=iter((failed_at_ms, failed_at_ms)).__next__,
+    )
+
+    observation = await failed.run_once("g-1")
+    await failed.flush_incidents()
+
+    assert observation.status == "unavailable"
+    incident = store.open_incidents()[0]
+    assert incident.scope == "candidate:g-1"
+    assert incident.kind == "clob-missing-leg"
+    assert incident.state == "recovering"
+
+    time.sleep(0.01)
+    recovered_at_ms = int(time.time() * 1_000)
+    recovered = CandidateWatcher(
+        structure_reader=SequenceStructureReader([revision, revision]),
+        books_reader=FakeBooksReader(
+            books(("yes-1", "0.40", "10"), ("yes-2", "0.50", "8"))
+        ),
+        store=store,
+        runtime=CandidateWatcherRuntime(),
+        interval_controller=IntervalController(),
+        clock_ms=iter((recovered_at_ms, recovered_at_ms)).__next__,
+    )
+    success = await recovered.run_once("g-1")
+    await recovered.flush_incidents()
+
+    assert success.status == "watching"
+    assert store.open_incidents() == ()
+
+
+@pytest.mark.asyncio
+async def test_sdk_429_records_group_scoped_clob_incident(tmp_path: Path) -> None:
+    revision = certified_group()
+
+    class RateLimitedBooks:
+        async def get_books(self, _token_ids, *, projection="full"):
+            request = httpx.Request("GET", "https://clob.example.test/books")
+            raise PolyApiException(
+                resp=httpx.Response(
+                    429,
+                    request=request,
+                    json={"error": "rate"},
+                )
+            )
+
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    store.publish_group_revision(revision)
+    now_ms = int(time.time() * 1_000)
+    candidate = CandidateWatcher(
+        structure_reader=SequenceStructureReader([revision]),
+        books_reader=RateLimitedBooks(),
+        store=store,
+        runtime=CandidateWatcherRuntime(),
+        interval_controller=IntervalController(),
+        clock_ms=iter((now_ms, now_ms)).__next__,
+    )
+
+    observation = await candidate.run_once("g-1")
+    await candidate.flush_incidents()
+
+    assert observation.status == "unavailable"
+    incident = store.open_incidents()[0]
+    assert incident.scope == "candidate:g-1"
+    assert incident.kind == "clob-429"
+
+
+@pytest.mark.asyncio
+async def test_record_timeout_opens_group_scoped_latency_incident(
+    tmp_path: Path,
+) -> None:
+    revision = certified_group()
+    candidate, store = watcher(
+        tmp_path,
+        structure=(revision, revision),
+        reader=FakeBooksReader([]),
+        clock_values=(int(time.time() * 1_000),),
+    )
+
+    await candidate.record_timeout("g-1")
+    await candidate.flush_incidents()
+
+    incident = store.open_incidents()[0]
+    assert incident.scope == "candidate:g-1"
+    assert incident.kind == "clob-latency"
 
 
 def test_priority_policy_preserves_quote_freshness_and_anti_starvation() -> None:

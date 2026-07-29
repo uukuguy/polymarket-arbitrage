@@ -170,6 +170,31 @@ def test_gamma_partial_remains_a_coverage_fact_not_a_failure_incident() -> None:
     assert plan["execute_supported"] is False
 
 
+@pytest.mark.parametrize(
+    ("fault_id", "expected_kind"),
+    [
+        ("clob-missing-leg", "clob-missing-leg"),
+        ("clob-429", "clob-429"),
+        ("clob-latency", "clob-latency"),
+    ],
+)
+def test_clob_plans_name_group_scoped_durable_incidents(
+    fault_id: str,
+    expected_kind: str,
+) -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan", "--fault", fault_id],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    plan = json.loads(result.stdout)
+    assert plan["expected_incident_kind"] == expected_kind
+    assert plan["execute_supported"] is False
+
+
 def test_reconciliation_stall_adapter_resumes_exact_worker_before_verification(
     tmp_path: Path,
 ) -> None:

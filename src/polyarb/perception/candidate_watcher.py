@@ -9,10 +9,12 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from decimal import Decimal
+from functools import partial
 from typing import Any, Literal, Protocol
 
 from loguru import logger
 
+from polyarb.perception.clob_incidents import CandidateGroupIncidents
 from polyarb.perception.group_structure import GroupStructureUnavailableError
 from polyarb.perception.models import (
     CandidatePriority,
@@ -111,8 +113,12 @@ class CandidateWatcherRuntime:
             last_group_error_kind=None,
         )
         self._group_errors: dict[str, str] = {}
+        self._group_attempt_counts: dict[str, int] = {}
 
     def record(self, fact: CandidateWatchFact) -> None:
+        self._group_attempt_counts[fact.group_id] = (
+            self._group_attempt_counts.get(fact.group_id, 0) + 1
+        )
         previous = self._snapshot
         success = fact.last_result in {"watching", "no-edge"}
         self._snapshot = CandidateWatcherSnapshot(
@@ -138,6 +144,9 @@ class CandidateWatcherRuntime:
 
     def snapshot(self) -> CandidateWatcherSnapshot:
         return self._snapshot
+
+    def group_attempt_count(self, group_id: str) -> int:
+        return self._group_attempt_counts.get(group_id, 0)
 
     def record_supervisor_failure(self, error: BaseException) -> None:
         previous = self._snapshot
@@ -302,6 +311,8 @@ class CandidateWatcher:
         self._clock_ms = clock_ms or _wall_clock_ms
         self._min_edge_bps = Decimal(str(min_edge_bps))
         self._require_resource_decision = require_resource_decision
+        self._clob_incidents = CandidateGroupIncidents(store)
+        self._clob_incident_operations: list[Callable[[], object]] = []
 
     async def run_once(
         self,
@@ -369,7 +380,7 @@ class CandidateWatcher:
                 "watching" if edge >= self._min_edge_bps else "no-edge"
             )
             priority: CandidatePriority = "high" if status == "watching" else "normal"
-            return await self._record(
+            observation = await self._record(
                 group_id=group_id,
                 membership_hash=before.membership_hash,
                 quote_batch_id=batch.quote_batch_id,
@@ -383,10 +394,19 @@ class CandidateWatcher:
                 consecutive_failures=0,
                 batch=batch,
             )
+            self._clob_incident_operations.append(
+                partial(
+                    self._clob_incidents.verify_success,
+                    group_id=group_id,
+                    membership_hash=before.membership_hash,
+                    quote_batch_id=batch.quote_batch_id,
+                )
+            )
+            return observation
         except asyncio.CancelledError:
             raise
-        except QuoteCollectionIntegrityError:
-            return await self._record_unavailable(
+        except QuoteCollectionIntegrityError as error:
+            observation = await self._record_unavailable(
                 group_id=group_id,
                 before=before,
                 observed_at_ms=(
@@ -396,6 +416,14 @@ class CandidateWatcher:
                 ),
                 reason="incomplete-quotes",
             )
+            self._clob_incident_operations.append(
+                partial(
+                    self._clob_incidents.record_failure,
+                    group_id,
+                    error,
+                )
+            )
+            return observation
         except GroupStructureUnavailableError:
             return await self._record_unavailable(
                 group_id=group_id,
@@ -412,7 +440,7 @@ class CandidateWatcher:
                 "candidate group collection failed "
                 f"group_id={group_id} kind={type(error).__name__}"
             )
-            return await self._record_unavailable(
+            observation = await self._record_unavailable(
                 group_id=group_id,
                 before=before,
                 observed_at_ms=(
@@ -422,6 +450,14 @@ class CandidateWatcher:
                 ),
                 reason="candidate-collection-failed",
             )
+            self._clob_incident_operations.append(
+                partial(
+                    self._clob_incidents.record_failure,
+                    group_id,
+                    error,
+                )
+            )
+            return observation
 
     async def _record_unavailable(
         self,
@@ -612,6 +648,27 @@ class CandidateWatcher:
             observed_at_ms=self._clock_ms(),
             reason="candidate-group-timeout",
         )
+        self._clob_incident_operations.append(
+            partial(
+                self._clob_incidents.record_failure,
+                group_id,
+                TimeoutError(),
+            )
+        )
+
+    async def flush_incidents(self) -> None:
+        if not self._clob_incident_operations:
+            return
+        operations = tuple(self._clob_incident_operations)
+        await asyncio.to_thread(self._run_clob_incident_operations, operations)
+        del self._clob_incident_operations[: len(operations)]
+
+    @staticmethod
+    def _run_clob_incident_operations(
+        operations: tuple[Callable[[], object], ...],
+    ) -> None:
+        for operation in operations:
+            operation()
 
 
 class CandidateGroupIds(Protocol):
@@ -783,38 +840,94 @@ class CandidateWatcherScheduler:
             1: "normal",
             2: "explore",
         }
-        for rank_value, _, group_id in self._select_cycle(
+        selected = self._select_cycle(
             due,
             admitted_group_ids=admitted_group_ids,
+        )
+        leading_high_count = 0
+        while (
+            leading_high_count < len(selected)
+            and leading_high_count < self._high_burst_groups
+            and selected[leading_high_count][0] == 0
         ):
-            before_count = self._runtime.snapshot().attempt_count
-            try:
+            leading_high_count += 1
+        reserved_end = leading_high_count
+        while (
+            reserved_end < len(selected)
+            and reserved_end - leading_high_count
+            < self._reserved_non_high_slots
+            and selected[reserved_end][0] != 0
+        ):
+            reserved_end += 1
+        for item in selected[:leading_high_count]:
+            await self._run_selected_group(
+                item,
+                priority_by_rank=priority_by_rank,
+                admission_contexts=admission_contexts,
+            )
+        reserved = selected[leading_high_count:reserved_end]
+        reserved_timeout_s = min(
+            self._lower_lane_max_wait_s,
+            self._group_timeout_s * max(1, len(reserved)),
+        )
+        await asyncio.gather(
+            *(
+                self._run_selected_group(
+                    item,
+                    priority_by_rank=priority_by_rank,
+                    admission_contexts=admission_contexts,
+                    timeout_s=reserved_timeout_s,
+                )
+                for item in reserved
+            )
+        )
+        for item in selected[reserved_end:]:
+            await self._run_selected_group(
+                item,
+                priority_by_rank=priority_by_rank,
+                admission_contexts=admission_contexts,
+            )
+        flush_incidents = getattr(self._watcher, "flush_incidents", None)
+        if flush_incidents is not None:
+            await flush_incidents()
+
+    async def _run_selected_group(
+        self,
+        item: tuple[int, int, str],
+        *,
+        priority_by_rank: dict[int, CandidatePriority],
+        admission_contexts: dict[str, CandidateAdmissionContext],
+        timeout_s: float | None = None,
+    ) -> None:
+        rank_value, _, group_id = item
+        before_count = self._runtime.group_attempt_count(group_id)
+        try:
+            await asyncio.wait_for(
+                self._watcher.run_once(
+                    group_id,
+                    priority_hint=priority_by_rank[rank_value],
+                    admission_context=admission_contexts.get(group_id),
+                ),
+                timeout=timeout_s or self._group_timeout_s,
+            )
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError as error:
+            self._runtime.record_group_failure(group_id, error)
+            if self._runtime.group_attempt_count(group_id) == before_count:
                 await asyncio.wait_for(
-                    self._watcher.run_once(
-                        group_id,
-                        priority_hint=priority_by_rank[rank_value],
-                        admission_context=admission_contexts.get(group_id),
-                    ),
-                    timeout=self._group_timeout_s,
+                    self._watcher.record_timeout(group_id),
+                    timeout=self._terminal_write_budget_s,
                 )
-            except asyncio.CancelledError:
-                raise
-            except TimeoutError as error:
-                self._runtime.record_group_failure(group_id, error)
-                if self._runtime.snapshot().attempt_count == before_count:
-                    await asyncio.wait_for(
-                        self._watcher.record_timeout(group_id),
-                        timeout=self._terminal_write_budget_s,
-                    )
-                logger.warning(f"candidate group timed out group_id={group_id}")
-            except Exception as error:
-                self._runtime.record_group_failure(group_id, error)
-                logger.warning(
-                    "candidate group task failed "
-                    f"group_id={group_id} kind={type(error).__name__}"
-                )
-            else:
-                self._runtime.record_group_success(group_id)
+            logger.warning(f"candidate group timed out group_id={group_id}")
+        except Exception as error:
+            self._runtime.record_group_failure(group_id, error)
+            logger.warning(
+                "candidate group task failed "
+                f"group_id={group_id} kind={type(error).__name__}"
+            )
+        else:
+            self._runtime.record_group_success(group_id)
 
     def _load_selection_snapshot(
         self,

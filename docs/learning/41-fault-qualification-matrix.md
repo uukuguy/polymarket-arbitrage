@@ -26,6 +26,11 @@ exact runtime baseline
   `child-timeout` / `child-failed` / `child-abandoned`，并进入恢复状态。
 - `src/polyarb/perception/gamma_incidents.py`：只把可证明的 Gamma timeout、
   malformed、cursor integrity 异常写成 durable Incident；未知错误不冒充 Gamma。
+- `src/polyarb/perception/clob_incidents.py:20`：保守识别 Candidate 的缺腿、SDK
+  429 和有界超时，并以 `candidate:<group_id>` 隔离故障；未知异常不冒充 CLOB。
+- `src/polyarb/perception/candidate_watcher.py:397`：Candidate 先提交原子终态，再排队
+  exact-group recovery/failure transition；`:659` 在本轮候选服务后统一 flush，避免
+  incident 写路径吃掉 reserved lane 的时间预算。
 - `src/polyarb/perception/incidents.py`：verified transition 会反查 recovery 之后的
   Candidate receipt、Discovery batch、Reconciliation window、HTTP probe 或 Resource
   decision，不能靠调用者自报成功。
@@ -44,7 +49,11 @@ exact runtime baseline
    SHA，不能拿一次批准复用到另一种故障或另一版代码。
 3. **异常与数据质量分开**：Gamma timeout/malformed/cursor 已有 durable incident；
    shape 合法的 partial page 进入 coverage/rejected 事实，不伪造 producer failure。
-4. **cleanup 串行门**：上一故障清理失败时，后续结果会混入多个变量，证据不再可归因，
+4. **Candidate 以组为故障边界**：一个 group 缺腿、429 或 latency 不能把全部
+   Candidate 标成不可用；恢复也只能由同一 group 的 current-membership Quote receipt
+   证明。终态事实同步提交，Incident 转换批后 flush；normal/explore reserved slots
+   有界并发启动，且 timeout 用 per-group attempt 计数，不能被 sibling 成功污染。
+5. **cleanup 串行门**：上一故障清理失败时，后续结果会混入多个变量，证据不再可归因，
    所以整个矩阵必须停止。
 
 ## 自检题
@@ -80,3 +89,13 @@ Runner 会立即写 `gamma-timeout`、`gamma-malformed` 或 `gamma-cursor`，并
 recovering。下一次成功页必须返回本次原子 publish 的 exact Discovery batch ID
 或 Reconciliation window ID，才能 verified。尚未完成的是生产 fault 注入 adapter，
 因此这些 fault 的 `execute_supported` 仍为 false；“运行时可观测”不等于“已获准注入”。
+
+### CLOB 组失败为什么不在每次请求返回前同步写 Incident？
+
+Candidate 的第一职责是让每个组得到一个原子 terminal fact，并守住 high 与
+normal/explore 的连续性预算。若超时处理立即另起 SQLite incident 写线程，它会和下一组
+的 Structure 读取争锁，把本地排队误报成新的 CLOB latency。现在 missing-leg、429、
+timeout 和成功恢复都先排入内存中的当前 cycle 操作队列，reserved lanes 服务完后统一
+落入 durable Incident。Dashboard/API 看到的是持久化后的
+`candidate:<group_id>` lifecycle；日志不是 authority。正常 scheduler cycle 返回前会
+完成 flush，所以这不是无管理的后台任务。
