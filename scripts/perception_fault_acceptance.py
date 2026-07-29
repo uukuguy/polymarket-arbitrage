@@ -118,7 +118,7 @@ def _validate_provenance(
         reasons.append("scope-mismatch")
     if evidence.get("app_id") != "polyarb-l1":
         reasons.append("invalid-app-id")
-    if required_scope != "production-readonly":
+    if not required_scope.startswith("production-"):
         return
 
     release_id = evidence.get("release_id")
@@ -322,13 +322,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--require-scope",
-        choices=("local-conformance", "production-readonly"),
+        choices=("local-conformance", "production-readonly", "production-fault"),
         required=True,
     )
     parser.add_argument("--expected-release")
     args = parser.parse_args(argv)
-    if args.require_scope == "production-readonly" and args.expected_release is None:
-        parser.error("--expected-release is required for production-readonly")
+    if args.require_scope.startswith("production-") and args.expected_release is None:
+        parser.error("--expected-release is required for production evidence")
     try:
         evidence = _read_evidence(args.evidence)
         verdict = evaluate(

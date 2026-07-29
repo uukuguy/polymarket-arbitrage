@@ -64,6 +64,35 @@ def test_verdict_passes_complete_evidence_within_every_sla() -> None:
     assert verdict.status == "PASS"
     assert verdict.reasons == ()
 
+def test_production_fault_scope_requires_and_accepts_exact_runtime_identity() -> None:
+    release = "a" * 40
+    evidence = fixture_evidence(
+        scope="production-fault",
+        release_id=release,
+        machine_id="85e647c4eed598",
+        boot_id="6d62de9e-4587-4c4a-bb4f-cf4f261ac0c2",
+        window_started_at_ms=1_000,
+        window_ended_at_ms=2_000,
+        sample_count=5,
+    )
+
+    verdict = acceptance.evaluate(
+        evidence,
+        required_scope="production-fault",
+        expected_release=release,
+    )
+
+    assert verdict.status == "PASS"
+    assert verdict.reasons == ()
+
+    mismatch = acceptance.evaluate(
+        evidence,
+        required_scope="production-fault",
+        expected_release="b" * 40,
+    )
+    assert mismatch.status == "FAIL"
+    assert "release-mismatch" in mismatch.reasons
+
 
 def test_verdict_rejects_incident_without_recovery_writer_receipt() -> None:
     evidence = fixture_evidence(

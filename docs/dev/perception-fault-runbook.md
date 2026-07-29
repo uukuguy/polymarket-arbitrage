@@ -83,3 +83,64 @@ prove. In particular, MTTD, containment, cross-membership Quote count, and
 orphan collecting-run count require later fault-specific evidence. Their
 absence produces a FAIL verdict rather than a default zero. An open Incident
 also fails the final stability gate.
+
+## Fault plan matrix
+
+Every fault has a Make target with the `chaos-perception-` prefix. With no
+arguments the target is read-only and prints its canonical JSON plan:
+
+```bash
+make chaos-perception-gamma-timeout
+```
+
+All 16 plans require only `python` in the deployed image and name the image
+gate, component, expected incident behavior, authentic recovery writer, and
+cleanup proof. The source of truth is `scripts/perception_chaos.py`.
+
+| Family | Fault IDs | Recovery authority |
+|---|---|---|
+| Gamma | `gamma-timeout`, `gamma-partial`, `gamma-malformed` | Discovery batch |
+| Gamma reconciliation | `gamma-cursor` | Reconciliation window progress |
+| CLOB | `clob-missing-leg`, `clob-429`, `clob-latency` | Candidate success receipt |
+| Producer | `candidate-exit`, `discovery-exit`, `reconciliation-stall` | component-specific writer above |
+| Host/store | `sqlite-busy`, `disk-pressure`, `contention` | Candidate receipt or Resource decision |
+| External/runtime | `telegram-failure`, `daemon-restart`, `deploy-interrupt` | notification state or release-bound HTTP probe |
+
+`expected_incident_kind` values beginning with `not-wired:` are deliberate
+blockers, not acceptable evidence. They mean the current batch/error path does
+not yet open a durable Incident. Its execution adapter must first close that
+chain-truth gap. A log line or resource decision alone cannot be relabeled as
+an Incident.
+
+Actual execution is an independent, fault-specific capability. It requires
+all of the following:
+
+```bash
+make chaos-perception-gamma-timeout \
+  mode=execute \
+  expected_release=<40-char-sha> \
+  authorization=fault:gamma-timeout:<40-char-sha> \
+  evidence_dir=<new-path>
+```
+
+The current executor rejects every such request with
+`adapter-not-implemented` before creating the evidence directory or making a
+network request. A target becomes executable only after its adapter, cleanup,
+chain-truth health surface, and end-to-end test are reviewed.
+
+## Recovery verdict
+
+Once a fault adapter has produced immutable `production-fault` evidence:
+
+```bash
+make verify-perception-recovery \
+  evidence=<evidence.json> \
+  output=<new-verdict.json> \
+  expected_release=<40-char-sha>
+```
+
+This validates the same complete SLA set as the final gate, including exact
+release/machine/boot/window provenance, zero open incidents, and a
+component-matching positive recovery writer receipt. It exclusively creates
+the verdict file and refuses overwrite. It does not inject, clean up, close an
+Incident, or mutate production.

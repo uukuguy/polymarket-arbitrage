@@ -841,6 +841,76 @@ qualify-perception-prod-readonly:
 	echo "evidence_dir=$$qualification_root"; \
 	exit $$qualification_rc
 
+PERCEPTION_CHAOS_FAULTS := gamma-timeout gamma-partial gamma-malformed gamma-cursor \
+	clob-missing-leg clob-429 clob-latency candidate-exit discovery-exit \
+	reconciliation-stall sqlite-busy disk-pressure telegram-failure \
+	daemon-restart deploy-interrupt contention
+PERCEPTION_CHAOS_TARGETS := $(addprefix chaos-perception-,$(PERCEPTION_CHAOS_FAULTS))
+.PHONY: $(PERCEPTION_CHAOS_TARGETS) verify-perception-recovery
+
+chaos-perception-gamma-timeout:
+chaos-perception-gamma-partial:
+chaos-perception-gamma-malformed:
+chaos-perception-gamma-cursor:
+chaos-perception-clob-missing-leg:
+chaos-perception-clob-429:
+chaos-perception-clob-latency:
+chaos-perception-candidate-exit:
+chaos-perception-discovery-exit:
+chaos-perception-reconciliation-stall:
+chaos-perception-sqlite-busy:
+chaos-perception-disk-pressure:
+chaos-perception-telegram-failure:
+chaos-perception-daemon-restart:
+chaos-perception-deploy-interrupt:
+chaos-perception-contention:
+
+## chaos-perception-gamma-timeout: Show the read-only Gamma timeout qualification plan; mode=execute is authorization-gated.
+## chaos-perception-gamma-partial: Show the read-only Gamma partial-page qualification plan; mode=execute is authorization-gated.
+## chaos-perception-gamma-malformed: Show the read-only Gamma malformed-response qualification plan; mode=execute is authorization-gated.
+## chaos-perception-gamma-cursor: Show the read-only Gamma cursor-loop qualification plan; mode=execute is authorization-gated.
+## chaos-perception-clob-missing-leg: Show the read-only CLOB missing-leg qualification plan; mode=execute is authorization-gated.
+## chaos-perception-clob-429: Show the read-only CLOB rate-limit qualification plan; mode=execute is authorization-gated.
+## chaos-perception-clob-latency: Show the read-only CLOB latency qualification plan; mode=execute is authorization-gated.
+## chaos-perception-candidate-exit: Show the read-only Candidate exit qualification plan; mode=execute is authorization-gated.
+## chaos-perception-discovery-exit: Show the read-only Discovery exit qualification plan; mode=execute is authorization-gated.
+## chaos-perception-reconciliation-stall: Show the read-only Reconciliation stall qualification plan; mode=execute is authorization-gated.
+## chaos-perception-sqlite-busy: Show the read-only bounded SQLite lock qualification plan; mode=execute is authorization-gated.
+## chaos-perception-disk-pressure: Show the read-only bounded disk-pressure qualification plan; mode=execute is authorization-gated.
+## chaos-perception-telegram-failure: Show the read-only Telegram failure qualification plan; mode=execute is authorization-gated.
+## chaos-perception-daemon-restart: Show the read-only daemon restart qualification plan; mode=execute is authorization-gated.
+## chaos-perception-deploy-interrupt: Show the read-only deploy interruption qualification plan; mode=execute is authorization-gated.
+## chaos-perception-contention: Show the read-only bounded contention qualification plan; mode=execute is authorization-gated.
+## Usage for explicit execution after adapter review: make chaos-perception-<fault> mode=execute expected_release=<sha> authorization=fault:<fault>:<sha> evidence_dir=<new-path>
+$(PERCEPTION_CHAOS_TARGETS): chaos-perception-%:
+	@set -eu; \
+	qualification_mode="$(or $(mode),plan)"; \
+	if [ "$$qualification_mode" = "plan" ]; then \
+	  exec uv run python scripts/perception_chaos.py plan --fault "$*"; \
+	fi; \
+	if [ "$$qualification_mode" != "execute" ]; then \
+	  echo "invalid-mode: $$qualification_mode" >&2; \
+	  exit 2; \
+	fi; \
+	exec uv run python scripts/perception_chaos.py execute \
+	  --fault "$*" \
+	  --expected-release "$(expected_release)" \
+	  --authorization "$(authorization)" \
+	  --evidence-dir "$(evidence_dir)"
+
+## verify-perception-recovery: Evaluate immutable production-fault evidence against exact release and all SLA/writer gates.
+## Usage: make verify-perception-recovery evidence=<json> output=<new-verdict-json> expected_release=<40-char-sha>
+verify-perception-recovery:
+	@set -eu; \
+	test -n "$(evidence)" || { echo "missing evidence=<json>" >&2; exit 2; }; \
+	test -n "$(output)" || { echo "missing output=<new-verdict-json>" >&2; exit 2; }; \
+	test -n "$(expected_release)" || { echo "missing expected_release=<40-char-sha>" >&2; exit 2; }; \
+	uv run python scripts/perception_fault_acceptance.py \
+	  --evidence "$(evidence)" \
+	  --output "$(output)" \
+	  --require-scope production-fault \
+	  --expected-release "$(expected_release)"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 07 — 7-day production soak monitoring (Better Stack driven)
 #
