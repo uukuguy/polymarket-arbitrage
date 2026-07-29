@@ -63,6 +63,7 @@ _URI_USERINFO_RE = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@")
 class ProducerSpec:
     component: str
     timeout_s: float
+    stall_detection_s: float | None = None
     terminate_grace_s: float = 1.0
     max_restarts: int = 3
     backoff_initial_s: float = 1.0
@@ -73,6 +74,10 @@ class ProducerSpec:
         if (
             self.component not in PRODUCER_COMMANDS
             or self.timeout_s <= 0
+            or (
+                self.stall_detection_s is not None
+                and not 0 < self.stall_detection_s < self.timeout_s
+            )
             or self.terminate_grace_s <= 0
             or self.max_restarts < 0
             or self.backoff_initial_s < 0
@@ -127,6 +132,10 @@ class ProducerSupervisor:
             outcome = "spawn-error"
             exit_code = None
             try:
+                attempt_recovery_anchor = self._recovery_anchor(
+                    spec.component,
+                    retries=retries,
+                )
                 child_env = os.environ.copy()
                 child_env["POLYARB_PRODUCER_SUPERVISOR_RUN_ID"] = supervisor_run_id
                 child_env["POLYARB_PRODUCER_ATTEMPT"] = str(attempt)
@@ -143,14 +152,17 @@ class ProducerSupervisor:
                 stderr_task = asyncio.create_task(
                     self._drain(process.stderr, spec.output_limit_bytes)
                 )
-                exit_code, signal = await self._wait(
+                exit_code, signal, incident = await self._wait(
                     process,
                     stop_event,
                     spec.timeout_s,
+                    spec.stall_detection_s,
                     spec.component,
                     incident,
                     supervisor_run_id,
                     attempt,
+                    attempt_recovery_anchor,
+                    retries,
                 )
                 if signal == "stop":
                     outcome = "cancelled"
@@ -227,35 +239,105 @@ class ProducerSupervisor:
         process,
         stop_event,
         timeout_s,
+        stall_detection_s,
         component,
         incident,
         supervisor_run_id,
         attempt,
+        attempt_recovery_anchor,
+        retries,
     ):
         wait_task = asyncio.create_task(process.wait())
         stop_task = asyncio.create_task(stop_event.wait())
         marker = self._progress_marker(component, supervisor_run_id, attempt)
         deadline = time.monotonic() + timeout_s
+        stall_deadline = (
+            None
+            if stall_detection_s is None
+            else time.monotonic() + stall_detection_s
+        )
+        stall_recovery_anchor = attempt_recovery_anchor
+        stall_reported = incident is not None
         try:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return None, "timeout"
+                    return None, "timeout", incident
+                stall_remaining = (
+                    None
+                    if stall_deadline is None or stall_reported
+                    else stall_deadline - time.monotonic()
+                )
+                if stall_remaining is not None and stall_remaining <= 0:
+                    current = self._progress_marker(
+                        component,
+                        supervisor_run_id,
+                        attempt,
+                    )
+                    if self._heartbeat_progress_advanced(marker, current):
+                        marker = current
+                        deadline = time.monotonic() + timeout_s
+                        stall_deadline = time.monotonic() + stall_detection_s
+                        stall_recovery_anchor = self._recovery_anchor(
+                            component,
+                            retries=retries,
+                        )
+                        continue
+                    incident = self._record_failure(
+                        incident,
+                        component=component,
+                        outcome="stalled",
+                        attempt=attempt,
+                        retry_count=retries,
+                    )
+                    self._begin_recovery(
+                        incident,
+                        retries=retries,
+                        recovery_anchor=stall_recovery_anchor,
+                    )
+                    incident = next(
+                        (
+                            item
+                            for item in self._incidents.open_incidents()
+                            if item.id == incident.id
+                        ),
+                        incident,
+                    )
+                    stall_reported = True
+                    continue
+                sample_wait = min(1.0, remaining)
+                if stall_remaining is not None:
+                    sample_wait = min(sample_wait, stall_remaining)
                 done, _ = await asyncio.wait(
                     {wait_task, stop_task},
-                    timeout=min(1.0, remaining),
+                    timeout=sample_wait,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if wait_task in done:
-                    return wait_task.result(), "exit"
+                    return wait_task.result(), "exit", incident
                 if stop_task in done and stop_task.result():
-                    return None, "stop"
+                    return None, "stop", incident
                 current = self._progress_marker(component, supervisor_run_id, attempt)
                 if self._heartbeat_progress_advanced(marker, current):
                     marker = current
                     deadline = time.monotonic() + timeout_s
+                    if stall_detection_s is not None:
+                        stall_deadline = time.monotonic() + stall_detection_s
+                        stall_recovery_anchor = self._recovery_anchor(
+                            component,
+                            retries=retries,
+                        )
                     if incident is not None:
                         self._attempt_verify(incident)
+                        incident = next(
+                            (
+                                item
+                                for item in self._incidents.open_incidents()
+                                if item.id == incident.id
+                            ),
+                            None,
+                        )
+                        stall_reported = incident is not None
                 elif self._valid_progress_marker(current) and not self._valid_progress_marker(
                     marker
                 ):
@@ -428,12 +510,17 @@ class ProducerSupervisor:
         *,
         retries: int,
         next_retry_at_ms: int | None = None,
+        recovery_anchor: dict | None = None,
     ) -> None:
         self._incidents.transition(
             incident.id,
             "recovering",
             {
-                **self._recovery_anchor(incident.scope, retries),
+                **(
+                    self._recovery_anchor(incident.scope, retries)
+                    if recovery_anchor is None
+                    else recovery_anchor
+                ),
                 "action": "retry-producer",
                 "next_retry_at_ms": next_retry_at_ms,
                 "retry_count": retries,

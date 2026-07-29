@@ -183,6 +183,11 @@ def _start_supervised_producers(
                 ProducerSpec(
                     component=component,
                     timeout_s=settings.producer_stall_timeout_s,
+                    stall_detection_s=(
+                        settings.producer_stall_detection_s
+                        if component == "reconciliation"
+                        else None
+                    ),
                     terminate_grace_s=settings.producer_terminate_grace_s,
                     max_restarts=settings.producer_max_restarts,
                     backoff_initial_s=settings.producer_backoff_initial_s,

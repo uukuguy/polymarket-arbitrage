@@ -145,6 +145,9 @@ def test_health_exposes_release_bound_qualification_policy(
         "discoveryCandidateMaxWaitS": (
             daemon_settings_for_test.discovery_candidate_max_wait_s
         ),
+        "producerStallDetectionS": (
+            daemon_settings_for_test.producer_stall_detection_s
+        ),
     }
 
 

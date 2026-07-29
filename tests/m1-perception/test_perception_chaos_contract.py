@@ -54,6 +54,7 @@ def test_every_fault_has_a_complete_readonly_plan(fault_id: str) -> None:
         fault_id in {
             "candidate-exit",
             "discovery-exit",
+            "reconciliation-stall",
         }
     )
 
@@ -110,7 +111,7 @@ def test_discovery_exit_plan_matches_sigterm_supervisor_outcome() -> None:
     assert json.loads(result.stdout)["expected_incident_kind"] == "child-nonzero"
 
 
-def test_reconciliation_stall_remains_blocked_until_early_detection_is_durable() -> None:
+def test_reconciliation_stall_uses_durable_early_detection_policy() -> None:
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "plan", "--fault", "reconciliation-stall"],
         cwd=ROOT,
@@ -120,8 +121,114 @@ def test_reconciliation_stall_remains_blocked_until_early_detection_is_durable()
     )
 
     plan = json.loads(result.stdout)
-    assert plan["execute_supported"] is False
+    assert plan["execute_supported"] is True
+    assert plan["expected_incident_kind"] == "child-stalled"
+    assert Settings().producer_stall_detection_s <= 30
+    assert (
+        Settings().producer_stall_detection_s
+        < Settings().producer_stall_timeout_s
+    )
     assert Settings().producer_stall_timeout_s > 30
+
+
+def test_reconciliation_stall_adapter_resumes_exact_worker_before_verification(
+    tmp_path: Path,
+) -> None:
+    release = "a" * 40
+    commands: list[tuple[str, ...]] = []
+
+    def command(argv):
+        argv = tuple(argv)
+        commands.append(argv)
+        if argv[0] == "make":
+            return subprocess.CompletedProcess(argv, 0, "PASS\n", "")
+        remote = argv[-1]
+        action = (
+            "locate"
+            if " locate " in f" {remote} "
+            else "sigcont"
+            if " resume " in f" {remote} "
+            else "sigstop"
+        )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "action": action,
+                    "component": "reconciliation",
+                    "pid": 43,
+                    "ppid": 1,
+                }
+            )
+            + "\n",
+            "",
+        )
+
+    history_reads = 0
+
+    def fetch_json(_base_url: str, path: str):
+        nonlocal history_reads
+        if path.startswith("/perception/incidents/recent"):
+            return {
+                "status": "available",
+                "items": [
+                    {
+                        "incident_id": "d" * 32,
+                        "kind": "child-stalled",
+                        "state": "recovering",
+                    }
+                ],
+            }, 0.1
+        history_reads += 1
+        state = "recovering" if history_reads == 1 else "verified"
+        return {
+            "status": "available",
+            "history_complete": True,
+            "recovery_writer_receipt": (
+                None
+                if state == "recovering"
+                else {
+                    "component": "reconciliation",
+                    "receipt_row_id": 99,
+                }
+            ),
+            "items": [
+                {"state": "detected", "occurred_at_ms": 1_100},
+                {"state": "contained", "occurred_at_ms": 1_200},
+                {"state": state, "occurred_at_ms": 1_300},
+            ],
+        }, 0.1
+
+    rounds = iter([[{}] * 5, [{}] * 5])
+    now = [0.0]
+    evidence = chaos.execute_reconciliation_stall(
+        base_url="https://example.test",
+        expected_release=release,
+        authorization=f"fault:reconciliation-stall:{release}",
+        evidence_dir=tmp_path / "reconciliation-stall",
+        timeout_s=10,
+        command=command,
+        fetch_json=fetch_json,
+        collect_rounds=lambda *_args, **_kwargs: next(rounds),
+        build_evidence=lambda samples, **_kwargs: {
+            "machine_id": "machine-1",
+            "boot_id": "12345678-1234-4234-9234-123456789abc",
+            "sample_count": len(samples),
+            "open_incident_count": 0,
+            "cross_membership_quote_batches": 0,
+            "orphan_collecting_runs": 0,
+            "incidents": [],
+        },
+        clock_ms=lambda: 1_000,
+        monotonic=lambda: now[0],
+        sleeper=lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+
+    remote_commands = [argv[-1] for argv in commands if argv[0] == "flyctl"]
+    assert " stall " in f" {remote_commands[1]} "
+    assert " resume " in f" {remote_commands[2]} "
+    assert evidence["incidents"][0]["recovery_writer_receipt"]["receipt_row_id"] == 99
 
 
 def test_candidate_exit_adapter_preserves_complete_release_bound_evidence(

@@ -167,6 +167,29 @@ def stall_worker(
     return worker
 
 
+def resume_worker(
+    proc_root: Path,
+    *,
+    expected_pid: int,
+    expected_release: str,
+    authorization: str,
+    environ: Mapping[str, str],
+    kill: Callable[[int, signal.Signals], None] = os.kill,
+) -> WorkerProcess:
+    """SIGCONT only the exact worker authorized by a reconciliation stall."""
+    worker = _authorized_worker(
+        proc_root,
+        component="reconciliation",
+        fault_id="reconciliation-stall",
+        expected_pid=expected_pid,
+        expected_release=expected_release,
+        authorization=authorization,
+        environ=environ,
+    )
+    kill(worker.pid, signal.SIGCONT)
+    return worker
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -181,6 +204,10 @@ def _parser() -> argparse.ArgumentParser:
     stall.add_argument("--expected-pid", required=True, type=int)
     stall.add_argument("--expected-release", required=True)
     stall.add_argument("--authorization", required=True)
+    resume = subparsers.add_parser("resume")
+    resume.add_argument("--expected-pid", required=True, type=int)
+    resume.add_argument("--expected-release", required=True)
+    resume.add_argument("--authorization", required=True)
     return parser
 
 
@@ -204,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
                 "signal": signal.SIGTERM.name,
                 **asdict(worker),
             }
-        else:
+        elif args.command == "stall":
             worker = stall_worker(
                 Path("/proc"),
                 expected_pid=args.expected_pid,
@@ -215,6 +242,19 @@ def main(argv: list[str] | None = None) -> int:
             payload = {
                 "action": "sigstop",
                 "signal": signal.SIGSTOP.name,
+                **asdict(worker),
+            }
+        else:
+            worker = resume_worker(
+                Path("/proc"),
+                expected_pid=args.expected_pid,
+                expected_release=args.expected_release,
+                authorization=args.authorization,
+                environ=os.environ,
+            )
+            payload = {
+                "action": "sigcont",
+                "signal": signal.SIGCONT.name,
                 **asdict(worker),
             }
         print(json.dumps(payload, sort_keys=True))

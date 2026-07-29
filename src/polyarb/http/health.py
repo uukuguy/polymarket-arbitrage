@@ -1023,6 +1023,7 @@ def _build_health_body(
             "discoveryCandidateMaxWaitS": (
                 settings.discovery_candidate_max_wait_s
             ),
+            "producerStallDetectionS": settings.producer_stall_detection_s,
         },
         "serviceId": "polyarb-l1",
         "description": "Polymarket L1 observation daemon — Structure 5m + Quote 2m",

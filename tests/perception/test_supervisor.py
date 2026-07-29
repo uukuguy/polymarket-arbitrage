@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import sys
 import time
 
@@ -41,6 +42,15 @@ def test_exact_commands_are_shell_free() -> None:
         "candidate",
     )
     assert all(isinstance(command, tuple) for command in PRODUCER_COMMANDS.values())
+
+
+def test_early_stall_detection_must_precede_hard_restart_timeout() -> None:
+    with pytest.raises(ValueError, match="invalid-producer-spec"):
+        ProducerSpec(
+            component="reconciliation",
+            timeout_s=30,
+            stall_detection_s=30,
+        )
 
 
 @pytest.mark.asyncio
@@ -149,6 +159,223 @@ async def test_progress_read_flapping_never_extends_stall_deadline(
 
     assert store.producer_receipts("candidate")[0].outcome == "timeout"
     assert time.monotonic() - started < 0.25
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_stall_opens_incident_without_killing_child(
+    tmp_path,
+) -> None:
+    store, supervisor = _supervisor(
+        tmp_path,
+        component="reconciliation",
+        command=(sys.executable, "-c", "import time; time.sleep(5)"),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        supervisor.run(
+            ProducerSpec(
+                component="reconciliation",
+                timeout_s=0.3,
+                stall_detection_s=0.04,
+                terminate_grace_s=0.05,
+                max_restarts=0,
+            ),
+            stop,
+        )
+    )
+
+    await asyncio.sleep(0.09)
+
+    incident = store.open_incidents()[0]
+    assert incident.kind == "child-stalled"
+    assert incident.state == "recovering"
+    assert store.producer_receipts("reconciliation") == ()
+
+    stop.set()
+    await task
+    assert store.producer_receipts("reconciliation")[0].outcome == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_hard_timeout_reuses_early_stall_incident(
+    tmp_path,
+) -> None:
+    store, supervisor = _supervisor(
+        tmp_path,
+        component="reconciliation",
+        command=(sys.executable, "-c", "import time; time.sleep(5)"),
+    )
+
+    await supervisor.run(
+        ProducerSpec(
+            component="reconciliation",
+            timeout_s=0.12,
+            stall_detection_s=0.03,
+            terminate_grace_s=0.05,
+            max_restarts=0,
+        ),
+        asyncio.Event(),
+    )
+
+    assert store.producer_receipts("reconciliation")[0].outcome == "timeout"
+    incidents = store.open_incidents()
+    assert len(incidents) == 1
+    assert incidents[0].kind == "child-stalled"
+    assert incidents[0].state == "escalated"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_checkpoint_verifies_early_stall_without_restart(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    script = (
+        "import time\n"
+        "from pathlib import Path\n"
+        "from polyarb.perception.store import OpportunityPerceptionStore\n"
+        f"s=OpportunityPerceptionStore(Path({str(store.db_path)!r}))\n"
+        "s.claim_producer_heartbeat_authority('reconciliation')\n"
+        "time.sleep(.4)\n"
+        "now=int(time.time()*1000)\n"
+        "w=s.begin_reconciliation(started_at_ms=now)\n"
+        "s.publish_reconciliation_batch("
+        "window_id=w.id,requested_cursor=None,next_cursor='page-2',"
+        "completed=False,started_at_ms=now,finished_at_ms=now+1,"
+        "page_event_count=0,candidates=())\n"
+        "s.record_producer_heartbeat('reconciliation',observed_at_ms=now+1)\n"
+        "time.sleep(5)\n"
+    )
+    supervisor = ProducerSupervisor(
+        store=store,
+        incidents=IncidentManager(store),
+        _test_commands={
+            **PRODUCER_COMMANDS,
+            "reconciliation": (sys.executable, "-c", script),
+        },
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        supervisor.run(
+            ProducerSpec(
+                component="reconciliation",
+                timeout_s=2.5,
+                stall_detection_s=0.15,
+                terminate_grace_s=0.05,
+                max_restarts=0,
+            ),
+            stop,
+        )
+    )
+
+    deadline = time.monotonic() + 2
+    open_incidents = await asyncio.to_thread(store.open_incidents)
+    while not open_incidents and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+        open_incidents = await asyncio.to_thread(store.open_incidents)
+    assert open_incidents[0].kind == "child-stalled"
+    while open_incidents and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+        open_incidents = await asyncio.to_thread(store.open_incidents)
+    assert open_incidents == ()
+    assert store.producer_receipts("reconciliation") == ()
+    stop.set()
+    await task
+    assert [receipt.outcome for receipt in store.producer_receipts("reconciliation")] == [
+        "cancelled"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sigstop_reconciliation_child_is_detected_and_resumes_with_checkpoint(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    pid_path = tmp_path / "worker.pid"
+    recover_path = tmp_path / "recover"
+    script = (
+        "import os,time\n"
+        "from pathlib import Path\n"
+        "from polyarb.perception.store import OpportunityPerceptionStore\n"
+        f"pid_path=Path({str(pid_path)!r})\n"
+        f"recover_path=Path({str(recover_path)!r})\n"
+        f"s=OpportunityPerceptionStore(Path({str(store.db_path)!r}))\n"
+        "s.claim_producer_heartbeat_authority('reconciliation')\n"
+        "pid_path.write_text(str(os.getpid()))\n"
+        "recovered=False\n"
+        "while True:\n"
+        " now=int(time.time()*1000)\n"
+        " if recover_path.exists() and not recovered:\n"
+        "  w=s.begin_reconciliation(started_at_ms=now)\n"
+        "  s.publish_reconciliation_batch("
+        "window_id=w.id,requested_cursor=None,next_cursor='page-2',"
+        "completed=False,started_at_ms=now,finished_at_ms=now+1,"
+        "page_event_count=0,candidates=())\n"
+        "  s.record_producer_heartbeat('reconciliation',observed_at_ms=now+1)\n"
+        "  recovered=True\n"
+        " else:\n"
+        "  s.record_producer_heartbeat("
+        "'reconciliation',observed_at_ms=now,state='yielded')\n"
+        " time.sleep(.02)\n"
+    )
+    supervisor = ProducerSupervisor(
+        store=store,
+        incidents=IncidentManager(store),
+        _test_commands={
+            **PRODUCER_COMMANDS,
+            "reconciliation": (sys.executable, "-c", script),
+        },
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        supervisor.run(
+            ProducerSpec(
+                component="reconciliation",
+                timeout_s=1,
+                stall_detection_s=0.12,
+                terminate_grace_s=0.05,
+                max_restarts=0,
+            ),
+            stop,
+        )
+    )
+    pid = None
+    try:
+        deadline = time.monotonic() + 2
+        while not pid_path.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        pid = int(pid_path.read_text())
+        while (
+            store.latest_producer_heartbeat_ms("reconciliation") is None
+            and time.monotonic() < deadline
+        ):
+            await asyncio.sleep(0.02)
+
+        os.kill(pid, signal.SIGSTOP)
+        open_incidents = await asyncio.to_thread(store.open_incidents)
+        while not open_incidents and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+            open_incidents = await asyncio.to_thread(store.open_incidents)
+        assert open_incidents[0].kind == "child-stalled"
+
+        recover_path.touch()
+        os.kill(pid, signal.SIGCONT)
+        open_incidents = await asyncio.to_thread(store.open_incidents)
+        while open_incidents and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+            open_incidents = await asyncio.to_thread(store.open_incidents)
+        assert open_incidents == ()
+        assert store.current_reconciliation().pages_completed == 1
+        assert store.producer_receipts("reconciliation") == ()
+    finally:
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+        stop.set()
+        await task
 
 
 @pytest.mark.asyncio

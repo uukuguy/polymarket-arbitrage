@@ -134,7 +134,7 @@ FAULTS = {
         _spec(
             "reconciliation-stall",
             "reconciliation",
-            "child-timeout",
+            "child-stalled",
             "neg_risk_reconciliation_windows",
             "release scoped stall and verify pages_completed advances",
         ),
@@ -190,6 +190,12 @@ FAULTS["discovery-exit"] = replace(
     FAULTS["discovery-exit"],
     execute_supported=True,
 )
+FAULTS["reconciliation-stall"] = replace(
+    FAULTS["reconciliation-stall"],
+    execute_supported=True,
+)
+
+
 def _write_exclusive(path: Path, payload: Mapping[str, object]) -> None:
     serialized = (
         json.dumps(
@@ -235,6 +241,41 @@ def _available(value: object, reason: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or value.get("status") != "available":
         raise AdapterFailedError(reason)
     return value
+
+
+def _resume_reconciliation_worker(
+    *,
+    command: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],
+    machine_id: str,
+    pid: int,
+    expected_release: str,
+    inner_authorization: str,
+) -> None:
+    resumed = _json_stdout(
+        command(
+            (
+                "flyctl",
+                "ssh",
+                "console",
+                "-a",
+                "polyarb-l1",
+                "--machine",
+                machine_id,
+                "-C",
+                "python -m polyarb.perception.chaos_primitive "
+                f"resume --expected-pid {pid} "
+                f"--expected-release {expected_release} "
+                f"--authorization {inner_authorization}",
+            )
+        ),
+        "reconciliation-resume",
+    )
+    if (
+        resumed.get("action") != "sigcont"
+        or resumed.get("component") != "reconciliation"
+        or resumed.get("pid") != pid
+    ):
+        raise AdapterFailedError("reconciliation-resume-invalid")
 
 
 def execute_producer_fault(
@@ -367,47 +408,67 @@ def execute_producer_fault(
     deadline = monotonic() + timeout_s
     history: Mapping[str, Any] | None = None
     incident_id: str | None = None
-    while monotonic() < deadline:
-        recent_body, _ = fetch_json(
-            base_url,
-            "/perception/incidents/recent"
-            f"?scope={component}&after_ms={injection_started_at_ms}&limit=10",
-        )
-        recent = _available(recent_body, "recent-incidents-unavailable")
-        items = recent.get("items")
-        if not isinstance(items, list):
-            raise AdapterFailedError("recent-incidents-invalid")
-        matches = [
-            item
-            for item in items
-            if isinstance(item, Mapping)
-            and item.get("kind") == expected_incident_kind
-        ]
-        ids = {
-            item.get("incident_id")
-            for item in matches
-            if isinstance(item.get("incident_id"), str)
-        }
-        if len(ids) > 1:
-            raise AdapterFailedError(f"{component}-incident-ambiguous")
-        if ids:
-            incident_id = next(iter(ids))
-            history_body, _ = fetch_json(
+    resumed = primitive != "stall"
+    try:
+        while monotonic() < deadline:
+            recent_body, _ = fetch_json(
                 base_url,
-                f"/perception/incidents/{incident_id}/history",
+                "/perception/incidents/recent"
+                f"?scope={component}&after_ms={injection_started_at_ms}&limit=10",
             )
-            history = _available(history_body, "incident-history-unavailable")
-            history_items = history.get("items")
-            if not isinstance(history_items, list) or not history_items:
-                raise AdapterFailedError("incident-history-invalid")
-            terminal = history_items[-1]
-            if isinstance(terminal, Mapping) and terminal.get("state") == "escalated":
-                raise AdapterFailedError(f"{component}-incident-escalated")
-            if isinstance(terminal, Mapping) and terminal.get("state") == "verified":
-                break
-        sleeper(0.25)
-    else:
-        raise AdapterFailedError(f"{component}-recovery-timeout")
+            recent = _available(recent_body, "recent-incidents-unavailable")
+            items = recent.get("items")
+            if not isinstance(items, list):
+                raise AdapterFailedError("recent-incidents-invalid")
+            matches = [
+                item
+                for item in items
+                if isinstance(item, Mapping)
+                and item.get("kind") == expected_incident_kind
+            ]
+            ids = {
+                item.get("incident_id")
+                for item in matches
+                if isinstance(item.get("incident_id"), str)
+            }
+            if len(ids) > 1:
+                raise AdapterFailedError(f"{component}-incident-ambiguous")
+            if ids:
+                incident_id = next(iter(ids))
+                if not resumed:
+                    _resume_reconciliation_worker(
+                        command=command,
+                        machine_id=machine_id,
+                        pid=pid,
+                        expected_release=expected_release,
+                        inner_authorization=inner_authorization,
+                    )
+                    resumed = True
+                history_body, _ = fetch_json(
+                    base_url,
+                    f"/perception/incidents/{incident_id}/history",
+                )
+                history = _available(history_body, "incident-history-unavailable")
+                history_items = history.get("items")
+                if not isinstance(history_items, list) or not history_items:
+                    raise AdapterFailedError("incident-history-invalid")
+                terminal = history_items[-1]
+                if isinstance(terminal, Mapping) and terminal.get("state") == "escalated":
+                    raise AdapterFailedError(f"{component}-incident-escalated")
+                if isinstance(terminal, Mapping) and terminal.get("state") == "verified":
+                    break
+            sleeper(0.25)
+        else:
+            raise AdapterFailedError(f"{component}-recovery-timeout")
+    finally:
+        if not resumed:
+            _resume_reconciliation_worker(
+                command=command,
+                machine_id=machine_id,
+                pid=pid,
+                expected_release=expected_release,
+                inner_authorization=inner_authorization,
+            )
 
     assert history is not None and incident_id is not None
     if history.get("history_complete") is not True:
@@ -486,7 +547,7 @@ def execute_reconciliation_stall(**kwargs) -> dict[str, object]:
         fault_id="reconciliation-stall",
         primitive="stall",
         expected_action="sigstop",
-        expected_incident_kind="child-timeout",
+        expected_incident_kind="child-stalled",
         **kwargs,
     )
 

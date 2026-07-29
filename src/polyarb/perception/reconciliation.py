@@ -163,15 +163,17 @@ class ReconciliationRunner:
         worker: ReconciliationWorker,
         gamma: object,
         interval_s: float,
+        idle_heartbeat_interval_s: float = 15.0,
         store: OpportunityPerceptionStore | None = None,
         require_resource_decision: bool = False,
     ) -> None:
-        if interval_s <= 0:
+        if interval_s <= 0 or idle_heartbeat_interval_s <= 0:
             raise ValueError("reconciliation-interval-must-be-positive")
         self._worker = worker
         self._store = store or worker._store
         self._gamma = gamma
         self._interval_s = interval_s
+        self._idle_heartbeat_interval_s = idle_heartbeat_interval_s
         self._require_resource_decision = require_resource_decision
 
     async def run(self, stop_event: asyncio.Event) -> None:
@@ -222,6 +224,9 @@ class ReconciliationRunner:
                         require_resource_decision=self._require_resource_decision,
                     )
                 deadline = time.monotonic() + self._interval_s
+                idle_heartbeat_deadline = (
+                    time.monotonic() + self._idle_heartbeat_interval_s
+                )
                 while not stop_event.is_set() and time.monotonic() < deadline:
                     if await asyncio.to_thread(
                         self._store.pending_operator_wakeup,
@@ -230,10 +235,36 @@ class ReconciliationRunner:
                         require_resource_decision=self._require_resource_decision,
                     ) is not None:
                         break
+                    now = time.monotonic()
+                    if now >= idle_heartbeat_deadline:
+                        try:
+                            await asyncio.to_thread(
+                                self._store.record_producer_heartbeat,
+                                "reconciliation",
+                                observed_at_ms=int(time.time() * 1_000),
+                                state="yielded",
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as error:
+                            logger.warning(
+                                "reconciliation idle heartbeat failed "
+                                f"kind={type(error).__name__}"
+                            )
+                        idle_heartbeat_deadline = (
+                            time.monotonic() + self._idle_heartbeat_interval_s
+                        )
                     try:
                         await asyncio.wait_for(
                             stop_event.wait(),
-                            timeout=min(1.0, max(0.0, deadline - time.monotonic())),
+                            timeout=min(
+                                1.0,
+                                max(0.0, deadline - time.monotonic()),
+                                max(
+                                    0.0,
+                                    idle_heartbeat_deadline - time.monotonic(),
+                                ),
+                            ),
                         )
                     except TimeoutError:
                         pass
@@ -258,6 +289,10 @@ def build_production_reconciliation(settings: object) -> ReconciliationRunner:
         ),
         gamma=gamma,
         interval_s=settings.reconciliation_interval_s,
+        idle_heartbeat_interval_s=min(
+            settings.reconciliation_interval_s,
+            getattr(settings, "producer_stall_detection_s", 30.0) / 2,
+        ),
         store=store,
         require_resource_decision=(
             settings.opportunity_resource_controller_enabled

@@ -176,11 +176,13 @@ runtime `POLYARB_RELEASE_ID`, the previously observed PID, and
 the component-specific `fault:<component>-exit:<release>:<pid>` before sending SIGTERM. It cannot target
 PID 1, an arbitrary process, or a second component.
 
-`reconciliation-stall` has a separately authorized SIGSTOP primitive, but its
-adapter deliberately remains non-executable. The current supervisor opens
-`child-timeout` only at the 180-second restart timeout, while qualification
-requires MTTD within 30 seconds. Lowering the restart timeout would turn normal
-slow batches into false failures. Closure requires a separate durable
-`child-stalled` early-detection/containment transition within 30/60 seconds,
-while retaining the longer statistically tuned restart timeout; only then may
-SIGSTOP execution be enabled.
+`reconciliation-stall` uses a separately authorized SIGSTOP/SIGCONT pair. The
+child emits authenticated `yielded` liveness every 12.5 seconds during its
+normal 60-second inter-page wait. Missing liveness opens durable
+`child-stalled` at the configured 25-second detection point; the process is not
+killed until the independently configured 180-second hard timeout. Once the
+Incident is visible, the adapter resumes the same release/PID and waits for a
+new Reconciliation page checkpoint to supply the recovery writer receipt.
+SIGCONT is also attempted from `finally` if observation fails after SIGSTOP.
+This preserves MTTD headroom without relabelling normal idle time as failure or
+lowering the statistically tuned restart threshold.

@@ -7,6 +7,7 @@ import pytest
 from polyarb.perception.chaos_primitive import (
     PrimitiveRefusedError,
     locate_worker,
+    resume_worker,
     stall_worker,
     terminate_worker,
 )
@@ -195,6 +196,37 @@ def test_stall_reconciliation_refuses_wrong_fault_authorization_before_signal(
         )
 
     assert killed == []
+
+
+def test_resume_reconciliation_worker_uses_sigcont_and_same_authorization(
+    tmp_path: Path,
+) -> None:
+    _process(
+        tmp_path,
+        1,
+        ppid=0,
+        argv=("python", "-m", "polyarb.daemon.main"),
+    )
+    _process(
+        tmp_path,
+        43,
+        ppid=1,
+        argv=("python", "-m", "polyarb.perception.worker_cli", "reconciliation"),
+    )
+    killed: list[tuple[int, signal.Signals]] = []
+    release = "a" * 40
+
+    worker = resume_worker(
+        tmp_path,
+        expected_pid=43,
+        expected_release=release,
+        authorization=f"fault:reconciliation-stall:{release}:43",
+        environ={"POLYARB_RELEASE_ID": release},
+        kill=lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    assert worker.component == "reconciliation"
+    assert killed == [(43, signal.SIGCONT)]
 
 
 @pytest.mark.parametrize(

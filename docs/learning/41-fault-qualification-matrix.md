@@ -57,15 +57,17 @@ exact runtime baseline
 
 ### 为什么现在所有 execute 都拒绝？
 
-除 `candidate-exit`、`discovery-exit` 外的 execute 仍拒绝。矩阵契约和生产注入能力是两个独立交付物。
+除 `candidate-exit`、`discovery-exit`、`reconciliation-stall` 外的 execute 仍拒绝。
+矩阵契约和生产注入能力是两个独立交付物。
 先冻结 fault、cleanup、writer 和证据结构，再逐个实现 adapter，能避免临时 SSH 命令
 绕过原子化与可恢复性要求。两个 producer-exit 使用同一完整模板：clean baseline →
 exact machine/boot/PID intent → SIGTERM → scoped recent Incident discovery → exact
 terminal history → component-specific writer receipt → clean post-window。接口可执行仍不等于生产 mutation 已获授权。
 
-### 为什么 Reconciliation SIGSTOP primitive 已有，execute 仍拒绝？
+### 为什么 Reconciliation stall 不直接把 restart timeout 改成 30 秒？
 
-“能制造故障”和“能满足生产检测 SLA”是两件事。当前 restart timeout 是 180 秒，
-可避免正常慢批次被频繁误杀；但等到 timeout 才创建 Incident 会违反 MTTD ≤30 秒。
-正确结构是 30 秒内持久化 `child-stalled` 并 contained，继续观察到统计驱动 timeout
-才重启。不能把 restart timeout 降到 30 秒来换一个表面 PASS。
+一次全窗口可能持续十分钟，但 Reconciliation 每批只提交一页。正常 60 秒
+inter-page wait 期间，child 每 12.5 秒写认证 `yielded`；25 秒收不到任何 child
+liveness 才持久化 `child-stalled`。这只负责发现和 containment，不杀进程。
+180 秒 hard timeout 仍独立负责重启。SIGCONT 后必须出现新的页 checkpoint 才能
+verified，所以 liveness 不会伪造业务恢复。

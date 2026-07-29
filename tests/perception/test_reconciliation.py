@@ -159,6 +159,50 @@ async def test_reconciliation_resource_disabled_never_reads_decision(tmp_path: P
     assert decision_reads == 0
 
 
+@pytest.mark.asyncio
+async def test_reconciliation_runner_emits_authenticated_idle_liveness(
+    tmp_path: Path,
+) -> None:
+    states: list[str] = []
+    stop = asyncio.Event()
+
+    class Store(OpportunityPerceptionStore):
+        def record_producer_heartbeat(
+            self,
+            _component,
+            *,
+            observed_at_ms,
+            state="progress",
+            **_kwargs,
+        ):
+            states.append(state)
+            if state == "yielded":
+                stop.set()
+            return len(states)
+
+    class Worker:
+        async def run_batch(self):
+            return SimpleNamespace(finished_at_ms=2_000, failed=False)
+
+    class Gamma:
+        async def aclose(self) -> None:
+            return None
+
+    store = Store(tmp_path / "state.db")
+    store.init_schema()
+    runner = ReconciliationRunner(
+        worker=Worker(),
+        gamma=Gamma(),
+        interval_s=0.2,
+        idle_heartbeat_interval_s=0.02,
+        store=store,
+    )
+
+    await runner.run(stop)
+
+    assert states[:2] == ["progress", "yielded"]
+
+
 def test_reconciliation_schema_upgrades_original_task4_tables_additively(
     tmp_path: Path,
 ) -> None:

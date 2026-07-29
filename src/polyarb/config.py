@@ -126,6 +126,12 @@ class Settings(BaseSettings):
     )
     opportunity_producer_supervisor_enabled: bool = False
     opportunity_resource_controller_enabled: bool = False
+    producer_stall_detection_s: float = Field(
+        default=25.0,
+        gt=0,
+        le=30,
+        allow_inf_nan=False,
+    )
     producer_stall_timeout_s: float = Field(default=180.0, gt=0, allow_inf_nan=False)
     producer_terminate_grace_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     producer_max_restarts: int = Field(default=3, ge=0, le=10)
@@ -418,6 +424,11 @@ class Settings(BaseSettings):
         if self.producer_backoff_max_s < self.producer_backoff_initial_s:
             raise ValueError(
                 "producer_backoff_max_s must be >= producer_backoff_initial_s"
+            )
+        if self.producer_stall_detection_s >= self.producer_stall_timeout_s:
+            raise ValueError(
+                "producer_stall_detection_s must be less than "
+                "producer_stall_timeout_s"
             )
         if (
             self.opportunity_resource_controller_enabled
