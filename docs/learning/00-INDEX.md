@@ -50,6 +50,7 @@
 | 36 | [有界 Incident 权威](36-有界Incident权威.md) | prefix checkpoint / open authority / replay anchor / failure breadcrumb |
 | 37 | [有界资源决策权威](37-有界资源决策权威.md) | deterministic policy replay / 512→256 compaction / suffix tail binding / resource evidence health |
 | 38 | [四类证据时间线](38-四类证据时间线.md) | 单事务四源合并 / canonical group 游标 / opportunity 转换 / per-group checkpoint seed / 保守与精确 history floor |
+| 39 | [机会运维读模型](39-opportunity-operations-read-models.md) | 认证机会入口 / zero 与 unavailable / server-time TTL / 真实 fixture / incident 分层证据 |
 
 ## Phase 02.1 教学增量（2026-05）
 

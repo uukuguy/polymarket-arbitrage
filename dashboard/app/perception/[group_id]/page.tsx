@@ -16,7 +16,8 @@ type TimelineItem = {
     | "Incident event";
   title: string;
   detail: string;
-  evidence?: string;
+  evidenceFields?: string[];
+  rawEvidence?: string;
 };
 
 const panel = {
@@ -44,6 +45,28 @@ function decodeRouteGroupId(encodedGroupId: string): string {
   } catch {
     return encodedGroupId;
   }
+}
+
+function incidentEvidenceFields(
+  evidence: Record<string, unknown>,
+): string[] {
+  const labels: [string, string][] = [
+    ["action", "action"],
+    ["retry_count", "retry count"],
+    ["next_retry_at_ms", "next retry"],
+    ["candidate_success_receipt_row_id", "success receipt"],
+    ["verification", "verification"],
+  ];
+  return labels.flatMap(([field, label]) => {
+    const value = evidence[field];
+    if (value === undefined || value === null) {
+      return [];
+    }
+    const rendered = field.endsWith("_at_ms") && typeof value === "number"
+      ? fmtTime(value)
+      : String(value);
+    return [`${label}: ${rendered}`];
+  });
 }
 
 function timelineItem(item: PerceptionGroupTimelineItem): TimelineItem {
@@ -98,7 +121,8 @@ function timelineItem(item: PerceptionGroupTimelineItem): TimelineItem {
     label: "Incident event",
     title: `${item.kind} · ${item.state}`,
     detail: `${item.scope} · sequence ${item.sequence}`,
-    evidence: JSON.stringify(item.evidence),
+    evidenceFields: incidentEvidenceFields(item.evidence),
+    rawEvidence: JSON.stringify(item.evidence),
   };
 }
 
@@ -211,8 +235,18 @@ export default async function PerceptionGroupPage({
               </div>
               <strong>{event.title}</strong>
               <div style={muted}>{event.detail}</div>
-              {event.evidence !== undefined && (
-                <code style={{ ...muted, display: "block" }}>{event.evidence}</code>
+              {event.evidenceFields?.map((field) => (
+                <div key={field} style={muted}>{field}</div>
+              ))}
+              {event.rawEvidence !== undefined && (
+                <details style={{ margin: "6px 0" }}>
+                  <summary style={{ ...muted, cursor: "pointer" }}>
+                    Raw evidence
+                  </summary>
+                  <code style={{ ...muted, display: "block" }}>
+                    {event.rawEvidence}
+                  </code>
+                </details>
               )}
               <time style={{ color: "#999", fontSize: 14 }}>
                 {fmtTime(event.occurredAtMs)}

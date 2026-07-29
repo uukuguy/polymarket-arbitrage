@@ -718,13 +718,21 @@ logs-tail-axiom:
 # Dashboard (Phase 02 Plan 02-06 — Vercel Next.js)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: dashboard-dev dashboard-build dashboard-typecheck dashboard-deploy smoke-l2-dashboard
+.PHONY: dashboard-dev dashboard-fixture-api dashboard-build dashboard-typecheck dashboard-deploy smoke-l2-dashboard
 .PHONY: smoke-perception-dashboard
 
 ## dashboard-dev: 本地起 dashboard (next dev :3000)
 dashboard-dev:
 	@echo ">> dashboard-dev — pnpm run dev"
 	cd dashboard && pnpm run dev
+
+## dashboard-fixture-api: Serve deterministic local M1 observer data for Dashboard visual acceptance
+## Usage: make dashboard-fixture-api db=output/playwright/perception-fixture.db port=8765
+## Local-only SQLite mutation; refuses to overwrite an existing fixture DB.
+dashboard-fixture-api:
+	@test -n "$(db)" || { echo "ERROR: db=<new-local-path> is required" >&2; exit 2; }
+	@echo ">> dashboard-fixture-api — local observer fixture on :$${port:-8765}"
+	uv run python scripts/perception_dashboard_fixture.py --db "$(db)" --port "$${port:-8765}"
 
 ## dashboard-build: Build dashboard production bundle (verify locally before Vercel deploy)
 dashboard-build:

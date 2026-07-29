@@ -70,12 +70,21 @@ def _valid_manual() -> str:
 <!-- m1-contract: route=/candidates file=dashboard/app/candidates/page.tsx -->
 <!-- m1-contract: route=/signals file=dashboard/app/signals/page.tsx -->
 <!-- m1-contract: route=/l3/[asset_id] file=dashboard/app/l3/[asset_id]/page.tsx -->
+<!-- m1-contract: route=/perception file=dashboard/app/perception/page.tsx -->
+<!-- m1-contract: route=/perception/[group_id] file=dashboard/app/perception/[group_id]/page.tsx -->
 """
 
 
 def _repo(tmp_path: Path) -> Path:
     (tmp_path / "src/polyarb/http").mkdir(parents=True)
-    for path in ("status", "candidates", "signals", "l3/[asset_id]"):
+    for path in (
+        "status",
+        "candidates",
+        "signals",
+        "l3/[asset_id]",
+        "perception",
+        "perception/[group_id]",
+    ):
         (tmp_path / "dashboard/app" / path).mkdir(parents=True)
     (tmp_path / "docs").mkdir()
     (tmp_path / ".planning").mkdir()
@@ -97,7 +106,14 @@ def _repo(tmp_path: Path) -> Path:
         'checks["mirror:l2_tob_age_seconds"] = []\n'
         'checks["l3:active_count"] = []\n'
     )
-    for path in ("status", "candidates", "signals", "l3/[asset_id]"):
+    for path in (
+        "status",
+        "candidates",
+        "signals",
+        "l3/[asset_id]",
+        "perception",
+        "perception/[group_id]",
+    ):
         (tmp_path / "dashboard/app" / path / "page.tsx").write_text("export default 1\n")
     return tmp_path
 

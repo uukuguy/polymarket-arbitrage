@@ -189,6 +189,18 @@ def test_dashboard_validates_and_renders_progress_evidence() -> None:
     )[1].split("</section>", 1)[0]
     assert "<NotExposed />" not in coverage_panel
     assert "Historical duration distribution is not tracked" in overview
+    assert "Date.now()" not in overview
+    assert "status.server_time_ms - resources.current.decided_at_ms" in overview
+    assert "resources.current.valid_until_ms - status.server_time_ms" in overview
+    assert "href={`/perception/${encodeURIComponent(item.group_id)}`}" in overview
+
+
+def test_visual_fixture_validates_path_before_creating_database() -> None:
+    fixture = _source("scripts/perception_dashboard_fixture.py")
+    main = fixture.split("def main() -> None:", 1)[1]
+    assert main.index("settings = Settings(") < main.index("store = _seed(args.db)")
+    assert "store.begin_reconciliation" in fixture
+    assert "store.apply_reconciliation_diff" in fixture
 
 
 def test_nested_contract_validators_fail_closed() -> None:
@@ -219,6 +231,9 @@ def test_group_page_builds_one_timestamped_operator_timeline() -> None:
         "Incident event",
         "occurredAtMs",
         ".sort(",
+        "incidentEvidenceFields",
+        "Raw evidence",
+        "<details",
     ):
         assert phrase in history
     for class_name in (
@@ -249,6 +264,23 @@ def test_group_page_decodes_route_identity_before_reader_reencodes_it() -> None:
     assert "belongsToGroup" not in history
     assert "candidate:${expectedGroupId}" in reader
     assert "encodeURIComponent(groupId)" in reader
+
+
+def test_perception_pages_keep_long_ids_inside_mobile_viewport() -> None:
+    overview = _source("dashboard/app/perception/page.tsx")
+    history = _source("dashboard/app/perception/[group_id]/page.tsx")
+    makefile = _source("Makefile")
+    fixture = _source("scripts/perception_dashboard_fixture.py")
+
+    assert 'overflowX: "auto"' in overview
+    assert "minWidth: 900" in overview
+    assert overview.count('overflowWrap: "anywhere"') >= 2
+    assert 'overflowWrap: "anywhere"' in history
+    assert "dashboard-fixture-api:" in makefile
+    assert "refuses to overwrite an existing fixture DB" in makefile
+    assert "FIXTURE_GROUP_ID" in fixture
+    assert "UNAVAILABLE_GROUP_ID" in fixture
+    assert "FixtureUnavailableMiddleware" in fixture
 
 
 def test_overview_labels_bounded_group_counts_and_filters_verified_incidents() -> None:

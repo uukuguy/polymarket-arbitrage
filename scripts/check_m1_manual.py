@@ -52,6 +52,7 @@ M1_MAKE_TARGETS = {
     "l3-promote-dry-run",
     "ohlc-spot-check",
     "dashboard-dev",
+    "dashboard-fixture-api",
     "smoke-l2-dashboard",
     "smoke-l3-dashboard",
     "smoke-perception-dashboard",

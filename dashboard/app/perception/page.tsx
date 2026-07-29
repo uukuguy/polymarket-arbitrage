@@ -107,7 +107,9 @@ export default async function PerceptionOverviewPage() {
     opportunityStatus.count === 0;
 
   return (
-    <main style={{ padding: 24, maxWidth: 1280, margin: "0 auto" }}>
+    <main
+      style={{ padding: 24, maxWidth: 1280, minWidth: 0, margin: "0 auto" }}
+    >
       <h1 style={{ fontSize: 26, marginBottom: 6 }}>Perception overview</h1>
       <p style={{ ...muted, marginTop: 0 }}>
         Observer-only view of bounded Task 6 public GET contracts. Every unknown
@@ -186,41 +188,60 @@ export default async function PerceptionOverviewPage() {
             More current opportunities exist after this bounded page.
           </p>
         )}
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
-              <th style={{ padding: 8 }}>Group</th>
-              <th style={{ padding: 8 }}>Certified edge (bps)</th>
-              <th style={{ padding: 8 }}>Bundle cost</th>
-              <th style={{ padding: 8 }}>Max bundle size</th>
-              <th style={{ padding: 8 }}>Structure age</th>
-              <th style={{ padding: 8 }}>Quote age</th>
-            </tr>
-          </thead>
-          <tbody>
-            {currentOpportunities.items.map((item) => (
-              <tr key={item.group_id} style={{ borderBottom: "1px solid #222" }}>
-                <td style={{ padding: 8 }}>{item.group_id}</td>
-                <td style={{ padding: 8 }}>
-                  {item.gross_edge_bps.toFixed(1)}
-                </td>
-                <td style={{ padding: 8 }}>{item.bundle_cost.toFixed(4)}</td>
-                <td style={{ padding: 8 }}>
-                  {item.max_bundle_size.toFixed(2)}
-                </td>
-                <td style={{ padding: 8 }}>
-                  {fmtAge(
-                    status.server_time_ms,
-                    item.structure_observed_at_ms,
-                  )}
-                </td>
-                <td style={{ padding: 8 }}>
-                  {fmtAge(status.server_time_ms, item.quote_quoted_at_ms)}
-                </td>
+        <div
+          aria-label="Current opportunities table"
+          style={{ maxWidth: "100%", overflowX: "auto" }}
+        >
+          <table
+            style={{
+              width: "100%",
+              minWidth: 900,
+              borderCollapse: "collapse",
+              fontSize: 13,
+            }}
+          >
+            <thead>
+              <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
+                <th style={{ padding: 8, minWidth: 300 }}>Group</th>
+                <th style={{ padding: 8 }}>Certified edge (bps)</th>
+                <th style={{ padding: 8 }}>Bundle cost</th>
+                <th style={{ padding: 8 }}>Max bundle size</th>
+                <th style={{ padding: 8 }}>Structure age</th>
+                <th style={{ padding: 8 }}>Quote age</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {currentOpportunities.items.map((item) => (
+                <tr key={item.group_id} style={{ borderBottom: "1px solid #222" }}>
+                  <td style={{ padding: 8, overflowWrap: "anywhere" }}>
+                    <a
+                      href={`/perception/${encodeURIComponent(item.group_id)}`}
+                      style={{ color: "#9ec5fe", overflowWrap: "anywhere" }}
+                    >
+                      {item.group_id}
+                    </a>
+                  </td>
+                  <td style={{ padding: 8 }}>
+                    {item.gross_edge_bps.toFixed(1)}
+                  </td>
+                  <td style={{ padding: 8 }}>{item.bundle_cost.toFixed(4)}</td>
+                  <td style={{ padding: 8 }}>
+                    {item.max_bundle_size.toFixed(2)}
+                  </td>
+                  <td style={{ padding: 8 }}>
+                    {fmtAge(
+                      status.server_time_ms,
+                      item.structure_observed_at_ms,
+                    )}
+                  </td>
+                  <td style={{ padding: 8 }}>
+                    {fmtAge(status.server_time_ms, item.quote_quoted_at_ms)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
         {currentOpportunities.items.length === 0 && (
           <p style={muted}>No authenticated current opportunity rows.</p>
         )}
@@ -352,14 +373,14 @@ export default async function PerceptionOverviewPage() {
               <p>
                 checkpoint: {fmtTime(reconciliation.reconciliation.checkpoint_at_ms)}
               </p>
-              <p style={muted}>
-                Historical duration distribution is not tracked; duration_ms is
-                the current validated window only.
-              </p>
             </>
           ) : (
             <p style={muted}>No reconciliation run has been recorded.</p>
           )}
+          <p style={muted}>
+            Historical duration distribution is not tracked; duration_ms is
+            the current validated window only.
+          </p>
         </section>
       </div>
 
@@ -376,11 +397,17 @@ export default async function PerceptionOverviewPage() {
             <p>
               Policy age{" "}
               {fmtDurationMs(
-                Math.max(0, Date.now() - resources.current.decided_at_ms),
+                Math.max(
+                  0,
+                  status.server_time_ms - resources.current.decided_at_ms,
+                ),
               )}{" "}
               · TTL remaining{" "}
               {fmtDurationMs(
-                Math.max(0, resources.current.valid_until_ms - Date.now()),
+                Math.max(
+                  0,
+                  resources.current.valid_until_ms - status.server_time_ms,
+                ),
               )}
             </p>
             <p style={muted}>
@@ -522,7 +549,7 @@ export default async function PerceptionOverviewPage() {
           >
             <a
               href={`/perception/${encodeURIComponent(group.group_id)}`}
-              style={{ color: "#9ec5fe" }}
+              style={{ color: "#9ec5fe", overflowWrap: "anywhere" }}
             >
               {group.group_id}
             </a>
