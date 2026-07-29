@@ -7,6 +7,7 @@ import pytest
 
 import scripts.perception_chaos as chaos
 import scripts.perception_fault_acceptance as acceptance
+from polyarb.config import Settings
 
 ROOT = Path(__file__).parents[2]
 SCRIPT = ROOT / "scripts/perception_chaos.py"
@@ -50,7 +51,10 @@ def test_every_fault_has_a_complete_readonly_plan(fault_id: str) -> None:
     assert plan["required_tools"] == ["python"]
     assert plan["image_check"] == "make chaos-l2-fly-image-check"
     assert plan["execute_supported"] is (
-        fault_id in {"candidate-exit", "discovery-exit"}
+        fault_id in {
+            "candidate-exit",
+            "discovery-exit",
+        }
     )
 
 
@@ -104,6 +108,20 @@ def test_discovery_exit_plan_matches_sigterm_supervisor_outcome() -> None:
 
     assert result.returncode == 0
     assert json.loads(result.stdout)["expected_incident_kind"] == "child-nonzero"
+
+
+def test_reconciliation_stall_remains_blocked_until_early_detection_is_durable() -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan", "--fault", "reconciliation-stall"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    plan = json.loads(result.stdout)
+    assert plan["execute_supported"] is False
+    assert Settings().producer_stall_timeout_s > 30
 
 
 def test_candidate_exit_adapter_preserves_complete_release_bound_evidence(

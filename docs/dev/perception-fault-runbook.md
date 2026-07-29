@@ -175,3 +175,12 @@ parent is the PID-1 M1 daemon. Its `terminate` command additionally binds the
 runtime `POLYARB_RELEASE_ID`, the previously observed PID, and
 the component-specific `fault:<component>-exit:<release>:<pid>` before sending SIGTERM. It cannot target
 PID 1, an arbitrary process, or a second component.
+
+`reconciliation-stall` has a separately authorized SIGSTOP primitive, but its
+adapter deliberately remains non-executable. The current supervisor opens
+`child-timeout` only at the 180-second restart timeout, while qualification
+requires MTTD within 30 seconds. Lowering the restart timeout would turn normal
+slow batches into false failures. Closure requires a separate durable
+`child-stalled` early-detection/containment transition within 30/60 seconds,
+while retaining the longer statistically tuned restart timeout; only then may
+SIGSTOP execution be enabled.

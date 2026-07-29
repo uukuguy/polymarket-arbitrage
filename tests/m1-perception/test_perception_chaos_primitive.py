@@ -7,6 +7,7 @@ import pytest
 from polyarb.perception.chaos_primitive import (
     PrimitiveRefusedError,
     locate_worker,
+    stall_worker,
     terminate_worker,
 )
 
@@ -133,6 +134,67 @@ def test_terminate_discovery_worker_uses_discovery_specific_authorization(
 
     assert worker.component == "discovery"
     assert killed == [(42, signal.SIGTERM)]
+
+
+def test_stall_reconciliation_worker_uses_sigstop_and_specific_authorization(
+    tmp_path: Path,
+) -> None:
+    _process(
+        tmp_path,
+        1,
+        ppid=0,
+        argv=("python", "-m", "polyarb.daemon.main"),
+    )
+    _process(
+        tmp_path,
+        43,
+        ppid=1,
+        argv=("python", "-m", "polyarb.perception.worker_cli", "reconciliation"),
+    )
+    killed: list[tuple[int, signal.Signals]] = []
+    release = "a" * 40
+
+    worker = stall_worker(
+        tmp_path,
+        expected_pid=43,
+        expected_release=release,
+        authorization=f"fault:reconciliation-stall:{release}:43",
+        environ={"POLYARB_RELEASE_ID": release},
+        kill=lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    assert worker.component == "reconciliation"
+    assert killed == [(43, signal.SIGSTOP)]
+
+
+def test_stall_reconciliation_refuses_wrong_fault_authorization_before_signal(
+    tmp_path: Path,
+) -> None:
+    _process(
+        tmp_path,
+        1,
+        ppid=0,
+        argv=("python", "-m", "polyarb.daemon.main"),
+    )
+    _process(
+        tmp_path,
+        43,
+        ppid=1,
+        argv=("python", "-m", "polyarb.perception.worker_cli", "reconciliation"),
+    )
+    killed: list[tuple[int, signal.Signals]] = []
+
+    with pytest.raises(PrimitiveRefusedError, match="authorization"):
+        stall_worker(
+            tmp_path,
+            expected_pid=43,
+            expected_release="a" * 40,
+            authorization=f"fault:candidate-exit:{'a' * 40}:43",
+            environ={"POLYARB_RELEASE_ID": "a" * 40},
+            kill=lambda pid, sig: killed.append((pid, sig)),
+        )
+
+    assert killed == []
 
 
 @pytest.mark.parametrize(

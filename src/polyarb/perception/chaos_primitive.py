@@ -105,6 +105,29 @@ def terminate_worker(
     fault_id = _TERMINATABLE_FAULTS.get(component)
     if fault_id is None:
         raise PrimitiveRefusedError("unsupported-component")
+    worker = _authorized_worker(
+        proc_root,
+        component=component,
+        fault_id=fault_id,
+        expected_pid=expected_pid,
+        expected_release=expected_release,
+        authorization=authorization,
+        environ=environ,
+    )
+    kill(worker.pid, signal.SIGTERM)
+    return worker
+
+
+def _authorized_worker(
+    proc_root: Path,
+    *,
+    component: str,
+    fault_id: str,
+    expected_pid: int,
+    expected_release: str,
+    authorization: str,
+    environ: Mapping[str, str],
+) -> WorkerProcess:
     if _RELEASE_RE.fullmatch(expected_release) is None:
         raise PrimitiveRefusedError("invalid-release")
     if environ.get("POLYARB_RELEASE_ID") != expected_release:
@@ -118,7 +141,29 @@ def terminate_worker(
     worker = locate_worker(proc_root, component)
     if worker.pid != expected_pid:
         raise PrimitiveRefusedError(f"pid-drift:{worker.pid}")
-    kill(worker.pid, signal.SIGTERM)
+    return worker
+
+
+def stall_worker(
+    proc_root: Path,
+    *,
+    expected_pid: int,
+    expected_release: str,
+    authorization: str,
+    environ: Mapping[str, str],
+    kill: Callable[[int, signal.Signals], None] = os.kill,
+) -> WorkerProcess:
+    """SIGSTOP only the exact authorized Reconciliation worker."""
+    worker = _authorized_worker(
+        proc_root,
+        component="reconciliation",
+        fault_id="reconciliation-stall",
+        expected_pid=expected_pid,
+        expected_release=expected_release,
+        authorization=authorization,
+        environ=environ,
+    )
+    kill(worker.pid, signal.SIGSTOP)
     return worker
 
 
@@ -132,6 +177,10 @@ def _parser() -> argparse.ArgumentParser:
     terminate.add_argument("--expected-pid", required=True, type=int)
     terminate.add_argument("--expected-release", required=True)
     terminate.add_argument("--authorization", required=True)
+    stall = subparsers.add_parser("stall")
+    stall.add_argument("--expected-pid", required=True, type=int)
+    stall.add_argument("--expected-release", required=True)
+    stall.add_argument("--authorization", required=True)
     return parser
 
 
@@ -141,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "locate":
             worker = locate_worker(Path("/proc"), args.component)
             payload = {"action": "locate", **asdict(worker)}
-        else:
+        elif args.command == "terminate":
             worker = terminate_worker(
                 Path("/proc"),
                 component=args.component,
@@ -153,6 +202,19 @@ def main(argv: list[str] | None = None) -> int:
             payload = {
                 "action": "sigterm",
                 "signal": signal.SIGTERM.name,
+                **asdict(worker),
+            }
+        else:
+            worker = stall_worker(
+                Path("/proc"),
+                expected_pid=args.expected_pid,
+                expected_release=args.expected_release,
+                authorization=args.authorization,
+                environ=os.environ,
+            )
+            payload = {
+                "action": "sigstop",
+                "signal": signal.SIGSTOP.name,
                 **asdict(worker),
             }
         print(json.dumps(payload, sort_keys=True))

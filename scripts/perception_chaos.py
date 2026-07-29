@@ -190,8 +190,6 @@ FAULTS["discovery-exit"] = replace(
     FAULTS["discovery-exit"],
     execute_supported=True,
 )
-
-
 def _write_exclusive(path: Path, payload: Mapping[str, object]) -> None:
     serialized = (
         json.dumps(
@@ -239,9 +237,13 @@ def _available(value: object, reason: str) -> Mapping[str, Any]:
     return value
 
 
-def execute_producer_exit(
+def execute_producer_fault(
     *,
     component: str,
+    fault_id: str,
+    primitive: str,
+    expected_action: str,
+    expected_incident_kind: str,
     base_url: str,
     expected_release: str,
     authorization: str,
@@ -255,9 +257,11 @@ def execute_producer_exit(
     monotonic: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> dict[str, object]:
-    if component not in {"candidate", "discovery"}:
-        raise AdapterFailedError("unsupported-producer-exit-component")
-    fault_id = f"{component}-exit"
+    if (
+        component not in {"candidate", "discovery", "reconciliation"}
+        or primitive not in {"terminate", "stall"}
+    ):
+        raise AdapterFailedError("unsupported-producer-fault")
     if timeout_s <= 0 or timeout_s > 600:
         raise AdapterFailedError("invalid-timeout")
     image_check = command(("make", "chaos-l2-fly-image-check", "required=python"))
@@ -329,6 +333,11 @@ def execute_producer_exit(
     )
     injection_started_at_ms = clock_ms()
     inner_authorization = f"fault:{fault_id}:{expected_release}:{pid}"
+    primitive_args = (
+        f"terminate --component {component}"
+        if primitive == "terminate"
+        else "stall"
+    )
     injected = _json_stdout(
         command(
             (
@@ -340,8 +349,8 @@ def execute_producer_exit(
                 "--machine",
                 machine_id,
                 "-C",
-                "python -m polyarb.perception.chaos_primitive terminate "
-                f"--component {component} --expected-pid {pid} "
+                "python -m polyarb.perception.chaos_primitive "
+                f"{primitive_args} --expected-pid {pid} "
                 f"--expected-release {expected_release} "
                 f"--authorization {inner_authorization}",
             )
@@ -349,7 +358,7 @@ def execute_producer_exit(
         f"{component}-terminate",
     )
     if (
-        injected.get("action") != "sigterm"
+        injected.get("action") != expected_action
         or injected.get("component") != component
         or injected.get("pid") != pid
     ):
@@ -372,7 +381,7 @@ def execute_producer_exit(
             item
             for item in items
             if isinstance(item, Mapping)
-            and item.get("kind") == "child-nonzero"
+            and item.get("kind") == expected_incident_kind
         ]
         ids = {
             item.get("incident_id")
@@ -460,6 +469,28 @@ def execute_producer_exit(
     return evidence
 
 
+def execute_producer_exit(*, component: str, **kwargs) -> dict[str, object]:
+    return execute_producer_fault(
+        component=component,
+        fault_id=f"{component}-exit",
+        primitive="terminate",
+        expected_action="sigterm",
+        expected_incident_kind="child-nonzero",
+        **kwargs,
+    )
+
+
+def execute_reconciliation_stall(**kwargs) -> dict[str, object]:
+    return execute_producer_fault(
+        component="reconciliation",
+        fault_id="reconciliation-stall",
+        primitive="stall",
+        expected_action="sigstop",
+        expected_incident_kind="child-timeout",
+        **kwargs,
+    )
+
+
 execute_candidate_exit = partial(execute_producer_exit, component="candidate")
 
 
@@ -497,8 +528,15 @@ def _execute(args: argparse.Namespace) -> int:
         return 2
     try:
         base_url = readonly._validate_base_url(args.base_url)
-        evidence = execute_producer_exit(
-            component=FAULTS[args.fault].component,
+        adapter = (
+            execute_reconciliation_stall
+            if args.fault == "reconciliation-stall"
+            else partial(
+                execute_producer_exit,
+                component=FAULTS[args.fault].component,
+            )
+        )
+        evidence = adapter(
             base_url=base_url,
             expected_release=release,
             authorization=args.authorization,

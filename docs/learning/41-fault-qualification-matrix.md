@@ -62,3 +62,10 @@ exact runtime baseline
 绕过原子化与可恢复性要求。两个 producer-exit 使用同一完整模板：clean baseline →
 exact machine/boot/PID intent → SIGTERM → scoped recent Incident discovery → exact
 terminal history → component-specific writer receipt → clean post-window。接口可执行仍不等于生产 mutation 已获授权。
+
+### 为什么 Reconciliation SIGSTOP primitive 已有，execute 仍拒绝？
+
+“能制造故障”和“能满足生产检测 SLA”是两件事。当前 restart timeout 是 180 秒，
+可避免正常慢批次被频繁误杀；但等到 timeout 才创建 Incident 会违反 MTTD ≤30 秒。
+正确结构是 30 秒内持久化 `child-stalled` 并 contained，继续观察到统计驱动 timeout
+才重启。不能把 restart timeout 降到 30 秒来换一个表面 PASS。
