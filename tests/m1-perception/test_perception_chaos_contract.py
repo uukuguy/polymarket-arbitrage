@@ -131,6 +131,45 @@ def test_reconciliation_stall_uses_durable_early_detection_policy() -> None:
     assert Settings().producer_stall_timeout_s > 30
 
 
+@pytest.mark.parametrize(
+    ("fault_id", "expected_kind"),
+    [
+        ("gamma-timeout", "gamma-timeout"),
+        ("gamma-malformed", "gamma-malformed"),
+        ("gamma-cursor", "gamma-cursor"),
+    ],
+)
+def test_gamma_exception_plans_name_the_durable_runner_incident(
+    fault_id: str,
+    expected_kind: str,
+) -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan", "--fault", fault_id],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    plan = json.loads(result.stdout)
+    assert plan["expected_incident_kind"] == expected_kind
+    assert plan["execute_supported"] is False
+
+
+def test_gamma_partial_remains_a_coverage_fact_not_a_failure_incident() -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan", "--fault", "gamma-partial"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    plan = json.loads(result.stdout)
+    assert plan["expected_incident_kind"].startswith("coverage:")
+    assert plan["execute_supported"] is False
+
+
 def test_reconciliation_stall_adapter_resumes_exact_worker_before_verification(
     tmp_path: Path,
 ) -> None:

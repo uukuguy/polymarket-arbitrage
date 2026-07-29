@@ -24,6 +24,8 @@ exact runtime baseline
   cleanup 和 image requirements 的单一来源。
 - `src/polyarb/perception/supervisor.py`：producer 失败生成
   `child-timeout` / `child-failed` / `child-abandoned`，并进入恢复状态。
+- `src/polyarb/perception/gamma_incidents.py`：只把可证明的 Gamma timeout、
+  malformed、cursor integrity 异常写成 durable Incident；未知错误不冒充 Gamma。
 - `src/polyarb/perception/incidents.py`：verified transition 会反查 recovery 之后的
   Candidate receipt、Discovery batch、Reconciliation window、HTTP probe 或 Resource
   decision，不能靠调用者自报成功。
@@ -40,16 +42,15 @@ exact runtime baseline
    `mode=execute` 才进入 mutation 分支。
 2. **fault-specific authorization**：授权串同时绑定 fault ID 和 40 字符 release
    SHA，不能拿一次批准复用到另一种故障或另一版代码。
-3. **先承认 not-wired**：Gamma 批内异常、部分资源/通知路径目前只有日志或状态，
-   没有 durable incident。先暴露缺口，再补 chain-truth，比造一个看似绿色的矩阵可靠。
+3. **异常与数据质量分开**：Gamma timeout/malformed/cursor 已有 durable incident；
+   shape 合法的 partial page 进入 coverage/rejected 事实，不伪造 producer failure。
 4. **cleanup 串行门**：上一故障清理失败时，后续结果会混入多个变量，证据不再可归因，
    所以整个矩阵必须停止。
 
 ## 自检题
 
 1. `candidate-exit` 后进程重新出现，为什么还不能把 Incident 标为 verified？
-2. Gamma malformed 只有 warning log 时，MTTD 能否进入资格证据？缺的 durable 写入
-   是什么？
+2. Gamma partial page 为什么不能直接复用 `gamma-malformed` Incident？
 3. 为什么 `authorization=fault:clob-429:<sha>` 不能执行 `clob-latency`？
 4. cleanup 成功但 `bootId` 在窗口中改变，为什么整段 evidence 仍必须失败？
 
@@ -71,3 +72,11 @@ inter-page wait 期间，child 每 12.5 秒写认证 `yielded`；25 秒收不到
 liveness 才持久化 `child-stalled`。这只负责发现和 containment，不杀进程。
 180 秒 hard timeout 仍独立负责重启。SIGCONT 后必须出现新的页 checkpoint 才能
 verified，所以 liveness 不会伪造业务恢复。
+
+### Gamma 的 warning log 现在还缺什么？
+
+timeout、malformed JSON/invalid member、cursor integrity 已不再是 log-only：
+Runner 会立即写 `gamma-timeout`、`gamma-malformed` 或 `gamma-cursor`，并进入
+recovering。下一次成功页必须返回本次原子 publish 的 exact Discovery batch ID
+或 Reconciliation window ID，才能 verified。尚未完成的是生产 fault 注入 adapter，
+因此这些 fault 的 `execute_supported` 仍为 false；“运行时可观测”不等于“已获准注入”。

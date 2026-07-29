@@ -3128,7 +3128,7 @@ class OpportunityPerceptionStore:
         page_event_count: int,
         candidates: tuple[DiscoveryScheduleCandidate, ...],
         admission_proof: DiscoveryAdmissionProof,
-    ) -> tuple[str, ...]:
+    ) -> tuple[int, tuple[str, ...]]:
         """Atomically certify, schedule, sample, promote, and advance a page."""
         admission_proof.validate()
         if started_at_ms > finished_at_ms:
@@ -3290,7 +3290,7 @@ class OpportunityPerceptionStore:
             self._refresh_discovery_status_projection(con)
             self._compact_discovery_authority(con)
             con.execute("COMMIT")
-            return tuple(group_id for _, group_id in promoted)
+            return batch_id, tuple(group_id for _, group_id in promoted)
         except BaseException:
             if con.in_transaction:
                 con.execute("ROLLBACK")

@@ -12,6 +12,7 @@ from loguru import logger
 
 from polyarb.clients.gamma_client import EventPage
 from polyarb.perception.discovery import DiscoveryWorker
+from polyarb.perception.gamma_incidents import GammaBatchIncidents
 from polyarb.perception.store import (
     OpportunityPerceptionStore,
     ReconciliationDiff,
@@ -175,6 +176,10 @@ class ReconciliationRunner:
         self._interval_s = interval_s
         self._idle_heartbeat_interval_s = idle_heartbeat_interval_s
         self._require_resource_decision = require_resource_decision
+        self._gamma_incidents = GammaBatchIncidents(
+            self._store,
+            scope="reconciliation",
+        )
 
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
@@ -211,9 +216,18 @@ class ReconciliationRunner:
                             observed_at_ms=result.finished_at_ms,
                         )
                         successful_checkpoint = not result.failed
+                        if successful_checkpoint:
+                            await asyncio.to_thread(
+                                self._gamma_incidents.verify_reconciliation,
+                                result.window_id,
+                            )
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
+                    await asyncio.to_thread(
+                        self._gamma_incidents.record_failure,
+                        error,
+                    )
                     logger.warning(f"reconciliation batch failed kind={type(error).__name__}")
                 if requested_nonce is not None and successful_checkpoint:
                     await asyncio.to_thread(

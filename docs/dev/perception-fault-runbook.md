@@ -111,9 +111,12 @@ cleanup proof. The source of truth is `scripts/perception_chaos.py`.
 | External/runtime | `telegram-failure`, `daemon-restart`, `deploy-interrupt` | notification state or release-bound HTTP probe |
 
 `expected_incident_kind` values beginning with `not-wired:` are deliberate
-blockers, not acceptable evidence. They mean the current batch/error path does
-not yet open a durable Incident. Its execution adapter must first close that
-chain-truth gap. A log line or resource decision alone cannot be relabeled as
+blockers, not acceptable evidence. Gamma timeout, malformed response, and
+cursor-integrity failures now open durable `gamma-*` Incidents in the bounded
+Discovery/Reconciliation runners; their next exact batch/window writer closes
+recovery. `gamma-partial` is intentionally different: a shape-valid but
+incomplete page is persisted as rejected/partial coverage, not relabelled as a
+process failure. A log line or resource decision alone cannot be relabeled as
 an Incident.
 
 Actual execution is an independent, fault-specific capability. It requires
@@ -127,12 +130,13 @@ make chaos-perception-gamma-timeout \
   evidence_dir=<new-path>
 ```
 
-All targets except `candidate-exit` and `discovery-exit` currently reject such requests with
+All targets except `candidate-exit`, `discovery-exit`, and
+`reconciliation-stall` currently reject such requests with
 `adapter-not-implemented` before creating the evidence directory or making a
-network request. Both producer-exit adapters first pass the image gate and a
-five-sample clean baseline, then binds one machine/boot/PID, writes immutable
-intent, sends the exact SIGTERM, discovers the new Incident from the bounded
-recent ledger, verifies its exact terminal history/writer receipt, and takes a
+network request. The executable producer adapters first pass the image gate
+and a five-sample clean baseline, then bind one machine/boot/PID, write
+immutable intent, apply the exact signal, discover the new Incident from the
+bounded recent ledger, verify its exact terminal history/writer receipt, and take a
 second five-sample clean window. Candidate requires a Candidate success
 receipt; Discovery requires a newer validated Discovery batch. A target becomes executable only after the
 same adapter, cleanup, chain-truth health surface, and end-to-end review.

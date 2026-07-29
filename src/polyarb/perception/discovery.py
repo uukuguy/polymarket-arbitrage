@@ -13,6 +13,7 @@ from typing import Protocol
 from loguru import logger
 
 from polyarb.clients.gamma_client import EventPage
+from polyarb.perception.gamma_incidents import GammaBatchIncidents
 from polyarb.perception.models import GroupLeg, GroupRevision
 from polyarb.perception.store import (
     DiscoveryAdmissionProof,
@@ -69,6 +70,7 @@ class DiscoveryBatchResult:
     finished_at_ms: int
     yielded: bool = False
     yield_reason: str | None = None
+    batch_id: int | None = None
 
 
 class CandidateGroupIds(Protocol):
@@ -257,7 +259,7 @@ class DiscoveryWorker:
         if page.requested_cursor != requested_cursor:
             raise ValueError("discovery-page-cursor-mismatch")
         candidates = await asyncio.to_thread(self._normalize_page, page)
-        promoted = await self._commit_batch(page, candidates)
+        batch_id, promoted = await self._commit_batch(page, candidates)
         return DiscoveryBatchResult(
             requested_cursor=requested_cursor,
             next_cursor=page.next_cursor,
@@ -267,13 +269,14 @@ class DiscoveryWorker:
             promoted_group_ids=promoted,
             started_at_ms=page.started_at_ms,
             finished_at_ms=page.finished_at_ms,
+            batch_id=batch_id,
         )
 
     async def _commit_batch(
         self,
         page: EventPage,
         candidates: tuple[DiscoveryScheduleCandidate, ...],
-    ) -> tuple[str, ...]:
+    ) -> tuple[int, tuple[str, ...]]:
         task = asyncio.create_task(
             asyncio.to_thread(
                 self._store.publish_discovery_batch,
@@ -442,6 +445,10 @@ class DiscoveryRunner:
         self._store = store or worker._store
         self._gamma = gamma
         self._interval_s = interval_s
+        self._gamma_incidents = GammaBatchIncidents(
+            self._store,
+            scope="discovery",
+        )
 
     async def run(self, stop_event: asyncio.Event) -> None:
         try:
@@ -462,6 +469,11 @@ class DiscoveryRunner:
                         observed_at_ms=result.finished_at_ms,
                         state="yielded" if result.yielded else "progress",
                     )
+                    if not result.yielded and result.batch_id is not None:
+                        await asyncio.to_thread(
+                            self._gamma_incidents.verify_discovery,
+                            result.batch_id,
+                        )
                     decision = (
                         await asyncio.to_thread(
                             self._store.latest_resource_decision,
@@ -480,6 +492,10 @@ class DiscoveryRunner:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
+                    await asyncio.to_thread(
+                        self._gamma_incidents.record_failure,
+                        error,
+                    )
                     logger.warning(
                         "discovery batch failed "
                         f"kind={type(error).__name__}"
