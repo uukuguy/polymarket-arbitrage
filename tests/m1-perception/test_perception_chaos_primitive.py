@@ -103,6 +103,38 @@ def test_terminate_worker_binds_release_fault_and_exact_pid(tmp_path: Path) -> N
     assert killed == [(41, signal.SIGTERM)]
 
 
+def test_terminate_discovery_worker_uses_discovery_specific_authorization(
+    tmp_path: Path,
+) -> None:
+    _process(
+        tmp_path,
+        1,
+        ppid=0,
+        argv=("python", "-m", "polyarb.daemon.main"),
+    )
+    _process(
+        tmp_path,
+        42,
+        ppid=1,
+        argv=("python", "-m", "polyarb.perception.worker_cli", "discovery"),
+    )
+    killed: list[tuple[int, signal.Signals]] = []
+    release = "a" * 40
+
+    worker = terminate_worker(
+        tmp_path,
+        component="discovery",
+        expected_pid=42,
+        expected_release=release,
+        authorization=f"fault:discovery-exit:{release}:42",
+        environ={"POLYARB_RELEASE_ID": release},
+        kill=lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    assert worker.component == "discovery"
+    assert killed == [(42, signal.SIGTERM)]
+
+
 @pytest.mark.parametrize(
     ("expected_pid", "expected_release", "authorization", "runtime_release", "reason"),
     [

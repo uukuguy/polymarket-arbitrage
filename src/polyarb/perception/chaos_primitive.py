@@ -14,7 +14,10 @@ from pathlib import Path
 
 _RELEASE_RE = re.compile(r"[0-9a-f]{40}")
 _WORKER_COMPONENTS = frozenset({"candidate", "discovery", "reconciliation"})
-_TERMINATABLE_FAULTS = {"candidate": "candidate-exit"}
+_TERMINATABLE_FAULTS = {
+    "candidate": "candidate-exit",
+    "discovery": "discovery-exit",
+}
 
 
 class PrimitiveRefusedError(RuntimeError):
@@ -98,7 +101,7 @@ def terminate_worker(
     environ: Mapping[str, str],
     kill: Callable[[int, signal.Signals], None] = os.kill,
 ) -> WorkerProcess:
-    """SIGTERM only the exact authorized Candidate worker."""
+    """SIGTERM only an exact authorized producer worker."""
     fault_id = _TERMINATABLE_FAULTS.get(component)
     if fault_id is None:
         raise PrimitiveRefusedError("unsupported-component")

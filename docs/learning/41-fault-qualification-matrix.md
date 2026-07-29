@@ -57,8 +57,8 @@ exact runtime baseline
 
 ### 为什么现在所有 execute 都拒绝？
 
-除 `candidate-exit` 外的 execute 仍拒绝。矩阵契约和生产注入能力是两个独立交付物。
+除 `candidate-exit`、`discovery-exit` 外的 execute 仍拒绝。矩阵契约和生产注入能力是两个独立交付物。
 先冻结 fault、cleanup、writer 和证据结构，再逐个实现 adapter，能避免临时 SSH 命令
-绕过原子化与可恢复性要求。Candidate 是第一个完整模板：clean baseline → exact
-machine/boot/PID intent → SIGTERM → recent Incident discovery → exact terminal history
-→ Candidate writer receipt → clean post-window。接口可执行仍不等于生产 mutation 已获授权。
+绕过原子化与可恢复性要求。两个 producer-exit 使用同一完整模板：clean baseline →
+exact machine/boot/PID intent → SIGTERM → scoped recent Incident discovery → exact
+terminal history → component-specific writer receipt → clean post-window。接口可执行仍不等于生产 mutation 已获授权。

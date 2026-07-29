@@ -16,6 +16,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -126,7 +127,7 @@ FAULTS = {
         _spec(
             "discovery-exit",
             "discovery",
-            "child-failed",
+            "child-nonzero",
             "neg_risk_discovery_batches",
             "allow supervisor restart and verify a newer completed batch",
         ),
@@ -185,6 +186,10 @@ FAULTS["candidate-exit"] = replace(
     FAULTS["candidate-exit"],
     execute_supported=True,
 )
+FAULTS["discovery-exit"] = replace(
+    FAULTS["discovery-exit"],
+    execute_supported=True,
+)
 
 
 def _write_exclusive(path: Path, payload: Mapping[str, object]) -> None:
@@ -234,8 +239,9 @@ def _available(value: object, reason: str) -> Mapping[str, Any]:
     return value
 
 
-def execute_candidate_exit(
+def execute_producer_exit(
     *,
+    component: str,
     base_url: str,
     expected_release: str,
     authorization: str,
@@ -249,6 +255,9 @@ def execute_candidate_exit(
     monotonic: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> dict[str, object]:
+    if component not in {"candidate", "discovery"}:
+        raise AdapterFailedError("unsupported-producer-exit-component")
+    fault_id = f"{component}-exit"
     if timeout_s <= 0 or timeout_s > 600:
         raise AdapterFailedError("invalid-timeout")
     image_check = command(("make", "chaos-l2-fly-image-check", "required=python"))
@@ -292,19 +301,19 @@ def execute_candidate_exit(
                 machine_id,
                 "-C",
                 "python -m polyarb.perception.chaos_primitive "
-                "locate --component candidate",
+                f"locate --component {component}",
             )
         ),
-        "candidate-locate",
+        f"{component}-locate",
     )
     pid = locate.get("pid")
     if (
         locate.get("action") != "locate"
-        or locate.get("component") != "candidate"
+        or locate.get("component") != component
         or type(pid) is not int
         or pid <= 1
     ):
-        raise AdapterFailedError("candidate-locate-invalid")
+        raise AdapterFailedError(f"{component}-locate-invalid")
 
     evidence_dir.mkdir()
     _write_exclusive(
@@ -313,13 +322,13 @@ def execute_candidate_exit(
             "authorization": authorization,
             "boot_id": boot_id,
             "expected_release": expected_release,
-            "fault_id": "candidate-exit",
+            "fault_id": fault_id,
             "machine_id": machine_id,
             "pid": pid,
         },
     )
     injection_started_at_ms = clock_ms()
-    inner_authorization = f"fault:candidate-exit:{expected_release}:{pid}"
+    inner_authorization = f"fault:{fault_id}:{expected_release}:{pid}"
     injected = _json_stdout(
         command(
             (
@@ -332,19 +341,19 @@ def execute_candidate_exit(
                 machine_id,
                 "-C",
                 "python -m polyarb.perception.chaos_primitive terminate "
-                f"--component candidate --expected-pid {pid} "
+                f"--component {component} --expected-pid {pid} "
                 f"--expected-release {expected_release} "
                 f"--authorization {inner_authorization}",
             )
         ),
-        "candidate-terminate",
+        f"{component}-terminate",
     )
     if (
         injected.get("action") != "sigterm"
-        or injected.get("component") != "candidate"
+        or injected.get("component") != component
         or injected.get("pid") != pid
     ):
-        raise AdapterFailedError("candidate-terminate-invalid")
+        raise AdapterFailedError(f"{component}-terminate-invalid")
 
     deadline = monotonic() + timeout_s
     history: Mapping[str, Any] | None = None
@@ -353,7 +362,7 @@ def execute_candidate_exit(
         recent_body, _ = fetch_json(
             base_url,
             "/perception/incidents/recent"
-            f"?scope=candidate&after_ms={injection_started_at_ms}&limit=10",
+            f"?scope={component}&after_ms={injection_started_at_ms}&limit=10",
         )
         recent = _available(recent_body, "recent-incidents-unavailable")
         items = recent.get("items")
@@ -371,7 +380,7 @@ def execute_candidate_exit(
             if isinstance(item.get("incident_id"), str)
         }
         if len(ids) > 1:
-            raise AdapterFailedError("candidate-incident-ambiguous")
+            raise AdapterFailedError(f"{component}-incident-ambiguous")
         if ids:
             incident_id = next(iter(ids))
             history_body, _ = fetch_json(
@@ -384,12 +393,12 @@ def execute_candidate_exit(
                 raise AdapterFailedError("incident-history-invalid")
             terminal = history_items[-1]
             if isinstance(terminal, Mapping) and terminal.get("state") == "escalated":
-                raise AdapterFailedError("candidate-incident-escalated")
+                raise AdapterFailedError(f"{component}-incident-escalated")
             if isinstance(terminal, Mapping) and terminal.get("state") == "verified":
                 break
         sleeper(0.25)
     else:
-        raise AdapterFailedError("candidate-recovery-timeout")
+        raise AdapterFailedError(f"{component}-recovery-timeout")
 
     assert history is not None and incident_id is not None
     if history.get("history_complete") is not True:
@@ -397,11 +406,11 @@ def execute_candidate_exit(
     receipt = history.get("recovery_writer_receipt")
     if (
         not isinstance(receipt, Mapping)
-        or receipt.get("component") != "candidate"
+        or receipt.get("component") != component
         or type(receipt.get("receipt_row_id")) is not int
         or receipt["receipt_row_id"] <= 0
     ):
-        raise AdapterFailedError("candidate-recovery-receipt-missing")
+        raise AdapterFailedError(f"{component}-recovery-receipt-missing")
     events = history["items"]
     assert isinstance(events, list)
     by_state = {
@@ -418,7 +427,7 @@ def execute_candidate_exit(
         or detected_at_ms < injection_started_at_ms
         or contained_at_ms < detected_at_ms
     ):
-        raise AdapterFailedError("candidate-lifecycle-timing-invalid")
+        raise AdapterFailedError(f"{component}-lifecycle-timing-invalid")
 
     post_rounds = collect_rounds(
         base_url,
@@ -439,7 +448,7 @@ def execute_candidate_exit(
             "containment_s": (contained_at_ms - detected_at_ms) / 1_000,
             "incidents": [
                 {
-                    "component": "candidate",
+                    "component": component,
                     "incident_id": incident_id,
                     "state": "verified",
                     "recovery_writer_receipt": dict(receipt),
@@ -449,6 +458,9 @@ def execute_candidate_exit(
     )
     _write_exclusive(evidence_dir / "evidence.json", evidence)
     return evidence
+
+
+execute_candidate_exit = partial(execute_producer_exit, component="candidate")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -485,7 +497,8 @@ def _execute(args: argparse.Namespace) -> int:
         return 2
     try:
         base_url = readonly._validate_base_url(args.base_url)
-        evidence = execute_candidate_exit(
+        evidence = execute_producer_exit(
+            component=FAULTS[args.fault].component,
             base_url=base_url,
             expected_release=release,
             authorization=args.authorization,

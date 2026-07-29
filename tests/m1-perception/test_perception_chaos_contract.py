@@ -49,7 +49,9 @@ def test_every_fault_has_a_complete_readonly_plan(fault_id: str) -> None:
     assert plan["cleanup"]
     assert plan["required_tools"] == ["python"]
     assert plan["image_check"] == "make chaos-l2-fly-image-check"
-    assert plan["execute_supported"] is (fault_id == "candidate-exit")
+    assert plan["execute_supported"] is (
+        fault_id in {"candidate-exit", "discovery-exit"}
+    )
 
 
 def test_execute_fails_before_mutation_when_adapter_is_not_ready(tmp_path: Path) -> None:
@@ -81,6 +83,19 @@ def test_execute_fails_before_mutation_when_adapter_is_not_ready(tmp_path: Path)
 def test_candidate_exit_plan_matches_sigterm_supervisor_outcome() -> None:
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "plan", "--fault", "candidate-exit"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["expected_incident_kind"] == "child-nonzero"
+
+
+def test_discovery_exit_plan_matches_sigterm_supervisor_outcome() -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan", "--fault", "discovery-exit"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -249,6 +264,104 @@ def test_candidate_exit_adapter_refuses_dirty_baseline_before_mutation(
 
     assert commands == [("make", "chaos-l2-fly-image-check", "required=python")]
     assert not (tmp_path / "must-not-exist").exists()
+
+
+def test_discovery_exit_adapter_binds_discovery_worker_and_receipt(
+    tmp_path: Path,
+) -> None:
+    release = "a" * 40
+    commands: list[tuple[str, ...]] = []
+
+    def command(argv):
+        argv = tuple(argv)
+        commands.append(argv)
+        if argv[0] == "make":
+            return subprocess.CompletedProcess(argv, 0, "PASS\n", "")
+        action = "locate" if " locate " in f" {argv[-1]} " else "sigterm"
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "action": action,
+                    "component": "discovery",
+                    "pid": 42,
+                    "ppid": 1,
+                }
+            )
+            + "\n",
+            "",
+        )
+
+    def fetch_json(_base_url: str, path: str):
+        if path.startswith("/perception/incidents/recent"):
+            assert "scope=discovery" in path
+            return {
+                "status": "available",
+                "items": [
+                    {
+                        "incident_id": "c" * 32,
+                        "kind": "child-nonzero",
+                        "state": "verified",
+                    }
+                ],
+            }, 0.1
+        return {
+            "status": "available",
+            "history_complete": True,
+            "recovery_writer_receipt": {
+                "component": "discovery",
+                "receipt_row_id": 88,
+            },
+            "items": [
+                {"state": "detected", "occurred_at_ms": 1_100},
+                {"state": "contained", "occurred_at_ms": 1_200},
+                {"state": "verified", "occurred_at_ms": 1_300},
+            ],
+        }, 0.1
+
+    rounds = iter([[{}] * 5, [{}] * 5])
+
+    evidence = chaos.execute_producer_exit(
+        component="discovery",
+        base_url="https://example.test",
+        expected_release=release,
+        authorization=f"fault:discovery-exit:{release}",
+        evidence_dir=tmp_path / "discovery-exit",
+        timeout_s=10,
+        command=command,
+        fetch_json=fetch_json,
+        collect_rounds=lambda *_args, **_kwargs: next(rounds),
+        build_evidence=lambda samples, **_kwargs: {
+            "machine_id": "machine-1",
+            "boot_id": "12345678-1234-4234-9234-123456789abc",
+            "sample_count": len(samples),
+            "open_incident_count": 0,
+            "cross_membership_quote_batches": 0,
+            "orphan_collecting_runs": 0,
+            "incidents": [],
+        },
+        clock_ms=lambda: 1_000,
+        monotonic=lambda: 0,
+        sleeper=lambda _seconds: None,
+    )
+
+    assert evidence["incidents"] == [
+        {
+            "component": "discovery",
+            "incident_id": "c" * 32,
+            "state": "verified",
+            "recovery_writer_receipt": {
+                "component": "discovery",
+                "receipt_row_id": 88,
+            },
+        }
+    ]
+    assert any("locate --component discovery" in argv[-1] for argv in commands)
+    assert any(
+        f"--authorization fault:discovery-exit:{release}:42" in argv[-1]
+        for argv in commands
+    )
 
 
 @pytest.mark.parametrize("fault_id", FAULT_IDS)

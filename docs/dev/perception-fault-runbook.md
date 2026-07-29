@@ -127,13 +127,14 @@ make chaos-perception-gamma-timeout \
   evidence_dir=<new-path>
 ```
 
-All targets except `candidate-exit` currently reject such requests with
+All targets except `candidate-exit` and `discovery-exit` currently reject such requests with
 `adapter-not-implemented` before creating the evidence directory or making a
-network request. The Candidate adapter first passes the image gate and a
+network request. Both producer-exit adapters first pass the image gate and a
 five-sample clean baseline, then binds one machine/boot/PID, writes immutable
 intent, sends the exact SIGTERM, discovers the new Incident from the bounded
 recent ledger, verifies its exact terminal history/writer receipt, and takes a
-second five-sample clean window. A target becomes executable only after the
+second five-sample clean window. Candidate requires a Candidate success
+receipt; Discovery requires a newer validated Discovery batch. A target becomes executable only after the
 same adapter, cleanup, chain-truth health surface, and end-to-end review.
 
 ## Recovery verdict
@@ -167,10 +168,10 @@ That endpoint returns the latest retained state per matching Incident even
 after it left the open list. More than one new `child-nonzero` ID is ambiguous
 and fails the experiment.
 
-For `candidate-exit`, the image-safe primitive is
+For `candidate-exit` and `discovery-exit`, the image-safe primitive is
 `python -m polyarb.perception.chaos_primitive`. Its read-only `locate` command
-requires exactly one Candidate worker whose command line is exact and whose
+requires exactly one requested worker whose command line is exact and whose
 parent is the PID-1 M1 daemon. Its `terminate` command additionally binds the
 runtime `POLYARB_RELEASE_ID`, the previously observed PID, and
-`fault:candidate-exit:<release>:<pid>` before sending SIGTERM. It cannot target
+the component-specific `fault:<component>-exit:<release>:<pid>` before sending SIGTERM. It cannot target
 PID 1, an arbitrary process, or a second component.
