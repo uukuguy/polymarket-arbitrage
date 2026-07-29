@@ -27,6 +27,10 @@ exact runtime baseline
 - `src/polyarb/perception/incidents.py`：verified transition 会反查 recovery 之后的
   Candidate receipt、Discovery batch、Reconciliation window、HTTP probe 或 Resource
   decision，不能靠调用者自报成功。
+- `src/polyarb/perception/chaos_primitive.py`：不用 `ps/pkill`，从 `/proc` 解析唯一的
+  daemon 直属 Candidate worker，并在 release/PID/fault 授权全部一致后才发 SIGTERM。
+- `src/polyarb/http/perception.py`：exact Incident ID 的 bounded lifecycle 读面；让
+  verified terminal 与 writer receipt 在 Incident 从 open 列表消失后仍可查询。
 - `scripts/perception_fault_acceptance.py`：`production-fault` verdict 再绑定
   release/machine/boot/window，并同时检查全局 SLA 与 open incident。
 

@@ -82,6 +82,12 @@ class IncidentScopeHistoryPage:
     floor_compacted_count: int | None
 
 
+@dataclass(frozen=True)
+class IncidentIdentityHistory:
+    items: tuple[IncidentScopeHistoryItem, ...]
+    history_complete: bool
+
+
 class IncidentManager:
     def __init__(
         self,
@@ -562,6 +568,53 @@ class IncidentManager:
                     None
                     if floor is None
                     else int(floor["compacted_event_count"])
+                ),
+            )
+        finally:
+            if _connection is None:
+                con.close()
+
+    def incident_history(
+        self,
+        incident_id: str,
+        *,
+        limit: int = 100,
+        _connection: sqlite3.Connection | None = None,
+    ) -> IncidentIdentityHistory | None:
+        if (
+            len(incident_id) != 32
+            or any(character not in "0123456789abcdef" for character in incident_id)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("invalid-incident-history-request")
+        con = _connection or self._connect(read_only=True)
+        try:
+            self._store._assert_owner_journal_clean(con)
+            self._validate_checkpoint(con)
+            self._validate_bounded_suffix(con)
+            self._validate_evidence_failure(con, require_resolved=True)
+            rows = con.execute(
+                "SELECT * FROM neg_risk_incident_events "
+                "WHERE incident_id=? ORDER BY sequence DESC LIMIT ?",
+                (incident_id, limit + 1),
+            ).fetchall()
+            if not rows:
+                return None
+            retained = rows[:limit]
+            retained.reverse()
+            items = tuple(
+                IncidentScopeHistoryItem(
+                    event_id=int(row["id"]),
+                    incident=self._from_row(row),
+                )
+                for row in retained
+            )
+            return IncidentIdentityHistory(
+                items=items,
+                history_complete=(
+                    len(rows) <= limit
+                    and items[0].incident.sequence == 1
+                    and items[0].incident.state == "detected"
                 ),
             )
         finally:
@@ -2173,6 +2226,7 @@ class IncidentManager:
 __all__ = [
     "ALLOWED",
     "Incident",
+    "IncidentIdentityHistory",
     "IncidentManager",
     "InvalidIncidentTransitionError",
     "RecoveryEvidenceRequiredError",

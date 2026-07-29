@@ -144,3 +144,19 @@ release/machine/boot/window provenance, zero open incidents, and a
 component-matching positive recovery writer receipt. It exclusively creates
 the verdict file and refuses overwrite. It does not inject, clean up, close an
 Incident, or mutate production.
+
+The fault runner must observe the Incident ID while it is open, then read
+`GET /perception/incidents/{incident_id}/history`. This bounded endpoint
+validates the incident checkpoint and retained suffix before returning at most
+100 lifecycle events. `history_complete=false`, a missing terminal `verified`,
+or a null `recovery_writer_receipt` fails qualification. This avoids SSH
+database reads and keeps the same terminal proof visible to the operator and
+Dashboard/API consumers.
+
+For `candidate-exit`, the image-safe primitive is
+`python -m polyarb.perception.chaos_primitive`. Its read-only `locate` command
+requires exactly one Candidate worker whose command line is exact and whose
+parent is the PID-1 M1 daemon. Its `terminate` command additionally binds the
+runtime `POLYARB_RELEASE_ID`, the previously observed PID, and
+`fault:candidate-exit:<release>:<pid>` before sending SIGTERM. It cannot target
+PID 1, an arbitrary process, or a second component.

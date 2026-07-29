@@ -89,6 +89,10 @@ class _ReadExecution:
             raise TimeoutError("perception-read-deadline")
 
 
+class _IncidentNotFoundError(RuntimeError):
+    pass
+
+
 def _check_read_deadline() -> None:
     execution = _READ_EXECUTION.get()
     if execution is not None:
@@ -1139,6 +1143,60 @@ def _incidents(
         con.close()
 
 
+def _incident_history(db_path: Path, incident_id: str) -> dict[str, Any]:
+    from polyarb.perception.incidents import IncidentManager
+
+    con = _connect(db_path)
+    try:
+        con.execute("BEGIN")
+        history = IncidentManager(_read_store(db_path)).incident_history(
+            incident_id,
+            _connection=con,
+        )
+        con.execute("COMMIT")
+        if history is None:
+            raise _IncidentNotFoundError
+        latest = history.items[-1].incident
+        receipt = None
+        if latest.state == "verified":
+            component = latest.scope.split(":", 1)[0]
+            pointer_fields = {
+                "candidate": "candidate_success_receipt_id",
+                "discovery": "batch_id",
+                "reconciliation": "window_id",
+            }
+            pointer = latest.evidence.get(pointer_fields.get(component, ""))
+            if type(pointer) is int and pointer > 0:
+                receipt = {
+                    "component": component,
+                    "receipt_row_id": pointer,
+                }
+        return {
+            "status": "available",
+            "incident_id": incident_id,
+            "scope": latest.scope,
+            "kind": latest.kind,
+            "history_complete": history.history_complete,
+            "recovery_writer_receipt": receipt,
+            "items": [
+                {
+                    "event_id": item.event_id,
+                    "sequence": item.incident.sequence,
+                    "state": item.incident.state,
+                    "occurred_at_ms": item.incident.occurred_at_ms,
+                    "evidence": _safe_evidence(item.incident.evidence),
+                }
+                for item in history.items
+            ],
+        }
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+
+
 def _resources(
     db_path: Path,
     limit: int,
@@ -1211,6 +1269,14 @@ async def _serve(request: Request, reader: Callable[[], dict[str, Any]]) -> JSON
         ) > 1_048_576:
             raise ValueError("response-output-too-large")
         return JSONResponse(body)
+    except _IncidentNotFoundError:
+        return JSONResponse(
+            {
+                "status": "unavailable",
+                "reason": "incident-not-found-or-retained",
+            },
+            status_code=404,
+        )
     except ValueError as error:
         if str(error) == "limit-must-be-an-integer-from-1-to-500":
             return JSONResponse(
@@ -1370,6 +1436,23 @@ async def perception_incidents(request: Request) -> JSONResponse:
         return JSONResponse({"status": "invalid-request", "reason": str(error)}, status_code=400)
     db_path = Path(request.app.state.sqlite_store.db_path)
     return await _serve(request, lambda: _incidents(db_path, limit, before))
+
+
+async def perception_incident_history(request: Request) -> JSONResponse:
+    incident_id = str(request.path_params["incident_id"])
+    if (
+        len(incident_id) != 32
+        or any(character not in "0123456789abcdef" for character in incident_id)
+    ):
+        return JSONResponse(
+            {"status": "invalid-request", "reason": "invalid-incident-id"},
+            status_code=400,
+        )
+    db_path = Path(request.app.state.sqlite_store.db_path)
+    return await _serve(
+        request,
+        lambda: _incident_history(db_path, incident_id),
+    )
 
 
 async def perception_resources(request: Request) -> JSONResponse:

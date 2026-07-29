@@ -606,6 +606,112 @@ def test_discovery_reconciliation_and_incidents_use_stable_envelopes(
     }
 
 
+def test_incident_history_endpoint_exposes_exact_bounded_lifecycle(
+    http_test_client,
+) -> None:
+    store = OpportunityPerceptionStore(
+        http_test_client.app.state.sqlite_store.db_path
+    )
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    incident = manager.detect("candidate", "child-failed", {"attempt": 1})
+    now[0] += 1
+    manager.transition(incident.id, "classified", {"action": "classify-producer-failure"})
+    now[0] += 1
+    manager.transition(incident.id, "contained", {"action": "restart-producer"})
+    now[0] += 1
+    manager.transition(incident.id, "recovering", {"retry": 1})
+
+    response = http_test_client.get(
+        f"/perception/incidents/{incident.id}/history"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "available"
+    assert body["incident_id"] == incident.id
+    assert body["scope"] == "candidate"
+    assert body["kind"] == "child-failed"
+    assert body["history_complete"] is True
+    assert body["recovery_writer_receipt"] is None
+    assert [item["sequence"] for item in body["items"]] == [1, 2, 3, 4]
+    assert [item["state"] for item in body["items"]] == [
+        "detected",
+        "classified",
+        "contained",
+        "recovering",
+    ]
+
+
+def test_incident_history_endpoint_exposes_verified_candidate_writer(
+    http_test_client,
+) -> None:
+    store = OpportunityPerceptionStore(
+        http_test_client.app.state.sqlite_store.db_path
+    )
+    now = [1]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    incident = manager.detect("candidate", "child-failed", {"attempt": 1})
+    manager.transition(incident.id, "classified", {})
+    manager.transition(incident.id, "contained", {})
+    manager.transition(incident.id, "recovering", {"retry": 1})
+    _seed_candidate_authority(store.db_path)
+    with sqlite3.connect(store.db_path) as con:
+        receipt_id = con.execute(
+            "SELECT MAX(id) FROM neg_risk_candidate_success_receipts"
+        ).fetchone()[0]
+    now[0] = 5
+    manager.transition(
+        incident.id,
+        "verified",
+        {
+            "candidate_success_receipt_id": receipt_id,
+            "group_id": "g-1",
+            "membership_hash": store.current_group("g-1").membership_hash,
+            "quote_batch_id": "q-1",
+        },
+    )
+
+    response = http_test_client.get(
+        f"/perception/incidents/{incident.id}/history"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"][-1]["state"] == "verified"
+    assert body["recovery_writer_receipt"] == {
+        "component": "candidate",
+        "receipt_row_id": receipt_id,
+    }
+
+
+@pytest.mark.parametrize("incident_id", ["bad", "A" * 32, "a" * 31, "g" * 32])
+def test_incident_history_endpoint_rejects_invalid_identity(
+    http_test_client,
+    incident_id: str,
+) -> None:
+    response = http_test_client.get(
+        f"/perception/incidents/{incident_id}/history"
+    )
+
+    assert response.status_code == 400
+    assert response.json()["reason"] == "invalid-incident-id"
+
+
+def test_incident_history_endpoint_returns_not_found_without_guessing(
+    http_test_client,
+) -> None:
+    response = http_test_client.get(
+        f"/perception/incidents/{'a' * 32}/history"
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "status": "unavailable",
+        "reason": "incident-not-found-or-retained",
+    }
+
+
 def test_resource_endpoint_returns_current_and_keyset_history(
     http_test_client,
 ) -> None:
