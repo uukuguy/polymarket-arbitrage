@@ -233,6 +233,21 @@ def test_resource_plans_name_sensor_backed_durable_incidents(
     assert plan["execute_supported"] is False
 
 
+def test_telegram_plan_names_durable_delivery_incident_and_writer() -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan", "--fault", "telegram-failure"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    plan = json.loads(result.stdout)
+    assert plan["expected_incident_kind"] == "telegram-delivery-failed"
+    assert plan["recovery_writer"] == "neg_risk_opportunity_notification_attempts"
+    assert plan["execute_supported"] is False
+
+
 def test_reconciliation_stall_adapter_resumes_exact_worker_before_verification(
     tmp_path: Path,
 ) -> None:

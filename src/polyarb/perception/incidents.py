@@ -2207,6 +2207,35 @@ class IncidentManager:
                     )
                 )
             )
+        if scope.startswith("notification:"):
+            try:
+                notification_id = int(scope.split(":", 1)[1])
+            except ValueError:
+                return False
+            failed_attempt_id = recovery_evidence.get("failed_attempt_id")
+            delivered_attempt_id = verification_evidence.get(
+                "delivered_attempt_id"
+            )
+            if (
+                type(failed_attempt_id) is not int
+                or type(delivered_attempt_id) is not int
+                or verification_evidence.get("notification_id")
+                != notification_id
+                or delivered_attempt_id <= failed_attempt_id
+            ):
+                return False
+            row = con.execute(
+                "SELECT * FROM neg_risk_opportunity_notification_attempts "
+                "WHERE id=? AND notification_id=?",
+                (delivered_attempt_id, notification_id),
+            ).fetchone()
+            return bool(
+                row
+                and row["outcome"] == "delivered"
+                and row["error_kind"] is None
+                and row["attempted_at_ms"] >= recovery_started_at_ms
+                and row["attempted_at_ms"] <= verification_at_ms
+            )
         return False
 
     def _connect(self, *, read_only: bool = False) -> sqlite3.Connection:

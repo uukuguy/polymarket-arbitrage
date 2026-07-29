@@ -124,3 +124,12 @@ Quote success receipt，不能用“数据库后来能连接”代替业务恢�
 恢复时 `IncidentManager` 会反查更新且通过完整 history replay 的 Resource decision，
 并额外要求 `mode=normal`、`health_claimed=true`。另一个 pressure decision 即使 ID 更新，
 也不能恶意关闭 Incident。
+
+### Telegram API 返回成功是否等于用户收到？
+
+不等于。recovery writer 是
+`neg_risk_opportunity_notification_attempts.outcome=delivered`，只证明同一 outbox
+卡片的 Telegram HTTP 调用成功并被 durable ledger 接受，不证明手机展示、用户已读，
+也不覆盖 Polywatch/Better Stack。此前 failed attempt 虽可重试，却无法进入资格矩阵的
+MTTD/containment/exact recovery。现在 delivered 已落而 Incident 写入瞬时失败时，下一轮
+会反查 durable attempt 收敛，不需要重复发送。

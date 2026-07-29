@@ -155,8 +155,8 @@ FAULTS = {
         _spec(
             "telegram-failure",
             "notification",
-            "not-wired: notification error state; adapter must open an incident",
-            "opportunity_watcher_state",
+            "telegram-delivery-failed",
+            "neg_risk_opportunity_notification_attempts",
             "remove scoped Telegram failure and verify notification recovery",
         ),
         _spec(

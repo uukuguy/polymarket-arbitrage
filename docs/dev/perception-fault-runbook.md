@@ -129,6 +129,13 @@ one-minute load divided by CPU count at or above
 entering `protect-hot-path`; only a later replay-valid normal/healthy Resource
 decision closes recovery. Their production mutation adapters remain disabled.
 
+Opportunity Telegram delivery reuses the durable outbox. A failed attempt opens
+`telegram-delivery-failed` at `notification:<outbox-id>` and retains the card
+for retry. Only a later `delivered` attempt for that exact outbox can verify
+recovery; a different successful notification cannot close it. This proves the
+Telegram API delivery writer, not handset display or user acknowledgement. Its
+production failure adapter remains disabled.
+
 Actual execution is an independent, fault-specific capability. It requires
 all of the following:
 

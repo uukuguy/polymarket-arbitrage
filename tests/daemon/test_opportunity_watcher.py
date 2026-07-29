@@ -16,6 +16,7 @@ os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 
 from polyarb.config import Settings
+from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.routing.neg_risk_quote_store import (
     CompleteQuoteProjection,
     PersistedQuote,
@@ -127,6 +128,37 @@ async def test_telegram_failure_is_retryable_without_losing_observation(
     pending = ledger.pending_notifications(now_ms=int(time.time() * 1000))
     assert len(pending) == 1
     assert pending[0].attempt_count == 1
+    incident = OpportunityPerceptionStore(settings.db_path).open_incidents()[0]
+    assert incident.scope == f"notification:{pending[0].id}"
+    assert incident.kind == "telegram-delivery-failed"
+    assert incident.state == "recovering"
+
+
+async def test_telegram_retry_closes_exact_notification_incident(
+    settings: Settings,
+    ledger: OpportunityLedger,
+    complete_projection: CompleteQuoteProjection,
+) -> None:
+    from polyarb.daemon.opportunity_watcher import OpportunityWatcher
+
+    send_telegram = AsyncMock(
+        side_effect=[OSError("telegram unavailable"), None]
+    )
+    watcher = OpportunityWatcher.for_test(
+        settings,
+        ledger=ledger,
+        send_telegram=send_telegram,
+    )
+
+    await watcher.reconcile_global_projection(complete_projection)
+    await watcher.deliver_pending_notifications()
+
+    attempts = ledger.notification_attempts(1)
+    assert [attempt.outcome for attempt in attempts] == [
+        "failed",
+        "delivered",
+    ]
+    assert OpportunityPerceptionStore(settings.db_path).open_incidents() == ()
 
 
 async def test_opportunity_alert_without_telegram_configuration_stays_retryable(

@@ -13,6 +13,8 @@ from loguru import logger
 from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.config import Settings
 from polyarb.daemon.alerts import send_opportunity_alert
+from polyarb.perception.notification_incidents import NotificationIncidents
+from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.routing.focused_quote_collector import (
     BooksReader,
     FocusedObservation,
@@ -76,6 +78,10 @@ class OpportunityWatcher:
         self._notification_delivery_count = 0
         self._notification_failure_count = 0
         self._last_notification_error_kind: str | None = None
+        self._notification_incidents = NotificationIncidents(
+            OpportunityPerceptionStore(settings.db_path),
+            clock_ms=self._clock_ms,
+        )
 
     @classmethod
     def for_test(
@@ -197,6 +203,18 @@ class OpportunityWatcher:
                     attempted_at_ms=self._clock_ms(),
                     error_kind=type(error).__name__,
                 )
+                failed_attempt = (
+                    await asyncio.to_thread(
+                        self._ledger.notification_attempts,
+                        notification.id,
+                    )
+                )[-1]
+                await asyncio.to_thread(
+                    self._notification_incidents.record_failure,
+                    notification_id=notification.id,
+                    failed_attempt_id=failed_attempt.id,
+                    error_kind=type(error).__name__,
+                )
                 logger.warning(
                     "opportunity notification delivery failed "
                     f"id={notification.id} kind={type(error).__name__}"
@@ -209,6 +227,15 @@ class OpportunityWatcher:
                     notification.id,
                     delivered_at_ms=self._clock_ms(),
                 )
+        try:
+            await asyncio.to_thread(
+                self._notification_incidents.reconcile_delivered,
+            )
+        except Exception as error:
+            logger.warning(
+                "notification incident reconciliation failed "
+                f"kind={type(error).__name__}"
+            )
 
     def snapshot(self) -> OpportunityWatcherSnapshot:
         return OpportunityWatcherSnapshot(
