@@ -27,6 +27,9 @@ ALLOWED: dict[IncidentState, set[IncidentState]] = {
     "verified": set(),
     "escalated": {"recovering"},
 }
+INCIDENT_EVIDENCE_MAX_BYTES = 4_096
+INCIDENT_OPEN_AUTHORITY_MAX_ROWS = 4_096
+INCIDENT_SCOPE_FLOOR_MAX_ROWS = 8_192
 
 
 class InvalidIncidentTransitionError(ValueError):
@@ -48,6 +51,37 @@ class Incident:
     evidence: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class IncidentPageItem:
+    incident: Incident
+    detected_at_ms: int
+    recovery_occurred_at_ms: int | None
+    recovery_evidence: dict[str, Any] | None
+    history_floor_event_id: int | None
+    history_floor_compacted_count: int | None
+
+
+@dataclass(frozen=True)
+class IncidentPage:
+    items: tuple[IncidentPageItem, ...]
+    next_before: tuple[int, str] | None
+    open_count: int
+
+
+@dataclass(frozen=True)
+class IncidentScopeHistoryItem:
+    event_id: int
+    incident: Incident
+
+
+@dataclass(frozen=True)
+class IncidentScopeHistoryPage:
+    items: tuple[IncidentScopeHistoryItem, ...]
+    next_before_event_id: int | None
+    floor_event_id: int | None
+    floor_compacted_count: int | None
+
+
 class IncidentManager:
     def __init__(
         self,
@@ -61,10 +95,13 @@ class IncidentManager:
     def detect(self, scope: str, kind: str, evidence: dict[str, Any]) -> Incident:
         if not scope or not kind or not isinstance(evidence, dict):
             raise ValueError("invalid-incident")
+        evidence_json = self._json(evidence)
         now_ms = self._clock_ms()
         con = self._connect()
+        authority_mutation_started = False
         try:
             con.execute("BEGIN IMMEDIATE")
+            self._validate_and_recover_writer(con, now_ms)
             row = con.execute(
                 "SELECT * FROM neg_risk_incident_events "
                 "WHERE scope=? AND kind=? ORDER BY id DESC LIMIT 1",
@@ -84,6 +121,7 @@ class IncidentManager:
                 con.commit()
                 return self._from_row(row)
             incident_id = uuid.uuid4().hex
+            authority_mutation_started = True
             con.execute(
                 "INSERT INTO neg_risk_incident_events("
                 "incident_id,sequence,scope,kind,state,occurred_at_ms,evidence_json"
@@ -95,7 +133,7 @@ class IncidentManager:
                     kind,
                     "detected",
                     now_ms,
-                    self._json(evidence),
+                    evidence_json,
                 ),
             )
             row = con.execute(
@@ -103,12 +141,22 @@ class IncidentManager:
             ).fetchone()
             owner_batch = self._new_owner_batch()
             self._sync_open_authority(con, row, owner_batch)
-            self._compact_events(con, owner_batch)
+            compacted = self._compact_events(con, owner_batch)
+            self._sync_suffix_authority(
+                con,
+                owner_batch,
+                appended_event=None if compacted else row,
+            )
             self._finalize_owner_batch(con, owner_batch)
             con.commit()
             return self._from_row(row)
-        except BaseException:
+        except BaseException as error:
             con.rollback()
+            if authority_mutation_started and isinstance(
+                error,
+                (sqlite3.Error, TypeError, ValueError),
+            ):
+                self._record_evidence_failure(now_ms)
             raise
         finally:
             con.close()
@@ -123,8 +171,10 @@ class IncidentManager:
             raise InvalidIncidentTransitionError("invalid-incident-transition")
         now_ms = self._clock_ms()
         con = self._connect()
+        authority_mutation_started = False
         try:
             con.execute("BEGIN IMMEDIATE")
+            self._validate_and_recover_writer(con, now_ms)
             row = con.execute(
                 "SELECT * FROM neg_risk_incident_events "
                 "WHERE incident_id=? ORDER BY sequence DESC LIMIT 1",
@@ -201,6 +251,8 @@ class IncidentManager:
                     )
                 ):
                     raise RecoveryEvidenceRequiredError("post-recovery-writer-evidence-required")
+            evidence_json = self._json(evidence)
+            authority_mutation_started = True
             con.execute(
                 "INSERT INTO neg_risk_incident_events("
                 "incident_id,sequence,scope,kind,state,occurred_at_ms,evidence_json"
@@ -212,7 +264,7 @@ class IncidentManager:
                     latest.kind,
                     state,
                     now_ms,
-                    self._json(evidence),
+                    evidence_json,
                 ),
             )
             written = con.execute(
@@ -220,34 +272,48 @@ class IncidentManager:
             ).fetchone()
             owner_batch = self._new_owner_batch()
             self._sync_open_authority(con, written, owner_batch)
-            self._compact_events(con, owner_batch)
+            compacted = self._compact_events(con, owner_batch)
+            self._sync_suffix_authority(
+                con,
+                owner_batch,
+                appended_event=None if compacted else written,
+            )
             self._finalize_owner_batch(con, owner_batch)
             con.commit()
             return self._from_row(written)
-        except BaseException:
+        except BaseException as error:
             con.rollback()
+            if authority_mutation_started and isinstance(
+                error,
+                (sqlite3.Error, TypeError, ValueError),
+            ):
+                self._record_evidence_failure(now_ms)
             raise
         finally:
             con.close()
 
-    def open_incidents(self) -> tuple[Incident, ...]:
-        con = self._connect(read_only=True)
+    def open_incidents(
+        self,
+        *,
+        _connection: sqlite3.Connection | None = None,
+    ) -> tuple[Incident, ...]:
+        con = _connection or self._connect(read_only=True)
         try:
             self._store._assert_owner_journal_clean(con)
             self._validate_checkpoint(con)
+            self._validate_bounded_suffix(con)
+            self._validate_evidence_failure(con, require_resolved=True)
+            aggregate = self._validated_open_aggregate(con)
             rows = con.execute(
-                "SELECT incident_id,sequence,scope,kind,state,occurred_at_ms,"
+                "SELECT incident_id,sequence,scope,kind,state,detected_at_ms,"
+                "occurred_at_ms,"
                 "evidence_json,recovery_occurred_at_ms,recovery_evidence_json,"
                 "row_hash FROM neg_risk_incident_open_authority "
-                "ORDER BY occurred_at_ms,incident_id"
+                "ORDER BY occurred_at_ms,incident_id LIMIT ?",
+                (INCIDENT_OPEN_AUTHORITY_MAX_ROWS + 1,),
             ).fetchall()
-            aggregate = con.execute(
-                "SELECT open_count,aggregate_digest FROM "
-                "neg_risk_incident_open_aggregate WHERE id=1"
-            ).fetchone()
             incidents = tuple(self._from_row(row) for row in rows)
             digest = 0
-            authority_by_id: dict[str, sqlite3.Row] = {}
             for row in rows:
                 evidence = json.loads(str(row["evidence_json"]))
                 recovery_json = row["recovery_evidence_json"]
@@ -263,6 +329,7 @@ class IncidentManager:
                     "evidence": evidence,
                     "incident_id": str(row["incident_id"]),
                     "kind": str(row["kind"]),
+                    "detected_at_ms": int(row["detected_at_ms"]),
                     "occurred_at_ms": int(row["occurred_at_ms"]),
                     "recovery_evidence": recovery_evidence,
                     "recovery_occurred_at_ms": row["recovery_occurred_at_ms"],
@@ -274,49 +341,307 @@ class IncidentManager:
                 if str(row["row_hash"]) != expected_hash:
                     raise ValueError("invalid-incident-open-authority")
                 digest ^= int(expected_hash.removeprefix("sha256:"), 16)
-                authority_by_id[str(row["incident_id"])] = row
             if (
-                aggregate is not None
-                and (
-                    int(aggregate["open_count"]) != len(incidents)
-                    or str(aggregate["aggregate_digest"]) != f"{digest:064x}"
-                )
-            ) or (
-                aggregate is None and incidents
+                int(aggregate["open_count"]) != len(incidents)
+                or str(aggregate["aggregate_digest"]) != f"{digest:064x}"
             ):
                 raise ValueError("invalid-incident-open-authority")
-            self._validate_retained_suffix(con, authority_by_id)
             return incidents
         finally:
-            con.close()
+            if _connection is None:
+                con.close()
+
+    def open_incident_page(
+        self,
+        *,
+        limit: int,
+        before: tuple[int, str] | None = None,
+        _connection: sqlite3.Connection | None = None,
+    ) -> IncidentPage:
+        if not 1 <= limit <= 500:
+            raise ValueError("invalid-incident-page-limit")
+        con = _connection or self._connect(read_only=True)
+        try:
+            self._store._assert_owner_journal_clean(con)
+            self._validate_checkpoint(con)
+            self._validate_bounded_suffix(con)
+            self._validate_evidence_failure(con, require_resolved=True)
+            open_count = self._validated_open_count(con)
+            where = ""
+            parameters: tuple[Any, ...] = ()
+            if before is not None:
+                before_ms, before_id = before
+                if before_ms < 0 or not before_id:
+                    raise ValueError("invalid-incident-page-cursor")
+                where = (
+                    "WHERE occurred_at_ms<? OR "
+                    "(occurred_at_ms=? AND incident_id<?) "
+                )
+                parameters = (before_ms, before_ms, before_id)
+            rows = con.execute(
+                "SELECT * FROM neg_risk_incident_open_authority "
+                f"{where}ORDER BY occurred_at_ms DESC,incident_id DESC LIMIT ?",
+                (*parameters, limit + 1),
+            ).fetchall()
+            page_rows = rows[:limit]
+            scopes = tuple({str(row["scope"]) for row in page_rows})
+            floors: dict[str, sqlite3.Row] = {}
+            if scopes:
+                placeholders = ",".join("?" for _ in scopes)
+                floors = {
+                    str(row["scope"]): self._validate_scope_floor_row(row)
+                    for row in con.execute(
+                        "SELECT * FROM neg_risk_incident_scope_floors "
+                        f"WHERE scope IN ({placeholders})",
+                        scopes,
+                    ).fetchall()
+                }
+            items = []
+            for row in page_rows:
+                incident = self._validate_open_authority_row(row)
+                recovery_json = row["recovery_evidence_json"]
+                floor = floors.get(incident.scope)
+                items.append(
+                    IncidentPageItem(
+                        incident=incident,
+                        detected_at_ms=int(row["detected_at_ms"]),
+                        recovery_occurred_at_ms=row["recovery_occurred_at_ms"],
+                        recovery_evidence=(
+                            None
+                            if recovery_json is None
+                            else json.loads(str(recovery_json))
+                        ),
+                        history_floor_event_id=(
+                            None if floor is None else int(floor["through_event_id"])
+                        ),
+                        history_floor_compacted_count=(
+                            None
+                            if floor is None
+                            else int(floor["compacted_event_count"])
+                        ),
+                    )
+                )
+            if items and open_count == 0:
+                raise ValueError("invalid-incident-open-aggregate")
+            next_before = (
+                None
+                if len(rows) <= limit
+                else (
+                    int(page_rows[-1]["occurred_at_ms"]),
+                    str(page_rows[-1]["incident_id"]),
+                )
+            )
+            return IncidentPage(
+                items=tuple(items),
+                next_before=next_before,
+                open_count=open_count,
+            )
+        finally:
+            if _connection is None:
+                con.close()
+
+    def open_incident_status(
+        self,
+        *,
+        _connection: sqlite3.Connection | None = None,
+    ) -> tuple[int, bool, bool, bool]:
+        con = _connection or self._connect(read_only=True)
+        try:
+            self._store._assert_owner_journal_clean(con)
+            self._validate_checkpoint(con)
+            self._validate_bounded_suffix(con)
+            self._validate_evidence_failure(con, require_resolved=True)
+            open_count = self._validated_open_count(con)
+            candidate = con.execute(
+                "SELECT * FROM neg_risk_incident_open_authority "
+                "WHERE scope='candidate' OR "
+                "(scope>='candidate:' AND scope<'candidate;') "
+                "ORDER BY scope,kind,occurred_at_ms DESC,incident_id DESC LIMIT 1"
+            ).fetchone()
+            if candidate is not None:
+                self._validate_open_authority_row(candidate)
+            http = con.execute(
+                "SELECT * FROM neg_risk_incident_open_authority "
+                "WHERE scope='http' "
+                "ORDER BY scope,kind,occurred_at_ms DESC,incident_id DESC LIMIT 1"
+            ).fetchone()
+            if http is not None:
+                self._validate_open_authority_row(http)
+            other = con.execute(
+                "SELECT * FROM neg_risk_incident_open_authority "
+                "WHERE scope!='http' AND scope!='candidate' AND "
+                "NOT (scope>='candidate:' AND scope<'candidate;') "
+                "ORDER BY scope,kind,occurred_at_ms DESC,incident_id DESC LIMIT 1"
+            ).fetchone()
+            if other is not None:
+                self._validate_open_authority_row(other)
+            return (
+                open_count,
+                candidate is not None,
+                http is not None,
+                other is not None,
+            )
+        finally:
+            if _connection is None:
+                con.close()
+
+    def group_incident_history(
+        self,
+        group_id: str,
+        *,
+        limit: int,
+        before_event_id: int | None = None,
+        _connection: sqlite3.Connection | None = None,
+    ) -> IncidentScopeHistoryPage:
+        if not group_id or not 1 <= limit <= 500:
+            raise ValueError("invalid-group-incident-history-request")
+        if before_event_id is not None and before_event_id <= 0:
+            raise ValueError("invalid-group-incident-history-request")
+        scope = f"candidate:{group_id}"
+        con = _connection or self._connect(read_only=True)
+        try:
+            self._store._assert_owner_journal_clean(con)
+            self._validate_checkpoint(con)
+            self._validate_bounded_suffix(con)
+            self._validate_evidence_failure(con, require_resolved=True)
+            where = "scope=? "
+            parameters: tuple[Any, ...] = (scope,)
+            if before_event_id is not None:
+                where += "AND id<? "
+                parameters = (scope, before_event_id)
+            rows = con.execute(
+                "SELECT * FROM neg_risk_incident_events "
+                f"WHERE {where}ORDER BY id DESC LIMIT ?",
+                (*parameters, limit + 1),
+            ).fetchall()
+            page_rows = rows[:limit]
+            floor = con.execute(
+                "SELECT scope,through_event_id,compacted_event_count,"
+                "floor_hash,row_hash "
+                "FROM neg_risk_incident_scope_floors WHERE scope=?",
+                (scope,),
+            ).fetchone()
+            if floor is not None:
+                floor = self._validate_scope_floor_row(floor)
+            return IncidentScopeHistoryPage(
+                items=tuple(
+                    IncidentScopeHistoryItem(
+                        event_id=int(row["id"]),
+                        incident=self._from_row(row),
+                    )
+                    for row in page_rows
+                ),
+                next_before_event_id=(
+                    None
+                    if len(rows) <= limit
+                    else int(page_rows[-1]["id"])
+                ),
+                floor_event_id=(
+                    None if floor is None else int(floor["through_event_id"])
+                ),
+                floor_compacted_count=(
+                    None
+                    if floor is None
+                    else int(floor["compacted_event_count"])
+                ),
+            )
+        finally:
+            if _connection is None:
+                con.close()
+
+    def _validated_open_count(self, con: sqlite3.Connection) -> int:
+        return int(self._validated_open_aggregate(con)["open_count"])
+
+    def _validated_open_digest(self, con: sqlite3.Connection) -> str:
+        return str(self._validated_open_aggregate(con)["aggregate_digest"])
+
+    def _validated_open_aggregate(
+        self,
+        con: sqlite3.Connection,
+    ) -> sqlite3.Row:
+        aggregate = con.execute(
+            "SELECT open_count,aggregate_digest,row_hash FROM "
+            "neg_risk_incident_open_aggregate WHERE id=1"
+        ).fetchone()
+        if aggregate is None:
+            raise ValueError("invalid-incident-open-aggregate")
+        open_count = int(aggregate["open_count"])
+        aggregate_digest = str(aggregate["aggregate_digest"])
+        actual_open_count = self._bounded_count(
+            con,
+            "neg_risk_incident_open_authority",
+            INCIDENT_OPEN_AUTHORITY_MAX_ROWS,
+        )
+        _, expected_hash = self._row_hash(
+            {
+                "aggregate_digest": aggregate_digest,
+                "open_count": open_count,
+            }
+        )
+        if (
+            open_count < 0
+            or actual_open_count > INCIDENT_OPEN_AUTHORITY_MAX_ROWS
+            or open_count != actual_open_count
+            or len(aggregate_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in aggregate_digest
+            )
+            or str(aggregate["row_hash"]) != expected_hash
+        ):
+            raise ValueError("invalid-incident-open-aggregate")
+        return aggregate
+
+    def _validate_scope_floor_row(self, row: sqlite3.Row) -> sqlite3.Row:
+        payload = {
+            "compacted_event_count": int(row["compacted_event_count"]),
+            "floor_hash": str(row["floor_hash"]),
+            "scope": str(row["scope"]),
+            "through_event_id": int(row["through_event_id"]),
+        }
+        _, expected_hash = self._row_hash(payload)
+        if (
+            not payload["scope"]
+            or payload["through_event_id"] <= 0
+            or payload["compacted_event_count"] <= 0
+            or not payload["floor_hash"].startswith("sha256:")
+            or str(row["row_hash"]) != expected_hash
+        ):
+            raise ValueError("invalid-incident-scope-floor")
+        return row
 
     def _validate_checkpoint(self, con: sqlite3.Connection) -> None:
-        suffix_count = int(
-            con.execute("SELECT COUNT(*) FROM neg_risk_incident_events").fetchone()[0]
+        suffix_count = self._bounded_count(
+            con,
+            "neg_risk_incident_events",
+            512,
         )
-        anchor_count = int(
-            con.execute(
-                "SELECT COUNT(*) FROM neg_risk_incident_replay_anchors"
-            ).fetchone()[0]
+        anchor_count = self._bounded_count(
+            con,
+            "neg_risk_incident_replay_anchors",
+            256,
         )
         if suffix_count > 512 or anchor_count > 256:
             raise ValueError("invalid-incident-checkpoint")
         checkpoint = con.execute(
             "SELECT * FROM neg_risk_incident_authority_checkpoint WHERE id=1"
         ).fetchone()
-        floor_count = int(
-            con.execute(
-                "SELECT COUNT(*) FROM neg_risk_incident_scope_floors"
-            ).fetchone()[0]
+        floor_count = self._bounded_count(
+            con,
+            "neg_risk_incident_scope_floors",
+            INCIDENT_SCOPE_FLOOR_MAX_ROWS,
         )
         if checkpoint is None:
             if floor_count or anchor_count:
                 raise ValueError("invalid-incident-checkpoint")
             return
+        if floor_count > INCIDENT_SCOPE_FLOOR_MAX_ROWS:
+            raise ValueError("incident-scope-floor-cap")
         payload = {
             "compacted_event_count": int(checkpoint["compacted_event_count"]),
             "generation": int(checkpoint["generation"]),
             "prefix_hash": str(checkpoint["prefix_hash"]),
+            "scope_floor_count": int(checkpoint["scope_floor_count"]),
             "through_event_id": int(checkpoint["through_event_id"]),
         }
         _, expected_hash = self._row_hash(payload)
@@ -335,11 +660,231 @@ class IncidentManager:
         ).fetchone()
         if (
             str(checkpoint["checkpoint_hash"]) != expected_hash
+            or int(checkpoint["scope_floor_count"]) != floor_count
             or not str(checkpoint["prefix_hash"]).startswith("sha256:")
             or suffix_before_floor is not None
             or invalid_floor is not None
         ):
             raise ValueError("invalid-incident-checkpoint")
+
+    def _validate_writer_authority(self, con: sqlite3.Connection) -> None:
+        self._store._assert_owner_journal_clean(con)
+        self._validate_checkpoint(con)
+        self._validate_bounded_suffix(con)
+        self._validated_open_count(con)
+        self._validate_evidence_failure(con, require_resolved=False)
+
+    def _validate_and_recover_writer(
+        self,
+        con: sqlite3.Connection,
+        now_ms: int,
+    ) -> None:
+        try:
+            self._validate_writer_authority(con)
+            owner_batch = self._new_owner_batch()
+            recovered = self._recover_evidence_failure(
+                con,
+                owner_batch,
+                now_ms,
+            )
+            self._finalize_owner_batch(con, owner_batch)
+        except (sqlite3.Error, TypeError, ValueError):
+            con.rollback()
+            self._record_evidence_failure(now_ms)
+            raise
+        if not recovered:
+            return
+        con.commit()
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            self._validate_writer_authority(con)
+        except (sqlite3.Error, TypeError, ValueError):
+            con.rollback()
+            self._record_evidence_failure(now_ms)
+            raise
+
+    def _validate_evidence_failure(
+        self,
+        con: sqlite3.Connection,
+        *,
+        require_resolved: bool,
+    ) -> sqlite3.Row | None:
+        row = con.execute(
+            "SELECT * FROM neg_risk_evidence_failures WHERE component='incident'"
+        ).fetchone()
+        if row is None:
+            return None
+        payload = {
+            "component": "incident",
+            "failed_at_ms": int(row["failed_at_ms"]),
+            "reason": str(row["reason"]),
+            "recovered_at_ms": row["recovered_at_ms"],
+        }
+        _, expected_hash = self._row_hash(payload)
+        if (
+            str(row["row_hash"]) != expected_hash
+            or row["reason"] != "authority-invalid"
+            or (
+                row["recovered_at_ms"] is not None
+                and int(row["recovered_at_ms"]) < int(row["failed_at_ms"])
+            )
+        ):
+            raise ValueError("invalid-incident-evidence-failure")
+        if require_resolved and row["recovered_at_ms"] is None:
+            raise ValueError("unresolved-incident-evidence-failure")
+        return row
+
+    def _record_evidence_failure(self, failed_at_ms: int) -> None:
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            existing = con.execute(
+                "SELECT 1 FROM neg_risk_evidence_failures "
+                "WHERE component='incident'"
+            ).fetchone()
+            payload = {
+                "component": "incident",
+                "failed_at_ms": failed_at_ms,
+                "reason": "authority-invalid",
+                "recovered_at_ms": None,
+            }
+            _, row_hash = self._row_hash(payload)
+            batch = self._new_owner_batch()
+            self._execute_owner_mutation(
+                con,
+                batch,
+                table_name="neg_risk_evidence_failures",
+                operation="INSERT" if existing is None else "UPDATE",
+                row_key="incident",
+                sql=(
+                    "INSERT INTO neg_risk_evidence_failures("
+                    "component,failed_at_ms,reason,recovered_at_ms,row_hash"
+                    ") VALUES('incident',?,'authority-invalid',NULL,?) "
+                    "ON CONFLICT(component) DO UPDATE SET "
+                    "failed_at_ms=excluded.failed_at_ms,"
+                    "reason=excluded.reason,recovered_at_ms=NULL,"
+                    "row_hash=excluded.row_hash"
+                ),
+                parameters=(failed_at_ms, row_hash),
+            )
+            self._finalize_owner_batch(con, batch)
+            con.commit()
+        except (sqlite3.Error, TypeError, ValueError):
+            con.rollback()
+        finally:
+            con.close()
+
+    def _recover_evidence_failure(
+        self,
+        con: sqlite3.Connection,
+        owner_batch: dict[str, Any],
+        recovered_at_ms: int,
+    ) -> bool:
+        row = self._validate_evidence_failure(con, require_resolved=False)
+        if row is None or row["recovered_at_ms"] is not None:
+            return False
+        payload = {
+            "component": "incident",
+            "failed_at_ms": int(row["failed_at_ms"]),
+            "reason": str(row["reason"]),
+            "recovered_at_ms": recovered_at_ms,
+        }
+        _, row_hash = self._row_hash(payload)
+        self._execute_owner_mutation(
+            con,
+            owner_batch,
+            table_name="neg_risk_evidence_failures",
+            operation="UPDATE",
+            row_key="incident",
+            sql=(
+                "UPDATE neg_risk_evidence_failures SET recovered_at_ms=?,"
+                "row_hash=? WHERE component='incident'"
+            ),
+            parameters=(recovered_at_ms, row_hash),
+        )
+        return True
+
+    def _validate_bounded_suffix(self, con: sqlite3.Connection) -> None:
+        self._validate_suffix_authority(con)
+        incident_ids = tuple(
+            str(row["incident_id"])
+            for row in con.execute(
+                "SELECT DISTINCT incident_id FROM neg_risk_incident_events"
+            ).fetchall()
+        )
+        authority_by_id: dict[str, sqlite3.Row] = {}
+        if incident_ids:
+            placeholders = ",".join("?" for _ in incident_ids)
+            rows = con.execute(
+                "SELECT * FROM neg_risk_incident_open_authority "
+                f"WHERE incident_id IN ({placeholders})",
+                incident_ids,
+            ).fetchall()
+            for row in rows:
+                self._validate_open_authority_row(row)
+                authority_by_id[str(row["incident_id"])] = row
+        self._validate_retained_suffix(con, authority_by_id)
+
+    def _suffix_chain_values(
+        self,
+        con: sqlite3.Connection,
+    ) -> tuple[int, int | None, int | None, str]:
+        checkpoint = con.execute(
+            "SELECT prefix_hash FROM neg_risk_incident_authority_checkpoint "
+            "WHERE id=1"
+        ).fetchone()
+        previous_hash = (
+            "sha256:" + ("0" * 64)
+            if checkpoint is None
+            else str(checkpoint["prefix_hash"])
+        )
+        rows = con.execute(
+            "SELECT id,incident_id,sequence,scope,kind,state,occurred_at_ms,"
+            "evidence_json FROM neg_risk_incident_events ORDER BY id"
+        ).fetchall()
+        for row in rows:
+            previous_hash = self._suffix_event_hash(row, previous_hash)
+        return (
+            len(rows),
+            None if not rows else int(rows[0]["id"]),
+            None if not rows else int(rows[-1]["id"]),
+            previous_hash,
+        )
+
+    def _suffix_event_hash(
+        self,
+        row: sqlite3.Row,
+        previous_hash: str,
+    ) -> str:
+        payload = {
+            "evidence_json": str(row["evidence_json"]),
+            "event_id": int(row["id"]),
+            "incident_id": str(row["incident_id"]),
+            "kind": str(row["kind"]),
+            "occurred_at_ms": int(row["occurred_at_ms"]),
+            "previous_hash": previous_hash,
+            "scope": str(row["scope"]),
+            "sequence": int(row["sequence"]),
+            "state": str(row["state"]),
+        }
+        return self._row_hash(payload)[1]
+
+    def _validate_suffix_authority(self, con: sqlite3.Connection) -> None:
+        authority = con.execute(
+            "SELECT event_count,first_event_id,last_event_id,chain_hash "
+            "FROM neg_risk_incident_suffix_authority WHERE id=1"
+        ).fetchone()
+        if authority is None:
+            raise ValueError("invalid-incident-suffix-authority")
+        expected = self._suffix_chain_values(con)
+        actual = (
+            int(authority["event_count"]),
+            authority["first_event_id"],
+            authority["last_event_id"],
+            str(authority["chain_hash"]),
+        )
+        if actual != expected:
+            raise ValueError("invalid-incident-suffix-authority")
 
     def _validate_retained_suffix(
         self,
@@ -415,6 +960,7 @@ class IncidentManager:
             "evidence": incident.evidence,
             "incident_id": incident.id,
             "kind": incident.kind,
+            "detected_at_ms": int(row["detected_at_ms"]),
             "occurred_at_ms": incident.occurred_at_ms,
             "recovery_evidence": recovery_evidence,
             "recovery_occurred_at_ms": row["recovery_occurred_at_ms"],
@@ -423,7 +969,10 @@ class IncidentManager:
             "state": incident.state,
         }
         _, expected_hash = self._row_hash(payload)
-        if str(row["row_hash"]) != expected_hash:
+        if (
+            str(row["row_hash"]) != expected_hash
+            or int(row["detected_at_ms"]) > incident.occurred_at_ms
+        ):
             raise ValueError("invalid-incident-open-authority")
         return incident
 
@@ -460,6 +1009,26 @@ class IncidentManager:
             sort_keys=True,
         )
         return canonical, "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+    @staticmethod
+    def _bounded_count(
+        con: sqlite3.Connection,
+        table_name: str,
+        maximum: int,
+    ) -> int:
+        if table_name not in {
+            "neg_risk_incident_events",
+            "neg_risk_incident_open_authority",
+            "neg_risk_incident_replay_anchors",
+            "neg_risk_incident_scope_floors",
+        }:
+            raise ValueError("invalid-incident-count-table")
+        return int(
+            con.execute(
+                f'SELECT COUNT(*) FROM (SELECT 1 FROM "{table_name}" LIMIT ?)',
+                (maximum + 1,),
+            ).fetchone()[0]
+        )
 
     @staticmethod
     def _new_owner_batch() -> dict[str, Any]:
@@ -503,6 +1072,57 @@ class IncidentManager:
             finalize=True,
         )
 
+    def _sync_suffix_authority(
+        self,
+        con: sqlite3.Connection,
+        owner_batch: dict[str, Any] | None,
+        *,
+        appended_event: sqlite3.Row | None = None,
+    ) -> None:
+        authority = con.execute(
+            "SELECT event_count,first_event_id,last_event_id,chain_hash "
+            "FROM neg_risk_incident_suffix_authority WHERE id=1"
+        ).fetchone()
+        if appended_event is not None and authority is not None:
+            event_id = int(appended_event["id"])
+            event_count = int(authority["event_count"]) + 1
+            first_event_id = (
+                event_id
+                if authority["first_event_id"] is None
+                else int(authority["first_event_id"])
+            )
+            last_event_id = event_id
+            chain_hash = self._suffix_event_hash(
+                appended_event,
+                str(authority["chain_hash"]),
+            )
+        else:
+            event_count, first_event_id, last_event_id, chain_hash = (
+                self._suffix_chain_values(con)
+            )
+        self._execute_owner_mutation(
+            con,
+            owner_batch,
+            table_name="neg_risk_incident_suffix_authority",
+            operation="INSERT" if authority is None else "UPDATE",
+            row_key="1",
+            sql=(
+                "INSERT INTO neg_risk_incident_suffix_authority("
+                "id,event_count,first_event_id,last_event_id,chain_hash"
+                ") VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "event_count=excluded.event_count,"
+                "first_event_id=excluded.first_event_id,"
+                "last_event_id=excluded.last_event_id,"
+                "chain_hash=excluded.chain_hash"
+            ),
+            parameters=(
+                event_count,
+                first_event_id,
+                last_event_id,
+                chain_hash,
+            ),
+        )
+
     def _sync_open_authority(
         self,
         con: sqlite3.Connection,
@@ -514,7 +1134,7 @@ class IncidentManager:
             (event["incident_id"],),
         ).fetchone()
         aggregate = con.execute(
-            "SELECT open_count,aggregate_digest FROM "
+            "SELECT open_count,aggregate_digest,row_hash FROM "
             "neg_risk_incident_open_aggregate WHERE id=1"
         ).fetchone()
         count = 0 if aggregate is None else int(aggregate["open_count"])
@@ -537,6 +1157,13 @@ class IncidentManager:
             )
             count -= 1
         else:
+            if old is None and count >= INCIDENT_OPEN_AUTHORITY_MAX_ROWS:
+                raise ValueError("incident-open-authority-cap")
+            detected_at = (
+                int(event["occurred_at_ms"])
+                if old is None
+                else int(old["detected_at_ms"])
+            )
             recovery_at = (
                 int(event["occurred_at_ms"])
                 if event["state"] == "recovering"
@@ -551,6 +1178,7 @@ class IncidentManager:
                 "evidence": json.loads(str(event["evidence_json"])),
                 "incident_id": str(event["incident_id"]),
                 "kind": str(event["kind"]),
+                "detected_at_ms": detected_at,
                 "occurred_at_ms": int(event["occurred_at_ms"]),
                 "recovery_evidence": (
                     None if recovery_json is None else json.loads(str(recovery_json))
@@ -569,13 +1197,15 @@ class IncidentManager:
                 row_key=str(event["incident_id"]),
                 sql=(
                     "INSERT INTO neg_risk_incident_open_authority("
-                    "incident_id,sequence,scope,kind,state,occurred_at_ms,"
+                    "incident_id,sequence,scope,kind,state,detected_at_ms,"
+                    "occurred_at_ms,"
                     "evidence_json,recovery_occurred_at_ms,"
                     "recovery_evidence_json,row_hash"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?) "
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(incident_id) DO UPDATE SET "
                     "sequence=excluded.sequence,scope=excluded.scope,"
                     "kind=excluded.kind,state=excluded.state,"
+                    "detected_at_ms=excluded.detected_at_ms,"
                     "occurred_at_ms=excluded.occurred_at_ms,"
                     "evidence_json=excluded.evidence_json,"
                     "recovery_occurred_at_ms=excluded.recovery_occurred_at_ms,"
@@ -584,13 +1214,21 @@ class IncidentManager:
                 ),
                 parameters=(
                     event["incident_id"], event["sequence"], event["scope"],
-                    event["kind"], event["state"], event["occurred_at_ms"],
-                    event["evidence_json"], recovery_at, recovery_json, row_hash,
+                    event["kind"], event["state"], detected_at,
+                    event["occurred_at_ms"], event["evidence_json"], recovery_at,
+                    recovery_json, row_hash,
                 ),
             )
             digest ^= int(row_hash.removeprefix("sha256:"), 16)
             if old is None:
                 count += 1
+        aggregate_digest = f"{digest:064x}"
+        _, aggregate_hash = self._row_hash(
+            {
+                "aggregate_digest": aggregate_digest,
+                "open_count": count,
+            }
+        )
         self._execute_owner_mutation(
             con,
             owner_batch,
@@ -599,11 +1237,12 @@ class IncidentManager:
             row_key="1",
             sql=(
                 "INSERT INTO neg_risk_incident_open_aggregate("
-                "id,open_count,aggregate_digest) VALUES(1,?,?) "
+                "id,open_count,aggregate_digest,row_hash) VALUES(1,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET open_count=excluded.open_count,"
-                "aggregate_digest=excluded.aggregate_digest"
+                "aggregate_digest=excluded.aggregate_digest,"
+                "row_hash=excluded.row_hash"
             ),
-            parameters=(count, f"{digest:064x}"),
+            parameters=(count, aggregate_digest, aggregate_hash),
         )
 
     def _ensure_replay_anchor(
@@ -705,12 +1344,14 @@ class IncidentManager:
         self,
         con: sqlite3.Connection,
         owner_batch: dict[str, Any] | None,
-    ) -> None:
-        count = int(
-            con.execute("SELECT COUNT(*) FROM neg_risk_incident_events").fetchone()[0]
+    ) -> bool:
+        count = self._bounded_count(
+            con,
+            "neg_risk_incident_events",
+            512,
         )
         if count <= 512:
-            return
+            return False
         rows = con.execute(
             "SELECT * FROM neg_risk_incident_events ORDER BY id LIMIT ?",
             (count - 256,),
@@ -736,10 +1377,25 @@ class IncidentManager:
             0 if checkpoint is None else int(checkpoint["compacted_event_count"])
         )
         generation = 1 if checkpoint is None else int(checkpoint["generation"]) + 1
+        scope_floor_count = self._bounded_count(
+            con,
+            "neg_risk_incident_scope_floors",
+            INCIDENT_SCOPE_FLOOR_MAX_ROWS,
+        ) + sum(
+            con.execute(
+                "SELECT 1 FROM neg_risk_incident_scope_floors WHERE scope=?",
+                (scope,),
+            ).fetchone()
+            is None
+            for scope in scope_counts
+        )
+        if scope_floor_count > INCIDENT_SCOPE_FLOOR_MAX_ROWS:
+            raise ValueError("incident-scope-floor-cap")
         checkpoint_payload = {
             "compacted_event_count": compacted,
             "generation": generation,
             "prefix_hash": prefix_hash,
+            "scope_floor_count": scope_floor_count,
             "through_event_id": through,
         }
         _, checkpoint_hash = self._row_hash(checkpoint_payload)
@@ -752,38 +1408,63 @@ class IncidentManager:
             sql=(
                 "INSERT INTO neg_risk_incident_authority_checkpoint("
                 "id,generation,through_event_id,compacted_event_count,"
-                "prefix_hash,checkpoint_hash) VALUES(1,?,?,?,?,?) "
+                "scope_floor_count,prefix_hash,checkpoint_hash"
+                ") VALUES(1,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "generation=excluded.generation,"
                 "through_event_id=excluded.through_event_id,"
                 "compacted_event_count=excluded.compacted_event_count,"
+                "scope_floor_count=excluded.scope_floor_count,"
                 "prefix_hash=excluded.prefix_hash,"
                 "checkpoint_hash=excluded.checkpoint_hash"
             ),
-            parameters=(generation, through, compacted, prefix_hash, checkpoint_hash),
+            parameters=(
+                generation,
+                through,
+                compacted,
+                scope_floor_count,
+                prefix_hash,
+                checkpoint_hash,
+            ),
         )
         for scope, (event_id, deleted_count, floor_hash) in scope_counts.items():
-            floor_exists = con.execute(
-                "SELECT 1 FROM neg_risk_incident_scope_floors WHERE scope=?",
+            floor = con.execute(
+                "SELECT * FROM neg_risk_incident_scope_floors WHERE scope=?",
                 (scope,),
             ).fetchone()
+            compacted_event_count = deleted_count + (
+                0 if floor is None else int(floor["compacted_event_count"])
+            )
+            floor_payload = {
+                "compacted_event_count": compacted_event_count,
+                "floor_hash": floor_hash,
+                "scope": scope,
+                "through_event_id": event_id,
+            }
+            _, floor_row_hash = self._row_hash(floor_payload)
             self._execute_owner_mutation(
                 con,
                 owner_batch,
                 table_name="neg_risk_incident_scope_floors",
-                operation="INSERT" if floor_exists is None else "UPDATE",
+                operation="INSERT" if floor is None else "UPDATE",
                 row_key=scope,
                 sql=(
                     "INSERT INTO neg_risk_incident_scope_floors("
-                    "scope,through_event_id,compacted_event_count,floor_hash"
-                    ") VALUES(?,?,?,?) ON CONFLICT(scope) DO UPDATE SET "
+                    "scope,through_event_id,compacted_event_count,floor_hash,"
+                    "row_hash) VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(scope) DO UPDATE SET "
                     "through_event_id=excluded.through_event_id,"
-                    "compacted_event_count="
-                    "neg_risk_incident_scope_floors.compacted_event_count+"
-                    "excluded.compacted_event_count,"
-                    "floor_hash=excluded.floor_hash"
+                    "compacted_event_count=excluded.compacted_event_count,"
+                    "floor_hash=excluded.floor_hash,"
+                    "row_hash=excluded.row_hash"
                 ),
-                parameters=(scope, event_id, deleted_count, floor_hash),
+                parameters=(
+                    scope,
+                    event_id,
+                    compacted_event_count,
+                    floor_hash,
+                    floor_row_hash,
+                ),
             )
         deleted_by_identity = {
             (str(row["incident_id"]), int(row["sequence"])): row
@@ -862,6 +1543,7 @@ class IncidentManager:
             "DELETE FROM neg_risk_incident_events WHERE id<=?",
             (through,),
         )
+        return True
 
     def _bootstrap_v4_authority(self, con: sqlite3.Connection) -> None:
         for table in (
@@ -869,14 +1551,19 @@ class IncidentManager:
             "neg_risk_incident_open_authority",
             "neg_risk_incident_open_aggregate",
             "neg_risk_incident_scope_floors",
+            "neg_risk_incident_suffix_authority",
             "neg_risk_incident_replay_anchors",
         ):
             if con.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None:
                 raise ValueError("invalid-incident-migration-target")
         histories: dict[str, list[Incident]] = {}
         rows = con.execute(
-            "SELECT * FROM neg_risk_incident_events ORDER BY incident_id,sequence"
+            "SELECT * FROM neg_risk_incident_events "
+            "ORDER BY incident_id,sequence LIMIT ?",
+            (513,),
         ).fetchall()
+        if len(rows) > 512:
+            raise ValueError("incident-event-suffix-cap")
         for row in rows:
             event = self._from_row(row)
             history = histories.setdefault(event.id, [])
@@ -896,6 +1583,313 @@ class IncidentManager:
             history.append(event)
             self._sync_open_authority(con, row, None)
         self._compact_events(con, None)
+        if not rows:
+            aggregate_digest = "0" * 64
+            _, aggregate_hash = self._row_hash(
+                {
+                    "aggregate_digest": aggregate_digest,
+                    "open_count": 0,
+                }
+            )
+            con.execute(
+                "INSERT INTO neg_risk_incident_open_aggregate("
+                "id,open_count,aggregate_digest,row_hash) VALUES(1,0,?,?)",
+                (aggregate_digest, aggregate_hash),
+            )
+        self._sync_suffix_authority(con, None)
+
+    def _migrate_v4_to_v5_authority(self, con: sqlite3.Connection) -> None:
+        checkpoint = con.execute(
+            "SELECT * FROM neg_risk_incident_authority_checkpoint WHERE id=1"
+        ).fetchone()
+        if checkpoint is not None:
+            old_checkpoint_payload = {
+                "compacted_event_count": int(
+                    checkpoint["compacted_event_count"]
+                ),
+                "generation": int(checkpoint["generation"]),
+                "prefix_hash": str(checkpoint["prefix_hash"]),
+                "through_event_id": int(checkpoint["through_event_id"]),
+            }
+            if self._row_hash(old_checkpoint_payload)[1] != str(
+                checkpoint["checkpoint_hash"]
+            ):
+                raise ValueError("invalid-v4-incident-checkpoint")
+        raw_rows = con.execute(
+            "SELECT * FROM neg_risk_incident_events ORDER BY id LIMIT ?",
+            (513,),
+        ).fetchall()
+        if len(raw_rows) > 512:
+            raise ValueError("incident-event-suffix-cap")
+        for row in raw_rows:
+            self._from_row(row)
+        open_rows = con.execute(
+            "SELECT * FROM neg_risk_incident_open_authority "
+            "ORDER BY incident_id LIMIT ?",
+            (INCIDENT_OPEN_AUTHORITY_MAX_ROWS + 1,),
+        ).fetchall()
+        if len(open_rows) > INCIDENT_OPEN_AUTHORITY_MAX_ROWS:
+            raise ValueError("incident-open-authority-cap")
+        old_digest = 0
+        for row in open_rows:
+            incident = self._from_row(row)
+            recovery_json = row["recovery_evidence_json"]
+            recovery_evidence = (
+                None if recovery_json is None else json.loads(str(recovery_json))
+            )
+            old_payload = {
+                "evidence": incident.evidence,
+                "incident_id": incident.id,
+                "kind": incident.kind,
+                "occurred_at_ms": incident.occurred_at_ms,
+                "recovery_evidence": recovery_evidence,
+                "recovery_occurred_at_ms": row["recovery_occurred_at_ms"],
+                "scope": incident.scope,
+                "sequence": incident.sequence,
+                "state": incident.state,
+            }
+            _, expected_hash = self._row_hash(old_payload)
+            if str(row["row_hash"]) != expected_hash:
+                raise ValueError("invalid-v4-incident-open-authority")
+            old_digest ^= int(expected_hash.removeprefix("sha256:"), 16)
+        aggregate = con.execute(
+            "SELECT open_count,aggregate_digest FROM "
+            "neg_risk_incident_open_aggregate WHERE id=1"
+        ).fetchone()
+        if aggregate is not None and (
+            int(aggregate["open_count"]) != len(open_rows)
+            or str(aggregate["aggregate_digest"]) != f"{old_digest:064x}"
+        ):
+            raise ValueError("invalid-v4-incident-open-aggregate")
+        if aggregate is None and open_rows:
+            raise ValueError("invalid-v4-incident-open-aggregate")
+        floor_rows = con.execute(
+            "SELECT * FROM neg_risk_incident_scope_floors "
+            "ORDER BY scope LIMIT ?",
+            (INCIDENT_SCOPE_FLOOR_MAX_ROWS + 1,),
+        ).fetchall()
+        if len(floor_rows) > INCIDENT_SCOPE_FLOOR_MAX_ROWS:
+            raise ValueError("incident-scope-floor-cap")
+
+        con.execute("DROP INDEX idx_neg_risk_incident_open_page")
+        con.execute("DROP INDEX idx_neg_risk_incident_open_scope_kind")
+        for table in (
+            "neg_risk_incident_authority_checkpoint",
+            "neg_risk_incident_open_authority",
+            "neg_risk_incident_open_aggregate",
+            "neg_risk_incident_scope_floors",
+        ):
+            con.execute(f'ALTER TABLE "{table}" RENAME TO "{table}_v4"')
+        migration_ddl = """
+            CREATE TABLE neg_risk_incident_authority_checkpoint (
+              id INTEGER PRIMARY KEY CHECK(id=1),
+              generation INTEGER NOT NULL CHECK(generation >= 1),
+              through_event_id INTEGER NOT NULL CHECK(through_event_id >= 0),
+              compacted_event_count INTEGER NOT NULL
+                CHECK(compacted_event_count >= 0),
+              scope_floor_count INTEGER NOT NULL CHECK(scope_floor_count >= 0),
+              prefix_hash TEXT NOT NULL,
+              checkpoint_hash TEXT NOT NULL
+            );
+            CREATE TABLE neg_risk_incident_open_authority (
+              incident_id TEXT PRIMARY KEY,
+              sequence INTEGER NOT NULL CHECK(sequence >= 1),
+              scope TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              state TEXT NOT NULL CHECK(state IN
+                ('detected','classified','contained','recovering','escalated')),
+              detected_at_ms INTEGER NOT NULL CHECK(detected_at_ms >= 0),
+              occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+              evidence_json TEXT NOT NULL,
+              recovery_occurred_at_ms INTEGER,
+              recovery_evidence_json TEXT,
+              row_hash TEXT NOT NULL
+            );
+            CREATE INDEX idx_neg_risk_incident_open_page
+              ON neg_risk_incident_open_authority(occurred_at_ms DESC,incident_id DESC);
+            CREATE INDEX idx_neg_risk_incident_open_scope_kind
+              ON neg_risk_incident_open_authority(
+                scope,kind,occurred_at_ms DESC,incident_id DESC);
+            CREATE TABLE neg_risk_incident_open_aggregate (
+              id INTEGER PRIMARY KEY CHECK(id=1),
+              open_count INTEGER NOT NULL CHECK(open_count >= 0),
+              aggregate_digest TEXT NOT NULL,
+              row_hash TEXT NOT NULL
+            );
+            CREATE TABLE neg_risk_incident_scope_floors (
+              scope TEXT PRIMARY KEY,
+              through_event_id INTEGER NOT NULL CHECK(through_event_id > 0),
+              compacted_event_count INTEGER NOT NULL
+                CHECK(compacted_event_count > 0),
+              floor_hash TEXT NOT NULL,
+              row_hash TEXT NOT NULL
+            );
+            CREATE TABLE neg_risk_incident_suffix_authority (
+              id INTEGER PRIMARY KEY CHECK(id=1),
+              event_count INTEGER NOT NULL CHECK(event_count >= 0),
+              first_event_id INTEGER
+                CHECK(first_event_id IS NULL OR first_event_id > 0),
+              last_event_id INTEGER
+                CHECK(last_event_id IS NULL OR last_event_id > 0),
+              chain_hash TEXT NOT NULL,
+              CHECK(
+                (event_count=0 AND first_event_id IS NULL AND last_event_id IS NULL)
+                OR
+                (event_count>0 AND first_event_id IS NOT NULL
+                 AND last_event_id IS NOT NULL)
+              )
+            );
+            """
+        for statement in migration_ddl.split(";"):
+            if statement.strip():
+                con.execute(statement)
+        digest = 0
+        for row in open_rows:
+            incident = self._from_row(row)
+            detected_row = con.execute(
+                "SELECT MIN(occurred_at_ms) FROM neg_risk_incident_events "
+                "WHERE incident_id=?",
+                (incident.id,),
+            ).fetchone()
+            detected_at_ms = (
+                incident.occurred_at_ms
+                if detected_row[0] is None
+                else int(detected_row[0])
+            )
+            recovery_json = row["recovery_evidence_json"]
+            payload = {
+                "evidence": incident.evidence,
+                "incident_id": incident.id,
+                "kind": incident.kind,
+                "detected_at_ms": detected_at_ms,
+                "occurred_at_ms": incident.occurred_at_ms,
+                "recovery_evidence": (
+                    None
+                    if recovery_json is None
+                    else json.loads(str(recovery_json))
+                ),
+                "recovery_occurred_at_ms": row["recovery_occurred_at_ms"],
+                "scope": incident.scope,
+                "sequence": incident.sequence,
+                "state": incident.state,
+            }
+            _, row_hash = self._row_hash(payload)
+            con.execute(
+                "INSERT INTO neg_risk_incident_open_authority("
+                "incident_id,sequence,scope,kind,state,detected_at_ms,"
+                "occurred_at_ms,evidence_json,recovery_occurred_at_ms,"
+                "recovery_evidence_json,row_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    incident.id,
+                    incident.sequence,
+                    incident.scope,
+                    incident.kind,
+                    incident.state,
+                    detected_at_ms,
+                    incident.occurred_at_ms,
+                    row["evidence_json"],
+                    row["recovery_occurred_at_ms"],
+                    recovery_json,
+                    row_hash,
+                ),
+            )
+            digest ^= int(row_hash.removeprefix("sha256:"), 16)
+        aggregate_digest = f"{digest:064x}"
+        _, aggregate_hash = self._row_hash(
+            {
+                "aggregate_digest": aggregate_digest,
+                "open_count": len(open_rows),
+            }
+        )
+        con.execute(
+            "INSERT INTO neg_risk_incident_open_aggregate("
+            "id,open_count,aggregate_digest,row_hash) VALUES(1,?,?,?)",
+            (len(open_rows), aggregate_digest, aggregate_hash),
+        )
+        for row in floor_rows:
+            payload = {
+                "compacted_event_count": int(row["compacted_event_count"]),
+                "floor_hash": str(row["floor_hash"]),
+                "scope": str(row["scope"]),
+                "through_event_id": int(row["through_event_id"]),
+            }
+            _, row_hash = self._row_hash(payload)
+            con.execute(
+                "INSERT INTO neg_risk_incident_scope_floors("
+                "scope,through_event_id,compacted_event_count,floor_hash,row_hash"
+                ") VALUES(?,?,?,?,?)",
+                (
+                    row["scope"],
+                    row["through_event_id"],
+                    row["compacted_event_count"],
+                    row["floor_hash"],
+                    row_hash,
+                ),
+            )
+        if checkpoint is not None:
+            checkpoint_payload = {
+                "compacted_event_count": int(
+                    checkpoint["compacted_event_count"]
+                ),
+                "generation": int(checkpoint["generation"]),
+                "prefix_hash": str(checkpoint["prefix_hash"]),
+                "scope_floor_count": len(floor_rows),
+                "through_event_id": int(checkpoint["through_event_id"]),
+            }
+            _, checkpoint_hash = self._row_hash(checkpoint_payload)
+            con.execute(
+                "INSERT INTO neg_risk_incident_authority_checkpoint("
+                "id,generation,through_event_id,compacted_event_count,"
+                "scope_floor_count,prefix_hash,checkpoint_hash"
+                ") VALUES(1,?,?,?,?,?,?)",
+                (
+                    checkpoint["generation"],
+                    checkpoint["through_event_id"],
+                    checkpoint["compacted_event_count"],
+                    len(floor_rows),
+                    checkpoint["prefix_hash"],
+                    checkpoint_hash,
+                ),
+            )
+        self._sync_suffix_authority(con, None)
+        for table in (
+            "neg_risk_incident_authority_checkpoint_v4",
+            "neg_risk_incident_open_authority_v4",
+            "neg_risk_incident_open_aggregate_v4",
+            "neg_risk_incident_scope_floors_v4",
+        ):
+            con.execute(f'DROP TABLE "{table}"')
+
+    def _initialize_empty_v4_authority(self, con: sqlite3.Connection) -> None:
+        if con.execute(
+            "SELECT 1 FROM neg_risk_incident_events LIMIT 1"
+        ).fetchone() is not None:
+            raise ValueError("invalid-incident-bootstrap")
+        aggregate_digest = "0" * 64
+        _, aggregate_hash = self._row_hash(
+            {
+                "aggregate_digest": aggregate_digest,
+                "open_count": 0,
+            }
+        )
+        owner_batch = self._new_owner_batch()
+        if con.execute(
+            "SELECT 1 FROM neg_risk_incident_open_aggregate WHERE id=1"
+        ).fetchone() is None:
+            self._execute_owner_mutation(
+                con,
+                owner_batch,
+                table_name="neg_risk_incident_open_aggregate",
+                operation="INSERT",
+                row_key="1",
+                sql=(
+                    "INSERT INTO neg_risk_incident_open_aggregate("
+                    "id,open_count,aggregate_digest,row_hash) VALUES(1,0,?,?)"
+                ),
+                parameters=(aggregate_digest, aggregate_hash),
+            )
+        self._sync_suffix_authority(con, owner_batch)
+        self._finalize_owner_batch(con, owner_batch)
 
     def _has_recovery_proof(
         self,
@@ -1107,9 +2101,17 @@ class IncidentManager:
     @staticmethod
     def _json(value: dict[str, Any]) -> str:
         try:
-            return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            encoded = json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
         except (TypeError, ValueError) as error:
             raise ValueError("invalid-incident-evidence") from error
+        if len(encoded.encode("utf-8")) > INCIDENT_EVIDENCE_MAX_BYTES:
+            raise ValueError("incident-evidence-too-large")
+        return encoded
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> Incident:
@@ -1128,6 +2130,8 @@ class IncidentManager:
                 or row["sequence"] < 1
                 or type(row["occurred_at_ms"]) is not int
                 or row["occurred_at_ms"] < 0
+                or len(str(row["evidence_json"]).encode("utf-8"))
+                > INCIDENT_EVIDENCE_MAX_BYTES
                 or not isinstance(evidence, dict)
                 or not all(isinstance(key, str) for key in evidence)
             ):

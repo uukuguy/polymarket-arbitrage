@@ -33,6 +33,13 @@ function fmtAge(serverTimeMs: number, observedAtMs: number): string {
     : `${(seconds / 60).toFixed(1)}m`;
 }
 
+function fmtDurationMs(value: number): string {
+  const seconds = value / 1000;
+  return seconds < 60
+    ? `${seconds.toFixed(1)}s`
+    : `${(seconds / 60).toFixed(1)}m`;
+}
+
 function countStatus(
   statuses: PerceptionGroupStatus[],
   status: PerceptionGroupStatus,
@@ -351,12 +358,22 @@ export default async function PerceptionOverviewPage() {
 
       <section style={panel}>
         <h2 style={{ marginTop: 0 }}>
-          Open incidents ({status.open_incident_count})
+          Open incidents ({incidents.open_count})
         </h2>
         <p style={muted}>
           Latest incident states from a bounded page; verified terminal events
           are omitted.
         </p>
+        <p style={muted}>
+          Notification delivery is not tracked. These rows prove durable
+          lifecycle/operator state only; they do not claim that an alert
+          reached any external channel.
+        </p>
+        {incidents.next_before !== null && (
+          <p style={{ color: "#ffd47a" }}>
+            More open incidents exist before this bounded page.
+          </p>
+        )}
         {openIncidents.length === 0 ? (
           <p style={muted}>
             No open incident state was returned. The authoritative open count
@@ -372,6 +389,37 @@ export default async function PerceptionOverviewPage() {
               <div style={muted}>
                 {fmtTime(incident.occurred_at_ms)} · {incident.scope}
               </div>
+              <div style={muted}>
+                lifecycle {fmtDurationMs(incident.lifecycle_age_ms)} · action{" "}
+                {incident.action ?? "not recorded"} · retries{" "}
+                {incident.retry_count ?? "not recorded"}
+              </div>
+              <div style={muted}>
+                next retry {fmtTime(incident.next_retry_at_ms)} · recovery{" "}
+                {incident.recovery_occurred_at_ms === null
+                  ? "not started"
+                  : `started ${fmtTime(incident.recovery_occurred_at_ms)}`}
+              </div>
+              {incident.recovery_start_evidence !== null && (
+                <pre
+                  style={{
+                    ...muted,
+                    margin: "6px 0 0",
+                    overflowWrap: "anywhere",
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  recovery-start evidence{" "}
+                  {JSON.stringify(incident.recovery_start_evidence, null, 2)}
+                </pre>
+              )}
+              {incident.history_floor !== null && (
+                <div style={muted}>
+                  history compacted through event{" "}
+                  {incident.history_floor.through_event_id} (
+                  {incident.history_floor.compacted_event_count} rows for scope)
+                </div>
+              )}
             </div>
           ))
         )}

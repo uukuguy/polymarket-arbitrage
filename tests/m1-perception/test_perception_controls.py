@@ -14,6 +14,7 @@ from starlette.requests import Request
 
 from polyarb.perception import store as perception_store
 from polyarb.perception.discovery import DiscoveryRunner
+from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.reconciliation import ReconciliationRunner
 from polyarb.perception.store import OpportunityPerceptionStore
 
@@ -115,14 +116,12 @@ def test_perception_control_refuses_disabled_and_escalated_component(
     http_test_client.app.state.settings = daemon_settings_for_test.model_copy(
         update={"opportunity_discovery_enabled": True}
     )
-    db_path = http_test_client.app.state.sqlite_store.db_path
-    with sqlite3.connect(db_path) as con:
-        con.executemany(
-            "INSERT INTO neg_risk_incident_events("
-            "incident_id,sequence,scope,kind,state,occurred_at_ms,evidence_json"
-            ") VALUES('esc',?,'discovery','worker-failure',?,?,'{}')",
-            ((1, "detected", 1), (2, "classified", 2), (3, "escalated", 3)),
-        )
+    manager = IncidentManager(
+        OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    )
+    incident = manager.detect("discovery", "worker-failure", {})
+    manager.transition(incident.id, "classified", {})
+    manager.transition(incident.id, "escalated", {})
     response = _signed(http_test_client, "/control/perception/discovery")
     assert response.status_code == 409
     assert response.json() == {
@@ -138,17 +137,45 @@ def test_perception_control_refuses_every_active_component_incident(
         update={"opportunity_discovery_enabled": True}
     )
     db_path = http_test_client.app.state.sqlite_store.db_path
-    with sqlite3.connect(db_path) as con:
-        con.execute(
-            "INSERT INTO neg_risk_incident_events("
-            "incident_id,sequence,scope,kind,state,occurred_at_ms,evidence_json"
-            ") VALUES('active',1,'discovery','worker-failure','detected',1,'{}')"
-        )
+    IncidentManager(
+        OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    ).detect("discovery", "worker-failure", {})
     response = _signed(http_test_client, "/control/perception/discovery")
     assert response.status_code == 409
     assert response.json()["reason"] == "component-incident-active"
     with sqlite3.connect(db_path) as con:
         assert con.execute("SELECT COUNT(*) FROM neg_risk_operator_queue").fetchone() == (0,)
+
+
+def test_component_control_refuses_active_incident_after_suffix_compaction(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    active = manager.detect("discovery", "worker-failure", {})
+    for index in range(512):
+        manager.detect(
+            f"operator:compaction-{index}",
+            "manual-investigation",
+            {},
+        )
+
+    with store._connect() as con:
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_incident_open_authority WHERE incident_id=?",
+            (active.id,),
+        ).fetchone() is not None
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_incident_events WHERE incident_id=?",
+            (active.id,),
+        ).fetchone() is None
+        with pytest.raises(RuntimeError, match="component-incident-active"):
+            store._validate_component_control_permission(
+                con,
+                "discovery",
+                now_ms=2_000,
+            )
 
 
 def test_operator_queue_deadline_rolls_back_before_return(tmp_path) -> None:
@@ -706,13 +733,8 @@ def test_active_incident_prevents_consume_and_preserves_queue(
         http_test_client, "/control/perception/discovery"
     ).status_code == 202
     db_path = http_test_client.app.state.sqlite_store.db_path
-    with sqlite3.connect(db_path) as con:
-        con.execute(
-            "INSERT INTO neg_risk_incident_events("
-            "incident_id,sequence,scope,kind,state,occurred_at_ms,evidence_json"
-            ") VALUES('paused',1,'discovery','worker-failure','detected',1,'{}')"
-        )
     store = OpportunityPerceptionStore(db_path, busy_timeout_ms=250)
+    IncidentManager(store).detect("discovery", "worker-failure", {})
     assert not store.consume_operator_wakeup(
         "discovery", occurred_at_ms=int(time.time() * 1_000)
     )

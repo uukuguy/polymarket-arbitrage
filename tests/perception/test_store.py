@@ -27,6 +27,9 @@ from polyarb.storage.schemas import (
     V2_OWNER_MUTATION_GUARD_DDL,
     V3_OWNER_JOURNAL_TRIGGER_NAMES,
     V3_OWNER_MUTATION_GUARD_DDL,
+    V4_LEGACY_EVIDENCE_OWNER_DDL,
+    V4_LEGACY_OWNER_JOURNAL_TRIGGER_DDL,
+    V4_OWNER_MUTATION_GUARD_DDL,
 )
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -215,6 +218,7 @@ _V4_EVIDENCE_OWNER_TABLES = (
     "neg_risk_incident_open_authority",
     "neg_risk_incident_open_aggregate",
     "neg_risk_incident_scope_floors",
+    "neg_risk_incident_suffix_authority",
     "neg_risk_incident_replay_anchors",
     "neg_risk_resource_authority_checkpoint",
     "neg_risk_evidence_failures",
@@ -355,6 +359,77 @@ def _downgrade_owner_v3_fixture_to_v2(
     assert aggregate_trigger_names
 
 
+def _upgrade_v3_fixture_to_frozen_v4(
+    store: OpportunityPerceptionStore,
+) -> None:
+    with store._connect() as con:
+        guard = store._assert_v3_owner_journal_clean(con)
+        con.executescript(V4_LEGACY_EVIDENCE_OWNER_DDL)
+        digest = 0
+        rows = con.execute(
+            "SELECT * FROM neg_risk_incident_events "
+            "WHERE state!='verified' ORDER BY incident_id,sequence"
+        ).fetchall()
+        latest = {}
+        for row in rows:
+            latest[str(row["incident_id"])] = row
+        for row in latest.values():
+            evidence = json.loads(str(row["evidence_json"]))
+            payload = {
+                "evidence": evidence,
+                "incident_id": str(row["incident_id"]),
+                "kind": str(row["kind"]),
+                "occurred_at_ms": int(row["occurred_at_ms"]),
+                "recovery_evidence": None,
+                "recovery_occurred_at_ms": None,
+                "scope": str(row["scope"]),
+                "sequence": int(row["sequence"]),
+                "state": str(row["state"]),
+            }
+            _, row_hash = IncidentManager._row_hash(payload)
+            digest ^= int(row_hash.removeprefix("sha256:"), 16)
+            con.execute(
+                "INSERT INTO neg_risk_incident_open_authority("
+                "incident_id,sequence,scope,kind,state,occurred_at_ms,"
+                "evidence_json,recovery_occurred_at_ms,"
+                "recovery_evidence_json,row_hash) VALUES(?,?,?,?,?,?,?,NULL,NULL,?)",
+                (
+                    row["incident_id"],
+                    row["sequence"],
+                    row["scope"],
+                    row["kind"],
+                    row["state"],
+                    row["occurred_at_ms"],
+                    row["evidence_json"],
+                    row_hash,
+                ),
+            )
+        con.execute(
+            "INSERT INTO neg_risk_incident_open_aggregate("
+            "id,open_count,aggregate_digest) VALUES(1,?,?)",
+            (len(latest), f"{digest:064x}"),
+        )
+        con.executescript(V4_LEGACY_OWNER_JOURNAL_TRIGGER_DDL)
+        con.execute("DROP TABLE neg_risk_owner_mutation_guard")
+        con.execute(V4_OWNER_MUTATION_GUARD_DDL)
+        con.execute(
+            "INSERT INTO neg_risk_owner_mutation_guard("
+            "id,consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash,authority_version,migration_state"
+            ") VALUES(1,?,?,?,?,?,?,4,'complete')",
+            (
+                guard["consumed_journal_id"],
+                guard["consumed_hash"],
+                guard["retained_base_id"],
+                guard["retained_base_hash"],
+                guard["candidate_aggregate_hash"],
+                guard["discovery_aggregate_hash"],
+            ),
+        )
+        con.commit()
+
+
 def test_existing_v2_owner_authority_migrates_atomically_through_v3_to_v4(
     tmp_path: Path,
 ) -> None:
@@ -388,7 +463,7 @@ def test_existing_v2_owner_authority_migrates_atomically_through_v3_to_v4(
         "no_edge_count",
         "unavailable_count",
     } <= columns
-    assert tuple(guard) == (4, "complete")
+    assert tuple(guard) == (5, "complete")
     assert store.candidate_current_summary().state_counts == {
         "watching": 1,
         "no-edge": 0,
@@ -431,7 +506,7 @@ def test_fresh_owner_v4_manifest_covers_bounded_evidence_authorities(
             )
         }
 
-    assert tuple(guard) == (4, "complete")
+    assert tuple(guard) == (5, "complete")
     assert expected_tables <= covered_tables
 
 
@@ -463,9 +538,73 @@ def test_existing_v3_owner_authority_migrates_atomically_to_v4(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-    assert tuple(guard) == (4, "complete")
+    assert tuple(guard) == (5, "complete")
     assert set(_V4_EVIDENCE_OWNER_TABLES) <= tables
     assert store.candidate_current_summary().opportunity_count == 1
+
+
+def test_frozen_v4_owner_authority_migrates_atomically_to_v5(
+    tmp_path: Path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    incident = IncidentManager(store, clock_ms=lambda: 2_000).detect(
+        "discovery",
+        "frozen-v4",
+        {"cursor": "legacy"},
+    )
+    _downgrade_owner_v4_fixture_to_v3(store)
+    _upgrade_v3_fixture_to_frozen_v4(store)
+
+    class MigrationTraceStore(OpportunityPerceptionStore):
+        def __init__(self, db_path: Path) -> None:
+            super().__init__(db_path)
+            self.statements: list[str] = []
+
+        def _connect(self) -> sqlite3.Connection:
+            con = super()._connect()
+            con.set_trace_callback(self.statements.append)
+            return con
+
+    migrated = MigrationTraceStore(store.db_path)
+    migrated.init_schema()
+    migrated.init_schema()
+
+    with migrated._connect() as con:
+        guard = con.execute(
+            "SELECT authority_version,migration_state "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        authority = con.execute(
+            "SELECT detected_at_ms FROM neg_risk_incident_open_authority "
+            "WHERE incident_id=?",
+            (incident.id,),
+        ).fetchone()
+        suffix = con.execute(
+            "SELECT event_count FROM neg_risk_incident_suffix_authority WHERE id=1"
+        ).fetchone()
+    assert tuple(guard) == (5, "complete")
+    assert authority["detected_at_ms"] == 2_000
+    assert suffix["event_count"] == 1
+    assert IncidentManager(migrated).open_incident_status()[0] == 1
+    migration_reads = tuple(
+        " ".join(statement.split())
+        for statement in migrated.statements
+        if statement.lstrip().upper().startswith("SELECT")
+    )
+    assert any(
+        "neg_risk_incident_events ORDER BY id LIMIT 513" in statement
+        for statement in migration_reads
+    )
+    assert any(
+        "neg_risk_incident_open_authority ORDER BY incident_id LIMIT 4097"
+        in statement
+        for statement in migration_reads
+    )
+    assert any(
+        "neg_risk_incident_scope_floors ORDER BY scope LIMIT 8193" in statement
+        for statement in migration_reads
+    )
 
 
 def test_v3_owner_migration_backfills_existing_open_incident_authority(
@@ -775,7 +914,7 @@ def test_concurrent_v2_owner_migrations_converge_to_one_v4(
             "SELECT authority_version,migration_state "
             "FROM neg_risk_owner_mutation_guard WHERE id=1"
         ).fetchone()
-    assert tuple(guard) == (4, "complete")
+    assert tuple(guard) == (5, "complete")
 
 
 def test_v2_owner_migration_backfills_from_compacted_retained_seed(
@@ -1460,8 +1599,8 @@ def test_owner_table_schema_fingerprint_rejects_semantic_drift(
                 "id INTEGER CHECK(id = 1)",
                 ),
                 "check": (
-                    "CHECK(authority_version = 4)",
-                    "CHECK(authority_version >= 4)",
+                    "CHECK(authority_version = 5)",
+                    "CHECK(authority_version >= 5)",
             ),
             "order": (
                 "candidate_aggregate_hash TEXT,\n  discovery_aggregate_hash TEXT",
@@ -1627,7 +1766,7 @@ def test_a527_owner_window_migrates_atomically_to_v4(
             "SELECT authority_version,migration_state,candidate_aggregate_hash,"
             "discovery_aggregate_hash FROM neg_risk_owner_mutation_guard WHERE id=1"
         ).fetchone()
-        assert tuple(guard[:2]) == (4, "complete")
+        assert tuple(guard[:2]) == (5, "complete")
         assert guard["candidate_aggregate_hash"] is not None
         assert guard["discovery_aggregate_hash"] is not None
         assert con.execute(
@@ -1730,7 +1869,7 @@ def test_concurrent_a527_owner_migrations_converge_to_one_v4_guard(
             "SELECT authority_version,migration_state "
             "FROM neg_risk_owner_mutation_guard WHERE id=1"
         ).fetchone()
-        assert tuple(guard) == (4, "complete")
+        assert tuple(guard) == (5, "complete")
         assert con.execute(
             "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
         ).fetchone()[0] <= 128

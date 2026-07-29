@@ -249,6 +249,23 @@ export interface PerceptionIncident {
     | "verified"
     | "escalated";
   occurred_at_ms: number;
+  detected_at_ms: number;
+  lifecycle_age_ms: number;
+  action:
+    | "classify-producer-failure"
+    | "operator-intervention"
+    | "restart-producer"
+    | "retry-producer"
+    | null;
+  retry_count: number | null;
+  next_retry_at_ms: number | null;
+  recovery_occurred_at_ms: number | null;
+  recovery_start_evidence: Record<string, unknown> | null;
+  history_floor: {
+    through_event_id: number;
+    compacted_event_count: number;
+  } | null;
+  notification_delivery_tracked: false;
   evidence: Record<string, unknown>;
 }
 
@@ -256,6 +273,8 @@ export interface PerceptionIncidentsEnvelope {
   status: "available";
   items: PerceptionIncident[];
   limit: number;
+  open_count: number;
+  next_before: string | null;
 }
 
 export interface PerceptionOverview {

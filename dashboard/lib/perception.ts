@@ -381,7 +381,26 @@ function isIncident(value: unknown): boolean {
       "verified",
       "escalated",
     ].includes(String(value.state)) &&
+    isNonNegativeInteger(value.detected_at_ms) &&
     typeof value.occurred_at_ms === "number" &&
+    isNonNegativeInteger(value.lifecycle_age_ms) &&
+    (value.action === null ||
+      [
+        "classify-producer-failure",
+        "operator-intervention",
+        "restart-producer",
+        "retry-producer",
+      ].includes(String(value.action))) &&
+    isNonNegativeIntegerOrNull(value.retry_count) &&
+    isNonNegativeIntegerOrNull(value.next_retry_at_ms) &&
+    isNonNegativeIntegerOrNull(value.recovery_occurred_at_ms) &&
+    (value.recovery_start_evidence === null ||
+      isRecord(value.recovery_start_evidence)) &&
+    (value.history_floor === null ||
+      (isRecord(value.history_floor) &&
+        isNonNegativeInteger(value.history_floor.through_event_id) &&
+        isNonNegativeInteger(value.history_floor.compacted_event_count))) &&
+    value.notification_delivery_tracked === false &&
     isRecord(value.evidence)
   );
 }
@@ -394,7 +413,9 @@ function isIncidentsEnvelope(
     value.status === "available" &&
     Array.isArray(value.items) &&
     value.items.every(isIncident) &&
-    typeof value.limit === "number"
+    typeof value.limit === "number" &&
+    isNonNegativeInteger(value.open_count) &&
+    (value.next_before === null || typeof value.next_before === "string")
   );
 }
 

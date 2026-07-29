@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+import polyarb.perception.incidents as incident_module
 from polyarb.http.health import read_perception_recovery_health
 from polyarb.perception.http_probe import BoundedHttpProbeWriter
 from polyarb.perception.incidents import (
@@ -347,6 +348,151 @@ def test_historical_non_object_incident_evidence_fails_closed(tmp_path) -> None:
     assert read_perception_recovery_health(store.db_path).evidence_consistent is False
 
 
+def test_incident_evidence_is_bounded_at_write_boundary(tmp_path) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    canonical_overhead = len(b'{"payload":""}')
+    accepted = manager.detect(
+        "operator:exact-boundary",
+        "manual-investigation",
+        {"payload": "x" * (4_096 - canonical_overhead)},
+    )
+
+    with pytest.raises(ValueError, match="incident-evidence-too-large"):
+        manager.detect(
+            "operator:oversized",
+            "manual-investigation",
+            {"payload": "x" * 4_096},
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert accepted.evidence["payload"]
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_incident_events "
+            "WHERE scope='operator:oversized'"
+        ).fetchone() is None
+
+
+def test_retained_suffix_valid_json_tamper_fails_closed(tmp_path) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    incident = manager.detect(
+        "candidate:valid-json-tamper",
+        "clob-timeout",
+        {"original": True},
+    )
+    manager.transition(incident.id, "classified", {"classification": "upstream"})
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_incident_events SET evidence_json=? "
+            "WHERE incident_id=? AND sequence=1",
+            ('{"forged":true}', incident.id),
+        )
+
+    with pytest.raises(ValueError, match="invalid-incident"):
+        manager.open_incident_status()
+    with pytest.raises(ValueError, match="invalid-incident"):
+        manager.open_incidents()
+    with pytest.raises(ValueError, match="invalid-incident"):
+        manager.group_incident_history("valid-json-tamper", limit=10)
+    assert read_perception_recovery_health(store.db_path).evidence_consistent is False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "DELETE FROM neg_risk_incident_open_aggregate WHERE id=1",
+        "UPDATE neg_risk_incident_open_aggregate SET open_count=0 WHERE id=1",
+        "UPDATE neg_risk_incident_open_aggregate "
+        "SET aggregate_digest=printf('%064d',0) WHERE id=1",
+    ),
+)
+def test_open_aggregate_tamper_fails_closed_after_trigger_is_restored(
+    tmp_path,
+    mutation: str,
+) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    manager.detect("candidate:aggregate-tamper", "clob-timeout", {})
+    operation = "delete" if mutation.startswith("DELETE") else "update"
+    trigger_name = f"trg_owner_incident_open_aggregate_{operation}"
+    with sqlite3.connect(store.db_path) as con:
+        trigger_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger_name,),
+        ).fetchone()[0]
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(mutation)
+        con.execute(trigger_sql)
+
+    with pytest.raises(ValueError, match="invalid-incident-open-aggregate"):
+        manager.open_incident_status()
+    assert read_perception_recovery_health(store.db_path).evidence_consistent is False
+
+
+def test_compacted_open_leaf_deletion_fails_closed_after_trigger_is_restored(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    target = manager.detect("candidate:deleted-open-leaf", "clob-timeout", {})
+    for sequence in range(513):
+        manager.detect(
+            f"operator:open-leaf-pressure-{sequence}",
+            "manual-investigation",
+            {"sequence": sequence},
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_incident_events WHERE incident_id=?",
+            (target.id,),
+        ).fetchone() is None
+        trigger_name = "trg_owner_incident_open_authority_delete"
+        trigger_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger_name,),
+        ).fetchone()[0]
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "DELETE FROM neg_risk_incident_open_authority WHERE incident_id=?",
+            (target.id,),
+        )
+        con.execute(trigger_sql)
+
+    with pytest.raises(ValueError, match="invalid-incident-open-aggregate"):
+        manager.open_incident_status()
+    assert read_perception_recovery_health(store.db_path).evidence_consistent is False
+
+
+def test_empty_v5_singleton_deletion_fails_closed_instead_of_bootstrapping(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    trigger_name = "trg_owner_incident_open_aggregate_delete"
+    with sqlite3.connect(store.db_path) as con:
+        trigger_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger_name,),
+        ).fetchone()[0]
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute("DELETE FROM neg_risk_incident_open_aggregate WHERE id=1")
+        con.execute(trigger_sql)
+
+    with pytest.raises(ValueError, match="invalid-incident-open-aggregate"):
+        manager.detect("operator:must-not-bootstrap", "manual-investigation", {})
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_incident_open_aggregate WHERE id=1"
+        ).fetchone() is None
+        assert con.execute(
+            "SELECT reason,recovered_at_ms FROM neg_risk_evidence_failures "
+            "WHERE component='incident'"
+        ).fetchone() == ("authority-invalid", None)
+    with pytest.raises(ValueError, match="unresolved-incident-evidence-failure"):
+        manager.open_incidents()
+
+
 def test_incident_writer_compacts_suffix_and_preserves_open_authority(
     tmp_path,
 ) -> None:
@@ -389,6 +535,109 @@ def test_incident_writer_compacts_suffix_and_preserves_open_authority(
             "SELECT generation FROM "
             "neg_risk_incident_authority_checkpoint WHERE id=1"
         ).fetchone()["generation"] >= 1
+
+
+def test_open_authority_hard_cap_rolls_back_new_incident(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(incident_module, "INCIDENT_OPEN_AUTHORITY_MAX_ROWS", 1)
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    manager.detect("operator:within-cap", "manual-investigation", {})
+
+    with pytest.raises(ValueError, match="incident-open-authority-cap"):
+        manager.detect("operator:over-cap", "manual-investigation", {})
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_open_authority"
+        ).fetchone()[0] == 1
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_incident_events WHERE scope='operator:over-cap'"
+        ).fetchone() is None
+
+
+def test_open_incidents_validates_bounded_count_before_reading_rows(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    manager.detect("operator:count-first", "manual-investigation", {})
+    statements: list[str] = []
+    con = sqlite3.connect(store.db_path)
+    con.row_factory = sqlite3.Row
+    con.set_trace_callback(statements.append)
+    monkeypatch.setattr(manager, "_connect", lambda **_kwargs: con)
+
+    def reject_before_open_read(_con: sqlite3.Connection) -> sqlite3.Row:
+        raise RuntimeError("count-first")
+
+    monkeypatch.setattr(manager, "_validated_open_aggregate", reject_before_open_read)
+
+    with pytest.raises(RuntimeError, match="count-first"):
+        manager.open_incidents()
+
+    assert not any(
+        "FROM neg_risk_incident_open_authority ORDER BY occurred_at_ms"
+        in " ".join(statement.split())
+        for statement in statements
+    )
+
+
+def test_scope_floor_hard_cap_prevents_unbounded_compaction(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(incident_module, "INCIDENT_SCOPE_FLOOR_MAX_ROWS", 1)
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    with sqlite3.connect(store.db_path) as con:
+        con.row_factory = sqlite3.Row
+        for event_id in range(1, 514):
+            con.execute(
+                "INSERT INTO neg_risk_incident_events("
+                "incident_id,sequence,scope,kind,state,occurred_at_ms,evidence_json"
+                ") VALUES(?,1,?,'manual-investigation','detected',1,'{}')",
+                (
+                    f"cap-{event_id}",
+                    f"operator:floor-cap-{event_id % 2}",
+                ),
+            )
+        with pytest.raises(ValueError, match="incident-scope-floor-cap"):
+            manager._compact_events(con, None)
+        con.rollback()
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_scope_floors"
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_incident_authority_checkpoint"
+        ).fetchone()[0] == 0
+
+
+def test_ordinary_append_advances_suffix_chain_without_second_full_scan(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    manager.detect("operator:first", "manual-investigation", {})
+    original = manager._suffix_chain_values
+    calls = 0
+
+    def counted(con):
+        nonlocal calls
+        calls += 1
+        return original(con)
+
+    monkeypatch.setattr(manager, "_suffix_chain_values", counted)
+    manager.detect("operator:second", "manual-investigation", {})
+
+    assert calls == 1
+    assert manager.open_incident_status()[0] == 2
 
 
 def test_open_incident_can_transition_after_latest_event_is_compacted(
@@ -556,7 +805,258 @@ def test_checkpoint_content_tamper_fails_closed_after_trigger_is_restored(
         manager.open_incidents()
 
 
-def test_candidate_recovery_rejects_malformed_complete_quote_row(tmp_path) -> None:
+def test_scope_floor_content_tamper_fails_closed_after_trigger_is_restored(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    group_id = "floor-tamper"
+    manager.detect(f"candidate:{group_id}", "clob-timeout", {})
+    for sequence in range(513):
+        manager.detect(
+            f"candidate:floor-pressure-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+    trigger_name = "trg_owner_incident_scope_floors_update"
+    with sqlite3.connect(store.db_path) as con:
+        trigger_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger_name,),
+        ).fetchone()[0]
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "UPDATE neg_risk_incident_scope_floors "
+            "SET compacted_event_count=compacted_event_count+1 WHERE scope=?",
+            (f"candidate:{group_id}",),
+        )
+        con.execute(trigger_sql)
+
+    with pytest.raises(ValueError, match="invalid-incident-scope-floor"):
+        manager.group_incident_history(group_id, limit=10)
+
+
+def test_scope_floor_deletion_fails_closed_after_trigger_is_restored(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    group_id = "floor-delete"
+    manager.detect(f"candidate:{group_id}", "clob-timeout", {})
+    for sequence in range(513):
+        manager.detect(
+            f"candidate:floor-delete-pressure-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+    trigger_name = "trg_owner_incident_scope_floors_delete"
+    with sqlite3.connect(store.db_path) as con:
+        trigger_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger_name,),
+        ).fetchone()[0]
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "DELETE FROM neg_risk_incident_scope_floors WHERE scope=?",
+            (f"candidate:{group_id}",),
+        )
+        con.execute(trigger_sql)
+
+    with pytest.raises(ValueError, match="invalid-incident-checkpoint"):
+        manager.group_incident_history(group_id, limit=10)
+
+
+def test_writer_rolls_back_and_tracks_checkpoint_failure_until_recovery(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    for sequence in range(513):
+        manager.detect(
+            f"candidate:writer-failure-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+    trigger_name = "trg_owner_incident_authority_checkpoint_update"
+    with sqlite3.connect(store.db_path) as con:
+        original_prefix = con.execute(
+            "SELECT prefix_hash FROM neg_risk_incident_authority_checkpoint"
+        ).fetchone()[0]
+        trigger_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger_name,),
+        ).fetchone()[0]
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "UPDATE neg_risk_incident_authority_checkpoint "
+            "SET prefix_hash='sha256:forged'"
+        )
+        con.execute(trigger_sql)
+
+    now[0] += 1
+    with pytest.raises(ValueError, match="invalid-incident-checkpoint"):
+        manager.detect("operator:must-rollback", "manual-investigation", {})
+    with sqlite3.connect(store.db_path) as con:
+        failure = con.execute(
+            "SELECT reason,recovered_at_ms FROM neg_risk_evidence_failures "
+            "WHERE component='incident'"
+        ).fetchone()
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_incident_open_authority "
+            "WHERE scope='operator:must-rollback'"
+        ).fetchone() is None
+    assert failure == ("authority-invalid", None)
+
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "UPDATE neg_risk_incident_authority_checkpoint SET prefix_hash=?",
+            (original_prefix,),
+        )
+        con.execute(trigger_sql)
+    now[0] += 1
+    manager.detect("operator:recovered", "manual-investigation", {})
+    with sqlite3.connect(store.db_path) as con:
+        recovered_at_ms = con.execute(
+            "SELECT recovered_at_ms FROM neg_risk_evidence_failures "
+            "WHERE component='incident'"
+        ).fetchone()[0]
+    assert recovered_at_ms == now[0]
+
+
+def test_idempotent_detect_recovers_breadcrumb_after_authority_repair(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    incident = manager.detect("operator:idempotent", "manual-investigation", {})
+    trigger_name = "trg_owner_incident_open_aggregate_update"
+    with sqlite3.connect(store.db_path) as con:
+        original_hash = con.execute(
+            "SELECT row_hash FROM neg_risk_incident_open_aggregate WHERE id=1"
+        ).fetchone()[0]
+        trigger_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger_name,),
+        ).fetchone()[0]
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "UPDATE neg_risk_incident_open_aggregate SET row_hash='sha256:forged'"
+        )
+        con.execute(trigger_sql)
+    now[0] += 1
+    with pytest.raises(ValueError, match="invalid-incident-open-aggregate"):
+        manager.detect("operator:idempotent", "manual-investigation", {})
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "UPDATE neg_risk_incident_open_aggregate SET row_hash=?",
+            (original_hash,),
+        )
+        con.execute(trigger_sql)
+
+    now[0] += 1
+    duplicate = manager.detect(
+        "operator:idempotent",
+        "manual-investigation",
+        {"ignored": True},
+    )
+
+    assert duplicate.id == incident.id
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT recovered_at_ms FROM neg_risk_evidence_failures "
+            "WHERE component='incident'"
+        ).fetchone()[0] == now[0]
+
+
+def test_post_append_authority_failure_rolls_back_and_records_breadcrumb(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+
+    def fail_suffix_sync(*_args, **_kwargs) -> None:
+        raise ValueError("forced-suffix-authority-failure")
+
+    monkeypatch.setattr(manager, "_sync_suffix_authority", fail_suffix_sync)
+    with pytest.raises(ValueError, match="forced-suffix-authority-failure"):
+        manager.detect("operator:post-append", "manual-investigation", {})
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT 1 FROM neg_risk_incident_events "
+            "WHERE scope='operator:post-append'"
+        ).fetchone() is None
+        assert con.execute(
+            "SELECT reason,recovered_at_ms FROM neg_risk_evidence_failures "
+            "WHERE component='incident'"
+        ).fetchone() == ("authority-invalid", None)
+    with pytest.raises(ValueError, match="unresolved-incident-evidence-failure"):
+        manager.open_incidents()
+
+
+def test_health_does_not_infer_other_scope_from_duplicate_candidate_incidents(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    manager.detect("candidate:g-a", "clob-timeout", {})
+    manager.detect("candidate:g-b", "clob-timeout", {})
+
+    health = read_perception_recovery_health(store.db_path)
+
+    assert health.open_count == 2
+    assert health.scopes == ("candidate",)
+
+
+def test_group_history_is_exact_scope_keyset_not_global_page_filter(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    target = manager.detect("candidate:g-exact", "clob-timeout", {})
+    now[0] += 1
+    manager.transition(target.id, "classified", {})
+    for sequence in range(100):
+        now[0] += 1
+        manager.detect(
+            f"candidate:other-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+    manager.detect("candidate:g-exact-suffix", "clob-timeout", {})
+
+    first = store.group_incident_history("g-exact", limit=1)
+    second = store.group_incident_history(
+        "g-exact",
+        limit=1,
+        before_event_id=first.next_before_event_id,
+    )
+
+    assert [item.incident.state for item in first.items] == ["classified"]
+    assert [item.incident.state for item in second.items] == ["detected"]
+    assert second.next_before_event_id is None
+    assert all(item.incident.scope == "candidate:g-exact" for item in first.items)
+    with sqlite3.connect(store.db_path) as con:
+        plan = tuple(
+            row[3]
+            for row in con.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM neg_risk_incident_events "
+                "WHERE scope=? AND id<? ORDER BY id DESC LIMIT ?",
+                ("candidate:g-exact", 10_000, 2),
+            )
+        )
+    assert any("idx_neg_risk_incident_scope_page" in detail for detail in plan)
+
+
+def test_candidate_recovery_fails_before_transition_on_owner_journal_tamper(
+    tmp_path,
+) -> None:
     store = _store(tmp_path)
     now = [2_000]
     manager = IncidentManager(store, clock_ms=lambda: now[0])
@@ -575,7 +1075,7 @@ def test_candidate_recovery_rejects_malformed_complete_quote_row(tmp_path) -> No
             (json.dumps(malformed),),
         )
     now[0] = 2_200
-    with pytest.raises(RecoveryEvidenceRequiredError):
+    with pytest.raises(ValueError, match="pending-owner-mutation"):
         manager.transition(
             incident.id,
             "verified",
@@ -585,3 +1085,9 @@ def test_candidate_recovery_rejects_malformed_complete_quote_row(tmp_path) -> No
                 "membership_hash": revision.membership_hash,
             },
         )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT MAX(sequence) FROM neg_risk_incident_events "
+            "WHERE incident_id=?",
+            (incident.id,),
+        ).fetchone()[0] == 4

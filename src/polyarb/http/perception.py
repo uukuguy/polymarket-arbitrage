@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextvars
 import json
 import re
@@ -474,17 +476,23 @@ def _read_incident_history(con: sqlite3.Connection, db_path: Path) -> list[dict[
 
 
 def _status(db_path: Path) -> dict[str, Any]:
+    from polyarb.perception.incidents import IncidentManager
+
     con = _connect(db_path)
     try:
         con.execute("BEGIN")
-        incidents = _read_incident_history(con, db_path)
-        if any(
-            item["state"] != "verified"
-            and (item["scope"] == "candidate" or item["scope"].startswith("candidate:"))
-            for item in incidents
-        ):
+        store = _read_store(db_path)
+        (
+            open_incident_count,
+            candidate_incident_open,
+            _http_incident_open,
+            _other_incident_open,
+        ) = IncidentManager(
+            store
+        ).open_incident_status(_connection=con)
+        if candidate_incident_open:
             raise ValueError("candidate-worker-unavailable")
-        summary = _read_store(db_path).candidate_current_summary(
+        summary = store.candidate_current_summary(
             _connection=con
         )
         count = summary.opportunity_count
@@ -500,7 +508,7 @@ def _status(db_path: Path) -> dict[str, Any]:
                 "count": count,
                 "reason": "certified-edge" if count else "no-certified-edge",
             },
-            "open_incident_count": sum(item["state"] != "verified" for item in incidents),
+            "open_incident_count": open_incident_count,
         }
     finally:
         con.close()
@@ -825,12 +833,125 @@ def _reconciliation(db_path: Path) -> dict[str, Any]:
     }
 
 
-def _incidents(db_path: Path, limit: int) -> dict[str, Any]:
+def _encode_incident_cursor(value: tuple[int, str]) -> str:
+    payload = json.dumps(
+        [value[0], value[1]],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_incident_cursor(value: str | None) -> tuple[int, str] | None:
+    if value is None:
+        return None
+    if not value or len(value) > 256:
+        raise ValueError("before-must-be-an-opaque-incident-cursor")
+    try:
+        payload = base64.b64decode(
+            value + "=" * (-len(value) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        decoded = json.loads(payload)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("before-must-be-an-opaque-incident-cursor") from error
+    if (
+        not isinstance(decoded, list)
+        or len(decoded) != 2
+        or type(decoded[0]) is not int
+        or decoded[0] < 0
+        or not isinstance(decoded[1], str)
+        or not decoded[1]
+    ):
+        raise ValueError("before-must-be-an-opaque-incident-cursor")
+    return decoded[0], decoded[1]
+
+
+def _incidents(
+    db_path: Path,
+    limit: int,
+    before: tuple[int, str] | None,
+) -> dict[str, Any]:
+    from polyarb.perception.incidents import IncidentManager
+
+    canonical_actions = {
+        "classify-producer-failure",
+        "operator-intervention",
+        "restart-producer",
+        "retry-producer",
+    }
     con = _connect(db_path)
     try:
-        latest = _read_incident_history(con, db_path)
-        latest.sort(key=lambda item: (item["occurred_at_ms"], item["incident_id"]), reverse=True)
-        return {"status": "available", "items": latest[:limit], "limit": limit}
+        con.execute("BEGIN")
+        page = IncidentManager(_read_store(db_path)).open_incident_page(
+            limit=limit,
+            before=before,
+            _connection=con,
+        )
+        con.execute("COMMIT")
+        now_ms = int(time.time() * 1_000)
+        return {
+            "status": "available",
+            "items": [
+                {
+                    "incident_id": item.incident.id,
+                    "sequence": item.incident.sequence,
+                    "scope": item.incident.scope,
+                    "kind": item.incident.kind,
+                    "state": item.incident.state,
+                    "detected_at_ms": item.detected_at_ms,
+                    "occurred_at_ms": item.incident.occurred_at_ms,
+                    "lifecycle_age_ms": max(0, now_ms - item.detected_at_ms),
+                    "action": (
+                        item.incident.evidence.get("action")
+                        if item.incident.evidence.get("action")
+                        in canonical_actions
+                        else None
+                    ),
+                    "retry_count": (
+                        item.incident.evidence.get("retry_count")
+                        if type(item.incident.evidence.get("retry_count")) is int
+                        and item.incident.evidence["retry_count"] >= 0
+                        else (
+                            item.incident.evidence.get("retry")
+                            if type(item.incident.evidence.get("retry")) is int
+                            and item.incident.evidence["retry"] >= 0
+                            else None
+                        )
+                    ),
+                    "next_retry_at_ms": (
+                        item.incident.evidence.get("next_retry_at_ms")
+                        if type(item.incident.evidence.get("next_retry_at_ms")) is int
+                        and item.incident.evidence["next_retry_at_ms"] >= 0
+                        else None
+                    ),
+                    "recovery_start_evidence": _safe_evidence(
+                        item.recovery_evidence
+                    ),
+                    "recovery_occurred_at_ms": item.recovery_occurred_at_ms,
+                    "history_floor": (
+                        None
+                        if item.history_floor_event_id is None
+                        else {
+                            "through_event_id": item.history_floor_event_id,
+                            "compacted_event_count":
+                                item.history_floor_compacted_count,
+                        }
+                    ),
+                    "notification_delivery_tracked": False,
+                    "evidence": _safe_evidence(item.incident.evidence),
+                }
+                for item in page.items
+            ],
+            "limit": limit,
+            "open_count": page.open_count,
+            "next_before": (
+                None
+                if page.next_before is None
+                else _encode_incident_cursor(page.next_before)
+            ),
+        }
     finally:
         con.close()
 
@@ -986,7 +1107,8 @@ async def perception_reconciliation(request: Request) -> JSONResponse:
 async def perception_incidents(request: Request) -> JSONResponse:
     try:
         limit = _limit(request)
+        before = _decode_incident_cursor(request.query_params.get("before"))
     except ValueError as error:
         return JSONResponse({"status": "invalid-request", "reason": str(error)}, status_code=400)
     db_path = Path(request.app.state.sqlite_store.db_path)
-    return await _serve(request, lambda: _incidents(db_path, limit))
+    return await _serve(request, lambda: _incidents(db_path, limit, before))

@@ -570,6 +570,47 @@ def test_resource_disabled_health_ignores_corrupt_resource_chain(
     assert not any(key.endswith("_producer_liveness") for key in checks)
 
 
+def test_health_incident_evidence_fails_on_restored_trigger_checkpoint_tamper(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    from polyarb.perception.incidents import IncidentManager
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=int(time.time() * 1000) - 1_000,
+    )
+    store = OpportunityPerceptionStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    for sequence in range(513):
+        manager.detect(
+            f"operator:health-tamper-{sequence}",
+            "manual-investigation",
+            {"sequence": sequence},
+        )
+    trigger_name = "trg_owner_incident_authority_checkpoint_update"
+    with sqlite3.connect(store.db_path) as con:
+        trigger_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger_name,),
+        ).fetchone()[0]
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "UPDATE neg_risk_incident_authority_checkpoint "
+            "SET prefix_hash='sha256:forged'"
+        )
+        con.execute(trigger_sql)
+
+    response = http_test_client.get("/health")
+
+    assert response.status_code == 503
+    check = response.json()["checks"]["perception:incident_evidence"][0]
+    assert check["status"] == "fail"
+    assert check["output"] == "scopes= evidence_consistent=False"
+
+
 @pytest.mark.parametrize(
     ("candidate", "discovery", "reconciliation", "expected"),
     [

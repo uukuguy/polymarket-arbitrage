@@ -44,6 +44,10 @@ from polyarb.storage.schemas import (
     V3_OWNER_MUTATION_GUARD_DDL,
     V4_EVIDENCE_OWNER_DDL,
     V4_EVIDENCE_OWNER_JOURNAL_TRIGGER_DDL,
+    V4_LEGACY_EVIDENCE_OWNER_DDL,
+    V4_LEGACY_OWNER_JOURNAL_TRIGGER_DDL,
+    V4_LEGACY_OWNER_JOURNAL_TRIGGER_NAMES,
+    V4_OWNER_MUTATION_GUARD_DDL,
 )
 
 _BUSY_TIMEOUT_MS = 5_000
@@ -65,7 +69,7 @@ _DISCOVERY_STATUS_PROJECTION_DOMAIN = "polyarb-discovery-status-projection-v1"
 _DISCOVERY_STATUS_PROJECTION_VERSION = 1
 _OWNER_MUTATION_JOURNAL_RETAIN_ROWS = 128
 _OWNER_MUTATION_LEGACY_MAX_ROWS = 1_025
-_OWNER_AUTHORITY_VERSION = 4
+_OWNER_AUTHORITY_VERSION = 5
 _CANONICAL_OWNER_TRIGGER_NAMES = frozenset(OWNER_JOURNAL_TRIGGER_NAMES)
 _OWNER_WRITE_ACTIONS = frozenset(
     (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE)
@@ -82,11 +86,17 @@ _OWNER_TABLE_NAMES = (
     "neg_risk_incident_open_authority",
     "neg_risk_incident_open_aggregate",
     "neg_risk_incident_scope_floors",
+    "neg_risk_incident_suffix_authority",
     "neg_risk_incident_replay_anchors",
     "neg_risk_resource_authority_checkpoint",
     "neg_risk_evidence_failures",
 )
 _V3_OWNER_TABLE_NAMES = _OWNER_TABLE_NAMES[:7]
+_V4_OWNER_TABLE_NAMES = tuple(
+    table
+    for table in _OWNER_TABLE_NAMES
+    if table != "neg_risk_incident_suffix_authority"
+)
 _V4_EVIDENCE_OWNER_TABLE_NAMES = _OWNER_TABLE_NAMES[7:]
 _RECONCILIATION_AUTHORITY_DOMAIN = "polyarb-reconciliation-authority-checkpoint-v1"
 _RECONCILIATION_AUTHORITY_VERSION = 1
@@ -1656,9 +1666,12 @@ class OpportunityPerceptionStore:
         tuple[object, ...],
         tuple[object, ...],
         tuple[object, ...],
+        tuple[object, ...],
     ]:
         current_con = sqlite3.connect(":memory:")
         current_con.row_factory = sqlite3.Row
+        v4_con = sqlite3.connect(":memory:")
+        v4_con.row_factory = sqlite3.Row
         v3_con = sqlite3.connect(":memory:")
         v3_con.row_factory = sqlite3.Row
         v2_con = sqlite3.connect(":memory:")
@@ -1681,6 +1694,11 @@ class OpportunityPerceptionStore:
                 con.execute(V3_OWNER_MUTATION_GUARD_DDL)
 
             downgrade_to_v3(v3_con)
+            downgrade_to_v3(v4_con)
+            v4_con.executescript(V4_LEGACY_EVIDENCE_OWNER_DDL)
+            v4_con.execute("DROP TABLE neg_risk_owner_mutation_guard")
+            v4_con.execute(V4_OWNER_MUTATION_GUARD_DDL)
+            v4_con.executescript(V4_LEGACY_OWNER_JOURNAL_TRIGGER_DDL)
             for historical_con, guard_ddl in (
                 (v2_con, V2_OWNER_MUTATION_GUARD_DDL),
                 (a527_con, A527_OWNER_MUTATION_GUARD_DDL),
@@ -1720,6 +1738,7 @@ class OpportunityPerceptionStore:
                 )
             manifests = (
                 manifest(current_con, _OWNER_TABLE_NAMES),
+                manifest(v4_con, _V4_OWNER_TABLE_NAMES),
                 manifest(v3_con, _V3_OWNER_TABLE_NAMES),
                 manifest(v2_con, _V3_OWNER_TABLE_NAMES),
                 manifest(a527_con, _V3_OWNER_TABLE_NAMES),
@@ -1728,12 +1747,14 @@ class OpportunityPerceptionStore:
             a527_con.close()
             v2_con.close()
             v3_con.close()
+            v4_con.close()
             current_con.close()
         return manifests
 
     @classmethod
     def _owner_manifest_state(cls, con: sqlite3.Connection) -> str:
         owner_tables = set(_OWNER_TABLE_NAMES)
+        v4_owner_tables = set(_V4_OWNER_TABLE_NAMES)
         v3_owner_tables = set(_V3_OWNER_TABLE_NAMES)
         placeholders = ",".join("?" for _ in owner_tables)
         present_tables = {
@@ -1747,15 +1768,19 @@ class OpportunityPerceptionStore:
         present_triggers = cls._owner_trigger_fingerprints(con)
         if not present_tables and not present_triggers:
             return "fresh"
-        if present_tables not in (owner_tables, v3_owner_tables):
+        if present_tables not in (owner_tables, v4_owner_tables, v3_owner_tables):
             raise ValueError("invalid-owner-authority-manifest")
-        current_manifest, v3_manifest, v2_manifest, a527_manifest = (
+        current_manifest, v4_manifest, v3_manifest, v2_manifest, a527_manifest = (
             cls._expected_owner_manifests()
         )
         table_names = (
             _OWNER_TABLE_NAMES
             if present_tables == owner_tables
-            else _V3_OWNER_TABLE_NAMES
+            else (
+                _V4_OWNER_TABLE_NAMES
+                if present_tables == v4_owner_tables
+                else _V3_OWNER_TABLE_NAMES
+            )
         )
         actual_manifest = (
             cls._owner_table_fingerprints(con, table_names),
@@ -1764,6 +1789,8 @@ class OpportunityPerceptionStore:
         )
         if actual_manifest == current_manifest:
             return "current"
+        if actual_manifest == v4_manifest:
+            return "v4"
         if actual_manifest == v3_manifest:
             return "v3"
         if actual_manifest == v2_manifest:
@@ -1773,6 +1800,7 @@ class OpportunityPerceptionStore:
         actual_triggers = actual_manifest[2]
         for expected_manifest in (
             current_manifest,
+            v4_manifest,
             v3_manifest,
             v2_manifest,
             a527_manifest,
@@ -2271,7 +2299,7 @@ class OpportunityPerceptionStore:
             "id,consumed_journal_id,consumed_hash,retained_base_id,"
             "retained_base_hash,candidate_aggregate_hash,"
             "discovery_aggregate_hash,authority_version,migration_state"
-            ") VALUES(1,?,?,?,?,?,?,4,'complete')",
+            ") VALUES(1,?,?,?,?,?,?,5,'complete')",
             (
                 guard["consumed_journal_id"],
                 guard["consumed_hash"],
@@ -2286,11 +2314,88 @@ class OpportunityPerceptionStore:
             raise ValueError("invalid-owner-authority-manifest")
         self._assert_owner_journal_clean(con)
 
+    @classmethod
+    def _assert_v4_owner_journal_clean(
+        cls,
+        con: sqlite3.Connection,
+    ) -> sqlite3.Row:
+        if cls._owner_manifest_state(con) != "v4":
+            raise ValueError("invalid-owner-authority-manifest")
+        guard = con.execute(
+            "SELECT consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash,authority_version,migration_state "
+            "FROM neg_risk_owner_mutation_guard WHERE id=1"
+        ).fetchone()
+        if (
+            guard is None
+            or int(guard["authority_version"]) != 4
+            or guard["migration_state"] != "complete"
+            or guard["candidate_aggregate_hash"] is None
+            or guard["discovery_aggregate_hash"] is None
+        ):
+            raise ValueError("invalid-owner-guard-state")
+        cls._validate_owner_journal_chain(
+            con,
+            guard=guard,
+            max_rows=_OWNER_MUTATION_JOURNAL_RETAIN_ROWS,
+        )
+        candidate_hash, discovery_hash = cls._owner_aggregate_hashes(con)
+        if not hmac.compare_digest(
+            str(guard["candidate_aggregate_hash"]),
+            candidate_hash,
+        ) or not hmac.compare_digest(
+            str(guard["discovery_aggregate_hash"]),
+            discovery_hash,
+        ):
+            raise ValueError("invalid-owner-aggregate-authority")
+        return guard
+
+    def _migrate_v4_owner_authority(self, con: sqlite3.Connection) -> None:
+        guard = self._assert_v4_owner_journal_clean(con)
+        self._check_deadline("owner-v4-v5-migration-deadline")
+        for name in (
+            set(V4_LEGACY_OWNER_JOURNAL_TRIGGER_NAMES)
+            - set(V3_OWNER_JOURNAL_TRIGGER_NAMES)
+        ):
+            con.execute(f'DROP TRIGGER "{name}"')
+        from polyarb.perception.incidents import IncidentManager
+
+        IncidentManager(self)._migrate_v4_to_v5_authority(con)
+        self._execute_trigger_ddl(
+            con,
+            V4_EVIDENCE_OWNER_JOURNAL_TRIGGER_DDL,
+        )
+        con.execute(
+            "ALTER TABLE neg_risk_owner_mutation_guard "
+            "RENAME TO neg_risk_owner_mutation_guard_v4"
+        )
+        con.execute(OWNER_MUTATION_GUARD_DDL)
+        con.execute(
+            "INSERT INTO neg_risk_owner_mutation_guard("
+            "id,consumed_journal_id,consumed_hash,retained_base_id,"
+            "retained_base_hash,candidate_aggregate_hash,"
+            "discovery_aggregate_hash,authority_version,migration_state"
+            ") VALUES(1,?,?,?,?,?,?,5,'complete')",
+            (
+                guard["consumed_journal_id"],
+                guard["consumed_hash"],
+                guard["retained_base_id"],
+                guard["retained_base_hash"],
+                guard["candidate_aggregate_hash"],
+                guard["discovery_aggregate_hash"],
+            ),
+        )
+        con.execute("DROP TABLE neg_risk_owner_mutation_guard_v4")
+        if self._owner_manifest_state(con) != "current":
+            raise ValueError("invalid-owner-authority-manifest")
+        self._assert_owner_journal_clean(con)
+
     def init_schema(self) -> None:
         con = self._connect()
         try:
             owner_manifest_state = self._owner_manifest_state(con)
-            if owner_manifest_state in {"a527", "v2", "v3"}:
+            if owner_manifest_state in {"a527", "v2", "v3", "v4"}:
                 con.execute("BEGIN IMMEDIATE")
                 locked_state = self._owner_manifest_state(con)
                 if locked_state == "a527":
@@ -2301,6 +2406,9 @@ class OpportunityPerceptionStore:
                     locked_state = "v3"
                 if locked_state == "v3":
                     self._migrate_v3_owner_authority(con)
+                    locked_state = "current"
+                if locked_state == "v4":
+                    self._migrate_v4_owner_authority(con)
                 elif locked_state != "current":
                     raise ValueError("invalid-owner-authority-manifest")
                 con.execute("COMMIT")
@@ -2330,6 +2438,7 @@ class OpportunityPerceptionStore:
                 "SELECT consumed_journal_id FROM neg_risk_owner_mutation_guard "
                 "WHERE id=1"
             ).fetchone()
+            owner_guard_bootstrap = guard is None
             journal_count = int(
                 con.execute(
                     "SELECT COUNT(*) FROM neg_risk_owner_mutation_journal"
@@ -2374,6 +2483,10 @@ class OpportunityPerceptionStore:
                     operation="INSERT",
                     row_key="1",
                 )
+            if owner_guard_bootstrap:
+                from polyarb.perception.incidents import IncidentManager
+
+                IncidentManager(self)._initialize_empty_v4_authority(con)
             additive_operator_columns = {
                 "neg_risk_operator_auth_nonces": {
                     "request_method": "TEXT",
@@ -8245,6 +8358,21 @@ class OpportunityPerceptionStore:
 
         return IncidentManager(self).open_incidents()
 
+    def group_incident_history(
+        self,
+        group_id: str,
+        *,
+        limit: int,
+        before_event_id: int | None = None,
+    ):
+        from polyarb.perception.incidents import IncidentManager
+
+        return IncidentManager(self).group_incident_history(
+            group_id,
+            limit=limit,
+            before_event_id=before_event_id,
+        )
+
     @staticmethod
     def _validated_operator_auth(
         con: sqlite3.Connection,
@@ -8634,72 +8762,15 @@ class OpportunityPerceptionStore:
         now_ms: int,
         require_resource_decision: bool = False,
     ) -> None:
-        from polyarb.perception.incidents import Incident, IncidentManager
+        from polyarb.perception.incidents import IncidentManager
         from polyarb.perception.resource_controller import validate_resource_history
 
-        rows = con.execute(
-            "SELECT * FROM neg_risk_incident_events ORDER BY incident_id,sequence"
-        ).fetchall()
-        histories: dict[str, list[Incident]] = {}
-        for row in rows:
-            try:
-                evidence = json.loads(row["evidence_json"])
-                event = Incident(
-                    id=str(row["incident_id"]),
-                    sequence=int(row["sequence"]),
-                    scope=str(row["scope"]),
-                    kind=str(row["kind"]),
-                    state=row["state"],
-                    occurred_at_ms=int(row["occurred_at_ms"]),
-                    evidence=evidence,
-                )
-            except (TypeError, ValueError, json.JSONDecodeError) as error:
-                raise ValueError("invalid-incident-history") from error
-            histories.setdefault(event.id, []).append(event)
-        allowed = {
-            "detected": {"classified"},
-            "classified": {"contained", "escalated"},
-            "contained": {"recovering", "escalated"},
-            "recovering": {"verified", "contained", "escalated"},
-            "verified": set(),
-            "escalated": {"recovering"},
-        }
         manager = IncidentManager(self)
-        for history in histories.values():
-            first = history[0]
-            recovery: Incident | None = None
-            for index, event in enumerate(history):
-                if (
-                    event.sequence != index + 1
-                    or event.scope != first.scope
-                    or event.kind != first.kind
-                    or (index == 0 and event.state != "detected")
-                    or (
-                        index > 0
-                        and event.state not in allowed[history[index - 1].state]
-                    )
-                    or (
-                        index > 0
-                        and event.occurred_at_ms < history[index - 1].occurred_at_ms
-                    )
-                ):
-                    raise ValueError("invalid-incident-history")
-                if event.state == "recovering":
-                    recovery = event
-                if event.state == "verified" and (
-                    recovery is None
-                    or not manager._has_recovery_proof(
-                        con,
-                        event,
-                        recovery_started_at_ms=recovery.occurred_at_ms,
-                        verification_at_ms=event.occurred_at_ms,
-                        recovery_evidence=recovery.evidence,
-                        verification_evidence=event.evidence,
-                    )
-                ):
-                    raise ValueError("invalid-incident-recovery-proof")
-            if first.scope == component and history[-1].state != "verified":
-                raise RuntimeError("component-incident-active")
+        if any(
+            incident.scope == component
+            for incident in manager.open_incidents(_connection=con)
+        ):
+            raise RuntimeError("component-incident-active")
         decision = validate_resource_history(con)
         producer = validate_producer_history(con, component, now_ms=now_ms)
         heartbeat = con.execute(

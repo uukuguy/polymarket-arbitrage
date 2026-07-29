@@ -89,9 +89,9 @@ perception-opportunities:
 perception-groups:
 	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/groups?limit=$(or $(limit),100)" | python -m json.tool
 
-## perception-incidents: Cloud read-only durable incident lifecycle list; optional limit=1..500.
+## perception-incidents: Cloud read-only open incident page; optional limit=1..500 and opaque before cursor.
 perception-incidents:
-	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/incidents?limit=$(or $(limit),100)" | python -m json.tool
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/incidents?limit=$(or $(limit),100)$(if $(before),&before=$(before),)" | python -m json.tool
 
 ## queue-discovery: HMAC-authenticated cloud wake-up for the enabled bounded Discovery loop.
 queue-discovery:

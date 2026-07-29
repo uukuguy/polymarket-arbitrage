@@ -7,6 +7,7 @@ import time
 import pytest
 
 from polyarb.http import perception
+from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.models import (
     GroupLeg,
     GroupQuoteBatch,
@@ -281,7 +282,65 @@ def test_discovery_reconciliation_and_incidents_use_stable_envelopes(
         "status": "available",
         "items": [],
         "limit": 5,
+        "open_count": 0,
+        "next_before": None,
     }
+
+
+def test_incident_endpoint_pages_more_than_legacy_history_cap(
+    http_test_client,
+) -> None:
+    store = OpportunityPerceptionStore(
+        http_test_client.app.state.sqlite_store.db_path
+    )
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    for sequence in range(600):
+        now[0] += 1
+        manager.detect(
+            f"candidate:http-page-{sequence}",
+            "clob-timeout",
+            {"sequence": sequence},
+        )
+
+    first = http_test_client.get("/perception/incidents?limit=100")
+
+    assert first.status_code == 200
+    first_body = first.json()
+    assert len(first_body["items"]) == 100
+    assert isinstance(first_body["next_before"], str)
+    second = http_test_client.get(
+        "/perception/incidents",
+        params={"limit": 100, "before": first_body["next_before"]},
+    )
+    assert second.status_code == 200
+    second_body = second.json()
+    assert len(second_body["items"]) == 100
+    assert {
+        item["incident_id"] for item in first_body["items"]
+    }.isdisjoint(item["incident_id"] for item in second_body["items"])
+
+
+def test_status_uses_open_aggregate_after_incident_compaction(
+    http_test_client,
+) -> None:
+    store = OpportunityPerceptionStore(
+        http_test_client.app.state.sqlite_store.db_path
+    )
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    for sequence in range(600):
+        now[0] += 1
+        manager.detect(
+            f"operator:{sequence}",
+            "manual-investigation",
+            {"sequence": sequence},
+        )
+
+    response = http_test_client.get("/perception/status")
+
+    assert response.status_code == 200
+    assert response.json()["open_incident_count"] == 600
 
 
 def test_discovery_status_does_not_permanently_fail_on_old_receipt_volume(
@@ -417,24 +476,34 @@ def test_reconciliation_exposes_validated_duration_and_diff_counts(
 
 def test_incidents_recursively_redact_legacy_secret_shapes(http_test_client) -> None:
     db_path = http_test_client.app.state.sqlite_store.db_path
-    evidence = (
-        '{"outer":{"API_KEY":"hunter2","authorization":"Bearer abc123",'
-        '"db":"postgresql://user:hunter2@db.invalid/x?password=hunter2",'
-        '"note":"password=hunter2","cookie":"session=hunter2"}}'
+    manager = IncidentManager(OpportunityPerceptionStore(db_path), clock_ms=lambda: 1)
+    manager.detect(
+        "discovery",
+        "worker-failure",
+        {
+            "action": "Bearer top-level-secret",
+            "outer": {
+                "API_KEY": "hunter2",
+                "authorization": "Bearer abc123",
+                "db": "postgresql://user:hunter2@db.invalid/x?password=hunter2",
+                "note": "password=hunter2",
+                "cookie": "session=hunter2",
+            }
+        },
     )
-    with sqlite3.connect(db_path) as con:
-        con.execute(
-            "INSERT INTO neg_risk_incident_events("
-            "incident_id,sequence,scope,kind,state,occurred_at_ms,evidence_json"
-            ") VALUES('secret',1,'discovery','worker-failure','detected',1,?)",
-            (evidence,),
-        )
     response = http_test_client.get("/perception/incidents")
     assert response.status_code == 200
     rendered = response.text.lower()
-    for secret in ("hunter2", "abc123", "postgresql://", "bearer "):
+    for secret in (
+        "hunter2",
+        "abc123",
+        "top-level-secret",
+        "postgresql://",
+        "bearer ",
+    ):
         assert secret not in rendered
     assert "[redacted]" in rendered
+    assert response.json()["items"][0]["action"] is None
 
 
 def test_status_rejects_forged_candidate_receipt_rowid(http_test_client) -> None:

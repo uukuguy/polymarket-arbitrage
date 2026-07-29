@@ -208,6 +208,7 @@ def test_overview_labels_bounded_group_counts_and_filters_verified_incidents() -
     assert "next_after" in overview
     assert 'incident.state !== "verified"' in overview
     assert "Latest incident states" in overview
+    assert "incident.recovery_start_evidence" in overview
 
 
 def test_overview_binds_candidate_envelopes_before_rendering() -> None:

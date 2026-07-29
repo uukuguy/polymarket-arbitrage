@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -68,7 +69,20 @@ async def test_nonzero_child_retries_then_escalates_without_hot_loop(tmp_path) -
     await supervisor.run(spec, asyncio.Event())
     receipts = store.producer_receipts("candidate")
     assert [receipt.outcome for receipt in receipts] == ["nonzero", "nonzero"]
-    assert store.open_incidents()[0].state == "escalated"
+    escalated = store.open_incidents()[0]
+    assert escalated.state == "escalated"
+    assert escalated.evidence["action"] == "operator-intervention"
+    assert escalated.evidence["retry_count"] == 1
+    with store._connect() as con:
+        recovery = con.execute(
+            "SELECT evidence_json FROM neg_risk_incident_events "
+            "WHERE incident_id=? AND state='recovering'",
+            (escalated.id,),
+        ).fetchone()
+    recovery_evidence = json.loads(recovery["evidence_json"])
+    assert recovery_evidence["action"] == "retry-producer"
+    assert recovery_evidence["retry_count"] == 1
+    assert type(recovery_evidence["next_retry_at_ms"]) is int
 
 
 @pytest.mark.asyncio

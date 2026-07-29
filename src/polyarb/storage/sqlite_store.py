@@ -470,6 +470,12 @@ class SQLiteStore:
                 _ensure_column(table, "membership_hash", "TEXT NOT NULL DEFAULT ''")
         finally:
             con.close()
+        # The base snapshot schema also contains the opportunity owner tables.
+        # Finish their canonical guard/singleton bootstrap through the same
+        # migration path used by opportunity-first producers.
+        from polyarb.perception.store import OpportunityPerceptionStore
+
+        OpportunityPerceptionStore(self._db_path).init_schema()
 
     def write_snapshot(
         self,

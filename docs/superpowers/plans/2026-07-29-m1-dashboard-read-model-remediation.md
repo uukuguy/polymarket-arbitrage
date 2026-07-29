@@ -229,15 +229,17 @@ partial-manifest cases are tested.
 
 **Authority and compaction contract**
 
-- Task 3 performs owner-authority **v3 → v4** migration for both
+- Task 3 performs owner-authority **v3 → v5** migration for both
   incident and resource checkpoint families. It creates the incident tables,
   the Task 4 resource checkpoint table, `neg_risk_incident_scope_floors`, and a
   shared `neg_risk_evidence_failures` breadcrumb authority, then installs the
-  exact v4 trigger/column manifest. Task 4 uses the already-migrated v4 schema and
+  exact v5 trigger/column manifest. The previously committed v4 manifest is
+  frozen and accepted only by an explicit atomic v4 → v5 migration; partial or
+  forged v4 manifests fail closed. Task 4 uses the already-migrated v5 schema and
   does not bump the manifest again. Tests cover copied-v2 upgrade, crash between
   DDL/bootstrap phases, restart/idempotency, and rejection of a forged or
   partially upgraded manifest. The migration fixture runs the real Task 2
-  v2 → v3 upgrade followed by the production v3 → v4 path; there is no
+  v2 → v3 upgrade followed by the production v3 → v5 path; there is no
   test-only direct migration.
 - Add `neg_risk_incident_authority_checkpoint` for the event prefix and
   `neg_risk_incident_open_authority` plus a one-row aggregate for current open
@@ -246,16 +248,19 @@ partial-manifest cases are tested.
   keyset-pageable authority rows; a verified transition deletes its open row
   and updates the aggregate atomically.
 - Add authenticated `neg_risk_incident_scope_floors` rows:
-  `{scope,through_event_id,compacted_event_count,floor_hash}`. Compaction
+  `{scope,through_event_id,compacted_event_count,floor_hash,row_hash}`. Add a
+  mandatory one-row suffix authority that chains every retained event from the
+  compacted prefix. Compaction
   updates only scopes represented in the at-most-256-row deleted chunk. Exact
-  indexed scope lookup proves per-group incident completeness without a global
-  map; storage may grow by scope, but public read work remains O(1).
+  indexed scope lookup plus the checkpoint's authenticated floor-set count
+  proves per-group incident completeness. Scope floors are hard-capped at
+  8,192 rows; exceeding the cap rolls back and records an unresolved breadcrumb.
 - `IncidentManager.detect()` and `.transition()` own compaction. After the new
   event/open-authority mutation in the same `BEGIN IMMEDIATE`, they validate the
   prior checkpoint plus suffix. At suffix high-water 512 they publish a new
   checkpoint and retain at most 256 event rows total. Open/latest/recovery
   anchors live only in normalized open authority and never force event-suffix
-  retention. A suffix above hard limit 1,024 rolls back the attempted write.
+  retention. A suffix above hard limit 512 rolls back the attempted write.
 - Add `neg_risk_incident_replay_anchors`, one authenticated predecessor per
   incident whose earlier event was compacted but which still has an event in
   the retained suffix. The anchor contains incident ID, sequence, scope, kind,
@@ -279,19 +284,23 @@ partial-manifest cases are tested.
   and matching health subcheck both fail closed on an unresolved component row.
   `reason` is a canonical enum of at most 64 characters (never raw exception
   text), and validation requires `recovered_at_ms >= failed_at_ms` when set.
-- The current open read validates the O(1) aggregate then examines at most
-  `limit + 1` row hashes. Event-history reads validate the checkpoint and at
-  most 1,024 suffix rows.
+- Open authority is hard-capped at 4,096 rows. Current reads reconcile the
+  authenticated aggregate count against the exact bounded leaf count before
+  examining at most `limit + 1` returned row hashes. Event-history reads
+  reconcile at most 8,192 floor rows and validate at most 512 suffix rows.
+  These are bounded O(cap) scans, not unbounded O(N) or claimed O(1) work.
 - Enrich lifecycle evidence with canonical `action`, `retry_count`,
-  `next_retry_at_ms`, and `recovery_evidence`; missing legacy values are
-  explicit `null`.
+  `next_retry_at_ms`, and `recovery_start_evidence`; missing legacy values are
+  explicit `null`. The latter is the authenticated `recovering` transition,
+  not terminal verification proof.
 - `GET /perception/incidents?before=<opaque>&limit=100` exposes current/open
-  state, lifecycle age, canonical actions, recovery proof, and history floor.
+  state, lifecycle age, canonical actions, recovery-start evidence, and history
+  floor. Verified terminal incidents are omitted from this open-only endpoint.
 - Add a store-level group-scoped history reader used later by Task 5. It binds
   group identity only through exact `scope == "candidate:<group_id>"`, uses
   `(scope,id)` indexing and keyset pagination, and never filters a global page.
 
-- [ ] Write RED tests for checkpoint/replay/tamper/crash/repeated compaction,
+- [x] Write RED tests for checkpoint/replay/tamper/crash/repeated compaction,
       transition and recovery invariants, 2,000 appended terminal incidents,
       2,000 distinct scopes, many simultaneously open incidents,
       open-authority aggregate integrity, per-scope floors, pagination, group
@@ -299,23 +308,23 @@ partial-manifest cases are tested.
       Supervisor action/retry fields. Cover recovering → compaction floor →
       verified → open-row deletion while replay remains valid. Assert replay
       anchors stay at or below 256, the event suffix never exceeds 512 after a
-      successful write, and each public validation examines no more than 1,024
+      successful write, and each public validation examines no more than 512
       suffix rows. Repeat 2,000 failure/recovery cycles per component and assert
       the breadcrumb table remains exactly two rows with O(2) health reads.
-- [ ] Add schema, owner-authority manifest/trigger coverage, deterministic
+- [x] Add schema, owner-authority manifest/trigger coverage, deterministic
       hashes, writer-triggered high/low-water compaction, and bounded readers.
-- [ ] Add the endpoint, strict Dashboard types, incident badges, lifecycle age,
-      automated action, retry/next retry, and verified recovery evidence.
-- [ ] Add `/health` `incident_evidence` chain truth: it reads the same
+- [x] Add the endpoint, strict Dashboard types, incident badges, lifecycle age,
+      automated action, retry/next retry, and recovery-start evidence.
+- [x] Add `/health` `incident_evidence` chain truth: it reads the same
       checkpoint/suffix validator; there is no new config gate; successful
       writes advance event/open authority atomically, while failed validation
       rolls back. It also fails on the separately committed unresolved
       breadcrumb. HTTP tests cover committed suffix corruption and a hard-limit
       rollback/breadcrumb, proving health/public reads fail closed.
-- [ ] Record an explicit contract revision in the manual/UI: notification
+- [x] Record an explicit contract revision in the manual/UI: notification
       delivery is **not tracked** and the Dashboard makes no delivery claim.
       Durable notification outbox work is a separate production slice.
-- [ ] Run:
+- [x] Run:
 
   ```bash
   uv run pytest tests/perception/test_incidents.py \
@@ -327,7 +336,7 @@ partial-manifest cases are tested.
   make dashboard-typecheck
   ```
 
-- [ ] Commit:
+- [x] Commit:
 
   ```bash
   git commit -m "feat(m1): bound incident recovery evidence"

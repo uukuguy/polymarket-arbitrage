@@ -110,6 +110,7 @@ class ProducerSupervisor:
                 component=spec.component,
                 outcome="abandoned",
                 attempt=attempt,
+                retry_count=retries,
             )
         if incident is not None:
             self._begin_recovery(incident, retries=0)
@@ -200,15 +201,20 @@ class ProducerSupervisor:
                 component=spec.component,
                 outcome=("unexpected-exit" if outcome == "success" else outcome),
                 attempt=attempt,
+                retry_count=retries,
             )
             if retries >= spec.max_restarts:
                 self._escalate(incident, retries=retries)
                 return
             retries += 1
-            self._begin_recovery(incident, retries=retries)
             delay = min(
                 spec.backoff_max_s,
                 spec.backoff_initial_s * (2 ** (retries - 1)),
+            )
+            self._begin_recovery(
+                incident,
+                retries=retries,
+                next_retry_at_ms=self._clock_ms() + int(delay * 1_000),
             )
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=delay)
@@ -365,35 +371,89 @@ class ProducerSupervisor:
         component: str,
         outcome: str,
         attempt: int,
+        retry_count: int,
     ) -> Incident:
         if incident is not None and all(
             item.id != incident.id for item in self._incidents.open_incidents()
         ):
             incident = None
         if incident is None:
-            incident = self._incidents.detect(component, f"child-{outcome}", {"attempt": attempt})
-            incident = self._incidents.transition(
-                incident.id, "classified", {"class": "producer-process"}
+            incident = self._incidents.detect(
+                component,
+                f"child-{outcome}",
+                {
+                    "action": "restart-producer",
+                    "attempt": attempt,
+                    "next_retry_at_ms": None,
+                    "retry_count": retry_count,
+                },
             )
-            return self._incidents.transition(incident.id, "contained", {"attempt": attempt})
+            incident = self._incidents.transition(
+                incident.id,
+                "classified",
+                {
+                    "action": "classify-producer-failure",
+                    "class": "producer-process",
+                    "next_retry_at_ms": None,
+                    "retry_count": retry_count,
+                },
+            )
+            return self._incidents.transition(
+                incident.id,
+                "contained",
+                {
+                    "action": "restart-producer",
+                    "attempt": attempt,
+                    "next_retry_at_ms": None,
+                    "retry_count": retry_count,
+                },
+            )
         if incident.state == "recovering":
             return self._incidents.transition(
-                incident.id, "contained", {"attempt": attempt, "outcome": outcome}
+                incident.id,
+                "contained",
+                {
+                    "action": "restart-producer",
+                    "attempt": attempt,
+                    "next_retry_at_ms": None,
+                    "outcome": outcome,
+                    "retry_count": retry_count,
+                },
             )
         return incident
 
-    def _begin_recovery(self, incident: Incident, *, retries: int) -> None:
+    def _begin_recovery(
+        self,
+        incident: Incident,
+        *,
+        retries: int,
+        next_retry_at_ms: int | None = None,
+    ) -> None:
         self._incidents.transition(
             incident.id,
             "recovering",
-            self._recovery_anchor(incident.scope, retries),
+            {
+                **self._recovery_anchor(incident.scope, retries),
+                "action": "retry-producer",
+                "next_retry_at_ms": next_retry_at_ms,
+                "retry_count": retries,
+            },
         )
 
     def _escalate(self, incident: Incident, *, retries: int) -> None:
         current = self._incidents.open_incidents()
         latest = next(item for item in current if item.id == incident.id)
         if latest.state in {"classified", "contained", "recovering"}:
-            self._incidents.transition(latest.id, "escalated", {"retry_limit": retries})
+            self._incidents.transition(
+                latest.id,
+                "escalated",
+                {
+                    "action": "operator-intervention",
+                    "next_retry_at_ms": None,
+                    "retry_count": retries,
+                    "retry_limit": retries,
+                },
+            )
 
     def _attempt_verify(self, incident: Incident) -> None:
         latest = next(item for item in self._incidents.open_incidents() if item.id == incident.id)

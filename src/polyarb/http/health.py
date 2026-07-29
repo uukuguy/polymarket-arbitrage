@@ -112,6 +112,13 @@ class PerceptionRecoveryHealth:
 
 
 @dataclass(frozen=True)
+class IncidentEvidenceHealth:
+    open_count: int | None
+    scopes: tuple[str, ...]
+    evidence_consistent: bool
+
+
+@dataclass(frozen=True)
 class ProducerLivenessHealth:
     state: str
     age_seconds: float | None
@@ -179,7 +186,16 @@ def read_perception_recovery_health(
         from polyarb.perception.store import OpportunityPerceptionStore
 
         store = OpportunityPerceptionStore(path, read_only=True)
-        incidents = IncidentManager(store).open_incidents()
+        open_count, candidate_open, http_open, other_open = IncidentManager(
+            store
+        ).open_incident_status()
+        scopes = []
+        if candidate_open:
+            scopes.append("candidate")
+        if http_open:
+            scopes.append("http")
+        if other_open:
+            scopes.append("other")
         mode, reason = "disabled", None
         if include_resource:
             con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25)
@@ -200,12 +216,33 @@ def read_perception_recovery_health(
             finally:
                 con.close()
         return PerceptionRecoveryHealth(
-            len(incidents),
-            tuple(sorted(incident.scope for incident in incidents)),
+            open_count,
+            tuple(scopes),
             mode,
             reason,
             True,
         )
+    except (sqlite3.Error, TypeError, ValueError, KeyError):
+        return unavailable
+
+
+def read_incident_evidence_health(path: Path) -> IncidentEvidenceHealth:
+    unavailable = IncidentEvidenceHealth(None, (), False)
+    try:
+        from polyarb.perception.incidents import IncidentManager
+        from polyarb.perception.store import OpportunityPerceptionStore
+
+        count, candidate_open, http_open, other_open = IncidentManager(
+            OpportunityPerceptionStore(path, read_only=True)
+        ).open_incident_status()
+        scopes = []
+        if candidate_open:
+            scopes.append("candidate")
+        if http_open:
+            scopes.append("http")
+        if other_open:
+            scopes.append("other")
+        return IncidentEvidenceHealth(count, tuple(scopes), True)
     except (sqlite3.Error, TypeError, ValueError, KeyError):
         return unavailable
 
@@ -366,6 +403,24 @@ def _build_health_checks(
 
     recovery_enabled = bool(getattr(settings, "opportunity_producer_supervisor_enabled", False))
     resource_enabled = bool(getattr(settings, "opportunity_resource_controller_enabled", False))
+    incident_evidence = read_incident_evidence_health(store.db_path)
+    incident_evidence_status = (
+        "pass" if incident_evidence.evidence_consistent else "fail"
+    )
+    overall = _severity(overall, incident_evidence_status)
+    checks["perception:incident_evidence"] = [
+        {
+            "componentId": "perception-incident-evidence",
+            "componentType": "component",
+            "observedValue": incident_evidence.open_count,
+            "status": incident_evidence_status,
+            "output": (
+                f"scopes={','.join(incident_evidence.scopes)} "
+                f"evidence_consistent={incident_evidence.evidence_consistent}"
+            ),
+            "time": _utc_now_iso(),
+        }
+    ]
     recovery = read_perception_recovery_health(
         store.db_path,
         now_ms=int(now_s * 1_000),
