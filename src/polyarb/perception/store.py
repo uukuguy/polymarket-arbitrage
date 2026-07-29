@@ -8320,6 +8320,7 @@ class OpportunityPerceptionStore:
                 validate_resource_history,
             )
 
+            self._assert_owner_journal_clean(con)
             decision = validate_resource_history(con)
             if decision is None:
                 if required:
@@ -8342,6 +8343,7 @@ class OpportunityPerceptionStore:
                 validate_resource_history,
             )
 
+            self._assert_owner_journal_clean(con)
             decision = validate_resource_history(con)
             if decision is None:
                 return None
