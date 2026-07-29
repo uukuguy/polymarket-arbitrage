@@ -53,6 +53,7 @@ M1_MAKE_TARGETS = {
     "ohlc-spot-check",
     "dashboard-dev",
     "dashboard-fixture-api",
+    "qualify-perception-local",
     "smoke-l2-dashboard",
     "smoke-l3-dashboard",
     "smoke-perception-dashboard",

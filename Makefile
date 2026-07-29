@@ -719,7 +719,7 @@ logs-tail-axiom:
 # ─────────────────────────────────────────────────────────────────────────────
 
 .PHONY: dashboard-dev dashboard-fixture-api dashboard-build dashboard-typecheck dashboard-deploy smoke-l2-dashboard
-.PHONY: smoke-perception-dashboard
+.PHONY: smoke-perception-dashboard qualify-perception-local
 
 ## dashboard-dev: 本地起 dashboard (next dev :3000)
 dashboard-dev:
@@ -795,6 +795,20 @@ smoke-perception-dashboard:
 	  200|302|307) echo "  /perception: $$code reachable" ;; \
 	  *) echo "  /perception: $$code FAIL"; exit 1 ;; \
 	esac
+
+## qualify-perception-local: Deterministic observer-only conformance gate for the M1 qualification evaluator
+## Uses committed synthetic evidence; PASS does not claim production readiness.
+qualify-perception-local:
+	@set -eu; \
+	qualification_tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$qualification_tmp"' EXIT; \
+	echo ">> qualify-perception-local — evaluator tests"; \
+	uv run pytest tests/m1-perception/test_perception_fault_acceptance.py -q; \
+	echo ">> qualify-perception-local — canonical PASS fixture"; \
+	uv run python scripts/perception_fault_acceptance.py \
+	  --evidence tests/fixtures/perception-fault-acceptance-pass.json \
+	  --output "$$qualification_tmp/verdict.json"; \
+	cat "$$qualification_tmp/verdict.json"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 07 — 7-day production soak monitoring (Better Stack driven)
