@@ -141,7 +141,7 @@ FAULTS = {
         _spec(
             "sqlite-busy",
             "candidate",
-            "child-failed",
+            "sqlite-busy",
             "neg_risk_candidate_success_receipts",
             "release bounded SQLite lock and verify a newer success receipt",
         ),

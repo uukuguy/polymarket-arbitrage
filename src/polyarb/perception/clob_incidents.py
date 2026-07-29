@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from py_clob_client.exceptions import PolyApiException
 
 from polyarb.perception.incidents import (
@@ -14,7 +16,9 @@ from polyarb.routing.neg_risk_quote_collector import (
     QuoteCollectionIntegrityError,
 )
 
-_KINDS = frozenset({"clob-missing-leg", "clob-429", "clob-latency"})
+_KINDS = frozenset(
+    {"clob-missing-leg", "clob-429", "clob-latency", "sqlite-busy"}
+)
 
 
 def clob_incident_kind(error: BaseException) -> str | None:
@@ -22,6 +26,18 @@ def clob_incident_kind(error: BaseException) -> str | None:
         return "clob-missing-leg"
     if isinstance(error, TimeoutError):
         return "clob-latency"
+    if isinstance(error, sqlite3.OperationalError):
+        error_code = getattr(error, "sqlite_errorcode", None)
+        base_code = error_code & 0xFF if type(error_code) is int else None
+        if base_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or str(
+            error
+        ).lower() in {
+            "database is busy",
+            "database is locked",
+            "database schema is locked",
+            "database table is locked",
+        }:
+            return "sqlite-busy"
     if (
         isinstance(error, PolyApiException)
         and error.status_code == 429

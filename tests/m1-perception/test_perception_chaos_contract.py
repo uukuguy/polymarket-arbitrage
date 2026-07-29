@@ -195,6 +195,20 @@ def test_clob_plans_name_group_scoped_durable_incidents(
     assert plan["execute_supported"] is False
 
 
+def test_sqlite_busy_plan_names_group_scoped_durable_incident() -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan", "--fault", "sqlite-busy"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    plan = json.loads(result.stdout)
+    assert plan["expected_incident_kind"] == "sqlite-busy"
+    assert plan["execute_supported"] is False
+
+
 def test_reconciliation_stall_adapter_resumes_exact_worker_before_verification(
     tmp_path: Path,
 ) -> None:

@@ -416,13 +416,7 @@ class CandidateWatcher:
                 ),
                 reason="incomplete-quotes",
             )
-            self._clob_incident_operations.append(
-                partial(
-                    self._clob_incidents.record_failure,
-                    group_id,
-                    error,
-                )
-            )
+            self.queue_incident_failure(group_id, error)
             return observation
         except GroupStructureUnavailableError:
             return await self._record_unavailable(
@@ -450,13 +444,7 @@ class CandidateWatcher:
                 ),
                 reason="candidate-collection-failed",
             )
-            self._clob_incident_operations.append(
-                partial(
-                    self._clob_incidents.record_failure,
-                    group_id,
-                    error,
-                )
-            )
+            self.queue_incident_failure(group_id, error)
             return observation
 
     async def _record_unavailable(
@@ -648,11 +636,18 @@ class CandidateWatcher:
             observed_at_ms=self._clock_ms(),
             reason="candidate-group-timeout",
         )
+        self.queue_incident_failure(group_id, TimeoutError())
+
+    def queue_incident_failure(
+        self,
+        group_id: str,
+        error: BaseException,
+    ) -> None:
         self._clob_incident_operations.append(
             partial(
                 self._clob_incidents.record_failure,
                 group_id,
-                TimeoutError(),
+                error,
             )
         )
 
@@ -922,6 +917,13 @@ class CandidateWatcherScheduler:
             logger.warning(f"candidate group timed out group_id={group_id}")
         except Exception as error:
             self._runtime.record_group_failure(group_id, error)
+            queue_incident_failure = getattr(
+                self._watcher,
+                "queue_incident_failure",
+                None,
+            )
+            if queue_incident_failure is not None:
+                queue_incident_failure(group_id, error)
             logger.warning(
                 "candidate group task failed "
                 f"group_id={group_id} kind={type(error).__name__}"

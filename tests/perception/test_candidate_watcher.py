@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sqlite3
 import threading
 import time
 from collections.abc import Sequence
@@ -582,6 +583,47 @@ async def test_record_timeout_opens_group_scoped_latency_incident(
     incident = store.open_incidents()[0]
     assert incident.scope == "candidate:g-1"
     assert incident.kind == "clob-latency"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_busy_opens_group_incident_after_terminal_writer_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = certified_group()
+    candidate, store = watcher(
+        tmp_path,
+        structure=(revision, revision),
+        reader=FakeBooksReader(
+            books(("yes-1", "0.40", "10"), ("yes-2", "0.50", "8"))
+        ),
+        clock_values=(
+            int(time.time() * 1_000),
+            int(time.time() * 1_000),
+        ),
+    )
+
+    async def locked_terminal_writer(**_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(candidate, "_record", locked_terminal_writer)
+    runtime = candidate._runtime
+    scheduler = CandidateWatcherScheduler(
+        watcher=candidate,
+        store=store,
+        candidate_group_ids=lambda: ("g-1",),
+        runtime=runtime,
+        clock_ms=lambda: 2_000,
+        cycle_max_groups=2,
+        reserved_non_high_slots=1,
+    )
+
+    await scheduler.run_due_once()
+
+    incident = store.open_incidents()[0]
+    assert incident.scope == "candidate:g-1"
+    assert incident.kind == "sqlite-busy"
+    assert incident.state == "recovering"
 
 
 def test_priority_policy_preserves_quote_freshness_and_anti_starvation() -> None:

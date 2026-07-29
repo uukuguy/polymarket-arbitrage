@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 
 import httpx
@@ -27,6 +28,7 @@ from polyarb.routing.neg_risk_quote_collector import (
     [
         (QuoteCollectionIntegrityError(), "clob-missing-leg"),
         (TimeoutError(), "clob-latency"),
+        (sqlite3.OperationalError("database is locked"), "sqlite-busy"),
         (RuntimeError("sqlite busy"), None),
     ],
 )
@@ -48,10 +50,20 @@ def test_clob_incident_kind_recognizes_sdk_429_only() -> None:
 
     assert clob_incident_kind(rate_limited) == "clob-429"
     assert clob_incident_kind(server_error) is None
+    assert clob_incident_kind(sqlite3.OperationalError("no such table")) is None
 
 
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (QuoteCollectionIntegrityError(), "clob-missing-leg"),
+        (sqlite3.OperationalError("database is locked"), "sqlite-busy"),
+    ],
+)
 def test_candidate_group_incident_requires_exact_success_receipt_to_verify(
     tmp_path,
+    error: BaseException,
+    kind: str,
 ) -> None:
     store = OpportunityPerceptionStore(tmp_path / "state.db")
     store.init_schema()
@@ -69,11 +81,11 @@ def test_candidate_group_incident_requires_exact_success_receipt_to_verify(
     )
     store.publish_group_revision(revision)
     tracker = CandidateGroupIncidents(store)
-    tracker.record_failure("g-1", QuoteCollectionIntegrityError())
+    tracker.record_failure("g-1", error)
 
     incident = store.open_incidents()[0]
     assert incident.scope == "candidate:g-1"
-    assert incident.kind == "clob-missing-leg"
+    assert incident.kind == kind
     assert incident.state == "recovering"
 
     time.sleep(0.01)

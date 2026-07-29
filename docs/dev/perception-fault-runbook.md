@@ -116,8 +116,10 @@ cursor-integrity failures now open durable `gamma-*` Incidents in the bounded
 Discovery/Reconciliation runners; their next exact batch/window writer closes
 recovery. `gamma-partial` is intentionally different: a shape-valid but
 incomplete page is persisted as rejected/partial coverage, not relabelled as a
-process failure. A log line or resource decision alone cannot be relabeled as
-an Incident.
+process failure. Candidate CLOB missing-leg/429/latency and SQLite BUSY/LOCKED
+open exact `candidate:<group_id>` Incidents; the SQLite fault is not called
+`child-failed` because the fail-soft scheduler does not exit. A log line or
+resource decision alone cannot be relabeled as an Incident.
 
 Actual execution is an independent, fault-specific capability. It requires
 all of the following:

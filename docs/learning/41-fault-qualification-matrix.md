@@ -26,8 +26,9 @@ exact runtime baseline
   `child-timeout` / `child-failed` / `child-abandoned`，并进入恢复状态。
 - `src/polyarb/perception/gamma_incidents.py`：只把可证明的 Gamma timeout、
   malformed、cursor integrity 异常写成 durable Incident；未知错误不冒充 Gamma。
-- `src/polyarb/perception/clob_incidents.py:20`：保守识别 Candidate 的缺腿、SDK
-  429 和有界超时，并以 `candidate:<group_id>` 隔离故障；未知异常不冒充 CLOB。
+- `src/polyarb/perception/clob_incidents.py:24`：保守识别 Candidate 的缺腿、SDK
+  429、有界超时和 SQLite `BUSY/LOCKED`，并以 `candidate:<group_id>` 隔离故障；
+  `no such table` 等其他 OperationalError 不冒充资源争锁。
 - `src/polyarb/perception/candidate_watcher.py:397`：Candidate 先提交原子终态，再排队
   exact-group recovery/failure transition；`:659` 在本轮候选服务后统一 flush，避免
   incident 写路径吃掉 reserved lane 的时间预算。
@@ -99,3 +100,12 @@ timeout 和成功恢复都先排入内存中的当前 cycle 操作队列，reser
 落入 durable Incident。Dashboard/API 看到的是持久化后的
 `candidate:<group_id>` lifecycle；日志不是 authority。正常 scheduler cycle 返回前会
 完成 flush，所以这不是无管理的后台任务。
+
+### SQLite busy 为什么不是 `child-failed`？
+
+Candidate scheduler 对单组失败是 fail-soft 的，SQLite terminal writer 被锁并不会自然让
+producer 子进程退出；把它写成 `child-failed` 会要求一个实际不会出现的 supervisor
+事件。现在只接受 SQLite 的 `BUSY/LOCKED` code 或精确标准消息，先由 Candidate 自身
+排队；若 terminal unavailable writer 也被锁而异常上抛，scheduler fallback 仍保留同一
+group/error，cycle 末锁释放后写成 `sqlite-busy`。恢复仍需同组 current-membership
+Quote success receipt，不能用“数据库后来能连接”代替业务恢复。
