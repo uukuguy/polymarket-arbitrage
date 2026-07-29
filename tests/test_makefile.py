@@ -150,6 +150,9 @@ def test_chaos_image_check_accepts_current_and_legacy_fly_status_shapes() -> Non
     assert ".ImageRef" in recipe
     assert "$$ref.Digest // $$ref.digest" in recipe
     assert "docker run --rm --entrypoint /bin/sh" in recipe
+    assert "flyctl ssh console -a polyarb-l2" in recipe
+    assert "Docker cannot read the private image" in recipe
+    assert "cannot inspect deployed image or live machine" in recipe
 
 
 def test_chaos_image_check_separates_observed_from_required_tools() -> None:

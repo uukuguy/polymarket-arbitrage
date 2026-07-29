@@ -19,8 +19,10 @@ make chaos-l2-fly-image-check
 ```
 
 该 target 自动从 `flyctl status -a polyarb-l2 --json` 解析当前部署 image 的
-完整 ref（`registry/repo:tag`），然后对 8 个 chaos 常用 primitive 跑
-`docker run --rm IMAGE /bin/sh -c "command -v TOOL"`，逐项打印 `OK` / `MISS`。
+完整 ref（`registry/repo:tag`），优先对 8 个 chaos 常用 primitive 跑
+`docker run --rm IMAGE /bin/sh -c "command -v TOOL"`。若本地 Docker 无法读取
+私有 Fly digest，则先验证 live started machine 的只读 SSH，再在同一 machine
+逐项执行 `command -v`；registry/auth 失败不会再被误报为工具缺失。
 这 8 项是始终完整打印的 **observed tools**，不等于每个 chaos plan 都要求
 它们存在。默认的 **required tools** 只有 `python`；如某个 plan 还依赖 curl：
 
@@ -31,7 +33,7 @@ make chaos-l2-fly-image-check required="python curl"
 退出码语义:
 - `0`: 全部 required tools 可用；optional MISS 仍会打印，但不误伤验收
 - `1`: 至少一个 required tool MISS，或无法解析当前 image
-- `2`: 本地 docker daemon 不可用，或 `required=` 包含未知工具
+- `2`: Docker 与 live machine 都不可检查，或 `required=` 包含未知工具
 
 ## 2. 当前 production image 工具矩阵
 

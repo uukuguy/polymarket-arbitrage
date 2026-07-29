@@ -1081,16 +1081,21 @@ chaos-l2-cleanup:
 ## requires local `docker` daemon + flyctl auth. If docker is unavailable
 ## the target still surfaces "ERROR: docker missing" without breaking CI.
 chaos-l2-fly-image-check:
-	@if ! command -v docker >/dev/null 2>&1; then \
-		echo "ERROR: docker not on PATH — this is a developer-local target."; \
-		echo "Install docker desktop or run from a host with the daemon."; \
-		exit 2; \
-	fi
 	@IMAGE=$$(FLY_API_TOKEN= flyctl status -a polyarb-l2 --json 2>/dev/null | jq -r '(.Machines[0].config.image // empty) as $$configured | if $$configured != "" then $$configured else (.ImageRef // .Machines[0].image_ref) as $$ref | (($$ref.Registry // $$ref.registry) + "/" + ($$ref.Repository // $$ref.repository) + (if ($$ref.Digest // $$ref.digest // "") != "" then "@" + ($$ref.Digest // $$ref.digest) else ":" + ($$ref.Tag // $$ref.tag) end)) end' 2>/dev/null); \
 	if [ -z "$$IMAGE" ] || [ "$$IMAGE" = "null/:null" ] || [ "$$IMAGE" = "/:" ]; then \
 		echo "ERROR: cannot resolve current polyarb-l2 image (flyctl auth?)"; exit 1; \
 	fi; \
 	echo "Checking primitives in $$IMAGE…"; \
+	INSPECT_MODE="ssh"; \
+	if command -v docker >/dev/null 2>&1 && \
+	   docker run --rm --entrypoint /bin/sh "$$IMAGE" -c "true" >/dev/null 2>&1; then \
+		INSPECT_MODE="docker"; \
+	else \
+		echo "Docker cannot read the private image; falling back to the live started machine (read-only)."; \
+		if ! FLY_API_TOKEN= flyctl ssh console -a polyarb-l2 -s -C "/bin/sh -c 'true'" >/dev/null 2>&1; then \
+			echo "ERROR: cannot inspect deployed image or live machine"; exit 2; \
+		fi; \
+	fi; \
 	OBSERVED_TOOLS="pkill ps kill which dig ping curl python"; \
 	REQUIRED_TOOLS="$(if $(strip $(required)),$(strip $(required)),python)"; \
 	for tool in $$REQUIRED_TOOLS; do \
@@ -1100,7 +1105,15 @@ chaos-l2-fly-image-check:
 	done; \
 	MISSING_TOOLS=""; \
 	for tool in $$OBSERVED_TOOLS; do \
-		if docker run --rm --entrypoint /bin/sh "$$IMAGE" -c "command -v $$tool >/dev/null 2>&1"; then \
+		if [ "$$INSPECT_MODE" = "docker" ]; then \
+			docker run --rm --entrypoint /bin/sh "$$IMAGE" -c "command -v $$tool >/dev/null 2>&1"; \
+			tool_rc=$$?; \
+		else \
+			FLY_API_TOKEN= flyctl ssh console -a polyarb-l2 -s \
+			  -C "/bin/sh -c 'command -v $$tool >/dev/null 2>&1'" >/dev/null 2>&1; \
+			tool_rc=$$?; \
+		fi; \
+		if [ "$$tool_rc" -eq 0 ]; then \
 			echo "  OK    $$tool"; \
 		else \
 			echo "  MISS  $$tool"; \
