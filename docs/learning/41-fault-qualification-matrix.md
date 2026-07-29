@@ -32,6 +32,12 @@ exact runtime baseline
 - `src/polyarb/perception/candidate_watcher.py:397`：Candidate 先提交原子终态，再排队
   exact-group recovery/failure transition；`:659` 在本轮候选服务后统一 flush，避免
   incident 写路径吃掉 reserved lane 的时间预算。
+- `src/polyarb/perception/resource_controller.py`：在原有 authenticated Resource
+  history 中 additive 记录 disk free 与 load-per-CPU；旧 v1 JSON 缺字段时解释为
+  unknown，不改写旧 hash。
+- `src/polyarb/perception/resource_incidents.py`：把真实 `disk-pressure` /
+  `host-contention` decision 转为 resource-scoped lifecycle；普通 Quote 慢不冒充
+  host contention。
 - `src/polyarb/perception/incidents.py`：verified transition 会反查 recovery 之后的
   Candidate receipt、Discovery batch、Reconciliation window、HTTP probe 或 Resource
   decision，不能靠调用者自报成功。
@@ -109,3 +115,12 @@ producer 子进程退出；把它写成 `child-failed` 会要求一个实际不�
 排队；若 terminal unavailable writer 也被锁而异常上抛，scheduler fallback 仍保留同一
 group/error，cycle 末锁释放后写成 `sqlite-busy`。恢复仍需同组 current-membership
 Quote success receipt，不能用“数据库后来能连接”代替业务恢复。
+
+### 为什么磁盘和 contention 不能只看 `/proc` 或一条日志？
+
+瞬时 OS probe 没有历史身份，日志又不能参与 recovery writer 校验。Resource controller
+把 sample、阈值、decision、sequence 和 hash chain 一起持久化；这让 Dashboard 能回答
+“哪个阈值在何时触发了哪次 shedding”。Incident 再引用该 decision 开始 lifecycle。
+恢复时 `IncidentManager` 会反查更新且通过完整 history replay 的 Resource decision，
+并额外要求 `mode=normal`、`health_claimed=true`。另一个 pressure decision 即使 ID 更新，
+也不能恶意关闭 Incident。

@@ -121,6 +121,14 @@ open exact `candidate:<group_id>` Incidents; the SQLite fault is not called
 `child-failed` because the fail-soft scheduler does not exit. A log line or
 resource decision alone cannot be relabeled as an Incident.
 
+Disk pressure and host contention are now derived from authenticated Resource
+samples rather than the injection command: database-filesystem free bytes below
+`POLYARB_RESOURCE_MIN_DISK_FREE_MB` opens `resource-disk-pressure`, while
+one-minute load divided by CPU count at or above
+`POLYARB_RESOURCE_MAX_LOAD_PER_CPU` opens `resource-contention`. Both contain by
+entering `protect-hot-path`; only a later replay-valid normal/healthy Resource
+decision closes recovery. Their production mutation adapters remain disabled.
+
 Actual execution is an independent, fault-specific capability. It requires
 all of the following:
 

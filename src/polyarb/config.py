@@ -141,6 +141,12 @@ class Settings(BaseSettings):
     resource_cooldown_s: float = Field(default=30.0, ge=0, allow_inf_nan=False)
     resource_sample_interval_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     resource_decision_ttl_s: float = Field(default=15.0, gt=0, allow_inf_nan=False)
+    resource_min_disk_free_mb: int = Field(default=128, ge=1)
+    resource_max_load_per_cpu: float = Field(
+        default=2.0,
+        gt=0,
+        allow_inf_nan=False,
+    )
     http_recovery_probe_interval_s: float = Field(
         default=15.0, gt=0, allow_inf_nan=False
     )

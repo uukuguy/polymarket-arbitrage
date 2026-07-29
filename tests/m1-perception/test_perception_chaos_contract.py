@@ -209,6 +209,30 @@ def test_sqlite_busy_plan_names_group_scoped_durable_incident() -> None:
     assert plan["execute_supported"] is False
 
 
+@pytest.mark.parametrize(
+    ("fault_id", "expected_kind"),
+    [
+        ("disk-pressure", "resource-disk-pressure"),
+        ("contention", "resource-contention"),
+    ],
+)
+def test_resource_plans_name_sensor_backed_durable_incidents(
+    fault_id: str,
+    expected_kind: str,
+) -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan", "--fault", fault_id],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    plan = json.loads(result.stdout)
+    assert plan["expected_incident_kind"] == expected_kind
+    assert plan["execute_supported"] is False
+
+
 def test_reconciliation_stall_adapter_resumes_exact_worker_before_verification(
     tmp_path: Path,
 ) -> None:

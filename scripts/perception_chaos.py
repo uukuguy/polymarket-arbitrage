@@ -148,7 +148,7 @@ FAULTS = {
         _spec(
             "disk-pressure",
             "resource",
-            "not-wired: resource decision only; adapter must open an incident",
+            "resource-disk-pressure",
             "neg_risk_resource_decisions",
             "remove bounded filler and verify a newer healthy resource decision",
         ),
@@ -176,7 +176,7 @@ FAULTS = {
         _spec(
             "contention",
             "resource",
-            "not-wired: resource decision only; adapter must open an incident",
+            "resource-contention",
             "neg_risk_resource_decisions",
             "stop bounded load and verify a newer healthy resource decision",
         ),

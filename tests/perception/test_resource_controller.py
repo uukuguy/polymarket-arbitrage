@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,6 +49,72 @@ def test_hot_quote_age_sheds_reconciliation_before_discovery(tmp_path) -> None:
     assert decision.reconciliation_enabled is False
     assert decision.discovery_batch_limit < decision.previous_discovery_batch_limit
     assert decision.high_candidate_interval_multiplier == 1.0
+
+
+def test_disk_and_host_contention_have_distinct_resource_reasons(tmp_path) -> None:
+    disk = ResourceController(
+        _controller(tmp_path / "disk", lambda: 2_000)._store,
+        clock_ms=lambda: 2_000,
+        min_disk_free_bytes=1_000,
+        max_load_per_cpu=2.0,
+        _verify_store_authority=False,
+    )
+    disk_decision = disk.decide(_sample(disk_free_bytes=999, load_per_cpu=0.5))
+    assert disk_decision.reason == "disk-pressure"
+    assert disk_decision.mode == "protect-hot-path"
+
+    load = ResourceController(
+        _controller(tmp_path / "load", lambda: 2_000)._store,
+        clock_ms=lambda: 2_000,
+        min_disk_free_bytes=1_000,
+        max_load_per_cpu=2.0,
+        _verify_store_authority=False,
+    )
+    load_decision = load.decide(
+        _sample(disk_free_bytes=2_000, load_per_cpu=2.1)
+    )
+    assert load_decision.reason == "host-contention"
+    assert load_decision.mode == "protect-hot-path"
+
+
+def test_capture_sample_records_host_resource_sensors(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _controller(tmp_path, lambda: 2_000)
+    monkeypatch.setattr(
+        resource_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=456),
+    )
+    monkeypatch.setattr(resource_module.os, "getloadavg", lambda: (4.0, 0.0, 0.0))
+    monkeypatch.setattr(resource_module.os, "cpu_count", lambda: 2)
+
+    sample = controller.capture_sample(
+        reconciliation_running=False,
+        previous_discovery_batch_limit=50,
+    )
+
+    assert sample.disk_free_bytes == 456
+    assert sample.load_per_cpu == 2.0
+
+
+def test_legacy_resource_sample_defaults_new_sensors_to_unknown() -> None:
+    legacy = {
+        "candidate_count": 0,
+        "candidate_quote_p95_ms": None,
+        "candidate_missing_quote_count": 0,
+        "candidate_worker_ok": True,
+        "discovery_worker_ok": True,
+        "reconciliation_running": False,
+        "previous_discovery_batch_limit": 50,
+        "observed_at_ms": 1,
+    }
+
+    sample = ResourceSample(**legacy)
+
+    assert sample.disk_free_bytes is None
+    assert sample.load_per_cpu is None
 
 
 def test_empty_candidate_set_expands_discovery_without_claiming_health(tmp_path) -> None:

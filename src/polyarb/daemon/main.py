@@ -62,6 +62,7 @@ from polyarb.perception.reconciliation import (
 from polyarb.perception.resource_controller import (
     ResourceController,
 )
+from polyarb.perception.resource_incidents import ResourcePressureIncidents
 from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.perception.supervisor import ProducerSpec, ProducerSupervisor
 from polyarb.storage.sqlite_store import SQLiteStore
@@ -211,9 +212,12 @@ async def _run_resource_controller(
         hot_quote_age_ms=int(settings.resource_hot_quote_age_s * 1_000),
         cooldown_ms=int(settings.resource_cooldown_s * 1_000),
         decision_ttl_ms=int(settings.resource_decision_ttl_s * 1_000),
+        min_disk_free_bytes=settings.resource_min_disk_free_mb * 1024 * 1024,
+        max_load_per_cpu=settings.resource_max_load_per_cpu,
     )
     previous_limit = settings.discovery_page_limit
     incident_manager = IncidentManager(store)
+    pressure_incidents = ResourcePressureIncidents(store)
     active_incident_id: str | None = None
     while not stop_event.is_set():
         try:
@@ -224,8 +228,15 @@ async def _run_resource_controller(
             )
             decision = await asyncio.to_thread(controller.decide, sample)
             previous_limit = decision.discovery_batch_limit
+            decision_id = await asyncio.to_thread(
+                store.latest_resource_decision_id
+            )
+            await asyncio.to_thread(
+                pressure_incidents.observe,
+                decision,
+                decision_id=decision_id,
+            )
             if active_incident_id is not None:
-                decision_id = await asyncio.to_thread(store.latest_resource_decision_id)
                 await asyncio.to_thread(
                     incident_manager.transition,
                     active_incident_id,

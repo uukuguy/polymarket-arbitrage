@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import shutil
 import sqlite3
 import time
 from dataclasses import asdict, dataclass, replace
@@ -29,6 +31,8 @@ class ResourceSample:
     reconciliation_running: bool
     previous_discovery_batch_limit: int
     observed_at_ms: int
+    disk_free_bytes: int | None = None
+    load_per_cpu: float | None = None
 
     def validate(self) -> None:
         numbers = (
@@ -46,6 +50,20 @@ class ResourceSample:
                 and (
                     not math.isfinite(self.candidate_quote_p95_ms)
                     or self.candidate_quote_p95_ms < 0
+                )
+            )
+            or (
+                self.disk_free_bytes is not None
+                and (
+                    isinstance(self.disk_free_bytes, bool)
+                    or self.disk_free_bytes < 0
+                )
+            )
+            or (
+                self.load_per_cpu is not None
+                and (
+                    not math.isfinite(self.load_per_cpu)
+                    or self.load_per_cpu < 0
                 )
             )
         ):
@@ -73,6 +91,8 @@ class ResourceDecision:
     decision_ttl_ms: int
     valid_until_ms: int
     mode_changed_at_ms: int
+    min_disk_free_bytes: int = 0
+    max_load_per_cpu: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -188,6 +208,8 @@ def _policy_decision(
     hot_quote_age_ms: int,
     cooldown_ms: int,
     decision_ttl_ms: int,
+    min_disk_free_bytes: int,
+    max_load_per_cpu: float,
     previous: ResourceDecision | None,
 ) -> ResourceDecision:
     unhealthy_hot_path = (
@@ -214,11 +236,31 @@ def _policy_decision(
         "decided_at_ms": now_ms,
         "high_candidate_interval_multiplier": 1.0,
         "http_preserved": True,
+        "min_disk_free_bytes": min_disk_free_bytes,
+        "max_load_per_cpu": max_load_per_cpu,
     }
-    if unhealthy_hot_path:
+    disk_pressure = (
+        sample.disk_free_bytes is not None
+        and min_disk_free_bytes > 0
+        and sample.disk_free_bytes < min_disk_free_bytes
+    )
+    host_contention = (
+        sample.load_per_cpu is not None
+        and max_load_per_cpu > 0
+        and sample.load_per_cpu >= max_load_per_cpu
+    )
+    if disk_pressure or host_contention or unhealthy_hot_path:
         desired = ResourceDecision(
             mode="protect-hot-path",
-            reason=("candidate-hot-path-pressure"),
+            reason=(
+                "disk-pressure"
+                if disk_pressure
+                else (
+                    "host-contention"
+                    if host_contention
+                    else "candidate-hot-path-pressure"
+                )
+            ),
             reconciliation_enabled=False,
             discovery_batch_limit=max(1, sample.previous_discovery_batch_limit // 2),
             discovery_duty_multiplier=0.25,
@@ -393,6 +435,9 @@ def _validate_resource_authority(
             or decision.hot_quote_age_ms <= 0
             or decision.cooldown_ms < 0
             or decision.decision_ttl_ms <= 0
+            or decision.min_disk_free_bytes < 0
+            or not math.isfinite(decision.max_load_per_cpu)
+            or decision.max_load_per_cpu < 0
             or decision.valid_until_ms != decision.decided_at_ms + decision.decision_ttl_ms
             or decision.mode_changed_at_ms > decision.decided_at_ms
             or (
@@ -414,6 +459,8 @@ def _validate_resource_authority(
                 hot_quote_age_ms=decision.hot_quote_age_ms,
                 cooldown_ms=decision.cooldown_ms,
                 decision_ttl_ms=decision.decision_ttl_ms,
+                min_disk_free_bytes=decision.min_disk_free_bytes,
+                max_load_per_cpu=decision.max_load_per_cpu,
                 previous=previous,
             ),
             sequence=expected_sequence,
@@ -766,15 +813,26 @@ class ResourceController:
         hot_quote_age_ms: int = 20_000,
         cooldown_ms: int = 30_000,
         decision_ttl_ms: int = 15_000,
+        min_disk_free_bytes: int = 128 * 1024 * 1024,
+        max_load_per_cpu: float = 2.0,
         clock_ms=None,
         _verify_store_authority: bool = True,
     ) -> None:
-        if hot_quote_age_ms <= 0 or cooldown_ms < 0 or decision_ttl_ms <= 0:
+        if (
+            hot_quote_age_ms <= 0
+            or cooldown_ms < 0
+            or decision_ttl_ms <= 0
+            or min_disk_free_bytes < 0
+            or not math.isfinite(max_load_per_cpu)
+            or max_load_per_cpu <= 0
+        ):
             raise ValueError("invalid-resource-policy")
         self._store = store
         self._hot_quote_age_ms = hot_quote_age_ms
         self._cooldown_ms = cooldown_ms
         self._decision_ttl_ms = decision_ttl_ms
+        self._min_disk_free_bytes = min_disk_free_bytes
+        self._max_load_per_cpu = max_load_per_cpu
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
         self._verify_store_authority = _verify_store_authority
 
@@ -824,6 +882,8 @@ class ResourceController:
                     hot_quote_age_ms=self._hot_quote_age_ms,
                     cooldown_ms=self._cooldown_ms,
                     decision_ttl_ms=self._decision_ttl_ms,
+                    min_disk_free_bytes=self._min_disk_free_bytes,
+                    max_load_per_cpu=self._max_load_per_cpu,
                     previous=previous,
                 ),
                 sequence=sequence,
@@ -883,6 +943,14 @@ class ResourceController:
         now_ms = self._clock_ms()
         freshness = self._store.candidate_freshness_snapshot(now_ms=now_ms)
         scopes = {incident.scope for incident in self._store.open_incidents()}
+        try:
+            disk_free_bytes = shutil.disk_usage(self._store.db_path.parent).free
+        except OSError:
+            disk_free_bytes = None
+        try:
+            load_per_cpu = os.getloadavg()[0] / max(1, os.cpu_count() or 1)
+        except OSError:
+            load_per_cpu = None
         return ResourceSample(
             candidate_count=freshness.candidate_count,
             candidate_quote_p95_ms=freshness.quote_p95_age_ms,
@@ -892,6 +960,8 @@ class ResourceController:
             reconciliation_running=(reconciliation_running and "reconciliation" not in scopes),
             previous_discovery_batch_limit=previous_discovery_batch_limit,
             observed_at_ms=now_ms,
+            disk_free_bytes=disk_free_bytes,
+            load_per_cpu=load_per_cpu,
         )
 
 

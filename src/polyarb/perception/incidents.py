@@ -2195,6 +2195,17 @@ class IncidentManager:
                 decision is not None
                 and decision.sequence == row["sequence"]
                 and decision.decided_at_ms == row["decided_at_ms"]
+                and (
+                    incident.kind
+                    not in {
+                        "resource-disk-pressure",
+                        "resource-contention",
+                    }
+                    or (
+                        decision.mode == "normal"
+                        and decision.health_claimed
+                    )
+                )
             )
         return False
 
