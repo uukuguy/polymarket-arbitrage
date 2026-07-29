@@ -1373,3 +1373,18 @@ transport activity and an orderbook resnapshot:
   The user has accepted reliability-first staged separation as the design
   direction, while asking that the final choice be considered and implemented
   together with the holistic repair.
+## 2026-07-29 — Task 8 fault chain closure
+
+Production qualification now separates runtime detection from mutation
+capability. Gamma, Candidate CLOB/SQLite, Resource disk/load, notification
+delivery, producer exit/stall, and HTTP faults all have durable expected
+Incident or coverage facts plus component-specific recovery writers. This does
+not make every injection executable: upstream API faults still require a
+scoped proxy with exact release/fault authorization and finally-protected
+cleanup; host/store/runtime faults retain distinct primitives.
+
+Resource history remains backward-readable: additive `disk_free_bytes` and
+`load_per_cpu` fields default to unknown for older v1 sample JSON, while each
+new decision persists the thresholds used for deterministic replay. Telegram
+recovery is keyed to the exact durable opportunity outbox ID; API delivery
+success is not user receipt/read evidence.

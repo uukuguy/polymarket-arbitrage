@@ -5694,3 +5694,34 @@ designing any image-dependent fault primitive. Do not deploy, enable flags,
 inject production faults, or cut over the global gate until the preceding
 local/read-only qualification passes and the specific production mutation is
 authorized.
+
+## SESSION 119 — 2026-07-29 (Task 8 runtime fault chains closed)
+
+- [IMPLEMENTED] Commits `a820e97` through `1147379` added early
+  Reconciliation stall detection, exact Candidate/Discovery exit recovery,
+  Gamma batch incidents, Candidate CLOB and SQLite-busy group incidents,
+  authenticated disk/load Resource incidents, and exact-outbox Telegram
+  delivery incidents.
+- [CONTINUITY] Candidate incident writes flush after reserved-lane service;
+  normal/explore slots start as a bounded concurrent batch and use per-group
+  attempt accounting. The starvation regression passed five consecutive runs.
+- [CHAIN TRUTH] All 16 fault plans now name real runtime incident/coverage
+  evidence; `not-wired` is absent. Recovery still requires component-specific
+  Candidate receipt, Discovery batch, Reconciliation checkpoint, healthy
+  Resource decision, exact notification delivered attempt, or HTTP probe.
+- [VERIFIED] `tests/perception + tests/m1-perception` passed 100% after the
+  Discovery fixture repair (`379495e`), followed by proportional
+  Candidate/Resource/Notification/HTTP regressions, Ruff, M1 manual, diff, and
+  82-plan no-drift gates.
+- [BOUNDARY] No deployment, feature flag, cloud config, production database,
+  fault injection, wallet, signing, order, or trade state changed. Runtime
+  evidence support does not authorize the 13 still-disabled production fault
+  adapters.
+
+### [NEXT — CURRENT]
+
+Continue Task 8 from `1147379`: design one scoped, authenticated, finally-cleaned
+up upstream fault proxy contract for Gamma/CLOB/Telegram before enabling any of
+those adapters. Keep disk filler, host load, daemon restart, and deploy
+interrupt as separate primitives because their cleanup and identity contracts
+differ. First command: `make planning-status`.
