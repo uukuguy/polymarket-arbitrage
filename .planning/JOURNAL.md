@@ -5663,3 +5663,34 @@ Structure performance from this diagnostic alone.
   scheduler/health sample. The next authorized operator with that local secret
   may issue exactly one signed `make unpause-prod`, then capture the named
   read-only attempt and strict-health evidence.
+
+## SESSION 118 — 2026-07-29 (M1 opportunity operations Dashboard accepted)
+
+- [IMPLEMENTED] Task 7 remediation Tasks 1–5 now expose authenticated
+  Discovery/Reconciliation progress, current Candidate opportunity authority,
+  bounded Incident lifecycle, bounded Resource decisions, and a four-class
+  group operations timeline. Candidate, Incident, and Resource compaction paths
+  fail closed and preserve explicit history floors.
+- [DASHBOARD] Commit `472d8e2` adds direct opportunity-to-timeline navigation,
+  server-authority Resource age/TTL, unconditional Reconciliation history
+  limitation copy, structured Incident evidence, deterministic real-store
+  visual fixtures, and mobile containment. Six final desktop/375 px captures
+  include available, unavailable, and long-identity states.
+- [REVIEW] The formal six-pillar re-review scored 24/24 with 0 Critical,
+  0 Important, and 0 Minor findings. The prior two Important and two Minor
+  findings were fixed rather than waived.
+- [VERIFIED] Perception/M1 tests and the full repository test suite completed at
+  100%; Dashboard typecheck/build and local fixture-backed HTTP smoke passed.
+  M1 manual, diff, and planning gates passed; 82 plans report no drift.
+- [BOUNDARY] No cloud release, feature flag, production database, fault
+  injection, wallet, balance, signing, order, or trade state changed. Task 7 is
+  locally complete; Task 8 production qualification and cutover remain pending.
+
+### [NEXT — CURRENT]
+
+Start Task 8 with RED tests for the deterministic qualification evaluator and
+the local/read-only Make targets. Run `make chaos-l2-fly-image-check` before
+designing any image-dependent fault primitive. Do not deploy, enable flags,
+inject production faults, or cut over the global gate until the preceding
+local/read-only qualification passes and the specific production mutation is
+authorized.

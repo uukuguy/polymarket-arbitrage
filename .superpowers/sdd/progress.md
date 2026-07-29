@@ -38,16 +38,16 @@ Baseline: `00bac7b`
 - Task 4: complete (commits ebdb151..114f30e, review clean; 47 focused + 213 proportional + 2507 full-suite collected passed)
 - Task 5: complete (commits 114f30e..e03f795, review clean; 89 focused + 318 proportional + 2627 full-suite collected passed)
 - Task 6: complete (commits e03f795..d8e2315, review clean; 235 focused + 438 expanded + 2938 full-suite collected, 0 failures)
-- Task 7: pending
+- Task 7: complete (commits fd4c37d..472d8e2; full repository suite passed; UI gate 24/24 with 0 findings)
 - Task 8: pending
 
 Task 7 read-model remediation:
 
 - Task 1: complete (commits 8ba84cb..b9b5afa, review clean; 37 focused contracts)
-- Task 2: pending
-- Task 3: pending
-- Task 4: pending
-- Task 5: pending
-- Task 6: pending
+- Task 2: complete (commits 5d408ad..936133f, review clean; authenticated current opportunity authority)
+- Task 3: complete (commits 39862ed..b22db52, review clean; bounded Incident lifecycle authority)
+- Task 4: complete (commits 7debd9b..9c49789, review clean; bounded resource authority)
+- Task 5: complete (commit 301fad1, review clean; authenticated four-class group timeline)
+- Task 6: complete (commit 472d8e2; full gates green; six-pillar UI review 24/24)
 
 Minor review findings to revisit in final whole-branch review: none.
