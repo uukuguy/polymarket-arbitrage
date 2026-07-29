@@ -64,3 +64,22 @@ Do not skip or reorder:
 
 A cleanup failure blocks every later injection. A locally green fixture can
 never substitute for any production step.
+
+## Production read-only baseline
+
+```bash
+make qualify-perception-prod-readonly expected_release=<40-char-sha>
+```
+
+The command performs only HTTPS GET requests to `/healthz`,
+`/perception/discovery`, `/perception/reconciliation`,
+`/perception/resources?limit=1`, and `/perception/incidents?limit=100`.
+It requires at least five samples with one unchanged `releaseId`, `machineId`,
+and UUID `bootId`, then preserves `evidence.json` and `verdict.json` under a
+new timestamped directory in `output/perception-qualification/`.
+
+This baseline intentionally omits any metric the public read models cannot
+prove. In particular, MTTD, containment, cross-membership Quote count, and
+orphan collecting-run count require later fault-specific evidence. Their
+absence produces a FAIL verdict rather than a default zero. An open Incident
+also fails the final stability gate.

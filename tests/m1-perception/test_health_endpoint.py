@@ -11,6 +11,7 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 from starlette.testclient import TestClient
@@ -114,6 +115,37 @@ def test_pass_when_fresh(
     assert body["status"] == "pass"
     ct = resp.headers.get("content-type", "")
     assert "application/health+json" in ct
+
+
+def test_health_binds_stable_machine_and_boot_identity(
+    http_test_client: TestClient,
+) -> None:
+    strict = http_test_client.get("/health").json()
+    probe = http_test_client.get("/healthz").json()
+
+    assert strict["machineId"] == "local"
+    assert UUID(strict["bootId"]).version == 4
+    assert probe["machineId"] == strict["machineId"]
+    assert probe["bootId"] == strict["bootId"]
+
+
+def test_health_exposes_release_bound_qualification_policy(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    body = http_test_client.get("/healthz").json()
+
+    assert body["qualificationPolicy"] == {
+        "candidateQuoteHardStaleS": (
+            daemon_settings_for_test.candidate_quote_hard_stale_s
+        ),
+        "candidateLowerLaneMaxWaitS": (
+            daemon_settings_for_test.candidate_lower_lane_max_wait_s
+        ),
+        "discoveryCandidateMaxWaitS": (
+            daemon_settings_for_test.discovery_candidate_max_wait_s
+        ),
+    }
 
 
 def test_warn_when_stale(

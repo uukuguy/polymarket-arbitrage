@@ -1,0 +1,358 @@
+"""Collect bounded read-only M1 perception qualification evidence."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import sys
+import time
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
+
+_READ_PATHS = (
+    ("/healthz", "health"),
+    ("/perception/discovery", "discovery"),
+    ("/perception/reconciliation", "reconciliation"),
+    ("/perception/resources?limit=1", "resources"),
+    ("/perception/incidents?limit=100", "incidents"),
+)
+_MAX_RESPONSE_BYTES = 1_048_576
+
+
+def _mapping(value: object, reason: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(reason)
+    return value
+
+
+def _number(value: object, reason: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError(reason)
+    return float(value)
+
+
+def _integer(value: object, reason: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(reason)
+    return value
+
+
+def _nearest_rank_p95(values: Sequence[float]) -> float:
+    if not values:
+        raise ValueError("http-latency-evidence-missing")
+    ordered = sorted(values)
+    return ordered[math.ceil(len(ordered) * 0.95) - 1]
+
+
+def build_evidence(
+    rounds: Sequence[Mapping[str, object]],
+    *,
+    expected_release: str,
+) -> dict[str, object]:
+    if len(rounds) < 5:
+        raise ValueError("insufficient-readonly-samples")
+
+    identities: set[tuple[str, str, str, str]] = set()
+    latencies: list[float] = []
+    checkpoints: list[int] = []
+    quote_p95_values: list[float] = []
+    normalized_rounds: list[Mapping[str, object]] = []
+
+    for sample in rounds:
+        health = _mapping(sample.get("health"), "health-evidence-invalid")
+        identity = (
+            str(health.get("serviceId")),
+            str(health.get("releaseId")),
+            str(health.get("machineId")),
+            str(health.get("bootId")),
+        )
+        identities.add(identity)
+        if identity[0] != "polyarb-l1" or identity[1] != expected_release:
+            raise ValueError("runtime-identity-mismatch")
+
+        observed_at_ms = _integer(
+            sample.get("observed_at_ms"),
+            "sample-time-invalid",
+        )
+        if normalized_rounds and observed_at_ms < _integer(
+            normalized_rounds[-1].get("observed_at_ms"),
+            "sample-time-invalid",
+        ):
+            raise ValueError("sample-time-order-invalid")
+        normalized_rounds.append(sample)
+
+        raw_latencies = sample.get("latencies_s")
+        if not isinstance(raw_latencies, list) or not raw_latencies:
+            raise ValueError("http-latency-evidence-missing")
+        latencies.extend(
+            _number(value, "http-latency-evidence-invalid")
+            for value in raw_latencies
+        )
+
+        for envelope_name in (
+            "discovery",
+            "reconciliation",
+            "resources",
+            "incidents",
+        ):
+            envelope = _mapping(
+                sample.get(envelope_name),
+                f"{envelope_name}-evidence-invalid",
+            )
+            if envelope.get("status") != "available":
+                raise ValueError(f"{envelope_name}-unavailable")
+
+        reconciliation = _mapping(
+            _mapping(
+                sample["reconciliation"],
+                "reconciliation-evidence-invalid",
+            ).get("reconciliation"),
+            "reconciliation-evidence-missing",
+        )
+        checkpoints.append(
+            _integer(
+                reconciliation.get("checkpoint_at_ms"),
+                "reconciliation-checkpoint-invalid",
+            )
+        )
+
+        resource_items = _mapping(
+            sample["resources"],
+            "resource-evidence-invalid",
+        ).get("items")
+        if not isinstance(resource_items, list) or not resource_items:
+            raise ValueError("resource-sample-missing")
+        resource_sample = _mapping(
+            _mapping(resource_items[0], "resource-item-invalid").get("sample"),
+            "resource-sample-invalid",
+        )
+        quote_p95_values.append(
+            _number(
+                resource_sample.get("candidate_quote_p95_ms"),
+                "candidate-quote-p95-missing",
+            )
+        )
+
+    if len(identities) != 1:
+        raise ValueError("runtime-identity-changed")
+    service_id, release_id, machine_id, boot_id = next(iter(identities))
+    latest = rounds[-1]
+    health = _mapping(latest["health"], "health-evidence-invalid")
+    policy = _mapping(
+        health.get("qualificationPolicy"),
+        "qualification-policy-missing",
+    )
+    discovery = _mapping(
+        _mapping(latest["discovery"], "discovery-evidence-invalid").get(
+            "discovery"
+        ),
+        "discovery-evidence-missing",
+    )
+    coverage = _mapping(discovery.get("coverage"), "coverage-evidence-missing")
+    by_minutes = _mapping(coverage.get("by_minutes"), "coverage-evidence-missing")
+    coverage_15 = _mapping(by_minutes.get("15"), "coverage-15m-missing")
+    admission = _mapping(
+        discovery.get("admission_proof"),
+        "admission-proof-missing",
+    )
+    reconciliation = _mapping(
+        _mapping(
+            latest["reconciliation"],
+            "reconciliation-evidence-invalid",
+        ).get("reconciliation"),
+        "reconciliation-evidence-missing",
+    )
+    reconciliation_status = reconciliation.get("status")
+    if reconciliation_status not in {"open", "complete", "applied"}:
+        raise ValueError("reconciliation-status-invalid")
+    incidents = _mapping(latest["incidents"], "incident-evidence-invalid")
+
+    result: dict[str, object] = {
+        "evidence_schema_version": 1,
+        "scope": "production-readonly",
+        "app_id": service_id,
+        "release_id": release_id,
+        "machine_id": machine_id,
+        "boot_id": boot_id,
+        "window_started_at_ms": _integer(
+            rounds[0].get("observed_at_ms"),
+            "sample-time-invalid",
+        ),
+        "window_ended_at_ms": _integer(
+            latest.get("observed_at_ms"),
+            "sample-time-invalid",
+        ),
+        "sample_count": len(rounds),
+        "http_p95_s": _nearest_rank_p95(latencies),
+        "candidate_quote_p95_s": max(quote_p95_values) / 1_000,
+        "candidate_stale_before_s": _number(
+            policy.get("candidateQuoteHardStaleS"),
+            "candidate-stale-policy-missing",
+        ),
+        "normal_quote_stale_before_s": _number(
+            policy.get("candidateLowerLaneMaxWaitS"),
+            "normal-stale-policy-missing",
+        ),
+        "liquidity_weighted_active_known_coverage": _number(
+            coverage_15.get("liquidity_weighted_fraction"),
+            "coverage-15m-invalid",
+        ),
+        "coverage_window_s": 900,
+        "oldest_known_group_visit_s": _number(
+            discovery.get("oldest_visit_age_ms"),
+            "oldest-visit-missing",
+        )
+        / 1_000,
+        "promotion_to_watch_s": _number(
+            admission.get("effective_start_bound_ms"),
+            "promotion-bound-missing",
+        )
+        / 1_000,
+        "reconciliation_complete": reconciliation_status
+        in {"complete", "applied"},
+        "reconciliation_advancing": checkpoints[-1] > checkpoints[0],
+        "open_incident_count": _integer(
+            incidents.get("open_count"),
+            "open-incident-count-missing",
+        ),
+        "incidents": [],
+        "source_rounds": list(normalized_rounds),
+    }
+    if result["reconciliation_complete"]:
+        result["reconciliation_closure_s"] = (
+            _number(
+                reconciliation.get("duration_ms"),
+                "reconciliation-duration-missing",
+            )
+            / 1_000
+        )
+    return result
+
+
+def _fetch_json(base_url: str, path: str) -> tuple[object, float]:
+    request = Request(f"{base_url.rstrip('/')}{path}", method="GET")
+    started = time.monotonic()
+    with urlopen(request, timeout=10) as response:  # noqa: S310
+        payload = response.read(_MAX_RESPONSE_BYTES + 1)
+    elapsed = time.monotonic() - started
+    if len(payload) > _MAX_RESPONSE_BYTES:
+        raise ValueError("readonly-response-too-large")
+    decoded = json.loads(payload)
+    if not isinstance(decoded, dict):
+        raise ValueError("readonly-response-not-object")
+    return decoded, elapsed
+
+
+def collect_rounds(
+    base_url: str,
+    *,
+    sample_count: int,
+    interval_s: float,
+    fetch_json: Callable[[str, str], tuple[object, float]] = _fetch_json,
+    clock_ms: Callable[[], int] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> list[dict[str, object]]:
+    if sample_count < 5 or sample_count > 120:
+        raise ValueError("samples-must-be-between-5-and-120")
+    if not math.isfinite(interval_s) or interval_s < 0 or interval_s > 60:
+        raise ValueError("interval-must-be-between-0-and-60")
+    effective_clock = (
+        (lambda: int(time.time() * 1_000)) if clock_ms is None else clock_ms
+    )
+    rounds: list[dict[str, object]] = []
+    for sequence in range(sample_count):
+        sample: dict[str, object] = {"latencies_s": []}
+        latencies = sample["latencies_s"]
+        assert isinstance(latencies, list)
+        for path, field in _READ_PATHS:
+            body, elapsed_s = fetch_json(base_url, path)
+            sample[field] = body
+            latencies.append(elapsed_s)
+        sample["observed_at_ms"] = effective_clock()
+        rounds.append(sample)
+        print(
+            f"readonly sample {sequence + 1}/{sample_count} complete",
+            file=sys.stderr,
+            flush=True,
+        )
+        if sequence + 1 < sample_count:
+            sleeper(interval_s)
+    return rounds
+
+
+def _validate_base_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("base-url-must-be-an-https-origin")
+    return value.rstrip("/")
+
+
+def _write_exclusive(path: Path, evidence: Mapping[str, object]) -> None:
+    payload = (
+        json.dumps(
+            evidence,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+    with path.open("x") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base-url", required=True)
+    parser.add_argument("--expected-release", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--samples", type=int, default=5)
+    parser.add_argument("--interval-s", type=float, default=1.0)
+    args = parser.parse_args(argv)
+    try:
+        base_url = _validate_base_url(args.base_url)
+        if re.fullmatch(r"[0-9a-f]{40}", args.expected_release) is None:
+            raise ValueError("expected-release-must-be-a-40-character-sha")
+        rounds = collect_rounds(
+            base_url,
+            sample_count=args.samples,
+            interval_s=args.interval_s,
+        )
+        evidence = build_evidence(
+            rounds,
+            expected_release=args.expected_release,
+        )
+        _write_exclusive(args.output, evidence)
+    except FileExistsError:
+        print(f"evidence output already exists: {args.output}", file=sys.stderr)
+        return 2
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        print(f"readonly qualification collection failed: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

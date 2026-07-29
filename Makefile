@@ -719,7 +719,7 @@ logs-tail-axiom:
 # ─────────────────────────────────────────────────────────────────────────────
 
 .PHONY: dashboard-dev dashboard-fixture-api dashboard-build dashboard-typecheck dashboard-deploy smoke-l2-dashboard
-.PHONY: smoke-perception-dashboard qualify-perception-local
+.PHONY: smoke-perception-dashboard qualify-perception-local qualify-perception-prod-readonly
 
 ## dashboard-dev: 本地起 dashboard (next dev :3000)
 dashboard-dev:
@@ -807,8 +807,39 @@ qualify-perception-local:
 	echo ">> qualify-perception-local — canonical PASS fixture"; \
 	uv run python scripts/perception_fault_acceptance.py \
 	  --evidence tests/fixtures/perception-fault-acceptance-pass.json \
-	  --output "$$qualification_tmp/verdict.json"; \
+	  --output "$$qualification_tmp/verdict.json" \
+	  --require-scope local-conformance; \
 	cat "$$qualification_tmp/verdict.json"
+
+## qualify-perception-prod-readonly: Preserve a bounded GET-only production evidence window and fail-closed verdict
+## Optional: expected_release=<40-char-sha> samples=5 interval_s=1 output_dir=<new-path>
+qualify-perception-prod-readonly:
+	@set -eu; \
+	qualification_release="$(or $(expected_release),$(shell git rev-parse HEAD))"; \
+	qualification_root="$(output_dir)"; \
+	if [ -z "$$qualification_root" ]; then \
+	  mkdir -p output/perception-qualification; \
+	  qualification_root="output/perception-qualification/prod-readonly-$$(date -u +%Y%m%dT%H%M%SZ)"; \
+	fi; \
+	mkdir "$$qualification_root"; \
+	echo ">> qualify-perception-prod-readonly — GET-only evidence for $$qualification_release"; \
+	uv run python scripts/perception_fault_readonly.py \
+	  --base-url "$(POLYARB_PERCEPTION_URL)" \
+	  --expected-release "$$qualification_release" \
+	  --output "$$qualification_root/evidence.json" \
+	  --samples "$(or $(samples),5)" \
+	  --interval-s "$(or $(interval_s),1)"; \
+	set +e; \
+	uv run python scripts/perception_fault_acceptance.py \
+	  --evidence "$$qualification_root/evidence.json" \
+	  --output "$$qualification_root/verdict.json" \
+	  --require-scope production-readonly \
+	  --expected-release "$$qualification_release"; \
+	qualification_rc=$$?; \
+	set -e; \
+	cat "$$qualification_root/verdict.json"; \
+	echo "evidence_dir=$$qualification_root"; \
+	exit $$qualification_rc
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 07 — 7-day production soak monitoring (Better Stack driven)

@@ -54,6 +54,7 @@ M1_MAKE_TARGETS = {
     "dashboard-dev",
     "dashboard-fixture-api",
     "qualify-perception-local",
+    "qualify-perception-prod-readonly",
     "smoke-l2-dashboard",
     "smoke-l3-dashboard",
     "smoke-perception-dashboard",

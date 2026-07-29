@@ -22,7 +22,9 @@ Source: starlette.io (RESEARCH.md §9 lines 1372-1398)
 
 from __future__ import annotations
 
+import os
 from typing import Any
+from uuid import uuid4
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -161,6 +163,8 @@ def create_app(
     app.state.scheduler = scheduler
     app.state.sqlite_store = sqlite_store
     app.state.settings = settings
+    app.state.machine_id = os.environ.get("FLY_MACHINE_ID", "local")
+    app.state.boot_id = str(uuid4())
     app.state.quote_worker_runtime = quote_worker_runtime
     app.state.quote_worker = quote_worker
     app.state.opportunity_watcher = opportunity_watcher

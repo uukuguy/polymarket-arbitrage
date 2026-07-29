@@ -7,11 +7,13 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 
 @dataclass(frozen=True)
@@ -103,8 +105,75 @@ def _has_recovery_writer_receipt(incident: Mapping[str, Any]) -> bool:
     )
 
 
-def evaluate(evidence: Mapping[str, Any]) -> QualificationVerdict:
+def _validate_provenance(
+    evidence: Mapping[str, Any],
+    *,
+    required_scope: str,
+    expected_release: str | None,
+    reasons: list[str],
+) -> None:
+    if evidence.get("evidence_schema_version") != 1:
+        reasons.append("invalid-evidence-schema-version")
+    if evidence.get("scope") != required_scope:
+        reasons.append("scope-mismatch")
+    if evidence.get("app_id") != "polyarb-l1":
+        reasons.append("invalid-app-id")
+    if required_scope != "production-readonly":
+        return
+
+    release_id = evidence.get("release_id")
+    if not isinstance(release_id, str) or re.fullmatch(r"[0-9a-f]{40}", release_id) is None:
+        reasons.append("invalid-release-id")
+    elif expected_release is not None and release_id != expected_release:
+        reasons.append("release-mismatch")
+
+    machine_id = evidence.get("machine_id")
+    if not isinstance(machine_id, str) or not machine_id or machine_id == "local":
+        reasons.append("invalid-machine-id")
+
+    boot_id = evidence.get("boot_id")
+    try:
+        parsed_boot = UUID(str(boot_id))
+        if parsed_boot.version != 4:
+            raise ValueError
+    except (AttributeError, TypeError, ValueError):
+        reasons.append("invalid-boot-id")
+
+    started_at_ms = evidence.get("window_started_at_ms")
+    ended_at_ms = evidence.get("window_ended_at_ms")
+    if (
+        not isinstance(started_at_ms, int)
+        or isinstance(started_at_ms, bool)
+        or not isinstance(ended_at_ms, int)
+        or isinstance(ended_at_ms, bool)
+        or started_at_ms < 0
+        or ended_at_ms < started_at_ms
+    ):
+        reasons.append("invalid-evidence-window")
+
+    sample_count = evidence.get("sample_count")
+    if (
+        not isinstance(sample_count, int)
+        or isinstance(sample_count, bool)
+        or sample_count < 5
+    ):
+        reasons.append("invalid-sample-count")
+
+
+def evaluate(
+    evidence: Mapping[str, Any],
+    *,
+    required_scope: str | None = None,
+    expected_release: str | None = None,
+) -> QualificationVerdict:
     reasons: list[str] = []
+    if required_scope is not None:
+        _validate_provenance(
+            evidence,
+            required_scope=required_scope,
+            expected_release=expected_release,
+            reasons=reasons,
+        )
     for field, maximum, reason in _MAXIMUMS:
         value = _validated_number(evidence, field, reasons)
         if value is not None and value > maximum:
@@ -156,6 +225,13 @@ def evaluate(evidence: Mapping[str, Any]) -> QualificationVerdict:
     )
     if orphan_collecting:
         reasons.append("orphan-collecting-run")
+    open_incidents = _validated_count(
+        evidence,
+        "open_incident_count",
+        reasons,
+    )
+    if open_incidents:
+        reasons.append("open-incident")
 
     incidents = evidence.get("incidents")
     if isinstance(incidents, list):
@@ -244,10 +320,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--require-scope",
+        choices=("local-conformance", "production-readonly"),
+        required=True,
+    )
+    parser.add_argument("--expected-release")
     args = parser.parse_args(argv)
+    if args.require_scope == "production-readonly" and args.expected_release is None:
+        parser.error("--expected-release is required for production-readonly")
     try:
         evidence = _read_evidence(args.evidence)
-        verdict = evaluate(evidence)
+        verdict = evaluate(
+            evidence,
+            required_scope=args.require_scope,
+            expected_release=args.expected_release,
+        )
         canonical_evidence = _canonical_json(evidence)
         output = {
             "evidence_sha256": (

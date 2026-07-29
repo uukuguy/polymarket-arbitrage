@@ -10,10 +10,14 @@ import scripts.perception_fault_acceptance as acceptance
 
 ROOT = Path(__file__).parents[2]
 EVALUATOR = ROOT / "scripts/perception_fault_acceptance.py"
+FIXTURE = ROOT / "tests/fixtures/perception-fault-acceptance-pass.json"
 
 
 def fixture_evidence(**overrides: object) -> dict[str, object]:
     evidence: dict[str, object] = {
+        "evidence_schema_version": 1,
+        "scope": "local-conformance",
+        "app_id": "polyarb-l1",
         "http_p95_s": 1.0,
         "candidate_quote_p95_s": 15,
         "candidate_stale_before_s": 60,
@@ -29,6 +33,7 @@ def fixture_evidence(**overrides: object) -> dict[str, object]:
         "containment_s": 20,
         "cross_membership_quote_batches": 0,
         "orphan_collecting_runs": 0,
+        "open_incident_count": 0,
         "incidents": [
             {
                 "component": "candidate",
@@ -111,6 +116,7 @@ def test_verdict_rejects_background_pass_with_hot_sla_violation() -> None:
         ("containment_s", 60.01, "containment"),
         ("cross_membership_quote_batches", 1, "cross-membership-quote"),
         ("orphan_collecting_runs", 1, "orphan-collecting-run"),
+        ("open_incident_count", 1, "open-incident"),
     ],
 )
 def test_verdict_rejects_each_sla_violation(
@@ -212,16 +218,24 @@ def test_missing_required_metric_fails_closed() -> None:
 def _run_cli(
     evidence_path: Path,
     output_path: Path,
+    *,
+    required_scope: str = "local-conformance",
+    expected_release: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    command = [
+        sys.executable,
+        str(EVALUATOR),
+        "--evidence",
+        str(evidence_path),
+        "--output",
+        str(output_path),
+        "--require-scope",
+        required_scope,
+    ]
+    if expected_release is not None:
+        command.extend(["--expected-release", expected_release])
     return subprocess.run(
-        [
-            sys.executable,
-            str(EVALUATOR),
-            "--evidence",
-            str(evidence_path),
-            "--output",
-            str(output_path),
-        ],
+        command,
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -264,6 +278,22 @@ def test_cli_returns_one_for_fail_verdict(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert json.loads(output_path.read_text())["status"] == "FAIL"
     assert "http-p95" in json.loads(output_path.read_text())["reasons"]
+
+
+def test_cli_rejects_local_fixture_for_production_scope(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "evidence.json"
+    output_path = tmp_path / "verdict.json"
+    evidence_path.write_text(FIXTURE.read_text())
+
+    result = _run_cli(
+        evidence_path,
+        output_path,
+        required_scope="production-readonly",
+        expected_release="a" * 40,
+    )
+
+    assert result.returncode == 1
+    assert "scope-mismatch" in json.loads(output_path.read_text())["reasons"]
 
 
 def test_cli_refuses_to_overwrite_verdict(tmp_path: Path) -> None:
@@ -316,3 +346,4 @@ def test_make_exposes_deterministic_local_qualification() -> None:
     assert "test_perception_fault_acceptance.py" in result.stdout
     assert "perception_fault_acceptance.py" in result.stdout
     assert "perception-fault-acceptance-pass.json" in result.stdout
+    assert "--require-scope local-conformance" in result.stdout

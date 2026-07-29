@@ -1004,12 +1004,26 @@ def _build_health_body(
     overall: str,
     checks: dict[str, list[dict[str, Any]]],
     settings: Any,
+    *,
+    machine_id: str,
+    boot_id: str,
 ) -> dict[str, Any]:
     """Shared IETF body shape — same for /health and /healthz (D-06 full mirror)."""
     return {
         "status": overall,
         "version": settings.version,
         "releaseId": settings.release_id,
+        "machineId": machine_id,
+        "bootId": boot_id,
+        "qualificationPolicy": {
+            "candidateQuoteHardStaleS": settings.candidate_quote_hard_stale_s,
+            "candidateLowerLaneMaxWaitS": (
+                settings.candidate_lower_lane_max_wait_s
+            ),
+            "discoveryCandidateMaxWaitS": (
+                settings.discovery_candidate_max_wait_s
+            ),
+        },
         "serviceId": "polyarb-l1",
         "description": "Polymarket L1 observation daemon — Structure 5m + Quote 2m",
         "checks": checks,
@@ -1037,7 +1051,13 @@ async def health(request: Request) -> JSONResponse:
         time.time(),
         getattr(request.app.state, "quote_worker_runtime", None),
     )
-    body = _build_health_body(overall, checks, settings)
+    body = _build_health_body(
+        overall,
+        checks,
+        settings,
+        machine_id=request.app.state.machine_id,
+        boot_id=request.app.state.boot_id,
+    )
     http_status = 503 if overall == "fail" else 200
     return JSONResponse(body, status_code=http_status, media_type=HEALTH_CONTENT_TYPE)
 
@@ -1071,6 +1091,12 @@ async def healthz(request: Request) -> JSONResponse:
         time.time(),
         getattr(request.app.state, "quote_worker_runtime", None),
     )
-    body = _build_health_body(overall, checks, settings)
+    body = _build_health_body(
+        overall,
+        checks,
+        settings,
+        machine_id=request.app.state.machine_id,
+        boot_id=request.app.state.boot_id,
+    )
     # KEY: ignore overall when deciding HTTP code — always 200.
     return JSONResponse(body, status_code=200, media_type=HEALTH_CONTENT_TYPE)
