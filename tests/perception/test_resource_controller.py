@@ -395,3 +395,37 @@ def test_resource_checkpoint_failure_rolls_back_sample_and_decision(
             "SELECT COUNT(*) FROM neg_risk_resource_authority_checkpoint"
         ).fetchone()[0] == 0
         controller._store._assert_owner_journal_clean(con)
+
+
+def test_resource_hard_limit_records_breadcrumb_and_next_writer_recovers(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [2_000]
+    controller = _controller(tmp_path, lambda: now[0])
+    monkeypatch.setattr(resource_module, "RESOURCE_SUFFIX_HARD_MAX_PAIRS", 1)
+    controller.decide(_sample())
+    now[0] = 2_001
+
+    with pytest.raises(ValueError, match="resource-history-hard-limit"):
+        controller.decide(_sample(observed_at_ms=now[0]))
+
+    with controller._store._connect() as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_resource_decisions"
+        ).fetchone()[0] == 1
+        failure = con.execute(
+            "SELECT * FROM neg_risk_evidence_failures WHERE component='resource'"
+        ).fetchone()
+        assert failure is not None
+        assert failure["reason"] == "authority-invalid"
+        assert failure["recovered_at_ms"] is None
+
+    monkeypatch.setattr(resource_module, "RESOURCE_SUFFIX_HARD_MAX_PAIRS", 1_024)
+    now[0] = 2_002
+    assert controller.decide(_sample(observed_at_ms=now[0])).sequence == 2
+    with controller._store._connect() as con:
+        failure = con.execute(
+            "SELECT * FROM neg_risk_evidence_failures WHERE component='resource'"
+        ).fetchone()
+        assert failure["recovered_at_ms"] == 2_002

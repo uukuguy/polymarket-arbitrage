@@ -8317,10 +8317,12 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             from polyarb.perception.resource_controller import (
+                validate_resource_evidence_failure,
                 validate_resource_history,
             )
 
             self._assert_owner_journal_clean(con)
+            validate_resource_evidence_failure(con, require_resolved=True)
             decision = validate_resource_history(con)
             if decision is None:
                 if required:
@@ -8340,10 +8342,12 @@ class OpportunityPerceptionStore:
         con = self._connect()
         try:
             from polyarb.perception.resource_controller import (
+                validate_resource_evidence_failure,
                 validate_resource_history,
             )
 
             self._assert_owner_journal_clean(con)
+            validate_resource_evidence_failure(con, require_resolved=True)
             decision = validate_resource_history(con)
             if decision is None:
                 return None

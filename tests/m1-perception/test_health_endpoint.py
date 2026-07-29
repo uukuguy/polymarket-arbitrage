@@ -538,7 +538,7 @@ def test_health_reports_persisted_degraded_structure_status(
     assert check["status"] == "warn"
 
 
-def test_resource_disabled_health_ignores_corrupt_resource_chain(
+def test_resource_evidence_health_has_no_capability_gate(
     daemon_settings_for_test: Any,
     http_test_client: TestClient,
 ) -> None:
@@ -563,10 +563,11 @@ def test_resource_disabled_health_ignores_corrupt_resource_chain(
 
     response = http_test_client.get("/health")
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     checks = response.json()["checks"]
     assert checks["perception:open_incidents"][0]["status"] == "pass"
     assert checks["perception:resource_mode"][0]["observedValue"] == "disabled"
+    assert checks["perception:resource_evidence"][0]["status"] == "fail"
     assert not any(key.endswith("_producer_liveness") for key in checks)
 
 
@@ -609,6 +610,60 @@ def test_health_incident_evidence_fails_on_restored_trigger_checkpoint_tamper(
     check = response.json()["checks"]["perception:incident_evidence"][0]
     assert check["status"] == "fail"
     assert check["output"] == "scopes= evidence_consistent=False"
+
+
+def test_health_resource_evidence_fails_on_checkpoint_tamper(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    from polyarb.perception.resource_controller import (
+        ResourceController,
+        ResourceSample,
+    )
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=int(time.time() * 1000) - 1_000,
+    )
+    store = OpportunityPerceptionStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    ResourceController(
+        store,
+        clock_ms=lambda: 2_000,
+        _verify_store_authority=False,
+    ).decide(
+        ResourceSample(
+            candidate_count=0,
+            candidate_quote_p95_ms=None,
+            candidate_missing_quote_count=0,
+            candidate_worker_ok=True,
+            discovery_worker_ok=True,
+            reconciliation_running=False,
+            previous_discovery_batch_limit=50,
+            observed_at_ms=2_000,
+        )
+    )
+    trigger_name = "trg_owner_resource_authority_checkpoint_update"
+    with sqlite3.connect(store.db_path) as con:
+        trigger_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (trigger_name,),
+        ).fetchone()[0]
+        con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "UPDATE neg_risk_resource_authority_checkpoint "
+            "SET last_decision_digest='sha256:forged'"
+        )
+        con.execute(trigger_sql)
+    daemon_settings_for_test.opportunity_resource_controller_enabled = True
+
+    response = http_test_client.get("/health")
+
+    assert response.status_code == 503
+    check = response.json()["checks"]["perception:resource_evidence"][0]
+    assert check["status"] == "fail"
+    assert check["output"] == "evidence_consistent=False"
 
 
 @pytest.mark.parametrize(

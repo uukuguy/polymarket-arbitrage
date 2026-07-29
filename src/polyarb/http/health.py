@@ -119,6 +119,12 @@ class IncidentEvidenceHealth:
 
 
 @dataclass(frozen=True)
+class ResourceEvidenceHealth:
+    sequence: int | None
+    evidence_consistent: bool
+
+
+@dataclass(frozen=True)
 class ProducerLivenessHealth:
     state: str
     age_seconds: float | None
@@ -243,6 +249,33 @@ def read_incident_evidence_health(path: Path) -> IncidentEvidenceHealth:
         if other_open:
             scopes.append("other")
         return IncidentEvidenceHealth(count, tuple(scopes), True)
+    except (sqlite3.Error, TypeError, ValueError, KeyError):
+        return unavailable
+
+
+def read_resource_evidence_health(path: Path) -> ResourceEvidenceHealth:
+    unavailable = ResourceEvidenceHealth(None, False)
+    try:
+        from polyarb.perception.resource_controller import (
+            validate_resource_evidence_failure,
+            validate_resource_history,
+        )
+        from polyarb.perception.store import OpportunityPerceptionStore
+
+        store = OpportunityPerceptionStore(path, read_only=True)
+        con = store._connect()
+        try:
+            con.execute("BEGIN")
+            store._assert_owner_journal_clean(con)
+            validate_resource_evidence_failure(con, require_resolved=True)
+            decision = validate_resource_history(con)
+            con.commit()
+        finally:
+            con.close()
+        return ResourceEvidenceHealth(
+            None if decision is None else decision.sequence,
+            True,
+        )
     except (sqlite3.Error, TypeError, ValueError, KeyError):
         return unavailable
 
@@ -417,6 +450,24 @@ def _build_health_checks(
             "output": (
                 f"scopes={','.join(incident_evidence.scopes)} "
                 f"evidence_consistent={incident_evidence.evidence_consistent}"
+            ),
+            "time": _utc_now_iso(),
+        }
+    ]
+    resource_evidence = read_resource_evidence_health(store.db_path)
+    resource_evidence_status = (
+        "pass" if resource_evidence.evidence_consistent else "fail"
+    )
+    overall = _severity(overall, resource_evidence_status)
+    checks["perception:resource_evidence"] = [
+        {
+            "componentId": "perception-resource-evidence",
+            "componentType": "component",
+            "observedValue": resource_evidence.sequence,
+            "status": resource_evidence_status,
+            "output": (
+                "evidence_consistent="
+                f"{resource_evidence.evidence_consistent}"
             ),
             "time": _utc_now_iso(),
         }

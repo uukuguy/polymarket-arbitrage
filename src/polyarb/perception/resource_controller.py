@@ -417,6 +417,147 @@ def validate_resource_history(con: sqlite3.Connection) -> ResourceDecision | Non
     return _validate_resource_authority(con).current_decision
 
 
+def validate_resource_evidence_failure(
+    con: sqlite3.Connection,
+    *,
+    require_resolved: bool,
+) -> sqlite3.Row | None:
+    row = con.execute(
+        "SELECT * FROM neg_risk_evidence_failures WHERE component='resource'"
+    ).fetchone()
+    if row is None:
+        return None
+    payload = {
+        "component": "resource",
+        "failed_at_ms": int(row["failed_at_ms"]),
+        "reason": str(row["reason"]),
+        "recovered_at_ms": row["recovered_at_ms"],
+    }
+    if (
+        str(row["row_hash"]) != _digest(payload)
+        or row["reason"] != "authority-invalid"
+        or (
+            row["recovered_at_ms"] is not None
+            and int(row["recovered_at_ms"]) < int(row["failed_at_ms"])
+        )
+    ):
+        raise ValueError("invalid-resource-evidence-failure")
+    if require_resolved and row["recovered_at_ms"] is None:
+        raise ValueError("unresolved-resource-evidence-failure")
+    return row
+
+
+def _record_resource_evidence_failure(
+    store: OpportunityPerceptionStore,
+    failed_at_ms: int,
+) -> None:
+    con = store._connect()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        existing = con.execute(
+            "SELECT 1 FROM neg_risk_evidence_failures "
+            "WHERE component='resource'"
+        ).fetchone()
+        payload = {
+            "component": "resource",
+            "failed_at_ms": failed_at_ms,
+            "reason": "authority-invalid",
+            "recovered_at_ms": None,
+        }
+        operation = "INSERT" if existing is None else "UPDATE"
+        writer_token = store._begin_expected_owner_mutation(
+            con,
+            table_name="neg_risk_evidence_failures",
+            operation=operation,
+            row_key="resource",
+        )
+        con.execute(
+            "INSERT INTO neg_risk_evidence_failures("
+            "component,failed_at_ms,reason,recovered_at_ms,row_hash"
+            ") VALUES('resource',?,'authority-invalid',NULL,?) "
+            "ON CONFLICT(component) DO UPDATE SET "
+            "failed_at_ms=excluded.failed_at_ms,"
+            "reason=excluded.reason,recovered_at_ms=NULL,"
+            "row_hash=excluded.row_hash",
+            (failed_at_ms, _digest(payload)),
+        )
+        store._consume_expected_owner_mutation(
+            con,
+            writer_token=writer_token,
+            table_name="neg_risk_evidence_failures",
+            operation=operation,
+            row_key="resource",
+        )
+        con.commit()
+    except (sqlite3.Error, TypeError, ValueError):
+        con.rollback()
+    finally:
+        con.close()
+
+
+def _recover_resource_evidence_failure(
+    con: sqlite3.Connection,
+    store: OpportunityPerceptionStore,
+    recovered_at_ms: int,
+) -> bool:
+    row = validate_resource_evidence_failure(con, require_resolved=False)
+    if row is None or row["recovered_at_ms"] is not None:
+        return False
+    payload = {
+        "component": "resource",
+        "failed_at_ms": int(row["failed_at_ms"]),
+        "reason": str(row["reason"]),
+        "recovered_at_ms": recovered_at_ms,
+    }
+    writer_token = store._begin_expected_owner_mutation(
+        con,
+        table_name="neg_risk_evidence_failures",
+        operation="UPDATE",
+        row_key="resource",
+    )
+    con.execute(
+        "UPDATE neg_risk_evidence_failures SET recovered_at_ms=?,row_hash=? "
+        "WHERE component='resource'",
+        (recovered_at_ms, _digest(payload)),
+    )
+    store._consume_expected_owner_mutation(
+        con,
+        writer_token=writer_token,
+        table_name="neg_risk_evidence_failures",
+        operation="UPDATE",
+        row_key="resource",
+    )
+    return True
+
+
+def _prepare_resource_writer(
+    con: sqlite3.Connection,
+    store: OpportunityPerceptionStore,
+    now_ms: int,
+) -> _ResourceAuthorityState:
+    try:
+        store._assert_owner_journal_clean(con)
+        prior = _validate_resource_authority(con)
+        recovered = _recover_resource_evidence_failure(con, store, now_ms)
+    except (sqlite3.Error, TypeError, ValueError):
+        con.rollback()
+        _record_resource_evidence_failure(store, now_ms)
+        raise
+    if not recovered:
+        return prior
+    con.commit()
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        store._assert_owner_journal_clean(con)
+        prior = _validate_resource_authority(con)
+        validate_resource_evidence_failure(con, require_resolved=True)
+        return prior
+    except (sqlite3.Error, TypeError, ValueError):
+        con.rollback()
+        _record_resource_evidence_failure(store, now_ms)
+        raise
+
+
 def _publish_resource_checkpoint(
     con: sqlite3.Connection,
     store: OpportunityPerceptionStore,
@@ -568,11 +709,12 @@ class ResourceController:
 
         con = sqlite3.connect(self._store.db_path, timeout=5)
         con.row_factory = sqlite3.Row
+        authority_mutation_started = False
         try:
             con.execute("BEGIN IMMEDIATE")
-            self._store._assert_owner_journal_clean(con)
-            prior = _validate_resource_authority(con)
+            prior = _prepare_resource_writer(con, self._store, now_ms)
             previous = prior.current_decision
+            authority_mutation_started = True
             cursor = con.execute(
                 "INSERT INTO neg_risk_resource_samples(observed_at_ms,sample_json) VALUES(?,?)",
                 (
@@ -633,8 +775,13 @@ class ResourceController:
             )
             con.commit()
             return desired
-        except BaseException:
+        except BaseException as error:
             con.rollback()
+            if authority_mutation_started and isinstance(
+                error,
+                (sqlite3.Error, TypeError, ValueError),
+            ):
+                _record_resource_evidence_failure(self._store, now_ms)
             raise
         finally:
             con.close()
@@ -665,5 +812,6 @@ __all__ = [
     "ResourceController",
     "ResourceDecision",
     "ResourceSample",
+    "validate_resource_evidence_failure",
     "validate_resource_history",
 ]
