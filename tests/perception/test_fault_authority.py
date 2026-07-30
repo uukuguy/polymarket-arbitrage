@@ -750,6 +750,94 @@ def test_fault_auth_indexes_cover_scoped_link_validation(db_path: Path) -> None:
     assert "idx_neg_risk_fault_auth_fault_operation" in plan
 
 
+def test_active_candidate_query_is_runtime_indexed_without_global_sort(
+    store: FaultAuthorityStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_100,
+        request_digest="7" * 64,
+    )
+    statements: list[str] = []
+    original_connect = store._connect
+
+    def traced_connect(deadline_monotonic=None):
+        con = original_connect(deadline_monotonic)
+        con.set_trace_callback(statements.append)
+        return con
+
+    monkeypatch.setattr(store, "_connect", traced_connect)
+    assert store.read_snapshot(now_ms=1_200, fault_id="fault-1").available
+    active_statements = [
+        statement
+        for statement in statements
+        if "neg_risk_fault_intents" in statement
+        and "accepted_at_ms" in statement
+        and "limit" in statement.lower()
+    ]
+    assert active_statements
+    assert all(
+        "join neg_risk_fault_runtime_starts" not in statement.lower()
+        and "component=" in statement.lower()
+        and "release_id=" in statement.lower()
+        and "machine_id=" in statement.lower()
+        and "boot_id=" in statement.lower()
+        for statement in active_statements
+    )
+
+    with sqlite3.connect(store._db_path) as con:
+        plan = " ".join(
+            str(column)
+            for row in con.execute(
+                "EXPLAIN QUERY PLAN "
+                "SELECT fault_id FROM neg_risk_fault_intents "
+                "WHERE component=? AND release_id=? AND machine_id=? AND boot_id=? "
+                "AND status='accepted' "
+                "ORDER BY accepted_at_ms DESC,fault_id DESC LIMIT 2",
+                (
+                    RUNTIME.component,
+                    RUNTIME.release_id,
+                    RUNTIME.machine_id,
+                    str(RUNTIME.boot_id),
+                ),
+            )
+            for column in row
+        )
+    assert "idx_neg_risk_fault_intent_active_runtime" in plan
+    assert "SCAN neg_risk_fault_intents" not in plan
+    assert "USE TEMP B-TREE" not in plan
+
+
+def test_existing_cleanup_action_history_inherits_absolute_deadline(
+    store: FaultAuthorityStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    store.request_cleanup("fault-1", auth=auth("d"), requested_at_ms=1_200)
+    inherited: list[float | None] = []
+    original = store._validate_history_in_connection
+
+    def observed(con, fault_id, *, deadline_monotonic=None):
+        inherited.append(deadline_monotonic)
+        return original(
+            con,
+            fault_id,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    monkeypatch.setattr(store, "_validate_history_in_connection", observed)
+    deadline = time.monotonic() + 0.2
+    store.request_cleanup(
+        "fault-1",
+        auth=auth("e"),
+        requested_at_ms=1_201,
+        deadline_monotonic=deadline,
+    )
+    assert inherited == [deadline]
+
+
 @pytest.mark.parametrize(
     "table",
     [

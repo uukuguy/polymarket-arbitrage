@@ -1406,6 +1406,11 @@ CREATE TABLE IF NOT EXISTS neg_risk_fault_intents (
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_fault_intent_runtime
   ON neg_risk_fault_intents(component,release_id,machine_id,boot_id,accepted_at_ms);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_fault_intent_active_runtime
+  ON neg_risk_fault_intents(
+    component,release_id,machine_id,boot_id,status,
+    accepted_at_ms DESC,fault_id DESC
+  );
 
 CREATE TABLE IF NOT EXISTS neg_risk_fault_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

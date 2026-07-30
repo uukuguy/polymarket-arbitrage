@@ -110,6 +110,7 @@ _PROCESS_OWNED_STATES = frozenset(
         FaultEventState.RECOVERED,
     }
 )
+_FAULT_COMPONENTS = ("candidate", "discovery", "reconciliation", "notification")
 
 
 def _runtime_hash(
@@ -255,9 +256,16 @@ class FaultAuthorityStore:
         if (
             deadline_monotonic is not None
             and isinstance(error, sqlite3.OperationalError)
-            and "locked" in str(error).lower()
+            and any(
+                marker in str(error).lower()
+                for marker in ("locked", "interrupted")
+            )
         ):
             raise TimeoutError("fault-authority-deadline") from error
+
+    @staticmethod
+    def _clear_progress_handler(con: sqlite3.Connection) -> None:
+        con.set_progress_handler(None, 0)
 
     @classmethod
     def _commit_before_deadline(
@@ -299,6 +307,11 @@ class FaultAuthorityStore:
         con.row_factory = sqlite3.Row
         con.execute(f"PRAGMA busy_timeout={timeout_ms}")
         con.execute("PRAGMA foreign_keys=ON")
+        if deadline_monotonic is not None:
+            con.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline_monotonic),
+                1_000,
+            )
         return con
 
     @staticmethod
@@ -451,30 +464,36 @@ class FaultAuthorityStore:
         limit: int,
     ) -> tuple[str, ...]:
         self._check_deadline(deadline_monotonic)
-        terminal_values = tuple(state.value for state in _TERMINAL_STATES)
-        placeholders = ",".join("?" for _ in terminal_values)
-        rows = con.execute(
-            "SELECT i.fault_id FROM neg_risk_fault_intents i "
-            "JOIN neg_risk_fault_runtime_starts r "
-            "ON r.component=i.component AND r.release_id=i.release_id "
-            "AND r.machine_id=i.machine_id AND r.boot_id=i.boot_id "
-            "WHERE i.status='accepted' "
-            "AND NOT EXISTS ("
-            " SELECT 1 FROM neg_risk_fault_runtime_starts newer "
-            " WHERE newer.component=r.component "
-            " AND (newer.started_at_ms>r.started_at_ms "
-            " OR (newer.started_at_ms=r.started_at_ms AND newer.id>r.id))"
-            ") "
-            "AND COALESCE(("
-            " SELECT e.state FROM neg_risk_fault_events e "
-            " WHERE e.fault_id=i.fault_id AND e.state IS NOT NULL "
-            " ORDER BY e.sequence DESC LIMIT 1"
-            "), '') NOT IN (" + placeholders + ") "
-            "ORDER BY i.accepted_at_ms DESC,i.fault_id LIMIT ?",
-            (*terminal_values, limit),
-        ).fetchall()
+        active: list[str] = []
+        for component in _FAULT_COMPONENTS:
+            self._check_deadline(deadline_monotonic)
+            runtime = self._current_runtime_in_connection(con, component)
+            if runtime is None:
+                continue
+            rows = con.execute(
+                "SELECT fault_id FROM neg_risk_fault_intents "
+                "WHERE component=? AND release_id=? AND machine_id=? AND boot_id=? "
+                "AND status='accepted' "
+                "ORDER BY accepted_at_ms DESC,fault_id DESC LIMIT 2",
+                (
+                    runtime.component,
+                    runtime.release_id,
+                    runtime.machine_id,
+                    str(runtime.boot_id),
+                ),
+            ).fetchall()
+            self._check_deadline(deadline_monotonic)
+            for row in rows:
+                self._check_deadline(deadline_monotonic)
+                fault_id = str(row["fault_id"])
+                if self._latest_state(con, fault_id) not in _TERMINAL_STATES:
+                    active.append(fault_id)
+                    if len(active) >= limit:
+                        break
+            if len(active) >= limit:
+                break
         self._check_deadline(deadline_monotonic)
-        return tuple(str(row["fault_id"]) for row in rows)
+        return tuple(active)
 
     def _has_active_chain(
         self,
@@ -650,11 +669,13 @@ class FaultAuthorityStore:
             self._commit_before_deadline(con, deadline_monotonic)
             return final_reason
         except BaseException as error:
+            self._clear_progress_handler(con)
             if con.in_transaction:
                 con.execute("ROLLBACK")
             self._normalize_deadline_error(error, deadline_monotonic)
             raise
         finally:
+            self._clear_progress_handler(con)
             con.close()
 
     def accept_intent(
@@ -792,11 +813,13 @@ class FaultAuthorityStore:
             self._commit_before_deadline(con, deadline_monotonic)
             return IntentAdmission(request.fault_id, True, "accepted")
         except BaseException as error:
+            self._clear_progress_handler(con)
             if con.in_transaction:
                 con.execute("ROLLBACK")
             self._normalize_deadline_error(error, deadline_monotonic)
             raise
         finally:
+            self._clear_progress_handler(con)
             con.close()
 
     def claim_pending(
@@ -1049,7 +1072,11 @@ class FaultAuthorityStore:
                 self._commit_before_deadline(con, deadline_monotonic)
                 raise ValueError(reason)
             if existing is not None:
-                history = self._validate_history_in_connection(con, fault_id)
+                history = self._validate_history_in_connection(
+                    con,
+                    fault_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
                 if not history.valid:
                     raise ValueError("fault-history-invalid")
                 self._check_deadline(deadline_monotonic)
@@ -1098,11 +1125,13 @@ class FaultAuthorityStore:
             self._commit_before_deadline(con, deadline_monotonic)
             return event
         except BaseException as error:
+            self._clear_progress_handler(con)
             if con.in_transaction:
                 con.execute("ROLLBACK")
             self._normalize_deadline_error(error, deadline_monotonic)
             raise
         finally:
+            self._clear_progress_handler(con)
             con.close()
 
     def append_event(
@@ -1724,10 +1753,12 @@ class FaultAuthorityStore:
                     history=history,
                 )
             except BaseException:
+                self._clear_progress_handler(con)
                 if con.in_transaction:
                     con.execute("ROLLBACK")
                 raise
             finally:
+                self._clear_progress_handler(con)
                 con.close()
         except (
             sqlite3.Error,

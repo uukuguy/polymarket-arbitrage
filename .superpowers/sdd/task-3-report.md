@@ -222,3 +222,38 @@ fifth table and without weakening append-only authority.
 - Schema lockstep and SQLite migration regressions: 32 passed.
 - Proportional perception suite, Ruff, `git diff --check`, Make help, M1 docs
   gate, and planning-status: recorded after final committed-tree verification.
+
+## Third security re-review remediation
+
+The final medium finding was closed without a new table or mutable current-state
+row.
+
+### Exact RED/GREEN evidence
+
+1. Active-query RED: traced `_current_active_fault_ids()` used one global
+   `neg_risk_fault_intents` join with correlated subqueries and ordering.
+   `LIMIT` did not bound the VM work.
+2. Active-query GREEN: the authority iterates the four fixed producer
+   components, reads each indexed current runtime, then probes at most the two
+   newest accepted intents for that exact runtime. Total candidate rows are
+   bounded to eight, preserving the adversarial two-active-chain fail-closed
+   check.
+3. Query-plan GREEN: `EXPLAIN QUERY PLAN` reports
+   `SEARCH neg_risk_fault_intents USING COVERING INDEX
+   idx_neg_risk_fault_intent_active_runtime (component=? AND release_id=? AND
+   machine_id=? AND boot_id=? AND status=?)`; it reports neither an intent
+   table scan nor a temporary B-tree.
+4. SQLite-VM RED: a 10-million-row recursive SQLite VM query with a 20 ms
+   absolute deadline occupied the worker for about 1.15 seconds.
+5. SQLite-VM GREEN: every deadline-aware connection installs a progress
+   handler checked every 1,000 opcodes. `interrupted` is normalized to the
+   authority timeout/unavailable shape, the handler is cleared before rollback
+   and again in `finally`, and the deterministic worker test completes below
+   150 ms then immediately reacquires the released worker slot.
+6. Cleanup propagation RED: the fresh-nonce/existing-action branch called
+   history validation with `deadline_monotonic=None`.
+7. Cleanup propagation GREEN: that branch passes the caller's exact absolute
+   deadline; the test observes identity equality, not a restarted budget.
+8. Bounded-query regression: the first latest-only probe hid the existing
+   two-active-chain tamper fixture. The final top-two-per-runtime design stays
+   constant-bounded and restores fail-closed projection.

@@ -521,6 +521,44 @@ def test_fault_worker_bridge_has_bounded_threads_zero_queue_and_recovers() -> No
     )
 
 
+def test_sqlite_vm_deadline_interrupts_worker_and_releases_slot(
+    tmp_path, make_http_test_client, monkeypatch
+) -> None:
+    client, runtime = _client(tmp_path, make_http_test_client)
+    assert _post(client, "/control/perception/faults/arm", _body(runtime)).status_code == 202
+    store = FaultAuthorityStore(client.app.state.sqlite_store.db_path)
+
+    def expensive_active_query(self, con, *, deadline_monotonic, limit):
+        con.execute(
+            "WITH RECURSIVE counter(value) AS ("
+            "VALUES(0) UNION ALL SELECT value+1 FROM counter WHERE value<10000000"
+            ") SELECT sum(value) FROM counter"
+        ).fetchone()
+        return ()
+
+    monkeypatch.setattr(
+        FaultAuthorityStore,
+        "_current_active_fault_ids",
+        expensive_active_query,
+    )
+
+    async def exercise() -> None:
+        deadline = time.monotonic() + 0.02
+        started = time.monotonic()
+        snapshot = await perception_faults._run_blocking(
+            store.read_snapshot,
+            now_ms=int(time.time() * 1_000),
+            fault_id="fault-api-1",
+            deadline_monotonic=deadline,
+        )
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.15
+        assert not snapshot.available
+        assert await perception_faults._run_blocking(lambda: "released") == "released"
+
+    asyncio.run(exercise())
+
+
 def test_runtime_read_is_bounded_and_missing_evidence_is_unavailable(
     tmp_path, make_http_test_client
 ) -> None:
