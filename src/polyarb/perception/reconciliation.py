@@ -12,6 +12,11 @@ from loguru import logger
 
 from polyarb.clients.gamma_client import EventPage
 from polyarb.perception.discovery import DiscoveryWorker
+from polyarb.perception.fault_runtime import (
+    FaultRuntimeProtocol,
+    PassThroughFaultRuntime,
+    cleanup_active_fault,
+)
 from polyarb.perception.gamma_incidents import GammaBatchIncidents
 from polyarb.perception.store import (
     OpportunityPerceptionStore,
@@ -51,6 +56,7 @@ class ReconciliationWorker:
         store: OpportunityPerceptionStore,
         page_limit: int = 100,
         clock_ms: Callable[[], int] | None = None,
+        fault_runtime: FaultRuntimeProtocol | None = None,
     ) -> None:
         if not 1 <= page_limit <= 100:
             raise ValueError("reconciliation-page-limit-must-be-within-1..100")
@@ -58,6 +64,7 @@ class ReconciliationWorker:
         self._store = store
         self._page_limit = page_limit
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
+        self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
 
     async def run_batch(self) -> ReconciliationBatchResult:
         try:
@@ -86,6 +93,7 @@ class ReconciliationWorker:
                 diff=diff,
             )
         requested_cursor = window.next_cursor
+        await self._fault_runtime.sync_before_batch()
         page = await self._gamma.fetch_active_event_page(requested_cursor, self._page_limit)
         if page.requested_cursor != requested_cursor:
             raise ValueError("reconciliation-page-cursor-mismatch")
@@ -171,6 +179,11 @@ class ReconciliationRunner:
         if interval_s <= 0 or idle_heartbeat_interval_s <= 0:
             raise ValueError("reconciliation-interval-must-be-positive")
         self._worker = worker
+        self._fault_runtime = getattr(
+            worker,
+            "_fault_runtime",
+            PassThroughFaultRuntime(),
+        )
         self._store = store or worker._store
         self._gamma = gamma
         self._interval_s = interval_s
@@ -283,12 +296,20 @@ class ReconciliationRunner:
                     except TimeoutError:
                         pass
         finally:
+            await cleanup_active_fault(
+                self._fault_runtime,
+                reason="reconciliation-stopped",
+            )
             close = getattr(self._gamma, "aclose", None)
             if close is not None:
                 await close()
 
 
-def build_production_reconciliation(settings: object) -> ReconciliationRunner:
+def build_production_reconciliation(
+    settings: object,
+    *,
+    fault_runtime: FaultRuntimeProtocol | None = None,
+) -> ReconciliationRunner:
     """Build the opt-in bounded calibration producer."""
     from polyarb.clients.gamma_client import GammaClient
 
@@ -300,6 +321,7 @@ def build_production_reconciliation(settings: object) -> ReconciliationRunner:
             gamma=gamma,
             store=store,
             page_limit=settings.reconciliation_page_limit,
+            fault_runtime=fault_runtime,
         ),
         gamma=gamma,
         interval_s=settings.reconciliation_interval_s,

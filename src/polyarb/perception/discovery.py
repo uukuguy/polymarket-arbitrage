@@ -13,6 +13,11 @@ from typing import Protocol
 from loguru import logger
 
 from polyarb.clients.gamma_client import EventPage
+from polyarb.perception.fault_runtime import (
+    FaultRuntimeProtocol,
+    PassThroughFaultRuntime,
+    cleanup_active_fault,
+)
 from polyarb.perception.gamma_incidents import GammaBatchIncidents
 from polyarb.perception.models import GroupLeg, GroupRevision
 from polyarb.perception.store import (
@@ -155,6 +160,7 @@ class DiscoveryWorker:
         candidate_reserved_non_high_slots: int = 3,
         clock_ms: Callable[[], int] | None = None,
         require_resource_decision: bool = False,
+        fault_runtime: FaultRuntimeProtocol | None = None,
     ) -> None:
         if not 1 <= page_limit <= 100:
             raise ValueError("discovery-page-limit-must-be-within-1..100")
@@ -205,6 +211,7 @@ class DiscoveryWorker:
         self._degraded_probe_every_cycles = degraded_probe_every_cycles
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
         self._require_resource_decision = require_resource_decision
+        self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
         self._store.configure_discovery_admission(
             self._admission_proof,
             now_ms=self._clock_ms(),
@@ -252,6 +259,7 @@ class DiscoveryWorker:
             if resource_decision is None
             else min(100, int(resource_decision["discovery_batch_limit"]))
         )
+        await self._fault_runtime.sync_before_batch()
         page = await self._gamma.fetch_active_event_page(
             requested_cursor,
             page_limit,
@@ -442,6 +450,11 @@ class DiscoveryRunner:
         if interval_s <= 0:
             raise ValueError("discovery-interval-must-be-positive")
         self._worker = worker
+        self._fault_runtime = getattr(
+            worker,
+            "_fault_runtime",
+            PassThroughFaultRuntime(),
+        )
         self._store = store or worker._store
         self._gamma = gamma
         self._interval_s = interval_s
@@ -525,6 +538,10 @@ class DiscoveryRunner:
                     except TimeoutError:
                         pass
         finally:
+            await cleanup_active_fault(
+                self._fault_runtime,
+                reason="discovery-stopped",
+            )
             close = getattr(self._gamma, "aclose", None)
             if close is not None:
                 await close()
@@ -534,6 +551,7 @@ def build_production_discovery(
     settings: object,
     *,
     candidate_freshness: Callable[[], CandidateFreshness],
+    fault_runtime: FaultRuntimeProtocol | None = None,
 ) -> DiscoveryRunner:
     """Build the opt-in bounded producer without changing legacy paths."""
     from polyarb.clients.gamma_client import GammaClient
@@ -572,6 +590,7 @@ def build_production_discovery(
         require_resource_decision=(
             settings.opportunity_resource_controller_enabled
         ),
+        fault_runtime=fault_runtime,
     )
     return DiscoveryRunner(
         worker=worker,

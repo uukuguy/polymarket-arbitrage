@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import signal
 import sys
 import time
+from uuid import UUID
 
 from polyarb.config import load_settings
 from polyarb.daemon.opportunity_watcher import build_focused_opportunity_watcher
@@ -16,6 +18,11 @@ from polyarb.perception.discovery import (
     build_production_discovery,
     compose_candidate_group_ids,
 )
+from polyarb.perception.fault_control import FaultRuntimeIdentity
+from polyarb.perception.fault_runtime import (
+    PassThroughFaultRuntime,
+    build_fault_runtime,
+)
 from polyarb.perception.reconciliation import build_production_reconciliation
 from polyarb.perception.store import OpportunityPerceptionStore
 
@@ -24,6 +31,29 @@ _FLAG_BY_COMPONENT = {
     "discovery": "opportunity_discovery_enabled",
     "reconciliation": "opportunity_reconciliation_enabled",
 }
+
+
+def _build_child_fault_runtime(component: str, settings):
+    enabled = bool(getattr(settings, "upstream_fault_control_enabled", False))
+    try:
+        identity = FaultRuntimeIdentity(
+            component=component,
+            release_id=settings.release_id,
+            machine_id=os.environ.get("FLY_MACHINE_ID", "local"),
+            boot_id=UUID(os.environ["POLYARB_PRODUCER_BOOT_ID"]),
+        )
+        supervisor_run_id = os.environ["POLYARB_PRODUCER_SUPERVISOR_RUN_ID"]
+        attempt = int(os.environ["POLYARB_PRODUCER_ATTEMPT"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return PassThroughFaultRuntime(degraded=enabled)
+    return build_fault_runtime(
+        enabled=enabled,
+        db_path=settings.db_path,
+        identity=identity,
+        supervisor_run_id=supervisor_run_id,
+        attempt=attempt,
+        started_at_ms=int(time.time() * 1_000),
+    )
 
 
 async def run_component(component: str, settings) -> None:
@@ -45,10 +75,15 @@ async def run_component(component: str, settings) -> None:
     store = OpportunityPerceptionStore(settings.db_path)
     store.init_schema()
     store.claim_producer_heartbeat_authority(component)
+    fault_runtime = _build_child_fault_runtime(component, settings)
     if component == "candidate":
         focused = build_focused_opportunity_watcher(settings)
         source = compose_candidate_group_ids(focused.candidate_group_ids, store)
-        worker = build_production_candidate_watcher(settings, candidate_group_ids=source)
+        worker = build_production_candidate_watcher(
+            settings,
+            candidate_group_ids=source,
+            fault_runtime=fault_runtime,
+        )
     elif component == "discovery":
 
         def freshness() -> CandidateFreshness:
@@ -59,9 +94,16 @@ async def run_component(component: str, settings) -> None:
                 missing_quote_count=fact.missing_quote_count,
             )
 
-        worker = build_production_discovery(settings, candidate_freshness=freshness)
+        worker = build_production_discovery(
+            settings,
+            candidate_freshness=freshness,
+            fault_runtime=fault_runtime,
+        )
     else:
-        worker = build_production_reconciliation(settings)
+        worker = build_production_reconciliation(
+            settings,
+            fault_runtime=fault_runtime,
+        )
     await worker.run(stop_event)
 
 

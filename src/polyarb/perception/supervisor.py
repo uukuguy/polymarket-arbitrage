@@ -139,6 +139,7 @@ class ProducerSupervisor:
                 child_env = os.environ.copy()
                 child_env["POLYARB_PRODUCER_SUPERVISOR_RUN_ID"] = supervisor_run_id
                 child_env["POLYARB_PRODUCER_ATTEMPT"] = str(attempt)
+                child_env["POLYARB_PRODUCER_BOOT_ID"] = str(uuid.uuid4())
                 process = await asyncio.create_subprocess_exec(
                     *self._commands[spec.component],
                     stdout=asyncio.subprocess.PIPE,

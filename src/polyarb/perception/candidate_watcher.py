@@ -15,6 +15,11 @@ from typing import Any, Literal, Protocol
 from loguru import logger
 
 from polyarb.perception.clob_incidents import CandidateGroupIncidents
+from polyarb.perception.fault_runtime import (
+    FaultRuntimeProtocol,
+    PassThroughFaultRuntime,
+    cleanup_active_fault,
+)
 from polyarb.perception.group_structure import GroupStructureUnavailableError
 from polyarb.perception.models import (
     CandidatePriority,
@@ -720,6 +725,7 @@ class CandidateWatcherScheduler:
         source_max_groups: int = 500,
         terminal_write_budget_s: float = 5.0,
         close_callbacks: Sequence[Callable[[], None]] = (),
+        fault_runtime: FaultRuntimeProtocol | None = None,
     ) -> None:
         self._watcher = watcher
         self._store = store
@@ -743,6 +749,7 @@ class CandidateWatcherScheduler:
         )
         self._reserved_lane_cursor = 0
         self._close_callbacks = tuple(close_callbacks)
+        self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
         self._closed = False
         if (
             not math.isfinite(poll_interval_s)
@@ -778,6 +785,7 @@ class CandidateWatcherScheduler:
         return self._runtime
 
     async def run_due_once(self) -> None:
+        await self._fault_runtime.sync_before_batch()
         loop = asyncio.get_running_loop()
         selection = await asyncio.wait_for(
             loop.run_in_executor(
@@ -1018,6 +1026,7 @@ class CandidateWatcherScheduler:
                 except TimeoutError:
                     pass
         finally:
+            await cleanup_active_fault(self._fault_runtime, reason="candidate-stopped")
             self.close()
 
     def close(self) -> None:
@@ -1043,6 +1052,7 @@ def build_production_candidate_watcher(
     settings: Any,
     *,
     candidate_group_ids: CandidateGroupIds,
+    fault_runtime: FaultRuntimeProtocol | None = None,
 ) -> CandidateWatcherScheduler:
     """Build the opt-in sibling worker from existing read-only CLOB seams."""
     from polyarb.clients.clob_client import ClobReaderClient
@@ -1124,6 +1134,7 @@ def build_production_candidate_watcher(
                 settings.candidate_terminal_write_budget_s
             ),
             close_callbacks=(executors.close,),
+            fault_runtime=fault_runtime,
         )
     except BaseException:
         executors.close()

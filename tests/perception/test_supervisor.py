@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 import time
+from uuid import UUID
 
 import pytest
 
@@ -61,6 +62,38 @@ async def test_worker_cli_rejects_disabled_component_without_touching_network() 
 
     with pytest.raises(RuntimeError, match="producer-supervisor-disabled"):
         await run_component("candidate", Settings())
+
+
+@pytest.mark.asyncio
+async def test_supervisor_passes_fresh_uuid4_boot_id_per_attempt(tmp_path) -> None:
+    output = tmp_path / "boots.txt"
+    script = (
+        "import os\n"
+        "from pathlib import Path\n"
+        f"p=Path({str(output)!r})\n"
+        "with p.open('a') as f: f.write(os.environ['POLYARB_PRODUCER_BOOT_ID']+'\\n')\n"
+        "raise SystemExit(1)\n"
+    )
+    _, supervisor = _supervisor(
+        tmp_path,
+        component="candidate",
+        command=(sys.executable, "-c", script),
+    )
+
+    await supervisor.run(
+        ProducerSpec(
+            component="candidate",
+            timeout_s=2,
+            max_restarts=1,
+            backoff_initial_s=0.01,
+        ),
+        asyncio.Event(),
+    )
+
+    boot_ids = [UUID(value) for value in output.read_text().splitlines()]
+    assert len(boot_ids) == 2
+    assert all(value.version == 4 for value in boot_ids)
+    assert boot_ids[0] != boot_ids[1]
 
 
 @pytest.mark.asyncio

@@ -22,10 +22,12 @@ Source: RESEARCH.md §Architecture Patterns Pattern 1 (lines 295-349, verbatim)
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 import time
 import uuid
+from uuid import UUID
 
 import uvicorn
 from loguru import logger
@@ -53,6 +55,12 @@ from polyarb.perception.discovery import (
     build_production_discovery,
     compose_candidate_group_ids,
 )
+from polyarb.perception.fault_control import FaultRuntimeIdentity
+from polyarb.perception.fault_runtime import (
+    FaultRuntimeProtocol,
+    PassThroughFaultRuntime,
+    build_fault_runtime,
+)
 from polyarb.perception.http_probe import BoundedHttpProbeWriter
 from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.reconciliation import (
@@ -66,6 +74,33 @@ from polyarb.perception.resource_incidents import ResourcePressureIncidents
 from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.perception.supervisor import ProducerSpec, ProducerSupervisor
 from polyarb.storage.sqlite_store import SQLiteStore
+
+
+def _build_daemon_fault_runtime(
+    settings,
+    *,
+    component: str,
+    boot_id: UUID,
+    supervisor_run_id: str,
+) -> FaultRuntimeProtocol:
+    enabled = bool(getattr(settings, "upstream_fault_control_enabled", False))
+    try:
+        identity = FaultRuntimeIdentity(
+            component=component,
+            release_id=settings.release_id,
+            machine_id=os.environ.get("FLY_MACHINE_ID", "local"),
+            boot_id=boot_id,
+        )
+    except (TypeError, ValueError, AttributeError):
+        return PassThroughFaultRuntime(degraded=enabled)
+    return build_fault_runtime(
+        enabled=enabled,
+        db_path=settings.db_path,
+        identity=identity,
+        supervisor_run_id=supervisor_run_id,
+        attempt=1,
+        started_at_ms=int(time.time() * 1_000),
+    )
 
 
 def _start_quote_worker(
@@ -396,18 +431,43 @@ async def main() -> int:
     sqlite_store.init_schema()
 
     scheduler = SnapshotScheduler(settings=settings, sqlite_store=sqlite_store)
-    focused_watcher = build_focused_opportunity_watcher(settings)
     perception_store = OpportunityPerceptionStore(settings.db_path)
     perception_store.init_schema()
+    isolated_producers = settings.opportunity_producer_supervisor_enabled
+    daemon_boot_id = uuid.uuid4()
+    daemon_run_id = uuid.uuid4().hex
+    notification_fault_runtime = _build_daemon_fault_runtime(
+        settings,
+        component="notification",
+        boot_id=daemon_boot_id,
+        supervisor_run_id=daemon_run_id,
+    )
+    component_fault_runtimes = (
+        {}
+        if isolated_producers
+        else {
+            component: _build_daemon_fault_runtime(
+                settings,
+                component=component,
+                boot_id=uuid.uuid4(),
+                supervisor_run_id=daemon_run_id,
+            )
+            for component in ("candidate", "discovery", "reconciliation")
+        }
+    )
+    focused_watcher = build_focused_opportunity_watcher(
+        settings,
+        fault_runtime=notification_fault_runtime,
+    )
     candidate_group_ids = compose_candidate_group_ids(
         focused_watcher.candidate_group_ids,
         perception_store,
     )
-    isolated_producers = settings.opportunity_producer_supervisor_enabled
     candidate_watcher = (
         build_production_candidate_watcher(
             settings,
             candidate_group_ids=candidate_group_ids,
+            fault_runtime=component_fault_runtimes["candidate"],
         )
         if settings.opportunity_first_watcher_enabled and not isolated_producers
         else None
@@ -425,12 +485,16 @@ async def main() -> int:
         build_production_discovery(
             settings,
             candidate_freshness=_candidate_freshness,
+            fault_runtime=component_fault_runtimes["discovery"],
         )
         if settings.opportunity_discovery_enabled and not isolated_producers
         else None
     )
     reconciliation = (
-        build_production_reconciliation(settings)
+        build_production_reconciliation(
+            settings,
+            fault_runtime=component_fault_runtimes["reconciliation"],
+        )
         if settings.opportunity_reconciliation_enabled and not isolated_producers
         else None
     )
