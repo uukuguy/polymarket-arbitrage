@@ -43,6 +43,13 @@ qualification harness work was performed.
   Reconciliation recovery requires the exact window checkpoint plus its
   compacted authority checkpoint; it does not depend on batch rows that the
   store legitimately compacts after apply.
+- Recovery and `OpportunityPerceptionStore.current_reconciliation` share one
+  same-connection checkpoint validator. It verifies canonical anchor and
+  checkpoint hashes, the live staging digest, retained-prefix absence, and
+  compacted row metadata inside the recovery transaction.
+- Cleanup receipt persistence failure freezes evidence, marks the runtime
+  degraded, clears injected/recovery metadata, and prevents later claims or
+  injection. Cancellation continues to propagate unchanged.
 
 ## Plan-versus-real-API correction
 
@@ -99,10 +106,22 @@ surface changed.
     writer type, old/missing writer row, other runtime, and fabricated future
     time. A detected-to-contained write failure freezes evidence, degrades the
     runtime, cleans to `ABANDONED`, and cannot create recovery.
+11. Review HIGH 4 RED/GREEN: five real-store corruptions initially all wrote
+    false `RECOVERED` events: tampered checkpoint hash, non-canonical anchor,
+    re-hashed false staging digest, compacted sample count, and a retained
+    prefix row. The shared validator now makes both store reads and recovery
+    fail closed without a lifecycle append.
+12. Review MEDIUM 1 RED/GREEN: post-injection cleanup authority failure
+    initially cleared the controller while leaving the runtime non-degraded
+    with stale injection metadata. It now freezes/degrades, removes stale
+    recovery capability, passes producer calls through, and performs no later
+    claim I/O.
 
 ## Verification
 
-- Focused fault control/runtime/adapter/Incident suites: 120 tests passed.
+- Fault control/runtime/adapter/Incident plus reconciliation suites:
+  161 tests passed.
+- Store and Discovery checkpoint/compaction suites: passed.
 - Repository-wide `pytest -q` completed with one unrelated pre-existing wiring
   failure in `tests/m1-perception/test_l1_quote_worker_wiring.py`: the untouched
   `polyarb.daemon.main` source lacks

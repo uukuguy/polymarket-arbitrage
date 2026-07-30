@@ -213,6 +213,7 @@ class FaultRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            self._freeze_evidence(error)
             logger.warning(
                 "fault control cleanup receipt unavailable "
                 f"component={self.identity.component} reason={reason} "
@@ -397,6 +398,9 @@ class FaultRuntime:
     def _freeze_evidence(self, error: BaseException) -> None:
         self._evidence_frozen = True
         self.degraded = True
+        self._injected_fault_id = None
+        self._last_injection = None
+        self._pending_recovery = None
         logger.warning(
             "fault control evidence unavailable "
             f"component={self.identity.component} kind={type(error).__name__}"

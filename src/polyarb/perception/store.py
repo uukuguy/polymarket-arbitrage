@@ -296,6 +296,122 @@ def reconciliation_authority_checkpoint_hash(
     return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
 
 
+def _reconciliation_window_seed(row: sqlite3.Row) -> dict[str, object]:
+    names = (
+        "id",
+        "status",
+        "failure_reason",
+        "next_cursor",
+        "started_at_ms",
+        "checkpoint_at_ms",
+        "finished_at_ms",
+        "pages_completed",
+        "events_seen",
+        "groups_staged",
+        "rejected_count",
+        "observations_count",
+        "baseline_count",
+        "baseline_digest",
+        "added_count",
+        "changed_count",
+        "closed_count",
+        "unchanged_count",
+        "applied_rejected_count",
+    )
+    return {name: row[name] for name in names}
+
+
+def _reconciliation_rows_digest(rows: list[sqlite3.Row]) -> str:
+    canonical = json.dumps(
+        [dict(row) for row in rows],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+
+
+def validate_reconciliation_authority_checkpoint(
+    con: sqlite3.Connection,
+    window: sqlite3.Row,
+    staged: list[sqlite3.Row],
+) -> tuple[sqlite3.Row, dict[str, object]] | None:
+    """Validate one compacted checkpoint using the caller's open transaction."""
+    row = con.execute(
+        "SELECT * FROM neg_risk_reconciliation_authority_checkpoints "
+        "WHERE window_id=?",
+        (window["id"],),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        anchor = json.loads(str(row["anchor_json"]))
+        canonical = json.dumps(
+            anchor,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        anchor_digest = f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+        expected_hash = reconciliation_authority_checkpoint_hash(
+            window_id=str(row["window_id"]),
+            domain=str(row["domain"]),
+            version=int(row["version"]),
+            generation=int(row["generation"]),
+            through_batch_id=int(row["through_batch_id"]),
+            through_sequence=int(row["through_sequence"]),
+            compacted_batch_rows=int(row["compacted_batch_rows"]),
+            compacted_sample_rows=int(row["compacted_sample_rows"]),
+            prefix_digest=str(row["prefix_digest"]),
+            anchor_digest=str(row["anchor_digest"]),
+        )
+        receipt = anchor["receipt"]
+        if (
+            row["domain"] != _RECONCILIATION_AUTHORITY_DOMAIN
+            or int(row["version"]) != _RECONCILIATION_AUTHORITY_VERSION
+            or int(row["generation"]) <= 0
+            or str(row["window_id"]) != str(window["id"])
+            or int(row["through_batch_id"]) != int(receipt["id"])
+            or int(row["through_sequence"]) != int(receipt["batch_sequence"])
+            or any(
+                int(row[name]) < 0
+                for name in (
+                    "through_batch_id",
+                    "through_sequence",
+                    "compacted_batch_rows",
+                    "compacted_sample_rows",
+                )
+            )
+            or canonical != str(row["anchor_json"])
+            or not hmac.compare_digest(str(row["anchor_digest"]), anchor_digest)
+            or not hmac.compare_digest(str(row["checkpoint_hash"]), expected_hash)
+            or anchor["window"] != _reconciliation_window_seed(window)
+            or anchor["staging_digest"] != _reconciliation_rows_digest(staged)
+            or not isinstance(anchor["seen_cursors"], list)
+            or not isinstance(anchor["cumulative"], dict)
+        ):
+            raise ValueError("invalid-reconciliation-authority-checkpoint")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("invalid-reconciliation-authority-checkpoint") from error
+    retained = con.execute(
+        "SELECT "
+        "(SELECT COUNT(*) FROM neg_risk_reconciliation_batches "
+        " WHERE window_id=? AND batch_sequence<=?),"
+        "(SELECT COUNT(*) FROM neg_risk_reconciliation_batch_samples s "
+        " JOIN neg_risk_reconciliation_batches b ON b.id=s.batch_id "
+        " WHERE b.window_id=? AND s.batch_id<=?)",
+        (
+            window["id"],
+            int(row["through_sequence"]),
+            window["id"],
+            int(row["through_batch_id"]),
+        ),
+    ).fetchone()
+    if any(int(value) for value in retained):
+        raise ValueError("invalid-reconciliation-authority-checkpoint")
+    return row, anchor
+
+
 def operator_auth_receipt_hash(
     *,
     nonce: str,
@@ -6437,38 +6553,11 @@ class OpportunityPerceptionStore:
 
     @staticmethod
     def _reconciliation_window_seed(row: sqlite3.Row) -> dict[str, object]:
-        names = (
-            "id",
-            "status",
-            "failure_reason",
-            "next_cursor",
-            "started_at_ms",
-            "checkpoint_at_ms",
-            "finished_at_ms",
-            "pages_completed",
-            "events_seen",
-            "groups_staged",
-            "rejected_count",
-            "observations_count",
-            "baseline_count",
-            "baseline_digest",
-            "added_count",
-            "changed_count",
-            "closed_count",
-            "unchanged_count",
-            "applied_rejected_count",
-        )
-        return {name: row[name] for name in names}
+        return _reconciliation_window_seed(row)
 
     @staticmethod
     def _reconciliation_rows_digest(rows: list[sqlite3.Row]) -> str:
-        canonical = json.dumps(
-            [dict(row) for row in rows],
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+        return _reconciliation_rows_digest(rows)
 
     def _validated_reconciliation_checkpoint(
         self,
@@ -6476,80 +6565,7 @@ class OpportunityPerceptionStore:
         window: sqlite3.Row,
         staged: list[sqlite3.Row],
     ) -> tuple[sqlite3.Row, dict[str, object]] | None:
-        row = con.execute(
-            "SELECT * FROM neg_risk_reconciliation_authority_checkpoints "
-            "WHERE window_id=?",
-            (window["id"],),
-        ).fetchone()
-        if row is None:
-            return None
-        try:
-            anchor = json.loads(str(row["anchor_json"]))
-            canonical = json.dumps(
-                anchor,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            anchor_digest = f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
-            expected_hash = reconciliation_authority_checkpoint_hash(
-                window_id=str(row["window_id"]),
-                domain=str(row["domain"]),
-                version=int(row["version"]),
-                generation=int(row["generation"]),
-                through_batch_id=int(row["through_batch_id"]),
-                through_sequence=int(row["through_sequence"]),
-                compacted_batch_rows=int(row["compacted_batch_rows"]),
-                compacted_sample_rows=int(row["compacted_sample_rows"]),
-                prefix_digest=str(row["prefix_digest"]),
-                anchor_digest=str(row["anchor_digest"]),
-            )
-            receipt = anchor["receipt"]
-            if (
-                row["domain"] != _RECONCILIATION_AUTHORITY_DOMAIN
-                or int(row["version"]) != _RECONCILIATION_AUTHORITY_VERSION
-                or int(row["generation"]) <= 0
-                or str(row["window_id"]) != str(window["id"])
-                or int(row["through_batch_id"]) != int(receipt["id"])
-                or int(row["through_sequence"]) != int(receipt["batch_sequence"])
-                or any(
-                    int(row[name]) < 0
-                    for name in (
-                        "through_batch_id",
-                        "through_sequence",
-                        "compacted_batch_rows",
-                        "compacted_sample_rows",
-                    )
-                )
-                or canonical != str(row["anchor_json"])
-                or not hmac.compare_digest(str(row["anchor_digest"]), anchor_digest)
-                or not hmac.compare_digest(str(row["checkpoint_hash"]), expected_hash)
-                or anchor["window"] != self._reconciliation_window_seed(window)
-                or anchor["staging_digest"]
-                != self._reconciliation_rows_digest(staged)
-                or not isinstance(anchor["seen_cursors"], list)
-                or not isinstance(anchor["cumulative"], dict)
-            ):
-                raise ValueError("invalid-reconciliation-authority-checkpoint")
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise ValueError("invalid-reconciliation-authority-checkpoint") from error
-        retained = con.execute(
-            "SELECT "
-            "(SELECT COUNT(*) FROM neg_risk_reconciliation_batches "
-            " WHERE window_id=? AND batch_sequence<=?),"
-            "(SELECT COUNT(*) FROM neg_risk_reconciliation_batch_samples s "
-            " JOIN neg_risk_reconciliation_batches b ON b.id=s.batch_id "
-            " WHERE b.window_id=? AND s.batch_id<=?)",
-            (
-                window["id"],
-                int(row["through_sequence"]),
-                window["id"],
-                int(row["through_batch_id"]),
-            ),
-        ).fetchone()
-        if any(int(value) for value in retained):
-            raise ValueError("invalid-reconciliation-authority-checkpoint")
-        return row, anchor
+        return validate_reconciliation_authority_checkpoint(con, window, staged)
 
     def _validate_reconciliation_checkpoint_snapshot(
         self,

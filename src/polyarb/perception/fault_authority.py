@@ -35,6 +35,7 @@ from polyarb.perception.fault_control import (
     normalize_fault_id,
     normalize_supervisor_run_id,
 )
+from polyarb.perception.store import validate_reconciliation_authority_checkpoint
 
 _ZERO_HASH = "0" * 64
 _TERMINAL_STATES = frozenset(
@@ -1336,12 +1337,21 @@ class FaultAuthorityStore:
             "SELECT id FROM neg_risk_reconciliation_windows "
             "ORDER BY started_at_ms DESC,rowid DESC LIMIT 1"
         ).fetchone()
-        checkpoint = con.execute(
-            "SELECT through_sequence,compacted_batch_rows "
-            "FROM neg_risk_reconciliation_authority_checkpoints "
-            "WHERE window_id=?",
+        staged = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_staging "
+            "WHERE window_id=? ORDER BY group_id",
             (receipt.writer_id,),
-        ).fetchone()
+        ).fetchall()
+        validated_checkpoint = (
+            None
+            if row is None
+            else validate_reconciliation_authority_checkpoint(con, row, staged)
+        )
+        checkpoint = (
+            None
+            if validated_checkpoint is None
+            else validated_checkpoint[0]
+        )
         if (
             row is None
             or latest is None

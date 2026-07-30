@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +34,7 @@ from polyarb.perception.fault_runtime import (
 from polyarb.perception.store import (
     DiscoveryAdmissionProof,
     OpportunityPerceptionStore,
+    reconciliation_authority_checkpoint_hash,
 )
 from polyarb.perception.worker_cli import _build_child_fault_runtime
 
@@ -572,6 +576,195 @@ async def test_recovery_requires_exact_real_discovery_writer_receipt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption",
+    (
+        "checkpoint-hash",
+        "noncanonical-anchor",
+        "staging-digest",
+        "compacted-sample-count",
+        "retained-prefix-row",
+    ),
+)
+async def test_reconciliation_recovery_rejects_corrupt_authority_checkpoint(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    path = tmp_path / f"{corruption}.db"
+    store = OpportunityPerceptionStore(path)
+    store.init_schema()
+    identity = FaultRuntimeIdentity(
+        component="reconciliation",
+        release_id="a" * 40,
+        machine_id="machine-1",
+        boot_id=uuid4(),
+    )
+    authority = FaultAuthorityStore(path)
+    authority.register_runtime_start(
+        identity,
+        supervisor_run_id=f"run-{corruption}",
+        attempt=1,
+        started_at_ms=1_000,
+    )
+    admission = authority.accept_intent(
+        FaultIntentRequest(
+            fault_id=f"fault-{corruption}",
+            kind=FaultKind.GAMMA_CURSOR,
+            call_class=FaultCallClass.GAMMA_RECONCILIATION_EVENT_PAGE,
+            target_key="reconciliation",
+            parameters={},
+            ttl_ms=30_000,
+            runtime=identity,
+        ),
+        auth=FaultAuthorization(
+            nonce_digest=hashlib.sha256(corruption.encode()).hexdigest(),
+            authorization_digest="2" * 64,
+        ),
+        accepted_at_ms=1_001,
+    )
+    assert admission.accepted
+    wall = [1_100]
+    runtime = FaultRuntime(
+        identity=identity,
+        authority=authority,
+        clock_ms=lambda: wall[0],
+        monotonic=lambda: 10.0,
+    )
+    await runtime.sync_before_batch()
+    decision = runtime.consume(
+        FaultCall(
+            FaultCallClass.GAMMA_RECONCILIATION_EVENT_PAGE,
+            "reconciliation",
+        )
+    )
+    await runtime.record_injection(decision.fault_id)
+    assert await runtime.link_detection(
+        decision.fault_id,
+        kind=FaultKind.GAMMA_CURSOR,
+        detection_id=f"incident-{corruption}",
+    )
+    assert (
+        await runtime.cleanup(decision.fault_id, "contained")
+    ).terminal_state is FaultEventState.CLEANED
+
+    window = store.begin_reconciliation(started_at_ms=1_200)
+    committed = store.publish_reconciliation_batch(
+        window_id=window.id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=1_200,
+        finished_at_ms=1_201,
+        page_event_count=0,
+        candidates=(),
+    )
+    store.apply_reconciliation_diff(committed.id)
+    receipt = runtime.make_recovery_receipt(
+        FaultRecoveryWriter.RECONCILIATION_CHECKPOINT,
+        writer_id=committed.id,
+        writer_occurred_at_ms=1_201,
+    )
+    assert receipt is not None
+    wall[0] = 1_300
+
+    with sqlite3.connect(path) as con:
+        con.row_factory = sqlite3.Row
+        checkpoint = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_authority_checkpoints "
+            "WHERE window_id=?",
+            (committed.id,),
+        ).fetchone()
+        assert checkpoint is not None
+        if corruption == "checkpoint-hash":
+            con.execute(
+                "UPDATE neg_risk_reconciliation_authority_checkpoints "
+                "SET checkpoint_hash='tampered' WHERE window_id=?",
+                (committed.id,),
+            )
+        elif corruption == "noncanonical-anchor":
+            con.execute(
+                "UPDATE neg_risk_reconciliation_authority_checkpoints "
+                "SET anchor_json=' ' || anchor_json WHERE window_id=?",
+                (committed.id,),
+            )
+        elif corruption == "staging-digest":
+            anchor = json.loads(checkpoint["anchor_json"])
+            anchor["staging_digest"] = "sha256:" + "0" * 64
+            anchor_json = json.dumps(
+                anchor,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            anchor_digest = (
+                f"sha256:{hashlib.sha256(anchor_json.encode()).hexdigest()}"
+            )
+            checkpoint_hash = reconciliation_authority_checkpoint_hash(
+                window_id=checkpoint["window_id"],
+                domain=checkpoint["domain"],
+                version=checkpoint["version"],
+                generation=checkpoint["generation"],
+                through_batch_id=checkpoint["through_batch_id"],
+                through_sequence=checkpoint["through_sequence"],
+                compacted_batch_rows=checkpoint["compacted_batch_rows"],
+                compacted_sample_rows=checkpoint["compacted_sample_rows"],
+                prefix_digest=checkpoint["prefix_digest"],
+                anchor_digest=anchor_digest,
+            )
+            con.execute(
+                "UPDATE neg_risk_reconciliation_authority_checkpoints SET "
+                "anchor_json=?,anchor_digest=?,checkpoint_hash=? WHERE window_id=?",
+                (
+                    anchor_json,
+                    anchor_digest,
+                    checkpoint_hash,
+                    committed.id,
+                ),
+            )
+        elif corruption == "compacted-sample-count":
+            con.execute(
+                "UPDATE neg_risk_reconciliation_authority_checkpoints "
+                "SET compacted_sample_rows=compacted_sample_rows+1 "
+                "WHERE window_id=?",
+                (committed.id,),
+            )
+        else:
+            con.execute(
+                "INSERT INTO neg_risk_reconciliation_batches("
+                "id,window_id,batch_sequence,requested_cursor,next_cursor,"
+                "completed,started_at_ms,finished_at_ms,page_event_count,"
+                "groups_staged,observed_count,unique_count,update_count,"
+                "duplicate_count,rejected_count"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    checkpoint["through_batch_id"],
+                    committed.id,
+                    checkpoint["through_sequence"],
+                    None,
+                    None,
+                    1,
+                    1_200,
+                    1_201,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
+            )
+
+    with pytest.raises(ValueError, match="authority-checkpoint"):
+        store.current_reconciliation()
+    assert await runtime.record_recovery(receipt) is False
+    assert runtime.degraded is True
+    assert authority.validate_history(decision.fault_id).events[-1].state is (
+        FaultEventState.CLEANED
+    )
+
+
+@pytest.mark.asyncio
 async def test_cleanup_clears_memory_before_append() -> None:
     observations: list[bool] = []
     authority = _Authority(_intent())
@@ -594,6 +787,53 @@ async def test_cleanup_clears_memory_before_append() -> None:
     assert result.receipt_persisted is True
     assert observations == [True]
     assert authority.events[0][1] is FaultEventState.ABANDONED
+
+
+@pytest.mark.asyncio
+async def test_post_injection_cleanup_write_failure_freezes_all_future_fault_io() -> None:
+    class CleanupBrokenAuthority(_Authority):
+        def relinquish_claim(self, fault_id, **kwargs):
+            raise RuntimeError("cleanup-authority-unavailable")
+
+    ownership = FaultOwnershipCapability(
+        fault_id="fault-1",
+        runtime=IDENTITY,
+        token="f" * 64,
+    )
+    authority = CleanupBrokenAuthority(_intent(ownership=ownership))
+    runtime = FaultRuntime(
+        identity=IDENTITY,
+        authority=authority,
+        clock_ms=iter((1_100, 1_101, 1_102)).__next__,
+        monotonic=lambda: 10.0,
+    )
+    await runtime.sync_before_batch()
+    decision = runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1")
+    )
+    assert await runtime.record_injection(decision.fault_id) is not None
+    claims_before = tuple(authority.claims)
+
+    cleanup = await runtime.cleanup(decision.fault_id, "forced-write-failure")
+
+    assert cleanup == CleanupResult(
+        memory_cleared=True,
+        receipt_persisted=False,
+        degraded=True,
+    )
+    assert runtime.degraded is True
+    assert runtime._evidence_frozen is True
+    assert runtime._injected_fault_id is None
+    assert runtime._last_injection is None
+    assert runtime.pending_recovery_fault_id is None
+    assert runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1")
+    ).inject is False
+
+    authority.intent = _intent(ownership=ownership)
+    await runtime.sync_before_batch()
+
+    assert tuple(authority.claims) == claims_before
 
 
 def test_disabled_or_unavailable_builder_is_pass_through(tmp_path: Path) -> None:
