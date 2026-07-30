@@ -27,6 +27,7 @@ from polyarb.perception.fault_control import (
 )
 from polyarb.perception.fault_runtime import (
     CleanupResult,
+    FaultRecoveryOutcome,
     FaultRuntime,
     PassThroughFaultRuntime,
     build_fault_runtime,
@@ -868,6 +869,291 @@ async def test_pass_through_runtime_never_blocks_batches() -> None:
     runtime = PassThroughFaultRuntime(degraded=True)
     await runtime.sync_before_batch()
     assert (await runtime.cleanup("unused", "cancelled")).memory_cleared is False
+
+
+async def _pending_real_recovery(
+    tmp_path: Path,
+    *,
+    name: str,
+    component: str,
+    kind: FaultKind,
+    call_class: FaultCallClass,
+    target_key: str,
+    parameters: dict[str, int],
+) -> tuple[FaultRuntime, FaultAuthorityStore]:
+    path = tmp_path / f"{name}.db"
+    store = OpportunityPerceptionStore(path)
+    store.init_schema()
+    identity = FaultRuntimeIdentity(
+        component=component,
+        release_id="a" * 40,
+        machine_id="machine-1",
+        boot_id=uuid4(),
+    )
+    authority = FaultAuthorityStore(path)
+    authority.register_runtime_start(
+        identity,
+        supervisor_run_id="run-1",
+        attempt=1,
+        started_at_ms=1_000,
+    )
+    assert authority.accept_intent(
+        FaultIntentRequest(
+            fault_id=f"fault-{name}",
+            kind=kind,
+            call_class=call_class,
+            target_key=target_key,
+            parameters=parameters,
+            ttl_ms=30_000,
+            runtime=identity,
+        ),
+        auth=FaultAuthorization(
+            nonce_digest="a" * 64,
+            authorization_digest="b" * 64,
+        ),
+        accepted_at_ms=1_001,
+    ).accepted
+    now_ms = 1_010
+
+    def clock_ms() -> int:
+        nonlocal now_ms
+        now_ms += 1
+        return now_ms
+
+    runtime = FaultRuntime(
+        identity=identity,
+        authority=authority,
+        clock_ms=clock_ms,
+        monotonic=lambda: 10.0,
+    )
+    await runtime.sync_before_batch()
+    decision = runtime.consume(FaultCall(call_class, target_key))
+    assert await runtime.record_injection(decision.fault_id) is not None
+    assert await runtime.link_detection(
+        decision.fault_id,
+        kind=kind,
+        detection_id=f"incident-{name}",
+    )
+    cleanup = await runtime.cleanup(decision.fault_id, "contained")
+    assert cleanup.terminal_state is FaultEventState.CLEANED
+    assert runtime.pending_recovery_fault_id == decision.fault_id
+    return runtime, authority
+
+
+@pytest.mark.parametrize(
+    (
+        "name",
+        "component",
+        "kind",
+        "call_class",
+        "target_key",
+        "parameters",
+        "wrong_writer",
+        "writer_id",
+    ),
+    [
+        (
+            "telegram-cross-family",
+            "notification",
+            FaultKind.TELEGRAM_FAILURE,
+            FaultCallClass.TELEGRAM_OPPORTUNITY_CARD,
+            "1",
+            {},
+            FaultRecoveryWriter.CANDIDATE_SUCCESS,
+            "candidate-qb",
+        ),
+        (
+            "candidate-cross-family",
+            "candidate",
+            FaultKind.CLOB_429,
+            FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH,
+            "group-1",
+            {},
+            FaultRecoveryWriter.TELEGRAM_DELIVERY,
+            1,
+        ),
+        (
+            "discovery-cross-family",
+            "discovery",
+            FaultKind.GAMMA_TIMEOUT,
+            FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
+            "discovery",
+            {"delay_ms": 1},
+            FaultRecoveryWriter.CANDIDATE_SUCCESS,
+            "candidate-qb",
+        ),
+        (
+            "reconciliation-cross-family",
+            "reconciliation",
+            FaultKind.GAMMA_CURSOR,
+            FaultCallClass.GAMMA_RECONCILIATION_EVENT_PAGE,
+            "reconciliation",
+            {},
+            FaultRecoveryWriter.TELEGRAM_DELIVERY,
+            1,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_exact_target_cross_family_recovery_is_evidence_invalid(
+    tmp_path: Path,
+    name: str,
+    component: str,
+    kind: FaultKind,
+    call_class: FaultCallClass,
+    target_key: str,
+    parameters: dict[str, int],
+    wrong_writer: FaultRecoveryWriter,
+    writer_id: int | str,
+) -> None:
+    runtime, authority = await _pending_real_recovery(
+        tmp_path,
+        name=name,
+        component=component,
+        kind=kind,
+        call_class=call_class,
+        target_key=target_key,
+        parameters=parameters,
+    )
+
+    outcome = await runtime.record_writer_recovery_outcome(
+        wrong_writer,
+        target_key=target_key,
+        writer_id=writer_id,
+        writer_occurred_at_ms=2_000,
+    )
+
+    assert outcome is FaultRecoveryOutcome.INVALID
+    history = authority.validate_history(f"fault-{name}")
+    assert history.valid
+    assert history.events[-1].state is FaultEventState.EVIDENCE_INVALID
+    assert runtime.degraded is True
+    assert runtime.pending_recovery_fault_id is None
+
+
+@pytest.mark.parametrize(
+    (
+        "name",
+        "component",
+        "kind",
+        "call_class",
+        "target_key",
+        "parameters",
+        "writer",
+        "writer_id",
+    ),
+    [
+        (
+            "telegram-other-target",
+            "notification",
+            FaultKind.TELEGRAM_FAILURE,
+            FaultCallClass.TELEGRAM_OPPORTUNITY_CARD,
+            "1",
+            {},
+            FaultRecoveryWriter.TELEGRAM_DELIVERY,
+            1,
+        ),
+        (
+            "candidate-other-target",
+            "candidate",
+            FaultKind.CLOB_429,
+            FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH,
+            "group-1",
+            {},
+            FaultRecoveryWriter.CANDIDATE_SUCCESS,
+            "candidate-qb",
+        ),
+        (
+            "discovery-other-target",
+            "discovery",
+            FaultKind.GAMMA_TIMEOUT,
+            FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
+            "discovery",
+            {"delay_ms": 1},
+            FaultRecoveryWriter.DISCOVERY_BATCH,
+            1,
+        ),
+        (
+            "reconciliation-other-target",
+            "reconciliation",
+            FaultKind.GAMMA_CURSOR,
+            FaultCallClass.GAMMA_RECONCILIATION_EVENT_PAGE,
+            "reconciliation",
+            {},
+            FaultRecoveryWriter.RECONCILIATION_CHECKPOINT,
+            "window-1",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_different_target_recovery_is_not_applicable_without_mutation(
+    tmp_path: Path,
+    name: str,
+    component: str,
+    kind: FaultKind,
+    call_class: FaultCallClass,
+    target_key: str,
+    parameters: dict[str, int],
+    writer: FaultRecoveryWriter,
+    writer_id: int | str,
+) -> None:
+    runtime, authority = await _pending_real_recovery(
+        tmp_path,
+        name=name,
+        component=component,
+        kind=kind,
+        call_class=call_class,
+        target_key=target_key,
+        parameters=parameters,
+    )
+    before = authority.validate_history(f"fault-{name}")
+
+    outcome = await runtime.record_writer_recovery_outcome(
+        writer,
+        target_key=f"other-{target_key}",
+        writer_id=writer_id,
+        writer_occurred_at_ms=2_000,
+    )
+
+    after = authority.validate_history(f"fault-{name}")
+    assert outcome is FaultRecoveryOutcome.NOT_APPLICABLE
+    assert after.events == before.events
+    assert runtime.degraded is False
+    assert runtime.pending_recovery_fault_id == f"fault-{name}"
+
+
+@pytest.mark.asyncio
+async def test_exact_recovery_authority_unavailable_is_not_evidence_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, authority = await _pending_real_recovery(
+        tmp_path,
+        name="telegram-authority-unavailable",
+        component="notification",
+        kind=FaultKind.TELEGRAM_FAILURE,
+        call_class=FaultCallClass.TELEGRAM_OPPORTUNITY_CARD,
+        target_key="1",
+        parameters={},
+    )
+
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(authority, "append_recovery_event", unavailable)
+    outcome = await runtime.record_writer_recovery_outcome(
+        FaultRecoveryWriter.TELEGRAM_DELIVERY,
+        target_key="1",
+        writer_id=1,
+        writer_occurred_at_ms=2_000,
+    )
+
+    assert outcome is FaultRecoveryOutcome.UNAVAILABLE
+    history = authority.validate_history("fault-telegram-authority-unavailable")
+    assert history.valid
+    assert history.events[-1].state is FaultEventState.CLEANED
+    assert runtime.degraded is True
+    assert runtime.pending_recovery_fault_id is None
 
 
 def test_each_builder_registration_uses_exact_boot_identity(tmp_path: Path) -> None:

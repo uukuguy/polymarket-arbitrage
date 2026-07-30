@@ -36,9 +36,10 @@ transport remain owned by their existing code.
   require the same notification, current runtime/ownership, exact latest
   append-only attempt overall, `outcome='delivered'`, no error kind, and a
   writer time strictly after injection and not after authority time.
-- Wrong writer family or other notification is `NOT_APPLICABLE` without
-  mutation. Stale, failed, fabricated, or semantically invalid exact evidence
-  is `INVALID`/`EVIDENCE_INVALID`. Authority/SQLite failure is
+- Another notification target is `NOT_APPLICABLE` without mutation or losing
+  pending recovery. An exact-target wrong writer family, stale, failed,
+  fabricated, or semantically invalid exact evidence is
+  `INVALID`/`EVIDENCE_INVALID`. Authority/SQLite failure is
   `UNAVAILABLE` with cleanup/freeze/degrade, never false invalidity.
 - Cleanup is persisted before retry. Existing Incident verification happens
   only from the exact delivered attempt; fault recovery does not write
@@ -89,6 +90,12 @@ surface, or Make target changed.
 7. Attempt-store and Incident-store unavailability RED escaped or stranded
    injection. GREEN produces no fabricated receipt, cleans to `ABANDONED`,
    freezes/degrades, then passes the next real sender call through.
+8. Review HIGH RED proved exact-target Telegram, Candidate, Discovery, and
+   Reconciliation cross-family writers were incorrectly `NOT_APPLICABLE`.
+   GREEN routes legal writers by `FaultKind`: exact-target family mismatch
+   appends `EVIDENCE_INVALID` while ownership is held and freezes/degrades;
+   different targets remain zero-mutation `NOT_APPLICABLE`, and authority
+   unavailability remains `UNAVAILABLE` with no invalid event.
 
 ## Verification
 
@@ -101,6 +108,19 @@ surface, or Make target changed.
 - Focused Ruff: passed.
 - `git diff --check`: passed.
 - Post-commit focused tests and Ruff: passed.
+- `make planning-status`: 82 plans, no drift.
+
+### Review HIGH remediation verification
+
+- Exact-target cross-family/different-target/authority-unavailable runtime
+  matrix: 9 tests passed.
+- Task 3–6 fault control, authority, runtime, Gamma/Candidate/Telegram
+  adapters and Incidents, daemon wiring, notification/outbox, and related
+  SQLite/store regressions: 740 tests passed.
+- Focused Ruff and Task 6 scoped `git diff --check`: passed.
+- Repository-wide `git diff --check` remains blocked only by an unstaged,
+  user-owned trailing blank line in `.superpowers/sdd/task-7-brief.md`; Task 6
+  did not edit or stage that file.
 - `make planning-status`: 82 plans, no drift.
 
 ## Concerns

@@ -15,7 +15,6 @@ from loguru import logger
 from polyarb.perception.fault_authority import FaultAuthorityStore
 from polyarb.perception.fault_control import (
     FaultCall,
-    FaultCallClass,
     FaultController,
     FaultDecision,
     FaultEventState,
@@ -500,16 +499,25 @@ class FaultRuntime:
             ):
                 return FaultRecoveryOutcome.RECORDED
             return FaultRecoveryOutcome.NOT_APPLICABLE
-        expected_writer = {
-            FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH: FaultRecoveryWriter.CANDIDATE_SUCCESS,
-            FaultCallClass.TELEGRAM_OPPORTUNITY_CARD: FaultRecoveryWriter.TELEGRAM_DELIVERY,
-        }.get(pending.intent.call_class)
-        if (
-            expected_writer is None
-            or writer is not expected_writer
-            or pending.intent.target_key != target_key
-        ):
+        if pending.intent.target_key != target_key:
             return FaultRecoveryOutcome.NOT_APPLICABLE
+        expected_writer = {
+            FaultKind.GAMMA_TIMEOUT: FaultRecoveryWriter.DISCOVERY_BATCH,
+            FaultKind.GAMMA_PARTIAL: FaultRecoveryWriter.DISCOVERY_BATCH,
+            FaultKind.GAMMA_MALFORMED: FaultRecoveryWriter.DISCOVERY_BATCH,
+            FaultKind.GAMMA_CURSOR: FaultRecoveryWriter.RECONCILIATION_CHECKPOINT,
+            FaultKind.CLOB_MISSING_LEG: FaultRecoveryWriter.CANDIDATE_SUCCESS,
+            FaultKind.CLOB_429: FaultRecoveryWriter.CANDIDATE_SUCCESS,
+            FaultKind.CLOB_LATENCY: FaultRecoveryWriter.CANDIDATE_SUCCESS,
+            FaultKind.TELEGRAM_FAILURE: FaultRecoveryWriter.TELEGRAM_DELIVERY,
+        }.get(pending.intent.kind)
+        invalid_reason = f"{pending.intent.runtime.component}-recovery-evidence-invalid"
+        if expected_writer is None or writer is not expected_writer:
+            await self.invalidate_evidence(
+                pending.intent.fault_id,
+                invalid_reason,
+            )
+            return FaultRecoveryOutcome.INVALID
         receipt = self.make_recovery_receipt(
             writer,
             writer_id=writer_id,
@@ -518,14 +526,14 @@ class FaultRuntime:
         if receipt is None:
             await self.invalidate_evidence(
                 pending.intent.fault_id,
-                f"{pending.intent.runtime.component}-recovery-evidence-invalid",
+                invalid_reason,
             )
             return FaultRecoveryOutcome.INVALID
         outcome = await self.record_recovery_outcome(receipt)
         if outcome is FaultRecoveryOutcome.INVALID:
             await self.invalidate_evidence(
                 pending.intent.fault_id,
-                "candidate-recovery-evidence-invalid",
+                invalid_reason,
             )
         return outcome
 
