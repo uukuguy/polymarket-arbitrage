@@ -48,6 +48,7 @@ from polyarb.storage.schemas import (
     V4_LEGACY_OWNER_JOURNAL_TRIGGER_DDL,
     V4_LEGACY_OWNER_JOURNAL_TRIGGER_NAMES,
     V4_OWNER_MUTATION_GUARD_DDL,
+    migrate_fault_auth_finalize,
 )
 
 _BUSY_TIMEOUT_MS = 5_000
@@ -2539,6 +2540,8 @@ class OpportunityPerceptionStore:
                 is not None
             )
             con.executescript(DDL)
+            if migrate_fault_auth_finalize(con):
+                con.executescript(DDL)
             self._validate_owner_trigger_sql(con)
             con.execute("BEGIN IMMEDIATE")
             locked_manifest_state = self._owner_manifest_state(con)

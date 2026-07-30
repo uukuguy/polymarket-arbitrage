@@ -27,6 +27,7 @@ def test_nonisolated_daemon_builders_receive_distinct_exact_fault_runtimes(
     )
     monkeypatch.setenv("FLY_MACHINE_ID", "daemon-machine")
     captured: dict[str, object] = {}
+    candidate_calls: list[tuple[object, object]] = []
 
     def focused_builder(_settings, *, fault_runtime):
         captured["notification"] = fault_runtime
@@ -34,6 +35,7 @@ def test_nonisolated_daemon_builders_receive_distinct_exact_fault_runtimes(
 
     def candidate_builder(_settings, *, candidate_group_ids, fault_runtime):
         captured["candidate"] = fault_runtime
+        candidate_calls.append((candidate_group_ids, fault_runtime))
         return "candidate-worker"
 
     def discovery_builder(_settings, *, candidate_freshness, fault_runtime):
@@ -79,3 +81,12 @@ def test_nonisolated_daemon_builders_receive_distinct_exact_fault_runtimes(
     assert {identity.machine_id for identity in identities} == {"daemon-machine"}
     assert len({identity.boot_id for identity in identities}) == 4
     assert all(identity.boot_id.version == 4 for identity in identities)
+    assert len(candidate_calls) == 1
+    assert callable(candidate_calls[0][0])
+    assert candidate_calls[0][1] is captured["candidate"]
+
+    settings.opportunity_first_watcher_enabled = False
+    disabled_workers = daemon_main._build_daemon_perception_workers(settings, store)
+
+    assert disabled_workers[1] is None
+    assert len(candidate_calls) == 1

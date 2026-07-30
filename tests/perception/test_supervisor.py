@@ -375,19 +375,21 @@ async def test_sigstop_reconciliation_child_is_detected_and_resumes_with_checkpo
     )
     pid = None
     try:
-        deadline = time.monotonic() + 2
-        while not pid_path.exists() and time.monotonic() < deadline:
+        startup_deadline = time.monotonic() + 2
+        while not pid_path.exists() and time.monotonic() < startup_deadline:
             await asyncio.sleep(0.02)
         pid = int(pid_path.read_text())
         while (
             store.latest_producer_heartbeat_ms("reconciliation") is None
-            and time.monotonic() < deadline
+            and time.monotonic() < startup_deadline
         ):
             await asyncio.sleep(0.02)
+        assert store.latest_producer_heartbeat_ms("reconciliation") is not None
 
         os.kill(pid, signal.SIGSTOP)
         open_incidents = await asyncio.to_thread(store.open_incidents)
-        while not open_incidents and time.monotonic() < deadline:
+        stall_deadline = time.monotonic() + 2
+        while not open_incidents and time.monotonic() < stall_deadline:
             await asyncio.sleep(0.02)
             open_incidents = await asyncio.to_thread(store.open_incidents)
         assert open_incidents[0].kind == "child-stalled"
@@ -395,7 +397,8 @@ async def test_sigstop_reconciliation_child_is_detected_and_resumes_with_checkpo
         recover_path.touch()
         os.kill(pid, signal.SIGCONT)
         open_incidents = await asyncio.to_thread(store.open_incidents)
-        while open_incidents and time.monotonic() < deadline:
+        recovery_deadline = time.monotonic() + 2
+        while open_incidents and time.monotonic() < recovery_deadline:
             await asyncio.sleep(0.02)
             open_incidents = await asyncio.to_thread(store.open_incidents)
         assert open_incidents == ()

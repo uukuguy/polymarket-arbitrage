@@ -67,6 +67,7 @@ from polyarb.http.perception_faults import (
     cleanup_fault,
     fault_runtime,
     fault_status,
+    finalize_fault,
 )
 from polyarb.http.scan import scan, scan_auth_middleware
 
@@ -178,6 +179,11 @@ def create_app(
         Route(
             "/control/perception/faults/cleanup",
             cleanup_fault,
+            methods=["POST"],
+        ),
+        Route(
+            "/control/perception/faults/{fault_id}/finalize",
+            finalize_fault,
             methods=["POST"],
         ),
         Route("/control/unpause", unpause, methods=["POST"]),  # D-03 Phase 02.1

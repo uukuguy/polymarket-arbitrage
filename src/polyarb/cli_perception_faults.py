@@ -34,6 +34,10 @@ def _parser() -> argparse.ArgumentParser:
     arm.add_argument("--intent", type=Path, required=True)
     cleanup = commands.add_parser("cleanup")
     cleanup.add_argument("--fault-id", required=True)
+    finalize = commands.add_parser("finalize")
+    finalize.add_argument("--fault-id", required=True)
+    finalize.add_argument("--artifact", type=Path, required=True)
+    finalize.add_argument("--expected-release", required=True)
     status = commands.add_parser("status")
     status.add_argument("--fault-id", required=True)
     return parser
@@ -104,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-    else:
+    elif args.command == "cleanup":
         path = "/control/perception/faults/cleanup"
         body = json.dumps(
             {"fault_id": args.fault_id}, separators=(",", ":")
@@ -115,6 +119,31 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
+    else:
+        path = f"/control/perception/faults/{args.fault_id}/finalize"
+        try:
+            artifact = json.loads(args.artifact.read_text())
+            if not isinstance(artifact, dict):
+                raise ValueError("artifact root must be an object")
+            runtime = artifact.get("runtime")
+            if (
+                not isinstance(runtime, dict)
+                or runtime.get("release_id") != args.expected_release
+                or len(args.expected_release) != 40
+                or any(character not in "0123456789abcdef" for character in args.expected_release)
+            ):
+                raise ValueError("artifact release does not match expected release")
+            body = json.dumps(
+                {"artifact": artifact},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+            headers = _signed_headers(path, body)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"ERROR: cannot read finalizer artifact: {exc}", file=sys.stderr)
+            return 2
+        method = "POST"
     request = Request(base + path, data=body, method=method, headers=headers)
     try:
         with urlopen(request, timeout=10) as response:  # noqa: S310 - operator URL

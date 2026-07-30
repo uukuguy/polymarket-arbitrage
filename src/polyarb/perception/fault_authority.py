@@ -1188,6 +1188,94 @@ class FaultAuthorityStore:
         finally:
             con.close()
 
+    def finalize_verdict(
+        self,
+        fault_id: str,
+        *,
+        verdict_id: str,
+        verdict_digest: str,
+        source_tail_hash: str,
+        runtime: FaultRuntimeIdentity,
+        auth: FaultAuthorization,
+        request_digest: str,
+        occurred_at_ms: int,
+        deadline_monotonic: float | None = None,
+    ) -> FaultEvent:
+        """Append VERIFIED only for an exact signed RECOVERED source chain."""
+        if self._read_only:
+            raise RuntimeError("fault-authority-read-only")
+        fault_id = normalize_fault_id(fault_id)
+        self._validate_time(occurred_at_ms, "invalid-occurred-at")
+        normalize_evidence(
+            FaultEventState.VERIFIED,
+            {"verdict_id": verdict_id, "verdict_digest": verdict_digest},
+        )
+        con = self._connect(deadline_monotonic)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            reservation_id, replay = self._reserve_auth(
+                con,
+                auth=auth,
+                operation="finalize",
+                fault_id=fault_id,
+                request_digest=request_digest,
+                occurred_at_ms=occurred_at_ms,
+            )
+            if replay:
+                self._append_auth_attempt(
+                    con, auth=auth, operation="finalize", fault_id=fault_id,
+                    request_digest=request_digest, outcome="rejected",
+                    reason="nonce-replay", occurred_at_ms=occurred_at_ms,
+                    reservation_id=reservation_id,
+                )
+                con.execute("COMMIT")
+                raise ValueError("nonce-replay")
+            history = self._validate_history_in_connection(con, fault_id)
+            if not history.valid or history.intent is None or not history.events:
+                raise ValueError("fault-history-invalid")
+            tail = history.events[-1]
+            expected_evidence = {
+                "verdict_id": verdict_id,
+                "verdict_digest": verdict_digest,
+            }
+            if tail.state is FaultEventState.VERIFIED:
+                if dict(tail.evidence) != expected_evidence:
+                    raise ValueError("verdict-conflict")
+                reason = "verdict-already-finalized"
+                event = tail
+            else:
+                current_runtime = self._current_runtime_in_connection(
+                    con, history.intent.runtime.component
+                )
+                if (
+                    tail.state is not FaultEventState.RECOVERED
+                    or tail.event_hash != source_tail_hash
+                    or history.intent.runtime != runtime
+                    or current_runtime != runtime
+                ):
+                    raise ValueError("verdict-source-mismatch")
+                event = self._append_event_in_transaction(
+                    con,
+                    fault_id,
+                    FaultEventState.VERIFIED,
+                    occurred_at_ms=occurred_at_ms,
+                    evidence=expected_evidence,
+                )
+                reason = "verdict-finalized"
+            self._append_auth_attempt(
+                con, auth=auth, operation="finalize", fault_id=fault_id,
+                request_digest=request_digest, outcome="accepted", reason=reason,
+                occurred_at_ms=occurred_at_ms, reservation_id=reservation_id,
+            )
+            con.execute("COMMIT")
+            return event
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
     def append_recovery_event(
         self,
         receipt: FaultRecoveryReceipt,
@@ -1633,7 +1721,9 @@ class FaultAuthorityStore:
             "   OR a.request_digest IS NOT r.request_digest "
             "   OR (a.operation='arm' AND a.reason!='accepted') "
             "   OR (a.operation='cleanup' AND a.reason NOT IN "
-            "      ('cleanup-requested','cleanup-already-requested'))"
+            "      ('cleanup-requested','cleanup-already-requested')) "
+            "   OR (a.operation='finalize' AND a.reason NOT IN "
+            "      ('verdict-finalized','verdict-already-finalized'))"
             " )) "
             " OR (a.outcome='rejected' AND a.reason!='nonce-replay' AND ("
             "   a.nonce_digest IS NOT r.nonce_digest "

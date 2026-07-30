@@ -1,81 +1,121 @@
 # Task 7 Implementer Report
 
-Status: IMPLEMENTATION GREEN — formal independent UI audit pending
+Status: IMPLEMENTATION GREEN — local qualification only
 
 ## Scope
 
-Task 7 only: an observer-only Next.js perception overview, bounded group
-history, Task 6 typed public-GET reader, navigation, read-only route smoke, and
-living-manual synchronization. No production deployment, cutover, wallet,
-signing, balances, orders, or real-money action occurred.
+Task 7 completes the typed upstream-fault orchestrator, immutable evidence
+export, independent candidate/final evaluation, and evaluator-signed
+finalization protocol. It supports exactly:
+
+```text
+gamma-timeout gamma-partial gamma-malformed gamma-cursor
+clob-missing-leg clob-429 clob-latency telegram-failure
+```
+
+No cloud, production, deploy, wallet, order, or real-money operation occurred.
+Existing SQLite/disk/load/process/restart/deploy chaos primitives remain
+separate.
 
 ## Implemented truth chain
 
-1. `dashboard/lib/perception.ts` consumes only the Task 6 public
-   `/perception/*` GET endpoints. Each overview or group read creates one
-   `AbortSignal.timeout(3000)` and shares that absolute deadline across its
-   parallel no-store requests. Transport, non-2xx HTTP, invalid JSON, and a
-   non-available envelope, or nested response-contract mismatch return a typed
-   `unavailable` result. Reconciliation accepts the exact Task 6
-   `open/complete/applied/failed` state set.
-2. `/perception` distinguishes the complete-read unavailable state from the
-   valid `available/count=0` state. Only the latter renders “No certified edge
-   right now.” Task 6 fields that do not yet exist—edge/capacity, Structure and
-   Quote age, raw/weighted coverage, resource mode—are explicitly labelled
-   “not exposed,” never fabricated as zero.
-3. `/perception/[group_id]` decodes the Next route segment exactly once and
-   the reader re-encodes it exactly once for the public API. Membership
-   revisions and matching incidents are merged and sorted by event time. The
-   history envelope and every revision must bind the requested group ID.
-   Quote batches and opportunity transitions remain explicit not-exposed
-   timeline classes until a bounded public contract exists.
-4. `make smoke-perception-dashboard` disables curlrc, uses bounded connect and
-   total timeouts, requests only `/perception`, accepts application 200 or
-   configured Vercel Auth 302/307, and rejects transport errors, 404, and 5xx.
-   It is a route-reachability check, not data-freshness evidence.
-5. The root navigation, living M1 manual, manual checker target inventory, and
-   route markers are synchronized.
+1. `perception_chaos execute` performs fail-closed preflight before network
+   access, collects a green read-only baseline, resolves exact producer
+   release/machine/boot/component identity, writes an exclusive typed intent,
+   arms through the doubly signed HTTP control endpoint, and observes the
+   matching producer-owned injection plus one Incident or Gamma partial
+   coverage fact.
+2. Cleanup executes for every `BaseException`, including timeout, malformed
+   response, cancellation, `KeyboardInterrupt`, and `SystemExit`. A missing or
+   invalid cleanup receipt freezes the remaining matrix. Recovery must be a
+   newer component-specific business-writer receipt before an immutable
+   `evidence.json` is exported.
+3. The production transport is real HTTP, not a producer primitive shim.
+   Starlette + SQLite local integration tests exercise all eight fault kinds
+   through arm, observe, doubly signed cleanup, recovered state, and read-only
+   export. The CLI rejects missing identity/authority arguments before creating
+   a transport or touching the network.
+4. `export_fault_envelope` opens SQLite read-only and preserves the complete
+   canonical intent, runtime, lifecycle, hashes, recovery writer identity, and
+   projection state. Candidate evidence stops at `RECOVERED`; it cannot call
+   the evaluator or append `VERIFIED`.
+5. The independent candidate evaluator recomputes every intent/event/tail
+   digest and validates exact runtime, target, parameters, nonce, injection,
+   detection/coverage, cleanup/recovery order, writer family, open-state
+   counts, and integrity gates. A third, distinct evaluator secret signs only
+   a production-fault PASS candidate.
+6. The disabled-by-default finalizer validates double control authentication,
+   the independent evaluator signature, exact recovered tail/runtime/fault
+   binding, and fresh nonce before appending one `VERIFIED` event containing
+   only `verdict_id` and `verdict_digest`. Exact artifact retry is idempotent;
+   nonce replay and conflicting verdicts are audited and rejected.
+7. The final evaluator re-reads the post-finalization evidence, validates the
+   candidate signature without either control secret or HTTP mutation
+   capability, and requires the exact `VERIFIED` event/digest.
 
-## TDD and browser finding
+## Schema and compatibility
 
-The initial source contract produced 8/8 expected RED failures because the
-reader, pages, navigation, and smoke target did not exist. The GREEN
-implementation reached 8/8 contracts.
+- `FaultEventState.VERIFIED` has strict evidence validation.
+- Finalization authorization was added to the authority schema.
+- Existing Task 3 databases are migrated by rebuilding the auth table while
+  preserving row IDs, hashes, event history, and foreign keys. The migration
+  test starts with real legacy runtime/nonce/intent/event rows and requires a
+  clean `foreign_key_check`.
+- Settings require three non-empty, pairwise-distinct secrets when finalization
+  is enabled; all new capabilities remain disabled by default.
 
-A local browser review then exposed a real route-identity bug: Next supplied
-`neg-risk%3Aevent-42`; the page passed it directly to a reader that correctly
-encoded again, producing `%253A` and hiding the matching incident. A new
-regression first failed RED, then the page decoded once with malformed-percent
-fallback. Review-driven RED/GREEN added nested runtime validators, bounded-page
-labels, terminal-incident filtering, the legal failed Reconciliation state,
-and requested-group history binding. The final contract is 12/12, the displayed
-group ID is `neg-risk:event-42`, and the matching incident count is one.
+## Operational entry points
+
+```text
+make evaluate-upstream-fault-candidate
+make finalize-upstream-fault
+make evaluate-upstream-fault-final
+```
+
+The candidate evaluator runs without ordinary/fault control secrets. The
+finalizer runs without the evaluator secret. The final evaluator runs without
+ordinary/fault control secrets and with HTTP mutation calls replaced by
+fail-fast test sentinels.
+
+## TDD and branch-wide gate remediation
+
+RED tests were added before implementation for exact preflight, all eight CLI
+dispatches, cleanup across `BaseException`, duplicate injection, matrix freeze,
+read-only export, named evaluator tamper failures, signature separation,
+finalization replay/conflict behavior, and legacy-schema migration.
+
+Two pre-existing branch-wide test defects surfaced during the full gate and
+were repaired transparently:
+
+1. Commit `8ab8091` extracted producer construction from `main()` into
+   `_build_daemon_perception_workers` but left a source-introspection assertion
+   aimed at the old function boundary. The test now proves that `main()` calls
+   the production helper, the helper applies the exact candidate feature gate
+   and builder/runtime parameters, disabled mode does not call the builder,
+   and `main()` still starts, cancels, and exposes the runtime.
+2. The SIGSTOP reconciliation recovery test shared one two-second deadline
+   across startup, stall detection, and recovery. It passed 10/10 in isolation
+   with no residual child process but failed under full-suite load after the
+   shared budget was exhausted. It now uses independent condition-based
+   deadlines for each phase, preserves the per-phase bound, and retains the
+   existing `finally` SIGCONT/terminate/reap cleanup.
 
 ## Verification
 
 ```text
-Task 7 Dashboard contract: 12 pass
-make dashboard-typecheck: pass
-make dashboard-build: pass; /perception and /perception/[group_id] are dynamic
-make docs-m1-check: pass
-make planning-status: 82 plans, no drift
-git diff --check: pass
+Task 7 focused authority/control/orchestrator/evaluator suites: pass
+Task 2 daemon/quote/candidate/fault-runtime/supervisor related suites: pass
+Ruff on every changed Python file: pass
+git diff --check on Makefile/scripts/src/tests: pass
+make test-m1-perception:
+  2750 passed, 1 skipped, 1 xfailed, 0 failed in 468.20s
+make planning-status:
+  82 plans, no drift
 ```
-
-Browser review used a local Task 6 JSON fixture only:
-
-- `http://127.0.0.1:3000/perception` → HTTP 200
-- `http://127.0.0.1:3000/perception/neg-risk%3Aevent-42` → HTTP 200
-- malformed nested JSON fixture on `http://127.0.0.1:3001/perception` → HTTP
-  200 typed “Perception unavailable / invalid JSON contract,” not a 500 or zero
-- desktop, 375 px overview, and group timeline screenshots were retained
-  locally under `output/playwright/` and are intentionally excluded from the
-  commit
-- the only console error was an unrelated missing `/favicon.ico`
 
 ## Remaining boundary
 
-The formal independent six-pillar UI audit still gates declaring Task 7
-complete. The independent code reviewer reported two remediation rounds; all
-Critical/Important findings must be closed before commit. Task 8 owns
-production fault qualification and cutover. Nothing was deployed by Task 7.
+No production qualification was attempted. Production use still requires an
+explicit operator-controlled run of Phase A, independent candidate evaluation,
+finalization, re-export, and final evaluation with the three authorities kept
+separate.

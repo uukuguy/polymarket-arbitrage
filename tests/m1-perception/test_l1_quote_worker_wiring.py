@@ -104,11 +104,19 @@ def test_l1_main_owns_quote_worker_shutdown() -> None:
 def test_l1_main_feature_flags_candidate_watcher_as_sibling_task() -> None:
     from polyarb.daemon import main
 
-    source = inspect.getsource(main.main)
-    assert "settings.opportunity_first_watcher_enabled" in source
-    assert "_start_candidate_watcher(candidate_watcher, stop_event)" in source
-    assert "candidate_watcher_task.cancel()" in source
-    assert "candidate_watcher_runtime=" in source
+    builder_source = inspect.getsource(main._build_daemon_perception_workers)
+    lifecycle_source = inspect.getsource(main.main)
+    assert "_build_daemon_perception_workers(" in lifecycle_source
+    assert "build_production_candidate_watcher(" in builder_source
+    assert "candidate_group_ids=candidate_group_ids" in builder_source
+    assert 'fault_runtime=component_fault_runtimes["candidate"]' in builder_source
+    assert (
+        "if settings.opportunity_first_watcher_enabled and not isolated_producers"
+        in builder_source
+    )
+    assert "_start_candidate_watcher(candidate_watcher, stop_event)" in lifecycle_source
+    assert "candidate_watcher_task.cancel()" in lifecycle_source
+    assert "candidate_watcher_runtime=" in lifecycle_source
 
 
 def test_candidate_watcher_controller_settings_are_explicit_and_off_by_default() -> None:

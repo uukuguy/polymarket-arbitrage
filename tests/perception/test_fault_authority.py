@@ -11,6 +11,8 @@ from uuid import UUID
 
 import pytest
 
+import scripts.perception_fault_acceptance as fault_acceptance
+import scripts.perception_fault_readonly as fault_readonly
 from polyarb.perception.fault_authority import (
     FaultAuthorityStore,
     _intent_hash,
@@ -26,6 +28,7 @@ from polyarb.perception.fault_control import (
     FaultRuntimeIdentity,
 )
 from polyarb.storage.schemas import DDL
+from polyarb.storage.sqlite_store import SQLiteStore
 
 RUNTIME = FaultRuntimeIdentity(
     component="candidate",
@@ -1131,6 +1134,176 @@ def test_lifecycle_hashes_validate_and_tampering_is_detected(
             "WHERE fault_id='fault-1' AND state='detected'"
         )
     assert not store.validate_history("fault-1").valid
+
+
+def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
+    store: FaultAuthorityStore, db_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_200)
+    assert claimed is not None
+    ownership = claimed.ownership_capability
+    store.append_event(
+        "fault-1", FaultEventState.INJECTED, occurred_at_ms=1_300,
+        evidence={"call_id": "call-1"}, ownership=ownership,
+    )
+    store.append_event(
+        "fault-1", FaultEventState.DETECTED, occurred_at_ms=1_400,
+        evidence={"incident_id": "incident-1"},
+    )
+    store.append_event(
+        "fault-1", FaultEventState.CONTAINED, occurred_at_ms=1_500,
+        evidence={"containment_id": "containment-1"},
+    )
+    store.append_event(
+        "fault-1", FaultEventState.CLEANED, occurred_at_ms=1_600,
+        evidence={"cleanup_id": "cleanup-1"}, ownership=ownership,
+    )
+    recovered = store.append_event(
+        "fault-1", FaultEventState.RECOVERED, occurred_at_ms=1_700,
+        evidence={"recovery_id": "recovery-1"}, ownership=ownership,
+    )
+    with sqlite3.connect(db_path) as con:
+        before_export = con.total_changes
+        row_counts = tuple(
+            con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            for table in (
+                "neg_risk_fault_runtime_starts",
+                "neg_risk_fault_auth_nonces",
+                "neg_risk_fault_intents",
+                "neg_risk_fault_events",
+            )
+        )
+    envelope = fault_readonly.export_fault_envelope(
+        db_path,
+        "fault-1",
+        now_ms=1_750,
+        integrity={
+            "open_incident_count": 0,
+            "cross_membership_quote_batches": 0,
+            "partial_publication_count": 0,
+            "orphan_collecting_runs": 0,
+            "freshness_gate": True,
+            "reconciliation_gate": True,
+        },
+    )
+    exported_verdict = fault_acceptance.evaluate_fault_envelope(
+        envelope, mode="candidate"
+    )
+    assert exported_verdict.reasons == ()
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET", "evaluator-test-secret"
+    )
+    artifact = fault_acceptance.build_candidate_artifact(envelope)
+    with sqlite3.connect(db_path) as con:
+        assert con.total_changes == before_export
+        assert tuple(
+            con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            for table in (
+                "neg_risk_fault_runtime_starts",
+                "neg_risk_fault_auth_nonces",
+                "neg_risk_fault_intents",
+                "neg_risk_fault_events",
+            )
+        ) == row_counts
+
+    verified = store.finalize_verdict(
+        "fault-1",
+        verdict_id=str(artifact["verdict_id"]),
+        verdict_digest=str(artifact["artifact_digest"]),
+        source_tail_hash=recovered.event_hash,
+        runtime=RUNTIME,
+        auth=auth("e"),
+        request_digest="f" * 64,
+        occurred_at_ms=1_800,
+    )
+
+    assert verified.state is FaultEventState.VERIFIED
+    assert verified.evidence == {
+        "verdict_id": artifact["verdict_id"],
+        "verdict_digest": artifact["artifact_digest"],
+    }
+    final_envelope = fault_readonly.export_fault_envelope(
+        db_path,
+        "fault-1",
+        now_ms=1_850,
+        integrity={
+            "open_incident_count": 0,
+            "cross_membership_quote_batches": 0,
+            "partial_publication_count": 0,
+            "orphan_collecting_runs": 0,
+            "freshness_gate": True,
+            "reconciliation_gate": True,
+        },
+    )
+    assert fault_acceptance.evaluate_fault_envelope(
+        final_envelope, mode="final", candidate_artifact=artifact
+    ).reasons == ()
+    same = store.finalize_verdict(
+        "fault-1",
+        verdict_id=str(artifact["verdict_id"]),
+        verdict_digest=str(artifact["artifact_digest"]),
+        source_tail_hash=recovered.event_hash,
+        runtime=RUNTIME,
+        auth=auth("f"),
+        request_digest="a" * 64,
+        occurred_at_ms=1_900,
+    )
+    assert same == verified
+    with pytest.raises(ValueError, match="verdict-conflict"):
+        store.finalize_verdict(
+            "fault-1",
+            verdict_id="verdict-other",
+            verdict_digest="0" * 64,
+            source_tail_hash=recovered.event_hash,
+            runtime=RUNTIME,
+            auth=auth("1"),
+            request_digest="2" * 64,
+            occurred_at_ms=2_000,
+        )
+
+
+def test_task3_auth_schema_upgrades_without_changing_existing_audit_hashes(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "old-task3.db"
+    old_ddl = DDL.replace(
+        "operation TEXT NOT NULL CHECK(operation IN ('arm','cleanup','finalize'))",
+        "operation TEXT NOT NULL CHECK(operation IN ('arm','cleanup'))",
+    )
+    with sqlite3.connect(db_path) as con:
+        con.executescript(old_ddl)
+    old_store = FaultAuthorityStore(db_path)
+    old_store.register_runtime_start(
+        RUNTIME, supervisor_run_id="run-1", attempt=1, started_at_ms=1_000
+    )
+    old_store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    before = old_store.validate_history("fault-1")
+    assert before.valid
+    with sqlite3.connect(db_path) as con:
+        audit_before = con.execute(
+            "SELECT id,row_hash FROM neg_risk_fault_auth_nonces ORDER BY id"
+        ).fetchall()
+
+    SQLiteStore(db_path).init_schema()
+
+    after = FaultAuthorityStore(db_path).validate_history("fault-1")
+    assert after.valid
+    assert after.events == before.events
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT id,row_hash FROM neg_risk_fault_auth_nonces ORDER BY id"
+        ).fetchall() == audit_before
+        table_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_fault_auth_nonces'"
+        ).fetchone()[0]
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+        intent_fk_targets = {
+            row[2] for row in con.execute("PRAGMA foreign_key_list(neg_risk_fault_intents)")
+        }
+    assert "'finalize'" in table_sql
+    assert intent_fk_targets == {"neg_risk_fault_auth_nonces"}
 
 
 @pytest.mark.parametrize(

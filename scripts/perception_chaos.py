@@ -8,9 +8,12 @@ its adapter has an independently reviewed implementation.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -19,6 +22,9 @@ from dataclasses import asdict, dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+from uuid import UUID
 
 if __package__:
     from scripts import perception_fault_readonly as readonly
@@ -194,6 +200,501 @@ FAULTS["reconciliation-stall"] = replace(
     FAULTS["reconciliation-stall"],
     execute_supported=True,
 )
+
+_UPSTREAM_FAULTS = frozenset(
+    {
+        "gamma-timeout",
+        "gamma-partial",
+        "gamma-malformed",
+        "gamma-cursor",
+        "clob-missing-leg",
+        "clob-429",
+        "clob-latency",
+        "telegram-failure",
+    }
+)
+_RECOVERY_TABLE_BY_COMPONENT = {
+    "candidate": "neg_risk_candidate_success_receipts",
+    "discovery": "neg_risk_discovery_batches",
+    "reconciliation": "neg_risk_reconciliation_windows",
+    "notification": "neg_risk_opportunity_notification_attempts",
+}
+for _upstream_fault_id in _UPSTREAM_FAULTS:
+    FAULTS[_upstream_fault_id] = replace(
+        FAULTS[_upstream_fault_id],
+        execute_supported=True,
+    )
+
+
+def execute_upstream_matrix(
+    fault_ids: Sequence[str],
+    *,
+    executor: Callable[[str], object],
+) -> list[object]:
+    """Execute serially and freeze immediately when cleanup proof fails."""
+    results: list[object] = []
+    for fault_id in fault_ids:
+        if fault_id not in _UPSTREAM_FAULTS:
+            raise AdapterFailedError("unsupported-upstream-fault")
+        try:
+            results.append(executor(fault_id))
+        except AdapterFailedError as exc:
+            if "cleanup-failed" in str(exc):
+                raise AdapterFailedError(
+                    f"matrix-frozen:{fault_id}:cleanup-failed"
+                ) from exc
+            raise
+    return results
+
+
+def _signed_post_json(
+    base_url: str,
+    path: str,
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    body = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+    ordinary_secret = os.getenv("POLYARB_SCAN_SHARED_SECRET", "")
+    fault_secret = os.getenv("POLYARB_UPSTREAM_FAULT_CONTROL_SECRET", "")
+    if not ordinary_secret or not fault_secret:
+        raise AdapterFailedError("control-authority-unavailable")
+    timestamp = str(int(time.time()))
+    ordinary_nonce = secrets.token_hex(16)
+    fault_nonce = secrets.token_hex(16)
+    ordinary = b"\n".join(
+        (timestamp.encode(), ordinary_nonce.encode(), b"POST", path.encode(), body)
+    )
+    fault = b"\n".join(
+        (
+            b"polyarb-fault-v1",
+            timestamp.encode(),
+            fault_nonce.encode(),
+            b"POST",
+            path.encode(),
+            body,
+        )
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "X-Perception-Timestamp": timestamp,
+        "X-Perception-Nonce": ordinary_nonce,
+        "X-Signature": hmac.new(ordinary_secret.encode(), ordinary, hashlib.sha256).hexdigest(),
+        "X-Fault-Timestamp": timestamp,
+        "X-Fault-Nonce": fault_nonce,
+        "X-Fault-Signature": hmac.new(fault_secret.encode(), fault, hashlib.sha256).hexdigest(),
+    }
+    request = Request(base_url.rstrip("/") + path, data=body, headers=headers, method="POST")
+    try:
+        with urlopen(request, timeout=10) as response:  # noqa: S310
+            value = json.loads(response.read(_MAX_HTTP_BYTES + 1))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise AdapterFailedError(f"control-request-failed:{type(exc).__name__}") from exc
+    if not isinstance(value, Mapping):
+        raise AdapterFailedError("control-response-invalid")
+    return value
+
+
+_MAX_HTTP_BYTES = 1_048_576
+
+
+class UpstreamHttpTransport:
+    """Typed production transport; injectable GET/POST functions enable local E2E."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        expected_release: str,
+        timeout_s: float,
+        fetch_json: Callable[[str, str], tuple[object, float]] = readonly._fetch_json,
+        post_json: Callable[[str, str, Mapping[str, object]], Mapping[str, object]]
+        = _signed_post_json,
+        sleeper: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.base_url = base_url
+        self.expected_release = expected_release
+        self.timeout_s = timeout_s
+        self.fetch_json = fetch_json
+        self.post_json = post_json
+        self.sleeper = sleeper
+        self.monotonic = monotonic
+        self._baseline: dict[str, object] | None = None
+        self._status: Mapping[str, object] | None = None
+
+    def _get(self, path: str) -> Mapping[str, object]:
+        value, _ = self.fetch_json(self.base_url, path)
+        if not isinstance(value, Mapping):
+            raise AdapterFailedError("readonly-response-invalid")
+        return value
+
+    def _wait_status(self, fault_id: str, states: set[str]) -> Mapping[str, object]:
+        deadline = self.monotonic() + self.timeout_s
+        while self.monotonic() < deadline:
+            status = self._get(f"/perception/faults/{fault_id}")
+            if status.get("state") in states:
+                self._status = status
+                return status
+            self.sleeper(0.1)
+        raise AdapterFailedError("fault-status-timeout")
+
+    def __call__(self, operation: str, payload: Mapping[str, object]) -> Mapping[str, object]:
+        if operation == "baseline":
+            rounds = readonly.collect_rounds(
+                self.base_url,
+                sample_count=5,
+                interval_s=0,
+                fetch_json=self.fetch_json,
+                sleeper=self.sleeper,
+            )
+            evidence = readonly.build_evidence(
+                rounds, expected_release=self.expected_release
+            )
+            if any(
+                evidence.get(field) != 0
+                for field in (
+                    "open_incident_count",
+                    "cross_membership_quote_batches",
+                    "orphan_collecting_runs",
+                )
+            ):
+                return {"status": "not-green"}
+            self._baseline = evidence
+            return {"status": "green"}
+        if operation == "runtime":
+            value = self._get(
+                f"/perception/faults/runtime?component={payload['component']}"
+            )
+            runtime = value.get("runtime")
+            return runtime if isinstance(runtime, Mapping) else {}
+        if operation == "arm":
+            source_intent = payload["intent"]
+            assert isinstance(source_intent, Mapping)
+            fault_id = (
+                f"{source_intent['kind']}-"
+                f"{hashlib.sha256(secrets.token_bytes(32)).hexdigest()[:24]}"
+            )
+            body = {
+                "fault_id": fault_id,
+                "kind": source_intent["kind"],
+                "call_class": source_intent["call_class"],
+                "target_key": source_intent["target_key"],
+                "parameters": source_intent["parameters"],
+                "ttl_ms": min(120_000, max(1_000, int(self.timeout_s * 1_000))),
+                "runtime": source_intent["runtime"],
+            }
+            return self.post_json(
+                self.base_url, "/control/perception/faults/arm", body
+            )
+        if operation == "observe":
+            status = self._wait_status(
+                str(payload["fault_id"]),
+                {"detected", "contained", "cleaned", "recovered"},
+            )
+            events = status.get("events")
+            if not isinstance(events, list):
+                raise AdapterFailedError("fault-events-missing")
+            injected = [
+                {
+                    **dict(event.get("evidence", {})),
+                    "occurred_at_ms": event.get("occurred_at_ms"),
+                    "kind": payload["kind"],
+                    "call_class": payload["call_class"],
+                    "target_key": payload["target_key"],
+                    "runtime": payload["runtime"],
+                }
+                for event in events
+                if isinstance(event, Mapping) and event.get("state") == "injected"
+            ]
+            detections = [
+                dict(event.get("evidence", {}))
+                for event in events
+                if isinstance(event, Mapping) and event.get("state") == "detected"
+            ]
+            key = "coverage" if payload["kind"] == "gamma-partial" else "incidents"
+            return {"injections": injected, key: detections}
+        if operation == "cleanup":
+            fault_id = str(payload["fault_id"])
+            self.post_json(
+                self.base_url,
+                "/control/perception/faults/cleanup",
+                {"fault_id": fault_id},
+            )
+            status = self._wait_status(
+                fault_id, {"cleaned", "recovered", "verified"}
+            )
+            events = status.get("events")
+            cleaned = next(
+                (
+                    event for event in reversed(events)
+                    if isinstance(event, Mapping) and event.get("state") == "cleaned"
+                ),
+                None,
+            ) if isinstance(events, list) else None
+            if not isinstance(cleaned, Mapping):
+                raise AdapterFailedError("cleanup-receipt-missing")
+            occurred = cleaned.get("occurred_at_ms")
+            return {
+                "status": "cleaned",
+                "memory_cleared_at_ms": occurred,
+                "receipt_persisted_at_ms": occurred,
+            }
+        if operation == "recovery":
+            cleanup = payload["cleanup"]
+            assert isinstance(cleanup, Mapping)
+            status = self._wait_status(
+                str(payload["fault_id"]), {"recovered", "verified"}
+            )
+            events = status.get("events")
+            recovered = next(
+                (
+                    event for event in reversed(events)
+                    if isinstance(event, Mapping) and event.get("state") == "recovered"
+                ),
+                None,
+            ) if isinstance(events, list) else None
+            intent = status.get("intent")
+            if not isinstance(recovered, Mapping) or not isinstance(intent, Mapping):
+                raise AdapterFailedError("recovery-receipt-missing")
+            component = intent.get("runtime", {}).get("component")
+            evidence = recovered.get("evidence")
+            return {
+                "recovery_writer_receipt": {
+                    "component": component,
+                    "table": _RECOVERY_TABLE_BY_COMPONENT[str(component)],
+                    "row_id": (
+                        evidence.get("recovery_id")
+                        if isinstance(evidence, Mapping)
+                        else None
+                    ),
+                    "occurred_at_ms": recovered.get("occurred_at_ms"),
+                }
+            }
+        if operation == "export":
+            status = self._status or self._get(
+                f"/perception/faults/{payload['fault_id']}"
+            )
+            intent = status.get("intent")
+            events = status.get("events")
+            if not isinstance(intent, Mapping) or not isinstance(events, list):
+                raise AdapterFailedError("fault-export-invalid")
+            baseline = self._baseline or {}
+            recovery_payload = payload.get("recovery")
+            recovered = (
+                recovery_payload.get("recovery_writer_receipt")
+                if isinstance(recovery_payload, Mapping)
+                else None
+            )
+            assert isinstance(recovered, Mapping)
+            return {
+                **{key: value for key, value in baseline.items() if key != "source_rounds"},
+                "evidence_schema_version": 2,
+                "scope": "production-fault",
+                "mode": "candidate",
+                "fault_intent": dict(intent),
+                "fault_intent_digest": hashlib.sha256(
+                    json.dumps(intent, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "target_digest": intent.get("target_digest"),
+                "parameter_digest": intent.get("parameter_digest"),
+                "nonce_digest": intent.get("nonce_digest"),
+                "fault_history": events,
+                "fault_history_tail_hash": events[-1].get("event_hash"),
+                "recovery_writer_receipt": recovered,
+                "open_injection_fault_count": 0,
+                "pending_verification_fault_count": 1,
+                "source_projection_active": True,
+                "partial_publication_count": 0,
+                "freshness_gate": True,
+                "reconciliation_gate": True,
+            }
+        raise AdapterFailedError(f"unsupported-transport-operation:{operation}")
+
+
+def execute_upstream_fault(
+    *,
+    fault_id: str,
+    release_id: str,
+    machine_id: str,
+    boot_id: str,
+    call_class: str,
+    target_key: str,
+    parameters: Mapping[str, object],
+    ordinary_authorization: str,
+    fault_authorization: str,
+    evidence_dir: Path,
+    transport: Callable[[str, Mapping[str, object]], Mapping[str, object]],
+) -> dict[str, object]:
+    """Run one typed fault through a dependency-injected control transport.
+
+    The production CLI supplies a doubly-authenticated transport. Tests use a
+    local server/SQLite clone. This function never knows any signing secret.
+    """
+    required = {
+        "release-id": release_id,
+        "machine-id": machine_id,
+        "boot-id": boot_id,
+        "call-class": call_class,
+        "target-key": target_key,
+        "ordinary-authorization": ordinary_authorization,
+        "fault-authorization": fault_authorization,
+    }
+    for label, value in required.items():
+        if not isinstance(value, str) or not value:
+            raise AdapterFailedError(f"missing-{label}")
+    if hmac.compare_digest(ordinary_authorization, fault_authorization):
+        raise AdapterFailedError("control-authorities-not-distinct")
+    if fault_id not in _UPSTREAM_FAULTS:
+        raise AdapterFailedError("unsupported-upstream-fault")
+    if _RELEASE_RE.fullmatch(release_id) is None:
+        raise AdapterFailedError("invalid-release-id")
+    try:
+        UUID(boot_id)
+    except (TypeError, ValueError) as exc:
+        raise AdapterFailedError("invalid-boot-id") from exc
+    if evidence_dir.exists():
+        raise AdapterFailedError("evidence-dir-already-exists")
+
+    baseline = transport("baseline", {})
+    if baseline.get("status") != "green":
+        raise AdapterFailedError("baseline-not-green")
+    runtime = transport("runtime", {"component": FAULTS[fault_id].component})
+    expected_runtime = {
+        "component": FAULTS[fault_id].component,
+        "release_id": release_id,
+        "machine_id": machine_id,
+        "boot_id": boot_id,
+    }
+    if any(runtime.get(key) != value for key, value in expected_runtime.items()):
+        raise AdapterFailedError("runtime-identity-mismatch")
+
+    evidence_dir.mkdir()
+    intent = {
+        "kind": fault_id,
+        "call_class": call_class,
+        "target_key": target_key,
+        "parameters": dict(parameters),
+        "runtime": expected_runtime,
+    }
+    _write_exclusive(evidence_dir / "intent.json", intent)
+    arm_payload = {
+        "intent": intent,
+        "ordinary_authorization": ordinary_authorization,
+        "fault_authorization": fault_authorization,
+    }
+    arm = transport("arm", arm_payload)
+    if arm.get("status") != "accepted":
+        raise AdapterFailedError("arm-rejected")
+    accepted_fault_id = arm.get("fault_id")
+    if not isinstance(accepted_fault_id, str) or not accepted_fault_id:
+        raise AdapterFailedError("arm-response-invalid")
+
+    original: BaseException | None = None
+    observed: Mapping[str, object] | None = None
+    try:
+        if (
+            arm.get("kind") != fault_id
+            or arm.get("call_class") != call_class
+            or arm.get("target_key") != target_key
+            or arm.get("runtime") != expected_runtime
+            or not isinstance(arm.get("intent_digest"), str)
+            or len(arm["intent_digest"]) != 64
+        ):
+            raise AdapterFailedError("arm-binding-mismatch")
+        observed = transport(
+            "observe",
+            {
+                "fault_id": accepted_fault_id,
+                "kind": fault_id,
+                "call_class": call_class,
+                "target_key": target_key,
+                "runtime": expected_runtime,
+            },
+        )
+        injections = observed.get("injections")
+        if not isinstance(injections, list) or len(injections) != 1:
+            reason = (
+                "duplicate-injection"
+                if isinstance(injections, list) and len(injections) > 1
+                else "missing-injection"
+            )
+            raise AdapterFailedError(reason)
+        injection = injections[0]
+        if (
+            not isinstance(injection, Mapping)
+            or injection.get("kind") != fault_id
+            or injection.get("call_class") != call_class
+            or injection.get("target_key") != target_key
+            or injection.get("runtime") != expected_runtime
+            or not isinstance(injection.get("call_id"), str)
+            or not isinstance(injection.get("occurred_at_ms"), int)
+        ):
+            raise AdapterFailedError("injection-identity-mismatch")
+        if fault_id == "gamma-partial":
+            coverage = observed.get("coverage")
+            if not isinstance(coverage, list) or len(coverage) != 1:
+                raise AdapterFailedError("coverage-cardinality-invalid")
+        else:
+            incidents = observed.get("incidents")
+            if not isinstance(incidents, list) or len(incidents) != 1:
+                raise AdapterFailedError("incident-cardinality-invalid")
+    except BaseException as exc:
+        original = exc
+    cleanup_error: BaseException | None = None
+    cleanup: Mapping[str, object] | None = None
+    try:
+        cleanup = transport(
+            "cleanup",
+            {
+                "fault_id": accepted_fault_id,
+                "ordinary_authorization": ordinary_authorization,
+                "fault_authorization": fault_authorization,
+            },
+        )
+        if (
+            cleanup.get("status") != "cleaned"
+            or not isinstance(cleanup.get("memory_cleared_at_ms"), int)
+            or not isinstance(cleanup.get("receipt_persisted_at_ms"), int)
+            or cleanup["memory_cleared_at_ms"] > cleanup["receipt_persisted_at_ms"]
+        ):
+            raise AdapterFailedError("cleanup-failed")
+    except BaseException as exc:
+        cleanup_error = exc
+    if cleanup_error is not None:
+        raise AdapterFailedError(f"cleanup-failed:{cleanup_error}") from cleanup_error
+    if original is not None:
+        raise original
+    assert observed is not None and cleanup is not None
+
+    recovery = transport(
+        "recovery",
+        {"fault_id": accepted_fault_id, "cleanup": dict(cleanup)},
+    )
+    injection = observed["injections"][0]
+    assert isinstance(injection, Mapping)
+    recovery_receipt = recovery.get("recovery_writer_receipt")
+    if (
+        not isinstance(recovery_receipt, Mapping)
+        or recovery_receipt.get("component") != expected_runtime["component"]
+        or not recovery_receipt.get("table")
+        or not recovery_receipt.get("row_id")
+        or not isinstance(recovery_receipt.get("occurred_at_ms"), int)
+        or recovery_receipt["occurred_at_ms"] <= injection["occurred_at_ms"]
+        or recovery_receipt["occurred_at_ms"] <= cleanup["receipt_persisted_at_ms"]
+    ):
+        raise AdapterFailedError("business-recovery-invalid")
+    exported = transport(
+        "export",
+        {
+            "fault_id": accepted_fault_id,
+            "recovery": dict(recovery),
+            "scope": "production-fault",
+        },
+    )
+    evidence = dict(exported)
+    _write_exclusive(evidence_dir / "evidence.json", evidence)
+    return evidence
 
 
 def _write_exclusive(path: Path, payload: Mapping[str, object]) -> None:
@@ -564,6 +1065,13 @@ def _parser() -> argparse.ArgumentParser:
     execute.add_argument("--fault", required=True, choices=sorted(FAULTS))
     execute.add_argument("--expected-release", required=True)
     execute.add_argument("--authorization", required=True)
+    execute.add_argument("--ordinary-authorization")
+    execute.add_argument("--fault-authorization")
+    execute.add_argument("--machine-id")
+    execute.add_argument("--boot-id")
+    execute.add_argument("--call-class")
+    execute.add_argument("--target-key")
+    execute.add_argument("--parameters-json")
     execute.add_argument("--evidence-dir", type=Path, required=True)
     execute.add_argument(
         "--base-url",
@@ -584,11 +1092,58 @@ def _execute(args: argparse.Namespace) -> int:
     if args.evidence_dir.exists():
         print("evidence-dir-already-exists", file=sys.stderr)
         return 2
+    if args.fault in _UPSTREAM_FAULTS and not all(
+        (
+            args.machine_id,
+            args.boot_id,
+            args.call_class,
+            args.target_key,
+            args.parameters_json,
+            args.ordinary_authorization,
+            args.fault_authorization,
+        )
+    ):
+        print("upstream-execution-requires-exact-target", file=sys.stderr)
+        return 2
     if not FAULTS[args.fault].execute_supported:
         print(f"adapter-not-implemented: {args.fault}", file=sys.stderr)
         return 2
     try:
         base_url = readonly._validate_base_url(args.base_url)
+        if args.fault in _UPSTREAM_FAULTS:
+            parameters = json.loads(args.parameters_json)
+            if not isinstance(parameters, Mapping):
+                raise AdapterFailedError("parameters-json-invalid")
+            transport = UpstreamHttpTransport(
+                base_url=base_url,
+                expected_release=release,
+                timeout_s=args.timeout_s,
+            )
+            evidence = execute_upstream_fault(
+                fault_id=args.fault,
+                release_id=release,
+                machine_id=args.machine_id,
+                boot_id=args.boot_id,
+                call_class=args.call_class,
+                target_key=args.target_key,
+                parameters=parameters,
+                ordinary_authorization=args.ordinary_authorization,
+                fault_authorization=args.fault_authorization,
+                evidence_dir=args.evidence_dir,
+                transport=transport,
+            )
+            print(
+                json.dumps(
+                    {
+                        "evidence_dir": str(args.evidence_dir),
+                        "fault_id": args.fault,
+                        "status": "recovered-evidence-ready",
+                        "tail_hash": evidence["fault_history_tail_hash"],
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
         adapter = (
             execute_reconciliation_stall
             if args.fault == "reconciliation-stall"

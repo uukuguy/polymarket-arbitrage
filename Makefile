@@ -124,12 +124,18 @@ cleanup-upstream-fault:
 	@test -n "$$POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET is required" >&2; exit 2)
 	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" cleanup --fault-id "$(fault_id)"
 
+## finalize-upstream-fault: Submit one evaluator-signed candidate; requires explicit disabled-by-default finalizer authority.
+finalize-upstream-fault:
+	@test -n "$(fault_id)" -a -n "$(artifact)" -a -n "$(expected_release)" || (echo 'usage: make finalize-upstream-fault fault_id="$$FAULT_ID" artifact="$$VERDICT_FILE" expected_release="$$RELEASE_SHA"' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" finalize --fault-id "$(fault_id)" --artifact "$(artifact)" --expected-release "$(expected_release)"
+
 ## upstream-fault-status: Read one bounded redacted fault projection; usage fault_id="$$FAULT_ID".
 upstream-fault-status:
 	@test -n "$(fault_id)" || (echo 'usage: make upstream-fault-status fault_id="$$FAULT_ID"' >&2; exit 2)
 	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" status --fault-id "$(fault_id)"
 
-.PHONY: fault-runtime-status arm-upstream-fault cleanup-upstream-fault upstream-fault-status
+.PHONY: fault-runtime-status arm-upstream-fault cleanup-upstream-fault finalize-upstream-fault upstream-fault-status
 
 .PHONY: docs-m1-check
 
@@ -839,6 +845,18 @@ qualify-perception-local:
 	  --require-scope local-conformance; \
 	cat "$$qualification_tmp/verdict.json"
 
+## evaluate-upstream-fault-candidate: Read-only signed candidate verdict from one immutable RECOVERED envelope.
+evaluate-upstream-fault-candidate:
+	@test -n "$(evidence)" -a -n "$(output)" -a -n "$(expected_release)" || (echo 'usage: make evaluate-upstream-fault-candidate evidence=... output=... expected_release=...' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET is required" >&2; exit 2)
+	@uv run python scripts/perception_fault_acceptance.py --evidence "$(evidence)" --output "$(output)" --require-scope production-fault --expected-release "$(expected_release)" --fault-mode candidate
+
+## evaluate-upstream-fault-final: Read-only final verdict after source authority appended exact VERIFIED.
+evaluate-upstream-fault-final:
+	@test -n "$(evidence)" -a -n "$(candidate)" -a -n "$(output)" -a -n "$(expected_release)" || (echo 'usage: make evaluate-upstream-fault-final evidence=... candidate=... output=... expected_release=...' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET is required" >&2; exit 2)
+	@uv run python scripts/perception_fault_acceptance.py --evidence "$(evidence)" --candidate-artifact "$(candidate)" --output "$(output)" --require-scope production-fault --expected-release "$(expected_release)" --fault-mode final
+
 ## qualify-perception-prod-readonly: Preserve a bounded GET-only production evidence window and fail-closed verdict
 ## Optional: expected_release=<40-char-sha> samples=5 interval_s=1 output_dir=<new-path>
 qualify-perception-prod-readonly:
@@ -909,7 +927,8 @@ chaos-perception-contention:
 ## chaos-perception-daemon-restart: Show the read-only daemon restart qualification plan; mode=execute is authorization-gated.
 ## chaos-perception-deploy-interrupt: Show the read-only deploy interruption qualification plan; mode=execute is authorization-gated.
 ## chaos-perception-contention: Show the read-only bounded contention qualification plan; mode=execute is authorization-gated.
-## Usage for explicit execution after adapter review: make chaos-perception-<fault> mode=execute expected_release=<sha> authorization=fault:<fault>:<sha> evidence_dir=<new-path>
+## Usage for upstream execution also requires ordinary_authorization, fault_authorization, machine_id, boot_id, call_class, target_key, and parameters_json.
+## Producer execution remains: make chaos-perception-<fault> mode=execute expected_release=<sha> authorization=fault:<fault>:<sha> evidence_dir=<new-path>
 $(PERCEPTION_CHAOS_TARGETS): chaos-perception-%:
 	@set -eu; \
 	qualification_mode="$(or $(mode),plan)"; \
@@ -924,6 +943,13 @@ $(PERCEPTION_CHAOS_TARGETS): chaos-perception-%:
 	  --fault "$*" \
 	  --expected-release "$(expected_release)" \
 	  --authorization "$(authorization)" \
+	  --ordinary-authorization "$(ordinary_authorization)" \
+	  --fault-authorization "$(fault_authorization)" \
+	  --machine-id "$(machine_id)" \
+	  --boot-id "$(boot_id)" \
+	  --call-class "$(call_class)" \
+	  --target-key "$(target_key)" \
+	  --parameters-json "$(parameters_json)" \
 	  --evidence-dir "$(evidence_dir)" \
 	  --base-url "$(POLYARB_PERCEPTION_URL)" \
 	  --timeout-s "$(or $(timeout_s),120)"

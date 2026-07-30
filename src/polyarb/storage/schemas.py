@@ -43,6 +43,58 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+
+def migrate_fault_auth_finalize(con) -> bool:
+    """Upgrade Task3's auth operation CHECK while preserving every audit row."""
+    row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='neg_risk_fault_auth_nonces'"
+    ).fetchone()
+    if row is None or "'finalize'" in str(row[0]):
+        return False
+    con.execute("PRAGMA foreign_keys=OFF")
+    con.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        con.executescript(
+            """
+            BEGIN IMMEDIATE;
+            ALTER TABLE neg_risk_fault_auth_nonces
+              RENAME TO neg_risk_fault_auth_nonces_pre_finalize;
+            CREATE TABLE neg_risk_fault_auth_nonces (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              record_type TEXT NOT NULL CHECK(record_type IN ('reservation','attempt')),
+              nonce_digest TEXT NOT NULL CHECK(length(nonce_digest) = 64),
+              authorization_digest TEXT NOT NULL CHECK(length(authorization_digest) = 64),
+              operation TEXT NOT NULL CHECK(operation IN ('arm','cleanup','finalize')),
+              fault_id TEXT,
+              request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+              outcome TEXT CHECK(outcome IN ('accepted','rejected')),
+              reason TEXT,
+              occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+              reservation_id INTEGER REFERENCES neg_risk_fault_auth_nonces(id),
+              row_hash TEXT NOT NULL CHECK(length(row_hash) = 64),
+              CHECK(
+                (record_type='reservation' AND outcome IS NULL AND reason IS NULL
+                  AND reservation_id IS NULL)
+                OR
+                (record_type='attempt' AND outcome IS NOT NULL AND reason IS NOT NULL
+                  AND reservation_id IS NOT NULL)
+              )
+            );
+            INSERT INTO neg_risk_fault_auth_nonces
+            SELECT * FROM neg_risk_fault_auth_nonces_pre_finalize;
+            DROP TABLE neg_risk_fault_auth_nonces_pre_finalize;
+            CREATE UNIQUE INDEX idx_neg_risk_fault_auth_one_reservation
+              ON neg_risk_fault_auth_nonces(nonce_digest)
+              WHERE record_type='reservation';
+            COMMIT;
+            """
+        )
+    finally:
+        con.execute("PRAGMA legacy_alter_table=OFF")
+        con.execute("PRAGMA foreign_keys=ON")
+    return True
+
 # Exact pre-v2 owner guard accepted for the one supported a527 migration.
 # Keep this as an explicit historical contract: startup migration must not
 # depend on a git checkout or infer an old schema by subtracting columns.
@@ -1355,7 +1407,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_fault_auth_nonces (
   record_type TEXT NOT NULL CHECK(record_type IN ('reservation','attempt')),
   nonce_digest TEXT NOT NULL CHECK(length(nonce_digest) = 64),
   authorization_digest TEXT NOT NULL CHECK(length(authorization_digest) = 64),
-  operation TEXT NOT NULL CHECK(operation IN ('arm','cleanup')),
+  operation TEXT NOT NULL CHECK(operation IN ('arm','cleanup','finalize')),
   fault_id TEXT,
   request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
   outcome TEXT CHECK(outcome IN ('accepted','rejected')),

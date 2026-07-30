@@ -52,6 +52,14 @@ def test_every_fault_has_a_complete_readonly_plan(fault_id: str) -> None:
     assert plan["image_check"] == "make chaos-l2-fly-image-check"
     assert plan["execute_supported"] is (
         fault_id in {
+            "gamma-timeout",
+            "gamma-partial",
+            "gamma-malformed",
+            "gamma-cursor",
+            "clob-missing-leg",
+            "clob-429",
+            "clob-latency",
+            "telegram-failure",
             "candidate-exit",
             "discovery-exit",
             "reconciliation-stall",
@@ -59,7 +67,7 @@ def test_every_fault_has_a_complete_readonly_plan(fault_id: str) -> None:
     )
 
 
-def test_execute_fails_before_mutation_when_adapter_is_not_ready(tmp_path: Path) -> None:
+def test_execute_fails_before_mutation_without_exact_upstream_target(tmp_path: Path) -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -81,7 +89,7 @@ def test_execute_fails_before_mutation_when_adapter_is_not_ready(tmp_path: Path)
     )
 
     assert result.returncode == 2
-    assert "adapter-not-implemented" in result.stderr
+    assert "upstream-execution-requires-exact-target" in result.stderr
     assert not (tmp_path / "evidence").exists()
 
 
@@ -153,7 +161,7 @@ def test_gamma_exception_plans_name_the_durable_runner_incident(
 
     plan = json.loads(result.stdout)
     assert plan["expected_incident_kind"] == expected_kind
-    assert plan["execute_supported"] is False
+    assert plan["execute_supported"] is True
 
 
 def test_gamma_partial_remains_a_coverage_fact_not_a_failure_incident() -> None:
@@ -167,7 +175,7 @@ def test_gamma_partial_remains_a_coverage_fact_not_a_failure_incident() -> None:
 
     plan = json.loads(result.stdout)
     assert plan["expected_incident_kind"].startswith("coverage:")
-    assert plan["execute_supported"] is False
+    assert plan["execute_supported"] is True
 
 
 @pytest.mark.parametrize(
@@ -192,7 +200,7 @@ def test_clob_plans_name_group_scoped_durable_incidents(
 
     plan = json.loads(result.stdout)
     assert plan["expected_incident_kind"] == expected_kind
-    assert plan["execute_supported"] is False
+    assert plan["execute_supported"] is True
 
 
 def test_sqlite_busy_plan_names_group_scoped_durable_incident() -> None:
@@ -245,7 +253,7 @@ def test_telegram_plan_names_durable_delivery_incident_and_writer() -> None:
     plan = json.loads(result.stdout)
     assert plan["expected_incident_kind"] == "telegram-delivery-failed"
     assert plan["recovery_writer"] == "neg_risk_opportunity_notification_attempts"
-    assert plan["execute_supported"] is False
+    assert plan["execute_supported"] is True
 
 
 def test_reconciliation_stall_adapter_resumes_exact_worker_before_verification(
@@ -673,3 +681,42 @@ def test_candidate_make_execute_binds_canonical_https_origin() -> None:
     assert result.returncode == 0, result.stderr
     assert '--base-url "https://polyarb-l1.fly.dev"' in result.stdout
     assert '--timeout-s "120"' in result.stdout
+
+
+def test_upstream_make_execute_passes_exact_runtime_and_separate_authorities() -> None:
+    release = "a" * 40
+    boot_id = "12345678-1234-4234-9234-123456789abc"
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "chaos-perception-gamma-timeout",
+            "mode=execute",
+            f"expected_release={release}",
+            f"authorization=fault:gamma-timeout:{release}",
+            "ordinary_authorization=ordinary-approval",
+            "fault_authorization=fault-approval",
+            "machine_id=machine-1",
+            f"boot_id={boot_id}",
+            "call_class=gamma-discovery-event-page",
+            "target_key=discovery",
+            'parameters_json={"delay_ms":10}',
+            "evidence_dir=output/gamma-timeout",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for expected in (
+        '--ordinary-authorization "ordinary-approval"',
+        '--fault-authorization "fault-approval"',
+        '--machine-id "machine-1"',
+        f'--boot-id "{boot_id}"',
+        '--call-class "gamma-discovery-event-page"',
+        '--target-key "discovery"',
+        '--parameters-json "{"delay_ms":10}"',
+    ):
+        assert expected in result.stdout

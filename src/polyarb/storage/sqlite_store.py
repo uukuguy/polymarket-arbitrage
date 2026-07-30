@@ -38,6 +38,7 @@ from polyarb.storage.schemas import (
     SCHEDULER_STATE_DDL,
     SNAPSHOT_ATTEMPTS_DDL,
     STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL,
+    migrate_fault_auth_finalize,
 )
 from polyarb.validator.category import Category, Issue, SnapshotStatus
 from polyarb.validator.layers import determine_snapshot_status
@@ -400,6 +401,8 @@ class SQLiteStore:
         con = sqlite3.connect(self._db_path, isolation_level=None)
         try:
             con.executescript(DDL)
+            if migrate_fault_auth_finalize(con):
+                con.executescript(DDL)
             # Phase 02 Plan 02: scheduler_state singleton table
             con.executescript(SCHEDULER_STATE_DDL)
             # Parent-observed outcomes for isolated scheduler snapshot children.

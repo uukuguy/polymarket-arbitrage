@@ -53,6 +53,7 @@
 | 39 | [机会运维读模型](39-opportunity-operations-read-models.md) | 认证机会入口 / zero 与 unavailable / server-time TTL / 真实 fixture / incident 分层证据 |
 | 40 | [生产资格证据](40-production-qualification-evidence.md) | local vs production scope / release-machine-boot 窗口 / missing 不等于零 / immutable verdict |
 | 41 | [故障资格矩阵](41-fault-qualification-matrix.md) | plan-only / fault-specific 授权 / durable incident / recovery writer / cleanup 串行门 |
+| 42 | [三权分立的故障资格链](42-three-authority-fault-qualification.md) | 为什么 RECOVERED 不是 VERIFIED / execute、evaluator、finalizer 如何分权 / cleanup 失败为何冻结 matrix |
 
 ## Phase 02.1 教学增量（2026-05）
 

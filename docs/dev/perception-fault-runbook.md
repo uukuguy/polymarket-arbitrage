@@ -147,16 +147,47 @@ make chaos-perception-gamma-timeout \
   evidence_dir=<new-path>
 ```
 
-All targets except `candidate-exit`, `discovery-exit`, and
-`reconciliation-stall` currently reject such requests with
-`adapter-not-implemented` before creating the evidence directory or making a
-network request. The executable producer adapters first pass the image gate
-and a five-sample clean baseline, then bind one machine/boot/PID, write
-immutable intent, apply the exact signal, discover the new Incident from the
-bounded recent ledger, verify its exact terminal history/writer receipt, and take a
-second five-sample clean window. Candidate requires a Candidate success
-receipt; Discovery requires a newer validated Discovery batch. A target becomes executable only after the
-same adapter, cleanup, chain-truth health surface, and end-to-end review.
+The eight typed upstream targets (four Gamma, three CLOB, and Telegram) use the
+HTTP control orchestrator. Their Make invocation additionally requires exact
+`ordinary_authorization`, `fault_authorization`, `machine_id`, `boot_id`,
+`call_class`, `target_key`, and `parameters_json`. Missing input fails before
+transport construction or network access. The orchestrator takes a five-sample
+green baseline, resolves exact producer runtime, arms through double HMAC,
+observes one injection and one Incident/coverage fact, and requests cleanup for
+every `BaseException`. Cleanup failure freezes the remaining matrix. Evidence
+is exported only after the component-specific business writer produces a
+newer recovery receipt, and stops at `RECOVERED`.
+
+`candidate-exit`, `discovery-exit`, and `reconciliation-stall` retain their
+independent image-aware signal adapters. The remaining host/store/restart/deploy
+targets reject execution fail-closed. A target becomes executable only after
+its adapter, cleanup, chain-truth health surface, and end-to-end review.
+
+## Independent verdict and finalization
+
+Keep the three phases in different processes and do not combine their secrets:
+
+```bash
+make evaluate-upstream-fault-candidate \
+  evidence=<recovered.json> output=<new-candidate.json> \
+  expected_release=<40-char-sha>
+
+make finalize-upstream-fault \
+  fault_id=<exact-id> artifact=<candidate.json> \
+  expected_release=<40-char-sha>
+
+make evaluate-upstream-fault-final \
+  evidence=<re-exported-verified.json> candidate=<candidate.json> \
+  output=<new-final.json> expected_release=<40-char-sha>
+```
+
+The candidate evaluator has only
+`POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET`; it recomputes every intent/event/tail
+hash and signs a PASS artifact. The disabled-by-default finalizer has ordinary
+and fault control secrets but never the evaluator secret. It validates the
+signature and exact recovered source chain before appending
+`VERIFIED(verdict_id, verdict_digest)`. Re-export and final evaluation are
+mandatory: a finalizer response alone is not qualification evidence.
 
 ## Recovery verdict
 

@@ -252,7 +252,7 @@ _EVIDENCE_KEYS: Mapping[FaultEventState, frozenset[str]] = {
     FaultEventState.CONTAINED: frozenset({"containment_id"}),
     FaultEventState.CLEANED: frozenset({"cleanup_id"}),
     FaultEventState.RECOVERED: frozenset({"recovery_id"}),
-    FaultEventState.VERIFIED: frozenset({"verdict_id"}),
+    FaultEventState.VERIFIED: frozenset({"verdict_id", "verdict_digest"}),
     FaultEventState.REJECTED: frozenset({"reason"}),
     FaultEventState.EXPIRED: frozenset({"reason"}),
     FaultEventState.ABANDONED: frozenset({"reason"}),
@@ -307,6 +307,8 @@ def normalize_evidence(
     if typed_state is FaultEventState.ARMED and set(normalized) != _EVIDENCE_KEYS[typed_state]:
         raise ValueError("invalid-evidence")
     if typed_state is FaultEventState.DETECTED and len(normalized) != 1:
+        raise ValueError("invalid-evidence")
+    if typed_state is FaultEventState.VERIFIED and set(normalized) != _EVIDENCE_KEYS[typed_state]:
         raise ValueError("invalid-evidence")
     return MappingProxyType(normalized)
 

@@ -25,6 +25,7 @@ Phase 02 Plan 02 additions:
 
 from __future__ import annotations
 
+import hmac
 import math
 import os
 from pathlib import Path
@@ -178,6 +179,8 @@ class Settings(BaseSettings):
     )
     upstream_fault_control_enabled: bool = False
     upstream_fault_control_secret: SecretStr = SecretStr("")
+    upstream_fault_finalizer_enabled: bool = False
+    upstream_fault_evaluator_secret: SecretStr = SecretStr("")
     upstream_fault_control_max_ttl_ms: int = Field(
         default=120_000, ge=1_000, le=120_000
     )
@@ -391,9 +394,21 @@ class Settings(BaseSettings):
             )
         if (
             self.upstream_fault_control_enabled
-            and fault_secret == secret_val
+            and hmac.compare_digest(fault_secret, secret_val)
         ):
             raise ValueError("fault control secret must be distinct")
+        evaluator_secret = self.upstream_fault_evaluator_secret.get_secret_value()
+        if self.upstream_fault_finalizer_enabled and (
+            not self.upstream_fault_control_enabled or not evaluator_secret
+        ):
+            raise ValueError(
+                "fault evaluator secret and fault control must be enabled for finalization"
+            )
+        if self.upstream_fault_finalizer_enabled and (
+            hmac.compare_digest(evaluator_secret, secret_val)
+            or hmac.compare_digest(evaluator_secret, fault_secret)
+        ):
+            raise ValueError("fault evaluator secret must be distinct")
         if self.candidate_high_interval_s > self.candidate_quote_hard_stale_s:
             raise ValueError(
                 "candidate_high_interval_s must not exceed "

@@ -274,7 +274,10 @@ def test_control_base_exception_is_not_swallowed() -> None:
         (FaultEventState.CONTAINED, {"containment_id": "containment-1"}),
         (FaultEventState.CLEANED, {"cleanup_id": "cleanup-1"}),
         (FaultEventState.RECOVERED, {"recovery_id": "recovery-1"}),
-        (FaultEventState.VERIFIED, {"verdict_id": "verdict-1"}),
+        (
+            FaultEventState.VERIFIED,
+            {"verdict_id": "verdict-1", "verdict_digest": "d" * 64},
+        ),
         (FaultEventState.REJECTED, {"reason": "nonce-replay"}),
         (FaultEventState.EXPIRED, {"reason": "intent-expired"}),
         (FaultEventState.ABANDONED, {"reason": "runtime-replaced"}),

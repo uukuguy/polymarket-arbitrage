@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
+import scripts.perception_chaos as chaos
+from polyarb import cli_perception_faults
 from polyarb.config import Settings
 from polyarb.http import perception_faults
 from polyarb.perception.fault_authority import FaultAuthorityStore
@@ -20,6 +22,7 @@ from polyarb.perception.fault_control import FaultEventState, FaultRuntimeIdenti
 
 ORDINARY_SECRET = "ordinary-control-secret"
 FAULT_SECRET = "distinct-fault-control-secret"
+EVALUATOR_SECRET = "distinct-evaluator-secret"
 
 
 @pytest.fixture
@@ -48,7 +51,13 @@ def make_http_test_client():
     return make
 
 
-def _client(tmp_path: Path, make_http_test_client, *, enabled: bool = True):
+def _client(
+    tmp_path: Path,
+    make_http_test_client,
+    *,
+    enabled: bool = True,
+    component: str = "candidate",
+):
     settings = Settings(
         db_path=tmp_path / "state.db",
         parquet_root=tmp_path / "parquet",
@@ -56,6 +65,8 @@ def _client(tmp_path: Path, make_http_test_client, *, enabled: bool = True):
         scan_shared_secret=SecretStr(ORDINARY_SECRET),
         upstream_fault_control_enabled=enabled,
         upstream_fault_control_secret=SecretStr(FAULT_SECRET if enabled else ""),
+        upstream_fault_finalizer_enabled=enabled,
+        upstream_fault_evaluator_secret=SecretStr(EVALUATOR_SECRET if enabled else ""),
         supabase_url="",
         supabase_service_key=SecretStr(""),
         supabase_db_dsn=SecretStr("postgresql://test.invalid/test"),
@@ -65,7 +76,7 @@ def _client(tmp_path: Path, make_http_test_client, *, enabled: bool = True):
     )
     client = make_http_test_client(settings)
     runtime = FaultRuntimeIdentity(
-        component="candidate",
+        component=component,
         release_id="a" * 40,
         machine_id="machine-1",
         boot_id=uuid.UUID("12345678-1234-4678-9234-567812345678"),
@@ -152,6 +163,351 @@ def test_enabled_fault_control_requires_a_distinct_nonempty_secret() -> None:
         )
 
 
+def test_enabled_finalizer_requires_three_distinct_secrets() -> None:
+    for evaluator_secret in ("", ORDINARY_SECRET, FAULT_SECRET):
+        with pytest.raises(ValidationError):
+            Settings(
+                scan_shared_secret=SecretStr(ORDINARY_SECRET),
+                upstream_fault_control_enabled=True,
+                upstream_fault_control_secret=SecretStr(FAULT_SECRET),
+                upstream_fault_finalizer_enabled=True,
+                upstream_fault_evaluator_secret=SecretStr(evaluator_secret),
+            )
+
+
+def test_finalizer_cli_never_requires_evaluator_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = "a" * 40
+    artifact = tmp_path / "candidate.json"
+    artifact.write_text(
+        json.dumps({"runtime": {"release_id": release}, "signature": "signed"})
+    )
+    monkeypatch.setenv("POLYARB_SCAN_SHARED_SECRET", ORDINARY_SECRET)
+    monkeypatch.setenv("POLYARB_UPSTREAM_FAULT_CONTROL_SECRET", FAULT_SECRET)
+    monkeypatch.delenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET", raising=False)
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"status":"verified"}'
+
+    monkeypatch.setattr(
+        cli_perception_faults, "urlopen", lambda *_args, **_kwargs: Response()
+    )
+    assert (
+        cli_perception_faults.main(
+            [
+                "--base-url",
+                "https://example.test",
+                "finalize",
+                "--fault-id",
+                "fault-1",
+                "--artifact",
+                str(artifact),
+                "--expected-release",
+                release,
+            ]
+        )
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    ("component", "kind", "call_class", "target_key", "parameters"),
+    (
+        ("discovery", "gamma-timeout", "gamma-discovery-event-page", "discovery", {"delay_ms": 10}),
+        (
+            "discovery",
+            "gamma-partial",
+            "gamma-discovery-event-page",
+            "discovery",
+            {"keep_events": 1},
+        ),
+        ("discovery", "gamma-malformed", "gamma-discovery-event-page", "discovery", {}),
+        ("reconciliation", "gamma-cursor", "gamma-reconciliation-event-page", "reconciliation", {}),
+        ("candidate", "clob-missing-leg", "clob-candidate-book-batch", "group-1", {"leg_index": 0}),
+        ("candidate", "clob-429", "clob-candidate-book-batch", "group-1", {}),
+        ("candidate", "clob-latency", "clob-candidate-book-batch", "group-1", {"delay_ms": 10}),
+        ("notification", "telegram-failure", "telegram-opportunity-card", "1", {}),
+    ),
+)
+def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqlite(
+    tmp_path: Path,
+    make_http_test_client,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+    kind: str,
+    call_class: str,
+    target_key: str,
+    parameters: dict[str, int],
+) -> None:
+    client, runtime = _client(
+        tmp_path, make_http_test_client, component=component
+    )
+    store = FaultAuthorityStore(client.app.state.sqlite_store.db_path)
+    producer: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        chaos.readonly,
+        "collect_rounds",
+        lambda *_args, **_kwargs: [{}] * 5,
+    )
+    monkeypatch.setattr(
+        chaos.readonly,
+        "build_evidence",
+        lambda *_args, **_kwargs: {
+            "app_id": "polyarb-l1",
+            "release_id": runtime.release_id,
+            "machine_id": runtime.machine_id,
+            "boot_id": str(runtime.boot_id),
+            "open_incident_count": 0,
+            "cross_membership_quote_batches": 0,
+            "orphan_collecting_runs": 0,
+            "partial_publication_count": 0,
+            "freshness_gate": True,
+            "reconciliation_gate": True,
+        },
+    )
+
+    def fetch_json(_base_url: str, path: str):
+        response = client.get(path)
+        return response.json(), 0.001
+
+    def post_json(_base_url: str, path: str, payload: dict[str, object]):
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        if path.endswith("/cleanup"):
+            store.append_event(
+                str(producer["fault_id"]),
+                FaultEventState.CLEANED,
+                occurred_at_ms=int(time.time() * 1_000),
+                evidence={"cleanup_id": "cleanup-1"},
+                ownership=producer["ownership"],
+            )
+        response = _post(client, path, body)
+        assert response.status_code in {200, 202}, response.text
+        value = response.json()
+        if path.endswith("/arm"):
+            lifecycle_at = int(time.time() * 1_000)
+            claimed = store.claim_pending(runtime, claimed_at_ms=lifecycle_at)
+            assert claimed is not None
+            ownership = claimed.ownership_capability
+            producer.update(fault_id=value["fault_id"], ownership=ownership)
+            store.append_event(
+                value["fault_id"], FaultEventState.INJECTED,
+                occurred_at_ms=lifecycle_at,
+                evidence={"call_id": "call-1"}, ownership=ownership,
+            )
+            detection = (
+                {"coverage_id": "coverage-" + "d" * 64}
+                if kind == "gamma-partial"
+                else {"incident_id": "incident-1"}
+            )
+            store.append_event(
+                value["fault_id"], FaultEventState.DETECTED,
+                occurred_at_ms=lifecycle_at, evidence=detection,
+            )
+            store.append_event(
+                value["fault_id"], FaultEventState.CONTAINED,
+                occurred_at_ms=lifecycle_at,
+                evidence={"containment_id": "contained-1"},
+            )
+        elif path.endswith("/cleanup"):
+            store.append_event(
+                str(producer["fault_id"]),
+                FaultEventState.RECOVERED,
+                occurred_at_ms=int(time.time() * 1_000),
+                evidence={"recovery_id": "recovery-1"},
+                ownership=producer["ownership"],
+            )
+        return value
+
+    transport = chaos.UpstreamHttpTransport(
+        base_url="https://local.test",
+        expected_release=runtime.release_id,
+        timeout_s=10,
+        fetch_json=fetch_json,
+        post_json=post_json,
+        sleeper=lambda _seconds: None,
+    )
+    evidence_dir = tmp_path / "evidence"
+    evidence = chaos.execute_upstream_fault(
+        fault_id=kind,
+        release_id=runtime.release_id,
+        machine_id=runtime.machine_id,
+        boot_id=str(runtime.boot_id),
+        call_class=call_class,
+        target_key=target_key,
+        parameters=parameters,
+        ordinary_authorization="ordinary-approval",
+        fault_authorization="fault-approval",
+        evidence_dir=evidence_dir,
+        transport=transport,
+    )
+    assert evidence["scope"] == "production-fault"
+    assert evidence["fault_history"][-1]["state"] == "recovered"
+    assert (evidence_dir / "evidence.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("component", "kind", "call_class", "target_key", "parameters"),
+    (
+        ("discovery", "gamma-timeout", "gamma-discovery-event-page", "discovery", {"delay_ms": 10}),
+        (
+            "discovery",
+            "gamma-partial",
+            "gamma-discovery-event-page",
+            "discovery",
+            {"keep_events": 1},
+        ),
+        ("discovery", "gamma-malformed", "gamma-discovery-event-page", "discovery", {}),
+        ("reconciliation", "gamma-cursor", "gamma-reconciliation-event-page", "reconciliation", {}),
+        ("candidate", "clob-missing-leg", "clob-candidate-book-batch", "group-1", {"leg_index": 0}),
+        ("candidate", "clob-429", "clob-candidate-book-batch", "group-1", {}),
+        ("candidate", "clob-latency", "clob-candidate-book-batch", "group-1", {"delay_ms": 10}),
+        ("notification", "telegram-failure", "telegram-opportunity-card", "1", {}),
+    ),
+)
+def test_finalizer_requires_signed_exact_candidate_and_appends_verified(
+    tmp_path: Path,
+    make_http_test_client,
+    component: str,
+    kind: str,
+    call_class: str,
+    target_key: str,
+    parameters: dict[str, int],
+) -> None:
+    client, runtime = _client(
+        tmp_path, make_http_test_client, component=component
+    )
+    arm = _post(
+        client,
+        "/control/perception/faults/arm",
+        _body(
+            runtime,
+            kind=kind,
+            call_class=call_class,
+            target_key=target_key,
+            parameters=parameters,
+        ),
+    )
+    assert arm.status_code == 202
+    store = FaultAuthorityStore(client.app.state.sqlite_store.db_path)
+    claimed = store.claim_pending(runtime, claimed_at_ms=int(time.time() * 1_000))
+    assert claimed is not None
+    now = int(time.time() * 1_000)
+    ownership = claimed.ownership_capability
+    store.append_event(
+        "fault-api-1", FaultEventState.INJECTED, occurred_at_ms=now,
+        evidence={"call_id": "call-1"}, ownership=ownership,
+    )
+    store.append_event(
+        "fault-api-1", FaultEventState.DETECTED, occurred_at_ms=now,
+        evidence={"incident_id": "incident-1"},
+    )
+    store.append_event(
+        "fault-api-1", FaultEventState.CONTAINED, occurred_at_ms=now,
+        evidence={"containment_id": "contained-1"},
+    )
+    store.append_event(
+        "fault-api-1", FaultEventState.CLEANED, occurred_at_ms=now,
+        evidence={"cleanup_id": "cleanup-1"}, ownership=ownership,
+    )
+    recovered = store.append_event(
+        "fault-api-1", FaultEventState.RECOVERED, occurred_at_ms=now,
+        evidence={"recovery_id": "recovery-1"}, ownership=ownership,
+    )
+    unsigned = {
+        "schema_version": 1,
+        "scope": "production-fault",
+        "mode": "candidate",
+        "status": "PASS",
+        "source_evidence_sha256": "sha256:" + "e" * 64,
+        "fault_id": "fault-api-1",
+        "runtime": {
+            "component": runtime.component,
+            "release_id": runtime.release_id,
+            "machine_id": runtime.machine_id,
+            "boot_id": str(runtime.boot_id),
+        },
+        "source_tail_hash": recovered.event_hash,
+        "verdict_id": "verdict-api-1",
+    }
+    canonical = json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+    digest = hashlib.sha256(canonical).hexdigest()
+    artifact = {
+        **unsigned,
+        "artifact_digest": digest,
+        "signature": hmac.new(
+            EVALUATOR_SECRET.encode(), digest.encode(), hashlib.sha256
+        ).hexdigest(),
+    }
+    path = "/control/perception/faults/fault-api-1/finalize"
+    invalid = json.dumps(
+        {"artifact": {**artifact, "signature": "0" * 64}}, separators=(",", ":")
+    ).encode()
+    assert _post(client, path, invalid).status_code == 401
+    for mutation in (
+        {"source_tail_hash": "0" * 64},
+        {"fault_id": "fault-api-other"},
+        {"runtime": {**artifact["runtime"], "machine_id": "machine-other"}},
+        {"scope": "local-conformance"},
+        {"mode": "final"},
+        {"status": "FAIL"},
+    ):
+        tampered = {**artifact, **mutation}
+        unsigned_tampered = {
+            key: value
+            for key, value in tampered.items()
+            if key not in {"artifact_digest", "signature"}
+        }
+        tampered_digest = hashlib.sha256(
+            json.dumps(
+                unsigned_tampered,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        tampered["artifact_digest"] = tampered_digest
+        tampered["signature"] = hmac.new(
+            EVALUATOR_SECRET.encode(), tampered_digest.encode(), hashlib.sha256
+        ).hexdigest()
+        tampered_body = json.dumps(
+            {"artifact": tampered}, separators=(",", ":")
+        ).encode()
+        assert _post(client, path, tampered_body).status_code in {400, 409}
+        assert store.validate_history("fault-api-1").events[-1].state is FaultEventState.RECOVERED
+    body = json.dumps({"artifact": artifact}, separators=(",", ":")).encode()
+    replay_nonce = uuid.uuid4().hex
+    response = _post(client, path, body, fault_nonce=replay_nonce)
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "verified",
+        "fault_id": "fault-api-1",
+        "verdict_id": "verdict-api-1",
+        "verdict_digest": digest,
+    }
+    replay = _post(client, path, body, fault_nonce=replay_nonce)
+    assert replay.status_code == 401
+    history = store.validate_history("fault-api-1")
+    assert sum(event.state is FaultEventState.VERIFIED for event in history.events) == 1
+    with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
+        rejected = con.execute(
+            "SELECT count(*) FROM neg_risk_fault_auth_nonces "
+            "WHERE operation='finalize' AND outcome='rejected' "
+            "AND reason='nonce-replay'"
+        ).fetchone()[0]
+    assert rejected == 1
+
+
 def test_arm_requires_enabled_and_second_fault_domain_hmac(
     tmp_path, make_http_test_client
 ) -> None:
@@ -211,6 +567,11 @@ def test_arm_validates_body_runtime_replay_and_active_chain_before_accept(
     assert set(first.json()) == {
         "status",
         "fault_id",
+        "kind",
+        "call_class",
+        "target_key",
+        "runtime",
+        "intent_digest",
         "parameter_digest",
         "authorization_digest",
     }

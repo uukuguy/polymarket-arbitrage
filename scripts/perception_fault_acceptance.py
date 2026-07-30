@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -20,6 +21,319 @@ from uuid import UUID
 class QualificationVerdict:
     status: str
     reasons: tuple[str, ...]
+
+
+def canonical_digest(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value)).hexdigest()
+
+
+_RECOVERY_TABLES = {
+    "candidate": "neg_risk_candidate_success_receipts",
+    "discovery": "neg_risk_discovery_batches",
+    "reconciliation": "neg_risk_reconciliation_windows",
+    "notification": "neg_risk_opportunity_notification_attempts",
+}
+_FAULT_CONTRACTS = {
+    "gamma-timeout": ("discovery", "gamma-discovery-event-page"),
+    "gamma-partial": ("discovery", "gamma-discovery-event-page"),
+    "gamma-malformed": ("discovery", "gamma-discovery-event-page"),
+    "gamma-cursor": ("reconciliation", "gamma-reconciliation-event-page"),
+    "clob-missing-leg": ("candidate", "clob-candidate-book-batch"),
+    "clob-429": ("candidate", "clob-candidate-book-batch"),
+    "clob-latency": ("candidate", "clob-candidate-book-batch"),
+    "telegram-failure": ("notification", "telegram-opportunity-card"),
+}
+
+
+def _event_digest(event: Mapping[str, Any]) -> str:
+    return canonical_digest(
+        {
+            "fault_id": event.get("fault_id"),
+            "sequence": event.get("sequence"),
+            "state": event.get("state"),
+            "action": event.get("action"),
+            "occurred_at_ms": event.get("occurred_at_ms"),
+            "evidence": event.get("evidence"),
+            "previous_hash": event.get("previous_hash"),
+        }
+    )
+
+
+def evaluate_fault_envelope(
+    evidence: Mapping[str, Any],
+    *,
+    mode: str,
+    candidate_artifact: Mapping[str, Any] | None = None,
+) -> QualificationVerdict:
+    """Evaluate one immutable exported fault envelope without any mutation."""
+    reasons: list[str] = []
+    if evidence.get("scope") != "production-fault":
+        reasons.append("scope-mismatch")
+    if evidence.get("evidence_schema_version") != 2:
+        reasons.append("invalid-evidence-schema-version")
+    intent = evidence.get("fault_intent")
+    if not isinstance(intent, Mapping):
+        reasons.append("missing-fault-intent")
+        return QualificationVerdict("FAIL", tuple(reasons))
+    if evidence.get("fault_intent_digest") != canonical_digest(intent):
+        reasons.append("fault-intent-digest-mismatch")
+    runtime = intent.get("runtime")
+    if not isinstance(runtime, Mapping):
+        reasons.append("missing-runtime")
+        runtime = {}
+    for field in ("release_id", "machine_id", "boot_id"):
+        if evidence.get(field) != runtime.get(field):
+            reasons.append(f"runtime-{field.replace('_', '-')}-mismatch")
+    if intent.get("nonce_digest") is None:
+        reasons.append("missing-nonce-digest")
+    if evidence.get("nonce_digest") != intent.get("nonce_digest"):
+        reasons.append("nonce-digest-mismatch")
+    if evidence.get("target_digest") != canonical_digest(intent.get("target_key")):
+        reasons.append("target-digest-mismatch")
+    if evidence.get("parameter_digest") != canonical_digest(intent.get("parameters")):
+        reasons.append("parameter-digest-mismatch")
+    contract = _FAULT_CONTRACTS.get(str(intent.get("kind")))
+    if (
+        contract is None
+        or runtime.get("component") != contract[0]
+        or intent.get("call_class") != contract[1]
+    ):
+        reasons.append("fault-contract-mismatch")
+
+    history = evidence.get("fault_history")
+    if not isinstance(history, list):
+        reasons.append("missing-fault-history")
+        history = []
+    state_counts: dict[str, int] = {}
+    previous = "0" * 64
+    previous_time = -1
+    for index, raw in enumerate(history, start=1):
+        if not isinstance(raw, Mapping):
+            reasons.append("invalid-fault-history")
+            continue
+        state = raw.get("state")
+        if isinstance(state, str):
+            state_counts[state] = state_counts.get(state, 0) + 1
+        if raw.get("sequence") != index:
+            reasons.append("event-sequence-mismatch")
+        if raw.get("previous_hash") != previous or raw.get("event_hash") != _event_digest(raw):
+            reasons.append("event-hash-mismatch")
+        occurred = raw.get("occurred_at_ms")
+        if not isinstance(occurred, int) or isinstance(occurred, bool) or occurred < previous_time:
+            reasons.append("event-time-invalid")
+        else:
+            previous_time = occurred
+        previous = str(raw.get("event_hash", ""))
+    if evidence.get("fault_history_tail_hash") != previous:
+        reasons.append("history-tail-hash-mismatch")
+
+    expected_states = (
+        "authorized",
+        "armed",
+        "injected",
+        "detected",
+        "contained",
+        "cleaned",
+        "recovered",
+    )
+    for state in expected_states:
+        count = state_counts.get(state, 0)
+        state_label = {
+            "injected": "injection",
+            "detected": "detection",
+            "cleaned": "cleanup",
+            "recovered": "recovery",
+        }.get(state, state)
+        if count == 0:
+            reasons.append(f"missing-{state_label}")
+        elif count > 1:
+            reasons.append(f"duplicate-{state_label}")
+    positions = {
+        state: next(
+            (index for index, item in enumerate(history) if isinstance(item, Mapping)
+             and item.get("state") == state),
+            -1,
+        )
+        for state in expected_states
+    }
+    if all(positions[state] >= 0 for state in expected_states):
+        if [positions[state] for state in expected_states] != sorted(
+            positions[state] for state in expected_states
+        ):
+            reasons.append("lifecycle-order-invalid")
+        injection_time = history[positions["injected"]].get("occurred_at_ms")
+        cleanup_time = history[positions["cleaned"]].get("occurred_at_ms")
+        recovery_time = history[positions["recovered"]].get("occurred_at_ms")
+        if not (
+            isinstance(injection_time, int)
+            and isinstance(cleanup_time, int)
+            and isinstance(recovery_time, int)
+            and injection_time < cleanup_time < recovery_time
+        ):
+            reasons.append("cleanup-recovery-order-invalid")
+    detected_events = [
+        item for item in history
+        if isinstance(item, Mapping) and item.get("state") == "detected"
+    ]
+    if len(detected_events) == 1:
+        detection_evidence = detected_events[0].get("evidence")
+        expected_detection_key = (
+            "coverage_id" if intent.get("kind") == "gamma-partial" else "incident_id"
+        )
+        if (
+            not isinstance(detection_evidence, Mapping)
+            or set(detection_evidence) != {expected_detection_key}
+            or not isinstance(detection_evidence.get(expected_detection_key), str)
+            or not detection_evidence.get(expected_detection_key)
+        ):
+            reasons.append("detection-identity-mismatch")
+    armed_events = [
+        item for item in history
+        if isinstance(item, Mapping) and item.get("state") == "armed"
+    ]
+    if len(armed_events) == 1:
+        armed_evidence = armed_events[0].get("evidence")
+        if (
+            not isinstance(armed_evidence, Mapping)
+            or armed_evidence.get("runtime_identity_digest")
+            != canonical_digest(runtime)
+            or not isinstance(armed_evidence.get("ownership_digest"), str)
+            or len(armed_evidence.get("ownership_digest", "")) != 64
+        ):
+            reasons.append("armed-runtime-digest-mismatch")
+
+    component = runtime.get("component")
+    receipt = evidence.get("recovery_writer_receipt")
+    expected_table = _RECOVERY_TABLES.get(str(component))
+    if not isinstance(receipt, Mapping):
+        reasons.append("missing-recovery-writer")
+    elif (
+        receipt.get("component") != component
+        or receipt.get("table") != expected_table
+        or not (
+            (
+                isinstance(receipt.get("row_id"), int)
+                and not isinstance(receipt.get("row_id"), bool)
+                and receipt.get("row_id", 0) > 0
+            )
+            or (isinstance(receipt.get("row_id"), str) and bool(receipt.get("row_id")))
+        )
+    ):
+        reasons.append("recovery-family-mismatch")
+    if isinstance(receipt, Mapping) and history:
+        cleanup_time = next(
+            (item.get("occurred_at_ms") for item in history
+             if isinstance(item, Mapping) and item.get("state") == "cleaned"),
+            None,
+        )
+        if not isinstance(cleanup_time, int) or receipt.get("occurred_at_ms", -1) <= cleanup_time:
+            reasons.append("recovery-not-newer-than-cleanup")
+
+    for field, reason in (
+        ("open_injection_fault_count", "open-injection-fault"),
+        ("open_incident_count", "open-incident"),
+        ("cross_membership_quote_batches", "cross-membership-quote"),
+        ("partial_publication_count", "partial-publication"),
+        ("orphan_collecting_runs", "orphan-collecting-run"),
+    ):
+        if evidence.get(field) != 0:
+            reasons.append(reason)
+    expected_pending = 1 if mode == "candidate" else 0
+    if evidence.get("pending_verification_fault_count") != expected_pending:
+        reasons.append("pending-verification-fault")
+    if evidence.get("source_projection_active") is not (mode == "candidate"):
+        reasons.append("source-projection-active-mismatch")
+    for field, reason in (
+        ("freshness_gate", "freshness-gate"),
+        ("reconciliation_gate", "reconciliation-gate"),
+    ):
+        if evidence.get(field) is not True:
+            reasons.append(reason)
+
+    if mode not in {"candidate", "final"}:
+        reasons.append("invalid-evaluator-mode")
+    if mode == "final":
+        verified = [
+            item for item in history
+            if isinstance(item, Mapping) and item.get("state") == "verified"
+        ]
+        if not verified:
+            reasons.append("missing-verified")
+        elif len(verified) != 1:
+            reasons.append("duplicate-verified")
+        if not isinstance(candidate_artifact, Mapping):
+            reasons.append("missing-candidate-verdict")
+        else:
+            secret = os.getenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET", "")
+            unsigned = {
+                key: value
+                for key, value in candidate_artifact.items()
+                if key not in {"artifact_digest", "signature"}
+            }
+            artifact_digest = canonical_digest(unsigned)
+            expected_signature = hmac.new(
+                secret.encode(), artifact_digest.encode(), hashlib.sha256
+            ).hexdigest()
+            if (
+                not secret
+                or candidate_artifact.get("artifact_digest") != artifact_digest
+                or not hmac.compare_digest(
+                    str(candidate_artifact.get("signature", "")),
+                    expected_signature,
+                )
+            ):
+                reasons.append("candidate-verdict-signature-mismatch")
+            if (
+                candidate_artifact.get("fault_id") != intent.get("fault_id")
+                or candidate_artifact.get("runtime") != runtime
+                or candidate_artifact.get("source_tail_hash")
+                != (
+                    verified[0].get("previous_hash")
+                    if len(verified) == 1 and isinstance(verified[0], Mapping)
+                    else None
+                )
+            ):
+                reasons.append("candidate-verdict-source-mismatch")
+        if isinstance(candidate_artifact, Mapping) and verified:
+            verified_evidence = verified[0].get("evidence")
+            if (
+                not isinstance(verified_evidence, Mapping)
+                or verified_evidence.get("verdict_id") != candidate_artifact.get("verdict_id")
+                or verified_evidence.get("verdict_digest")
+                != candidate_artifact.get("artifact_digest")
+            ):
+                reasons.append("verified-verdict-mismatch")
+    return QualificationVerdict("PASS" if not reasons else "FAIL", tuple(dict.fromkeys(reasons)))
+
+
+def build_candidate_artifact(evidence: Mapping[str, Any]) -> dict[str, object]:
+    """Create a signed PASS candidate; local fixtures can never be signed."""
+    verdict = evaluate_fault_envelope(evidence, mode="candidate")
+    if verdict.status != "PASS":
+        raise ValueError("candidate-evidence-failed")
+    secret = os.getenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET", "")
+    if not secret:
+        raise ValueError("evaluator-authority-unavailable")
+    source_digest = canonical_digest(evidence)
+    intent = evidence["fault_intent"]
+    assert isinstance(intent, Mapping)
+    unsigned: dict[str, object] = {
+        "schema_version": 1,
+        "scope": "production-fault",
+        "mode": "candidate",
+        "status": "PASS",
+        "source_evidence_sha256": f"sha256:{source_digest}",
+        "fault_id": intent["fault_id"],
+        "runtime": intent["runtime"],
+        "source_tail_hash": evidence["fault_history_tail_hash"],
+    }
+    unsigned["verdict_id"] = f"verdict-{canonical_digest(unsigned)[:32]}"
+    artifact_digest = canonical_digest(unsigned)
+    unsigned["artifact_digest"] = artifact_digest
+    unsigned["signature"] = hmac.new(
+        secret.encode(), artifact_digest.encode(), hashlib.sha256
+    ).hexdigest()
+    return unsigned
 
 
 _MAXIMUMS = (
@@ -332,11 +646,38 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
     )
     parser.add_argument("--expected-release")
+    parser.add_argument("--fault-mode", choices=("candidate", "final"))
+    parser.add_argument("--candidate-artifact", type=Path)
     args = parser.parse_args(argv)
     if args.require_scope.startswith("production-") and args.expected_release is None:
         parser.error("--expected-release is required for production evidence")
     try:
         evidence = _read_evidence(args.evidence)
+        if args.fault_mode is not None:
+            if args.require_scope != "production-fault":
+                raise ValueError("fault mode requires production-fault scope")
+            if args.fault_mode == "candidate":
+                output = build_candidate_artifact(evidence)
+                _write_exclusive(args.output, output)
+                return 0
+            if args.candidate_artifact is None:
+                raise ValueError("final mode requires candidate artifact")
+            candidate = _read_evidence(args.candidate_artifact)
+            fault_verdict = evaluate_fault_envelope(
+                evidence,
+                mode="final",
+                candidate_artifact=candidate,
+            )
+            output = {
+                "candidate_verdict_id": candidate.get("verdict_id"),
+                "evidence_sha256": f"sha256:{canonical_digest(evidence)}",
+                "mode": "final",
+                "reasons": list(fault_verdict.reasons),
+                "schema_version": 1,
+                "status": fault_verdict.status,
+            }
+            _write_exclusive(args.output, output)
+            return 0 if fault_verdict.status == "PASS" else 1
         verdict = evaluate(
             evidence,
             required_scope=args.require_scope,

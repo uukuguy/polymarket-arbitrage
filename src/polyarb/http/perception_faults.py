@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -57,6 +58,21 @@ _ARM_FIELDS = frozenset(
     }
 )
 _RUNTIME_FIELDS = frozenset({"component", "release_id", "machine_id", "boot_id"})
+_VERDICT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "scope",
+        "mode",
+        "status",
+        "source_evidence_sha256",
+        "fault_id",
+        "runtime",
+        "source_tail_hash",
+        "verdict_id",
+        "artifact_digest",
+        "signature",
+    }
+)
 
 
 def _json_no_duplicates(raw: bytes) -> object:
@@ -320,6 +336,20 @@ async def arm_fault(request: Request) -> JSONResponse:
         {
             "status": "accepted",
             "fault_id": intent.fault_id,
+            "kind": intent.kind.value,
+            "call_class": intent.call_class.value,
+            "target_key": intent.target_key,
+            "runtime": _runtime_json(intent.runtime),
+            "intent_digest": canonical_digest(
+                {
+                    "fault_id": intent.fault_id,
+                    "kind": intent.kind.value,
+                    "call_class": intent.call_class.value,
+                    "target_key": intent.target_key,
+                    "parameters": dict(intent.parameters),
+                    "runtime": _runtime_json(intent.runtime),
+                }
+            ),
             "parameter_digest": canonical_digest(dict(intent.parameters)),
             "authorization_digest": auth.authorization_digest,
         },
@@ -427,6 +457,106 @@ async def cleanup_fault(request: Request) -> JSONResponse:
     )
 
 
+async def finalize_fault(request: Request) -> JSONResponse:
+    """Finalize only an evaluator-signed candidate for the exact path fault."""
+    settings = request.app.state.settings
+    if not settings.upstream_fault_finalizer_enabled:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "fault-finalizer-disabled"},
+            status_code=409,
+        )
+    body = await _bounded_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    auth = _fault_auth(request, body)
+    if auth is None:
+        return JSONResponse({"error": "invalid fault authentication"}, status_code=401)
+    try:
+        root = _json_no_duplicates(body)
+        if not isinstance(root, dict) or set(root) != {"artifact"}:
+            raise ValueError("invalid-fields")
+        artifact = root["artifact"]
+        if not isinstance(artifact, dict) or set(artifact) != _VERDICT_FIELDS:
+            raise ValueError("invalid-artifact-fields")
+        path_fault_id = normalize_fault_id(request.path_params["fault_id"])
+        if artifact["fault_id"] != path_fault_id:
+            raise ValueError("fault-id-mismatch")
+        runtime_value = artifact["runtime"]
+        if not isinstance(runtime_value, dict) or set(runtime_value) != _RUNTIME_FIELDS:
+            raise ValueError("invalid-runtime-fields")
+        runtime = FaultRuntimeIdentity(
+            component=runtime_value["component"],
+            release_id=runtime_value["release_id"],
+            machine_id=runtime_value["machine_id"],
+            boot_id=UUID(runtime_value["boot_id"]),
+        )
+        if (
+            artifact["schema_version"] != 1
+            or artifact["scope"] != "production-fault"
+            or artifact["mode"] != "candidate"
+            or artifact["status"] != "PASS"
+        ):
+            raise ValueError("invalid-artifact-mode")
+        unsigned = {
+            key: value
+            for key, value in artifact.items()
+            if key not in {"artifact_digest", "signature"}
+        }
+        digest = canonical_digest(unsigned)
+        signature = hmac.new(
+            settings.upstream_fault_evaluator_secret.get_secret_value().encode(),
+            digest.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if (
+            artifact["artifact_digest"] != digest
+            or not hmac.compare_digest(str(artifact["signature"]), signature)
+            or not isinstance(artifact["source_evidence_sha256"], str)
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}", artifact["source_evidence_sha256"]
+            )
+            is None
+        ):
+            return JSONResponse({"error": "invalid evaluator verdict"}, status_code=401)
+        source_tail_hash = artifact["source_tail_hash"]
+        if (
+            not isinstance(source_tail_hash, str)
+            or len(source_tail_hash) != 64
+            or not isinstance(artifact["verdict_id"], str)
+        ):
+            raise ValueError("invalid-artifact-identity")
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"error": "invalid finalizer request"}, status_code=400)
+    try:
+        event = await _run_mutation(
+            _store(request).finalize_verdict,
+            path_fault_id,
+            verdict_id=artifact["verdict_id"],
+            verdict_digest=digest,
+            source_tail_hash=source_tail_hash,
+            runtime=runtime,
+            auth=auth,
+            request_digest=hashlib.sha256(body).hexdigest(),
+            occurred_at_ms=int(time.time() * 1_000),
+        )
+    except ValueError as exc:
+        status = 401 if str(exc) == "nonce-replay" else 409
+        return JSONResponse({"status": "rejected", "reason": str(exc)}, status_code=status)
+    except (TimeoutError, sqlite3.Error):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "fault-control-store-unavailable"},
+            status_code=409,
+        )
+    return JSONResponse(
+        {
+            "status": "verified",
+            "fault_id": path_fault_id,
+            "verdict_id": event.evidence["verdict_id"],
+            "verdict_digest": event.evidence["verdict_digest"],
+        }
+    )
+
+
 def _runtime_json(runtime: FaultRuntimeIdentity) -> dict[str, str]:
     return {
         "component": runtime.component,
@@ -494,11 +624,28 @@ async def fault_status(request: Request) -> JSONResponse:
             "event_count": len(history.events),
             "lifecycle": lifecycle_values[-32:],
             "actions": actions[-8:],
+            "events": [
+                {
+                    "fault_id": event.fault_id,
+                    "sequence": event.sequence,
+                    "state": event.state.value if event.state else None,
+                    "action": event.action.value if event.action else None,
+                    "occurred_at_ms": event.occurred_at_ms,
+                    "evidence": dict(event.evidence),
+                    "previous_hash": event.previous_hash,
+                    "event_hash": event.event_hash,
+                }
+                for event in history.events[-32:]
+            ],
             "intent": {
+                "fault_id": history.intent.fault_id,
                 "kind": history.intent.kind.value,
                 "call_class": history.intent.call_class.value,
                 "target_key": history.intent.target_key,
+                "parameters": dict(history.intent.parameters),
                 "parameter_digest": canonical_digest(dict(history.intent.parameters)),
+                "target_digest": canonical_digest(history.intent.target_key),
+                "nonce_digest": history.intent.nonce_digest,
                 "ttl_ms": history.intent.ttl_ms,
                 "runtime": _runtime_json(history.intent.runtime),
             },

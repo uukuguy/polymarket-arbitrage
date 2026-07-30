@@ -15,6 +15,9 @@ from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from polyarb.perception.fault_authority import FaultAuthorityStore
+from polyarb.perception.fault_control import canonical_digest
+
 _READ_PATHS = (
     ("/healthz", "health"),
     ("/perception/discovery", "discovery"),
@@ -24,6 +27,106 @@ _READ_PATHS = (
     ("/perception/qualification", "qualification"),
 )
 _MAX_RESPONSE_BYTES = 1_048_576
+_FAULT_RECOVERY_TABLES = {
+    "candidate": "neg_risk_candidate_success_receipts",
+    "discovery": "neg_risk_discovery_batches",
+    "reconciliation": "neg_risk_reconciliation_windows",
+    "notification": "neg_risk_opportunity_notification_attempts",
+}
+
+
+def export_fault_envelope(
+    db_path: Path,
+    fault_id: str,
+    *,
+    integrity: Mapping[str, object],
+    now_ms: int,
+) -> dict[str, object]:
+    """Export one bounded immutable envelope through SQLite read-only mode."""
+    snapshot = FaultAuthorityStore(db_path, read_only=True).read_snapshot(
+        now_ms=now_ms, fault_id=fault_id
+    )
+    if (
+        not snapshot.available
+        or snapshot.history is None
+        or not snapshot.history.valid
+        or snapshot.history.intent is None
+        or snapshot.projection is None
+    ):
+        raise ValueError("fault-authority-unavailable")
+    intent = snapshot.history.intent
+    runtime = {
+        "component": intent.runtime.component,
+        "release_id": intent.runtime.release_id,
+        "machine_id": intent.runtime.machine_id,
+        "boot_id": str(intent.runtime.boot_id),
+    }
+    intent_json = {
+        "fault_id": intent.fault_id,
+        "kind": intent.kind.value,
+        "call_class": intent.call_class.value,
+        "target_key": intent.target_key,
+        "parameters": dict(intent.parameters),
+        "nonce_digest": intent.nonce_digest,
+        "runtime": runtime,
+    }
+    events = [
+        {
+            "fault_id": event.fault_id,
+            "sequence": event.sequence,
+            "state": event.state.value if event.state is not None else None,
+            "action": event.action.value if event.action is not None else None,
+            "occurred_at_ms": event.occurred_at_ms,
+            "evidence": dict(event.evidence),
+            "previous_hash": event.previous_hash,
+            "event_hash": event.event_hash,
+        }
+        for event in snapshot.history.events
+    ]
+    recovered = next(
+        (
+            event for event in reversed(snapshot.history.events)
+            if event.state is not None and event.state.value == "recovered"
+        ),
+        None,
+    )
+    if recovered is None:
+        raise ValueError("fault-not-recovered")
+    recovery_id = recovered.evidence.get("recovery_id")
+    envelope: dict[str, object] = {
+        "evidence_schema_version": 2,
+        "scope": "production-fault",
+        "mode": "candidate",
+        "app_id": "polyarb-l1",
+        "release_id": runtime["release_id"],
+        "machine_id": runtime["machine_id"],
+        "boot_id": runtime["boot_id"],
+        "fault_intent": intent_json,
+        "fault_intent_digest": canonical_digest(intent_json),
+        "target_digest": canonical_digest(intent.target_key),
+        "parameter_digest": canonical_digest(dict(intent.parameters)),
+        "nonce_digest": intent.nonce_digest,
+        "fault_history": events,
+        "fault_history_tail_hash": events[-1]["event_hash"],
+        "recovery_writer_receipt": {
+            "table": _FAULT_RECOVERY_TABLES[intent.runtime.component],
+            "row_id": recovery_id,
+            "component": intent.runtime.component,
+            "occurred_at_ms": recovered.occurred_at_ms,
+        },
+        "open_injection_fault_count": int(
+            snapshot.projection.state is not None
+            and snapshot.projection.state.value
+            in {"authorized", "armed", "injected", "detected", "contained", "cleaned"}
+        ),
+        "pending_verification_fault_count": int(
+            snapshot.projection.state is not None
+            and snapshot.projection.state.value == "recovered"
+        ),
+        "source_projection_active": snapshot.projection.active,
+    }
+    envelope.update(dict(integrity))
+    return envelope
 
 
 def _mapping(value: object, reason: str) -> Mapping[str, Any]:
