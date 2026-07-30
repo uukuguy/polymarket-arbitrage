@@ -35,7 +35,10 @@ from polyarb.perception.fault_control import (
     normalize_fault_id,
     normalize_supervisor_run_id,
 )
-from polyarb.perception.store import validate_reconciliation_authority_checkpoint
+from polyarb.perception.store import (
+    candidate_success_receipt_hash,
+    validate_reconciliation_authority_checkpoint,
+)
 
 _ZERO_HASH = "0" * 64
 _TERMINAL_STATES = frozenset(
@@ -74,6 +77,7 @@ _NEXT_STATES: Mapping[FaultEventState, frozenset[FaultEventState]] = {
             FaultEventState.DETECTED,
             FaultEventState.ABANDONED,
             FaultEventState.CLEANUP_FAILED,
+            FaultEventState.EVIDENCE_INVALID,
             FaultEventState.ESCALATED,
         }
     ),
@@ -82,6 +86,7 @@ _NEXT_STATES: Mapping[FaultEventState, frozenset[FaultEventState]] = {
             FaultEventState.CONTAINED,
             FaultEventState.ABANDONED,
             FaultEventState.CLEANUP_FAILED,
+            FaultEventState.EVIDENCE_INVALID,
             FaultEventState.ESCALATED,
         }
     ),
@@ -89,6 +94,7 @@ _NEXT_STATES: Mapping[FaultEventState, frozenset[FaultEventState]] = {
         {
             FaultEventState.CLEANED,
             FaultEventState.CLEANUP_FAILED,
+            FaultEventState.EVIDENCE_INVALID,
             FaultEventState.ESCALATED,
         }
     ),
@@ -113,6 +119,7 @@ _PROCESS_OWNED_STATES = frozenset(
         FaultEventState.INJECTED,
         FaultEventState.CLEANED,
         FaultEventState.RECOVERED,
+        FaultEventState.EVIDENCE_INVALID,
     }
 )
 _FAULT_COMPONENTS = ("candidate", "discovery", "reconciliation", "notification")
@@ -255,16 +262,11 @@ class FaultAuthorityStore:
             raise TimeoutError("fault-authority-deadline")
 
     @staticmethod
-    def _normalize_deadline_error(
-        error: BaseException, deadline_monotonic: float | None
-    ) -> None:
+    def _normalize_deadline_error(error: BaseException, deadline_monotonic: float | None) -> None:
         if (
             deadline_monotonic is not None
             and isinstance(error, sqlite3.OperationalError)
-            and any(
-                marker in str(error).lower()
-                for marker in ("locked", "interrupted")
-            )
+            and any(marker in str(error).lower() for marker in ("locked", "interrupted"))
         ):
             raise TimeoutError("fault-authority-deadline") from error
 
@@ -280,16 +282,12 @@ class FaultAuthorityStore:
     ) -> None:
         cls._check_deadline(deadline_monotonic)
         if deadline_monotonic is not None:
-            remaining_ms = max(
-                1, int(max(0.001, deadline_monotonic - time.monotonic()) * 1_000)
-            )
+            remaining_ms = max(1, int(max(0.001, deadline_monotonic - time.monotonic()) * 1_000))
             con.execute(f"PRAGMA busy_timeout={remaining_ms}")
             cls._check_deadline(deadline_monotonic)
         con.execute("COMMIT")
 
-    def _connect(
-        self, deadline_monotonic: float | None = None
-    ) -> sqlite3.Connection:
+    def _connect(self, deadline_monotonic: float | None = None) -> sqlite3.Connection:
         self._check_deadline(deadline_monotonic)
         timeout_ms = self._busy_timeout_ms
         if deadline_monotonic is not None:
@@ -514,9 +512,7 @@ class FaultAuthorityStore:
         deadline_monotonic: float | None,
     ) -> bool:
         return bool(
-            self._current_active_fault_ids(
-                con, deadline_monotonic=deadline_monotonic, limit=1
-            )
+            self._current_active_fault_ids(con, deadline_monotonic=deadline_monotonic, limit=1)
         )
 
     @staticmethod
@@ -736,9 +732,7 @@ class FaultAuthorityStore:
                 reason = "runtime-unavailable"
             elif self._runtime_from_row(current) != request.runtime:
                 reason = "runtime-mismatch"
-            elif self._has_active_chain(
-                con, deadline_monotonic=deadline_monotonic
-            ):
+            elif self._has_active_chain(con, deadline_monotonic=deadline_monotonic):
                 reason = "fault-already-active"
 
             self._check_deadline(deadline_monotonic)
@@ -879,11 +873,7 @@ class FaultAuthorityStore:
             for candidate in rows:
                 history = self._validate_history_in_connection(con, candidate["fault_id"])
                 latest_lifecycle = next(
-                    (
-                        event.state
-                        for event in reversed(history.events)
-                        if event.state is not None
-                    ),
+                    (event.state for event in reversed(history.events) if event.state is not None),
                     None,
                 )
                 if (
@@ -1173,8 +1163,7 @@ class FaultAuthorityStore:
                 raise ValueError("fault-not-found")
             latest_state = self._latest_state(con, fault_id)
             process_owned_terminal = (
-                typed_state
-                in {FaultEventState.ABANDONED, FaultEventState.EXPIRED}
+                typed_state in {FaultEventState.ABANDONED, FaultEventState.EXPIRED}
                 and latest_state is not FaultEventState.AUTHORIZED
             )
             if typed_state in _PROCESS_OWNED_STATES or process_owned_terminal:
@@ -1228,11 +1217,7 @@ class FaultAuthorityStore:
             assert intent_row is not None
             self._require_ownership(con, intent_row, ownership)
             tail = next(
-                (
-                    event.state
-                    for event in reversed(history.events)
-                    if event.state is not None
-                ),
+                (event.state for event in reversed(history.events) if event.state is not None),
                 None,
             )
             injected = tuple(
@@ -1241,9 +1226,7 @@ class FaultAuthorityStore:
                 if event.state is FaultEventState.INJECTED
                 and event.occurred_at_ms == injected_at_ms
             )
-            current_runtime = self._current_runtime_in_connection(
-                con, receipt.component
-            )
+            current_runtime = self._current_runtime_in_connection(con, receipt.component)
             if (
                 tail is not FaultEventState.CLEANED
                 or len(injected) != 1
@@ -1259,7 +1242,11 @@ class FaultAuthorityStore:
                 con.execute("ROLLBACK")
                 return None
 
-            recovery_id = self._validated_recovery_writer_id(con, receipt)
+            recovery_id = self._validated_recovery_writer_id(
+                con,
+                receipt,
+                intent,
+            )
             if recovery_id is None:
                 con.execute("ROLLBACK")
                 return None
@@ -1271,11 +1258,7 @@ class FaultAuthorityStore:
                 evidence={"recovery_id": recovery_id},
             )
             validated = self._validate_history_in_connection(con, receipt.fault_id)
-            if (
-                not validated.valid
-                or not validated.events
-                or validated.events[-1] != event
-            ):
+            if not validated.valid or not validated.events or validated.events[-1] != event:
                 raise ValueError("fault-recovery-invalid")
             con.execute("COMMIT")
             return event
@@ -1290,12 +1273,80 @@ class FaultAuthorityStore:
     def _validated_recovery_writer_id(
         con: sqlite3.Connection,
         receipt: FaultRecoveryReceipt,
+        intent: FaultIntent,
     ) -> str | None:
+        if receipt.writer is FaultRecoveryWriter.CANDIDATE_SUCCESS:
+            if (
+                receipt.component != "candidate"
+                or receipt.call_class is not FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH
+                or receipt.kind
+                not in {
+                    FaultKind.CLOB_MISSING_LEG,
+                    FaultKind.CLOB_429,
+                    FaultKind.CLOB_LATENCY,
+                }
+                or intent.target_key == ""
+            ):
+                return None
+            row = con.execute(
+                "SELECT * FROM neg_risk_candidate_success_receipts WHERE quote_batch_id=?",
+                (receipt.writer_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            group = con.execute(
+                "SELECT * FROM neg_risk_group_revisions WHERE group_id=? "
+                "ORDER BY revision DESC LIMIT 1",
+                (row["group_id"],),
+            ).fetchone()
+            quote = con.execute(
+                "SELECT rowid,* FROM neg_risk_group_quote_batches WHERE id=?",
+                (row["quote_batch_id"],),
+            ).fetchone()
+            fact = con.execute(
+                "SELECT * FROM neg_risk_candidate_watch_facts WHERE id=?",
+                (row["candidate_fact_row_id"],),
+            ).fetchone()
+            expected_hash = candidate_success_receipt_hash(
+                transaction_id=str(row["transaction_id"]),
+                group_id=str(row["group_id"]),
+                event_id=str(row["event_id"]),
+                membership_hash=str(row["membership_hash"]),
+                quote_batch_id=str(row["quote_batch_id"]),
+                group_revision_row_id=int(row["group_revision_row_id"]),
+                quote_batch_row_id=int(row["quote_batch_row_id"]),
+                candidate_fact_row_id=int(row["candidate_fact_row_id"]),
+                observed_at_ms=int(row["observed_at_ms"]),
+            )
+            if (
+                group is None
+                or quote is None
+                or fact is None
+                or row["group_id"] != intent.target_key
+                or row["group_revision_row_id"] != group["id"]
+                or row["membership_hash"] != group["membership_hash"]
+                or row["event_id"] != group["event_id"]
+                or row["quote_batch_row_id"] != quote["rowid"]
+                or row["group_id"] != quote["group_id"]
+                or row["membership_hash"] != quote["membership_hash"]
+                or row["quote_batch_id"] != quote["id"]
+                or row["candidate_fact_row_id"] != fact["id"]
+                or row["group_id"] != fact["group_id"]
+                or row["membership_hash"] != fact["membership_hash"]
+                or row["quote_batch_id"] != fact["quote_batch_id"]
+                or row["observed_at_ms"] != fact["observed_at_ms"]
+                or row["observed_at_ms"] != receipt.writer_occurred_at_ms
+                or row["receipt_hash"] != expected_hash
+                or quote["status"] != "complete"
+                or fact["last_result"] not in {"watching", "no-edge"}
+            ):
+                return None
+            return f"candidate-success-{row['id']}"
+
         if receipt.writer is FaultRecoveryWriter.DISCOVERY_BATCH:
             if (
                 receipt.component != "discovery"
-                or receipt.call_class
-                is not FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE
+                or receipt.call_class is not FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE
                 or receipt.kind
                 not in {
                     FaultKind.GAMMA_TIMEOUT,
@@ -1308,9 +1359,7 @@ class FaultAuthorityStore:
                 "SELECT * FROM neg_risk_discovery_batches WHERE id=?",
                 (receipt.writer_id,),
             ).fetchone()
-            latest_id = con.execute(
-                "SELECT MAX(id) FROM neg_risk_discovery_batches"
-            ).fetchone()[0]
+            latest_id = con.execute("SELECT MAX(id) FROM neg_risk_discovery_batches").fetchone()[0]
             if (
                 row is None
                 or row["id"] != latest_id
@@ -1321,11 +1370,9 @@ class FaultAuthorityStore:
             return f"discovery-batch-{row['id']}"
 
         if (
-            receipt.writer
-            is not FaultRecoveryWriter.RECONCILIATION_CHECKPOINT
+            receipt.writer is not FaultRecoveryWriter.RECONCILIATION_CHECKPOINT
             or receipt.component != "reconciliation"
-            or receipt.call_class
-            is not FaultCallClass.GAMMA_RECONCILIATION_EVENT_PAGE
+            or receipt.call_class is not FaultCallClass.GAMMA_RECONCILIATION_EVENT_PAGE
             or receipt.kind is not FaultKind.GAMMA_CURSOR
         ):
             return None
@@ -1338,20 +1385,13 @@ class FaultAuthorityStore:
             "ORDER BY started_at_ms DESC,rowid DESC LIMIT 1"
         ).fetchone()
         staged = con.execute(
-            "SELECT * FROM neg_risk_reconciliation_staging "
-            "WHERE window_id=? ORDER BY group_id",
+            "SELECT * FROM neg_risk_reconciliation_staging WHERE window_id=? ORDER BY group_id",
             (receipt.writer_id,),
         ).fetchall()
         validated_checkpoint = (
-            None
-            if row is None
-            else validate_reconciliation_authority_checkpoint(con, row, staged)
+            None if row is None else validate_reconciliation_authority_checkpoint(con, row, staged)
         )
-        checkpoint = (
-            None
-            if validated_checkpoint is None
-            else validated_checkpoint[0]
-        )
+        checkpoint = None if validated_checkpoint is None else validated_checkpoint[0]
         if (
             row is None
             or latest is None
@@ -1380,11 +1420,7 @@ class FaultAuthorityStore:
         try:
             con.execute("BEGIN IMMEDIATE")
             history = self._validate_history_in_connection(con, fault_id)
-            if (
-                not history.valid
-                or history.intent is None
-                or not history.events
-            ):
+            if not history.valid or history.intent is None or not history.events:
                 raise ValueError("fault-history-invalid")
             intent_row = con.execute(
                 "SELECT * FROM neg_risk_fault_intents WHERE fault_id=?",
@@ -1393,23 +1429,12 @@ class FaultAuthorityStore:
             assert intent_row is not None
             self._require_ownership(con, intent_row, ownership)
             tail = next(
-                (
-                    event.state
-                    for event in reversed(history.events)
-                    if event.state is not None
-                ),
+                (event.state for event in reversed(history.events) if event.state is not None),
                 None,
             )
             if tail is FaultEventState.ARMED:
-                expired = (
-                    occurred_at_ms
-                    >= history.intent.accepted_at_ms + history.intent.ttl_ms
-                )
-                state = (
-                    FaultEventState.EXPIRED
-                    if expired
-                    else FaultEventState.ABANDONED
-                )
+                expired = occurred_at_ms >= history.intent.accepted_at_ms + history.intent.ttl_ms
+                state = FaultEventState.EXPIRED if expired else FaultEventState.ABANDONED
             elif tail in {
                 FaultEventState.INJECTED,
                 FaultEventState.DETECTED,
@@ -1663,9 +1688,7 @@ class FaultAuthorityStore:
             return FaultHistory(fault_id, False, "intent-missing", None, ())
         if not self._auth_links_valid_for_fault(
             con, fault_id, deadline_monotonic=deadline_monotonic
-        ) or not self._intent_row_valid(
-            con, row, deadline_monotonic=deadline_monotonic
-        ):
+        ) or not self._intent_row_valid(con, row, deadline_monotonic=deadline_monotonic):
             return FaultHistory(fault_id, False, "intent-integrity-invalid", None, ())
         try:
             intent = self._intent_from_row(row)
@@ -1728,13 +1751,9 @@ class FaultAuthorityStore:
                             attempt,
                             expected_operation="cleanup",
                             expected_fault_id=fault_id,
-                            expected_request_digest=event.evidence[
-                                "request_digest"
-                            ],
+                            expected_request_digest=event.evidence["request_digest"],
                             expected_nonce_digest=event.evidence["nonce_digest"],
-                            expected_authorization_digest=event.evidence[
-                                "authorization_digest"
-                            ],
+                            expected_authorization_digest=event.evidence["authorization_digest"],
                             expected_reason="cleanup-requested",
                         )
                     ):
@@ -1743,9 +1762,7 @@ class FaultAuthorityStore:
                 else:
                     if event.action is not None:
                         raise ValueError("invalid-event-action")
-                    evidence_json = canonical_json(
-                        normalize_evidence(event.state, event.evidence)
-                    )
+                    evidence_json = canonical_json(normalize_evidence(event.state, event.evidence))
                 expected_hash = _event_hash(
                     fault_id=event.fault_id,
                     sequence=event.sequence,
@@ -1765,9 +1782,7 @@ class FaultAuthorityStore:
                 return FaultHistory(fault_id, False, "event-time-regression", intent, events)
             if event.state is None:
                 if previous_state is None:
-                    return FaultHistory(
-                        fault_id, False, "lifecycle-origin-invalid", intent, events
-                    )
+                    return FaultHistory(fault_id, False, "lifecycle-origin-invalid", intent, events)
             elif previous_state is None:
                 if event.state is not expected_first:
                     return FaultHistory(fault_id, False, "lifecycle-origin-invalid", intent, events)
@@ -1801,9 +1816,7 @@ class FaultAuthorityStore:
         deadline_monotonic: float | None,
     ) -> FaultProjection:
         if not history.valid or history.intent is None:
-            return FaultProjection(
-                fault_id, False, False, None, history.reason, history.intent
-            )
+            return FaultProjection(fault_id, False, False, None, history.reason, history.intent)
         accepted_fault_ids = self._current_active_fault_ids(
             con, deadline_monotonic=deadline_monotonic, limit=2
         )
@@ -1825,11 +1838,7 @@ class FaultAuthorityStore:
                     history.intent,
                 )
             latest_candidate = next(
-                (
-                    event.state
-                    for event in reversed(candidate.events)
-                    if event.state is not None
-                ),
+                (event.state for event in reversed(candidate.events) if event.state is not None),
                 None,
             )
             if latest_candidate not in _TERMINAL_STATES:
@@ -1838,15 +1847,9 @@ class FaultAuthorityStore:
             return FaultProjection(
                 fault_id, False, False, None, "multiple-active-chains", history.intent
             )
-        current = self._current_runtime_in_connection(
-            con, history.intent.runtime.component
-        )
+        current = self._current_runtime_in_connection(con, history.intent.runtime.component)
         latest = next(
-            (
-                event.state
-                for event in reversed(history.events)
-                if event.state is not None
-            ),
+            (event.state for event in reversed(history.events) if event.state is not None),
             None,
         )
         if latest is None:
@@ -1905,12 +1908,8 @@ class FaultAuthorityStore:
                     self._check_deadline(deadline_monotonic)
                     con.execute("COMMIT")
                     if runtime is None:
-                        return FaultAuthoritySnapshot(
-                            False, "runtime-evidence-unavailable"
-                        )
-                    return FaultAuthoritySnapshot(
-                        True, "valid", runtime=runtime
-                    )
+                        return FaultAuthoritySnapshot(False, "runtime-evidence-unavailable")
+                    return FaultAuthoritySnapshot(True, "valid", runtime=runtime)
                 assert fault_id is not None
                 history = self._validate_history_in_connection(
                     con, fault_id, deadline_monotonic=deadline_monotonic
@@ -1951,6 +1950,4 @@ class FaultAuthorityStore:
         snapshot = self.read_snapshot(now_ms=now_ms, fault_id=fault_id)
         if snapshot.projection is not None:
             return snapshot.projection
-        return FaultProjection(
-            fault_id, False, False, None, snapshot.reason, None
-        )
+        return FaultProjection(fault_id, False, False, None, snapshot.reason, None)

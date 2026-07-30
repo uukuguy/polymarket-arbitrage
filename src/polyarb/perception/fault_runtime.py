@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -39,6 +40,12 @@ class FaultInjectionReceipt:
     fault_id: str
     call_id: str
     occurred_at_ms: int
+
+
+class FaultRecoveryOutcome(StrEnum):
+    RECORDED = "recorded"
+    INVALID = "invalid"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +92,23 @@ class FaultRuntimeProtocol(Protocol):
     ) -> FaultRecoveryReceipt | None: ...
 
     async def record_recovery(self, receipt: FaultRecoveryReceipt) -> bool: ...
+
+    async def record_recovery_outcome(
+        self,
+        receipt: FaultRecoveryReceipt,
+    ) -> FaultRecoveryOutcome: ...
+
+    async def invalidate_evidence(
+        self,
+        fault_id: str,
+        reason: str,
+    ) -> CleanupResult: ...
+
+    async def evidence_unavailable(
+        self,
+        fault_id: str,
+        reason: str,
+    ) -> CleanupResult: ...
 
 
 class FaultRuntime:
@@ -138,11 +162,7 @@ class FaultRuntime:
 
     @property
     def pending_recovery_fault_id(self) -> str | None:
-        return (
-            None
-            if self._pending_recovery is None
-            else self._pending_recovery.intent.fault_id
-        )
+        return None if self._pending_recovery is None else self._pending_recovery.intent.fault_id
 
     async def sync_before_batch(self) -> None:
         """Claim at most one intent; store failure leaves controller unchanged."""
@@ -307,11 +327,7 @@ class FaultRuntime:
         ):
             return False
         try:
-            evidence_key = (
-                "coverage_id"
-                if kind is FaultKind.GAMMA_PARTIAL
-                else "incident_id"
-            )
+            evidence_key = "coverage_id" if kind is FaultKind.GAMMA_PARTIAL else "incident_id"
 
             def persist_detection() -> None:
                 self._authority.append_event(
@@ -363,6 +379,15 @@ class FaultRuntime:
             return None
 
     async def record_recovery(self, receipt: FaultRecoveryReceipt) -> bool:
+        return (
+            await self.record_recovery_outcome(receipt)
+            is FaultRecoveryOutcome.RECORDED
+        )
+
+    async def record_recovery_outcome(
+        self,
+        receipt: FaultRecoveryReceipt,
+    ) -> FaultRecoveryOutcome:
         """Append one writer-owned recovery fact after successful cleanup."""
         pending = self._pending_recovery
         if (
@@ -375,7 +400,7 @@ class FaultRuntime:
             or receipt.component != pending.intent.runtime.component
             or receipt.runtime != pending.intent.runtime
         ):
-            return False
+            return FaultRecoveryOutcome.INVALID
         try:
             written = await self._settle_evidence_write(
                 lambda: self._authority.append_recovery_event(
@@ -389,11 +414,80 @@ class FaultRuntime:
             raise
         except Exception as error:
             self._freeze_evidence(error)
-            return False
+            return FaultRecoveryOutcome.UNAVAILABLE
         if written is None:
-            return False
+            return FaultRecoveryOutcome.INVALID
         self._pending_recovery = None
-        return True
+        return FaultRecoveryOutcome.RECORDED
+
+    async def invalidate_evidence(
+        self,
+        fault_id: str,
+        reason: str,
+    ) -> CleanupResult:
+        """Persist a proven semantic invalidity, then freeze qualification."""
+        active = self._controller.active
+        pending = self._pending_recovery
+        ownership = (
+            active.intent.ownership_capability
+            if active is not None and active.intent.fault_id == fault_id
+            else (
+                pending.ownership
+                if pending is not None and pending.intent.fault_id == fault_id
+                else None
+            )
+        )
+        if ownership is None:
+            self._freeze_evidence(ValueError("fault-evidence-invalid"))
+            return CleanupResult(False, False, degraded=True)
+
+        memory_cleared = active is not None
+
+        def persist_invalidity(_: str | None = None) -> None:
+            self._authority.append_event(
+                fault_id,
+                FaultEventState.EVIDENCE_INVALID,
+                occurred_at_ms=self._clock_ms(),
+                evidence={"reason": "evidence-invalid"},
+                ownership=ownership,
+            )
+
+        try:
+            if active is not None:
+                await self._settle_evidence_write(
+                    lambda: self._controller.clear(
+                        fault_id,
+                        receipt_writer=persist_invalidity,
+                    )
+                )
+            else:
+                await self._settle_evidence_write(persist_invalidity)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._freeze_evidence(error)
+            return CleanupResult(
+                memory_cleared=memory_cleared,
+                receipt_persisted=False,
+                degraded=True,
+            )
+        self._freeze_evidence(ValueError("fault-evidence-invalid"))
+        return CleanupResult(
+            memory_cleared=memory_cleared,
+            receipt_persisted=True,
+            degraded=True,
+            terminal_state=FaultEventState.EVIDENCE_INVALID,
+        )
+
+    async def evidence_unavailable(
+        self,
+        fault_id: str,
+        reason: str,
+    ) -> CleanupResult:
+        """Restore pass-through, but do not label unavailable proof invalid."""
+        result = await self.cleanup(fault_id, reason)
+        self._freeze_evidence(RuntimeError("fault-evidence-unavailable"))
+        return replace(result, degraded=True)
 
     def _freeze_evidence(self, error: BaseException) -> None:
         self._evidence_frozen = True
@@ -456,6 +550,30 @@ class PassThroughFaultRuntime:
 
     async def record_recovery(self, receipt: FaultRecoveryReceipt) -> bool:
         return False
+
+    async def record_recovery_outcome(
+        self,
+        receipt: FaultRecoveryReceipt,
+    ) -> FaultRecoveryOutcome:
+        return (
+            FaultRecoveryOutcome.UNAVAILABLE
+            if self.degraded
+            else FaultRecoveryOutcome.INVALID
+        )
+
+    async def invalidate_evidence(
+        self,
+        fault_id: str,
+        reason: str,
+    ) -> CleanupResult:
+        return CleanupResult(False, False, degraded=self.degraded)
+
+    async def evidence_unavailable(
+        self,
+        fault_id: str,
+        reason: str,
+    ) -> CleanupResult:
+        return CleanupResult(False, False, degraded=self.degraded)
 
 
 async def cleanup_active_fault(

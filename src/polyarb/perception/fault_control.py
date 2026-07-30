@@ -66,6 +66,7 @@ class FaultKind(StrEnum):
 class FaultRecoveryWriter(StrEnum):
     DISCOVERY_BATCH = "discovery-batch"
     RECONCILIATION_CHECKPOINT = "reconciliation-checkpoint"
+    CANDIDATE_SUCCESS = "candidate-success"
 
 
 class FaultEventState(StrEnum):
@@ -270,9 +271,7 @@ _EVIDENCE_REASONS: Mapping[FaultEventState, frozenset[str]] = {
         }
     ),
     FaultEventState.EXPIRED: frozenset({"intent-expired"}),
-    FaultEventState.ABANDONED: frozenset(
-        {"runtime-replaced", "process-relinquished"}
-    ),
+    FaultEventState.ABANDONED: frozenset({"runtime-replaced", "process-relinquished"}),
     FaultEventState.CLEANUP_FAILED: frozenset({"cleanup-failed"}),
     FaultEventState.RECOVERY_TIMEOUT: frozenset({"recovery-timeout"}),
     FaultEventState.EVIDENCE_INVALID: frozenset({"evidence-invalid"}),
@@ -369,10 +368,7 @@ class FaultRecoveryReceipt:
                 or self.writer_id < 1
             ):
                 raise ValueError("invalid-recovery-receipt")
-        elif (
-            not isinstance(self.writer_id, str)
-            or not _RECOVERY_ID_RE.fullmatch(self.writer_id)
-        ):
+        elif not isinstance(self.writer_id, str) or not _RECOVERY_ID_RE.fullmatch(self.writer_id):
             raise ValueError("invalid-recovery-receipt")
         object.__setattr__(self, "fault_id", fault_id)
         object.__setattr__(self, "kind", kind)

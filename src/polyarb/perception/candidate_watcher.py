@@ -9,13 +9,22 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from functools import partial
 from typing import Any, Literal, Protocol
 
 from loguru import logger
 
 from polyarb.perception.clob_incidents import CandidateGroupIncidents
+from polyarb.perception.fault_adapters import (
+    CandidateBooksDecision,
+    CandidateBooksFault,
+)
+from polyarb.perception.fault_control import (
+    FaultDecision,
+    FaultKind,
+    FaultRecoveryWriter,
+)
 from polyarb.perception.fault_runtime import (
+    FaultRecoveryOutcome,
     FaultRuntimeProtocol,
     PassThroughFaultRuntime,
     cleanup_active_fault,
@@ -61,6 +70,20 @@ class CandidateObservation:
     effective_interval_s: float
     next_due_at_ms: int
     schedule_reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateIncidentFailure:
+    group_id: str
+    error: BaseException
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateIncidentSuccess:
+    group_id: str
+    membership_hash: str
+    quote_batch_id: str
+    observed_at_ms: int
 
 
 @dataclass(frozen=True)
@@ -276,17 +299,21 @@ def next_interval_s(
     quote_hard_stale_s: float = 90.0,
 ) -> float:
     """Compatibility helper that makes every initial cadence an input."""
-    return IntervalController(
-        high_interval_s=high_interval_s,
-        normal_interval_s=normal_interval_s,
-        explore_interval_s=explore_interval_s,
-        quote_hard_stale_s=quote_hard_stale_s,
-    ).transition(
-        priority=priority,
-        consecutive_failures=consecutive_failures,
-        observed_at_ms=0,
-        last_result="unavailable" if consecutive_failures else "watching",
-    ).effective_interval_s
+    return (
+        IntervalController(
+            high_interval_s=high_interval_s,
+            normal_interval_s=normal_interval_s,
+            explore_interval_s=explore_interval_s,
+            quote_hard_stale_s=quote_hard_stale_s,
+        )
+        .transition(
+            priority=priority,
+            consecutive_failures=consecutive_failures,
+            observed_at_ms=0,
+            last_result="unavailable" if consecutive_failures else "watching",
+        )
+        .effective_interval_s
+    )
 
 
 class CandidateWatcher:
@@ -304,12 +331,11 @@ class CandidateWatcher:
         clock_ms: Callable[[], int] | None = None,
         min_edge_bps: float = 100.0,
         require_resource_decision: bool = False,
+        fault_runtime: FaultRuntimeProtocol | None = None,
     ) -> None:
         self._structure_reader = structure_reader
         self._books_reader = books_reader
-        self._lower_priority_books_reader = (
-            lower_priority_books_reader or books_reader
-        )
+        self._lower_priority_books_reader = lower_priority_books_reader or books_reader
         self._store = store
         self._runtime = runtime
         self._interval_controller = interval_controller
@@ -317,7 +343,13 @@ class CandidateWatcher:
         self._min_edge_bps = Decimal(str(min_edge_bps))
         self._require_resource_decision = require_resource_decision
         self._clob_incidents = CandidateGroupIncidents(store)
-        self._clob_incident_operations: list[Callable[[], object]] = []
+        self._clob_incident_operations: list[
+            _CandidateIncidentFailure | _CandidateIncidentSuccess
+        ] = []
+        self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
+        self._candidate_fault = CandidateBooksFault(runtime=self._fault_runtime)
+        self._pending_latency_faults: dict[str, CandidateBooksDecision] = {}
+        self._expected_timeout_groups: set[str] = set()
 
     async def run_once(
         self,
@@ -350,17 +382,30 @@ class CandidateWatcher:
         started_at_ms = self._clock_ms()
         observed_at_ms: int | None = None
         before: GroupRevision | None = None
+        fault_decision = CandidateBooksDecision(FaultDecision(False))
         try:
             before = await self._structure_reader.read_group(group_id)
             books_reader = (
-                self._books_reader
-                if priority_hint == "high"
-                else self._lower_priority_books_reader
+                self._books_reader if priority_hint == "high" else self._lower_priority_books_reader
             )
-            books = await books_reader.get_books(
-                [leg.yes_token_id for leg in before.legs],
-                projection="top",
+            token_ids = [leg.yes_token_id for leg in before.legs]
+            fault_decision = await self._candidate_fault.before_books(group_id)
+            if fault_decision.decision.kind is FaultKind.CLOB_LATENCY:
+                self._pending_latency_faults[group_id] = fault_decision
+            try:
+                books = await books_reader.get_books(
+                    token_ids,
+                    projection="top",
+                )
+            except BaseException:
+                await self._candidate_fault.settle_inner_failure(fault_decision)
+                raise
+            books = await self._candidate_fault.after_books(
+                fault_decision,
+                token_ids=token_ids,
+                books=books,
             )
+            self._pending_latency_faults.pop(group_id, None)
             after = await self._structure_reader.read_group(group_id)
             observed_at_ms = self._clock_ms()
             if after.membership_hash != before.membership_hash:
@@ -381,9 +426,7 @@ class CandidateWatcher:
                 Decimal(0),
             )
             edge = (Decimal(1) - bundle_cost) * Decimal(10_000)
-            status: CandidateResult = (
-                "watching" if edge >= self._min_edge_bps else "no-edge"
-            )
+            status: CandidateResult = "watching" if edge >= self._min_edge_bps else "no-edge"
             priority: CandidatePriority = "high" if status == "watching" else "normal"
             observation = await self._record(
                 group_id=group_id,
@@ -400,53 +443,50 @@ class CandidateWatcher:
                 batch=batch,
             )
             self._clob_incident_operations.append(
-                partial(
-                    self._clob_incidents.verify_success,
+                _CandidateIncidentSuccess(
                     group_id=group_id,
                     membership_hash=before.membership_hash,
                     quote_batch_id=batch.quote_batch_id,
+                    observed_at_ms=observed_at_ms,
                 )
             )
             return observation
         except asyncio.CancelledError:
+            if group_id in self._expected_timeout_groups:
+                self._expected_timeout_groups.discard(group_id)
+            else:
+                pending = self._pending_latency_faults.pop(group_id, None)
+                if pending is not None:
+                    await self._candidate_fault.settle_inner_failure(pending)
             raise
         except QuoteCollectionIntegrityError as error:
+            self._pending_latency_faults.pop(group_id, None)
+            self._candidate_fault.tag_error(error, fault_decision)
             observation = await self._record_unavailable(
                 group_id=group_id,
                 before=before,
-                observed_at_ms=(
-                    observed_at_ms
-                    if observed_at_ms is not None
-                    else self._clock_ms()
-                ),
+                observed_at_ms=(observed_at_ms if observed_at_ms is not None else self._clock_ms()),
                 reason="incomplete-quotes",
             )
             self.queue_incident_failure(group_id, error)
             return observation
         except GroupStructureUnavailableError:
+            self._pending_latency_faults.pop(group_id, None)
             return await self._record_unavailable(
                 group_id=group_id,
                 before=before,
-                observed_at_ms=(
-                    observed_at_ms
-                    if observed_at_ms is not None
-                    else self._clock_ms()
-                ),
+                observed_at_ms=(observed_at_ms if observed_at_ms is not None else self._clock_ms()),
                 reason="group-not-certified",
             )
         except Exception as error:
+            self._pending_latency_faults.pop(group_id, None)
             logger.warning(
-                "candidate group collection failed "
-                f"group_id={group_id} kind={type(error).__name__}"
+                f"candidate group collection failed group_id={group_id} kind={type(error).__name__}"
             )
             observation = await self._record_unavailable(
                 group_id=group_id,
                 before=before,
-                observed_at_ms=(
-                    observed_at_ms
-                    if observed_at_ms is not None
-                    else self._clock_ms()
-                ),
+                observed_at_ms=(observed_at_ms if observed_at_ms is not None else self._clock_ms()),
                 reason="candidate-collection-failed",
             )
             self.queue_incident_failure(group_id, error)
@@ -472,9 +512,7 @@ class CandidateWatcher:
         # A transient failure never demotes a known candidate into the slower
         # exploration lane. Preserve its prior class; a newly promoted
         # candidate starts high so the first retry remains freshness-bounded.
-        priority: CandidatePriority = (
-            previous.priority_class if previous is not None else "high"
-        )
+        priority: CandidatePriority = previous.priority_class if previous is not None else "high"
         return await self._record(
             group_id=group_id,
             membership_hash=None if before is None else before.membership_hash,
@@ -583,9 +621,7 @@ class CandidateWatcher:
         **kwargs: Any,
     ) -> CandidateWatchFact:
         """Finish a started SQLite commit before propagating cancellation."""
-        task = asyncio.create_task(
-            asyncio.to_thread(writer, *args, **kwargs)
-        )
+        task = asyncio.create_task(asyncio.to_thread(writer, *args, **kwargs))
         cancellation: asyncio.CancelledError | None = None
         while True:
             try:
@@ -641,34 +677,119 @@ class CandidateWatcher:
             observed_at_ms=self._clock_ms(),
             reason="candidate-group-timeout",
         )
-        self.queue_incident_failure(group_id, TimeoutError())
+        error = TimeoutError()
+        selected = self._pending_latency_faults.pop(group_id, None)
+        if selected is not None:
+            self._candidate_fault.tag_error(error, selected)
+        self.queue_incident_failure(group_id, error)
+
+    def prepare_timeout(self, group_id: str) -> None:
+        """Mark the scheduler-owned cancellation that becomes a timeout fact."""
+        if group_id in self._pending_latency_faults:
+            self._expected_timeout_groups.add(group_id)
 
     def queue_incident_failure(
         self,
         group_id: str,
         error: BaseException,
     ) -> None:
-        self._clob_incident_operations.append(
-            partial(
-                self._clob_incidents.record_failure,
-                group_id,
-                error,
-            )
-        )
+        self._clob_incident_operations.append(_CandidateIncidentFailure(group_id, error))
 
     async def flush_incidents(self) -> None:
         if not self._clob_incident_operations:
             return
         operations = tuple(self._clob_incident_operations)
-        await asyncio.to_thread(self._run_clob_incident_operations, operations)
-        del self._clob_incident_operations[: len(operations)]
-
-    @staticmethod
-    def _run_clob_incident_operations(
-        operations: tuple[Callable[[], object], ...],
-    ) -> None:
         for operation in operations:
-            operation()
+            if isinstance(operation, _CandidateIncidentSuccess):
+                pending_fault_id = self._fault_runtime.pending_recovery_fault_id
+                if pending_fault_id is not None:
+                    recovery = self._fault_runtime.make_recovery_receipt(
+                        FaultRecoveryWriter.CANDIDATE_SUCCESS,
+                        writer_id=operation.quote_batch_id,
+                        writer_occurred_at_ms=operation.observed_at_ms,
+                    )
+                    outcome = (
+                        FaultRecoveryOutcome.UNAVAILABLE
+                        if recovery is None and self._fault_runtime.degraded
+                        else (
+                            FaultRecoveryOutcome.INVALID
+                            if recovery is None
+                            else await self._fault_runtime.record_recovery_outcome(
+                                recovery
+                            )
+                        )
+                    )
+                    if outcome is not FaultRecoveryOutcome.RECORDED:
+                        if outcome is FaultRecoveryOutcome.UNAVAILABLE:
+                            await self._fault_runtime.cleanup(
+                                pending_fault_id,
+                                "candidate-recovery-evidence-unavailable",
+                            )
+                        else:
+                            await self._fault_runtime.invalidate_evidence(
+                                pending_fault_id,
+                                "candidate-recovery-evidence-invalid",
+                            )
+                await asyncio.to_thread(
+                    self._clob_incidents.verify_success,
+                    group_id=operation.group_id,
+                    membership_hash=operation.membership_hash,
+                    quote_batch_id=operation.quote_batch_id,
+                )
+                continue
+            fault_id = getattr(operation.error, "_polyarb_fault_id", None)
+            fault_kind = getattr(operation.error, "_polyarb_fault_kind", None)
+            if not isinstance(fault_id, str) or not isinstance(fault_kind, FaultKind):
+                await asyncio.to_thread(
+                    self._clob_incidents.record_failure,
+                    operation.group_id,
+                    operation.error,
+                )
+                continue
+            try:
+                receipt = await asyncio.to_thread(
+                    self._clob_incidents.record_qualified_failure,
+                    operation.group_id,
+                    operation.error,
+                )
+                valid_receipt = receipt is not None and await asyncio.to_thread(
+                    self._clob_incidents.validate_qualified_receipt,
+                    receipt,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await self._fault_runtime.evidence_unavailable(
+                    fault_id,
+                    "candidate-incident-evidence-unavailable",
+                )
+                continue
+            linked = (
+                False
+                if not valid_receipt
+                else await self._fault_runtime.link_detection(
+                    fault_id,
+                    kind=fault_kind,
+                    detection_id=receipt.incident_id,
+                )
+            )
+            if not linked:
+                if self._fault_runtime.degraded:
+                    await self._fault_runtime.cleanup(
+                        fault_id,
+                        "candidate-incident-evidence-unavailable",
+                    )
+                else:
+                    await self._fault_runtime.invalidate_evidence(
+                        fault_id,
+                        "candidate-incident-evidence-invalid",
+                    )
+                continue
+            await self._fault_runtime.cleanup(
+                fault_id,
+                "candidate-clob-fault-contained",
+            )
+        del self._clob_incident_operations[: len(operations)]
 
 
 class CandidateGroupIds(Protocol):
@@ -821,13 +942,10 @@ class CandidateWatcherScheduler:
                         event_id=schedule.event_id,
                         membership_hash=schedule.membership_hash,
                         promoted_at_ms=schedule.promoted_at_ms,
-                        candidate_start_deadline_at_ms=(
-                            schedule.candidate_start_deadline_at_ms
-                        ),
+                        candidate_start_deadline_at_ms=(schedule.candidate_start_deadline_at_ms),
                     )
-                    score_order = (
-                        schedule.candidate_start_deadline_at_ms * 1_000_000
-                        - int(schedule.priority_score * 1_000)
+                    score_order = schedule.candidate_start_deadline_at_ms * 1_000_000 - int(
+                        schedule.priority_score * 1_000
                     )
                     due.append(
                         (
@@ -857,8 +975,7 @@ class CandidateWatcherScheduler:
         reserved_end = leading_high_count
         while (
             reserved_end < len(selected)
-            and reserved_end - leading_high_count
-            < self._reserved_non_high_slots
+            and reserved_end - leading_high_count < self._reserved_non_high_slots
             and selected[reserved_end][0] != 0
         ):
             reserved_end += 1
@@ -905,15 +1022,36 @@ class CandidateWatcherScheduler:
         rank_value, _, group_id = item
         before_count = self._runtime.group_attempt_count(group_id)
         try:
-            await asyncio.wait_for(
+            group_task = asyncio.create_task(
                 self._watcher.run_once(
                     group_id,
                     priority_hint=priority_by_rank[rank_value],
                     admission_context=admission_contexts.get(group_id),
-                ),
-                timeout=timeout_s or self._group_timeout_s,
+                )
             )
+            timeout = timeout_s or self._group_timeout_s
+            done, _ = await asyncio.wait((group_task,), timeout=timeout)
+            if not done:
+                prepare_timeout = getattr(self._watcher, "prepare_timeout", None)
+                if prepare_timeout is not None:
+                    prepare_timeout(group_id)
+                group_task.cancel()
+                try:
+                    await group_task
+                except asyncio.CancelledError:
+                    pass
+                raise TimeoutError
+            group_task.result()
         except asyncio.CancelledError:
+            if "group_task" in locals() and not group_task.done():
+                group_task.cancel()
+                settle = asyncio.create_task(self._settle_cancelled_group(group_task))
+                while True:
+                    try:
+                        await asyncio.shield(settle)
+                        break
+                    except asyncio.CancelledError:
+                        continue
             raise
         except TimeoutError as error:
             self._runtime.record_group_failure(group_id, error)
@@ -933,11 +1071,17 @@ class CandidateWatcherScheduler:
             if queue_incident_failure is not None:
                 queue_incident_failure(group_id, error)
             logger.warning(
-                "candidate group task failed "
-                f"group_id={group_id} kind={type(error).__name__}"
+                f"candidate group task failed group_id={group_id} kind={type(error).__name__}"
             )
         else:
             self._runtime.record_group_success(group_id)
+
+    @staticmethod
+    async def _settle_cancelled_group(task: asyncio.Task[object]) -> None:
+        try:
+            await task
+        except BaseException:
+            return
 
     def _load_selection_snapshot(
         self,
@@ -956,19 +1100,11 @@ class CandidateWatcherScheduler:
         admitted_group_ids = admitted_group_ids or set()
         ordered = sorted(due, key=lambda item: (item[1], item[0], item[2]))
         high = [item for item in ordered if item[0] == 0]
-        admissions = [
-            item for item in ordered if item[2] in admitted_group_ids
-        ][: self._reserved_non_high_slots]
-        normal = [
-            item
-            for item in ordered
-            if item[0] == 1 and item[2] not in admitted_group_ids
+        admissions = [item for item in ordered if item[2] in admitted_group_ids][
+            : self._reserved_non_high_slots
         ]
-        explore = [
-            item
-            for item in ordered
-            if item[0] == 2 and item[2] not in admitted_group_ids
-        ]
+        normal = [item for item in ordered if item[0] == 1 and item[2] not in admitted_group_ids]
+        explore = [item for item in ordered if item[0] == 2 and item[2] not in admitted_group_ids]
         reserved: list[tuple[int, int, str]] = list(admissions)
         lanes = [normal, explore]
         lane_index = self._reserved_lane_cursor
@@ -978,9 +1114,7 @@ class CandidateWatcherScheduler:
                 if lane and len(reserved) < self._reserved_non_high_slots:
                     reserved.append(lane.pop(0))
             lane_index = (lane_index + 1) % len(lanes)
-        self._reserved_lane_cursor = (
-            self._reserved_lane_cursor + 1
-        ) % len(lanes)
+        self._reserved_lane_cursor = (self._reserved_lane_cursor + 1) % len(lanes)
         remaining = self._cycle_max_groups - len(reserved)
         selected_high = high[:remaining]
         remaining -= len(selected_high)
@@ -991,9 +1125,7 @@ class CandidateWatcherScheduler:
         high_burst = selected_high[: self._high_burst_groups]
         tail = selected_high[self._high_burst_groups :] + selected_lower
         return tuple(
-            high_burst
-            + reserved
-            + sorted(tail, key=lambda item: (item[0], item[1], item[2]))
+            high_burst + reserved + sorted(tail, key=lambda item: (item[0], item[1], item[2]))
         )
 
     async def run(self, stop_event: asyncio.Event) -> None:
@@ -1015,10 +1147,7 @@ class CandidateWatcherScheduler:
                 except Exception as error:
                     delay_s = self._supervisor_retry_s
                     self._runtime.record_supervisor_failure(error)
-                    logger.warning(
-                        "candidate scheduler cycle failed "
-                        f"kind={type(error).__name__}"
-                    )
+                    logger.warning(f"candidate scheduler cycle failed kind={type(error).__name__}")
                 if stop_event.is_set():
                     break
                 try:
@@ -1039,8 +1168,7 @@ class CandidateWatcherScheduler:
                 callback()
             except Exception as error:
                 logger.warning(
-                    "candidate scheduler close callback failed "
-                    f"kind={type(error).__name__}"
+                    f"candidate scheduler close callback failed kind={type(error).__name__}"
                 )
 
 
@@ -1062,28 +1190,14 @@ def build_production_candidate_watcher(
     store.init_schema()
     store.configure_discovery_admission(
         DiscoveryAdmissionProof(
-            effective_capacity=(
-                settings.discovery_effective_admission_capacity
-            ),
-            candidate_max_wait_ms=int(
-                settings.discovery_candidate_max_wait_s * 1_000
-            ),
-            selection_budget_ms=math.ceil(
-                settings.candidate_selection_budget_s * 1_000
-            ),
-            poll_interval_ms=math.ceil(
-                settings.candidate_scheduler_poll_s * 1_000
-            ),
-            group_timeout_ms=math.ceil(
-                settings.candidate_group_timeout_s * 1_000
-            ),
-            terminal_write_budget_ms=math.ceil(
-                settings.candidate_terminal_write_budget_s * 1_000
-            ),
+            effective_capacity=(settings.discovery_effective_admission_capacity),
+            candidate_max_wait_ms=int(settings.discovery_candidate_max_wait_s * 1_000),
+            selection_budget_ms=math.ceil(settings.candidate_selection_budget_s * 1_000),
+            poll_interval_ms=math.ceil(settings.candidate_scheduler_poll_s * 1_000),
+            group_timeout_ms=math.ceil(settings.candidate_group_timeout_s * 1_000),
+            terminal_write_budget_ms=math.ceil(settings.candidate_terminal_write_budget_s * 1_000),
             high_burst_groups=settings.candidate_high_burst_groups,
-            reserved_non_high_slots=(
-                settings.candidate_reserved_non_high_slots
-            ),
+            reserved_non_high_slots=(settings.candidate_reserved_non_high_slots),
         ),
         now_ms=_wall_clock_ms(),
     )
@@ -1109,9 +1223,8 @@ def build_production_candidate_watcher(
                 quote_hard_stale_s=settings.candidate_quote_hard_stale_s,
             ),
             min_edge_bps=settings.neg_risk_observe_min_edge_bps,
-            require_resource_decision=(
-                settings.opportunity_resource_controller_enabled
-            ),
+            require_resource_decision=(settings.opportunity_resource_controller_enabled),
+            fault_runtime=fault_runtime,
         )
         return CandidateWatcherScheduler(
             watcher=watcher,
@@ -1125,14 +1238,10 @@ def build_production_candidate_watcher(
             group_timeout_s=settings.candidate_group_timeout_s,
             high_burst_groups=settings.candidate_high_burst_groups,
             lower_lane_max_wait_s=settings.candidate_lower_lane_max_wait_s,
-            discovery_candidate_max_wait_s=(
-                settings.discovery_candidate_max_wait_s
-            ),
+            discovery_candidate_max_wait_s=(settings.discovery_candidate_max_wait_s),
             selection_budget_s=settings.candidate_selection_budget_s,
             source_max_groups=settings.candidate_source_max_groups,
-            terminal_write_budget_s=(
-                settings.candidate_terminal_write_budget_s
-            ),
+            terminal_write_budget_s=(settings.candidate_terminal_write_budget_s),
             close_callbacks=(executors.close,),
             fault_runtime=fault_runtime,
         )

@@ -1,4 +1,4 @@
-"""Typed, exact-call Gamma fault adapters.
+"""Typed, exact-call upstream fault adapters.
 
 The adapter never inspects URLs or response bodies.  Invalid or unavailable
 control evidence falls through to the real page call exactly once.
@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from dataclasses import replace
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 
 import httpx
+from py_clob_client.exceptions import PolyApiException
 
 from polyarb.clients.gamma_client import EventPage
 from polyarb.perception.fault_control import (
@@ -23,6 +25,119 @@ from polyarb.perception.fault_control import (
     normalize_fault_id,
 )
 from polyarb.perception.fault_runtime import FaultRuntimeProtocol
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateBooksDecision:
+    decision: FaultDecision
+    receipt: object | None = None
+
+
+class CandidateBooksFault:
+    """Exact-group seam around the Candidate watcher's selected books call."""
+
+    def __init__(self, *, runtime: FaultRuntimeProtocol) -> None:
+        self._runtime = runtime
+
+    async def before_books(self, group_id: str) -> CandidateBooksDecision:
+        try:
+            decision = self._runtime.consume(
+                FaultCall(
+                    FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH,
+                    group_id,
+                )
+            )
+        except Exception:
+            return CandidateBooksDecision(FaultDecision(False))
+        if not self._qualified(decision):
+            return CandidateBooksDecision(FaultDecision(False))
+        assert decision.fault_id is not None
+        receipt = await self._runtime.record_injection(decision.fault_id)
+        if receipt is None:
+            return CandidateBooksDecision(FaultDecision(False))
+        return CandidateBooksDecision(decision, receipt)
+
+    async def after_books(
+        self,
+        selected: CandidateBooksDecision,
+        *,
+        token_ids: Sequence[str],
+        books: Sequence[dict],
+    ) -> Sequence[dict]:
+        if selected.receipt is None or not selected.decision.inject:
+            return books
+        decision = selected.decision
+        assert decision.kind is not None
+        if decision.kind is FaultKind.CLOB_429:
+            error = PolyApiException(error_msg="qualified-clob-429")
+            error.status_code = 429
+            _tag_error(error, selected.receipt)
+            error._polyarb_fault_kind = decision.kind
+            raise error
+        if decision.kind is FaultKind.CLOB_LATENCY:
+            await asyncio.sleep(decision.parameters["delay_ms"] / 1_000)
+            return books
+        leg_index = decision.parameters["leg_index"]
+        if leg_index >= len(token_ids) or leg_index >= len(books):
+            assert decision.fault_id is not None
+            await self._runtime.cleanup(
+                decision.fault_id,
+                "missing-leg-not-applicable",
+            )
+            return books
+        return tuple((*books[:leg_index], *books[leg_index + 1 :]))
+
+    async def settle_inner_failure(
+        self,
+        selected: CandidateBooksDecision,
+    ) -> None:
+        if selected.receipt is None or selected.decision.fault_id is None:
+            return
+        task = asyncio.create_task(
+            self._runtime.cleanup(
+                selected.decision.fault_id,
+                "injected-books-call-failed",
+            )
+        )
+        while True:
+            try:
+                await asyncio.shield(task)
+                return
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                return
+
+    @staticmethod
+    def tag_error(
+        error: BaseException,
+        selected: CandidateBooksDecision,
+    ) -> None:
+        if selected.receipt is None:
+            return
+        _tag_error(error, selected.receipt)
+        error._polyarb_fault_kind = selected.decision.kind
+
+    @staticmethod
+    def _qualified(decision: FaultDecision) -> bool:
+        if (
+            not isinstance(decision, FaultDecision)
+            or not decision.inject
+            or decision.fault_id is None
+            or decision.kind
+            not in {
+                FaultKind.CLOB_MISSING_LEG,
+                FaultKind.CLOB_429,
+                FaultKind.CLOB_LATENCY,
+            }
+        ):
+            return False
+        expected = {
+            FaultKind.CLOB_MISSING_LEG: {"leg_index"},
+            FaultKind.CLOB_429: set(),
+            FaultKind.CLOB_LATENCY: {"delay_ms"},
+        }[decision.kind]
+        return set(decision.parameters) == expected
 
 
 class _QualifiedCursor(str):
@@ -235,6 +350,8 @@ def _tag_error(error: BaseException, receipt: object) -> None:
 
 
 __all__ = [
+    "CandidateBooksDecision",
+    "CandidateBooksFault",
     "FaultingGammaPageClient",
     "PartialGammaPageError",
     "gamma_fault_id",

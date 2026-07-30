@@ -9,6 +9,7 @@ from py_clob_client.exceptions import PolyApiException
 
 from polyarb.perception.clob_incidents import (
     CandidateGroupIncidents,
+    QualifiedCandidateIncidentReceipt,
     clob_incident_kind,
 )
 from polyarb.perception.models import (
@@ -122,3 +123,37 @@ def test_candidate_group_incident_requires_exact_success_receipt_to_verify(
     )
 
     assert store.open_incidents() == ()
+
+
+def test_qualified_candidate_incident_binds_exact_group_and_call_id(
+    tmp_path,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "qualified.db")
+    store.init_schema()
+    tracker = CandidateGroupIncidents(store, clock_ms=lambda: 1_000)
+    error = QuoteCollectionIntegrityError()
+    error._polyarb_fault_call_id = "call-qualified"
+
+    receipt = tracker.record_qualified_failure("g-1", error)
+
+    assert isinstance(receipt, QualifiedCandidateIncidentReceipt)
+    assert receipt.scope == "candidate:g-1"
+    assert receipt.kind == "clob-missing-leg"
+    assert receipt.fault_call_id == "call-qualified"
+    assert tracker.validate_qualified_receipt(receipt) is True
+
+
+@pytest.mark.parametrize("existing_at_ms", [1_000, 999])
+def test_qualified_candidate_incident_rejects_organic_open_dedup(
+    tmp_path,
+    existing_at_ms: int,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "ambiguous.db")
+    store.init_schema()
+    organic = CandidateGroupIncidents(store, clock_ms=lambda: existing_at_ms)
+    assert organic.record_failure("g-1", QuoteCollectionIntegrityError()) is not None
+    qualified = CandidateGroupIncidents(store, clock_ms=lambda: 1_000)
+    error = QuoteCollectionIntegrityError()
+    error._polyarb_fault_call_id = "call-qualified"
+
+    assert qualified.record_qualified_failure("g-1", error) is None
