@@ -5725,3 +5725,35 @@ up upstream fault proxy contract for Gamma/CLOB/Telegram before enabling any of
 those adapters. Keep disk filler, host load, daemon restart, and deploy
 interrupt as separate primitives because their cleanup and identity contracts
 differ. First command: `make planning-status`.
+
+## SESSION 120 — 2026-07-30 (production-grade upstream fault control approved)
+
+- [PRODUCTION STANDARD] Future work now defaults to the final production
+  platform. Observer, paper, qualification, canary, and eventual real-money
+  modes exercise the same architecture with different authority; the project
+  has not yet claimed real-money production operation.
+- [DESIGN] Commit `1c2d849` approves a permanent, dormant-by-default,
+  in-process typed fault boundary for Gamma, Candidate CLOB, and Telegram.
+  Invalid control state is data-plane pass-through; missing qualification
+  evidence is FAIL. Faults require exact release/machine/boot/call-class/target,
+  single-use nonce, bounded TTL, one-active admission, cleanup-before-receipt,
+  append-only evidence, and an independent evaluator.
+- [PLAN] Commit `54b748f` adds the eight-task TDD implementation plan. It
+  accounts for isolated producer processes via append-only intent plus
+  safe-boundary child claim, gives Telegram its own notification runtime,
+  prevents partial Gamma pages from publishing, preserves existing Incident
+  authorities, and keeps disk/load/process/restart/deploy primitives separate.
+- [VERIFIED] `make planning-status` remains green with 82 plans and no drift.
+  User-owned `findings.md`, `progress.md`, and `task_plan.md` were not modified
+  or staged. No runtime code, deployment, feature flag, secret, production DB,
+  or fault mutation changed.
+
+### [NEXT — CURRENT]
+
+Execute
+`docs/superpowers/plans/2026-07-30-scoped-upstream-fault-control.md`
+from Task 1 with RED tests for the pure controller and append-only authority.
+First command:
+`uv run pytest tests/perception/test_fault_control.py -q`.
+Implementation remains local/read-only until a later exact production mutation
+is separately authorized.
