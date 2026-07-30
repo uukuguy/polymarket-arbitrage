@@ -671,6 +671,199 @@ async def test_cancelled_committed_timeout_detaches_exact_fault_decision(
     assert getattr(organic_error, "_polyarb_fault_call_id", None) is None
 
 
+async def _real_latency_stack(tmp_path, name: str):
+    path = tmp_path / f"{name}.db"
+    store = OpportunityPerceptionStore(path)
+    store.init_schema()
+    revision = _group("group-a")
+    store.publish_group_revision(revision)
+    identity = FaultRuntimeIdentity(
+        component="candidate",
+        release_id="a" * 40,
+        machine_id="machine-1",
+        boot_id=UUID("99999999-9999-4999-8999-999999999999"),
+    )
+    authority = FaultAuthorityStore(path)
+    base_ms = int(time.time() * 1_000)
+    authority.register_runtime_start(
+        identity,
+        supervisor_run_id="run-1",
+        attempt=1,
+        started_at_ms=base_ms,
+    )
+    assert authority.accept_intent(
+        FaultIntentRequest(
+            fault_id=f"fault-{name}",
+            kind=FaultKind.CLOB_LATENCY,
+            call_class=FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH,
+            target_key="group-a",
+            parameters={"delay_ms": 1},
+            ttl_ms=30_000,
+            runtime=identity,
+        ),
+        auth=FaultAuthorization(
+            nonce_digest="9" * 64,
+            authorization_digest="a" * 64,
+        ),
+        accepted_at_ms=base_ms + 1,
+    ).accepted
+    now = base_ms + 10
+
+    def clock_ms():
+        nonlocal now
+        now += 1
+        return now
+
+    fault_runtime = FaultRuntime(
+        identity=identity,
+        authority=authority,
+        clock_ms=clock_ms,
+        monotonic=lambda: 10.0,
+    )
+    await fault_runtime.sync_before_batch()
+    watcher_runtime = CandidateWatcherRuntime()
+    watcher = CandidateWatcher(
+        structure_reader=_Structure(revision, []),
+        books_reader=_Books([]),
+        store=store,
+        runtime=watcher_runtime,
+        interval_controller=IntervalController(),
+        clock_ms=clock_ms,
+        fault_runtime=fault_runtime,
+    )
+    return store, authority, fault_runtime, watcher_runtime, watcher
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("_repeat", range(3))
+async def test_uncommitted_timeout_ignores_concurrent_same_group_success(
+    tmp_path,
+    monkeypatch,
+    _repeat,
+) -> None:
+    (
+        store,
+        authority,
+        fault_runtime,
+        watcher_runtime,
+        watcher,
+    ) = await _real_latency_stack(tmp_path, f"concurrent-success-{_repeat}")
+    entered = threading.Event()
+    release = threading.Event()
+    original_writer = store.record_candidate_watch_fact
+
+    def uncommitted_timeout_writer(*args, **kwargs):
+        if kwargs.get("reason") == "candidate-group-timeout":
+            entered.set()
+            assert release.wait(timeout=2)
+            raise sqlite3.OperationalError("forced-uncommitted-timeout")
+        return original_writer(*args, **kwargs)
+
+    monkeypatch.setattr(
+        store,
+        "record_candidate_watch_fact",
+        uncommitted_timeout_writer,
+    )
+    scheduler = CandidateWatcherScheduler(
+        watcher=watcher,
+        store=store,
+        candidate_group_ids=lambda: (),
+        runtime=watcher_runtime,
+        group_timeout_s=0.0005,
+        terminal_write_budget_s=5,
+        fault_runtime=fault_runtime,
+    )
+    selected = asyncio.create_task(
+        scheduler._run_selected_group(
+            (0, 0, "group-a"),
+            priority_by_rank={0: "high"},
+            admission_contexts={},
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 2)
+    selected.cancel()
+    concurrent = await watcher.run_once("group-a")
+    assert concurrent.status == "watching"
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await selected
+    scheduler.close()
+
+    exact_failures = [
+        operation
+        for operation in watcher._clob_incident_operations
+        if hasattr(operation, "error")
+        and getattr(operation.error, "_polyarb_fault_call_id", None) is not None
+    ]
+    assert exact_failures == []
+    assert watcher_runtime.snapshot().group_failure_count == 0
+    assert authority.validate_history(f"fault-concurrent-success-{_repeat}").events[
+        -1
+    ].state.value == "abandoned"
+    assert watcher._pending_latency_faults == {}
+    assert watcher._timeout_contexts == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("_repeat", range(3))
+async def test_success_commit_wins_scheduler_timeout_cancellation(
+    tmp_path,
+    monkeypatch,
+    _repeat,
+) -> None:
+    (
+        store,
+        authority,
+        fault_runtime,
+        watcher_runtime,
+        watcher,
+    ) = await _real_latency_stack(tmp_path, f"success-wins-{_repeat}")
+    committed = threading.Event()
+    release = threading.Event()
+    original_writer = store.publish_candidate_success
+
+    def blocked_success_return(*args, **kwargs):
+        fact = original_writer(*args, **kwargs)
+        committed.set()
+        assert release.wait(timeout=2)
+        return fact
+
+    monkeypatch.setattr(store, "publish_candidate_success", blocked_success_return)
+    scheduler = CandidateWatcherScheduler(
+        watcher=watcher,
+        store=store,
+        candidate_group_ids=lambda: (),
+        runtime=watcher_runtime,
+        group_timeout_s=0.01,
+        terminal_write_budget_s=5,
+        fault_runtime=fault_runtime,
+    )
+    selected = asyncio.create_task(
+        scheduler._run_selected_group(
+            (0, 0, "group-a"),
+            priority_by_rank={0: "high"},
+            admission_contexts={},
+        )
+    )
+    assert await asyncio.to_thread(committed.wait, 2)
+    await asyncio.sleep(0.02)
+    release.set()
+    await selected
+    scheduler.close()
+
+    facts = store.candidate_watch_facts("group-a")
+    assert [fact.last_result for fact in facts] == ["watching"]
+    assert watcher_runtime.snapshot().group_failure_count == 0
+    assert not any(
+        hasattr(operation, "error") for operation in watcher._clob_incident_operations
+    )
+    assert authority.validate_history(f"fault-success-wins-{_repeat}").events[
+        -1
+    ].state.value == "abandoned"
+    assert watcher._pending_latency_faults == {}
+    assert watcher._timeout_contexts == {}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tamper_recovery", [False, True])
 async def test_real_candidate_chain_recovers_from_new_exact_group_receipt(

@@ -89,7 +89,29 @@ the old `call_id`. The race now runs three times and proves:
 - after the exact operation is flushed and the real fault reaches `CLEANED`, a
   later organic timeout for the same group has no old fault `call_id`.
 
-The final focused runs collected 269 tests (74 exact Candidate tests plus 195
+The final HIGH found that a shared per-group attempt count was still not an
+invocation receipt. Two real SQLite races, each repeated three times, closed
+that gap:
+
+- an uncommitted timeout writer plus a concurrent same-group success no longer
+  treats the other invocation's success count as this timeout's commit; the
+  timed invocation emits zero exact Incident/failure evidence and cleans its
+  unobserved injected fault to `ABANDONED`;
+- a Candidate success committed before scheduler cancellation is authoritative
+  `SUCCESS`; it wins over the deadline, produces no timeout fact or group
+  failure, and its unobserved injected fault is owned-cleaned to `ABANDONED`
+  without fabricating detection, invalidity or recovery.
+
+Every scheduler-created Candidate task now owns a private
+`_CandidateInvocation` with a mutable-once terminal cell:
+`NONE`, `SUCCESS(exact fact)`, `UNAVAILABLE(exact fact)`, `ORGANIC_ERROR`, or
+`CANCELLED_UNCOMMITTED`. The exact writer future returns a `CandidateWatchFact`;
+the same worker path re-reads that exact `fact.id` and all fields from SQLite
+before installing the cell. Scheduler and timeout handling inspect only that
+task's cell—never group counters. Same-fact replay is idempotent; conflicting
+terminal installation fails closed.
+
+The final focused runs collected 275 tests (80 exact Candidate tests plus 195
 shared runtime/authority and Gamma regressions) and reached 100% with exit code
 0:
 
@@ -168,6 +190,12 @@ Ruff passed for all changed source and test files.
     that local decision. If the terminal SQLite worker committed before
     cancellation, runtime attempt installation is authoritative and the exact
     Incident operation is queued once; otherwise neither is fabricated.
+13. Terminal authority is task-local. A committed success always wins over
+    scheduler timeout; a committed unavailable fact alone authorizes the exact
+    timeout Incident. Concurrent same-group work cannot satisfy another cell.
+    If a consumed fault reaches a committed success without an exact failure
+    observation, the runtime relinquishes the owned `INJECTED` chain as
+    `ABANDONED`, preserving lifecycle truth.
 
 ## Remaining boundary
 

@@ -8195,6 +8195,33 @@ class OpportunityPerceptionStore:
             con.close()
         return None if row is None else self._candidate_watch_fact_from_row(row)
 
+    def validate_candidate_terminal_fact(
+        self,
+        fact: CandidateWatchFact,
+    ) -> CandidateWatchFact:
+        """Re-read one exact writer result; another group attempt cannot satisfy it."""
+        if not isinstance(fact, CandidateWatchFact):
+            raise TypeError("candidate-terminal-fact-required")
+        con = self._connect()
+        try:
+            self._assert_owner_journal_clean(con)
+            row = con.execute(
+                "SELECT id,group_id,membership_hash,quote_batch_id,observed_at_ms,"
+                "last_result,reason,bundle_cost,gross_edge_bps,max_bundle_size,"
+                "priority_class,consecutive_failures,effective_interval_s,"
+                "schedule_reason,next_due_at_ms "
+                "FROM neg_risk_candidate_watch_facts WHERE id=?",
+                (fact.id,),
+            ).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            raise ValueError("candidate-terminal-fact-missing")
+        validated = self._candidate_watch_fact_from_row(row)
+        if validated != fact:
+            raise ValueError("candidate-terminal-fact-mismatch")
+        return validated
+
     @staticmethod
     def _candidate_watch_fact_from_row(
         row: sqlite3.Row,

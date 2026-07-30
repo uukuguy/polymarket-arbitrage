@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any, Literal, Protocol
 
 from loguru import logger
@@ -75,6 +76,7 @@ class CandidateObservation:
 class _CandidateIncidentFailure:
     group_id: str
     error: BaseException
+    terminal_fact_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,10 +87,76 @@ class _CandidateIncidentSuccess:
     observed_at_ms: int
 
 
+class _CandidateTerminalState(StrEnum):
+    NONE = "none"
+    SUCCESS = "success"
+    UNAVAILABLE = "unavailable"
+    ORGANIC_ERROR = "organic-error"
+    CANCELLED_UNCOMMITTED = "cancelled-uncommitted"
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateTerminalOutcome:
+    state: _CandidateTerminalState
+    fact: CandidateWatchFact | None = None
+
+
+class _CandidateTerminalOutcomeCell:
+    """Private per-invocation terminal authority, installed at most once."""
+
+    def __init__(self) -> None:
+        self._outcome = _CandidateTerminalOutcome(_CandidateTerminalState.NONE)
+
+    @property
+    def outcome(self) -> _CandidateTerminalOutcome:
+        return self._outcome
+
+    def install_fact(self, fact: CandidateWatchFact) -> None:
+        state = (
+            _CandidateTerminalState.SUCCESS
+            if fact.last_result in {"watching", "no-edge"}
+            else _CandidateTerminalState.UNAVAILABLE
+        )
+        outcome = _CandidateTerminalOutcome(state, fact)
+        if self._outcome.state is _CandidateTerminalState.NONE:
+            self._outcome = outcome
+        elif self._outcome != outcome:
+            raise ValueError("candidate-terminal-outcome-conflict")
+
+    def install_uncommitted(self, state: _CandidateTerminalState) -> None:
+        if state not in {
+            _CandidateTerminalState.ORGANIC_ERROR,
+            _CandidateTerminalState.CANCELLED_UNCOMMITTED,
+        }:
+            raise ValueError("candidate-terminal-uncommitted-state-invalid")
+        if self._outcome.state is _CandidateTerminalState.NONE:
+            self._outcome = _CandidateTerminalOutcome(state)
+
+
+class _CandidateInvocation:
+    """Task-private outcome and the exact decision consumed by this invocation."""
+
+    def __init__(self) -> None:
+        self.terminal = _CandidateTerminalOutcomeCell()
+        self._decision: CandidateBooksDecision | None = None
+
+    @property
+    def decision(self) -> CandidateBooksDecision | None:
+        return self._decision
+
+    def install_decision(self, decision: CandidateBooksDecision) -> None:
+        if decision.receipt is None:
+            return
+        if self._decision is None:
+            self._decision = decision
+        elif self._decision != decision:
+            raise ValueError("candidate-invocation-decision-conflict")
+
+
 class _CandidateGroupTimeout(TimeoutError):
-    def __init__(self, decision: CandidateBooksDecision | None) -> None:
+    def __init__(self, invocation: _CandidateInvocation | None) -> None:
         super().__init__("candidate-group-timeout")
-        self.decision = decision
+        self.invocation = invocation
 
 
 @dataclass(frozen=True)
@@ -362,7 +430,9 @@ class CandidateWatcher:
         *,
         priority_hint: CandidatePriority = "high",
         admission_context: CandidateAdmissionContext | None = None,
+        _invocation: _CandidateInvocation | None = None,
     ) -> CandidateObservation:
+        invocation = _invocation or _CandidateInvocation()
         if admission_context is not None:
             if admission_context.group_id != group_id:
                 raise ValueError("candidate-admission-group-mismatch")
@@ -395,6 +465,7 @@ class CandidateWatcher:
             )
             token_ids = [leg.yes_token_id for leg in before.legs]
             fault_decision = await self._candidate_fault.before_books(group_id)
+            invocation.install_decision(fault_decision)
             if fault_decision.decision.kind is FaultKind.CLOB_LATENCY:
                 self._pending_latency_faults[group_id] = fault_decision
             try:
@@ -419,6 +490,7 @@ class CandidateWatcher:
                     before=before,
                     observed_at_ms=observed_at_ms,
                     reason="structure-membership-changed",
+                    terminal=invocation.terminal,
                 )
             batch = build_complete_group_quote_batch(
                 before,
@@ -446,6 +518,7 @@ class CandidateWatcher:
                 priority=priority,
                 consecutive_failures=0,
                 batch=batch,
+                terminal=invocation.terminal,
             )
             self._clob_incident_operations.append(
                 _CandidateIncidentSuccess(
@@ -466,9 +539,13 @@ class CandidateWatcher:
                 and cancellation.args[0] is timeout_context[1]
             )
             if timeout_owned:
-                cancellation._polyarb_timeout_decision = pending
-            elif pending is not None:
-                await self._candidate_fault.settle_inner_failure(pending)
+                cancellation._polyarb_timeout_invocation = invocation
+            else:
+                if pending is not None:
+                    await self._candidate_fault.settle_inner_failure(pending)
+                invocation.terminal.install_uncommitted(
+                    _CandidateTerminalState.CANCELLED_UNCOMMITTED
+                )
             raise
         except QuoteCollectionIntegrityError as error:
             self._pending_latency_faults.pop(group_id, None)
@@ -478,6 +555,7 @@ class CandidateWatcher:
                 before=before,
                 observed_at_ms=(observed_at_ms if observed_at_ms is not None else self._clock_ms()),
                 reason="incomplete-quotes",
+                terminal=invocation.terminal,
             )
             self.queue_incident_failure(group_id, error)
             return observation
@@ -488,6 +566,7 @@ class CandidateWatcher:
                 before=before,
                 observed_at_ms=(observed_at_ms if observed_at_ms is not None else self._clock_ms()),
                 reason="group-not-certified",
+                terminal=invocation.terminal,
             )
         except Exception as error:
             self._pending_latency_faults.pop(group_id, None)
@@ -499,12 +578,17 @@ class CandidateWatcher:
                 before=before,
                 observed_at_ms=(observed_at_ms if observed_at_ms is not None else self._clock_ms()),
                 reason="candidate-collection-failed",
+                terminal=invocation.terminal,
             )
             self.queue_incident_failure(group_id, error)
             return observation
         finally:
             self._pending_latency_faults.pop(group_id, None)
             self._timeout_contexts.pop(group_id, None)
+
+    @staticmethod
+    def new_invocation() -> _CandidateInvocation:
+        return _CandidateInvocation()
 
     async def _record_unavailable(
         self,
@@ -513,6 +597,7 @@ class CandidateWatcher:
         before: GroupRevision | None,
         observed_at_ms: int,
         reason: str,
+        terminal: _CandidateTerminalOutcomeCell | None = None,
     ) -> CandidateObservation:
         previous = await asyncio.to_thread(
             self._store.latest_candidate_watch_fact,
@@ -539,6 +624,7 @@ class CandidateWatcher:
             max_bundle_size=None,
             priority=priority,
             consecutive_failures=consecutive_failures,
+            terminal=terminal,
         )
 
     async def _record(
@@ -556,6 +642,7 @@ class CandidateWatcher:
         priority: CandidatePriority,
         consecutive_failures: int,
         batch: GroupQuoteBatch | None = None,
+        terminal: _CandidateTerminalOutcomeCell | None = None,
     ) -> CandidateObservation:
         transition = self._interval_controller.transition(
             priority=priority,
@@ -601,6 +688,7 @@ class CandidateWatcher:
             await self._commit_terminal_fact(
                 self._store.publish_candidate_success,
                 batch,
+                terminal=terminal,
                 **terminal_fields,
             )
         else:
@@ -609,6 +697,7 @@ class CandidateWatcher:
                 group_id=group_id,
                 membership_hash=membership_hash,
                 quote_batch_id=quote_batch_id,
+                terminal=terminal,
                 **terminal_fields,
             )
         return CandidateObservation(
@@ -632,10 +721,15 @@ class CandidateWatcher:
         self,
         writer: Callable[..., CandidateWatchFact],
         *args: Any,
+        terminal: _CandidateTerminalOutcomeCell | None = None,
         **kwargs: Any,
     ) -> CandidateWatchFact:
         """Finish a started SQLite commit before propagating cancellation."""
-        task = asyncio.create_task(asyncio.to_thread(writer, *args, **kwargs))
+        def write_and_verify() -> CandidateWatchFact:
+            fact = writer(*args, **kwargs)
+            return self._store.validate_candidate_terminal_fact(fact)
+
+        task = asyncio.create_task(asyncio.to_thread(write_and_verify))
         cancellation: asyncio.CancelledError | None = None
         while True:
             try:
@@ -649,6 +743,8 @@ class CandidateWatcher:
                 if cancellation is not None:
                     raise cancellation from error
                 raise
+        if terminal is not None:
+            terminal.install_fact(fact)
         self._runtime.record(fact)
         if cancellation is not None:
             raise cancellation
@@ -686,28 +782,56 @@ class CandidateWatcher:
     async def record_timeout(
         self,
         group_id: str,
-        decision: CandidateBooksDecision | None = None,
+        invocation: _CandidateInvocation | None = None,
     ) -> None:
         """Persist an explicit unavailable transition for a bounded group timeout."""
-        detached = decision or self._pending_latency_faults.pop(group_id, None)
+        owned = invocation or _CandidateInvocation()
+        detached = owned.decision or self._pending_latency_faults.pop(group_id, None)
         self._timeout_contexts.pop(group_id, None)
         error = TimeoutError()
         if detached is not None:
             self._candidate_fault.tag_error(error, detached)
-        before_count = self._runtime.group_attempt_count(group_id)
         try:
             await self._record_unavailable(
                 group_id=group_id,
                 before=None,
                 observed_at_ms=self._clock_ms(),
                 reason="candidate-group-timeout",
+                terminal=owned.terminal,
             )
         except asyncio.CancelledError:
-            if self._runtime.group_attempt_count(group_id) > before_count:
-                self.queue_incident_failure(group_id, error)
+            if owned.terminal.outcome.state is _CandidateTerminalState.UNAVAILABLE:
+                assert owned.terminal.outcome.fact is not None
+                self.queue_incident_failure(
+                    group_id,
+                    error,
+                    terminal_fact_id=owned.terminal.outcome.fact.id,
+                )
+                self._runtime.record_group_failure(group_id, error)
+            else:
+                if detached is not None:
+                    await self._candidate_fault.settle_inner_failure(detached)
+                owned.terminal.install_uncommitted(
+                    _CandidateTerminalState.CANCELLED_UNCOMMITTED
+                )
+            raise
+        except Exception:
+            if detached is not None:
+                await self._candidate_fault.settle_inner_failure(detached)
+            owned.terminal.install_uncommitted(
+                _CandidateTerminalState.ORGANIC_ERROR
+            )
             raise
         else:
-            self.queue_incident_failure(group_id, error)
+            outcome = owned.terminal.outcome
+            if outcome.state is not _CandidateTerminalState.UNAVAILABLE:
+                raise ValueError("candidate-timeout-terminal-receipt-missing")
+            assert outcome.fact is not None
+            self.queue_incident_failure(
+                group_id,
+                error,
+                terminal_fact_id=outcome.fact.id,
+            )
         finally:
             self._pending_latency_faults.pop(group_id, None)
             self._timeout_contexts.pop(group_id, None)
@@ -715,9 +839,9 @@ class CandidateWatcher:
     async def record_timeout_decision(
         self,
         group_id: str,
-        decision: CandidateBooksDecision | None,
+        invocation: _CandidateInvocation | None,
     ) -> None:
-        await self.record_timeout(group_id, decision)
+        await self.record_timeout(group_id, invocation)
 
     def prepare_timeout(
         self,
@@ -726,8 +850,7 @@ class CandidateWatcher:
         token: object,
     ) -> None:
         """Mark the scheduler-owned cancellation that becomes a timeout fact."""
-        if group_id in self._pending_latency_faults:
-            self._timeout_contexts[group_id] = (task, token)
+        self._timeout_contexts[group_id] = (task, token)
 
     def clear_timeout(
         self,
@@ -742,8 +865,43 @@ class CandidateWatcher:
         self,
         group_id: str,
         error: BaseException,
+        *,
+        terminal_fact_id: int | None = None,
     ) -> None:
-        self._clob_incident_operations.append(_CandidateIncidentFailure(group_id, error))
+        if terminal_fact_id is not None and any(
+            isinstance(operation, _CandidateIncidentFailure)
+            and operation.terminal_fact_id == terminal_fact_id
+            for operation in self._clob_incident_operations
+        ):
+            return
+        self._clob_incident_operations.append(
+            _CandidateIncidentFailure(group_id, error, terminal_fact_id)
+        )
+
+    async def settle_successful_timeout(
+        self,
+        invocation: _CandidateInvocation,
+    ) -> None:
+        outcome = invocation.terminal.outcome
+        if outcome.state is not _CandidateTerminalState.SUCCESS or outcome.fact is None:
+            raise ValueError("candidate-success-terminal-receipt-required")
+        if invocation.decision is not None:
+            await self._candidate_fault.settle_inner_failure(invocation.decision)
+        if not any(
+            isinstance(operation, _CandidateIncidentSuccess)
+            and operation.quote_batch_id == outcome.fact.quote_batch_id
+            for operation in self._clob_incident_operations
+        ):
+            assert outcome.fact.membership_hash is not None
+            assert outcome.fact.quote_batch_id is not None
+            self._clob_incident_operations.append(
+                _CandidateIncidentSuccess(
+                    group_id=outcome.fact.group_id,
+                    membership_hash=outcome.fact.membership_hash,
+                    quote_batch_id=outcome.fact.quote_batch_id,
+                    observed_at_ms=outcome.fact.observed_at_ms,
+                )
+            )
 
     async def flush_incidents(self) -> None:
         if not self._clob_incident_operations:
@@ -1053,13 +1211,20 @@ class CandidateWatcherScheduler:
         timeout_s: float | None = None,
     ) -> None:
         rank_value, _, group_id = item
-        before_count = self._runtime.group_attempt_count(group_id)
+        invocation_factory = getattr(self._watcher, "new_invocation", None)
+        invocation = None if invocation_factory is None else invocation_factory()
+        timeout_resolved_as_success = False
         try:
+            run_kwargs = {
+                "priority_hint": priority_by_rank[rank_value],
+                "admission_context": admission_contexts.get(group_id),
+            }
+            if invocation is not None:
+                run_kwargs["_invocation"] = invocation
             group_task = asyncio.create_task(
                 self._watcher.run_once(
                     group_id,
-                    priority_hint=priority_by_rank[rank_value],
-                    admission_context=admission_contexts.get(group_id),
+                    **run_kwargs,
                 )
             )
             timeout = timeout_s or self._group_timeout_s
@@ -1083,9 +1248,24 @@ class CandidateWatcherScheduler:
                         and outcome.args
                         and outcome.args[0] is timeout_token
                     ):
-                        raise _CandidateGroupTimeout(
-                            getattr(outcome, "_polyarb_timeout_decision", None)
-                        ) from None
+                        owned = getattr(
+                            outcome,
+                            "_polyarb_timeout_invocation",
+                            invocation,
+                        )
+                        if (
+                            owned is not None
+                            and owned.terminal.outcome.state
+                            is _CandidateTerminalState.SUCCESS
+                        ):
+                            settle_success = getattr(
+                                self._watcher,
+                                "settle_successful_timeout",
+                            )
+                            await settle_success(owned)
+                            timeout_resolved_as_success = True
+                        else:
+                            raise _CandidateGroupTimeout(owned) from None
                     else:
                         raise outcome
                 except asyncio.CancelledError:
@@ -1093,7 +1273,8 @@ class CandidateWatcherScheduler:
                 finally:
                     if clear_timeout is not None:
                         clear_timeout(group_id, group_task, timeout_token)
-            group_task.result()
+            if not timeout_resolved_as_success:
+                group_task.result()
         except asyncio.CancelledError:
             if "group_task" in locals() and not group_task.done():
                 group_task.cancel()
@@ -1106,21 +1287,29 @@ class CandidateWatcherScheduler:
                         continue
             raise
         except _CandidateGroupTimeout as error:
-            self._runtime.record_group_failure(group_id, error)
-            if self._runtime.group_attempt_count(group_id) == before_count:
-                record_timeout = getattr(
-                    self._watcher,
-                    "record_timeout_decision",
-                    self._watcher.record_timeout,
-                )
-                await asyncio.wait_for(
-                    record_timeout(group_id, error.decision)
-                    if hasattr(self._watcher, "record_timeout_decision")
-                    else record_timeout(group_id),
-                    timeout=self._terminal_write_budget_s,
-                )
+            record_timeout = getattr(
+                self._watcher,
+                "record_timeout_decision",
+                self._watcher.record_timeout,
+            )
+            await asyncio.wait_for(
+                record_timeout(group_id, error.invocation)
+                if hasattr(self._watcher, "record_timeout_decision")
+                else record_timeout(group_id),
+                timeout=self._terminal_write_budget_s,
+            )
+            if (
+                error.invocation is None
+                or error.invocation.terminal.outcome.state
+                is _CandidateTerminalState.UNAVAILABLE
+            ):
+                self._runtime.record_group_failure(group_id, error)
             logger.warning(f"candidate group timed out group_id={group_id}")
         except Exception as error:
+            if invocation is not None:
+                invocation.terminal.install_uncommitted(
+                    _CandidateTerminalState.ORGANIC_ERROR
+                )
             self._runtime.record_group_failure(group_id, error)
             queue_incident_failure = getattr(
                 self._watcher,
