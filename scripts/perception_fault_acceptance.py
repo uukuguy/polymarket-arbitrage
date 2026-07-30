@@ -22,8 +22,10 @@ from polyarb.perception.evaluator_signing import (
     verify_digest,
 )
 from polyarb.perception.fault_control import (
+    FaultEventState,
     FaultRuntimeIdentity,
     fault_call_binding_digest,
+    normalize_evidence,
 )
 from polyarb.safe_artifact import read_stable_bytes, write_exclusive_bytes
 
@@ -73,6 +75,27 @@ _EVENT_FIELDS = frozenset(
         "evidence", "previous_hash", "event_hash",
     }
 )
+_INTENT_FIELDS = frozenset(
+    {
+        "fault_id", "kind", "call_class", "target_key", "parameters",
+        "nonce_digest", "runtime",
+    }
+)
+_RUNTIME_FIELDS = frozenset(
+    {"component", "release_id", "machine_id", "boot_id"}
+)
+_PRODUCTION_EVIDENCE_FIELDS = {
+    "authorized": frozenset({"reason"}),
+    "armed": frozenset({"runtime_identity_digest", "ownership_digest"}),
+    "injected": frozenset({"call_id", "call_binding_digest"}),
+    "detected": None,
+    "contained": frozenset({"containment_id"}),
+    "cleaned": frozenset(
+        {"cleanup_id", "memory_cleared_at_ms", "receipt_persisted_at_ms"}
+    ),
+    "recovered": frozenset({"recovery_id"}),
+    "verified": frozenset({"verdict_id", "verdict_digest"}),
+}
 
 
 def _event_digest(event: Mapping[str, Any]) -> str:
@@ -110,12 +133,16 @@ def evaluate_fault_envelope(
     if not isinstance(intent, Mapping):
         reasons.append("missing-fault-intent")
         return QualificationVerdict("FAIL", tuple(reasons))
+    if set(intent) != _INTENT_FIELDS:
+        reasons.append("invalid-fault-intent-fields")
     if evidence.get("fault_intent_digest") != canonical_digest(intent):
         reasons.append("fault-intent-digest-mismatch")
     runtime = intent.get("runtime")
     if not isinstance(runtime, Mapping):
         reasons.append("missing-runtime")
         runtime = {}
+    elif set(runtime) != _RUNTIME_FIELDS:
+        reasons.append("invalid-runtime-fields")
     for field in ("release_id", "machine_id", "boot_id"):
         if evidence.get(field) != runtime.get(field):
             reasons.append(f"runtime-{field.replace('_', '-')}-mismatch")
@@ -159,9 +186,29 @@ def evaluate_fault_envelope(
             continue
         if set(raw) != _EVENT_FIELDS:
             reasons.append("invalid-event-fields")
+        state = raw.get("state")
+        action = raw.get("action")
+        if not (
+            (isinstance(state, str) and action is None)
+            or (state is None and action in {"cleanup-requested", "cleanup-confirmed"})
+        ):
+            reasons.append("invalid-event-state-action")
+        if isinstance(state, str):
+            event_evidence = (
+                raw.get("evidence") if isinstance(raw.get("evidence"), Mapping) else {}
+            )
+            try:
+                normalize_evidence(
+                    FaultEventState(state),
+                    event_evidence,
+                )
+            except (TypeError, ValueError):
+                reasons.append("invalid-state-evidence")
+            expected_evidence = _PRODUCTION_EVIDENCE_FIELDS.get(state)
+            if expected_evidence is not None and set(event_evidence) != expected_evidence:
+                reasons.append("invalid-state-evidence-fields")
         if raw.get("fault_id") != intent.get("fault_id"):
             reasons.append("event-fault-id-mismatch")
-        state = raw.get("state")
         if isinstance(state, str):
             state_counts[state] = state_counts.get(state, 0) + 1
         if raw.get("sequence") != index:
@@ -176,6 +223,44 @@ def evaluate_fault_envelope(
         previous = str(raw.get("event_hash", ""))
     if evidence.get("fault_history_tail_hash") != previous:
         reasons.append("history-tail-hash-mismatch")
+
+    cleanup_confirmations = [
+        item
+        for item in history
+        if isinstance(item, Mapping) and item.get("action") == "cleanup-confirmed"
+    ]
+    cleaned_events = [
+        item
+        for item in history
+        if isinstance(item, Mapping) and item.get("state") == "cleaned"
+    ]
+    if len(cleanup_confirmations) != 1 or len(cleaned_events) != 1:
+        reasons.append("cleanup-confirmation-missing")
+    else:
+        confirmation = cleanup_confirmations[0]
+        confirmation_evidence = confirmation.get("evidence")
+        cleaned = cleaned_events[0]
+        cleaned_evidence = cleaned.get("evidence")
+        if (
+            not isinstance(confirmation_evidence, Mapping)
+            or not isinstance(cleaned_evidence, Mapping)
+            or set(confirmation_evidence)
+            != {
+                "cleaned_event_hash",
+                "cleanup_id",
+                "memory_cleared_at_ms",
+                "receipt_commit_confirmed_at_ms",
+            }
+            or confirmation_evidence.get("cleaned_event_hash")
+            != cleaned.get("event_hash")
+            or confirmation_evidence.get("cleanup_id")
+            != cleaned_evidence.get("cleanup_id")
+            or str(confirmation_evidence.get("memory_cleared_at_ms"))
+            != str(cleaned_evidence.get("memory_cleared_at_ms"))
+            or confirmation_evidence.get("receipt_commit_confirmed_at_ms")
+            != confirmation.get("occurred_at_ms")
+        ):
+            reasons.append("cleanup-confirmation-invalid")
 
     expected_states = (
         "authorized",
@@ -297,7 +382,7 @@ def evaluate_fault_envelope(
         or set(detection_receipt)
         != {
             "detection_id", "kind", "call_class", "target_key", "runtime",
-            "source_kind",
+            "source_kind", "source_history",
         }
         or detection_receipt.get("detection_id") != detection_id
         or detection_receipt.get("kind") != intent.get("kind")
@@ -312,6 +397,12 @@ def evaluate_fault_envelope(
         )
     ):
         reasons.append("detection-source-binding-mismatch")
+    elif (
+        not isinstance(detection_receipt.get("source_history"), list)
+        or not detection_receipt["source_history"]
+        or any(not isinstance(item, Mapping) for item in detection_receipt["source_history"])
+    ):
+        reasons.append("detection-source-history-invalid")
 
     component = runtime.get("component")
     receipt = evidence.get("recovery_writer_receipt")

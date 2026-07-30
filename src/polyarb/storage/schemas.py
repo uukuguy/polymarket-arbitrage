@@ -1472,14 +1472,15 @@ CREATE TABLE IF NOT EXISTS neg_risk_fault_events (
     ('authorized','armed','injected','detected','contained','recovered',
      'cleaned','verified','rejected','expired','abandoned','cleanup-failed',
      'recovery-timeout','evidence-invalid','escalated')),
-  action TEXT CHECK(action IS NULL OR action = 'cleanup-requested'),
+  action TEXT CHECK(action IS NULL OR action IN
+    ('cleanup-requested','cleanup-confirmed')),
   occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
   evidence_json TEXT NOT NULL,
   previous_hash TEXT NOT NULL CHECK(length(previous_hash) = 64),
   event_hash TEXT NOT NULL CHECK(length(event_hash) = 64),
   CHECK(
     (state IS NOT NULL AND action IS NULL)
-    OR (state IS NULL AND action = 'cleanup-requested')
+    OR (state IS NULL AND action IN ('cleanup-requested','cleanup-confirmed'))
   ),
   UNIQUE(fault_id,sequence),
   UNIQUE(event_hash)
@@ -1491,6 +1492,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_neg_risk_fault_one_injection
 CREATE UNIQUE INDEX IF NOT EXISTS idx_neg_risk_fault_one_cleanup_terminal
   ON neg_risk_fault_events(fault_id)
   WHERE state IN ('cleaned','cleanup-failed');
+
+CREATE TABLE IF NOT EXISTS neg_risk_fault_coverage_rejections (
+  coverage_id TEXT PRIMARY KEY CHECK(length(coverage_id) = 73),
+  fault_id TEXT NOT NULL UNIQUE REFERENCES neg_risk_fault_intents(fault_id),
+  call_class TEXT NOT NULL CHECK(call_class='gamma-discovery-event-page'),
+  target_key TEXT NOT NULL CHECK(target_key='discovery'),
+  component TEXT NOT NULL CHECK(component='discovery'),
+  release_id TEXT NOT NULL CHECK(length(release_id)=40),
+  machine_id TEXT NOT NULL,
+  boot_id TEXT NOT NULL,
+  original_count INTEGER NOT NULL CHECK(original_count >= 1),
+  kept_count INTEGER NOT NULL CHECK(kept_count >= 0 AND kept_count < original_count),
+  requested_cursor_digest TEXT NOT NULL CHECK(length(requested_cursor_digest)=64),
+  next_cursor_digest TEXT NOT NULL CHECK(length(next_cursor_digest)=64),
+  recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms >= 0),
+  source_hash TEXT NOT NULL CHECK(length(source_hash)=64)
+);
 
 CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_auth_attempt_link
 BEFORE INSERT ON neg_risk_fault_auth_nonces
@@ -1534,6 +1552,12 @@ BEFORE UPDATE ON neg_risk_fault_events
 BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_events_no_delete
 BEFORE DELETE ON neg_risk_fault_events
+BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_coverage_rejections_no_update
+BEFORE UPDATE ON neg_risk_fault_coverage_rejections
+BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_coverage_rejections_no_delete
+BEFORE DELETE ON neg_risk_fault_coverage_rejections
 BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
 
 -- Phase 1.1 T2: append-only translation cache.

@@ -192,19 +192,6 @@ FAULTS = {
         ),
     )
 }
-FAULTS["candidate-exit"] = replace(
-    FAULTS["candidate-exit"],
-    legacy_execute_supported=True,
-)
-FAULTS["discovery-exit"] = replace(
-    FAULTS["discovery-exit"],
-    legacy_execute_supported=True,
-)
-FAULTS["reconciliation-stall"] = replace(
-    FAULTS["reconciliation-stall"],
-    legacy_execute_supported=True,
-)
-
 _UPSTREAM_FAULTS = frozenset(
     {
         "gamma-timeout",
@@ -288,7 +275,10 @@ def _signed_post_json(
     request = Request(base_url.rstrip("/") + path, data=body, headers=headers, method="POST")
     try:
         with urlopen(request, timeout=10) as response:  # noqa: S310
-            value = json.loads(response.read(_MAX_HTTP_BYTES + 1))
+            raw = response.read(_MAX_HTTP_BYTES + 1)
+        if len(raw) > _MAX_HTTP_BYTES:
+            raise AdapterFailedError("control-response-oversized")
+        value = json.loads(raw)
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise AdapterFailedError(f"control-request-failed:{type(exc).__name__}") from exc
     if not isinstance(value, Mapping):
@@ -506,9 +496,29 @@ class UpstreamHttpTransport:
             evidence = cleaned.get("evidence")
             if not isinstance(evidence, Mapping):
                 raise AdapterFailedError("cleanup-receipt-missing")
+            confirmation = next(
+                (
+                    event
+                    for event in reversed(events)
+                    if isinstance(event, Mapping)
+                    and event.get("action") == "cleanup-confirmed"
+                ),
+                None,
+            )
+            confirmation_evidence = (
+                confirmation.get("evidence")
+                if isinstance(confirmation, Mapping)
+                else None
+            )
             try:
-                memory_cleared = int(str(evidence["memory_cleared_at_ms"]))
-                persisted = int(str(evidence["receipt_persisted_at_ms"]))
+                if not isinstance(confirmation_evidence, Mapping):
+                    raise KeyError("cleanup-confirmed")
+                memory_cleared = int(
+                    str(confirmation_evidence["memory_cleared_at_ms"])
+                )
+                persisted = int(
+                    str(confirmation_evidence["receipt_commit_confirmed_at_ms"])
+                )
             except (KeyError, TypeError, ValueError) as exc:
                 raise AdapterFailedError("cleanup-receipt-missing") from exc
             return {
@@ -745,13 +755,12 @@ def execute_upstream_fault(
     except BaseException as exc:
         cleanup_error = exc
     if cleanup_error is not None:
-        wrapped_cleanup = AdapterFailedError(f"cleanup-failed:{cleanup_error}")
         if original is not None:
             raise BaseExceptionGroup(
                 "fault-execution-and-cleanup-failed:cleanup-failed",
-                [original, wrapped_cleanup],
+                [original, cleanup_error],
             )
-        raise wrapped_cleanup from cleanup_error
+        raise cleanup_error
     if original is not None:
         raise original
     assert observed is not None and cleanup is not None
@@ -1150,7 +1159,7 @@ def _parser() -> argparse.ArgumentParser:
     execute = subparsers.add_parser("execute")
     execute.add_argument("--fault", required=True, choices=sorted(FAULTS))
     execute.add_argument("--expected-release", required=True)
-    execute.add_argument("--authorization", required=True)
+    execute.add_argument("--authorization")
     execute.add_argument("--machine-id")
     execute.add_argument("--boot-id")
     execute.add_argument("--call-class")
@@ -1170,13 +1179,17 @@ def _execute(args: argparse.Namespace) -> int:
     if _RELEASE_RE.fullmatch(release) is None:
         print("invalid-expected-release", file=sys.stderr)
         return 2
-    if args.authorization != f"fault:{args.fault}:{release}":
+    is_upstream = args.fault in _UPSTREAM_FAULTS
+    if not is_upstream and args.authorization != f"fault:{args.fault}:{release}":
         print("invalid-fault-authorization", file=sys.stderr)
+        return 2
+    if is_upstream and args.authorization is not None:
+        print("upstream-authorization-argument-forbidden", file=sys.stderr)
         return 2
     if args.evidence_dir.exists():
         print("evidence-dir-already-exists", file=sys.stderr)
         return 2
-    if args.fault in _UPSTREAM_FAULTS and not all(
+    if is_upstream and not all(
         (
             args.machine_id,
             args.boot_id,
@@ -1192,7 +1205,7 @@ def _execute(args: argparse.Namespace) -> int:
         return 2
     try:
         base_url = readonly._validate_base_url(args.base_url)
-        if args.fault in _UPSTREAM_FAULTS:
+        if is_upstream:
             parameters = json.loads(args.parameters_json)
             if not isinstance(parameters, Mapping):
                 raise AdapterFailedError("parameters-json-invalid")

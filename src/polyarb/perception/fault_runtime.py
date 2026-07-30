@@ -257,6 +257,15 @@ class FaultRuntime:
                 ownership=ownership,
                 memory_cleared_at_ms=memory_cleared_at_ms,
             )
+            confirm = getattr(self._authority, "confirm_cleanup_commit", None)
+            if callable(confirm) and event.state is FaultEventState.CLEANED:
+                confirm(
+                    fault_id,
+                    cleaned=event,
+                    memory_cleared_at_ms=memory_cleared_at_ms,
+                    confirmed_at_ms=self._clock_ms(),
+                    ownership=ownership,
+                )
             terminal_state = event.state
 
         try:
@@ -411,6 +420,37 @@ class FaultRuntime:
         except Exception as error:
             self._freeze_evidence(error)
             return False
+        return True
+
+    async def record_partial_coverage_source(
+        self,
+        fault_id: str,
+        *,
+        coverage_id: str,
+        original_count: int,
+        kept_count: int,
+        requested_cursor_digest: str,
+        next_cursor_digest: str,
+    ) -> bool:
+        """Persist the source-owned rejected-page fact before lifecycle linking."""
+        active = self._controller.active
+        if (
+            active is None
+            or active.intent.fault_id != fault_id
+            or active.intent.kind is not FaultKind.GAMMA_PARTIAL
+        ):
+            return False
+        await self._settle_evidence_write(
+            lambda: self._authority.record_partial_coverage_rejection(
+                fault_id,
+                coverage_id=coverage_id,
+                original_count=original_count,
+                kept_count=kept_count,
+                requested_cursor_digest=requested_cursor_digest,
+                next_cursor_digest=next_cursor_digest,
+                recorded_at_ms=self._clock_ms(),
+            )
+        )
         return True
 
     def make_recovery_receipt(

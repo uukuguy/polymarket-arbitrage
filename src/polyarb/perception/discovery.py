@@ -529,6 +529,14 @@ class DiscoveryRunner:
                 except PartialGammaPageError as error:
                     fault_id = gamma_fault_id(error)
                     if fault_id is not None:
+                        await self._fault_runtime.record_partial_coverage_source(
+                            fault_id,
+                            coverage_id=error.coverage_id,
+                            original_count=error.original_count,
+                            kept_count=error.kept_count,
+                            requested_cursor_digest=error.requested_cursor_digest,
+                            next_cursor_digest=error.next_cursor_digest,
+                        )
                         await self._fault_runtime.link_detection(
                             fault_id,
                             kind=FaultKind.GAMMA_PARTIAL,

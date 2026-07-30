@@ -848,13 +848,13 @@ qualify-perception-local:
 ## evaluate-upstream-fault-candidate: Read-only signed candidate verdict from one immutable RECOVERED envelope.
 evaluate-upstream-fault-candidate:
 	@test -n "$(evidence)" -a -n "$(output)" -a -n "$(expected_release)" || (echo 'usage: make evaluate-upstream-fault-candidate evidence=... output=... expected_release=...' >&2; exit 2)
-	@test -n "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET is required" >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY" || (echo "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY is required" >&2; exit 2)
 	@uv run python scripts/perception_fault_acceptance.py --evidence "$(evidence)" --output "$(output)" --require-scope production-fault --expected-release "$(expected_release)" --fault-mode candidate
 
 ## evaluate-upstream-fault-final: Read-only final verdict after source authority appended exact VERIFIED.
 evaluate-upstream-fault-final:
 	@test -n "$(evidence)" -a -n "$(candidate)" -a -n "$(output)" -a -n "$(expected_release)" || (echo 'usage: make evaluate-upstream-fault-final evidence=... candidate=... output=... expected_release=...' >&2; exit 2)
-	@test -n "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET is required" >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY" || (echo "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY is required" >&2; exit 2)
 	@uv run python scripts/perception_fault_acceptance.py --evidence "$(evidence)" --candidate-artifact "$(candidate)" --output "$(output)" --require-scope production-fault --expected-release "$(expected_release)" --fault-mode final
 
 ## qualify-perception-prod-readonly: Preserve a bounded GET-only production evidence window and fail-closed verdict
@@ -927,7 +927,7 @@ chaos-perception-contention:
 ## chaos-perception-daemon-restart: Show the read-only daemon restart qualification plan; mode=execute is authorization-gated.
 ## chaos-perception-deploy-interrupt: Show the read-only deploy interruption qualification plan; mode=execute is authorization-gated.
 ## chaos-perception-contention: Show the read-only bounded contention qualification plan; mode=execute is authorization-gated.
-## Usage for upstream execution also requires ordinary_authorization, fault_authorization, machine_id, boot_id, call_class, target_key, and parameters_json.
+## Upstream execution reads both HMAC authorities only from the environment and requires machine_id, boot_id, call_class, target_key, and parameters_json.
 ## Producer execution remains: make chaos-perception-<fault> mode=execute expected_release=<sha> authorization=fault:<fault>:<sha> evidence_dir=<new-path>
 $(PERCEPTION_CHAOS_TARGETS): chaos-perception-%:
 	@set -eu; \
@@ -939,12 +939,9 @@ $(PERCEPTION_CHAOS_TARGETS): chaos-perception-%:
 	  echo "invalid-mode: $$qualification_mode" >&2; \
 	  exit 2; \
 	fi; \
-	exec uv run python scripts/perception_chaos.py execute \
+	set -- uv run python scripts/perception_chaos.py execute \
 	  --fault "$*" \
 	  --expected-release "$(expected_release)" \
-	  --authorization "$(authorization)" \
-	  --ordinary-authorization "$(ordinary_authorization)" \
-	  --fault-authorization "$(fault_authorization)" \
 	  --machine-id "$(machine_id)" \
 	  --boot-id "$(boot_id)" \
 	  --call-class "$(call_class)" \
@@ -952,7 +949,12 @@ $(PERCEPTION_CHAOS_TARGETS): chaos-perception-%:
 	  --parameters-json "$(parameters_json)" \
 	  --evidence-dir "$(evidence_dir)" \
 	  --base-url "$(POLYARB_PERCEPTION_URL)" \
-	  --timeout-s "$(or $(timeout_s),120)"
+	  --timeout-s "$(or $(timeout_s),120)"; \
+	case "$*" in \
+	  gamma-timeout|gamma-partial|gamma-malformed|gamma-cursor|clob-missing-leg|clob-429|clob-latency|telegram-failure) ;; \
+	  *) set -- "$$@" --authorization "$(authorization)" ;; \
+	esac; \
+	exec "$$@"
 
 ## verify-perception-recovery: Evaluate immutable production-fault evidence against exact release and all SLA/writer gates.
 ## Usage: make verify-perception-recovery evidence=<json> output=<new-verdict-json> expected_release=<40-char-sha>

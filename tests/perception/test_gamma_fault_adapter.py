@@ -439,7 +439,7 @@ async def test_real_partial_chain_persists_redacted_coverage_then_recovers(
 
     history = authority.validate_history("fault-partial")
     assert history.valid is True
-    assert [event.state.value for event in history.events] == [
+    assert [event.state.value for event in history.events if event.state is not None] == [
         "authorized",
         "armed",
         "injected",
@@ -616,7 +616,7 @@ async def test_real_reconciliation_cursor_chain_recovers_on_new_checkpoint(
 
     history = authority.validate_history("fault-cursor")
     assert history.valid is True
-    assert [event.state.value for event in history.events] == [
+    assert [event.state.value for event in history.events if event.state is not None] == [
         "authorized",
         "armed",
         "injected",

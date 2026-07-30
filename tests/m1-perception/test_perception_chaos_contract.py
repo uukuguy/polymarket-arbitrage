@@ -74,8 +74,6 @@ def test_execute_fails_before_mutation_without_exact_upstream_target(tmp_path: P
             "gamma-timeout",
             "--expected-release",
             "a" * 40,
-            "--authorization",
-            f"fault:gamma-timeout:{'a' * 40}",
             "--evidence-dir",
             str(tmp_path / "evidence"),
         ],
@@ -103,7 +101,7 @@ def test_candidate_exit_plan_matches_sigterm_supervisor_outcome() -> None:
     plan = json.loads(result.stdout)
     assert plan["expected_incident_kind"] == "child-nonzero"
     assert plan["execute_supported"] is False
-    assert plan["legacy_execute_supported"] is True
+    assert plan["legacy_execute_supported"] is False
 
 
 def test_discovery_exit_plan_matches_sigterm_supervisor_outcome() -> None:
@@ -119,7 +117,7 @@ def test_discovery_exit_plan_matches_sigterm_supervisor_outcome() -> None:
     plan = json.loads(result.stdout)
     assert plan["expected_incident_kind"] == "child-nonzero"
     assert plan["execute_supported"] is False
-    assert plan["legacy_execute_supported"] is True
+    assert plan["legacy_execute_supported"] is False
 
 
 def test_reconciliation_stall_uses_durable_early_detection_policy() -> None:
@@ -133,7 +131,7 @@ def test_reconciliation_stall_uses_durable_early_detection_policy() -> None:
 
     plan = json.loads(result.stdout)
     assert plan["execute_supported"] is False
-    assert plan["legacy_execute_supported"] is True
+    assert plan["legacy_execute_supported"] is False
     assert plan["expected_incident_kind"] == "child-stalled"
     assert Settings().producer_stall_detection_s <= 30
     assert (
@@ -715,8 +713,6 @@ def test_upstream_make_execute_passes_exact_runtime_and_separate_authorities() -
 
     assert result.returncode == 0, result.stderr
     for expected in (
-        '--ordinary-authorization "ordinary-approval"',
-        '--fault-authorization "fault-approval"',
         '--machine-id "machine-1"',
         f'--boot-id "{boot_id}"',
         '--call-class "gamma-discovery-event-page"',
@@ -724,3 +720,5 @@ def test_upstream_make_execute_passes_exact_runtime_and_separate_authorities() -
         '--parameters-json "{"delay_ms":10}"',
     ):
         assert expected in result.stdout
+    assert "--ordinary-authorization" not in result.stdout
+    assert "--fault-authorization" not in result.stdout

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import time
@@ -380,6 +381,78 @@ class FaultAuthorityStore:
                 raise ValueError("runtime-identity-conflict")
             con.execute("COMMIT")
             return identity
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def record_partial_coverage_rejection(
+        self,
+        fault_id: str,
+        *,
+        coverage_id: str,
+        original_count: int,
+        kept_count: int,
+        requested_cursor_digest: str,
+        next_cursor_digest: str,
+        recorded_at_ms: int,
+    ) -> None:
+        """Persist the producer-owned Gamma partial-page fact before detection."""
+        if self._read_only:
+            raise RuntimeError("fault-authority-read-only")
+        fault_id = normalize_fault_id(fault_id)
+        self._validate_time(recorded_at_ms, "invalid-coverage-recorded-at")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT * FROM neg_risk_fault_intents WHERE fault_id=?",
+                (fault_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["kind"] != "gamma-partial"
+                or row["call_class"] != "gamma-discovery-event-page"
+                or row["target_key"] != "discovery"
+                or type(original_count) is not int
+                or type(kept_count) is not int
+                or not 0 <= kept_count < original_count
+                or not isinstance(coverage_id, str)
+                or not coverage_id.startswith("coverage-")
+                or len(coverage_id) != 73
+                or any(
+                    not isinstance(value, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                    for value in (requested_cursor_digest, next_cursor_digest)
+                )
+            ):
+                raise ValueError("invalid-partial-coverage-source")
+            payload = {
+                "boot_id": row["boot_id"],
+                "call_class": row["call_class"],
+                "component": row["component"],
+                "coverage_id": coverage_id,
+                "fault_id": fault_id,
+                "kept_count": kept_count,
+                "machine_id": row["machine_id"],
+                "next_cursor_digest": next_cursor_digest,
+                "original_count": original_count,
+                "recorded_at_ms": recorded_at_ms,
+                "release_id": row["release_id"],
+                "requested_cursor_digest": requested_cursor_digest,
+                "target_key": row["target_key"],
+            }
+            con.execute(
+                "INSERT INTO neg_risk_fault_coverage_rejections("
+                + ",".join(payload)
+                + ",source_hash) VALUES("
+                + ",".join("?" for _ in range(len(payload) + 1))
+                + ")",
+                (*payload.values(), canonical_digest(payload)),
+            )
+            con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
                 con.execute("ROLLBACK")
@@ -938,27 +1011,55 @@ class FaultAuthorityStore:
         sequence = 1 if latest is None else int(latest["sequence"]) + 1
         previous_hash = _ZERO_HASH if latest is None else str(latest["event_hash"])
         if state is None:
-            if action is not FaultEventAction.CLEANUP_REQUESTED or set(evidence) != {
-                "authorization_digest",
-                "nonce_digest",
-                "request_digest",
-                "reservation_id",
-                "attempt_id",
-            }:
+            request_fields = {
+                "authorization_digest", "nonce_digest", "request_digest",
+                "reservation_id", "attempt_id",
+            }
+            confirmation_fields = {
+                "cleaned_event_hash", "cleanup_id", "memory_cleared_at_ms",
+                "receipt_commit_confirmed_at_ms",
+            }
+            expected_fields = (
+                request_fields
+                if action is FaultEventAction.CLEANUP_REQUESTED
+                else confirmation_fields
+                if action is FaultEventAction.CLEANUP_CONFIRMED
+                else set()
+            )
+            if set(evidence) != expected_fields:
                 raise ValueError("invalid-action-evidence")
-            for key in ("authorization_digest", "nonce_digest", "request_digest"):
-                value = evidence[key]
+            if action is FaultEventAction.CLEANUP_CONFIRMED:
                 if (
-                    not isinstance(value, str)
-                    or len(value) != 64
-                    or not set(value) <= set("0123456789abcdef")
+                    re.fullmatch(r"[0-9a-f]{64}", str(evidence["cleaned_event_hash"]))
+                    is None
+                    or re.fullmatch(r"[a-zA-Z0-9._:-]{1,128}", str(evidence["cleanup_id"]))
+                    is None
+                    or any(
+                        type(evidence[key]) is not int or int(evidence[key]) < 0
+                        for key in (
+                            "memory_cleared_at_ms",
+                            "receipt_commit_confirmed_at_ms",
+                        )
+                    )
+                    or int(evidence["receipt_commit_confirmed_at_ms"])
+                    < int(evidence["memory_cleared_at_ms"])
                 ):
                     raise ValueError("invalid-action-evidence")
-            for key in ("reservation_id", "attempt_id"):
-                value = evidence[key]
-                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                    raise ValueError("invalid-action-evidence")
-            normalized_evidence: Mapping[str, object] = dict(evidence)
+                normalized_evidence = dict(evidence)
+            else:
+                for key in ("authorization_digest", "nonce_digest", "request_digest"):
+                    value = evidence[key]
+                    if (
+                        not isinstance(value, str)
+                        or len(value) != 64
+                        or not set(value) <= set("0123456789abcdef")
+                    ):
+                        raise ValueError("invalid-action-evidence")
+                for key in ("reservation_id", "attempt_id"):
+                    value = evidence[key]
+                    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                        raise ValueError("invalid-action-evidence")
+                normalized_evidence = dict(evidence)
         else:
             if action is not None:
                 raise ValueError("invalid-event-action")
@@ -1134,6 +1235,58 @@ class FaultAuthorityStore:
             raise
         finally:
             self._clear_progress_handler(con)
+            con.close()
+
+    def confirm_cleanup_commit(
+        self,
+        fault_id: str,
+        *,
+        cleaned: FaultEvent,
+        memory_cleared_at_ms: int,
+        confirmed_at_ms: int,
+        ownership: FaultOwnershipCapability,
+    ) -> FaultEvent:
+        """Append exact post-commit proof after the CLEANED transaction returned."""
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            intent_row = con.execute(
+                "SELECT * FROM neg_risk_fault_intents WHERE fault_id=?",
+                (fault_id,),
+            ).fetchone()
+            if intent_row is None:
+                raise ValueError("fault-not-found")
+            self._require_ownership(con, intent_row, ownership)
+            latest = con.execute(
+                "SELECT * FROM neg_risk_fault_events WHERE fault_id=? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (fault_id,),
+            ).fetchone()
+            if latest is None or latest["event_hash"] != cleaned.event_hash:
+                raise ValueError("cleanup-event-not-tail")
+            cleanup_id = cleaned.evidence.get("cleanup_id")
+            if cleaned.state is not FaultEventState.CLEANED or not isinstance(cleanup_id, str):
+                raise ValueError("cleanup-event-invalid")
+            event = self._append_event_in_transaction(
+                con,
+                fault_id,
+                None,
+                action=FaultEventAction.CLEANUP_CONFIRMED,
+                occurred_at_ms=confirmed_at_ms,
+                evidence={
+                    "cleaned_event_hash": cleaned.event_hash,
+                    "cleanup_id": cleanup_id,
+                    "memory_cleared_at_ms": memory_cleared_at_ms,
+                    "receipt_commit_confirmed_at_ms": confirmed_at_ms,
+                },
+            )
+            con.execute("COMMIT")
+            return event
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
             con.close()
 
     def append_event(
@@ -1857,53 +2010,79 @@ class FaultAuthorityStore:
                 return FaultHistory(fault_id, False, "hash-predecessor-invalid", intent, events)
             try:
                 if event.state is None:
-                    if event.action is not FaultEventAction.CLEANUP_REQUESTED or set(
-                        event.evidence
-                    ) != {
-                        "authorization_digest",
-                        "nonce_digest",
-                        "request_digest",
-                        "reservation_id",
-                        "attempt_id",
-                    }:
-                        raise ValueError("invalid-action-evidence")
-                    for key in (
-                        "authorization_digest",
-                        "nonce_digest",
-                        "request_digest",
-                    ):
-                        value = event.evidence[key]
+                    if event.action is FaultEventAction.CLEANUP_CONFIRMED:
+                        prior = events[index - 2] if index >= 2 else None
                         if (
-                            not isinstance(value, str)
-                            or len(value) != 64
-                            or not set(value) <= set("0123456789abcdef")
+                            prior is None
+                            or prior.state is not FaultEventState.CLEANED
+                            or set(event.evidence)
+                            != {
+                                "cleaned_event_hash",
+                                "cleanup_id",
+                                "memory_cleared_at_ms",
+                                "receipt_commit_confirmed_at_ms",
+                            }
+                            or event.evidence["cleaned_event_hash"] != prior.event_hash
+                            or event.evidence["cleanup_id"]
+                            != prior.evidence.get("cleanup_id")
+                            or int(event.evidence["memory_cleared_at_ms"])
+                            != int(prior.evidence.get("memory_cleared_at_ms", -1))
+                            or int(event.evidence["receipt_commit_confirmed_at_ms"])
+                            != event.occurred_at_ms
+                            or event.occurred_at_ms < prior.occurred_at_ms
                         ):
+                            raise ValueError("invalid-cleanup-confirmation")
+                        evidence_json = canonical_json(event.evidence)
+                    else:
+                        if event.action is not FaultEventAction.CLEANUP_REQUESTED or set(
+                            event.evidence
+                        ) != {
+                            "authorization_digest",
+                            "nonce_digest",
+                            "request_digest",
+                            "reservation_id",
+                            "attempt_id",
+                        }:
                             raise ValueError("invalid-action-evidence")
-                    reservation = con.execute(
-                        "SELECT * FROM neg_risk_fault_auth_nonces WHERE id=?",
-                        (event.evidence["reservation_id"],),
-                    ).fetchone()
-                    attempt = con.execute(
-                        "SELECT * FROM neg_risk_fault_auth_nonces WHERE id=?",
-                        (event.evidence["attempt_id"],),
-                    ).fetchone()
-                    if (
-                        reservation is None
-                        or attempt is None
-                        or attempt["occurred_at_ms"] != event.occurred_at_ms
-                        or not self._auth_pair_valid(
-                            reservation,
-                            attempt,
-                            expected_operation="cleanup",
-                            expected_fault_id=fault_id,
-                            expected_request_digest=event.evidence["request_digest"],
-                            expected_nonce_digest=event.evidence["nonce_digest"],
-                            expected_authorization_digest=event.evidence["authorization_digest"],
-                            expected_reason="cleanup-requested",
-                        )
-                    ):
-                        raise ValueError("action-authorization-invalid")
-                    evidence_json = canonical_json(event.evidence)
+                        for key in (
+                            "authorization_digest",
+                            "nonce_digest",
+                            "request_digest",
+                        ):
+                            value = event.evidence[key]
+                            if (
+                                not isinstance(value, str)
+                                or len(value) != 64
+                                or not set(value) <= set("0123456789abcdef")
+                            ):
+                                raise ValueError("invalid-action-evidence")
+                        reservation = con.execute(
+                            "SELECT * FROM neg_risk_fault_auth_nonces WHERE id=?",
+                            (event.evidence["reservation_id"],),
+                        ).fetchone()
+                        attempt = con.execute(
+                            "SELECT * FROM neg_risk_fault_auth_nonces WHERE id=?",
+                            (event.evidence["attempt_id"],),
+                        ).fetchone()
+                        if (
+                            reservation is None
+                            or attempt is None
+                            or attempt["occurred_at_ms"] != event.occurred_at_ms
+                            or not self._auth_pair_valid(
+                                reservation,
+                                attempt,
+                                expected_operation="cleanup",
+                                expected_fault_id=fault_id,
+                                expected_request_digest=event.evidence["request_digest"],
+                                expected_nonce_digest=event.evidence["nonce_digest"],
+                                expected_authorization_digest=event.evidence[
+                                    "authorization_digest"
+                                ],
+                                expected_reason="cleanup-requested",
+                            )
+                        ):
+                            raise ValueError("action-authorization-invalid")
+                        evidence_json = canonical_json(event.evidence)
                 else:
                     if event.action is not None:
                         raise ValueError("invalid-event-action")

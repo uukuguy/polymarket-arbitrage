@@ -90,6 +90,7 @@ class FaultEventState(StrEnum):
 
 class FaultEventAction(StrEnum):
     CLEANUP_REQUESTED = "cleanup-requested"
+    CLEANUP_CONFIRMED = "cleanup-confirmed"
 
 
 FAULT_CALL_CLASS_BY_KIND: Mapping[FaultKind, FaultCallClass] = {

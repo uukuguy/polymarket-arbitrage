@@ -11,8 +11,19 @@ _MAX_ARTIFACT_BYTES = 1_048_576
 
 
 def read_stable_bytes(path: Path) -> bytes:
+    parent_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
+    parent_fd = os.open(path.parent, parent_flags)
+    try:
+        parent = os.fstat(parent_fd)
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid():
+            raise ValueError("unsafe-artifact-parent")
+        fd = os.open(path.name, flags, dir_fd=parent_fd)
+    except BaseException:
+        os.close(parent_fd)
+        raise
     try:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_ARTIFACT_BYTES:
@@ -37,6 +48,7 @@ def read_stable_bytes(path: Path) -> bytes:
         return value
     finally:
         os.close(fd)
+        os.close(parent_fd)
 
 
 def write_exclusive_bytes(path: Path, value: bytes) -> None:
@@ -48,13 +60,15 @@ def write_exclusive_bytes(path: Path, value: bytes) -> None:
         parent = os.fstat(parent_fd)
         if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid():
             raise ValueError("unsafe-artifact-parent")
-        temporary = path.parent / f".{path.name}.tmp-{secrets.token_hex(16)}"
+        parent_identity = (parent.st_dev, parent.st_ino)
+        temporary = f".{path.name}.tmp-{secrets.token_hex(16)}"
         try:
             fd = os.open(
                 temporary,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL
                 | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
+                dir_fd=parent_fd,
             )
             try:
                 written = 0
@@ -66,11 +80,24 @@ def write_exclusive_bytes(path: Path, value: bytes) -> None:
                     raise ValueError("unsafe-artifact-output")
             finally:
                 os.close(fd)
-            os.link(temporary, path, follow_symlinks=False)
+            current_parent = os.stat(path.parent, follow_symlinks=False)
+            if (current_parent.st_dev, current_parent.st_ino) != parent_identity:
+                raise ValueError("unstable-artifact-parent")
+            os.link(
+                temporary,
+                path.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            current_parent = os.stat(path.parent, follow_symlinks=False)
+            if (current_parent.st_dev, current_parent.st_ino) != parent_identity:
+                os.unlink(path.name, dir_fd=parent_fd)
+                raise ValueError("unstable-artifact-parent")
             os.fsync(parent_fd)
         finally:
             try:
-                os.unlink(temporary)
+                os.unlink(temporary, dir_fd=parent_fd)
                 os.fsync(parent_fd)
             except FileNotFoundError:
                 pass

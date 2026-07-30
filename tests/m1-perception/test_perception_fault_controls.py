@@ -359,7 +359,7 @@ def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqli
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         if path.endswith("/cleanup"):
             cleanup_at = int(time.time() * 1_000)
-            store.append_event(
+            cleaned = store.append_event(
                 str(producer["fault_id"]),
                 FaultEventState.CLEANED,
                 occurred_at_ms=cleanup_at,
@@ -368,6 +368,13 @@ def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqli
                     "memory_cleared_at_ms": str(cleanup_at),
                     "receipt_persisted_at_ms": str(cleanup_at),
                 },
+                ownership=producer["ownership"],
+            )
+            store.confirm_cleanup_commit(
+                str(producer["fault_id"]),
+                cleaned=cleaned,
+                memory_cleared_at_ms=cleanup_at,
+                confirmed_at_ms=cleanup_at,
                 ownership=producer["ownership"],
             )
         response = _post(client, path, body)
@@ -379,7 +386,7 @@ def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqli
             assert claimed is not None
             ownership = claimed.ownership_capability
             producer.update(fault_id=value["fault_id"], ownership=ownership)
-            store.append_event(
+            cleaned = store.append_event(
                 value["fault_id"], FaultEventState.INJECTED,
                 occurred_at_ms=lifecycle_at,
                 evidence={"call_id": "call-1"}, ownership=ownership,
@@ -491,7 +498,7 @@ def test_ambiguous_committed_arm_is_resolved_and_cleaned_by_exact_fault_id(
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         if path.endswith("/cleanup"):
             cleanup_at = int(time.time() * 1_000)
-            store.append_event(
+            cleaned = store.append_event(
                 str(producer["fault_id"]),
                 FaultEventState.CLEANED,
                 occurred_at_ms=cleanup_at,
@@ -500,6 +507,13 @@ def test_ambiguous_committed_arm_is_resolved_and_cleaned_by_exact_fault_id(
                     "memory_cleared_at_ms": str(cleanup_at),
                     "receipt_persisted_at_ms": str(cleanup_at),
                 },
+                ownership=producer["ownership"],
+            )
+            store.confirm_cleanup_commit(
+                str(producer["fault_id"]),
+                cleaned=cleaned,
+                memory_cleared_at_ms=cleanup_at,
+                confirmed_at_ms=cleanup_at,
                 ownership=producer["ownership"],
             )
         response = _post(client, path, body)

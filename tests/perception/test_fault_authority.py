@@ -70,6 +70,66 @@ def auth(value: str = "b") -> FaultAuthorization:
     return FaultAuthorization(nonce_digest=value * 64, authorization_digest="c" * 64)
 
 
+def test_partial_coverage_source_is_exact_bound_and_append_only(
+    store: FaultAuthorityStore,
+    db_path: Path,
+) -> None:
+    runtime = FaultRuntimeIdentity(
+        component="discovery",
+        release_id="a" * 40,
+        machine_id="machine-1",
+        boot_id=UUID("12345678-1234-4678-9234-567812345678"),
+    )
+    store.register_runtime_start(
+        runtime,
+        supervisor_run_id="coverage-runtime",
+        attempt=1,
+        started_at_ms=1_000,
+    )
+    admission = store.accept_intent(
+        request(
+            kind=FaultKind.GAMMA_PARTIAL,
+            call_class=FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
+            target_key="discovery",
+            parameters={"keep_events": 1},
+            runtime=runtime,
+        ),
+        auth=auth(),
+        accepted_at_ms=1_100,
+    )
+    assert admission.accepted
+    coverage_id = "coverage-" + "1" * 64
+    store.record_partial_coverage_rejection(
+        "fault-1",
+        coverage_id=coverage_id,
+        original_count=2,
+        kept_count=1,
+        requested_cursor_digest="2" * 64,
+        next_cursor_digest="3" * 64,
+        recorded_at_ms=1_200,
+    )
+    with sqlite3.connect(db_path) as con:
+        row = con.execute(
+            "SELECT coverage_id,component,target_key FROM "
+            "neg_risk_fault_coverage_rejections"
+        ).fetchone()
+        assert row == (coverage_id, "discovery", "discovery")
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            con.execute(
+                "UPDATE neg_risk_fault_coverage_rejections SET machine_id='other'"
+            )
+    with pytest.raises(sqlite3.IntegrityError):
+        store.record_partial_coverage_rejection(
+            "fault-1",
+            coverage_id="coverage-" + "4" * 64,
+            original_count=2,
+            kept_count=1,
+            requested_cursor_digest="2" * 64,
+            next_cursor_digest="3" * 64,
+            recorded_at_ms=1_201,
+        )
+
+
 def rehash_auth_row(con: sqlite3.Connection, row_id: int) -> None:
     con.row_factory = sqlite3.Row
     row = con.execute(
@@ -1150,6 +1210,18 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
 ) -> None:
     perception_store = OpportunityPerceptionStore(db_path)
     perception_store.init_schema()
+    reconciliation = perception_store.begin_reconciliation(started_at_ms=100)
+    perception_store.publish_reconciliation_batch(
+        window_id=reconciliation.id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=110,
+        finished_at_ms=120,
+        page_event_count=0,
+        candidates=(),
+    )
+    perception_store.apply_reconciliation_diff(reconciliation.id)
     group = GroupRevision.certified(
         group_id="group-1",
         event_id="event-1",
@@ -1207,9 +1279,21 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
         "fault-1", FaultEventState.CONTAINED, occurred_at_ms=1_500,
         evidence={"containment_id": "containment-1"},
     )
-    store.append_event(
+    cleaned = store.append_event(
         "fault-1", FaultEventState.CLEANED, occurred_at_ms=1_600,
-        evidence={"cleanup_id": "cleanup-1"}, ownership=ownership,
+        evidence={
+            "cleanup_id": "cleanup-1",
+            "memory_cleared_at_ms": "1590",
+            "receipt_persisted_at_ms": "1600",
+        },
+        ownership=ownership,
+    )
+    store.confirm_cleanup_commit(
+        "fault-1",
+        cleaned=cleaned,
+        memory_cleared_at_ms=1_590,
+        confirmed_at_ms=1_601,
+        ownership=ownership,
     )
     quote = GroupQuoteBatch.complete(
         group_id=group.group_id,
@@ -1358,7 +1442,10 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
     ).reasons
     with sqlite3.connect(db_path) as con:
         con.execute("DELETE FROM neg_risk_candidate_success_receipts WHERE id=1")
-    with pytest.raises(ValueError, match="fault-recovery-source-missing"):
+    with pytest.raises(
+        ValueError,
+        match="fault-recovery-source-missing|pending-owner-mutation",
+    ):
         fault_readonly.export_fault_envelope(
             db_path,
             "fault-1",

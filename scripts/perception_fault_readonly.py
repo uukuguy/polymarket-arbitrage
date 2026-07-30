@@ -18,6 +18,8 @@ from urllib.request import Request, urlopen
 
 from polyarb.perception.fault_authority import FaultAuthorityStore
 from polyarb.perception.fault_control import canonical_digest
+from polyarb.perception.incidents import IncidentManager
+from polyarb.perception.store import OpportunityPerceptionStore
 
 _READ_PATHS = (
     ("/healthz", "health"),
@@ -60,7 +62,7 @@ def export_fault_envelope(
         intent = history.intent
         source_facts = _fault_source_facts(
             con,
-            authority=authority,
+            db_path=db_path,
             history=history,
             projection=projection,
             now_ms=now_ms,
@@ -137,7 +139,7 @@ def export_fault_envelope(
 def _fault_source_facts(
     con: sqlite3.Connection,
     *,
-    authority: FaultAuthorityStore,
+    db_path: Path,
     history: Any,
     projection: Any,
     now_ms: int,
@@ -157,7 +159,44 @@ def _fault_source_facts(
     incident_id = detected.evidence.get("incident_id")
     detection_id = incident_id or detected.evidence.get("coverage_id")
     source_kind = "coverage:partial-or-rejected-page"
-    if incident_id is not None:
+    source_history: list[dict[str, object]]
+    if incident_id is None:
+        coverage = con.execute(
+            "SELECT * FROM neg_risk_fault_coverage_rejections "
+            "WHERE coverage_id=? AND fault_id=?",
+            (detection_id, history.intent.fault_id),
+        ).fetchone()
+        if coverage is None:
+            raise ValueError("fault-coverage-source-missing")
+        coverage_payload = {
+            key: coverage[key]
+            for key in (
+                "boot_id", "call_class", "component", "coverage_id", "fault_id",
+                "kept_count", "machine_id", "next_cursor_digest",
+                "original_count", "recorded_at_ms", "release_id",
+                "requested_cursor_digest", "target_key",
+            )
+        }
+        if (
+            coverage["source_hash"] != canonical_digest(coverage_payload)
+            or coverage["call_class"] != history.intent.call_class.value
+            or coverage["target_key"] != history.intent.target_key
+            or coverage["component"] != history.intent.runtime.component
+            or coverage["release_id"] != history.intent.runtime.release_id
+            or coverage["machine_id"] != history.intent.runtime.machine_id
+            or coverage["boot_id"] != str(history.intent.runtime.boot_id)
+        ):
+            raise ValueError("fault-coverage-source-invalid")
+        source_history = [{**coverage_payload, "source_hash": coverage["source_hash"]}]
+    else:
+        incident_manager = IncidentManager(
+            OpportunityPerceptionStore(
+                db_path,
+                read_only=True,
+                deadline_monotonic=time.monotonic() + 0.5,
+            )
+        )
+        incident_manager._validate_writer_authority(con)
         incident = con.execute(
             "SELECT incident_id,kind FROM neg_risk_incident_events "
             "WHERE incident_id=? ORDER BY sequence LIMIT 1",
@@ -166,6 +205,38 @@ def _fault_source_facts(
         if incident is None:
             raise ValueError("fault-incident-source-missing")
         source_kind = str(incident["kind"])
+        checkpoint = con.execute(
+            "SELECT prefix_hash FROM neg_risk_incident_authority_checkpoint WHERE id=1"
+        ).fetchone()
+        previous_hash = (
+            "sha256:" + "0" * 64
+            if checkpoint is None
+            else str(checkpoint["prefix_hash"])
+        )
+        source_history = []
+        for row in con.execute(
+            "SELECT id,incident_id,sequence,scope,kind,state,occurred_at_ms,"
+            "evidence_json FROM neg_risk_incident_events ORDER BY id"
+        ).fetchall():
+            event_hash = incident_manager._suffix_event_hash(row, previous_hash)
+            if row["incident_id"] == incident_id:
+                source_history.append(
+                    {
+                        "event_hash": event_hash,
+                        "event_id": int(row["id"]),
+                        "evidence": json.loads(row["evidence_json"]),
+                        "incident_id": str(row["incident_id"]),
+                        "kind": str(row["kind"]),
+                        "occurred_at_ms": int(row["occurred_at_ms"]),
+                        "previous_hash": previous_hash,
+                        "scope": str(row["scope"]),
+                        "sequence": int(row["sequence"]),
+                        "state": str(row["state"]),
+                    }
+                )
+            previous_hash = event_hash
+        if not source_history:
+            raise ValueError("fault-incident-source-missing")
 
     recovered = next(
         (
@@ -258,10 +329,12 @@ def _fault_source_facts(
         "FROM current WHERE current.status='certified'",
         (now_ms - freshness_limit_ms, now_ms),
     ).fetchone()
-    latest_reconciliation = con.execute(
-        "SELECT status FROM neg_risk_reconciliation_windows "
-        "ORDER BY started_at_ms DESC,rowid DESC LIMIT 1"
-    ).fetchone()
+    perception_store = OpportunityPerceptionStore(
+        db_path,
+        read_only=True,
+        deadline_monotonic=time.monotonic() + 0.5,
+    )
+    reconciliation = perception_store.current_reconciliation(_connection=con)
     return {
         "detection_receipt": {
             "detection_id": detection_id,
@@ -275,6 +348,7 @@ def _fault_source_facts(
                 "boot_id": str(history.intent.runtime.boot_id),
             },
             "source_kind": source_kind,
+            "source_history": source_history,
         },
         "recovery_writer_receipt": {
             "table": table,
@@ -303,8 +377,8 @@ def _fault_source_facts(
         ),
         "freshness_gate": int(freshness["missing"] or 0) == 0,
         "reconciliation_gate": (
-            latest_reconciliation is None
-            or latest_reconciliation["status"] in {"complete", "applied"}
+            reconciliation is not None
+            and reconciliation.status in {"complete", "applied"}
         ),
     }
 

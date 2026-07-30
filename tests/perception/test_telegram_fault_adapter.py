@@ -350,7 +350,11 @@ async def test_real_authority_chain_recovers_only_later_exact_delivery(
 
     cleaned = authority.validate_history("fault-telegram-real")
     assert cleaned.valid
-    assert cleaned.events[-1].state.value == "cleaned"
+    assert next(
+        event.state.value
+        for event in reversed(cleaned.events)
+        if event.state is not None
+    ) == "cleaned"
     assert runtime.pending_recovery_fault_id == "fault-telegram-real"
     assert [attempt.outcome for attempt in ledger.notification_attempts(2)] == [
         "delivered"
@@ -360,7 +364,7 @@ async def test_real_authority_chain_recovers_only_later_exact_delivery(
 
     recovered = authority.validate_history("fault-telegram-real")
     assert recovered.valid
-    assert [event.state.value for event in recovered.events] == [
+    assert [event.state.value for event in recovered.events if event.state is not None] == [
         "authorized",
         "armed",
         "injected",
@@ -469,7 +473,11 @@ async def test_cancel_after_failed_attempt_commit_preserves_exact_evidence(
 
     history = authority.validate_history("fault-telegram-cancel")
     assert history.valid
-    assert history.events[-1].state.value == "cleaned"
+    assert next(
+        event.state.value
+        for event in reversed(history.events)
+        if event.state is not None
+    ) == "cleaned"
     assert len(ledger.notification_attempts(1)) == 1
 
 

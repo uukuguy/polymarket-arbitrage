@@ -663,7 +663,13 @@ async def test_cancelled_committed_timeout_detaches_exact_fault_decision(
     assert getattr(exact_error, "_polyarb_fault_call_id") is not None
 
     await watcher.flush_incidents()
-    assert authority.validate_history("fault-cancelled-timeout").events[-1].state.value == "cleaned"
+    assert next(
+        event.state.value
+        for event in reversed(
+            authority.validate_history("fault-cancelled-timeout").events
+        )
+        if event.state is not None
+    ) == "cleaned"
 
     monkeypatch.setattr(store, "record_candidate_watch_fact", original_writer)
     await watcher.record_timeout("group-a")
@@ -950,7 +956,7 @@ async def test_real_candidate_chain_recovers_from_new_exact_group_receipt(
         assert history.events[-1].state.value == "evidence-invalid"
         assert runtime.degraded is True
         return
-    assert [event.state.value for event in history.events] == [
+    assert [event.state.value for event in history.events if event.state is not None] == [
         "authorized",
         "armed",
         "injected",
@@ -1037,12 +1043,20 @@ async def test_other_group_success_does_not_consume_pending_candidate_recovery(
     assert (await watcher.run_once("group-a")).status == "unavailable"
     await watcher.flush_incidents()
     cleaned_history = authority.validate_history("fault-exact-target")
-    assert cleaned_history.events[-1].state.value == "cleaned"
+    assert next(
+        event.state.value
+        for event in reversed(cleaned_history.events)
+        if event.state is not None
+    ) == "cleaned"
 
     assert (await watcher.run_once("group-b")).status == "watching"
     await watcher.flush_incidents()
     after_other_group = authority.validate_history("fault-exact-target")
-    assert after_other_group.events[-1].state.value == "cleaned"
+    assert next(
+        event.state.value
+        for event in reversed(after_other_group.events)
+        if event.state is not None
+    ) == "cleaned"
     assert len(after_other_group.events) == len(cleaned_history.events)
     assert runtime.pending_recovery_fault_id == "fault-exact-target"
     assert runtime.degraded is False

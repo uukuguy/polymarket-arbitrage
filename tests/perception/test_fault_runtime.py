@@ -483,7 +483,11 @@ async def test_recovery_requires_exact_real_discovery_writer_receipt(
         writer_occurred_at_ms=1_200,
     )
     assert await runtime.record_recovery(correct) is False
-    assert authority.validate_history("fault-recovery").events[-1].state is (
+    assert next(
+        event.state
+        for event in reversed(authority.validate_history("fault-recovery").events)
+        if event.state is not None
+    ) is (
         FaultEventState.CLEANED
     )
     wall[0] = 1_300
@@ -568,7 +572,11 @@ async def test_recovery_requires_exact_real_discovery_writer_receipt(
 
     for receipt in rejected:
         assert await runtime.record_recovery(receipt) is False
-        assert authority.validate_history("fault-recovery").events[-1].state is (
+        assert next(
+            event.state
+            for event in reversed(authority.validate_history("fault-recovery").events)
+            if event.state is not None
+        ) is (
             FaultEventState.CLEANED
         )
 
@@ -764,7 +772,11 @@ async def test_reconciliation_recovery_rejects_corrupt_authority_checkpoint(
         store.current_reconciliation()
     assert await runtime.record_recovery(receipt) is False
     assert runtime.degraded is True
-    assert authority.validate_history(decision.fault_id).events[-1].state is (
+    assert next(
+        event.state
+        for event in reversed(authority.validate_history(decision.fault_id).events)
+        if event.state is not None
+    ) is (
         FaultEventState.CLEANED
     )
 
@@ -1158,7 +1170,9 @@ async def test_exact_recovery_authority_unavailable_is_not_evidence_invalid(
     assert outcome is FaultRecoveryOutcome.UNAVAILABLE
     history = authority.validate_history("fault-telegram-authority-unavailable")
     assert history.valid
-    assert history.events[-1].state is FaultEventState.CLEANED
+    assert next(
+        event.state for event in reversed(history.events) if event.state is not None
+    ) is FaultEventState.CLEANED
     assert runtime.degraded is True
     assert runtime.pending_recovery_fault_id is None
 
@@ -1203,7 +1217,9 @@ async def test_cross_family_invalid_append_failure_returns_unavailable(
     assert outcome is FaultRecoveryOutcome.UNAVAILABLE
     history = authority.validate_history("fault-cross-family-invalid-append-failure")
     assert history.valid
-    assert history.events[-1].state is FaultEventState.CLEANED
+    assert next(
+        event.state for event in reversed(history.events) if event.state is not None
+    ) is FaultEventState.CLEANED
     assert runtime.degraded is True
     assert runtime.pending_recovery_fault_id is None
 
@@ -1236,7 +1252,9 @@ async def test_post_validation_invalid_append_failure_returns_unavailable(
     assert outcome is FaultRecoveryOutcome.UNAVAILABLE
     history = authority.validate_history("fault-post-validation-invalid-append-failure")
     assert history.valid
-    assert history.events[-1].state is FaultEventState.CLEANED
+    assert next(
+        event.state for event in reversed(history.events) if event.state is not None
+    ) is FaultEventState.CLEANED
     assert runtime.degraded is True
     assert runtime.pending_recovery_fault_id is None
 

@@ -293,7 +293,8 @@ def test_original_and_cleanup_failures_are_preserved_in_order(tmp_path: Path) ->
         )
 
     assert caught.value.exceptions[0] is original
-    assert "cleanup-failed" in str(caught.value.exceptions[1])
+    assert isinstance(caught.value.exceptions[1], OSError)
+    assert str(caught.value.exceptions[1]) == "cleanup transport lost"
 
 
 def test_cleanup_failed_freezes_remaining_matrix() -> None:
@@ -416,8 +417,6 @@ def test_cli_dispatches_each_upstream_fault_only_to_typed_http_transport(
             fault_id,
             "--expected-release",
             release,
-            "--authorization",
-            f"fault:{fault_id}:{release}",
             "--machine-id",
             "machine-1",
             "--boot-id",
@@ -487,16 +486,35 @@ def _production_envelope() -> dict[str, object]:
             ),
             ("detected", {"incident_id": "incident-1"}, 13),
             ("contained", {"containment_id": "contained-1"}, 14),
-            ("cleaned", {"cleanup_id": "cleanup-1"}, 15),
+            (
+                "cleaned",
+                {
+                    "cleanup_id": "cleanup-1",
+                    "memory_cleared_at_ms": "15",
+                    "receipt_persisted_at_ms": "15",
+                },
+                15,
+            ),
+            ("cleanup-confirmed", {}, 15),
             ("recovered", {"recovery_id": "41"}, 16),
         ),
         start=1,
     ):
+        action = None
+        if state == "cleanup-confirmed":
+            action = state
+            state = None
+            evidence = {
+                "cleaned_event_hash": previous,
+                "cleanup_id": "cleanup-1",
+                "memory_cleared_at_ms": 15,
+                "receipt_commit_confirmed_at_ms": 15,
+            }
         event = {
             "fault_id": "fault-1",
             "sequence": sequence,
             "state": state,
-            "action": None,
+            "action": action,
             "occurred_at_ms": occurred,
             "evidence": evidence,
             "previous_hash": previous,
@@ -532,6 +550,13 @@ def _production_envelope() -> dict[str, object]:
             "target_key": "group-1",
             "runtime": runtime,
             "source_kind": "clob-429",
+            "source_history": [
+                {
+                    "incident_id": "incident-1",
+                    "sequence": 1,
+                    "state": "detected",
+                }
+            ],
         },
         "open_injection_fault_count": 0,
         "pending_verification_fault_count": 1,
@@ -555,7 +580,7 @@ def _production_envelope() -> dict[str, object]:
          "event-hash-mismatch"),
         (lambda value: value["fault_history"].pop(3), "missing-detection"),
         (lambda value: value["fault_history"].pop(5), "missing-cleanup"),
-        (lambda value: value["fault_history"].pop(6), "missing-recovery"),
+        (lambda value: value["fault_history"].pop(7), "missing-recovery"),
         (lambda value: value["recovery_writer_receipt"].update(
             table="neg_risk_discovery_batches"), "recovery-family-mismatch"),
         (lambda value: value.update(open_injection_fault_count=1), "open-injection-fault"),
@@ -597,6 +622,59 @@ def test_candidate_rejects_wrong_envelope_mode_cross_fault_history_and_release()
     assert "expected-release-mismatch" in release.reasons
 
 
+def _rehash_history(evidence: dict[str, object]) -> None:
+    previous = "0" * 64
+    history = evidence["fault_history"]
+    assert isinstance(history, list)
+    for sequence, event in enumerate(history, start=1):
+        assert isinstance(event, dict)
+        event["sequence"] = sequence
+        event["previous_hash"] = previous
+        event["event_hash"] = acceptance.canonical_digest(
+            {key: value for key, value in event.items() if key != "event_hash"}
+        )
+        previous = event["event_hash"]
+    evidence["fault_history_tail_hash"] = previous
+
+
+def test_production_evaluator_rejects_rehashed_weak_or_extended_schema() -> None:
+    for mutation, reason in (
+        (
+            lambda value: value["fault_intent"].update(attacker="extra"),
+            "invalid-fault-intent-fields",
+        ),
+        (
+            lambda value: value["fault_intent"]["runtime"].update(attacker="extra"),
+            "invalid-runtime-fields",
+        ),
+        (
+            lambda value: value["fault_history"][2].update(action="attacker-action"),
+            "invalid-event-state-action",
+        ),
+        (
+            lambda value: value["fault_history"][5].update(
+                evidence={"cleanup_id": "cleanup-1"}
+            ),
+            "invalid-state-evidence-fields",
+        ),
+        (
+            lambda value: value["fault_history"][2].update(
+                evidence={"call_id": "call-1"}
+            ),
+            "invalid-state-evidence-fields",
+        ),
+    ):
+        evidence = _production_envelope()
+        mutation(evidence)
+        intent = evidence["fault_intent"]
+        assert isinstance(intent, dict)
+        evidence["fault_intent_digest"] = acceptance.canonical_digest(intent)
+        _rehash_history(evidence)
+        verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
+        assert verdict.status == "FAIL"
+        assert reason in verdict.reasons
+
+
 def test_candidate_binds_call_and_detection_to_exact_intent() -> None:
     call = _production_envelope()
     call["fault_history"][2]["evidence"]["call_binding_digest"] = "0" * 64
@@ -633,6 +711,27 @@ def test_artifact_io_rejects_symlink_and_never_publishes_partial_final(
     with pytest.raises(OSError, match="publish failed"):
         safe_artifact.write_exclusive_bytes(final, b'{"complete":true}\n')
     assert not final.exists()
+
+
+def test_artifact_write_rejects_parent_directory_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "trusted"
+    moved = tmp_path / "trusted-moved"
+    parent.mkdir()
+    original_link = safe_artifact.os.link
+
+    def replace_parent_then_link(*args, **kwargs):
+        parent.rename(moved)
+        parent.mkdir()
+        return original_link(*args, **kwargs)
+
+    monkeypatch.setattr(safe_artifact.os, "link", replace_parent_then_link)
+    with pytest.raises(ValueError, match="unstable-artifact-parent"):
+        safe_artifact.write_exclusive_bytes(parent / "verdict.json", b"{}")
+    assert not (parent / "verdict.json").exists()
+    assert not (moved / "verdict.json").exists()
     assert list(tmp_path.glob(".final.json.tmp-*")) == []
 
 
@@ -679,7 +778,7 @@ def test_final_evaluator_has_only_readonly_evidence_and_evaluator_authority(
     final_evidence = deepcopy(candidate_source)
     verified = {
         "fault_id": "fault-1",
-        "sequence": 8,
+        "sequence": 9,
         "state": "verified",
         "action": None,
         "occurred_at_ms": 17,
