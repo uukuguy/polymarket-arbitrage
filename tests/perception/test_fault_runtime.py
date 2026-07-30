@@ -24,6 +24,7 @@ from polyarb.perception.fault_control import (
     FaultRecoveryReceipt,
     FaultRecoveryWriter,
     FaultRuntimeIdentity,
+    fault_call_binding_digest,
 )
 from polyarb.perception.fault_runtime import (
     CleanupResult,
@@ -1578,7 +1579,22 @@ async def test_real_sqlite_contained_cleanup_returns_actual_cleaned_terminal(
         "fault-contained",
         FaultEventState.INJECTED,
         occurred_at_ms=1_201,
-        evidence={"call_id": "call-contained"},
+        evidence={
+            "call_id": "call-contained",
+            "call_binding_digest": fault_call_binding_digest(
+                fault_id="fault-contained",
+                kind=FaultKind.CLOB_429.value,
+                call_class=FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH.value,
+                target_key="group-contained",
+                runtime={
+                    "component": IDENTITY.component,
+                    "release_id": IDENTITY.release_id,
+                    "machine_id": IDENTITY.machine_id,
+                    "boot_id": str(IDENTITY.boot_id),
+                },
+                call_id="call-contained",
+            ),
+        },
         ownership=ownership,
     )
     authority.append_event(

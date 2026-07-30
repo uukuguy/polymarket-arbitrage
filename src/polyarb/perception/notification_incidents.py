@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from polyarb.perception.fault_control import FaultEventState, normalize_evidence
+from polyarb.perception.fault_control import normalize_fault_call_id
 from polyarb.perception.incidents import Incident, IncidentManager
 from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.routing.opportunity_ledger import NotificationAttempt
@@ -56,13 +56,8 @@ class NotificationIncidents:
         fault_call_id: str,
     ) -> QualifiedNotificationIncidentReceipt | None:
         try:
-            call_id = dict(
-                normalize_evidence(
-                    FaultEventState.INJECTED,
-                    {"call_id": fault_call_id},
-                )
-            )["call_id"]
-        except (KeyError, TypeError, ValueError):
+            call_id = normalize_fault_call_id(fault_call_id)
+        except (TypeError, ValueError):
             return None
         _, receipt = self._record_failure(
             notification_id=notification_id,

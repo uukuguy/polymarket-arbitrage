@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -522,6 +523,33 @@ def _production_envelope() -> dict[str, object]:
         event["event_hash"] = acceptance.canonical_digest(event)
         previous = event["event_hash"]
         events.append(event)
+    incident_source_history: list[dict[str, object]] = []
+    incident_previous = "sha256:" + "0" * 64
+    for event_id, state in enumerate(
+        ("detected", "classified", "contained", "recovering", "verified"),
+        start=1,
+    ):
+        payload = {
+            "evidence_json": "{}",
+            "event_id": event_id,
+            "incident_id": "incident-1",
+            "kind": "clob-429",
+            "occurred_at_ms": 20 + event_id,
+            "previous_hash": incident_previous,
+            "scope": "candidate:group-1",
+            "sequence": event_id,
+            "state": state,
+        }
+        event_hash = "sha256:" + hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        incident_source_history.append({**payload, "event_hash": event_hash})
+        incident_previous = event_hash
     return {
         "evidence_schema_version": 2,
         "scope": "production-fault",
@@ -550,13 +578,7 @@ def _production_envelope() -> dict[str, object]:
             "target_key": "group-1",
             "runtime": runtime,
             "source_kind": "clob-429",
-            "source_history": [
-                {
-                    "incident_id": "incident-1",
-                    "sequence": 1,
-                    "state": "detected",
-                }
-            ],
+            "source_history": incident_source_history,
         },
         "open_injection_fault_count": 0,
         "pending_verification_fault_count": 1,
@@ -673,6 +695,41 @@ def test_production_evaluator_rejects_rehashed_weak_or_extended_schema() -> None
         verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
         assert verdict.status == "FAIL"
         assert reason in verdict.reasons
+
+
+def test_production_evaluator_rejects_rehashed_attacker_source_history() -> None:
+    evidence = _production_envelope()
+    evidence["detection_receipt"]["source_history"] = [{"attacker": "yes"}]
+
+    verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
+
+    assert verdict.status == "FAIL"
+    assert "detection-source-history-invalid" in verdict.reasons
+
+
+def test_production_evaluator_rejects_rehashed_arbitrary_cleanup_request() -> None:
+    evidence = _production_envelope()
+    history = evidence["fault_history"]
+    assert isinstance(history, list)
+    history.insert(
+        5,
+        {
+            "fault_id": "fault-1",
+            "sequence": 0,
+            "state": None,
+            "action": "cleanup-requested",
+            "occurred_at_ms": 14,
+            "evidence": {"attacker": "yes"},
+            "previous_hash": "",
+            "event_hash": "",
+        },
+    )
+    _rehash_history(evidence)
+
+    verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
+
+    assert verdict.status == "FAIL"
+    assert "invalid-action-evidence" in verdict.reasons
 
 
 def test_candidate_binds_call_and_detection_to_exact_intent() -> None:

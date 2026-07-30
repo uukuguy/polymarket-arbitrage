@@ -1,241 +1,249 @@
-# Task 7 Fresh Re-review
+# Task 7 Final Fresh Re-review
 
 Baseline: `fe89de0`
-Reviewed HEAD: `799667c`
+Reviewed HEAD: `0dc831d`
 
 ## Spec Compliance ❌
 
-The remediation is not production-safe. C3 (asymmetric evaluator authority) is
-resolved, and the exact-ID ambiguous-arm cleanup is materially improved, but C2,
-H1, H2, H3, M1, and M2 still have release-blocking gaps. The committed Makefile
-also cannot execute the new upstream path.
+The second remediation closes most previously reported runtime and I/O gaps,
+but Task 7 is still not production-safe. The deployed-schema migration for the
+new cleanup confirmation action is missing, Gamma-partial coverage identity is
+not cryptographically derived from its source facts, and the independent
+evaluator still signs envelopes with fabricated detection source history.
 
-This review used an isolated archive of `799667c`; concurrent dirty worktree
-changes were excluded. No cloud, deploy, wallet, order, balance, signing, or
-real-money operation was performed.
+This review used an isolated archive of `0dc831d`; shared unstaged coordinator
+files were excluded. No cloud, deploy, production-fault, wallet, order, balance,
+or real-money operation was performed.
 
-Direct local reproductions proved:
+Direct clean-HEAD reproductions proved:
 
-- changing a non-first Incident event after candidate export still allows the
-  final authoritative export and final evaluator to return `PASS`;
-- an empty reconciliation table is exported as `reconciliation_gate=true`;
-- fully rebound envelopes with extra intent/runtime fields or an arbitrary
-  event action return `PASS`;
-- a candidate with CLEANED evidence containing only `cleanup_id` returns
-  `PASS`, and authority normalization also accepts legacy one-field INJECTED and
-  CLEANED evidence;
-- all documented upstream Make invocations contain CLI arguments that argparse
-  rejects, while all three advertised legacy execute primitives return
-  `adapter-not-implemented`.
+- initializing current code over the pre-`0dc831d` fault-event schema leaves
+  the old CHECK constraint in place; CLEANED commits, then
+  `confirm_cleanup_commit()` fails with `sqlite3.IntegrityError`;
+- `record_partial_coverage_rejection()` accepts and persists an arbitrary
+  `coverage-<64 hex>` ID unrelated to the supplied counts and cursor digests;
+- replacing `detection_receipt.source_history` with
+  `[{"attacker":"fabricated"}]` still returns evaluator `PASS`;
+- authority normalization still accepts INJECTED with only `call_id` and
+  CLEANED with only `cleanup_id`.
 
 ## Strengths
 
-- The caller creates and persists the exact fault ID before arm. Ambiguous arm
-  failures query admission and attempt idempotent cleanup of that exact ID.
-- The exporter opens SQLite read-only, validates the fault ledger, and derives
-  most facts in one bounded transaction rather than accepting caller integrity
-  booleans.
-- Candidate signing now uses Ed25519. The evaluator alone reads the private key;
-  the finalizer and final evaluator use the pinned public key.
-- Fault-domain HMAC uses the shared versioned body-digest contract, and secret
-  preflight occurs before network calls or evidence-directory creation.
-- Wrong envelope mode, cross-fault event identity, release mismatch, replayed
-  finalization, and post-candidate source changes have focused fail-closed tests.
-- Exactly eight typed upstream faults set `execute_supported`; schema-migration,
-  authenticated read-only GET, absolute SQLite deadline, response-lost
-  finalization, and finalizer idempotency tests pass.
-- The focused clean-HEAD suites for the orchestrator, control HTTP surface, and
-  fault authority passed.
+- C1's exact fault ID is persisted before arm, ambiguous arm responses resolve
+  admission and clean the exact ID, and oversized POST responses now fail on
+  the sentinel before parsing. Original and cleanup `BaseException` identities
+  are preserved in order.
+- The production exporter is authenticated, read-only, single-transaction, and
+  deadline-bounded. Incident-backed export now invokes the complete Incident
+  writer/suffix authority validator, and missing reconciliation evidence
+  produces a failing gate without a fixture exception.
+- Gamma partial now has a producer-owned append-only coverage table with
+  fault/call/target/runtime/count/cursor fields, a source hash, foreign key,
+  uniqueness, and no-update/no-delete triggers.
+- The evaluator now rejects extra intent/runtime fields, illegal state/action
+  combinations, weak injected/cleaned event payloads, wrong mode, cross-fault
+  history, wrong release, incorrect call binding, and top-level detection
+  binding mismatches.
+- On a newly created database, cleanup clears memory, commits CLEANED, samples a
+  post-return confirmation time, then appends one ownership-checked,
+  predecessor-bound `cleanup-confirmed` action. Transport reads that action and
+  no longer aliases the CLEANED timestamp.
+- Artifact reads and all temporary/link/unlink writes are relative to a
+  validated owned parent descriptor. Stable file descriptors, byte limits,
+  exact candidate bytes, no-replace publication, fsync, and parent-swap cleanup
+  are covered.
+- Upstream CLI execution rejects dummy authorization arguments; Make uses the
+  Ed25519 private/public variables and no longer passes ordinary/fault dummy
+  arguments. Exactly eight typed upstream faults advertise
+  `execute_supported`; the old legacy flags are false.
+- Ed25519 evaluator-private/finalizer-public separation, read-only authoritative
+  export, finalizer replay/idempotency/source-change checks, and absolute
+  SQLite deadlines remain intact.
+- Six focused clean-HEAD suites covering the orchestrator, HTTP controls,
+  capability contract, fault authority, runtime, and Gamma adapter passed.
 
 ## Issues
 
 ### CRITICAL
 
-1. `scripts/perception_fault_readonly.py:158`
+1. `src/polyarb/storage/schemas.py:1475`
 
-   The “authoritative” exporter still fails open over source evidence. Gamma
-   partial initializes the qualifying `source_kind` and copies `coverage_id`
-   from the fault event without querying any durable coverage source. For
-   Incident-backed faults, lines 161-168 read only the first event's ID/kind and
-   never validate the Incident history, suffix authority, open-authority hashes,
-   aggregate, replay anchors, or terminal recovery evidence. Lines 305-308 also
-   treat a missing reconciliation row as a passing gate.
+   `cleanup-confirmed` was added only to the `CREATE TABLE IF NOT EXISTS`
+   definition. SQLite does not update an existing table's CHECK constraint, and
+   there is no table-rebuild migration from the previously deployed constraint
+   that permits only `cleanup-requested`.
 
-   I created a real Incident/fault/writer chain, exported the candidate,
-   corrupted Incident sequence 2, and then finalized. The second export
-   succeeded and the final evaluator returned `PASS`. The same database had
-   zero reconciliation rows yet exported `reconciliation_gate=true`.
+   I created a database with the pre-remediation fault-event constraint, ran
+   current `init_schema()`, and verified the stored table SQL still omitted
+   `cleanup-confirmed`. A real authorized/armed/injected/detected/contained/
+   CLEANED chain then failed at `confirm_cleanup_commit()` with:
 
-   Fix: validate the complete Incident authority in the same read transaction;
-   bind Gamma-partial to a durable coverage record; make missing required
-   freshness/reconciliation/integrity sources named failures rather than
-   passing defaults.
+   `CHECK constraint failed: action IS NULL OR action='cleanup-requested'`.
+
+   Production cleanup therefore clears memory and commits CLEANED but cannot
+   create the mandatory post-commit proof; recovery evidence freezes after an
+   upgrade. Existing migration tests build their “old” schema from the current
+   DDL, so they cannot detect this.
+
+   Fix: add an idempotent, transactional table-rebuild migration preserving IDs,
+   hashes, indexes, triggers, and foreign keys; test a literal frozen
+   pre-`0dc831d` schema through cleanup confirmation and subsequent recovery.
+
+2. `scripts/perception_fault_acceptance.py:400`
+
+   The independent evaluator validates only that `source_history` is a nonempty
+   list of mappings. It does not enforce the exact coverage/Incident source
+   schemas, recompute coverage `source_hash`, recompute Incident suffix hashes,
+   bind every source row to the detection ID/kind/runtime, or require the
+   expected Incident lifecycle.
+
+   A candidate envelope whose source history was replaced with a single
+   attacker-controlled mapping returned `QualificationVerdict(status='PASS')`.
+   Since `build_candidate_artifact()` signs any evaluator PASS from a supplied
+   evidence file, authoritative export can be bypassed at the independent
+   signing boundary.
+
+   Fix: define exact source-history variants. For coverage, recompute both the
+   source hash and coverage ID and bind fault/call/target/runtime/count/cursors.
+   For Incidents, validate exact fields, sequence, global predecessor/event
+   hashes, incident identity/kind, and terminal recovery/verification semantics.
 
 ### HIGH
 
-1. `scripts/perception_fault_acceptance.py:109`
+1. `src/polyarb/perception/fault_authority.py:422`
 
-   The evaluator does not enforce an exact nested schema. It hashes but accepts
-   extra intent/runtime fields, does not validate state/action combinations,
-   and does not validate CLEANED evidence. Separately,
-   `src/polyarb/perception/fault_control.py:314` permits any subset of allowed
-   evidence fields except for ARMED, DETECTED, and VERIFIED.
+   Coverage IDs are checked only for the `coverage-` prefix and total length.
+   Neither the writer nor exporter verifies:
 
-   Direct reproductions returned `PASS` for a fully rebound extra intent field,
-   a fully rebound extra runtime field, an arbitrary `attacker-action`, and
-   CLEANED evidence containing only `cleanup_id`. `normalize_evidence()` also
-   accepted INJECTED with only `call_id`. This preserves the compatibility
-   backdoor M2 required deleting.
+   `coverage_id == "coverage-" + canonical_digest({counts, cursor digests})`.
 
-   Fix: enforce exact typed fields for intent, runtime, every state/action
-   payload, receipts, and candidate artifact; require both new cleanup timings
-   and the call-binding digest; add all four false-PASS cases as tests.
+   I persisted `coverage-ffff...` with unrelated counts/digests successfully.
+   Although `source_hash` protects the stored row from later mutation, it does
+   not prove that the detection ID names those source facts. This violates the
+   required exact ID/count/cursor binding.
 
-2. `Makefile:942`
+   Fix: derive the ID inside the source owner or recompute and require it in both
+   `record_partial_coverage_rejection()` and export; add wrong-ID tests with an
+   otherwise valid row/hash.
 
-   The operational entrypoints are inconsistent with the committed CLI.
-   Makefile lines 946-947 always pass `--ordinary-authorization` and
-   `--fault-authorization`, which the parser does not define, so every upstream
-   `mode=execute` command exits in argparse. Lines 851 and 857 still require the
-   deleted `POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET`, while the evaluator now
-   requires private/public Ed25519 variables. Finally,
-   `scripts/perception_chaos.py:1190` ignores `legacy_execute_supported`, so
-   `candidate-exit`, `discovery-exit`, and `reconciliation-stall` are documented
-   as executable but always reject.
+2. `src/polyarb/perception/fault_control.py:315`
 
-   Fix: split upstream and legacy CLI contracts, update Makefile and the manual
-   to the actual environment authorities, dispatch the legacy flag deliberately,
-   and add subprocess/Make contract tests rather than plan-only flag tests.
+   The authority compatibility backdoor remains. `normalize_evidence()` accepts
+   any subset of allowed fields for INJECTED and CLEANED; exact-key enforcement
+   still applies only to ARMED, DETECTED cardinality, and VERIFIED. Consequently
+   `append_event()` and history validation can accept one-field legacy
+   injection/cleanup events even though the independent evaluator later rejects
+   them.
 
-3. `scripts/perception_chaos.py:290`
+   This lets the source projection call an under-specified chain valid and
+   contradicts the requirement to delete weak compatibility rather than merely
+   reject it downstream.
 
-   POST control responses are read with a `+1` sentinel but the sentinel length
-   is never rejected. A mapping JSON at the limit plus trailing whitespace is
-   accepted, so the required oversized-response failure and cleanup path is not
-   implemented even though GET responses perform this check.
-
-   Fix: retain the raw bytes, reject `len(raw) > _MAX_HTTP_BYTES`, then parse;
-   test an oversized-but-parseable arm response and exact-ID cleanup.
-
-4. `scripts/perception_chaos.py:748`
-
-   Cleanup failures are converted to `AdapterFailedError`. With an original
-   failure, the group contains the wrapper rather than the cleanup
-   `KeyboardInterrupt`, `SystemExit`, `CancelledError`, or other
-   `BaseException`; with cleanup alone, the exact exception is not re-raised.
-   H3 therefore still destroys cleanup exception identity and traceback.
-
-   Fix: preserve both actual exceptions in order and derive matrix-freeze state
-   without replacing either exception.
-
-5. `src/polyarb/perception/fault_runtime.py:252`
-
-   `receipt_persisted_at_ms` is sampled before `relinquish_claim()` starts its
-   SQLite transaction and commits. It therefore is not an observed persistence
-   completion time. Combined with the optional CLEANED schema above, M2's
-   clear-before-durable-receipt proof remains incomplete.
-
-   Fix: record persistence completion after a successful commit through an
-   authority-owned receipt and verify strict ordering under a delayed-commit
-   test.
+   Fix: require exact key sets for every lifecycle state, with an explicit
+   migration/quarantine policy for pre-existing weak histories; add authority
+   append and restart-validation tests.
 
 ### MEDIUM
 
-1. `src/polyarb/safe_artifact.py:46`
+1. `docs/dev/perception-fault-runbook.md:146`
 
-   The parent directory descriptor is validated, but temp creation, hard-link
-   publication, and unlink use absolute/pathname resolution at lines 51-74. A
-   parent rename/replacement after validation can redirect publication into an
-   unvalidated directory while `fsync` targets the old directory descriptor.
-   Reads also validate only the final file, not parent ownership/stability.
+   The developer runbook still instructs upstream execution with the removed
+   predictable authorization argument, names the removed
+   `ordinary_authorization`/`fault_authorization` inputs, and documents the
+   obsolete symmetric `POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET`. It also says
+   the three legacy producer executions remain available, while their
+   capability flags and dispatcher are now disabled.
 
-   Fix: perform all operations relative to the validated `parent_fd` with
-   `dir_fd` APIs and basenames, validate the read parent, and add adversarial
-   parent-swap tests.
-
-2. `scripts/perception_chaos.py:1153`
-
-   Upstream execution still requires a predictable dummy
-   `--authorization=fault:<fault>:<release>` even though real authority comes
-   from environment-held HMAC keys. This contradicts H2 and the manual's claim
-   that dummy authorization arguments are gone.
-
-   Fix: make the legacy acknowledgement a legacy-only option and remove it
-   entirely from the upstream path.
+   Fix: update the runbook to the environment-HMAC and Ed25519 contracts and
+   clearly mark legacy producer execution unavailable.
 
 ## Verification
 
-- Clean-HEAD focused suites passed:
+- PASS:
   `test_upstream_fault_e2e.py`,
-  `test_perception_fault_controls.py`, and
-  `test_fault_authority.py`.
-- The isolated full suite completed with two non-Task-7 failures: the archive
-  intentionally has no `.git` directory for the climb shell test, and one
-  resource-Incident timing test failed once but passed on two immediate isolated
-  reruns.
-- The false-PASS and CLI reproductions listed under Spec Compliance were run
-  directly against the isolated `799667c` source.
+  `test_perception_fault_controls.py`,
+  `test_perception_chaos_contract.py`,
+  `test_fault_authority.py`,
+  `test_fault_runtime.py`, and
+  `test_gamma_fault_adapter.py`.
+- `git diff --check fe89de0..0dc831d`: PASS.
+- The four adversarial reproductions listed under Spec Compliance were executed
+  directly against isolated `0dc831d`.
 
 ## Assessment
 
 **Needs fixes.**
 
-Do not run the production upstream fault matrix from `799667c`. The false-PASS
-source exporter, noncanonical evaluator acceptance, broken Make/CLI surface, and
-incomplete cleanup semantics remain release blockers.
+Do not run the production upstream matrix from `0dc831d`. The missing deployed
+schema migration alone breaks every upgraded cleanup-confirmation chain; the
+coverage-ID and independent-evaluator false-PASS gaps also prevent trustworthy
+production qualification.
 
----
+## Third Remediation Resolution
 
-## Second remediation against this re-review
+Resolved on top of `0dc831d` without cloud, deploy, production-fault, wallet,
+order, balance, or real-money operations:
 
-Status: SECOND REMEDIATION GREEN — local qualification only.
-No cloud, deploy, production fault, wallet, order, balance, or real-money
-operation was performed.
+- Added an idempotent transactional migration for the frozen pre-`0dc831d`
+  `neg_risk_fault_events` action CHECK. It rebuilds the table with
+  `foreign_keys=OFF` and `legacy_alter_table=ON`, preserves every event ID,
+  sequence, state/action, evidence, predecessor/hash, and row order, then
+  restores foreign-key enforcement. Current DDL recreates the append-only
+  triggers and partial unique indexes. A literal old-schema fixture proves
+  `foreign_key_check` is empty, repeated `init_schema()` is stable, history
+  hashes do not change, and a real post-CLEANED `cleanup-confirmed` append
+  succeeds. An authorizer-injected DROP failure proves the rebuild rolls back
+  atomically.
+- `normalize_evidence()` now requires the complete INJECTED and CLEANED schemas
+  for every new authority append. Restart validation retains a narrow,
+  version-aware read-only compatibility path for already-persisted historical
+  one-field rows; it cannot be used by a new writer. Production Incident
+  receipt code now uses a separate `normalize_fault_call_id()` based on the
+  single canonical `_CALL_ID_RE`, so strict event validation is never reused as
+  an ID sanitizer.
+- Partial coverage authority derives and requires the exact
+  `coverage-<digest(counts,cursors)>` identity. Both authority and independent
+  evaluator recompute the semantic ID and source hash.
+- Incident export now includes the complete retained global suffix, including
+  predecessor rows from other incidents. The independent evaluator enforces
+  exact source fields, canonical evidence JSON, monotonic event IDs, global
+  predecessor/event hashes, target incident sequence/kind/state transitions,
+  and terminal VERIFIED state. Coverage history receives analogous exact
+  schema/hash/runtime/fault/call/target checks. Rehashed attacker mappings now
+  fail.
+- Cleanup request and confirmation actions receive exact nested schemas,
+  digest/ID/time types, and CLEANED predecessor binding at the independent
+  evaluator. Ambiguous-arm cleanup failures retain the original
+  `BaseException` object rather than wrapping it. The dead public
+  `legacy_execute_supported` field was removed.
+- Make help, the developer runbook, and the M1 manual no longer advertise
+  dummy CLI authorization, disabled producer execution, or the removed
+  symmetric evaluator secret. They document the three Ed25519 phases exactly:
+  candidate evaluator private key; finalizer public key plus control HMACs;
+  read-only final evaluator public key only.
 
-- **C1:** POST responses now reject the 1 MiB + 1 sentinel before JSON parsing.
-  Exact-ID ambiguous arm cleanup remains unchanged and adversarially covered.
-- **C2 / authoritative sources:** Gamma partial-page detection now writes a
-  source-owned append-only coverage rejection bound to exact fault, call,
-  target, runtime, counts, cursor digests, and source hash before lifecycle
-  detection. Export requires that row and validates its hash/runtime. Incident
-  export validates the complete Incident writer authority inside the same
-  transaction and emits the target history with sequence, evidence, state, and
-  global suffix predecessor/event hashes. Reconciliation uses the store's full
-  same-connection authority validator; missing evidence is fail-closed.
-- **H1:** production evaluation enforces exact intent/runtime/event/action and
-  per-state evidence fields. Fully rehashed extra-field, arbitrary-action,
-  one-field INJECTED, and one-field CLEANED reproductions are named FAIL.
-- **H2 / Make:** typed upstream execution rejects the predictable
-  `--authorization` acknowledgement and reads both HMAC authorities only from
-  the environment. Make no longer passes dummy ordinary/fault arguments and
-  now gates candidate/final evaluation on the Ed25519 private/public variables.
-  The three dead legacy producer flags are no longer advertised.
-- **H3:** cleanup-only `BaseException` is re-raised with its identity intact;
-  grouped failures preserve the original first and the actual cleanup
-  exception second.
-- **M1:** reads and every write/temp/link/unlink operation are relative to a
-  validated owned parent descriptor. Parent replacement is checked before and
-  after publication; an adversarial swap removes the anchored publication and
-  leaves neither substituted nor moved final output.
-- **M2:** after memory clear and the first CLEANED transaction returns, runtime
-  samples a distinct confirmation time and appends one ownership-validated,
-  hash-chained `cleanup-confirmed` action in a second transaction. The action
-  binds exact CLEANED event hash, cleanup ID, memory-clear time, and commit
-  confirmation time. History, transport, and evaluator require this proof.
+During full verification, systematic debugging exposed one unrelated but real
+read-snapshot race: `open_incidents()` could combine a pre-commit owner guard
+with a post-commit journal row because its multi-query validation lacked an
+explicit SQLite read transaction. A RED/GREEN contract test now requires one
+snapshot on manager-owned read-only connections. The SIGSTOP integration test
+also uses a test-only five-second overall recovery window while preserving its
+0.12-second stall detection threshold; production defaults are unchanged.
 
-Verification completed before the final full rerun:
+## Final Verification
 
-- five complete fault suites: PASS;
-- candidate/Gamma/Telegram adapter suites after action-history adaptation: PASS;
-- changed-file Ruff: PASS;
-- `make docs-m1-check`: PASS;
-- `make planning-status`: 82 plans, no drift.
+- Focused upstream qualification/authority/runtime/control set: **316 passed**.
+- Candidate, Gamma, notification, Telegram, and call-ID regression set after
+  strict writer rollout: **156 passed**.
+- Resource/supervisor concurrency scenarios: **10/10 paired repetitions
+  passed** after the snapshot/test-SLO correction, with no child-process
+  residue.
+- Full suite: **3654 collected, 100% PASS**, with one expected xfail and one
+  expected skip.
+- Changed-file Ruff: PASS.
+- `make docs-m1-check`: PASS.
+- `make planning-status`: PASS, no drift.
+- `git diff --check` on owned files: PASS.
 
-The first second-remediation full run reached 100% and exposed only nine stale
-test assumptions that every history item has a lifecycle state; the new typed
-action intentionally has `state=NULL`. Those tests were updated to inspect
-lifecycle states while retaining the action in the exact history, and all three
-impacted adapter suites then passed.
-
-The final repository-wide rerun reached 100% with exit code 0, one expected
-xfail, one skip, and only the repository's existing warnings.
+Assessment after remediation: **Ready for fresh independent re-review.**
+Production execution remains explicitly out of scope and was not run.

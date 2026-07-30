@@ -247,6 +247,15 @@ def normalize_fault_id(value: str) -> str:
     )
 
 
+def normalize_fault_call_id(value: str) -> str:
+    """Normalize one opaque fault-call identity without weakening event evidence."""
+    return _normalize_field_identifier(
+        value,
+        pattern=_CALL_ID_RE,
+        reason="invalid-fault-call-id",
+    )
+
+
 def normalize_supervisor_run_id(value: str) -> str:
     return _normalize_field_identifier(
         value,
@@ -331,11 +340,14 @@ def normalize_evidence(
                 pattern=_EVIDENCE_ID_PATTERNS[key],
                 reason="invalid-evidence",
             )
-    if typed_state is FaultEventState.ARMED and set(normalized) != _EVIDENCE_KEYS[typed_state]:
+    if typed_state in {
+        FaultEventState.ARMED,
+        FaultEventState.INJECTED,
+        FaultEventState.CLEANED,
+        FaultEventState.VERIFIED,
+    } and set(normalized) != _EVIDENCE_KEYS[typed_state]:
         raise ValueError("invalid-evidence")
     if typed_state is FaultEventState.DETECTED and len(normalized) != 1:
-        raise ValueError("invalid-evidence")
-    if typed_state is FaultEventState.VERIFIED and set(normalized) != _EVIDENCE_KEYS[typed_state]:
         raise ValueError("invalid-evidence")
     return MappingProxyType(normalized)
 

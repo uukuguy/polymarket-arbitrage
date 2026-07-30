@@ -22,7 +22,11 @@ from polyarb.http import perception_faults
 from polyarb.perception.evaluator_signing import sign_digest
 from polyarb.perception.fault_auth import fault_hmac_message
 from polyarb.perception.fault_authority import FaultAuthorityStore
-from polyarb.perception.fault_control import FaultEventState, FaultRuntimeIdentity
+from polyarb.perception.fault_control import (
+    FaultEventState,
+    FaultRuntimeIdentity,
+    fault_call_binding_digest,
+)
 
 ORDINARY_SECRET = "ordinary-control-secret"
 FAULT_SECRET = "distinct-fault-control-secret"
@@ -32,6 +36,41 @@ EVALUATOR_PRIVATE_KEY = (
 EVALUATOR_PUBLIC_KEY = (
     "ed25519-v1:test-key:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w"
 )
+
+
+def _injected_evidence(
+    *,
+    fault_id: str,
+    kind: str,
+    call_class: str,
+    target_key: str,
+    runtime: FaultRuntimeIdentity,
+    call_id: str = "call-1",
+) -> dict[str, str]:
+    return {
+        "call_id": call_id,
+        "call_binding_digest": fault_call_binding_digest(
+            fault_id=fault_id,
+            kind=kind,
+            call_class=call_class,
+            target_key=target_key,
+            runtime={
+                "component": runtime.component,
+                "release_id": runtime.release_id,
+                "machine_id": runtime.machine_id,
+                "boot_id": str(runtime.boot_id),
+            },
+            call_id=call_id,
+        ),
+    }
+
+
+def _cleaned_evidence(at_ms: int) -> dict[str, str]:
+    return {
+        "cleanup_id": "cleanup-1",
+        "memory_cleared_at_ms": str(at_ms),
+        "receipt_persisted_at_ms": str(at_ms),
+    }
 
 
 @pytest.fixture
@@ -389,7 +428,14 @@ def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqli
             cleaned = store.append_event(
                 value["fault_id"], FaultEventState.INJECTED,
                 occurred_at_ms=lifecycle_at,
-                evidence={"call_id": "call-1"}, ownership=ownership,
+                evidence=_injected_evidence(
+                    fault_id=value["fault_id"],
+                    kind=kind,
+                    call_class=call_class,
+                    target_key=target_key,
+                    runtime=runtime,
+                ),
+                ownership=ownership,
             )
             detection = (
                 {"coverage_id": "coverage-" + "d" * 64}
@@ -531,7 +577,13 @@ def test_ambiguous_committed_arm_is_resolved_and_cleaned_by_exact_fault_id(
                 value["fault_id"],
                 FaultEventState.INJECTED,
                 occurred_at_ms=lifecycle_at,
-                evidence={"call_id": "call-1"},
+                evidence=_injected_evidence(
+                    fault_id=value["fault_id"],
+                    kind="gamma-timeout",
+                    call_class="gamma-discovery-event-page",
+                    target_key="discovery",
+                    runtime=runtime,
+                ),
                 ownership=claimed.ownership_capability,
             )
             store.append_event(
@@ -648,7 +700,14 @@ def test_finalizer_requires_signed_exact_candidate_and_appends_verified(
     ownership = claimed.ownership_capability
     store.append_event(
         "fault-api-1", FaultEventState.INJECTED, occurred_at_ms=now,
-        evidence={"call_id": "call-1"}, ownership=ownership,
+        evidence=_injected_evidence(
+            fault_id="fault-api-1",
+            kind=kind,
+            call_class=call_class,
+            target_key=target_key,
+            runtime=runtime,
+        ),
+        ownership=ownership,
     )
     store.append_event(
         "fault-api-1", FaultEventState.DETECTED, occurred_at_ms=now,
@@ -660,7 +719,7 @@ def test_finalizer_requires_signed_exact_candidate_and_appends_verified(
     )
     store.append_event(
         "fault-api-1", FaultEventState.CLEANED, occurred_at_ms=now,
-        evidence={"cleanup_id": "cleanup-1"}, ownership=ownership,
+        evidence=_cleaned_evidence(now), ownership=ownership,
     )
     recovered = store.append_event(
         "fault-api-1", FaultEventState.RECOVERED, occurred_at_ms=now,
@@ -945,7 +1004,13 @@ def test_cleanup_reports_producer_terminal_truth_instead_of_pending(
         "fault-api-1",
         FaultEventState.INJECTED,
         occurred_at_ms=now_ms,
-        evidence={"call_id": "call-1"},
+        evidence=_injected_evidence(
+            fault_id="fault-api-1",
+            kind="clob-latency",
+            call_class="clob-candidate-book-batch",
+            target_key="group-1",
+            runtime=runtime,
+        ),
         ownership=intent.ownership_capability,
     )
     authority.append_event(
@@ -964,7 +1029,7 @@ def test_cleanup_reports_producer_terminal_truth_instead_of_pending(
         "fault-api-1",
         FaultEventState.CLEANED,
         occurred_at_ms=now_ms,
-        evidence={"cleanup_id": "cleanup-1"},
+        evidence=_cleaned_evidence(now_ms),
         ownership=intent.ownership_capability,
     )
     response = _post(

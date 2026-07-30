@@ -429,6 +429,16 @@ class FaultAuthorityStore:
                 )
             ):
                 raise ValueError("invalid-partial-coverage-source")
+            expected_coverage_id = "coverage-" + canonical_digest(
+                {
+                    "kept_count": kept_count,
+                    "next_cursor_digest": next_cursor_digest,
+                    "original_count": original_count,
+                    "requested_cursor_digest": requested_cursor_digest,
+                }
+            )
+            if coverage_id != expected_coverage_id:
+                raise ValueError("invalid-partial-coverage-source")
             payload = {
                 "boot_id": row["boot_id"],
                 "call_class": row["call_class"],
@@ -1727,6 +1737,8 @@ class FaultAuthorityStore:
             }:
                 state = FaultEventState.ABANDONED
             elif tail is FaultEventState.CONTAINED:
+                if memory_cleared_at_ms is None:
+                    raise ValueError("cleanup-evidence-required")
                 state = FaultEventState.CLEANED
             else:
                 raise ValueError("fault-not-relinquishable")
@@ -1737,14 +1749,8 @@ class FaultAuthorityStore:
                 if state is FaultEventState.ABANDONED
                 else {
                     "cleanup_id": secrets.token_hex(16),
-                    **(
-                        {
-                            "memory_cleared_at_ms": str(memory_cleared_at_ms),
-                            "receipt_persisted_at_ms": str(occurred_at_ms),
-                        }
-                        if memory_cleared_at_ms is not None
-                        else {}
-                    ),
+                    "memory_cleared_at_ms": str(memory_cleared_at_ms),
+                    "receipt_persisted_at_ms": str(occurred_at_ms),
                 }
             )
             event = self._append_event_in_transaction(
@@ -2086,7 +2092,27 @@ class FaultAuthorityStore:
                 else:
                     if event.action is not None:
                         raise ValueError("invalid-event-action")
-                    evidence_json = canonical_json(normalize_evidence(event.state, event.evidence))
+                    try:
+                        normalized_stored = normalize_evidence(
+                            event.state, event.evidence
+                        )
+                    except ValueError:
+                        legacy_key = {
+                            FaultEventState.INJECTED: "call_id",
+                            FaultEventState.CLEANED: "cleanup_id",
+                        }.get(event.state)
+                        if (
+                            legacy_key is None
+                            or set(event.evidence) != {legacy_key}
+                            or re.fullmatch(
+                                r"[a-zA-Z0-9._:-]{1,128}",
+                                str(event.evidence[legacy_key]),
+                            )
+                            is None
+                        ):
+                            raise
+                        normalized_stored = event.evidence
+                    evidence_json = canonical_json(normalized_stored)
                 expected_hash = _event_hash(
                     fault_id=event.fault_id,
                     sequence=event.sequence,

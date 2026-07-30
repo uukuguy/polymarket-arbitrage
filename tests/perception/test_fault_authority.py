@@ -26,6 +26,7 @@ from polyarb.perception.fault_control import (
     FaultIntentRequest,
     FaultKind,
     FaultRuntimeIdentity,
+    canonical_digest,
     fault_call_binding_digest,
 )
 from polyarb.perception.incidents import IncidentManager
@@ -36,7 +37,7 @@ from polyarb.perception.models import (
     GroupRevision,
 )
 from polyarb.perception.store import OpportunityPerceptionStore
-from polyarb.storage.schemas import DDL
+from polyarb.storage.schemas import DDL, migrate_fault_events_cleanup_confirmation
 from polyarb.storage.sqlite_store import SQLiteStore
 
 RUNTIME = FaultRuntimeIdentity(
@@ -70,6 +71,249 @@ def auth(value: str = "b") -> FaultAuthorization:
     return FaultAuthorization(nonce_digest=value * 64, authorization_digest="c" * 64)
 
 
+def injected_evidence(
+    *,
+    fault_id: str = "fault-1",
+    call_id: str = "call-1",
+    kind: FaultKind = FaultKind.CLOB_LATENCY,
+    call_class: FaultCallClass = FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH,
+    target_key: str = "group-1",
+    runtime: FaultRuntimeIdentity = RUNTIME,
+) -> dict[str, str]:
+    return {
+        "call_id": call_id,
+        "call_binding_digest": fault_call_binding_digest(
+            fault_id=fault_id,
+            kind=kind.value,
+            call_class=call_class.value,
+            target_key=target_key,
+            runtime={
+                "component": runtime.component,
+                "release_id": runtime.release_id,
+                "machine_id": runtime.machine_id,
+                "boot_id": str(runtime.boot_id),
+            },
+            call_id=call_id,
+        ),
+    }
+
+
+def cleaned_evidence() -> dict[str, str]:
+    return {
+        "cleanup_id": "cleanup-1",
+        "memory_cleared_at_ms": "1590",
+        "receipt_persisted_at_ms": "1600",
+    }
+
+
+def downgrade_fault_event_action_check(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as con:
+        con.execute("PRAGMA foreign_keys=OFF")
+        con.execute("PRAGMA legacy_alter_table=ON")
+        try:
+            con.executescript(
+                """
+                BEGIN IMMEDIATE;
+                ALTER TABLE neg_risk_fault_events
+                  RENAME TO neg_risk_fault_events_current;
+                CREATE TABLE neg_risk_fault_events (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  fault_id TEXT NOT NULL
+                    REFERENCES neg_risk_fault_intents(fault_id),
+                  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+                  state TEXT CHECK(state IN
+                    ('authorized','armed','injected','detected','contained',
+                     'recovered','cleaned','verified','rejected','expired',
+                     'abandoned','cleanup-failed','recovery-timeout',
+                     'evidence-invalid','escalated')),
+                  action TEXT CHECK(
+                    action IS NULL OR action='cleanup-requested'
+                  ),
+                  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+                  evidence_json TEXT NOT NULL,
+                  previous_hash TEXT NOT NULL CHECK(length(previous_hash) = 64),
+                  event_hash TEXT NOT NULL CHECK(length(event_hash) = 64),
+                  CHECK(
+                    (state IS NOT NULL AND action IS NULL)
+                    OR (state IS NULL AND action='cleanup-requested')
+                  ),
+                  UNIQUE(fault_id,sequence),
+                  UNIQUE(event_hash)
+                );
+                INSERT INTO neg_risk_fault_events(
+                  id,fault_id,sequence,state,action,occurred_at_ms,evidence_json,
+                  previous_hash,event_hash
+                )
+                SELECT
+                  id,fault_id,sequence,state,action,occurred_at_ms,evidence_json,
+                  previous_hash,event_hash
+                FROM neg_risk_fault_events_current
+                ORDER BY id;
+                DROP TABLE neg_risk_fault_events_current;
+                COMMIT;
+                """
+            )
+        finally:
+            con.execute("PRAGMA legacy_alter_table=OFF")
+            con.execute("PRAGMA foreign_keys=ON")
+
+
+def test_new_injected_and_cleaned_writes_require_complete_evidence(
+    store: FaultAuthorityStore,
+) -> None:
+    assert store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100).accepted
+    claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_200)
+    assert claimed is not None and claimed.ownership_capability is not None
+    ownership = claimed.ownership_capability
+    with pytest.raises(ValueError, match="invalid-evidence"):
+        store.append_event(
+            "fault-1",
+            FaultEventState.INJECTED,
+            occurred_at_ms=1_300,
+            evidence={"call_id": "call-1"},
+            ownership=ownership,
+        )
+    store.append_event(
+        "fault-1",
+        FaultEventState.INJECTED,
+        occurred_at_ms=1_300,
+        evidence=injected_evidence(),
+        ownership=ownership,
+    )
+    store.append_event(
+        "fault-1",
+        FaultEventState.DETECTED,
+        occurred_at_ms=1_400,
+        evidence={"incident_id": "incident-1"},
+    )
+    store.append_event(
+        "fault-1",
+        FaultEventState.CONTAINED,
+        occurred_at_ms=1_500,
+        evidence={"containment_id": "containment-1"},
+    )
+    with pytest.raises(ValueError, match="invalid-evidence"):
+        store.append_event(
+            "fault-1",
+            FaultEventState.CLEANED,
+            occurred_at_ms=1_600,
+            evidence={"cleanup_id": "cleanup-1"},
+            ownership=ownership,
+        )
+
+
+def test_old_fault_event_schema_migrates_without_rewriting_history(
+    store: FaultAuthorityStore,
+    db_path: Path,
+) -> None:
+    assert store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100).accepted
+    claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_200)
+    assert claimed is not None and claimed.ownership_capability is not None
+    ownership = claimed.ownership_capability
+    store.append_event(
+        "fault-1",
+        FaultEventState.INJECTED,
+        occurred_at_ms=1_300,
+        evidence=injected_evidence(),
+        ownership=ownership,
+    )
+    store.append_event(
+        "fault-1",
+        FaultEventState.DETECTED,
+        occurred_at_ms=1_400,
+        evidence={"incident_id": "incident-1"},
+    )
+    store.append_event(
+        "fault-1",
+        FaultEventState.CONTAINED,
+        occurred_at_ms=1_500,
+        evidence={"containment_id": "containment-1"},
+    )
+    cleaned = store.append_event(
+        "fault-1",
+        FaultEventState.CLEANED,
+        occurred_at_ms=1_600,
+        evidence=cleaned_evidence(),
+        ownership=ownership,
+    )
+    with sqlite3.connect(db_path) as con:
+        before = con.execute(
+            "SELECT id,fault_id,sequence,state,action,occurred_at_ms,"
+            "evidence_json,previous_hash,event_hash "
+            "FROM neg_risk_fault_events ORDER BY id"
+        ).fetchall()
+
+    downgrade_fault_event_action_check(db_path)
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "CREATE TABLE fault_event_reference("
+            "event_id INTEGER REFERENCES neg_risk_fault_events(id))"
+        )
+        con.execute(
+            "INSERT INTO fault_event_reference(event_id) VALUES(?)",
+            (cleaned.event_id,),
+        )
+
+    perception_store = OpportunityPerceptionStore(db_path)
+    perception_store.init_schema()
+    perception_store.init_schema()
+
+    with sqlite3.connect(db_path) as con:
+        after = con.execute(
+            "SELECT id,fault_id,sequence,state,action,occurred_at_ms,"
+            "evidence_json,previous_hash,event_hash "
+            "FROM neg_risk_fault_events WHERE action IS NULL ORDER BY id"
+        ).fetchall()
+        table_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_fault_events'"
+        ).fetchone()[0]
+        assert after == before
+        assert "'cleanup-confirmed'" in table_sql
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    confirmation = store.confirm_cleanup_commit(
+        "fault-1",
+        cleaned=cleaned,
+        memory_cleared_at_ms=1_590,
+        confirmed_at_ms=1_601,
+        ownership=ownership,
+    )
+    assert confirmation.action is FaultEventAction.CLEANUP_CONFIRMED
+
+
+def test_fault_event_schema_migration_rolls_back_atomically(db_path: Path) -> None:
+    downgrade_fault_event_action_check(db_path)
+    with sqlite3.connect(db_path) as con:
+        def deny_old_table_drop(
+            action: int,
+            arg1: str | None,
+            _arg2: str | None,
+            _db: str | None,
+            _trigger: str | None,
+        ) -> int:
+            if (
+                action == sqlite3.SQLITE_DROP_TABLE
+                and arg1 == "neg_risk_fault_events_pre_confirmation"
+            ):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        con.set_authorizer(deny_old_table_drop)
+        with pytest.raises(sqlite3.DatabaseError):
+            migrate_fault_events_cleanup_confirmation(con)
+        con.set_authorizer(None)
+        table_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_fault_events'"
+        ).fetchone()[0]
+        assert "'cleanup-confirmed'" not in table_sql
+        assert con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_fault_events_pre_confirmation'"
+        ).fetchone() is None
+
+
 def test_partial_coverage_source_is_exact_bound_and_append_only(
     store: FaultAuthorityStore,
     db_path: Path,
@@ -98,7 +342,14 @@ def test_partial_coverage_source_is_exact_bound_and_append_only(
         accepted_at_ms=1_100,
     )
     assert admission.accepted
-    coverage_id = "coverage-" + "1" * 64
+    coverage_id = "coverage-" + canonical_digest(
+        {
+            "kept_count": 1,
+            "next_cursor_digest": "3" * 64,
+            "original_count": 2,
+            "requested_cursor_digest": "2" * 64,
+        }
+    )
     store.record_partial_coverage_rejection(
         "fault-1",
         coverage_id=coverage_id,
@@ -118,7 +369,7 @@ def test_partial_coverage_source_is_exact_bound_and_append_only(
             con.execute(
                 "UPDATE neg_risk_fault_coverage_rejections SET machine_id='other'"
             )
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(ValueError, match="invalid-partial-coverage-source"):
         store.record_partial_coverage_rejection(
             "fault-1",
             coverage_id="coverage-" + "4" * 64,
@@ -504,7 +755,7 @@ def test_owned_relinquish_selects_a_lifecycle_valid_durable_terminal(
             "fault-1",
             FaultEventState.INJECTED,
             occurred_at_ms=1_200,
-            evidence={"call_id": "call-1"},
+            evidence=injected_evidence(),
             ownership=ownership,
         )
     if tail in {FaultEventState.DETECTED, FaultEventState.CONTAINED}:
@@ -526,6 +777,7 @@ def test_owned_relinquish_selects_a_lifecycle_valid_durable_terminal(
         "fault-1",
         occurred_at_ms=occurred_at_ms,
         ownership=ownership,
+        memory_cleared_at_ms=occurred_at_ms,
     )
 
     assert event.state is expected
@@ -602,7 +854,7 @@ def test_claim_rejects_injection_without_a_claim(
         "fault-1",
         FaultEventState.INJECTED,
         occurred_at_ms=1_200,
-        evidence={"call_id": "call-1"},
+        evidence=injected_evidence(),
         ownership=claimed.ownership_capability,
     )
     with sqlite3.connect(db_path) as con:
@@ -1021,7 +1273,7 @@ def test_process_owned_lifecycle_events_require_claim_capability(
             "fault-1",
             FaultEventState.INJECTED,
             occurred_at_ms=1_300,
-            evidence={"call_id": "call-1"},
+            evidence=injected_evidence(),
         )
     wrong_runtime = replace(
         claimed.ownership_capability,
@@ -1032,14 +1284,14 @@ def test_process_owned_lifecycle_events_require_claim_capability(
             "fault-1",
             FaultEventState.INJECTED,
             occurred_at_ms=1_300,
-            evidence={"call_id": "call-1"},
+            evidence=injected_evidence(),
             ownership=wrong_runtime,
         )
     injected = store.append_event(
         "fault-1",
         FaultEventState.INJECTED,
         occurred_at_ms=1_300,
-        evidence={"call_id": "call-1"},
+        evidence=injected_evidence(),
         ownership=claimed.ownership_capability,
     )
     assert injected.state is FaultEventState.INJECTED
@@ -1060,13 +1312,13 @@ def test_process_owned_lifecycle_events_require_claim_capability(
             "fault-1",
             FaultEventState.CLEANED,
             occurred_at_ms=1_600,
-            evidence={"cleanup_id": "cleanup-1"},
+            evidence=cleaned_evidence(),
         )
     store.append_event(
         "fault-1",
         FaultEventState.CLEANED,
         occurred_at_ms=1_600,
-        evidence={"cleanup_id": "cleanup-1"},
+        evidence=cleaned_evidence(),
         ownership=claimed.ownership_capability,
     )
     with pytest.raises(PermissionError, match="ownership-capability-required"):
@@ -1166,7 +1418,7 @@ def test_lifecycle_hashes_validate_and_tampering_is_detected(
         "fault-1",
         FaultEventState.INJECTED,
         occurred_at_ms=1_300,
-        evidence={"call_id": "call-1"},
+        evidence=injected_evidence(),
         ownership=claimed.ownership_capability,
     )
     store.append_event(
@@ -1185,7 +1437,7 @@ def test_lifecycle_hashes_validate_and_tampering_is_detected(
         "fault-1",
         FaultEventState.CLEANED,
         occurred_at_ms=1_600,
-        evidence={"cleanup_id": "cleanup-1"},
+        evidence=cleaned_evidence(),
         ownership=claimed.ownership_capability,
     )
     store.append_event(
@@ -1541,7 +1793,7 @@ def test_projection_fails_closed_for_invalid_chains(
                 "fault-1",
                 FaultEventState.INJECTED,
                 occurred_at_ms=1_300,
-                evidence={"call_id": "call-1"},
+                evidence=injected_evidence(),
                 ownership=claimed.ownership_capability,
             )
             with sqlite3.connect(db_path) as con:
@@ -1555,7 +1807,7 @@ def test_projection_fails_closed_for_invalid_chains(
                 "fault-1",
                 FaultEventState.INJECTED,
                 occurred_at_ms=1_300,
-                evidence={"call_id": "call-1"},
+                evidence=injected_evidence(),
                 ownership=claimed.ownership_capability,
             )
             with sqlite3.connect(db_path) as con:
@@ -1568,7 +1820,7 @@ def test_projection_fails_closed_for_invalid_chains(
                 "fault-1",
                 FaultEventState.CLEANED,
                 occurred_at_ms=1_300,
-                evidence={"cleanup_id": "cleanup-1"},
+                evidence=cleaned_evidence(),
                 ownership=claimed.ownership_capability,
             )
     assert not store.project_fault("fault-1", now_ms=2_000).available
@@ -1608,7 +1860,7 @@ def test_stale_active_chain_projects_abandoned_and_is_never_claimable(
             "fault-1",
             state,
             occurred_at_ms=1_300,
-            evidence={"call_id": "call-1"},
+            evidence=injected_evidence(),
             ownership=claimed.ownership_capability,
         )
     newer = replace(RUNTIME, boot_id=UUID("87654321-4321-4876-9234-567812345678"))

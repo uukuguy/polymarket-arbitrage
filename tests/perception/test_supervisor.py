@@ -365,7 +365,7 @@ async def test_sigstop_reconciliation_child_is_detected_and_resumes_with_checkpo
         supervisor.run(
             ProducerSpec(
                 component="reconciliation",
-                timeout_s=1,
+                timeout_s=5,
                 stall_detection_s=0.12,
                 terminate_grace_s=0.05,
                 max_restarts=0,

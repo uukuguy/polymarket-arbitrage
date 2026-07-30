@@ -96,6 +96,110 @@ _PRODUCTION_EVIDENCE_FIELDS = {
     "recovered": frozenset({"recovery_id"}),
     "verified": frozenset({"verdict_id", "verdict_digest"}),
 }
+_INCIDENT_SOURCE_FIELDS = frozenset(
+    {
+        "event_hash", "event_id", "evidence_json", "incident_id", "kind",
+        "occurred_at_ms", "previous_hash", "scope", "sequence", "state",
+    }
+)
+_INCIDENT_TRANSITIONS = {
+    "detected": {"classified"},
+    "classified": {"contained", "escalated"},
+    "contained": {"recovering", "escalated"},
+    "recovering": {"verified", "contained", "escalated"},
+    "verified": set(),
+    "escalated": {"recovering"},
+}
+_COVERAGE_SOURCE_FIELDS = frozenset(
+    {
+        "boot_id", "call_class", "component", "coverage_id", "fault_id",
+        "kept_count", "machine_id", "next_cursor_digest", "original_count",
+        "recorded_at_ms", "release_id", "requested_cursor_digest",
+        "source_hash", "target_key",
+    }
+)
+
+
+def _source_history_valid(
+    receipt: Mapping[str, Any],
+    *,
+    intent: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+) -> bool:
+    history = receipt.get("source_history")
+    if not isinstance(history, list) or not history:
+        return False
+    if receipt.get("source_kind") == "coverage:partial-or-rejected-page":
+        if len(history) != 1 or not isinstance(history[0], Mapping):
+            return False
+        row = history[0]
+        payload = {key: row.get(key) for key in _COVERAGE_SOURCE_FIELDS - {"source_hash"}}
+        expected_id = "coverage-" + canonical_digest(
+            {
+                "kept_count": row.get("kept_count"),
+                "next_cursor_digest": row.get("next_cursor_digest"),
+                "original_count": row.get("original_count"),
+                "requested_cursor_digest": row.get("requested_cursor_digest"),
+            }
+        )
+        return (
+            set(row) == _COVERAGE_SOURCE_FIELDS
+            and row.get("source_hash") == canonical_digest(payload)
+            and row.get("coverage_id") == expected_id == receipt.get("detection_id")
+            and row.get("fault_id") == intent.get("fault_id")
+            and row.get("call_class") == intent.get("call_class")
+            and row.get("target_key") == intent.get("target_key")
+            and all(row.get(key) == runtime.get(key) for key in (
+                "component", "release_id", "machine_id", "boot_id"
+            ))
+        )
+
+    previous_hash: object = None
+    target: list[Mapping[str, Any]] = []
+    previous_event_id = -1
+    for row in history:
+        if not isinstance(row, Mapping) or set(row) != _INCIDENT_SOURCE_FIELDS:
+            return False
+        try:
+            evidence = json.loads(str(row["evidence_json"]))
+            canonical_evidence = json.dumps(
+                evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            )
+            payload = {
+                "evidence_json": str(row["evidence_json"]),
+                "event_id": int(row["event_id"]),
+                "incident_id": str(row["incident_id"]),
+                "kind": str(row["kind"]),
+                "occurred_at_ms": int(row["occurred_at_ms"]),
+                "previous_hash": str(row["previous_hash"]),
+                "scope": str(row["scope"]),
+                "sequence": int(row["sequence"]),
+                "state": str(row["state"]),
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        expected_hash = "sha256:" + hashlib.sha256(_canonical_json(payload)).hexdigest()
+        if (
+            canonical_evidence != row["evidence_json"]
+            or row["event_hash"] != expected_hash
+            or (previous_hash is not None and row["previous_hash"] != previous_hash)
+            or int(row["event_id"]) <= previous_event_id
+        ):
+            return False
+        previous_hash = row["event_hash"]
+        previous_event_id = int(row["event_id"])
+        if row["incident_id"] == receipt.get("detection_id"):
+            target.append(row)
+    if not target or target[0].get("state") != "detected":
+        return False
+    for index, row in enumerate(target, start=1):
+        if row.get("sequence") != index or row.get("kind") != receipt.get("source_kind"):
+            return False
+        if index > 1 and row.get("state") not in _INCIDENT_TRANSITIONS.get(
+            str(target[index - 2].get("state")), set()
+        ):
+            return False
+    return target[-1].get("state") == "verified"
 
 
 def _event_digest(event: Mapping[str, Any]) -> str:
@@ -207,6 +311,63 @@ def evaluate_fault_envelope(
             expected_evidence = _PRODUCTION_EVIDENCE_FIELDS.get(state)
             if expected_evidence is not None and set(event_evidence) != expected_evidence:
                 reasons.append("invalid-state-evidence-fields")
+        elif action == "cleanup-requested":
+            event_evidence = raw.get("evidence")
+            digest_fields = (
+                "authorization_digest",
+                "nonce_digest",
+                "request_digest",
+            )
+            if (
+                not isinstance(event_evidence, Mapping)
+                or set(event_evidence)
+                != {
+                    *digest_fields,
+                    "reservation_id",
+                    "attempt_id",
+                }
+                or any(
+                    not isinstance(event_evidence.get(key), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", event_evidence[key]) is None
+                    for key in digest_fields
+                )
+                or any(
+                    not isinstance(event_evidence.get(key), int)
+                    or isinstance(event_evidence.get(key), bool)
+                    or event_evidence[key] <= 0
+                    for key in ("reservation_id", "attempt_id")
+                )
+            ):
+                reasons.append("invalid-action-evidence")
+        elif action == "cleanup-confirmed":
+            event_evidence = raw.get("evidence")
+            if (
+                not isinstance(event_evidence, Mapping)
+                or set(event_evidence)
+                != {
+                    "cleaned_event_hash",
+                    "cleanup_id",
+                    "memory_cleared_at_ms",
+                    "receipt_commit_confirmed_at_ms",
+                }
+                or not isinstance(event_evidence.get("cleaned_event_hash"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", event_evidence["cleaned_event_hash"]
+                )
+                is None
+                or not isinstance(event_evidence.get("cleanup_id"), str)
+                or not event_evidence["cleanup_id"]
+                or any(
+                    not isinstance(event_evidence.get(key), int)
+                    or isinstance(event_evidence.get(key), bool)
+                    or event_evidence[key] < 0
+                    for key in (
+                        "memory_cleared_at_ms",
+                        "receipt_commit_confirmed_at_ms",
+                    )
+                )
+            ):
+                reasons.append("invalid-action-evidence")
         if raw.get("fault_id") != intent.get("fault_id"):
             reasons.append("event-fault-id-mismatch")
         if isinstance(state, str):
@@ -397,10 +558,10 @@ def evaluate_fault_envelope(
         )
     ):
         reasons.append("detection-source-binding-mismatch")
-    elif (
-        not isinstance(detection_receipt.get("source_history"), list)
-        or not detection_receipt["source_history"]
-        or any(not isinstance(item, Mapping) for item in detection_receipt["source_history"])
+    elif not _source_history_valid(
+        detection_receipt,
+        intent=intent,
+        runtime=runtime,
     ):
         reasons.append("detection-source-history-invalid")
 

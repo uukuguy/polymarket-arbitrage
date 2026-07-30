@@ -17,6 +17,7 @@ from polyarb.perception.fault_control import (
     FaultRecoveryWriter,
     FaultRuntimeIdentity,
     normalize_evidence,
+    normalize_fault_call_id,
     normalize_parameters,
     normalize_target,
 )
@@ -27,6 +28,18 @@ RUNTIME = FaultRuntimeIdentity(
     machine_id="machine-1",
     boot_id=UUID("12345678-1234-4678-9234-567812345678"),
 )
+
+
+def test_fault_call_id_normalizer_is_exact_and_secret_safe() -> None:
+    assert normalize_fault_call_id(" call-1_A.b ") == "call-1_A.b"
+    for invalid in (
+        "https://example.test/call",
+        "token-value",
+        "call:1",
+        "c" * 129,
+    ):
+        with pytest.raises(ValueError, match="invalid-fault-call-id"):
+            normalize_fault_call_id(invalid)
 
 
 def intent(**changes: object) -> FaultIntent:
@@ -269,10 +282,20 @@ def test_control_base_exception_is_not_swallowed() -> None:
             FaultEventState.ARMED,
             {"runtime_identity_digest": "a" * 64, "ownership_digest": "b" * 64},
         ),
-        (FaultEventState.INJECTED, {"call_id": "call-1"}),
+        (
+            FaultEventState.INJECTED,
+            {"call_id": "call-1", "call_binding_digest": "c" * 64},
+        ),
         (FaultEventState.DETECTED, {"incident_id": "incident-1"}),
         (FaultEventState.CONTAINED, {"containment_id": "containment-1"}),
-        (FaultEventState.CLEANED, {"cleanup_id": "cleanup-1"}),
+        (
+            FaultEventState.CLEANED,
+            {
+                "cleanup_id": "cleanup-1",
+                "memory_cleared_at_ms": "100",
+                "receipt_persisted_at_ms": "101",
+            },
+        ),
         (FaultEventState.RECOVERED, {"recovery_id": "recovery-1"}),
         (
             FaultEventState.VERIFIED,

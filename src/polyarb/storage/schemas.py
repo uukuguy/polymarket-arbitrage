@@ -41,6 +41,8 @@ event analysis can re-derive from the SQLite db directly.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pyarrow as pa
 
 
@@ -93,6 +95,73 @@ def migrate_fault_auth_finalize(con) -> bool:
     finally:
         con.execute("PRAGMA legacy_alter_table=OFF")
         con.execute("PRAGMA foreign_keys=ON")
+    return True
+
+
+def migrate_fault_events_cleanup_confirmation(con) -> bool:
+    """Expand the historical action CHECK without changing event identities."""
+    row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='neg_risk_fault_events'"
+    ).fetchone()
+    if row is None or "'cleanup-confirmed'" in str(row[0]):
+        return False
+    if con.in_transaction:
+        raise sqlite3.OperationalError("fault-event-migration-requires-no-transaction")
+    foreign_keys_enabled = bool(con.execute("PRAGMA foreign_keys").fetchone()[0])
+    con.execute("PRAGMA foreign_keys=OFF")
+    con.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        con.executescript(
+            """
+            BEGIN IMMEDIATE;
+            ALTER TABLE neg_risk_fault_events
+              RENAME TO neg_risk_fault_events_pre_confirmation;
+            CREATE TABLE neg_risk_fault_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              fault_id TEXT NOT NULL REFERENCES neg_risk_fault_intents(fault_id),
+              sequence INTEGER NOT NULL CHECK(sequence >= 1),
+              state TEXT CHECK(state IN
+                ('authorized','armed','injected','detected','contained','recovered',
+                 'cleaned','verified','rejected','expired','abandoned','cleanup-failed',
+                 'recovery-timeout','evidence-invalid','escalated')),
+              action TEXT CHECK(action IS NULL OR action IN
+                ('cleanup-requested','cleanup-confirmed')),
+              occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+              evidence_json TEXT NOT NULL,
+              previous_hash TEXT NOT NULL CHECK(length(previous_hash) = 64),
+              event_hash TEXT NOT NULL CHECK(length(event_hash) = 64),
+              CHECK(
+                (state IS NOT NULL AND action IS NULL)
+                OR (state IS NULL AND action IN
+                  ('cleanup-requested','cleanup-confirmed'))
+              ),
+              UNIQUE(fault_id,sequence),
+              UNIQUE(event_hash)
+            );
+            INSERT INTO neg_risk_fault_events(
+              id,fault_id,sequence,state,action,occurred_at_ms,evidence_json,
+              previous_hash,event_hash
+            )
+            SELECT
+              id,fault_id,sequence,state,action,occurred_at_ms,evidence_json,
+              previous_hash,event_hash
+            FROM neg_risk_fault_events_pre_confirmation
+            ORDER BY id;
+            DROP TABLE neg_risk_fault_events_pre_confirmation;
+            COMMIT;
+            """
+        )
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError("fault-event-migration-foreign-key-check")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.execute("PRAGMA legacy_alter_table=OFF")
+        con.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys_enabled else 'OFF'}")
     return True
 
 # Exact pre-v2 owner guard accepted for the one supported a527 migration.

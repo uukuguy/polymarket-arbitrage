@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from py_clob_client.exceptions import PolyApiException
 
-from polyarb.perception.fault_control import FaultEventState, normalize_evidence
+from polyarb.perception.fault_control import normalize_fault_call_id
 from polyarb.perception.incidents import (
     Incident,
     IncidentManager,
@@ -77,13 +77,8 @@ class CandidateGroupIncidents:
     ) -> QualifiedCandidateIncidentReceipt | None:
         raw_call_id = getattr(error, "_polyarb_fault_call_id", None)
         try:
-            call_id = dict(
-                normalize_evidence(
-                    FaultEventState.INJECTED,
-                    {"call_id": raw_call_id},
-                )
-            )["call_id"]
-        except (KeyError, TypeError, ValueError):
+            call_id = normalize_fault_call_id(raw_call_id)
+        except (TypeError, ValueError):
             return None
         _, receipt = self._record_failure(
             group_id,

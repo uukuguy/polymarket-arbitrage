@@ -101,7 +101,7 @@ def test_candidate_exit_plan_matches_sigterm_supervisor_outcome() -> None:
     plan = json.loads(result.stdout)
     assert plan["expected_incident_kind"] == "child-nonzero"
     assert plan["execute_supported"] is False
-    assert plan["legacy_execute_supported"] is False
+    assert "legacy_execute_supported" not in plan
 
 
 def test_discovery_exit_plan_matches_sigterm_supervisor_outcome() -> None:
@@ -117,7 +117,7 @@ def test_discovery_exit_plan_matches_sigterm_supervisor_outcome() -> None:
     plan = json.loads(result.stdout)
     assert plan["expected_incident_kind"] == "child-nonzero"
     assert plan["execute_supported"] is False
-    assert plan["legacy_execute_supported"] is False
+    assert "legacy_execute_supported" not in plan
 
 
 def test_reconciliation_stall_uses_durable_early_detection_policy() -> None:
@@ -131,7 +131,7 @@ def test_reconciliation_stall_uses_durable_early_detection_policy() -> None:
 
     plan = json.loads(result.stdout)
     assert plan["execute_supported"] is False
-    assert plan["legacy_execute_supported"] is False
+    assert "legacy_execute_supported" not in plan
     assert plan["expected_incident_kind"] == "child-stalled"
     assert Settings().producer_stall_detection_s <= 30
     assert (
@@ -663,7 +663,7 @@ def test_make_exposes_release_bound_recovery_verifier() -> None:
     assert f'--expected-release \"{"a" * 40}\"' in result.stdout
 
 
-def test_candidate_make_execute_binds_canonical_https_origin() -> None:
+def test_candidate_make_execute_is_plan_only_without_legacy_authorization() -> None:
     result = subprocess.run(
         [
             "make",
@@ -671,7 +671,6 @@ def test_candidate_make_execute_binds_canonical_https_origin() -> None:
             "chaos-perception-candidate-exit",
             "mode=execute",
             f"expected_release={'a' * 40}",
-            f"authorization=fault:candidate-exit:{'a' * 40}",
             "evidence_dir=output/candidate-exit",
         ],
         cwd=ROOT,
@@ -683,6 +682,7 @@ def test_candidate_make_execute_binds_canonical_https_origin() -> None:
     assert result.returncode == 0, result.stderr
     assert '--base-url "https://polyarb-l1.fly.dev"' in result.stdout
     assert '--timeout-s "120"' in result.stdout
+    assert "--authorization" not in result.stdout
 
 
 def test_upstream_make_execute_passes_exact_runtime_and_separate_authorities() -> None:
@@ -695,9 +695,6 @@ def test_upstream_make_execute_passes_exact_runtime_and_separate_authorities() -
             "chaos-perception-gamma-timeout",
             "mode=execute",
             f"expected_release={release}",
-            f"authorization=fault:gamma-timeout:{release}",
-            "ordinary_authorization=ordinary-approval",
-            "fault_authorization=fault-approval",
             "machine_id=machine-1",
             f"boot_id={boot_id}",
             "call_class=gamma-discovery-event-page",
@@ -712,6 +709,7 @@ def test_upstream_make_execute_passes_exact_runtime_and_separate_authorities() -
     )
 
     assert result.returncode == 0, result.stderr
+    assert "--authorization" not in result.stdout
     for expected in (
         '--machine-id "machine-1"',
         f'--boot-id "{boot_id}"',

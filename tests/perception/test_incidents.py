@@ -26,6 +26,22 @@ def _store(tmp_path):
     return store
 
 
+def test_open_incidents_validates_authority_in_one_read_snapshot(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    original = store._assert_owner_journal_clean
+
+    def require_snapshot(con: sqlite3.Connection) -> None:
+        assert con.in_transaction
+        original(con)
+
+    monkeypatch.setattr(store, "_assert_owner_journal_clean", require_snapshot)
+
+    assert IncidentManager(store).open_incidents() == ()
+
+
 def _publish_quote(store, *, quoted_at_ms: int = 4_000):
     revision = GroupRevision.certified(
         group_id="g-1",

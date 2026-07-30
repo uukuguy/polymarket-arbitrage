@@ -143,25 +143,30 @@ all of the following:
 make chaos-perception-gamma-timeout \
   mode=execute \
   expected_release=<40-char-sha> \
-  authorization=fault:gamma-timeout:<40-char-sha> \
+  machine_id=<exact-machine> \
+  boot_id=<exact-boot-uuid> \
+  call_class=gamma-discovery-event-page \
+  target_key=discovery \
+  parameters_json='{"delay_ms":10}' \
   evidence_dir=<new-path>
 ```
 
 The eight typed upstream targets (four Gamma, three CLOB, and Telegram) use the
 HTTP control orchestrator. Their Make invocation additionally requires exact
-`ordinary_authorization`, `fault_authorization`, `machine_id`, `boot_id`,
-`call_class`, `target_key`, and `parameters_json`. Missing input fails before
-transport construction or network access. The orchestrator takes a five-sample
-green baseline, resolves exact producer runtime, arms through double HMAC,
+`machine_id`, `boot_id`, `call_class`, `target_key`, and `parameters_json`.
+The ordinary and fault-control HMAC keys are loaded only from
+`POLYARB_SCAN_SHARED_SECRET` and
+`POLYARB_UPSTREAM_FAULT_CONTROL_SECRET`; no CLI authorization placeholder is
+accepted. Missing input fails before transport construction or network access.
+The orchestrator takes a five-sample green baseline, resolves exact producer
+runtime, arms through double HMAC,
 observes one injection and one Incident/coverage fact, and requests cleanup for
 every `BaseException`. Cleanup failure freezes the remaining matrix. Evidence
 is exported only after the component-specific business writer produces a
 newer recovery receipt, and stops at `RECOVERED`.
 
-`candidate-exit`, `discovery-exit`, and `reconciliation-stall` retain their
-independent image-aware signal adapters. The remaining host/store/restart/deploy
-targets reject execution fail-closed. A target becomes executable only after
-its adapter, cleanup, chain-truth health surface, and end-to-end review.
+`candidate-exit`, `discovery-exit`, `reconciliation-stall`, and the remaining
+host/store/restart/deploy targets are plan-only and reject execution fail-closed.
 
 ## Independent verdict and finalization
 
@@ -181,13 +186,16 @@ make evaluate-upstream-fault-final \
   output=<new-final.json> expected_release=<40-char-sha>
 ```
 
-The candidate evaluator has only
-`POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET`; it recomputes every intent/event/tail
-hash and signs a PASS artifact. The disabled-by-default finalizer has ordinary
-and fault control secrets but never the evaluator secret. It validates the
-signature and exact recovered source chain before appending
-`VERIFIED(verdict_id, verdict_digest)`. Re-export and final evaluation are
-mandatory: a finalizer response alone is not qualification evidence.
+The candidate evaluator alone has
+`POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY`; it recomputes every
+intent/event/tail hash and signs a PASS artifact with Ed25519. The
+disabled-by-default finalizer has the ordinary and fault-control HMAC keys plus
+the pinned `POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY`, but never the private
+key. It validates the signature and exact recovered source chain before
+appending `VERIFIED(verdict_id, verdict_digest)`. The final evaluator is
+read-only, holds only the same pinned public key, and revalidates the candidate
+signature against the re-exported VERIFIED chain. Re-export and final evaluation
+are mandatory: a finalizer response alone is not qualification evidence.
 
 ## Recovery verdict
 

@@ -305,6 +305,8 @@ class IncidentManager:
     ) -> tuple[Incident, ...]:
         con = _connection or self._connect(read_only=True)
         try:
+            if _connection is None:
+                con.execute("BEGIN")
             self._store._assert_owner_journal_clean(con)
             self._validate_checkpoint(con)
             self._validate_bounded_suffix(con)

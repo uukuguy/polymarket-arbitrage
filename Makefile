@@ -911,24 +911,24 @@ chaos-perception-daemon-restart:
 chaos-perception-deploy-interrupt:
 chaos-perception-contention:
 
-## chaos-perception-gamma-timeout: Show the read-only Gamma timeout qualification plan; mode=execute is authorization-gated.
-## chaos-perception-gamma-partial: Show the read-only Gamma partial-page qualification plan; mode=execute is authorization-gated.
-## chaos-perception-gamma-malformed: Show the read-only Gamma malformed-response qualification plan; mode=execute is authorization-gated.
-## chaos-perception-gamma-cursor: Show the read-only Gamma cursor-loop qualification plan; mode=execute is authorization-gated.
-## chaos-perception-clob-missing-leg: Show the read-only CLOB missing-leg qualification plan; mode=execute is authorization-gated.
-## chaos-perception-clob-429: Show the read-only CLOB rate-limit qualification plan; mode=execute is authorization-gated.
-## chaos-perception-clob-latency: Show the read-only CLOB latency qualification plan; mode=execute is authorization-gated.
-## chaos-perception-candidate-exit: Show the read-only Candidate exit qualification plan; mode=execute is authorization-gated.
-## chaos-perception-discovery-exit: Show the read-only Discovery exit qualification plan; mode=execute is authorization-gated.
-## chaos-perception-reconciliation-stall: Show the read-only Reconciliation stall qualification plan; mode=execute is authorization-gated.
-## chaos-perception-sqlite-busy: Show the read-only bounded SQLite lock qualification plan; mode=execute is authorization-gated.
-## chaos-perception-disk-pressure: Show the read-only bounded disk-pressure qualification plan; mode=execute is authorization-gated.
-## chaos-perception-telegram-failure: Show the read-only Telegram failure qualification plan; mode=execute is authorization-gated.
-## chaos-perception-daemon-restart: Show the read-only daemon restart qualification plan; mode=execute is authorization-gated.
-## chaos-perception-deploy-interrupt: Show the read-only deploy interruption qualification plan; mode=execute is authorization-gated.
-## chaos-perception-contention: Show the read-only bounded contention qualification plan; mode=execute is authorization-gated.
+## chaos-perception-gamma-timeout: Plan Gamma timeout; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-gamma-partial: Plan Gamma partial page; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-gamma-malformed: Plan malformed Gamma response; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-gamma-cursor: Plan Gamma cursor loop; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-clob-missing-leg: Plan missing CLOB leg; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-clob-429: Plan CLOB rate limit; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-clob-latency: Plan CLOB latency; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-candidate-exit: Plan-only Candidate exit contract; execution is disabled.
+## chaos-perception-discovery-exit: Plan-only Discovery exit contract; execution is disabled.
+## chaos-perception-reconciliation-stall: Plan-only Reconciliation stall contract; execution is disabled.
+## chaos-perception-sqlite-busy: Plan-only bounded SQLite lock contract; execution is disabled.
+## chaos-perception-disk-pressure: Plan-only bounded disk-pressure contract; execution is disabled.
+## chaos-perception-telegram-failure: Plan Telegram failure; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-daemon-restart: Plan-only daemon restart contract; execution is disabled.
+## chaos-perception-deploy-interrupt: Plan-only deploy interruption contract; execution is disabled.
+## chaos-perception-contention: Plan-only bounded contention contract; execution is disabled.
 ## Upstream execution reads both HMAC authorities only from the environment and requires machine_id, boot_id, call_class, target_key, and parameters_json.
-## Producer execution remains: make chaos-perception-<fault> mode=execute expected_release=<sha> authorization=fault:<fault>:<sha> evidence_dir=<new-path>
+## Typed usage: make chaos-perception-<typed-upstream> mode=execute expected_release=<sha> machine_id=<id> boot_id=<uuid> call_class=<class> target_key=<key> parameters_json=<json> evidence_dir=<new-path>
 $(PERCEPTION_CHAOS_TARGETS): chaos-perception-%:
 	@set -eu; \
 	qualification_mode="$(or $(mode),plan)"; \
@@ -950,10 +950,6 @@ $(PERCEPTION_CHAOS_TARGETS): chaos-perception-%:
 	  --evidence-dir "$(evidence_dir)" \
 	  --base-url "$(POLYARB_PERCEPTION_URL)" \
 	  --timeout-s "$(or $(timeout_s),120)"; \
-	case "$*" in \
-	  gamma-timeout|gamma-partial|gamma-malformed|gamma-cursor|clob-missing-leg|clob-429|clob-latency|telegram-failure) ;; \
-	  *) set -- "$$@" --authorization "$(authorization)" ;; \
-	esac; \
 	exec "$$@"
 
 ## verify-perception-recovery: Evaluate immutable production-fault evidence against exact release and all SLA/writer gates.

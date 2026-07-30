@@ -47,7 +47,6 @@ class FaultSpec:
     required_tools: tuple[str, ...] = ("python",)
     image_check: str = "make chaos-l2-fly-image-check"
     execute_supported: bool = False
-    legacy_execute_supported: bool = False
 
     def plan(self) -> dict[str, object]:
         result = asdict(self)
@@ -681,7 +680,7 @@ def execute_upstream_fault(
                 )
                 raise BaseExceptionGroup(
                     f"{qualifier}:cleanup-failed",
-                    [arm_error, AdapterFailedError(f"cleanup-failed:{cleanup_error}")],
+                    [arm_error, cleanup_error],
                 )
         raise
 
@@ -1180,8 +1179,8 @@ def _execute(args: argparse.Namespace) -> int:
         print("invalid-expected-release", file=sys.stderr)
         return 2
     is_upstream = args.fault in _UPSTREAM_FAULTS
-    if not is_upstream and args.authorization != f"fault:{args.fault}:{release}":
-        print("invalid-fault-authorization", file=sys.stderr)
+    if not FAULTS[args.fault].execute_supported:
+        print(f"adapter-not-implemented: {args.fault}", file=sys.stderr)
         return 2
     if is_upstream and args.authorization is not None:
         print("upstream-authorization-argument-forbidden", file=sys.stderr)
@@ -1199,9 +1198,6 @@ def _execute(args: argparse.Namespace) -> int:
         )
     ):
         print("upstream-execution-requires-exact-target", file=sys.stderr)
-        return 2
-    if not FAULTS[args.fault].execute_supported:
-        print(f"adapter-not-implemented: {args.fault}", file=sys.stderr)
         return 2
     try:
         base_url = readonly._validate_base_url(args.base_url)

@@ -219,23 +219,22 @@ def _fault_source_facts(
             "evidence_json FROM neg_risk_incident_events ORDER BY id"
         ).fetchall():
             event_hash = incident_manager._suffix_event_hash(row, previous_hash)
-            if row["incident_id"] == incident_id:
-                source_history.append(
-                    {
-                        "event_hash": event_hash,
-                        "event_id": int(row["id"]),
-                        "evidence": json.loads(row["evidence_json"]),
-                        "incident_id": str(row["incident_id"]),
-                        "kind": str(row["kind"]),
-                        "occurred_at_ms": int(row["occurred_at_ms"]),
-                        "previous_hash": previous_hash,
-                        "scope": str(row["scope"]),
-                        "sequence": int(row["sequence"]),
-                        "state": str(row["state"]),
-                    }
-                )
+            source_history.append(
+                {
+                    "event_hash": event_hash,
+                    "event_id": int(row["id"]),
+                    "evidence_json": str(row["evidence_json"]),
+                    "incident_id": str(row["incident_id"]),
+                    "kind": str(row["kind"]),
+                    "occurred_at_ms": int(row["occurred_at_ms"]),
+                    "previous_hash": previous_hash,
+                    "scope": str(row["scope"]),
+                    "sequence": int(row["sequence"]),
+                    "state": str(row["state"]),
+                }
+            )
             previous_hash = event_hash
-        if not source_history:
+        if not any(item["incident_id"] == incident_id for item in source_history):
             raise ValueError("fault-incident-source-missing")
 
     recovered = next(
