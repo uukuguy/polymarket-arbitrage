@@ -62,6 +62,12 @@ from polyarb.http.perception import (
     perception_resources,
     perception_status,
 )
+from polyarb.http.perception_faults import (
+    arm_fault,
+    cleanup_fault,
+    fault_runtime,
+    fault_status,
+)
 from polyarb.http.scan import scan, scan_auth_middleware
 
 
@@ -153,6 +159,8 @@ def create_app(
         Route("/perception/incidents", perception_incidents, methods=["GET"]),
         Route("/perception/qualification", perception_qualification, methods=["GET"]),
         Route("/perception/resources", perception_resources, methods=["GET"]),
+        Route("/perception/faults/runtime", fault_runtime, methods=["GET"]),
+        Route("/perception/faults/{fault_id}", fault_status, methods=["GET"]),
         Route("/scan", scan, methods=["POST"]),
         Route("/control/market-map/build", build_market_map, methods=["POST"]),
         Route("/control/neg-risk/scan", scan_neg_risk_map, methods=["POST"]),
@@ -164,6 +172,12 @@ def create_app(
         Route(
             "/control/perception/reconciliation",
             queue_perception_reconciliation,
+            methods=["POST"],
+        ),
+        Route("/control/perception/faults/arm", arm_fault, methods=["POST"]),
+        Route(
+            "/control/perception/faults/cleanup",
+            cleanup_fault,
             methods=["POST"],
         ),
         Route("/control/unpause", unpause, methods=["POST"]),  # D-03 Phase 02.1

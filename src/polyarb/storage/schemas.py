@@ -1383,7 +1383,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_fault_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   fault_id TEXT NOT NULL REFERENCES neg_risk_fault_intents(fault_id),
   sequence INTEGER NOT NULL CHECK(sequence >= 1),
-  state TEXT NOT NULL CHECK(state IN
+  state TEXT CHECK(state IN
     ('authorized','armed','injected','detected','contained','recovered',
      'cleaned','verified','rejected','expired','abandoned','cleanup-failed',
      'recovery-timeout','evidence-invalid','escalated')),
@@ -1392,6 +1392,10 @@ CREATE TABLE IF NOT EXISTS neg_risk_fault_events (
   evidence_json TEXT NOT NULL,
   previous_hash TEXT NOT NULL CHECK(length(previous_hash) = 64),
   event_hash TEXT NOT NULL CHECK(length(event_hash) = 64),
+  CHECK(
+    (state IS NOT NULL AND action IS NULL)
+    OR (state IS NULL AND action = 'cleanup-requested')
+  ),
   UNIQUE(fault_id,sequence),
   UNIQUE(event_hash)
 );

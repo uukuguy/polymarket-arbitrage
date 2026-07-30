@@ -80,6 +80,10 @@ class FaultEventState(StrEnum):
     ESCALATED = "escalated"
 
 
+class FaultEventAction(StrEnum):
+    CLEANUP_REQUESTED = "cleanup-requested"
+
+
 FAULT_CALL_CLASS_BY_KIND: Mapping[FaultKind, FaultCallClass] = {
     FaultKind.GAMMA_TIMEOUT: FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
     FaultKind.GAMMA_PARTIAL: FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
@@ -435,8 +439,8 @@ class FaultEvent:
     event_id: int
     fault_id: str
     sequence: int
-    state: FaultEventState
-    action: str | None
+    state: FaultEventState | None
+    action: FaultEventAction | None
     occurred_at_ms: int
     evidence: Mapping[str, object]
     previous_hash: str

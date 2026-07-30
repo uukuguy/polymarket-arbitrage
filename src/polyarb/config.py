@@ -176,6 +176,11 @@ class Settings(BaseSettings):
             "Required at runtime; empty only for tests (set POLYARB_ALLOW_EMPTY_SECRET=1)."
         ),
     )
+    upstream_fault_control_enabled: bool = False
+    upstream_fault_control_secret: SecretStr = SecretStr("")
+    upstream_fault_control_max_ttl_ms: int = Field(
+        default=120_000, ge=1_000, le=120_000
+    )
     # Version returned in /health JSON response
     version: str = Field(default="0.2.0")
     # GHA injects commit SHA in Plan 04 deploy
@@ -378,6 +383,17 @@ class Settings(BaseSettings):
                 "POLYARB_SCAN_SHARED_SECRET must be set in production. "
                 "To run tests or local dev without a secret, set POLYARB_ALLOW_EMPTY_SECRET=1."
             )
+        fault_secret = self.upstream_fault_control_secret.get_secret_value()
+        if self.upstream_fault_control_enabled and not fault_secret:
+            raise ValueError(
+                "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET must be set when "
+                "upstream fault control is enabled"
+            )
+        if (
+            self.upstream_fault_control_enabled
+            and fault_secret == secret_val
+        ):
+            raise ValueError("fault control secret must be distinct")
         if self.candidate_high_interval_s > self.candidate_quote_hard_stale_s:
             raise ValueError(
                 "candidate_high_interval_s must not exceed "

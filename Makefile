@@ -107,6 +107,30 @@ queue-reconciliation:
 	@test -n "$$POLYARB_SCAN_SHARED_SECRET" || (echo "POLYARB_SCAN_SHARED_SECRET is required" >&2; exit 2)
 	@uv run python -m polyarb.cli_perception queue-reconciliation --base-url "$(POLYARB_PERCEPTION_URL)"
 
+## fault-runtime-status: Read the exact current producer runtime identity; component=candidate|discovery|reconciliation|notification.
+fault-runtime-status:
+	@case "$(component)" in candidate|discovery|reconciliation|notification) ;; *) echo "usage: make fault-runtime-status component=candidate|discovery|reconciliation|notification" >&2; exit 2;; esac
+	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" runtime --component "$(component)"
+
+## arm-upstream-fault: Arm one exact scoped intent file; usage: make arm-upstream-fault intent="$$INTENT_FILE".
+arm-upstream-fault:
+	@test -n "$(intent)" || (echo 'usage: make arm-upstream-fault intent="$$INTENT_FILE"' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" arm --intent "$(intent)"
+
+## cleanup-upstream-fault: Request exact-ID producer-owned cleanup; usage: make cleanup-upstream-fault fault_id="$$FAULT_ID".
+cleanup-upstream-fault:
+	@test -n "$(fault_id)" || (echo 'usage: make cleanup-upstream-fault fault_id="$$FAULT_ID"' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" cleanup --fault-id "$(fault_id)"
+
+## upstream-fault-status: Read one bounded redacted fault projection; usage fault_id="$$FAULT_ID".
+upstream-fault-status:
+	@test -n "$(fault_id)" || (echo 'usage: make upstream-fault-status fault_id="$$FAULT_ID"' >&2; exit 2)
+	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" status --fault-id "$(fault_id)"
+
+.PHONY: fault-runtime-status arm-upstream-fault cleanup-upstream-fault upstream-fault-status
+
 .PHONY: docs-m1-check
 
 ## docs-m1-check: Offline verification of the M1 platform manual's commands, links, routes, health names, and readiness matrix
@@ -371,7 +395,7 @@ watchlist-alerts:
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: test test-m1 test-observation test-slippage
+.PHONY: test test-m1 test-m1-perception test-observation test-slippage
 
 ## test: Run all tests
 test:
@@ -380,6 +404,10 @@ test:
 ## test-m1: Run all M1 market perception tests
 test-m1:
 	@uv run pytest -v tests/m1-perception/
+
+## test-m1-perception: Run the complete M1 opportunity-first gate across perception unit and integration tests
+test-m1-perception:
+	@uv run pytest -v tests/perception/ tests/m1-perception/
 
 ## test-observation: Run observation module tests (scanner / diff / tracker / show / watchlist / recipes / formatter)
 test-observation:

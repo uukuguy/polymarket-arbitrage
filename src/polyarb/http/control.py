@@ -115,6 +115,7 @@ async def control_auth_middleware(request: Request, call_next: Any, *, secret: s
         except TimeoutError:
             return JSONResponse({"error": "request body timeout"}, status_code=408)
         body = b"".join(chunks)
+        request.state.perception_control_body = body
     else:
         body = await request.body()
     if request.url.path.startswith("/control/perception/"):

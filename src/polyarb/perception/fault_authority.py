@@ -14,6 +14,7 @@ from uuid import UUID
 from polyarb.perception.fault_control import (
     FaultAuthorization,
     FaultEvent,
+    FaultEventAction,
     FaultEventState,
     FaultHistory,
     FaultIntent,
@@ -183,8 +184,8 @@ def _event_hash(
     *,
     fault_id: str,
     sequence: int,
-    state: FaultEventState,
-    action: str | None,
+    state: FaultEventState | None,
+    action: FaultEventAction | None,
     occurred_at_ms: int,
     evidence_json: str,
     previous_hash: str,
@@ -197,7 +198,7 @@ def _event_hash(
             "occurred_at_ms": occurred_at_ms,
             "previous_hash": previous_hash,
             "sequence": sequence,
-            "state": state.value,
+            "state": state.value if state is not None else None,
         }
     )
 
@@ -370,7 +371,7 @@ class FaultAuthorityStore:
     def _latest_state(con: sqlite3.Connection, fault_id: str) -> FaultEventState | None:
         row = con.execute(
             "SELECT state FROM neg_risk_fault_events WHERE fault_id=? "
-            "ORDER BY sequence DESC LIMIT 1",
+            "AND state IS NOT NULL ORDER BY sequence DESC LIMIT 1",
             (fault_id,),
         ).fetchone()
         return FaultEventState(row["state"]) if row is not None else None
@@ -560,10 +561,18 @@ class FaultAuthorityStore:
             row = None
             for candidate in rows:
                 history = self._validate_history_in_connection(con, candidate["fault_id"])
+                latest_lifecycle = next(
+                    (
+                        event.state
+                        for event in reversed(history.events)
+                        if event.state is not None
+                    ),
+                    None,
+                )
                 if (
                     history.valid
                     and history.events
-                    and history.events[-1].state is FaultEventState.AUTHORIZED
+                    and latest_lifecycle is FaultEventState.AUTHORIZED
                 ):
                     row = candidate
                     break
@@ -608,11 +617,11 @@ class FaultAuthorityStore:
         self,
         con: sqlite3.Connection,
         fault_id: str,
-        state: FaultEventState,
+        state: FaultEventState | None,
         *,
         occurred_at_ms: int,
         evidence: Mapping[str, object],
-        action: str | None = None,
+        action: FaultEventAction | None = None,
     ) -> FaultEvent:
         latest = con.execute(
             "SELECT sequence,event_hash FROM neg_risk_fault_events "
@@ -621,7 +630,24 @@ class FaultAuthorityStore:
         ).fetchone()
         sequence = 1 if latest is None else int(latest["sequence"]) + 1
         previous_hash = _ZERO_HASH if latest is None else str(latest["event_hash"])
-        normalized_evidence = normalize_evidence(state, evidence)
+        if state is None:
+            if action is not FaultEventAction.CLEANUP_REQUESTED or set(evidence) != {
+                "authorization_digest",
+                "nonce_digest",
+            }:
+                raise ValueError("invalid-action-evidence")
+            for value in evidence.values():
+                if (
+                    not isinstance(value, str)
+                    or len(value) != 64
+                    or not set(value) <= set("0123456789abcdef")
+                ):
+                    raise ValueError("invalid-action-evidence")
+            normalized_evidence: Mapping[str, object] = dict(evidence)
+        else:
+            if action is not None:
+                raise ValueError("invalid-event-action")
+            normalized_evidence = normalize_evidence(state, evidence)
         evidence_json = canonical_json(normalized_evidence)
         digest = _event_hash(
             fault_id=fault_id,
@@ -639,8 +665,8 @@ class FaultAuthorityStore:
             (
                 fault_id,
                 sequence,
-                state.value,
-                action,
+                state.value if state is not None else None,
+                action.value if action is not None else None,
                 occurred_at_ms,
                 evidence_json,
                 previous_hash,
@@ -648,7 +674,7 @@ class FaultAuthorityStore:
             ),
         )
         return FaultEvent(
-            event_id=int(cursor.lastrowid),
+            event_id=int(cursor.lastrowid or 0),
             fault_id=fault_id,
             sequence=sequence,
             state=state,
@@ -658,6 +684,87 @@ class FaultAuthorityStore:
             previous_hash=previous_hash,
             event_hash=digest,
         )
+
+    def request_cleanup(
+        self,
+        fault_id: str,
+        *,
+        auth: FaultAuthorization,
+        requested_at_ms: int,
+    ) -> FaultEvent:
+        """Append a request action; only the owning process can prove cleanup."""
+        if self._read_only:
+            raise RuntimeError("fault-authority-read-only")
+        if not isinstance(auth, FaultAuthorization):
+            raise ValueError("invalid-intent-envelope")
+        self._validate_time(requested_at_ms, "invalid-requested-at")
+        evidence = {
+            "authorization_digest": auth.authorization_digest,
+            "nonce_digest": auth.nonce_digest,
+        }
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            replay = con.execute(
+                "SELECT * FROM neg_risk_fault_auth_nonces WHERE nonce_digest=?",
+                (auth.nonce_digest,),
+            ).fetchone()
+            existing = con.execute(
+                "SELECT * FROM neg_risk_fault_events WHERE fault_id=? "
+                "AND action='cleanup-requested' ORDER BY sequence LIMIT 1",
+                (fault_id,),
+            ).fetchone()
+            if replay is not None:
+                if (
+                    existing is not None
+                    and replay["authorization_digest"] == auth.authorization_digest
+                    and replay["accepted_at_ms"] == requested_at_ms
+                ):
+                    history = self._validate_history_in_connection(con, fault_id)
+                    if not history.valid:
+                        raise ValueError("fault-history-invalid")
+                    event = self._event_from_row(existing)
+                    con.execute("COMMIT")
+                    return event
+                raise ValueError("nonce-replay")
+            intent = con.execute(
+                "SELECT 1 FROM neg_risk_fault_intents WHERE fault_id=? AND status='accepted'",
+                (fault_id,),
+            ).fetchone()
+            if intent is None:
+                raise ValueError("fault-not-found")
+            if existing is not None:
+                raise ValueError("cleanup-already-requested")
+            con.execute(
+                "INSERT INTO neg_risk_fault_auth_nonces("
+                "nonce_digest,authorization_digest,accepted_at_ms,row_hash) VALUES (?,?,?,?)",
+                (
+                    auth.nonce_digest,
+                    auth.authorization_digest,
+                    requested_at_ms,
+                    _nonce_hash(
+                        nonce_digest=auth.nonce_digest,
+                        authorization_digest=auth.authorization_digest,
+                        accepted_at_ms=requested_at_ms,
+                    ),
+                ),
+            )
+            event = self._append_event_in_transaction(
+                con,
+                fault_id,
+                None,
+                action=FaultEventAction.CLEANUP_REQUESTED,
+                occurred_at_ms=requested_at_ms,
+                evidence=evidence,
+            )
+            con.execute("COMMIT")
+            return event
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
 
     def append_event(
         self,
@@ -739,7 +846,14 @@ class FaultAuthorityStore:
             ).fetchone()
             assert intent_row is not None
             self._require_ownership(con, intent_row, ownership)
-            tail = history.events[-1].state
+            tail = next(
+                (
+                    event.state
+                    for event in reversed(history.events)
+                    if event.state is not None
+                ),
+                None,
+            )
             if tail is FaultEventState.ARMED:
                 expired = (
                     occurred_at_ms
@@ -819,8 +933,8 @@ class FaultAuthorityStore:
             event_id=row["id"],
             fault_id=row["fault_id"],
             sequence=row["sequence"],
-            state=FaultEventState(row["state"]),
-            action=row["action"],
+            state=FaultEventState(row["state"]) if row["state"] is not None else None,
+            action=FaultEventAction(row["action"]) if row["action"] is not None else None,
             occurred_at_ms=row["occurred_at_ms"],
             evidence=json.loads(row["evidence_json"]),
             previous_hash=row["previous_hash"],
@@ -920,7 +1034,38 @@ class FaultAuthorityStore:
             if event.sequence != index or event.previous_hash != previous:
                 return FaultHistory(fault_id, False, "hash-predecessor-invalid", intent, events)
             try:
-                evidence_json = canonical_json(normalize_evidence(event.state, event.evidence))
+                if event.state is None:
+                    if event.action is not FaultEventAction.CLEANUP_REQUESTED or set(
+                        event.evidence
+                    ) != {"authorization_digest", "nonce_digest"}:
+                        raise ValueError("invalid-action-evidence")
+                    for value in event.evidence.values():
+                        if (
+                            not isinstance(value, str)
+                            or len(value) != 64
+                            or not set(value) <= set("0123456789abcdef")
+                        ):
+                            raise ValueError("invalid-action-evidence")
+                    nonce_row = con.execute(
+                        "SELECT * FROM neg_risk_fault_auth_nonces "
+                        "WHERE nonce_digest=?",
+                        (event.evidence["nonce_digest"],),
+                    ).fetchone()
+                    if (
+                        nonce_row is None
+                        or not self._nonce_row_valid(nonce_row)
+                        or nonce_row["authorization_digest"]
+                        != event.evidence["authorization_digest"]
+                        or nonce_row["accepted_at_ms"] != event.occurred_at_ms
+                    ):
+                        raise ValueError("action-authorization-invalid")
+                    evidence_json = canonical_json(event.evidence)
+                else:
+                    if event.action is not None:
+                        raise ValueError("invalid-event-action")
+                    evidence_json = canonical_json(
+                        normalize_evidence(event.state, event.evidence)
+                    )
                 expected_hash = _event_hash(
                     fault_id=event.fault_id,
                     sequence=event.sequence,
@@ -938,13 +1083,19 @@ class FaultAuthorityStore:
                 return FaultHistory(fault_id, False, "event-hash-invalid", intent, events)
             if event.occurred_at_ms < previous_time:
                 return FaultHistory(fault_id, False, "event-time-regression", intent, events)
-            if previous_state is None:
+            if event.state is None:
+                if previous_state is None:
+                    return FaultHistory(
+                        fault_id, False, "lifecycle-origin-invalid", intent, events
+                    )
+            elif previous_state is None:
                 if event.state is not expected_first:
                     return FaultHistory(fault_id, False, "lifecycle-origin-invalid", intent, events)
             elif event.state not in _NEXT_STATES.get(previous_state, frozenset()):
                 return FaultHistory(fault_id, False, "lifecycle-regression", intent, events)
             previous = event.event_hash
-            previous_state = event.state
+            if event.state is not None:
+                previous_state = event.state
             previous_time = event.occurred_at_ms
         if not events:
             return FaultHistory(fault_id, False, "event-history-missing", intent, events)
@@ -1014,14 +1165,29 @@ class FaultAuthorityStore:
                         "evidence-invalid",
                         history.intent,
                     )
-                if candidate.events[-1].state not in _TERMINAL_STATES:
+                latest_candidate = next(
+                    (
+                        event.state
+                        for event in reversed(candidate.events)
+                        if event.state is not None
+                    ),
+                    None,
+                )
+                if latest_candidate not in _TERMINAL_STATES:
                     active_count += 1
             if active_count > 1:
                 return FaultProjection(
                     fault_id, False, False, None, "multiple-active-chains", history.intent
                 )
             current = self.current_runtime(history.intent.runtime.component)
-            latest = history.events[-1].state
+            latest = next(
+                (event.state for event in reversed(history.events) if event.state is not None),
+                None,
+            )
+            if latest is None:
+                return FaultProjection(
+                    fault_id, False, False, None, "event-history-missing", history.intent
+                )
             if current != history.intent.runtime:
                 return FaultProjection(
                     fault_id,

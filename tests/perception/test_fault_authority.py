@@ -12,6 +12,7 @@ from polyarb.perception.fault_authority import FaultAuthorityStore, _intent_hash
 from polyarb.perception.fault_control import (
     FaultAuthorization,
     FaultCallClass,
+    FaultEventAction,
     FaultEventState,
     FaultIntentRequest,
     FaultKind,
@@ -92,6 +93,67 @@ def test_accepted_intent_persists_only_digests_and_canonical_parameters(
     assert row["nonce_digest"] == "b" * 64
     assert row["authorization_digest"] == "c" * 64
     assert "secret" not in set(row.keys())
+
+
+def test_cleanup_request_is_action_only_hash_chained_and_idempotent(
+    store: FaultAuthorityStore, db_path: Path
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    cleanup_auth = auth("d")
+
+    first = store.request_cleanup(
+        "fault-1", auth=cleanup_auth, requested_at_ms=1_200
+    )
+    second = store.request_cleanup(
+        "fault-1", auth=cleanup_auth, requested_at_ms=1_200
+    )
+
+    assert first == second
+    assert first.state is None
+    assert first.action is FaultEventAction.CLEANUP_REQUESTED
+    history = store.validate_history("fault-1")
+    assert history.valid
+    assert [event.state for event in history.events] == [
+        FaultEventState.AUTHORIZED,
+        None,
+    ]
+    projection = store.project_fault("fault-1", now_ms=1_201)
+    assert projection.available and projection.active
+    assert projection.state is FaultEventState.AUTHORIZED
+    with sqlite3.connect(db_path) as con:
+        row = con.execute(
+            "SELECT state,action,evidence_json FROM neg_risk_fault_events "
+            "WHERE action='cleanup-requested'"
+        ).fetchone()
+    assert row == (
+        None,
+        "cleanup-requested",
+        '{"authorization_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","nonce_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}',
+    )
+
+
+def test_cleanup_request_replay_cannot_target_another_fault(
+    store: FaultAuthorityStore,
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    cleanup_auth = auth("d")
+    store.request_cleanup("fault-1", auth=cleanup_auth, requested_at_ms=1_200)
+    with pytest.raises(ValueError, match="nonce-replay"):
+        store.request_cleanup(
+            "other-fault", auth=cleanup_auth, requested_at_ms=1_200
+        )
+
+
+def test_cleanup_action_does_not_block_lifecycle_claim(
+    store: FaultAuthorityStore,
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    store.request_cleanup("fault-1", auth=auth("d"), requested_at_ms=1_150)
+
+    claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_200)
+
+    assert claimed is not None
+    assert store.validate_history("fault-1").valid
 
 
 def test_replay_runtime_mismatch_stale_runtime_and_second_active_reject(
