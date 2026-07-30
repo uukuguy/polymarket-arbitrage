@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sqlite3
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
@@ -16,11 +18,14 @@ from polyarb.perception.fault_control import (
     FaultHistory,
     FaultIntent,
     FaultIntentRequest,
+    FaultOwnershipCapability,
     FaultProjection,
     FaultRuntimeIdentity,
     IntentAdmission,
     canonical_digest,
     canonical_json,
+    normalize_evidence,
+    normalize_identifier,
 )
 
 _ZERO_HASH = "0" * 64
@@ -92,6 +97,84 @@ _NEXT_STATES: Mapping[FaultEventState, frozenset[FaultEventState]] = {
         }
     ),
 }
+_PROCESS_OWNED_STATES = frozenset(
+    {
+        FaultEventState.INJECTED,
+        FaultEventState.CLEANED,
+        FaultEventState.RECOVERED,
+    }
+)
+
+
+def _runtime_hash(
+    identity: FaultRuntimeIdentity,
+    *,
+    supervisor_run_id: str,
+    attempt: int,
+    started_at_ms: int,
+) -> str:
+    return canonical_digest(
+        {
+            "attempt": attempt,
+            "boot_id": str(identity.boot_id),
+            "component": identity.component,
+            "machine_id": identity.machine_id,
+            "release_id": identity.release_id,
+            "started_at_ms": started_at_ms,
+            "supervisor_run_id": supervisor_run_id,
+        }
+    )
+
+
+def _nonce_hash(
+    *,
+    nonce_digest: str,
+    authorization_digest: str,
+    accepted_at_ms: int,
+) -> str:
+    return canonical_digest(
+        {
+            "accepted_at_ms": accepted_at_ms,
+            "authorization_digest": authorization_digest,
+            "nonce_digest": nonce_digest,
+        }
+    )
+
+
+def _intent_hash(fields: Mapping[str, object]) -> str:
+    return canonical_digest(
+        {
+            "accepted_at_ms": fields["accepted_at_ms"],
+            "authorization_digest": fields["authorization_digest"],
+            "boot_id": fields["boot_id"],
+            "call_class": fields["call_class"],
+            "component": fields["component"],
+            "fault_id": fields["fault_id"],
+            "kind": fields["kind"],
+            "machine_id": fields["machine_id"],
+            "nonce_digest": fields["nonce_digest"],
+            "parameter_digest": fields["parameter_digest"],
+            "parameters_json": fields["parameters_json"],
+            "rejection_reason": fields["rejection_reason"],
+            "release_id": fields["release_id"],
+            "status": fields["status"],
+            "target_key": fields["target_key"],
+            "ttl_ms": fields["ttl_ms"],
+        }
+    )
+
+
+def _ownership_digest(capability: FaultOwnershipCapability) -> str:
+    return canonical_digest(
+        {
+            "boot_id": str(capability.runtime.boot_id),
+            "component": capability.runtime.component,
+            "fault_id": capability.fault_id,
+            "machine_id": capability.runtime.machine_id,
+            "release_id": capability.runtime.release_id,
+            "token": capability.token,
+        }
+    )
 
 
 def _event_hash(
@@ -169,25 +252,21 @@ class FaultAuthorityStore:
             raise RuntimeError("fault-authority-read-only")
         if not isinstance(identity, FaultRuntimeIdentity):
             raise ValueError("invalid-runtime")
-        if (
-            not isinstance(supervisor_run_id, str)
-            or not supervisor_run_id
-            or len(supervisor_run_id) > 128
-        ):
-            raise ValueError("invalid-supervisor-run-id")
+        try:
+            supervisor_run_id = normalize_identifier(
+                supervisor_run_id,
+                reason="invalid-supervisor-run-id",
+            )
+        except ValueError as exc:
+            raise ValueError("invalid-supervisor-run-id") from exc
         if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
             raise ValueError("invalid-attempt")
         self._validate_time(started_at_ms, "invalid-started-at")
-        digest = canonical_digest(
-            {
-                "attempt": attempt,
-                "boot_id": str(identity.boot_id),
-                "component": identity.component,
-                "machine_id": identity.machine_id,
-                "release_id": identity.release_id,
-                "started_at_ms": started_at_ms,
-                "supervisor_run_id": supervisor_run_id,
-            }
+        digest = _runtime_hash(
+            identity,
+            supervisor_run_id=supervisor_run_id,
+            attempt=attempt,
+            started_at_ms=started_at_ms,
         )
         con = self._connect()
         try:
@@ -234,7 +313,7 @@ class FaultAuthorityStore:
             con = self._connect()
             try:
                 row = con.execute(
-                    "SELECT component,release_id,machine_id,boot_id "
+                    "SELECT * "
                     "FROM neg_risk_fault_runtime_starts WHERE component=? "
                     "ORDER BY started_at_ms DESC,id DESC LIMIT 1",
                     (component,),
@@ -243,7 +322,9 @@ class FaultAuthorityStore:
                 con.close()
         except sqlite3.Error:
             return None
-        return self._runtime_from_row(row) if row is not None else None
+        if row is None or not self._runtime_row_valid(row):
+            return None
+        return self._runtime_from_row(row)
 
     @staticmethod
     def _runtime_from_row(row: sqlite3.Row) -> FaultRuntimeIdentity:
@@ -253,6 +334,19 @@ class FaultAuthorityStore:
             machine_id=row["machine_id"],
             boot_id=UUID(row["boot_id"]),
         )
+
+    @classmethod
+    def _runtime_row_valid(cls, row: sqlite3.Row) -> bool:
+        try:
+            identity = cls._runtime_from_row(row)
+            return row["identity_digest"] == _runtime_hash(
+                identity,
+                supervisor_run_id=row["supervisor_run_id"],
+                attempt=row["attempt"],
+                started_at_ms=row["started_at_ms"],
+            )
+        except (KeyError, ValueError, TypeError, IndexError):
+            return False
 
     @staticmethod
     def _intent_from_row(row: sqlite3.Row) -> FaultIntent:
@@ -324,7 +418,7 @@ class FaultAuthorityStore:
                 (auth.nonce_digest,),
             ).fetchone()
             current = con.execute(
-                "SELECT component,release_id,machine_id,boot_id "
+                "SELECT * "
                 "FROM neg_risk_fault_runtime_starts WHERE component=? "
                 "ORDER BY started_at_ms DESC,id DESC LIMIT 1",
                 (request.runtime.component,),
@@ -332,7 +426,7 @@ class FaultAuthorityStore:
             reason = "accepted"
             if replay is not None:
                 reason = "nonce-replay"
-            elif current is None:
+            elif current is None or not self._runtime_row_valid(current):
                 reason = "runtime-unavailable"
             elif self._runtime_from_row(current) != request.runtime:
                 reason = "runtime-mismatch"
@@ -340,35 +434,70 @@ class FaultAuthorityStore:
                 reason = "fault-already-active"
 
             if replay is None:
+                nonce_hash = _nonce_hash(
+                    nonce_digest=auth.nonce_digest,
+                    authorization_digest=auth.authorization_digest,
+                    accepted_at_ms=accepted_at_ms,
+                )
                 con.execute(
                     "INSERT INTO neg_risk_fault_auth_nonces("
-                    "nonce_digest,authorization_digest,accepted_at_ms) VALUES (?,?,?)",
-                    (auth.nonce_digest, auth.authorization_digest, accepted_at_ms),
+                    "nonce_digest,authorization_digest,accepted_at_ms,row_hash) "
+                    "VALUES (?,?,?,?)",
+                    (
+                        auth.nonce_digest,
+                        auth.authorization_digest,
+                        accepted_at_ms,
+                        nonce_hash,
+                    ),
                 )
             parameters_json = canonical_json(dict(request.parameters))
+            intent_fields: dict[str, object] = {
+                "fault_id": request.fault_id,
+                "kind": request.kind.value,
+                "call_class": request.call_class.value,
+                "target_key": request.target_key,
+                "parameters_json": parameters_json,
+                "parameter_digest": hashlib.sha256(parameters_json.encode()).hexdigest(),
+                "ttl_ms": request.ttl_ms,
+                "component": request.runtime.component,
+                "release_id": request.runtime.release_id,
+                "machine_id": request.runtime.machine_id,
+                "boot_id": str(request.runtime.boot_id),
+                "nonce_digest": auth.nonce_digest,
+                "authorization_digest": auth.authorization_digest,
+                "accepted_at_ms": accepted_at_ms,
+                "status": "accepted" if reason == "accepted" else "rejected",
+                "rejection_reason": None if reason == "accepted" else reason,
+            }
             con.execute(
                 "INSERT INTO neg_risk_fault_intents("
                 "fault_id,kind,call_class,target_key,parameters_json,parameter_digest,"
                 "ttl_ms,component,release_id,machine_id,boot_id,nonce_digest,"
-                "authorization_digest,accepted_at_ms,status,rejection_reason)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "authorization_digest,accepted_at_ms,status,rejection_reason,intent_hash)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    request.fault_id,
-                    request.kind.value,
-                    request.call_class.value,
-                    request.target_key,
-                    parameters_json,
-                    hashlib.sha256(parameters_json.encode()).hexdigest(),
-                    request.ttl_ms,
-                    request.runtime.component,
-                    request.runtime.release_id,
-                    request.runtime.machine_id,
-                    str(request.runtime.boot_id),
-                    auth.nonce_digest,
-                    auth.authorization_digest,
-                    accepted_at_ms,
-                    "accepted" if reason == "accepted" else "rejected",
-                    None if reason == "accepted" else reason,
+                    *(
+                        intent_fields[key]
+                        for key in (
+                            "fault_id",
+                            "kind",
+                            "call_class",
+                            "target_key",
+                            "parameters_json",
+                            "parameter_digest",
+                            "ttl_ms",
+                            "component",
+                            "release_id",
+                            "machine_id",
+                            "boot_id",
+                            "nonce_digest",
+                            "authorization_digest",
+                            "accepted_at_ms",
+                            "status",
+                            "rejection_reason",
+                        )
+                    ),
+                    _intent_hash(intent_fields),
                 ),
             )
             state = FaultEventState.AUTHORIZED if reason == "accepted" else FaultEventState.REJECTED
@@ -403,22 +532,24 @@ class FaultAuthorityStore:
         try:
             con.execute("BEGIN IMMEDIATE")
             current = con.execute(
-                "SELECT component,release_id,machine_id,boot_id "
+                "SELECT * "
                 "FROM neg_risk_fault_runtime_starts WHERE component=? "
                 "ORDER BY started_at_ms DESC,id DESC LIMIT 1",
                 (identity.component,),
             ).fetchone()
-            if current is None or self._runtime_from_row(current) != identity:
+            if (
+                current is None
+                or not self._runtime_row_valid(current)
+                or self._runtime_from_row(current) != identity
+            ):
                 con.execute("COMMIT")
                 return None
-            row = con.execute(
+            rows = con.execute(
                 "SELECT i.* FROM neg_risk_fault_intents i "
                 "WHERE i.status='accepted' AND i.component=? AND i.release_id=? "
                 "AND i.machine_id=? AND i.boot_id=? "
                 "AND i.accepted_at_ms+i.ttl_ms>? "
-                "AND NOT EXISTS (SELECT 1 FROM neg_risk_fault_events e "
-                "WHERE e.fault_id=i.fault_id AND e.state='armed') "
-                "ORDER BY i.accepted_at_ms,i.fault_id LIMIT 1",
+                "ORDER BY i.accepted_at_ms,i.fault_id",
                 (
                     identity.component,
                     identity.release_id,
@@ -426,10 +557,25 @@ class FaultAuthorityStore:
                     str(identity.boot_id),
                     claimed_at_ms,
                 ),
-            ).fetchone()
+            ).fetchall()
+            row = None
+            for candidate in rows:
+                history = self._validate_history_in_connection(con, candidate["fault_id"])
+                if (
+                    history.valid
+                    and history.events
+                    and history.events[-1].state is FaultEventState.AUTHORIZED
+                ):
+                    row = candidate
+                    break
             if row is None:
                 con.execute("COMMIT")
                 return None
+            capability = FaultOwnershipCapability(
+                fault_id=row["fault_id"],
+                runtime=identity,
+                token=secrets.token_hex(32),
+            )
             self._append_event_in_transaction(
                 con,
                 row["fault_id"],
@@ -443,11 +589,15 @@ class FaultAuthorityStore:
                             "machine_id": identity.machine_id,
                             "release_id": identity.release_id,
                         }
-                    )
+                    ),
+                    "ownership_digest": _ownership_digest(capability),
                 },
             )
             con.execute("COMMIT")
-            return self._intent_from_row(row)
+            return replace(
+                self._intent_from_row(row),
+                ownership_capability=capability,
+            )
         except BaseException:
             if con.in_transaction:
                 con.execute("ROLLBACK")
@@ -472,7 +622,8 @@ class FaultAuthorityStore:
         ).fetchone()
         sequence = 1 if latest is None else int(latest["sequence"]) + 1
         previous_hash = _ZERO_HASH if latest is None else str(latest["event_hash"])
-        evidence_json = canonical_json(dict(evidence))
+        normalized_evidence = normalize_evidence(state, evidence)
+        evidence_json = canonical_json(normalized_evidence)
         digest = _event_hash(
             fault_id=fault_id,
             sequence=sequence,
@@ -516,6 +667,7 @@ class FaultAuthorityStore:
         *,
         occurred_at_ms: int,
         evidence: Mapping[str, object],
+        ownership: FaultOwnershipCapability | None = None,
     ) -> FaultEvent:
         if self._read_only:
             raise RuntimeError("fault-authority-read-only")
@@ -523,16 +675,22 @@ class FaultAuthorityStore:
         self._validate_time(occurred_at_ms, "invalid-occurred-at")
         if not isinstance(evidence, Mapping):
             raise ValueError("invalid-evidence")
+        normalize_evidence(typed_state, evidence)
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
-            if (
-                con.execute(
-                    "SELECT 1 FROM neg_risk_fault_intents WHERE fault_id=?", (fault_id,)
-                ).fetchone()
-                is None
-            ):
+            intent_row = con.execute(
+                "SELECT * FROM neg_risk_fault_intents WHERE fault_id=?",
+                (fault_id,),
+            ).fetchone()
+            if intent_row is None:
                 raise ValueError("fault-not-found")
+            if typed_state in _PROCESS_OWNED_STATES:
+                self._require_ownership(
+                    con,
+                    intent_row,
+                    ownership,
+                )
             event = self._append_event_in_transaction(
                 con,
                 fault_id,
@@ -549,6 +707,34 @@ class FaultAuthorityStore:
         finally:
             con.close()
 
+    def _require_ownership(
+        self,
+        con: sqlite3.Connection,
+        intent_row: sqlite3.Row,
+        ownership: FaultOwnershipCapability | None,
+    ) -> None:
+        if (
+            not isinstance(ownership, FaultOwnershipCapability)
+            or ownership.fault_id != intent_row["fault_id"]
+        ):
+            raise PermissionError("ownership-capability-required")
+        intent = self._intent_from_row(intent_row)
+        if ownership.runtime != intent.runtime:
+            raise PermissionError("ownership-capability-required")
+        armed = con.execute(
+            "SELECT evidence_json FROM neg_risk_fault_events WHERE fault_id=? AND state='armed'",
+            (intent.fault_id,),
+        ).fetchone()
+        if armed is None:
+            raise PermissionError("ownership-capability-required")
+        try:
+            evidence = json.loads(armed["evidence_json"])
+            matches = evidence["ownership_digest"] == _ownership_digest(ownership)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            matches = False
+        if not matches:
+            raise PermissionError("ownership-capability-required")
+
     @staticmethod
     def _event_from_row(row: sqlite3.Row) -> FaultEvent:
         return FaultEvent(
@@ -563,22 +749,85 @@ class FaultAuthorityStore:
             event_hash=row["event_hash"],
         )
 
-    def validate_history(self, fault_id: str) -> FaultHistory:
+    @staticmethod
+    def _nonce_row_valid(row: sqlite3.Row) -> bool:
         try:
-            con = self._connect()
-            try:
-                row = con.execute(
-                    "SELECT * FROM neg_risk_fault_intents WHERE fault_id=?", (fault_id,)
-                ).fetchone()
-                event_rows = con.execute(
-                    "SELECT * FROM neg_risk_fault_events WHERE fault_id=? ORDER BY sequence,id",
-                    (fault_id,),
-                ).fetchall()
-            finally:
-                con.close()
-            if row is None:
-                return FaultHistory(fault_id, False, "intent-missing", None, ())
+            return row["row_hash"] == _nonce_hash(
+                nonce_digest=row["nonce_digest"],
+                authorization_digest=row["authorization_digest"],
+                accepted_at_ms=row["accepted_at_ms"],
+            )
+        except (KeyError, TypeError, ValueError, IndexError):
+            return False
+
+    def _intent_row_valid(
+        self,
+        con: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> bool:
+        try:
+            parameters = json.loads(row["parameters_json"])
+            if canonical_json(parameters) != row["parameters_json"]:
+                return False
+            if (
+                hashlib.sha256(row["parameters_json"].encode()).hexdigest()
+                != row["parameter_digest"]
+            ):
+                return False
+            if row["intent_hash"] != _intent_hash(row):
+                return False
+            self._intent_from_row(row)
+            runtime = con.execute(
+                "SELECT * FROM neg_risk_fault_runtime_starts "
+                "WHERE component=? AND release_id=? AND machine_id=? AND boot_id=?",
+                (
+                    row["component"],
+                    row["release_id"],
+                    row["machine_id"],
+                    row["boot_id"],
+                ),
+            ).fetchone()
+            if runtime is None or not self._runtime_row_valid(runtime):
+                return False
+            nonce = con.execute(
+                "SELECT * FROM neg_risk_fault_auth_nonces WHERE nonce_digest=?",
+                (row["nonce_digest"],),
+            ).fetchone()
+            if nonce is None or not self._nonce_row_valid(nonce):
+                return False
+            return (
+                row["status"] != "accepted"
+                or nonce["authorization_digest"] == row["authorization_digest"]
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            IndexError,
+            json.JSONDecodeError,
+            sqlite3.Error,
+        ):
+            return False
+
+    def _validate_history_in_connection(
+        self,
+        con: sqlite3.Connection,
+        fault_id: str,
+    ) -> FaultHistory:
+        row = con.execute(
+            "SELECT * FROM neg_risk_fault_intents WHERE fault_id=?",
+            (fault_id,),
+        ).fetchone()
+        if row is None:
+            return FaultHistory(fault_id, False, "intent-missing", None, ())
+        if not self._intent_row_valid(con, row):
+            return FaultHistory(fault_id, False, "intent-integrity-invalid", None, ())
+        try:
             intent = self._intent_from_row(row)
+            event_rows = con.execute(
+                "SELECT * FROM neg_risk_fault_events WHERE fault_id=? ORDER BY sequence,id",
+                (fault_id,),
+            ).fetchall()
             events = tuple(self._event_from_row(value) for value in event_rows)
         except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError):
             return FaultHistory(fault_id, False, "authority-unavailable", None, ())
@@ -593,7 +842,7 @@ class FaultAuthorityStore:
             if event.sequence != index or event.previous_hash != previous:
                 return FaultHistory(fault_id, False, "hash-predecessor-invalid", intent, events)
             try:
-                evidence_json = canonical_json(dict(event.evidence))
+                evidence_json = canonical_json(normalize_evidence(event.state, event.evidence))
                 expected_hash = _event_hash(
                     fault_id=event.fault_id,
                     sequence=event.sequence,
@@ -622,6 +871,16 @@ class FaultAuthorityStore:
         if not events:
             return FaultHistory(fault_id, False, "event-history-missing", intent, events)
         return FaultHistory(fault_id, True, "valid", intent, events)
+
+    def validate_history(self, fault_id: str) -> FaultHistory:
+        try:
+            con = self._connect()
+            try:
+                return self._validate_history_in_connection(con, fault_id)
+            finally:
+                con.close()
+        except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError):
+            return FaultHistory(fault_id, False, "authority-unavailable", None, ())
 
     def project_fault(self, fault_id: str, *, now_ms: int) -> FaultProjection:
         try:

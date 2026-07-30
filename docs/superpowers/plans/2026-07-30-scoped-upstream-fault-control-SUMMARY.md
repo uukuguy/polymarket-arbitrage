@@ -28,6 +28,17 @@ Implemented:
   handling, exact-runtime single-use claim, hash-chained lifecycle facts,
   deterministic fail-closed validation, read-only projection, and stale
   runtime abandonment.
+- Review hardening binds every semantic runtime, nonce, intent, and event field
+  into canonical hashes; append-only triggers reject authority UPDATE/DELETE;
+  claim validates an intact latest-`authorized` chain in the same transaction.
+- Successful claim returns a boot/runtime-bound in-memory ownership capability.
+  Only its digest is durable, and `injected`, `cleaned`, and `recovered` writes
+  require the unpersisted capability.
+- Controller admission derives monotonic expiry from wall-clock TTL remaining,
+  and parameters are immutable private copies.
+- Lifecycle evidence is state-specific and identifier-only; unknown fields,
+  URL/query/header/cookie/authorization/token/body-shaped material, and unsafe
+  supervisor run IDs are rejected before persistence.
 - Append-only schema names:
   `neg_risk_fault_runtime_starts`,
   `neg_risk_fault_auth_nonces`,
@@ -49,6 +60,13 @@ Tests run:
 - GREEN: `uv run pytest tests/perception/test_fault_control.py
   tests/perception/test_fault_authority.py -q` passed, 44 tests.
 - `uv run ruff check` for both modules and both test files passed.
+
+Task 1 review hardening:
+
+- Combined RED: 18 focused failures exposed the six review findings.
+- GREEN: 65 focused model/authority tests pass after the fixes.
+- Existing `test_store.py` and observation formatter/scanner schema regressions
+  pass with the new hash columns and append-only triggers.
 
 Remaining plan work:
 

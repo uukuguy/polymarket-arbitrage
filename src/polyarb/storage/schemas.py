@@ -1353,7 +1353,8 @@ CREATE INDEX IF NOT EXISTS idx_neg_risk_fault_runtime_current
 CREATE TABLE IF NOT EXISTS neg_risk_fault_auth_nonces (
   nonce_digest TEXT PRIMARY KEY CHECK(length(nonce_digest) = 64),
   authorization_digest TEXT NOT NULL CHECK(length(authorization_digest) = 64),
-  accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0)
+  accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0),
+  row_hash TEXT NOT NULL CHECK(length(row_hash) = 64)
 );
 
 CREATE TABLE IF NOT EXISTS neg_risk_fault_intents (
@@ -1372,7 +1373,8 @@ CREATE TABLE IF NOT EXISTS neg_risk_fault_intents (
   authorization_digest TEXT NOT NULL CHECK(length(authorization_digest) = 64),
   accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0),
   status TEXT NOT NULL CHECK(status IN ('accepted','rejected')),
-  rejection_reason TEXT
+  rejection_reason TEXT,
+  intent_hash TEXT NOT NULL CHECK(length(intent_hash) = 64)
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_fault_intent_runtime
   ON neg_risk_fault_intents(component,release_id,machine_id,boot_id,accepted_at_ms);
@@ -1400,6 +1402,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_neg_risk_fault_one_injection
 CREATE UNIQUE INDEX IF NOT EXISTS idx_neg_risk_fault_one_cleanup_terminal
   ON neg_risk_fault_events(fault_id)
   WHERE state IN ('cleaned','cleanup-failed');
+
+CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_runtime_starts_no_update
+BEFORE UPDATE ON neg_risk_fault_runtime_starts
+BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_runtime_starts_no_delete
+BEFORE DELETE ON neg_risk_fault_runtime_starts
+BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_auth_nonces_no_update
+BEFORE UPDATE ON neg_risk_fault_auth_nonces
+BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_auth_nonces_no_delete
+BEFORE DELETE ON neg_risk_fault_auth_nonces
+BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_intents_no_update
+BEFORE UPDATE ON neg_risk_fault_intents
+BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_intents_no_delete
+BEFORE DELETE ON neg_risk_fault_intents
+BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_events_no_update
+BEFORE UPDATE ON neg_risk_fault_events
+BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_neg_risk_fault_events_no_delete
+BEFORE DELETE ON neg_risk_fault_events
+BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END;
 
 -- Phase 1.1 T2: append-only translation cache.
 -- Invariants:

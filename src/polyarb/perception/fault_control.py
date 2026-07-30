@@ -15,6 +15,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
@@ -23,6 +24,7 @@ _RELEASE_RE = re.compile(r"^[0-9a-f]{40}$")
 _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _COMPONENTS = frozenset({"candidate", "discovery", "reconciliation", "notification"})
+_SECRET_WORDS = ("authorization", "cookie", "header", "password", "secret", "token")
 
 
 class FaultCallClass(StrEnum):
@@ -91,9 +93,17 @@ FAULT_PARAMETER_RULES: Mapping[FaultKind, Mapping[str, tuple[int, int]]] = {
 }
 
 
+def _canonical_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _canonical_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_value(item) for item in value]
+    return value
+
+
 def canonical_json(value: object) -> str:
     return json.dumps(
-        value,
+        _canonical_value(value),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -121,7 +131,7 @@ def normalize_target(call_class: FaultCallClass, target_key: str) -> str:
         or "/" in target
         or "?" in target
         or "=" in target
-        or any(word in lowered for word in ("token", "secret", "cookie", "authorization"))
+        or any(word in lowered for word in _SECRET_WORDS)
     ):
         raise ValueError("invalid-target")
     if typed_class is FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE:
@@ -138,7 +148,7 @@ def normalize_target(call_class: FaultCallClass, target_key: str) -> str:
     return target
 
 
-def normalize_parameters(kind: FaultKind, parameters: Mapping[str, object]) -> dict[str, int]:
+def normalize_parameters(kind: FaultKind, parameters: Mapping[str, object]) -> Mapping[str, int]:
     try:
         typed_kind = FaultKind(kind)
     except (TypeError, ValueError) as exc:
@@ -159,7 +169,57 @@ def normalize_parameters(kind: FaultKind, parameters: Mapping[str, object]) -> d
         if not minimum <= integer <= maximum:
             raise ValueError("parameter-out-of-bounds")
         normalized[key] = integer
+    return MappingProxyType(normalized)
+
+
+def normalize_identifier(value: str, *, reason: str = "invalid-identifier") -> str:
+    if not isinstance(value, str):
+        raise ValueError(reason)
+    normalized = value.strip()
+    lowered = normalized.lower()
+    if not _SAFE_KEY_RE.fullmatch(normalized) or any(word in lowered for word in _SECRET_WORDS):
+        raise ValueError(reason)
     return normalized
+
+
+_EVIDENCE_KEYS: Mapping[FaultEventState, frozenset[str]] = {
+    FaultEventState.AUTHORIZED: frozenset({"reason"}),
+    FaultEventState.ARMED: frozenset({"runtime_identity_digest", "ownership_digest"}),
+    FaultEventState.INJECTED: frozenset({"call_id"}),
+    FaultEventState.DETECTED: frozenset({"incident_id"}),
+    FaultEventState.CONTAINED: frozenset({"containment_id"}),
+    FaultEventState.CLEANED: frozenset({"cleanup_id"}),
+    FaultEventState.RECOVERED: frozenset({"recovery_id"}),
+    FaultEventState.VERIFIED: frozenset({"verdict_id"}),
+    FaultEventState.REJECTED: frozenset({"reason"}),
+    FaultEventState.EXPIRED: frozenset({"reason"}),
+    FaultEventState.ABANDONED: frozenset({"reason"}),
+    FaultEventState.CLEANUP_FAILED: frozenset({"reason"}),
+    FaultEventState.RECOVERY_TIMEOUT: frozenset({"reason"}),
+    FaultEventState.EVIDENCE_INVALID: frozenset({"reason"}),
+    FaultEventState.ESCALATED: frozenset({"reason"}),
+}
+
+
+def normalize_evidence(
+    state: FaultEventState,
+    evidence: Mapping[str, object],
+) -> Mapping[str, str]:
+    typed_state = FaultEventState(state)
+    if not isinstance(evidence, Mapping) or not set(evidence) <= _EVIDENCE_KEYS[typed_state]:
+        raise ValueError("invalid-evidence")
+    normalized: dict[str, str] = {}
+    for key, value in evidence.items():
+        if not isinstance(value, str):
+            raise ValueError("invalid-evidence")
+        if key.endswith("_digest"):
+            _validate_digest(value, "invalid-evidence")
+            normalized[key] = value
+        else:
+            normalized[key] = normalize_identifier(value, reason="invalid-evidence")
+    if typed_state is FaultEventState.ARMED and set(normalized) != _EVIDENCE_KEYS[typed_state]:
+        raise ValueError("invalid-evidence")
+    return MappingProxyType(normalized)
 
 
 def _validate_digest(value: str, reason: str) -> None:
@@ -228,6 +288,11 @@ class FaultAuthorization:
 class FaultIntent(FaultIntentRequest):
     nonce_digest: str
     accepted_at_ms: int
+    ownership_capability: FaultOwnershipCapability | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         super(FaultIntent, self).__post_init__()
@@ -238,6 +303,22 @@ class FaultIntent(FaultIntentRequest):
             or self.accepted_at_ms < 0
         ):
             raise ValueError("invalid-accepted-at")
+        if self.ownership_capability is not None:
+            if self.ownership_capability.fault_id != self.fault_id:
+                raise ValueError("ownership-fault-mismatch")
+            if self.ownership_capability.runtime != self.runtime:
+                raise ValueError("ownership-runtime-mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class FaultOwnershipCapability:
+    fault_id: str
+    runtime: FaultRuntimeIdentity
+    token: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        normalize_identifier(self.fault_id, reason="invalid-fault-id")
+        _validate_digest(self.token, "invalid-ownership-token")
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,7 +345,7 @@ class FaultDecision:
     inject: bool
     fault_id: str | None = None
     kind: FaultKind | None = None
-    parameters: Mapping[str, int] = field(default_factory=dict)
+    parameters: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,10 +422,16 @@ class FaultController:
             or claimed_at_ms < 0
         ):
             raise ValueError("invalid-claimed-at")
+        elapsed_ms = claimed_at_ms - intent.accepted_at_ms
+        remaining_ms = intent.ttl_ms - elapsed_ms
+        if elapsed_ms < 0:
+            raise ValueError("claim-before-acceptance")
+        if remaining_ms <= 0:
+            raise ValueError("intent-expired")
         self._active = ActiveFault(
             intent=intent,
             claimed_at_ms=claimed_at_ms,
-            expires_monotonic=self._monotonic() + intent.ttl_ms / 1_000,
+            expires_monotonic=self._monotonic() + remaining_ms / 1_000,
         )
 
     def consume(self, call: FaultCall) -> FaultDecision:
@@ -362,7 +449,12 @@ class FaultController:
             expires_monotonic=active.expires_monotonic,
             consumed=True,
         )
-        return FaultDecision(True, intent.fault_id, intent.kind, dict(intent.parameters))
+        return FaultDecision(
+            True,
+            intent.fault_id,
+            intent.kind,
+            MappingProxyType(dict(intent.parameters)),
+        )
 
     async def execute(
         self,

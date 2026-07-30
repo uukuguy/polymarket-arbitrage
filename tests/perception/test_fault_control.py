@@ -160,6 +160,36 @@ def test_expired_fault_passes_through() -> None:
     ).inject
 
 
+def test_admit_uses_only_ttl_remaining_since_acceptance() -> None:
+    now = [10.0]
+    controller = FaultController(runtime=RUNTIME, monotonic=lambda: now[0])
+    controller.admit(intent(accepted_at_ms=900, ttl_ms=1_000), claimed_at_ms=1_800)
+    now[0] = 10.099
+    assert controller.consume(FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1")).inject
+
+    expired = FaultController(runtime=RUNTIME, monotonic=lambda: 10.0)
+    with pytest.raises(ValueError, match="intent-expired"):
+        expired.admit(
+            intent(accepted_at_ms=900, ttl_ms=1_000),
+            claimed_at_ms=1_900,
+        )
+
+
+def test_fault_parameters_are_immutable_private_copies() -> None:
+    supplied = {"delay_ms": 10}
+    value = intent(parameters=supplied)
+    supplied["delay_ms"] = 20
+    assert value.parameters["delay_ms"] == 10
+    with pytest.raises(TypeError):
+        value.parameters["delay_ms"] = 30  # type: ignore[index]
+
+    controller = FaultController(runtime=RUNTIME, monotonic=lambda: 10.0)
+    controller.admit(value, claimed_at_ms=1_000)
+    decision = controller.consume(FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1"))
+    with pytest.raises(TypeError):
+        decision.parameters["delay_ms"] = 30  # type: ignore[index]
+
+
 def test_invalid_controller_input_never_blocks_real_call() -> None:
     controller = FaultController(runtime=RUNTIME, monotonic=lambda: 10.0)
     calls = []

@@ -8,7 +8,7 @@ from uuid import UUID
 
 import pytest
 
-from polyarb.perception.fault_authority import FaultAuthorityStore
+from polyarb.perception.fault_authority import FaultAuthorityStore, _intent_hash
 from polyarb.perception.fault_control import (
     FaultAuthorization,
     FaultCallClass,
@@ -25,6 +25,11 @@ RUNTIME = FaultRuntimeIdentity(
     machine_id="machine-1",
     boot_id=UUID("12345678-1234-4678-9234-567812345678"),
 )
+
+
+def disable_append_only(con: sqlite3.Connection, table: str) -> None:
+    con.execute(f"DROP TRIGGER trg_{table}_no_update")
+    con.execute(f"DROP TRIGGER trg_{table}_no_delete")
 
 
 def request(**changes: object) -> FaultIntentRequest:
@@ -140,6 +145,212 @@ def test_only_exact_runtime_claims_and_claim_is_single_use_across_connections(
     assert sum(value is not None for value in results) == 1
 
 
+@pytest.mark.parametrize(
+    "terminal_state",
+    [FaultEventState.EXPIRED, FaultEventState.ABANDONED, FaultEventState.ESCALATED],
+)
+def test_claim_requires_an_intact_latest_authorized_chain(
+    store: FaultAuthorityStore,
+    db_path: Path,
+    terminal_state: FaultEventState,
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    store.append_event("fault-1", terminal_state, occurred_at_ms=1_200, evidence={})
+    assert store.claim_pending(RUNTIME, claimed_at_ms=1_300) is None
+
+    with sqlite3.connect(db_path) as con:
+        disable_append_only(con, "neg_risk_fault_events")
+        con.execute(
+            "DELETE FROM neg_risk_fault_events WHERE fault_id='fault-1' AND state=?",
+            (terminal_state.value,),
+        )
+        con.execute(
+            "UPDATE neg_risk_fault_events SET evidence_json='{}' "
+            "WHERE fault_id='fault-1' AND state='authorized'"
+        )
+    assert store.claim_pending(RUNTIME, claimed_at_ms=1_300) is None
+
+
+def test_claim_rejects_injection_without_a_claim(
+    store: FaultAuthorityStore,
+    db_path: Path,
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_150)
+    assert claimed is not None
+    store.append_event(
+        "fault-1",
+        FaultEventState.INJECTED,
+        occurred_at_ms=1_200,
+        evidence={"call_id": "call-1"},
+        ownership=claimed.ownership_capability,
+    )
+    with sqlite3.connect(db_path) as con:
+        disable_append_only(con, "neg_risk_fault_events")
+        con.execute("DELETE FROM neg_risk_fault_events WHERE fault_id='fault-1' AND state='armed'")
+    assert store.claim_pending(RUNTIME, claimed_at_ms=1_300) is None
+
+
+@pytest.mark.parametrize("fact", ["intent", "nonce", "runtime"])
+def test_runtime_nonce_and_intent_hashes_cover_persisted_facts(
+    store: FaultAuthorityStore,
+    db_path: Path,
+    fact: str,
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    if fact == "intent":
+        with sqlite3.connect(db_path) as con:
+            disable_append_only(con, "neg_risk_fault_intents")
+            con.execute(
+                "UPDATE neg_risk_fault_intents SET target_key='group-2' WHERE fault_id='fault-1'"
+            )
+    elif fact == "nonce":
+        with sqlite3.connect(db_path) as con:
+            disable_append_only(con, "neg_risk_fault_auth_nonces")
+            con.execute(
+                "UPDATE neg_risk_fault_auth_nonces SET authorization_digest=?",
+                ("d" * 64,),
+            )
+    else:
+        with sqlite3.connect(db_path) as con:
+            disable_append_only(con, "neg_risk_fault_runtime_starts")
+            con.execute("UPDATE neg_risk_fault_runtime_starts SET supervisor_run_id='run-tampered'")
+        assert store.current_runtime("candidate") is None
+    assert store.claim_pending(RUNTIME, claimed_at_ms=1_200) is None
+    assert not store.validate_history("fault-1").valid
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "neg_risk_fault_runtime_starts",
+        "neg_risk_fault_auth_nonces",
+        "neg_risk_fault_intents",
+        "neg_risk_fault_events",
+    ],
+)
+def test_fault_authority_tables_reject_update_and_delete(
+    store: FaultAuthorityStore,
+    db_path: Path,
+    table: str,
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    with sqlite3.connect(db_path) as con:
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            con.execute(f"UPDATE {table} SET rowid=rowid")
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            con.execute(f"DELETE FROM {table}")
+
+
+def test_process_owned_lifecycle_events_require_claim_capability(
+    store: FaultAuthorityStore,
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_200)
+    assert claimed is not None and claimed.ownership_capability is not None
+
+    with pytest.raises(PermissionError, match="ownership-capability-required"):
+        store.append_event(
+            "fault-1",
+            FaultEventState.INJECTED,
+            occurred_at_ms=1_300,
+            evidence={"call_id": "call-1"},
+        )
+    wrong_runtime = replace(
+        claimed.ownership_capability,
+        runtime=replace(RUNTIME, machine_id="machine-2"),
+    )
+    with pytest.raises(PermissionError, match="ownership-capability-required"):
+        store.append_event(
+            "fault-1",
+            FaultEventState.INJECTED,
+            occurred_at_ms=1_300,
+            evidence={"call_id": "call-1"},
+            ownership=wrong_runtime,
+        )
+    injected = store.append_event(
+        "fault-1",
+        FaultEventState.INJECTED,
+        occurred_at_ms=1_300,
+        evidence={"call_id": "call-1"},
+        ownership=claimed.ownership_capability,
+    )
+    assert injected.state is FaultEventState.INJECTED
+    store.append_event(
+        "fault-1",
+        FaultEventState.DETECTED,
+        occurred_at_ms=1_400,
+        evidence={"incident_id": "incident-1"},
+    )
+    store.append_event(
+        "fault-1",
+        FaultEventState.CONTAINED,
+        occurred_at_ms=1_500,
+        evidence={"containment_id": "containment-1"},
+    )
+    with pytest.raises(PermissionError, match="ownership-capability-required"):
+        store.append_event(
+            "fault-1",
+            FaultEventState.CLEANED,
+            occurred_at_ms=1_600,
+            evidence={"cleanup_id": "cleanup-1"},
+        )
+    store.append_event(
+        "fault-1",
+        FaultEventState.CLEANED,
+        occurred_at_ms=1_600,
+        evidence={"cleanup_id": "cleanup-1"},
+        ownership=claimed.ownership_capability,
+    )
+    with pytest.raises(PermissionError, match="ownership-capability-required"):
+        store.append_event(
+            "fault-1",
+            FaultEventState.RECOVERED,
+            occurred_at_ms=1_700,
+            evidence={"recovery_id": "recovery-1"},
+        )
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"authorization": "Bearer secret"},
+        {"incident_id": "https://example.test/incident"},
+        {"incident_id": "token=secret"},
+        {"response_body": "raw"},
+    ],
+)
+def test_evidence_rejects_unknown_or_secret_like_fields(
+    store: FaultAuthorityStore,
+    evidence: dict[str, object],
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    with pytest.raises(ValueError, match="invalid-evidence"):
+        store.append_event(
+            "fault-1",
+            FaultEventState.DETECTED,
+            occurred_at_ms=1_200,
+            evidence=evidence,
+        )
+
+
+@pytest.mark.parametrize(
+    "supervisor_run_id",
+    ["https://supervisor", "token=secret", "x" * 129],
+)
+def test_runtime_registration_rejects_unsafe_supervisor_run_id(
+    db_path: Path,
+    supervisor_run_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="invalid-supervisor-run-id"):
+        FaultAuthorityStore(db_path).register_runtime_start(
+            RUNTIME,
+            supervisor_run_id=supervisor_run_id,
+            attempt=1,
+            started_at_ms=1_000,
+        )
+
+
 def test_missing_or_corrupt_schema_projects_unavailable(tmp_path: Path) -> None:
     missing = FaultAuthorityStore(tmp_path / "missing.db", read_only=True)
     assert not missing.project_fault("fault-1", now_ms=2_000).available
@@ -158,18 +369,44 @@ def test_lifecycle_hashes_validate_and_tampering_is_detected(
     store: FaultAuthorityStore, db_path: Path
 ) -> None:
     store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
-    store.claim_pending(RUNTIME, claimed_at_ms=1_200)
+    claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_200)
+    assert claimed is not None
     store.append_event(
-        "fault-1", FaultEventState.INJECTED, occurred_at_ms=1_300, evidence={"call": 1}
+        "fault-1",
+        FaultEventState.INJECTED,
+        occurred_at_ms=1_300,
+        evidence={"call_id": "call-1"},
+        ownership=claimed.ownership_capability,
     )
     store.append_event(
-        "fault-1", FaultEventState.DETECTED, occurred_at_ms=1_400, evidence={"incident": "i-1"}
+        "fault-1",
+        FaultEventState.DETECTED,
+        occurred_at_ms=1_400,
+        evidence={"incident_id": "incident-1"},
     )
-    store.append_event("fault-1", FaultEventState.CONTAINED, occurred_at_ms=1_500, evidence={})
-    store.append_event("fault-1", FaultEventState.CLEANED, occurred_at_ms=1_600, evidence={})
-    store.append_event("fault-1", FaultEventState.RECOVERED, occurred_at_ms=1_700, evidence={})
+    store.append_event(
+        "fault-1",
+        FaultEventState.CONTAINED,
+        occurred_at_ms=1_500,
+        evidence={"containment_id": "containment-1"},
+    )
+    store.append_event(
+        "fault-1",
+        FaultEventState.CLEANED,
+        occurred_at_ms=1_600,
+        evidence={"cleanup_id": "cleanup-1"},
+        ownership=claimed.ownership_capability,
+    )
+    store.append_event(
+        "fault-1",
+        FaultEventState.RECOVERED,
+        occurred_at_ms=1_700,
+        evidence={"recovery_id": "recovery-1"},
+        ownership=claimed.ownership_capability,
+    )
     assert store.validate_history("fault-1").valid
     with sqlite3.connect(db_path) as con:
+        disable_append_only(con, "neg_risk_fault_events")
         con.execute(
             "UPDATE neg_risk_fault_events SET evidence_json='{}' "
             "WHERE fault_id='fault-1' AND state='detected'"
@@ -193,12 +430,42 @@ def test_projection_fails_closed_for_invalid_chains(
     store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
     if mutation == "two-active":
         with sqlite3.connect(db_path) as con:
+            con.row_factory = sqlite3.Row
+            source = dict(
+                con.execute(
+                    "SELECT * FROM neg_risk_fault_intents WHERE fault_id='fault-1'"
+                ).fetchone()
+            )
+            source["fault_id"] = "fault-2"
+            source["intent_hash"] = _intent_hash(source)
             con.execute(
-                "INSERT INTO neg_risk_fault_intents "
-                "SELECT 'fault-2',kind,call_class,target_key,parameters_json,parameter_digest,"
+                "INSERT INTO neg_risk_fault_intents("
+                "fault_id,kind,call_class,target_key,parameters_json,parameter_digest,"
                 "ttl_ms,component,release_id,machine_id,boot_id,nonce_digest,"
-                "authorization_digest,accepted_at_ms,'accepted',NULL FROM neg_risk_fault_intents "
-                "WHERE fault_id='fault-1'"
+                "authorization_digest,accepted_at_ms,status,rejection_reason,intent_hash)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                tuple(
+                    source[key]
+                    for key in (
+                        "fault_id",
+                        "kind",
+                        "call_class",
+                        "target_key",
+                        "parameters_json",
+                        "parameter_digest",
+                        "ttl_ms",
+                        "component",
+                        "release_id",
+                        "machine_id",
+                        "boot_id",
+                        "nonce_digest",
+                        "authorization_digest",
+                        "accepted_at_ms",
+                        "status",
+                        "rejection_reason",
+                        "intent_hash",
+                    )
+                ),
             )
         store.append_event(
             "fault-2",
@@ -206,12 +473,12 @@ def test_projection_fails_closed_for_invalid_chains(
             occurred_at_ms=1_100,
             evidence={"reason": "accepted"},
         )
-    elif mutation == "injection-without-claim":
-        store.append_event("fault-1", FaultEventState.INJECTED, occurred_at_ms=1_300, evidence={})
     else:
-        store.claim_pending(RUNTIME, claimed_at_ms=1_200)
+        claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_200)
+        assert claimed is not None
         if mutation == "missing-predecessor":
             with sqlite3.connect(db_path) as con:
+                disable_append_only(con, "neg_risk_fault_events")
                 con.execute(
                     "UPDATE neg_risk_fault_events SET previous_hash=? "
                     "WHERE fault_id=? AND state='armed'",
@@ -219,16 +486,38 @@ def test_projection_fails_closed_for_invalid_chains(
                 )
         elif mutation == "regression":
             store.append_event(
-                "fault-1", FaultEventState.INJECTED, occurred_at_ms=1_300, evidence={}
+                "fault-1",
+                FaultEventState.INJECTED,
+                occurred_at_ms=1_300,
+                evidence={"call_id": "call-1"},
+                ownership=claimed.ownership_capability,
             )
             with sqlite3.connect(db_path) as con:
+                disable_append_only(con, "neg_risk_fault_events")
                 con.execute(
                     "UPDATE neg_risk_fault_events SET state='authorized' "
                     "WHERE fault_id='fault-1' AND state='injected'"
                 )
+        elif mutation == "injection-without-claim":
+            store.append_event(
+                "fault-1",
+                FaultEventState.INJECTED,
+                occurred_at_ms=1_300,
+                evidence={"call_id": "call-1"},
+                ownership=claimed.ownership_capability,
+            )
+            with sqlite3.connect(db_path) as con:
+                disable_append_only(con, "neg_risk_fault_events")
+                con.execute(
+                    "DELETE FROM neg_risk_fault_events WHERE fault_id='fault-1' AND state='armed'"
+                )
         else:
             store.append_event(
-                "fault-1", FaultEventState.CLEANED, occurred_at_ms=1_300, evidence={}
+                "fault-1",
+                FaultEventState.CLEANED,
+                occurred_at_ms=1_300,
+                evidence={"cleanup_id": "cleanup-1"},
+                ownership=claimed.ownership_capability,
             )
     assert not store.project_fault("fault-1", now_ms=2_000).available
 
@@ -239,8 +528,15 @@ def test_stale_active_chain_projects_abandoned_and_is_never_claimable(
 ) -> None:
     store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
     if state is not None:
-        store.claim_pending(RUNTIME, claimed_at_ms=1_200)
-        store.append_event("fault-1", state, occurred_at_ms=1_300, evidence={})
+        claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_200)
+        assert claimed is not None
+        store.append_event(
+            "fault-1",
+            state,
+            occurred_at_ms=1_300,
+            evidence={"call_id": "call-1"},
+            ownership=claimed.ownership_capability,
+        )
     newer = replace(RUNTIME, boot_id=UUID("87654321-4321-4876-9234-567812345678"))
     store.register_runtime_start(newer, supervisor_run_id="run-2", attempt=2, started_at_ms=1_400)
     projection = store.project_fault("fault-1", now_ms=1_500)
