@@ -16,6 +16,11 @@ from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from polyarb.perception.evaluator_signing import (
+    SIGNATURE_VERSION,
+    load_private_key,
+    sign_digest,
+)
 from polyarb.perception.fault_authority import FaultAuthorityStore
 from polyarb.perception.fault_control import canonical_digest
 from polyarb.perception.incidents import IncidentManager
@@ -30,12 +35,27 @@ _READ_PATHS = (
     ("/perception/qualification", "qualification"),
 )
 _MAX_RESPONSE_BYTES = 1_048_576
+_SOURCE_AUTHORITY_DOMAIN = "polyarb-upstream-fault-source-envelope-v1"
+
+
+def source_facts_digest(envelope: Mapping[str, object]) -> str:
+    """Hash immutable authority facts, excluding the current-time gate result."""
+    return canonical_digest(
+        {
+            key: value
+            for key, value in envelope.items()
+            if key not in {"freshness_gate", "source_authority"}
+        }
+    )
+
+
 def export_fault_envelope(
     db_path: Path,
     fault_id: str,
     *,
     now_ms: int,
     freshness_limit_ms: int = 90_000,
+    source_private_key: str | None = None,
 ) -> dict[str, object]:
     """Derive one bounded envelope from one read-only SQLite transaction."""
     authority = FaultAuthorityStore(db_path, read_only=True)
@@ -45,27 +65,13 @@ def export_fault_envelope(
     con = authority._connect(deadline)
     try:
         con.execute("BEGIN")
-        history = authority._validate_history_in_connection(con, fault_id)
-        projection = authority._project_fault_in_connection(
+        envelope = derive_fault_envelope_in_connection(
             con,
-            fault_id,
-            now_ms=now_ms,
-            history=history,
-            deadline_monotonic=deadline,
-        )
-        if (
-            not history.valid
-            or history.intent is None
-            or not projection.available
-        ):
-            raise ValueError("fault-authority-unavailable")
-        intent = history.intent
-        source_facts = _fault_source_facts(
-            con,
+            authority=authority,
             db_path=db_path,
-            history=history,
-            projection=projection,
+            fault_id=fault_id,
             now_ms=now_ms,
+            deadline_monotonic=deadline,
             freshness_limit_ms=freshness_limit_ms,
         )
         con.execute("COMMIT")
@@ -75,6 +81,43 @@ def export_fault_envelope(
         raise
     finally:
         con.close()
+    return attest_fault_envelope(envelope, source_private_key=source_private_key)
+
+
+def derive_fault_envelope_in_connection(
+    con: sqlite3.Connection,
+    *,
+    authority: FaultAuthorityStore,
+    db_path: Path,
+    fault_id: str,
+    now_ms: int,
+    deadline_monotonic: float,
+    freshness_limit_ms: int,
+) -> dict[str, object]:
+    """Derive the unsigned source envelope inside the caller's transaction."""
+    history = authority._validate_history_in_connection(con, fault_id)
+    projection = authority._project_fault_in_connection(
+        con,
+        fault_id,
+        now_ms=now_ms,
+        history=history,
+        deadline_monotonic=deadline_monotonic,
+    )
+    if (
+        not history.valid
+        or history.intent is None
+        or not projection.available
+    ):
+        raise ValueError("fault-authority-unavailable")
+    intent = history.intent
+    source_facts = _fault_source_facts(
+        con,
+        db_path=db_path,
+        history=history,
+        projection=projection,
+        now_ms=now_ms,
+        freshness_limit_ms=freshness_limit_ms,
+    )
     runtime = {
         "component": intent.runtime.component,
         "release_id": intent.runtime.release_id,
@@ -136,6 +179,39 @@ def export_fault_envelope(
     return envelope
 
 
+def attest_fault_envelope(
+    envelope: dict[str, object],
+    *,
+    source_private_key: str | None = None,
+) -> dict[str, object]:
+    """Attach producer-only Ed25519 attestation to one derived envelope."""
+    source_key = source_private_key or os.getenv(
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY", ""
+    )
+    if not source_key:
+        raise ValueError("source-authority-unavailable")
+    source_digest = canonical_digest(envelope)
+    immutable_digest = source_facts_digest(envelope)
+    signature_digest = canonical_digest(
+        {
+            "domain": _SOURCE_AUTHORITY_DOMAIN,
+            "envelope_digest": source_digest,
+        }
+    )
+    kid, _key = load_private_key(source_key)
+    signed_kid, signature = sign_digest(source_key, signature_digest)
+    assert signed_kid == kid
+    envelope["source_authority"] = {
+        "domain": _SOURCE_AUTHORITY_DOMAIN,
+        "envelope_digest": source_digest,
+        "source_facts_digest": immutable_digest,
+        "signature": signature,
+        "signature_kid": kid,
+        "signature_version": SIGNATURE_VERSION,
+    }
+    return envelope
+
+
 def _fault_source_facts(
     con: sqlite3.Connection,
     *,
@@ -188,7 +264,25 @@ def _fault_source_facts(
             or coverage["boot_id"] != str(history.intent.runtime.boot_id)
         ):
             raise ValueError("fault-coverage-source-invalid")
-        source_history = [{**coverage_payload, "source_hash": coverage["source_hash"]}]
+        injected = next(
+            (
+                event for event in history.events
+                if event.state is not None and event.state.value == "injected"
+            ),
+            None,
+        )
+        if injected is None or not isinstance(injected.evidence.get("call_id"), str):
+            raise ValueError("fault-coverage-source-invalid")
+        exported_coverage_payload = {
+            **coverage_payload,
+            "injected_call_id": injected.evidence["call_id"],
+        }
+        source_history = [
+            {
+                **exported_coverage_payload,
+                "source_hash": canonical_digest(exported_coverage_payload),
+            }
+        ]
     else:
         incident_manager = IncidentManager(
             OpportunityPerceptionStore(
@@ -378,7 +472,16 @@ def _fault_source_facts(
             "table": table,
             "row_id": writer_row["id"],
             "component": history.intent.runtime.component,
+            "fault_id": history.intent.fault_id,
             "occurred_at_ms": int(writer_row[occurred_column]),
+            "recovery_id": recovery_id,
+            "runtime": {
+                "component": history.intent.runtime.component,
+                "release_id": history.intent.runtime.release_id,
+                "machine_id": history.intent.runtime.machine_id,
+                "boot_id": str(history.intent.runtime.boot_id),
+            },
+            "target_key": history.intent.target_key,
         },
         "open_incident_count": int(
             con.execute(
@@ -400,6 +503,9 @@ def _fault_source_facts(
             ).fetchone()[0]
         ),
         "freshness_gate": int(freshness["missing"] or 0) == 0,
+        "source_valid_until_ms": (
+            int(writer_row[occurred_column]) + freshness_limit_ms
+        ),
         "reconciliation_gate": (
             reconciliation is not None
             and reconciliation.status in {"complete", "applied"}

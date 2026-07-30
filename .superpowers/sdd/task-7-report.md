@@ -278,3 +278,49 @@ Post-review verification:
   operation was performed.
 
 Assessment: **Ready for one final independent re-review.**
+
+## Fifth Remediation Resolution
+
+The final integrity review found that an unkeyed, caller-rehashed non-genesis
+checkpoint could still qualify, plus four strict-source and migration gaps.
+The remediation introduces a dedicated SOURCE Ed25519 authority that is
+cryptographically and operationally separate from the verdict keypair:
+
+- The source/export service alone holds the SOURCE private key and signs the
+  complete canonical envelope. Candidate and final evaluators verify it with
+  SOURCE public only. The orchestrator preserves the exact authenticated HTTP
+  response bytes, and the candidate artifact binds their exact SHA-256.
+- The signed envelope carries both its complete digest and an immutable
+  source-facts digest. The latter excludes only the current-time freshness
+  result. Finalization rebuilds those facts in the same `BEGIN IMMEDIATE`
+  transaction, rejects authority changes as `verdict-source-mismatch`, and
+  enforces the persisted recovery-writer deadline separately as
+  `verdict-source-stale`.
+- Incident history must start at `checkpoint.through_event_id + 1` and remain
+  globally gapless. Exact scope, detected call ID, checkpoint, suffix, and
+  source signature are all required.
+- Gamma coverage now enforces exact fields/types/count bounds/cursor digests,
+  semantic coverage ID/source hash, exact runtime/intent, and the INJECTED call
+  ID. Recovery receipts use an exact eight-field schema and bind the encoded
+  recovery ID, row ID, component family, fault, target, runtime, and time.
+- The historical auth-nonce CHECK migration, like the event migration, now
+  performs target-table foreign-key validation before destructive drop/commit.
+  Orphan self-FK failure restores the exact old schema, rows, indexes, triggers,
+  pragma state, and leaves no transaction open.
+
+Explicit RED-to-GREEN reproductions cover the reviewer's fully rehashed
+non-genesis checkpoint, wrong SOURCE key, source-signed malformed coverage and
+recovery receipts, shifted Incident IDs, source change before finalization,
+time-only expiry, exact response-byte preservation, and orphan auth/event
+migrations. No cloud or production operation was performed.
+
+Final local qualification:
+
+- Upstream E2E: 62 PASS.
+- Fault controls: 36 PASS.
+- Fault authority: 76 PASS.
+- Seven-file focused/broad gate: 391 PASS.
+- Full suite: 3671 collected, 100% PASS with one expected xfail and one skip.
+- Changed-file Ruff, M1 docs gate, and planning-status: PASS.
+
+Assessment: **Ready for fresh independent re-review.**

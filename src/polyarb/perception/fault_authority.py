@@ -1358,6 +1358,9 @@ class FaultAuthorityStore:
         verdict_id: str,
         verdict_digest: str,
         source_tail_hash: str,
+        source_envelope_digest: str,
+        source_valid_until_ms: int,
+        source_freshness_limit_ms: int,
         runtime: FaultRuntimeIdentity,
         auth: FaultAuthorization,
         request_digest: str,
@@ -1373,7 +1376,17 @@ class FaultAuthorityStore:
             FaultEventState.VERIFIED,
             {"verdict_id": verdict_id, "verdict_digest": verdict_digest},
         )
-        con = self._connect(deadline_monotonic)
+        if (
+            not isinstance(source_envelope_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", source_envelope_digest) is None
+            or type(source_valid_until_ms) is not int
+            or source_valid_until_ms <= 0
+            or type(source_freshness_limit_ms) is not int
+            or source_freshness_limit_ms <= 0
+        ):
+            raise ValueError("verdict-source-mismatch")
+        deadline = deadline_monotonic or (time.monotonic() + 0.75)
+        con = self._connect(deadline)
         try:
             con.execute("BEGIN IMMEDIATE")
             reservation_id, replay = self._reserve_auth(
@@ -1416,6 +1429,29 @@ class FaultAuthorityStore:
                     or history.intent.runtime != runtime
                     or current_runtime != runtime
                 ):
+                    raise ValueError("verdict-source-mismatch")
+                from scripts.perception_fault_readonly import (
+                    derive_fault_envelope_in_connection,
+                    source_facts_digest,
+                )
+
+                current_source = derive_fault_envelope_in_connection(
+                    con,
+                    authority=self,
+                    db_path=self._db_path,
+                    fault_id=fault_id,
+                    now_ms=occurred_at_ms,
+                    deadline_monotonic=deadline,
+                    freshness_limit_ms=source_freshness_limit_ms,
+                )
+                if (
+                    current_source.get("freshness_gate") is not True
+                    or current_source.get("source_valid_until_ms")
+                    != source_valid_until_ms
+                    or occurred_at_ms > source_valid_until_ms
+                ):
+                    raise ValueError("verdict-source-stale")
+                if source_facts_digest(current_source) != source_envelope_digest:
                     raise ValueError("verdict-source-mismatch")
                 event = self._append_event_in_transaction(
                     con,

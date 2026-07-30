@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,9 @@ EVALUATOR_PRIVATE_KEY = (
 )
 EVALUATOR_PUBLIC_KEY = (
     "ed25519-v1:test-key:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w"
+)
+SOURCE_PRIVATE_KEY = (
+    "ed25519-v1:source-key:AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI"
 )
 
 
@@ -113,6 +117,9 @@ def _client(
         scan_shared_secret=SecretStr(ORDINARY_SECRET),
         upstream_fault_control_enabled=enabled,
         upstream_fault_control_secret=SecretStr(FAULT_SECRET if enabled else ""),
+        upstream_fault_source_private_key=SecretStr(
+            SOURCE_PRIVATE_KEY if enabled else ""
+        ),
         upstream_fault_finalizer_enabled=enabled,
         upstream_fault_evaluator_public_key=EVALUATOR_PUBLIC_KEY if enabled else "",
         supabase_url="",
@@ -262,6 +269,29 @@ def test_enabled_finalizer_requires_pinned_evaluator_public_key() -> None:
                 upstream_fault_finalizer_enabled=True,
                 upstream_fault_evaluator_public_key=public_key,
             )
+
+
+def test_source_export_private_key_uses_strict_distinct_ed25519_role() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            scan_shared_secret=SecretStr(ORDINARY_SECRET),
+            upstream_fault_control_enabled=True,
+            upstream_fault_control_secret=SecretStr(FAULT_SECRET),
+            upstream_fault_source_private_key=SecretStr(
+                "not-an-ed25519-key"
+            ),
+        )
+    with pytest.raises(ValidationError):
+        Settings(
+            scan_shared_secret=SecretStr(ORDINARY_SECRET),
+            upstream_fault_control_enabled=True,
+            upstream_fault_control_secret=SecretStr(FAULT_SECRET),
+            upstream_fault_source_private_key=SecretStr(
+                EVALUATOR_PRIVATE_KEY
+            ),
+            upstream_fault_finalizer_enabled=True,
+            upstream_fault_evaluator_public_key=EVALUATOR_PUBLIC_KEY,
+        )
 
 
 def test_readonly_export_requires_both_authorities_without_control_mutation(
@@ -461,13 +491,10 @@ def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqli
             )
         return value
 
-    transport = chaos.UpstreamHttpTransport(
-        base_url="https://local.test",
-        expected_release=runtime.release_id,
-        timeout_s=10,
-        fetch_json=fetch_json,
-        post_json=post_json,
-        control_get_json=lambda _base_url, _path: {
+    exported_raw: list[bytes] = []
+
+    def control_get_json(_base_url: str, _path: str) -> Mapping[str, object]:
+        payload = {
             "scope": "production-fault",
             "fault_intent": {"fault_id": producer["fault_id"]},
             "fault_history": [
@@ -479,7 +506,18 @@ def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqli
             "fault_history_tail_hash": store.validate_history(
                 str(producer["fault_id"])
             ).events[-1].event_hash,
-        },
+        }
+        raw = json.dumps(payload, indent=2).encode()
+        exported_raw.append(raw)
+        return chaos.ExportedEnvelope(payload, raw)
+
+    transport = chaos.UpstreamHttpTransport(
+        base_url="https://local.test",
+        expected_release=runtime.release_id,
+        timeout_s=10,
+        fetch_json=fetch_json,
+        post_json=post_json,
+        control_get_json=control_get_json,
         sleeper=lambda _seconds: None,
     )
     evidence_dir = tmp_path / "evidence"
@@ -496,7 +534,7 @@ def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqli
     )
     assert evidence["scope"] == "production-fault"
     assert evidence["fault_history"][-1]["state"] == "recovered"
-    assert (evidence_dir / "evidence.json").exists()
+    assert (evidence_dir / "evidence.json").read_bytes() == exported_raw[0]
 
 
 @pytest.mark.parametrize("arm_result", ("response-lost", "malformed"))
@@ -672,12 +710,23 @@ def test_ambiguous_committed_arm_is_resolved_and_cleaned_by_exact_fault_id(
 def test_finalizer_requires_signed_exact_candidate_and_appends_verified(
     tmp_path: Path,
     make_http_test_client,
+    monkeypatch: pytest.MonkeyPatch,
     component: str,
     kind: str,
     call_class: str,
     target_key: str,
     parameters: dict[str, int],
 ) -> None:
+    current_source = {
+        "fixture": "source-envelope",
+        "freshness_gate": True,
+        "source_valid_until_ms": 0,
+    }
+    monkeypatch.setattr(
+        fault_readonly,
+        "derive_fault_envelope_in_connection",
+        lambda *_args, **_kwargs: current_source,
+    )
     client, runtime = _client(
         tmp_path, make_http_test_client, component=component
     )
@@ -697,6 +746,7 @@ def test_finalizer_requires_signed_exact_candidate_and_appends_verified(
     claimed = store.claim_pending(runtime, claimed_at_ms=int(time.time() * 1_000))
     assert claimed is not None
     now = int(time.time() * 1_000)
+    current_source["source_valid_until_ms"] = now + 90_000
     ownership = claimed.ownership_capability
     store.append_event(
         "fault-api-1", FaultEventState.INJECTED, occurred_at_ms=now,
@@ -733,6 +783,10 @@ def test_finalizer_requires_signed_exact_candidate_and_appends_verified(
         "mode": "candidate",
         "status": "PASS",
         "source_evidence_sha256": "sha256:" + "e" * 64,
+        "source_envelope_digest": fault_readonly.source_facts_digest(
+            current_source
+        ),
+        "source_valid_until_ms": now + 90_000,
         "fault_id": "fault-api-1",
         "runtime": {
             "component": runtime.component,
@@ -758,7 +812,8 @@ def test_finalizer_requires_signed_exact_candidate_and_appends_verified(
     invalid = _artifact_body({**artifact, "signature": "0" * 64})
     assert _post(client, path, invalid).status_code == 401
     for mutation in (
-        {"source_tail_hash": "0" * 64},
+            {"source_tail_hash": "0" * 64},
+            {"source_envelope_digest": "d" * 64},
         {"fault_id": "fault-api-other"},
         {"runtime": {**artifact["runtime"], "machine_id": "machine-other"}},
         {"scope": "local-conformance"},

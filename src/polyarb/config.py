@@ -32,10 +32,11 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from polyarb.perception.evaluator_signing import load_public_key
+from polyarb.perception.evaluator_signing import load_private_key, load_public_key
 
 
 class Settings(BaseSettings):
@@ -181,6 +182,7 @@ class Settings(BaseSettings):
     )
     upstream_fault_control_enabled: bool = False
     upstream_fault_control_secret: SecretStr = SecretStr("")
+    upstream_fault_source_private_key: SecretStr = SecretStr("")
     upstream_fault_finalizer_enabled: bool = False
     upstream_fault_evaluator_public_key: str = ""
     upstream_fault_control_max_ttl_ms: int = Field(
@@ -399,6 +401,15 @@ class Settings(BaseSettings):
             and hmac.compare_digest(fault_secret, secret_val)
         ):
             raise ValueError("fault control secret must be distinct")
+        source_private_key = (
+            self.upstream_fault_source_private_key.get_secret_value()
+        )
+        source_key = None
+        if source_private_key:
+            try:
+                _source_kid, source_key = load_private_key(source_private_key)
+            except ValueError as exc:
+                raise ValueError("invalid fault source private key") from exc
         evaluator_public_key = self.upstream_fault_evaluator_public_key
         if self.upstream_fault_finalizer_enabled and (
             not self.upstream_fault_control_enabled or not evaluator_public_key
@@ -409,9 +420,19 @@ class Settings(BaseSettings):
             )
         if self.upstream_fault_finalizer_enabled:
             try:
-                load_public_key(evaluator_public_key)
+                _evaluator_kid, evaluator_key = load_public_key(
+                    evaluator_public_key
+                )
             except ValueError as exc:
                 raise ValueError("invalid fault evaluator public key") from exc
+            if (
+                source_key is not None
+                and source_key.public_key().public_bytes(
+                    Encoding.Raw, PublicFormat.Raw
+                )
+                == evaluator_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+            ):
+                raise ValueError("fault source and evaluator keys must be distinct")
         if self.candidate_high_interval_s > self.candidate_quote_hard_stale_s:
             raise ValueError(
                 "candidate_high_interval_s must not exceed "

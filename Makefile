@@ -848,12 +848,14 @@ qualify-perception-local:
 ## evaluate-upstream-fault-candidate: Read-only signed candidate verdict from one immutable RECOVERED envelope.
 evaluate-upstream-fault-candidate:
 	@test -n "$(evidence)" -a -n "$(output)" -a -n "$(expected_release)" || (echo 'usage: make evaluate-upstream-fault-candidate evidence=... output=... expected_release=...' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY" || (echo "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY is required" >&2; exit 2)
 	@test -n "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY" || (echo "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY is required" >&2; exit 2)
 	@uv run python scripts/perception_fault_acceptance.py --evidence "$(evidence)" --output "$(output)" --require-scope production-fault --expected-release "$(expected_release)" --fault-mode candidate
 
 ## evaluate-upstream-fault-final: Read-only final verdict after source authority appended exact VERIFIED.
 evaluate-upstream-fault-final:
 	@test -n "$(evidence)" -a -n "$(candidate)" -a -n "$(output)" -a -n "$(expected_release)" || (echo 'usage: make evaluate-upstream-fault-final evidence=... candidate=... output=... expected_release=...' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY" || (echo "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY is required" >&2; exit 2)
 	@test -n "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY" || (echo "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY is required" >&2; exit 2)
 	@uv run python scripts/perception_fault_acceptance.py --evidence "$(evidence)" --candidate-artifact "$(candidate)" --output "$(output)" --require-scope production-fault --expected-release "$(expected_release)" --fault-mode final
 

@@ -69,6 +69,8 @@ _VERDICT_FIELDS = frozenset(
         "mode",
         "status",
         "source_evidence_sha256",
+        "source_envelope_digest",
+        "source_valid_until_ms",
         "fault_id",
         "runtime",
         "source_tail_hash",
@@ -294,6 +296,10 @@ async def export_fault(request: Request) -> JSONResponse:
             now_ms=int(time.time() * 1_000),
             freshness_limit_ms=int(
                 request.app.state.settings.candidate_quote_hard_stale_s * 1_000
+            ),
+            source_private_key=(
+                request.app.state.settings.upstream_fault_source_private_key
+                .get_secret_value()
             ),
         )
     except (KeyError, TypeError, ValueError, sqlite3.Error, TimeoutError):
@@ -605,6 +611,13 @@ async def finalize_fault(request: Request) -> JSONResponse:
                 r"sha256:[0-9a-f]{64}", artifact["source_evidence_sha256"]
             )
             is None
+            or not isinstance(artifact["source_envelope_digest"], str)
+            or re.fullmatch(
+                r"[0-9a-f]{64}", artifact["source_envelope_digest"]
+            )
+            is None
+            or type(artifact["source_valid_until_ms"]) is not int
+            or artifact["source_valid_until_ms"] <= 0
         ):
             return JSONResponse({"error": "invalid evaluator verdict"}, status_code=401)
         source_tail_hash = artifact["source_tail_hash"]
@@ -623,6 +636,11 @@ async def finalize_fault(request: Request) -> JSONResponse:
             verdict_id=artifact["verdict_id"],
             verdict_digest=digest,
             source_tail_hash=source_tail_hash,
+            source_envelope_digest=artifact["source_envelope_digest"],
+            source_valid_until_ms=artifact["source_valid_until_ms"],
+            source_freshness_limit_ms=int(
+                settings.candidate_quote_hard_stale_s * 1_000
+            ),
             runtime=runtime,
             auth=auth,
             request_digest=hashlib.sha256(body).hexdigest(),

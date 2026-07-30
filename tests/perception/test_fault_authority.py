@@ -37,8 +37,19 @@ from polyarb.perception.models import (
     GroupRevision,
 )
 from polyarb.perception.store import OpportunityPerceptionStore
-from polyarb.storage.schemas import DDL, migrate_fault_events_cleanup_confirmation
+from polyarb.storage.schemas import (
+    DDL,
+    migrate_fault_auth_finalize,
+    migrate_fault_events_cleanup_confirmation,
+)
 from polyarb.storage.sqlite_store import SQLiteStore
+
+SOURCE_PRIVATE_KEY = (
+    "ed25519-v1:source-key:AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI"
+)
+SOURCE_PUBLIC_KEY = (
+    "ed25519-v1:source-key:gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q"
+)
 
 RUNTIME = FaultRuntimeIdentity(
     component="candidate",
@@ -358,6 +369,64 @@ def test_fault_event_schema_migration_rolls_back_on_foreign_key_failure(
         assert after_schema == before_schema
         assert after_rows == before_rows
         assert "'cleanup-confirmed'" not in table_sql
+
+
+def test_fault_auth_schema_migration_rolls_back_on_foreign_key_failure(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "old-auth-orphan.db"
+    old_ddl = DDL.replace(
+        "operation TEXT NOT NULL CHECK(operation IN ('arm','cleanup','finalize'))",
+        "operation TEXT NOT NULL CHECK(operation IN ('arm','cleanup'))",
+    )
+    with sqlite3.connect(db_path) as con:
+        con.executescript(old_ddl)
+        con.execute("PRAGMA foreign_keys=OFF")
+        con.execute("DROP TRIGGER trg_neg_risk_fault_auth_attempt_link")
+        con.execute(
+            "INSERT INTO neg_risk_fault_auth_nonces("
+            "id,record_type,nonce_digest,authorization_digest,operation,fault_id,"
+            "request_digest,outcome,reason,occurred_at_ms,reservation_id,row_hash"
+            ") VALUES(99,'attempt',?,?, 'arm','fault-orphan',?,"
+            "'rejected','orphan',1,98,?)",
+            ("1" * 64, "2" * 64, "3" * 64, "4" * 64),
+        )
+        before_schema = con.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master "
+            "WHERE tbl_name='neg_risk_fault_auth_nonces' "
+            "OR name='neg_risk_fault_auth_nonces' ORDER BY type,name"
+        ).fetchall()
+        before_rows = con.execute(
+            "SELECT * FROM neg_risk_fault_auth_nonces ORDER BY id"
+        ).fetchall()
+        con.commit()
+
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="fault-auth-migration-foreign-key-check",
+        ):
+            migrate_fault_auth_finalize(con)
+
+        assert not con.in_transaction
+        assert con.execute("PRAGMA foreign_keys").fetchone() == (0,)
+        assert con.execute("PRAGMA legacy_alter_table").fetchone() == (0,)
+        assert con.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master "
+            "WHERE tbl_name='neg_risk_fault_auth_nonces' "
+            "OR name='neg_risk_fault_auth_nonces' ORDER BY type,name"
+        ).fetchall() == before_schema
+        assert con.execute(
+            "SELECT * FROM neg_risk_fault_auth_nonces ORDER BY id"
+        ).fetchall() == before_rows
+        table_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_fault_auth_nonces'"
+        ).fetchone()[0]
+        assert "'finalize'" not in table_sql
+        assert con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_fault_auth_nonces_pre_finalize'"
+        ).fetchone() is None
 
 
 def test_partial_coverage_source_is_exact_bound_and_append_only(
@@ -1506,6 +1575,12 @@ def test_lifecycle_hashes_validate_and_tampering_is_detected(
 def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
     store: FaultAuthorityStore, db_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY", SOURCE_PRIVATE_KEY
+    )
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY", SOURCE_PUBLIC_KEY
+    )
     perception_store = OpportunityPerceptionStore(db_path)
     perception_store.init_schema()
     reconciliation = perception_store.begin_reconciliation(started_at_ms=100)
@@ -1683,11 +1758,83 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
             )
         ) == row_counts
 
+    with pytest.raises(ValueError, match="verdict-source-stale"):
+        store.finalize_verdict(
+            "fault-1",
+            verdict_id=str(artifact["verdict_id"]),
+            verdict_digest=str(artifact["artifact_digest"]),
+            source_tail_hash=recovered.event_hash,
+            source_envelope_digest=str(artifact["source_envelope_digest"]),
+            source_valid_until_ms=int(artifact["source_valid_until_ms"]),
+            source_freshness_limit_ms=90_000,
+            runtime=RUNTIME,
+            auth=auth("3"),
+            request_digest="3" * 64,
+            occurred_at_ms=int(artifact["source_valid_until_ms"]) + 1,
+        )
+
+    changed_clock = [1_760]
+    changed_manager = IncidentManager(
+        perception_store,
+        clock_ms=lambda: changed_clock[0],
+    )
+    changed_incident = changed_manager.detect(
+        "reconciliation", "clob-429", {}
+    )
+    with pytest.raises(ValueError, match="verdict-source-mismatch"):
+        store.finalize_verdict(
+            "fault-1",
+            verdict_id=str(artifact["verdict_id"]),
+            verdict_digest=str(artifact["artifact_digest"]),
+            source_tail_hash=recovered.event_hash,
+            source_envelope_digest=str(artifact["source_envelope_digest"]),
+            source_valid_until_ms=int(artifact["source_valid_until_ms"]),
+            source_freshness_limit_ms=90_000,
+            runtime=RUNTIME,
+            auth=auth("d"),
+            request_digest="d" * 64,
+            occurred_at_ms=1_790,
+        )
+    for state, occurred_at_ms in (
+        ("classified", 1_791),
+        ("contained", 1_792),
+        ("recovering", 1_793),
+    ):
+        changed_clock[0] = occurred_at_ms
+        changed_manager.transition(changed_incident.id, state, {})
+    changed_window = perception_store.begin_reconciliation(started_at_ms=1_794)
+    perception_store.publish_reconciliation_batch(
+        window_id=changed_window.id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=1_794,
+        finished_at_ms=1_795,
+        page_event_count=0,
+        candidates=(),
+    )
+    perception_store.apply_reconciliation_diff(changed_window.id)
+    changed_clock[0] = 1_796
+    changed_manager.transition(
+        changed_incident.id,
+        "verified",
+        {"window_id": changed_window.id},
+    )
+    envelope = fault_readonly.export_fault_envelope(
+        db_path,
+        "fault-1",
+        now_ms=1_797,
+    )
+    artifact = fault_acceptance.build_candidate_artifact(envelope)
+
     verified = store.finalize_verdict(
         "fault-1",
         verdict_id=str(artifact["verdict_id"]),
         verdict_digest=str(artifact["artifact_digest"]),
         source_tail_hash=recovered.event_hash,
+        source_envelope_digest=str(artifact["source_envelope_digest"]),
+        source_valid_until_ms=int(artifact["source_valid_until_ms"]),
+        source_freshness_limit_ms=90_000,
         runtime=RUNTIME,
         auth=auth("e"),
         request_digest="f" * 64,
@@ -1712,6 +1859,9 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
         verdict_id=str(artifact["verdict_id"]),
         verdict_digest=str(artifact["artifact_digest"]),
         source_tail_hash=recovered.event_hash,
+        source_envelope_digest=str(artifact["source_envelope_digest"]),
+        source_valid_until_ms=int(artifact["source_valid_until_ms"]),
+        source_freshness_limit_ms=90_000,
         runtime=RUNTIME,
         auth=auth("f"),
         request_digest="a" * 64,
@@ -1724,6 +1874,9 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
             verdict_id="verdict-other",
             verdict_digest="0" * 64,
             source_tail_hash=recovered.event_hash,
+            source_envelope_digest=str(artifact["source_envelope_digest"]),
+            source_valid_until_ms=int(artifact["source_valid_until_ms"]),
+            source_freshness_limit_ms=90_000,
             runtime=RUNTIME,
             auth=auth("1"),
             request_digest="2" * 64,
@@ -1777,6 +1930,7 @@ def test_task3_auth_schema_upgrades_without_changing_existing_audit_hashes(
             "SELECT id,row_hash FROM neg_risk_fault_auth_nonces ORDER BY id"
         ).fetchall()
 
+    SQLiteStore(db_path).init_schema()
     SQLiteStore(db_path).init_schema()
 
     after = FaultAuthorityStore(db_path).validate_history("fault-1")

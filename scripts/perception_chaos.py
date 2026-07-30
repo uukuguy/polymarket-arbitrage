@@ -330,10 +330,18 @@ def _signed_get_json(base_url: str, path: str) -> Mapping[str, object]:
         raise AdapterFailedError(f"control-request-failed:{type(exc).__name__}") from exc
     if not isinstance(value, Mapping):
         raise AdapterFailedError("control-response-invalid")
-    return value
+    return ExportedEnvelope(value, raw)
 
 
 _MAX_HTTP_BYTES = 1_048_576
+
+
+class ExportedEnvelope(dict[str, object]):
+    """Parsed envelope plus the exact authenticated HTTP response bytes."""
+
+    def __init__(self, value: Mapping[str, object], raw_bytes: bytes) -> None:
+        super().__init__(value)
+        self.raw_bytes = raw_bytes
 
 
 class UpstreamHttpTransport:
@@ -790,7 +798,14 @@ def execute_upstream_fault(
         },
     )
     evidence = dict(exported)
-    _write_exclusive(evidence_dir / "evidence.json", evidence)
+    raw_bytes = getattr(exported, "raw_bytes", None)
+    if isinstance(raw_bytes, bytes):
+        parsed = json.loads(raw_bytes)
+        if not isinstance(parsed, Mapping) or dict(parsed) != evidence:
+            raise AdapterFailedError("fault-export-bytes-mismatch")
+        write_exclusive_bytes(evidence_dir / "evidence.json", raw_bytes)
+    else:
+        _write_exclusive(evidence_dir / "evidence.json", evidence)
     return evidence
 
 

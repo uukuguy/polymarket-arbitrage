@@ -46,6 +46,12 @@ _RECOVERY_TABLES = {
     "reconciliation": "neg_risk_reconciliation_windows",
     "notification": "neg_risk_opportunity_notification_attempts",
 }
+_RECOVERY_PREFIXES = {
+    "candidate": "candidate-success-",
+    "discovery": "discovery-batch-",
+    "reconciliation": "reconciliation-window-",
+    "notification": "telegram-delivery-",
+}
 _FAULT_CONTRACTS = {
     "gamma-timeout": ("discovery", "gamma-discovery-event-page"),
     "gamma-partial": ("discovery", "gamma-discovery-event-page"),
@@ -56,6 +62,7 @@ _FAULT_CONTRACTS = {
     "clob-latency": ("candidate", "clob-candidate-book-batch"),
     "telegram-failure": ("notification", "telegram-opportunity-card"),
 }
+_SOURCE_AUTHORITY_DOMAIN = "polyarb-upstream-fault-source-envelope-v1"
 _ENVELOPE_FIELDS = frozenset(
     {
         "evidence_schema_version", "scope", "mode", "app_id", "release_id",
@@ -66,7 +73,17 @@ _ENVELOPE_FIELDS = frozenset(
         "source_projection_active", "open_incident_count",
         "cross_membership_quote_batches", "partial_publication_count",
         "orphan_collecting_runs", "freshness_gate", "reconciliation_gate",
-        "detection_receipt",
+        "detection_receipt", "source_authority", "source_valid_until_ms",
+    }
+)
+_SOURCE_AUTHORITY_FIELDS = frozenset(
+    {
+        "domain",
+        "envelope_digest",
+        "signature",
+        "signature_kid",
+        "signature_version",
+        "source_facts_digest",
     }
 )
 _EVENT_FIELDS = frozenset(
@@ -113,8 +130,8 @@ _INCIDENT_TRANSITIONS = {
 _COVERAGE_SOURCE_FIELDS = frozenset(
     {
         "boot_id", "call_class", "component", "coverage_id", "fault_id",
-        "kept_count", "machine_id", "next_cursor_digest", "original_count",
-        "recorded_at_ms", "release_id", "requested_cursor_digest",
+        "injected_call_id", "kept_count", "machine_id", "next_cursor_digest",
+        "original_count", "recorded_at_ms", "release_id", "requested_cursor_digest",
         "source_hash", "target_key",
     }
 )
@@ -159,9 +176,20 @@ def _source_history_valid(
         )
         return (
             set(row) == _COVERAGE_SOURCE_FIELDS
+            and type(row.get("original_count")) is int
+            and type(row.get("kept_count")) is int
+            and 0 <= row["kept_count"] < row["original_count"]
+            and type(row.get("recorded_at_ms")) is int
+            and row["recorded_at_ms"] >= 0
+            and all(
+                isinstance(row.get(key), str)
+                and re.fullmatch(r"[0-9a-f]{64}", row[key]) is not None
+                for key in ("requested_cursor_digest", "next_cursor_digest")
+            )
             and row.get("source_hash") == canonical_digest(payload)
             and row.get("coverage_id") == expected_id == receipt.get("detection_id")
             and row.get("fault_id") == intent.get("fault_id")
+            and row.get("injected_call_id") == injected_call_id
             and row.get("call_class") == intent.get("call_class")
             and row.get("target_key") == intent.get("target_key")
             and all(row.get(key) == runtime.get(key) for key in (
@@ -226,7 +254,8 @@ def _source_history_valid(
     )
     previous_hash: object = checkpoint_payload["prefix_hash"]
     target: list[tuple[Mapping[str, Any], object]] = []
-    previous_event_id = -1
+    previous_event_id = checkpoint_payload["through_event_id"]
+    incident_sequences: dict[str, int] = {}
     for row in history:
         if not isinstance(row, Mapping) or set(row) != _INCIDENT_SOURCE_FIELDS:
             return False
@@ -253,12 +282,14 @@ def _source_history_valid(
             canonical_evidence != row["evidence_json"]
             or row["event_hash"] != expected_hash
             or row["previous_hash"] != previous_hash
-            or int(row["event_id"]) <= previous_event_id
-            or int(row["event_id"]) <= checkpoint_payload["through_event_id"]
+            or int(row["event_id"]) != previous_event_id + 1
+            or int(row["sequence"])
+            != incident_sequences.get(str(row["incident_id"]), 0) + 1
         ):
             return False
         previous_hash = row["event_hash"]
         previous_event_id = int(row["event_id"])
+        incident_sequences[str(row["incident_id"])] = int(row["sequence"])
         if row["incident_id"] == receipt.get("detection_id"):
             target.append((row, evidence))
     if (
@@ -307,6 +338,42 @@ def evaluate_fault_envelope(
     reasons: list[str] = []
     if set(evidence) != _ENVELOPE_FIELDS:
         reasons.append("invalid-envelope-fields")
+    source_authority = evidence.get("source_authority")
+    unsigned_evidence = {
+        key: value for key, value in evidence.items() if key != "source_authority"
+    }
+    source_digest = canonical_digest(unsigned_evidence)
+    source_facts_digest = canonical_digest(
+        {
+            key: value
+            for key, value in unsigned_evidence.items()
+            if key != "freshness_gate"
+        }
+    )
+    source_public_key = os.getenv(
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY", ""
+    )
+    if (
+        not isinstance(source_authority, Mapping)
+        or set(source_authority) != _SOURCE_AUTHORITY_FIELDS
+        or source_authority.get("domain") != _SOURCE_AUTHORITY_DOMAIN
+        or source_authority.get("envelope_digest") != source_digest
+        or source_authority.get("source_facts_digest") != source_facts_digest
+        or not source_public_key
+        or not verify_digest(
+            source_public_key,
+            kid=source_authority.get("signature_kid"),
+            version=source_authority.get("signature_version"),
+            digest=canonical_digest(
+                {
+                    "domain": _SOURCE_AUTHORITY_DOMAIN,
+                    "envelope_digest": source_digest,
+                }
+            ),
+            signature=source_authority.get("signature"),
+        )
+    ):
+        reasons.append("source-authority-signature-mismatch")
     if evidence.get("scope") != "production-fault":
         reasons.append("scope-mismatch")
     if evidence.get("mode") != mode:
@@ -650,11 +717,39 @@ def evaluate_fault_envelope(
     component = runtime.get("component")
     receipt = evidence.get("recovery_writer_receipt")
     expected_table = _RECOVERY_TABLES.get(str(component))
+    recovered_events = [
+        item for item in history
+        if isinstance(item, Mapping) and item.get("state") == "recovered"
+    ]
+    recovered_event = recovered_events[0] if len(recovered_events) == 1 else None
+    recovered_evidence = (
+        recovered_event.get("evidence")
+        if isinstance(recovered_event, Mapping)
+        and isinstance(recovered_event.get("evidence"), Mapping)
+        else {}
+    )
+    expected_recovery_id = recovered_evidence.get("recovery_id")
+    expected_prefix = _RECOVERY_PREFIXES.get(str(component))
     if not isinstance(receipt, Mapping):
         reasons.append("missing-recovery-writer")
     elif (
-        receipt.get("component") != component
+        set(receipt)
+        != {
+            "component",
+            "fault_id",
+            "occurred_at_ms",
+            "recovery_id",
+            "row_id",
+            "runtime",
+            "table",
+            "target_key",
+        }
+        or receipt.get("component") != component
         or receipt.get("table") != expected_table
+        or receipt.get("fault_id") != intent.get("fault_id")
+        or receipt.get("target_key") != intent.get("target_key")
+        or receipt.get("runtime") != runtime
+        or receipt.get("recovery_id") != expected_recovery_id
         or not (
             (
                 isinstance(receipt.get("row_id"), int)
@@ -662,6 +757,15 @@ def evaluate_fault_envelope(
                 and receipt.get("row_id", 0) > 0
             )
             or (isinstance(receipt.get("row_id"), str) and bool(receipt.get("row_id")))
+        )
+        or not isinstance(expected_recovery_id, str)
+        or not isinstance(expected_prefix, str)
+        or expected_recovery_id
+        != f"{expected_prefix}{receipt.get('row_id')}"
+        or type(receipt.get("occurred_at_ms")) is not int
+        or (
+            isinstance(recovered_event, Mapping)
+            and receipt["occurred_at_ms"] > recovered_event.get("occurred_at_ms", -1)
         )
     ):
         reasons.append("recovery-family-mismatch")
@@ -694,6 +798,11 @@ def evaluate_fault_envelope(
     ):
         if evidence.get(field) is not True:
             reasons.append(reason)
+    if (
+        type(evidence.get("source_valid_until_ms")) is not int
+        or evidence["source_valid_until_ms"] <= 0
+    ):
+        reasons.append("source-valid-until-invalid")
 
     if mode not in {"candidate", "final"}:
         reasons.append("invalid-evaluator-mode")
@@ -753,7 +862,11 @@ def evaluate_fault_envelope(
     return QualificationVerdict("PASS" if not reasons else "FAIL", tuple(dict.fromkeys(reasons)))
 
 
-def build_candidate_artifact(evidence: Mapping[str, Any]) -> dict[str, object]:
+def build_candidate_artifact(
+    evidence: Mapping[str, Any],
+    *,
+    source_bytes: bytes | None = None,
+) -> dict[str, object]:
     """Create a signed PASS candidate; local fixtures can never be signed."""
     verdict = evaluate_fault_envelope(evidence, mode="candidate")
     if verdict.status != "PASS":
@@ -763,15 +876,21 @@ def build_candidate_artifact(evidence: Mapping[str, Any]) -> dict[str, object]:
     )
     if not private_key:
         raise ValueError("evaluator-authority-unavailable")
-    source_digest = canonical_digest(evidence)
+    source_digest = hashlib.sha256(
+        _canonical_json(evidence) if source_bytes is None else source_bytes
+    ).hexdigest()
     intent = evidence["fault_intent"]
+    source_authority = evidence["source_authority"]
     assert isinstance(intent, Mapping)
+    assert isinstance(source_authority, Mapping)
     unsigned: dict[str, object] = {
         "schema_version": 1,
         "scope": "production-fault",
         "mode": "candidate",
         "status": "PASS",
         "source_evidence_sha256": f"sha256:{source_digest}",
+        "source_envelope_digest": source_authority["source_facts_digest"],
+        "source_valid_until_ms": evidence["source_valid_until_ms"],
         "fault_id": intent["fault_id"],
         "runtime": intent["runtime"],
         "source_tail_hash": evidence["fault_history_tail_hash"],
@@ -1100,7 +1219,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.require_scope.startswith("production-") and args.expected_release is None:
         parser.error("--expected-release is required for production evidence")
     try:
-        evidence = _read_evidence(args.evidence)
+        evidence_bytes = read_stable_bytes(args.evidence)
+        evidence = json.loads(
+            evidence_bytes.decode("utf-8"),
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        if type(evidence) is not dict:
+            raise ValueError("evidence root must be an object")
         if args.fault_mode is not None:
             if args.require_scope != "production-fault":
                 raise ValueError("fault mode requires production-fault scope")
@@ -1111,7 +1237,10 @@ def main(argv: list[str] | None = None) -> int:
                     expected_release=args.expected_release,
                 ).status != "PASS":
                     raise ValueError("candidate-evidence-failed")
-                output = build_candidate_artifact(evidence)
+                output = build_candidate_artifact(
+                    evidence,
+                    source_bytes=evidence_bytes,
+                )
                 _write_exclusive(args.output, output)
                 return 0
             if args.candidate_artifact is None:

@@ -163,7 +163,10 @@ runtime, arms through double HMAC,
 observes one injection and one Incident/coverage fact, and requests cleanup for
 every `BaseException`. Cleanup failure freezes the remaining matrix. Evidence
 is exported only after the component-specific business writer produces a
-newer recovery receipt, and stops at `RECOVERED`.
+newer recovery receipt, and stops at `RECOVERED`. The source/export service
+alone holds `POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY` and signs the complete
+canonical source-derived envelope with a dedicated Ed25519 keypair. The
+orchestrator preserves the authenticated HTTP response bytes exactly.
 
 `candidate-exit`, `discovery-exit`, `reconciliation-stall`, and the remaining
 host/store/restart/deploy targets are plan-only and reject execution fail-closed.
@@ -186,15 +189,19 @@ make evaluate-upstream-fault-final \
   output=<new-final.json> expected_release=<40-char-sha>
 ```
 
-The candidate evaluator alone has
-`POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY`; it recomputes every
-intent/event/tail hash and signs a PASS artifact with Ed25519. The
+The candidate evaluator has only
+`POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY` plus the separate
+`POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY`. It verifies the producer
+attestation, recomputes every intent/event/tail hash, binds the exact evidence
+file SHA-256 and immutable source-facts digest, then signs a PASS artifact.
+Source and verdict keypairs must never be reused. The
 disabled-by-default finalizer has the ordinary and fault-control HMAC keys plus
 the pinned `POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY`, but never the private
-key. It validates the signature and exact recovered source chain before
-appending `VERIFIED(verdict_id, verdict_digest)`. The final evaluator is
-read-only, holds only the same pinned public key, and revalidates the candidate
-signature against the re-exported VERIFIED chain. Re-export and final evaluation
+key or source signing key. In the same SQLite transaction it rebuilds the full
+immutable source facts, rejects source changes, and enforces the persisted
+source-valid-until deadline as `verdict-source-stale` before appending
+`VERIFIED(verdict_id, verdict_digest)`. The final evaluator is read-only and
+holds only the source and verdict public keys. Re-export and final evaluation
 are mandatory: a finalizer response alone is not qualification evidence.
 
 ## Recovery verdict

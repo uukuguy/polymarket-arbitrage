@@ -54,6 +54,9 @@ def migrate_fault_auth_finalize(con) -> bool:
     ).fetchone()
     if row is None or "'finalize'" in str(row[0]):
         return False
+    if con.in_transaction:
+        raise sqlite3.OperationalError("fault-auth-migration-requires-no-transaction")
+    foreign_keys_enabled = bool(con.execute("PRAGMA foreign_keys").fetchone()[0])
     con.execute("PRAGMA foreign_keys=OFF")
     con.execute("PRAGMA legacy_alter_table=ON")
     try:
@@ -85,16 +88,27 @@ def migrate_fault_auth_finalize(con) -> bool:
             );
             INSERT INTO neg_risk_fault_auth_nonces
             SELECT * FROM neg_risk_fault_auth_nonces_pre_finalize;
-            DROP TABLE neg_risk_fault_auth_nonces_pre_finalize;
-            CREATE UNIQUE INDEX idx_neg_risk_fault_auth_one_reservation
-              ON neg_risk_fault_auth_nonces(nonce_digest)
-              WHERE record_type='reservation';
-            COMMIT;
             """
         )
+        violations = con.execute(
+            "PRAGMA foreign_key_check(neg_risk_fault_auth_nonces)"
+        ).fetchall()
+        if violations:
+            raise sqlite3.IntegrityError("fault-auth-migration-foreign-key-check")
+        con.execute("DROP TABLE neg_risk_fault_auth_nonces_pre_finalize")
+        con.execute(
+            "CREATE UNIQUE INDEX idx_neg_risk_fault_auth_one_reservation "
+            "ON neg_risk_fault_auth_nonces(nonce_digest) "
+            "WHERE record_type='reservation'"
+        )
+        con.execute("COMMIT")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
     finally:
         con.execute("PRAGMA legacy_alter_table=OFF")
-        con.execute("PRAGMA foreign_keys=ON")
+        con.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys_enabled else 'OFF'}")
     return True
 
 

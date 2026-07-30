@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 
@@ -28,6 +29,19 @@ EVALUATOR_PRIVATE_KEY = (
 EVALUATOR_PUBLIC_KEY = (
     "ed25519-v1:test-key:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w"
 )
+SOURCE_PRIVATE_KEY = (
+    "ed25519-v1:source-key:AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI"
+)
+SOURCE_PUBLIC_KEY = (
+    "ed25519-v1:source-key:gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q"
+)
+
+
+@pytest.fixture(autouse=True)
+def _source_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY", SOURCE_PUBLIC_KEY
+    )
 
 
 @pytest.mark.parametrize("fault_id", UPSTREAM_FAULTS)
@@ -441,6 +455,35 @@ def test_cli_dispatches_each_upstream_fault_only_to_typed_http_transport(
     assert captured["parameters"] == parameters
 
 
+def _sign_source_envelope(evidence: dict[str, object]) -> None:
+    evidence.pop("source_authority", None)
+    envelope_digest = acceptance.canonical_digest(evidence)
+    source_facts_digest = acceptance.canonical_digest(
+        {
+            key: value
+            for key, value in evidence.items()
+            if key != "freshness_gate"
+        }
+    )
+    signature_digest = acceptance.canonical_digest(
+        {
+            "domain": "polyarb-upstream-fault-source-envelope-v1",
+            "envelope_digest": envelope_digest,
+        }
+    )
+    kid, signature = acceptance.sign_digest(
+        SOURCE_PRIVATE_KEY, signature_digest
+    )
+    evidence["source_authority"] = {
+        "domain": "polyarb-upstream-fault-source-envelope-v1",
+        "envelope_digest": envelope_digest,
+        "source_facts_digest": source_facts_digest,
+        "signature": signature,
+        "signature_kid": kid,
+        "signature_version": acceptance.SIGNATURE_VERSION,
+    }
+
+
 def _production_envelope() -> dict[str, object]:
     runtime = {
         "component": "candidate",
@@ -497,7 +540,7 @@ def _production_envelope() -> dict[str, object]:
                 15,
             ),
             ("cleanup-confirmed", {}, 15),
-            ("recovered", {"recovery_id": "41"}, 16),
+            ("recovered", {"recovery_id": "candidate-success-41"}, 16),
         ),
         start=1,
     ):
@@ -571,7 +614,7 @@ def _production_envelope() -> dict[str, object]:
             ).encode()
         ).hexdigest(),
     }
-    return {
+    envelope: dict[str, object] = {
         "evidence_schema_version": 2,
         "scope": "production-fault",
         "mode": "candidate",
@@ -590,7 +633,11 @@ def _production_envelope() -> dict[str, object]:
             "table": "neg_risk_candidate_success_receipts",
             "row_id": 41,
             "component": "candidate",
+            "fault_id": "fault-1",
             "occurred_at_ms": 16,
+            "recovery_id": "candidate-success-41",
+            "runtime": runtime,
+            "target_key": "group-1",
         },
         "detection_receipt": {
             "detection_id": "incident-1",
@@ -610,8 +657,11 @@ def _production_envelope() -> dict[str, object]:
         "partial_publication_count": 0,
         "orphan_collecting_runs": 0,
         "freshness_gate": True,
+        "source_valid_until_ms": 90_016,
         "reconciliation_gate": True,
     }
+    _sign_source_envelope(envelope)
+    return envelope
 
 
 @pytest.mark.parametrize(
@@ -704,6 +754,98 @@ def _rehash_incident_source_history(evidence: dict[str, object]) -> None:
         previous = row["event_hash"]
 
 
+def _production_coverage_envelope() -> dict[str, object]:
+    evidence = _production_envelope()
+    runtime = {
+        **evidence["fault_intent"]["runtime"],
+        "component": "discovery",
+    }
+    intent = {
+        **evidence["fault_intent"],
+        "kind": "gamma-partial",
+        "call_class": "gamma-discovery-event-page",
+        "target_key": "discovery",
+        "runtime": runtime,
+    }
+    evidence.update(
+        {
+            "fault_intent": intent,
+            "fault_intent_digest": acceptance.canonical_digest(intent),
+            "target_digest": acceptance.canonical_digest("discovery"),
+        }
+    )
+    history = evidence["fault_history"]
+    history[1]["evidence"]["runtime_identity_digest"] = (
+        acceptance.canonical_digest(runtime)
+    )
+    history[2]["evidence"]["call_binding_digest"] = (
+        acceptance.fault_call_binding_digest(
+            fault_id="fault-1",
+            kind="gamma-partial",
+            call_class="gamma-discovery-event-page",
+            target_key="discovery",
+            runtime=runtime,
+            call_id="call-1",
+        )
+    )
+    requested = "1" * 64
+    following = "2" * 64
+    coverage_id = "coverage-" + acceptance.canonical_digest(
+        {
+            "kept_count": 1,
+            "next_cursor_digest": following,
+            "original_count": 2,
+            "requested_cursor_digest": requested,
+        }
+    )
+    history[3]["evidence"] = {"coverage_id": coverage_id}
+    history[7]["evidence"] = {"recovery_id": "discovery-batch-41"}
+    _rehash_history(evidence)
+    coverage_payload = {
+        "boot_id": runtime["boot_id"],
+        "call_class": "gamma-discovery-event-page",
+        "component": "discovery",
+        "coverage_id": coverage_id,
+        "fault_id": "fault-1",
+        "injected_call_id": "call-1",
+        "kept_count": 1,
+        "machine_id": runtime["machine_id"],
+        "next_cursor_digest": following,
+        "original_count": 2,
+        "recorded_at_ms": 13,
+        "release_id": runtime["release_id"],
+        "requested_cursor_digest": requested,
+        "target_key": "discovery",
+    }
+    evidence["detection_receipt"] = {
+        "detection_id": coverage_id,
+        "kind": "gamma-partial",
+        "call_class": "gamma-discovery-event-page",
+        "target_key": "discovery",
+        "runtime": runtime,
+        "source_kind": "coverage:partial-or-rejected-page",
+        "source_checkpoint": None,
+        "source_history": [
+            {
+                **coverage_payload,
+                "source_hash": acceptance.canonical_digest(coverage_payload),
+            }
+        ],
+    }
+    evidence["recovery_writer_receipt"] = {
+        "table": "neg_risk_discovery_batches",
+        "row_id": 41,
+        "component": "discovery",
+        "fault_id": "fault-1",
+        "occurred_at_ms": 16,
+        "recovery_id": "discovery-batch-41",
+        "runtime": runtime,
+        "target_key": "discovery",
+    }
+    _sign_source_envelope(evidence)
+    return evidence
+
+
 def test_production_evaluator_rejects_rehashed_weak_or_extended_schema() -> None:
     for mutation, reason in (
         (
@@ -786,6 +928,119 @@ def test_production_evaluator_rejects_rehashed_unrelated_incident(
 
     assert verdict.status == "FAIL"
     assert "detection-source-history-invalid" in verdict.reasons
+
+
+def test_production_evaluator_rejects_forged_non_genesis_incident_anchor() -> None:
+    evidence = _production_envelope()
+    receipt = evidence["detection_receipt"]
+    checkpoint = receipt["source_checkpoint"]
+    checkpoint.update(
+        {
+            "compacted_event_count": 100,
+            "generation": 7,
+            "prefix_hash": "sha256:" + "7" * 64,
+            "scope_floor_count": 1,
+            "through_event_id": 100,
+        }
+    )
+    checkpoint_payload = {
+        key: value
+        for key, value in checkpoint.items()
+        if key != "checkpoint_hash"
+    }
+    checkpoint["checkpoint_hash"] = "sha256:" + hashlib.sha256(
+        json.dumps(
+            checkpoint_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    source = receipt["source_history"]
+    source[0]["previous_hash"] = checkpoint["prefix_hash"]
+    for row in source:
+        row["event_id"] += 100
+    _rehash_incident_source_history(evidence)
+
+    verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
+
+    assert verdict.status == "FAIL"
+    assert "source-authority-signature-mismatch" in verdict.reasons
+
+
+def test_source_signed_recovery_receipt_requires_exact_identity_and_schema() -> None:
+    for mutation in (
+        lambda receipt: receipt.update(row_id=999_999),
+        lambda receipt: receipt.update(attacker="extra"),
+        lambda receipt: receipt.update(recovery_id="candidate-success-999999"),
+    ):
+        evidence = _production_envelope()
+        mutation(evidence["recovery_writer_receipt"])
+        _sign_source_envelope(evidence)
+
+        verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
+
+        assert verdict.status == "FAIL"
+        assert "recovery-family-mismatch" in verdict.reasons
+
+
+def test_source_signed_incident_suffix_rejects_shifted_global_ids() -> None:
+    evidence = _production_envelope()
+    source = evidence["detection_receipt"]["source_history"]
+    for row in source:
+        row["event_id"] += 1
+    _rehash_incident_source_history(evidence)
+    _sign_source_envelope(evidence)
+
+    verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
+
+    assert verdict.status == "FAIL"
+    assert "detection-source-history-invalid" in verdict.reasons
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("bool-count", "count-range", "cursor", "call-id", "extra"),
+)
+def test_source_signed_coverage_rejects_noncanonical_source(
+    mutation: str,
+) -> None:
+    evidence = _production_coverage_envelope()
+    source = evidence["detection_receipt"]["source_history"][0]
+    if mutation == "bool-count":
+        source["original_count"] = True
+    elif mutation == "count-range":
+        source["kept_count"] = source["original_count"]
+    elif mutation == "cursor":
+        source["requested_cursor_digest"] = "not-a-digest"
+    elif mutation == "call-id":
+        source["injected_call_id"] = "call-other"
+    else:
+        source["attacker"] = "extra"
+    payload = {
+        key: value for key, value in source.items() if key != "source_hash"
+    }
+    source["source_hash"] = acceptance.canonical_digest(payload)
+    _sign_source_envelope(evidence)
+
+    verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
+
+    assert verdict.status == "FAIL"
+    assert "detection-source-history-invalid" in verdict.reasons
+
+
+def test_source_authority_rejects_wrong_public_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = _production_envelope()
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY", EVALUATOR_PUBLIC_KEY
+    )
+
+    verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
+
+    assert verdict.status == "FAIL"
+    assert "source-authority-signature-mismatch" in verdict.reasons
 
 
 def test_production_evaluator_rejects_rehashed_arbitrary_cleanup_request() -> None:
@@ -884,13 +1139,23 @@ def test_candidate_verdict_is_signed_and_final_mode_requires_verified(
     )
     monkeypatch.delenv("POLYARB_SCAN_SHARED_SECRET", raising=False)
     monkeypatch.delenv("POLYARB_UPSTREAM_FAULT_CONTROL_SECRET", raising=False)
+    monkeypatch.delenv(
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY", raising=False
+    )
     evidence = _production_envelope()
+    source_bytes = json.dumps(evidence, indent=2).encode()
 
-    artifact = acceptance.build_candidate_artifact(evidence)
+    artifact = acceptance.build_candidate_artifact(
+        evidence,
+        source_bytes=source_bytes,
+    )
 
     assert artifact["status"] == "PASS"
     assert artifact["mode"] == "candidate"
     assert artifact["signature"]
+    assert artifact["source_evidence_sha256"] == (
+        "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+    )
     final_before = acceptance.evaluate_fault_envelope(
         evidence, mode="final", candidate_artifact=artifact
     )
@@ -907,12 +1172,17 @@ def test_final_evaluator_has_only_readonly_evidence_and_evaluator_authority(
     )
     monkeypatch.delenv("POLYARB_SCAN_SHARED_SECRET", raising=False)
     monkeypatch.delenv("POLYARB_UPSTREAM_FAULT_CONTROL_SECRET", raising=False)
+    monkeypatch.delenv(
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY", raising=False
+    )
     candidate_source = _production_envelope()
     artifact = acceptance.build_candidate_artifact(candidate_source)
     monkeypatch.delenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY")
     monkeypatch.setenv(
         "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY", EVALUATOR_PUBLIC_KEY
     )
+    assert "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY" in os.environ
+    assert "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY" not in os.environ
     final_evidence = deepcopy(candidate_source)
     verified = {
         "fault_id": "fault-1",
@@ -932,6 +1202,7 @@ def test_final_evaluator_has_only_readonly_evidence_and_evaluator_authority(
     final_evidence["mode"] = "final"
     final_evidence["pending_verification_fault_count"] = 0
     final_evidence["source_projection_active"] = False
+    _sign_source_envelope(final_evidence)
 
     evidence_path = tmp_path / "final-evidence.json"
     artifact_path = tmp_path / "candidate-artifact.json"
