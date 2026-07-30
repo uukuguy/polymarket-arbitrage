@@ -518,12 +518,16 @@ CLI prints redacted JSON and never accepts a secret on argv; it reads
 Add documented targets:
 
 ```make
+test-m1-perception
 fault-runtime-status
 arm-upstream-fault
 cleanup-upstream-fault
 upstream-fault-status
 ```
 
+`test-m1-perception` runs both `tests/perception/` and
+`tests/m1-perception/`; the existing `test-m1` target covers only the latter
+and is not the complete opportunity-first gate.
 `arm-upstream-fault` requires `intent="$INTENT_FILE"` and does not synthesize a
 broad target. `cleanup-upstream-fault` requires `fault_id="$FAULT_ID"`.
 
