@@ -17,6 +17,7 @@ from polyarb.perception.fault_control import (
     FaultIntent,
     FaultIntentRequest,
     FaultKind,
+    FaultOwnershipCapability,
     FaultRuntimeIdentity,
 )
 from polyarb.perception.fault_runtime import (
@@ -66,7 +67,11 @@ class _Authority:
         self.events.append((fault_id, state, kwargs))
 
     def relinquish_claim(self, fault_id, **kwargs):
-        state = FaultEventState.ABANDONED
+        state = (
+            FaultEventState.CLEANED
+            if self.events and self.events[-1][1] is FaultEventState.CONTAINED
+            else FaultEventState.ABANDONED
+        )
         self.events.append((fault_id, state, kwargs))
         return SimpleNamespace(state=state)
 
@@ -111,6 +116,181 @@ async def test_store_claim_failure_is_redacted_pass_through(caplog) -> None:
         FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1")
     ).inject is False
     assert "secret-value" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_injection_and_incident_links_are_process_owned_and_ordered() -> None:
+    ownership = FaultOwnershipCapability(
+        fault_id="fault-1",
+        runtime=IDENTITY,
+        token="f" * 64,
+    )
+    authority = _Authority(_intent(ownership=ownership))
+    runtime = FaultRuntime(
+        identity=IDENTITY,
+        authority=authority,
+        clock_ms=iter((1_100, 1_101, 1_102, 1_103)).__next__,
+        monotonic=lambda: 10.0,
+    )
+    await runtime.sync_before_batch()
+    decision = runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1")
+    )
+
+    injection = await runtime.record_injection(decision.fault_id)
+    linked = await runtime.link_detection(
+        decision.fault_id,
+        kind=FaultKind.CLOB_429,
+        detection_id="incident-1",
+    )
+
+    assert injection is not None
+    assert linked is True
+    assert [event[1] for event in authority.events] == [
+        FaultEventState.INJECTED,
+        FaultEventState.DETECTED,
+        FaultEventState.CONTAINED,
+    ]
+    assert all(
+        event[2]["ownership"] is ownership
+        for event in (authority.events[0], authority.events[2])
+    )
+    assert authority.events[1][2].get("ownership") is None
+
+
+@pytest.mark.asyncio
+async def test_injection_receipt_failure_freezes_future_hot_path() -> None:
+    class BrokenAuthority(_Authority):
+        def append_event(self, fault_id, state, **kwargs):
+            raise RuntimeError("corrupt-authority")
+
+    ownership = FaultOwnershipCapability(
+        fault_id="fault-1",
+        runtime=IDENTITY,
+        token="f" * 64,
+    )
+    runtime = FaultRuntime(
+        identity=IDENTITY,
+        authority=BrokenAuthority(_intent(ownership=ownership)),
+        clock_ms=lambda: 1_100,
+        monotonic=lambda: 10.0,
+    )
+    await runtime.sync_before_batch()
+    decision = runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1")
+    )
+
+    assert await runtime.record_injection(decision.fault_id) is None
+    assert runtime.degraded is True
+    assert runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1")
+    ).inject is False
+
+
+@pytest.mark.asyncio
+async def test_pass_through_runtime_receipts_are_noop() -> None:
+    runtime = PassThroughFaultRuntime(degraded=True)
+
+    assert await runtime.record_injection("fault-1") is None
+    assert (
+        await runtime.link_detection(
+            "fault-1",
+            kind=FaultKind.GAMMA_TIMEOUT,
+            detection_id="incident-1",
+        )
+        is False
+    )
+    assert runtime.pending_recovery_fault_id is None
+    assert await runtime.record_recovery("discovery-batch-1") is False
+
+
+@pytest.mark.asyncio
+async def test_cleaned_fault_retains_owning_capability_for_exact_recovery() -> None:
+    ownership = FaultOwnershipCapability(
+        fault_id="fault-1",
+        runtime=IDENTITY,
+        token="f" * 64,
+    )
+    authority = _Authority(_intent(ownership=ownership))
+    runtime = FaultRuntime(
+        identity=IDENTITY,
+        authority=authority,
+        clock_ms=iter((1_100, 1_101, 1_102, 1_103, 1_104, 1_105)).__next__,
+        monotonic=lambda: 10.0,
+    )
+    await runtime.sync_before_batch()
+    decision = runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1")
+    )
+    await runtime.record_injection(decision.fault_id)
+    assert await runtime.link_detection(
+        decision.fault_id,
+        kind=FaultKind.CLOB_429,
+        detection_id="incident-1",
+    )
+
+    cleanup = await runtime.cleanup(decision.fault_id, "contained")
+    recovered = await runtime.record_recovery("candidate-batch-7")
+
+    assert cleanup.terminal_state is FaultEventState.CLEANED
+    assert recovered is True
+    assert runtime.pending_recovery_fault_id is None
+    assert [event[1] for event in authority.events] == [
+        FaultEventState.INJECTED,
+        FaultEventState.DETECTED,
+        FaultEventState.CONTAINED,
+        FaultEventState.CLEANED,
+        FaultEventState.RECOVERED,
+    ]
+    assert authority.events[-1][2]["ownership"] is ownership
+
+
+@pytest.mark.asyncio
+async def test_partial_detection_uses_coverage_evidence_not_incident_evidence() -> None:
+    gamma_identity = FaultRuntimeIdentity(
+        component="discovery",
+        release_id="a" * 40,
+        machine_id="machine-1",
+        boot_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+    )
+    ownership = FaultOwnershipCapability(
+        fault_id="fault-partial",
+        runtime=gamma_identity,
+        token="f" * 64,
+    )
+    intent = FaultIntent(
+        fault_id="fault-partial",
+        kind=FaultKind.GAMMA_PARTIAL,
+        call_class=FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
+        target_key="discovery",
+        parameters={"keep_events": 1},
+        ttl_ms=30_000,
+        runtime=gamma_identity,
+        nonce_digest="b" * 64,
+        accepted_at_ms=1_000,
+        ownership_capability=ownership,
+    )
+    authority = _Authority(intent)
+    runtime = FaultRuntime(
+        identity=gamma_identity,
+        authority=authority,
+        clock_ms=iter((1_100, 1_101, 1_102, 1_103)).__next__,
+        monotonic=lambda: 10.0,
+    )
+    await runtime.sync_before_batch()
+    decision = runtime.consume(
+        FaultCall(FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE, "discovery")
+    )
+    await runtime.record_injection(decision.fault_id)
+
+    assert await runtime.link_detection(
+        decision.fault_id,
+        kind=FaultKind.GAMMA_PARTIAL,
+        detection_id="coverage-" + "c" * 64,
+    )
+    assert authority.events[1][2]["evidence"] == {
+        "coverage_id": "coverage-" + "c" * 64
+    }
 
 
 @pytest.mark.asyncio

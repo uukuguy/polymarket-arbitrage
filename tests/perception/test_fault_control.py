@@ -311,6 +311,26 @@ def test_evidence_identifier_rejects_sensitive_shapes(value: str) -> None:
         )
 
 
+def test_detected_evidence_requires_exactly_one_incident_or_coverage_id() -> None:
+    coverage = {"coverage_id": "coverage-" + "a" * 64}
+    assert dict(normalize_evidence(FaultEventState.DETECTED, coverage)) == coverage
+    with pytest.raises(ValueError, match="invalid-evidence"):
+        normalize_evidence(FaultEventState.DETECTED, {})
+    with pytest.raises(ValueError, match="invalid-evidence"):
+        normalize_evidence(
+            FaultEventState.DETECTED,
+            {
+                "coverage_id": "coverage-" + "a" * 64,
+                "incident_id": "incident-1",
+            },
+        )
+    with pytest.raises(ValueError, match="invalid-evidence"):
+        normalize_evidence(
+            FaultEventState.DETECTED,
+            {"coverage_id": "coverage-not-a-digest"},
+        )
+
+
 def test_reason_evidence_is_enumerated_not_free_form() -> None:
     with pytest.raises(ValueError, match="invalid-evidence"):
         normalize_evidence(

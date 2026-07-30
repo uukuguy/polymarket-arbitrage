@@ -26,6 +26,7 @@ _GROUP_TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SUPERVISOR_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CALL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _INCIDENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_COVERAGE_ID_RE = re.compile(r"^coverage-[0-9a-f]{64}$")
 _CONTAINMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CLEANUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _RECOVERY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -228,6 +229,7 @@ def normalize_supervisor_run_id(value: str) -> str:
 _EVIDENCE_ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
     "call_id": _CALL_ID_RE,
     "incident_id": _INCIDENT_ID_RE,
+    "coverage_id": _COVERAGE_ID_RE,
     "containment_id": _CONTAINMENT_ID_RE,
     "cleanup_id": _CLEANUP_ID_RE,
     "recovery_id": _RECOVERY_ID_RE,
@@ -239,7 +241,7 @@ _EVIDENCE_KEYS: Mapping[FaultEventState, frozenset[str]] = {
     FaultEventState.AUTHORIZED: frozenset({"reason"}),
     FaultEventState.ARMED: frozenset({"runtime_identity_digest", "ownership_digest"}),
     FaultEventState.INJECTED: frozenset({"call_id"}),
-    FaultEventState.DETECTED: frozenset({"incident_id"}),
+    FaultEventState.DETECTED: frozenset({"incident_id", "coverage_id"}),
     FaultEventState.CONTAINED: frozenset({"containment_id"}),
     FaultEventState.CLEANED: frozenset({"cleanup_id"}),
     FaultEventState.RECOVERED: frozenset({"recovery_id"}),
@@ -298,6 +300,8 @@ def normalize_evidence(
                 reason="invalid-evidence",
             )
     if typed_state is FaultEventState.ARMED and set(normalized) != _EVIDENCE_KEYS[typed_state]:
+        raise ValueError("invalid-evidence")
+    if typed_state is FaultEventState.DETECTED and len(normalized) != 1:
         raise ValueError("invalid-evidence")
     return MappingProxyType(normalized)
 

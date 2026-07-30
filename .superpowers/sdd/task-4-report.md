@@ -1,73 +1,113 @@
-# Task 4 Implementer Report
+# Task 4 report — typed Gamma Discovery and Reconciliation adapters
 
-Status: DONE
+## Status
 
-## Scope
+Implemented locally and verified. No deployment, feature enablement, secret
+access, production database mutation, Candidate/CLOB work, Telegram work, or
+qualification harness work was performed.
 
-Task 4 only: default-off checkpointed Full Reconciliation, exact restart,
-terminal completion proof, atomic concurrency-safe diff, scoped health,
-operator Make entries, and legacy Structure demotion. No Task 5 incidents or
-process isolation, no Task 6 API/Dashboard/cutover, no deployment, and no
-trading capability.
+## Delivered
 
-## Final truth chain
+- Added `FaultingGammaPageClient`, wrapping only
+  `fetch_active_event_page`; it never inspects `GammaClient._get`, a URL, or
+  settings.
+- Bound Discovery only to
+  `GAMMA_DISCOVERY_EVENT_PAGE/discovery` and Reconciliation only to
+  `GAMMA_RECONCILIATION_EVENT_PAGE/reconciliation`.
+- Added deterministic timeout, malformed JSON, cursor-integrity, and partial
+  coverage faults. Every pass-through path calls the real Gamma client exactly
+  once.
+- Added redacted `PartialGammaPageError` evidence containing only original and
+  kept counts, cursor digests, a fault ID, injection time, and a canonical
+  coverage ID. The partial page is read from the real client but is rejected
+  before normalization or publication; the Discovery cursor is preserved.
+- Added a strict `DETECTED` evidence union: exactly one `incident_id` or one
+  `coverage-<sha256>` ID. Partial coverage uses the latter and creates no
+  Gamma Incident.
+- Required an exact, unique, post-injection Incident authority match before
+  linking timeout, malformed, or cursor detection.
+- Wired owning-process cleanup before recovery and retained the opaque
+  ownership capability internally only long enough to append the next
+  component writer recovery receipt.
+- Bound recovery to the exact runtime's next Discovery batch or
+  Reconciliation window. Existing `GammaBatchIncidents` recovery rules and
+  verification semantics are unchanged.
 
-1. One batch fetches exactly one bounded Gamma event page. Staging samples,
-   page receipt, window aggregates and opaque next cursor commit together.
-   Cancellation waits for that writer to reach COMMIT or ROLLBACK.
-2. Restart reads the latest validated window and resumes its exact durable
-   cursor. Receipt sequence, requested→next cursor chain, terminal empty page,
-   checkpoint timestamps and batch/window/sample/staging aggregates are
-   validated in one read snapshot; corrupted state fails closed.
-3. An `open` window cannot call diff application. A terminal empty page first
-   leaves a recoverable `complete` window; restart applies it idempotently.
-4. Diff application is one `BEGIN IMMEDIATE` transaction using Task 1 revision
-   and quote-supersession semantics. It persists added, changed, closed,
-   unchanged and rejected counts plus the full observation interval.
-5. Window creation atomically captures an exact append-only certified baseline.
-   A versioned/domain-separated digest binds the canonical ordered baseline
-   rows and count; legacy windows without this proof restart rather than
-   guessing a backfill. Change and closure use baseline CAS, not timestamps:
-   equal-millisecond, clock-skewed and all post-begin online revisions win.
-6. Incomplete/unsupported identity suppresses closure only when group/event
-   binds the exact baseline. A forged attacker event cannot mask a missing
-   baseline group.
-7. Every observed group has append-only per-batch evidence. Materialized
-   staging deterministically classifies cross-page observations as unique,
-   updated/latest-wins or duplicate/no-op. Receipts retain all four counts plus
-   rejected count.
-8. Apply writes append-only per-group action evidence in the same transaction
-   as revision mutations and counters. Applied validation replays
-   added/changed/closed/unchanged/rejected actions, binds their baseline,
-   staging and exact result revisions, and recomputes all five counters.
-9. A cursor loop atomically terminates the window as failed/cursor-loop; it can
-   never apply, and the next run starts a fresh window from cursor None.
-10. Health reuses the store's complete validated snapshot. Reconciliation
-   progress/checkpoint age are scoped checks and do not alter overall or
-   Candidate availability. Missing/corrupt schema or numeric state is
-   unavailable, not idle or an exception.
-11. New and legacy producers are independently default-off. Legacy Structure
-   adaptive timing and history remain readable, but main does not start its
-   universe-sized loop unless explicitly enabled.
+## Plan-versus-real-API correction
+
+The locked Task 4 file list assumed Task 3 exposed process-owned injection and
+Incident-link receipt methods. The final Task 3
+`FaultRuntimeProtocol` exposed only `consume`, safe-boundary sync, and cleanup;
+`FaultAuthorityStore.append_event(INJECTED)` requires the ownership capability
+held privately by `FaultRuntime`.
+
+With coordinator approval, Task 4 therefore minimally extended
+`fault_runtime.py` and its focused tests with:
+
+- `record_injection(fault_id) -> FaultInjectionReceipt | None`;
+- `link_detection(fault_id, kind, detection_id) -> bool`;
+- `pending_recovery_fault_id`; and
+- `record_recovery(recovery_id) -> bool`.
+
+The capability never leaves the concrete runtime. Pass-through runtimes are
+no-op, normal calls perform no evidence I/O, and authority write failure marks
+the runtime degraded and freezes later injection.
+
+The coordinator also approved the minimal `fault_control.py` evidence change
+for canonical partial coverage IDs; no schema, HTTP, CLI, or control-plane
+surface changed.
+
+## TDD evidence
+
+1. Adapter RED: the focused command failed collection with
+   `ModuleNotFoundError: polyarb.perception.fault_adapters`.
+2. Adapter GREEN: typed timeout/malformed, real-page partial rejection,
+   cursor mismatch, cross-scope pass-through, runtime/store failure
+   pass-through, failed receipt pass-through, and cancellation tests passed.
+3. Coverage evidence RED: after temporarily removing the new whitelist shape,
+   the exact one-of coverage test failed with `invalid-evidence`.
+4. Coverage evidence GREEN: `DETECTED` accepts exactly one valid incident or
+   coverage ID and rejects empty, dual, and malformed evidence.
+5. Non-applicable partial RED/GREEN: a short complete real page initially left
+   the injected controller active; the adapter now performs owning cleanup and
+   returns that real page without fabricating partial coverage.
+6. Lifecycle GREEN: fake-authority tests prove
+   injected → detected → contained → cleaned → recovered and ownership use;
+   evidence failure freezes future hot-path injection.
+7. Real-store GREEN: Discovery partial and Reconciliation cursor tests run
+   real fault authority, real producer runners, real Incident authority, and
+   real writer stores in one SQLite database.
 
 ## Verification
 
-```text
-Initial RED: ModuleNotFoundError for polyarb.perception.reconciliation
-Focused reconciliation + health: 45 passed
-Proportional perception/scheduler/config/wiring/watcher suite: passed
-Full repository: 2507 collected, 100% passed (1 expected xfail, 1 skip)
-Changed-file Ruff and Ruff format: pass
-python compileall: pass
-make reconciliation-status fixture: pass
-make docs-m1-check: pass
-git diff --check: pass
-make planning-status: 82 plans, no drift
-```
+- Focused Task 4 plus Task 3 runtime/control and related
+  Discovery/Reconciliation suites: 346 tests passed.
+- Focused Ruff across every changed Python source/test: passed.
+- `git diff --check`: passed.
+- `make planning-status`: 82 plans, no drift.
 
-## Remaining boundary
+No aggregate load flake occurred in the Task 4 runs.
 
-Task 5 owns incidents, load shedding and producer process isolation. Task 6
-owns public API/Dashboard/cutover and production qualification. Flags remain
-off; nothing was deployed and no wallet, signing, balance, order or real-money
-path was added.
+## Chain-truth evidence
+
+- Discovery partial:
+  authorized → armed → injected → detected(`coverage_id`) → contained →
+  cleaned → recovered; zero Incident rows; only the later complete empty batch
+  is published.
+- Reconciliation cursor:
+  authorized → armed → injected → detected(exact `incident_id`) → contained →
+  cleaned → recovered; the next checkpoint is newer than injection and the
+  existing Gamma Incident verifies.
+- Timeout cancellation:
+  injection is followed by owning cleanup; no recovery polling occurs.
+- Persisted fault evidence excludes response body, event payload, URL, and raw
+  cursors.
+
+## Concerns
+
+- Final `verified` fault state remains the responsibility of the independent
+  evaluator in a later planned task; this task stops at authentic component
+  recovery and preserves the existing Incident verification chain.
+- If a `gamma-partial` page is already at or below `keep_events`, the adapter
+  records owning cleanup and returns the complete real page. The qualification
+  chain is therefore non-successful rather than stuck or falsely partial.

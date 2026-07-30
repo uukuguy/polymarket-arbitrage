@@ -1,0 +1,220 @@
+"""Typed, exact-call Gamma fault adapters.
+
+The adapter never inspects URLs or response bodies.  Invalid or unavailable
+control evidence falls through to the real page call exactly once.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from dataclasses import replace
+
+import httpx
+
+from polyarb.clients.gamma_client import EventPage
+from polyarb.perception.fault_control import (
+    FaultCall,
+    FaultCallClass,
+    FaultDecision,
+    FaultKind,
+    canonical_digest,
+    normalize_fault_id,
+)
+from polyarb.perception.fault_runtime import FaultRuntimeProtocol
+
+
+class _QualifiedCursor(str):
+    def __new__(
+        cls,
+        *,
+        fault_id: str,
+        injected_at_ms: int,
+    ):
+        value = super().__new__(cls, "qualified-gamma-cursor-mismatch")
+        value.fault_id = fault_id
+        value.injected_at_ms = injected_at_ms
+        return value
+
+
+def _cursor_digest(cursor: str | None) -> str:
+    value = "<none>" if cursor is None else cursor
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+class PartialGammaPageError(RuntimeError):
+    """A real Gamma page whose requested truncation would reject coverage."""
+
+    def __init__(
+        self,
+        *,
+        original_count: int,
+        kept_count: int,
+        requested_cursor_digest: str,
+        next_cursor_digest: str,
+        fault_id: str,
+        injected_at_ms: int,
+    ) -> None:
+        self.original_count = original_count
+        self.kept_count = kept_count
+        self.requested_cursor_digest = requested_cursor_digest
+        self.next_cursor_digest = next_cursor_digest
+        self.fault_id = normalize_fault_id(fault_id)
+        self.injected_at_ms = injected_at_ms
+        self.coverage_id = "coverage-" + canonical_digest(
+            {
+                "kept_count": kept_count,
+                "next_cursor_digest": next_cursor_digest,
+                "original_count": original_count,
+                "requested_cursor_digest": requested_cursor_digest,
+            }
+        )
+        super().__init__(
+            "qualified-gamma-partial "
+            f"original_count={original_count} kept_count={kept_count} "
+            f"requested_cursor_digest={requested_cursor_digest} "
+            f"next_cursor_digest={next_cursor_digest}"
+        )
+
+
+class FaultingGammaPageClient:
+    """Wrap only ``fetch_active_event_page`` for one exact producer scope."""
+
+    def __init__(
+        self,
+        *,
+        inner: object,
+        runtime: FaultRuntimeProtocol,
+        call_class: FaultCallClass,
+        target_key: str,
+    ) -> None:
+        self._inner = inner
+        self._runtime = runtime
+        self._call_class = FaultCallClass(call_class)
+        self._target_key = target_key
+        self._call = FaultCall(self._call_class, target_key)
+
+    async def fetch_active_event_page(
+        self,
+        cursor: str | None,
+        limit: int,
+    ) -> EventPage:
+        try:
+            decision = self._runtime.consume(self._call)
+        except Exception:
+            return await self._fetch_real(cursor, limit)
+        if not self._qualified(decision):
+            return await self._fetch_real(cursor, limit)
+        assert decision.fault_id is not None
+        receipt = await self._runtime.record_injection(decision.fault_id)
+        if receipt is None:
+            return await self._fetch_real(cursor, limit)
+        if decision.kind is FaultKind.GAMMA_TIMEOUT:
+            await asyncio.sleep(decision.parameters["delay_ms"] / 1_000)
+            error = httpx.ReadTimeout("qualified-gamma-timeout")
+            _tag_error(error, receipt)
+            raise error
+        if decision.kind is FaultKind.GAMMA_MALFORMED:
+            error = json.JSONDecodeError("qualified-gamma-malformed", "", 0)
+            _tag_error(error, receipt)
+            raise error
+        page = await self._fetch_real(cursor, limit)
+        if decision.kind is FaultKind.GAMMA_CURSOR:
+            return replace(
+                page,
+                requested_cursor=_QualifiedCursor(
+                    fault_id=decision.fault_id,
+                    injected_at_ms=receipt.occurred_at_ms,
+                ),
+            )
+        keep_events = decision.parameters["keep_events"]
+        if keep_events < len(page.events):
+            raise PartialGammaPageError(
+                original_count=len(page.events),
+                kept_count=keep_events,
+                requested_cursor_digest=_cursor_digest(page.requested_cursor),
+                next_cursor_digest=_cursor_digest(page.next_cursor),
+                fault_id=decision.fault_id,
+                injected_at_ms=receipt.occurred_at_ms,
+            )
+        await self._runtime.cleanup(
+            decision.fault_id,
+            "partial-not-applicable",
+        )
+        return page
+
+    async def _fetch_real(self, cursor: str | None, limit: int) -> EventPage:
+        fetch = getattr(self._inner, "fetch_active_event_page")
+        return await fetch(cursor, limit)
+
+    def _qualified(self, decision: FaultDecision) -> bool:
+        if (
+            not isinstance(decision, FaultDecision)
+            or not decision.inject
+            or decision.fault_id is None
+        ):
+            return False
+        allowed = {
+            FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE: {
+                FaultKind.GAMMA_TIMEOUT,
+                FaultKind.GAMMA_PARTIAL,
+                FaultKind.GAMMA_MALFORMED,
+            },
+            FaultCallClass.GAMMA_RECONCILIATION_EVENT_PAGE: {
+                FaultKind.GAMMA_CURSOR,
+            },
+        }[self._call_class]
+        if decision.kind not in allowed:
+            return False
+        expected_parameters = {
+            FaultKind.GAMMA_TIMEOUT: {"delay_ms"},
+            FaultKind.GAMMA_PARTIAL: {"keep_events"},
+            FaultKind.GAMMA_MALFORMED: set(),
+            FaultKind.GAMMA_CURSOR: set(),
+        }[decision.kind]
+        return set(decision.parameters) == expected_parameters
+
+
+def gamma_fault_id(error: BaseException) -> str | None:
+    value = (
+        error.fault_id
+        if isinstance(error, PartialGammaPageError)
+        else getattr(error, "_polyarb_fault_id", None)
+    )
+    try:
+        return normalize_fault_id(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def gamma_injected_at_ms(error: BaseException) -> int | None:
+    value = (
+        error.injected_at_ms
+        if isinstance(error, PartialGammaPageError)
+        else getattr(error, "_polyarb_injected_at_ms", None)
+    )
+    return value if type(value) is int and value >= 0 else None
+
+
+def gamma_cursor_error(page: EventPage, message: str) -> ValueError:
+    error = ValueError(message)
+    cursor = page.requested_cursor
+    if isinstance(cursor, _QualifiedCursor):
+        error._polyarb_fault_id = cursor.fault_id
+        error._polyarb_injected_at_ms = cursor.injected_at_ms
+    return error
+
+
+def _tag_error(error: BaseException, receipt: object) -> None:
+    error._polyarb_fault_id = getattr(receipt, "fault_id", None)
+    error._polyarb_injected_at_ms = getattr(receipt, "occurred_at_ms", None)
+
+
+__all__ = [
+    "FaultingGammaPageClient",
+    "PartialGammaPageError",
+    "gamma_fault_id",
+    "gamma_injected_at_ms",
+    "gamma_cursor_error",
+]

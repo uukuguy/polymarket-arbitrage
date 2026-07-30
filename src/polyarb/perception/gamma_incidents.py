@@ -94,6 +94,27 @@ class GammaBatchIncidents:
             raise ValueError("gamma-incident-scope-mismatch")
         self._verify({"batch_id": batch_id})
 
+    def unique_match(
+        self,
+        incident_id: str,
+        *,
+        kind: str,
+        injected_at_ms: int | None,
+    ) -> bool:
+        if kind not in _KINDS or injected_at_ms is None:
+            return False
+        matches = tuple(
+            incident
+            for incident in self._manager.open_incidents()
+            if (
+                incident.id == incident_id
+                and incident.scope == self._scope
+                and incident.kind == kind
+                and incident.occurred_at_ms >= injected_at_ms
+            )
+        )
+        return len(matches) == 1
+
     def _verify(self, pointer: dict[str, object]) -> None:
         for incident in self._manager.open_incidents():
             if (

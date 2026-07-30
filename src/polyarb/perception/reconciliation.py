@@ -12,6 +12,13 @@ from loguru import logger
 
 from polyarb.clients.gamma_client import EventPage
 from polyarb.perception.discovery import DiscoveryWorker
+from polyarb.perception.fault_adapters import (
+    FaultingGammaPageClient,
+    gamma_cursor_error,
+    gamma_fault_id,
+    gamma_injected_at_ms,
+)
+from polyarb.perception.fault_control import FaultCallClass, FaultKind
 from polyarb.perception.fault_runtime import (
     FaultRuntimeProtocol,
     PassThroughFaultRuntime,
@@ -60,11 +67,16 @@ class ReconciliationWorker:
     ) -> None:
         if not 1 <= page_limit <= 100:
             raise ValueError("reconciliation-page-limit-must-be-within-1..100")
-        self._gamma = gamma
+        self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
+        self._gamma = FaultingGammaPageClient(
+            inner=gamma,
+            runtime=self._fault_runtime,
+            call_class=FaultCallClass.GAMMA_RECONCILIATION_EVENT_PAGE,
+            target_key="reconciliation",
+        )
         self._store = store
         self._page_limit = page_limit
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
-        self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
 
     async def run_batch(self) -> ReconciliationBatchResult:
         try:
@@ -96,7 +108,10 @@ class ReconciliationWorker:
         await self._fault_runtime.sync_before_batch()
         page = await self._gamma.fetch_active_event_page(requested_cursor, self._page_limit)
         if page.requested_cursor != requested_cursor:
-            raise ValueError("reconciliation-page-cursor-mismatch")
+            raise gamma_cursor_error(
+                page,
+                "reconciliation-page-cursor-mismatch",
+            )
         candidates = await asyncio.to_thread(DiscoveryWorker._normalize_page, page)
         committed = await self._commit_page(window.id, page, candidates)
         diff = None
@@ -230,6 +245,9 @@ class ReconciliationRunner:
                         )
                         successful_checkpoint = not result.failed
                         if successful_checkpoint:
+                            await self._fault_runtime.record_recovery(
+                                f"reconciliation-window-{result.window_id}"
+                            )
                             await asyncio.to_thread(
                                 self._gamma_incidents.verify_reconciliation,
                                 result.window_id,
@@ -237,10 +255,30 @@ class ReconciliationRunner:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    await asyncio.to_thread(
+                    incident = await asyncio.to_thread(
                         self._gamma_incidents.record_failure,
                         error,
                     )
+                    fault_id = gamma_fault_id(error)
+                    if incident is not None and fault_id is not None:
+                        kind = FaultKind(incident.kind)
+                        injected_at_ms = gamma_injected_at_ms(error)
+                        matches = await asyncio.to_thread(
+                            self._gamma_incidents.unique_match,
+                            incident.id,
+                            kind=incident.kind,
+                            injected_at_ms=injected_at_ms,
+                        )
+                        if matches:
+                            await self._fault_runtime.link_detection(
+                                fault_id,
+                                kind=kind,
+                                detection_id=incident.id,
+                            )
+                        await self._fault_runtime.cleanup(
+                            fault_id,
+                            "gamma-fault-contained",
+                        )
                     logger.warning(f"reconciliation batch failed kind={type(error).__name__}")
                 if requested_nonce is not None and successful_checkpoint:
                     await asyncio.to_thread(

@@ -13,6 +13,13 @@ from typing import Protocol
 from loguru import logger
 
 from polyarb.clients.gamma_client import EventPage
+from polyarb.perception.fault_adapters import (
+    FaultingGammaPageClient,
+    PartialGammaPageError,
+    gamma_fault_id,
+    gamma_injected_at_ms,
+)
+from polyarb.perception.fault_control import FaultCallClass, FaultKind
 from polyarb.perception.fault_runtime import (
     FaultRuntimeProtocol,
     PassThroughFaultRuntime,
@@ -203,7 +210,13 @@ class DiscoveryWorker:
         self._admission_proof.validate()
         if effective_capacity > computed_capacity:
             raise ValueError("discovery-admission-capacity-exceeds-proof")
-        self._gamma = gamma
+        self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
+        self._gamma = FaultingGammaPageClient(
+            inner=gamma,
+            runtime=self._fault_runtime,
+            call_class=FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
+            target_key="discovery",
+        )
         self._store = store
         self._page_limit = page_limit
         self._load_controller = load_controller
@@ -211,7 +224,6 @@ class DiscoveryWorker:
         self._degraded_probe_every_cycles = degraded_probe_every_cycles
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
         self._require_resource_decision = require_resource_decision
-        self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
         self._store.configure_discovery_admission(
             self._admission_proof,
             now_ms=self._clock_ms(),
@@ -483,6 +495,9 @@ class DiscoveryRunner:
                         state="yielded" if result.yielded else "progress",
                     )
                     if not result.yielded and result.batch_id is not None:
+                        await self._fault_runtime.record_recovery(
+                            f"discovery-batch-{result.batch_id}"
+                        )
                         await asyncio.to_thread(
                             self._gamma_incidents.verify_discovery,
                             result.batch_id,
@@ -504,11 +519,48 @@ class DiscoveryRunner:
                     successful_checkpoint = not result.yielded
                 except asyncio.CancelledError:
                     raise
+                except PartialGammaPageError as error:
+                    fault_id = gamma_fault_id(error)
+                    if fault_id is not None:
+                        await self._fault_runtime.link_detection(
+                            fault_id,
+                            kind=FaultKind.GAMMA_PARTIAL,
+                            detection_id=error.coverage_id,
+                        )
+                        await self._fault_runtime.cleanup(
+                            fault_id,
+                            "partial-or-rejected-page",
+                        )
+                    logger.warning(
+                        "discovery batch rejected coverage "
+                        f"original_count={error.original_count} "
+                        f"kept_count={error.kept_count}"
+                    )
                 except Exception as error:
-                    await asyncio.to_thread(
+                    incident = await asyncio.to_thread(
                         self._gamma_incidents.record_failure,
                         error,
                     )
+                    fault_id = gamma_fault_id(error)
+                    if incident is not None and fault_id is not None:
+                        kind = FaultKind(incident.kind)
+                        injected_at_ms = gamma_injected_at_ms(error)
+                        matches = await asyncio.to_thread(
+                            self._gamma_incidents.unique_match,
+                            incident.id,
+                            kind=incident.kind,
+                            injected_at_ms=injected_at_ms,
+                        )
+                        if matches:
+                            await self._fault_runtime.link_detection(
+                                fault_id,
+                                kind=kind,
+                                detection_id=incident.id,
+                            )
+                        await self._fault_runtime.cleanup(
+                            fault_id,
+                            "gamma-fault-contained",
+                        )
                     logger.warning(
                         "discovery batch failed "
                         f"kind={type(error).__name__}"
