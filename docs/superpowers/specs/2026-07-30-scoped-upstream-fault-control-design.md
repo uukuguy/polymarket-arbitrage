@@ -199,8 +199,8 @@ authorized
   → injected
   → detected
   → contained
-  → recovered
   → cleaned
+  → recovered
   → verified
 ```
 
@@ -214,6 +214,9 @@ Rules:
 - an expired fault cannot be extended in place;
 - a new release or boot invalidates the authorization;
 - cleanup always disables injection before persisting its receipt;
+- only the process that owns the in-memory controller may persist the cleanup
+  receipt; a remote control API may request, wait for, and idempotently confirm
+  cleanup, but may not claim that it cleared another process's memory;
 - a cleanup receipt failure leaves production pass-through but qualification
   failed and later injection frozen;
 - cancellation and timeout run the same cleanup path;
@@ -352,4 +355,3 @@ The implementation plan must:
 - complete local and read-only gates before requesting any production
   authorization; and
 - request separate authorization for each exact release and fault mutation.
-

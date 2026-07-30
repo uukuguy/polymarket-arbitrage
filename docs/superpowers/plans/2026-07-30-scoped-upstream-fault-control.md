@@ -70,6 +70,16 @@ processes. Therefore:
 The non-isolated daemon path uses the same runtime registration and claim
 protocol; it does not get a second implementation.
 
+Cleanup is process-owned:
+
+- the producer holding the in-memory controller clears it after detection and
+  containment, then appends the cleanup receipt;
+- the control API can append a cleanup request, wait for the process-owned
+  receipt, and return an idempotent already-cleaned result;
+- the control API never records a receipt claiming that it cleared another
+  process's memory; and
+- business recovery is evaluated only after the process-owned cleanup receipt.
+
 ### Typed surface
 
 ```python
@@ -136,6 +146,9 @@ Add these tables to `src/polyarb/storage/schemas.py`:
 `authorized`, `armed`, `injected`, `detected`, `contained`, `recovered`,
 `cleaned`, `verified`, `rejected`, `expired`, `abandoned`,
 `cleanup-failed`, `recovery-timeout`, `evidence-invalid`, `escalated`.
+
+`neg_risk_fault_events.action` separately allows `cleanup-requested`; it is a
+control request, not proof that the in-memory fault has been cleared.
 
 Do not create a mutable “current fault” row. Current state is a deterministic
 projection from the immutable intent/event chain. Enforce unique accepted
@@ -452,6 +465,8 @@ Cover:
 - secrets/raw URLs never appear in response, logs, or DB;
 - `POST /control/perception/faults/arm` returns accepted `fault_id` and digests;
 - `POST /control/perception/faults/cleanup` is exact-ID and idempotent;
+- cleanup POST appends/observes a request and waits for the producer-owned
+  `cleaned` receipt; it never fabricates that receipt in the HTTP process;
 - read-only `GET /perception/faults/{fault_id}` returns a bounded redacted
   projection and complete-history flag;
 - control-store timeout is 409/unavailable and does not affect producers.
