@@ -556,6 +556,122 @@ async def test_scheduler_stale_wait_snapshot_preserves_organic_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("_repeat", range(3))
+async def test_cancelled_committed_timeout_detaches_exact_fault_decision(
+    tmp_path,
+    monkeypatch,
+    _repeat,
+) -> None:
+    committed = threading.Event()
+    release = threading.Event()
+    path = tmp_path / "cancelled-timeout-terminal.db"
+    store = OpportunityPerceptionStore(path)
+    store.init_schema()
+    revision = _group("group-a")
+    store.publish_group_revision(revision)
+    identity = FaultRuntimeIdentity(
+        component="candidate",
+        release_id="a" * 40,
+        machine_id="machine-1",
+        boot_id=UUID("ffffffff-ffff-4fff-8fff-ffffffffffff"),
+    )
+    authority = FaultAuthorityStore(path)
+    base_ms = int(time.time() * 1_000)
+    authority.register_runtime_start(
+        identity,
+        supervisor_run_id="run-1",
+        attempt=1,
+        started_at_ms=base_ms,
+    )
+    assert authority.accept_intent(
+        FaultIntentRequest(
+            fault_id="fault-cancelled-timeout",
+            kind=FaultKind.CLOB_LATENCY,
+            call_class=FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH,
+            target_key="group-a",
+            parameters={"delay_ms": 100},
+            ttl_ms=30_000,
+            runtime=identity,
+        ),
+        auth=FaultAuthorization(
+            nonce_digest="7" * 64,
+            authorization_digest="8" * 64,
+        ),
+        accepted_at_ms=base_ms + 1,
+    ).accepted
+    now = base_ms + 10
+
+    def clock_ms():
+        nonlocal now
+        now += 1
+        return now
+
+    fault_runtime = FaultRuntime(
+        identity=identity,
+        authority=authority,
+        clock_ms=clock_ms,
+        monotonic=lambda: 10.0,
+    )
+    await fault_runtime.sync_before_batch()
+    watcher_runtime = CandidateWatcherRuntime()
+    watcher = CandidateWatcher(
+        structure_reader=_Structure(revision, []),
+        books_reader=_Books([]),
+        store=store,
+        runtime=watcher_runtime,
+        interval_controller=IntervalController(),
+        clock_ms=clock_ms,
+        fault_runtime=fault_runtime,
+    )
+    original_writer = store.record_candidate_watch_fact
+
+    def blocking_writer(*args, **kwargs):
+        fact = original_writer(*args, **kwargs)
+        committed.set()
+        assert release.wait(timeout=2)
+        return fact
+
+    monkeypatch.setattr(store, "record_candidate_watch_fact", blocking_writer)
+    scheduler = CandidateWatcherScheduler(
+        watcher=watcher,
+        store=store,
+        candidate_group_ids=lambda: (),
+        runtime=watcher_runtime,
+        group_timeout_s=0.01,
+        terminal_write_budget_s=5,
+        fault_runtime=fault_runtime,
+    )
+    selected = asyncio.create_task(
+        scheduler._run_selected_group(
+            (0, 0, "group-a"),
+            priority_by_rank={0: "high"},
+            admission_contexts={},
+        )
+    )
+    assert await asyncio.to_thread(committed.wait, 2)
+    selected.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await selected
+    scheduler.close()
+
+    assert watcher._pending_latency_faults == {}
+    assert watcher._timeout_contexts == {}
+    assert watcher_runtime.group_attempt_count("group-a") == 1
+    assert len(watcher._clob_incident_operations) == 1
+    exact_error = watcher._clob_incident_operations[0].error
+    assert getattr(exact_error, "_polyarb_fault_call_id") is not None
+
+    await watcher.flush_incidents()
+    assert authority.validate_history("fault-cancelled-timeout").events[-1].state.value == "cleaned"
+
+    monkeypatch.setattr(store, "record_candidate_watch_fact", original_writer)
+    await watcher.record_timeout("group-a")
+    organic_error = watcher._clob_incident_operations[-1].error
+    assert getattr(organic_error, "_polyarb_fault_call_id", None) is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tamper_recovery", [False, True])
 async def test_real_candidate_chain_recovers_from_new_exact_group_receipt(
     tmp_path,

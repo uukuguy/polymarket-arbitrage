@@ -72,7 +72,24 @@ repair:
    receipt is `INVALID`; a queued older same-group success is skipped for
    recovery while the latest `q2` records `RECOVERED`.
 
-The final focused runs collected 266 tests (71 exact Candidate tests plus 195
+The remaining HIGH from re-review also received a real SQLite RED. Candidate
+terminal fact commit was blocked after commit but before returning, then
+`_run_selected_group` was cancelled. The old path left the exact latency
+decision in `_pending_latency_faults`, recorded the committed attempt without
+its exact Incident operation, and allowed the next organic timeout to inherit
+the old `call_id`. The race now runs three times and proves:
+
+- task/token-matched cancellation detaches both timeout context and the frozen
+  exact decision before any further await;
+- committed terminal fact installs exactly one attempt and one exact Incident
+  operation before the original cancellation propagates;
+- an uncommitted write installs neither attempt nor Incident evidence;
+- all success, organic error, timeout, budget cancellation and external
+  cancellation exits clear both per-group maps;
+- after the exact operation is flushed and the real fault reaches `CLEANED`, a
+  later organic timeout for the same group has no old fault `call_id`.
+
+The final focused runs collected 269 tests (74 exact Candidate tests plus 195
 shared runtime/authority and Gamma regressions) and reached 100% with exit code
 0:
 
@@ -145,6 +162,12 @@ Ruff passed for all changed source and test files.
     recovery is installed idempotently. Scheduler timeout requires a
     task-specific cancellation token. All per-group timeout/latency maps are
     cleared after settlement.
+12. Scheduler-owned timeout cancellation carries the detached exact decision
+    with the task-specific cancellation result. `record_timeout` clears both
+    shared maps before its first await and derives its Incident operation from
+    that local decision. If the terminal SQLite worker committed before
+    cancellation, runtime attempt installation is authoritative and the exact
+    Incident operation is queued once; otherwise neither is fabricated.
 
 ## Remaining boundary
 

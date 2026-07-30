@@ -85,6 +85,12 @@ class _CandidateIncidentSuccess:
     observed_at_ms: int
 
 
+class _CandidateGroupTimeout(TimeoutError):
+    def __init__(self, decision: CandidateBooksDecision | None) -> None:
+        super().__init__("candidate-group-timeout")
+        self.decision = decision
+
+
 @dataclass(frozen=True)
 class SchedulingTransition:
     priority_class: CandidatePriority
@@ -452,16 +458,17 @@ class CandidateWatcher:
             return observation
         except asyncio.CancelledError as cancellation:
             timeout_context = self._timeout_contexts.pop(group_id, None)
+            pending = self._pending_latency_faults.pop(group_id, None)
             timeout_owned = (
                 timeout_context is not None
                 and timeout_context[0] is asyncio.current_task()
                 and cancellation.args
                 and cancellation.args[0] is timeout_context[1]
             )
-            if not timeout_owned:
-                pending = self._pending_latency_faults.pop(group_id, None)
-                if pending is not None:
-                    await self._candidate_fault.settle_inner_failure(pending)
+            if timeout_owned:
+                cancellation._polyarb_timeout_decision = pending
+            elif pending is not None:
+                await self._candidate_fault.settle_inner_failure(pending)
             raise
         except QuoteCollectionIntegrityError as error:
             self._pending_latency_faults.pop(group_id, None)
@@ -495,6 +502,9 @@ class CandidateWatcher:
             )
             self.queue_incident_failure(group_id, error)
             return observation
+        finally:
+            self._pending_latency_faults.pop(group_id, None)
+            self._timeout_contexts.pop(group_id, None)
 
     async def _record_unavailable(
         self,
@@ -673,19 +683,41 @@ class CandidateWatcher:
             raise cancellation
         return fact
 
-    async def record_timeout(self, group_id: str) -> None:
+    async def record_timeout(
+        self,
+        group_id: str,
+        decision: CandidateBooksDecision | None = None,
+    ) -> None:
         """Persist an explicit unavailable transition for a bounded group timeout."""
-        await self._record_unavailable(
-            group_id=group_id,
-            before=None,
-            observed_at_ms=self._clock_ms(),
-            reason="candidate-group-timeout",
-        )
+        detached = decision or self._pending_latency_faults.pop(group_id, None)
+        self._timeout_contexts.pop(group_id, None)
         error = TimeoutError()
-        selected = self._pending_latency_faults.pop(group_id, None)
-        if selected is not None:
-            self._candidate_fault.tag_error(error, selected)
-        self.queue_incident_failure(group_id, error)
+        if detached is not None:
+            self._candidate_fault.tag_error(error, detached)
+        before_count = self._runtime.group_attempt_count(group_id)
+        try:
+            await self._record_unavailable(
+                group_id=group_id,
+                before=None,
+                observed_at_ms=self._clock_ms(),
+                reason="candidate-group-timeout",
+            )
+        except asyncio.CancelledError:
+            if self._runtime.group_attempt_count(group_id) > before_count:
+                self.queue_incident_failure(group_id, error)
+            raise
+        else:
+            self.queue_incident_failure(group_id, error)
+        finally:
+            self._pending_latency_faults.pop(group_id, None)
+            self._timeout_contexts.pop(group_id, None)
+
+    async def record_timeout_decision(
+        self,
+        group_id: str,
+        decision: CandidateBooksDecision | None,
+    ) -> None:
+        await self.record_timeout(group_id, decision)
 
     def prepare_timeout(
         self,
@@ -1051,7 +1083,9 @@ class CandidateWatcherScheduler:
                         and outcome.args
                         and outcome.args[0] is timeout_token
                     ):
-                        raise TimeoutError from None
+                        raise _CandidateGroupTimeout(
+                            getattr(outcome, "_polyarb_timeout_decision", None)
+                        ) from None
                     else:
                         raise outcome
                 except asyncio.CancelledError:
@@ -1071,11 +1105,18 @@ class CandidateWatcherScheduler:
                     except asyncio.CancelledError:
                         continue
             raise
-        except TimeoutError as error:
+        except _CandidateGroupTimeout as error:
             self._runtime.record_group_failure(group_id, error)
             if self._runtime.group_attempt_count(group_id) == before_count:
+                record_timeout = getattr(
+                    self._watcher,
+                    "record_timeout_decision",
+                    self._watcher.record_timeout,
+                )
                 await asyncio.wait_for(
-                    self._watcher.record_timeout(group_id),
+                    record_timeout(group_id, error.decision)
+                    if hasattr(self._watcher, "record_timeout_decision")
+                    else record_timeout(group_id),
                     timeout=self._terminal_write_budget_s,
                 )
             logger.warning(f"candidate group timed out group_id={group_id}")
