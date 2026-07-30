@@ -1331,6 +1331,76 @@ CREATE TABLE IF NOT EXISTS neg_risk_producer_heartbeats (
 CREATE INDEX IF NOT EXISTS idx_neg_risk_producer_heartbeat_component
   ON neg_risk_producer_heartbeats(component,id);
 
+-- Scoped upstream fault-control authority. These four tables contain only
+-- append-only runtime, authorization, intent, and hash-chained lifecycle facts.
+CREATE TABLE IF NOT EXISTS neg_risk_fault_runtime_starts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  component TEXT NOT NULL CHECK(component IN
+    ('candidate','discovery','reconciliation','notification')),
+  release_id TEXT NOT NULL CHECK(length(release_id) = 40),
+  machine_id TEXT NOT NULL CHECK(length(machine_id) BETWEEN 1 AND 128),
+  boot_id TEXT NOT NULL,
+  supervisor_run_id TEXT NOT NULL CHECK(length(supervisor_run_id) BETWEEN 1 AND 128),
+  attempt INTEGER NOT NULL CHECK(attempt >= 1),
+  started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+  identity_digest TEXT NOT NULL CHECK(length(identity_digest) = 64),
+  UNIQUE(component,release_id,machine_id,boot_id),
+  UNIQUE(component,supervisor_run_id,attempt)
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_fault_runtime_current
+  ON neg_risk_fault_runtime_starts(component,started_at_ms DESC,id DESC);
+
+CREATE TABLE IF NOT EXISTS neg_risk_fault_auth_nonces (
+  nonce_digest TEXT PRIMARY KEY CHECK(length(nonce_digest) = 64),
+  authorization_digest TEXT NOT NULL CHECK(length(authorization_digest) = 64),
+  accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_fault_intents (
+  fault_id TEXT PRIMARY KEY CHECK(length(fault_id) BETWEEN 1 AND 128),
+  kind TEXT NOT NULL,
+  call_class TEXT NOT NULL,
+  target_key TEXT NOT NULL CHECK(length(target_key) BETWEEN 1 AND 128),
+  parameters_json TEXT NOT NULL,
+  parameter_digest TEXT NOT NULL CHECK(length(parameter_digest) = 64),
+  ttl_ms INTEGER NOT NULL CHECK(ttl_ms BETWEEN 1000 AND 120000),
+  component TEXT NOT NULL,
+  release_id TEXT NOT NULL CHECK(length(release_id) = 40),
+  machine_id TEXT NOT NULL,
+  boot_id TEXT NOT NULL,
+  nonce_digest TEXT NOT NULL CHECK(length(nonce_digest) = 64),
+  authorization_digest TEXT NOT NULL CHECK(length(authorization_digest) = 64),
+  accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0),
+  status TEXT NOT NULL CHECK(status IN ('accepted','rejected')),
+  rejection_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_fault_intent_runtime
+  ON neg_risk_fault_intents(component,release_id,machine_id,boot_id,accepted_at_ms);
+
+CREATE TABLE IF NOT EXISTS neg_risk_fault_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fault_id TEXT NOT NULL REFERENCES neg_risk_fault_intents(fault_id),
+  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+  state TEXT NOT NULL CHECK(state IN
+    ('authorized','armed','injected','detected','contained','recovered',
+     'cleaned','verified','rejected','expired','abandoned','cleanup-failed',
+     'recovery-timeout','evidence-invalid','escalated')),
+  action TEXT CHECK(action IS NULL OR action = 'cleanup-requested'),
+  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+  evidence_json TEXT NOT NULL,
+  previous_hash TEXT NOT NULL CHECK(length(previous_hash) = 64),
+  event_hash TEXT NOT NULL CHECK(length(event_hash) = 64),
+  UNIQUE(fault_id,sequence),
+  UNIQUE(event_hash)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_neg_risk_fault_one_claim
+  ON neg_risk_fault_events(fault_id) WHERE state = 'armed';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_neg_risk_fault_one_injection
+  ON neg_risk_fault_events(fault_id) WHERE state = 'injected';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_neg_risk_fault_one_cleanup_terminal
+  ON neg_risk_fault_events(fault_id)
+  WHERE state IN ('cleaned','cleanup-failed');
+
 -- Phase 1.1 T2: append-only translation cache.
 -- Invariants:
 --  * never DELETE FROM (cumulative across snapshots)
