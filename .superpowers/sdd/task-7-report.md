@@ -1,121 +1,99 @@
-# Task 7 Implementer Report
+# Task 7 Remediation Implementer Report
 
-Status: IMPLEMENTATION GREEN — local qualification only
+Status: REMEDIATION GREEN — local qualification only
 
-## Scope
+The fresh-review findings are preserved unchanged in
+`.superpowers/sdd/task-7-review-findings.md`. No cloud, production, deploy,
+wallet, order, balance, signing, or real-money operation was performed.
 
-Task 7 completes the typed upstream-fault orchestrator, immutable evidence
-export, independent candidate/final evaluation, and evaluator-signed
-finalization protocol. It supports exactly:
+## Review resolution
 
-```text
-gamma-timeout gamma-partial gamma-malformed gamma-cursor
-clob-missing-leg clob-429 clob-latency telegram-failure
-```
+### C1 — ambiguous arm cleanup
 
-No cloud, production, deploy, wallet, order, or real-money operation occurred.
-Existing SQLite/disk/load/process/restart/deploy chaos primitives remain
-separate.
+- The orchestrator now generates the exact fault ID and durably publishes
+  `intent.json` before any network request.
+- Arm is inside the `BaseException` cleanup envelope.
+- Lost, malformed, oversized, and non-mapping arm responses resolve the exact
+  ID through status and issue idempotent cleanup. A failed status read still
+  attempts cleanup.
+- The original exception is re-raised unchanged when cleanup succeeds.
+  Original plus cleanup failures are retained in order in a
+  `BaseExceptionGroup`.
 
-## Implemented truth chain
+### C2 — authoritative source export
 
-1. `perception_chaos execute` performs fail-closed preflight before network
-   access, collects a green read-only baseline, resolves exact producer
-   release/machine/boot/component identity, writes an exclusive typed intent,
-   arms through the doubly signed HTTP control endpoint, and observes the
-   matching producer-owned injection plus one Incident or Gamma partial
-   coverage fact.
-2. Cleanup executes for every `BaseException`, including timeout, malformed
-   response, cancellation, `KeyboardInterrupt`, and `SystemExit`. A missing or
-   invalid cleanup receipt freezes the remaining matrix. Recovery must be a
-   newer component-specific business-writer receipt before an immutable
-   `evidence.json` is exported.
-3. The production transport is real HTTP, not a producer primitive shim.
-   Starlette + SQLite local integration tests exercise all eight fault kinds
-   through arm, observe, doubly signed cleanup, recovered state, and read-only
-   export. The CLI rejects missing identity/authority arguments before creating
-   a transport or touching the network.
-4. `export_fault_envelope` opens SQLite read-only and preserves the complete
-   canonical intent, runtime, lifecycle, hashes, recovery writer identity, and
-   projection state. Candidate evidence stops at `RECOVERED`; it cannot call
-   the evaluator or append `VERIFIED`.
-5. The independent candidate evaluator recomputes every intent/event/tail
-   digest and validates exact runtime, target, parameters, nonce, injection,
-   detection/coverage, cleanup/recovery order, writer family, open-state
-   counts, and integrity gates. A third, distinct evaluator secret signs only
-   a production-fault PASS candidate.
-6. The disabled-by-default finalizer validates double control authentication,
-   the independent evaluator signature, exact recovered tail/runtime/fault
-   binding, and fresh nonce before appending one `VERIFIED` event containing
-   only `verdict_id` and `verdict_digest`. Exact artifact retry is idempotent;
-   nonce replay and conflicting verdicts are audited and rejected.
-7. The final evaluator re-reads the post-finalization evidence, validates the
-   candidate signature without either control secret or HTTP mutation
-   capability, and requires the exact `VERIFIED` event/digest.
+- Production export is now an ordinary-plus-fault-HMAC authenticated,
+  read-only endpoint:
+  `/perception/faults/{fault_id}/export`.
+- One read-only SQLite transaction, under one 750 ms deadline, validates the
+  fault history/projection and derives Incident/coverage binding, the exact
+  component recovery-writer row and timestamp, open incidents, incomplete
+  publication, current quote freshness, reconciliation state,
+  cross-membership mismatches, and orphan collecting runs.
+- `export_fault_envelope()` no longer accepts caller-supplied integrity facts.
+- The production transport consumes only this endpoint; cached baseline values
+  and hard-coded qualification booleans/counts were removed.
+- Missing/tampered source rows fail export. A real Incident lifecycle and real
+  candidate-success writer integration proves the clean and dirty paths.
 
-## Schema and compatibility
+### C3 — evaluator independence
 
-- `FaultEventState.VERIFIED` has strict evidence validation.
-- Finalization authorization was added to the authority schema.
-- Existing Task 3 databases are migrated by rebuilding the auth table while
-  preserving row IDs, hashes, event history, and foreign keys. The migration
-  test starts with real legacy runtime/nonce/intent/event rows and requires a
-  clean `foreign_key_check`.
-- Settings require three non-empty, pairwise-distinct secrets when finalization
-  is enabled; all new capabilities remain disabled by default.
+- `cryptography>=48.0.0` is a direct runtime dependency.
+- Candidate verdicts use strict Ed25519 keys encoded as
+  `ed25519-v1:<kid>:<base64url-raw32>`.
+- Only the evaluator reads
+  `POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY`.
+- The finalizer setting contains only the pinned public key, validates its
+  version/format at startup, and verifies artifact version, kid, digest, and
+  signature.
+- The final evaluator deletes the private-key environment after candidate
+  creation and verifies with only the public key.
 
-## Operational entry points
+### H1-H4
+
+- The evaluator enforces exact envelope/event fields, evidence mode, typed
+  runtime identity, expected release, event-to-intent fault ID, canonical state
+  tail, call binding, detection source binding, and candidate/final transition
+  rules. The reviewer wrong-mode and fully rehashed cross-fault reproductions
+  are named FAIL cases.
+- Dummy ordinary/fault authorization CLI arguments were removed. Production
+  control secrets are validated before GET or filesystem mutation.
+- Server, orchestrator, and finalizer CLI share the versioned
+  `polyarb-fault-v2` HMAC message containing `sha256(body)`.
+- Cleanup double failures preserve the original first and still freeze the
+  matrix.
+- Exactly the eight typed upstream faults advertise `execute_supported`;
+  legacy producer primitives use `legacy_execute_supported`.
+
+### M1-M2
+
+- Artifact reads use one `O_NOFOLLOW` descriptor, regular-file and 1 MiB
+  checks, and stable `(dev, ino, size)` verification.
+- Artifact writes use a same-directory `0600` temporary file, file fsync,
+  hard-link no-replace publication, directory fsync, temporary unlink, and a
+  second directory fsync. A failed publication never exposes a partial final
+  artifact.
+- Finalizer submission transfers the exact candidate bytes as base64 plus
+  SHA-256; the server validates those bytes before parsing.
+- Cleanup clears process memory before the callback, records an actual
+  `memory_cleared_at_ms`, then persists `receipt_persisted_at_ms`. The transport
+  reads these durable fields instead of aliasing the event timestamp.
+
+## Verification
+
+- Focused Task 7 / authority / runtime / chaos suites: PASS.
+- Ruff on every changed source and test file: PASS.
+- Full repository: `3645 tests collected`; PASS with the repository's existing
+  expected xfail/skip and warnings.
+- `make planning-status`: 82 plans, no drift.
+
+## Operational boundary
+
+The upstream matrix remains disabled by default and was not run against any
+deployed environment. The existing Makefile entry points remain:
 
 ```text
 make evaluate-upstream-fault-candidate
 make finalize-upstream-fault
 make evaluate-upstream-fault-final
 ```
-
-The candidate evaluator runs without ordinary/fault control secrets. The
-finalizer runs without the evaluator secret. The final evaluator runs without
-ordinary/fault control secrets and with HTTP mutation calls replaced by
-fail-fast test sentinels.
-
-## TDD and branch-wide gate remediation
-
-RED tests were added before implementation for exact preflight, all eight CLI
-dispatches, cleanup across `BaseException`, duplicate injection, matrix freeze,
-read-only export, named evaluator tamper failures, signature separation,
-finalization replay/conflict behavior, and legacy-schema migration.
-
-Two pre-existing branch-wide test defects surfaced during the full gate and
-were repaired transparently:
-
-1. Commit `8ab8091` extracted producer construction from `main()` into
-   `_build_daemon_perception_workers` but left a source-introspection assertion
-   aimed at the old function boundary. The test now proves that `main()` calls
-   the production helper, the helper applies the exact candidate feature gate
-   and builder/runtime parameters, disabled mode does not call the builder,
-   and `main()` still starts, cancels, and exposes the runtime.
-2. The SIGSTOP reconciliation recovery test shared one two-second deadline
-   across startup, stall detection, and recovery. It passed 10/10 in isolation
-   with no residual child process but failed under full-suite load after the
-   shared budget was exhausted. It now uses independent condition-based
-   deadlines for each phase, preserves the per-phase bound, and retains the
-   existing `finally` SIGCONT/terminate/reap cleanup.
-
-## Verification
-
-```text
-Task 7 focused authority/control/orchestrator/evaluator suites: pass
-Task 2 daemon/quote/candidate/fault-runtime/supervisor related suites: pass
-Ruff on every changed Python file: pass
-git diff --check on Makefile/scripts/src/tests: pass
-make test-m1-perception:
-  2750 passed, 1 skipped, 1 xfailed, 0 failed in 468.20s
-make planning-status:
-  82 plans, no drift
-```
-
-## Remaining boundary
-
-No production qualification was attempted. Production use still requires an
-explicit operator-controlled run of Phase A, independent candidate evaluation,
-finalization, re-export, and final evaluation with the three authorities kept
-separate.

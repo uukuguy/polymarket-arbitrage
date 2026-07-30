@@ -65,6 +65,7 @@ from polyarb.http.perception import (
 from polyarb.http.perception_faults import (
     arm_fault,
     cleanup_fault,
+    export_fault,
     fault_runtime,
     fault_status,
     finalize_fault,
@@ -176,6 +177,11 @@ def create_app(
             methods=["POST"],
         ),
         Route("/control/perception/faults/arm", arm_fault, methods=["POST"]),
+        Route(
+            "/perception/faults/{fault_id}/export",
+            export_fault,
+            methods=["GET"],
+        ),
         Route(
             "/control/perception/faults/cleanup",
             cleanup_fault,

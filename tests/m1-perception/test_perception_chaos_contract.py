@@ -60,9 +60,6 @@ def test_every_fault_has_a_complete_readonly_plan(fault_id: str) -> None:
             "clob-429",
             "clob-latency",
             "telegram-failure",
-            "candidate-exit",
-            "discovery-exit",
-            "reconciliation-stall",
         }
     )
 
@@ -103,7 +100,10 @@ def test_candidate_exit_plan_matches_sigterm_supervisor_outcome() -> None:
     )
 
     assert result.returncode == 0
-    assert json.loads(result.stdout)["expected_incident_kind"] == "child-nonzero"
+    plan = json.loads(result.stdout)
+    assert plan["expected_incident_kind"] == "child-nonzero"
+    assert plan["execute_supported"] is False
+    assert plan["legacy_execute_supported"] is True
 
 
 def test_discovery_exit_plan_matches_sigterm_supervisor_outcome() -> None:
@@ -116,7 +116,10 @@ def test_discovery_exit_plan_matches_sigterm_supervisor_outcome() -> None:
     )
 
     assert result.returncode == 0
-    assert json.loads(result.stdout)["expected_incident_kind"] == "child-nonzero"
+    plan = json.loads(result.stdout)
+    assert plan["expected_incident_kind"] == "child-nonzero"
+    assert plan["execute_supported"] is False
+    assert plan["legacy_execute_supported"] is True
 
 
 def test_reconciliation_stall_uses_durable_early_detection_policy() -> None:
@@ -129,7 +132,8 @@ def test_reconciliation_stall_uses_durable_early_detection_policy() -> None:
     )
 
     plan = json.loads(result.stdout)
-    assert plan["execute_supported"] is True
+    assert plan["execute_supported"] is False
+    assert plan["legacy_execute_supported"] is True
     assert plan["expected_incident_kind"] == "child-stalled"
     assert Settings().producer_stall_detection_s <= 30
     assert (

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import hmac
 import json
@@ -14,6 +15,9 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+from polyarb.perception.fault_auth import fault_hmac_message
+from polyarb.safe_artifact import read_stable_bytes
 
 _DEFAULT_BASE_URL = "https://polyarb-l1.fly.dev"
 
@@ -57,15 +61,12 @@ def _signed_headers(path: str, body: bytes) -> dict[str, str]:
     ordinary = b"\n".join(
         (timestamp.encode(), ordinary_nonce.encode(), b"POST", path.encode(), body)
     )
-    fault = b"\n".join(
-        (
-            b"polyarb-fault-v1",
-            timestamp.encode(),
-            fault_nonce.encode(),
-            b"POST",
-            path.encode(),
-            body,
-        )
+    fault = fault_hmac_message(
+        timestamp=timestamp,
+        nonce=fault_nonce,
+        method="POST",
+        path=path,
+        body=body,
     )
     return {
         "Content-Type": "application/json",
@@ -98,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "arm":
         path = "/control/perception/faults/arm"
         try:
-            body = args.intent.read_bytes()
+            body = read_stable_bytes(args.intent)
         except OSError as exc:
             print(f"ERROR: cannot read intent: {exc}", file=sys.stderr)
             return 2
@@ -122,7 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         path = f"/control/perception/faults/{args.fault_id}/finalize"
         try:
-            artifact = json.loads(args.artifact.read_text())
+            artifact_bytes = read_stable_bytes(args.artifact)
+            artifact = json.loads(artifact_bytes)
             if not isinstance(artifact, dict):
                 raise ValueError("artifact root must be an object")
             runtime = artifact.get("runtime")
@@ -134,7 +136,10 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 raise ValueError("artifact release does not match expected release")
             body = json.dumps(
-                {"artifact": artifact},
+                {
+                    "artifact_b64": base64.b64encode(artifact_bytes).decode("ascii"),
+                    "artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+                },
                 sort_keys=True,
                 separators=(",", ":"),
                 ensure_ascii=False,

@@ -24,6 +24,7 @@ from polyarb.perception.fault_control import (
     FaultRecoveryReceipt,
     FaultRecoveryWriter,
     FaultRuntimeIdentity,
+    fault_call_binding_digest,
 )
 
 
@@ -248,10 +249,13 @@ class FaultRuntime:
 
         def persist_cleanup_receipt(_: str) -> None:
             nonlocal terminal_state
+            memory_cleared_at_ms = self._clock_ms()
+            persisted_at_ms = self._clock_ms()
             event = self._authority.relinquish_claim(
                 fault_id,
-                occurred_at_ms=self._clock_ms(),
+                occurred_at_ms=persisted_at_ms,
                 ownership=ownership,
+                memory_cleared_at_ms=memory_cleared_at_ms,
             )
             terminal_state = event.state
 
@@ -332,7 +336,22 @@ class FaultRuntime:
                     fault_id,
                     FaultEventState.INJECTED,
                     occurred_at_ms=occurred_at_ms,
-                    evidence={"call_id": call_id},
+                    evidence={
+                        "call_id": call_id,
+                        "call_binding_digest": fault_call_binding_digest(
+                            fault_id=fault_id,
+                            kind=active.intent.kind.value,
+                            call_class=active.intent.call_class.value,
+                            target_key=active.intent.target_key,
+                            runtime={
+                                "component": active.intent.runtime.component,
+                                "release_id": active.intent.runtime.release_id,
+                                "machine_id": active.intent.runtime.machine_id,
+                                "boot_id": str(active.intent.runtime.boot_id),
+                            },
+                            call_id=call_id,
+                        ),
+                    },
                     ownership=active.intent.ownership_capability,
                 ),
                 settled=install_receipt,

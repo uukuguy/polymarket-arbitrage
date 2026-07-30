@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import polyarb.safe_artifact as safe_artifact
 import scripts.perception_chaos as chaos
 import scripts.perception_fault_acceptance as acceptance
 
@@ -20,6 +21,12 @@ UPSTREAM_FAULTS = (
     "clob-latency",
     "telegram-failure",
 )
+EVALUATOR_PRIVATE_KEY = (
+    "ed25519-v1:test-key:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"
+)
+EVALUATOR_PUBLIC_KEY = (
+    "ed25519-v1:test-key:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w"
+)
 
 
 @pytest.mark.parametrize("fault_id", UPSTREAM_FAULTS)
@@ -27,10 +34,17 @@ def test_all_and_only_typed_upstream_faults_are_executable(fault_id: str) -> Non
     assert chaos.FAULTS[fault_id].execute_supported is True
 
 
+def test_exactly_eight_faults_advertise_typed_upstream_execution() -> None:
+    assert {
+        fault_id
+        for fault_id, spec in chaos.FAULTS.items()
+        if spec.execute_supported
+    } == set(UPSTREAM_FAULTS)
+
+
 @pytest.mark.parametrize(
     "missing",
-    ("release_id", "machine_id", "boot_id", "call_class", "target_key",
-         "ordinary_authorization", "fault_authorization"),
+    ("release_id", "machine_id", "boot_id", "call_class", "target_key"),
 )
 def test_preflight_rejects_missing_exact_identity_or_separate_authority(
     missing: str, tmp_path: Path
@@ -43,8 +57,6 @@ def test_preflight_rejects_missing_exact_identity_or_separate_authority(
         "call_class": "gamma-discovery-event-page",
         "target_key": "discovery",
         "parameters": {"delay_ms": 10},
-        "ordinary_authorization": "ordinary",
-        "fault_authorization": "fault",
         "evidence_dir": tmp_path / "new",
     }
     values[missing] = ""
@@ -71,13 +83,42 @@ def test_preflight_rejects_existing_evidence_dir_before_arm(tmp_path: Path) -> N
             call_class="gamma-discovery-event-page",
             target_key="discovery",
             parameters={"delay_ms": 10},
-            ordinary_authorization="ordinary",
-            fault_authorization="fault",
             evidence_dir=evidence_dir,
             transport=lambda *_: calls.append("arm"),
         )
 
     assert calls == []
+
+
+def test_production_secret_preflight_precedes_get_and_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("POLYARB_SCAN_SHARED_SECRET", raising=False)
+    monkeypatch.delenv("POLYARB_UPSTREAM_FAULT_CONTROL_SECRET", raising=False)
+    calls: list[str] = []
+    transport = chaos.UpstreamHttpTransport(
+        base_url="https://example.test",
+        expected_release="a" * 40,
+        timeout_s=1,
+        fetch_json=lambda *_args: (calls.append("GET"), 0.0),
+    )
+    evidence_dir = tmp_path / "must-not-exist"
+
+    with pytest.raises(chaos.AdapterFailedError, match="control-authority-unavailable"):
+        chaos.execute_upstream_fault(
+            fault_id="gamma-timeout",
+            release_id="a" * 40,
+            machine_id="machine-1",
+            boot_id="12345678-1234-4234-9234-123456789abc",
+            call_class="gamma-discovery-event-page",
+            target_key="discovery",
+            parameters={"delay_ms": 10},
+            evidence_dir=evidence_dir,
+            transport=transport,
+        )
+
+    assert calls == []
+    assert not evidence_dir.exists()
 
 
 @pytest.mark.parametrize(
@@ -95,7 +136,7 @@ def test_cleanup_runs_for_every_base_exception_without_swallowing(
 ) -> None:
     calls: list[str] = []
 
-    def transport(operation: str, _payload: object) -> dict[str, object]:
+    def transport(operation: str, payload: object) -> dict[str, object]:
         calls.append(operation)
         if operation == "baseline":
             return {"status": "green"}
@@ -107,9 +148,12 @@ def test_cleanup_runs_for_every_base_exception_without_swallowing(
                 "component": "discovery",
             }
         if operation == "arm":
+            assert isinstance(payload, dict)
+            intent = payload["intent"]
+            assert isinstance(intent, dict)
             return {
                 "status": "accepted",
-                "fault_id": "fault-1",
+                "fault_id": intent["fault_id"],
                 "kind": "gamma-timeout",
                 "call_class": "gamma-discovery-event-page",
                 "target_key": "discovery",
@@ -140,13 +184,116 @@ def test_cleanup_runs_for_every_base_exception_without_swallowing(
             call_class="gamma-discovery-event-page",
             target_key="discovery",
             parameters={"delay_ms": 10},
-            ordinary_authorization="ordinary",
-            fault_authorization="fault",
             evidence_dir=tmp_path / type(failure).__name__,
             transport=transport,
         )
 
     assert calls[-1] == "cleanup"
+
+
+def test_ambiguous_arm_status_failure_still_cleans_exact_durable_fault_id(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str | None]] = []
+    original = TimeoutError("arm response lost")
+
+    def transport(operation: str, payload: object) -> dict[str, object]:
+        fault_id = None
+        if isinstance(payload, dict):
+            raw_fault_id = payload.get("fault_id")
+            if isinstance(raw_fault_id, str):
+                fault_id = raw_fault_id
+            intent = payload.get("intent")
+            if isinstance(intent, dict) and isinstance(intent.get("fault_id"), str):
+                fault_id = intent["fault_id"]
+        calls.append((operation, fault_id))
+        if operation == "baseline":
+            return {"status": "green"}
+        if operation == "runtime":
+            return {
+                "release_id": "a" * 40,
+                "machine_id": "machine-1",
+                "boot_id": "12345678-1234-4234-9234-123456789abc",
+                "component": "discovery",
+            }
+        if operation == "arm":
+            raise original
+        if operation == "admission":
+            raise OSError("status unavailable")
+        if operation == "cleanup":
+            return {
+                "status": "cleaned",
+                "memory_cleared_at_ms": 20,
+                "receipt_persisted_at_ms": 21,
+            }
+        raise AssertionError(operation)
+
+    evidence_dir = tmp_path / "ambiguous"
+    with pytest.raises(TimeoutError) as caught:
+        chaos.execute_upstream_fault(
+            fault_id="gamma-timeout",
+            release_id="a" * 40,
+            machine_id="machine-1",
+            boot_id="12345678-1234-4234-9234-123456789abc",
+            call_class="gamma-discovery-event-page",
+            target_key="discovery",
+            parameters={"delay_ms": 10},
+            evidence_dir=evidence_dir,
+            transport=transport,
+        )
+
+    durable_id = json.loads((evidence_dir / "intent.json").read_text())["fault_id"]
+    assert caught.value is original
+    assert calls[-2:] == [("admission", durable_id), ("cleanup", durable_id)]
+
+
+def test_original_and_cleanup_failures_are_preserved_in_order(tmp_path: Path) -> None:
+    original = KeyboardInterrupt("observe interrupted")
+
+    def transport(operation: str, payload: object) -> dict[str, object]:
+        if operation == "baseline":
+            return {"status": "green"}
+        if operation == "runtime":
+            return {
+                "release_id": "a" * 40,
+                "machine_id": "machine-1",
+                "boot_id": "12345678-1234-4234-9234-123456789abc",
+                "component": "discovery",
+            }
+        if operation == "arm":
+            assert isinstance(payload, dict)
+            intent = payload["intent"]
+            assert isinstance(intent, dict)
+            return {
+                "status": "accepted",
+                "fault_id": intent["fault_id"],
+                "kind": "gamma-timeout",
+                "call_class": "gamma-discovery-event-page",
+                "target_key": "discovery",
+                "runtime": intent["runtime"],
+                "intent_digest": "d" * 64,
+            }
+        if operation == "observe":
+            raise original
+        if operation == "cleanup":
+            raise OSError("cleanup transport lost")
+        raise AssertionError(operation)
+
+    with pytest.raises(BaseExceptionGroup) as caught:
+        chaos.execute_upstream_fault(
+            fault_id="gamma-timeout",
+            release_id="a" * 40,
+            machine_id="machine-1",
+            boot_id="12345678-1234-4234-9234-123456789abc",
+            call_class="gamma-discovery-event-page",
+            target_key="discovery",
+            parameters={"delay_ms": 10},
+            evidence_dir=tmp_path / "grouped",
+            transport=transport,
+        )
+
+    assert caught.value.exceptions[0] is original
+    assert "cleanup-failed" in str(caught.value.exceptions[1])
 
 
 def test_cleanup_failed_freezes_remaining_matrix() -> None:
@@ -180,9 +327,12 @@ def test_duplicate_injection_is_rejected_after_cleanup(tmp_path: Path) -> None:
         if operation == "runtime":
             return runtime
         if operation == "arm":
+            assert isinstance(payload, dict)
+            intent = payload["intent"]
+            assert isinstance(intent, dict)
             return {
                 "status": "accepted",
-                "fault_id": "fault-1",
+                "fault_id": intent["fault_id"],
                 "kind": "clob-429",
                 "call_class": "clob-candidate-book-batch",
                 "target_key": "group-1",
@@ -219,8 +369,6 @@ def test_duplicate_injection_is_rejected_after_cleanup(tmp_path: Path) -> None:
             call_class="clob-candidate-book-batch",
             target_key="group-1",
             parameters={},
-            ordinary_authorization="ordinary",
-            fault_authorization="fault",
             evidence_dir=tmp_path / "duplicate",
             transport=transport,
         )
@@ -270,10 +418,6 @@ def test_cli_dispatches_each_upstream_fault_only_to_typed_http_transport(
             release,
             "--authorization",
             f"fault:{fault_id}:{release}",
-            "--ordinary-authorization",
-            "ordinary-approval",
-            "--fault-authorization",
-            "fault-approval",
             "--machine-id",
             "machine-1",
             "--boot-id",
@@ -326,7 +470,21 @@ def _production_envelope() -> dict[str, object]:
                 },
                 11,
             ),
-            ("injected", {"call_id": "call-1"}, 12),
+            (
+                "injected",
+                {
+                    "call_id": "call-1",
+                    "call_binding_digest": acceptance.fault_call_binding_digest(
+                        fault_id="fault-1",
+                        kind="clob-429",
+                        call_class="clob-candidate-book-batch",
+                        target_key="group-1",
+                        runtime=runtime,
+                        call_id="call-1",
+                    ),
+                },
+                12,
+            ),
             ("detected", {"incident_id": "incident-1"}, 13),
             ("contained", {"containment_id": "contained-1"}, 14),
             ("cleaned", {"cleanup_id": "cleanup-1"}, 15),
@@ -367,6 +525,14 @@ def _production_envelope() -> dict[str, object]:
             "component": "candidate",
             "occurred_at_ms": 16,
         },
+        "detection_receipt": {
+            "detection_id": "incident-1",
+            "kind": "clob-429",
+            "call_class": "clob-candidate-book-batch",
+            "target_key": "group-1",
+            "runtime": runtime,
+            "source_kind": "clob-429",
+        },
         "open_injection_fault_count": 0,
         "pending_verification_fault_count": 1,
         "source_projection_active": True,
@@ -405,10 +571,80 @@ def test_candidate_evaluator_names_every_tamper(mutator, reason: str) -> None:
     assert reason in verdict.reasons
 
 
+def test_candidate_rejects_wrong_envelope_mode_cross_fault_history_and_release() -> None:
+    wrong_mode = _production_envelope()
+    wrong_mode["mode"] = "final"
+    assert "evidence-mode-mismatch" in acceptance.evaluate_fault_envelope(
+        wrong_mode, mode="candidate"
+    ).reasons
+
+    cross_fault = _production_envelope()
+    previous = "0" * 64
+    for event in cross_fault["fault_history"]:
+        event["fault_id"] = "fault-other"
+        event["previous_hash"] = previous
+        event["event_hash"] = acceptance.canonical_digest(event)
+        previous = event["event_hash"]
+    cross_fault["fault_history_tail_hash"] = previous
+    verdict = acceptance.evaluate_fault_envelope(cross_fault, mode="candidate")
+    assert "event-fault-id-mismatch" in verdict.reasons
+
+    release = acceptance.evaluate_fault_envelope(
+        _production_envelope(),
+        mode="candidate",
+        expected_release="b" * 40,
+    )
+    assert "expected-release-mismatch" in release.reasons
+
+
+def test_candidate_binds_call_and_detection_to_exact_intent() -> None:
+    call = _production_envelope()
+    call["fault_history"][2]["evidence"]["call_binding_digest"] = "0" * 64
+    call["fault_history"][2]["event_hash"] = acceptance.canonical_digest(
+        call["fault_history"][2]
+    )
+    assert "injected-call-binding-mismatch" in acceptance.evaluate_fault_envelope(
+        call, mode="candidate"
+    ).reasons
+
+    detection = _production_envelope()
+    detection["detection_receipt"]["target_key"] = "group-other"
+    assert "detection-source-binding-mismatch" in acceptance.evaluate_fault_envelope(
+        detection, mode="candidate"
+    ).reasons
+
+
+def test_artifact_io_rejects_symlink_and_never_publishes_partial_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_text("{}")
+    linked = tmp_path / "linked.json"
+    linked.symlink_to(source)
+    with pytest.raises(OSError):
+        safe_artifact.read_stable_bytes(linked)
+
+    final = tmp_path / "final.json"
+    monkeypatch.setattr(
+        safe_artifact.os,
+        "link",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("publish failed")),
+    )
+    with pytest.raises(OSError, match="publish failed"):
+        safe_artifact.write_exclusive_bytes(final, b'{"complete":true}\n')
+    assert not final.exists()
+    assert list(tmp_path.glob(".final.json.tmp-*")) == []
+
+
 def test_candidate_verdict_is_signed_and_final_mode_requires_verified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET", "evaluator-only")
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", EVALUATOR_PRIVATE_KEY
+    )
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY", EVALUATOR_PUBLIC_KEY
+    )
     monkeypatch.delenv("POLYARB_SCAN_SHARED_SECRET", raising=False)
     monkeypatch.delenv("POLYARB_UPSTREAM_FAULT_CONTROL_SECRET", raising=False)
     evidence = _production_envelope()
@@ -429,11 +665,17 @@ def test_final_evaluator_has_only_readonly_evidence_and_evaluator_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET", "evaluator-only")
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", EVALUATOR_PRIVATE_KEY
+    )
     monkeypatch.delenv("POLYARB_SCAN_SHARED_SECRET", raising=False)
     monkeypatch.delenv("POLYARB_UPSTREAM_FAULT_CONTROL_SECRET", raising=False)
     candidate_source = _production_envelope()
     artifact = acceptance.build_candidate_artifact(candidate_source)
+    monkeypatch.delenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY")
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY", EVALUATOR_PUBLIC_KEY
+    )
     final_evidence = deepcopy(candidate_source)
     verified = {
         "fault_id": "fault-1",
@@ -450,6 +692,7 @@ def test_final_evaluator_has_only_readonly_evidence_and_evaluator_authority(
     verified["event_hash"] = acceptance.canonical_digest(verified)
     final_evidence["fault_history"].append(verified)
     final_evidence["fault_history_tail_hash"] = verified["event_hash"]
+    final_evidence["mode"] = "final"
     final_evidence["pending_verification_fault_count"] = 0
     final_evidence["source_projection_active"] = False
 

@@ -224,7 +224,9 @@ async def test_containment_write_failure_freezes_and_cannot_create_recovery() ->
     runtime = FaultRuntime(
         identity=IDENTITY,
         authority=authority,
-        clock_ms=iter((1_100, 1_101, 1_102, 1_103, 1_104)).__next__,
+        clock_ms=iter(
+            (1_100, 1_101, 1_102, 1_103, 1_104, 1_105)
+        ).__next__,
         monotonic=lambda: 10.0,
     )
     await runtime.sync_before_batch()
@@ -296,7 +298,9 @@ async def test_cleaned_fault_retains_owning_capability_for_exact_recovery() -> N
     runtime = FaultRuntime(
         identity=IDENTITY,
         authority=authority,
-        clock_ms=iter((1_100, 1_101, 1_102, 1_103, 1_104, 1_105)).__next__,
+        clock_ms=iter(
+            (1_100, 1_101, 1_102, 1_103, 1_104, 1_105, 1_106)
+        ).__next__,
         monotonic=lambda: 10.0,
     )
     await runtime.sync_before_batch()
@@ -768,6 +772,7 @@ async def test_reconciliation_recovery_rejects_corrupt_authority_checkpoint(
 @pytest.mark.asyncio
 async def test_cleanup_clears_memory_before_append() -> None:
     observations: list[bool] = []
+    receipts: list[dict[str, object]] = []
     authority = _Authority(_intent())
     runtime = FaultRuntime(
         identity=IDENTITY,
@@ -778,6 +783,7 @@ async def test_cleanup_clears_memory_before_append() -> None:
 
     def relinquish_claim(fault_id, **kwargs):
         observations.append(runtime.active_fault_id is None)
+        receipts.append(kwargs)
         authority.events.append((fault_id, FaultEventState.ABANDONED, kwargs))
         return SimpleNamespace(state=FaultEventState.ABANDONED)
 
@@ -787,6 +793,7 @@ async def test_cleanup_clears_memory_before_append() -> None:
     assert result.memory_cleared is True
     assert result.receipt_persisted is True
     assert observations == [True]
+    assert receipts[0]["memory_cleared_at_ms"] <= receipts[0]["occurred_at_ms"]
     assert authority.events[0][1] is FaultEventState.ABANDONED
 
 

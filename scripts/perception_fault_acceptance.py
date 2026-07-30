@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import hmac
 import json
 import math
 import os
@@ -15,6 +14,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID
+
+from polyarb.perception.evaluator_signing import (
+    SIGNATURE_VERSION,
+    load_private_key,
+    sign_digest,
+    verify_digest,
+)
+from polyarb.perception.fault_control import (
+    FaultRuntimeIdentity,
+    fault_call_binding_digest,
+)
+from polyarb.safe_artifact import read_stable_bytes, write_exclusive_bytes
 
 
 @dataclass(frozen=True)
@@ -43,6 +54,25 @@ _FAULT_CONTRACTS = {
     "clob-latency": ("candidate", "clob-candidate-book-batch"),
     "telegram-failure": ("notification", "telegram-opportunity-card"),
 }
+_ENVELOPE_FIELDS = frozenset(
+    {
+        "evidence_schema_version", "scope", "mode", "app_id", "release_id",
+        "machine_id", "boot_id", "fault_intent", "fault_intent_digest",
+        "target_digest", "parameter_digest", "nonce_digest", "fault_history",
+        "fault_history_tail_hash", "recovery_writer_receipt",
+        "open_injection_fault_count", "pending_verification_fault_count",
+        "source_projection_active", "open_incident_count",
+        "cross_membership_quote_batches", "partial_publication_count",
+        "orphan_collecting_runs", "freshness_gate", "reconciliation_gate",
+        "detection_receipt",
+    }
+)
+_EVENT_FIELDS = frozenset(
+    {
+        "fault_id", "sequence", "state", "action", "occurred_at_ms",
+        "evidence", "previous_hash", "event_hash",
+    }
+)
 
 
 def _event_digest(event: Mapping[str, Any]) -> str:
@@ -64,11 +94,16 @@ def evaluate_fault_envelope(
     *,
     mode: str,
     candidate_artifact: Mapping[str, Any] | None = None,
+    expected_release: str | None = None,
 ) -> QualificationVerdict:
     """Evaluate one immutable exported fault envelope without any mutation."""
     reasons: list[str] = []
+    if set(evidence) != _ENVELOPE_FIELDS:
+        reasons.append("invalid-envelope-fields")
     if evidence.get("scope") != "production-fault":
         reasons.append("scope-mismatch")
+    if evidence.get("mode") != mode:
+        reasons.append("evidence-mode-mismatch")
     if evidence.get("evidence_schema_version") != 2:
         reasons.append("invalid-evidence-schema-version")
     intent = evidence.get("fault_intent")
@@ -84,6 +119,17 @@ def evaluate_fault_envelope(
     for field in ("release_id", "machine_id", "boot_id"):
         if evidence.get(field) != runtime.get(field):
             reasons.append(f"runtime-{field.replace('_', '-')}-mismatch")
+    try:
+        FaultRuntimeIdentity(
+            component=runtime.get("component"),
+            release_id=runtime.get("release_id"),
+            machine_id=runtime.get("machine_id"),
+            boot_id=UUID(str(runtime.get("boot_id"))),
+        )
+    except (TypeError, ValueError):
+        reasons.append("runtime-identity-invalid")
+    if expected_release is not None and runtime.get("release_id") != expected_release:
+        reasons.append("expected-release-mismatch")
     if intent.get("nonce_digest") is None:
         reasons.append("missing-nonce-digest")
     if evidence.get("nonce_digest") != intent.get("nonce_digest"):
@@ -111,6 +157,10 @@ def evaluate_fault_envelope(
         if not isinstance(raw, Mapping):
             reasons.append("invalid-fault-history")
             continue
+        if set(raw) != _EVENT_FIELDS:
+            reasons.append("invalid-event-fields")
+        if raw.get("fault_id") != intent.get("fault_id"):
+            reasons.append("event-fault-id-mismatch")
         state = raw.get("state")
         if isinstance(state, str):
             state_counts[state] = state_counts.get(state, 0) + 1
@@ -136,6 +186,14 @@ def evaluate_fault_envelope(
         "cleaned",
         "recovered",
     )
+    exact_states = [
+        item.get("state")
+        for item in history
+        if isinstance(item, Mapping) and item.get("state") is not None
+    ]
+    required_states = list(expected_states) + (["verified"] if mode == "final" else [])
+    if exact_states != required_states:
+        reasons.append("lifecycle-state-machine-invalid")
     for state in expected_states:
         count = state_counts.get(state, 0)
         state_label = {
@@ -201,6 +259,59 @@ def evaluate_fault_envelope(
             or len(armed_evidence.get("ownership_digest", "")) != 64
         ):
             reasons.append("armed-runtime-digest-mismatch")
+    injected_events = [
+        item for item in history
+        if isinstance(item, Mapping) and item.get("state") == "injected"
+    ]
+    if len(injected_events) == 1:
+        injected_evidence = injected_events[0].get("evidence")
+        call_id = (
+            injected_evidence.get("call_id")
+            if isinstance(injected_evidence, Mapping)
+            else None
+        )
+        if (
+            not isinstance(call_id, str)
+            or set(injected_evidence) != {"call_id", "call_binding_digest"}
+            or injected_evidence.get("call_binding_digest")
+            != fault_call_binding_digest(
+                fault_id=str(intent.get("fault_id")),
+                kind=str(intent.get("kind")),
+                call_class=str(intent.get("call_class")),
+                target_key=str(intent.get("target_key")),
+                runtime=runtime,
+                call_id=call_id,
+            )
+        ):
+            reasons.append("injected-call-binding-mismatch")
+
+    detection_receipt = evidence.get("detection_receipt")
+    detected_evidence = (
+        detected_events[0].get("evidence") if len(detected_events) == 1 else None
+    )
+    detection_id = None
+    if isinstance(detected_evidence, Mapping):
+        detection_id = next(iter(detected_evidence.values()), None)
+    if (
+        not isinstance(detection_receipt, Mapping)
+        or set(detection_receipt)
+        != {
+            "detection_id", "kind", "call_class", "target_key", "runtime",
+            "source_kind",
+        }
+        or detection_receipt.get("detection_id") != detection_id
+        or detection_receipt.get("kind") != intent.get("kind")
+        or detection_receipt.get("call_class") != intent.get("call_class")
+        or detection_receipt.get("target_key") != intent.get("target_key")
+        or detection_receipt.get("runtime") != runtime
+        or detection_receipt.get("source_kind")
+        != (
+            "coverage:partial-or-rejected-page"
+            if intent.get("kind") == "gamma-partial"
+            else intent.get("kind")
+        )
+    ):
+        reasons.append("detection-source-binding-mismatch")
 
     component = runtime.get("component")
     receipt = evidence.get("recovery_writer_receipt")
@@ -264,22 +375,24 @@ def evaluate_fault_envelope(
         if not isinstance(candidate_artifact, Mapping):
             reasons.append("missing-candidate-verdict")
         else:
-            secret = os.getenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET", "")
+            public_key = os.getenv(
+                "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY", ""
+            )
             unsigned = {
                 key: value
                 for key, value in candidate_artifact.items()
                 if key not in {"artifact_digest", "signature"}
             }
             artifact_digest = canonical_digest(unsigned)
-            expected_signature = hmac.new(
-                secret.encode(), artifact_digest.encode(), hashlib.sha256
-            ).hexdigest()
             if (
-                not secret
+                not public_key
                 or candidate_artifact.get("artifact_digest") != artifact_digest
-                or not hmac.compare_digest(
-                    str(candidate_artifact.get("signature", "")),
-                    expected_signature,
+                or not verify_digest(
+                    public_key,
+                    kid=candidate_artifact.get("signature_kid"),
+                    version=candidate_artifact.get("signature_version"),
+                    digest=artifact_digest,
+                    signature=candidate_artifact.get("signature"),
                 )
             ):
                 reasons.append("candidate-verdict-signature-mismatch")
@@ -311,8 +424,10 @@ def build_candidate_artifact(evidence: Mapping[str, Any]) -> dict[str, object]:
     verdict = evaluate_fault_envelope(evidence, mode="candidate")
     if verdict.status != "PASS":
         raise ValueError("candidate-evidence-failed")
-    secret = os.getenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET", "")
-    if not secret:
+    private_key = os.getenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", ""
+    )
+    if not private_key:
         raise ValueError("evaluator-authority-unavailable")
     source_digest = canonical_digest(evidence)
     intent = evidence["fault_intent"]
@@ -328,11 +443,14 @@ def build_candidate_artifact(evidence: Mapping[str, Any]) -> dict[str, object]:
         "source_tail_hash": evidence["fault_history_tail_hash"],
     }
     unsigned["verdict_id"] = f"verdict-{canonical_digest(unsigned)[:32]}"
+    kid, _ = load_private_key(private_key)
+    unsigned["signature_version"] = SIGNATURE_VERSION
+    unsigned["signature_kid"] = kid
     artifact_digest = canonical_digest(unsigned)
     unsigned["artifact_digest"] = artifact_digest
-    unsigned["signature"] = hmac.new(
-        secret.encode(), artifact_digest.encode(), hashlib.sha256
-    ).hexdigest()
+    _signed_kid, signature = sign_digest(private_key, artifact_digest)
+    assert _signed_kid == kid
+    unsigned["signature"] = signature
     return unsigned
 
 
@@ -619,7 +737,7 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _read_evidence(path: Path) -> dict[str, Any]:
     payload = json.loads(
-        path.read_text(),
+        read_stable_bytes(path).decode("utf-8"),
         parse_constant=_reject_json_constant,
         object_pairs_hook=_reject_duplicate_keys,
     )
@@ -629,11 +747,7 @@ def _read_evidence(path: Path) -> dict[str, Any]:
 
 
 def _write_exclusive(path: Path, payload: Mapping[str, Any]) -> None:
-    serialized = _canonical_json(payload).decode() + "\n"
-    with path.open("x") as stream:
-        stream.write(serialized)
-        stream.flush()
-        os.fsync(stream.fileno())
+    write_exclusive_bytes(path, _canonical_json(payload) + b"\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -657,6 +771,12 @@ def main(argv: list[str] | None = None) -> int:
             if args.require_scope != "production-fault":
                 raise ValueError("fault mode requires production-fault scope")
             if args.fault_mode == "candidate":
+                if evaluate_fault_envelope(
+                    evidence,
+                    mode="candidate",
+                    expected_release=args.expected_release,
+                ).status != "PASS":
+                    raise ValueError("candidate-evidence-failed")
                 output = build_candidate_artifact(evidence)
                 _write_exclusive(args.output, output)
                 return 0
@@ -667,6 +787,7 @@ def main(argv: list[str] | None = None) -> int:
                 evidence,
                 mode="final",
                 candidate_artifact=candidate,
+                expected_release=args.expected_release,
             )
             output = {
                 "candidate_verdict_id": candidate.get("verdict_id"),

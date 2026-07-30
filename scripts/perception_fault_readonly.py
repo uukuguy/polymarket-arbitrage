@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -27,34 +28,51 @@ _READ_PATHS = (
     ("/perception/qualification", "qualification"),
 )
 _MAX_RESPONSE_BYTES = 1_048_576
-_FAULT_RECOVERY_TABLES = {
-    "candidate": "neg_risk_candidate_success_receipts",
-    "discovery": "neg_risk_discovery_batches",
-    "reconciliation": "neg_risk_reconciliation_windows",
-    "notification": "neg_risk_opportunity_notification_attempts",
-}
-
-
 def export_fault_envelope(
     db_path: Path,
     fault_id: str,
     *,
-    integrity: Mapping[str, object],
     now_ms: int,
+    freshness_limit_ms: int = 90_000,
 ) -> dict[str, object]:
-    """Export one bounded immutable envelope through SQLite read-only mode."""
-    snapshot = FaultAuthorityStore(db_path, read_only=True).read_snapshot(
-        now_ms=now_ms, fault_id=fault_id
-    )
-    if (
-        not snapshot.available
-        or snapshot.history is None
-        or not snapshot.history.valid
-        or snapshot.history.intent is None
-        or snapshot.projection is None
-    ):
-        raise ValueError("fault-authority-unavailable")
-    intent = snapshot.history.intent
+    """Derive one bounded envelope from one read-only SQLite transaction."""
+    authority = FaultAuthorityStore(db_path, read_only=True)
+    if type(freshness_limit_ms) is not int or freshness_limit_ms <= 0:
+        raise ValueError("invalid-freshness-limit")
+    deadline = time.monotonic() + 0.75
+    con = authority._connect(deadline)
+    try:
+        con.execute("BEGIN")
+        history = authority._validate_history_in_connection(con, fault_id)
+        projection = authority._project_fault_in_connection(
+            con,
+            fault_id,
+            now_ms=now_ms,
+            history=history,
+            deadline_monotonic=deadline,
+        )
+        if (
+            not history.valid
+            or history.intent is None
+            or not projection.available
+        ):
+            raise ValueError("fault-authority-unavailable")
+        intent = history.intent
+        source_facts = _fault_source_facts(
+            con,
+            authority=authority,
+            history=history,
+            projection=projection,
+            now_ms=now_ms,
+            freshness_limit_ms=freshness_limit_ms,
+        )
+        con.execute("COMMIT")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
     runtime = {
         "component": intent.runtime.component,
         "release_id": intent.runtime.release_id,
@@ -81,22 +99,16 @@ def export_fault_envelope(
             "previous_hash": event.previous_hash,
             "event_hash": event.event_hash,
         }
-        for event in snapshot.history.events
+        for event in history.events
     ]
-    recovered = next(
-        (
-            event for event in reversed(snapshot.history.events)
-            if event.state is not None and event.state.value == "recovered"
-        ),
-        None,
-    )
-    if recovered is None:
-        raise ValueError("fault-not-recovered")
-    recovery_id = recovered.evidence.get("recovery_id")
     envelope: dict[str, object] = {
         "evidence_schema_version": 2,
         "scope": "production-fault",
-        "mode": "candidate",
+        "mode": (
+            "final"
+            if projection.state is not None and projection.state.value == "verified"
+            else "candidate"
+        ),
         "app_id": "polyarb-l1",
         "release_id": runtime["release_id"],
         "machine_id": runtime["machine_id"],
@@ -108,25 +120,193 @@ def export_fault_envelope(
         "nonce_digest": intent.nonce_digest,
         "fault_history": events,
         "fault_history_tail_hash": events[-1]["event_hash"],
-        "recovery_writer_receipt": {
-            "table": _FAULT_RECOVERY_TABLES[intent.runtime.component],
-            "row_id": recovery_id,
-            "component": intent.runtime.component,
-            "occurred_at_ms": recovered.occurred_at_ms,
-        },
         "open_injection_fault_count": int(
-            snapshot.projection.state is not None
-            and snapshot.projection.state.value
+            projection.state is not None
+            and projection.state.value
             in {"authorized", "armed", "injected", "detected", "contained", "cleaned"}
         ),
         "pending_verification_fault_count": int(
-            snapshot.projection.state is not None
-            and snapshot.projection.state.value == "recovered"
+            projection.state is not None and projection.state.value == "recovered"
         ),
-        "source_projection_active": snapshot.projection.active,
+        "source_projection_active": projection.active,
     }
-    envelope.update(dict(integrity))
+    envelope.update(source_facts)
     return envelope
+
+
+def _fault_source_facts(
+    con: sqlite3.Connection,
+    *,
+    authority: FaultAuthorityStore,
+    history: Any,
+    projection: Any,
+    now_ms: int,
+    freshness_limit_ms: int,
+) -> dict[str, object]:
+    """Validate and derive every qualification fact inside the caller's snapshot."""
+    detected = next(
+        (
+            event
+            for event in history.events
+            if event.state is not None and event.state.value == "detected"
+        ),
+        None,
+    )
+    if detected is None:
+        raise ValueError("fault-detection-missing")
+    incident_id = detected.evidence.get("incident_id")
+    detection_id = incident_id or detected.evidence.get("coverage_id")
+    source_kind = "coverage:partial-or-rejected-page"
+    if incident_id is not None:
+        incident = con.execute(
+            "SELECT incident_id,kind FROM neg_risk_incident_events "
+            "WHERE incident_id=? ORDER BY sequence LIMIT 1",
+            (incident_id,),
+        ).fetchone()
+        if incident is None:
+            raise ValueError("fault-incident-source-missing")
+        source_kind = str(incident["kind"])
+
+    recovered = next(
+        (
+            event
+            for event in reversed(history.events)
+            if event.state is not None and event.state.value == "recovered"
+        ),
+        None,
+    )
+    if recovered is None:
+        raise ValueError("fault-not-recovered")
+    recovery_id = str(recovered.evidence.get("recovery_id", ""))
+    recovery_queries = {
+        "candidate": (
+            "neg_risk_candidate_success_receipts",
+            "SELECT id FROM neg_risk_candidate_success_receipts WHERE id=?",
+            "candidate-success-",
+        ),
+        "discovery": (
+            "neg_risk_discovery_batches",
+            "SELECT id FROM neg_risk_discovery_batches WHERE id=?",
+            "discovery-batch-",
+        ),
+        "reconciliation": (
+            "neg_risk_reconciliation_windows",
+            "SELECT id FROM neg_risk_reconciliation_windows WHERE id=?",
+            "reconciliation-window-",
+        ),
+        "notification": (
+            "neg_risk_opportunity_notification_attempts",
+            "SELECT id FROM neg_risk_opportunity_notification_attempts WHERE id=?",
+            "telegram-delivery-",
+        ),
+    }
+    table, query, prefix = recovery_queries[history.intent.runtime.component]
+    if not recovery_id.startswith(prefix):
+        raise ValueError("fault-recovery-source-invalid")
+    writer_id: object = recovery_id[len(prefix):]
+    if history.intent.runtime.component != "reconciliation":
+        try:
+            writer_id = int(str(writer_id))
+        except ValueError as exc:
+            raise ValueError("fault-recovery-source-invalid") from exc
+    writer_row = con.execute(query.replace("SELECT id", "SELECT *"), (writer_id,)).fetchone()
+    if writer_row is None:
+        raise ValueError("fault-recovery-source-missing")
+    occurred_column = {
+        "candidate": "observed_at_ms",
+        "discovery": "finished_at_ms",
+        "reconciliation": "checkpoint_at_ms",
+        "notification": "attempted_at_ms",
+    }[history.intent.runtime.component]
+
+    candidate_mismatches = int(
+        con.execute(
+            "SELECT COUNT(*) FROM neg_risk_candidate_success_receipts r "
+            "LEFT JOIN neg_risk_group_revisions g ON g.id=r.group_revision_row_id "
+            "LEFT JOIN neg_risk_group_quote_batches q "
+            "ON q.rowid=r.quote_batch_row_id AND q.id=r.quote_batch_id "
+            "LEFT JOIN neg_risk_candidate_watch_facts f "
+            "ON f.id=r.candidate_fact_row_id "
+            "WHERE g.id IS NULL OR q.rowid IS NULL OR f.id IS NULL "
+            "OR r.group_id!=g.group_id OR r.group_id!=q.group_id "
+            "OR r.group_id!=f.group_id OR r.membership_hash!=g.membership_hash "
+            "OR r.membership_hash!=q.membership_hash "
+            "OR r.membership_hash!=f.membership_hash "
+            "OR q.group_revision!=g.revision OR f.quote_batch_id!=q.id"
+        ).fetchone()[0]
+    )
+    legacy_mismatches = int(
+        con.execute(
+            "SELECT COUNT(DISTINCT l.quote_run_id) "
+            "FROM neg_risk_quote_run_legs l JOIN neg_risk_quotes q "
+            "ON q.quote_run_id=l.quote_run_id AND q.yes_token_id=l.yes_token_id "
+            "WHERE trim(l.event_id)='' OR trim(l.membership_hash)='' "
+            "OR trim(q.event_id)='' OR trim(q.membership_hash)='' "
+            "OR q.event_id!=l.event_id OR q.membership_hash!=l.membership_hash "
+            "OR q.neg_risk_market_id!=l.neg_risk_market_id "
+            "OR q.market_id!=l.market_id OR q.condition_id!=l.condition_id"
+        ).fetchone()[0]
+    )
+    freshness = con.execute(
+        "WITH current AS (SELECT r.* FROM neg_risk_group_revisions r JOIN "
+        "(SELECT group_id,MAX(revision) revision FROM neg_risk_group_revisions "
+        "GROUP BY group_id) c ON c.group_id=r.group_id AND c.revision=r.revision) "
+        "SELECT COUNT(*) AS candidates,SUM(CASE WHEN NOT EXISTS "
+        "(SELECT 1 FROM neg_risk_group_quote_batches q WHERE q.group_id=current.group_id "
+        "AND q.membership_hash=current.membership_hash AND q.status='complete' "
+        "AND q.quoted_at_ms BETWEEN ? AND ?) THEN 1 ELSE 0 END) AS missing "
+        "FROM current WHERE current.status='certified'",
+        (now_ms - freshness_limit_ms, now_ms),
+    ).fetchone()
+    latest_reconciliation = con.execute(
+        "SELECT status FROM neg_risk_reconciliation_windows "
+        "ORDER BY started_at_ms DESC,rowid DESC LIMIT 1"
+    ).fetchone()
+    return {
+        "detection_receipt": {
+            "detection_id": detection_id,
+            "kind": history.intent.kind.value,
+            "call_class": history.intent.call_class.value,
+            "target_key": history.intent.target_key,
+            "runtime": {
+                "component": history.intent.runtime.component,
+                "release_id": history.intent.runtime.release_id,
+                "machine_id": history.intent.runtime.machine_id,
+                "boot_id": str(history.intent.runtime.boot_id),
+            },
+            "source_kind": source_kind,
+        },
+        "recovery_writer_receipt": {
+            "table": table,
+            "row_id": writer_row["id"],
+            "component": history.intent.runtime.component,
+            "occurred_at_ms": int(writer_row[occurred_column]),
+        },
+        "open_incident_count": int(
+            con.execute(
+                "SELECT COUNT(*) FROM neg_risk_incident_open_authority"
+            ).fetchone()[0]
+        ),
+        "cross_membership_quote_batches": candidate_mismatches + legacy_mismatches,
+        "partial_publication_count": int(
+            con.execute(
+                "SELECT COUNT(*) FROM neg_risk_discovery_batches WHERE completed=0 "
+                "AND next_cursor IS requested_cursor"
+            ).fetchone()[0]
+        ),
+        "orphan_collecting_runs": int(
+            con.execute(
+                "SELECT COUNT(*) FROM neg_risk_quote_runs "
+                "WHERE status='collecting' AND lease_expires_at_ms<=?",
+                (now_ms,),
+            ).fetchone()[0]
+        ),
+        "freshness_gate": int(freshness["missing"] or 0) == 0,
+        "reconciliation_gate": (
+            latest_reconciliation is None
+            or latest_reconciliation["status"] in {"complete", "applied"}
+        ),
+    }
 
 
 def _mapping(value: object, reason: str) -> Mapping[str, Any]:

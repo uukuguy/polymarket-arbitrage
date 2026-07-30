@@ -35,6 +35,8 @@ import yaml
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from polyarb.perception.evaluator_signing import load_public_key
+
 
 class Settings(BaseSettings):
     gamma_url: str = "https://gamma-api.polymarket.com"
@@ -180,7 +182,7 @@ class Settings(BaseSettings):
     upstream_fault_control_enabled: bool = False
     upstream_fault_control_secret: SecretStr = SecretStr("")
     upstream_fault_finalizer_enabled: bool = False
-    upstream_fault_evaluator_secret: SecretStr = SecretStr("")
+    upstream_fault_evaluator_public_key: str = ""
     upstream_fault_control_max_ttl_ms: int = Field(
         default=120_000, ge=1_000, le=120_000
     )
@@ -397,18 +399,19 @@ class Settings(BaseSettings):
             and hmac.compare_digest(fault_secret, secret_val)
         ):
             raise ValueError("fault control secret must be distinct")
-        evaluator_secret = self.upstream_fault_evaluator_secret.get_secret_value()
+        evaluator_public_key = self.upstream_fault_evaluator_public_key
         if self.upstream_fault_finalizer_enabled and (
-            not self.upstream_fault_control_enabled or not evaluator_secret
+            not self.upstream_fault_control_enabled or not evaluator_public_key
         ):
             raise ValueError(
-                "fault evaluator secret and fault control must be enabled for finalization"
+                "fault evaluator public key and fault control must be enabled "
+                "for finalization"
             )
-        if self.upstream_fault_finalizer_enabled and (
-            hmac.compare_digest(evaluator_secret, secret_val)
-            or hmac.compare_digest(evaluator_secret, fault_secret)
-        ):
-            raise ValueError("fault evaluator secret must be distinct")
+        if self.upstream_fault_finalizer_enabled:
+            try:
+                load_public_key(evaluator_public_key)
+            except ValueError as exc:
+                raise ValueError("invalid fault evaluator public key") from exc
         if self.candidate_high_interval_s > self.candidate_quote_hard_stale_s:
             raise ValueError(
                 "candidate_high_interval_s must not exceed "

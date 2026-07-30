@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -16,6 +18,8 @@ from uuid import UUID
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from polyarb.perception.evaluator_signing import verify_digest
+from polyarb.perception.fault_auth import fault_hmac_message
 from polyarb.perception.fault_authority import FaultAuthorityStore
 from polyarb.perception.fault_control import (
     FaultAuthorization,
@@ -71,6 +75,8 @@ _VERDICT_FIELDS = frozenset(
         "verdict_id",
         "artifact_digest",
         "signature",
+        "signature_kid",
+        "signature_version",
     }
 )
 
@@ -106,15 +112,12 @@ def _fault_auth(request: Request, body: bytes) -> FaultAuthorization | None:
         or not received
     ):
         return None
-    canonical = b"\n".join(
-        (
-            b"polyarb-fault-v1",
-            timestamp.encode(),
-            nonce.encode(),
-            request.method.encode(),
-            request.url.path.encode(),
-            body,
-        )
+    canonical = fault_hmac_message(
+        timestamp=timestamp,
+        nonce=nonce,
+        method=request.method,
+        path=request.url.path,
+        body=body,
     )
     secret = request.app.state.settings.upstream_fault_control_secret.get_secret_value()
     expected = hmac.new(secret.encode(), canonical, hashlib.sha256).hexdigest()
@@ -126,6 +129,38 @@ def _fault_auth(request: Request, body: bytes) -> FaultAuthorization | None:
         nonce_digest=hashlib.sha256(nonce.encode()).hexdigest(),
         authorization_digest=hashlib.sha256(canonical).hexdigest(),
     )
+
+
+def _ordinary_read_auth(request: Request, body: bytes) -> bool:
+    timestamp = request.headers.get("X-Perception-Timestamp", "")
+    nonce = request.headers.get("X-Perception-Nonce", "")
+    received = request.headers.get("X-Signature", "")
+    try:
+        timestamp_s = int(timestamp)
+    except ValueError:
+        return False
+    if (
+        str(timestamp_s) != timestamp
+        or abs(int(time.time()) - timestamp_s) > _AUTH_SKEW_SECONDS
+        or not 16 <= len(nonce) <= 128
+        or not nonce.isalnum()
+    ):
+        return False
+    canonical = b"\n".join(
+        (
+            timestamp.encode(),
+            nonce.encode(),
+            request.method.encode(),
+            request.url.path.encode(),
+            body,
+        )
+    )
+    expected = hmac.new(
+        request.app.state.settings.scan_shared_secret.get_secret_value().encode(),
+        canonical,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(received.removeprefix("sha256="), expected)
 
 
 async def _bounded_body(request: Request) -> bytes | JSONResponse:
@@ -230,6 +265,43 @@ async def _read_snapshot(
         ),
         timeout=remaining,
     )
+
+
+async def export_fault(request: Request) -> JSONResponse:
+    """Return one authenticated, source-derived, read-only fault envelope."""
+    if not request.app.state.settings.upstream_fault_control_enabled:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "fault-control-disabled"},
+            status_code=409,
+        )
+    body = await _bounded_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    if (
+        body
+        or not _ordinary_read_auth(request, body)
+        or _fault_auth(request, body) is None
+    ):
+        return JSONResponse({"error": "invalid fault authentication"}, status_code=401)
+    try:
+        fault_id = normalize_fault_id(request.path_params["fault_id"])
+        from scripts.perception_fault_readonly import export_fault_envelope
+
+        envelope = await _run_blocking(
+            export_fault_envelope,
+            request.app.state.sqlite_store.db_path,
+            fault_id,
+            now_ms=int(time.time() * 1_000),
+            freshness_limit_ms=int(
+                request.app.state.settings.candidate_quote_hard_stale_s * 1_000
+            ),
+        )
+    except (KeyError, TypeError, ValueError, sqlite3.Error, TimeoutError):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "fault-export-unavailable"},
+            status_code=409,
+        )
+    return JSONResponse(envelope)
 
 
 async def _audit_invalid_request(
@@ -473,9 +545,25 @@ async def finalize_fault(request: Request) -> JSONResponse:
         return JSONResponse({"error": "invalid fault authentication"}, status_code=401)
     try:
         root = _json_no_duplicates(body)
-        if not isinstance(root, dict) or set(root) != {"artifact"}:
+        if not isinstance(root, dict) or set(root) != {
+            "artifact_b64", "artifact_sha256"
+        }:
             raise ValueError("invalid-fields")
-        artifact = root["artifact"]
+        if (
+            not isinstance(root["artifact_b64"], str)
+            or not isinstance(root["artifact_sha256"], str)
+        ):
+            raise ValueError("invalid-artifact-transfer")
+        artifact_bytes = base64.b64decode(
+            root["artifact_b64"], validate=True
+        )
+        if (
+            len(artifact_bytes) > _MAX_BODY_BYTES
+            or hashlib.sha256(artifact_bytes).hexdigest()
+            != root["artifact_sha256"]
+        ):
+            raise ValueError("invalid-artifact-transfer")
+        artifact = _json_no_duplicates(artifact_bytes)
         if not isinstance(artifact, dict) or set(artifact) != _VERDICT_FIELDS:
             raise ValueError("invalid-artifact-fields")
         path_fault_id = normalize_fault_id(request.path_params["fault_id"])
@@ -503,14 +591,15 @@ async def finalize_fault(request: Request) -> JSONResponse:
             if key not in {"artifact_digest", "signature"}
         }
         digest = canonical_digest(unsigned)
-        signature = hmac.new(
-            settings.upstream_fault_evaluator_secret.get_secret_value().encode(),
-            digest.encode(),
-            hashlib.sha256,
-        ).hexdigest()
         if (
             artifact["artifact_digest"] != digest
-            or not hmac.compare_digest(str(artifact["signature"]), signature)
+            or not verify_digest(
+                settings.upstream_fault_evaluator_public_key,
+                kid=artifact["signature_kid"],
+                version=artifact["signature_version"],
+                digest=digest,
+                signature=artifact["signature"],
+            )
             or not isinstance(artifact["source_evidence_sha256"], str)
             or re.fullmatch(
                 r"sha256:[0-9a-f]{64}", artifact["source_evidence_sha256"]
@@ -525,7 +614,7 @@ async def finalize_fault(request: Request) -> JSONResponse:
             or not isinstance(artifact["verdict_id"], str)
         ):
             raise ValueError("invalid-artifact-identity")
-    except (KeyError, TypeError, ValueError):
+    except (binascii.Error, KeyError, TypeError, ValueError):
         return JSONResponse({"error": "invalid finalizer request"}, status_code=400)
     try:
         event = await _run_mutation(

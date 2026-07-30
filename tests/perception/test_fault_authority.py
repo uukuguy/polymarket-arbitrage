@@ -26,7 +26,16 @@ from polyarb.perception.fault_control import (
     FaultIntentRequest,
     FaultKind,
     FaultRuntimeIdentity,
+    fault_call_binding_digest,
 )
+from polyarb.perception.incidents import IncidentManager
+from polyarb.perception.models import (
+    GroupLeg,
+    GroupQuoteBatch,
+    GroupQuoteLeg,
+    GroupRevision,
+)
+from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.storage.schemas import DDL
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -1139,18 +1148,61 @@ def test_lifecycle_hashes_validate_and_tampering_is_detected(
 def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
     store: FaultAuthorityStore, db_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    perception_store = OpportunityPerceptionStore(db_path)
+    perception_store.init_schema()
+    group = GroupRevision.certified(
+        group_id="group-1",
+        event_id="event-1",
+        revision=1,
+        started_at_ms=900,
+        observed_at_ms=1_000,
+        source_cursor="cursor-1",
+        legs=(
+            GroupLeg("market-1", "condition-1", "token-1", "one"),
+            GroupLeg("market-2", "condition-2", "token-2", "two"),
+        ),
+    )
+    perception_store.publish_group_revision(group)
     store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
     claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_200)
     assert claimed is not None
     ownership = claimed.ownership_capability
     store.append_event(
         "fault-1", FaultEventState.INJECTED, occurred_at_ms=1_300,
-        evidence={"call_id": "call-1"}, ownership=ownership,
+        evidence={
+            "call_id": "call-1",
+            "call_binding_digest": fault_call_binding_digest(
+                fault_id="fault-1",
+                kind=FaultKind.CLOB_LATENCY.value,
+                call_class=FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH.value,
+                target_key="group-1",
+                runtime={
+                    "component": RUNTIME.component,
+                    "release_id": RUNTIME.release_id,
+                    "machine_id": RUNTIME.machine_id,
+                    "boot_id": str(RUNTIME.boot_id),
+                },
+                call_id="call-1",
+            ),
+        },
+        ownership=ownership,
     )
+    incident_clock = [1_400]
+    manager = IncidentManager(
+        perception_store,
+        clock_ms=lambda: incident_clock[0],
+    )
+    incident = manager.detect("candidate:group-1", "clob-latency", {})
     store.append_event(
         "fault-1", FaultEventState.DETECTED, occurred_at_ms=1_400,
-        evidence={"incident_id": "incident-1"},
+        evidence={"incident_id": incident.id},
     )
+    incident_clock[0] = 1_450
+    manager.transition(incident.id, "classified", {})
+    incident_clock[0] = 1_500
+    manager.transition(incident.id, "contained", {})
+    incident_clock[0] = 1_550
+    manager.transition(incident.id, "recovering", {})
     store.append_event(
         "fault-1", FaultEventState.CONTAINED, occurred_at_ms=1_500,
         evidence={"containment_id": "containment-1"},
@@ -1159,9 +1211,50 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
         "fault-1", FaultEventState.CLEANED, occurred_at_ms=1_600,
         evidence={"cleanup_id": "cleanup-1"}, ownership=ownership,
     )
+    quote = GroupQuoteBatch.complete(
+        group_id=group.group_id,
+        membership_hash=group.membership_hash,
+        quote_batch_id="quote-recovery-1",
+        started_at_ms=1_610,
+        quoted_at_ms=1_650,
+        legs=tuple(
+            GroupQuoteLeg(
+                leg.yes_token_id,
+                group.membership_hash,
+                0.4,
+                10,
+                "executable",
+            )
+            for leg in group.legs
+        ),
+    )
+    perception_store.publish_candidate_success(
+        quote,
+        observed_at_ms=1_650,
+        last_result="watching",
+        reason=None,
+        bundle_cost=0.8,
+        gross_edge_bps=2_000,
+        max_bundle_size=10,
+        priority_class="high",
+        consecutive_failures=0,
+        effective_interval_s=15,
+        schedule_reason="recovered",
+        next_due_at_ms=20_000,
+    )
+    incident_clock[0] = 1_660
+    manager.transition(
+        incident.id,
+        "verified",
+        {
+            "quote_batch_id": quote.quote_batch_id,
+            "group_id": group.group_id,
+            "membership_hash": group.membership_hash,
+        },
+    )
     recovered = store.append_event(
         "fault-1", FaultEventState.RECOVERED, occurred_at_ms=1_700,
-        evidence={"recovery_id": "recovery-1"}, ownership=ownership,
+        evidence={"recovery_id": "candidate-success-1"}, ownership=ownership,
     )
     with sqlite3.connect(db_path) as con:
         before_export = con.total_changes
@@ -1178,21 +1271,18 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
         db_path,
         "fault-1",
         now_ms=1_750,
-        integrity={
-            "open_incident_count": 0,
-            "cross_membership_quote_batches": 0,
-            "partial_publication_count": 0,
-            "orphan_collecting_runs": 0,
-            "freshness_gate": True,
-            "reconciliation_gate": True,
-        },
     )
     exported_verdict = fault_acceptance.evaluate_fault_envelope(
         envelope, mode="candidate"
     )
     assert exported_verdict.reasons == ()
     monkeypatch.setenv(
-        "POLYARB_UPSTREAM_FAULT_EVALUATOR_SECRET", "evaluator-test-secret"
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY",
+        "ed25519-v1:test-key:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+    )
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY",
+        "ed25519-v1:test-key:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
     )
     artifact = fault_acceptance.build_candidate_artifact(envelope)
     with sqlite3.connect(db_path) as con:
@@ -1227,14 +1317,6 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
         db_path,
         "fault-1",
         now_ms=1_850,
-        integrity={
-            "open_incident_count": 0,
-            "cross_membership_quote_batches": 0,
-            "partial_publication_count": 0,
-            "orphan_collecting_runs": 0,
-            "freshness_gate": True,
-            "reconciliation_gate": True,
-        },
     )
     assert fault_acceptance.evaluate_fault_envelope(
         final_envelope, mode="final", candidate_artifact=artifact
@@ -1260,6 +1342,27 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
             auth=auth("1"),
             request_digest="2" * 64,
             occurred_at_ms=2_000,
+        )
+    IncidentManager(
+        perception_store,
+        clock_ms=lambda: 2_100,
+    ).detect("candidate:other", "clob-429", {})
+    dirty = fault_readonly.export_fault_envelope(
+        db_path,
+        "fault-1",
+        now_ms=2_200,
+    )
+    assert dirty["open_incident_count"] == 1
+    assert "open-incident" in fault_acceptance.evaluate_fault_envelope(
+        dirty, mode="final", candidate_artifact=artifact
+    ).reasons
+    with sqlite3.connect(db_path) as con:
+        con.execute("DELETE FROM neg_risk_candidate_success_receipts WHERE id=1")
+    with pytest.raises(ValueError, match="fault-recovery-source-missing"):
+        fault_readonly.export_fault_envelope(
+            db_path,
+            "fault-1",
+            now_ms=2_300,
         )
 
 

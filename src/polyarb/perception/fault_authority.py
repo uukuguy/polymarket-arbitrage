@@ -1543,6 +1543,7 @@ class FaultAuthorityStore:
         *,
         occurred_at_ms: int,
         ownership: FaultOwnershipCapability | None,
+        memory_cleared_at_ms: int | None = None,
     ) -> FaultEvent:
         """Persist the only lifecycle-valid terminal for a process-owned claim."""
         if self._read_only:
@@ -1581,7 +1582,17 @@ class FaultAuthorityStore:
                 if state is FaultEventState.EXPIRED
                 else {"reason": "process-relinquished"}
                 if state is FaultEventState.ABANDONED
-                else {"cleanup_id": secrets.token_hex(16)}
+                else {
+                    "cleanup_id": secrets.token_hex(16),
+                    **(
+                        {
+                            "memory_cleared_at_ms": str(memory_cleared_at_ms),
+                            "receipt_persisted_at_ms": str(occurred_at_ms),
+                        }
+                        if memory_cleared_at_ms is not None
+                        else {}
+                    ),
+                }
             )
             event = self._append_event_in_transaction(
                 con,

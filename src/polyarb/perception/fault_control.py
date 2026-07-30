@@ -144,6 +144,27 @@ def canonical_digest(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
+def fault_call_binding_digest(
+    *,
+    fault_id: str,
+    kind: str,
+    call_class: str,
+    target_key: str,
+    runtime: Mapping[str, object],
+    call_id: str,
+) -> str:
+    return canonical_digest(
+        {
+            "call_class": call_class,
+            "call_id": call_id,
+            "fault_id": fault_id,
+            "kind": kind,
+            "runtime": dict(runtime),
+            "target_key": target_key,
+        }
+    )
+
+
 def normalize_target(call_class: FaultCallClass, target_key: str) -> str:
     try:
         typed_class = FaultCallClass(call_class)
@@ -241,16 +262,21 @@ _EVIDENCE_ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
     "cleanup_id": _CLEANUP_ID_RE,
     "recovery_id": _RECOVERY_ID_RE,
     "verdict_id": _VERDICT_ID_RE,
+    "call_binding_digest": _DIGEST_RE,
+    "memory_cleared_at_ms": re.compile(r"(?:0|[1-9][0-9]{0,15})"),
+    "receipt_persisted_at_ms": re.compile(r"(?:0|[1-9][0-9]{0,15})"),
 }
 
 
 _EVIDENCE_KEYS: Mapping[FaultEventState, frozenset[str]] = {
     FaultEventState.AUTHORIZED: frozenset({"reason"}),
     FaultEventState.ARMED: frozenset({"runtime_identity_digest", "ownership_digest"}),
-    FaultEventState.INJECTED: frozenset({"call_id"}),
+    FaultEventState.INJECTED: frozenset({"call_id", "call_binding_digest"}),
     FaultEventState.DETECTED: frozenset({"incident_id", "coverage_id"}),
     FaultEventState.CONTAINED: frozenset({"containment_id"}),
-    FaultEventState.CLEANED: frozenset({"cleanup_id"}),
+    FaultEventState.CLEANED: frozenset(
+        {"cleanup_id", "memory_cleared_at_ms", "receipt_persisted_at_ms"}
+    ),
     FaultEventState.RECOVERED: frozenset({"recovery_id"}),
     FaultEventState.VERIFIED: frozenset({"verdict_id", "verdict_digest"}),
     FaultEventState.REJECTED: frozenset({"reason"}),
