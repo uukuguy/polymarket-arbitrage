@@ -134,30 +134,68 @@ def test_discovery_gamma_incident_requires_new_batch_to_verify(tmp_path) -> None
     assert store.open_incidents() == ()
 
 
-def test_gamma_incident_match_is_unique_exact_scope_kind_and_post_injection(
+def test_qualified_gamma_incident_receipt_binds_exact_call_id_at_same_ms(
     tmp_path,
 ) -> None:
     store = OpportunityPerceptionStore(tmp_path / "state.db")
     store.init_schema()
-    tracker = GammaBatchIncidents(store, scope="discovery")
-    incident = tracker.record_failure(httpx.ReadTimeout("slow"))
-    assert incident is not None
+    tracker = GammaBatchIncidents(
+        store,
+        scope="discovery",
+        clock_ms=lambda: 1_000,
+    )
+    error = httpx.ReadTimeout("qualified-gamma-timeout")
+    error._polyarb_fault_call_id = "call-qualified"
 
-    assert tracker.unique_match(
-        incident.id,
-        kind="gamma-timeout",
-        injected_at_ms=incident.occurred_at_ms,
+    receipt = tracker.record_qualified_failure(error)
+
+    assert receipt is not None
+    assert receipt.kind == "gamma-timeout"
+    assert receipt.fault_call_id == "call-qualified"
+    assert receipt.detection_sequence == 1
+    assert tracker.validate_qualified_receipt(receipt) is True
+    with store._connect() as con:
+        evidence = json.loads(
+            con.execute(
+                "SELECT evidence_json FROM neg_risk_incident_events "
+                "WHERE incident_id=? AND sequence=1",
+                (receipt.incident_id,),
+            ).fetchone()[0]
+        )
+    assert evidence["fault_call_id"] == "call-qualified"
+
+
+@pytest.mark.parametrize("existing_at_ms", [1_000, 999])
+def test_qualified_gamma_incident_rejects_same_ms_or_open_dedup_without_call_id(
+    tmp_path,
+    existing_at_ms: int,
+) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    organic = GammaBatchIncidents(
+        store,
+        scope="discovery",
+        clock_ms=lambda: existing_at_ms,
     )
-    assert not tracker.unique_match(
-        incident.id,
-        kind="gamma-malformed",
-        injected_at_ms=incident.occurred_at_ms,
+    assert organic.record_failure(httpx.ReadTimeout("organic-timeout")) is not None
+    qualified = GammaBatchIncidents(
+        store,
+        scope="discovery",
+        clock_ms=lambda: 1_000,
     )
-    assert not tracker.unique_match(
-        incident.id,
-        kind="gamma-timeout",
-        injected_at_ms=incident.occurred_at_ms + 1,
-    )
+    error = httpx.ReadTimeout("qualified-gamma-timeout")
+    error._polyarb_fault_call_id = "call-qualified"
+
+    receipt = qualified.record_qualified_failure(error)
+
+    assert receipt is None
+    with store._connect() as con:
+        detection_rows = con.execute(
+            "SELECT evidence_json FROM neg_risk_incident_events "
+            "WHERE scope='discovery' AND kind='gamma-timeout' AND sequence=1"
+        ).fetchall()
+    assert len(detection_rows) == 1
+    assert "fault_call_id" not in json.loads(detection_rows[0][0])
 
 
 @pytest.mark.asyncio
@@ -286,6 +324,11 @@ async def test_discovery_fault_chain_links_incident_then_cleans_before_recovery(
             self.pending_recovery_fault_id = fault_id
             return CleanupResult(True, True)
 
+        def make_recovery_receipt(
+            self, writer, *, writer_id, writer_occurred_at_ms
+        ):
+            return f"{writer.value}-{writer_id}"
+
         async def record_recovery(self, recovery_id):
             assert self.pending_recovery_fault_id == "fault-1"
             order.append(f"recovered:{recovery_id}")
@@ -305,6 +348,7 @@ async def test_discovery_fault_chain_links_incident_then_cleans_before_recovery(
                 error = httpx.ReadTimeout("qualified-gamma-timeout")
                 error._polyarb_fault_id = "fault-1"
                 error._polyarb_injected_at_ms = 0
+                error._polyarb_fault_call_id = "call-1"
                 raise error
             now_ms = int(time.time() * 1_000)
             store.publish_discovery_batch(

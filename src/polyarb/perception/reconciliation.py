@@ -16,9 +16,12 @@ from polyarb.perception.fault_adapters import (
     FaultingGammaPageClient,
     gamma_cursor_error,
     gamma_fault_id,
-    gamma_injected_at_ms,
 )
-from polyarb.perception.fault_control import FaultCallClass, FaultKind
+from polyarb.perception.fault_control import (
+    FaultCallClass,
+    FaultKind,
+    FaultRecoveryWriter,
+)
 from polyarb.perception.fault_runtime import (
     FaultRuntimeProtocol,
     PassThroughFaultRuntime,
@@ -245,9 +248,13 @@ class ReconciliationRunner:
                         )
                         successful_checkpoint = not result.failed
                         if successful_checkpoint:
-                            await self._fault_runtime.record_recovery(
-                                f"reconciliation-window-{result.window_id}"
+                            recovery = self._fault_runtime.make_recovery_receipt(
+                                FaultRecoveryWriter.RECONCILIATION_CHECKPOINT,
+                                writer_id=result.window_id,
+                                writer_occurred_at_ms=result.finished_at_ms,
                             )
+                            if recovery is not None:
+                                await self._fault_runtime.record_recovery(recovery)
                             await asyncio.to_thread(
                                 self._gamma_incidents.verify_reconciliation,
                                 result.window_id,
@@ -255,25 +262,28 @@ class ReconciliationRunner:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    incident = await asyncio.to_thread(
-                        self._gamma_incidents.record_failure,
-                        error,
-                    )
                     fault_id = gamma_fault_id(error)
-                    if incident is not None and fault_id is not None:
-                        kind = FaultKind(incident.kind)
-                        injected_at_ms = gamma_injected_at_ms(error)
-                        matches = await asyncio.to_thread(
-                            self._gamma_incidents.unique_match,
-                            incident.id,
-                            kind=incident.kind,
-                            injected_at_ms=injected_at_ms,
+                    if fault_id is None:
+                        await asyncio.to_thread(
+                            self._gamma_incidents.record_failure,
+                            error,
                         )
-                        if matches:
+                    else:
+                        receipt = await asyncio.to_thread(
+                            self._gamma_incidents.record_qualified_failure,
+                            error,
+                        )
+                        if (
+                            receipt is not None
+                            and await asyncio.to_thread(
+                                self._gamma_incidents.validate_qualified_receipt,
+                                receipt,
+                            )
+                        ):
                             await self._fault_runtime.link_detection(
                                 fault_id,
-                                kind=kind,
-                                detection_id=incident.id,
+                                kind=FaultKind(receipt.kind),
+                                detection_id=receipt.incident_id,
                             )
                         await self._fault_runtime.cleanup(
                             fault_id,

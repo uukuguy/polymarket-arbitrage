@@ -31,10 +31,12 @@ class _QualifiedCursor(str):
         *,
         fault_id: str,
         injected_at_ms: int,
+        call_id: str,
     ):
         value = super().__new__(cls, "qualified-gamma-cursor-mismatch")
         value.fault_id = fault_id
         value.injected_at_ms = injected_at_ms
+        value.call_id = call_id
         return value
 
 
@@ -119,13 +121,21 @@ class FaultingGammaPageClient:
             error = json.JSONDecodeError("qualified-gamma-malformed", "", 0)
             _tag_error(error, receipt)
             raise error
-        page = await self._fetch_real(cursor, limit)
+        try:
+            page = await self._fetch_real(cursor, limit)
+        except BaseException:
+            await self._settle_cleanup(
+                decision.fault_id,
+                "injected-transform-fetch-failed",
+            )
+            raise
         if decision.kind is FaultKind.GAMMA_CURSOR:
             return replace(
                 page,
                 requested_cursor=_QualifiedCursor(
                     fault_id=decision.fault_id,
                     injected_at_ms=receipt.occurred_at_ms,
+                    call_id=receipt.call_id,
                 ),
             )
         keep_events = decision.parameters["keep_events"]
@@ -143,6 +153,17 @@ class FaultingGammaPageClient:
             "partial-not-applicable",
         )
         return page
+
+    async def _settle_cleanup(self, fault_id: str, reason: str) -> None:
+        task = asyncio.create_task(self._runtime.cleanup(fault_id, reason))
+        while True:
+            try:
+                await asyncio.shield(task)
+                return
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                return
 
     async def _fetch_real(self, cursor: str | None, limit: int) -> EventPage:
         fetch = getattr(self._inner, "fetch_active_event_page")
@@ -203,12 +224,14 @@ def gamma_cursor_error(page: EventPage, message: str) -> ValueError:
     if isinstance(cursor, _QualifiedCursor):
         error._polyarb_fault_id = cursor.fault_id
         error._polyarb_injected_at_ms = cursor.injected_at_ms
+        error._polyarb_fault_call_id = cursor.call_id
     return error
 
 
 def _tag_error(error: BaseException, receipt: object) -> None:
     error._polyarb_fault_id = getattr(receipt, "fault_id", None)
     error._polyarb_injected_at_ms = getattr(receipt, "occurred_at_ms", None)
+    error._polyarb_fault_call_id = getattr(receipt, "call_id", None)
 
 
 __all__ = [

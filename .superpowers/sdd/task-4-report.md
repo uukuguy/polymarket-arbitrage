@@ -17,6 +17,10 @@ qualification harness work was performed.
 - Added deterministic timeout, malformed JSON, cursor-integrity, and partial
   coverage faults. Every pass-through path calls the real Gamma client exactly
   once.
+- If the real Gamma fetch fails after a transform fault was injected, the
+  adapter settles owning cleanup before re-raising the original, untagged
+  timeout, malformed-response, or cancellation error. The durable tail is
+  `ABANDONED`, never a stranded `INJECTED`.
 - Added redacted `PartialGammaPageError` evidence containing only original and
   kept counts, cursor digests, a fault ID, injection time, and a canonical
   coverage ID. The partial page is read from the real client but is rejected
@@ -24,14 +28,21 @@ qualification harness work was performed.
 - Added a strict `DETECTED` evidence union: exactly one `incident_id` or one
   `coverage-<sha256>` ID. Partial coverage uses the latter and creates no
   Gamma Incident.
-- Required an exact, unique, post-injection Incident authority match before
-  linking timeout, malformed, or cursor detection.
+- Bound timeout, malformed, and cursor Incident detection to the exact
+  `FaultInjectionReceipt.call_id`. A fresh detection event persists that
+  `fault_call_id`; same-millisecond organic incidents and pre-existing open
+  dedup incidents cannot be linked to the injected fault.
 - Wired owning-process cleanup before recovery and retained the opaque
   ownership capability internally only long enough to append the next
   component writer recovery receipt.
-- Bound recovery to the exact runtime's next Discovery batch or
-  Reconciliation window. Existing `GammaBatchIncidents` recovery rules and
-  verification semantics are unchanged.
+- Replaced string recovery IDs with a typed `FaultRecoveryReceipt`. Recovery is
+  appended atomically only after the authority verifies the exact fault, kind,
+  call class, component, current runtime, injection event, writer timestamp,
+  and real same-database writer row.
+- Discovery recovery requires the latest progressing Discovery batch.
+  Reconciliation recovery requires the exact window checkpoint plus its
+  compacted authority checkpoint; it does not depend on batch rows that the
+  store legitimately compacts after apply.
 
 ## Plan-versus-real-API correction
 
@@ -47,7 +58,8 @@ With coordinator approval, Task 4 therefore minimally extended
 - `record_injection(fault_id) -> FaultInjectionReceipt | None`;
 - `link_detection(fault_id, kind, detection_id) -> bool`;
 - `pending_recovery_fault_id`; and
-- `record_recovery(recovery_id) -> bool`.
+- `make_recovery_receipt(writer, writer_id, writer_occurred_at_ms)`; and
+- `record_recovery(receipt: FaultRecoveryReceipt) -> bool`.
 
 The capability never leaves the concrete runtime. Pass-through runtimes are
 no-op, normal calls perform no evidence I/O, and authority write failure marks
@@ -77,11 +89,24 @@ surface changed.
 7. Real-store GREEN: Discovery partial and Reconciliation cursor tests run
    real fault authority, real producer runners, real Incident authority, and
    real writer stores in one SQLite database.
+8. Review HIGH 1 RED/GREEN: six real-authority cases cover partial/cursor
+   transform faults followed by organic timeout, malformed-response, or
+   cancellation; all preserve the original error and terminate `ABANDONED`.
+9. Review HIGH 2 RED/GREEN: exact call-ID receipt tests cover legitimate
+   same-millisecond detection and reject both same-millisecond and older open
+   Incident dedup without the injected call ID.
+10. Review HIGH 3 RED/GREEN: typed recovery tests reject wrong fault, kind,
+    writer type, old/missing writer row, other runtime, and fabricated future
+    time. A detected-to-contained write failure freezes evidence, degrades the
+    runtime, cleans to `ABANDONED`, and cannot create recovery.
 
 ## Verification
 
-- Focused Task 4 plus Task 3 runtime/control and related
-  Discovery/Reconciliation suites: 346 tests passed.
+- Focused fault control/runtime/adapter/Incident suites: 120 tests passed.
+- Repository-wide `pytest -q` completed with one unrelated pre-existing wiring
+  failure in `tests/m1-perception/test_l1_quote_worker_wiring.py`: the untouched
+  `polyarb.daemon.main` source lacks
+  `settings.opportunity_first_watcher_enabled`.
 - Focused Ruff across every changed Python source/test: passed.
 - `git diff --check`: passed.
 - `make planning-status`: 82 plans, no drift.

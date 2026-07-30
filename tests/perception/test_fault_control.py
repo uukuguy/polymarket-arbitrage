@@ -13,6 +13,8 @@ from polyarb.perception.fault_control import (
     FaultEventState,
     FaultIntent,
     FaultKind,
+    FaultRecoveryReceipt,
+    FaultRecoveryWriter,
     FaultRuntimeIdentity,
     normalize_evidence,
     normalize_parameters,
@@ -328,6 +330,39 @@ def test_detected_evidence_requires_exactly_one_incident_or_coverage_id() -> Non
         normalize_evidence(
             FaultEventState.DETECTED,
             {"coverage_id": "coverage-not-a-digest"},
+        )
+
+
+def test_recovery_receipt_is_typed_and_redacted() -> None:
+    receipt = FaultRecoveryReceipt(
+        fault_id="fault-1",
+        kind=FaultKind.GAMMA_TIMEOUT,
+        call_class=FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
+        component="discovery",
+        runtime=FaultRuntimeIdentity(
+            component="discovery",
+            release_id="a" * 40,
+            machine_id="machine-1",
+            boot_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        ),
+        writer=FaultRecoveryWriter.DISCOVERY_BATCH,
+        writer_id=7,
+        writer_occurred_at_ms=1_200,
+    )
+
+    assert receipt.writer is FaultRecoveryWriter.DISCOVERY_BATCH
+    assert receipt.writer_id == 7
+    assert "url" not in repr(receipt).lower()
+    with pytest.raises(ValueError, match="invalid-recovery-receipt"):
+        FaultRecoveryReceipt(
+            fault_id="fault-1",
+            kind=FaultKind.GAMMA_TIMEOUT,
+            call_class=FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
+            component="discovery",
+            runtime=receipt.runtime,
+            writer=FaultRecoveryWriter.DISCOVERY_BATCH,
+            writer_id="7",
+            writer_occurred_at_ms=1_200,
         )
 
 

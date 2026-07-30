@@ -14,6 +14,7 @@ from polyarb.perception.discovery import DiscoveryRunner, DiscoveryWorker
 from polyarb.perception.fault_adapters import (
     FaultingGammaPageClient,
     PartialGammaPageError,
+    gamma_fault_id,
 )
 from polyarb.perception.fault_authority import FaultAuthorityStore
 from polyarb.perception.fault_control import (
@@ -380,7 +381,7 @@ async def test_real_partial_chain_persists_redacted_coverage_then_recovers(
         ),
         accepted_at_ms=1_001,
     ).accepted
-    wall = iter(range(1_100, 1_200))
+    wall = iter((*range(1_100, 1_106), *range(1_200, 1_300)))
     runtime = FaultRuntime(
         identity=identity,
         authority=authority,
@@ -494,6 +495,11 @@ async def test_timeout_cancellation_cleans_before_any_recovery_poll(tmp_path) ->
             self.active_fault_id = None
             return SimpleNamespace(memory_cleared=True, receipt_persisted=True)
 
+        def make_recovery_receipt(
+            self, writer, *, writer_id, writer_occurred_at_ms
+        ):
+            return f"{writer}:{writer_id}:{writer_occurred_at_ms}"
+
         async def record_recovery(self, recovery_id):
             order.append("recovered")
             return True
@@ -559,7 +565,12 @@ async def test_real_reconciliation_cursor_chain_recovers_on_new_checkpoint(
         ),
         accepted_at_ms=base_ms + 1,
     ).accepted
-    wall = iter(range(base_ms + 10, base_ms + 100))
+    wall = iter(
+        (
+            *range(base_ms + 10, base_ms + 16),
+            *range(base_ms + 100, base_ms + 200),
+        )
+    )
     runtime = FaultRuntime(
         identity=identity,
         authority=authority,
@@ -576,7 +587,7 @@ async def test_real_reconciliation_cursor_chain_recovers_on_new_checkpoint(
             if self.calls == 2:
                 await asyncio.sleep(0.01)
                 stop.set()
-            page_ms = int(time.time() * 1_000)
+            page_ms = base_ms + 50 + self.calls
             return EventPage(
                 events=(),
                 requested_cursor=cursor,
@@ -626,3 +637,110 @@ async def test_real_reconciliation_cursor_chain_recovers_on_new_checkpoint(
         for event in history.events
         if event.state.value == "injected"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "inner_error"),
+    [
+        (FaultKind.GAMMA_PARTIAL, httpx.ReadTimeout("organic-timeout")),
+        (
+            FaultKind.GAMMA_PARTIAL,
+            json.JSONDecodeError("organic-malformed", "", 0),
+        ),
+        (FaultKind.GAMMA_PARTIAL, asyncio.CancelledError()),
+        (FaultKind.GAMMA_CURSOR, httpx.ReadTimeout("organic-timeout")),
+        (
+            FaultKind.GAMMA_CURSOR,
+            json.JSONDecodeError("organic-malformed", "", 0),
+        ),
+        (FaultKind.GAMMA_CURSOR, asyncio.CancelledError()),
+    ],
+)
+async def test_transform_fault_organic_fetch_failure_abandons_injected_chain(
+    tmp_path,
+    kind: FaultKind,
+    inner_error: BaseException,
+) -> None:
+    component = (
+        "discovery"
+        if kind is FaultKind.GAMMA_PARTIAL
+        else "reconciliation"
+    )
+    call_class = (
+        FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE
+        if kind is FaultKind.GAMMA_PARTIAL
+        else FaultCallClass.GAMMA_RECONCILIATION_EVENT_PAGE
+    )
+    parameters = {"keep_events": 0} if kind is FaultKind.GAMMA_PARTIAL else {}
+    path = tmp_path / f"{component}.db"
+    store = OpportunityPerceptionStore(path)
+    store.init_schema()
+    identity = FaultRuntimeIdentity(
+        component=component,
+        release_id="a" * 40,
+        machine_id="machine-1",
+        boot_id=UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+    )
+    authority = FaultAuthorityStore(path)
+    authority.register_runtime_start(
+        identity,
+        supervisor_run_id="run-organic",
+        attempt=1,
+        started_at_ms=1_000,
+    )
+    assert authority.accept_intent(
+        FaultIntentRequest(
+            fault_id=f"fault-{component}",
+            kind=kind,
+            call_class=call_class,
+            target_key=component,
+            parameters=parameters,
+            ttl_ms=30_000,
+            runtime=identity,
+        ),
+        auth=FaultAuthorization(
+            nonce_digest="f" * 64,
+            authorization_digest="0" * 64,
+        ),
+        accepted_at_ms=1_001,
+    ).accepted
+    wall = iter(range(1_100, 1_200))
+    runtime = FaultRuntime(
+        identity=identity,
+        authority=authority,
+        clock_ms=wall.__next__,
+        monotonic=lambda: 10.0,
+    )
+    await runtime.sync_before_batch()
+
+    class FailingGamma:
+        calls = 0
+
+        async def fetch_active_event_page(self, cursor, limit):
+            self.calls += 1
+            raise inner_error
+
+    inner = FailingGamma()
+    client = FaultingGammaPageClient(
+        inner=inner,
+        runtime=runtime,
+        call_class=call_class,
+        target_key=component,
+    )
+
+    with pytest.raises(type(inner_error)) as caught:
+        await client.fetch_active_event_page(None, 100)
+
+    assert caught.value is inner_error
+    assert gamma_fault_id(caught.value) is None
+    assert inner.calls == 1
+    history = authority.validate_history(f"fault-{component}")
+    assert history.valid is True
+    assert [event.state.value for event in history.events] == [
+        "authorized",
+        "armed",
+        "injected",
+        "abandoned",
+    ]
+    assert runtime.active_fault_id is None

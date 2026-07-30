@@ -15,14 +15,18 @@ from uuid import UUID
 from polyarb.perception.fault_control import (
     FaultAuthoritySnapshot,
     FaultAuthorization,
+    FaultCallClass,
     FaultEvent,
     FaultEventAction,
     FaultEventState,
     FaultHistory,
     FaultIntent,
     FaultIntentRequest,
+    FaultKind,
     FaultOwnershipCapability,
     FaultProjection,
+    FaultRecoveryReceipt,
+    FaultRecoveryWriter,
     FaultRuntimeIdentity,
     IntentAdmission,
     canonical_digest,
@@ -1193,6 +1197,163 @@ class FaultAuthorityStore:
             raise
         finally:
             con.close()
+
+    def append_recovery_event(
+        self,
+        receipt: FaultRecoveryReceipt,
+        *,
+        injected_at_ms: int,
+        occurred_at_ms: int,
+        ownership: FaultOwnershipCapability | None,
+    ) -> FaultEvent | None:
+        """Append recovery only when the exact post-injection writer row exists."""
+        if self._read_only:
+            raise RuntimeError("fault-authority-read-only")
+        if not isinstance(receipt, FaultRecoveryReceipt):
+            return None
+        self._validate_time(injected_at_ms, "invalid-injected-at")
+        self._validate_time(occurred_at_ms, "invalid-occurred-at")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            history = self._validate_history_in_connection(con, receipt.fault_id)
+            if not history.valid or history.intent is None or not history.events:
+                raise ValueError("fault-history-invalid")
+            intent = history.intent
+            intent_row = con.execute(
+                "SELECT * FROM neg_risk_fault_intents WHERE fault_id=?",
+                (receipt.fault_id,),
+            ).fetchone()
+            assert intent_row is not None
+            self._require_ownership(con, intent_row, ownership)
+            tail = next(
+                (
+                    event.state
+                    for event in reversed(history.events)
+                    if event.state is not None
+                ),
+                None,
+            )
+            injected = tuple(
+                event
+                for event in history.events
+                if event.state is FaultEventState.INJECTED
+                and event.occurred_at_ms == injected_at_ms
+            )
+            current_runtime = self._current_runtime_in_connection(
+                con, receipt.component
+            )
+            if (
+                tail is not FaultEventState.CLEANED
+                or len(injected) != 1
+                or receipt.fault_id != intent.fault_id
+                or receipt.kind is not intent.kind
+                or receipt.call_class is not intent.call_class
+                or receipt.component != intent.runtime.component
+                or receipt.runtime != intent.runtime
+                or current_runtime != receipt.runtime
+                or receipt.writer_occurred_at_ms <= injected_at_ms
+                or receipt.writer_occurred_at_ms > occurred_at_ms
+            ):
+                con.execute("ROLLBACK")
+                return None
+
+            recovery_id = self._validated_recovery_writer_id(con, receipt)
+            if recovery_id is None:
+                con.execute("ROLLBACK")
+                return None
+            event = self._append_event_in_transaction(
+                con,
+                receipt.fault_id,
+                FaultEventState.RECOVERED,
+                occurred_at_ms=occurred_at_ms,
+                evidence={"recovery_id": recovery_id},
+            )
+            validated = self._validate_history_in_connection(con, receipt.fault_id)
+            if (
+                not validated.valid
+                or not validated.events
+                or validated.events[-1] != event
+            ):
+                raise ValueError("fault-recovery-invalid")
+            con.execute("COMMIT")
+            return event
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    @staticmethod
+    def _validated_recovery_writer_id(
+        con: sqlite3.Connection,
+        receipt: FaultRecoveryReceipt,
+    ) -> str | None:
+        if receipt.writer is FaultRecoveryWriter.DISCOVERY_BATCH:
+            if (
+                receipt.component != "discovery"
+                or receipt.call_class
+                is not FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE
+                or receipt.kind
+                not in {
+                    FaultKind.GAMMA_TIMEOUT,
+                    FaultKind.GAMMA_MALFORMED,
+                    FaultKind.GAMMA_PARTIAL,
+                }
+            ):
+                return None
+            row = con.execute(
+                "SELECT * FROM neg_risk_discovery_batches WHERE id=?",
+                (receipt.writer_id,),
+            ).fetchone()
+            latest_id = con.execute(
+                "SELECT MAX(id) FROM neg_risk_discovery_batches"
+            ).fetchone()[0]
+            if (
+                row is None
+                or row["id"] != latest_id
+                or row["finished_at_ms"] != receipt.writer_occurred_at_ms
+                or not (row["completed"] or row["next_cursor"] != row["requested_cursor"])
+            ):
+                return None
+            return f"discovery-batch-{row['id']}"
+
+        if (
+            receipt.writer
+            is not FaultRecoveryWriter.RECONCILIATION_CHECKPOINT
+            or receipt.component != "reconciliation"
+            or receipt.call_class
+            is not FaultCallClass.GAMMA_RECONCILIATION_EVENT_PAGE
+            or receipt.kind is not FaultKind.GAMMA_CURSOR
+        ):
+            return None
+        row = con.execute(
+            "SELECT * FROM neg_risk_reconciliation_windows WHERE id=?",
+            (receipt.writer_id,),
+        ).fetchone()
+        latest = con.execute(
+            "SELECT id FROM neg_risk_reconciliation_windows "
+            "ORDER BY started_at_ms DESC,rowid DESC LIMIT 1"
+        ).fetchone()
+        checkpoint = con.execute(
+            "SELECT through_sequence,compacted_batch_rows "
+            "FROM neg_risk_reconciliation_authority_checkpoints "
+            "WHERE window_id=?",
+            (receipt.writer_id,),
+        ).fetchone()
+        if (
+            row is None
+            or latest is None
+            or row["id"] != latest["id"]
+            or row["checkpoint_at_ms"] != receipt.writer_occurred_at_ms
+            or row["pages_completed"] < 1
+            or checkpoint is None
+            or checkpoint["through_sequence"] < row["pages_completed"]
+            or checkpoint["compacted_batch_rows"] < row["pages_completed"]
+        ):
+            return None
+        return f"reconciliation-window-{row['id']}"
 
     def relinquish_claim(
         self,

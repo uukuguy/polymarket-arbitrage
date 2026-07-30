@@ -63,6 +63,11 @@ class FaultKind(StrEnum):
     TELEGRAM_FAILURE = "telegram-failure"
 
 
+class FaultRecoveryWriter(StrEnum):
+    DISCOVERY_BATCH = "discovery-batch"
+    RECONCILIATION_CHECKPOINT = "reconciliation-checkpoint"
+
+
 class FaultEventState(StrEnum):
     AUTHORIZED = "authorized"
     ARMED = "armed"
@@ -327,6 +332,52 @@ class FaultRuntimeIdentity:
             raise ValueError("invalid-machine-id")
         if not isinstance(self.boot_id, UUID) or self.boot_id.version != 4:
             raise ValueError("invalid-boot-id")
+
+
+@dataclass(frozen=True, slots=True)
+class FaultRecoveryReceipt:
+    fault_id: str
+    kind: FaultKind
+    call_class: FaultCallClass
+    component: str
+    runtime: FaultRuntimeIdentity
+    writer: FaultRecoveryWriter
+    writer_id: int | str
+    writer_occurred_at_ms: int
+
+    def __post_init__(self) -> None:
+        try:
+            fault_id = normalize_fault_id(self.fault_id)
+            kind = FaultKind(self.kind)
+            call_class = FaultCallClass(self.call_class)
+            writer = FaultRecoveryWriter(self.writer)
+        except (TypeError, ValueError) as error:
+            raise ValueError("invalid-recovery-receipt") from error
+        if (
+            self.component not in _COMPONENTS
+            or not isinstance(self.runtime, FaultRuntimeIdentity)
+            or self.runtime.component != self.component
+            or isinstance(self.writer_occurred_at_ms, bool)
+            or not isinstance(self.writer_occurred_at_ms, int)
+            or self.writer_occurred_at_ms < 0
+        ):
+            raise ValueError("invalid-recovery-receipt")
+        if writer is FaultRecoveryWriter.DISCOVERY_BATCH:
+            if (
+                isinstance(self.writer_id, bool)
+                or not isinstance(self.writer_id, int)
+                or self.writer_id < 1
+            ):
+                raise ValueError("invalid-recovery-receipt")
+        elif (
+            not isinstance(self.writer_id, str)
+            or not _RECOVERY_ID_RE.fullmatch(self.writer_id)
+        ):
+            raise ValueError("invalid-recovery-receipt")
+        object.__setattr__(self, "fault_id", fault_id)
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "call_class", call_class)
+        object.__setattr__(self, "writer", writer)
 
 
 @dataclass(frozen=True, slots=True)

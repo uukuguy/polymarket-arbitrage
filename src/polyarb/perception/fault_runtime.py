@@ -17,8 +17,11 @@ from polyarb.perception.fault_control import (
     FaultController,
     FaultDecision,
     FaultEventState,
+    FaultIntent,
     FaultKind,
     FaultOwnershipCapability,
+    FaultRecoveryReceipt,
+    FaultRecoveryWriter,
     FaultRuntimeIdentity,
 )
 
@@ -36,6 +39,13 @@ class FaultInjectionReceipt:
     fault_id: str
     call_id: str
     occurred_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingRecovery:
+    intent: FaultIntent
+    ownership: FaultOwnershipCapability
+    injection: FaultInjectionReceipt
 
 
 class FaultRuntimeProtocol(Protocol):
@@ -66,7 +76,15 @@ class FaultRuntimeProtocol(Protocol):
         detection_id: str,
     ) -> bool: ...
 
-    async def record_recovery(self, recovery_id: str) -> bool: ...
+    def make_recovery_receipt(
+        self,
+        writer: FaultRecoveryWriter,
+        *,
+        writer_id: int | str,
+        writer_occurred_at_ms: int,
+    ) -> FaultRecoveryReceipt | None: ...
+
+    async def record_recovery(self, receipt: FaultRecoveryReceipt) -> bool: ...
 
 
 class FaultRuntime:
@@ -91,15 +109,16 @@ class FaultRuntime:
         self.degraded = False
         self._evidence_frozen = False
         self._injected_fault_id: str | None = None
-        self._pending_recovery: tuple[str, FaultOwnershipCapability] | None = None
+        self._pending_recovery: _PendingRecovery | None = None
+        self._last_injection: FaultInjectionReceipt | None = None
 
     @staticmethod
-    async def _settle_evidence_write(call) -> None:
+    async def _settle_evidence_write(call):
         task = asyncio.create_task(asyncio.to_thread(call))
         cancellation: asyncio.CancelledError | None = None
         while True:
             try:
-                await asyncio.shield(task)
+                result = await asyncio.shield(task)
                 break
             except asyncio.CancelledError as error:
                 cancellation = cancellation or error
@@ -110,6 +129,7 @@ class FaultRuntime:
                 raise
         if cancellation is not None:
             raise cancellation
+        return result
 
     @property
     def active_fault_id(self) -> str | None:
@@ -118,7 +138,11 @@ class FaultRuntime:
 
     @property
     def pending_recovery_fault_id(self) -> str | None:
-        return None if self._pending_recovery is None else self._pending_recovery[0]
+        return (
+            None
+            if self._pending_recovery is None
+            else self._pending_recovery.intent.fault_id
+        )
 
     async def sync_before_batch(self) -> None:
         """Claim at most one intent; store failure leaves controller unchanged."""
@@ -195,9 +219,19 @@ class FaultRuntime:
                 f"kind={type(error).__name__}"
             )
             return CleanupResult(True, False, degraded=True)
-        if terminal_state is FaultEventState.CLEANED and ownership is not None:
-            self._pending_recovery = (fault_id, ownership)
+        if (
+            terminal_state is FaultEventState.CLEANED
+            and ownership is not None
+            and self._last_injection is not None
+            and self._last_injection.fault_id == fault_id
+        ):
+            self._pending_recovery = _PendingRecovery(
+                intent=active.intent,
+                ownership=ownership,
+                injection=self._last_injection,
+            )
         self._injected_fault_id = None
+        self._last_injection = None
         return CleanupResult(
             True,
             True,
@@ -244,12 +278,14 @@ class FaultRuntime:
         except Exception as error:
             self._freeze_evidence(error)
             return None
-        self._injected_fault_id = fault_id
-        return FaultInjectionReceipt(
+        receipt = FaultInjectionReceipt(
             fault_id=fault_id,
             call_id=call_id,
             occurred_at_ms=occurred_at_ms,
         )
+        self._injected_fault_id = fault_id
+        self._last_injection = receipt
+        return receipt
 
     async def link_detection(
         self,
@@ -301,26 +337,59 @@ class FaultRuntime:
             return False
         return True
 
-    async def record_recovery(self, recovery_id: str) -> bool:
-        """Append one writer-owned recovery fact after successful cleanup."""
+    def make_recovery_receipt(
+        self,
+        writer: FaultRecoveryWriter,
+        *,
+        writer_id: int | str,
+        writer_occurred_at_ms: int,
+    ) -> FaultRecoveryReceipt | None:
         pending = self._pending_recovery
         if self._evidence_frozen or pending is None:
-            return False
-        fault_id, ownership = pending
+            return None
         try:
-            await self._settle_evidence_write(
-                lambda: self._authority.append_event(
-                    fault_id,
-                    FaultEventState.RECOVERED,
+            return FaultRecoveryReceipt(
+                fault_id=pending.intent.fault_id,
+                kind=pending.intent.kind,
+                call_class=pending.intent.call_class,
+                component=pending.intent.runtime.component,
+                runtime=pending.intent.runtime,
+                writer=writer,
+                writer_id=writer_id,
+                writer_occurred_at_ms=writer_occurred_at_ms,
+            )
+        except (TypeError, ValueError):
+            return None
+
+    async def record_recovery(self, receipt: FaultRecoveryReceipt) -> bool:
+        """Append one writer-owned recovery fact after successful cleanup."""
+        pending = self._pending_recovery
+        if (
+            self._evidence_frozen
+            or pending is None
+            or not isinstance(receipt, FaultRecoveryReceipt)
+            or receipt.fault_id != pending.intent.fault_id
+            or receipt.kind is not pending.intent.kind
+            or receipt.call_class is not pending.intent.call_class
+            or receipt.component != pending.intent.runtime.component
+            or receipt.runtime != pending.intent.runtime
+        ):
+            return False
+        try:
+            written = await self._settle_evidence_write(
+                lambda: self._authority.append_recovery_event(
+                    receipt,
+                    injected_at_ms=pending.injection.occurred_at_ms,
                     occurred_at_ms=self._clock_ms(),
-                    evidence={"recovery_id": recovery_id},
-                    ownership=ownership,
+                    ownership=pending.ownership,
                 )
             )
         except asyncio.CancelledError:
             raise
         except Exception as error:
             self._freeze_evidence(error)
+            return False
+        if written is None:
             return False
         self._pending_recovery = None
         return True
@@ -372,7 +441,16 @@ class PassThroughFaultRuntime:
     ) -> bool:
         return False
 
-    async def record_recovery(self, recovery_id: str) -> bool:
+    def make_recovery_receipt(
+        self,
+        writer: FaultRecoveryWriter,
+        *,
+        writer_id: int | str,
+        writer_occurred_at_ms: int,
+    ) -> FaultRecoveryReceipt | None:
+        return None
+
+    async def record_recovery(self, receipt: FaultRecoveryReceipt) -> bool:
         return False
 
 

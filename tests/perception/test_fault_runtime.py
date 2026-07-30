@@ -18,6 +18,8 @@ from polyarb.perception.fault_control import (
     FaultIntentRequest,
     FaultKind,
     FaultOwnershipCapability,
+    FaultRecoveryReceipt,
+    FaultRecoveryWriter,
     FaultRuntimeIdentity,
 )
 from polyarb.perception.fault_runtime import (
@@ -26,7 +28,10 @@ from polyarb.perception.fault_runtime import (
     PassThroughFaultRuntime,
     build_fault_runtime,
 )
-from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.store import (
+    DiscoveryAdmissionProof,
+    OpportunityPerceptionStore,
+)
 from polyarb.perception.worker_cli import _build_child_fault_runtime
 
 IDENTITY = FaultRuntimeIdentity(
@@ -74,6 +79,16 @@ class _Authority:
         )
         self.events.append((fault_id, state, kwargs))
         return SimpleNamespace(state=state)
+
+    def append_recovery_event(self, receipt, **kwargs):
+        self.events.append(
+            (
+                receipt.fault_id,
+                FaultEventState.RECOVERED,
+                {**kwargs, "evidence": {"recovery_id": str(receipt.writer_id)}},
+            )
+        )
+        return SimpleNamespace(state=FaultEventState.RECOVERED)
 
 
 @pytest.mark.asyncio
@@ -129,7 +144,7 @@ async def test_injection_and_incident_links_are_process_owned_and_ordered() -> N
     runtime = FaultRuntime(
         identity=IDENTITY,
         authority=authority,
-        clock_ms=iter((1_100, 1_101, 1_102, 1_103)).__next__,
+        clock_ms=iter((1_100, 1_101, 1_102, 1_103, 1_104)).__next__,
         monotonic=lambda: 10.0,
     )
     await runtime.sync_before_batch()
@@ -188,6 +203,60 @@ async def test_injection_receipt_failure_freezes_future_hot_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_containment_write_failure_freezes_and_cannot_create_recovery() -> None:
+    class ContainmentBrokenAuthority(_Authority):
+        def append_event(self, fault_id, state, **kwargs):
+            if state is FaultEventState.CONTAINED:
+                raise RuntimeError("containment-write-failed")
+            super().append_event(fault_id, state, **kwargs)
+
+    ownership = FaultOwnershipCapability(
+        fault_id="fault-1",
+        runtime=IDENTITY,
+        token="f" * 64,
+    )
+    authority = ContainmentBrokenAuthority(_intent(ownership=ownership))
+    runtime = FaultRuntime(
+        identity=IDENTITY,
+        authority=authority,
+        clock_ms=iter((1_100, 1_101, 1_102, 1_103, 1_104)).__next__,
+        monotonic=lambda: 10.0,
+    )
+    await runtime.sync_before_batch()
+    decision = runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1")
+    )
+    await runtime.record_injection(decision.fault_id)
+
+    assert (
+        await runtime.link_detection(
+            decision.fault_id,
+            kind=FaultKind.CLOB_429,
+            detection_id="incident-1",
+        )
+        is False
+    )
+    assert runtime.degraded is True
+    cleanup = await runtime.cleanup(decision.fault_id, "containment-failed")
+
+    assert cleanup.terminal_state is FaultEventState.ABANDONED
+    assert runtime.pending_recovery_fault_id is None
+    assert (
+        runtime.make_recovery_receipt(
+            FaultRecoveryWriter.DISCOVERY_BATCH,
+            writer_id=1,
+            writer_occurred_at_ms=1_200,
+        )
+        is None
+    )
+    assert [event[1] for event in authority.events] == [
+        FaultEventState.INJECTED,
+        FaultEventState.DETECTED,
+        FaultEventState.ABANDONED,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_pass_through_runtime_receipts_are_noop() -> None:
     runtime = PassThroughFaultRuntime(degraded=True)
 
@@ -201,7 +270,14 @@ async def test_pass_through_runtime_receipts_are_noop() -> None:
         is False
     )
     assert runtime.pending_recovery_fault_id is None
-    assert await runtime.record_recovery("discovery-batch-1") is False
+    assert (
+        runtime.make_recovery_receipt(
+            FaultRecoveryWriter.DISCOVERY_BATCH,
+            writer_id=1,
+            writer_occurred_at_ms=1_200,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -230,7 +306,13 @@ async def test_cleaned_fault_retains_owning_capability_for_exact_recovery() -> N
     )
 
     cleanup = await runtime.cleanup(decision.fault_id, "contained")
-    recovered = await runtime.record_recovery("candidate-batch-7")
+    receipt = runtime.make_recovery_receipt(
+        FaultRecoveryWriter.DISCOVERY_BATCH,
+        writer_id=7,
+        writer_occurred_at_ms=1_104,
+    )
+    assert receipt is not None
+    recovered = await runtime.record_recovery(receipt)
 
     assert cleanup.terminal_state is FaultEventState.CLEANED
     assert recovered is True
@@ -290,6 +372,202 @@ async def test_partial_detection_uses_coverage_evidence_not_incident_evidence() 
     )
     assert authority.events[1][2]["evidence"] == {
         "coverage_id": "coverage-" + "c" * 64
+    }
+
+
+@pytest.mark.asyncio
+async def test_recovery_requires_exact_real_discovery_writer_receipt(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "recovery.db"
+    store = OpportunityPerceptionStore(path)
+    store.init_schema()
+    proof = DiscoveryAdmissionProof(
+        effective_capacity=2,
+        candidate_max_wait_ms=60_000,
+        selection_budget_ms=6_000,
+        poll_interval_ms=1_000,
+        group_timeout_ms=10_000,
+        terminal_write_budget_ms=5_000,
+        high_burst_groups=1,
+        reserved_non_high_slots=2,
+    )
+    store.configure_discovery_admission(proof, now_ms=0)
+    old_batch_id, _ = store.publish_discovery_batch(
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=900,
+        finished_at_ms=900,
+        page_event_count=0,
+        candidates=(),
+        admission_proof=proof,
+    )
+    identity = FaultRuntimeIdentity(
+        component="discovery",
+        release_id="a" * 40,
+        machine_id="machine-1",
+        boot_id=UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+    )
+    authority = FaultAuthorityStore(path)
+    authority.register_runtime_start(
+        identity,
+        supervisor_run_id="run-recovery",
+        attempt=1,
+        started_at_ms=1_000,
+    )
+    admission = authority.accept_intent(
+        FaultIntentRequest(
+            fault_id="fault-recovery",
+            kind=FaultKind.GAMMA_TIMEOUT,
+            call_class=FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
+            target_key="discovery",
+            parameters={"delay_ms": 1},
+            ttl_ms=30_000,
+            runtime=identity,
+        ),
+        auth=FaultAuthorization(
+            nonce_digest="1" * 64,
+            authorization_digest="2" * 64,
+        ),
+        accepted_at_ms=1_001,
+    )
+    assert admission.accepted
+    wall = [1_100]
+    runtime = FaultRuntime(
+        identity=identity,
+        authority=authority,
+        clock_ms=lambda: wall[0],
+        monotonic=lambda: 10.0,
+    )
+    await runtime.sync_before_batch()
+    decision = runtime.consume(
+        FaultCall(FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE, "discovery")
+    )
+    await runtime.record_injection(decision.fault_id)
+    assert await runtime.link_detection(
+        decision.fault_id,
+        kind=FaultKind.GAMMA_TIMEOUT,
+        detection_id="incident-recovery",
+    )
+    cleanup = await runtime.cleanup(decision.fault_id, "contained")
+    assert cleanup.terminal_state is FaultEventState.CLEANED
+    good_batch_id, _ = store.publish_discovery_batch(
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        started_at_ms=1_200,
+        finished_at_ms=1_200,
+        page_event_count=0,
+        candidates=(),
+        admission_proof=proof,
+    )
+    wall[0] = 1_199
+    correct = FaultRecoveryReceipt(
+        fault_id="fault-recovery",
+        kind=FaultKind.GAMMA_TIMEOUT,
+        call_class=FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
+        component="discovery",
+        runtime=identity,
+        writer=FaultRecoveryWriter.DISCOVERY_BATCH,
+        writer_id=good_batch_id,
+        writer_occurred_at_ms=1_200,
+    )
+    assert await runtime.record_recovery(correct) is False
+    assert authority.validate_history("fault-recovery").events[-1].state is (
+        FaultEventState.CLEANED
+    )
+    wall[0] = 1_300
+    other_runtime = FaultRuntimeIdentity(
+        component="discovery",
+        release_id="a" * 40,
+        machine_id="other-machine",
+        boot_id=UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+    )
+    rejected = (
+        FaultRecoveryReceipt(
+            fault_id="fault-other",
+            kind=correct.kind,
+            call_class=correct.call_class,
+            component=correct.component,
+            runtime=correct.runtime,
+            writer=correct.writer,
+            writer_id=correct.writer_id,
+            writer_occurred_at_ms=correct.writer_occurred_at_ms,
+        ),
+        FaultRecoveryReceipt(
+            fault_id=correct.fault_id,
+            kind=FaultKind.GAMMA_PARTIAL,
+            call_class=correct.call_class,
+            component=correct.component,
+            runtime=correct.runtime,
+            writer=correct.writer,
+            writer_id=correct.writer_id,
+            writer_occurred_at_ms=correct.writer_occurred_at_ms,
+        ),
+        FaultRecoveryReceipt(
+            fault_id=correct.fault_id,
+            kind=correct.kind,
+            call_class=correct.call_class,
+            component=correct.component,
+            runtime=correct.runtime,
+            writer=FaultRecoveryWriter.RECONCILIATION_CHECKPOINT,
+            writer_id="window-other",
+            writer_occurred_at_ms=correct.writer_occurred_at_ms,
+        ),
+        FaultRecoveryReceipt(
+            fault_id=correct.fault_id,
+            kind=correct.kind,
+            call_class=correct.call_class,
+            component=correct.component,
+            runtime=correct.runtime,
+            writer=correct.writer,
+            writer_id=old_batch_id,
+            writer_occurred_at_ms=900,
+        ),
+        FaultRecoveryReceipt(
+            fault_id=correct.fault_id,
+            kind=correct.kind,
+            call_class=correct.call_class,
+            component=correct.component,
+            runtime=correct.runtime,
+            writer=correct.writer,
+            writer_id=999_999,
+            writer_occurred_at_ms=correct.writer_occurred_at_ms,
+        ),
+        FaultRecoveryReceipt(
+            fault_id=correct.fault_id,
+            kind=correct.kind,
+            call_class=correct.call_class,
+            component=correct.component,
+            runtime=other_runtime,
+            writer=correct.writer,
+            writer_id=correct.writer_id,
+            writer_occurred_at_ms=correct.writer_occurred_at_ms,
+        ),
+        FaultRecoveryReceipt(
+            fault_id=correct.fault_id,
+            kind=correct.kind,
+            call_class=correct.call_class,
+            component=correct.component,
+            runtime=correct.runtime,
+            writer=correct.writer,
+            writer_id=correct.writer_id,
+            writer_occurred_at_ms=9_999,
+        ),
+    )
+
+    for receipt in rejected:
+        assert await runtime.record_recovery(receipt) is False
+        assert authority.validate_history("fault-recovery").events[-1].state is (
+            FaultEventState.CLEANED
+        )
+
+    assert await runtime.record_recovery(correct) is True
+    history = authority.validate_history("fault-recovery")
+    assert history.events[-1].state is FaultEventState.RECOVERED
+    assert history.events[-1].evidence == {
+        "recovery_id": f"discovery-batch-{good_batch_id}"
     }
 
 
