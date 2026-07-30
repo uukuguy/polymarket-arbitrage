@@ -67,6 +67,13 @@ Task 1 review hardening:
 - GREEN: 65 focused model/authority tests pass after the fixes.
 - Existing `test_store.py` and observation formatter/scanner schema regressions
   pass with the new hash columns and append-only triggers.
+- Second review hardening makes any ordinary control-infrastructure
+  `Exception` pass through exactly once without swallowing cancellation or
+  other `BaseException`; replaces the generic safe-value regex with dedicated
+  fault, supervisor, target, and lifecycle-evidence contracts plus enumerated
+  reasons; and projects any corrupt current-runtime accepted chain as
+  unavailable `evidence-invalid`.
+- Second review GREEN: 99 focused model/authority tests pass.
 
 Remaining plan work:
 

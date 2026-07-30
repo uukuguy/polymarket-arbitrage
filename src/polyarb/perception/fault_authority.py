@@ -25,7 +25,7 @@ from polyarb.perception.fault_control import (
     canonical_digest,
     canonical_json,
     normalize_evidence,
-    normalize_identifier,
+    normalize_supervisor_run_id,
 )
 
 _ZERO_HASH = "0" * 64
@@ -253,10 +253,7 @@ class FaultAuthorityStore:
         if not isinstance(identity, FaultRuntimeIdentity):
             raise ValueError("invalid-runtime")
         try:
-            supervisor_run_id = normalize_identifier(
-                supervisor_run_id,
-                reason="invalid-supervisor-run-id",
-            )
+            supervisor_run_id = normalize_supervisor_run_id(supervisor_run_id)
         except ValueError as exc:
             raise ValueError("invalid-supervisor-run-id") from exc
         if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
@@ -891,21 +888,52 @@ class FaultAuthorityStore:
             con = self._connect()
             try:
                 accepted_rows = con.execute(
-                    "SELECT fault_id FROM neg_risk_fault_intents WHERE status='accepted'"
+                    "SELECT fault_id,component,release_id,machine_id,boot_id "
+                    "FROM neg_risk_fault_intents WHERE status='accepted'"
                 ).fetchall()
             finally:
                 con.close()
             active_count = 0
             for accepted in accepted_rows:
+                try:
+                    accepted_runtime = FaultRuntimeIdentity(
+                        component=accepted["component"],
+                        release_id=accepted["release_id"],
+                        machine_id=accepted["machine_id"],
+                        boot_id=UUID(accepted["boot_id"]),
+                    )
+                except (ValueError, TypeError):
+                    return FaultProjection(
+                        fault_id,
+                        False,
+                        False,
+                        FaultEventState.EVIDENCE_INVALID,
+                        "evidence-invalid",
+                        history.intent,
+                    )
+                current_runtime = self.current_runtime(accepted_runtime.component)
+                if current_runtime is None:
+                    return FaultProjection(
+                        fault_id,
+                        False,
+                        False,
+                        FaultEventState.EVIDENCE_INVALID,
+                        "evidence-invalid",
+                        history.intent,
+                    )
+                if current_runtime != accepted_runtime:
+                    continue
                 candidate = self.validate_history(accepted["fault_id"])
-                if (
-                    candidate.valid
-                    and candidate.intent is not None
-                    and candidate.events
-                    and candidate.events[-1].state not in _TERMINAL_STATES
-                    and self.current_runtime(candidate.intent.runtime.component)
-                    == candidate.intent.runtime
-                ):
+                if not candidate.valid or candidate.intent is None or not candidate.events:
+                    return FaultProjection(
+                        fault_id,
+                        False,
+                        False,
+                        FaultEventState.EVIDENCE_INVALID,
+                        "evidence-invalid",
+                        history.intent,
+                    )
+                if candidate.events[-1].state not in _TERMINAL_STATES:
                     active_count += 1
             if active_count > 1:
                 return FaultProjection(

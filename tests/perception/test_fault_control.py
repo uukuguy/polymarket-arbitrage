@@ -10,9 +10,11 @@ from polyarb.perception.fault_control import (
     FaultCall,
     FaultCallClass,
     FaultController,
+    FaultEventState,
     FaultIntent,
     FaultKind,
     FaultRuntimeIdentity,
+    normalize_evidence,
     normalize_parameters,
     normalize_target,
 )
@@ -201,6 +203,120 @@ def test_invalid_controller_input_never_blocks_real_call() -> None:
     result = asyncio.run(controller.execute(object(), real_call))
     assert result == "real"
     assert calls == ["called"]
+
+
+def test_control_infrastructure_exception_passes_through_once() -> None:
+    clock_calls = [0]
+
+    def clock() -> float:
+        clock_calls[0] += 1
+        if clock_calls[0] > 1:
+            raise OSError("clock unavailable")
+        return 10.0
+
+    controller = FaultController(runtime=RUNTIME, monotonic=clock)
+    controller.admit(intent(), claimed_at_ms=1_000)
+    real_calls = []
+
+    async def real_call() -> str:
+        real_calls.append("called")
+        return "real"
+
+    result = asyncio.run(
+        controller.execute(
+            FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1"),
+            real_call,
+        )
+    )
+    assert result == "real"
+    assert real_calls == ["called"]
+
+
+def test_control_base_exception_is_not_swallowed() -> None:
+    clock_calls = [0]
+
+    def clock() -> float:
+        clock_calls[0] += 1
+        if clock_calls[0] > 1:
+            raise KeyboardInterrupt
+        return 10.0
+
+    controller = FaultController(runtime=RUNTIME, monotonic=clock)
+    controller.admit(intent(), claimed_at_ms=1_000)
+    real_calls = []
+
+    async def real_call() -> str:
+        real_calls.append("called")
+        return "real"
+
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(
+            controller.execute(
+                FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-1"),
+                real_call,
+            )
+        )
+    assert real_calls == []
+
+
+@pytest.mark.parametrize(
+    ("state", "evidence"),
+    [
+        (FaultEventState.AUTHORIZED, {"reason": "accepted"}),
+        (
+            FaultEventState.ARMED,
+            {"runtime_identity_digest": "a" * 64, "ownership_digest": "b" * 64},
+        ),
+        (FaultEventState.INJECTED, {"call_id": "call-1"}),
+        (FaultEventState.DETECTED, {"incident_id": "incident-1"}),
+        (FaultEventState.CONTAINED, {"containment_id": "containment-1"}),
+        (FaultEventState.CLEANED, {"cleanup_id": "cleanup-1"}),
+        (FaultEventState.RECOVERED, {"recovery_id": "recovery-1"}),
+        (FaultEventState.VERIFIED, {"verdict_id": "verdict-1"}),
+        (FaultEventState.REJECTED, {"reason": "nonce-replay"}),
+        (FaultEventState.EXPIRED, {"reason": "intent-expired"}),
+        (FaultEventState.ABANDONED, {"reason": "runtime-replaced"}),
+        (FaultEventState.CLEANUP_FAILED, {"reason": "cleanup-failed"}),
+        (FaultEventState.RECOVERY_TIMEOUT, {"reason": "recovery-timeout"}),
+        (FaultEventState.EVIDENCE_INVALID, {"reason": "evidence-invalid"}),
+        (FaultEventState.ESCALATED, {"reason": "escalated"}),
+    ],
+)
+def test_every_task1_state_accepts_only_its_legitimate_evidence(
+    state: FaultEventState,
+    evidence: dict[str, str],
+) -> None:
+    assert dict(normalize_evidence(state, evidence)) == evidence
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "123456:ABCDEF",
+        "https://example.test/id",
+        "id?secret=value",
+        "header-value",
+        "cookie-value",
+        "authorization-value",
+        "token-value",
+        "response-body",
+        "client-secret",
+    ],
+)
+def test_evidence_identifier_rejects_sensitive_shapes(value: str) -> None:
+    with pytest.raises(ValueError, match="invalid-evidence"):
+        normalize_evidence(
+            FaultEventState.DETECTED,
+            {"incident_id": value},
+        )
+
+
+def test_reason_evidence_is_enumerated_not_free_form() -> None:
+    with pytest.raises(ValueError, match="invalid-evidence"):
+        normalize_evidence(
+            FaultEventState.REJECTED,
+            {"reason": "123456:ABCDEF"},
+        )
 
 
 def test_clear_removes_memory_before_receipt_write_and_freezes_on_failure() -> None:

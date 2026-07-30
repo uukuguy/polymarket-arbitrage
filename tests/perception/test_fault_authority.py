@@ -351,6 +351,30 @@ def test_runtime_registration_rejects_unsafe_supervisor_run_id(
         )
 
 
+@pytest.mark.parametrize(
+    "supervisor_run_id",
+    [
+        "123456:ABCDEF",
+        "header-value",
+        "cookie-value",
+        "authorization-value",
+        "response-body",
+        "client-secret",
+    ],
+)
+def test_runtime_registration_rejects_sensitive_supervisor_shapes(
+    db_path: Path,
+    supervisor_run_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="invalid-supervisor-run-id"):
+        FaultAuthorityStore(db_path).register_runtime_start(
+            RUNTIME,
+            supervisor_run_id=supervisor_run_id,
+            attempt=1,
+            started_at_ms=1_000,
+        )
+
+
 def test_missing_or_corrupt_schema_projects_unavailable(tmp_path: Path) -> None:
     missing = FaultAuthorityStore(tmp_path / "missing.db", read_only=True)
     assert not missing.project_fault("fault-1", now_ms=2_000).available
@@ -520,6 +544,53 @@ def test_projection_fails_closed_for_invalid_chains(
                 ownership=claimed.ownership_capability,
             )
     assert not store.project_fault("fault-1", now_ms=2_000).available
+
+
+def test_projection_rejects_any_corrupt_current_runtime_accepted_chain(
+    store: FaultAuthorityStore,
+    db_path: Path,
+) -> None:
+    store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
+    with sqlite3.connect(db_path) as con:
+        con.row_factory = sqlite3.Row
+        source = dict(
+            con.execute("SELECT * FROM neg_risk_fault_intents WHERE fault_id='fault-1'").fetchone()
+        )
+        source["fault_id"] = "fault-corrupt"
+        source["intent_hash"] = "0" * 64
+        con.execute(
+            "INSERT INTO neg_risk_fault_intents("
+            "fault_id,kind,call_class,target_key,parameters_json,parameter_digest,"
+            "ttl_ms,component,release_id,machine_id,boot_id,nonce_digest,"
+            "authorization_digest,accepted_at_ms,status,rejection_reason,intent_hash)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            tuple(
+                source[key]
+                for key in (
+                    "fault_id",
+                    "kind",
+                    "call_class",
+                    "target_key",
+                    "parameters_json",
+                    "parameter_digest",
+                    "ttl_ms",
+                    "component",
+                    "release_id",
+                    "machine_id",
+                    "boot_id",
+                    "nonce_digest",
+                    "authorization_digest",
+                    "accepted_at_ms",
+                    "status",
+                    "rejection_reason",
+                    "intent_hash",
+                )
+            ),
+        )
+    projection = store.project_fault("fault-1", now_ms=1_200)
+    assert not projection.available
+    assert projection.state is FaultEventState.EVIDENCE_INVALID
+    assert projection.reason == "evidence-invalid"
 
 
 @pytest.mark.parametrize("state", [None, FaultEventState.INJECTED])

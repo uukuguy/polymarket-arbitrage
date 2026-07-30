@@ -21,10 +21,27 @@ from uuid import UUID
 
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _RELEASE_RE = re.compile(r"^[0-9a-f]{40}$")
-_SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_FAULT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_GROUP_TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SUPERVISOR_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_CALL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_INCIDENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_CONTAINMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_CLEANUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_RECOVERY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_VERDICT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _COMPONENTS = frozenset({"candidate", "discovery", "reconciliation", "notification"})
-_SECRET_WORDS = ("authorization", "cookie", "header", "password", "secret", "token")
+_SENSITIVE_MARKERS = (
+    "authorization",
+    "body",
+    "cookie",
+    "header",
+    "password",
+    "response",
+    "secret",
+    "token",
+)
 
 
 class FaultCallClass(StrEnum):
@@ -131,7 +148,7 @@ def normalize_target(call_class: FaultCallClass, target_key: str) -> str:
         or "/" in target
         or "?" in target
         or "=" in target
-        or any(word in lowered for word in _SECRET_WORDS)
+        or any(word in lowered for word in _SENSITIVE_MARKERS)
     ):
         raise ValueError("invalid-target")
     if typed_class is FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE:
@@ -143,7 +160,7 @@ def normalize_target(call_class: FaultCallClass, target_key: str) -> str:
     elif typed_class is FaultCallClass.TELEGRAM_OPPORTUNITY_CARD:
         if not target.isdecimal():
             raise ValueError("invalid-notification-target")
-    elif not _SAFE_KEY_RE.fullmatch(target):
+    elif not _GROUP_TARGET_RE.fullmatch(target):
         raise ValueError("invalid-group-target")
     return target
 
@@ -172,14 +189,46 @@ def normalize_parameters(kind: FaultKind, parameters: Mapping[str, object]) -> M
     return MappingProxyType(normalized)
 
 
-def normalize_identifier(value: str, *, reason: str = "invalid-identifier") -> str:
+def _normalize_field_identifier(
+    value: str,
+    *,
+    pattern: re.Pattern[str],
+    reason: str,
+) -> str:
     if not isinstance(value, str):
         raise ValueError(reason)
     normalized = value.strip()
-    lowered = normalized.lower()
-    if not _SAFE_KEY_RE.fullmatch(normalized) or any(word in lowered for word in _SECRET_WORDS):
+    if not pattern.fullmatch(normalized) or any(
+        marker in normalized.lower() for marker in _SENSITIVE_MARKERS
+    ):
         raise ValueError(reason)
     return normalized
+
+
+def normalize_fault_id(value: str) -> str:
+    return _normalize_field_identifier(
+        value,
+        pattern=_FAULT_ID_RE,
+        reason="invalid-fault-id",
+    )
+
+
+def normalize_supervisor_run_id(value: str) -> str:
+    return _normalize_field_identifier(
+        value,
+        pattern=_SUPERVISOR_RUN_ID_RE,
+        reason="invalid-supervisor-run-id",
+    )
+
+
+_EVIDENCE_ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
+    "call_id": _CALL_ID_RE,
+    "incident_id": _INCIDENT_ID_RE,
+    "containment_id": _CONTAINMENT_ID_RE,
+    "cleanup_id": _CLEANUP_ID_RE,
+    "recovery_id": _RECOVERY_ID_RE,
+    "verdict_id": _VERDICT_ID_RE,
+}
 
 
 _EVIDENCE_KEYS: Mapping[FaultEventState, frozenset[str]] = {
@@ -199,6 +248,23 @@ _EVIDENCE_KEYS: Mapping[FaultEventState, frozenset[str]] = {
     FaultEventState.EVIDENCE_INVALID: frozenset({"reason"}),
     FaultEventState.ESCALATED: frozenset({"reason"}),
 }
+_EVIDENCE_REASONS: Mapping[FaultEventState, frozenset[str]] = {
+    FaultEventState.AUTHORIZED: frozenset({"accepted"}),
+    FaultEventState.REJECTED: frozenset(
+        {
+            "fault-already-active",
+            "nonce-replay",
+            "runtime-mismatch",
+            "runtime-unavailable",
+        }
+    ),
+    FaultEventState.EXPIRED: frozenset({"intent-expired"}),
+    FaultEventState.ABANDONED: frozenset({"runtime-replaced"}),
+    FaultEventState.CLEANUP_FAILED: frozenset({"cleanup-failed"}),
+    FaultEventState.RECOVERY_TIMEOUT: frozenset({"recovery-timeout"}),
+    FaultEventState.EVIDENCE_INVALID: frozenset({"evidence-invalid"}),
+    FaultEventState.ESCALATED: frozenset({"escalated"}),
+}
 
 
 def normalize_evidence(
@@ -215,8 +281,16 @@ def normalize_evidence(
         if key.endswith("_digest"):
             _validate_digest(value, "invalid-evidence")
             normalized[key] = value
+        elif key == "reason":
+            if value not in _EVIDENCE_REASONS[typed_state]:
+                raise ValueError("invalid-evidence")
+            normalized[key] = value
         else:
-            normalized[key] = normalize_identifier(value, reason="invalid-evidence")
+            normalized[key] = _normalize_field_identifier(
+                value,
+                pattern=_EVIDENCE_ID_PATTERNS[key],
+                reason="invalid-evidence",
+            )
     if typed_state is FaultEventState.ARMED and set(normalized) != _EVIDENCE_KEYS[typed_state]:
         raise ValueError("invalid-evidence")
     return MappingProxyType(normalized)
@@ -256,8 +330,7 @@ class FaultIntentRequest:
     runtime: FaultRuntimeIdentity
 
     def __post_init__(self) -> None:
-        if not isinstance(self.fault_id, str) or not _SAFE_KEY_RE.fullmatch(self.fault_id):
-            raise ValueError("invalid-fault-id")
+        object.__setattr__(self, "fault_id", normalize_fault_id(self.fault_id))
         kind = FaultKind(self.kind)
         call_class = FaultCallClass(self.call_class)
         if FAULT_CALL_CLASS_BY_KIND[kind] is not call_class:
@@ -317,7 +390,7 @@ class FaultOwnershipCapability:
     token: str = field(repr=False)
 
     def __post_init__(self) -> None:
-        normalize_identifier(self.fault_id, reason="invalid-fault-id")
+        normalize_fault_id(self.fault_id)
         _validate_digest(self.token, "invalid-ownership-token")
 
 
@@ -464,7 +537,7 @@ class FaultController:
         """Validate control input fail-open and execute the supplied real call."""
         try:
             self.consume(call)  # adapters introduced later interpret decisions
-        except (TypeError, ValueError, RuntimeError):
+        except Exception:
             pass
         result = real_call()
         return await result if inspect.isawaitable(result) else result
