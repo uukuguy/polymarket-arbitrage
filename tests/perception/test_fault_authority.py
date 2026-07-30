@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
@@ -105,7 +106,7 @@ def test_cleanup_request_is_action_only_hash_chained_and_idempotent(
         "fault-1", auth=cleanup_auth, requested_at_ms=1_200
     )
     second = store.request_cleanup(
-        "fault-1", auth=cleanup_auth, requested_at_ms=1_200
+        "fault-1", auth=auth("e"), requested_at_ms=1_201
     )
 
     assert first == second
@@ -125,11 +126,20 @@ def test_cleanup_request_is_action_only_hash_chained_and_idempotent(
             "SELECT state,action,evidence_json FROM neg_risk_fault_events "
             "WHERE action='cleanup-requested'"
         ).fetchone()
+        attempts = con.execute(
+            "SELECT outcome,reason FROM neg_risk_fault_auth_nonces "
+            "WHERE record_type='attempt' ORDER BY id"
+        ).fetchall()
     assert row == (
         None,
         "cleanup-requested",
         '{"authorization_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","nonce_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}',
     )
+    assert attempts == [
+        ("accepted", "accepted"),
+        ("accepted", "cleanup-requested"),
+        ("accepted", "cleanup-already-requested"),
+    ]
 
 
 def test_cleanup_request_replay_cannot_target_another_fault(
@@ -158,6 +168,7 @@ def test_cleanup_action_does_not_block_lifecycle_claim(
 
 def test_replay_runtime_mismatch_stale_runtime_and_second_active_reject(
     store: FaultAuthorityStore,
+    db_path: Path,
 ) -> None:
     assert store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100).accepted
     assert not store.accept_intent(
@@ -177,6 +188,74 @@ def test_replay_runtime_mismatch_stale_runtime_and_second_active_reject(
     assert not store.accept_intent(
         request(fault_id="fault-stale"), auth=auth("e"), accepted_at_ms=1_201
     ).accepted
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (1,)
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (1,)
+        attempts = con.execute(
+            "SELECT outcome,reason FROM neg_risk_fault_auth_nonces "
+            "WHERE record_type='attempt' ORDER BY id"
+        ).fetchall()
+    assert attempts == [
+        ("accepted", "accepted"),
+        ("rejected", "nonce-replay"),
+        ("rejected", "fault-already-active"),
+        ("rejected", "runtime-mismatch"),
+        ("rejected", "runtime-mismatch"),
+    ]
+
+
+def test_expired_deadline_rolls_back_nonce_intent_and_event(
+    store: FaultAuthorityStore,
+    db_path: Path,
+) -> None:
+    with pytest.raises(TimeoutError, match="fault-authority-deadline"):
+        store.accept_intent(
+            request(),
+            auth=auth(),
+            accepted_at_ms=1_100,
+            deadline_monotonic=time.monotonic() - 1,
+        )
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_auth_nonces").fetchone() == (0,)
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (0,)
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (0,)
+
+
+def test_locked_write_settles_by_deadline_without_later_commit(
+    store: FaultAuthorityStore,
+    db_path: Path,
+) -> None:
+    lock = sqlite3.connect(db_path, isolation_level=None)
+    lock.execute("BEGIN IMMEDIATE")
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def attempt() -> None:
+        try:
+            store.accept_intent(
+                request(),
+                auth=auth(),
+                accepted_at_ms=1_100,
+                deadline_monotonic=time.monotonic() + 0.05,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=attempt)
+    worker.start()
+    assert finished.wait(timeout=1)
+    lock.execute("ROLLBACK")
+    lock.close()
+    worker.join(timeout=1)
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], TimeoutError)
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_auth_nonces").fetchone() == (0,)
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (0,)
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (0,)
 
 
 def test_rejected_request_cannot_be_claimed(store: FaultAuthorityStore) -> None:

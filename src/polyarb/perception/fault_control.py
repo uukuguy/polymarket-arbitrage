@@ -466,6 +466,15 @@ class FaultProjection:
     intent: FaultIntent | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class FaultAuthoritySnapshot:
+    available: bool
+    reason: str
+    runtime: FaultRuntimeIdentity | None = None
+    projection: FaultProjection | None = None
+    history: FaultHistory | None = None
+
+
 class FaultController:
     """Single-process, single-use in-memory admission controller."""
 

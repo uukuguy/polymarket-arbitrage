@@ -1351,11 +1351,30 @@ CREATE INDEX IF NOT EXISTS idx_neg_risk_fault_runtime_current
   ON neg_risk_fault_runtime_starts(component,started_at_ms DESC,id DESC);
 
 CREATE TABLE IF NOT EXISTS neg_risk_fault_auth_nonces (
-  nonce_digest TEXT PRIMARY KEY CHECK(length(nonce_digest) = 64),
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  record_type TEXT NOT NULL CHECK(record_type IN ('reservation','attempt')),
+  nonce_digest TEXT NOT NULL CHECK(length(nonce_digest) = 64),
   authorization_digest TEXT NOT NULL CHECK(length(authorization_digest) = 64),
-  accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0),
-  row_hash TEXT NOT NULL CHECK(length(row_hash) = 64)
+  operation TEXT NOT NULL CHECK(operation IN ('arm','cleanup')),
+  fault_id TEXT,
+  request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+  outcome TEXT CHECK(outcome IN ('accepted','rejected')),
+  reason TEXT,
+  occurred_at_ms INTEGER NOT NULL CHECK(occurred_at_ms >= 0),
+  reservation_id INTEGER REFERENCES neg_risk_fault_auth_nonces(id),
+  row_hash TEXT NOT NULL CHECK(length(row_hash) = 64),
+  CHECK(
+    (record_type='reservation' AND outcome IS NULL AND reason IS NULL
+      AND reservation_id IS NULL)
+    OR
+    (record_type='attempt' AND outcome IS NOT NULL AND reason IS NOT NULL
+      AND reservation_id IS NOT NULL)
+  )
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_neg_risk_fault_auth_one_reservation
+  ON neg_risk_fault_auth_nonces(nonce_digest) WHERE record_type='reservation';
+CREATE INDEX IF NOT EXISTS idx_neg_risk_fault_auth_attempts
+  ON neg_risk_fault_auth_nonces(nonce_digest,record_type,id);
 
 CREATE TABLE IF NOT EXISTS neg_risk_fault_intents (
   fault_id TEXT PRIMARY KEY CHECK(length(fault_id) BETWEEN 1 AND 128),
@@ -1372,8 +1391,8 @@ CREATE TABLE IF NOT EXISTS neg_risk_fault_intents (
   nonce_digest TEXT NOT NULL CHECK(length(nonce_digest) = 64),
   authorization_digest TEXT NOT NULL CHECK(length(authorization_digest) = 64),
   accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0),
-  status TEXT NOT NULL CHECK(status IN ('accepted','rejected')),
-  rejection_reason TEXT,
+  status TEXT NOT NULL CHECK(status = 'accepted'),
+  rejection_reason TEXT CHECK(rejection_reason IS NULL),
   intent_hash TEXT NOT NULL CHECK(length(intent_hash) = 64)
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_fault_intent_runtime

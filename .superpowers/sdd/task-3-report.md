@@ -90,3 +90,72 @@ authorized for these undeployed tables.
 - Repository-wide mypy remains noisy from pre-existing missing third-party
   stubs and unrelated baseline errors; Ruff and proportional runtime tests are
   clean.
+
+## Security review remediation
+
+The six review findings were addressed in a separate follow-up change.
+
+### Schema evolution
+
+The coordinator authorized evolving the fresh, undeployed
+`neg_risk_fault_auth_nonces` table without adding a fifth table:
+
+- the former one-row-per-nonce shape became append-only typed
+  `reservation`/`attempt` rows;
+- a partial unique index permits exactly one reservation per nonce;
+- each authenticated attempt records operation, optional normalized fault ID,
+  request digest, accepted/rejected outcome, reason, server occurrence time,
+  reservation link, and a hash covering every persisted fact;
+- attempts have a same-table foreign-key reservation link; reservation,
+  outcome, and link shapes are enforced with SQLite CHECK constraints;
+- UPDATE/DELETE triggers remain unchanged;
+- accepted intents are schema-constrained to `status='accepted'` with no
+  rejection reason. Rejections now exist only as auth attempt facts.
+
+This is a fresh-schema change only. No migration or deployed database was
+touched.
+
+### Security RED/GREEN evidence
+
+1. Rejection audit RED: runtime mismatch, replay, and active-chain rejection
+   produced five intents/events instead of one accepted chain, and the nonce
+   table lacked typed attempt columns.
+2. Rejection audit GREEN: only the accepted arm creates intent/lifecycle rows;
+   every authenticated rejection appends a hashed attempt linked to the unique
+   reservation.
+3. Server-time RED: valid signatures at -299 and +299 seconds persisted the
+   signed client time, extending/regressing TTL history.
+4. Server-time GREEN: arm/action times use server milliseconds; signed time is
+   only skew/canonical authorization input. Both skew directions preserve the
+   one-second TTL and monotonic event history.
+5. Cleanup retry RED: a fresh valid nonce for the exact fault returned 400.
+6. Cleanup retry GREEN: each fresh nonce is reserved/audited, the existing
+   action-only receipt is observed without duplication, and bounded terminal
+   polling continues.
+7. Deadline RED: an already-expired mutation deadline was accepted; a real
+   SQLite `BEGIN IMMEDIATE` barrier surfaced an unnormalized
+   `database is locked`.
+8. Deadline GREEN: busy timeout is capped by the shared monotonic deadline;
+   checks run before mutation and COMMIT; deadline lock failures become
+   `TimeoutError`; rollback leaves reservation/attempt/intent/event counts at
+   zero. A Starlette barrier also proves no 409 response can race a later
+   commit.
+9. Terminal RED: producer-owned `cleaned` truth returned 409/pending instead
+   of its current terminal state.
+10. Terminal GREEN: cleanup returns explicit `already-terminal` plus
+    `current_state` for every recognized terminal/non-injecting lifecycle
+    outcome; the cleanup-request action alone remains non-terminal.
+11. Read-path RED: status/runtime performed synchronous multi-connection
+    SQLite reads and `read_snapshot` did not exist.
+12. Read-path GREEN: one read-only `BEGIN` snapshot produces runtime or
+    history+projection from one connection; all HTTP reads execute off-loop
+    under an explicit deadline and corruption/timeout is unavailable-shaped.
+
+### Remediation verification
+
+- Focused authority, new Starlette fault controls, and existing perception
+  controls: 0 failures.
+- Proportional `tests/perception/` plus both control files: 100% passed.
+- Schema lockstep and SQLite migration tests: 100% passed.
+- Ruff, `git diff --check`, CLI help, Make help, docs gate, and planning-status:
+  passed.

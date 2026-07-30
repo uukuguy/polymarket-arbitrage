@@ -8,6 +8,7 @@ import hmac
 import json
 import sqlite3
 import time
+from typing import Any
 from uuid import UUID
 
 from starlette.requests import Request
@@ -26,6 +27,20 @@ _MAX_BODY_BYTES = 65_536
 _AUTH_SKEW_SECONDS = 300
 _STORE_BUDGET_SECONDS = 0.75
 _CLEANUP_WAIT_SECONDS = 0.2
+_TERMINAL_CLEANUP_STATES = frozenset(
+    {
+        "cleaned",
+        "abandoned",
+        "expired",
+        "recovered",
+        "verified",
+        "rejected",
+        "cleanup-failed",
+        "recovery-timeout",
+        "evidence-invalid",
+        "escalated",
+    }
+)
 _ARM_FIELDS = frozenset(
     {
         "fault_id",
@@ -55,7 +70,7 @@ def _json_no_duplicates(raw: bytes) -> object:
         raise ValueError("invalid-json") from exc
 
 
-def _fault_auth(request: Request, body: bytes) -> tuple[FaultAuthorization, int] | None:
+def _fault_auth(request: Request, body: bytes) -> FaultAuthorization | None:
     timestamp = request.headers.get("X-Fault-Timestamp", "")
     nonce = request.headers.get("X-Fault-Nonce", "")
     received = request.headers.get("X-Fault-Signature", "")
@@ -87,12 +102,9 @@ def _fault_auth(request: Request, body: bytes) -> tuple[FaultAuthorization, int]
         received = received[7:]
     if not hmac.compare_digest(received, expected):
         return None
-    return (
-        FaultAuthorization(
-            nonce_digest=hashlib.sha256(nonce.encode()).hexdigest(),
-            authorization_digest=hashlib.sha256(canonical).hexdigest(),
-        ),
-        timestamp_s * 1_000,
+    return FaultAuthorization(
+        nonce_digest=hashlib.sha256(nonce.encode()).hexdigest(),
+        authorization_digest=hashlib.sha256(canonical).hexdigest(),
     )
 
 
@@ -113,6 +125,59 @@ def _store(request: Request, *, read_only: bool = False) -> FaultAuthorityStore:
     )
 
 
+async def _run_mutation(function: Any, *args: Any, **kwargs: Any) -> Any:
+    deadline = time.monotonic() + _STORE_BUDGET_SECONDS
+    kwargs["deadline_monotonic"] = deadline
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(task), timeout=_STORE_BUDGET_SECONDS + 0.1
+        )
+    except TimeoutError:
+        # The store checks the same deadline before every mutation and COMMIT.
+        # Settle the worker so an unavailable response can never race a late commit.
+        return await asyncio.shield(task)
+
+
+async def _read_snapshot(request: Request, **selectors: Any) -> Any:
+    deadline = time.monotonic() + _STORE_BUDGET_SECONDS
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            _store(request, read_only=True).read_snapshot,
+            now_ms=int(time.time() * 1_000),
+            deadline_monotonic=deadline,
+            **selectors,
+        ),
+        timeout=_STORE_BUDGET_SECONDS + 0.1,
+    )
+
+
+async def _audit_invalid_request(
+    request: Request,
+    *,
+    auth: FaultAuthorization,
+    operation: str,
+    body: bytes,
+    fault_id: str | None,
+) -> JSONResponse | None:
+    try:
+        await _run_mutation(
+            _store(request).reject_control_attempt,
+            auth=auth,
+            operation=operation,
+            fault_id=fault_id,
+            request_digest=hashlib.sha256(body).hexdigest(),
+            reason="invalid-request",
+            occurred_at_ms=int(time.time() * 1_000),
+        )
+        return None
+    except (TimeoutError, sqlite3.Error):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "fault-control-store-unavailable"},
+            status_code=409,
+        )
+
+
 async def arm_fault(request: Request) -> JSONResponse:
     if not request.app.state.settings.upstream_fault_control_enabled:
         return JSONResponse(
@@ -125,7 +190,7 @@ async def arm_fault(request: Request) -> JSONResponse:
     authorized = _fault_auth(request, body)
     if authorized is None:
         return JSONResponse({"error": "invalid fault authentication"}, status_code=401)
-    auth, accepted_at_ms = authorized
+    auth = authorized
     try:
         payload = _json_no_duplicates(body)
         if not isinstance(payload, dict) or set(payload) != _ARM_FIELDS:
@@ -151,19 +216,31 @@ async def arm_fault(request: Request) -> JSONResponse:
         if intent.ttl_ms > request.app.state.settings.upstream_fault_control_max_ttl_ms:
             raise ValueError("invalid-ttl")
     except (KeyError, TypeError, ValueError):
+        audit_failure = await _audit_invalid_request(
+            request,
+            auth=auth,
+            operation="arm",
+            body=body,
+            fault_id=None,
+        )
+        if audit_failure is not None:
+            return audit_failure
         return JSONResponse({"error": "invalid fault request"}, status_code=400)
     try:
-        admission = await asyncio.wait_for(
-            asyncio.to_thread(
-                _store(request).accept_intent,
-                intent,
-                auth=auth,
-                accepted_at_ms=accepted_at_ms,
-            ),
-            timeout=_STORE_BUDGET_SECONDS,
+        admission = await _run_mutation(
+            _store(request).accept_intent,
+            intent,
+            auth=auth,
+            accepted_at_ms=int(time.time() * 1_000),
+            request_digest=hashlib.sha256(body).hexdigest(),
         )
     except sqlite3.IntegrityError:
         return JSONResponse({"error": "invalid fault authentication"}, status_code=401)
+    except ValueError:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "fault-control-store-unavailable"},
+            status_code=409,
+        )
     except (TimeoutError, sqlite3.Error):
         return JSONResponse(
             {"status": "unavailable", "reason": "fault-control-store-unavailable"},
@@ -198,7 +275,7 @@ async def cleanup_fault(request: Request) -> JSONResponse:
     authorized = _fault_auth(request, body)
     if authorized is None:
         return JSONResponse({"error": "invalid fault authentication"}, status_code=401)
-    auth, requested_at_ms = authorized
+    auth = authorized
     try:
         payload = _json_no_duplicates(body)
         if (
@@ -208,28 +285,29 @@ async def cleanup_fault(request: Request) -> JSONResponse:
         ):
             raise ValueError("invalid-fields")
         fault_id = payload["fault_id"]
-        await asyncio.wait_for(
-            asyncio.to_thread(
-                _store(request).request_cleanup,
-                fault_id,
-                auth=auth,
-                requested_at_ms=requested_at_ms,
-            ),
-            timeout=_STORE_BUDGET_SECONDS,
+    except (KeyError, TypeError, ValueError):
+        audit_failure = await _audit_invalid_request(
+            request,
+            auth=auth,
+            operation="cleanup",
+            body=body,
+            fault_id=None,
+        )
+        if audit_failure is not None:
+            return audit_failure
+        return JSONResponse({"error": "invalid cleanup request"}, status_code=400)
+    try:
+        await _run_mutation(
+            _store(request).request_cleanup,
+            fault_id,
+            auth=auth,
+            requested_at_ms=int(time.time() * 1_000),
+            request_digest=hashlib.sha256(body).hexdigest(),
         )
     except ValueError as exc:
         if str(exc) == "nonce-replay":
             return JSONResponse({"error": "invalid fault authentication"}, status_code=401)
-        return JSONResponse({"error": "invalid cleanup request"}, status_code=400)
-    except (TimeoutError, sqlite3.Error):
-        return JSONResponse(
-            {"status": "unavailable", "reason": "fault-control-store-unavailable"},
-            status_code=409,
-        )
-    deadline = time.monotonic() + _CLEANUP_WAIT_SECONDS
-    history = _store(request, read_only=True).validate_history(fault_id)
-    while time.monotonic() < deadline:
-        if not history.valid:
+        if str(exc) in {"fault-auth-history-invalid", "fault-history-invalid"}:
             return JSONResponse(
                 {
                     "status": "unavailable",
@@ -237,19 +315,42 @@ async def cleanup_fault(request: Request) -> JSONResponse:
                 },
                 status_code=409,
             )
-        lifecycle = [event.state for event in history.events if event.state is not None]
-        if lifecycle and lifecycle[-1].value in {
-            "cleaned",
-            "cleanup-failed",
-            "abandoned",
-            "expired",
-        }:
+        return JSONResponse({"error": "invalid cleanup request"}, status_code=400)
+    except (TimeoutError, sqlite3.Error):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "fault-control-store-unavailable"},
+            status_code=409,
+        )
+    deadline = time.monotonic() + _CLEANUP_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            snapshot = await _read_snapshot(request, fault_id=fault_id)
+        except TimeoutError:
+            snapshot = None
+        if (
+            snapshot is None
+            or not snapshot.available
+            or snapshot.history is None
+            or snapshot.projection is None
+        ):
             return JSONResponse(
-                {"status": lifecycle[-1].value, "fault_id": fault_id},
+                {
+                    "status": "unavailable",
+                    "reason": "fault-control-store-unavailable",
+                },
+                status_code=409,
+            )
+        state = snapshot.projection.state
+        if state is not None and state.value in _TERMINAL_CLEANUP_STATES:
+            return JSONResponse(
+                {
+                    "status": "already-terminal",
+                    "fault_id": fault_id,
+                    "current_state": state.value,
+                },
                 status_code=200,
             )
         await asyncio.sleep(0.02)
-        history = _store(request, read_only=True).validate_history(fault_id)
     return JSONResponse(
         {"status": FaultEventAction.CLEANUP_REQUESTED.value, "fault_id": fault_id},
         status_code=202,
@@ -269,25 +370,42 @@ async def fault_runtime(request: Request) -> JSONResponse:
     component = request.query_params.get("component", "")
     if component not in {"candidate", "discovery", "reconciliation", "notification"}:
         return JSONResponse({"error": "invalid component"}, status_code=400)
-    runtime = _store(request, read_only=True).current_runtime(component)
-    if runtime is None:
+    try:
+        snapshot = await _read_snapshot(request, component=component)
+    except TimeoutError:
+        snapshot = None
+    if snapshot is None or not snapshot.available or snapshot.runtime is None:
         return JSONResponse(
             {"status": "unavailable", "reason": "runtime-evidence-unavailable"},
             status_code=503,
         )
-    return JSONResponse({"status": "available", "runtime": _runtime_json(runtime)})
+    return JSONResponse(
+        {"status": "available", "runtime": _runtime_json(snapshot.runtime)}
+    )
 
 
 async def fault_status(request: Request) -> JSONResponse:
     fault_id = request.path_params["fault_id"]
-    authority = _store(request, read_only=True)
-    projection = authority.project_fault(fault_id, now_ms=int(time.time() * 1_000))
-    history = authority.validate_history(fault_id)
-    if not projection.available or not history.valid or history.intent is None:
+    try:
+        snapshot = await _read_snapshot(request, fault_id=fault_id)
+    except TimeoutError:
+        snapshot = None
+    if (
+        snapshot is None
+        or not snapshot.available
+        or snapshot.projection is None
+        or snapshot.history is None
+        or snapshot.history.intent is None
+    ):
         return JSONResponse(
-            {"status": "unavailable", "reason": projection.reason},
+            {
+                "status": "unavailable",
+                "reason": snapshot.reason if snapshot is not None else "authority-unavailable",
+            },
             status_code=503,
         )
+    projection = snapshot.projection
+    history = snapshot.history
     lifecycle_values = [
         event.state.value for event in history.events if event.state is not None
     ]

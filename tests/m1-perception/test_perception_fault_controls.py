@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -12,8 +13,9 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from polyarb.config import Settings
+from polyarb.http import perception_faults
 from polyarb.perception.fault_authority import FaultAuthorityStore
-from polyarb.perception.fault_control import FaultRuntimeIdentity
+from polyarb.perception.fault_control import FaultEventState, FaultRuntimeIdentity
 
 ORDINARY_SECRET = "ordinary-control-secret"
 FAULT_SECRET = "distinct-fault-control-secret"
@@ -186,6 +188,10 @@ def test_arm_validates_body_runtime_replay_and_active_chain_before_accept(
     assert _post(client, path, duplicate).status_code == 400
     with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
         assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (0,)
+        assert con.execute(
+            "SELECT count(*) FROM neg_risk_fault_auth_nonces "
+            "WHERE record_type='attempt' AND outcome='rejected'"
+        ).fetchone() == (6,)
         database_text = "\n".join(
             str(value)
             for row in con.execute(
@@ -214,6 +220,9 @@ def test_arm_validates_body_runtime_replay_and_active_chain_before_accept(
     )
     assert second.status_code == 409
     assert second.json()["reason"] == "fault-already-active"
+    with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (1,)
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (1,)
 
 
 def test_arm_rejects_skew_malformed_nonce_oversize_and_wrong_runtime(
@@ -236,6 +245,53 @@ def test_arm_rejects_skew_malformed_nonce_oversize_and_wrong_runtime(
     response = _post(client, path, wrong)
     assert response.status_code == 409
     assert response.json()["reason"] == "runtime-mismatch"
+    with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (0,)
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("offset_s", [-299, 299])
+def test_signed_client_time_never_controls_intent_or_ttl(
+    tmp_path, make_http_test_client, offset_s
+) -> None:
+    client, runtime = _client(tmp_path, make_http_test_client)
+    before_ms = int(time.time() * 1_000)
+    response = _post(
+        client,
+        "/control/perception/faults/arm",
+        _body(runtime, ttl_ms=1_000),
+        fault_timestamp=str(int(time.time()) + offset_s),
+    )
+    after_ms = int(time.time() * 1_000)
+    assert response.status_code == 202
+    with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
+        accepted_at_ms, event_at_ms = con.execute(
+            "SELECT i.accepted_at_ms,e.occurred_at_ms "
+            "FROM neg_risk_fault_intents i JOIN neg_risk_fault_events e "
+            "ON e.fault_id=i.fault_id WHERE e.state='authorized'"
+        ).fetchone()
+    assert before_ms <= accepted_at_ms <= after_ms
+    assert event_at_ms == accepted_at_ms
+    projection = FaultAuthorityStore(client.app.state.sqlite_store.db_path).project_fault(
+        "fault-api-1", now_ms=accepted_at_ms + 1_000
+    )
+    assert projection.state is FaultEventState.EXPIRED
+    cleanup_before_ms = int(time.time() * 1_000)
+    cleanup = _post(
+        client,
+        "/control/perception/faults/cleanup",
+        b'{"fault_id":"fault-api-1"}',
+        fault_timestamp=str(int(time.time()) - offset_s),
+    )
+    cleanup_after_ms = int(time.time() * 1_000)
+    assert cleanup.status_code == 202
+    with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
+        action_at_ms = con.execute(
+            "SELECT occurred_at_ms FROM neg_risk_fault_events "
+            "WHERE action='cleanup-requested'"
+        ).fetchone()[0]
+    assert cleanup_before_ms <= action_at_ms <= cleanup_after_ms
+    assert action_at_ms >= event_at_ms
 
 
 def test_status_is_redacted_and_cleanup_never_fabricates_terminal(
@@ -256,13 +312,7 @@ def test_status_is_redacted_and_cleanup_never_fabricates_terminal(
     cleanup = _post(client, "/control/perception/faults/cleanup", cleanup_body)
     assert cleanup.status_code == 202
     assert cleanup.json()["status"] == "cleanup-requested"
-    again = _post(
-        client,
-        "/control/perception/faults/cleanup",
-        cleanup_body,
-        fault_nonce=cleanup.request.headers["X-Fault-Nonce"],
-        fault_timestamp=cleanup.request.headers["X-Fault-Timestamp"],
-    )
+    again = _post(client, "/control/perception/faults/cleanup", cleanup_body)
     assert again.status_code == 202
     with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
         assert con.execute(
@@ -272,6 +322,124 @@ def test_status_is_redacted_and_cleanup_never_fabricates_terminal(
             "SELECT count(*) FROM neg_risk_fault_events WHERE state IN "
             "('cleaned','abandoned','expired')"
         ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT count(*) FROM neg_risk_fault_auth_nonces "
+            "WHERE record_type='reservation'"
+        ).fetchone() == (3,)
+
+
+def test_cleanup_reports_producer_terminal_truth_instead_of_pending(
+    tmp_path, make_http_test_client
+) -> None:
+    client, runtime = _client(tmp_path, make_http_test_client)
+    assert _post(client, "/control/perception/faults/arm", _body(runtime)).status_code == 202
+    authority = FaultAuthorityStore(client.app.state.sqlite_store.db_path)
+    intent = authority.claim_pending(runtime, claimed_at_ms=int(time.time() * 1_000))
+    assert intent is not None and intent.ownership_capability is not None
+    now_ms = int(time.time() * 1_000)
+    authority.append_event(
+        "fault-api-1",
+        FaultEventState.INJECTED,
+        occurred_at_ms=now_ms,
+        evidence={"call_id": "call-1"},
+        ownership=intent.ownership_capability,
+    )
+    authority.append_event(
+        "fault-api-1",
+        FaultEventState.DETECTED,
+        occurred_at_ms=now_ms,
+        evidence={"incident_id": "incident-1"},
+    )
+    authority.append_event(
+        "fault-api-1",
+        FaultEventState.CONTAINED,
+        occurred_at_ms=now_ms,
+        evidence={"containment_id": "containment-1"},
+    )
+    authority.append_event(
+        "fault-api-1",
+        FaultEventState.CLEANED,
+        occurred_at_ms=now_ms,
+        evidence={"cleanup_id": "cleanup-1"},
+        ownership=intent.ownership_capability,
+    )
+    response = _post(
+        client,
+        "/control/perception/faults/cleanup",
+        b'{"fault_id":"fault-api-1"}',
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "already-terminal",
+        "fault_id": "fault-api-1",
+        "current_state": "cleaned",
+    }
+
+
+def test_fault_reads_run_off_event_loop_through_one_snapshot_method(
+    tmp_path, make_http_test_client, monkeypatch
+) -> None:
+    client, runtime = _client(tmp_path, make_http_test_client)
+    assert _post(client, "/control/perception/faults/arm", _body(runtime)).status_code == 202
+    event_loop_threads: list[int] = []
+    worker_threads: list[int] = []
+    original_to_thread = perception_faults.asyncio.to_thread
+
+    async def observed_to_thread(function, *args, **kwargs):
+        event_loop_threads.append(threading.get_ident())
+
+        def worker():
+            worker_threads.append(threading.get_ident())
+            return function(*args, **kwargs)
+
+        return await original_to_thread(worker)
+
+    monkeypatch.setattr(perception_faults.asyncio, "to_thread", observed_to_thread)
+    assert client.get("/perception/faults/fault-api-1").status_code == 200
+    assert client.get("/perception/faults/runtime?component=candidate").status_code == 200
+    assert len(event_loop_threads) == len(worker_threads) == 2
+    assert all(
+        event_thread != worker_thread
+        for event_thread, worker_thread in zip(event_loop_threads, worker_threads)
+    )
+
+
+def test_timeout_response_cannot_race_a_late_intent_commit(
+    tmp_path, make_http_test_client, monkeypatch
+) -> None:
+    client, runtime = _client(tmp_path, make_http_test_client)
+    entered = threading.Event()
+    release = threading.Event()
+    response_done = threading.Event()
+    responses: list[object] = []
+    original = FaultAuthorityStore.accept_intent
+
+    def blocked(self, *args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=2)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(FaultAuthorityStore, "accept_intent", blocked)
+
+    def send() -> None:
+        responses.append(
+            _post(client, "/control/perception/faults/arm", _body(runtime))
+        )
+        response_done.set()
+
+    request_thread = threading.Thread(target=send)
+    request_thread.start()
+    assert entered.wait(timeout=1)
+    assert not response_done.wait(timeout=1.25)
+    release.set()
+    assert response_done.wait(timeout=2)
+    request_thread.join(timeout=2)
+    assert responses[0].status_code == 409
+
+    with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_auth_nonces").fetchone() == (0,)
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (0,)
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (0,)
 
 
 def test_runtime_read_is_bounded_and_missing_evidence_is_unavailable(
