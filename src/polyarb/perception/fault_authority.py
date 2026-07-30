@@ -598,6 +598,71 @@ class FaultAuthorityStore:
             self._current_active_fault_ids(con, deadline_monotonic=deadline_monotonic, limit=1)
         )
 
+    def _reconcile_unclaimed_in_transaction(
+        self,
+        con: sqlite3.Connection,
+        *,
+        now_ms: int,
+        deadline_monotonic: float | None,
+    ) -> None:
+        """Materialize TTL/cleanup truth before admission or owner claim."""
+        self._check_deadline(deadline_monotonic)
+        rows = con.execute(
+            "SELECT i.fault_id,i.accepted_at_ms,i.ttl_ms,"
+            "(SELECT e.state FROM neg_risk_fault_events e "
+            " WHERE e.fault_id=i.fault_id AND e.state IS NOT NULL "
+            " ORDER BY e.sequence DESC LIMIT 1) AS latest_state,"
+            "EXISTS(SELECT 1 FROM neg_risk_fault_events a "
+            " WHERE a.fault_id=i.fault_id AND a.action='cleanup-requested') "
+            "AS cleanup_requested "
+            "FROM neg_risk_fault_intents i WHERE i.status='accepted' "
+            "AND (SELECT e.state FROM neg_risk_fault_events e "
+            " WHERE e.fault_id=i.fault_id AND e.state IS NOT NULL "
+            " ORDER BY e.sequence DESC LIMIT 1)='authorized' "
+            "AND (i.accepted_at_ms+i.ttl_ms<=? OR EXISTS("
+            " SELECT 1 FROM neg_risk_fault_events a "
+            " WHERE a.fault_id=i.fault_id AND a.action='cleanup-requested')) "
+            "ORDER BY i.accepted_at_ms,i.fault_id LIMIT 2",
+            (now_ms,),
+        ).fetchall()
+        for row in rows:
+            self._check_deadline(deadline_monotonic)
+            history = self._validate_history_in_connection(
+                con,
+                row["fault_id"],
+                deadline_monotonic=deadline_monotonic,
+            )
+            if (
+                not history.valid
+                or not history.events
+                or next(
+                    (
+                        event.state
+                        for event in reversed(history.events)
+                        if event.state is not None
+                    ),
+                    None,
+                )
+                is not FaultEventState.AUTHORIZED
+            ):
+                continue
+            if bool(row["cleanup_requested"]):
+                self._append_event_in_transaction(
+                    con,
+                    row["fault_id"],
+                    FaultEventState.ABANDONED,
+                    occurred_at_ms=now_ms,
+                    evidence={"reason": "cleanup-requested-before-claim"},
+                )
+            elif now_ms >= int(row["accepted_at_ms"]) + int(row["ttl_ms"]):
+                self._append_event_in_transaction(
+                    con,
+                    row["fault_id"],
+                    FaultEventState.EXPIRED,
+                    occurred_at_ms=now_ms,
+                    evidence={"reason": "intent-expired"},
+                )
+
     @staticmethod
     def _auth_row_fields(
         *,
@@ -802,6 +867,16 @@ class FaultAuthorityStore:
                 request_digest=request_digest,
                 occurred_at_ms=accepted_at_ms,
             )
+            self._reconcile_unclaimed_in_transaction(
+                con,
+                now_ms=accepted_at_ms,
+                deadline_monotonic=deadline_monotonic,
+            )
+            existing_intent = con.execute(
+                "SELECT status,rejection_reason FROM neg_risk_fault_intents "
+                "WHERE fault_id=?",
+                (request.fault_id,),
+            ).fetchone()
             current = con.execute(
                 "SELECT * "
                 "FROM neg_risk_fault_runtime_starts WHERE component=? "
@@ -811,6 +886,8 @@ class FaultAuthorityStore:
             reason = "accepted"
             if replay:
                 reason = "nonce-replay"
+            elif existing_intent is not None:
+                reason = "fault-id-already-recorded"
             elif current is None or not self._runtime_row_valid(current):
                 reason = "runtime-unavailable"
             elif self._runtime_from_row(current) != request.runtime:
@@ -830,7 +907,7 @@ class FaultAuthorityStore:
                 occurred_at_ms=accepted_at_ms,
                 reservation_id=reservation_id,
             )
-            if reason != "accepted":
+            if existing_intent is not None:
                 self._commit_before_deadline(con, deadline_monotonic)
                 return IntentAdmission(request.fault_id, False, reason)
             parameters_json = canonical_json(dict(request.parameters))
@@ -852,8 +929,8 @@ class FaultAuthorityStore:
                 "auth_reservation_id": reservation_id,
                 "auth_attempt_id": attempt_id,
                 "accepted_at_ms": accepted_at_ms,
-                "status": "accepted",
-                "rejection_reason": None,
+                "status": "accepted" if reason == "accepted" else "rejected",
+                "rejection_reason": None if reason == "accepted" else reason,
             }
             self._check_deadline(deadline_monotonic)
             con.execute(
@@ -895,12 +972,16 @@ class FaultAuthorityStore:
             self._append_event_in_transaction(
                 con,
                 request.fault_id,
-                FaultEventState.AUTHORIZED,
+                (
+                    FaultEventState.AUTHORIZED
+                    if reason == "accepted"
+                    else FaultEventState.REJECTED
+                ),
                 occurred_at_ms=accepted_at_ms,
-                evidence={"reason": "accepted"},
+                evidence={"reason": reason},
             )
             self._commit_before_deadline(con, deadline_monotonic)
-            return IntentAdmission(request.fault_id, True, "accepted")
+            return IntentAdmission(request.fault_id, reason == "accepted", reason)
         except BaseException as error:
             self._clear_progress_handler(con)
             if con.in_transaction:
@@ -938,6 +1019,11 @@ class FaultAuthorityStore:
             ):
                 con.execute("COMMIT")
                 return None
+            self._reconcile_unclaimed_in_transaction(
+                con,
+                now_ms=claimed_at_ms,
+                deadline_monotonic=None,
+            )
             rows = con.execute(
                 "SELECT i.* FROM neg_risk_fault_intents i "
                 "WHERE i.status='accepted' AND i.component=? AND i.release_id=? "
@@ -996,6 +1082,53 @@ class FaultAuthorityStore:
                 self._intent_from_row(row),
                 ownership_capability=capability,
             )
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def owner_cleanup_requested(
+        self,
+        fault_id: str,
+        *,
+        ownership: FaultOwnershipCapability,
+    ) -> bool:
+        """Return authenticated cleanup intent for the exact current owner."""
+        fault_id = normalize_fault_id(fault_id)
+        con = self._connect()
+        try:
+            con.execute("BEGIN")
+            intent_row = con.execute(
+                "SELECT * FROM neg_risk_fault_intents WHERE fault_id=? "
+                "AND status='accepted'",
+                (fault_id,),
+            ).fetchone()
+            if intent_row is None:
+                con.execute("COMMIT")
+                return False
+            self._require_ownership(con, intent_row, ownership)
+            history = self._validate_history_in_connection(con, fault_id)
+            requested = bool(
+                history.valid
+                and history.events
+                and any(
+                    event.action is FaultEventAction.CLEANUP_REQUESTED
+                    for event in history.events
+                )
+                and next(
+                    (
+                        event.state
+                        for event in reversed(history.events)
+                        if event.state is not None
+                    ),
+                    None,
+                )
+                not in _TERMINAL_STATES
+            )
+            con.execute("COMMIT")
+            return requested
         except BaseException:
             if con.in_transaction:
                 con.execute("ROLLBACK")
@@ -1891,6 +2024,7 @@ class FaultAuthorityStore:
         expected_nonce_digest: str,
         expected_authorization_digest: str,
         expected_reason: str,
+        expected_outcome: str = "accepted",
     ) -> bool:
         try:
             expected = {
@@ -1900,18 +2034,23 @@ class FaultAuthorityStore:
                 "nonce_digest": expected_nonce_digest,
                 "authorization_digest": expected_authorization_digest,
             }
+            reservation_matches = all(
+                reservation[key] == value for key, value in expected.items()
+            )
+            if expected_outcome == "rejected" and expected_reason == "nonce-replay":
+                reservation_matches = (
+                    reservation["nonce_digest"] == expected_nonce_digest
+                )
             return bool(
                 self._nonce_row_valid(reservation)
                 and self._nonce_row_valid(attempt)
                 and reservation["record_type"] == "reservation"
                 and attempt["record_type"] == "attempt"
                 and int(attempt["reservation_id"]) == int(reservation["id"])
-                and attempt["outcome"] == "accepted"
+                and attempt["outcome"] == expected_outcome
                 and attempt["reason"] == expected_reason
-                and all(
-                    reservation[key] == value and attempt[key] == value
-                    for key, value in expected.items()
-                )
+                and reservation_matches
+                and all(attempt[key] == value for key, value in expected.items())
             )
         except (KeyError, TypeError, ValueError, IndexError):
             return False
@@ -1976,18 +2115,25 @@ class FaultAuthorityStore:
             if row["intent_hash"] != _intent_hash(row):
                 return False
             self._intent_from_row(row)
-            runtime = con.execute(
-                "SELECT * FROM neg_risk_fault_runtime_starts "
-                "WHERE component=? AND release_id=? AND machine_id=? AND boot_id=?",
-                (
-                    row["component"],
-                    row["release_id"],
-                    row["machine_id"],
-                    row["boot_id"],
-                ),
-            ).fetchone()
-            if runtime is None or not self._runtime_row_valid(runtime):
+            status = row["status"]
+            rejection_reason = row["rejection_reason"]
+            if status not in {"accepted", "rejected"}:
                 return False
+            if (status == "accepted") != (rejection_reason is None):
+                return False
+            if status == "accepted":
+                runtime = con.execute(
+                    "SELECT * FROM neg_risk_fault_runtime_starts "
+                    "WHERE component=? AND release_id=? AND machine_id=? AND boot_id=?",
+                    (
+                        row["component"],
+                        row["release_id"],
+                        row["machine_id"],
+                        row["boot_id"],
+                    ),
+                ).fetchone()
+                if runtime is None or not self._runtime_row_valid(runtime):
+                    return False
             reservation = con.execute(
                 "SELECT * FROM neg_risk_fault_auth_nonces WHERE id=?",
                 (row["auth_reservation_id"],),
@@ -1998,9 +2144,7 @@ class FaultAuthorityStore:
             ).fetchone()
             self._check_deadline(deadline_monotonic)
             return bool(
-                row["status"] == "accepted"
-                and row["rejection_reason"] is None
-                and reservation is not None
+                reservation is not None
                 and attempt is not None
                 and attempt["occurred_at_ms"] == row["accepted_at_ms"]
                 and self._auth_pair_valid(
@@ -2011,7 +2155,12 @@ class FaultAuthorityStore:
                     expected_request_digest=row["request_digest"],
                     expected_nonce_digest=row["nonce_digest"],
                     expected_authorization_digest=row["authorization_digest"],
-                    expected_reason="accepted",
+                    expected_reason=(
+                        "accepted" if status == "accepted" else rejection_reason
+                    ),
+                    expected_outcome=(
+                        "accepted" if status == "accepted" else "rejected"
+                    ),
                 )
             )
         except (
@@ -2253,6 +2402,15 @@ class FaultAuthorityStore:
         if latest is None:
             return FaultProjection(
                 fault_id, False, False, None, "event-history-missing", history.intent
+            )
+        if latest in _TERMINAL_STATES:
+            return FaultProjection(
+                fault_id,
+                True,
+                False,
+                latest,
+                "valid",
+                history.intent,
             )
         if current != history.intent.runtime:
             return FaultProjection(

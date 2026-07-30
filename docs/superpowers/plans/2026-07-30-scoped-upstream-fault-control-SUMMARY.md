@@ -48,9 +48,14 @@ The four append-only authority tables are
 `neg_risk_fault_runtime_starts`, `neg_risk_fault_auth_nonces`,
 `neg_risk_fault_intents`, and `neg_risk_fault_events`. Event and authorization
 migrations validate foreign keys before commit and roll back as one unit.
-Accepted intent, exact runtime, single claim/injection, lifecycle hash chain,
-cleanup terminal, and replay constraints are durable; the hot path reads only
-one immutable producer-local `ActiveFault`.
+Accepted or rejected intent, exact runtime, single claim/injection, lifecycle
+hash chain, cleanup terminal, and replay constraints are durable. Rejected
+envelopes bind their exact reason plus request/auth attempt correlation and are
+never active or claimable; same-fault replay appends an auth attempt without
+mutating or duplicating the original envelope. The accepted-only legacy schema
+migrates atomically with pre/post-drop full foreign-key checks, rollback, index
+recreation, and append-only trigger recreation. The hot path reads only one
+immutable producer-local `ActiveFault`.
 
 Isolated and in-process producers use the same protocol. Every child attempt
 has a new `producer_boot_id`; Candidate, Discovery, Reconciliation, and the
@@ -68,11 +73,16 @@ Intent TTL is 1,000–120,000 ms and bounded fault parameters are kind-specific.
 
 ### Cleanup and chain truth
 
-Cleanup is memory-first. The remote API can append `cleanup-requested`, but
-only the owning producer's generic cleanup path can clear memory, call
-`relinquish_claim()` to append `CLEANED`, and call
-`confirm_cleanup_commit()` for the post-commit confirmation. Receipt failure
-degrades/freezes the runtime and blocks later matrix rows.
+Cleanup is memory-first. The remote API appends `cleanup-requested`, and the
+producer consumes it at the next safe boundary. A never-claimed intent is
+terminalized as `ABANDONED` in the claim transaction and can never inject. An
+owned claim clears memory before `relinquish_claim()` appends its
+lifecycle-valid terminal (`ABANDONED`, or `CLEANED` after containment);
+`confirm_cleanup_commit()` supplies the post-commit confirmation for
+`CLEANED`. Receipt failure degrades/freezes the runtime and blocks later matrix
+rows. Admission and claim also materialize never-claimed TTL expiry as a real
+`EXPIRED` event before one-active is evaluated, so read projection and
+write-side availability cannot drift.
 
 The component-specific business evidence writers are Candidate success,
 Discovery batch, Reconciliation checkpoint, and Telegram delivery. They
@@ -111,7 +121,11 @@ re-export and read-only final evaluation are mandatory.
 ## Local verification
 
 - `make test-m1-perception`:
-  **2796 passed, 1 skipped, 1 xfailed** from 2,798 collected in 478.76 s.
+  **2803 passed, 1 skipped, 1 xfailed** from 2,805 collected in 482.46 s.
+- Repository-wide `uv run pytest -q`: exit 0 from 3,690 collected
+  (3,688 passed, 1 skipped, 1 xfailed). The project-level `addopts=-q` plus
+  command-line `-q` intentionally suppresses pytest's final count line; the
+  collected count was confirmed separately with `pytest --collect-only`.
 - `make qualify-perception-local`: 36 evaluator tests passed and the canonical
   synthetic fixture returned `status=PASS` with no reasons. This is local
   conformance only.
@@ -127,6 +141,15 @@ re-export and read-only final evaluation are mandatory.
 - `git config --get core.hooksPath`: `.githooks`.
 
 ## Review remediation
+
+The final whole-plan review found and closed three authority-continuity gaps:
+owner runtimes now consume authenticated cleanup requests; never-claimed TTL
+expiry is persisted before later admission; and every fresh valid rejected arm
+has an immutable, non-claimable envelope. Regression coverage includes
+cleanup-before-claim, cleanup-after-claim, expiry followed by a new arm,
+same-fault replay correlation, concurrent distinct arms, all rejection
+classes, accepted-only schema migration, and atomic rollback on an external
+child FK violation.
 
 The Task 8 independent review removed the superseded
 `docs/learning/42-three-authority-fault-qualification.md`, leaving

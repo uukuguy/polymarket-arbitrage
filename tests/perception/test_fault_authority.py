@@ -11,6 +11,7 @@ from uuid import UUID
 
 import pytest
 
+import polyarb.storage.schemas as storage_schemas
 import scripts.perception_fault_acceptance as fault_acceptance
 import scripts.perception_fault_readonly as fault_readonly
 from polyarb.perception.fault_authority import (
@@ -28,6 +29,7 @@ from polyarb.perception.fault_control import (
     FaultRecoveryReceipt,
     FaultRecoveryWriter,
     FaultRuntimeIdentity,
+    IntentAdmission,
     canonical_digest,
     fault_call_binding_digest,
 )
@@ -509,6 +511,116 @@ def test_fault_auth_schema_migration_rolls_back_on_external_child_fk_failure(
         ).fetchone() is None
 
 
+def test_fault_intent_status_migration_preserves_accepted_history_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "old-intent-status.db"
+    old_ddl = DDL.replace(
+        """status TEXT NOT NULL CHECK(status IN ('accepted','rejected')),
+  rejection_reason TEXT,
+  intent_hash TEXT NOT NULL CHECK(length(intent_hash) = 64),
+  CHECK(
+    (status='accepted' AND rejection_reason IS NULL)
+    OR
+    (status='rejected' AND rejection_reason IN
+      ('fault-already-active','nonce-replay','runtime-mismatch',
+       'runtime-unavailable'))
+  )""",
+        """status TEXT NOT NULL CHECK(status = 'accepted'),
+  rejection_reason TEXT CHECK(rejection_reason IS NULL),
+  intent_hash TEXT NOT NULL CHECK(length(intent_hash) = 64)""",
+    )
+    with sqlite3.connect(db_path) as con:
+        con.executescript(old_ddl)
+    old_store = FaultAuthorityStore(db_path)
+    old_store.register_runtime_start(
+        RUNTIME,
+        supervisor_run_id="run-1",
+        attempt=1,
+        started_at_ms=1_000,
+    )
+    assert old_store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_100,
+    ).accepted
+
+    migrate = getattr(storage_schemas, "migrate_fault_intent_status", None)
+    assert callable(migrate), "fault intent status migration is missing"
+    with sqlite3.connect(db_path) as con:
+        assert migrate(con) is True
+        assert migrate(con) is False
+        table_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_fault_intents'"
+        ).fetchone()[0]
+        assert "status IN ('accepted','rejected')" in table_sql
+        assert con.execute(
+            "SELECT status,rejection_reason FROM neg_risk_fault_intents"
+        ).fetchall() == [("accepted", None)]
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert old_store.validate_history("fault-1").valid
+
+
+def test_fault_intent_status_migration_rolls_back_on_external_child_fk_failure(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "old-intent-status-orphan.db"
+    old_ddl = DDL.replace(
+        """status TEXT NOT NULL CHECK(status IN ('accepted','rejected')),
+  rejection_reason TEXT,
+  intent_hash TEXT NOT NULL CHECK(length(intent_hash) = 64),
+  CHECK(
+    (status='accepted' AND rejection_reason IS NULL)
+    OR
+    (status='rejected' AND rejection_reason IN
+      ('fault-already-active','nonce-replay','runtime-mismatch',
+       'runtime-unavailable'))
+  )""",
+        """status TEXT NOT NULL CHECK(status = 'accepted'),
+  rejection_reason TEXT CHECK(rejection_reason IS NULL),
+  intent_hash TEXT NOT NULL CHECK(length(intent_hash) = 64)""",
+    )
+    with sqlite3.connect(db_path) as con:
+        con.executescript(old_ddl)
+        con.execute("PRAGMA foreign_keys=OFF")
+        con.execute(
+            "INSERT INTO neg_risk_fault_events("
+            "fault_id,sequence,state,action,occurred_at_ms,evidence_json,"
+            "previous_hash,event_hash) VALUES("
+            "'orphan',1,'authorized',NULL,1,'{\"reason\":\"accepted\"}',?,?"
+            ")",
+            ("0" * 64, "1" * 64),
+        )
+        before_schema = con.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
+        ).fetchall()
+        before_events = con.execute(
+            "SELECT * FROM neg_risk_fault_events"
+        ).fetchall()
+        con.commit()
+
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="fault-intent-migration-foreign-key-check",
+        ):
+            storage_schemas.migrate_fault_intent_status(con)
+
+        assert not con.in_transaction
+        assert con.execute("PRAGMA foreign_keys").fetchone() == (0,)
+        assert con.execute("PRAGMA legacy_alter_table").fetchone() == (0,)
+        assert con.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
+        ).fetchall() == before_schema
+        assert con.execute(
+            "SELECT * FROM neg_risk_fault_events"
+        ).fetchall() == before_events
+        assert con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_fault_intents_pre_status'"
+        ).fetchone() is None
+
+
 def test_partial_coverage_source_is_exact_bound_and_append_only(
     store: FaultAuthorityStore,
     db_path: Path,
@@ -789,7 +901,7 @@ def test_cleanup_request_replay_cannot_target_another_fault(
         )
 
 
-def test_cleanup_action_does_not_block_lifecycle_claim(
+def test_cleanup_before_claim_is_terminalized_without_arming(
     store: FaultAuthorityStore,
 ) -> None:
     store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100)
@@ -797,8 +909,73 @@ def test_cleanup_action_does_not_block_lifecycle_claim(
 
     claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_200)
 
-    assert claimed is not None
-    assert store.validate_history("fault-1").valid
+    assert claimed is None
+    history = store.validate_history("fault-1")
+    assert history.valid
+    assert [event.state for event in history.events] == [
+        FaultEventState.AUTHORIZED,
+        None,
+        FaultEventState.ABANDONED,
+    ]
+    assert history.events[-1].evidence == {
+        "reason": "cleanup-requested-before-claim"
+    }
+
+
+def test_expired_unclaimed_intent_is_persisted_before_next_admission(
+    store: FaultAuthorityStore,
+) -> None:
+    first = store.accept_intent(
+        request(ttl_ms=1_000),
+        auth=auth(),
+        accepted_at_ms=1_100,
+    )
+    second = store.accept_intent(
+        request(fault_id="fault-2"),
+        auth=auth("d"),
+        accepted_at_ms=2_100,
+    )
+
+    assert first.accepted
+    assert second.accepted
+    expired = store.validate_history("fault-1")
+    assert expired.valid
+    assert expired.events[-1].state is FaultEventState.EXPIRED
+    assert expired.events[-1].evidence == {"reason": "intent-expired"}
+
+
+def test_rejected_arm_persists_immutable_non_claimable_envelope(
+    store: FaultAuthorityStore,
+    db_path: Path,
+) -> None:
+    unavailable = replace(
+        RUNTIME,
+        boot_id=UUID("87654321-4321-4876-9234-567812345678"),
+    )
+
+    admission = store.accept_intent(
+        request(fault_id="fault-rejected", runtime=unavailable),
+        auth=auth("d"),
+        accepted_at_ms=1_100,
+        request_digest="7" * 64,
+    )
+
+    assert not admission.accepted
+    assert admission.reason == "runtime-mismatch"
+    assert store.claim_pending(unavailable, claimed_at_ms=1_200) is None
+    history = store.validate_history("fault-rejected")
+    assert history.valid
+    assert history.events[-1].state is FaultEventState.REJECTED
+    assert history.events[-1].evidence == {"reason": "runtime-mismatch"}
+    projection = store.project_fault("fault-rejected", now_ms=1_200)
+    assert projection.available and not projection.active
+    assert projection.state is FaultEventState.REJECTED
+    with sqlite3.connect(db_path) as con:
+        row = con.execute(
+            "SELECT status,rejection_reason,request_digest "
+            "FROM neg_risk_fault_intents WHERE fault_id='fault-rejected'"
+        ).fetchone()
+    assert row == ("rejected", "runtime-mismatch", "7" * 64)
 
 
 def test_replay_runtime_mismatch_stale_runtime_and_second_active_reject(
@@ -823,9 +1000,21 @@ def test_replay_runtime_mismatch_stale_runtime_and_second_active_reject(
     assert not store.accept_intent(
         request(fault_id="fault-stale"), auth=auth("e"), accepted_at_ms=1_201
     ).accepted
+    for fault_id in (
+        "fault-replay",
+        "fault-second",
+        "fault-mismatch",
+        "fault-stale",
+    ):
+        rejected = store.validate_history(fault_id)
+        assert rejected.valid, (fault_id, rejected.reason)
+        assert rejected.events[-1].state is FaultEventState.REJECTED
     with sqlite3.connect(db_path) as con:
-        assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (1,)
-        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (1,)
+        assert con.execute(
+            "SELECT status,count(*) FROM neg_risk_fault_intents "
+            "GROUP BY status ORDER BY status"
+        ).fetchall() == [("accepted", 1), ("rejected", 4)]
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (5,)
         attempts = con.execute(
             "SELECT outcome,reason FROM neg_risk_fault_auth_nonces "
             "WHERE record_type='attempt' ORDER BY id"
@@ -898,6 +1087,74 @@ def test_rejected_request_cannot_be_claimed(store: FaultAuthorityStore) -> None:
     admission = store.accept_intent(request(runtime=bad), auth=auth(), accepted_at_ms=1_100)
     assert not admission.accepted
     assert store.claim_pending(bad, claimed_at_ms=1_200) is None
+
+
+def test_same_fault_replay_keeps_one_envelope_and_appends_correlated_attempt(
+    store: FaultAuthorityStore,
+    db_path: Path,
+) -> None:
+    first = store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_100,
+        request_digest="7" * 64,
+    )
+    replay = store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_101,
+        request_digest="7" * 64,
+    )
+
+    assert first.accepted
+    assert not replay.accepted and replay.reason == "nonce-replay"
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT count(*) FROM neg_risk_fault_intents"
+        ).fetchone() == (1,)
+        assert con.execute(
+            "SELECT outcome,reason,fault_id,request_digest "
+            "FROM neg_risk_fault_auth_nonces WHERE record_type='attempt' "
+            "ORDER BY id"
+        ).fetchall() == [
+            ("accepted", "accepted", "fault-1", "7" * 64),
+            ("rejected", "nonce-replay", "fault-1", "7" * 64),
+        ]
+
+
+def test_concurrent_distinct_arms_persist_one_accepted_and_one_rejected_envelope(
+    store: FaultAuthorityStore,
+    db_path: Path,
+) -> None:
+    barrier = threading.Barrier(2)
+    results: list[IntentAdmission] = []
+
+    def arm(fault_id: str, nonce: str) -> None:
+        barrier.wait()
+        results.append(
+            FaultAuthorityStore(db_path).accept_intent(
+                request(fault_id=fault_id),
+                auth=auth(nonce),
+                accepted_at_ms=1_100,
+                request_digest=hashlib.sha256(fault_id.encode()).hexdigest(),
+            )
+        )
+
+    workers = [
+        threading.Thread(target=arm, args=("fault-concurrent-1", "d")),
+        threading.Thread(target=arm, args=("fault-concurrent-2", "e")),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert sorted(result.accepted for result in results) == [False, True]
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT status,count(*) FROM neg_risk_fault_intents "
+            "GROUP BY status ORDER BY status"
+        ).fetchall() == [("accepted", 1), ("rejected", 1)]
 
 
 def test_only_exact_runtime_claims_and_claim_is_single_use_across_connections(

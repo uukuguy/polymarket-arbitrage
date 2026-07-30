@@ -243,11 +243,32 @@ make cleanup-upstream-fault fault_id=<exact-id>
 make upstream-fault-status fault_id=<exact-id>
 ```
 
-The cleanup endpoint records `cleanup-requested`; only the owning producer may
-clear its in-memory controller and append `CLEANED` plus
-`cleanup-confirmed`. If either receipt is absent or inconsistent, stop: mark
-the row `cleanup-failed`, preserve the evidence directory, escalate to the
-operator, and do not arm another fault or continue the matrix.
+The cleanup endpoint records `cleanup-requested`. Every producer consumes that
+authenticated action at its next safe batch/cycle boundary. If the intent was
+never claimed, the authority transaction prevents the claim and appends
+`ABANDONED(reason=cleanup-requested-before-claim)`. If the producer already
+owns the claim, it clears memory first and then writes the lifecycle-valid
+terminal receipt (`ABANDONED` before containment, or `CLEANED` plus
+`cleanup-confirmed` after containment). A cleanup HTTP 200 is therefore not
+the terminal proof: wait for the durable terminal event. If the required
+receipt is absent or inconsistent, stop, preserve the evidence directory,
+escalate to the operator, and do not arm another fault or continue the matrix.
+
+Arm admission also materializes expired, never-claimed `AUTHORIZED` intents as
+real `EXPIRED(reason=intent-expired)` events in the same `BEGIN IMMEDIATE`
+transaction before evaluating one-active. Read-side projection and write-side
+admission therefore use the same TTL boundary; an old virtual expiry cannot
+block future arms forever.
+
+Every syntactically valid arm request has an immutable intent envelope with
+`status=accepted|rejected`. A rejected envelope carries an exact
+`rejection_reason`, its authorization reservation/attempt IDs and request
+digest in the intent hash, starts with a terminal `REJECTED` event, and is
+excluded from active and claim queries. An exact same-`fault_id` retry cannot
+create a second envelope: it appends a correlated rejected authentication
+attempt to the existing immutable envelope. Distinct concurrent arms serialize
+at the authority transaction; one may be accepted and the other is retained as
+a non-claimable rejected envelope.
 
 `candidate-exit`, `discovery-exit`, `reconciliation-stall`, and the remaining
 host/store/restart/deploy targets are plan-only and reject execution fail-closed.

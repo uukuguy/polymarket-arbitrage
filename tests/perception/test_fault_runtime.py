@@ -1740,6 +1740,42 @@ async def test_expired_unmatched_fault_is_relinquished_then_same_boot_claims_nex
 
 
 @pytest.mark.asyncio
+async def test_cleanup_requested_after_claim_clears_owner_before_next_injection(
+    tmp_path: Path,
+) -> None:
+    wall = [1_200]
+    _, authority, runtime = _real_runtime(
+        tmp_path,
+        clock_ms=lambda: wall[0],
+        monotonic=lambda: 10.0,
+    )
+    _accept(
+        authority,
+        fault_id="fault-cleanup-requested",
+        target_key="group-cleanup",
+        accepted_at_ms=1_100,
+    )
+    await runtime.sync_before_batch()
+    assert runtime.active_fault_id == "fault-cleanup-requested"
+    authority.request_cleanup(
+        "fault-cleanup-requested",
+        auth=FaultAuthorization("f" * 64, "e" * 64),
+        requested_at_ms=1_250,
+    )
+    wall[0] = 1_300
+
+    await runtime.sync_before_batch()
+
+    assert runtime.active_fault_id is None
+    assert runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-cleanup")
+    ).inject is False
+    history = authority.validate_history("fault-cleanup-requested")
+    assert history.valid
+    assert history.events[-1].state is FaultEventState.ABANDONED
+
+
+@pytest.mark.asyncio
 async def test_frozen_controller_performs_zero_future_authority_claim_work(
     tmp_path: Path,
 ) -> None:

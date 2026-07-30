@@ -39,6 +39,7 @@ from polyarb.storage.schemas import (
     SNAPSHOT_ATTEMPTS_DDL,
     STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL,
     migrate_fault_auth_finalize,
+    migrate_fault_intent_status,
 )
 from polyarb.validator.category import Category, Issue, SnapshotStatus
 from polyarb.validator.layers import determine_snapshot_status
@@ -402,6 +403,8 @@ class SQLiteStore:
         try:
             con.executescript(DDL)
             if migrate_fault_auth_finalize(con):
+                con.executescript(DDL)
+            if migrate_fault_intent_status(con):
                 con.executescript(DDL)
             # Phase 02 Plan 02: scheduler_state singleton table
             con.executescript(SCHEDULER_STATE_DDL)

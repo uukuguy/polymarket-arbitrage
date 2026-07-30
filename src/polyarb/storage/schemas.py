@@ -113,6 +113,100 @@ def migrate_fault_auth_finalize(con) -> bool:
     return True
 
 
+def migrate_fault_intent_status(con) -> bool:
+    """Expand immutable intent envelopes to represent accepted or rejected."""
+    row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='neg_risk_fault_intents'"
+    ).fetchone()
+    if row is None or "status IN ('accepted','rejected')" in str(row[0]):
+        return False
+    if con.in_transaction:
+        raise sqlite3.OperationalError("fault-intent-migration-requires-no-transaction")
+    foreign_keys_enabled = bool(con.execute("PRAGMA foreign_keys").fetchone()[0])
+    con.execute("PRAGMA foreign_keys=OFF")
+    con.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        con.executescript(
+            """
+            BEGIN IMMEDIATE;
+            ALTER TABLE neg_risk_fault_intents
+              RENAME TO neg_risk_fault_intents_pre_status;
+            CREATE TABLE neg_risk_fault_intents (
+              fault_id TEXT PRIMARY KEY CHECK(length(fault_id) BETWEEN 1 AND 128),
+              kind TEXT NOT NULL,
+              call_class TEXT NOT NULL,
+              target_key TEXT NOT NULL CHECK(length(target_key) BETWEEN 1 AND 128),
+              parameters_json TEXT NOT NULL,
+              parameter_digest TEXT NOT NULL CHECK(length(parameter_digest) = 64),
+              ttl_ms INTEGER NOT NULL CHECK(ttl_ms BETWEEN 1000 AND 120000),
+              component TEXT NOT NULL,
+              release_id TEXT NOT NULL CHECK(length(release_id) = 40),
+              machine_id TEXT NOT NULL,
+              boot_id TEXT NOT NULL,
+              nonce_digest TEXT NOT NULL CHECK(length(nonce_digest) = 64),
+              authorization_digest TEXT NOT NULL
+                CHECK(length(authorization_digest) = 64),
+              request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+              auth_reservation_id INTEGER NOT NULL
+                REFERENCES neg_risk_fault_auth_nonces(id),
+              auth_attempt_id INTEGER NOT NULL UNIQUE
+                REFERENCES neg_risk_fault_auth_nonces(id),
+              accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0),
+              status TEXT NOT NULL CHECK(status IN ('accepted','rejected')),
+              rejection_reason TEXT,
+              intent_hash TEXT NOT NULL CHECK(length(intent_hash) = 64),
+              CHECK(
+                (status='accepted' AND rejection_reason IS NULL)
+                OR
+                (status='rejected' AND rejection_reason IN
+                  ('fault-already-active','nonce-replay','runtime-mismatch',
+                   'runtime-unavailable'))
+              )
+            );
+            INSERT INTO neg_risk_fault_intents
+            SELECT * FROM neg_risk_fault_intents_pre_status;
+            """
+        )
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError("fault-intent-migration-foreign-key-check")
+        con.execute("DROP TABLE neg_risk_fault_intents_pre_status")
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError("fault-intent-migration-foreign-key-check")
+        con.execute(
+            "CREATE INDEX idx_neg_risk_fault_intent_runtime "
+            "ON neg_risk_fault_intents("
+            "component,release_id,machine_id,boot_id,accepted_at_ms)"
+        )
+        con.execute(
+            "CREATE INDEX idx_neg_risk_fault_intent_active_runtime "
+            "ON neg_risk_fault_intents("
+            "component,release_id,machine_id,boot_id,status,"
+            "accepted_at_ms DESC,fault_id DESC)"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_neg_risk_fault_intents_no_update "
+            "BEFORE UPDATE ON neg_risk_fault_intents "
+            "BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_neg_risk_fault_intents_no_delete "
+            "BEFORE DELETE ON neg_risk_fault_intents "
+            "BEGIN SELECT RAISE(ABORT,'fault authority append-only'); END"
+        )
+        con.execute("COMMIT")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.execute("PRAGMA legacy_alter_table=OFF")
+        con.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys_enabled else 'OFF'}")
+    return True
+
+
 def migrate_fault_events_cleanup_confirmation(con) -> bool:
     """Expand the historical action CHECK without changing event identities."""
     row = con.execute(
@@ -1538,9 +1632,16 @@ CREATE TABLE IF NOT EXISTS neg_risk_fault_intents (
   auth_attempt_id INTEGER NOT NULL UNIQUE
     REFERENCES neg_risk_fault_auth_nonces(id),
   accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms >= 0),
-  status TEXT NOT NULL CHECK(status = 'accepted'),
-  rejection_reason TEXT CHECK(rejection_reason IS NULL),
-  intent_hash TEXT NOT NULL CHECK(length(intent_hash) = 64)
+  status TEXT NOT NULL CHECK(status IN ('accepted','rejected')),
+  rejection_reason TEXT,
+  intent_hash TEXT NOT NULL CHECK(length(intent_hash) = 64),
+  CHECK(
+    (status='accepted' AND rejection_reason IS NULL)
+    OR
+    (status='rejected' AND rejection_reason IN
+      ('fault-already-active','nonce-replay','runtime-mismatch',
+       'runtime-unavailable'))
+  )
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_fault_intent_runtime
   ON neg_risk_fault_intents(component,release_id,machine_id,boot_id,accepted_at_ms);

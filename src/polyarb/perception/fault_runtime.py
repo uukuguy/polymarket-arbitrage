@@ -202,6 +202,28 @@ class FaultRuntime:
             return
         active = self._controller.active
         if active is not None:
+            ownership = active.intent.ownership_capability
+            if ownership is not None:
+                try:
+                    cleanup_requested = await asyncio.to_thread(
+                        self._authority.owner_cleanup_requested,
+                        active.intent.fault_id,
+                        ownership=ownership,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "fault control cleanup request unavailable "
+                        f"component={self.identity.component} "
+                        f"kind={type(error).__name__}"
+                    )
+                    cleanup_requested = False
+                if cleanup_requested:
+                    await self.cleanup(active.intent.fault_id, "cleanup-requested")
+                    if self._controller.frozen:
+                        return
+                    active = self._controller.active
+                    if active is None:
+                        return
             if self._monotonic() < active.expires_monotonic:
                 return
             await self.cleanup(active.intent.fault_id, "intent-expired")

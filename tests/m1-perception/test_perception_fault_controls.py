@@ -1019,8 +1019,15 @@ def test_arm_validates_body_runtime_replay_and_active_chain_before_accept(
     assert second.status_code == 409
     assert second.json()["reason"] == "fault-already-active"
     with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
-        assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (1,)
-        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (1,)
+        assert con.execute(
+            "SELECT status,count(*) FROM neg_risk_fault_intents "
+            "GROUP BY status ORDER BY status"
+        ).fetchall() == [("accepted", 1), ("rejected", 1)]
+        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (2,)
+        assert con.execute(
+            "SELECT count(*) FROM neg_risk_fault_auth_nonces "
+            "WHERE record_type='attempt' AND outcome='rejected'"
+        ).fetchone() == (8,)
 
 
 def test_arm_rejects_skew_malformed_nonce_oversize_and_wrong_runtime(
@@ -1044,8 +1051,12 @@ def test_arm_rejects_skew_malformed_nonce_oversize_and_wrong_runtime(
     assert response.status_code == 409
     assert response.json()["reason"] == "runtime-mismatch"
     with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
-        assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (0,)
-        assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (0,)
+        assert con.execute(
+            "SELECT status,rejection_reason FROM neg_risk_fault_intents"
+        ).fetchone() == ("rejected", "runtime-mismatch")
+        assert con.execute(
+            "SELECT state FROM neg_risk_fault_events"
+        ).fetchone() == ("rejected",)
 
 
 @pytest.mark.parametrize("offset_s", [-299, 299])
