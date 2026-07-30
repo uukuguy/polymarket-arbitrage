@@ -118,6 +118,16 @@ _COVERAGE_SOURCE_FIELDS = frozenset(
         "source_hash", "target_key",
     }
 )
+_INCIDENT_CHECKPOINT_FIELDS = frozenset(
+    {
+        "checkpoint_hash",
+        "compacted_event_count",
+        "generation",
+        "prefix_hash",
+        "scope_floor_count",
+        "through_event_id",
+    }
+)
 
 
 def _source_history_valid(
@@ -125,12 +135,17 @@ def _source_history_valid(
     *,
     intent: Mapping[str, Any],
     runtime: Mapping[str, Any],
+    injected_call_id: object,
 ) -> bool:
     history = receipt.get("source_history")
     if not isinstance(history, list) or not history:
         return False
     if receipt.get("source_kind") == "coverage:partial-or-rejected-page":
-        if len(history) != 1 or not isinstance(history[0], Mapping):
+        if (
+            receipt.get("source_checkpoint") is not None
+            or len(history) != 1
+            or not isinstance(history[0], Mapping)
+        ):
             return False
         row = history[0]
         payload = {key: row.get(key) for key in _COVERAGE_SOURCE_FIELDS - {"source_hash"}}
@@ -154,8 +169,63 @@ def _source_history_valid(
             ))
         )
 
-    previous_hash: object = None
-    target: list[Mapping[str, Any]] = []
+    checkpoint = receipt.get("source_checkpoint")
+    if not isinstance(checkpoint, Mapping) or set(checkpoint) != _INCIDENT_CHECKPOINT_FIELDS:
+        return False
+    try:
+        checkpoint_payload = {
+            "compacted_event_count": int(checkpoint["compacted_event_count"]),
+            "generation": int(checkpoint["generation"]),
+            "prefix_hash": str(checkpoint["prefix_hash"]),
+            "scope_floor_count": int(checkpoint["scope_floor_count"]),
+            "through_event_id": int(checkpoint["through_event_id"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        return False
+    if (
+        any(
+            isinstance(checkpoint[key], bool) or not isinstance(checkpoint[key], int)
+            for key in (
+                "compacted_event_count",
+                "generation",
+                "scope_floor_count",
+                "through_event_id",
+            )
+        )
+        or any(checkpoint_payload[key] < 0 for key in (
+            "compacted_event_count",
+            "generation",
+            "scope_floor_count",
+            "through_event_id",
+        ))
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", checkpoint_payload["prefix_hash"])
+        is None
+        or checkpoint.get("checkpoint_hash")
+        != "sha256:" + hashlib.sha256(_canonical_json(checkpoint_payload)).hexdigest()
+        or (
+            checkpoint_payload["generation"] == 0
+            and checkpoint_payload
+            != {
+                "compacted_event_count": 0,
+                "generation": 0,
+                "prefix_hash": "sha256:" + "0" * 64,
+                "scope_floor_count": 0,
+                "through_event_id": 0,
+            }
+        )
+    ):
+        return False
+
+    component = runtime.get("component")
+    expected_scope = (
+        f"candidate:{intent.get('target_key')}"
+        if component == "candidate"
+        else f"notification:{intent.get('target_key')}"
+        if component == "notification"
+        else component
+    )
+    previous_hash: object = checkpoint_payload["prefix_hash"]
+    target: list[tuple[Mapping[str, Any], object]] = []
     previous_event_id = -1
     for row in history:
         if not isinstance(row, Mapping) or set(row) != _INCIDENT_SOURCE_FIELDS:
@@ -182,24 +252,34 @@ def _source_history_valid(
         if (
             canonical_evidence != row["evidence_json"]
             or row["event_hash"] != expected_hash
-            or (previous_hash is not None and row["previous_hash"] != previous_hash)
+            or row["previous_hash"] != previous_hash
             or int(row["event_id"]) <= previous_event_id
+            or int(row["event_id"]) <= checkpoint_payload["through_event_id"]
         ):
             return False
         previous_hash = row["event_hash"]
         previous_event_id = int(row["event_id"])
         if row["incident_id"] == receipt.get("detection_id"):
-            target.append(row)
-    if not target or target[0].get("state") != "detected":
+            target.append((row, evidence))
+    if (
+        not target
+        or target[0][0].get("state") != "detected"
+        or not isinstance(target[0][1], Mapping)
+        or target[0][1].get("fault_call_id") != injected_call_id
+    ):
         return False
-    for index, row in enumerate(target, start=1):
-        if row.get("sequence") != index or row.get("kind") != receipt.get("source_kind"):
-            return False
-        if index > 1 and row.get("state") not in _INCIDENT_TRANSITIONS.get(
-            str(target[index - 2].get("state")), set()
+    for index, (row, _evidence) in enumerate(target, start=1):
+        if (
+            row.get("sequence") != index
+            or row.get("kind") != receipt.get("source_kind")
+            or row.get("scope") != expected_scope
         ):
             return False
-    return target[-1].get("state") == "verified"
+        if index > 1 and row.get("state") not in _INCIDENT_TRANSITIONS.get(
+            str(target[index - 2][0].get("state")), set()
+        ):
+            return False
+    return target[-1][0].get("state") == "verified"
 
 
 def _event_digest(event: Mapping[str, Any]) -> str:
@@ -509,6 +589,7 @@ def evaluate_fault_envelope(
         item for item in history
         if isinstance(item, Mapping) and item.get("state") == "injected"
     ]
+    call_id: object = None
     if len(injected_events) == 1:
         injected_evidence = injected_events[0].get("evidence")
         call_id = (
@@ -543,7 +624,7 @@ def evaluate_fault_envelope(
         or set(detection_receipt)
         != {
             "detection_id", "kind", "call_class", "target_key", "runtime",
-            "source_kind", "source_history",
+            "source_kind", "source_checkpoint", "source_history",
         }
         or detection_receipt.get("detection_id") != detection_id
         or detection_receipt.get("kind") != intent.get("kind")
@@ -562,6 +643,7 @@ def evaluate_fault_envelope(
         detection_receipt,
         intent=intent,
         runtime=runtime,
+        injected_call_id=call_id,
     ):
         reasons.append("detection-source-history-invalid")
 

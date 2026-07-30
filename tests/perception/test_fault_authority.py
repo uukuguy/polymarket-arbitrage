@@ -314,6 +314,52 @@ def test_fault_event_schema_migration_rolls_back_atomically(db_path: Path) -> No
         ).fetchone() is None
 
 
+def test_fault_event_schema_migration_rolls_back_on_foreign_key_failure(
+    db_path: Path,
+) -> None:
+    downgrade_fault_event_action_check(db_path)
+    with sqlite3.connect(db_path) as con:
+        con.execute("PRAGMA foreign_keys=OFF")
+        con.execute(
+            "INSERT INTO neg_risk_fault_events("
+            "id,fault_id,sequence,state,action,occurred_at_ms,evidence_json,"
+            "previous_hash,event_hash"
+            ") VALUES(99,'orphan-fault',1,'authorized',NULL,1,'{}',?,?)",
+            ("0" * 64, "9" * 64),
+        )
+        before_schema = con.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master "
+            "WHERE tbl_name='neg_risk_fault_events' "
+            "OR name='neg_risk_fault_events' ORDER BY type,name"
+        ).fetchall()
+        before_rows = con.execute(
+            "SELECT * FROM neg_risk_fault_events ORDER BY id"
+        ).fetchall()
+        con.commit()
+
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="fault-event-migration-foreign-key-check",
+        ):
+            migrate_fault_events_cleanup_confirmation(con)
+
+        after_schema = con.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master "
+            "WHERE tbl_name='neg_risk_fault_events' "
+            "OR name='neg_risk_fault_events' ORDER BY type,name"
+        ).fetchall()
+        after_rows = con.execute(
+            "SELECT * FROM neg_risk_fault_events ORDER BY id"
+        ).fetchall()
+        table_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='neg_risk_fault_events'"
+        ).fetchone()[0]
+        assert after_schema == before_schema
+        assert after_rows == before_rows
+        assert "'cleanup-confirmed'" not in table_sql
+
+
 def test_partial_coverage_source_is_exact_bound_and_append_only(
     store: FaultAuthorityStore,
     db_path: Path,
@@ -1516,7 +1562,11 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
         perception_store,
         clock_ms=lambda: incident_clock[0],
     )
-    incident = manager.detect("candidate:group-1", "clob-latency", {})
+    incident = manager.detect(
+        "candidate:group-1",
+        "clob-latency",
+        {"fault_call_id": "call-1"},
+    )
     store.append_event(
         "fault-1", FaultEventState.DETECTED, occurred_at_ms=1_400,
         evidence={"incident_id": incident.id},

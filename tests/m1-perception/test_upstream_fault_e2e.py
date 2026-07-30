@@ -529,8 +529,11 @@ def _production_envelope() -> dict[str, object]:
         ("detected", "classified", "contained", "recovering", "verified"),
         start=1,
     ):
+        evidence_json = (
+            '{"fault_call_id":"call-1"}' if state == "detected" else "{}"
+        )
         payload = {
-            "evidence_json": "{}",
+            "evidence_json": evidence_json,
             "event_id": event_id,
             "incident_id": "incident-1",
             "kind": "clob-429",
@@ -550,6 +553,24 @@ def _production_envelope() -> dict[str, object]:
         ).hexdigest()
         incident_source_history.append({**payload, "event_hash": event_hash})
         incident_previous = event_hash
+    checkpoint_payload = {
+        "compacted_event_count": 0,
+        "generation": 0,
+        "prefix_hash": "sha256:" + "0" * 64,
+        "scope_floor_count": 0,
+        "through_event_id": 0,
+    }
+    source_checkpoint = {
+        **checkpoint_payload,
+        "checkpoint_hash": "sha256:" + hashlib.sha256(
+            json.dumps(
+                checkpoint_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest(),
+    }
     return {
         "evidence_schema_version": 2,
         "scope": "production-fault",
@@ -578,6 +599,7 @@ def _production_envelope() -> dict[str, object]:
             "target_key": "group-1",
             "runtime": runtime,
             "source_kind": "clob-429",
+            "source_checkpoint": source_checkpoint,
             "source_history": incident_source_history,
         },
         "open_injection_fault_count": 0,
@@ -659,6 +681,29 @@ def _rehash_history(evidence: dict[str, object]) -> None:
     evidence["fault_history_tail_hash"] = previous
 
 
+def _rehash_incident_source_history(evidence: dict[str, object]) -> None:
+    receipt = evidence["detection_receipt"]
+    assert isinstance(receipt, dict)
+    history = receipt["source_history"]
+    assert isinstance(history, list) and history
+    first = history[0]
+    assert isinstance(first, dict)
+    previous = first["previous_hash"]
+    for row in history:
+        assert isinstance(row, dict)
+        row["previous_hash"] = previous
+        payload = {key: value for key, value in row.items() if key != "event_hash"}
+        row["event_hash"] = "sha256:" + hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        previous = row["event_hash"]
+
+
 def test_production_evaluator_rejects_rehashed_weak_or_extended_schema() -> None:
     for mutation, reason in (
         (
@@ -700,6 +745,42 @@ def test_production_evaluator_rejects_rehashed_weak_or_extended_schema() -> None
 def test_production_evaluator_rejects_rehashed_attacker_source_history() -> None:
     evidence = _production_envelope()
     evidence["detection_receipt"]["source_history"] = [{"attacker": "yes"}]
+
+    verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
+
+    assert verdict.status == "FAIL"
+    assert "detection-source-history-invalid" in verdict.reasons
+
+
+@pytest.mark.parametrize("mutation", ("scope", "call-id", "checkpoint"))
+def test_production_evaluator_rejects_rehashed_unrelated_incident(
+    mutation: str,
+) -> None:
+    evidence = _production_envelope()
+    source = evidence["detection_receipt"]["source_history"]
+    if mutation == "scope":
+        for row in source:
+            row["scope"] = "candidate:group-other"
+    elif mutation == "call-id":
+        source[0]["evidence_json"] = '{"fault_call_id":"call-other"}'
+    else:
+        checkpoint = evidence["detection_receipt"]["source_checkpoint"]
+        checkpoint["prefix_hash"] = "sha256:" + "1" * 64
+        payload = {
+            key: value
+            for key, value in checkpoint.items()
+            if key != "checkpoint_hash"
+        }
+        checkpoint["checkpoint_hash"] = "sha256:" + hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+    if mutation != "checkpoint":
+        _rehash_incident_source_history(evidence)
 
     verdict = acceptance.evaluate_fault_envelope(evidence, mode="candidate")
 

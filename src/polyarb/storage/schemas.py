@@ -148,13 +148,15 @@ def migrate_fault_events_cleanup_confirmation(con) -> bool:
               previous_hash,event_hash
             FROM neg_risk_fault_events_pre_confirmation
             ORDER BY id;
-            DROP TABLE neg_risk_fault_events_pre_confirmation;
-            COMMIT;
             """
         )
-        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        violations = con.execute(
+            "PRAGMA foreign_key_check(neg_risk_fault_events)"
+        ).fetchall()
         if violations:
             raise sqlite3.IntegrityError("fault-event-migration-foreign-key-check")
+        con.execute("DROP TABLE neg_risk_fault_events_pre_confirmation")
+        con.execute("COMMIT")
     except BaseException:
         if con.in_transaction:
             con.execute("ROLLBACK")

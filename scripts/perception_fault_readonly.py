@@ -160,6 +160,7 @@ def _fault_source_facts(
     detection_id = incident_id or detected.evidence.get("coverage_id")
     source_kind = "coverage:partial-or-rejected-page"
     source_history: list[dict[str, object]]
+    source_checkpoint: dict[str, object] | None = None
     if incident_id is None:
         coverage = con.execute(
             "SELECT * FROM neg_risk_fault_coverage_rejections "
@@ -206,13 +207,36 @@ def _fault_source_facts(
             raise ValueError("fault-incident-source-missing")
         source_kind = str(incident["kind"])
         checkpoint = con.execute(
-            "SELECT prefix_hash FROM neg_risk_incident_authority_checkpoint WHERE id=1"
+            "SELECT generation,through_event_id,compacted_event_count,"
+            "scope_floor_count,prefix_hash,checkpoint_hash "
+            "FROM neg_risk_incident_authority_checkpoint WHERE id=1"
         ).fetchone()
-        previous_hash = (
-            "sha256:" + "0" * 64
+        checkpoint_payload = (
+            {
+                "compacted_event_count": 0,
+                "generation": 0,
+                "prefix_hash": "sha256:" + "0" * 64,
+                "scope_floor_count": 0,
+                "through_event_id": 0,
+            }
             if checkpoint is None
-            else str(checkpoint["prefix_hash"])
+            else {
+                "compacted_event_count": int(checkpoint["compacted_event_count"]),
+                "generation": int(checkpoint["generation"]),
+                "prefix_hash": str(checkpoint["prefix_hash"]),
+                "scope_floor_count": int(checkpoint["scope_floor_count"]),
+                "through_event_id": int(checkpoint["through_event_id"]),
+            }
         )
+        source_checkpoint = {
+            **checkpoint_payload,
+            "checkpoint_hash": (
+                incident_manager._row_hash(checkpoint_payload)[1]
+                if checkpoint is None
+                else str(checkpoint["checkpoint_hash"])
+            ),
+        }
+        previous_hash = str(checkpoint_payload["prefix_hash"])
         source_history = []
         for row in con.execute(
             "SELECT id,incident_id,sequence,scope,kind,state,occurred_at_ms,"
@@ -347,6 +371,7 @@ def _fault_source_facts(
                 "boot_id": str(history.intent.runtime.boot_id),
             },
             "source_kind": source_kind,
+            "source_checkpoint": source_checkpoint,
             "source_history": source_history,
         },
         "recovery_writer_receipt": {

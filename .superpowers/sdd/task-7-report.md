@@ -247,3 +247,34 @@ also uses a test-only five-second overall recovery window while preserving its
 
 Assessment after remediation: **Ready for fresh independent re-review.**
 Production execution remains explicitly out of scope and was not run.
+
+## Fourth Remediation Resolution
+
+The fresh review of `0dc831d..4b414f6` returned two remaining Important
+findings. Both are resolved after explicit RED reproductions:
+
+1. Incident detection receipts now export an exact validated checkpoint
+   payload/hash (or canonical zero genesis). The evaluator recomputes that hash,
+   requires the first suffix predecessor to match its prefix, requires retained
+   IDs after `through_event_id`, derives the exact component/target scope, and
+   binds the target DETECTED evidence `fault_call_id` to the fault ledger's
+   INJECTED call. Fully rehashed wrong-scope, wrong-call, and wrong-anchor
+   suffixes fail with `detection-source-history-invalid`.
+2. The old fault-events migration now runs
+   `foreign_key_check(neg_risk_fault_events)` after copy but before dropping the
+   old table or committing. An orphan-row fixture proves failure restores the
+   byte-for-byte old table SQL, rows, indexes, triggers, and references; the
+   preexisting authorizer failure and clean/idempotent migration cases remain
+   green.
+
+Post-review verification:
+
+- Extended qualification focused set: **389 passed**.
+- Full suite: **3658 collected, 100% PASS**, with one expected xfail and one
+  expected skip.
+- Changed-file Ruff, M1 docs gate, planning-status, and owned staged diff
+  checks: PASS.
+- No cloud, deploy, production-fault, wallet, order, balance, or real-money
+  operation was performed.
+
+Assessment: **Ready for one final independent re-review.**
