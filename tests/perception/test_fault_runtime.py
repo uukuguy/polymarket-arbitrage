@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 
+from polyarb.perception.fault_authority import FaultAuthorityStore
 from polyarb.perception.fault_control import (
+    FaultAuthorization,
     FaultCall,
     FaultCallClass,
     FaultEventState,
     FaultIntent,
+    FaultIntentRequest,
     FaultKind,
     FaultRuntimeIdentity,
 )
@@ -21,6 +25,7 @@ from polyarb.perception.fault_runtime import (
     PassThroughFaultRuntime,
     build_fault_runtime,
 )
+from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.perception.worker_cli import _build_child_fault_runtime
 
 IDENTITY = FaultRuntimeIdentity(
@@ -59,6 +64,11 @@ class _Authority:
 
     def append_event(self, fault_id, state, **kwargs):
         self.events.append((fault_id, state, kwargs))
+
+    def relinquish_claim(self, fault_id, **kwargs):
+        state = FaultEventState.ABANDONED
+        self.events.append((fault_id, state, kwargs))
+        return SimpleNamespace(state=state)
 
 
 @pytest.mark.asyncio
@@ -114,17 +124,18 @@ async def test_cleanup_clears_memory_before_append() -> None:
     )
     await runtime.sync_before_batch()
 
-    def append_event(fault_id, state, **kwargs):
+    def relinquish_claim(fault_id, **kwargs):
         observations.append(runtime.active_fault_id is None)
-        authority.events.append((fault_id, state, kwargs))
+        authority.events.append((fault_id, FaultEventState.ABANDONED, kwargs))
+        return SimpleNamespace(state=FaultEventState.ABANDONED)
 
-    authority.append_event = append_event
+    authority.relinquish_claim = relinquish_claim
     result = await runtime.cleanup("fault-1", "cancelled")
 
     assert result.memory_cleared is True
     assert result.receipt_persisted is True
     assert observations == [True]
-    assert authority.events[0][1] is FaultEventState.CLEANED
+    assert authority.events[0][1] is FaultEventState.ABANDONED
 
 
 def test_disabled_or_unavailable_builder_is_pass_through(tmp_path: Path) -> None:
@@ -379,3 +390,202 @@ def test_child_registration_binds_supervisor_attempt_and_exact_environment_ident
         "run-child",
         4,
     )
+
+
+def _real_runtime(
+    tmp_path: Path,
+    *,
+    authority_type=FaultAuthorityStore,
+    clock_ms=lambda: 1_200,
+    monotonic=lambda: 10.0,
+):
+    path = tmp_path / "runtime.db"
+    OpportunityPerceptionStore(path).init_schema()
+    authority = authority_type(path)
+    authority.register_runtime_start(
+        IDENTITY,
+        supervisor_run_id="run-real",
+        attempt=1,
+        started_at_ms=1_000,
+    )
+    return (
+        path,
+        authority,
+        FaultRuntime(
+            identity=IDENTITY,
+            authority=authority,
+            clock_ms=clock_ms,
+            monotonic=monotonic,
+        ),
+    )
+
+
+def _accept(
+    authority: FaultAuthorityStore,
+    *,
+    fault_id: str,
+    target_key: str,
+    accepted_at_ms: int,
+    ttl_ms: int = 10_000,
+    nonce: str = "d",
+) -> None:
+    admission = authority.accept_intent(
+        FaultIntentRequest(
+            fault_id=fault_id,
+            kind=FaultKind.CLOB_429,
+            call_class=FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH,
+            target_key=target_key,
+            parameters={},
+            ttl_ms=ttl_ms,
+            runtime=IDENTITY,
+        ),
+        auth=FaultAuthorization(
+            nonce_digest=nonce * 64,
+            authorization_digest="e" * 64,
+        ),
+        accepted_at_ms=accepted_at_ms,
+    )
+    assert admission.accepted is True
+
+
+@pytest.mark.asyncio
+async def test_real_sqlite_armed_cleanup_persists_valid_abandoned_terminal(
+    tmp_path: Path,
+) -> None:
+    _, authority, runtime = _real_runtime(tmp_path, clock_ms=lambda: 1_300)
+    _accept(
+        authority,
+        fault_id="fault-real",
+        target_key="group-real",
+        accepted_at_ms=1_100,
+    )
+    await runtime.sync_before_batch()
+
+    result = await runtime.cleanup("fault-real", "cancelled")
+
+    history = authority.validate_history("fault-real")
+    assert result.memory_cleared is True
+    assert result.receipt_persisted is True
+    assert result.terminal_state is FaultEventState.ABANDONED
+    assert history.valid is True
+    assert history.events[-1].state is FaultEventState.ABANDONED
+
+
+@pytest.mark.asyncio
+async def test_real_sqlite_contained_cleanup_returns_actual_cleaned_terminal(
+    tmp_path: Path,
+) -> None:
+    wall = [1_200]
+    _, authority, runtime = _real_runtime(tmp_path, clock_ms=lambda: wall[0])
+    _accept(
+        authority,
+        fault_id="fault-contained",
+        target_key="group-contained",
+        accepted_at_ms=1_100,
+    )
+    await runtime.sync_before_batch()
+    active = runtime._controller.active
+    assert active is not None and active.intent.ownership_capability is not None
+    ownership = active.intent.ownership_capability
+    authority.append_event(
+        "fault-contained",
+        FaultEventState.INJECTED,
+        occurred_at_ms=1_201,
+        evidence={"call_id": "call-contained"},
+        ownership=ownership,
+    )
+    authority.append_event(
+        "fault-contained",
+        FaultEventState.DETECTED,
+        occurred_at_ms=1_202,
+        evidence={"incident_id": "incident-contained"},
+    )
+    authority.append_event(
+        "fault-contained",
+        FaultEventState.CONTAINED,
+        occurred_at_ms=1_203,
+        evidence={"containment_id": "containment-contained"},
+    )
+    wall[0] = 1_300
+
+    result = await runtime.cleanup("fault-contained", "contained")
+
+    assert result.receipt_persisted is True
+    assert result.terminal_state is FaultEventState.CLEANED
+    assert authority.validate_history("fault-contained").valid is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_blocked_claim_settles_and_relinquishes_real_sqlite_chain(
+    tmp_path: Path,
+) -> None:
+    committed = threading.Event()
+    release = threading.Event()
+
+    class BlockingAuthority(FaultAuthorityStore):
+        def claim_pending(self, identity, *, claimed_at_ms):
+            result = super().claim_pending(identity, claimed_at_ms=claimed_at_ms)
+            committed.set()
+            assert release.wait(timeout=2)
+            return result
+
+    _, authority, runtime = _real_runtime(tmp_path, authority_type=BlockingAuthority)
+    _accept(
+        authority,
+        fault_id="fault-cancelled-claim",
+        target_key="group-cancelled",
+        accepted_at_ms=1_100,
+    )
+    task = asyncio.create_task(runtime.sync_before_batch())
+    assert await asyncio.to_thread(committed.wait, 2)
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    history = authority.validate_history("fault-cancelled-claim")
+    assert runtime.active_fault_id is None
+    assert history.valid is True
+    assert history.events[-1].state is FaultEventState.ABANDONED
+
+
+@pytest.mark.asyncio
+async def test_expired_unmatched_fault_is_relinquished_then_same_boot_claims_next(
+    tmp_path: Path,
+) -> None:
+    wall = [1_200]
+    monotonic = [10.0]
+    _, authority, runtime = _real_runtime(
+        tmp_path,
+        clock_ms=lambda: wall[0],
+        monotonic=lambda: monotonic[0],
+    )
+    _accept(
+        authority,
+        fault_id="fault-expired",
+        target_key="group-unmatched",
+        accepted_at_ms=1_100,
+        ttl_ms=1_000,
+    )
+    await runtime.sync_before_batch()
+    assert runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-other")
+    ).inject is False
+    wall[0] = 2_200
+    monotonic[0] = 11.1
+
+    await runtime.sync_before_batch()
+    expired = authority.validate_history("fault-expired")
+    assert expired.valid is True
+    assert expired.events[-1].state is FaultEventState.EXPIRED
+    _accept(
+        authority,
+        fault_id="fault-next",
+        target_key="group-next",
+        accepted_at_ms=2_300,
+        nonce="f",
+    )
+    wall[0] = 2_400
+    await runtime.sync_before_batch()
+
+    assert runtime.active_fault_id == "fault-next"

@@ -259,7 +259,9 @@ _EVIDENCE_REASONS: Mapping[FaultEventState, frozenset[str]] = {
         }
     ),
     FaultEventState.EXPIRED: frozenset({"intent-expired"}),
-    FaultEventState.ABANDONED: frozenset({"runtime-replaced"}),
+    FaultEventState.ABANDONED: frozenset(
+        {"runtime-replaced", "process-relinquished"}
+    ),
     FaultEventState.CLEANUP_FAILED: frozenset({"cleanup-failed"}),
     FaultEventState.RECOVERY_TIMEOUT: frozenset({"recovery-timeout"}),
     FaultEventState.EVIDENCE_INVALID: frozenset({"evidence-invalid"}),

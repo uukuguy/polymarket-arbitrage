@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -26,6 +25,7 @@ class CleanupResult:
     memory_cleared: bool
     receipt_persisted: bool
     degraded: bool = False
+    terminal_state: FaultEventState | None = None
 
 
 class FaultRuntimeProtocol(Protocol):
@@ -57,9 +57,10 @@ class FaultRuntime:
         self.identity = identity
         self._authority = authority
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
+        self._monotonic = monotonic or time.monotonic
         self._controller = FaultController(
             runtime=identity,
-            monotonic=monotonic or time.monotonic,
+            monotonic=self._monotonic,
         )
 
     @property
@@ -69,19 +70,39 @@ class FaultRuntime:
 
     async def sync_before_batch(self) -> None:
         """Claim at most one intent; store failure leaves controller unchanged."""
-        if self._controller.active is not None:
-            return
+        active = self._controller.active
+        if active is not None:
+            if self._monotonic() < active.expires_monotonic:
+                return
+            await self.cleanup(active.intent.fault_id, "intent-expired")
+            if self._controller.frozen:
+                return
         claimed_at_ms = self._clock_ms()
-        try:
-            intent = await asyncio.to_thread(
+        claim_task = asyncio.create_task(
+            asyncio.to_thread(
                 self._authority.claim_pending,
                 self.identity,
                 claimed_at_ms=claimed_at_ms,
             )
+        )
+        try:
+            intent = await asyncio.shield(claim_task)
             if intent is not None:
                 self._controller.admit(intent, claimed_at_ms=claimed_at_ms)
-        except asyncio.CancelledError:
-            raise
+        except asyncio.CancelledError as cancellation:
+            try:
+                intent = await asyncio.shield(claim_task)
+            except Exception as error:
+                logger.warning(
+                    "fault control cancelled claim unavailable "
+                    f"component={self.identity.component} "
+                    f"kind={type(error).__name__}"
+                )
+            else:
+                if intent is not None:
+                    self._controller.admit(intent, claimed_at_ms=claimed_at_ms)
+                    await self.cleanup(intent.fault_id, "claim-cancelled")
+            raise cancellation
         except Exception as error:
             logger.warning(
                 "fault control claim unavailable "
@@ -94,15 +115,16 @@ class FaultRuntime:
         if active is None or active.intent.fault_id != fault_id:
             return CleanupResult(False, False)
         ownership = active.intent.ownership_capability
+        terminal_state: FaultEventState | None = None
 
         def persist_cleanup_receipt(_: str) -> None:
-            self._authority.append_event(
+            nonlocal terminal_state
+            event = self._authority.relinquish_claim(
                 fault_id,
-                FaultEventState.CLEANED,
                 occurred_at_ms=self._clock_ms(),
-                evidence={"cleanup_id": uuid.uuid4().hex},
                 ownership=ownership,
             )
+            terminal_state = event.state
 
         try:
             await asyncio.to_thread(
@@ -119,7 +141,11 @@ class FaultRuntime:
                 f"kind={type(error).__name__}"
             )
             return CleanupResult(True, False, degraded=True)
-        return CleanupResult(True, True)
+        return CleanupResult(
+            True,
+            True,
+            terminal_state=terminal_state,
+        )
 
     def consume(self, call: FaultCall) -> FaultDecision:
         """Pure in-memory hot-path decision."""

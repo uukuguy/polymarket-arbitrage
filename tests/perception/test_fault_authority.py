@@ -146,6 +146,96 @@ def test_only_exact_runtime_claims_and_claim_is_single_use_across_connections(
 
 
 @pytest.mark.parametrize(
+    ("tail", "occurred_at_ms", "expected"),
+    [
+        (FaultEventState.ARMED, 1_200, FaultEventState.ABANDONED),
+        (FaultEventState.ARMED, 11_100, FaultEventState.EXPIRED),
+        (FaultEventState.INJECTED, 1_400, FaultEventState.ABANDONED),
+        (FaultEventState.DETECTED, 1_500, FaultEventState.ABANDONED),
+        (FaultEventState.CONTAINED, 1_600, FaultEventState.CLEANED),
+    ],
+)
+def test_owned_relinquish_selects_a_lifecycle_valid_durable_terminal(
+    store: FaultAuthorityStore,
+    tail: FaultEventState,
+    occurred_at_ms: int,
+    expected: FaultEventState,
+) -> None:
+    assert store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100).accepted
+    claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_150)
+    assert claimed is not None and claimed.ownership_capability is not None
+    ownership = claimed.ownership_capability
+    if tail in {
+        FaultEventState.INJECTED,
+        FaultEventState.DETECTED,
+        FaultEventState.CONTAINED,
+    }:
+        store.append_event(
+            "fault-1",
+            FaultEventState.INJECTED,
+            occurred_at_ms=1_200,
+            evidence={"call_id": "call-1"},
+            ownership=ownership,
+        )
+    if tail in {FaultEventState.DETECTED, FaultEventState.CONTAINED}:
+        store.append_event(
+            "fault-1",
+            FaultEventState.DETECTED,
+            occurred_at_ms=1_300,
+            evidence={"incident_id": "incident-1"},
+        )
+    if tail is FaultEventState.CONTAINED:
+        store.append_event(
+            "fault-1",
+            FaultEventState.CONTAINED,
+            occurred_at_ms=1_400,
+            evidence={"containment_id": "containment-1"},
+        )
+
+    event = store.relinquish_claim(
+        "fault-1",
+        occurred_at_ms=occurred_at_ms,
+        ownership=ownership,
+    )
+
+    assert event.state is expected
+    history = store.validate_history("fault-1")
+    assert history.valid is True
+    assert history.events[-1].state is expected
+
+
+@pytest.mark.parametrize(
+    ("state", "evidence"),
+    [
+        (FaultEventState.ABANDONED, {"reason": "process-relinquished"}),
+        (FaultEventState.EXPIRED, {"reason": "intent-expired"}),
+    ],
+)
+def test_claimed_abandon_and_expiry_require_exact_ownership(
+    store: FaultAuthorityStore,
+    state: FaultEventState,
+    evidence: dict[str, str],
+) -> None:
+    assert store.accept_intent(request(), auth=auth(), accepted_at_ms=1_100).accepted
+    claimed = store.claim_pending(RUNTIME, claimed_at_ms=1_150)
+    assert claimed is not None
+
+    with pytest.raises(PermissionError, match="ownership-capability-required"):
+        store.append_event(
+            "fault-1",
+            state,
+            occurred_at_ms=1_200,
+            evidence=evidence,
+        )
+    with pytest.raises(PermissionError, match="ownership-capability-required"):
+        store.relinquish_claim(
+            "fault-1",
+            occurred_at_ms=1_200,
+            ownership=None,
+        )
+
+
+@pytest.mark.parametrize(
     "terminal_state",
     [FaultEventState.EXPIRED, FaultEventState.ABANDONED, FaultEventState.ESCALATED],
 )

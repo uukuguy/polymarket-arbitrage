@@ -63,6 +63,7 @@ _NEXT_STATES: Mapping[FaultEventState, frozenset[FaultEventState]] = {
     FaultEventState.INJECTED: frozenset(
         {
             FaultEventState.DETECTED,
+            FaultEventState.ABANDONED,
             FaultEventState.CLEANUP_FAILED,
             FaultEventState.ESCALATED,
         }
@@ -70,6 +71,7 @@ _NEXT_STATES: Mapping[FaultEventState, frozenset[FaultEventState]] = {
     FaultEventState.DETECTED: frozenset(
         {
             FaultEventState.CONTAINED,
+            FaultEventState.ABANDONED,
             FaultEventState.CLEANUP_FAILED,
             FaultEventState.ESCALATED,
         }
@@ -682,7 +684,13 @@ class FaultAuthorityStore:
             ).fetchone()
             if intent_row is None:
                 raise ValueError("fault-not-found")
-            if typed_state in _PROCESS_OWNED_STATES:
+            latest_state = self._latest_state(con, fault_id)
+            process_owned_terminal = (
+                typed_state
+                in {FaultEventState.ABANDONED, FaultEventState.EXPIRED}
+                and latest_state is not FaultEventState.AUTHORIZED
+            )
+            if typed_state in _PROCESS_OWNED_STATES or process_owned_terminal:
                 self._require_ownership(
                     con,
                     intent_row,
@@ -695,6 +703,79 @@ class FaultAuthorityStore:
                 occurred_at_ms=occurred_at_ms,
                 evidence=evidence,
             )
+            con.execute("COMMIT")
+            return event
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def relinquish_claim(
+        self,
+        fault_id: str,
+        *,
+        occurred_at_ms: int,
+        ownership: FaultOwnershipCapability | None,
+    ) -> FaultEvent:
+        """Persist the only lifecycle-valid terminal for a process-owned claim."""
+        if self._read_only:
+            raise RuntimeError("fault-authority-read-only")
+        self._validate_time(occurred_at_ms, "invalid-occurred-at")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            history = self._validate_history_in_connection(con, fault_id)
+            if (
+                not history.valid
+                or history.intent is None
+                or not history.events
+            ):
+                raise ValueError("fault-history-invalid")
+            intent_row = con.execute(
+                "SELECT * FROM neg_risk_fault_intents WHERE fault_id=?",
+                (fault_id,),
+            ).fetchone()
+            assert intent_row is not None
+            self._require_ownership(con, intent_row, ownership)
+            tail = history.events[-1].state
+            if tail is FaultEventState.ARMED:
+                expired = (
+                    occurred_at_ms
+                    >= history.intent.accepted_at_ms + history.intent.ttl_ms
+                )
+                state = (
+                    FaultEventState.EXPIRED
+                    if expired
+                    else FaultEventState.ABANDONED
+                )
+            elif tail in {
+                FaultEventState.INJECTED,
+                FaultEventState.DETECTED,
+            }:
+                state = FaultEventState.ABANDONED
+            elif tail is FaultEventState.CONTAINED:
+                state = FaultEventState.CLEANED
+            else:
+                raise ValueError("fault-not-relinquishable")
+            evidence = (
+                {"reason": "intent-expired"}
+                if state is FaultEventState.EXPIRED
+                else {"reason": "process-relinquished"}
+                if state is FaultEventState.ABANDONED
+                else {"cleanup_id": secrets.token_hex(16)}
+            )
+            event = self._append_event_in_transaction(
+                con,
+                fault_id,
+                state,
+                occurred_at_ms=occurred_at_ms,
+                evidence=evidence,
+            )
+            validated = self._validate_history_in_connection(con, fault_id)
+            if not validated.valid or validated.events[-1].state is not state:
+                raise ValueError("fault-terminal-invalid")
             con.execute("COMMIT")
             return event
         except BaseException:
