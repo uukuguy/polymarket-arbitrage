@@ -70,6 +70,8 @@ class FaultRuntime:
 
     async def sync_before_batch(self) -> None:
         """Claim at most one intent; store failure leaves controller unchanged."""
+        if self._controller.frozen:
+            return
         active = self._controller.active
         if active is not None:
             if self._monotonic() < active.expires_monotonic:

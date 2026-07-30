@@ -103,6 +103,86 @@ def _build_daemon_fault_runtime(
     )
 
 
+def _build_daemon_perception_workers(
+    settings,
+    perception_store: OpportunityPerceptionStore,
+) -> tuple[
+    OpportunityWatcher,
+    CandidateWatcherScheduler | None,
+    DiscoveryRunner | None,
+    ReconciliationRunner | None,
+]:
+    """Bind exact in-daemon runtimes to each producer builder."""
+    isolated_producers = settings.opportunity_producer_supervisor_enabled
+    daemon_boot_id = uuid.uuid4()
+    daemon_run_id = uuid.uuid4().hex
+    notification_fault_runtime = _build_daemon_fault_runtime(
+        settings,
+        component="notification",
+        boot_id=daemon_boot_id,
+        supervisor_run_id=daemon_run_id,
+    )
+    component_fault_runtimes = (
+        {}
+        if isolated_producers
+        else {
+            component: _build_daemon_fault_runtime(
+                settings,
+                component=component,
+                boot_id=uuid.uuid4(),
+                supervisor_run_id=daemon_run_id,
+            )
+            for component in ("candidate", "discovery", "reconciliation")
+        }
+    )
+    focused_watcher = build_focused_opportunity_watcher(
+        settings,
+        fault_runtime=notification_fault_runtime,
+    )
+    candidate_group_ids = compose_candidate_group_ids(
+        focused_watcher.candidate_group_ids,
+        perception_store,
+    )
+    candidate_watcher = (
+        build_production_candidate_watcher(
+            settings,
+            candidate_group_ids=candidate_group_ids,
+            fault_runtime=component_fault_runtimes["candidate"],
+        )
+        if settings.opportunity_first_watcher_enabled and not isolated_producers
+        else None
+    )
+
+    def candidate_freshness() -> CandidateFreshness:
+        snapshot = perception_store.candidate_freshness_snapshot(
+            now_ms=int(time.time() * 1_000)
+        )
+        return CandidateFreshness(
+            candidate_count=snapshot.candidate_count,
+            quote_p95_age_ms=snapshot.quote_p95_age_ms,
+            missing_quote_count=snapshot.missing_quote_count,
+        )
+
+    discovery = (
+        build_production_discovery(
+            settings,
+            candidate_freshness=candidate_freshness,
+            fault_runtime=component_fault_runtimes["discovery"],
+        )
+        if settings.opportunity_discovery_enabled and not isolated_producers
+        else None
+    )
+    reconciliation = (
+        build_production_reconciliation(
+            settings,
+            fault_runtime=component_fault_runtimes["reconciliation"],
+        )
+        if settings.opportunity_reconciliation_enabled and not isolated_producers
+        else None
+    )
+    return focused_watcher, candidate_watcher, discovery, reconciliation
+
+
 def _start_quote_worker(
     quote_worker: QuoteWorker | None,
     stop_event: asyncio.Event,
@@ -434,69 +514,14 @@ async def main() -> int:
     perception_store = OpportunityPerceptionStore(settings.db_path)
     perception_store.init_schema()
     isolated_producers = settings.opportunity_producer_supervisor_enabled
-    daemon_boot_id = uuid.uuid4()
-    daemon_run_id = uuid.uuid4().hex
-    notification_fault_runtime = _build_daemon_fault_runtime(
+    (
+        focused_watcher,
+        candidate_watcher,
+        discovery,
+        reconciliation,
+    ) = _build_daemon_perception_workers(
         settings,
-        component="notification",
-        boot_id=daemon_boot_id,
-        supervisor_run_id=daemon_run_id,
-    )
-    component_fault_runtimes = (
-        {}
-        if isolated_producers
-        else {
-            component: _build_daemon_fault_runtime(
-                settings,
-                component=component,
-                boot_id=uuid.uuid4(),
-                supervisor_run_id=daemon_run_id,
-            )
-            for component in ("candidate", "discovery", "reconciliation")
-        }
-    )
-    focused_watcher = build_focused_opportunity_watcher(
-        settings,
-        fault_runtime=notification_fault_runtime,
-    )
-    candidate_group_ids = compose_candidate_group_ids(
-        focused_watcher.candidate_group_ids,
         perception_store,
-    )
-    candidate_watcher = (
-        build_production_candidate_watcher(
-            settings,
-            candidate_group_ids=candidate_group_ids,
-            fault_runtime=component_fault_runtimes["candidate"],
-        )
-        if settings.opportunity_first_watcher_enabled and not isolated_producers
-        else None
-    )
-
-    def _candidate_freshness() -> CandidateFreshness:
-        snapshot = perception_store.candidate_freshness_snapshot(now_ms=int(time.time() * 1_000))
-        return CandidateFreshness(
-            candidate_count=snapshot.candidate_count,
-            quote_p95_age_ms=snapshot.quote_p95_age_ms,
-            missing_quote_count=snapshot.missing_quote_count,
-        )
-
-    discovery = (
-        build_production_discovery(
-            settings,
-            candidate_freshness=_candidate_freshness,
-            fault_runtime=component_fault_runtimes["discovery"],
-        )
-        if settings.opportunity_discovery_enabled and not isolated_producers
-        else None
-    )
-    reconciliation = (
-        build_production_reconciliation(
-            settings,
-            fault_runtime=component_fault_runtimes["reconciliation"],
-        )
-        if settings.opportunity_reconciliation_enabled and not isolated_producers
-        else None
     )
     quote_worker = (
         None

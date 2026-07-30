@@ -589,3 +589,45 @@ async def test_expired_unmatched_fault_is_relinquished_then_same_boot_claims_nex
     await runtime.sync_before_batch()
 
     assert runtime.active_fault_id == "fault-next"
+
+
+@pytest.mark.asyncio
+async def test_frozen_controller_performs_zero_future_authority_claim_work(
+    tmp_path: Path,
+) -> None:
+    class FailingRelinquishAuthority(FaultAuthorityStore):
+        claim_count = 0
+
+        def claim_pending(self, identity, *, claimed_at_ms):
+            self.claim_count += 1
+            return super().claim_pending(identity, claimed_at_ms=claimed_at_ms)
+
+        def relinquish_claim(self, fault_id, *, occurred_at_ms, ownership):
+            raise RuntimeError("forced-receipt-failure")
+
+    _, authority, runtime = _real_runtime(
+        tmp_path,
+        authority_type=FailingRelinquishAuthority,
+    )
+    _accept(
+        authority,
+        fault_id="fault-freeze",
+        target_key="group-freeze",
+        accepted_at_ms=1_100,
+    )
+    await runtime.sync_before_batch()
+    before = authority.validate_history("fault-freeze")
+    cleanup = await runtime.cleanup("fault-freeze", "forced-failure")
+    assert cleanup.receipt_persisted is False
+    assert runtime._controller.frozen is True
+    assert authority.claim_count == 1
+
+    await runtime.sync_before_batch()
+
+    after = authority.validate_history("fault-freeze")
+    assert authority.claim_count == 1
+    assert after == before
+    assert runtime.active_fault_id is None
+    assert runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-freeze")
+    ).inject is False
