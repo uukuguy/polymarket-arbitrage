@@ -69,11 +69,18 @@ Intent TTL is 1,000–120,000 ms and bounded fault parameters are kind-specific.
 ### Cleanup and chain truth
 
 Cleanup is memory-first. The remote API can append `cleanup-requested`, but
-only the owning producer can clear memory, append `CLEANED`, and append the
-post-commit `cleanup-confirmed` action. Receipt failure degrades/freezes the
-runtime and blocks later matrix rows. `RECOVERED` requires a newer, exact
-component/target/runtime business writer row; the dedicated authority writer
-validates the real SQLite row and binds its `recovery_id`.
+only the owning producer's generic cleanup path can clear memory, call
+`relinquish_claim()` to append `CLEANED`, and call
+`confirm_cleanup_commit()` for the post-commit confirmation. Receipt failure
+degrades/freezes the runtime and blocks later matrix rows.
+
+The component-specific business evidence writers are Candidate success,
+Discovery batch, Reconciliation checkpoint, and Telegram delivery. They
+provide the real writer row and typed receipt. The generic
+`FaultRuntime.record_recovery()` →
+`FaultAuthorityStore.append_recovery_event()` ledger transition validator
+then checks exact component/target/runtime, order, ownership, and the source
+SQLite row before binding its `recovery_id` in `RECOVERED`.
 
 The exporter binds a validated complete Incident suffix/checkpoint, exact
 Gamma partial-coverage source rows, an exact eight-field recovery writer
@@ -118,6 +125,17 @@ re-export and read-only final evaluation are mandatory.
   out-of-scope `.superpowers/sdd/task-7-brief.md:123` trailing blank line;
   that ignored coordinator file was not edited or staged by Task 8.
 - `git config --get core.hooksPath`: `.githooks`.
+
+## Review remediation
+
+The Task 8 independent review removed the superseded
+`docs/learning/42-three-authority-fault-qualification.md`, leaving
+`42-生产故障控制边界.md` as the single indexed authority for this topic. It also
+separated component-specific business evidence writers from the generic
+cleanup and recovery ledger-transition validators, and added an exact
+`source_facts_digest` code excerpt with a current `file:line` reference.
+`rg` found no remaining Markdown link or old “三权分立” title, and the focused
+fault runtime, authority, and upstream end-to-end test set passed.
 
 ## External gates and authorization boundary
 
