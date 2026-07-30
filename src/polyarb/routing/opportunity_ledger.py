@@ -502,11 +502,11 @@ class OpportunityLedger:
         notification_id: int,
         *,
         delivered_at_ms: int,
-    ) -> None:
+    ) -> NotificationAttempt | None:
         """Append a delivery attempt without changing its immutable intent."""
         con = self._connect()
         try:
-            con.execute(
+            row = con.execute(
                 "INSERT INTO neg_risk_opportunity_notification_attempts("
                 "notification_id,attempted_at_ms,outcome,error_kind"
                 ") SELECT ?,?,'delivered',NULL WHERE EXISTS("
@@ -515,11 +515,12 @@ class OpportunityLedger:
                 ") AND NOT EXISTS("
                 "SELECT 1 FROM neg_risk_opportunity_notification_attempts "
                 "WHERE notification_id=? AND outcome='delivered'"
-                ")",
+                ") RETURNING id,notification_id,attempted_at_ms,outcome,error_kind",
                 (notification_id, delivered_at_ms, notification_id, notification_id),
-            )
+            ).fetchone()
         finally:
             con.close()
+        return self._attempt_from_row(row)
 
     def mark_notification_failed(
         self,
@@ -527,11 +528,11 @@ class OpportunityLedger:
         *,
         attempted_at_ms: int,
         error_kind: str,
-    ) -> None:
+    ) -> NotificationAttempt | None:
         """Append a retryable failed attempt without touching market state."""
         con = self._connect()
         try:
-            con.execute(
+            row = con.execute(
                 "INSERT INTO neg_risk_opportunity_notification_attempts("
                 "notification_id,attempted_at_ms,outcome,error_kind"
                 ") SELECT ?,?,'failed',? WHERE EXISTS("
@@ -540,7 +541,7 @@ class OpportunityLedger:
                 ") AND NOT EXISTS("
                 "SELECT 1 FROM neg_risk_opportunity_notification_attempts "
                 "WHERE notification_id=? AND outcome='delivered'"
-                ")",
+                ") RETURNING id,notification_id,attempted_at_ms,outcome,error_kind",
                 (
                     notification_id,
                     attempted_at_ms,
@@ -548,9 +549,10 @@ class OpportunityLedger:
                     notification_id,
                     notification_id,
                 ),
-            )
+            ).fetchone()
         finally:
             con.close()
+        return self._attempt_from_row(row)
 
     def notification_attempts(self, notification_id: int) -> tuple[NotificationAttempt, ...]:
         """Return append-only delivery evidence in its original order."""
@@ -565,14 +567,20 @@ class OpportunityLedger:
         finally:
             con.close()
         return tuple(
-            NotificationAttempt(
-                id=int(row[0]),
-                notification_id=int(row[1]),
-                attempted_at_ms=int(row[2]),
-                outcome=str(row[3]),
-                error_kind=str(row[4]) if row[4] is not None else None,
-            )
+            self._attempt_from_row(row)
             for row in rows
+        )
+
+    @staticmethod
+    def _attempt_from_row(row: sqlite3.Row | tuple | None) -> NotificationAttempt | None:
+        if row is None:
+            return None
+        return NotificationAttempt(
+            id=int(row[0]),
+            notification_id=int(row[1]),
+            attempted_at_ms=int(row[2]),
+            outcome=str(row[3]),
+            error_kind=str(row[4]) if row[4] is not None else None,
         )
 
 

@@ -67,6 +67,7 @@ class FaultRecoveryWriter(StrEnum):
     DISCOVERY_BATCH = "discovery-batch"
     RECONCILIATION_CHECKPOINT = "reconciliation-checkpoint"
     CANDIDATE_SUCCESS = "candidate-success"
+    TELEGRAM_DELIVERY = "telegram-delivery"
 
 
 class FaultEventState(StrEnum):
@@ -361,7 +362,10 @@ class FaultRecoveryReceipt:
             or self.writer_occurred_at_ms < 0
         ):
             raise ValueError("invalid-recovery-receipt")
-        if writer is FaultRecoveryWriter.DISCOVERY_BATCH:
+        if writer in {
+            FaultRecoveryWriter.DISCOVERY_BATCH,
+            FaultRecoveryWriter.TELEGRAM_DELIVERY,
+        }:
             if (
                 isinstance(self.writer_id, bool)
                 or not isinstance(self.writer_id, int)

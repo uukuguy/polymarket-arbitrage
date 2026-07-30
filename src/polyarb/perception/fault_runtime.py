@@ -500,11 +500,13 @@ class FaultRuntime:
             ):
                 return FaultRecoveryOutcome.RECORDED
             return FaultRecoveryOutcome.NOT_APPLICABLE
+        expected_writer = {
+            FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH: FaultRecoveryWriter.CANDIDATE_SUCCESS,
+            FaultCallClass.TELEGRAM_OPPORTUNITY_CARD: FaultRecoveryWriter.TELEGRAM_DELIVERY,
+        }.get(pending.intent.call_class)
         if (
-            writer is not FaultRecoveryWriter.CANDIDATE_SUCCESS
-            or pending.intent.runtime.component != "candidate"
-            or pending.intent.call_class
-            is not FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH
+            expected_writer is None
+            or writer is not expected_writer
             or pending.intent.target_key != target_key
         ):
             return FaultRecoveryOutcome.NOT_APPLICABLE
@@ -516,7 +518,7 @@ class FaultRuntime:
         if receipt is None:
             await self.invalidate_evidence(
                 pending.intent.fault_id,
-                "candidate-recovery-evidence-invalid",
+                f"{pending.intent.runtime.component}-recovery-evidence-invalid",
             )
             return FaultRecoveryOutcome.INVALID
         outcome = await self.record_recovery_outcome(receipt)

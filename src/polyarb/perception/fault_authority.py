@@ -1275,6 +1275,43 @@ class FaultAuthorityStore:
         receipt: FaultRecoveryReceipt,
         intent: FaultIntent,
     ) -> str | None:
+        if receipt.writer is FaultRecoveryWriter.TELEGRAM_DELIVERY:
+            if (
+                receipt.component != "notification"
+                or receipt.call_class is not FaultCallClass.TELEGRAM_OPPORTUNITY_CARD
+                or receipt.kind is not FaultKind.TELEGRAM_FAILURE
+            ):
+                return None
+            try:
+                notification_id = int(intent.target_key)
+            except (TypeError, ValueError):
+                return None
+            row = con.execute(
+                "SELECT * FROM neg_risk_opportunity_notification_attempts "
+                "WHERE id=? AND notification_id=?",
+                (receipt.writer_id, notification_id),
+            ).fetchone()
+            latest = con.execute(
+                "SELECT id FROM neg_risk_opportunity_notification_attempts "
+                "WHERE notification_id=? ORDER BY id DESC LIMIT 1",
+                (notification_id,),
+            ).fetchone()
+            notification = con.execute(
+                "SELECT id FROM neg_risk_opportunity_notifications WHERE id=?",
+                (notification_id,),
+            ).fetchone()
+            if (
+                row is None
+                or latest is None
+                or notification is None
+                or row["id"] != latest["id"]
+                or row["attempted_at_ms"] != receipt.writer_occurred_at_ms
+                or row["outcome"] != "delivered"
+                or row["error_kind"] is not None
+            ):
+                return None
+            return f"telegram-delivery-{row['id']}"
+
         if receipt.writer is FaultRecoveryWriter.CANDIDATE_SUCCESS:
             if (
                 receipt.component != "candidate"

@@ -13,7 +13,13 @@ from loguru import logger
 from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.config import Settings
 from polyarb.daemon.alerts import send_opportunity_alert
+from polyarb.perception.fault_adapters import (
+    QualifiedTelegramTransportError,
+    TelegramDeliveryFault,
+)
+from polyarb.perception.fault_control import FaultKind, FaultRecoveryWriter
 from polyarb.perception.fault_runtime import (
+    FaultRecoveryOutcome,
     FaultRuntimeProtocol,
     PassThroughFaultRuntime,
     cleanup_active_fault,
@@ -80,6 +86,7 @@ class OpportunityWatcher:
         self._wait_for_stop = wait_for_stop or _wait_for_stop
         self._focused_interval_s = focused_interval_s
         self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
+        self._telegram_fault = TelegramDeliveryFault(runtime=self._fault_runtime)
         self._reconciliation_count = 0
         self._last_reconciled_at_ms: int | None = None
         self._notification_delivery_count = 0
@@ -206,43 +213,101 @@ class OpportunityWatcher:
         )
         for notification in notifications:
             try:
+                await self._telegram_fault.before_send(notification.id)
                 await self._send_telegram(
                     self._settings,
                     _format_card(notification),
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception as error:  # delivery is deliberately retryable
                 self._notification_failure_count += 1
-                self._last_notification_error_kind = type(error).__name__
-                await asyncio.to_thread(
-                    self._ledger.mark_notification_failed,
-                    notification.id,
-                    attempted_at_ms=self._clock_ms(),
-                    error_kind=type(error).__name__,
-                )
-                failed_attempt = (
-                    await asyncio.to_thread(
-                        self._ledger.notification_attempts,
-                        notification.id,
+                error_kind = type(error).__name__
+                self._last_notification_error_kind = error_kind
+                try:
+                    failed_attempt, cancellation = await self._settle_attempt_write(
+                        lambda: self._ledger.mark_notification_failed(
+                            notification.id,
+                            attempted_at_ms=self._clock_ms(),
+                            error_kind=error_kind,
+                        )
                     )
-                )[-1]
-                await asyncio.to_thread(
-                    self._notification_incidents.record_failure,
-                    notification_id=notification.id,
-                    failed_attempt_id=failed_attempt.id,
-                    error_kind=type(error).__name__,
+                except asyncio.CancelledError:
+                    if isinstance(error, QualifiedTelegramTransportError):
+                        await self._settle_operation(
+                            self._fault_runtime.cleanup(
+                                error.fault_id,
+                                "notification-attempt-uncommitted",
+                            )
+                        )
+                    raise
+                except Exception as store_error:
+                    if isinstance(error, QualifiedTelegramTransportError):
+                        await self._settle_operation(
+                            self._fault_runtime.evidence_unavailable(
+                                error.fault_id,
+                                "notification-failed-attempt-unavailable",
+                            )
+                        )
+                    logger.warning(
+                        "opportunity notification attempt unavailable "
+                        f"id={notification.id} kind={type(store_error).__name__}"
+                    )
+                    continue
+                if failed_attempt is None:
+                    if isinstance(error, QualifiedTelegramTransportError):
+                        _, evidence_cancellation = await self._settle_operation(
+                            self._fault_runtime.evidence_unavailable(
+                                error.fault_id,
+                                "notification-failed-attempt-unavailable",
+                            )
+                        )
+                        cancellation = cancellation or evidence_cancellation
+                    if cancellation is not None:
+                        raise cancellation
+                    continue
+                _, evidence_cancellation = await self._settle_operation(
+                    self._record_failed_delivery(
+                        notification,
+                        failed_attempt,
+                        error,
+                    )
                 )
+                cancellation = cancellation or evidence_cancellation
                 logger.warning(
                     "opportunity notification delivery failed "
                     f"id={notification.id} kind={type(error).__name__}"
                 )
+                if cancellation is not None:
+                    raise cancellation
             else:
                 self._notification_delivery_count += 1
                 self._last_notification_error_kind = None
-                await asyncio.to_thread(
-                    self._ledger.mark_notification_delivered,
-                    notification.id,
-                    delivered_at_ms=self._clock_ms(),
-                )
+                try:
+                    delivered_attempt, cancellation = await self._settle_attempt_write(
+                        lambda: self._ledger.mark_notification_delivered(
+                            notification.id,
+                            delivered_at_ms=self._clock_ms(),
+                        )
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as store_error:
+                    logger.warning(
+                        "opportunity notification attempt unavailable "
+                        f"id={notification.id} kind={type(store_error).__name__}"
+                    )
+                    continue
+                if delivered_attempt is not None:
+                    _, evidence_cancellation = await self._settle_operation(
+                        self._record_delivered_delivery(
+                            notification,
+                            delivered_attempt,
+                        )
+                    )
+                    cancellation = cancellation or evidence_cancellation
+                if cancellation is not None:
+                    raise cancellation
         try:
             await asyncio.to_thread(
                 self._notification_incidents.reconcile_delivered,
@@ -252,6 +317,102 @@ class OpportunityWatcher:
                 "notification incident reconciliation failed "
                 f"kind={type(error).__name__}"
             )
+
+    async def _record_failed_delivery(
+        self,
+        notification: PendingNotification,
+        failed_attempt,
+        error: BaseException,
+    ) -> None:
+        if isinstance(error, QualifiedTelegramTransportError):
+            try:
+                receipt = await asyncio.to_thread(
+                    self._notification_incidents.record_qualified_failure,
+                    notification_id=notification.id,
+                    failed_attempt_id=failed_attempt.id,
+                    error_kind=type(error).__name__,
+                    fault_call_id=error.call_id,
+                )
+                valid = (
+                    receipt is not None
+                    and await asyncio.to_thread(
+                        self._notification_incidents.validate_qualified_receipt,
+                        receipt,
+                    )
+                )
+            except Exception:
+                await self._fault_runtime.evidence_unavailable(
+                    error.fault_id,
+                    "notification-incident-evidence-unavailable",
+                )
+                return
+            if not valid:
+                await self._fault_runtime.invalidate_evidence(
+                    error.fault_id,
+                    "notification-incident-evidence-invalid",
+                )
+            elif await self._fault_runtime.link_detection(
+                error.fault_id,
+                kind=FaultKind.TELEGRAM_FAILURE,
+                detection_id=receipt.incident_id,
+            ):
+                await self._fault_runtime.cleanup(
+                    error.fault_id,
+                    "notification-delivery-failed",
+                )
+            else:
+                await self._fault_runtime.evidence_unavailable(
+                    error.fault_id,
+                    "notification-detection-link-unavailable",
+                )
+            return
+        await asyncio.to_thread(
+            self._notification_incidents.record_failure,
+            notification_id=notification.id,
+            failed_attempt_id=failed_attempt.id,
+            error_kind=type(error).__name__,
+        )
+
+    async def _record_delivered_delivery(
+        self,
+        notification: PendingNotification,
+        delivered_attempt,
+    ) -> None:
+        outcome = await self._fault_runtime.record_writer_recovery_outcome(
+            FaultRecoveryWriter.TELEGRAM_DELIVERY,
+            target_key=str(notification.id),
+            writer_id=delivered_attempt.id,
+            writer_occurred_at_ms=delivered_attempt.attempted_at_ms,
+        )
+        if outcome in {
+            FaultRecoveryOutcome.RECORDED,
+            FaultRecoveryOutcome.NOT_APPLICABLE,
+        }:
+            await asyncio.to_thread(
+                self._notification_incidents.verify_delivery,
+                notification_id=notification.id,
+                delivered_attempt_id=delivered_attempt.id,
+            )
+
+    @staticmethod
+    async def _settle_attempt_write(call):
+        return await OpportunityWatcher._settle_operation(asyncio.to_thread(call))
+
+    @staticmethod
+    async def _settle_operation(operation):
+        task = asyncio.create_task(operation)
+        cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                return result, cancellation
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+                continue
+            except BaseException as error:
+                if cancellation is not None:
+                    raise cancellation from error
+                raise
 
     def snapshot(self) -> OpportunityWatcherSnapshot:
         return OpportunityWatcherSnapshot(

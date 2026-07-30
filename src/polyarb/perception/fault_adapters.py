@@ -140,6 +140,54 @@ class CandidateBooksFault:
         return set(decision.parameters) == expected
 
 
+class QualifiedTelegramTransportError(RuntimeError):
+    """Deterministic pre-transport failure carrying only fault evidence."""
+
+    def __init__(self, *, fault_id: str, call_id: str, injected_at_ms: int) -> None:
+        self.fault_id = normalize_fault_id(fault_id)
+        self.call_id = call_id
+        self.injected_at_ms = injected_at_ms
+        self._polyarb_fault_id = self.fault_id
+        self._polyarb_fault_call_id = call_id
+        self._polyarb_injected_at_ms = injected_at_ms
+        self._polyarb_fault_kind = FaultKind.TELEGRAM_FAILURE
+        super().__init__("qualified-telegram-delivery-failure")
+
+
+class TelegramDeliveryFault:
+    """Exact durable-notification seam immediately before Telegram transport."""
+
+    def __init__(self, *, runtime: FaultRuntimeProtocol) -> None:
+        self._runtime = runtime
+
+    async def before_send(self, notification_id: int) -> None:
+        try:
+            decision = self._runtime.consume(
+                FaultCall(
+                    FaultCallClass.TELEGRAM_OPPORTUNITY_CARD,
+                    str(notification_id),
+                )
+            )
+        except Exception:
+            return
+        if (
+            not isinstance(decision, FaultDecision)
+            or not decision.inject
+            or decision.fault_id is None
+            or decision.kind is not FaultKind.TELEGRAM_FAILURE
+            or decision.parameters
+        ):
+            return
+        receipt = await self._runtime.record_injection(decision.fault_id)
+        if receipt is None:
+            return
+        raise QualifiedTelegramTransportError(
+            fault_id=receipt.fault_id,
+            call_id=receipt.call_id,
+            injected_at_ms=receipt.occurred_at_ms,
+        )
+
+
 class _QualifiedCursor(str):
     def __new__(
         cls,
@@ -354,6 +402,8 @@ __all__ = [
     "CandidateBooksFault",
     "FaultingGammaPageClient",
     "PartialGammaPageError",
+    "QualifiedTelegramTransportError",
+    "TelegramDeliveryFault",
     "gamma_fault_id",
     "gamma_injected_at_ms",
     "gamma_cursor_error",
