@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -419,20 +418,16 @@ class Settings(BaseSettings):
                 "for finalization"
             )
         if self.upstream_fault_finalizer_enabled:
+            if source_key is not None:
+                raise ValueError(
+                    "fault finalizer process must not hold source private key"
+                )
             try:
-                _evaluator_kid, evaluator_key = load_public_key(
+                _evaluator_kid, _evaluator_key = load_public_key(
                     evaluator_public_key
                 )
             except ValueError as exc:
                 raise ValueError("invalid fault evaluator public key") from exc
-            if (
-                source_key is not None
-                and source_key.public_key().public_bytes(
-                    Encoding.Raw, PublicFormat.Raw
-                )
-                == evaluator_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
-            ):
-                raise ValueError("fault source and evaluator keys must be distinct")
         if self.candidate_high_interval_s > self.candidate_quote_hard_stale_s:
             raise ValueError(
                 "candidate_high_interval_s must not exceed "

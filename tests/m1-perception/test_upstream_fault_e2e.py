@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 from copy import deepcopy
 from pathlib import Path
 
@@ -455,14 +456,18 @@ def test_cli_dispatches_each_upstream_fault_only_to_typed_http_transport(
     assert captured["parameters"] == parameters
 
 
-def _sign_source_envelope(evidence: dict[str, object]) -> None:
+def _sign_source_envelope(
+    evidence: dict[str, object],
+    *,
+    private_key: str = SOURCE_PRIVATE_KEY,
+) -> None:
     evidence.pop("source_authority", None)
     envelope_digest = acceptance.canonical_digest(evidence)
     source_facts_digest = acceptance.canonical_digest(
         {
             key: value
             for key, value in evidence.items()
-            if key != "freshness_gate"
+            if key not in {"freshness_gate", "orphan_collecting_runs"}
         }
     )
     signature_digest = acceptance.canonical_digest(
@@ -472,7 +477,7 @@ def _sign_source_envelope(evidence: dict[str, object]) -> None:
         }
     )
     kid, signature = acceptance.sign_digest(
-        SOURCE_PRIVATE_KEY, signature_digest
+        private_key, signature_digest
     )
     evidence["source_authority"] = {
         "domain": "polyarb-upstream-fault-source-envelope-v1",
@@ -1041,6 +1046,111 @@ def test_source_authority_rejects_wrong_public_key(
 
     assert verdict.status == "FAIL"
     assert "source-authority-signature-mismatch" in verdict.reasons
+
+
+def test_source_facts_digest_excludes_all_current_time_projections() -> None:
+    before = _production_envelope()
+    after = deepcopy(before)
+    after["freshness_gate"] = False
+    after["orphan_collecting_runs"] = 1
+    assert acceptance.canonical_digest(
+        {
+            key: value
+            for key, value in before.items()
+            if key
+            not in {
+                "freshness_gate",
+                "orphan_collecting_runs",
+                "source_authority",
+            }
+        }
+    ) == acceptance.canonical_digest(
+        {
+            key: value
+            for key, value in after.items()
+            if key
+            not in {
+                "freshness_gate",
+                "orphan_collecting_runs",
+                "source_authority",
+            }
+        }
+    )
+
+
+def test_candidate_and_final_evaluators_reject_same_source_verdict_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = _production_envelope()
+    _sign_source_envelope(evidence, private_key=EVALUATOR_PRIVATE_KEY)
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY", EVALUATOR_PUBLIC_KEY
+    )
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", EVALUATOR_PRIVATE_KEY
+    )
+    assert acceptance.evaluate_fault_envelope(
+        evidence, mode="candidate"
+    ).status == "PASS"
+    with pytest.raises(ValueError, match="authority-role-collision"):
+        acceptance.build_candidate_artifact(evidence)
+
+    monkeypatch.delenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY")
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY", EVALUATOR_PUBLIC_KEY
+    )
+    verdict = acceptance.evaluate_fault_envelope(
+        evidence,
+        mode="final",
+        candidate_artifact={},
+    )
+    assert "authority-role-collision" in verdict.reasons
+
+
+@pytest.mark.parametrize(
+    ("target", "forbidden"),
+    (
+        (
+            "evaluate-upstream-fault-candidate",
+            "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY",
+        ),
+        (
+            "evaluate-upstream-fault-final",
+            "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY",
+        ),
+        (
+            "evaluate-upstream-fault-final",
+            "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY",
+        ),
+    ),
+)
+def test_make_evaluator_targets_reject_forbidden_private_authority(
+    tmp_path: Path,
+    target: str,
+    forbidden: str,
+) -> None:
+    env = {
+        **os.environ,
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY": SOURCE_PUBLIC_KEY,
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY": EVALUATOR_PRIVATE_KEY,
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY": EVALUATOR_PUBLIC_KEY,
+        forbidden: SOURCE_PRIVATE_KEY,
+    }
+    result = subprocess.run(
+        [
+            "make",
+            target,
+            f"evidence={tmp_path / 'evidence.json'}",
+            f"candidate={tmp_path / 'candidate.json'}",
+            f"output={tmp_path / 'output.json'}",
+            f"expected_release={'a' * 40}",
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    assert result.returncode == 2
+    assert "must not hold" in result.stderr
 
 
 def test_production_evaluator_rejects_rehashed_arbitrary_cleanup_request() -> None:

@@ -194,15 +194,19 @@ The candidate evaluator has only
 `POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY`. It verifies the producer
 attestation, recomputes every intent/event/tail hash, binds the exact evidence
 file SHA-256 and immutable source-facts digest, then signs a PASS artifact.
-Source and verdict keypairs must never be reused. The
+The Make target rejects a co-resident SOURCE private key, and the evaluator
+rejects SOURCE/VERDICT keypair reuse. The
 disabled-by-default finalizer has the ordinary and fault-control HMAC keys plus
 the pinned `POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY`, but never the private
-key or source signing key. In the same SQLite transaction it rebuilds the full
-immutable source facts, rejects source changes, and enforces the persisted
-source-valid-until deadline as `verdict-source-stale` before appending
+key or source signing key; Settings rejects startup if a SOURCE private key is
+present. In the same SQLite transaction it rebuilds the full immutable source
+facts, rejects source changes as `verdict-source-mismatch`, and then enforces
+the persisted source-valid-until deadline as `verdict-source-stale` before appending
 `VERIFIED(verdict_id, verdict_digest)`. The final evaluator is read-only and
-holds only the source and verdict public keys. Re-export and final evaluation
-are mandatory: a finalizer response alone is not qualification evidence.
+holds only the source and verdict public keys; its Make target rejects either
+private key and its evaluator rejects public-key reuse. Re-export and final
+evaluation are mandatory: a finalizer response alone is not qualification
+evidence.
 
 ## Recovery verdict
 

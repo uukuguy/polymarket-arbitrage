@@ -44,7 +44,12 @@ def source_facts_digest(envelope: Mapping[str, object]) -> str:
         {
             key: value
             for key, value in envelope.items()
-            if key not in {"freshness_gate", "source_authority"}
+            if key
+            not in {
+                "freshness_gate",
+                "orphan_collecting_runs",
+                "source_authority",
+            }
         }
     )
 

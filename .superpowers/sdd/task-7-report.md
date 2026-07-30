@@ -291,8 +291,8 @@ cryptographically and operationally separate from the verdict keypair:
   SOURCE public only. The orchestrator preserves the exact authenticated HTTP
   response bytes, and the candidate artifact binds their exact SHA-256.
 - The signed envelope carries both its complete digest and an immutable
-  source-facts digest. The latter excludes only the current-time freshness
-  result. Finalization rebuilds those facts in the same `BEGIN IMMEDIATE`
+  source-facts digest. The latter excludes current-time freshness projections.
+  Finalization rebuilds those facts in the same `BEGIN IMMEDIATE`
   transaction, rejects authority changes as `verdict-source-mismatch`, and
   enforces the persisted recovery-writer deadline separately as
   `verdict-source-stale`.
@@ -304,7 +304,7 @@ cryptographically and operationally separate from the verdict keypair:
   ID. Recovery receipts use an exact eight-field schema and bind the encoded
   recovery ID, row ID, component family, fault, target, runtime, and time.
 - The historical auth-nonce CHECK migration, like the event migration, now
-  performs target-table foreign-key validation before destructive drop/commit.
+  performs database-wide foreign-key validation before destructive drop/commit.
   Orphan self-FK failure restores the exact old schema, rows, indexes, triggers,
   pragma state, and leaves no transaction open.
 
@@ -324,3 +324,37 @@ Final local qualification:
 - Changed-file Ruff, M1 docs gate, and planning-status: PASS.
 
 Assessment: **Ready for fresh independent re-review.**
+
+## Sixth Remediation Resolution
+
+Fresh independent review found that the auth-nonce migration's table-scoped FK
+check missed inbound references from fault intents. A parallel integrity review
+also found generic terminal event writes, a current-time value in immutable
+facts, and process-role/taxonomy enforcement gaps. The repair closes each
+boundary:
+
+- Auth-nonce migration now runs database-wide `PRAGMA foreign_key_check` before
+  drop/commit. An old-schema intent whose reservation and attempt rows are
+  missing reproduces RED and now restores the exact database schema and rows.
+- Generic `append_event` rejects `CLEANED`, `RECOVERED`, and `VERIFIED`.
+  Cleanup, recovery, and verdict state can be written only through
+  `relinquish_claim`, `append_recovery_event`, and `finalize_verdict`
+  respectively. `INJECTED` remains the runtime injection writer and still
+  requires the exact ownership capability and call binding.
+- Immutable source facts exclude both `freshness_gate` and the `now_ms`-derived
+  `orphan_collecting_runs`; the complete SOURCE signature still covers the
+  entire envelope. Current gates and deadline expiry remain independently
+  evaluated.
+- Finalizer source-rebuild failures normalize to `verdict-source-mismatch`;
+  immutable source changes are compared before staleness, so tampering cannot
+  hide behind an expired deadline.
+- Finalizer settings reject a co-resident SOURCE private key. Make evaluator
+  targets reject forbidden private-key environment variables, and candidate
+  and final evaluator operations reject SOURCE/VERDICT keypair reuse.
+
+Final local qualification: 77 authority, 36 controls, and 67 upstream E2E
+tests PASS; the seven-file broad gate is 397 PASS; the full suite is 3677
+collected and 100% PASS with one expected xfail and one skip; Ruff, M1 docs,
+and planning gates PASS.
+
+Assessment: **Ready for dual fresh independent re-review.**

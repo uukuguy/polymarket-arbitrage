@@ -15,9 +15,12 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
 from polyarb.perception.evaluator_signing import (
     SIGNATURE_VERSION,
     load_private_key,
+    load_public_key,
     sign_digest,
     verify_digest,
 )
@@ -347,7 +350,7 @@ def evaluate_fault_envelope(
         {
             key: value
             for key, value in unsigned_evidence.items()
-            if key != "freshness_gate"
+            if key not in {"freshness_gate", "orphan_collecting_runs"}
         }
     )
     source_public_key = os.getenv(
@@ -821,6 +824,15 @@ def evaluate_fault_envelope(
             public_key = os.getenv(
                 "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY", ""
             )
+            try:
+                _source_kid, source_key = load_public_key(source_public_key)
+                _evaluator_kid, evaluator_key = load_public_key(public_key)
+                if source_key.public_bytes(
+                    Encoding.Raw, PublicFormat.Raw
+                ) == evaluator_key.public_bytes(Encoding.Raw, PublicFormat.Raw):
+                    reasons.append("authority-role-collision")
+            except ValueError:
+                pass
             unsigned = {
                 key: value
                 for key, value in candidate_artifact.items()
@@ -876,6 +888,20 @@ def build_candidate_artifact(
     )
     if not private_key:
         raise ValueError("evaluator-authority-unavailable")
+    source_public_key = os.getenv(
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY", ""
+    )
+    try:
+        _source_kid, source_key = load_public_key(source_public_key)
+        _evaluator_kid, evaluator_key = load_private_key(private_key)
+    except ValueError as exc:
+        raise ValueError("evaluator-authority-unavailable") from exc
+    if source_key.public_bytes(
+        Encoding.Raw, PublicFormat.Raw
+    ) == evaluator_key.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw
+    ):
+        raise ValueError("authority-role-collision")
     source_digest = hashlib.sha256(
         _canonical_json(evidence) if source_bytes is None else source_bytes
     ).hexdigest()

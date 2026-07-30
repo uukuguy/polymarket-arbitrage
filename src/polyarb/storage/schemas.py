@@ -90,9 +90,10 @@ def migrate_fault_auth_finalize(con) -> bool:
             SELECT * FROM neg_risk_fault_auth_nonces_pre_finalize;
             """
         )
-        violations = con.execute(
-            "PRAGMA foreign_key_check(neg_risk_fault_auth_nonces)"
-        ).fetchall()
+        # A table-scoped check sees only FKs declared by the rebuilt nonce
+        # table.  It does not inspect external children such as fault intents,
+        # whose auth_reservation_id/auth_attempt_id reference this table.
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise sqlite3.IntegrityError("fault-auth-migration-foreign-key-check")
         con.execute("DROP TABLE neg_risk_fault_auth_nonces_pre_finalize")

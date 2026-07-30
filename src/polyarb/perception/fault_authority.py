@@ -1315,6 +1315,12 @@ class FaultAuthorityStore:
         if not isinstance(evidence, Mapping):
             raise ValueError("invalid-evidence")
         normalize_evidence(typed_state, evidence)
+        if typed_state in {
+            FaultEventState.CLEANED,
+            FaultEventState.RECOVERED,
+            FaultEventState.VERIFIED,
+        }:
+            raise ValueError("fault-state-requires-specialized-writer")
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -1435,24 +1441,29 @@ class FaultAuthorityStore:
                     source_facts_digest,
                 )
 
-                current_source = derive_fault_envelope_in_connection(
-                    con,
-                    authority=self,
-                    db_path=self._db_path,
-                    fault_id=fault_id,
-                    now_ms=occurred_at_ms,
-                    deadline_monotonic=deadline,
-                    freshness_limit_ms=source_freshness_limit_ms,
-                )
+                try:
+                    current_source = derive_fault_envelope_in_connection(
+                        con,
+                        authority=self,
+                        db_path=self._db_path,
+                        fault_id=fault_id,
+                        now_ms=occurred_at_ms,
+                        deadline_monotonic=deadline,
+                        freshness_limit_ms=source_freshness_limit_ms,
+                    )
+                except ValueError as exc:
+                    raise ValueError("verdict-source-mismatch") from exc
                 if (
-                    current_source.get("freshness_gate") is not True
+                    source_facts_digest(current_source) != source_envelope_digest
                     or current_source.get("source_valid_until_ms")
                     != source_valid_until_ms
+                ):
+                    raise ValueError("verdict-source-mismatch")
+                if (
+                    current_source.get("freshness_gate") is not True
                     or occurred_at_ms > source_valid_until_ms
                 ):
                     raise ValueError("verdict-source-stale")
-                if source_facts_digest(current_source) != source_envelope_digest:
-                    raise ValueError("verdict-source-mismatch")
                 event = self._append_event_in_transaction(
                     con,
                     fault_id,

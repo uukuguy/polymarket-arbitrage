@@ -109,6 +109,7 @@ def _client(
     *,
     enabled: bool = True,
     component: str = "candidate",
+    finalizer: bool = False,
 ):
     settings = Settings(
         db_path=tmp_path / "state.db",
@@ -118,10 +119,12 @@ def _client(
         upstream_fault_control_enabled=enabled,
         upstream_fault_control_secret=SecretStr(FAULT_SECRET if enabled else ""),
         upstream_fault_source_private_key=SecretStr(
-            SOURCE_PRIVATE_KEY if enabled else ""
+            SOURCE_PRIVATE_KEY if enabled and not finalizer else ""
         ),
-        upstream_fault_finalizer_enabled=enabled,
-        upstream_fault_evaluator_public_key=EVALUATOR_PUBLIC_KEY if enabled else "",
+        upstream_fault_finalizer_enabled=enabled and finalizer,
+        upstream_fault_evaluator_public_key=(
+            EVALUATOR_PUBLIC_KEY if enabled and finalizer else ""
+        ),
         supabase_url="",
         supabase_service_key=SecretStr(""),
         supabase_db_dsn=SecretStr("postgresql://test.invalid/test"),
@@ -251,6 +254,30 @@ def _artifact_body(artifact: dict[str, object]) -> bytes:
     ).encode()
 
 
+def _append_fixture_event(
+    store: FaultAuthorityStore,
+    fault_id: str,
+    state: FaultEventState,
+    *,
+    occurred_at_ms: int,
+    evidence: Mapping[str, object],
+):
+    con = store._connect()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        event = store._append_event_in_transaction(
+            con,
+            fault_id,
+            state,
+            occurred_at_ms=occurred_at_ms,
+            evidence=evidence,
+        )
+        con.execute("COMMIT")
+        return event
+    finally:
+        con.close()
+
+
 def test_enabled_fault_control_requires_a_distinct_nonempty_secret() -> None:
     with pytest.raises(ValidationError):
         Settings(
@@ -289,6 +316,18 @@ def test_source_export_private_key_uses_strict_distinct_ed25519_role() -> None:
             upstream_fault_source_private_key=SecretStr(
                 EVALUATOR_PRIVATE_KEY
             ),
+            upstream_fault_finalizer_enabled=True,
+            upstream_fault_evaluator_public_key=EVALUATOR_PUBLIC_KEY,
+        )
+    with pytest.raises(
+        ValidationError,
+        match="finalizer process must not hold source private key",
+    ):
+        Settings(
+            scan_shared_secret=SecretStr(ORDINARY_SECRET),
+            upstream_fault_control_enabled=True,
+            upstream_fault_control_secret=SecretStr(FAULT_SECRET),
+            upstream_fault_source_private_key=SecretStr(SOURCE_PRIVATE_KEY),
             upstream_fault_finalizer_enabled=True,
             upstream_fault_evaluator_public_key=EVALUATOR_PUBLIC_KEY,
         )
@@ -428,7 +467,8 @@ def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqli
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         if path.endswith("/cleanup"):
             cleanup_at = int(time.time() * 1_000)
-            cleaned = store.append_event(
+            cleaned = _append_fixture_event(
+                store,
                 str(producer["fault_id"]),
                 FaultEventState.CLEANED,
                 occurred_at_ms=cleanup_at,
@@ -437,7 +477,6 @@ def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqli
                     "memory_cleared_at_ms": str(cleanup_at),
                     "receipt_persisted_at_ms": str(cleanup_at),
                 },
-                ownership=producer["ownership"],
             )
             store.confirm_cleanup_commit(
                 str(producer["fault_id"]),
@@ -482,12 +521,12 @@ def test_upstream_http_transport_reaches_recovered_through_local_server_and_sqli
                 evidence={"containment_id": "contained-1"},
             )
         elif path.endswith("/cleanup"):
-            store.append_event(
+            _append_fixture_event(
+                store,
                 str(producer["fault_id"]),
                 FaultEventState.RECOVERED,
                 occurred_at_ms=int(time.time() * 1_000),
                 evidence={"recovery_id": "recovery-1"},
-                ownership=producer["ownership"],
             )
         return value
 
@@ -582,7 +621,8 @@ def test_ambiguous_committed_arm_is_resolved_and_cleaned_by_exact_fault_id(
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         if path.endswith("/cleanup"):
             cleanup_at = int(time.time() * 1_000)
-            cleaned = store.append_event(
+            cleaned = _append_fixture_event(
+                store,
                 str(producer["fault_id"]),
                 FaultEventState.CLEANED,
                 occurred_at_ms=cleanup_at,
@@ -591,7 +631,6 @@ def test_ambiguous_committed_arm_is_resolved_and_cleaned_by_exact_fault_id(
                     "memory_cleared_at_ms": str(cleanup_at),
                     "receipt_persisted_at_ms": str(cleanup_at),
                 },
-                ownership=producer["ownership"],
             )
             store.confirm_cleanup_commit(
                 str(producer["fault_id"]),
@@ -639,12 +678,12 @@ def test_ambiguous_committed_arm_is_resolved_and_cleaned_by_exact_fault_id(
             if arm_result == "response-lost":
                 raise response_lost
             return ["not", "an", "object"]
-        store.append_event(
+        _append_fixture_event(
+            store,
             str(producer["fault_id"]),
             FaultEventState.RECOVERED,
             occurred_at_ms=int(time.time() * 1_000),
             evidence={"recovery_id": "recovery-1"},
-            ownership=producer["ownership"],
         )
         return value
 
@@ -728,7 +767,7 @@ def test_finalizer_requires_signed_exact_candidate_and_appends_verified(
         lambda *_args, **_kwargs: current_source,
     )
     client, runtime = _client(
-        tmp_path, make_http_test_client, component=component
+        tmp_path, make_http_test_client, component=component, finalizer=True
     )
     arm = _post(
         client,
@@ -767,14 +806,26 @@ def test_finalizer_requires_signed_exact_candidate_and_appends_verified(
         "fault-api-1", FaultEventState.CONTAINED, occurred_at_ms=now,
         evidence={"containment_id": "contained-1"},
     )
-    store.append_event(
-        "fault-api-1", FaultEventState.CLEANED, occurred_at_ms=now,
-        evidence=_cleaned_evidence(now), ownership=ownership,
-    )
-    recovered = store.append_event(
-        "fault-api-1", FaultEventState.RECOVERED, occurred_at_ms=now,
-        evidence={"recovery_id": "recovery-1"}, ownership=ownership,
-    )
+    fixture_con = store._connect()
+    try:
+        fixture_con.execute("BEGIN IMMEDIATE")
+        store._append_event_in_transaction(
+            fixture_con,
+            "fault-api-1",
+            FaultEventState.CLEANED,
+            occurred_at_ms=now,
+            evidence=_cleaned_evidence(now),
+        )
+        recovered = store._append_event_in_transaction(
+            fixture_con,
+            "fault-api-1",
+            FaultEventState.RECOVERED,
+            occurred_at_ms=now,
+            evidence={"recovery_id": "recovery-1"},
+        )
+        fixture_con.execute("COMMIT")
+    finally:
+        fixture_con.close()
     export_path = "/perception/faults/fault-api-1/export"
     assert client.get(export_path).status_code == 401
     unsigned = {
@@ -1080,12 +1131,12 @@ def test_cleanup_reports_producer_terminal_truth_instead_of_pending(
         occurred_at_ms=now_ms,
         evidence={"containment_id": "containment-1"},
     )
-    authority.append_event(
+    _append_fixture_event(
+        authority,
         "fault-api-1",
         FaultEventState.CLEANED,
         occurred_at_ms=now_ms,
         evidence=_cleaned_evidence(now_ms),
-        ownership=intent.ownership_capability,
     )
     response = _post(
         client,
