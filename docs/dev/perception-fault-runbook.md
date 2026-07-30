@@ -13,6 +13,10 @@ boot, evidence window, live samples, incident IDs, actions, cleanup results,
 and component-specific recovery writer receipts are captured and bound into an
 immutable evidence artifact.
 
+This subsystem never reads or writes wallet keys, balances, signing material,
+orders, fills, positions, or trades. Its only mutation surface is the
+disabled-by-default upstream-fault control plane and its append-only evidence.
+
 ## Local gate
 
 ```bash
@@ -65,6 +69,12 @@ Do not skip or reorder:
 A cleanup failure blocks every later injection. A locally green fixture can
 never substitute for any production step.
 
+Every production step below requires separate user authorization for the exact
+deployed release. Every individual `mode=execute` or manual arm requires a
+second, fault-specific authorization; authorization for one fault does not
+authorize the next matrix row. This runbook deliberately provides no command
+that defaults to mutation.
+
 ## Production read-only baseline
 
 ```bash
@@ -87,6 +97,60 @@ evidence. Their absence produces a FAIL verdict rather than a default zero.
 Cross-membership and orphan counters are explicit current observations; the
 fault adapter must compare the same runtime before and after injection. An open
 Incident also fails the final stability gate.
+
+Before drafting or authorizing an intent, inspect only read models:
+
+```bash
+make perception-status
+make perception-incidents limit=100
+make fault-runtime-status component=candidate
+make fault-runtime-status component=discovery
+make fault-runtime-status component=reconciliation
+make fault-runtime-status component=notification
+```
+
+After an exact fault ID exists, `make upstream-fault-status
+fault_id=<exact-id>` is also read-only.
+
+## Review-only minimal intent files
+
+The following JSON objects are review templates, not shell commands. Replace
+every placeholder with the just-observed runtime identity and a new exact fault
+ID. Keep the file outside source control, mode `0600`, and do not put either
+HMAC or either Ed25519 key in it.
+
+Gamma Discovery page (`gamma-timeout`; `gamma-partial` changes `kind` and uses
+`{"keep_events":1}`, while `gamma-malformed` uses `{}`):
+
+```json
+{"fault_id":"<new-id>","kind":"gamma-timeout","call_class":"gamma-discovery-event-page","target_key":"discovery","parameters":{"delay_ms":10},"runtime":{"component":"discovery","release_id":"<40-char-sha>","machine_id":"<machine>","boot_id":"<uuid>"},"ttl_ms":30000}
+```
+
+Gamma Reconciliation page:
+
+```json
+{"fault_id":"<new-id>","kind":"gamma-cursor","call_class":"gamma-reconciliation-event-page","target_key":"reconciliation","parameters":{},"runtime":{"component":"reconciliation","release_id":"<40-char-sha>","machine_id":"<machine>","boot_id":"<uuid>"},"ttl_ms":30000}
+```
+
+Candidate CLOB book batch (`clob-429`; `clob-missing-leg` uses
+`{"leg_index":0}`, while `clob-latency` uses `{"delay_ms":10}`):
+
+```json
+{"fault_id":"<new-id>","kind":"clob-429","call_class":"clob-candidate-book-batch","target_key":"<durable-group-id>","parameters":{},"runtime":{"component":"candidate","release_id":"<40-char-sha>","machine_id":"<machine>","boot_id":"<uuid>"},"ttl_ms":30000}
+```
+
+Telegram opportunity card:
+
+```json
+{"fault_id":"<new-id>","kind":"telegram-failure","call_class":"telegram-opportunity-card","target_key":"<decimal-outbox-id>","parameters":{},"runtime":{"component":"notification","release_id":"<40-char-sha>","machine_id":"<machine>","boot_id":"<uuid>"},"ttl_ms":30000}
+```
+
+Only after the exact intent receives its own mutation authorization may the
+operator load both distinct HMAC values into the process environment and run
+`make arm-upstream-fault intent=<0600-path>`. The CLI signs the exact body with
+the ordinary perception HMAC and the fault-domain HMAC; it never accepts those
+secrets as command-line values. SOURCE and VERDICT private keys must not be
+present in the operator shell.
 
 ## Fault plan matrix
 
@@ -168,12 +232,29 @@ alone holds `POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY` and signs the complete
 canonical source-derived envelope with a dedicated Ed25519 keypair. The
 orchestrator preserves the authenticated HTTP response bytes exactly.
 
+Automatic cleanup runs for every post-arm `BaseException`, including
+cancellation and process-exit exceptions. If the orchestrator loses the arm
+response, it first queries exact-ID admission and conservatively requests
+cleanup when admission is unknown. For an independently observed active fault,
+the separately authorized manual fallback is:
+
+```bash
+make cleanup-upstream-fault fault_id=<exact-id>
+make upstream-fault-status fault_id=<exact-id>
+```
+
+The cleanup endpoint records `cleanup-requested`; only the owning producer may
+clear its in-memory controller and append `CLEANED` plus
+`cleanup-confirmed`. If either receipt is absent or inconsistent, stop: mark
+the row `cleanup-failed`, preserve the evidence directory, escalate to the
+operator, and do not arm another fault or continue the matrix.
+
 `candidate-exit`, `discovery-exit`, `reconciliation-stall`, and the remaining
 host/store/restart/deploy targets are plan-only and reject execution fail-closed.
 
 ## Independent verdict and finalization
 
-Keep the three phases in different processes and do not combine their secrets:
+Keep all four roles in different processes and do not combine their secrets:
 
 ```bash
 make evaluate-upstream-fault-candidate \
@@ -220,6 +301,40 @@ holds only the source and verdict public keys; its Make target rejects either
 private key and its evaluator rejects public-key reuse. Re-export and final
 evaluation are mandatory: a finalizer response alone is not qualification
 evidence.
+
+`source_facts_digest` excludes the export-time freshness result and other
+current-clock projections. It binds immutable SQLite source facts. Freshness
+is a separate gate derived from the persisted recovery-writer timestamp:
+`source_valid_until_ms`; the finalizer compares that deadline with its current
+authority clock. Therefore an unchanged database that merely ages out fails
+as `verdict-source-stale`, while a source mutation fails as
+`verdict-source-mismatch`.
+
+The exact artifact directory created by the typed orchestrator is the supplied
+new `evidence_dir`; it contains at least `intent.json` and the exact
+authenticated `evidence.json` response bytes (or `failure.json` on a bounded
+failure). Never edit or reuse it. Store the exclusive-create candidate and
+final verdicts in the same immutable experiment directory, then verify with:
+
+```bash
+make evaluate-upstream-fault-candidate \
+  evidence=<evidence-dir>/evidence.json \
+  output=<evidence-dir>/candidate.json \
+  expected_release=<40-char-sha>
+make finalize-upstream-fault \
+  fault_id=<exact-id> artifact=<evidence-dir>/candidate.json \
+  expected_release=<40-char-sha>
+# Re-export the now-VERIFIED source through the authorized source service.
+make evaluate-upstream-fault-final \
+  evidence=<evidence-dir>/verified-evidence.json \
+  candidate=<evidence-dir>/candidate.json \
+  output=<evidence-dir>/final.json \
+  expected_release=<40-char-sha>
+```
+
+The final PASS is valid only when the re-exported source bytes and final
+verdict are preserved together. Synthetic/local evidence and a candidate or
+finalizer response alone never qualify a cloud release.
 
 ## Recovery verdict
 

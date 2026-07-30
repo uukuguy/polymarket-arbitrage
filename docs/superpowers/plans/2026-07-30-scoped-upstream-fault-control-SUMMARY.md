@@ -1,87 +1,161 @@
 # Scoped Upstream Fault Control Summary
 
-**Status:** in-progress
+**Status:** local implementation complete; production qualification NOT RUN
+
 **Approved design:**
 [`2026-07-30-scoped-upstream-fault-control-design.md`](../specs/2026-07-30-scoped-upstream-fault-control-design.md)
 
-Task 1 establishes the dormant-by-default fault model and append-only SQLite
-authority. It does not add HTTP, adapters, runtime bridges, deployment,
-feature flags, or production mutation.
+## Outcome
 
-Implemented:
+The branch now provides a dormant-by-default, production-designed control and
+qualification boundary for eight typed upstream faults:
 
-- Frozen fault/runtime/intent/event/projection contracts and canonical JSON
-  hashing in `fault_control.py`.
-- Locked call classes:
-  `gamma-discovery-event-page`,
-  `gamma-reconciliation-event-page`,
-  `clob-candidate-book-batch`, and
-  `telegram-opportunity-card`.
-- Exact kind-to-call-class mapping, target normalization, parameter bounds,
-  TTL validation, release/machine/boot identity validation, and digest-only
-  authorization identity.
-- A single-use in-memory controller with exact-scope matching, monotonic
-  expiry, fail-open real calls, memory-first cleanup, and admission freeze
-  after cleanup-receipt failure.
-- An independent `FaultAuthorityStore` with bounded SQLite busy timeouts,
-  append-only runtime registration, transactional authorization/replay
-  handling, exact-runtime single-use claim, hash-chained lifecycle facts,
-  deterministic fail-closed validation, read-only projection, and stale
-  runtime abandonment.
-- Review hardening binds every semantic runtime, nonce, intent, and event field
-  into canonical hashes; append-only triggers reject authority UPDATE/DELETE;
-  claim validates an intact latest-`authorized` chain in the same transaction.
-- Successful claim returns a boot/runtime-bound in-memory ownership capability.
-  Only its digest is durable, and `injected`, `cleaned`, and `recovered` writes
-  require the unpersisted capability.
-- Controller admission derives monotonic expiry from wall-clock TTL remaining,
-  and parameters are immutable private copies.
-- Lifecycle evidence is state-specific and identifier-only; unknown fields,
-  URL/query/header/cookie/authorization/token/body-shaped material, and unsafe
-  supervisor run IDs are rejected before persistence.
-- Append-only schema names:
-  `neg_risk_fault_runtime_starts`,
-  `neg_risk_fault_auth_nonces`,
-  `neg_risk_fault_intents`, and
-  `neg_risk_fault_events`.
-- Lifecycle safety order is `contained -> cleaned -> recovered`; a remote
-  cleanup request is not represented as a process-owned cleanup receipt.
+- Gamma Discovery: timeout, partial-page rejection, malformed response;
+- Gamma Reconciliation: cursor-integrity failure;
+- Candidate CLOB: exact-group missing leg, 429, and latency; and
+- Telegram: exact durable-outbox delivery failure.
 
-Tests run:
+Normal mode and any control-store/config/evidence failure pass through to the
+real upstream call. Qualification is independently fail-closed. No wallet,
+signing, balance, order, fill, position, or trade path is in scope.
 
-- RED: `uv run pytest tests/perception/test_fault_control.py -q` failed at
-  collection because `polyarb.perception.fault_control` did not exist.
-- GREEN: `uv run pytest tests/perception/test_fault_control.py -q` passed,
-  29 tests.
-- RED: `uv run pytest tests/perception/test_fault_authority.py -q` failed at
-  collection because `polyarb.perception.fault_authority` did not exist.
-- GREEN: `uv run pytest tests/perception/test_fault_authority.py -q` passed,
-  15 tests.
-- GREEN: `uv run pytest tests/perception/test_fault_control.py
-  tests/perception/test_fault_authority.py -q` passed, 44 tests.
-- `uv run ruff check` for both modules and both test files passed.
+## Implementation commits
 
-Task 1 review hardening:
+- Preconditions and complete local gate:
+  `b6b794d`, `d766308`.
+- Authority model, append-only schema, ownership capability, and fail-open
+  controller: `630fdbb`, `8b37e59`, `ad1cf72`.
+- Exact producer boot identity, safe-boundary claim, cancellation-safe
+  relinquish, and freeze behavior: `7538717`, `96700d6`, `8ab8091`.
+- Dual-HMAC API/CLI, bounded read models, finalizer route, and Make entries:
+  `7ad9dea`, `8ffee59`, `84237e7`, `7d57172`, `79060eb`.
+- Gamma adapters and writer truth:
+  `620c920`, `788602c`, `c58264a`.
+- Candidate exact-group adapters and committed invocation evidence:
+  `728e08a`, `a2c37d9`, `78e028f`, `f303b29`.
+- Telegram exact-outbox adapter and cross-family invalidity handling:
+  `9a8c4b8`, `3020b06`, `fe89de0`.
+- Orchestrator, cleanup/recovery chain, evaluator/finalizer, complete source
+  attestation, and capability hardening:
+  `c87250d`, `799667c`, `0dc831d`, `4b414f6`, `b6a7dfa`, `b142d60`,
+  `3a35a68`, `91f758a`.
 
-- Combined RED: 18 focused failures exposed the six review findings.
-- GREEN: 65 focused model/authority tests pass after the fixes.
-- Existing `test_store.py` and observation formatter/scanner schema regressions
-  pass with the new hash columns and append-only triggers.
-- Second review hardening makes any ordinary control-infrastructure
-  `Exception` pass through exactly once without swallowing cancellation or
-  other `BaseException`; replaces the generic safe-value regex with dedicated
-  fault, supervisor, target, and lifecycle-evidence contracts plus enumerated
-  reasons; and projects any corrupt current-runtime accepted chain as
-  unavailable `evidence-invalid`.
-- Second review GREEN: 99 focused model/authority tests pass.
+## Locked contracts
 
-Remaining plan work:
+### Schema and runtime
 
-- Task 2: producer boot identity, runtime registration, and safe-boundary claim.
-- Task 3: typed Gamma/CLOB/Telegram adapters.
-- Task 4: control API and dedicated dual-HMAC authority.
-- Task 5: process-owned cleanup and recovery binding.
-- Task 6: independent evaluator and qualification evidence.
-- Task 7: configuration, Makefile/operator entry points, docs, and full local
-  acceptance.
-- Task 8: separately authorized deployment and production qualification.
+The four append-only authority tables are
+`neg_risk_fault_runtime_starts`, `neg_risk_fault_auth_nonces`,
+`neg_risk_fault_intents`, and `neg_risk_fault_events`. Event and authorization
+migrations validate foreign keys before commit and roll back as one unit.
+Accepted intent, exact runtime, single claim/injection, lifecycle hash chain,
+cleanup terminal, and replay constraints are durable; the hot path reads only
+one immutable producer-local `ActiveFault`.
+
+Isolated and in-process producers use the same protocol. Every child attempt
+has a new `producer_boot_id`; Candidate, Discovery, Reconciliation, and the
+daemon-owned notification runtime claim only at a safe cycle/batch boundary.
+A restarted process cannot inherit a prior boot's fault.
+
+### Call and target boundary
+
+The only call classes are Gamma Discovery page, Gamma Reconciliation page,
+Candidate CLOB book batch, and Telegram opportunity card. Their target keys
+are respectively `discovery`, `reconciliation`, durable `group_id`, and
+decimal durable notification/outbox ID. URLs, headers, tokens, response
+bodies, expressions, and shell fragments are never accepted as targets.
+Intent TTL is 1,000–120,000 ms and bounded fault parameters are kind-specific.
+
+### Cleanup and chain truth
+
+Cleanup is memory-first. The remote API can append `cleanup-requested`, but
+only the owning producer can clear memory, append `CLEANED`, and append the
+post-commit `cleanup-confirmed` action. Receipt failure degrades/freezes the
+runtime and blocks later matrix rows. `RECOVERED` requires a newer, exact
+component/target/runtime business writer row; the dedicated authority writer
+validates the real SQLite row and binds its `recovery_id`.
+
+The exporter binds a validated complete Incident suffix/checkpoint, exact
+Gamma partial-coverage source rows, an exact eight-field recovery writer
+receipt, the complete fault event chain, and current authority facts in one
+SQLite snapshot. The orchestrator preserves authenticated HTTP response bytes
+without parse/reserialize substitution.
+
+### Four-role qualification
+
+The roles and allowed capabilities are:
+
+| Role | Required | Forbidden |
+|---|---|---|
+| source/export HTTP | ordinary + fault HMAC, SOURCE private | VERDICT private |
+| candidate evaluator | SOURCE public, VERDICT private | SOURCE private, both HMACs |
+| finalizer HTTP | ordinary + fault HMAC, VERDICT public | both private keys |
+| final evaluator | SOURCE public, VERDICT public | both private keys, both HMACs |
+
+SOURCE and VERDICT are distinct Ed25519 keypairs. The SOURCE signature covers
+the complete canonical envelope; `source_facts_digest` excludes current-clock
+freshness projections and binds immutable source facts. The separately
+persisted `source_valid_until_ms` is checked against the finalizer's current
+authority clock. Source mutation reports `verdict-source-mismatch`; unchanged
+source that simply ages out reports `verdict-source-stale`. Only the finalizer
+may append exact `VERIFIED(verdict_id, verdict_digest)`, after which a
+re-export and read-only final evaluation are mandatory.
+
+## Local verification
+
+- `make test-m1-perception`:
+  **2796 passed, 1 skipped, 1 xfailed** from 2,798 collected in 478.76 s.
+- `make qualify-perception-local`: 36 evaluator tests passed and the canonical
+  synthetic fixture returned `status=PASS` with no reasons. This is local
+  conformance only.
+- `make docs-m1-check`: `M1 manual contract: OK`.
+- `uv run ruff check` on all touched fault-control runtime, adapter, authority,
+  HTTP, orchestrator, exporter, and evaluator modules: `All checks passed!`.
+- `make planning-status`: 82 plans across three workstreams,
+  `no drift detected`.
+- `git diff --check -- <Task-8-doc-whitelist>`: PASS.
+- Repository-wide `git diff --check`: exit 2 only for the pre-existing,
+  out-of-scope `.superpowers/sdd/task-7-brief.md:123` trailing blank line;
+  that ignored coordinator file was not edited or staged by Task 8.
+- `git config --get core.hooksPath`: `.githooks`.
+
+## External gates and authorization boundary
+
+`DEPLOYED_RELEASE` and `NEW_EVIDENCE_DIR` were both unset. Therefore
+`make qualify-perception-prod-readonly` was **NOT RUN**. There is no exact
+deployed release or newly authorized evidence directory, and this project has
+not yet had a real production run. No local or synthetic result is labelled
+production PASS.
+
+**UNAUTHORIZED READ-ONLY CHECK ACCIDENTALLY STARTED, TERMINATED, NO MUTATION
+OBSERVED.** While following the image-aware gate, `make
+chaos-l2-fly-image-check` resolved the `polyarb-l2` image with read-only
+`flyctl status`; local Docker could not read the private image, so the target
+automatically fell back to read-only live-machine `command -v` probes.
+`pkill`, `ps`, and `kill` were reported missing before the make process and its
+children were terminated. A local process-table check confirmed no target,
+SSH-console, or Docker child remained. No deploy, secret/config change,
+feature enablement, arm, injection, cleanup, wallet/order/trade operation, or
+other external mutation was performed. Because cloud inspection was outside
+this task's authorization, this gate is not recorded as PASS and will not be
+retried here.
+
+Production qualification remains a later, separately authorized operation. It
+requires an exact deployed release, explicit read-only evidence authorization,
+separate authorization for one exact fault mutation at a time, configured
+four-role secrets, and a fresh 24-hour continuous evidence window after the
+matrix.
+
+## Next exact command
+
+After the user separately authorizes read-only qualification for an exact
+deployed release and supplies a new evidence directory:
+
+```bash
+make qualify-perception-prod-readonly \
+  expected_release="$DEPLOYED_RELEASE" \
+  output_dir="$NEW_EVIDENCE_DIR"
+```
+
+This is GET-only. It does not authorize deployment, feature/secret changes, or
+any fault mutation.
