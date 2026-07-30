@@ -358,3 +358,29 @@ collected and 100% PASS with one expected xfail and one skip; Ruff, M1 docs,
 and planning gates PASS.
 
 Assessment: **Ready for dual fresh independent re-review.**
+
+## Seventh Remediation Resolution
+
+Fresh review showed that Make enforced evaluator isolation but direct CLI
+invocation did not. Root integrity review also identified a second current-time
+gate: a collecting quote lease could become orphaned after candidate evidence
+without changing immutable facts.
+
+- Direct candidate evaluation now rejects SOURCE private and both control HMAC
+  environments. Direct final evaluation rejects SOURCE private, VERDICT
+  private, and both control HMAC environments. The Make targets enforce the
+  same rows.
+- Source/export Settings rejects a co-resident VERDICT private key. Finalizer
+  Settings rejects both SOURCE and VERDICT private keys. This completes the
+  four-role capability matrix documented in the runbook.
+- Finalization explicitly rechecks `orphan_collecting_runs == 0` inside the
+  same source transaction. With an unchanged database, crossing only a
+  collecting-run lease returns `verdict-source-stale`; after normal expired
+  lease cleanup, re-export/finalization remains possible.
+
+Final local qualification after these changes: focused 186 PASS (77 authority,
+37 controls, 72 upstream E2E); seven-file broad 403 PASS; full suite 3683
+collected and 100% PASS with one expected xfail and one skip; Ruff, M1 docs,
+and planning gates PASS.
+
+Assessment: **Ready for dual fresh independent re-review.**

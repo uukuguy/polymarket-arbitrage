@@ -1836,6 +1836,14 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
     )
     assert recovered is not None
     with sqlite3.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO neg_risk_quote_runs("
+            "universe_snapshot_id,universe_taken_at_ms,universe_hash,"
+            "source_truth_hash,quoted_at_ms,requested_token_count,"
+            "successful_response_count,lease_expires_at_ms,status"
+            ") VALUES(1,1,'u','s',1,0,0,1800,'collecting')"
+        )
+    with sqlite3.connect(db_path) as con:
         before_export = con.total_changes
         row_counts = tuple(
             con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
@@ -1875,6 +1883,26 @@ def test_control_finalizer_requires_exact_recovered_chain_and_is_idempotent(
                 "neg_risk_fault_events",
             )
         ) == row_counts
+
+    with pytest.raises(ValueError, match="verdict-source-stale"):
+        store.finalize_verdict(
+            "fault-1",
+            verdict_id=str(artifact["verdict_id"]),
+            verdict_digest=str(artifact["artifact_digest"]),
+            source_tail_hash=recovered.event_hash,
+            source_envelope_digest=str(artifact["source_envelope_digest"]),
+            source_valid_until_ms=int(artifact["source_valid_until_ms"]),
+            source_freshness_limit_ms=90_000,
+            runtime=RUNTIME,
+            auth=auth("6"),
+            request_digest="6" * 64,
+            occurred_at_ms=1_801,
+        )
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "UPDATE neg_risk_quote_runs SET status='failed',"
+            "failure_reason='collector-lease-expired' WHERE status='collecting'"
+        )
 
     missing_writer_path = db_path.with_name("fault-missing-writer.db")
     with (

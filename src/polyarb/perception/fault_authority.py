@@ -1461,6 +1461,7 @@ class FaultAuthorityStore:
                     raise ValueError("verdict-source-mismatch")
                 if (
                     current_source.get("freshness_gate") is not True
+                    or current_source.get("orphan_collecting_runs") != 0
                     or occurred_at_ms > source_valid_until_ms
                 ):
                     raise ValueError("verdict-source-stale")

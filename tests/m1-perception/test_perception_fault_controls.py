@@ -333,6 +333,34 @@ def test_source_export_private_key_uses_strict_distinct_ed25519_role() -> None:
         )
 
 
+def test_source_and_finalizer_settings_reject_forbidden_evaluator_private_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY",
+        EVALUATOR_PRIVATE_KEY,
+    )
+    with pytest.raises(
+        ValidationError,
+        match="source process must not hold evaluator private key",
+    ):
+        Settings(
+            scan_shared_secret=SecretStr(ORDINARY_SECRET),
+            upstream_fault_source_private_key=SecretStr(SOURCE_PRIVATE_KEY),
+        )
+    with pytest.raises(
+        ValidationError,
+        match="finalizer process must not hold evaluator private key",
+    ):
+        Settings(
+            scan_shared_secret=SecretStr(ORDINARY_SECRET),
+            upstream_fault_control_enabled=True,
+            upstream_fault_control_secret=SecretStr(FAULT_SECRET),
+            upstream_fault_finalizer_enabled=True,
+            upstream_fault_evaluator_public_key=EVALUATOR_PUBLIC_KEY,
+        )
+
+
 def test_readonly_export_requires_both_authorities_without_control_mutation(
     tmp_path: Path,
     make_http_test_client,
@@ -759,6 +787,7 @@ def test_finalizer_requires_signed_exact_candidate_and_appends_verified(
     current_source = {
         "fixture": "source-envelope",
         "freshness_gate": True,
+        "orphan_collecting_runs": 0,
         "source_valid_until_ms": 0,
     }
     monkeypatch.setattr(

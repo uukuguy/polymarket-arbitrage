@@ -409,6 +409,12 @@ class Settings(BaseSettings):
                 _source_kid, source_key = load_private_key(source_private_key)
             except ValueError as exc:
                 raise ValueError("invalid fault source private key") from exc
+            if os.getenv(
+                "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", ""
+            ):
+                raise ValueError(
+                    "fault source process must not hold evaluator private key"
+                )
         evaluator_public_key = self.upstream_fault_evaluator_public_key
         if self.upstream_fault_finalizer_enabled and (
             not self.upstream_fault_control_enabled or not evaluator_public_key
@@ -421,6 +427,12 @@ class Settings(BaseSettings):
             if source_key is not None:
                 raise ValueError(
                     "fault finalizer process must not hold source private key"
+                )
+            if os.getenv(
+                "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", ""
+            ):
+                raise ValueError(
+                    "fault finalizer process must not hold evaluator private key"
                 )
             try:
                 _evaluator_kid, _evaluator_key = load_public_key(

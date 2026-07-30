@@ -189,6 +189,19 @@ make evaluate-upstream-fault-final \
   output=<new-final.json> expected_release=<40-char-sha>
 ```
 
+The enforced four-role capability matrix is:
+
+| Process role | Required authority | Forbidden secret authority |
+|---|---|---|
+| source/export HTTP | ordinary + fault-control HMAC, SOURCE private | VERDICT private |
+| candidate evaluator | SOURCE public, VERDICT private | SOURCE private, both control HMACs |
+| finalizer HTTP | ordinary + fault-control HMAC, VERDICT public | SOURCE private, VERDICT private |
+| final evaluator | SOURCE public, VERDICT public | SOURCE private, VERDICT private, both control HMACs |
+
+Settings enforces the two HTTP-process private-key boundaries. Both evaluator
+Make targets and the direct evaluator CLI enforce their rows, so bypassing Make
+does not restore a forbidden capability.
+
 The candidate evaluator has only
 `POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY` plus the separate
 `POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY`. It verifies the producer

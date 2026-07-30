@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 
@@ -1122,6 +1123,22 @@ def test_candidate_and_final_evaluators_reject_same_source_verdict_key(
             "evaluate-upstream-fault-final",
             "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY",
         ),
+        (
+            "evaluate-upstream-fault-candidate",
+            "POLYARB_SCAN_SHARED_SECRET",
+        ),
+        (
+            "evaluate-upstream-fault-candidate",
+            "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET",
+        ),
+        (
+            "evaluate-upstream-fault-final",
+            "POLYARB_SCAN_SHARED_SECRET",
+        ),
+        (
+            "evaluate-upstream-fault-final",
+            "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET",
+        ),
     ),
 )
 def test_make_evaluator_targets_reject_forbidden_private_authority(
@@ -1129,13 +1146,22 @@ def test_make_evaluator_targets_reject_forbidden_private_authority(
     target: str,
     forbidden: str,
 ) -> None:
-    env = {
-        **os.environ,
-        "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY": SOURCE_PUBLIC_KEY,
-        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY": EVALUATOR_PRIVATE_KEY,
-        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY": EVALUATOR_PUBLIC_KEY,
-        forbidden: SOURCE_PRIVATE_KEY,
-    }
+    env = dict(os.environ)
+    for name in (
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY",
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY",
+        "POLYARB_SCAN_SHARED_SECRET",
+        "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET",
+    ):
+        env.pop(name, None)
+    env["POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY"] = SOURCE_PUBLIC_KEY
+    if target == "evaluate-upstream-fault-candidate":
+        env["POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY"] = (
+            EVALUATOR_PRIVATE_KEY
+        )
+    else:
+        env["POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY"] = EVALUATOR_PUBLIC_KEY
+    env[forbidden] = SOURCE_PRIVATE_KEY
     result = subprocess.run(
         [
             "make",
@@ -1151,6 +1177,141 @@ def test_make_evaluator_targets_reject_forbidden_private_authority(
     )
     assert result.returncode == 2
     assert "must not hold" in result.stderr
+
+
+def test_direct_evaluator_cli_rejects_forbidden_process_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_source = _production_envelope()
+    monkeypatch.setenv(
+        "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY",
+        EVALUATOR_PRIVATE_KEY,
+    )
+    artifact = acceptance.build_candidate_artifact(candidate_source)
+    monkeypatch.delenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY")
+
+    final_source = deepcopy(candidate_source)
+    verified = {
+        "fault_id": "fault-1",
+        "sequence": 9,
+        "state": "verified",
+        "action": None,
+        "occurred_at_ms": 17,
+        "evidence": {
+            "verdict_id": artifact["verdict_id"],
+            "verdict_digest": artifact["artifact_digest"],
+        },
+        "previous_hash": candidate_source["fault_history_tail_hash"],
+    }
+    verified["event_hash"] = acceptance.canonical_digest(verified)
+    final_source["fault_history"].append(verified)
+    final_source["fault_history_tail_hash"] = verified["event_hash"]
+    final_source["mode"] = "final"
+    final_source["pending_verification_fault_count"] = 0
+    final_source["source_projection_active"] = False
+    _sign_source_envelope(final_source)
+
+    candidate_path = tmp_path / "candidate-source.json"
+    artifact_path = tmp_path / "candidate-artifact.json"
+    final_path = tmp_path / "final-source.json"
+    candidate_path.write_text(json.dumps(candidate_source))
+    artifact_path.write_text(json.dumps(artifact))
+    final_path.write_text(json.dumps(final_source))
+
+    cases = (
+        (
+            "candidate",
+            candidate_path,
+            None,
+            "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY",
+        ),
+        (
+            "candidate",
+            candidate_path,
+            None,
+            "POLYARB_SCAN_SHARED_SECRET",
+        ),
+        (
+            "candidate",
+            candidate_path,
+            None,
+            "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET",
+        ),
+        (
+            "final",
+            final_path,
+            artifact_path,
+            "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY",
+        ),
+        (
+            "final",
+            final_path,
+            artifact_path,
+            "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY",
+        ),
+        (
+            "final",
+            final_path,
+            artifact_path,
+            "POLYARB_SCAN_SHARED_SECRET",
+        ),
+        (
+            "final",
+            final_path,
+            artifact_path,
+            "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET",
+        ),
+    )
+    for index, (mode, evidence_path, candidate_artifact, forbidden) in enumerate(
+        cases
+    ):
+        env = dict(os.environ)
+        for name in (
+            "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY",
+            "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY",
+            "POLYARB_SCAN_SHARED_SECRET",
+            "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET",
+        ):
+            env.pop(name, None)
+        env["POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY"] = SOURCE_PUBLIC_KEY
+        if mode == "candidate":
+            env["POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY"] = (
+                EVALUATOR_PRIVATE_KEY
+            )
+        else:
+            env["POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY"] = (
+                EVALUATOR_PUBLIC_KEY
+            )
+        env[forbidden] = "forbidden-secret"
+        output = tmp_path / f"forbidden-{index}.json"
+        command = [
+            sys.executable,
+            "scripts/perception_fault_acceptance.py",
+            "--evidence",
+            str(evidence_path),
+            "--output",
+            str(output),
+            "--require-scope",
+            "production-fault",
+            "--expected-release",
+            "a" * 40,
+            "--fault-mode",
+            mode,
+        ]
+        if candidate_artifact is not None:
+            command.extend(
+                ["--candidate-artifact", str(candidate_artifact)]
+            )
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        assert result.returncode == 2
+        assert "forbidden-private-authority" in result.stderr
+        assert not output.exists()
 
 
 def test_production_evaluator_rejects_rehashed_arbitrary_cleanup_request() -> None:

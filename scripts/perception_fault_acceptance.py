@@ -1229,6 +1229,21 @@ def _write_exclusive(path: Path, payload: Mapping[str, Any]) -> None:
     write_exclusive_bytes(path, _canonical_json(payload) + b"\n")
 
 
+def _enforce_fault_evaluator_environment(mode: str) -> None:
+    forbidden = [
+        "POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY",
+        "POLYARB_SCAN_SHARED_SECRET",
+        "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET",
+    ]
+    if mode == "final":
+        forbidden.append("POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY")
+    present = [name for name in forbidden if os.getenv(name, "")]
+    if present:
+        raise ValueError(
+            f"{mode}-evaluator-forbidden-private-authority:{','.join(present)}"
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--evidence", type=Path, required=True)
@@ -1256,6 +1271,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.fault_mode is not None:
             if args.require_scope != "production-fault":
                 raise ValueError("fault mode requires production-fault scope")
+            _enforce_fault_evaluator_environment(args.fault_mode)
             if args.fault_mode == "candidate":
                 if evaluate_fault_envelope(
                     evidence,
