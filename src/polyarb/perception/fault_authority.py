@@ -465,31 +465,38 @@ class FaultAuthorityStore:
     ) -> tuple[str, ...]:
         self._check_deadline(deadline_monotonic)
         active: list[str] = []
+        terminal_values = tuple(state.value for state in _TERMINAL_STATES)
+        terminal_placeholders = ",".join("?" for _ in terminal_values)
         for component in _FAULT_COMPONENTS:
             self._check_deadline(deadline_monotonic)
             runtime = self._current_runtime_in_connection(con, component)
             if runtime is None:
                 continue
             rows = con.execute(
-                "SELECT fault_id FROM neg_risk_fault_intents "
-                "WHERE component=? AND release_id=? AND machine_id=? AND boot_id=? "
-                "AND status='accepted' "
-                "ORDER BY accepted_at_ms DESC,fault_id DESC LIMIT 2",
+                "SELECT i.fault_id FROM neg_risk_fault_intents i "
+                "WHERE i.component=? AND i.release_id=? "
+                "AND i.machine_id=? AND i.boot_id=? "
+                "AND i.status='accepted' "
+                "AND COALESCE(("
+                " SELECT e.state FROM neg_risk_fault_events e "
+                " WHERE e.fault_id=i.fault_id AND e.state IS NOT NULL "
+                " ORDER BY e.sequence DESC LIMIT 1"
+                "), '') NOT IN (" + terminal_placeholders + ") "
+                "ORDER BY i.accepted_at_ms DESC,i.fault_id DESC LIMIT 2",
                 (
                     runtime.component,
                     runtime.release_id,
                     runtime.machine_id,
                     str(runtime.boot_id),
+                    *terminal_values,
                 ),
             ).fetchall()
             self._check_deadline(deadline_monotonic)
             for row in rows:
                 self._check_deadline(deadline_monotonic)
-                fault_id = str(row["fault_id"])
-                if self._latest_state(con, fault_id) not in _TERMINAL_STATES:
-                    active.append(fault_id)
-                    if len(active) >= limit:
-                        break
+                active.append(str(row["fault_id"]))
+                if len(active) >= limit:
+                    break
             if len(active) >= limit:
                 break
         self._check_deadline(deadline_monotonic)

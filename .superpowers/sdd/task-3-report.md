@@ -257,3 +257,50 @@ row.
 8. Bounded-query regression: the first latest-only probe hid the existing
    two-active-chain tamper fixture. The final top-two-per-runtime design stays
    constant-bounded and restores fail-closed projection.
+
+## Final active-projection review remediation
+
+The raw top-two intent probe still allowed terminal chains to mask an older
+active chain. This was repaired without changing the four-table authority
+shape.
+
+### Exact RED/GREEN evidence
+
+1. Masking RED: two complete, self-consistent fixtures created an old active
+   chain, respectively one and four newer terminal chains, and a newest active
+   chain. Raw `ORDER BY accepted_at_ms DESC LIMIT 2` saw only the newest active
+   plus a terminal chain, so the old fault snapshot incorrectly remained
+   available.
+2. Masking GREEN: each exact-runtime indexed query now applies an indexed
+   correlated latest-lifecycle predicate first, retaining only current
+   non-terminal candidates; `ORDER BY ... LIMIT 2` is applied to that projected
+   active result. Both masking variants and the original adjacent two-active
+   fixture return `multiple-active-chains` unavailable.
+3. Query-plan GREEN: the final plan reports
+   `SEARCH i USING COVERING INDEX idx_neg_risk_fault_intent_active_runtime`,
+   followed by `CORRELATED SCALAR SUBQUERY` and
+   `SEARCH e USING INDEX sqlite_autoindex_neg_risk_fault_events_1
+   (fault_id=?)`. It reports neither an intent table scan nor a temporary
+   B-tree.
+4. Deadline preservation: the query may inspect terminal history for
+   integrity, but the already-verified SQLite progress handler bounds VM work
+   at the same absolute deadline and releases the authority worker slot on
+   interruption.
+
+### Final review verification
+
+- Focused authority, fault API, and existing perception controls: 109 passed.
+- Schema lockstep and SQLite migration regressions: 32 passed.
+- The complete proportional suite ran to 100% twice and every Task 3 test
+  passed. Under host load average about 21, the first run missed two unrelated
+  reconciliation-supervisor two-second subprocess windows; after load dropped,
+  both passed in isolation. The second run hit unrelated Candidate timing and
+  Resource owner-read concurrency tests; each passed in isolation, with the
+  Resource test passing immediately when run alone.
+- This round therefore records a green Task 3 matrix plus green isolation for
+  every proportional-suite failure, not a false claim that the loaded-host
+  aggregate process exited zero. The unchanged baseline had already completed
+  the same proportional command at 100% exit zero before this final query-only
+  change.
+- Ruff, docs, planning, and diff gates are recorded after the final
+  committed-tree verification.

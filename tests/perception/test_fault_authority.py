@@ -784,23 +784,41 @@ def test_active_candidate_query_is_runtime_indexed_without_global_sort(
         and "release_id=" in statement.lower()
         and "machine_id=" in statement.lower()
         and "boot_id=" in statement.lower()
+        and "not in" in statement.lower()
         for statement in active_statements
     )
 
+    terminal_values = (
+        "verified",
+        "rejected",
+        "expired",
+        "abandoned",
+        "cleanup-failed",
+        "recovery-timeout",
+        "evidence-invalid",
+        "escalated",
+    )
+    placeholders = ",".join("?" for _ in terminal_values)
     with sqlite3.connect(store._db_path) as con:
         plan = " ".join(
             str(column)
             for row in con.execute(
                 "EXPLAIN QUERY PLAN "
-                "SELECT fault_id FROM neg_risk_fault_intents "
-                "WHERE component=? AND release_id=? AND machine_id=? AND boot_id=? "
-                "AND status='accepted' "
-                "ORDER BY accepted_at_ms DESC,fault_id DESC LIMIT 2",
+                "SELECT i.fault_id FROM neg_risk_fault_intents i "
+                "WHERE i.component=? AND i.release_id=? "
+                "AND i.machine_id=? AND i.boot_id=? AND i.status='accepted' "
+                "AND COALESCE(("
+                " SELECT e.state FROM neg_risk_fault_events e "
+                " WHERE e.fault_id=i.fault_id AND e.state IS NOT NULL "
+                " ORDER BY e.sequence DESC LIMIT 1"
+                "), '') NOT IN (" + placeholders + ") "
+                "ORDER BY i.accepted_at_ms DESC,i.fault_id DESC LIMIT 2",
                 (
                     RUNTIME.component,
                     RUNTIME.release_id,
                     RUNTIME.machine_id,
                     str(RUNTIME.boot_id),
+                    *terminal_values,
                 ),
             )
             for column in row
@@ -808,6 +826,65 @@ def test_active_candidate_query_is_runtime_indexed_without_global_sort(
     assert "idx_neg_risk_fault_intent_active_runtime" in plan
     assert "SCAN neg_risk_fault_intents" not in plan
     assert "USE TEMP B-TREE" not in plan
+
+
+@pytest.mark.parametrize("terminal_count", [1, 4])
+def test_terminal_intents_cannot_hide_an_older_second_active_chain(
+    store: FaultAuthorityStore,
+    db_path: Path,
+    terminal_count: int,
+) -> None:
+    store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_100,
+        request_digest="7" * 64,
+    )
+    with sqlite3.connect(db_path) as con:
+        con.row_factory = sqlite3.Row
+        base = dict(
+            con.execute(
+                "SELECT * FROM neg_risk_fault_intents WHERE fault_id='fault-1'"
+            ).fetchone()
+        )
+        for index in range(terminal_count):
+            source = dict(base)
+            source["accepted_at_ms"] = 1_200 + index * 10
+            insert_cloned_intent(
+                con,
+                source,
+                fault_id=f"fault-terminal-{index}",
+            )
+        newest = dict(base)
+        newest["accepted_at_ms"] = 1_300 + terminal_count * 10
+        insert_cloned_intent(con, newest, fault_id="fault-newest-active")
+
+    for index in range(terminal_count):
+        fault_id = f"fault-terminal-{index}"
+        occurred_at_ms = 1_200 + index * 10
+        store.append_event(
+            fault_id,
+            FaultEventState.AUTHORIZED,
+            occurred_at_ms=occurred_at_ms,
+            evidence={"reason": "accepted"},
+        )
+        store.append_event(
+            fault_id,
+            FaultEventState.ABANDONED,
+            occurred_at_ms=occurred_at_ms + 1,
+            evidence={},
+        )
+    store.append_event(
+        "fault-newest-active",
+        FaultEventState.AUTHORIZED,
+        occurred_at_ms=1_300 + terminal_count * 10,
+        evidence={"reason": "accepted"},
+    )
+
+    snapshot = store.read_snapshot(now_ms=2_000, fault_id="fault-1")
+    assert not snapshot.available
+    assert snapshot.projection is not None
+    assert snapshot.projection.reason == "multiple-active-chains"
 
 
 def test_existing_cleanup_action_history_inherits_absolute_deadline(
