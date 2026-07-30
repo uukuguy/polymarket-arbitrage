@@ -1248,6 +1248,51 @@ async def test_cancelled_blocked_claim_settles_and_relinquishes_real_sqlite_chai
 
 
 @pytest.mark.asyncio
+async def test_cancelled_committed_injection_installs_receipt_then_abandons_chain(
+    tmp_path: Path,
+) -> None:
+    committed = threading.Event()
+    release = threading.Event()
+
+    class BlockingAuthority(FaultAuthorityStore):
+        def append_event(self, fault_id, state, **kwargs):
+            result = super().append_event(fault_id, state, **kwargs)
+            if state is FaultEventState.INJECTED:
+                committed.set()
+                assert release.wait(timeout=2)
+            return result
+
+    wall = iter((1_200, 1_201, 1_202, 1_203))
+    _, authority, runtime = _real_runtime(
+        tmp_path,
+        authority_type=BlockingAuthority,
+        clock_ms=wall.__next__,
+    )
+    _accept(
+        authority,
+        fault_id="fault-cancelled-injection",
+        target_key="group-cancelled",
+        accepted_at_ms=1_100,
+    )
+    await runtime.sync_before_batch()
+    decision = runtime.consume(
+        FaultCall(FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH, "group-cancelled")
+    )
+    task = asyncio.create_task(runtime.record_injection(decision.fault_id))
+    assert await asyncio.to_thread(committed.wait, 2)
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    history = authority.validate_history("fault-cancelled-injection")
+    assert history.valid is True
+    assert history.events[-1].state is FaultEventState.ABANDONED
+    assert runtime.active_fault_id is None
+    assert runtime.pending_recovery_fault_id is None
+
+
+@pytest.mark.asyncio
 async def test_expired_unmatched_fault_is_relinquished_then_same_boot_claims_next(
     tmp_path: Path,
 ) -> None:

@@ -24,7 +24,6 @@ from polyarb.perception.fault_control import (
     FaultRecoveryWriter,
 )
 from polyarb.perception.fault_runtime import (
-    FaultRecoveryOutcome,
     FaultRuntimeProtocol,
     PassThroughFaultRuntime,
     cleanup_active_fault,
@@ -349,7 +348,7 @@ class CandidateWatcher:
         self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
         self._candidate_fault = CandidateBooksFault(runtime=self._fault_runtime)
         self._pending_latency_faults: dict[str, CandidateBooksDecision] = {}
-        self._expected_timeout_groups: set[str] = set()
+        self._timeout_contexts: dict[str, tuple[asyncio.Task[object], object]] = {}
 
     async def run_once(
         self,
@@ -451,10 +450,15 @@ class CandidateWatcher:
                 )
             )
             return observation
-        except asyncio.CancelledError:
-            if group_id in self._expected_timeout_groups:
-                self._expected_timeout_groups.discard(group_id)
-            else:
+        except asyncio.CancelledError as cancellation:
+            timeout_context = self._timeout_contexts.pop(group_id, None)
+            timeout_owned = (
+                timeout_context is not None
+                and timeout_context[0] is asyncio.current_task()
+                and cancellation.args
+                and cancellation.args[0] is timeout_context[1]
+            )
+            if not timeout_owned:
                 pending = self._pending_latency_faults.pop(group_id, None)
                 if pending is not None:
                     await self._candidate_fault.settle_inner_failure(pending)
@@ -683,10 +687,24 @@ class CandidateWatcher:
             self._candidate_fault.tag_error(error, selected)
         self.queue_incident_failure(group_id, error)
 
-    def prepare_timeout(self, group_id: str) -> None:
+    def prepare_timeout(
+        self,
+        group_id: str,
+        task: asyncio.Task[object],
+        token: object,
+    ) -> None:
         """Mark the scheduler-owned cancellation that becomes a timeout fact."""
         if group_id in self._pending_latency_faults:
-            self._expected_timeout_groups.add(group_id)
+            self._timeout_contexts[group_id] = (task, token)
+
+    def clear_timeout(
+        self,
+        group_id: str,
+        task: asyncio.Task[object],
+        token: object,
+    ) -> None:
+        if self._timeout_contexts.get(group_id) == (task, token):
+            self._timeout_contexts.pop(group_id, None)
 
     def queue_incident_failure(
         self,
@@ -699,37 +717,20 @@ class CandidateWatcher:
         if not self._clob_incident_operations:
             return
         operations = tuple(self._clob_incident_operations)
+        latest_success_by_group = {
+            operation.group_id: operation
+            for operation in operations
+            if isinstance(operation, _CandidateIncidentSuccess)
+        }
         for operation in operations:
             if isinstance(operation, _CandidateIncidentSuccess):
-                pending_fault_id = self._fault_runtime.pending_recovery_fault_id
-                if pending_fault_id is not None:
-                    recovery = self._fault_runtime.make_recovery_receipt(
+                if latest_success_by_group[operation.group_id] is operation:
+                    await self._fault_runtime.record_writer_recovery_outcome(
                         FaultRecoveryWriter.CANDIDATE_SUCCESS,
+                        target_key=operation.group_id,
                         writer_id=operation.quote_batch_id,
                         writer_occurred_at_ms=operation.observed_at_ms,
                     )
-                    outcome = (
-                        FaultRecoveryOutcome.UNAVAILABLE
-                        if recovery is None and self._fault_runtime.degraded
-                        else (
-                            FaultRecoveryOutcome.INVALID
-                            if recovery is None
-                            else await self._fault_runtime.record_recovery_outcome(
-                                recovery
-                            )
-                        )
-                    )
-                    if outcome is not FaultRecoveryOutcome.RECORDED:
-                        if outcome is FaultRecoveryOutcome.UNAVAILABLE:
-                            await self._fault_runtime.cleanup(
-                                pending_fault_id,
-                                "candidate-recovery-evidence-unavailable",
-                            )
-                        else:
-                            await self._fault_runtime.invalidate_evidence(
-                                pending_fault_id,
-                                "candidate-recovery-evidence-invalid",
-                            )
                 await asyncio.to_thread(
                     self._clob_incidents.verify_success,
                     group_id=operation.group_id,
@@ -1031,16 +1032,33 @@ class CandidateWatcherScheduler:
             )
             timeout = timeout_s or self._group_timeout_s
             done, _ = await asyncio.wait((group_task,), timeout=timeout)
-            if not done:
+            if not done and not group_task.done():
+                timeout_token = object()
                 prepare_timeout = getattr(self._watcher, "prepare_timeout", None)
+                clear_timeout = getattr(self._watcher, "clear_timeout", None)
                 if prepare_timeout is not None:
-                    prepare_timeout(group_id)
-                group_task.cancel()
+                    prepare_timeout(group_id, group_task, timeout_token)
+                cancellation_requested = group_task.cancel(timeout_token)
                 try:
-                    await group_task
+                    completed, outcome = await asyncio.shield(
+                        asyncio.create_task(self._group_task_outcome(group_task))
+                    )
+                    if completed:
+                        group_task.result()
+                    elif (
+                        isinstance(outcome, asyncio.CancelledError)
+                        and cancellation_requested
+                        and outcome.args
+                        and outcome.args[0] is timeout_token
+                    ):
+                        raise TimeoutError from None
+                    else:
+                        raise outcome
                 except asyncio.CancelledError:
-                    pass
-                raise TimeoutError
+                    raise
+                finally:
+                    if clear_timeout is not None:
+                        clear_timeout(group_id, group_task, timeout_token)
             group_task.result()
         except asyncio.CancelledError:
             if "group_task" in locals() and not group_task.done():
@@ -1082,6 +1100,15 @@ class CandidateWatcherScheduler:
             await task
         except BaseException:
             return
+
+    @staticmethod
+    async def _group_task_outcome(
+        task: asyncio.Task[object],
+    ) -> tuple[bool, object | BaseException]:
+        try:
+            return True, await task
+        except BaseException as error:
+            return False, error
 
     def _load_selection_snapshot(
         self,

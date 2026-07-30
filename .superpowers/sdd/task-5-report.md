@@ -18,7 +18,8 @@ authority/runtime contract:
 - Candidate success-receipt validation against the current group revision,
   membership, quote batch, terminal fact, observed time and canonical receipt
   hash;
-- `FaultRecoveryOutcome` (`RECORDED`, `INVALID`, `UNAVAILABLE`);
+- `FaultRecoveryOutcome` (`RECORDED`, `INVALID`, `UNAVAILABLE`,
+  `NOT_APPLICABLE`);
 - owned `EVIDENCE_INVALID` terminalization for proven structural/semantic
   invalidity, kept separate from transient authority/DB unavailability.
 
@@ -38,7 +39,42 @@ were observed for each implementation slice:
 - missing recovery proof not degrading;
 - authority unavailability propagating instead of fail-open degradation.
 
-The final focused run collected 260 tests and reached 100% with exit code 0:
+The five HIGH review findings each received a deterministic RED before the
+repair:
+
+1. **Exact recovery target** — real SQLite showed a `group-b` success changing
+   pending `group-a` recovery from `CLEANED` to `EVIDENCE_INVALID`. The runtime
+   now checks writer family and target atomically and returns `NOT_APPLICABLE`
+   with zero authority mutation. The pending `group-a` chain remains cleaned
+   until a newer exact-group success recovers it.
+2. **Scheduler wait race** — a controlled stale `asyncio.wait` snapshot
+   returned a completed-success task as pending and reproduced a false timeout
+   fact. The scheduler now rechecks task completion, binds timeout cancellation
+   to a unique token and accepts timeout only when cancellation was requested
+   and the task's actual `CancelledError` carries that token. Success and
+   organic errors retain their real outcomes.
+3. **Injection commit-aware cancellation** — a real authority committed
+   `INJECTED`, blocked before returning, then the caller was cancelled; the old
+   runtime left an active injected chain. The settled callback now installs the
+   committed receipt before rethrowing cancellation, then shield-settles owned
+   cleanup to `ABANDONED`. A failed, uncommitted write installs no receipt and
+   creates no cleanup claim.
+4. **Recovery commit-aware cancellation** — a real authority committed
+   `RECOVERED`, blocked before returning, then the flush was cancelled; the old
+   runtime retained pending recovery. The runtime now clears pending state and
+   retains one bounded completed receipt before rethrowing. Retried queue work
+   recognizes the same writer as `RECORDED` without another event or invalid
+   terminal.
+5. **Latest exact-group writer** — after `q1` then `q2`, the old validator still
+   accepted `q1`. Validation now uses the existing
+   `(group_id, id DESC)` authority index in the same transaction and requires
+   the receipt row to be that group's current latest success. A stale exact
+   receipt is `INVALID`; a queued older same-group success is skipped for
+   recovery while the latest `q2` records `RECOVERED`.
+
+The final focused runs collected 266 tests (71 exact Candidate tests plus 195
+shared runtime/authority and Gamma regressions) and reached 100% with exit code
+0:
 
 ```text
 uv run pytest \
@@ -95,10 +131,20 @@ Ruff passed for all changed source and test files.
    requires a newer atomic Candidate success receipt whose current group
    revision, membership, quote/fact rows, timestamp and canonical hash all
    validate in the same SQLite authority.
-8. Proven semantic mismatch or tampering appends owned `EVIDENCE_INVALID` and
-   freezes qualification. DB lock/I/O/authority exceptions freeze/degrade
-   without inventing invalid evidence. Cancellation settles cleanup and
-   re-raises the original cancellation.
+8. A success from another group or recovery family is `NOT_APPLICABLE`: it
+   cannot consume, invalidate or freeze the pending exact-group chain. Within a
+   flush, only the latest success per group is offered as recovery authority.
+9. The Candidate validator additionally requires the supplied receipt to be the
+   target group's latest authoritative success row, while preserving all exact
+   quote/fact/current-membership/hash links.
+10. Proven semantic mismatch, stale exact-target writer or tampering is
+    `INVALID`; DB lock/I/O/authority exceptions are `UNAVAILABLE`. Only proven
+    invalidity can append owned `EVIDENCE_INVALID`.
+11. Injection and recovery writes settle their real commit outcome before
+    propagating cancellation. Committed injection is cleaned; committed
+    recovery is installed idempotently. Scheduler timeout requires a
+    task-specific cancellation token. All per-group timeout/latency maps are
+    cleared after settlement.
 
 ## Remaining boundary
 

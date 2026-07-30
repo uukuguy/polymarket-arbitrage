@@ -15,6 +15,7 @@ from loguru import logger
 from polyarb.perception.fault_authority import FaultAuthorityStore
 from polyarb.perception.fault_control import (
     FaultCall,
+    FaultCallClass,
     FaultController,
     FaultDecision,
     FaultEventState,
@@ -46,6 +47,7 @@ class FaultRecoveryOutcome(StrEnum):
     RECORDED = "recorded"
     INVALID = "invalid"
     UNAVAILABLE = "unavailable"
+    NOT_APPLICABLE = "not-applicable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +55,12 @@ class _PendingRecovery:
     intent: FaultIntent
     ownership: FaultOwnershipCapability
     injection: FaultInjectionReceipt
+
+
+@dataclass(frozen=True, slots=True)
+class _CompletedRecovery:
+    receipt: FaultRecoveryReceipt
+    target_key: str
 
 
 class FaultRuntimeProtocol(Protocol):
@@ -98,6 +106,15 @@ class FaultRuntimeProtocol(Protocol):
         receipt: FaultRecoveryReceipt,
     ) -> FaultRecoveryOutcome: ...
 
+    async def record_writer_recovery_outcome(
+        self,
+        writer: FaultRecoveryWriter,
+        *,
+        target_key: str,
+        writer_id: int | str,
+        writer_occurred_at_ms: int,
+    ) -> FaultRecoveryOutcome: ...
+
     async def invalidate_evidence(
         self,
         fault_id: str,
@@ -135,9 +152,10 @@ class FaultRuntime:
         self._injected_fault_id: str | None = None
         self._pending_recovery: _PendingRecovery | None = None
         self._last_injection: FaultInjectionReceipt | None = None
+        self._completed_recovery: _CompletedRecovery | None = None
 
     @staticmethod
-    async def _settle_evidence_write(call):
+    async def _settle_evidence_write(call, *, settled=None):
         task = asyncio.create_task(asyncio.to_thread(call))
         cancellation: asyncio.CancelledError | None = None
         while True:
@@ -151,9 +169,23 @@ class FaultRuntime:
                 if cancellation is not None:
                     raise cancellation from error
                 raise
+        if settled is not None:
+            settled(result)
         if cancellation is not None:
             raise cancellation
         return result
+
+    @staticmethod
+    async def _settle_cancelled_operation(operation) -> None:
+        task = asyncio.create_task(operation)
+        while True:
+            try:
+                await asyncio.shield(task)
+                return
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                return
 
     @property
     def active_fault_id(self) -> str | None:
@@ -284,6 +316,17 @@ class FaultRuntime:
             return None
         occurred_at_ms = self._clock_ms()
         call_id = secrets.token_hex(16)
+        receipt = FaultInjectionReceipt(
+            fault_id=fault_id,
+            call_id=call_id,
+            occurred_at_ms=occurred_at_ms,
+        )
+
+        def install_receipt(_: object) -> None:
+            self._injected_fault_id = fault_id
+            self._last_injection = receipt
+            self._completed_recovery = None
+
         try:
             await self._settle_evidence_write(
                 lambda: self._authority.append_event(
@@ -292,20 +335,18 @@ class FaultRuntime:
                     occurred_at_ms=occurred_at_ms,
                     evidence={"call_id": call_id},
                     ownership=active.intent.ownership_capability,
-                )
+                ),
+                settled=install_receipt,
             )
-        except asyncio.CancelledError:
-            raise
+        except asyncio.CancelledError as cancellation:
+            if self._last_injection is receipt:
+                await self._settle_cancelled_operation(
+                    self.cleanup(fault_id, "injection-commit-cancelled")
+                )
+            raise cancellation
         except Exception as error:
             self._freeze_evidence(error)
             return None
-        receipt = FaultInjectionReceipt(
-            fault_id=fault_id,
-            call_id=call_id,
-            occurred_at_ms=occurred_at_ms,
-        )
-        self._injected_fault_id = fault_id
-        self._last_injection = receipt
         return receipt
 
     async def link_detection(
@@ -391,6 +432,12 @@ class FaultRuntime:
         """Append one writer-owned recovery fact after successful cleanup."""
         pending = self._pending_recovery
         if (
+            pending is None
+            and self._completed_recovery is not None
+            and receipt == self._completed_recovery.receipt
+        ):
+            return FaultRecoveryOutcome.RECORDED
+        if (
             self._evidence_frozen
             or pending is None
             or not isinstance(receipt, FaultRecoveryReceipt)
@@ -401,6 +448,16 @@ class FaultRuntime:
             or receipt.runtime != pending.intent.runtime
         ):
             return FaultRecoveryOutcome.INVALID
+
+        def install_recovery(written: object | None) -> None:
+            if written is None:
+                return
+            self._pending_recovery = None
+            self._completed_recovery = _CompletedRecovery(
+                receipt=receipt,
+                target_key=pending.intent.target_key,
+            )
+
         try:
             written = await self._settle_evidence_write(
                 lambda: self._authority.append_recovery_event(
@@ -408,7 +465,8 @@ class FaultRuntime:
                     injected_at_ms=pending.injection.occurred_at_ms,
                     occurred_at_ms=self._clock_ms(),
                     ownership=pending.ownership,
-                )
+                ),
+                settled=install_recovery,
             )
         except asyncio.CancelledError:
             raise
@@ -417,8 +475,57 @@ class FaultRuntime:
             return FaultRecoveryOutcome.UNAVAILABLE
         if written is None:
             return FaultRecoveryOutcome.INVALID
-        self._pending_recovery = None
         return FaultRecoveryOutcome.RECORDED
+
+    async def record_writer_recovery_outcome(
+        self,
+        writer: FaultRecoveryWriter,
+        *,
+        target_key: str,
+        writer_id: int | str,
+        writer_occurred_at_ms: int,
+    ) -> FaultRecoveryOutcome:
+        """Validate writer family and target before touching recovery authority."""
+        pending = self._pending_recovery
+        if self._evidence_frozen:
+            return FaultRecoveryOutcome.UNAVAILABLE
+        if pending is None:
+            completed = self._completed_recovery
+            if (
+                completed is not None
+                and completed.target_key == target_key
+                and completed.receipt.writer is writer
+                and completed.receipt.writer_id == writer_id
+                and completed.receipt.writer_occurred_at_ms == writer_occurred_at_ms
+            ):
+                return FaultRecoveryOutcome.RECORDED
+            return FaultRecoveryOutcome.NOT_APPLICABLE
+        if (
+            writer is not FaultRecoveryWriter.CANDIDATE_SUCCESS
+            or pending.intent.runtime.component != "candidate"
+            or pending.intent.call_class
+            is not FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH
+            or pending.intent.target_key != target_key
+        ):
+            return FaultRecoveryOutcome.NOT_APPLICABLE
+        receipt = self.make_recovery_receipt(
+            writer,
+            writer_id=writer_id,
+            writer_occurred_at_ms=writer_occurred_at_ms,
+        )
+        if receipt is None:
+            await self.invalidate_evidence(
+                pending.intent.fault_id,
+                "candidate-recovery-evidence-invalid",
+            )
+            return FaultRecoveryOutcome.INVALID
+        outcome = await self.record_recovery_outcome(receipt)
+        if outcome is FaultRecoveryOutcome.INVALID:
+            await self.invalidate_evidence(
+                pending.intent.fault_id,
+                "candidate-recovery-evidence-invalid",
+            )
+        return outcome
 
     async def invalidate_evidence(
         self,
@@ -495,6 +602,7 @@ class FaultRuntime:
         self._injected_fault_id = None
         self._last_injection = None
         self._pending_recovery = None
+        self._completed_recovery = None
         logger.warning(
             "fault control evidence unavailable "
             f"component={self.identity.component} kind={type(error).__name__}"
@@ -561,6 +669,20 @@ class PassThroughFaultRuntime:
             else FaultRecoveryOutcome.INVALID
         )
 
+    async def record_writer_recovery_outcome(
+        self,
+        writer: FaultRecoveryWriter,
+        *,
+        target_key: str,
+        writer_id: int | str,
+        writer_occurred_at_ms: int,
+    ) -> FaultRecoveryOutcome:
+        return (
+            FaultRecoveryOutcome.UNAVAILABLE
+            if self.degraded
+            else FaultRecoveryOutcome.NOT_APPLICABLE
+        )
+
     async def invalidate_evidence(
         self,
         fault_id: str,
@@ -618,9 +740,10 @@ def build_fault_runtime(
 
 __all__ = [
     "CleanupResult",
+    "FaultInjectionReceipt",
+    "FaultRecoveryOutcome",
     "FaultRuntime",
     "FaultRuntimeProtocol",
-    "FaultInjectionReceipt",
     "PassThroughFaultRuntime",
     "build_fault_runtime",
     "cleanup_active_fault",

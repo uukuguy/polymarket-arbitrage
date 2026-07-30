@@ -1294,6 +1294,11 @@ class FaultAuthorityStore:
             ).fetchone()
             if row is None:
                 return None
+            latest = con.execute(
+                "SELECT id FROM neg_risk_candidate_success_receipts "
+                "WHERE group_id=? ORDER BY id DESC LIMIT 1",
+                (row["group_id"],),
+            ).fetchone()
             group = con.execute(
                 "SELECT * FROM neg_risk_group_revisions WHERE group_id=? "
                 "ORDER BY revision DESC LIMIT 1",
@@ -1320,8 +1325,10 @@ class FaultAuthorityStore:
             )
             if (
                 group is None
+                or latest is None
                 or quote is None
                 or fact is None
+                or row["id"] != latest["id"]
                 or row["group_id"] != intent.target_key
                 or row["group_revision_row_id"] != group["id"]
                 or row["membership_hash"] != group["membership_hash"]
