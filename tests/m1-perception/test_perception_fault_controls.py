@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -284,7 +285,7 @@ def test_signed_client_time_never_controls_intent_or_ttl(
         fault_timestamp=str(int(time.time()) - offset_s),
     )
     cleanup_after_ms = int(time.time() * 1_000)
-    assert cleanup.status_code == 202
+    assert cleanup.status_code == 202, cleanup.text
     with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
         action_at_ms = con.execute(
             "SELECT occurred_at_ms FROM neg_risk_fault_events "
@@ -310,7 +311,7 @@ def test_status_is_redacted_and_cleanup_never_fabricates_terminal(
 
     cleanup_body = b'{"fault_id":"fault-api-1"}'
     cleanup = _post(client, "/control/perception/faults/cleanup", cleanup_body)
-    assert cleanup.status_code == 202
+    assert cleanup.status_code == 202, cleanup.text
     assert cleanup.json()["status"] == "cleanup-requested"
     again = _post(client, "/control/perception/faults/cleanup", cleanup_body)
     assert again.status_code == 202
@@ -383,18 +384,19 @@ def test_fault_reads_run_off_event_loop_through_one_snapshot_method(
     assert _post(client, "/control/perception/faults/arm", _body(runtime)).status_code == 202
     event_loop_threads: list[int] = []
     worker_threads: list[int] = []
-    original_to_thread = perception_faults.asyncio.to_thread
+    original_read = perception_faults._read_snapshot
+    original_store_read = FaultAuthorityStore.read_snapshot
 
-    async def observed_to_thread(function, *args, **kwargs):
+    async def observed_read(request, **kwargs):
         event_loop_threads.append(threading.get_ident())
+        return await original_read(request, **kwargs)
 
-        def worker():
-            worker_threads.append(threading.get_ident())
-            return function(*args, **kwargs)
+    def observed_store_read(self, *args, **kwargs):
+        worker_threads.append(threading.get_ident())
+        return original_store_read(self, *args, **kwargs)
 
-        return await original_to_thread(worker)
-
-    monkeypatch.setattr(perception_faults.asyncio, "to_thread", observed_to_thread)
+    monkeypatch.setattr(perception_faults, "_read_snapshot", observed_read)
+    monkeypatch.setattr(FaultAuthorityStore, "read_snapshot", observed_store_read)
     assert client.get("/perception/faults/fault-api-1").status_code == 200
     assert client.get("/perception/faults/runtime?component=candidate").status_code == 200
     assert len(event_loop_threads) == len(worker_threads) == 2
@@ -430,16 +432,93 @@ def test_timeout_response_cannot_race_a_late_intent_commit(
     request_thread = threading.Thread(target=send)
     request_thread.start()
     assert entered.wait(timeout=1)
-    assert not response_done.wait(timeout=1.25)
-    release.set()
-    assert response_done.wait(timeout=2)
-    request_thread.join(timeout=2)
+    assert response_done.wait(timeout=1.0)
     assert responses[0].status_code == 409
+    release.set()
+    request_thread.join(timeout=2)
+    time.sleep(0.05)
 
     with sqlite3.connect(client.app.state.sqlite_store.db_path) as con:
         assert con.execute("SELECT count(*) FROM neg_risk_fault_auth_nonces").fetchone() == (0,)
         assert con.execute("SELECT count(*) FROM neg_risk_fault_intents").fetchone() == (0,)
         assert con.execute("SELECT count(*) FROM neg_risk_fault_events").fetchone() == (0,)
+
+
+def test_cleanup_slow_snapshot_uses_one_200ms_deadline(
+    tmp_path, make_http_test_client, monkeypatch
+) -> None:
+    client, runtime = _client(tmp_path, make_http_test_client)
+    assert _post(client, "/control/perception/faults/arm", _body(runtime)).status_code == 202
+    original = FaultAuthorityStore.read_snapshot
+
+    def slow_read(self, *args, **kwargs):
+        time.sleep(0.5)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(FaultAuthorityStore, "read_snapshot", slow_read)
+    started = time.monotonic()
+    response = _post(
+        client,
+        "/control/perception/faults/cleanup",
+        b'{"fault_id":"fault-api-1"}',
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.35
+    assert response.status_code == 409
+    assert response.json() == {
+        "status": "unavailable",
+        "reason": "fault-control-store-unavailable",
+    }
+
+
+def test_fault_worker_bridge_has_bounded_threads_zero_queue_and_recovers() -> None:
+    for _ in range(100):
+        if not any(
+            thread.name == "fault-authority" for thread in threading.enumerate()
+        ):
+            break
+        time.sleep(0.01)
+    release = threading.Event()
+    lock = threading.Lock()
+    started = 0
+
+    def blocked() -> str:
+        nonlocal started
+        with lock:
+            started += 1
+        assert release.wait(timeout=2)
+        return "done"
+
+    async def exercise() -> None:
+        tasks = [
+            asyncio.create_task(perception_faults._run_blocking(blocked))
+            for _ in range(5)
+        ]
+        for _ in range(50):
+            with lock:
+                if started >= perception_faults._FAULT_WORKER_LIMIT:
+                    break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        with lock:
+            assert started == perception_faults._FAULT_WORKER_LIMIT
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        assert results.count("done") == perception_faults._FAULT_WORKER_LIMIT
+        assert sum(isinstance(value, TimeoutError) for value in results) == 1
+        assert await perception_faults._run_blocking(lambda: "recovered") == "recovered"
+
+    asyncio.run(exercise())
+    for _ in range(50):
+        if not any(
+            thread.name == "fault-authority" for thread in threading.enumerate()
+        ):
+            break
+        time.sleep(0.01)
+    assert not any(
+        thread.name == "fault-authority" for thread in threading.enumerate()
+    )
 
 
 def test_runtime_read_is_bounded_and_missing_evidence_is_unavailable(

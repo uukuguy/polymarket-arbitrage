@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import sqlite3
+import threading
 import time
 from typing import Any
 from uuid import UUID
@@ -21,12 +22,15 @@ from polyarb.perception.fault_control import (
     FaultIntentRequest,
     FaultRuntimeIdentity,
     canonical_digest,
+    normalize_fault_id,
 )
 
 _MAX_BODY_BYTES = 65_536
 _AUTH_SKEW_SECONDS = 300
 _STORE_BUDGET_SECONDS = 0.75
 _CLEANUP_WAIT_SECONDS = 0.2
+_FAULT_WORKER_LIMIT = 4
+_FAULT_WORKER_SLOTS = threading.BoundedSemaphore(_FAULT_WORKER_LIMIT)
 _TERMINAL_CLEANUP_STATES = frozenset(
     {
         "cleaned",
@@ -128,27 +132,87 @@ def _store(request: Request, *, read_only: bool = False) -> FaultAuthorityStore:
 async def _run_mutation(function: Any, *args: Any, **kwargs: Any) -> Any:
     deadline = time.monotonic() + _STORE_BUDGET_SECONDS
     kwargs["deadline_monotonic"] = deadline
-    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    task = asyncio.create_task(_run_blocking(function, *args, **kwargs))
     try:
         return await asyncio.wait_for(
             asyncio.shield(task), timeout=_STORE_BUDGET_SECONDS + 0.1
         )
     except TimeoutError:
-        # The store checks the same deadline before every mutation and COMMIT.
-        # Settle the worker so an unavailable response can never race a late commit.
-        return await asyncio.shield(task)
+        # The store's shared absolute deadline gates every mutation and COMMIT.
+        # A delayed worker therefore cannot commit after this bounded response.
+        def consume_result(completed: asyncio.Task[Any]) -> None:
+            try:
+                completed.exception()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        task.add_done_callback(consume_result)
+        raise
 
 
-async def _read_snapshot(request: Request, **selectors: Any) -> Any:
-    deadline = time.monotonic() + _STORE_BUDGET_SECONDS
+async def _run_blocking(function: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run bounded SQLite work without tying response time to executor teardown."""
+    if not _FAULT_WORKER_SLOTS.acquire(blocking=False):
+        raise TimeoutError("fault-authority-workers-unavailable")
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[Any] = loop.create_future()
+
+    def deliver(value: Any = None, error: BaseException | None = None) -> None:
+        if result.done():
+            return
+        if error is None:
+            result.set_result(value)
+        else:
+            result.set_exception(error)
+
+    def worker() -> None:
+        value: Any = None
+        error: BaseException | None = None
+        try:
+            value = function(*args, **kwargs)
+        except BaseException as caught:
+            error = caught
+        finally:
+            _FAULT_WORKER_SLOTS.release()
+        try:
+            loop.call_soon_threadsafe(deliver, value, error)
+        except RuntimeError:
+            pass
+
+    try:
+        threading.Thread(
+            target=worker,
+            name="fault-authority",
+            daemon=True,
+        ).start()
+    except BaseException:
+        _FAULT_WORKER_SLOTS.release()
+        raise
+    return await result
+
+
+async def _read_snapshot(
+    request: Request,
+    *,
+    deadline_monotonic: float | None = None,
+    **selectors: Any,
+) -> Any:
+    deadline = deadline_monotonic or (
+        time.monotonic() + _STORE_BUDGET_SECONDS
+    )
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("fault-snapshot-deadline")
     return await asyncio.wait_for(
-        asyncio.to_thread(
+        _run_blocking(
             _store(request, read_only=True).read_snapshot,
             now_ms=int(time.time() * 1_000),
             deadline_monotonic=deadline,
             **selectors,
         ),
-        timeout=_STORE_BUDGET_SECONDS + 0.1,
+        timeout=remaining,
     )
 
 
@@ -284,7 +348,7 @@ async def cleanup_fault(request: Request) -> JSONResponse:
             or not isinstance(payload["fault_id"], str)
         ):
             raise ValueError("invalid-fields")
-        fault_id = payload["fault_id"]
+        fault_id = normalize_fault_id(payload["fault_id"])
     except (KeyError, TypeError, ValueError):
         audit_failure = await _audit_invalid_request(
             request,
@@ -323,8 +387,14 @@ async def cleanup_fault(request: Request) -> JSONResponse:
         )
     deadline = time.monotonic() + _CLEANUP_WAIT_SECONDS
     while time.monotonic() < deadline:
+        if deadline - time.monotonic() <= 0.025:
+            break
         try:
-            snapshot = await _read_snapshot(request, fault_id=fault_id)
+            snapshot = await _read_snapshot(
+                request,
+                fault_id=fault_id,
+                deadline_monotonic=deadline,
+            )
         except TimeoutError:
             snapshot = None
         if (
@@ -350,7 +420,7 @@ async def cleanup_fault(request: Request) -> JSONResponse:
                 },
                 status_code=200,
             )
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
     return JSONResponse(
         {"status": FaultEventAction.CLEANUP_REQUESTED.value, "fault_id": fault_id},
         status_code=202,

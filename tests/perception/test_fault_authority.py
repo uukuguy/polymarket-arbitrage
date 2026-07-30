@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import threading
 import time
@@ -9,7 +11,11 @@ from uuid import UUID
 
 import pytest
 
-from polyarb.perception.fault_authority import FaultAuthorityStore, _intent_hash
+from polyarb.perception.fault_authority import (
+    FaultAuthorityStore,
+    _intent_hash,
+    _nonce_hash,
+)
 from polyarb.perception.fault_control import (
     FaultAuthorization,
     FaultCallClass,
@@ -50,6 +56,115 @@ def request(**changes: object) -> FaultIntentRequest:
 
 def auth(value: str = "b") -> FaultAuthorization:
     return FaultAuthorization(nonce_digest=value * 64, authorization_digest="c" * 64)
+
+
+def rehash_auth_row(con: sqlite3.Connection, row_id: int) -> None:
+    con.row_factory = sqlite3.Row
+    row = con.execute(
+        "SELECT * FROM neg_risk_fault_auth_nonces WHERE id=?", (row_id,)
+    ).fetchone()
+    assert row is not None
+    digest = _nonce_hash(
+        record_type=row["record_type"],
+        nonce_digest=row["nonce_digest"],
+        authorization_digest=row["authorization_digest"],
+        operation=row["operation"],
+        fault_id=row["fault_id"],
+        request_digest=row["request_digest"],
+        outcome=row["outcome"],
+        reason=row["reason"],
+        occurred_at_ms=row["occurred_at_ms"],
+        reservation_id=row["reservation_id"],
+    )
+    con.execute(
+        "UPDATE neg_risk_fault_auth_nonces SET row_hash=? WHERE id=?",
+        (digest, row_id),
+    )
+
+
+def insert_cloned_intent(
+    con: sqlite3.Connection,
+    source: dict[str, object],
+    *,
+    fault_id: str,
+    corrupt_intent_hash: bool = False,
+) -> None:
+    nonce_digest = hashlib.sha256(f"{fault_id}:nonce".encode()).hexdigest()
+    authorization_digest = hashlib.sha256(f"{fault_id}:auth".encode()).hexdigest()
+    request_digest = hashlib.sha256(f"{fault_id}:request".encode()).hexdigest()
+    reservation_fields = {
+        "record_type": "reservation",
+        "nonce_digest": nonce_digest,
+        "authorization_digest": authorization_digest,
+        "operation": "arm",
+        "fault_id": fault_id,
+        "request_digest": request_digest,
+        "outcome": None,
+        "reason": None,
+        "occurred_at_ms": source["accepted_at_ms"],
+        "reservation_id": None,
+    }
+    reservation_id = con.execute(
+        "INSERT INTO neg_risk_fault_auth_nonces("
+        "record_type,nonce_digest,authorization_digest,operation,fault_id,"
+        "request_digest,outcome,reason,occurred_at_ms,reservation_id,row_hash)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (*reservation_fields.values(), _nonce_hash(**reservation_fields)),
+    ).lastrowid
+    attempt_fields = {
+        **reservation_fields,
+        "record_type": "attempt",
+        "outcome": "accepted",
+        "reason": "accepted",
+        "reservation_id": reservation_id,
+    }
+    attempt_id = con.execute(
+        "INSERT INTO neg_risk_fault_auth_nonces("
+        "record_type,nonce_digest,authorization_digest,operation,fault_id,"
+        "request_digest,outcome,reason,occurred_at_ms,reservation_id,row_hash)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (*attempt_fields.values(), _nonce_hash(**attempt_fields)),
+    ).lastrowid
+    source.update(
+        {
+            "fault_id": fault_id,
+            "nonce_digest": nonce_digest,
+            "authorization_digest": authorization_digest,
+            "request_digest": request_digest,
+            "auth_reservation_id": reservation_id,
+            "auth_attempt_id": attempt_id,
+        }
+    )
+    source["intent_hash"] = (
+        "0" * 64 if corrupt_intent_hash else _intent_hash(source)
+    )
+    columns = (
+        "fault_id",
+        "kind",
+        "call_class",
+        "target_key",
+        "parameters_json",
+        "parameter_digest",
+        "ttl_ms",
+        "component",
+        "release_id",
+        "machine_id",
+        "boot_id",
+        "nonce_digest",
+        "authorization_digest",
+        "request_digest",
+        "auth_reservation_id",
+        "auth_attempt_id",
+        "accepted_at_ms",
+        "status",
+        "rejection_reason",
+        "intent_hash",
+    )
+    con.execute(
+        f"INSERT INTO neg_risk_fault_intents({','.join(columns)}) "
+        f"VALUES ({','.join('?' for _ in columns)})",
+        tuple(source[column] for column in columns),
+    )
 
 
 @pytest.fixture
@@ -130,11 +245,13 @@ def test_cleanup_request_is_action_only_hash_chained_and_idempotent(
             "SELECT outcome,reason FROM neg_risk_fault_auth_nonces "
             "WHERE record_type='attempt' ORDER BY id"
         ).fetchall()
-    assert row == (
-        None,
-        "cleanup-requested",
-        '{"authorization_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","nonce_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}',
-    )
+        assert row[0:2] == (None, "cleanup-requested")
+        action_evidence = json.loads(row[2])
+        assert action_evidence["authorization_digest"] == "c" * 64
+        assert action_evidence["nonce_digest"] == "d" * 64
+        assert len(action_evidence["request_digest"]) == 64
+        assert action_evidence["reservation_id"] > 0
+        assert action_evidence["attempt_id"] > 0
     assert attempts == [
         ("accepted", "accepted"),
         ("accepted", "cleanup-requested"),
@@ -452,6 +569,188 @@ def test_runtime_nonce_and_intent_hashes_cover_persisted_facts(
 
 
 @pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("operation", "cleanup"),
+        ("fault_id", "fault-other"),
+        ("request_digest", "9" * 64),
+        ("authorization_digest", "8" * 64),
+    ],
+)
+def test_arm_attempt_must_exactly_match_its_reservation_and_intent(
+    store: FaultAuthorityStore,
+    db_path: Path,
+    column: str,
+    value: str,
+) -> None:
+    store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_100,
+        request_digest="7" * 64,
+    )
+    with sqlite3.connect(db_path) as con:
+        disable_append_only(con, "neg_risk_fault_auth_nonces")
+        attempt_id = con.execute(
+            "SELECT id FROM neg_risk_fault_auth_nonces "
+            "WHERE record_type='attempt' AND outcome='accepted'"
+        ).fetchone()[0]
+        con.execute(
+            f"UPDATE neg_risk_fault_auth_nonces SET {column}=? WHERE id=?",
+            (value, attempt_id),
+        )
+        rehash_auth_row(con, attempt_id)
+
+    snapshot = store.read_snapshot(now_ms=1_200, fault_id="fault-1")
+    assert not snapshot.available
+    assert not store.validate_history("fault-1").valid
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("operation", "arm"),
+        ("fault_id", "fault-other"),
+        ("request_digest", "9" * 64),
+        ("authorization_digest", "8" * 64),
+    ],
+)
+def test_cleanup_action_must_exactly_match_accepted_attempt_and_reservation(
+    store: FaultAuthorityStore,
+    db_path: Path,
+    column: str,
+    value: str,
+) -> None:
+    store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_100,
+        request_digest="7" * 64,
+    )
+    store.request_cleanup(
+        "fault-1",
+        auth=auth("d"),
+        requested_at_ms=1_200,
+        request_digest="6" * 64,
+    )
+    with sqlite3.connect(db_path) as con:
+        disable_append_only(con, "neg_risk_fault_auth_nonces")
+        attempt_id = con.execute(
+            "SELECT id FROM neg_risk_fault_auth_nonces "
+            "WHERE record_type='attempt' AND outcome='accepted' "
+            "AND reason='cleanup-requested'"
+        ).fetchone()[0]
+        con.execute(
+            f"UPDATE neg_risk_fault_auth_nonces SET {column}=? WHERE id=?",
+            (value, attempt_id),
+        )
+        rehash_auth_row(con, attempt_id)
+
+    snapshot = store.read_snapshot(now_ms=1_300, fault_id="fault-1")
+    assert not snapshot.available
+    assert not store.validate_history("fault-1").valid
+
+
+def test_rejected_nonce_replay_may_differ_only_as_explicit_replay(
+    store: FaultAuthorityStore,
+) -> None:
+    store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_100,
+        request_digest="7" * 64,
+    )
+    replay = store.accept_intent(
+        request(fault_id="fault-replay"),
+        auth=auth(),
+        accepted_at_ms=1_101,
+        request_digest="6" * 64,
+    )
+    assert not replay.accepted and replay.reason == "nonce-replay"
+    assert store.read_snapshot(now_ms=1_200, fault_id="fault-1").available
+
+
+def test_snapshot_queries_only_current_candidates_and_exact_auth_links(
+    store: FaultAuthorityStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(40):
+        fault_id = f"historical-{index}"
+        digest = hashlib.sha256(f"nonce-{index}".encode()).hexdigest()
+        authorization = hashlib.sha256(f"auth-{index}".encode()).hexdigest()
+        admission = store.accept_intent(
+            request(fault_id=fault_id),
+            auth=FaultAuthorization(digest, authorization),
+            accepted_at_ms=1_100 + index * 2,
+            request_digest=hashlib.sha256(f"request-{index}".encode()).hexdigest(),
+        )
+        assert admission.accepted
+        store.append_event(
+            fault_id,
+            FaultEventState.ABANDONED,
+            occurred_at_ms=1_101 + index * 2,
+            evidence={},
+        )
+    admission = store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_300,
+        request_digest="7" * 64,
+    )
+    assert admission.accepted
+
+    statements: list[str] = []
+    original_connect = store._connect
+
+    def traced_connect(deadline_monotonic=None):
+        con = original_connect(deadline_monotonic)
+        con.set_trace_callback(statements.append)
+        return con
+
+    monkeypatch.setattr(store, "_connect", traced_connect)
+    snapshot = store.read_snapshot(
+        now_ms=1_400,
+        fault_id="fault-1",
+        deadline_monotonic=time.monotonic() + 0.2,
+    )
+
+    assert snapshot.available
+    assert not any(
+        "neg_risk_fault_auth_nonces order by id" in statement.lower()
+        for statement in statements
+    )
+    exact_history_reads = [
+        statement
+        for statement in statements
+        if "select * from neg_risk_fault_intents where fault_id=" in statement.lower()
+    ]
+    assert len(exact_history_reads) <= 2
+
+
+def test_fault_auth_indexes_cover_scoped_link_validation(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as con:
+        indexes = {
+            row[1] for row in con.execute(
+                "PRAGMA index_list('neg_risk_fault_auth_nonces')"
+            )
+        }
+        assert {
+            "idx_neg_risk_fault_auth_reservation_attempt",
+            "idx_neg_risk_fault_auth_fault_operation",
+        } <= indexes
+        plan = " ".join(
+            str(column)
+            for row in con.execute(
+                "EXPLAIN QUERY PLAN SELECT id FROM neg_risk_fault_auth_nonces "
+                "WHERE fault_id=? AND operation=? AND record_type=?",
+                ("fault-1", "cleanup", "attempt"),
+            )
+            for column in row
+        )
+    assert "idx_neg_risk_fault_auth_fault_operation" in plan
+
+
+@pytest.mark.parametrize(
     "table",
     [
         "neg_risk_fault_runtime_starts",
@@ -691,37 +990,7 @@ def test_projection_fails_closed_for_invalid_chains(
                     "SELECT * FROM neg_risk_fault_intents WHERE fault_id='fault-1'"
                 ).fetchone()
             )
-            source["fault_id"] = "fault-2"
-            source["intent_hash"] = _intent_hash(source)
-            con.execute(
-                "INSERT INTO neg_risk_fault_intents("
-                "fault_id,kind,call_class,target_key,parameters_json,parameter_digest,"
-                "ttl_ms,component,release_id,machine_id,boot_id,nonce_digest,"
-                "authorization_digest,accepted_at_ms,status,rejection_reason,intent_hash)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                tuple(
-                    source[key]
-                    for key in (
-                        "fault_id",
-                        "kind",
-                        "call_class",
-                        "target_key",
-                        "parameters_json",
-                        "parameter_digest",
-                        "ttl_ms",
-                        "component",
-                        "release_id",
-                        "machine_id",
-                        "boot_id",
-                        "nonce_digest",
-                        "authorization_digest",
-                        "accepted_at_ms",
-                        "status",
-                        "rejection_reason",
-                        "intent_hash",
-                    )
-                ),
-            )
+            insert_cloned_intent(con, source, fault_id="fault-2")
         store.append_event(
             "fault-2",
             FaultEventState.AUTHORIZED,
@@ -787,36 +1056,11 @@ def test_projection_rejects_any_corrupt_current_runtime_accepted_chain(
         source = dict(
             con.execute("SELECT * FROM neg_risk_fault_intents WHERE fault_id='fault-1'").fetchone()
         )
-        source["fault_id"] = "fault-corrupt"
-        source["intent_hash"] = "0" * 64
-        con.execute(
-            "INSERT INTO neg_risk_fault_intents("
-            "fault_id,kind,call_class,target_key,parameters_json,parameter_digest,"
-            "ttl_ms,component,release_id,machine_id,boot_id,nonce_digest,"
-            "authorization_digest,accepted_at_ms,status,rejection_reason,intent_hash)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            tuple(
-                source[key]
-                for key in (
-                    "fault_id",
-                    "kind",
-                    "call_class",
-                    "target_key",
-                    "parameters_json",
-                    "parameter_digest",
-                    "ttl_ms",
-                    "component",
-                    "release_id",
-                    "machine_id",
-                    "boot_id",
-                    "nonce_digest",
-                    "authorization_digest",
-                    "accepted_at_ms",
-                    "status",
-                    "rejection_reason",
-                    "intent_hash",
-                )
-            ),
+        insert_cloned_intent(
+            con,
+            source,
+            fault_id="fault-corrupt",
+            corrupt_intent_hash=True,
         )
     projection = store.project_fault("fault-1", now_ms=1_200)
     assert not projection.available

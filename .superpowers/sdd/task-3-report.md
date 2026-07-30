@@ -159,3 +159,66 @@ touched.
 - Schema lockstep and SQLite migration tests: 100% passed.
 - Ruff, `git diff --check`, CLI help, Make help, docs gate, and planning-status:
   passed.
+
+## Second security re-review remediation
+
+The remaining semantic-linkage and hard-bound findings were repaired without a
+fifth table and without weakening append-only authority.
+
+### Exact RED/GREEN evidence
+
+1. Semantic-link RED: seven self-consistent owner-tamper fixtures dropped the
+   append-only trigger, changed one accepted attempt's operation, fault ID,
+   request digest, or authorization digest, and recomputed its row hash.
+   Snapshot/history still reported available in all seven vulnerable cases.
+2. Semantic-link GREEN: accepted intents persist exact reservation ID, attempt
+   ID, and request digest; cleanup action evidence persists the same direct
+   identifiers. Validation loads those exact primary-key rows and requires
+   equality across nonce, authorization, operation, normalized fault ID, and
+   request digest. All nine focused semantic/replay cases pass.
+3. Replay GREEN: an attempt whose identity differs from its reservation is
+   permitted only when it is exactly `rejected/nonce-replay`; the schema has a
+   cross-row insert trigger, and fault-scoped validation rejects any other
+   semantic mismatch.
+4. Cleanup-bound RED: an injected 500 ms snapshot read made cleanup take
+   535 ms because each poll started an independent 850 ms read budget.
+5. Cleanup-bound GREEN: cleanup passes its one absolute 200 ms deadline into
+   every snapshot read; SQLite busy timeout and the outer guard use only the
+   remaining duration. The deterministic slow-read case returns unavailable
+   within the locked tolerance.
+6. Mutation-bound RED attempt 1: removing the unbounded settle await was not
+   sufficient because Starlette request-loop teardown waited for
+   `asyncio.to_thread`'s default-executor worker; the blocked response still
+   exceeded one second.
+7. Mutation-bound GREEN attempt 2: this narrow authority boundary now uses a
+   daemon worker bridge plus the cooperative absolute-deadline protocol.
+   Every SQL loop/query checks the same deadline, COMMIT re-caps SQLite
+   `busy_timeout` to remaining time and checks immediately beforehand, and the
+   HTTP guard has no unbounded settle path. Releasing a delayed worker after
+   the unavailable response leaves auth, intent, and event row counts at zero.
+8. Scale GREEN: 40 complete historical intent/auth chains plus one current
+   chain prove snapshot validation performs no global auth `fetchall()` and
+   loads at most the bounded current candidates and exact linked rows.
+   `_has_active_chain` is one current-runtime/latest-state indexed query.
+9. Worker-cap RED: five blocked bridge calls started five daemon threads.
+10. Worker-cap GREEN: a module-wide four-slot `BoundedSemaphore` admits at
+    most four workers with no queue; the fifth call fails unavailable
+    immediately. Releasing the four workers restores admission, and thread
+    enumeration proves no named authority worker remains. The preceding
+    timed-out slow-read case also proves a closed request loop cannot leak its
+    slot when the daemon finishes.
+11. Sequencing regression/GREEN: the proportional run exposed that result
+    delivery could wake a following request just before semaphore release, and
+    that a final normal cleanup poll could start with only a few milliseconds
+    remaining. Workers now release admission before loop delivery; cleanup
+    reserves the final 25 ms rather than starting an under-budget read.
+    Rapid sequential cleanup remains pending, while the injected 500 ms read
+    remains bounded unavailable.
+
+### Second remediation verification
+
+- Authority suite: 64 passed.
+- Fault API plus existing perception controls: 40 passed.
+- Schema lockstep and SQLite migration regressions: 32 passed.
+- Proportional perception suite, Ruff, `git diff --check`, Make help, M1 docs
+  gate, and planning-status: recorded after final committed-tree verification.

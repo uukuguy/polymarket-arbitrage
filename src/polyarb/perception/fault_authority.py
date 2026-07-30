@@ -28,6 +28,7 @@ from polyarb.perception.fault_control import (
     canonical_digest,
     canonical_json,
     normalize_evidence,
+    normalize_fault_id,
     normalize_supervisor_run_id,
 )
 
@@ -165,6 +166,8 @@ def _intent_hash(fields: Mapping[str, object]) -> str:
         {
             "accepted_at_ms": fields["accepted_at_ms"],
             "authorization_digest": fields["authorization_digest"],
+            "auth_attempt_id": fields["auth_attempt_id"],
+            "auth_reservation_id": fields["auth_reservation_id"],
             "boot_id": fields["boot_id"],
             "call_class": fields["call_class"],
             "component": fields["component"],
@@ -174,6 +177,7 @@ def _intent_hash(fields: Mapping[str, object]) -> str:
             "nonce_digest": fields["nonce_digest"],
             "parameter_digest": fields["parameter_digest"],
             "parameters_json": fields["parameters_json"],
+            "request_digest": fields["request_digest"],
             "rejection_reason": fields["rejection_reason"],
             "release_id": fields["release_id"],
             "status": fields["status"],
@@ -254,6 +258,21 @@ class FaultAuthorityStore:
             and "locked" in str(error).lower()
         ):
             raise TimeoutError("fault-authority-deadline") from error
+
+    @classmethod
+    def _commit_before_deadline(
+        cls,
+        con: sqlite3.Connection,
+        deadline_monotonic: float | None,
+    ) -> None:
+        cls._check_deadline(deadline_monotonic)
+        if deadline_monotonic is not None:
+            remaining_ms = max(
+                1, int(max(0.001, deadline_monotonic - time.monotonic()) * 1_000)
+            )
+            con.execute(f"PRAGMA busy_timeout={remaining_ms}")
+            cls._check_deadline(deadline_monotonic)
+        con.execute("COMMIT")
 
     def _connect(
         self, deadline_monotonic: float | None = None
@@ -424,27 +443,50 @@ class FaultAuthorityStore:
         ).fetchone()
         return FaultEventState(row["state"]) if row is not None else None
 
-    def _has_active_chain(self, con: sqlite3.Connection) -> bool:
+    def _current_active_fault_ids(
+        self,
+        con: sqlite3.Connection,
+        *,
+        deadline_monotonic: float | None,
+        limit: int,
+    ) -> tuple[str, ...]:
+        self._check_deadline(deadline_monotonic)
+        terminal_values = tuple(state.value for state in _TERMINAL_STATES)
+        placeholders = ",".join("?" for _ in terminal_values)
         rows = con.execute(
-            "SELECT * FROM neg_risk_fault_intents WHERE status='accepted'"
+            "SELECT i.fault_id FROM neg_risk_fault_intents i "
+            "JOIN neg_risk_fault_runtime_starts r "
+            "ON r.component=i.component AND r.release_id=i.release_id "
+            "AND r.machine_id=i.machine_id AND r.boot_id=i.boot_id "
+            "WHERE i.status='accepted' "
+            "AND NOT EXISTS ("
+            " SELECT 1 FROM neg_risk_fault_runtime_starts newer "
+            " WHERE newer.component=r.component "
+            " AND (newer.started_at_ms>r.started_at_ms "
+            " OR (newer.started_at_ms=r.started_at_ms AND newer.id>r.id))"
+            ") "
+            "AND COALESCE(("
+            " SELECT e.state FROM neg_risk_fault_events e "
+            " WHERE e.fault_id=i.fault_id AND e.state IS NOT NULL "
+            " ORDER BY e.sequence DESC LIMIT 1"
+            "), '') NOT IN (" + placeholders + ") "
+            "ORDER BY i.accepted_at_ms DESC,i.fault_id LIMIT ?",
+            (*terminal_values, limit),
         ).fetchall()
-        for row in rows:
-            current = con.execute(
-                "SELECT release_id,machine_id,boot_id FROM neg_risk_fault_runtime_starts "
-                "WHERE component=? ORDER BY started_at_ms DESC,id DESC LIMIT 1",
-                (row["component"],),
-            ).fetchone()
-            if current is None:
-                continue
-            exact = (
-                current["release_id"] == row["release_id"]
-                and current["machine_id"] == row["machine_id"]
-                and current["boot_id"] == row["boot_id"]
+        self._check_deadline(deadline_monotonic)
+        return tuple(str(row["fault_id"]) for row in rows)
+
+    def _has_active_chain(
+        self,
+        con: sqlite3.Connection,
+        *,
+        deadline_monotonic: float | None,
+    ) -> bool:
+        return bool(
+            self._current_active_fault_ids(
+                con, deadline_monotonic=deadline_monotonic, limit=1
             )
-            state = self._latest_state(con, row["fault_id"])
-            if exact and state not in _TERMINAL_STATES:
-                return True
-        return False
+        )
 
     @staticmethod
     def _auth_row_fields(
@@ -548,8 +590,8 @@ class FaultAuthorityStore:
         reason: str,
         occurred_at_ms: int,
         reservation_id: int,
-    ) -> None:
-        self._insert_auth_row(
+    ) -> int:
+        return self._insert_auth_row(
             con,
             self._auth_row_fields(
                 record_type="attempt",
@@ -605,7 +647,7 @@ class FaultAuthorityStore:
                 reservation_id=reservation_id,
             )
             self._check_deadline(deadline_monotonic)
-            con.execute("COMMIT")
+            self._commit_before_deadline(con, deadline_monotonic)
             return final_reason
         except BaseException as error:
             if con.in_transaction:
@@ -661,11 +703,13 @@ class FaultAuthorityStore:
                 reason = "runtime-unavailable"
             elif self._runtime_from_row(current) != request.runtime:
                 reason = "runtime-mismatch"
-            elif self._has_active_chain(con):
+            elif self._has_active_chain(
+                con, deadline_monotonic=deadline_monotonic
+            ):
                 reason = "fault-already-active"
 
             self._check_deadline(deadline_monotonic)
-            self._append_auth_attempt(
+            attempt_id = self._append_auth_attempt(
                 con,
                 auth=auth,
                 operation="arm",
@@ -677,8 +721,7 @@ class FaultAuthorityStore:
                 reservation_id=reservation_id,
             )
             if reason != "accepted":
-                self._check_deadline(deadline_monotonic)
-                con.execute("COMMIT")
+                self._commit_before_deadline(con, deadline_monotonic)
                 return IntentAdmission(request.fault_id, False, reason)
             parameters_json = canonical_json(dict(request.parameters))
             intent_fields: dict[str, object] = {
@@ -695,6 +738,9 @@ class FaultAuthorityStore:
                 "boot_id": str(request.runtime.boot_id),
                 "nonce_digest": auth.nonce_digest,
                 "authorization_digest": auth.authorization_digest,
+                "request_digest": request_digest,
+                "auth_reservation_id": reservation_id,
+                "auth_attempt_id": attempt_id,
                 "accepted_at_ms": accepted_at_ms,
                 "status": "accepted",
                 "rejection_reason": None,
@@ -704,8 +750,9 @@ class FaultAuthorityStore:
                 "INSERT INTO neg_risk_fault_intents("
                 "fault_id,kind,call_class,target_key,parameters_json,parameter_digest,"
                 "ttl_ms,component,release_id,machine_id,boot_id,nonce_digest,"
-                "authorization_digest,accepted_at_ms,status,rejection_reason,intent_hash)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "authorization_digest,request_digest,auth_reservation_id,"
+                "auth_attempt_id,accepted_at_ms,status,rejection_reason,intent_hash)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     *(
                         intent_fields[key]
@@ -723,6 +770,9 @@ class FaultAuthorityStore:
                             "boot_id",
                             "nonce_digest",
                             "authorization_digest",
+                            "request_digest",
+                            "auth_reservation_id",
+                            "auth_attempt_id",
                             "accepted_at_ms",
                             "status",
                             "rejection_reason",
@@ -739,8 +789,7 @@ class FaultAuthorityStore:
                 occurred_at_ms=accepted_at_ms,
                 evidence={"reason": "accepted"},
             )
-            self._check_deadline(deadline_monotonic)
-            con.execute("COMMIT")
+            self._commit_before_deadline(con, deadline_monotonic)
             return IntentAdmission(request.fault_id, True, "accepted")
         except BaseException as error:
             if con.in_transaction:
@@ -867,14 +916,22 @@ class FaultAuthorityStore:
             if action is not FaultEventAction.CLEANUP_REQUESTED or set(evidence) != {
                 "authorization_digest",
                 "nonce_digest",
+                "request_digest",
+                "reservation_id",
+                "attempt_id",
             }:
                 raise ValueError("invalid-action-evidence")
-            for value in evidence.values():
+            for key in ("authorization_digest", "nonce_digest", "request_digest"):
+                value = evidence[key]
                 if (
                     not isinstance(value, str)
                     or len(value) != 64
                     or not set(value) <= set("0123456789abcdef")
                 ):
+                    raise ValueError("invalid-action-evidence")
+            for key in ("reservation_id", "attempt_id"):
+                value = evidence[key]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                     raise ValueError("invalid-action-evidence")
             normalized_evidence: Mapping[str, object] = dict(evidence)
         else:
@@ -932,14 +989,11 @@ class FaultAuthorityStore:
             raise RuntimeError("fault-authority-read-only")
         if not isinstance(auth, FaultAuthorization):
             raise ValueError("invalid-intent-envelope")
+        fault_id = normalize_fault_id(fault_id)
         self._validate_time(requested_at_ms, "invalid-requested-at")
         request_digest = request_digest or canonical_digest(
             {"fault_id": fault_id, "operation": "cleanup"}
         )
-        evidence = {
-            "authorization_digest": auth.authorization_digest,
-            "nonce_digest": auth.nonce_digest,
-        }
         con = self._connect(deadline_monotonic)
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -971,7 +1025,7 @@ class FaultAuthorityStore:
                     reservation_id=reservation_id,
                 )
                 self._check_deadline(deadline_monotonic)
-                con.execute("COMMIT")
+                self._commit_before_deadline(con, deadline_monotonic)
                 raise ValueError("nonce-replay")
             intent = con.execute(
                 "SELECT 1 FROM neg_risk_fault_intents WHERE fault_id=? AND status='accepted'",
@@ -992,14 +1046,14 @@ class FaultAuthorityStore:
                     reservation_id=reservation_id,
                 )
                 self._check_deadline(deadline_monotonic)
-                con.execute("COMMIT")
+                self._commit_before_deadline(con, deadline_monotonic)
                 raise ValueError(reason)
             if existing is not None:
                 history = self._validate_history_in_connection(con, fault_id)
                 if not history.valid:
                     raise ValueError("fault-history-invalid")
                 self._check_deadline(deadline_monotonic)
-                self._append_auth_attempt(
+                attempt_id = self._append_auth_attempt(
                     con,
                     auth=auth,
                     operation="cleanup",
@@ -1011,10 +1065,10 @@ class FaultAuthorityStore:
                     reservation_id=reservation_id,
                 )
                 self._check_deadline(deadline_monotonic)
-                con.execute("COMMIT")
+                self._commit_before_deadline(con, deadline_monotonic)
                 return self._event_from_row(existing)
             self._check_deadline(deadline_monotonic)
-            self._append_auth_attempt(
+            attempt_id = self._append_auth_attempt(
                 con,
                 auth=auth,
                 operation="cleanup",
@@ -1025,6 +1079,13 @@ class FaultAuthorityStore:
                 occurred_at_ms=requested_at_ms,
                 reservation_id=reservation_id,
             )
+            evidence = {
+                "authorization_digest": auth.authorization_digest,
+                "nonce_digest": auth.nonce_digest,
+                "request_digest": request_digest,
+                "reservation_id": reservation_id,
+                "attempt_id": attempt_id,
+            }
             self._check_deadline(deadline_monotonic)
             event = self._append_event_in_transaction(
                 con,
@@ -1034,8 +1095,7 @@ class FaultAuthorityStore:
                 occurred_at_ms=requested_at_ms,
                 evidence=evidence,
             )
-            self._check_deadline(deadline_monotonic)
-            con.execute("COMMIT")
+            self._commit_before_deadline(con, deadline_monotonic)
             return event
         except BaseException as error:
             if con.in_transaction:
@@ -1238,36 +1298,89 @@ class FaultAuthorityStore:
         except (KeyError, TypeError, ValueError, IndexError):
             return False
 
-    def _auth_rows_valid_in_connection(self, con: sqlite3.Connection) -> bool:
+    def _auth_pair_valid(
+        self,
+        reservation: sqlite3.Row,
+        attempt: sqlite3.Row,
+        *,
+        expected_operation: str,
+        expected_fault_id: str,
+        expected_request_digest: str,
+        expected_nonce_digest: str,
+        expected_authorization_digest: str,
+        expected_reason: str,
+    ) -> bool:
         try:
-            rows = con.execute(
-                "SELECT * FROM neg_risk_fault_auth_nonces ORDER BY id"
-            ).fetchall()
-            reservations = {
-                int(row["id"]): row
-                for row in rows
-                if row["record_type"] == "reservation"
+            expected = {
+                "operation": expected_operation,
+                "fault_id": expected_fault_id,
+                "request_digest": expected_request_digest,
+                "nonce_digest": expected_nonce_digest,
+                "authorization_digest": expected_authorization_digest,
             }
-            for row in rows:
-                if not self._nonce_row_valid(row):
-                    return False
-                if row["record_type"] == "attempt":
-                    reservation = reservations.get(int(row["reservation_id"]))
-                    if (
-                        reservation is None
-                        or reservation["nonce_digest"] != row["nonce_digest"]
-                    ):
-                        return False
-            return True
-        except (KeyError, TypeError, ValueError, IndexError, sqlite3.Error):
+            return bool(
+                self._nonce_row_valid(reservation)
+                and self._nonce_row_valid(attempt)
+                and reservation["record_type"] == "reservation"
+                and attempt["record_type"] == "attempt"
+                and int(attempt["reservation_id"]) == int(reservation["id"])
+                and attempt["outcome"] == "accepted"
+                and attempt["reason"] == expected_reason
+                and all(
+                    reservation[key] == value and attempt[key] == value
+                    for key, value in expected.items()
+                )
+            )
+        except (KeyError, TypeError, ValueError, IndexError):
             return False
+
+    def _auth_links_valid_for_fault(
+        self,
+        con: sqlite3.Connection,
+        fault_id: str,
+        *,
+        deadline_monotonic: float | None,
+    ) -> bool:
+        """Reject semantic cross-link tamper with one indexed, fault-scoped query."""
+        self._check_deadline(deadline_monotonic)
+        mismatch = con.execute(
+            "SELECT 1 FROM neg_risk_fault_auth_nonces a "
+            "LEFT JOIN neg_risk_fault_auth_nonces r ON r.id=a.reservation_id "
+            "WHERE a.record_type='attempt' "
+            "AND (a.fault_id=? OR r.fault_id=?) AND ("
+            " r.id IS NULL OR r.record_type!='reservation' "
+            " OR (a.outcome='accepted' AND ("
+            "   a.nonce_digest IS NOT r.nonce_digest "
+            "   OR a.authorization_digest IS NOT r.authorization_digest "
+            "   OR a.operation IS NOT r.operation "
+            "   OR a.fault_id IS NOT r.fault_id "
+            "   OR a.request_digest IS NOT r.request_digest "
+            "   OR (a.operation='arm' AND a.reason!='accepted') "
+            "   OR (a.operation='cleanup' AND a.reason NOT IN "
+            "      ('cleanup-requested','cleanup-already-requested'))"
+            " )) "
+            " OR (a.outcome='rejected' AND a.reason!='nonce-replay' AND ("
+            "   a.nonce_digest IS NOT r.nonce_digest "
+            "   OR a.authorization_digest IS NOT r.authorization_digest "
+            "   OR a.operation IS NOT r.operation "
+            "   OR a.fault_id IS NOT r.fault_id "
+            "   OR a.request_digest IS NOT r.request_digest"
+            " ))"
+            ") LIMIT 1",
+            (fault_id, fault_id),
+        ).fetchone()
+        self._check_deadline(deadline_monotonic)
+        return mismatch is None
 
     def _intent_row_valid(
         self,
         con: sqlite3.Connection,
         row: sqlite3.Row,
+        *,
+        deadline_monotonic: float | None = None,
     ) -> bool:
         try:
+            self._check_deadline(deadline_monotonic)
             parameters = json.loads(row["parameters_json"])
             if canonical_json(parameters) != row["parameters_json"]:
                 return False
@@ -1291,27 +1404,31 @@ class FaultAuthorityStore:
             ).fetchone()
             if runtime is None or not self._runtime_row_valid(runtime):
                 return False
-            nonce = con.execute(
-                "SELECT * FROM neg_risk_fault_auth_nonces "
-                "WHERE record_type='reservation' AND nonce_digest=?",
-                (row["nonce_digest"],),
+            reservation = con.execute(
+                "SELECT * FROM neg_risk_fault_auth_nonces WHERE id=?",
+                (row["auth_reservation_id"],),
             ).fetchone()
-            if nonce is None or not self._nonce_row_valid(nonce):
-                return False
             attempt = con.execute(
-                "SELECT * FROM neg_risk_fault_auth_nonces "
-                "WHERE record_type='attempt' AND reservation_id=? "
-                "AND outcome='accepted' AND reason='accepted' ORDER BY id LIMIT 1",
-                (nonce["id"],),
+                "SELECT * FROM neg_risk_fault_auth_nonces WHERE id=?",
+                (row["auth_attempt_id"],),
             ).fetchone()
+            self._check_deadline(deadline_monotonic)
             return bool(
                 row["status"] == "accepted"
-                and nonce["operation"] == "arm"
-                and nonce["authorization_digest"] == row["authorization_digest"]
+                and row["rejection_reason"] is None
+                and reservation is not None
                 and attempt is not None
-                and self._nonce_row_valid(attempt)
-                and attempt["authorization_digest"] == row["authorization_digest"]
                 and attempt["occurred_at_ms"] == row["accepted_at_ms"]
+                and self._auth_pair_valid(
+                    reservation,
+                    attempt,
+                    expected_operation="arm",
+                    expected_fault_id=row["fault_id"],
+                    expected_request_digest=row["request_digest"],
+                    expected_nonce_digest=row["nonce_digest"],
+                    expected_authorization_digest=row["authorization_digest"],
+                    expected_reason="accepted",
+                )
             )
         except (
             KeyError,
@@ -1327,14 +1444,21 @@ class FaultAuthorityStore:
         self,
         con: sqlite3.Connection,
         fault_id: str,
+        *,
+        deadline_monotonic: float | None = None,
     ) -> FaultHistory:
+        self._check_deadline(deadline_monotonic)
         row = con.execute(
             "SELECT * FROM neg_risk_fault_intents WHERE fault_id=?",
             (fault_id,),
         ).fetchone()
         if row is None:
             return FaultHistory(fault_id, False, "intent-missing", None, ())
-        if not self._intent_row_valid(con, row):
+        if not self._auth_links_valid_for_fault(
+            con, fault_id, deadline_monotonic=deadline_monotonic
+        ) or not self._intent_row_valid(
+            con, row, deadline_monotonic=deadline_monotonic
+        ):
             return FaultHistory(fault_id, False, "intent-integrity-invalid", None, ())
         try:
             intent = self._intent_from_row(row)
@@ -1353,46 +1477,59 @@ class FaultAuthorityStore:
             FaultEventState.AUTHORIZED if row["status"] == "accepted" else FaultEventState.REJECTED
         )
         for index, event in enumerate(events, start=1):
+            self._check_deadline(deadline_monotonic)
             if event.sequence != index or event.previous_hash != previous:
                 return FaultHistory(fault_id, False, "hash-predecessor-invalid", intent, events)
             try:
                 if event.state is None:
                     if event.action is not FaultEventAction.CLEANUP_REQUESTED or set(
                         event.evidence
-                    ) != {"authorization_digest", "nonce_digest"}:
+                    ) != {
+                        "authorization_digest",
+                        "nonce_digest",
+                        "request_digest",
+                        "reservation_id",
+                        "attempt_id",
+                    }:
                         raise ValueError("invalid-action-evidence")
-                    for value in event.evidence.values():
+                    for key in (
+                        "authorization_digest",
+                        "nonce_digest",
+                        "request_digest",
+                    ):
+                        value = event.evidence[key]
                         if (
                             not isinstance(value, str)
                             or len(value) != 64
                             or not set(value) <= set("0123456789abcdef")
                         ):
                             raise ValueError("invalid-action-evidence")
-                    nonce_row = con.execute(
-                        "SELECT * FROM neg_risk_fault_auth_nonces "
-                        "WHERE record_type='reservation' AND nonce_digest=?",
-                        (event.evidence["nonce_digest"],),
+                    reservation = con.execute(
+                        "SELECT * FROM neg_risk_fault_auth_nonces WHERE id=?",
+                        (event.evidence["reservation_id"],),
                     ).fetchone()
-                    attempt_row = (
-                        con.execute(
-                            "SELECT * FROM neg_risk_fault_auth_nonces "
-                            "WHERE record_type='attempt' AND reservation_id=? "
-                            "AND outcome='accepted' AND reason='cleanup-requested' "
-                            "ORDER BY id LIMIT 1",
-                            (nonce_row["id"],),
-                        ).fetchone()
-                        if nonce_row is not None
-                        else None
-                    )
+                    attempt = con.execute(
+                        "SELECT * FROM neg_risk_fault_auth_nonces WHERE id=?",
+                        (event.evidence["attempt_id"],),
+                    ).fetchone()
                     if (
-                        nonce_row is None
-                        or not self._nonce_row_valid(nonce_row)
-                        or nonce_row["operation"] != "cleanup"
-                        or nonce_row["authorization_digest"]
-                        != event.evidence["authorization_digest"]
-                        or attempt_row is None
-                        or not self._nonce_row_valid(attempt_row)
-                        or attempt_row["occurred_at_ms"] != event.occurred_at_ms
+                        reservation is None
+                        or attempt is None
+                        or attempt["occurred_at_ms"] != event.occurred_at_ms
+                        or not self._auth_pair_valid(
+                            reservation,
+                            attempt,
+                            expected_operation="cleanup",
+                            expected_fault_id=fault_id,
+                            expected_request_digest=event.evidence[
+                                "request_digest"
+                            ],
+                            expected_nonce_digest=event.evidence["nonce_digest"],
+                            expected_authorization_digest=event.evidence[
+                                "authorization_digest"
+                            ],
+                            expected_reason="cleanup-requested",
+                        )
                     ):
                         raise ValueError("action-authorization-invalid")
                     evidence_json = canonical_json(event.evidence)
@@ -1460,45 +1597,16 @@ class FaultAuthorityStore:
             return FaultProjection(
                 fault_id, False, False, None, history.reason, history.intent
             )
-        accepted_rows = con.execute(
-            "SELECT fault_id,component,release_id,machine_id,boot_id "
-            "FROM neg_risk_fault_intents WHERE status='accepted'"
-        ).fetchall()
+        accepted_fault_ids = self._current_active_fault_ids(
+            con, deadline_monotonic=deadline_monotonic, limit=2
+        )
         active_count = 0
-        for accepted in accepted_rows:
+        for accepted_fault_id in accepted_fault_ids:
             self._check_deadline(deadline_monotonic)
-            try:
-                accepted_runtime = FaultRuntimeIdentity(
-                    component=accepted["component"],
-                    release_id=accepted["release_id"],
-                    machine_id=accepted["machine_id"],
-                    boot_id=UUID(accepted["boot_id"]),
-                )
-            except (ValueError, TypeError):
-                return FaultProjection(
-                    fault_id,
-                    False,
-                    False,
-                    FaultEventState.EVIDENCE_INVALID,
-                    "evidence-invalid",
-                    history.intent,
-                )
-            current_runtime = self._current_runtime_in_connection(
-                con, accepted_runtime.component
-            )
-            if current_runtime is None:
-                return FaultProjection(
-                    fault_id,
-                    False,
-                    False,
-                    FaultEventState.EVIDENCE_INVALID,
-                    "evidence-invalid",
-                    history.intent,
-                )
-            if current_runtime != accepted_runtime:
-                continue
             candidate = self._validate_history_in_connection(
-                con, accepted["fault_id"]
+                con,
+                accepted_fault_id,
+                deadline_monotonic=deadline_monotonic,
             )
             if not candidate.valid or candidate.intent is None or not candidate.events:
                 return FaultProjection(
@@ -1597,12 +1705,9 @@ class FaultAuthorityStore:
                         True, "valid", runtime=runtime
                     )
                 assert fault_id is not None
-                if not self._auth_rows_valid_in_connection(con):
-                    con.execute("COMMIT")
-                    return FaultAuthoritySnapshot(
-                        False, "fault-auth-history-invalid"
-                    )
-                history = self._validate_history_in_connection(con, fault_id)
+                history = self._validate_history_in_connection(
+                    con, fault_id, deadline_monotonic=deadline_monotonic
+                )
                 projection = self._project_fault_in_connection(
                     con,
                     fault_id,
