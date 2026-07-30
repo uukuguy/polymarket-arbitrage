@@ -96,6 +96,14 @@ surface, or Make target changed.
    appends `EVIDENCE_INVALID` while ownership is held and freezes/degrades;
    different targets remain zero-mutation `NOT_APPLICABLE`, and authority
    unavailability remains `UNAVAILABLE` with no invalid event.
+9. Final-review HIGH RED proved cross-family and post-validator semantic
+   invalidity still returned `INVALID` when the terminal
+   `EVIDENCE_INVALID` append raised SQLite `OperationalError`; durable history
+   remained `CLEANED`. GREEN centralizes owned invalidation and returns
+   `INVALID` only when `receipt_persisted is True` and the returned terminal is
+   exactly `EVIDENCE_INVALID`. Failed, missing, or wrong-terminal invalidation
+   proof returns `UNAVAILABLE`, retains freeze/degrade, clears pending
+   recovery, and never resumes claims.
 
 ## Verification
 
@@ -112,11 +120,11 @@ surface, or Make target changed.
 
 ### Review HIGH remediation verification
 
-- Exact-target cross-family/different-target/authority-unavailable runtime
-  matrix: 9 tests passed.
+- Exact-target cross-family/different-target/authority-unavailable plus
+  invalid-terminal-append runtime matrix: 11 tests passed.
 - Task 3–6 fault control, authority, runtime, Gamma/Candidate/Telegram
   adapters and Incidents, daemon wiring, notification/outbox, and related
-  SQLite/store regressions: 740 tests passed.
+  SQLite/store regressions: 742 tests passed.
 - Focused Ruff and Task 6 scoped `git diff --check`: passed.
 - Repository-wide `git diff --check` remains blocked only by an unstaged,
   user-owned trailing blank line in `.superpowers/sdd/task-7-brief.md`; Task 6

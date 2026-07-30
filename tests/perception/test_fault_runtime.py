@@ -1156,6 +1156,84 @@ async def test_exact_recovery_authority_unavailable_is_not_evidence_invalid(
     assert runtime.pending_recovery_fault_id is None
 
 
+def _break_evidence_invalid_append(
+    monkeypatch: pytest.MonkeyPatch,
+    authority: FaultAuthorityStore,
+) -> None:
+    original = authority.append_event
+
+    def append_event(fault_id, state, **kwargs):
+        if state is FaultEventState.EVIDENCE_INVALID:
+            raise sqlite3.OperationalError("database is locked")
+        return original(fault_id, state, **kwargs)
+
+    monkeypatch.setattr(authority, "append_event", append_event)
+
+
+@pytest.mark.asyncio
+async def test_cross_family_invalid_append_failure_returns_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, authority = await _pending_real_recovery(
+        tmp_path,
+        name="cross-family-invalid-append-failure",
+        component="notification",
+        kind=FaultKind.TELEGRAM_FAILURE,
+        call_class=FaultCallClass.TELEGRAM_OPPORTUNITY_CARD,
+        target_key="1",
+        parameters={},
+    )
+    _break_evidence_invalid_append(monkeypatch, authority)
+
+    outcome = await runtime.record_writer_recovery_outcome(
+        FaultRecoveryWriter.CANDIDATE_SUCCESS,
+        target_key="1",
+        writer_id="candidate-qb",
+        writer_occurred_at_ms=2_000,
+    )
+
+    assert outcome is FaultRecoveryOutcome.UNAVAILABLE
+    history = authority.validate_history("fault-cross-family-invalid-append-failure")
+    assert history.valid
+    assert history.events[-1].state is FaultEventState.CLEANED
+    assert runtime.degraded is True
+    assert runtime.pending_recovery_fault_id is None
+
+
+@pytest.mark.asyncio
+async def test_post_validation_invalid_append_failure_returns_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, authority = await _pending_real_recovery(
+        tmp_path,
+        name="post-validation-invalid-append-failure",
+        component="notification",
+        kind=FaultKind.TELEGRAM_FAILURE,
+        call_class=FaultCallClass.TELEGRAM_OPPORTUNITY_CARD,
+        target_key="1",
+        parameters={},
+    )
+    _break_evidence_invalid_append(monkeypatch, authority)
+
+    # Writer family and target are legal, but attempt 999 does not exist, so
+    # the same-transaction authority validator returns semantic invalidity.
+    outcome = await runtime.record_writer_recovery_outcome(
+        FaultRecoveryWriter.TELEGRAM_DELIVERY,
+        target_key="1",
+        writer_id=999,
+        writer_occurred_at_ms=2_000,
+    )
+
+    assert outcome is FaultRecoveryOutcome.UNAVAILABLE
+    history = authority.validate_history("fault-post-validation-invalid-append-failure")
+    assert history.valid
+    assert history.events[-1].state is FaultEventState.CLEANED
+    assert runtime.degraded is True
+    assert runtime.pending_recovery_fault_id is None
+
+
 def test_each_builder_registration_uses_exact_boot_identity(tmp_path: Path) -> None:
     from polyarb.perception.store import OpportunityPerceptionStore
 

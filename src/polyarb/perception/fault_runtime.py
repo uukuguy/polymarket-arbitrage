@@ -513,29 +513,43 @@ class FaultRuntime:
         }.get(pending.intent.kind)
         invalid_reason = f"{pending.intent.runtime.component}-recovery-evidence-invalid"
         if expected_writer is None or writer is not expected_writer:
-            await self.invalidate_evidence(
+            return await self._record_owned_invalidity(
                 pending.intent.fault_id,
                 invalid_reason,
             )
-            return FaultRecoveryOutcome.INVALID
         receipt = self.make_recovery_receipt(
             writer,
             writer_id=writer_id,
             writer_occurred_at_ms=writer_occurred_at_ms,
         )
         if receipt is None:
-            await self.invalidate_evidence(
+            return await self._record_owned_invalidity(
                 pending.intent.fault_id,
                 invalid_reason,
             )
-            return FaultRecoveryOutcome.INVALID
         outcome = await self.record_recovery_outcome(receipt)
         if outcome is FaultRecoveryOutcome.INVALID:
-            await self.invalidate_evidence(
+            return await self._record_owned_invalidity(
                 pending.intent.fault_id,
                 invalid_reason,
             )
         return outcome
+
+    async def _record_owned_invalidity(
+        self,
+        fault_id: str,
+        reason: str,
+    ) -> FaultRecoveryOutcome:
+        result = await self.invalidate_evidence(fault_id, reason)
+        if (
+            isinstance(result, CleanupResult)
+            and result.receipt_persisted is True
+            and result.terminal_state is FaultEventState.EVIDENCE_INVALID
+        ):
+            return FaultRecoveryOutcome.INVALID
+        if not self.degraded:
+            self._freeze_evidence(RuntimeError("fault-invalidity-evidence-unavailable"))
+        return FaultRecoveryOutcome.UNAVAILABLE
 
     async def invalidate_evidence(
         self,
