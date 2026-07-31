@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from typer.testing import CliRunner
 
+from polyarb.perception.structure_sync import StructureSyncCheckpoint
 from polyarb.snapshot.cli import app
 
 
@@ -30,6 +31,33 @@ def test_structure_sync_cli_returns_certified_snapshot_json(monkeypatch) -> None
 
     assert result.exit_code == 0
     assert json.loads(result.stdout)["snapshot_id"] == 800
+
+
+def test_structure_sync_cli_returns_cooperative_checkpoint_json(monkeypatch) -> None:
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+    checkpoint = StructureSyncCheckpoint(
+        window_id="window-1",
+        stage="markets",
+        pages_processed=80,
+    )
+    with patch(
+        "polyarb.snapshot.cli.run_structure_sync_until_published",
+        new=AsyncMock(return_value=checkpoint),
+    ) as run:
+        result = CliRunner().invoke(
+            app,
+            ["structure-sync", "--json", "--max-pages", "80"],
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "checkpointed": True,
+        "pages_processed": 80,
+        "stage": "markets",
+        "window_id": "window-1",
+    }
+    assert run.await_args.kwargs["max_pages"] == 80
 
 
 def test_snapshot_cli_json_contract(monkeypatch) -> None:

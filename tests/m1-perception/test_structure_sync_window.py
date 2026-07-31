@@ -14,6 +14,7 @@ from polyarb.clients.gamma_client import (
 from polyarb.perception import structure_sync as structure_sync_module
 from polyarb.perception.structure_sync import (
     StagedGammaSource,
+    StructureSyncCheckpoint,
     StructureSyncWorker,
     finalize_structure_window,
     run_structure_sync_until_published,
@@ -116,6 +117,54 @@ async def test_structure_worker_advances_one_event_then_one_market_page(tmp_path
     assert store.get_latest_structure_sync()["started_at_ms"] > 0
     assert (await worker.run_batch()).stage == "markets"
     assert store.get_latest_structure_sync()["status"] == "complete"
+
+
+async def test_structure_sync_yields_after_bounded_pages_without_losing_cursor(
+    settings_for_test,
+) -> None:
+    """A long Structure window must release the producer slot for Quote."""
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    cursors: list[str | None] = []
+
+    class Gamma:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def fetch_active_event_page(self, cursor, limit):
+            cursors.append(cursor)
+            page_number = len(cursors)
+            return EventPage(
+                ({"id": f"event-{page_number}"},),
+                cursor,
+                f"event-{page_number + 1}",
+                False,
+                page_number * 10,
+                page_number * 10 + 1,
+            )
+
+        async def fetch_active_market_page(self, cursor, limit):
+            raise AssertionError("event coverage is intentionally incomplete")
+
+    with patch(
+        "polyarb.perception.structure_sync.GammaClient",
+        return_value=Gamma(),
+    ):
+        result = await run_structure_sync_until_published(
+            settings_for_test,
+            max_pages=2,
+        )
+
+    assert result == StructureSyncCheckpoint(
+        window_id=store.get_latest_structure_sync()["id"],
+        stage="events",
+        pages_processed=2,
+    )
+    assert cursors == [None, "event-2"]
+    assert store.get_latest_structure_sync()["event_cursor"] == "event-3"
 
 
 async def test_structure_worker_emits_scheduler_stage_before_remote_page_fetch(

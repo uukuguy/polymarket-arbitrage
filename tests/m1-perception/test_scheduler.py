@@ -361,9 +361,39 @@ async def test_snapshot_pipeline_runs_in_isolated_subprocess(
         "structure-sync",
         "--json",
         "--low-priority",
+        "--max-pages",
+        "80",
     )
     assert kwargs["stdout"] == asyncio.subprocess.PIPE
     assert kwargs["stderr"] == asyncio.subprocess.PIPE
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_accepts_cooperative_checkpoint() -> None:
+    from polyarb.daemon.scheduler import (
+        IsolatedStructureCheckpoint,
+        run_snapshot_in_subprocess,
+    )
+
+    process = _FakeProcess(
+        {
+            "checkpointed": True,
+            "window_id": "window-1",
+            "stage": "markets",
+            "pages_processed": 80,
+        },
+        returncode=0,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    result = await run_snapshot_in_subprocess(spawn=spawn)
+
+    assert isinstance(result, IsolatedStructureCheckpoint)
+    assert result.window_id == "window-1"
+    assert result.stage == "markets"
+    assert result.pages_processed == 80
 
 
 def test_snapshot_stage_parser_keeps_only_final_allowlisted_marker() -> None:
@@ -781,6 +811,39 @@ async def test_degraded_does_not_count_as_failure(
     # Counter should stay at 0; state should stay RUNNING
     assert scheduler._failure_counter == 0
     assert scheduler.state == SchedulerState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_structure_checkpoint_releases_slot_without_failure_or_alert(
+    daemon_settings_for_test: Any,
+) -> None:
+    """A cooperative page slice is progress, not a degraded incident."""
+    from polyarb.daemon.scheduler import IsolatedStructureCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(
+        return_value=IsolatedStructureCheckpoint(
+            window_id="window-1",
+            stage="markets",
+            pages_processed=80,
+            elapsed_ms=40_000,
+        )
+    )
+
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()) as heartbeat:
+        await scheduler._tick()
+
+    attempt = store.get_latest_snapshot_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "cancelled"
+    assert attempt["failure_kind"] == "structure-checkpoint"
+    assert scheduler._failure_counter == 0
+    assert scheduler.state == SchedulerState.RUNNING
+    assert scheduler._checkpoint_pending is True
+    heartbeat.assert_not_called()
 
 
 @pytest.mark.asyncio

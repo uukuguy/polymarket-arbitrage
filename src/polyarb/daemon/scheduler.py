@@ -70,6 +70,7 @@ class SnapshotSubprocessError(RuntimeError):
 
 
 SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
+STRUCTURE_SLICE_MAX_PAGES = 80
 RECOVERY_RETRY_DELAY_S = 5.0
 MAX_RECOVERY_RETRY_DELAY_S = 60.0
 
@@ -108,6 +109,14 @@ class IsolatedSnapshotResult:
     elapsed_ms: int
 
 
+@dataclass(frozen=True)
+class IsolatedStructureCheckpoint:
+    window_id: str
+    stage: str
+    pages_processed: int
+    elapsed_ms: int
+
+
 async def run_snapshot_in_subprocess(
     *,
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (
@@ -124,6 +133,8 @@ async def run_snapshot_in_subprocess(
         "structure-sync",
         "--json",
         "--low-priority",
+        "--max-pages",
+        str(STRUCTURE_SLICE_MAX_PAGES),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -232,6 +243,36 @@ async def run_snapshot_in_subprocess(
             last_stage=last_stage,
             elapsed_ms=process_elapsed_ms,
         )
+    if payload.get("checkpointed") is True:
+        window_id = payload.get("window_id")
+        stage = payload.get("stage")
+        pages_processed = payload.get("pages_processed")
+        if (
+            not isinstance(window_id, str)
+            or not window_id
+            or stage not in {"events", "markets", "complete"}
+            or isinstance(pages_processed, bool)
+            or not isinstance(pages_processed, int)
+            or pages_processed < 1
+            or process.returncode != 0
+        ):
+            raise SnapshotSubprocessError(
+                "invalid-json",
+                last_stage=last_stage,
+                elapsed_ms=process_elapsed_ms,
+            )
+        logger.info(
+            "isolated snapshot checkpointed "
+            f"pid={getattr(process, 'pid', None)} "
+            f"elapsed_ms={process_elapsed_ms} stage={stage} "
+            f"pages_processed={pages_processed} window_id={window_id}"
+        )
+        return IsolatedStructureCheckpoint(
+            window_id=window_id,
+            stage=stage,
+            pages_processed=pages_processed,
+            elapsed_ms=process_elapsed_ms,
+        )
     try:
         status = SnapshotStatus(str(payload.get("status", "")).lower())
     except ValueError as error:
@@ -307,6 +348,7 @@ class SnapshotScheduler:
         self._settings = settings
         self._sqlite_store = sqlite_store
         self._producer_lock = producer_lock
+        self._checkpoint_pending = False
 
         # Restore state from DB (test_counter_persists_across_restart)
         self._failure_counter = 0
@@ -533,6 +575,7 @@ class SnapshotScheduler:
             # durable restore path already migrates this value.
             self.state = SchedulerState.RECOVERING
 
+        self._checkpoint_pending = False
         attempt_id = await asyncio.to_thread(
             self._sqlite_store.begin_snapshot_attempt,
             started_at_ms=int(time.time() * 1000),
@@ -540,6 +583,28 @@ class SnapshotScheduler:
 
         try:
             result = await self._run_snapshot()
+            if isinstance(result, IsolatedStructureCheckpoint):
+                last_stage = (
+                    "gamma-events"
+                    if result.stage == "events"
+                    else "gamma-markets"
+                )
+                await self._finish_attempt(
+                    attempt_id=attempt_id,
+                    outcome="cancelled",
+                    snapshot_id=None,
+                    failure_kind="structure-checkpoint",
+                    last_stage=last_stage,
+                    elapsed_ms=result.elapsed_ms,
+                )
+                self._checkpoint_pending = True
+                logger.info(
+                    "snapshot tick checkpointed: "
+                    f"stage={result.stage} pages={result.pages_processed} "
+                    f"failure_counter={self._failure_counter}"
+                )
+                self._persist_counter()
+                return
             result_status = getattr(result, "status", None)
 
             if result_status in (SnapshotStatus.OK, SnapshotStatus.DEGRADED):
@@ -764,7 +829,9 @@ class SnapshotScheduler:
                 if await self._wait_for_next_tick(
                     stop_event,
                     (
-                        recovery_retry_delay_s(self._failure_counter)
+                        0.1
+                        if self._checkpoint_pending
+                        else recovery_retry_delay_s(self._failure_counter)
                         if self._failure_counter > 0
                         else self._effective_cadence_s
                     ),

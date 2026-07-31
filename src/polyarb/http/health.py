@@ -800,7 +800,11 @@ def _build_health_checks(
         attempt_value = str(latest_attempt["outcome"])
         diagnostic_parts = []
         failure_kind = latest_attempt["failure_kind"]
-        if failure_kind is not None:
+        is_structure_checkpoint = (
+            attempt_value == "cancelled"
+            and failure_kind == "structure-checkpoint"
+        )
+        if failure_kind is not None and not is_structure_checkpoint:
             diagnostic_parts.append(str(failure_kind))
         last_stage = latest_attempt["last_stage"]
         if last_stage is not None:
@@ -809,7 +813,10 @@ def _build_health_checks(
         if elapsed_ms is not None:
             diagnostic_parts.append(f"elapsed_ms={elapsed_ms}")
         attempt_output = " ".join(diagnostic_parts) or None
-        if attempt_value in {"failed", "cancelled"}:
+        if is_structure_checkpoint:
+            attempt_value = "checkpointed"
+            attempt_status = "pass"
+        elif attempt_value in {"failed", "cancelled"}:
             attempt_status = "warn" if truth_age_status == "pass" else "fail"
         elif attempt_value == "running":
             attempt_age_s = max(

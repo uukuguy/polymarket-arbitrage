@@ -67,9 +67,11 @@ Telegram outbox 也采用同一原则：每轮最多投递 20 条，生产发送
 限流。这里的“有界”不是降级后放弃，而是让恢复工作本身不会制造第二次故障。
 
 Structure 与全市场 Quote 的隔离子进程共享一个进程内 producer slot。当前 Quote
-结束后，已经排队的 Structure 先取得 slot，避免 Quote 因单轮超过 120 秒而无缝重启、
-持续饿死 Structure；Structure 发布后 Quote 立即取得 slot 并绑定新 snapshot。锁等待
-不计入子进程 timeout，HTTP 与 Polywatch 仍由父进程响应。
+结束后，已经排队的 Structure 取得 slot；但 Structure 不再独占到整扇窗口发布。
+每推进 80 个已提交页面，它返回一个协作 checkpoint 并释放 slot。到期 Quote 因而能在
+切片边界插入刷新，Structure 随后从 durable cursor 续排。`checkpointed/pass` 不增加
+failure counter，也不触发故障告警；真正超时、异常退出和 cursor 拒绝仍保留原有
+恢复/报警链。锁等待不计入子进程 timeout，HTTP 与 Polywatch 仍由父进程响应。
 
 ## 自检题
 
@@ -79,6 +81,7 @@ Structure 与全市场 Quote 的隔离子进程共享一个进程内 producer sl
 4. point lookup 为什么不破坏 staged window 的全集权威？
 5. 哪三类生产证据齐全后，才能说机会 feed 已恢复？
 6. 为什么 quote retention 应产生 freelist，而不在生产主循环中执行 `VACUUM`？
+7. 为什么整轮互斥能修复 Structure 超时，却仍可能让机会 feed 违反新鲜度 SLA？
 
 ## FAQ 增量
 

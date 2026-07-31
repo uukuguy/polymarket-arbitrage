@@ -41,6 +41,15 @@ class StructureSyncBatch:
     completed: bool
 
 
+@dataclass(frozen=True)
+class StructureSyncCheckpoint:
+    """Durable progress returned when one cooperative producer slice ends."""
+
+    window_id: str
+    stage: str
+    pages_processed: int
+
+
 class StructureSyncWorker:
     """Advance exactly one Gamma page; publication is intentionally elsewhere."""
 
@@ -231,8 +240,14 @@ async def finalize_structure_window(
     return result
 
 
-async def run_structure_sync_until_published(settings: Settings):
-    """Continuously checkpoint bounded pages until one certified revision publishes."""
+async def run_structure_sync_until_published(
+    settings: Settings,
+    *,
+    max_pages: int | None = None,
+):
+    """Checkpoint pages until publication or one cooperative slice ends."""
+    if max_pages is not None and max_pages < 1:
+        raise ValueError("structure-sync-max-pages-must-be-positive")
     store = SQLiteStore(settings.db_path)
     store.init_structure_sync_schema()
     latest = store.get_latest_structure_sync()
@@ -246,6 +261,7 @@ async def run_structure_sync_until_published(settings: Settings):
             )
         worker = StructureSyncWorker(gamma=gamma, store=store)
         cursor_restarts = 0
+        pages_processed = 0
         while True:
             try:
                 batch = await worker.run_batch()
@@ -275,6 +291,13 @@ async def run_structure_sync_until_published(settings: Settings):
                     f"successor_window_id={successor['id']}"
                 )
                 continue
+            pages_processed += 1
+            if max_pages is not None and pages_processed >= max_pages:
+                return StructureSyncCheckpoint(
+                    window_id=batch.window_id,
+                    stage=batch.stage,
+                    pages_processed=pages_processed,
+                )
             if batch.stage == "markets" and batch.completed:
                 return await finalize_structure_window(
                     settings,

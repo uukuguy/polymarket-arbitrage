@@ -463,6 +463,34 @@ def test_health_surfaces_failed_scheduler_attempt_while_truth_is_fresh(
     )
 
 
+def test_health_treats_cooperative_structure_checkpoint_as_healthy_progress(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1000)
+    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=now_ms - 2_000)
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    attempt_id = store.begin_snapshot_attempt(started_at_ms=now_ms - 1_000)
+    store.finish_snapshot_attempt(
+        attempt_id=attempt_id,
+        outcome="cancelled",
+        finished_at_ms=now_ms - 500,
+        snapshot_id=None,
+        failure_kind="structure-checkpoint",
+        last_stage="gamma-markets",
+        elapsed_ms=40_000,
+    )
+
+    attempt = http_test_client.get("/health").json()["checks"][
+        "snapshot:latest_attempt"
+    ][0]
+    assert attempt["observedValue"] == "checkpointed"
+    assert attempt["status"] == "pass"
+    assert attempt["output"] == "stage=gamma-markets elapsed_ms=40000"
+
+
 def test_health_omits_stage_for_historical_attempt_without_diagnostics(
     daemon_settings_for_test: Any,
     http_test_client: TestClient,

@@ -1440,7 +1440,10 @@ success is not user receipt/read evidence.
   full-universe Quote run exceeds its nominal 120-second cadence, start-to-start
   scheduling immediately launches another run; an overlapping lower-priority
   Structure child then repeatedly times out despite durable cursor progress.
-  A fair process-local producer slot now serializes only the heavy child
-  processes: an already-waiting Structure runs after the current Quote, then
-  Quote rebinds to the newly published snapshot. Lock wait is outside the
-  child's timeout and never blocks the HTTP parent.
+  A process-local producer slot serializes the heavy child processes, while
+  Structure cooperatively checkpoints after 80 durable pages and immediately
+  requeues. This bounds the time Quote waits for the slot without losing
+  Structure progress. A cooperative checkpoint is healthy progress, not a
+  failure-counter increment; real timeout/exit still uses the recovery and
+  alert chain. Lock wait is outside the child's timeout and never blocks the
+  HTTP parent.

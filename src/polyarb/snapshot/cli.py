@@ -21,7 +21,10 @@ import typer
 from loguru import logger
 
 from polyarb.config import load_settings
-from polyarb.perception.structure_sync import run_structure_sync_until_published
+from polyarb.perception.structure_sync import (
+    StructureSyncCheckpoint,
+    run_structure_sync_until_published,
+)
 from polyarb.snapshot.orchestrator import run_snapshot
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -31,12 +34,40 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 def structure_sync(
     json_output: bool = typer.Option(False, "--json"),
     low_priority: bool = typer.Option(False, "--low-priority", hidden=True),
+    max_pages: int | None = typer.Option(
+        None,
+        "--max-pages",
+        min=1,
+        hidden=True,
+    ),
 ) -> None:
     """Resume bounded Gamma pages and publish one certified Structure revision."""
     if low_priority:
         os.nice(10)
     settings = load_settings()
-    result = asyncio.run(run_structure_sync_until_published(settings))
+    result = asyncio.run(
+        run_structure_sync_until_published(settings, max_pages=max_pages)
+    )
+    if isinstance(result, StructureSyncCheckpoint):
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "checkpointed": True,
+                        "pages_processed": result.pages_processed,
+                        "stage": result.stage,
+                        "window_id": result.window_id,
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(
+                "CHECKPOINTED | "
+                f"stage={result.stage} pages={result.pages_processed} "
+                f"window_id={result.window_id}"
+            )
+        return
     if json_output:
         print(
             json.dumps(
