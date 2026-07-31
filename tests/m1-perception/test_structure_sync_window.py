@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -174,6 +175,79 @@ def test_incomplete_structure_window_cannot_be_read_for_publication(tmp_path) ->
     window = store.begin_or_resume_structure_sync(started_at_ms=1)
     with pytest.raises(ValueError, match="not-complete"):
         store.read_complete_structure_sync(window["id"])
+
+
+def test_published_structure_retention_is_bounded_and_keeps_latest_window(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = SQLiteStore(db_path)
+    store.init_schema()
+    window_ids: list[str] = []
+
+    for index in range(3):
+        with sqlite3.connect(db_path) as con:
+            snapshot_id = con.execute(
+                "INSERT INTO snapshots("
+                "taken_at_ms,finished_at_ms,mode,market_count,"
+                "market_view_published,data_product,archive_status,"
+                "snapshot_status,is_valid,parquet_path"
+                ") VALUES (?,?, 'full',0,1,'structure','not_requested',"
+                "'degraded',1,'not-requested') RETURNING id",
+                (index * 100 + 1, index * 100 + 2),
+            ).fetchone()[0]
+        window = store.begin_or_resume_structure_sync(started_at_ms=index * 100 + 10)
+        window_id = str(window["id"])
+        store.commit_structure_event_page(
+            window_id=window_id,
+            requested_cursor=None,
+            next_cursor=None,
+            completed=True,
+            events=[{"id": f"event-{index}"}],
+            finished_at_ms=index * 100 + 20,
+        )
+        store.commit_structure_market_page(
+            window_id=window_id,
+            requested_cursor=None,
+            next_cursor=None,
+            completed=True,
+            markets=[{"id": f"market-{index}"}],
+            finished_at_ms=index * 100 + 30,
+        )
+        store.mark_structure_sync_published(
+            window_id=window_id,
+            snapshot_id=int(snapshot_id),
+            published_at_ms=index * 100 + 40,
+        )
+        window_ids.append(window_id)
+
+    deleted, deleted_ids = store.purge_published_structure_sync_windows(
+        keep_last=1,
+        max_windows_per_run=1,
+    )
+
+    assert (deleted, deleted_ids) == (1, [window_ids[0]])
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_staging WHERE window_id=?",
+            (window_ids[0],),
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_market_staging WHERE window_id=?",
+            (window_ids[0],),
+        ).fetchone()[0] == 0
+        assert [
+            row[0]
+            for row in con.execute(
+                "SELECT id FROM structure_sync_windows ORDER BY checkpoint_at_ms"
+            )
+        ] == window_ids[1:]
+
+    assert store.purge_published_structure_sync_windows(
+        keep_last=1,
+        max_windows_per_run=1,
+    ) == (1, [window_ids[1]])
+    assert store.get_latest_structure_sync()["id"] == window_ids[2]
 
 
 async def test_structure_retry_skips_full_database_schema_migration(

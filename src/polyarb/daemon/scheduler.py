@@ -562,6 +562,21 @@ class SnapshotScheduler:
                     # Retention is fail-soft relative to a valid fresh snapshot,
                     # but its failure remains visible in production logs.
                     logger.warning(f"snapshot retention failed: {e!r}")
+                try:
+                    deleted_windows, _ = await asyncio.to_thread(
+                        self._sqlite_store.purge_published_structure_sync_windows,
+                        keep_last=1,
+                        max_windows_per_run=1,
+                    )
+                    if deleted_windows:
+                        logger.info(
+                            "structure staging retention deleted "
+                            f"{deleted_windows} expired published window"
+                        )
+                except Exception as e:  # noqa: BLE001
+                    # The certified snapshot remains valid; the next successful
+                    # cycle retries this bounded disk-reclamation transaction.
+                    logger.warning(f"structure staging retention failed: {e!r}")
             else:
                 snapshot_id = getattr(result, "snapshot_id", None)
                 await self._finish_attempt(

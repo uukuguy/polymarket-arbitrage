@@ -1055,6 +1055,73 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def purge_published_structure_sync_windows(
+        self,
+        *,
+        keep_last: int = 1,
+        max_windows_per_run: int = 1,
+    ) -> tuple[int, list[str]]:
+        """Delete a bounded batch of raw staging already bound to snapshots."""
+        if keep_last < 1:
+            raise ValueError("keep_last must be positive")
+        if max_windows_per_run < 1:
+            raise ValueError("max_windows_per_run must be positive")
+
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            keep_ids = [
+                str(row[0])
+                for row in con.execute(
+                    "SELECT id FROM structure_sync_windows "
+                    "WHERE status='published' "
+                    "ORDER BY checkpoint_at_ms DESC,id DESC LIMIT ?",
+                    (keep_last,),
+                )
+            ]
+            placeholders = ",".join("?" for _ in keep_ids)
+            to_delete = [
+                str(row[0])
+                for row in con.execute(
+                    "SELECT id FROM structure_sync_windows "
+                    "WHERE status='published' "
+                    f"AND id NOT IN ({placeholders}) "
+                    "ORDER BY checkpoint_at_ms,id LIMIT ?",
+                    (*keep_ids, max_windows_per_run),
+                )
+            ]
+            if to_delete:
+                delete_placeholders = ",".join("?" for _ in to_delete)
+                con.execute(
+                    "DELETE FROM structure_sync_event_staging "
+                    f"WHERE window_id IN ({delete_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    "DELETE FROM structure_sync_market_staging "
+                    f"WHERE window_id IN ({delete_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    "DELETE FROM structure_sync_windows "
+                    f"WHERE id IN ({delete_placeholders}) AND status='published'",
+                    to_delete,
+                )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+        if to_delete:
+            logger.info(
+                "structure staging retention deleted "
+                f"{len(to_delete)} published windows ids={to_delete}"
+            )
+        return len(to_delete), to_delete
+
     def read_complete_structure_sync(self, window_id: object) -> tuple[list[dict], list[dict]]:
         """Return staged facts only after both source traversals completed."""
         if not isinstance(window_id, str) or not window_id:

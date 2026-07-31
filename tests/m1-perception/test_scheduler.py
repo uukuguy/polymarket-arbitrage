@@ -761,6 +761,25 @@ async def test_successful_tick_purges_expired_snapshots_on_attached_store(
 
 
 @pytest.mark.asyncio
+async def test_successful_tick_purges_one_old_published_structure_window(
+    daemon_settings_for_test: Any,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    purge = MagicMock(return_value=(0, []))
+    store.purge_published_structure_sync_windows = purge  # type: ignore[method-assign]
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK))
+
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()):
+        await scheduler._tick()
+
+    purge.assert_called_once_with(keep_last=1, max_windows_per_run=1)
+
+
+@pytest.mark.asyncio
 async def test_degraded_tick_also_calls_heartbeat_ok(
     daemon_settings_for_test: Any,
 ) -> None:
