@@ -5793,3 +5793,36 @@ branch for later. Until that choice is made, preserve the worktree and do not
 deploy or run production qualification. Next session starts with
 `/gsd-resume-work --ws m1-perception`; first repository check:
 `make planning-status`.
+
+## SESSION 122 — 2026-07-31 (fault-control worktree integrated and closed)
+
+- [INTEGRATED] Local `main` merged `fix/l3-continuity-repair` at `b4c9ee3`.
+  The two main-only operational-monitoring commits were stable-patch-id
+  equivalent to commits already present on the feature branch. The merge kept
+  both histories, and the merge tree exactly matched the independently reviewed
+  feature tree (`d52b927d70885779025365dfa31dd0783b5d2a1e`).
+- [VERIFIED AFTER MERGE] Repository pytest collected 3,695 tests and exited
+  zero with one expected xfail and one skip. Local qualification produced 36
+  passing evaluator tests plus the canonical synthetic PASS fixture;
+  `docs-m1-check` and `planning-status` passed with no drift. Commit `620e88c`
+  removed 11 pre-existing trailing spaces from merged design metadata so the
+  integrated diff is mechanically clean.
+- [WORKTREE CLOSED] The owned
+  `.worktrees/l3-continuity-repair` worktree was removed and pruned. The merged
+  local branch was deleted with ordinary `git branch -d` after removing its
+  obsolete remote-upstream binding; no force deletion was used.
+- [USER STATE PRESERVED] Six pre-existing unstaged user/SDD files were saved to
+  a named stash before integration, restored onto `main`, and verified by
+  identical stable patch-id
+  `a5fa2c13b117a0f5730d977d7eae9bc0639a7f9c`. The temporary stash was then
+  dropped, leaving those exact files visible and unstaged on `main`.
+- [BOUNDARY] Nothing was pushed, deployed, enabled, or mutated in production.
+  Production qualification remains NOT RUN and requires a separate exact
+  release/evidence authorization.
+
+### [NEXT — CURRENT]
+
+Resume directly on local `main`; no L3 continuity-repair worktree remains.
+Start the next session with `/gsd-resume-work --ws m1-perception`, then run
+`make planning-status`. Do not run production qualification or any fault
+mutation without the separately authorized release/evidence scope.
