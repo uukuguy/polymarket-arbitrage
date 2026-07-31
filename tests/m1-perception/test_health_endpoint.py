@@ -8,8 +8,10 @@ HTTP 200 for pass/warn, 503 for fail.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -23,6 +25,39 @@ def _read_market_truth_health(path: Path, *, now_s: float):
     reader = getattr(health_module, "read_market_truth_health", None)
     assert callable(reader), "read_market_truth_health is not implemented"
     return reader(path, now_s)
+
+
+@pytest.mark.parametrize("handler_name", ["health", "healthz"])
+async def test_health_database_projection_runs_off_event_loop(
+    daemon_settings_for_test: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    handler_name: str,
+) -> None:
+    event_loop_thread = threading.get_ident()
+    projection_threads: list[int] = []
+
+    def build_checks(*_args, **_kwargs):
+        projection_threads.append(threading.get_ident())
+        return {}, "pass"
+
+    monkeypatch.setattr(health_module, "_build_health_checks", build_checks)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                sqlite_store=SimpleNamespace(db_path=daemon_settings_for_test.db_path),
+                settings=daemon_settings_for_test,
+                quote_worker_runtime=None,
+                machine_id="machine-test",
+                boot_id="boot-test",
+            )
+        )
+    )
+
+    response = await getattr(health_module, handler_name)(request)
+
+    assert response.status_code == 200
+    assert projection_threads
+    assert projection_threads[0] != event_loop_thread
 
 
 # ---------------------------------------------------------------------------

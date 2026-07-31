@@ -46,6 +46,7 @@ Source: datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -1082,7 +1083,8 @@ async def health(request: Request) -> JSONResponse:
     store: SQLiteStore = request.app.state.sqlite_store
     settings = request.app.state.settings
 
-    checks, overall = _build_health_checks(
+    checks, overall = await asyncio.to_thread(
+        _build_health_checks,
         store,
         settings,
         time.time(),
@@ -1122,7 +1124,8 @@ async def healthz(request: Request) -> JSONResponse:
     store: SQLiteStore = request.app.state.sqlite_store
     settings = request.app.state.settings
 
-    checks, overall = _build_health_checks(
+    checks, overall = await asyncio.to_thread(
+        _build_health_checks,
         store,
         settings,
         time.time(),
