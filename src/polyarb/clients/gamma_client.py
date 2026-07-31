@@ -459,7 +459,7 @@ class GammaClient:
 
         async def fetch_batch(
             batch: list[tuple[str, str]],
-        ) -> dict[str, dict[str, str | bool]]:
+        ) -> dict[str, dict[str, object]]:
             expected_groups = dict(batch)
             expected_ids = set(expected_groups)
             payload = await self._get(
@@ -476,13 +476,32 @@ class GammaClient:
             if (
                 any(type(market_id) is not str for market_id in response_ids)
                 or len(response_ids) != len(set(response_ids))
-                or set(response_ids) != expected_ids
+                or not set(response_ids) <= expected_ids
             ):
                 raise PaginationIntegrityError(
                     "/markets exact-id parent response identity set mismatch"
                 )
 
-            batch_states: dict[str, dict[str, str | bool]] = {}
+            batch_states: dict[str, dict[str, object]] = {}
+            missing_ids = sorted(expected_ids - set(response_ids))
+            if missing_ids:
+                point_states = await self.fetch_market_states(missing_ids)
+                for market_id in missing_ids:
+                    state = point_states[market_id]
+                    source_absent = state.get("source_absent") is True
+                    active = state.get("active")
+                    closed = state.get("closed")
+                    if not source_absent and active is True and closed is False:
+                        raise PaginationIntegrityError(
+                            "/markets exact-id parent response omitted open market"
+                        )
+                    batch_states[market_id] = {
+                        "event_id": None,
+                        "active": bool(active),
+                        "closed": bool(closed),
+                        "archived": bool(source_absent or closed or not active),
+                        "source_absent": source_absent,
+                    }
             for market in payload:
                 market_id = market["id"]
                 if (
@@ -526,7 +545,7 @@ class GammaClient:
             items[start : start + self.MARKET_PARENT_LOOKUP_BATCH_SIZE]
             for start in range(0, len(items), self.MARKET_PARENT_LOOKUP_BATCH_SIZE)
         ]
-        states: dict[str, dict[str, str | bool]] = {}
+        states: dict[str, dict[str, object]] = {}
         for start in range(0, len(batches), self.MAX_CONCURRENT_PARENT_LOOKUPS):
             wave = batches[start : start + self.MAX_CONCURRENT_PARENT_LOOKUPS]
             for batch_states in await asyncio.gather(*(fetch_batch(batch) for batch in wave)):

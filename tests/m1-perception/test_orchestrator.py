@@ -1507,7 +1507,9 @@ async def test_orphan_neg_risk_parent_lookup_failure_blocks_publication(
 
     assert result.is_valid is False
     assert coverage[:2] == (0, "events")
-    assert coverage[2] == "orphan-parent-state-lookup-failed:RuntimeError"
+    assert coverage[2] == (
+        "orphan-parent-state-lookup-failed:RuntimeError:parent unavailable"
+    )
     assert publish_mock.await_count == 0
 
 

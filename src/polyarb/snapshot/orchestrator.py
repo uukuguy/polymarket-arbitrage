@@ -867,7 +867,8 @@ async def run_snapshot(
                         )
                     except Exception as e:  # noqa: BLE001 — fail closed at source boundary
                         orphan_parent_lookup_failure_reason = (
-                            f"orphan-parent-state-lookup-failed:{type(e).__name__}"
+                            "orphan-parent-state-lookup-failed:"
+                            f"{type(e).__name__}:{str(e)}"
                         )[:160]
                         logger.error(f"Gamma orphan neg-risk parent lookup failed: {e!r}")
                     else:

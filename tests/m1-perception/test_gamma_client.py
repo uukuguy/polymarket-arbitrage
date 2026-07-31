@@ -539,8 +539,49 @@ async def test_fetch_market_parent_states_requires_exact_response_identity_set(
     }
     async with GammaClient(settings) as client:
         client._get = AsyncMock(return_value=payloads[response_kind])
-        with pytest.raises(PaginationIntegrityError, match="identity"):
+        with pytest.raises(
+            PaginationIntegrityError,
+            match="identity|invalid shape",
+        ):
             await client.fetch_market_parent_states(market_groups)
+
+
+async def test_fetch_market_parent_states_quarantines_missing_non_open_market() -> None:
+    settings = _fast_settings()
+    market_groups = {"market-1": "group-1", "market-2": "group-2"}
+    parent_payload = [
+        {
+            "id": "market-1",
+            "negRisk": True,
+            "negRiskMarketID": "group-1",
+            "events": [
+                {
+                    "id": "event-1",
+                    "active": False,
+                    "closed": False,
+                    "archived": True,
+                }
+            ],
+        }
+    ]
+
+    async with GammaClient(settings) as client:
+        client._get = AsyncMock(
+            side_effect=[
+                parent_payload,
+                {"id": "market-2", "active": False, "closed": True},
+            ]
+        )
+        states = await client.fetch_market_parent_states(market_groups)
+
+    assert states["market-1"]["event_id"] == "event-1"
+    assert states["market-2"] == {
+        "event_id": None,
+        "active": False,
+        "closed": True,
+        "archived": True,
+        "source_absent": False,
+    }
 
 
 async def test_fetch_market_parent_states_propagates_chunk_failure_and_stops() -> None:
@@ -642,6 +683,10 @@ async def test_fetch_market_parent_states_fails_closed_on_malformed_truth(
         router.get("/markets", params={"id": "market-1"}).mock(
             return_value=httpx.Response(200, json=payload)
         )
+        if not payload:
+            router.get("/markets/market-1").mock(
+                return_value=httpx.Response(200, json=[])
+            )
         async with GammaClient(settings) as client:
             with pytest.raises(PaginationIntegrityError):
                 await client.fetch_market_parent_states({"market-1": "group-1"})
