@@ -8,7 +8,7 @@ import sqlite3
 import time
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -107,6 +107,24 @@ async def test_global_reconciliation_runs_only_after_certification(
     await watcher.reconcile_global_projection(complete_projection)
 
     assert ledger.current_opportunities()[0]["status"] == "observe"
+
+
+async def test_global_reconciliation_skips_no_edge_groups_without_active_master(
+    settings: Settings,
+    ledger: OpportunityLedger,
+) -> None:
+    from polyarb.daemon.opportunity_watcher import OpportunityWatcher
+
+    reconcile = Mock(wraps=ledger.reconcile_global)
+    ledger.reconcile_global = reconcile  # type: ignore[method-assign]
+
+    await OpportunityWatcher.for_test(
+        settings,
+        ledger=ledger,
+        send_telegram=AsyncMock(),
+    ).reconcile_global_projection(_projection(first_ask=0.55))
+
+    reconcile.assert_not_called()
 
 
 async def test_telegram_failure_is_retryable_without_losing_observation(

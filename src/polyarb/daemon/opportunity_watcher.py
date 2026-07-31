@@ -188,12 +188,25 @@ class OpportunityWatcher:
             projection,
             min_edge_bps=self._observe_min_edge_bps(),
         )
+        active_identity_keys = await asyncio.to_thread(
+            self._ledger.active_identity_keys
+        )
         for assessment in assessed.assessments:
             # Incomplete groups are not zero-price/no-edge evidence.  The
             # current global ledger only accepts complete observe/no-edge facts,
             # so leave unavailable groups unchanged until focused invalidation
             # handling is introduced.
             if assessment.status == "unavailable":
+                continue
+            if assessment.status == "no-edge" and (
+                assessment.event_id,
+                assessment.group_id,
+                assessment.membership_hash,
+            ) not in active_identity_keys:
+                # The ledger's no-edge path is intentionally a no-op when no
+                # matching master exists.  Filter those overwhelmingly common
+                # groups with one bounded read instead of opening and
+                # committing one SQLite transaction per group.
                 continue
             await asyncio.to_thread(
                 self._ledger.reconcile_global,

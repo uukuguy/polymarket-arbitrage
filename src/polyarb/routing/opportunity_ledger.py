@@ -295,6 +295,21 @@ class OpportunityLedger:
         )
         return [dict(zip(keys, row, strict=True)) for row in rows]
 
+    def active_identity_keys(self) -> frozenset[tuple[str, str, str]]:
+        """Return identities for which a no-edge assessment can close a master."""
+        con = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT event_id,group_id,membership_hash "
+                "FROM neg_risk_opportunities WHERE status='observe'"
+            ).fetchall()
+        finally:
+            con.close()
+        return frozenset(
+            (str(event_id), str(group_id), str(membership_hash))
+            for event_id, group_id, membership_hash in rows
+        )
+
     def active_masters(self) -> tuple[ActiveOpportunity, ...]:
         """Return open masters with their immutable global all-leg identity.
 
