@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from polyarb.clients.gamma_client import EventPage, MarketPage
 from polyarb.perception.structure_sync import StructureSyncWorker
 from polyarb.storage.sqlite_store import SQLiteStore
@@ -81,3 +83,11 @@ async def test_structure_worker_advances_one_event_then_one_market_page(tmp_path
     assert (await worker.run_batch()).stage == "events"
     assert (await worker.run_batch()).stage == "markets"
     assert store.get_latest_structure_sync()["status"] == "complete"
+
+
+def test_incomplete_structure_window_cannot_be_read_for_publication(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=1)
+    with pytest.raises(ValueError, match="not-complete"):
+        store.read_complete_structure_sync(window["id"])

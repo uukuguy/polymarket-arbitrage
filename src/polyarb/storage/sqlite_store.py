@@ -1013,6 +1013,35 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def read_complete_structure_sync(self, window_id: object) -> tuple[list[dict], list[dict]]:
+        """Return staged facts only after both source traversals completed."""
+        if not isinstance(window_id, str) or not window_id:
+            raise ValueError("invalid-structure-sync-window")
+        con = sqlite3.connect(self._db_path)
+        try:
+            row = con.execute(
+                "SELECT status FROM structure_sync_windows WHERE id=?", (window_id,)
+            ).fetchone()
+            if row is None or row[0] != "complete":
+                raise ValueError("structure-sync-window-not-complete")
+            events = [
+                json.loads(str(item[0]))
+                for item in con.execute(
+                    "SELECT payload_json FROM structure_sync_event_staging "
+                    "WHERE window_id=? ORDER BY event_id", (window_id,)
+                ).fetchall()
+            ]
+            markets = [
+                json.loads(str(item[0]))
+                for item in con.execute(
+                    "SELECT payload_json FROM structure_sync_market_staging "
+                    "WHERE window_id=? ORDER BY market_id", (window_id,)
+                ).fetchall()
+            ]
+            return events, markets
+        finally:
+            con.close()
+
     @staticmethod
     def _structure_sync_window_row(row: tuple[object, ...]) -> dict[str, object]:
         keys = (
