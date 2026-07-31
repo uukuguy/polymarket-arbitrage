@@ -672,6 +672,7 @@ def make_l2_event_handler(
     """
 
     pending_tob: dict[str, dict] = {}
+    latest_depth: dict[str, tuple[object, object]] = {}
     tob_drain_task: asyncio.Task[None] | None = None
 
     async def drain_top_of_book() -> None:
@@ -685,6 +686,19 @@ def make_l2_event_handler(
         asset_id = str(row.get("asset_id") or "")
         if not asset_id:
             return
+        depth = (row.get("depth_yes_usd"), row.get("depth_no_usd"))
+        if depth[0] is not None or depth[1] is not None:
+            latest_depth[asset_id] = depth
+        elif asset_id in latest_depth:
+            # A best_bid_ask frame carries fresh prices but no order-book
+            # depth. Preserve the last real book depth so "latest per asset"
+            # remains eligible for the L3 recipe instead of being overwritten
+            # by NULLs immediately after every initial dump.
+            row = {
+                **row,
+                "depth_yes_usd": latest_depth[asset_id][0],
+                "depth_no_usd": latest_depth[asset_id][1],
+            }
         pending_tob[asset_id] = row
         if tob_drain_task is None or tob_drain_task.done():
             tob_drain_task = asyncio.create_task(

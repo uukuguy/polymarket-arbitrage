@@ -95,6 +95,39 @@ async def test_production_mirror_coalesces_pending_rows_by_asset() -> None:
     ] == 0.35
 
 
+@pytest.mark.asyncio
+async def test_price_update_preserves_last_real_book_depth() -> None:
+    mirror = MagicMock()
+    mirror.push_top_of_book.return_value = True
+    handler = make_l2_event_handler(mirror)
+
+    await handler(
+        {
+            "event_type": "book",
+            "asset_id": "asset-a",
+            "bids": [{"price": "0.4", "size": "1000"}],
+            "asks": [{"price": "0.6", "size": "1000"}],
+            "timestamp": "2026-07-24T06:00:00Z",
+        }
+    )
+    await _wait_until(lambda: mirror.push_top_of_book.call_count == 1)
+    await handler(
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "asset-a",
+            "best_bid": "0.45",
+            "best_ask": "0.55",
+            "timestamp": "2026-07-24T06:00:01Z",
+        }
+    )
+    await _wait_until(lambda: mirror.push_top_of_book.call_count == 2)
+
+    book_row = mirror.push_top_of_book.call_args_list[0].args[0][0]
+    price_row = mirror.push_top_of_book.call_args_list[1].args[0][0]
+    assert price_row["depth_yes_usd"] == book_row["depth_yes_usd"]
+    assert price_row["depth_no_usd"] == book_row["depth_no_usd"]
+
+
 def _consumer(
     *,
     tob_written: bool,

@@ -2639,6 +2639,45 @@ async def test_run_periodic_waits_for_active_connection_before_run_zero() -> Non
 
 
 @pytest.mark.asyncio
+async def test_run_periodic_waits_for_real_candidate_set_before_run_zero() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    stop_event = asyncio.Event()
+    consumer = MagicMock()
+    consumer.has_active_connection = True
+    candidates = {"value": frozenset({"bootstrap-a", "bootstrap-b", "bootstrap-c"})}
+    consumer.candidate_assets_snapshot.side_effect = lambda: candidates["value"]
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_promote(**kwargs: Any) -> dict:
+        calls.append(kwargs)
+        stop_event.set()
+        return {}
+
+    with patch.object(l3_promote, "promote_run", side_effect=_fake_promote):
+        task = asyncio.create_task(
+            l3_promote.run_periodic(
+                stop_event=stop_event,
+                settings=settings,
+                ws_consumer=consumer,
+                recipe_yaml_path=RECIPE_PATH,
+                evidence_store=store,
+                evidence_runtime=runtime,
+            )
+        )
+        await asyncio.sleep(0.01)
+        assert calls == []
+        candidates["value"] = frozenset(f"candidate-{index}" for index in range(10))
+        await asyncio.wait_for(task, timeout=0.3)
+
+    assert len(calls) == 1
+    assert calls[0]["run_seq"] == 0
+
+
+@pytest.mark.asyncio
 async def test_run_periodic_stop_while_waiting_for_connection_emits_no_run() -> None:
     from polyarb.observation import l3_promote
 

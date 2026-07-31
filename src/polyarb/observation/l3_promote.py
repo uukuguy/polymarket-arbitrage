@@ -96,6 +96,7 @@ _POSTGREST_TIMEOUT_S: float = 5.0
 _MAX_TOKEN_MAP_CACHE = 1010  # 1000 fetched rows + exact current L3 identities
 _MIRROR_RECONCILE_BATCH_SIZE = 100
 _STARTUP_CONNECTION_POLL_S = 0.1
+_STARTUP_CANDIDATE_WAIT_S = 30.0
 _POSTGREST_READ_ATTEMPTS = 3
 _POSTGREST_READ_RETRY_S = 1.0
 
@@ -1459,6 +1460,30 @@ async def run_periodic(
     if stop_event.is_set():
         logger.info("l3-promote: stopped before initial websocket connection")
         return
+    # Candidate reconciliation and the promoter start together after boot.
+    # Give the durable candidate source one bounded window to replace the
+    # three bootstrap assets; otherwise run zero becomes predictably
+    # underfilled and production waits a full five-minute grid to recover.
+    candidate_snapshot = getattr(ws_consumer, "candidate_assets_snapshot", None)
+    candidate_deadline = time.monotonic() + _STARTUP_CANDIDATE_WAIT_S
+    while not stop_event.is_set() and callable(candidate_snapshot):
+        current_candidates = candidate_snapshot()
+        if not isinstance(current_candidates, frozenset) or len(current_candidates) >= 10:
+            break
+        remaining_s = candidate_deadline - time.monotonic()
+        if remaining_s <= 0:
+            logger.warning(
+                "l3-promote: startup candidate wait expired count={}",
+                len(current_candidates),
+            )
+            break
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=min(_STARTUP_CONNECTION_POLL_S, remaining_s),
+            )
+        except TimeoutError:
+            continue
     while not stop_event.is_set():
         run_seq = evidence_runtime.next_run_seq()
         scheduled_at = boot_started_at + timedelta(seconds=run_seq * interval_s)
