@@ -25,6 +25,8 @@ Phase 02 Plan 02 additions:
 
 from __future__ import annotations
 
+import hmac
+import math
 import os
 from pathlib import Path
 from typing import Literal
@@ -32,6 +34,8 @@ from typing import Literal
 import yaml
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from polyarb.perception.evaluator_signing import load_private_key, load_public_key
 
 
 class Settings(BaseSettings):
@@ -52,6 +56,106 @@ class Settings(BaseSettings):
     # opts in; production cadence stays below the hard 300-second feed SLA.
     neg_risk_quote_worker_enabled: bool = False
     neg_risk_quote_interval_s: int = Field(default=120, gt=0, le=240)
+    neg_risk_observe_min_edge_bps: float = Field(default=100.0, ge=0)
+    neg_risk_focused_interval_s: float = Field(default=15.0, gt=0)
+    # Opportunity-first Slice B is additive and remains opt-in until its
+    # production qualification gate. These are controller inputs, not hidden
+    # timing constants.
+    opportunity_first_watcher_enabled: bool = False
+    candidate_high_interval_s: float = Field(
+        default=15.0, gt=0, allow_inf_nan=False
+    )
+    candidate_normal_interval_s: float = Field(
+        default=60.0, gt=0, allow_inf_nan=False
+    )
+    candidate_explore_interval_s: float = Field(
+        default=300.0, gt=0, allow_inf_nan=False
+    )
+    candidate_quote_hard_stale_s: float = Field(
+        default=90.0, gt=0, allow_inf_nan=False
+    )
+    candidate_cycle_max_groups: int = Field(default=12, ge=2)
+    candidate_reserved_non_high_slots: int = Field(default=3, ge=1)
+    candidate_group_timeout_s: float = Field(
+        default=30.0, gt=0, allow_inf_nan=False
+    )
+    candidate_high_burst_groups: int = Field(default=1, ge=1)
+    # Production acceptance requires normal candidates to be quoted or
+    # explicitly stale within 120s. Operators may tighten, never relax, it.
+    candidate_lower_lane_max_wait_s: float = Field(
+        default=120.0,
+        gt=0,
+        le=120,
+        allow_inf_nan=False,
+    )
+    candidate_supervisor_retry_s: float = Field(
+        default=1.0, gt=0, allow_inf_nan=False
+    )
+    candidate_scheduler_poll_s: float = Field(
+        default=1.0, gt=0, allow_inf_nan=False
+    )
+    candidate_selection_budget_s: float = Field(
+        default=6.0, gt=0, allow_inf_nan=False
+    )
+    candidate_source_max_groups: int = Field(default=500, ge=1, le=500)
+    candidate_terminal_write_budget_s: float = Field(
+        default=5.0, ge=5.0, allow_inf_nan=False
+    )
+    candidate_attempt_start_write_budget_s: float = Field(
+        default=5.0, ge=5.0, allow_inf_nan=False
+    )
+    candidate_high_clob_workers: int = Field(default=2, ge=1)
+    candidate_lower_clob_workers: int = Field(default=1, ge=1)
+    # Slice C remains dark until production qualification. Each run fetches
+    # exactly one bounded Gamma event page and persists its opaque cursor.
+    opportunity_discovery_enabled: bool = False
+    discovery_page_limit: int = Field(default=100, ge=1, le=100)
+    discovery_interval_s: float = Field(
+        default=30.0, gt=0, allow_inf_nan=False
+    )
+    discovery_candidate_max_wait_s: float = Field(
+        default=60.0, gt=0, le=60, allow_inf_nan=False
+    )
+    discovery_degraded_probe_every_cycles: int = Field(default=10, ge=2)
+    # Slice D calibration. Both the bounded reconciler and the former
+    # universe-sized Structure scheduler remain dark until qualification.
+    opportunity_reconciliation_enabled: bool = False
+    reconciliation_page_limit: int = Field(default=100, ge=1, le=100)
+    reconciliation_interval_s: float = Field(
+        default=60.0, gt=0, allow_inf_nan=False
+    )
+    reconciliation_checkpoint_warn_s: float = Field(
+        default=900.0, gt=0, allow_inf_nan=False
+    )
+    opportunity_producer_supervisor_enabled: bool = False
+    opportunity_resource_controller_enabled: bool = False
+    producer_stall_detection_s: float = Field(
+        default=25.0,
+        gt=0,
+        le=30,
+        allow_inf_nan=False,
+    )
+    producer_stall_timeout_s: float = Field(default=180.0, gt=0, allow_inf_nan=False)
+    producer_terminate_grace_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    producer_max_restarts: int = Field(default=3, ge=0, le=10)
+    producer_backoff_initial_s: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    producer_backoff_max_s: float = Field(default=30.0, ge=0, allow_inf_nan=False)
+    resource_hot_quote_age_s: float = Field(default=20.0, gt=0, allow_inf_nan=False)
+    resource_cooldown_s: float = Field(default=30.0, ge=0, allow_inf_nan=False)
+    resource_sample_interval_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    resource_decision_ttl_s: float = Field(default=15.0, gt=0, allow_inf_nan=False)
+    resource_min_disk_free_mb: int = Field(default=128, ge=1)
+    resource_max_load_per_cpu: float = Field(
+        default=2.0,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    http_recovery_probe_interval_s: float = Field(
+        default=15.0, gt=0, allow_inf_nan=False
+    )
+    legacy_structure_reconciliation_enabled: bool = False
+    market_map_max_age_s: int = Field(default=1800, gt=0)
+    neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 
     liquidity_threshold_usd: float = 1000.0
 
@@ -74,6 +178,14 @@ class Settings(BaseSettings):
             "HMAC-SHA256 shared secret for /scan endpoint auth (Plan 02). "
             "Required at runtime; empty only for tests (set POLYARB_ALLOW_EMPTY_SECRET=1)."
         ),
+    )
+    upstream_fault_control_enabled: bool = False
+    upstream_fault_control_secret: SecretStr = SecretStr("")
+    upstream_fault_source_private_key: SecretStr = SecretStr("")
+    upstream_fault_finalizer_enabled: bool = False
+    upstream_fault_evaluator_public_key: str = ""
+    upstream_fault_control_max_ttl_ms: int = Field(
+        default=120_000, ge=1_000, le=120_000
     )
     # Version returned in /health JSON response
     version: str = Field(default="0.2.0")
@@ -277,6 +389,126 @@ class Settings(BaseSettings):
                 "POLYARB_SCAN_SHARED_SECRET must be set in production. "
                 "To run tests or local dev without a secret, set POLYARB_ALLOW_EMPTY_SECRET=1."
             )
+        fault_secret = self.upstream_fault_control_secret.get_secret_value()
+        if self.upstream_fault_control_enabled and not fault_secret:
+            raise ValueError(
+                "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET must be set when "
+                "upstream fault control is enabled"
+            )
+        if (
+            self.upstream_fault_control_enabled
+            and hmac.compare_digest(fault_secret, secret_val)
+        ):
+            raise ValueError("fault control secret must be distinct")
+        source_private_key = (
+            self.upstream_fault_source_private_key.get_secret_value()
+        )
+        source_key = None
+        if source_private_key:
+            try:
+                _source_kid, source_key = load_private_key(source_private_key)
+            except ValueError as exc:
+                raise ValueError("invalid fault source private key") from exc
+            if os.getenv(
+                "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", ""
+            ):
+                raise ValueError(
+                    "fault source process must not hold evaluator private key"
+                )
+        evaluator_public_key = self.upstream_fault_evaluator_public_key
+        if self.upstream_fault_finalizer_enabled and (
+            not self.upstream_fault_control_enabled or not evaluator_public_key
+        ):
+            raise ValueError(
+                "fault evaluator public key and fault control must be enabled "
+                "for finalization"
+            )
+        if self.upstream_fault_finalizer_enabled:
+            if source_key is not None:
+                raise ValueError(
+                    "fault finalizer process must not hold source private key"
+                )
+            if os.getenv(
+                "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", ""
+            ):
+                raise ValueError(
+                    "fault finalizer process must not hold evaluator private key"
+                )
+            try:
+                _evaluator_kid, _evaluator_key = load_public_key(
+                    evaluator_public_key
+                )
+            except ValueError as exc:
+                raise ValueError("invalid fault evaluator public key") from exc
+        if self.candidate_high_interval_s > self.candidate_quote_hard_stale_s:
+            raise ValueError(
+                "candidate_high_interval_s must not exceed "
+                "candidate_quote_hard_stale_s"
+            )
+        if (
+            self.candidate_reserved_non_high_slots
+            >= self.candidate_cycle_max_groups
+        ):
+            raise ValueError(
+                "candidate_reserved_non_high_slots must be less than "
+                "candidate_cycle_max_groups"
+            )
+        if (
+            self.candidate_reserved_non_high_slots * 5
+            < self.candidate_cycle_max_groups
+        ):
+            raise ValueError(
+                "candidate_reserved_non_high_slots must reserve at least "
+                "20 percent of each cycle"
+            )
+        if self.candidate_high_burst_groups > (
+            self.candidate_cycle_max_groups
+            - self.candidate_reserved_non_high_slots
+        ):
+            raise ValueError(
+                "candidate_high_burst_groups exceeds the cycle high capacity"
+            )
+        if (
+            self.candidate_high_burst_groups
+            > self.candidate_high_clob_workers
+        ):
+            raise ValueError(
+                "candidate_high_burst_groups must not exceed "
+                "candidate_high_clob_workers"
+            )
+        if (
+            self.candidate_high_burst_groups
+            * self.candidate_group_timeout_s
+            >= self.candidate_lower_lane_max_wait_s
+        ):
+            raise ValueError(
+                "candidate high burst timeout budget must stay below "
+                "candidate_lower_lane_max_wait_s"
+            )
+        if self.discovery_effective_admission_capacity <= 0:
+            raise ValueError(
+                "candidate timing leaves no proven Discovery promotion capacity"
+            )
+        if self.producer_backoff_max_s < self.producer_backoff_initial_s:
+            raise ValueError(
+                "producer_backoff_max_s must be >= producer_backoff_initial_s"
+            )
+        if self.producer_stall_detection_s >= self.producer_stall_timeout_s:
+            raise ValueError(
+                "producer_stall_detection_s must be less than "
+                "producer_stall_timeout_s"
+            )
+        if (
+            self.opportunity_resource_controller_enabled
+            and not self.opportunity_producer_supervisor_enabled
+        ):
+            raise ValueError(
+                "opportunity resource controller requires producer supervisor"
+            )
+        if self.resource_decision_ttl_s <= self.resource_sample_interval_s:
+            raise ValueError(
+                "resource_decision_ttl_s must exceed resource_sample_interval_s"
+            )
         # Auto-enable Supabase mirror if both URL + service key are set
         # Phase 03.1-02: same secrets gate l2_mirror_enabled (L2 daemon uses the
         # same Supabase project for the L2 dashboard mirror).
@@ -291,6 +523,59 @@ class Settings(BaseSettings):
         ):
             object.__setattr__(self, "r2_enabled", True)
         return self
+
+    @property
+    def discovery_effective_admission_capacity(self) -> int:
+        max_wait_ms = int(self.discovery_candidate_max_wait_s * 1_000)
+        selection_ms = math.ceil(self.candidate_selection_budget_s * 1_000)
+        poll_ms = math.ceil(self.candidate_scheduler_poll_s * 1_000)
+        timeout_ms = math.ceil(self.candidate_group_timeout_s * 1_000)
+        terminal_ms = math.ceil(
+            self.candidate_terminal_write_budget_s * 1_000
+        )
+        start_write_ms = math.ceil(
+            self.candidate_attempt_start_write_budget_s * 1_000
+        )
+        capacity = 0
+        for candidate_capacity in range(
+            1, self.candidate_reserved_non_high_slots + 1
+        ):
+            bound = (
+                poll_ms
+                + selection_ms
+                + self.candidate_high_burst_groups * (timeout_ms + terminal_ms)
+                + candidate_capacity * start_write_ms
+                + (candidate_capacity - 1) * (timeout_ms + terminal_ms)
+            )
+            if bound > max_wait_ms:
+                break
+            capacity = candidate_capacity
+        return capacity
+
+    @property
+    def discovery_effective_start_bound_ms(self) -> int | None:
+        capacity = self.discovery_effective_admission_capacity
+        if capacity <= 0:
+            return None
+        return (
+            math.ceil(self.candidate_scheduler_poll_s * 1_000)
+            + math.ceil(self.candidate_selection_budget_s * 1_000)
+            + capacity
+            * math.ceil(
+                self.candidate_attempt_start_write_budget_s * 1_000
+            )
+            + (
+                self.candidate_high_burst_groups
+                + capacity
+                - 1
+            )
+            * (
+                math.ceil(self.candidate_group_timeout_s * 1_000)
+                + math.ceil(
+                    self.candidate_terminal_write_budget_s * 1_000
+                )
+            )
+        )
 
     @field_validator("db_path", "parquet_root", "cache_root")
     @classmethod

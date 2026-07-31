@@ -59,9 +59,10 @@ def _make_fake_gamma(markets: list[dict]) -> object:
     fake.fetch_all_active_events.return_value = []
 
     def _make_iter(items):
-        async def _iter():
+        async def _iter(coverage):
             for item in items:
                 yield item
+            coverage.result = type(coverage.result)(len(items), 1, True, None)
 
         return _iter
 

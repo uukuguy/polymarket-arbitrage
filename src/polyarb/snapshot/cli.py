@@ -12,6 +12,8 @@ Output convention (cron-grep friendly):
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -47,8 +49,30 @@ def snapshot(
         "--config",
         help="Path to YAML config (overrides config/snapshot.yaml).",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit one machine-readable result object on stdout.",
+    ),
+    low_priority: bool = typer.Option(
+        False,
+        "--low-priority",
+        hidden=True,
+        help="Lower this process priority for the in-app scheduler.",
+    ),
+    product: str = typer.Option(
+        "legacy_combined",
+        "--product",
+        help=(
+            "Data product: structure (Gamma-only online truth), archive "
+            "(research-only CLOB/Parquet), or legacy_combined."
+        ),
+    ),
 ) -> None:
     """Capture a one-shot Polymarket market snapshot."""
+    if low_priority:
+        os.nice(10)
+
     # Re-route loguru: default is INFO; --verbose drops to DEBUG.
     # Timestamp prefix lets the user (and post-mortem readers of /tmp logs)
     # measure phase durations and locate slow steps, surfaced after
@@ -62,9 +86,11 @@ def snapshot(
     )
 
     settings = load_settings(config)
-    mode = "full" if full else "subset"
+    mode = "full" if full or product in ("structure", "archive") else "subset"
 
-    result = asyncio.run(run_snapshot(settings, mode=mode, use_cache=not no_cache))
+    result = asyncio.run(
+        run_snapshot(settings, mode=mode, product=product, use_cache=not no_cache)
+    )
 
     # D-F1: single-line summary on stdout (cron / make can grep this).
     status = result.status.upper()  # "ok" → "OK", "degraded" → "DEGRADED", etc.
@@ -72,7 +98,22 @@ def snapshot(
         f"{status} | {result.market_count} markets | mode={result.mode} | "
         f"{result.issue_count} issues | -> {result.parquet_path}"
     )
-    print(summary)
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "is_valid": result.is_valid,
+                    "issue_count": result.issue_count,
+                    "market_count": result.market_count,
+                    "mode": result.mode,
+                    "snapshot_id": result.snapshot_id,
+                    "status": result.status,
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        print(summary)
 
     # D-F3: stderr summary on FAILED + exit 1.
     if not result.is_valid:

@@ -1,15 +1,75 @@
 from __future__ import annotations
 
+import copy
+import json
+
 import pytest
 
 from polyarb.routing.opportunity_diagnosis import diagnose_opportunity_feed
 
 VALID_ZERO_BODY = (
     '{"strategy":"neg-risk-buy-all","profit_basis":"gross-before-fees",'
-    '"coverage":"known-universe","quote_sla_seconds":300,'
-    '"universe_sla_seconds":50400,'
-    '"count":0,"opportunities":[]}'
+    '"coverage":"verified-standard-neg-risk","source_snapshot_id":10,'
+    '"universe_hash":"u1","quote_run_id":20,"quote_sla_seconds":300,'
+    '"count":0,"rejections":{"augmented-neg-risk-not-supported":4,'
+    '"incomplete-quotes":2},"opportunities":[]}'
 )
+
+VALID_ONE_PAYLOAD = {
+    "strategy": "neg-risk-buy-all",
+    "profit_basis": "gross-before-fees",
+    "coverage": "verified-standard-neg-risk",
+    "source_snapshot_id": 10,
+    "universe_hash": "u1",
+    "quote_run_id": 20,
+    "quote_sla_seconds": 300,
+    "count": 1,
+    "rejections": {},
+    "opportunities": [
+        {
+            "event_id": "e1",
+            "group_id": "g1",
+            "membership_hash": "m1",
+            "quality": "complete-supported",
+            "quote_run_id": 20,
+            "quote_age_seconds": 10.0,
+            "snapshot_id": 10,
+            "snapshot_age_seconds": 100.0,
+            "universe_snapshot_id": 10,
+            "universe_age_seconds": 100.0,
+            "sum_asks": 0.95,
+            "gross_edge_bps": 500.0,
+            "executable_quantity": 8.0,
+            "gross_profit": 0.4,
+            "legs": [
+                {
+                    "market_id": "m1",
+                    "condition_id": "c1",
+                    "slug": "one",
+                    "yes_token_id": "t1",
+                    "ask_price": 0.40,
+                    "ask_size": 12.0,
+                },
+                {
+                    "market_id": "m2",
+                    "condition_id": "c2",
+                    "slug": "two",
+                    "yes_token_id": "t2",
+                    "ask_price": 0.55,
+                    "ask_size": 8.0,
+                },
+            ],
+        }
+    ],
+}
+
+
+def _make_consistent_one_leg(candidate: dict) -> None:
+    candidate["legs"] = candidate["legs"][:1]
+    candidate["sum_asks"] = 0.4
+    candidate["gross_edge_bps"] = 6000.0
+    candidate["executable_quantity"] = 12.0
+    candidate["gross_profit"] = 7.2
 
 
 def test_200_zero_is_the_only_zero_opportunity_result() -> None:
@@ -23,13 +83,7 @@ def test_200_zero_is_the_only_zero_opportunity_result() -> None:
 
 
 def test_200_nonzero_is_available_with_safe_metadata() -> None:
-    result = diagnose_opportunity_feed(
-        200,
-        '{"strategy":"neg-risk-buy-all","profit_basis":"gross-before-fees",'
-        '"coverage":"known-universe","quote_sla_seconds":300,'
-        '"universe_sla_seconds":50400,'
-        '"count":1,"opportunities":[{"group_id":"g1"}]}',
-    )
+    result = diagnose_opportunity_feed(200, json.dumps(VALID_ONE_PAYLOAD))
 
     assert (result.kind, result.count, result.strategy, result.profit_basis, result.exit_code) == (
         "available-opportunities",
@@ -38,6 +92,9 @@ def test_200_nonzero_is_available_with_safe_metadata() -> None:
         "gross-before-fees",
         0,
     )
+    assert result.source_snapshot_id == 10
+    assert result.universe_hash == "u1"
+    assert result.quote_run_id == 20
 
 
 def test_503_snapshot_age_is_stale_not_zero() -> None:
@@ -104,7 +161,21 @@ def test_unrelated_503_is_unavailable() -> None:
             "invalid-schema",
         ),
         (
+            VALID_ZERO_BODY.replace(
+                '"strategy":"neg-risk-buy-all"',
+                '"strategy":"other"',
+            ),
+            "invalid-schema",
+        ),
+        (
             VALID_ZERO_BODY.replace('"profit_basis":"gross-before-fees"', '"profit_basis":""'),
+            "invalid-schema",
+        ),
+        (
+            VALID_ZERO_BODY.replace(
+                '"profit_basis":"gross-before-fees"',
+                '"profit_basis":"net-after-fees"',
+            ),
             "invalid-schema",
         ),
     ],
@@ -123,16 +194,71 @@ def test_200_invalid_payload_is_not_a_zero_result(body: str, expected_reason: st
 @pytest.mark.parametrize(
     "body",
     [
-        VALID_ZERO_BODY.replace('"coverage":"known-universe",', ""),
-        VALID_ZERO_BODY.replace('"coverage":"known-universe"', '"coverage":"snapshot"'),
+        VALID_ZERO_BODY.replace('"coverage":"verified-standard-neg-risk",', ""),
+        VALID_ZERO_BODY.replace(
+            '"coverage":"verified-standard-neg-risk"',
+            '"coverage":"known-universe"',
+        ),
+        VALID_ZERO_BODY.replace('"source_snapshot_id":10,', ""),
+        VALID_ZERO_BODY.replace('"source_snapshot_id":10', '"source_snapshot_id":true'),
+        VALID_ZERO_BODY.replace('"universe_hash":"u1",', ""),
+        VALID_ZERO_BODY.replace('"universe_hash":"u1"', '"universe_hash":""'),
+        VALID_ZERO_BODY.replace('"quote_run_id":20,', ""),
+        VALID_ZERO_BODY.replace('"quote_run_id":20', '"quote_run_id":true'),
         VALID_ZERO_BODY.replace('"quote_sla_seconds":300', '"quote_sla_seconds":"300"'),
         VALID_ZERO_BODY.replace('"quote_sla_seconds":300', '"quote_sla_seconds":301'),
-        VALID_ZERO_BODY.replace('"universe_sla_seconds":50400', '"universe_sla_seconds":"50400"'),
-        VALID_ZERO_BODY.replace('"universe_sla_seconds":50400', '"universe_sla_seconds":50401'),
+        VALID_ZERO_BODY.replace(
+            '"rejections":{"augmented-neg-risk-not-supported":4,"incomplete-quotes":2},',
+            "",
+        ),
+        VALID_ZERO_BODY.replace(
+            '"augmented-neg-risk-not-supported":4',
+            '"private-database-error":4',
+        ),
+        VALID_ZERO_BODY.replace('"incomplete-quotes":2', '"incomplete-quotes":true'),
     ],
 )
-def test_200_requires_fixed_known_universe_coverage_and_slas(body: str) -> None:
+def test_200_requires_complete_verified_identity_and_bounded_rejections(body: str) -> None:
     result = diagnose_opportunity_feed(200, body)
+
+    assert (result.kind, result.reason, result.exit_code) == (
+        "invalid-response",
+        "invalid-schema",
+        2,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda candidate: candidate.pop("event_id"),
+        lambda candidate: candidate.update(quote_run_id=21),
+        lambda candidate: candidate.update(quote_age_seconds=float("nan")),
+        lambda candidate: candidate.update(sum_asks=float("inf")),
+        lambda candidate: candidate.update(gross_edge_bps=501.0),
+        lambda candidate: candidate.update(executable_quantity=9.0),
+        lambda candidate: candidate.update(gross_profit=0.5),
+        lambda candidate: candidate.update(snapshot_id=11),
+        lambda candidate: candidate.update(snapshot_id=10.0),
+        lambda candidate: candidate.update(universe_snapshot_id=11),
+        lambda candidate: candidate.update(legs=[]),
+        lambda candidate: candidate["legs"][0].update(ask_price=float("nan")),
+        lambda candidate: candidate["legs"][0].update(ask_size=0),
+        lambda candidate: candidate["legs"][0].update(ask_size=10**400),
+        lambda candidate: candidate["legs"].append(
+            dict(candidate["legs"][0])
+        ),
+        lambda candidate: candidate["legs"][0].pop("condition_id"),
+        _make_consistent_one_leg,
+    ],
+)
+def test_200_nonzero_requires_full_finite_consistent_candidate(
+    mutation,
+) -> None:
+    payload = copy.deepcopy(VALID_ONE_PAYLOAD)
+    mutation(payload["opportunities"][0])
+
+    result = diagnose_opportunity_feed(200, json.dumps(payload))
 
     assert (result.kind, result.reason, result.exit_code) == (
         "invalid-response",
@@ -164,13 +290,7 @@ def test_diagnostic_output_omits_none_values_and_server_error_text() -> None:
 def test_reasons_are_limited_to_operator_safe_vocabulary() -> None:
     diagnostics = [
         diagnose_opportunity_feed(200, VALID_ZERO_BODY),
-        diagnose_opportunity_feed(
-            200,
-            '{"strategy":"neg-risk-buy-all","profit_basis":"gross-before-fees",'
-            '"coverage":"known-universe","quote_sla_seconds":300,'
-            '"universe_sla_seconds":50400,'
-            '"count":1,"opportunities":[{}]}',
-        ),
+        diagnose_opportunity_feed(200, json.dumps(VALID_ONE_PAYLOAD)),
         diagnose_opportunity_feed(503, '{"error":"snapshot age 1200s exceeds 900s"}'),
         diagnose_opportunity_feed(503, '{"error":"unbounded server details"}'),
         diagnose_opportunity_feed(200, "not-json"),

@@ -1,4 +1,4 @@
-"""Daemon entry-point: HTTP server + snapshot scheduler + optional quote worker.
+"""Daemon entry-point: HTTP server + snapshot scheduler + observer workers.
 
 Phase 02 Plan 02 — asyncio SIGINT/SIGTERM graceful shutdown.
 
@@ -22,13 +22,21 @@ Source: RESEARCH.md §Architecture Patterns Pattern 1 (lines 295-349, verbatim)
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
+import time
+import uuid
+from uuid import UUID
 
 import uvicorn
 from loguru import logger
 
 from polyarb.config import load_settings
+from polyarb.daemon.opportunity_watcher import (
+    OpportunityWatcher,
+    build_focused_opportunity_watcher,
+)
 from polyarb.daemon.quote_worker import (
     QuoteWorker,
     build_production_quote_worker,
@@ -37,7 +45,142 @@ from polyarb.daemon.scheduler import SnapshotScheduler
 from polyarb.http.app import create_app
 from polyarb.observability.logging import init_logging
 from polyarb.observability.sentry import init_sentry
+from polyarb.perception.candidate_watcher import (
+    CandidateWatcherScheduler,
+    build_production_candidate_watcher,
+)
+from polyarb.perception.discovery import (
+    CandidateFreshness,
+    DiscoveryRunner,
+    build_production_discovery,
+    compose_candidate_group_ids,
+)
+from polyarb.perception.fault_control import FaultRuntimeIdentity
+from polyarb.perception.fault_runtime import (
+    FaultRuntimeProtocol,
+    PassThroughFaultRuntime,
+    build_fault_runtime,
+)
+from polyarb.perception.http_probe import BoundedHttpProbeWriter
+from polyarb.perception.incidents import IncidentManager
+from polyarb.perception.reconciliation import (
+    ReconciliationRunner,
+    build_production_reconciliation,
+)
+from polyarb.perception.resource_controller import (
+    ResourceController,
+)
+from polyarb.perception.resource_incidents import ResourcePressureIncidents
+from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.supervisor import ProducerSpec, ProducerSupervisor
 from polyarb.storage.sqlite_store import SQLiteStore
+
+
+def _build_daemon_fault_runtime(
+    settings,
+    *,
+    component: str,
+    boot_id: UUID,
+    supervisor_run_id: str,
+) -> FaultRuntimeProtocol:
+    enabled = bool(getattr(settings, "upstream_fault_control_enabled", False))
+    try:
+        identity = FaultRuntimeIdentity(
+            component=component,
+            release_id=settings.release_id,
+            machine_id=os.environ.get("FLY_MACHINE_ID", "local"),
+            boot_id=boot_id,
+        )
+    except (TypeError, ValueError, AttributeError):
+        return PassThroughFaultRuntime(degraded=enabled)
+    return build_fault_runtime(
+        enabled=enabled,
+        db_path=settings.db_path,
+        identity=identity,
+        supervisor_run_id=supervisor_run_id,
+        attempt=1,
+        started_at_ms=int(time.time() * 1_000),
+    )
+
+
+def _build_daemon_perception_workers(
+    settings,
+    perception_store: OpportunityPerceptionStore,
+) -> tuple[
+    OpportunityWatcher,
+    CandidateWatcherScheduler | None,
+    DiscoveryRunner | None,
+    ReconciliationRunner | None,
+]:
+    """Bind exact in-daemon runtimes to each producer builder."""
+    isolated_producers = settings.opportunity_producer_supervisor_enabled
+    daemon_boot_id = uuid.uuid4()
+    daemon_run_id = uuid.uuid4().hex
+    notification_fault_runtime = _build_daemon_fault_runtime(
+        settings,
+        component="notification",
+        boot_id=daemon_boot_id,
+        supervisor_run_id=daemon_run_id,
+    )
+    component_fault_runtimes = (
+        {}
+        if isolated_producers
+        else {
+            component: _build_daemon_fault_runtime(
+                settings,
+                component=component,
+                boot_id=uuid.uuid4(),
+                supervisor_run_id=daemon_run_id,
+            )
+            for component in ("candidate", "discovery", "reconciliation")
+        }
+    )
+    focused_watcher = build_focused_opportunity_watcher(
+        settings,
+        fault_runtime=notification_fault_runtime,
+    )
+    candidate_group_ids = compose_candidate_group_ids(
+        focused_watcher.candidate_group_ids,
+        perception_store,
+    )
+    candidate_watcher = (
+        build_production_candidate_watcher(
+            settings,
+            candidate_group_ids=candidate_group_ids,
+            fault_runtime=component_fault_runtimes["candidate"],
+        )
+        if settings.opportunity_first_watcher_enabled and not isolated_producers
+        else None
+    )
+
+    def candidate_freshness() -> CandidateFreshness:
+        snapshot = perception_store.candidate_freshness_snapshot(
+            now_ms=int(time.time() * 1_000)
+        )
+        return CandidateFreshness(
+            candidate_count=snapshot.candidate_count,
+            quote_p95_age_ms=snapshot.quote_p95_age_ms,
+            missing_quote_count=snapshot.missing_quote_count,
+        )
+
+    discovery = (
+        build_production_discovery(
+            settings,
+            candidate_freshness=candidate_freshness,
+            fault_runtime=component_fault_runtimes["discovery"],
+        )
+        if settings.opportunity_discovery_enabled and not isolated_producers
+        else None
+    )
+    reconciliation = (
+        build_production_reconciliation(
+            settings,
+            fault_runtime=component_fault_runtimes["reconciliation"],
+        )
+        if settings.opportunity_reconciliation_enabled and not isolated_producers
+        else None
+    )
+    return focused_watcher, candidate_watcher, discovery, reconciliation
 
 
 def _start_quote_worker(
@@ -47,6 +190,308 @@ def _start_quote_worker(
     if quote_worker is None:
         return None
     return asyncio.create_task(quote_worker.run(stop_event))
+
+
+def _start_opportunity_watcher(
+    watcher: OpportunityWatcher | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if watcher is None:
+        return None
+    return asyncio.create_task(watcher.run(stop_event))
+
+
+def _start_candidate_watcher(
+    watcher: CandidateWatcherScheduler | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if watcher is None:
+        return None
+    return asyncio.create_task(watcher.run(stop_event))
+
+
+def _start_discovery(
+    discovery: DiscoveryRunner | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if discovery is None:
+        return None
+    return asyncio.create_task(discovery.run(stop_event))
+
+
+def _start_reconciliation(
+    reconciliation: ReconciliationRunner | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if reconciliation is None:
+        return None
+    return asyncio.create_task(reconciliation.run(stop_event))
+
+
+async def _wait_for_http_startup(server, server_task, *, timeout_s: float = 10.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while not server.started:
+        if server_task.done():
+            if server_task.cancelled():
+                raise RuntimeError("http-server-startup-failed:cancelled")
+            error = server_task.exception()
+            detail = "exited" if error is None else type(error).__name__
+            raise RuntimeError(f"http-server-startup-failed:{detail}") from error
+        if asyncio.get_running_loop().time() >= deadline:
+            raise RuntimeError("http-server-startup-failed:readiness-timeout")
+        await asyncio.sleep(0.05)
+
+
+async def _abort_http_startup(
+    server,
+    server_task,
+    incidents: IncidentManager,
+    error: BaseException,
+) -> None:
+    incident = incidents.detect(
+        "http",
+        "startup-failure",
+        {"error_kind": type(error).__name__},
+    )
+    if incident.state == "detected":
+        incident = incidents.transition(
+            incident.id,
+            "classified",
+            {"class": "http-startup"},
+        )
+    if incident.state == "classified":
+        incident = incidents.transition(
+            incident.id,
+            "contained",
+            {"producers_started": False},
+        )
+    if incident.state in {"contained", "recovering"}:
+        incidents.transition(
+            incident.id,
+            "escalated",
+            {"requires_process_restart": True},
+        )
+    server.should_exit = True
+    if not server_task.done():
+        server_task.cancel()
+    await asyncio.gather(server_task, return_exceptions=True)
+
+
+def _start_supervised_producers(
+    settings,
+    store: OpportunityPerceptionStore,
+    stop_event: asyncio.Event,
+) -> list[asyncio.Task[None]]:
+    if not settings.opportunity_producer_supervisor_enabled:
+        return []
+    flags = {
+        "candidate": settings.opportunity_first_watcher_enabled,
+        "discovery": settings.opportunity_discovery_enabled,
+        "reconciliation": settings.opportunity_reconciliation_enabled,
+    }
+    supervisor = ProducerSupervisor(
+        store=store,
+        incidents=IncidentManager(store),
+    )
+    return [
+        asyncio.create_task(
+            supervisor.run(
+                ProducerSpec(
+                    component=component,
+                    timeout_s=settings.producer_stall_timeout_s,
+                    stall_detection_s=(
+                        settings.producer_stall_detection_s
+                        if component == "reconciliation"
+                        else None
+                    ),
+                    terminate_grace_s=settings.producer_terminate_grace_s,
+                    max_restarts=settings.producer_max_restarts,
+                    backoff_initial_s=settings.producer_backoff_initial_s,
+                    backoff_max_s=settings.producer_backoff_max_s,
+                ),
+                stop_event,
+            )
+        )
+        for component, enabled in flags.items()
+        if enabled
+    ]
+
+
+async def _run_resource_controller(
+    settings,
+    store: OpportunityPerceptionStore,
+    stop_event: asyncio.Event,
+) -> None:
+    controller = ResourceController(
+        store,
+        hot_quote_age_ms=int(settings.resource_hot_quote_age_s * 1_000),
+        cooldown_ms=int(settings.resource_cooldown_s * 1_000),
+        decision_ttl_ms=int(settings.resource_decision_ttl_s * 1_000),
+        min_disk_free_bytes=settings.resource_min_disk_free_mb * 1024 * 1024,
+        max_load_per_cpu=settings.resource_max_load_per_cpu,
+    )
+    previous_limit = settings.discovery_page_limit
+    incident_manager = IncidentManager(store)
+    pressure_incidents = ResourcePressureIncidents(store)
+    active_incident_id: str | None = None
+    while not stop_event.is_set():
+        try:
+            sample = await asyncio.to_thread(
+                controller.capture_sample,
+                reconciliation_running=settings.opportunity_reconciliation_enabled,
+                previous_discovery_batch_limit=previous_limit,
+            )
+            decision = await asyncio.to_thread(controller.decide, sample)
+            previous_limit = decision.discovery_batch_limit
+            decision_id = await asyncio.to_thread(
+                store.latest_resource_decision_id
+            )
+            await asyncio.to_thread(
+                pressure_incidents.observe,
+                decision,
+                decision_id=decision_id,
+            )
+            if active_incident_id is not None:
+                await asyncio.to_thread(
+                    incident_manager.transition,
+                    active_incident_id,
+                    "verified",
+                    {"decision_id": decision_id},
+                )
+                active_incident_id = None
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            incident = await asyncio.to_thread(
+                incident_manager.detect,
+                "resource",
+                "controller-failure",
+                {"error_kind": type(error).__name__},
+            )
+            if incident.state == "detected":
+                incident = await asyncio.to_thread(
+                    incident_manager.transition,
+                    incident.id,
+                    "classified",
+                    {"class": "control-plane"},
+                )
+            if incident.state == "classified":
+                incident = await asyncio.to_thread(
+                    incident_manager.transition,
+                    incident.id,
+                    "contained",
+                    {"policy": "retain-last-decision"},
+                )
+            if incident.state == "contained":
+                incident = await asyncio.to_thread(
+                    incident_manager.transition,
+                    incident.id,
+                    "recovering",
+                    {"retry": 1},
+                )
+            active_incident_id = incident.id
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=settings.resource_sample_interval_s,
+            )
+        except TimeoutError:
+            pass
+
+
+async def _run_http_recovery_probe(
+    settings,
+    store: OpportunityPerceptionStore,
+    stop_event: asyncio.Event,
+) -> None:
+    url = f"http://127.0.0.1:{settings.http_port}/healthz"
+    manager = IncidentManager(store)
+    writer = BoundedHttpProbeWriter(store, timeout_s=2.0)
+    while not stop_event.is_set():
+        incidents = await asyncio.to_thread(manager.open_incidents)
+        recovering = next(
+            (
+                incident
+                for incident in incidents
+                if incident.scope == "http" and incident.state == "recovering"
+            ),
+            None,
+        )
+        probe_nonce = (
+            recovering.evidence.get("probe_nonce")
+            if recovering is not None
+            else uuid.uuid4().hex
+        )
+        if not isinstance(probe_nonce, str) or not probe_nonce:
+            probe_nonce = uuid.uuid4().hex
+        result = await asyncio.to_thread(
+            writer.probe,
+            url,
+            expected_release_id=settings.release_id,
+            probe_nonce=probe_nonce,
+        )
+        if result.responsive:
+            if recovering is not None:
+                try:
+                    await asyncio.to_thread(
+                        manager.transition,
+                        recovering.id,
+                        "verified",
+                        {
+                            "release_id": settings.release_id,
+                            "probe_nonce": probe_nonce,
+                        },
+                    )
+                except ValueError:
+                    pass
+        else:
+            incident = await asyncio.to_thread(
+                manager.detect,
+                "http",
+                "unresponsive",
+                {"release_id": settings.release_id},
+            )
+            if incident.state == "detected":
+                incident = await asyncio.to_thread(
+                    manager.transition,
+                    incident.id,
+                    "classified",
+                    {"class": "http-probe"},
+                )
+            if incident.state == "classified":
+                incident = await asyncio.to_thread(
+                    manager.transition,
+                    incident.id,
+                    "contained",
+                    {"probe_timeout_s": 2.0},
+                )
+            if incident.state == "contained":
+                await asyncio.to_thread(
+                    manager.transition,
+                    incident.id,
+                    "recovering",
+                    {
+                        "release_id": settings.release_id,
+                        "probe_nonce": uuid.uuid4().hex,
+                    },
+                )
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=settings.http_recovery_probe_interval_s,
+            )
+        except TimeoutError:
+            pass
+
+
+def _start_legacy_structure_scheduler(
+    scheduler: SnapshotScheduler,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if not scheduler.legacy_reconciliation_enabled:
+        logger.info("legacy Structure reconciliation disabled")
+        return None
+    return asyncio.create_task(scheduler.run(stop_event))
 
 
 async def main() -> int:
@@ -66,12 +511,36 @@ async def main() -> int:
     sqlite_store.init_schema()
 
     scheduler = SnapshotScheduler(settings=settings, sqlite_store=sqlite_store)
-    quote_worker = build_production_quote_worker(settings)
+    perception_store = OpportunityPerceptionStore(settings.db_path)
+    perception_store.init_schema()
+    isolated_producers = settings.opportunity_producer_supervisor_enabled
+    (
+        focused_watcher,
+        candidate_watcher,
+        discovery,
+        reconciliation,
+    ) = _build_daemon_perception_workers(
+        settings,
+        perception_store,
+    )
+    quote_worker = (
+        None
+        if isolated_producers
+        else build_production_quote_worker(
+            settings,
+            opportunity_watcher=focused_watcher,
+        )
+    )
     app = create_app(
         scheduler=scheduler,
         sqlite_store=sqlite_store,
         settings=settings,
         quote_worker_runtime=quote_worker.runtime if quote_worker is not None else None,
+        quote_worker=quote_worker,
+        opportunity_watcher=focused_watcher,
+        candidate_watcher_runtime=(
+            candidate_watcher.runtime if candidate_watcher is not None else None
+        ),
     )
 
     config = uvicorn.Config(
@@ -95,19 +564,44 @@ async def main() -> int:
 
     server_task = asyncio.create_task(server.serve())
 
-    # Wait for uvicorn to be ready before starting the scheduler.
-    # server.started is set once uvicorn binds its socket and begins
-    # accepting connections. Without this gate, the scheduler's first
-    # tick can monopolize the event loop for minutes and Fly's health
-    # check never sees a live port.
-    for _ in range(100):
-        if server.started:
-            break
-        await asyncio.sleep(0.1)
+    # A bound and accepting HTTP socket is the startup commit point. Producer
+    # work must not begin if uvicorn exits, fails to bind, or never becomes
+    # ready.
+    try:
+        await _wait_for_http_startup(server, server_task, timeout_s=10.0)
+    except RuntimeError as error:
+        await _abort_http_startup(
+            server,
+            server_task,
+            IncidentManager(perception_store),
+            error,
+        )
+        logger.error("daemon HTTP startup failed; producers were not started")
+        return 1
     logger.info(f"daemon running: http server on :{settings.http_port}, starting scheduler")
 
-    scheduler_task = asyncio.create_task(scheduler.run(stop_event))
+    scheduler_task = (
+        None if isolated_producers else _start_legacy_structure_scheduler(scheduler, stop_event)
+    )
     quote_worker_task = _start_quote_worker(quote_worker, stop_event)
+    focused_watcher_task = _start_opportunity_watcher(
+        None if isolated_producers else focused_watcher,
+        stop_event,
+    )
+    candidate_watcher_task = _start_candidate_watcher(candidate_watcher, stop_event)
+    discovery_task = _start_discovery(discovery, stop_event)
+    reconciliation_task = _start_reconciliation(reconciliation, stop_event)
+    supervised_tasks = _start_supervised_producers(settings, perception_store, stop_event)
+    resource_task = (
+        asyncio.create_task(_run_resource_controller(settings, perception_store, stop_event))
+        if settings.opportunity_resource_controller_enabled
+        else None
+    )
+    http_probe_task = (
+        asyncio.create_task(_run_http_recovery_probe(settings, perception_store, stop_event))
+        if settings.opportunity_producer_supervisor_enabled
+        else None
+    )
 
     await stop_event.wait()
     logger.info("stop_event set, shutting down server")
@@ -117,9 +611,24 @@ async def main() -> int:
     # tick (e.g. ~minutes-long snapshot waiting on Gamma HTTP) is interrupted
     # within ~1s rather than waiting for the current await to return. The
     # scheduler re-raises CancelledError out of _tick() per F-04 contract.
-    scheduler_task.cancel()
+    if scheduler_task is not None:
+        scheduler_task.cancel()
+    if focused_watcher_task is not None:
+        focused_watcher_task.cancel()
+    if candidate_watcher_task is not None:
+        candidate_watcher_task.cancel()
+    if discovery_task is not None:
+        discovery_task.cancel()
+    if reconciliation_task is not None:
+        reconciliation_task.cancel()
     if quote_worker_task is not None:
         quote_worker_task.cancel()
+    for task in supervised_tasks:
+        task.cancel()
+    if resource_task is not None:
+        resource_task.cancel()
+    if http_probe_task is not None:
+        http_probe_task.cancel()
 
     # Bounded final wait — even if some task ignores cancellation, the daemon
     # exits within 5s instead of hanging indefinitely.
@@ -127,8 +636,15 @@ async def main() -> int:
         await asyncio.wait_for(
             asyncio.gather(
                 server_task,
-                scheduler_task,
+                *([scheduler_task] if scheduler_task is not None else []),
+                *([focused_watcher_task] if focused_watcher_task is not None else []),
                 *([quote_worker_task] if quote_worker_task is not None else []),
+                *([candidate_watcher_task] if candidate_watcher_task is not None else []),
+                *([discovery_task] if discovery_task is not None else []),
+                *([reconciliation_task] if reconciliation_task is not None else []),
+                *supervised_tasks,
+                *([resource_task] if resource_task is not None else []),
+                *([http_probe_task] if http_probe_task is not None else []),
                 return_exceptions=True,
             ),
             timeout=5.0,

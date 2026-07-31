@@ -30,11 +30,23 @@ Output contract (markets):
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
+
+from polyarb.perception.market_truth import (
+    CONFLICTING_EVENT_MEMBERSHIP_REASON,
+    INVALID_EVENT_MEMBER_REASON,
+    INVALID_NEG_RISK_FLAGS_REASON,
+    MISSING_EVENT_MEMBERSHIP_REASON,
+    NEG_RISK_ENABLEMENT_CONFLICT_REASON,
+    EventMember,
+    GroupTruth,
+    membership_hash,
+)
 
 
 def _parse_json_list(raw: Any) -> list[Any]:
@@ -59,6 +71,70 @@ def _safe_float(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _strict_bool(raw: Any) -> bool | None:
+    """Preserve exact external booleans; malformed state remains unknown."""
+    return raw if type(raw) is bool else None
+
+
+def _strict_identity(raw: Any) -> str | None:
+    """Return a stripped authoritative string ID; reject every non-string."""
+    if type(raw) is not str:
+        return None
+    value = raw.strip()
+    return value or None
+
+
+class EventTruthConflictError(RuntimeError):
+    """Raised when duplicate event IDs disagree on authoritative structure."""
+
+    def __init__(self, event_id: str) -> None:
+        super().__init__(f"duplicate-event-truth-conflict:{event_id}"[:200])
+
+
+def _typed_fingerprint_value(raw: object) -> tuple[str, str]:
+    """Preserve scalar type and value without retaining the source object."""
+    return type(raw).__name__, repr(raw)
+
+
+def _event_structural_fingerprint(raw: dict) -> str:
+    """Return order-independent event truth without retaining the raw payload."""
+    markets = raw.get("markets")
+    member_fingerprints: list[tuple[tuple[str, str], ...]] = []
+    if isinstance(markets, list):
+        for member in markets:
+            if not isinstance(member, dict):
+                member_fingerprints.append(
+                    (
+                        ("invalid-member", type(member).__name__),
+                        _typed_fingerprint_value(member),
+                    )
+                )
+                continue
+            member_fingerprints.append(
+                (
+                    _typed_fingerprint_value(member.get("id")),
+                    _typed_fingerprint_value(member.get("active")),
+                    _typed_fingerprint_value(member.get("closed")),
+                    _typed_fingerprint_value(member.get("negRiskOther")),
+                )
+            )
+    canonical_members = tuple(sorted(member_fingerprints))
+    canonical = (
+        _typed_fingerprint_value(raw.get("negRisk")),
+        _typed_fingerprint_value(raw.get("enableNegRisk")),
+        _typed_fingerprint_value(raw.get("negRiskAugmented")),
+        _typed_fingerprint_value(raw.get("negRiskMarketID")),
+        _typed_fingerprint_value(raw.get("active")),
+        _typed_fingerprint_value(raw.get("closed")),
+        ("markets-container", "list")
+        if isinstance(markets, list)
+        else _typed_fingerprint_value(markets),
+        canonical_members,
+    )
+    encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def _parse_end_time_ms(raw: Any) -> int | None:
@@ -96,9 +172,9 @@ def normalize_market(raw: dict, market_to_event_map: dict[str, str] | None = Non
     market_id → event_id; if unavailable for a given market, ``event_id`` is
     None (acceptable — orphan markets exist when /events doesn't list them).
     """
-    market_id_raw = raw.get("id")
-    if market_id_raw is None or market_id_raw == "":
-        logger.warning(f"normalize_market: missing 'id' in raw payload (slug={raw.get('slug')})")
+    market_id_str = _strict_identity(raw.get("id"))
+    if market_id_str is None:
+        logger.warning(f"normalize_market: invalid 'id' in raw payload (slug={raw.get('slug')})")
         return None
 
     # ── token IDs (Pitfall 2 + Pitfall 3) ────────────────────────────────────
@@ -126,7 +202,6 @@ def normalize_market(raw: dict, market_to_event_map: dict[str, str] | None = Non
     end_time_ms = _parse_end_time_ms(end_iso)
 
     # ── Phase 1.1 Amendment 01: event_id from reverse lookup ──────────────────
-    market_id_str = str(market_id_raw)
     event_id: str | None = None
     if market_to_event_map is not None:
         event_id = market_to_event_map.get(market_id_str)
@@ -147,10 +222,10 @@ def normalize_market(raw: dict, market_to_event_map: dict[str, str] | None = Non
         "best_ask_price": None,
         "best_ask_size": None,
         "end_time_ms": end_time_ms,
-        "active": bool(raw.get("active", False)),
-        "closed": bool(raw.get("closed", False)),
-        "neg_risk": bool(raw.get("negRisk", False)),
-        "neg_risk_market_id": raw.get("negRiskMarketID"),
+        "active": _strict_bool(raw.get("active")),
+        "closed": _strict_bool(raw.get("closed")),
+        "neg_risk": _strict_bool(raw.get("negRisk")),
+        "neg_risk_market_id": _strict_identity(raw.get("negRiskMarketID")),
         # Stamped by orchestrator at CLOB-fetch completion (Pitfall 6):
         # Phase 02: stage stamp filled by orchestrator stage 5; see schemas.py for semantic note
         "fetched_at_ms": None,
@@ -165,7 +240,13 @@ def normalize_market(raw: dict, market_to_event_map: dict[str, str] | None = Non
 
 def normalize_events(
     raw_events: list[dict],
-) -> tuple[list[dict], list[dict], dict[str, str]]:
+) -> tuple[
+    list[dict],
+    list[dict],
+    dict[str, str],
+    list[EventMember],
+    list[GroupTruth],
+]:
     """Normalize Gamma /events raw response into storage rows + market→event map.
 
     Phase 1.1 Amendment 01.
@@ -178,6 +259,9 @@ def normalize_events(
         market_to_event_map: dict[market_id → event_id]. Used by normalize_market
             to populate the markets.event_id FK column. A market that appears
             multiple times across events keeps the FIRST event_id seen.
+        event_members: immutable structural members for neg-risk events.
+        group_truths: immutable completeness/support classification per neg-risk
+            group.
 
     Events with no ``id`` are skipped (unrecoverable — events PK requires it).
     Events whose ``markets`` list is missing/non-list contribute no map entries.
@@ -186,22 +270,37 @@ def normalize_events(
     events_rows: list[dict] = []
     event_tags_rows: list[dict] = []
     market_to_event_map: dict[str, str] = {}
-    seen_event_ids: set[str] = set()
+    event_members: list[EventMember] = []
+    group_truths: list[GroupTruth] = []
+    group_candidates: list[
+        tuple[
+            str,
+            str,
+            bool,
+            int,
+            list[EventMember],
+            set[str],
+            str | None,
+            str | None,
+        ]
+    ] = []
+    market_event_ids: dict[str, set[str]] = {}
+    event_fingerprints: dict[str, str] = {}
 
     for raw in raw_events:
-        event_id_raw = raw.get("id")
-        if event_id_raw is None or event_id_raw == "":
-            logger.warning(f"normalize_events: missing 'id' (slug={raw.get('slug')}) — skipped")
+        event_id = _strict_identity(raw.get("id"))
+        if event_id is None:
+            logger.warning(f"normalize_events: invalid 'id' (slug={raw.get('slug')}) — skipped")
             continue
-        event_id = str(event_id_raw)
 
-        # Dedupe by event_id — Gamma /events can return duplicates across pagination
-        # boundaries (similar to /markets ~4% dup rate observed in Phase 1).
-        # Without this, the events table PK (id, snapshot_id) rejects the insert
-        # and rolls back the whole snapshot.
-        if event_id in seen_event_ids:
+        # Validate structural equality before deduping pagination overlap.
+        # Member order is non-semantic; identity/state drift is authoritative.
+        fingerprint = _event_structural_fingerprint(raw)
+        if event_id in event_fingerprints:
+            if event_fingerprints[event_id] != fingerprint:
+                raise EventTruthConflictError(event_id)
             continue
-        seen_event_ids.add(event_id)
+        event_fingerprints[event_id] = fingerprint
 
         # Slug is required by the schema (NOT NULL); fall back to event_id if absent
         # (defensive — real events always have a slug).
@@ -262,18 +361,149 @@ def normalize_events(
 
         # ── nested markets → market→event reverse lookup ──────────────────────
         markets = raw.get("markets")
+        group_id = _strict_identity(raw.get("negRiskMarketID"))
+        group_members: list[EventMember] = []
+        structural_market_ids: set[str] = set()
+        membership_reason: str | None = None
+        classification_reason: str | None = None
+        neg_risk_raw = raw.get("negRisk")
+        enable_neg_risk_raw = raw.get("enableNegRisk")
+        augmented_raw = raw.get("negRiskAugmented")
+        if group_id is not None:
+            if not all(
+                type(value) is bool
+                for value in (
+                    neg_risk_raw,
+                    enable_neg_risk_raw,
+                    augmented_raw,
+                )
+            ):
+                classification_reason = INVALID_NEG_RISK_FLAGS_REASON
+            elif not neg_risk_raw or not enable_neg_risk_raw:
+                classification_reason = NEG_RISK_ENABLEMENT_CONFLICT_REASON
+        if group_id is not None and (not isinstance(markets, list) or not markets):
+            membership_reason = MISSING_EVENT_MEMBERSHIP_REASON
         if isinstance(markets, list):
             for m in markets:
                 if not isinstance(m, dict):
+                    if group_id is not None:
+                        membership_reason = INVALID_EVENT_MEMBER_REASON
                     continue
-                m_id = m.get("id")
-                if m_id is None or m_id == "":
+                m_id_str = _strict_identity(m.get("id"))
+                if m_id_str is None:
+                    if group_id is not None:
+                        membership_reason = INVALID_EVENT_MEMBER_REASON
                     continue
-                m_id_str = str(m_id)
-                # Keep FIRST mapping if a market appears in multiple events
-                # (shouldn't normally happen, but be defensive).
-                if m_id_str not in market_to_event_map:
+                market_event_ids.setdefault(m_id_str, set()).add(event_id)
+                nested_active = m.get("active")
+                nested_closed = m.get("closed")
+                status_is_explicit = type(nested_active) is bool and type(nested_closed) is bool
+                belongs_in_active_stream = not status_is_explicit or (
+                    nested_active and not nested_closed
+                )
+                # /markets is active=true/closed=false. Preserve the legacy
+                # mapping for event payloads that omit nested status, but do
+                # not create a completeness obligation for explicitly
+                # inactive/closed structural members.
+                if belongs_in_active_stream and m_id_str not in market_to_event_map:
                     market_to_event_map[m_id_str] = event_id
+
+                if group_id is not None:
+                    if m_id_str in structural_market_ids:
+                        membership_reason = INVALID_EVENT_MEMBER_REASON
+                        continue
+                    structural_market_ids.add(m_id_str)
+                    active_raw = m.get("active")
+                    closed_raw = m.get("closed")
+                    other_raw = m.get("negRiskOther")
+                    if not all(
+                        type(value) is bool for value in (active_raw, closed_raw, other_raw)
+                    ):
+                        membership_reason = INVALID_EVENT_MEMBER_REASON
+                        continue
+                    active = active_raw
+                    closed = closed_raw
+                    if other_raw:
+                        member_kind = "other"
+                    elif not active:
+                        member_kind = "inactive-reserved"
+                    else:
+                        member_kind = "named"
+                    group_members.append(
+                        EventMember(
+                            event_id=event_id,
+                            group_id=group_id,
+                            market_id=m_id_str,
+                            member_kind=member_kind,
+                            active=active,
+                            closed=closed,
+                        )
+                    )
+
+        if group_id is not None:
+            event_members.extend(group_members)
+            group_candidates.append(
+                (
+                    event_id,
+                    group_id,
+                    augmented_raw is True,
+                    len(group_members),
+                    group_members,
+                    structural_market_ids,
+                    membership_reason,
+                    classification_reason,
+                )
+            )
+
+    conflicting_market_ids = {
+        market_id for market_id, event_ids in market_event_ids.items() if len(event_ids) > 1
+    }
+    for (
+        event_id,
+        group_id,
+        augmented,
+        expected_member_count,
+        group_members,
+        structural_market_ids,
+        membership_reason,
+        classification_reason,
+    ) in group_candidates:
+        supported = not augmented and all(
+            member.member_kind == "named" and member.active and not member.closed
+            for member in group_members
+        )
+        if structural_market_ids & conflicting_market_ids:
+            quality = "incomplete-source"
+            reason = CONFLICTING_EVENT_MEMBERSHIP_REASON
+        elif classification_reason is not None:
+            quality = "incomplete-source"
+            reason = classification_reason
+        elif membership_reason is not None:
+            quality = "incomplete-source"
+            reason = membership_reason
+        elif augmented:
+            quality = "complete-unsupported"
+            reason = "augmented-neg-risk-not-supported"
+        elif supported:
+            quality = "complete-supported"
+            reason = None
+        else:
+            quality = "complete-unsupported"
+            reason = "standard-neg-risk-has-non-tradable-members"
+        group_truths.append(
+            GroupTruth(
+                event_id=event_id,
+                group_id=group_id,
+                neg_risk_type="augmented" if augmented else "standard",
+                expected_member_count=expected_member_count,
+                active_named_count=sum(
+                    member.member_kind == "named" and member.active for member in group_members
+                ),
+                membership_hash=membership_hash(event_id, group_id, group_members),
+                quality=quality,
+                reason=reason,
+            )
+        )
 
     # Dedupe event_tags within a single batch on (event_id, tag_id) — duplicate
     # tag_ids on one event can occur if the API returns the same tag twice
@@ -289,4 +519,10 @@ def normalize_events(
         seen.add(key)
         deduped_tags.append(et)
 
-    return events_rows, deduped_tags, market_to_event_map
+    return (
+        events_rows,
+        deduped_tags,
+        market_to_event_map,
+        event_members,
+        group_truths,
+    )

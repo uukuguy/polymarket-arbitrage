@@ -1,0 +1,98 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-07-29T13:12:22.670Z",
+  "phase": "m1-perception-task-8",
+  "phase_name": "production fault qualification and cutover",
+  "phase_dir": "docs/superpowers/plans/2026-07-28-m1-opportunity-first-rollout.md",
+  "plan": 1,
+  "task": 5,
+  "total_tasks": 7,
+  "status": "paused",
+  "completed_tasks": [
+    {
+      "id": 1,
+      "name": "deterministic local and read-only production qualification",
+      "status": "done",
+      "commit": "073abd2"
+    },
+    {
+      "id": 2,
+      "name": "fault matrix and image-aware producer primitives",
+      "status": "done",
+      "commit": "43a0087"
+    },
+    {
+      "id": 3,
+      "name": "Candidate, Discovery, and Reconciliation producer recovery adapters",
+      "status": "done",
+      "commit": "a820e97"
+    },
+    {
+      "id": 4,
+      "name": "all 16 runtime fault evidence chains",
+      "status": "done",
+      "commit": "1147379"
+    },
+    {
+      "id": 5,
+      "name": "remaining production fault adapters",
+      "status": "in_progress",
+      "progress": "Adapter families audited; scoped upstream proxy contract is next. Thirteen adapters remain disabled and fail closed."
+    }
+  ],
+  "remaining_tasks": [
+    {
+      "id": 5,
+      "name": "implement scoped Gamma/CLOB/Telegram, host/store, and runtime/deploy adapters with atomic cleanup",
+      "status": "in_progress"
+    },
+    {
+      "id": 6,
+      "name": "run full local and read-only qualification and write Task 8 handoff evidence",
+      "status": "not_started"
+    },
+    {
+      "id": 7,
+      "name": "after exact authorization deploy, inject one production fault at a time, and collect the continuous window",
+      "status": "not_started"
+    }
+  ],
+  "blockers": [
+    {
+      "description": "Production deployment, feature flags, fault injection, and cutover require separate exact-SHA and fault-specific authorization.",
+      "type": "human_action",
+      "workaround": "Continue all local adapter implementation and observer-only verification without production mutation."
+    }
+  ],
+  "human_actions_pending": [
+    {
+      "action": "Authorize each exact production deployment/fault only after its local adapter, cleanup, and evidence contract passes.",
+      "context": "Runtime evidence support does not authorize cloud mutation.",
+      "blocking": true
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "Keep upstream API faults behind one scoped authenticated proxy contract, but keep disk filler, host load, daemon restart, and deploy interrupt as separate primitives.",
+      "rationale": "Their cleanup and runtime identity effects differ, so one generic mutation function would make evidence non-attributable.",
+      "phase": "m1-perception-task-8"
+    },
+    {
+      "decision": "Use exact component recovery writers rather than logs or process liveness.",
+      "rationale": "Qualification requires business recovery: Candidate receipt, Discovery batch, Reconciliation checkpoint, healthy Resource decision, exact outbox delivery, or release-bound HTTP probe.",
+      "phase": "m1-perception-task-8"
+    },
+    {
+      "decision": "Preserve legacy Resource v1 history with additive optional host sensor fields and decision-persisted thresholds.",
+      "rationale": "Existing authenticated history must replay without rewriting hashes.",
+      "phase": "m1-perception-task-8"
+    }
+  ],
+  "uncommitted_files": [
+    "findings.md",
+    "progress.md",
+    "task_plan.md"
+  ],
+  "next_action": "Run `make planning-status`, read SESSION 119 and the Task 8 runbook, then write the scoped upstream fault proxy design critique before any adapter code.",
+  "context_notes": "Worktree: /Users/sujiangwen/sandbox/hacker2026/PolyMarket/polymarket-arbitrage/.worktrees/l3-continuity-repair; branch: fix/l3-continuity-repair; HEAD before handoff: a5aa19e. No server or background process is running. Production and all trading state were untouched. Report every task completion/failure promptly and do not silently run long gates."
+}

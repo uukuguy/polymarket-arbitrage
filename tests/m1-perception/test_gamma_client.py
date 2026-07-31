@@ -6,15 +6,26 @@ asyncio_mode=auto is set in pyproject [tool.pytest.ini_options], so plain
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
+from unittest.mock import call as mock_call
 
 import httpx
 import pytest
 import respx
 
-from polyarb.clients.gamma_client import GammaClient, _NonRetryableHTTPError
+from polyarb.clients.gamma_client import (
+    GammaClient,
+    PaginationCoverage,
+    PaginationIntegrityError,
+    PaginationResult,
+    _NonRetryableHTTPError,
+)
 from polyarb.config import Settings
+from polyarb.perception.market_truth import INVALID_EVENT_MEMBER_REASON
+from polyarb.snapshot.normalizer import normalize_events
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -31,6 +42,54 @@ def _make_market_dict(idx: int) -> dict:
     return {"id": str(540000 + idx), "question": f"market {idx}", "active": True}
 
 
+def _market_page(markets: list[dict], next_cursor: str | None = None) -> dict:
+    return {"markets": markets, "next_cursor": next_cursor}
+
+
+def _event_page(events: list[dict], next_cursor: str | None = None) -> dict:
+    return {"events": events, "next_cursor": next_cursor}
+
+
+async def test_markets_use_keyset_until_missing_next_cursor() -> None:
+    settings = _fast_settings()
+    page_1 = {"markets": [_make_market_dict(i) for i in range(100)], "next_cursor": "c1"}
+    page_2 = {"markets": [_make_market_dict(100)], "next_cursor": None}
+    coverage = PaginationCoverage(source="markets")
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        route = router.get("/markets/keyset").mock(
+            side_effect=[httpx.Response(200, json=page_1), httpx.Response(200, json=page_2)]
+        )
+        async with GammaClient(settings) as client:
+            rows = [row async for row in client.iter_active_markets(coverage)]
+    assert len(rows) == 101
+    assert coverage.result == PaginationResult(101, 2, True, None)
+    assert route.calls[0].request.url.params.get("after_cursor") is None
+    assert route.calls[1].request.url.params["after_cursor"] == "c1"
+
+
+async def test_repeated_keyset_cursor_is_not_complete() -> None:
+    settings = _fast_settings()
+    coverage = PaginationCoverage(source="markets")
+    page = {"markets": [_make_market_dict(1)], "next_cursor": "same"}
+    with respx.mock(base_url=settings.gamma_url) as router:
+        router.get("/markets/keyset").mock(return_value=httpx.Response(200, json=page))
+        async with GammaClient(settings) as client:
+            with pytest.raises(PaginationIntegrityError, match="repeated cursor"):
+                _ = [row async for row in client.iter_active_markets(coverage)]
+    assert coverage.result.completed is False
+
+
+async def test_keyset_http_error_never_becomes_successful_short_page() -> None:
+    settings = _fast_settings()
+    coverage = PaginationCoverage(source="markets")
+    with respx.mock(base_url=settings.gamma_url) as router:
+        router.get("/markets/keyset").mock(return_value=httpx.Response(422, json={"error": "cap"}))
+        async with GammaClient(settings) as client:
+            with pytest.raises(_NonRetryableHTTPError):
+                _ = [row async for row in client.iter_active_markets(coverage)]
+    assert coverage.result.completed is False
+
+
 @pytest.fixture
 def real_gamma_sample() -> list[dict]:
     """The recorded T1 fixture (5 real markets)."""
@@ -41,7 +100,7 @@ def real_gamma_sample() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: pagination terminates on short page; offset increments by PAGE_LIMIT
+# Test 1: pagination terminates only when next_cursor is missing
 # ---------------------------------------------------------------------------
 async def test_fetch_all_paginates_until_short_page() -> None:
     settings = _fast_settings()
@@ -50,11 +109,11 @@ async def test_fetch_all_paginates_until_short_page() -> None:
     page2 = [_make_market_dict(200 + i) for i in range(42)]  # short page → terminate
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        route = router.get("/markets").mock(
+        route = router.get("/markets/keyset").mock(
             side_effect=[
-                httpx.Response(200, json=page0),
-                httpx.Response(200, json=page1),
-                httpx.Response(200, json=page2),
+                httpx.Response(200, json=_market_page(page0, "c1")),
+                httpx.Response(200, json=_market_page(page1, "c2")),
+                httpx.Response(200, json=_market_page(page2)),
             ]
         )
         client = GammaClient(settings)
@@ -65,9 +124,8 @@ async def test_fetch_all_paginates_until_short_page() -> None:
 
     assert len(out) == 242
     assert route.call_count == 3
-    # Verify offset incremented by 100 each call.
-    offsets = [int(call.request.url.params.get("offset", "0")) for call in route.calls]
-    assert offsets == [0, 100, 200]
+    cursors = [call.request.url.params.get("after_cursor") for call in route.calls]
+    assert cursors == [None, "c1", "c2"]
     # Verify limit param sent on every call.
     limits = [int(call.request.url.params.get("limit", "0")) for call in route.calls]
     assert limits == [100, 100, 100]
@@ -79,8 +137,8 @@ async def test_fetch_all_paginates_until_short_page() -> None:
 async def test_fetch_all_single_page_terminates_immediately(real_gamma_sample: list[dict]) -> None:
     settings = _fast_settings()
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        route = router.get("/markets").mock(
-            return_value=httpx.Response(200, json=real_gamma_sample)
+        route = router.get("/markets/keyset").mock(
+            return_value=httpx.Response(200, json=_market_page(real_gamma_sample))
         )
         client = GammaClient(settings)
         try:
@@ -103,11 +161,11 @@ async def test_retry_on_500_then_succeeds() -> None:
     page = [_make_market_dict(i) for i in range(5)]  # short → terminate
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        route = router.get("/markets").mock(
+        route = router.get("/markets/keyset").mock(
             side_effect=[
                 httpx.Response(500, json={"error": "boom"}),
                 httpx.Response(500, json={"error": "boom"}),
-                httpx.Response(200, json=page),
+                httpx.Response(200, json=_market_page(page)),
             ]
         )
         client = GammaClient(settings)
@@ -126,7 +184,7 @@ async def test_retry_on_500_then_succeeds() -> None:
 async def test_retry_exhausts_then_raises() -> None:
     settings = _fast_settings()  # retry_attempts=3
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        route = router.get("/markets").mock(
+        route = router.get("/markets/keyset").mock(
             return_value=httpx.Response(500, json={"error": "boom"})
         )
         client = GammaClient(settings)
@@ -145,7 +203,7 @@ async def test_retry_exhausts_then_raises() -> None:
 async def test_no_retry_on_404() -> None:
     settings = _fast_settings()
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        route = router.get("/markets").mock(
+        route = router.get("/markets/keyset").mock(
             return_value=httpx.Response(404, json={"error": "not found"})
         )
         client = GammaClient(settings)
@@ -156,6 +214,392 @@ async def test_no_retry_on_404() -> None:
             await client.aclose()
     # Critical assertion: 4xx → exactly 1 call, NOT retry_attempts.
     assert route.call_count == 1
+
+
+async def test_fetch_market_states_deduplicates_and_preserves_closed_truth() -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        first = router.get("/markets/market-1").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": "market-1", "active": True, "closed": True},
+            )
+        )
+        second = router.get("/markets/market-2").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": "market-2", "active": False, "closed": False},
+            )
+        )
+        async with GammaClient(settings) as client:
+            states = await client.fetch_market_states(["market-2", "market-1", "market-1"])
+
+    assert states == {
+        "market-1": {"active": True, "closed": True},
+        "market-2": {"active": False, "closed": False},
+    }
+    assert first.call_count == 1
+    assert second.call_count == 1
+
+
+async def test_fetch_market_states_falls_back_from_point_404_to_exact_list() -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        point = router.get("/markets/market-1").mock(
+            return_value=httpx.Response(
+                404,
+                json={"type": "not found error", "error": "id not found"},
+            )
+        )
+        exact = router.get(
+            "/markets",
+            params={"id": "market-1", "limit": "1"},
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json=[{"id": "market-1", "active": True, "closed": False}],
+            )
+        )
+        async with GammaClient(settings) as client:
+            states = await client.fetch_market_states(["market-1"])
+
+    assert states == {"market-1": {"active": True, "closed": False}}
+    assert point.call_count == 1
+    assert exact.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [{"id": "wrong-market", "active": True, "closed": False}],
+        [{"id": "market-1", "active": 1, "closed": False}],
+        [
+            {"id": "market-1", "active": True, "closed": False},
+            {"id": "market-1", "active": True, "closed": False},
+        ],
+    ],
+)
+async def test_fetch_market_states_point_404_fallback_fails_closed(
+    payload: list[dict],
+) -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/markets/market-1").mock(
+            return_value=httpx.Response(404, json={"error": "id not found"})
+        )
+        router.get(
+            "/markets",
+            params={"id": "market-1", "limit": "1"},
+        ).mock(return_value=httpx.Response(200, json=payload))
+        async with GammaClient(settings) as client:
+            with pytest.raises(PaginationIntegrityError, match="fallback"):
+                await client.fetch_market_states(["market-1"])
+
+
+async def test_fetch_market_states_non_404_does_not_fallback() -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        point = router.get("/markets/market-1").mock(
+            return_value=httpx.Response(422, json={"error": "invalid"})
+        )
+        async with GammaClient(settings) as client:
+            with pytest.raises(_NonRetryableHTTPError):
+                await client.fetch_market_states(["market-1"])
+
+    assert point.call_count == 1
+
+
+async def test_fetch_market_states_fails_closed_on_malformed_identity() -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/markets/market-1").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": "wrong-market", "active": True, "closed": True},
+            )
+        )
+        async with GammaClient(settings) as client:
+            with pytest.raises(PaginationIntegrityError, match="identity mismatch"):
+                await client.fetch_market_states(["market-1"])
+
+
+async def test_fetch_market_states_rejects_unbounded_lookup_set() -> None:
+    settings = _fast_settings()
+    async with GammaClient(settings) as client:
+        with pytest.raises(PaginationIntegrityError, match="lookup limit"):
+            await client.fetch_market_states(
+                [f"market-{index}" for index in range(client.MAX_MARKET_STATE_LOOKUPS + 1)]
+            )
+
+
+async def test_fetch_market_parent_states_returns_inactive_parent_truth() -> None:
+    settings = _fast_settings()
+    payload = {
+        "id": "market-1",
+        "negRisk": True,
+        "negRiskMarketID": "group-1",
+        "events": [
+            {
+                "id": "event-1",
+                "active": False,
+                "closed": False,
+                "archived": True,
+            }
+        ],
+    }
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        route = router.get("/markets", params={"id": "market-1"}).mock(
+            return_value=httpx.Response(200, json=[payload])
+        )
+        async with GammaClient(settings) as client:
+            states = await client.fetch_market_parent_states({"market-1": "group-1"})
+
+    assert states == {
+        "market-1": {
+            "event_id": "event-1",
+            "active": False,
+            "closed": False,
+            "archived": True,
+        }
+    }
+    assert route.call_count == 1
+
+
+async def test_fetch_market_parent_states_batches_large_exact_id_set() -> None:
+    settings = _fast_settings()
+    market_groups = {
+        f"market-{index:03d}": f"group-{index:03d}"
+        for index in range(GammaClient.MARKET_PARENT_LOOKUP_BATCH_SIZE * 2 + 2)
+    }
+
+    def _payload(ids: list[str]) -> list[dict]:
+        return [
+            {
+                "id": market_id,
+                "negRisk": True,
+                "negRiskMarketID": market_groups[market_id],
+                "events": [
+                    {
+                        "id": f"event-{market_id}",
+                        "active": False,
+                        "closed": False,
+                        "archived": True,
+                    }
+                ],
+            }
+            for market_id in reversed(ids)
+        ]
+
+    sorted_ids = sorted(market_groups)
+    chunks = [
+        sorted_ids[start : start + GammaClient.MARKET_PARENT_LOOKUP_BATCH_SIZE]
+        for start in range(0, len(sorted_ids), GammaClient.MARKET_PARENT_LOOKUP_BATCH_SIZE)
+    ]
+    async with GammaClient(settings) as client:
+        client._get = AsyncMock(side_effect=[_payload(ids) for ids in chunks])
+        states = await client.fetch_market_parent_states(market_groups)
+
+    assert set(states) == set(market_groups)
+    assert client._get.await_args_list == [
+        mock_call(
+            "/markets",
+            [("id", market_id) for market_id in ids] + [("limit", str(len(ids)))],
+        )
+        for ids in chunks
+    ]
+
+
+async def test_fetch_market_parent_states_bounds_parallel_batch_lookups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow Gamma batch cannot serially consume the whole Structure deadline."""
+    settings = _fast_settings()
+    monkeypatch.setattr(GammaClient, "MARKET_PARENT_LOOKUP_BATCH_SIZE", 1)
+    market_groups = {f"market-{index}": f"group-{index}" for index in range(6)}
+    active = 0
+    peak = 0
+
+    async def get_batch(_path, params):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0)
+            market_id = params[0][1]
+            return [
+                {
+                    "id": market_id,
+                    "negRisk": True,
+                    "negRiskMarketID": market_groups[market_id],
+                    "events": [
+                        {
+                            "id": f"event-{market_id}",
+                            "active": False,
+                            "closed": False,
+                            "archived": True,
+                        }
+                    ],
+                }
+            ]
+        finally:
+            active -= 1
+
+    async with GammaClient(settings) as client:
+        client._get = get_batch
+        states = await client.fetch_market_parent_states(market_groups)
+
+    assert set(states) == set(market_groups)
+    assert peak == GammaClient.MAX_CONCURRENT_PARENT_LOOKUPS
+
+
+@pytest.mark.parametrize("response_kind", ["missing", "extra", "duplicate"])
+async def test_fetch_market_parent_states_requires_exact_response_identity_set(
+    response_kind: str,
+) -> None:
+    settings = _fast_settings()
+    market_groups = {"market-1": "group-1", "market-2": "group-2"}
+
+    def _market(market_id: str) -> dict:
+        return {
+            "id": market_id,
+            "negRisk": True,
+            "negRiskMarketID": market_groups.get(market_id, "group-extra"),
+            "events": [
+                {
+                    "id": f"event-{market_id}",
+                    "active": False,
+                    "closed": False,
+                    "archived": True,
+                }
+            ],
+        }
+
+    payloads = {
+        "missing": [_market("market-1")],
+        "extra": [_market("market-1"), _market("market-2"), _market("market-extra")],
+        "duplicate": [_market("market-1"), _market("market-1")],
+    }
+    async with GammaClient(settings) as client:
+        client._get = AsyncMock(return_value=payloads[response_kind])
+        with pytest.raises(PaginationIntegrityError, match="identity"):
+            await client.fetch_market_parent_states(market_groups)
+
+
+async def test_fetch_market_parent_states_propagates_chunk_failure_and_stops() -> None:
+    settings = _fast_settings()
+    market_groups = {
+        f"market-{index:03d}": f"group-{index:03d}"
+        for index in range(GammaClient.MARKET_PARENT_LOOKUP_BATCH_SIZE + 1)
+    }
+    first_ids = sorted(market_groups)[: GammaClient.MARKET_PARENT_LOOKUP_BATCH_SIZE]
+    first_payload = [
+        {
+            "id": market_id,
+            "negRisk": True,
+            "negRiskMarketID": market_groups[market_id],
+            "events": [
+                {
+                    "id": f"event-{market_id}",
+                    "active": False,
+                    "closed": False,
+                    "archived": True,
+                }
+            ],
+        }
+        for market_id in first_ids
+    ]
+
+    async with GammaClient(settings) as client:
+        client._get = AsyncMock(side_effect=[first_payload, httpx.ConnectError("chunk failed")])
+        with pytest.raises(httpx.ConnectError, match="chunk failed"):
+            await client.fetch_market_parent_states(market_groups)
+
+    assert client._get.await_count == 2
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [{"id": "wrong", "negRisk": True, "negRiskMarketID": "group-1", "events": []}],
+        [
+            {
+                "id": "market-1",
+                "negRisk": True,
+                "negRiskMarketID": "wrong-group",
+                "events": [],
+            }
+        ],
+        [
+            {
+                "id": "market-1",
+                "negRisk": True,
+                "negRiskMarketID": "group-1",
+                "events": [],
+            }
+        ],
+        [
+            {
+                "id": "market-1",
+                "negRisk": True,
+                "negRiskMarketID": "group-1",
+                "events": [
+                    {
+                        "id": "event-1",
+                        "active": False,
+                        "closed": False,
+                        "archived": False,
+                    },
+                    {
+                        "id": "event-2",
+                        "active": False,
+                        "closed": False,
+                        "archived": False,
+                    },
+                ],
+            }
+        ],
+        [
+            {
+                "id": "market-1",
+                "negRisk": True,
+                "negRiskMarketID": "group-1",
+                "events": [
+                    {
+                        "id": "event-1",
+                        "active": "false",
+                        "closed": False,
+                        "archived": False,
+                    }
+                ],
+            }
+        ],
+    ],
+)
+async def test_fetch_market_parent_states_fails_closed_on_malformed_truth(
+    payload: list[dict],
+) -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/markets", params={"id": "market-1"}).mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        async with GammaClient(settings) as client:
+            with pytest.raises(PaginationIntegrityError):
+                await client.fetch_market_parent_states({"market-1": "group-1"})
+
+
+async def test_fetch_market_parent_states_rejects_unbounded_lookup_set() -> None:
+    settings = _fast_settings()
+    async with GammaClient(settings) as client:
+        with pytest.raises(PaginationIntegrityError, match="lookup limit"):
+            await client.fetch_market_parent_states(
+                {
+                    f"market-{index}": f"group-{index}"
+                    for index in range(client.MAX_MARKET_PARENT_LOOKUPS + 1)
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -170,31 +614,26 @@ async def test_aclose_closes_http_client() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 7: progress logging — periodic INFO emit during paginated fetch.
-#
-# Backstory: LIVE-RUN-003 hung at 15min with zero output because the original
-# fetch_all_active_markets() only logged a single line *after* all 490 pages
-# completed. This test pins the new contract: a 'starting' line, the 1st page
-# emits, then every 50th page, plus a 'final' line.
+# Test 7: long keyset traversal remains memory-bounded and completes.
 # ---------------------------------------------------------------------------
-async def test_fetch_all_emits_periodic_progress() -> None:
-    """Pagination over 110 pages must emit progress lines, not silent for ~3min."""
+async def test_fetch_all_handles_many_keyset_pages() -> None:
     from loguru import logger
 
     settings = _fast_settings()
-    # 110 full pages + 1 short page → 111 calls, terminates on the short one.
     full_pages = [[_make_market_dict(i + 100 * p) for i in range(100)] for p in range(110)]
     short_page = [_make_market_dict(11000 + i) for i in range(7)]
 
+    responses = [
+        httpx.Response(200, json=_market_page(page, f"c{index + 1}"))
+        for index, page in enumerate(full_pages)
+    ]
+    responses.append(httpx.Response(200, json=_market_page(short_page)))
+
     captured: list[str] = []
     sink_id = logger.add(lambda msg: captured.append(msg.record["message"]), level="INFO")
-
     try:
         with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-            router.get("/markets").mock(
-                side_effect=[httpx.Response(200, json=p) for p in full_pages]
-                + [httpx.Response(200, json=short_page)]
-            )
+            route = router.get("/markets/keyset").mock(side_effect=responses)
             client = GammaClient(settings)
             try:
                 out = await client.fetch_all_active_markets()
@@ -204,20 +643,13 @@ async def test_fetch_all_emits_periodic_progress() -> None:
         logger.remove(sink_id)
 
     assert len(out) == 110 * 100 + 7
-
-    # Contract assertions — order matters but exact phrasing is intentionally
-    # loose so future tweaks to wording don't break the test.
-    starting = [m for m in captured if "starting streaming fetch" in m]
-    page_1 = [m for m in captured if "page 1 fetched" in m]
-    page_50 = [m for m in captured if "page 50 fetched" in m]
-    page_100 = [m for m in captured if "page 100 fetched" in m]
-    final = [m for m in captured if "final" in m]
-
-    assert len(starting) == 1, f"expected 1 'starting' line, got {captured}"
-    assert len(page_1) == 1, f"expected page-1 progress, got {captured}"
-    assert len(page_50) == 1, f"expected page-50 progress, got {captured}"
-    assert len(page_100) == 1, f"expected page-100 progress, got {captured}"
-    assert len(final) == 1, f"expected final summary line, got {captured}"
+    assert route.call_count == 111
+    assert route.calls[-1].request.url.params["after_cursor"] == "c110"
+    assert len([message for message in captured if "starting streaming fetch" in message]) == 1
+    assert len([message for message in captured if "page 1 fetched" in message]) == 1
+    assert len([message for message in captured if "page 50 fetched" in message]) == 1
+    assert len([message for message in captured if "page 100 fetched" in message]) == 1
+    assert len([message for message in captured if "final" in message]) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,11 +688,11 @@ async def test_fetch_events_paginates_until_short_page() -> None:
     page2 = [_make_event_dict(200 + i) for i in range(31)]  # short page → terminate
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        route = router.get("/events").mock(
+        route = router.get("/events/keyset").mock(
             side_effect=[
-                httpx.Response(200, json=page0),
-                httpx.Response(200, json=page1),
-                httpx.Response(200, json=page2),
+                httpx.Response(200, json=_event_page(page0, "c1")),
+                httpx.Response(200, json=_event_page(page1, "c2")),
+                httpx.Response(200, json=_event_page(page2)),
             ]
         )
         client = GammaClient(settings)
@@ -271,8 +703,8 @@ async def test_fetch_events_paginates_until_short_page() -> None:
 
     assert len(out) == 231
     assert route.call_count == 3
-    offsets = [int(call.request.url.params.get("offset", "0")) for call in route.calls]
-    assert offsets == [0, 100, 200]
+    cursors = [call.request.url.params.get("after_cursor") for call in route.calls]
+    assert cursors == [None, "c1", "c2"]
     # Verify the events filter params (active=true, closed=false), no archived param.
     for call in route.calls:
         assert call.request.url.params.get("active") == "true"
@@ -285,7 +717,9 @@ async def test_fetch_events_single_short_page() -> None:
     events = [_make_event_dict(i) for i in range(7)]
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        route = router.get("/events").mock(return_value=httpx.Response(200, json=events))
+        route = router.get("/events/keyset").mock(
+            return_value=httpx.Response(200, json=_event_page(events))
+        )
         client = GammaClient(settings)
         try:
             out = await client.fetch_all_active_events()
@@ -307,10 +741,10 @@ async def test_fetch_events_500_then_succeeds() -> None:
     page = [_make_event_dict(i) for i in range(3)]
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        route = router.get("/events").mock(
+        route = router.get("/events/keyset").mock(
             side_effect=[
                 httpx.Response(500, json={"error": "boom"}),
-                httpx.Response(200, json=page),
+                httpx.Response(200, json=_event_page(page)),
             ]
         )
         client = GammaClient(settings)
@@ -327,7 +761,7 @@ async def test_fetch_events_404_no_retry() -> None:
     """4xx on /events is non-retryable (same policy as /markets)."""
     settings = _fast_settings()
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        route = router.get("/events").mock(
+        route = router.get("/events/keyset").mock(
             return_value=httpx.Response(404, json={"error": "not found"})
         )
         client = GammaClient(settings)
@@ -382,18 +816,19 @@ async def test_iter_active_markets_yields_one_at_a_time() -> None:
         for i in range(42)
     ]
 
+    coverage = PaginationCoverage(source="markets")
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        router.get("/markets").mock(
+        router.get("/markets/keyset").mock(
             side_effect=[
-                httpx.Response(200, json=page0),
-                httpx.Response(200, json=page1),
-                httpx.Response(200, json=page2),
+                httpx.Response(200, json=_market_page(page0, "c1")),
+                httpx.Response(200, json=_market_page(page1, "c2")),
+                httpx.Response(200, json=_market_page(page2)),
             ]
         )
         client = GammaClient(settings)
         try:
             collected: list[dict] = []
-            async for m in client.iter_active_markets():
+            async for m in client.iter_active_markets(coverage):
                 collected.append(m)
         finally:
             await client.aclose()
@@ -408,19 +843,20 @@ async def test_iter_active_markets_yields_one_at_a_time() -> None:
     keep = GammaClient._MARKET_KEEP
     for m in collected:
         assert set(m.keys()) <= keep, f"unexpected keys: {set(m.keys()) - keep}"
+    assert coverage.result == PaginationResult(242, 3, True, None)
 
 
 async def test_iter_active_markets_paginate_is_async_gen() -> None:
-    """Structural check: _paginate is now an async generator function, not coroutine."""
+    """Structural check: keyset paginator is an async generator function."""
     import inspect
 
-    assert inspect.isasyncgenfunction(GammaClient._paginate)
+    assert inspect.isasyncgenfunction(GammaClient._paginate_keyset)
     assert inspect.isasyncgenfunction(GammaClient.iter_active_markets)
     assert inspect.isasyncgenfunction(GammaClient.iter_active_events)
 
 
 async def test_iter_active_events_trims_nested_markets() -> None:
-    """iter_active_events yields events whose `markets` is trimmed to `[{"id": ...}]`."""
+    """Event projection preserves membership truth fields and strips unrelated data."""
     settings = _fast_settings()
     raw_events = [
         {
@@ -429,28 +865,100 @@ async def test_iter_active_events_trims_nested_markets() -> None:
             "title": f"Event {i}",
             "active": True,
             "closed": False,
+            "negRisk": True,
+            "enableNegRisk": True,
+            "negRiskAugmented": False,
+            "negRiskMarketID": f"group-{i}",
             "markets": [
-                {"id": str(540000 + i * 10 + k), "extra": "junk", "more": [1, 2]} for k in range(3)
+                {
+                    "id": str(540000 + i * 10 + k),
+                    "active": True,
+                    "closed": False,
+                    "negRiskOther": False,
+                    "groupItemTitle": f"Candidate {k}",
+                    "extra": "junk",
+                    "more": [1, 2],
+                }
+                for k in range(3)
             ],
         }
         for i in range(5)
     ]
 
+    coverage = PaginationCoverage(source="events")
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        router.get("/events").mock(return_value=httpx.Response(200, json=raw_events))
+        router.get("/events/keyset").mock(
+            return_value=httpx.Response(200, json=_event_page(raw_events))
+        )
         client = GammaClient(settings)
         try:
             collected: list[dict] = []
-            async for e in client.iter_active_events():
+            async for e in client.iter_active_events(coverage):
                 collected.append(e)
         finally:
             await client.aclose()
 
     assert len(collected) == 5
     for ev in collected:
+        assert ev["negRisk"] is True
+        assert ev["enableNegRisk"] is True
+        assert ev["negRiskAugmented"] is False
+        assert ev["negRiskMarketID"].startswith("group-")
         assert isinstance(ev["markets"], list)
         for m in ev["markets"]:
-            assert set(m.keys()) == {"id"}, f"nested markets not trimmed: {m}"
+            assert set(m.keys()) == {
+                "id",
+                "active",
+                "closed",
+                "negRiskOther",
+                "groupItemTitle",
+            }, f"nested markets not trimmed: {m}"
+    assert coverage.result == PaginationResult(5, 1, True, None)
+
+
+async def test_event_projection_preserves_invalid_membership_evidence() -> None:
+    settings = _fast_settings()
+    raw_event = _make_event_dict(0, n_markets=0)
+    raw_event["negRisk"] = True
+    raw_event["enableNegRisk"] = True
+    raw_event["negRiskAugmented"] = False
+    raw_event["negRiskMarketID"] = "group-invalid"
+    raw_event["markets"] = [
+        "not-a-dict",
+        {
+            "id": "market-a",
+            "active": True,
+            "closed": False,
+            "negRiskOther": False,
+            "unused": "stripped",
+        },
+        {
+            "id": "market-b",
+            "active": True,
+            "closed": False,
+            "negRiskOther": False,
+        },
+    ]
+    coverage = PaginationCoverage(source="events")
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get("/events/keyset").mock(
+            return_value=httpx.Response(200, json=_event_page([raw_event]))
+        )
+        async with GammaClient(settings) as client:
+            projected = [event async for event in client.iter_active_events(coverage)][0]
+
+    assert projected["markets"][0] == "not-a-dict"
+    assert projected["markets"][1] == {
+        "id": "market-a",
+        "active": True,
+        "closed": False,
+        "negRiskOther": False,
+        "groupItemTitle": None,
+    }
+    _, _, _, members, groups = normalize_events([projected])
+    assert [member.market_id for member in members] == ["market-a", "market-b"]
+    assert groups[0].quality == "incomplete-source"
+    assert groups[0].reason == INVALID_EVENT_MEMBER_REASON
 
 
 async def test_fetch_all_active_markets_still_returns_list() -> None:
@@ -462,7 +970,9 @@ async def test_fetch_all_active_markets_still_returns_list() -> None:
     page = [_make_market_dict(i) for i in range(50)]
 
     with respx.mock(base_url=settings.gamma_url, assert_all_called=False) as router:
-        router.get("/markets").mock(return_value=httpx.Response(200, json=page))
+        router.get("/markets/keyset").mock(
+            return_value=httpx.Response(200, json=_market_page(page))
+        )
         client = GammaClient(settings)
         try:
             via_list = await client.fetch_all_active_markets()
@@ -472,11 +982,14 @@ async def test_fetch_all_active_markets_still_returns_list() -> None:
         assert len(via_list) == 50
 
         # Reset respx and call iterator path
-        router.get("/markets").mock(return_value=httpx.Response(200, json=page))
+        router.get("/markets/keyset").mock(
+            return_value=httpx.Response(200, json=_market_page(page))
+        )
         client2 = GammaClient(settings)
         try:
             via_iter: list[dict] = []
-            async for m in client2.iter_active_markets():
+            coverage = PaginationCoverage(source="markets")
+            async for m in client2.iter_active_markets(coverage):
                 via_iter.append(m)
         finally:
             await client2.aclose()
@@ -485,29 +998,30 @@ async def test_fetch_all_active_markets_still_returns_list() -> None:
     assert [m["id"] for m in via_list] == [m["id"] for m in via_iter]
 
 
-async def test_iter_active_markets_422_yields_partial() -> None:
-    """422 mid-pagination → iterator stops cleanly with items yielded so far."""
+async def test_iter_active_markets_422_marks_partial_and_raises() -> None:
+    """422 mid-pagination must not convert partial results into success."""
     settings = _fast_settings()
     page0 = [_make_market_dict(i) for i in range(100)]
     page1 = [_make_market_dict(100 + i) for i in range(100)]
-    # Third call returns 422 (Polymarket offset>10000 cap)
+    coverage = PaginationCoverage(source="markets")
     with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
-        router.get("/markets").mock(
+        router.get("/markets/keyset").mock(
             side_effect=[
-                httpx.Response(200, json=page0),
-                httpx.Response(200, json=page1),
+                httpx.Response(200, json=_market_page(page0, "c1")),
+                httpx.Response(200, json=_market_page(page1, "c2")),
                 httpx.Response(422, json={"error": "offset cap"}),
             ]
         )
         client = GammaClient(settings)
         try:
             collected: list[dict] = []
-            async for m in client.iter_active_markets():
-                collected.append(m)
+            with pytest.raises(_NonRetryableHTTPError):
+                async for m in client.iter_active_markets(coverage):
+                    collected.append(m)
         finally:
             await client.aclose()
-    # 200 items yielded; iterator stops without raising
     assert len(collected) == 200
+    assert coverage.result.completed is False
 
 
 async def test_iter_active_markets_max_pages_runaway_raises() -> None:
@@ -522,14 +1036,22 @@ async def test_iter_active_markets_max_pages_runaway_raises() -> None:
         GammaClient.MAX_PAGES = 3  # type: ignore[assignment]
 
         with respx.mock(base_url=settings.gamma_url, assert_all_called=False) as router:
-            # Return a full page every time → never terminates organically.
-            router.get("/markets").mock(return_value=httpx.Response(200, json=full_page))
+            call_number = 0
+
+            def next_page(_request: httpx.Request) -> httpx.Response:
+                nonlocal call_number
+                call_number += 1
+                return httpx.Response(200, json=_market_page(full_page, f"cursor-{call_number}"))
+
+            router.get("/markets/keyset").mock(side_effect=next_page)
             client = GammaClient(settings)
+            coverage = PaginationCoverage(source="markets")
             try:
-                with pytest.raises(RuntimeError, match="exceeded"):
-                    async for _ in client.iter_active_markets():
+                with pytest.raises(PaginationIntegrityError, match="exceeded"):
+                    async for _ in client.iter_active_markets(coverage):
                         pass
             finally:
                 await client.aclose()
+            assert coverage.result == PaginationResult(300, 3, False, "cursor-3")
     finally:
         GammaClient.MAX_PAGES = orig_max  # type: ignore[assignment]

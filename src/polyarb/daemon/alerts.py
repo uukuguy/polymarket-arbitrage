@@ -43,6 +43,10 @@ from polyarb.config import Settings
 _LAST_ALERT_TIME_MS: dict[str, int] = {}
 
 
+class TelegramUnavailableError(RuntimeError):
+    """The configured Telegram transport cannot accept an opportunity card."""
+
+
 def _is_deduped(key: str, window_seconds: int) -> bool:
     """True if `key` fired within the last ``window_seconds`` (and we should suppress)."""
     now_ms = int(time.time() * 1000)
@@ -119,6 +123,21 @@ async def send_heartbeat_ok(settings: Settings) -> None:
             logger.warning(f"heartbeat send failed: {e!r}")
 
 
+async def send_opportunity_alert(settings: Settings, card: str) -> None:
+    """Send one durable observer-only opportunity card directly to Telegram.
+
+    Unlike operational alerts, this transport intentionally propagates a send
+    failure.  The opportunity watcher records it in the durable outbox and
+    retries without changing the market observation.
+    """
+    await _telegram_direct(
+        settings,
+        text=card,
+        parse_mode=None,
+        raise_on_failure=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Channel internals
 # ---------------------------------------------------------------------------
@@ -142,7 +161,13 @@ async def _better_stack_fail(settings: Settings, *, reason: str) -> bool:
             return False
 
 
-async def _telegram_direct(settings: Settings, *, text: str) -> None:
+async def _telegram_direct(
+    settings: Settings,
+    *,
+    text: str,
+    parse_mode: str | None = "Markdown",
+    raise_on_failure: bool = False,
+) -> None:
     """POST to api.telegram.org/bot<token>/sendMessage as a last-resort fallback.
 
     Skipped (no-op) if telegram_bot_token or telegram_chat_id are empty —
@@ -153,16 +178,23 @@ async def _telegram_direct(settings: Settings, *, text: str) -> None:
     token = settings.telegram_bot_token.get_secret_value()
     chat_id = settings.telegram_chat_id
     if not token or not chat_id:
+        if raise_on_failure:
+            raise TelegramUnavailableError("telegram credentials are not configured")
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "Markdown",
     }
+    if parse_mode is not None:
+        payload["parse_mode"] = parse_mode
     async with httpx.AsyncClient(timeout=5.0) as client:
         try:
-            await client.post(url, json=payload)
+            response = await client.post(url, json=payload)
+            if raise_on_failure:
+                response.raise_for_status()
         except Exception as e:  # noqa: BLE001
             logger.error(f"Telegram direct send failed: {e!r}")
+            if raise_on_failure:
+                raise

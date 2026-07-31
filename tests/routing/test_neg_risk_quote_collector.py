@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from dataclasses import dataclass
 
 import pytest
 
+from polyarb.perception.market_truth import SourceCoverage
 from polyarb.routing.neg_risk_quote_collector import (
+    _QUOTE_RUN_LEASE_RENEWAL_S,
     QuoteCollectionIntegrityError,
     QuoteRunLeaseLostError,
     QuoteUniverseUnavailableError,
     collect_neg_risk_quotes,
 )
 from polyarb.routing.neg_risk_quote_store import (
+    QUOTE_RUN_LEASE_MS,
     NegRiskQuoteStore,
     QuoteRunBusyError,
     UniverseLeg,
@@ -20,6 +24,13 @@ from polyarb.routing.neg_risk_quote_store import (
 from polyarb.storage.sqlite_store import SQLiteStore
 
 NOW_MS = 1_700_000_000_000
+EVENT_ID = "event-a"
+MEMBERSHIP_HASH = "membership-hash-a"
+
+
+def test_production_quote_lease_tolerates_single_vcpu_snapshot_contention() -> None:
+    assert QUOTE_RUN_LEASE_MS == 180_000
+    assert _QUOTE_RUN_LEASE_RENEWAL_S == 60.0
 
 
 @dataclass
@@ -32,9 +43,16 @@ class FakeReader:
     def __init__(self, response: object) -> None:
         self.response = response
         self.requests: list[list[str]] = []
+        self.projections: list[str] = []
 
-    async def get_books(self, token_ids: list[str]) -> object:
+    async def get_books(
+        self,
+        token_ids: list[str],
+        *,
+        projection: str = "full",
+    ) -> object:
         self.requests.append(token_ids)
+        self.projections.append(projection)
         if isinstance(self.response, BaseException):
             raise self.response
         return self.response
@@ -47,8 +65,14 @@ class BlockingReader(FakeReader):
         self.release = asyncio.Event()
         self.cancelled = False
 
-    async def get_books(self, token_ids: list[str]) -> object:
+    async def get_books(
+        self,
+        token_ids: list[str],
+        *,
+        projection: str = "full",
+    ) -> object:
         self.requests.append(token_ids)
+        self.projections.append(projection)
         self.started.set()
         try:
             await self.release.wait()
@@ -81,20 +105,61 @@ def quote_db(tmp_path):
     with sqlite3.connect(path) as con:
         con.execute(
             "INSERT INTO snapshots("
-            "taken_at_ms, finished_at_ms, mode, market_count, is_valid, parquet_path"
-            ") VALUES (?, ?, 'subset', 2, 1, 'fixture.parquet')",
+            "taken_at_ms, finished_at_ms, mode, market_count,market_view_published,"
+            "data_product,is_valid, parquet_path"
+            ") VALUES (?, ?, 'subset', 2,1,'structure',1, 'fixture.parquet')",
             (NOW_MS - 1_000, NOW_MS - 900),
         )
         snapshot_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
         con.executemany(
             "INSERT INTO markets("
             "market_id, condition_id, slug, yes_token_id, active, closed, "
-            "neg_risk_market_id, fetched_at_ms, snapshot_id"
-            ") VALUES (?, ?, ?, ?, 1, 0, ?, ?, ?)",
+            "neg_risk_market_id, fetched_at_ms, snapshot_id, incomplete, event_id"
+            ") VALUES (?, ?, ?, ?, 1, 0, ?, ?, ?, 0, ?)",
             [
-                ("market-a", "condition-a", "alpha", "token-a", "group-a", NOW_MS, snapshot_id),
-                ("market-b", "condition-b", "beta", "token-b", "group-a", NOW_MS, snapshot_id),
+                (
+                    "market-a",
+                    "condition-a",
+                    "alpha",
+                    "token-a",
+                    "group-a",
+                    NOW_MS,
+                    snapshot_id,
+                    EVENT_ID,
+                ),
+                (
+                    "market-b",
+                    "condition-b",
+                    "beta",
+                    "token-b",
+                    "group-a",
+                    NOW_MS,
+                    snapshot_id,
+                    EVENT_ID,
+                ),
             ],
+        )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage("
+            "snapshot_id,completed,market_items,event_items"
+            ") VALUES (?,1,2,1)",
+            (snapshot_id,),
+        )
+        con.executemany(
+            "INSERT INTO event_market_memberships("
+            "snapshot_id,event_id,neg_risk_market_id,market_id,member_kind,active,closed"
+            ") VALUES (?,?,?,?, 'named',1,0)",
+            [
+                (snapshot_id, EVENT_ID, "group-a", "market-a"),
+                (snapshot_id, EVENT_ID, "group-a", "market-b"),
+            ],
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (?,?,?,'standard',2,2,?,'complete-supported',NULL)",
+            (snapshot_id, EVENT_ID, "group-a", MEMBERSHIP_HASH),
         )
     return path
 
@@ -114,10 +179,56 @@ def _collect(store: NegRiskQuoteStore, reader: FakeReader, *, start: int = NOW_M
     )
 
 
+async def test_slow_universe_reconstruction_does_not_block_event_loop(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    original = store.latest_verified_universe
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_universe():
+        started.set()
+        assert release.wait(timeout=1)
+        return original()
+
+    store.latest_verified_universe = slow_universe  # type: ignore[method-assign]
+    task = asyncio.create_task(
+        collect_neg_risk_quotes(
+            quote_store=store,
+            reader=FakeReader([]),
+            now_ms=_now_sequence(NOW_MS, NOW_MS + 25, NOW_MS + 25, NOW_MS + 25),
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 0.2)
+
+    ticker = asyncio.Event()
+    asyncio.get_running_loop().call_soon(ticker.set)
+    await asyncio.wait_for(ticker.wait(), timeout=0.05)
+    assert not task.done()
+
+    release.set()
+    await task
+
+
 def _legs() -> tuple[UniverseLeg, ...]:
     return (
-        UniverseLeg("group-a", "market-a", "condition-a", "alpha", "token-a"),
-        UniverseLeg("group-a", "market-b", "condition-b", "beta", "token-b"),
+        UniverseLeg(
+            "group-a",
+            "market-a",
+            "condition-a",
+            "alpha",
+            "token-a",
+            EVENT_ID,
+            MEMBERSHIP_HASH,
+        ),
+        UniverseLeg(
+            "group-a",
+            "market-b",
+            "condition-b",
+            "beta",
+            "token-b",
+            EVENT_ID,
+            MEMBERSHIP_HASH,
+        ),
     )
 
 
@@ -148,6 +259,7 @@ def test_collects_latest_universe_once_and_persists_lowest_valid_ask(quote_db) -
     result = _collect(store, reader)
 
     assert reader.requests == [["token-a", "token-b"]]
+    assert reader.projections == ["top"]
     assert result.status == "complete"
     assert result.universe_snapshot_id == 1
     assert result.requested_token_count == 2
@@ -322,14 +434,110 @@ def test_busy_or_unavailable_universe_does_not_call_clob(quote_db) -> None:
     with sqlite3.connect(empty_path) as con:
         con.execute(
             "INSERT INTO snapshots("
-            "taken_at_ms, finished_at_ms, mode, market_count, is_valid, parquet_path"
-            ") VALUES (?, ?, 'subset', 0, 1, 'fixture.parquet')",
+            "taken_at_ms, finished_at_ms, mode, market_count,market_view_published,"
+            "data_product,is_valid, parquet_path"
+            ") VALUES (?, ?, 'subset', 1,1,'structure',1, 'fixture.parquet')",
             (NOW_MS, NOW_MS),
         )
+        con.execute(
+            "INSERT INTO markets("
+            "market_id,condition_id,yes_token_id,active,closed,neg_risk_market_id,"
+            "fetched_at_ms,snapshot_id,incomplete,event_id"
+            ") VALUES ('augmented-market','augmented-condition','augmented-token',"
+            "1,0,'augmented-group',?,1,0,'augmented-event')",
+            (NOW_MS,),
+        )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage("
+            "snapshot_id,completed,market_items,event_items"
+            ") VALUES (1,1,1,1)"
+        )
+        con.execute(
+            "INSERT INTO event_market_memberships("
+            "snapshot_id,event_id,neg_risk_market_id,market_id,member_kind,active,closed"
+            ") VALUES (1,'augmented-event','augmented-group','augmented-market','named',1,0)"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (1,'augmented-event','augmented-group','augmented',1,1,"
+            "'augmented-hash','complete-unsupported','augmented-neg-risk-not-supported')"
+        )
     zero_eligible_reader = FakeReader([])
-    with pytest.raises(QuoteUniverseUnavailableError, match="quote-universe-unavailable"):
-        _collect(NegRiskQuoteStore(empty_path), zero_eligible_reader)
+    result = _collect(NegRiskQuoteStore(empty_path), zero_eligible_reader)
+
+    assert result.status == "complete"
+    assert result.requested_token_count == 0
+    assert result.successful_response_count == 0
+    assert result.elapsed_ms == 0
     assert zero_eligible_reader.requests == []
+
+
+def test_complete_published_zero_market_universe_completes_without_clob(tmp_path) -> None:
+    path = tmp_path / "zero-market.db"
+    snapshot_store = SQLiteStore(path)
+    snapshot_store.init_schema()
+    snapshot_store.write_snapshot(
+        taken_at_ms=NOW_MS,
+        finished_at_ms=NOW_MS + 1,
+        mode="subset",
+        parquet_path="zero-market.parquet",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        source_coverage=SourceCoverage.complete(0, 0),
+        event_members=[],
+        group_truths=[],
+        publish_markets=True,
+        data_product="structure",
+    )
+    reader = FakeReader([])
+
+    result = _collect(NegRiskQuoteStore(path), reader)
+
+    assert result.status == "complete"
+    assert result.requested_token_count == 0
+    assert reader.requests == []
+
+
+def test_zero_leg_completion_failure_fails_run_without_calling_clob(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "zero-market-failure.db"
+    snapshot_store = SQLiteStore(path)
+    snapshot_store.init_schema()
+    snapshot_store.write_snapshot(
+        taken_at_ms=NOW_MS,
+        finished_at_ms=NOW_MS + 1,
+        mode="subset",
+        parquet_path="zero-market.parquet",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        source_coverage=SourceCoverage.complete(0, 0),
+        event_members=[],
+        group_truths=[],
+        publish_markets=True,
+        data_product="structure",
+    )
+    store = NegRiskQuoteStore(path)
+    reader = FakeReader([])
+
+    def fail_complete(*_: object, **__: object):
+        raise sqlite3.OperationalError("injected completion failure")
+
+    monkeypatch.setattr(store, "complete_run", fail_complete)
+
+    with pytest.raises(sqlite3.OperationalError, match="injected completion failure"):
+        _collect(store, reader)
+
+    assert reader.requests == []
+    with sqlite3.connect(path) as con:
+        assert con.execute(
+            "SELECT status,failure_reason FROM neg_risk_quote_runs"
+        ).fetchall() == [("failed", "collector-error")]
 
 
 def test_slow_collector_renews_lease_before_an_expired_run_can_be_reclaimed(
@@ -366,10 +574,10 @@ def test_slow_collector_renews_lease_before_an_expired_run_can_be_reclaimed(
 
         # Renew just before expiry, then advance beyond the original lease.
         # A second process must still see the renewed owner as live.
-        clock["now"] = NOW_MS + 29_999
+        clock["now"] = NOW_MS + QUOTE_RUN_LEASE_MS - 1
         sleeper.permit_first_tick.set()
         await lease_renewed.wait()
-        clock["now"] = NOW_MS + 30_000
+        clock["now"] = NOW_MS + QUOTE_RUN_LEASE_MS
         with pytest.raises(QuoteRunBusyError, match="collecting quote run"):
             store.begin_run(
                 universe_snapshot_id=1,
@@ -438,7 +646,7 @@ def test_collector_does_not_persist_after_final_renewal_lease_expires(
 
         def expire_after_final_renewal(run_id: int) -> None:
             actual_renew(run_id)
-            clock["now"] = NOW_MS + 30_000
+            clock["now"] = NOW_MS + QUOTE_RUN_LEASE_MS
 
         monkeypatch.setattr(store, "renew_run_lease", expire_after_final_renewal)
         with pytest.raises(QuoteRunLeaseLostError, match="quote-run-lease-lost"):

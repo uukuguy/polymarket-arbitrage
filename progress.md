@@ -147,6 +147,45 @@
 | Quote/snapshot health | release 130 sampled health | Both remain pass | quote ages 36.7/17.9/20.3 s; snapshot pass | ✓ |
 | Runtime identity | release 131 strict health | Exact deployed SHA | `cb0ba9c54d79…` | ✓ |
 
+## Session: 2026-07-27
+
+### Phase 7: Consolidated M1 production repair
+
+- **Status:** in progress
+- The prior long-run observation is closed as discovery evidence rather than
+  an unfinished 24-hour acceptance run.
+- A repeated full-snapshot OOM after the runtime memory reductions confirmed
+  a capacity/topology defect. Separate evidence also identified missing direct
+  snapshot-failure health/alerting, quote freshness coupling, and recovery
+  notification granularity gaps.
+- Next action: complete a single staged design and implementation plan before
+  changing production topology or resource allocation.
+
+### Design contract
+
+- Wrote `docs/superpowers/specs/2026-07-27-m1-production-data-layers-design.md`.
+- The design separates Structure, Quote, L2/L3, and Archive data products;
+  defines a 30-minute Structure and 300-second Quote initial M1 contract;
+  treats Archive as isolated research/audit work; and stages shared publication
+  before any cross-machine M2 consumption.
+- No production configuration, deploy, storage migration, or resource change
+  has been made by this design work.
+
+### Written-spec review
+
+- User approved the staged data-layer design on 2026-07-27.
+- The task has entered implementation planning. The approved design has three
+  independently shippable scopes: M1 attempt/incident truth, M1 Structure vs
+  Archive/Quote contract separation, and later M1→M2 shared publication.
+
+### First-wave implementation plan
+
+- Wrote and self-reviewed
+  `docs/superpowers/plans/2026-07-27-m1-attempt-truth-and-component-incidents.md`.
+- It covers durable scheduler attempt records, direct health exposure, per-
+  component Polywatch recovery, a read-only operator command, tests, manual,
+  learning documentation, and no production mutation.
+
 ## Error Log
 
 | Timestamp | Error | Attempt | Resolution |

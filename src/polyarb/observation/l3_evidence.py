@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -64,7 +65,9 @@ _RUNTIME_EVENT_DETAIL_KEYS: Mapping[RuntimeEventKind, frozenset[str]] = MappingP
         RuntimeEventKind.WS_GENERATION_CHANGED: frozenset(
             {"previous_generation", "new_generation"}
         ),
-        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED: frozenset({"operation", "error_type"}),
+        RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED: frozenset(
+            {"operation", "error_type", "required_count", "missing_count"}
+        ),
         RuntimeEventKind.SUBSCRIPTION_COMPENSATED: frozenset({"operation", "close_succeeded"}),
         RuntimeEventKind.EVIDENCE_WRITER_FAILED: frozenset({"failed_event_seq"}),
         RuntimeEventKind.EVIDENCE_WRITER_RECOVERED: frozenset({"recovered_event_seq"}),
@@ -84,6 +87,7 @@ _RUNTIME_EVENT_OPERATIONS = frozenset(
         "connection_close",
         "candidate_replace",
         "book_refresh",
+        "promotion_stage",
     }
 )
 _RUNTIME_EVENT_ERROR_TYPES = frozenset(
@@ -132,12 +136,16 @@ def _validate_runtime_event_detail_values(
             "new_generation",
             "failed_event_seq",
             "recovered_event_seq",
+            "required_count",
+            "missing_count",
         }:
             maximum = {
                 "stale_seconds": 3_600,
                 "reconnect_attempt": 1_000_000,
                 "budget_count": 128,
                 "retry_after_ms": 3_600_000,
+                "required_count": 10_000,
+                "missing_count": 10_000,
             }.get(key, 2**63 - 1)
             _bounded_detail_int(kind, key, value, maximum=maximum)
         elif key == "source" and (
@@ -806,6 +814,28 @@ class WsMembershipSnapshot:
 
 
 @dataclass(frozen=True)
+class PreparedL3Target:
+    """Generation-scoped durable evidence staged before membership publication."""
+
+    generation: int
+    asset_ids: frozenset[str]
+    evidenced_at: Mapping[str, datetime]
+
+    def __post_init__(self) -> None:
+        _require_nonnegative("generation", self.generation)
+        assets = frozenset(self.asset_ids)
+        evidence = dict(self.evidenced_at)
+        if not assets or set(evidence) != set(assets):
+            raise ValueError("prepared evidence must exactly match target assets")
+        for asset_id in assets:
+            _require_nonempty("prepared asset ID", asset_id)
+        for asset_id, observed_at in evidence.items():
+            _require_utc(f"prepared evidence[{asset_id!r}]", observed_at)
+        object.__setattr__(self, "asset_ids", assets)
+        object.__setattr__(self, "evidenced_at", _frozen_mapping(evidence))
+
+
+@dataclass(frozen=True)
 class FrameDispatchResult:
     """Durable write outcomes for one production WebSocket frame."""
 
@@ -987,6 +1017,24 @@ class L3EvidenceRuntime:
         self._writer_ok_by_channel: dict[str, bool] = {}
         self._writer_result_at_by_channel: dict[str, datetime] = {}
         self._writer_reason_by_channel: dict[str, str] = {}
+        self._transition_lock = asyncio.Lock()
+        self._membership_is_converged = True
+        self._membership_convergence_waiters: set[asyncio.Future[None]] = set()
+
+    @property
+    def transition_lock(self) -> asyncio.Lock:
+        """Serialize mapping publication with the sample that consumes it."""
+        return self._transition_lock
+
+    async def wait_for_membership_convergence(self) -> None:
+        """Block durable sampling while membership is an in-flight partial state."""
+        while not self._membership_is_converged:
+            waiter = asyncio.get_running_loop().create_future()
+            self._membership_convergence_waiters.add(waiter)
+            try:
+                await waiter
+            finally:
+                self._membership_convergence_waiters.discard(waiter)
 
     def next_run_seq(self) -> int:
         sequence = self._run_seq
@@ -1125,6 +1173,14 @@ class L3EvidenceRuntime:
         self._committed = copied.committed
         self._evidenced = copied.evidenced
         self._evidenced_at = copied.evidenced_at
+        if copied.desired == copied.committed == copied.evidenced:
+            self._membership_is_converged = True
+            for waiter in tuple(self._membership_convergence_waiters):
+                if not waiter.done():
+                    waiter.set_result(None)
+            self._membership_convergence_waiters.clear()
+        else:
+            self._membership_is_converged = False
 
     def mark_promote_persisted(self, at: datetime) -> None:
         _require_utc("promote persisted at", at)

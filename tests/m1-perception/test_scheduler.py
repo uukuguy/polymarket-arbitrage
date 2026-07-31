@@ -13,6 +13,10 @@ FAILURE_THRESHOLD 3 → 5 to absorb DNS jitter via tenacity retry):
 
 from __future__ import annotations
 
+import asyncio
+import json
+import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -58,8 +62,507 @@ def test_scheduler_interval_reads_env_var(monkeypatch: pytest.MonkeyPatch) -> No
 class _FakeResult:
     """Minimal snapshot result stub."""
 
-    def __init__(self, status: SnapshotStatus) -> None:
+    def __init__(
+        self,
+        status: SnapshotStatus,
+        *,
+        snapshot_id: int = 1,
+        last_stage: str | None = None,
+        elapsed_ms: int | None = None,
+    ) -> None:
         self.status = status
+        self.snapshot_id = snapshot_id
+        self.last_stage = last_stage
+        self.elapsed_ms = elapsed_ms
+
+
+class _FakeProcess:
+    def __init__(
+        self,
+        payload: object,
+        *,
+        returncode: int,
+        block: bool = False,
+        stderr: bytes = b"bounded stderr",
+    ) -> None:
+        self.stdout = (
+            payload
+            if isinstance(payload, bytes)
+            else json.dumps(payload).encode()
+        )
+        self.returncode = returncode
+        self.block = block
+        self.stderr = stderr
+        self.terminated = False
+        self.killed = False
+        self._reaped = asyncio.Event()
+
+    async def communicate(self):
+        if self.block and not self.killed:
+            await self._reaped.wait()
+        return self.stdout, self.stderr
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+        self._reaped.set()
+
+
+def test_snapshot_attempt_lifecycle_is_append_only(daemon_settings_for_test: Any) -> None:
+    """A terminal scheduler attempt keeps its original OOM classification."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    attempt_id = store.begin_snapshot_attempt(started_at_ms=1_000)
+    store.finish_snapshot_attempt(
+        attempt_id=attempt_id,
+        outcome="failed",
+        finished_at_ms=2_000,
+        snapshot_id=None,
+        failure_kind="snapshot-subprocess-signal-sigkill-possible-oom",
+    )
+
+    assert store.get_latest_snapshot_attempt() == {
+        "id": attempt_id,
+        "started_at_ms": 1_000,
+        "finished_at_ms": 2_000,
+        "outcome": "failed",
+        "snapshot_id": None,
+        "failure_kind": "snapshot-subprocess-signal-sigkill-possible-oom",
+        "last_stage": None,
+        "elapsed_ms": None,
+    }
+
+
+def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(tmp_path: Path) -> None:
+    """Fresh and pre-diagnostic attempt tables expose nullable diagnostic columns."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    fresh_db = tmp_path / "fresh.db"
+    SQLiteStore(fresh_db).init_schema()
+    with sqlite3.connect(fresh_db) as con:
+        fresh_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
+    assert {"elapsed_ms", "last_stage"} <= fresh_columns
+
+    legacy_db = tmp_path / "legacy.db"
+    with sqlite3.connect(legacy_db) as con:
+        con.execute(
+            "CREATE TABLE snapshot_attempts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, started_at_ms INTEGER NOT NULL, "
+            "finished_at_ms INTEGER, outcome TEXT NOT NULL, snapshot_id INTEGER, "
+            "failure_kind TEXT)"
+        )
+        con.execute(
+            "INSERT INTO snapshot_attempts(started_at_ms, outcome) VALUES (?, ?)",
+            (1_000, "running"),
+        )
+
+    legacy_store = SQLiteStore(legacy_db)
+    legacy_store.init_schema()
+    legacy_store.init_schema()
+
+    with sqlite3.connect(legacy_db) as con:
+        legacy_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
+        historical_diagnostics = con.execute(
+            "SELECT last_stage, elapsed_ms FROM snapshot_attempts WHERE id = 1"
+        ).fetchone()
+    assert {"elapsed_ms", "last_stage"} <= legacy_columns
+    assert historical_diagnostics == (None, None)
+
+
+def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
+    daemon_settings_for_test: Any,
+) -> None:
+    """A later writer cannot turn recorded success into a fabricated failure."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    attempt_id = store.begin_snapshot_attempt(started_at_ms=1_000)
+    store.finish_snapshot_attempt(
+        attempt_id=attempt_id,
+        outcome="succeeded",
+        finished_at_ms=2_000,
+        snapshot_id=746,
+        failure_kind=None,
+    )
+
+    with pytest.raises(ValueError, match="not running"):
+        store.finish_snapshot_attempt(
+            attempt_id=attempt_id,
+            outcome="failed",
+            finished_at_ms=3_000,
+            snapshot_id=None,
+            failure_kind="late-rewrite",
+        )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_persists_sigkill_attempt_failure(
+    daemon_settings_for_test: Any,
+) -> None:
+    """A kernel-killed child leaves durable operational evidence behind."""
+    from polyarb.daemon.scheduler import SnapshotSubprocessError
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(
+        side_effect=SnapshotSubprocessError(
+            "timeout",
+            last_stage="gamma-markets",
+            elapsed_ms=245_012,
+        )
+    )
+
+    await scheduler._tick()
+
+    assert store.get_latest_snapshot_attempt() == {
+        "id": 1,
+        "started_at_ms": pytest.approx(int(time.time() * 1000), abs=2_000),
+        "finished_at_ms": pytest.approx(int(time.time() * 1000), abs=2_000),
+        "outcome": "failed",
+        "snapshot_id": None,
+        "failure_kind": "snapshot-subprocess-timeout",
+        "last_stage": "gamma-markets",
+        "elapsed_ms": 245_012,
+    }
+
+
+@pytest.mark.asyncio
+async def test_scheduler_persists_successful_attempt_diagnostics(
+    daemon_settings_for_test: Any,
+) -> None:
+    """A terminal successful row retains parent-observed diagnostics."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(
+        return_value=_FakeResult(
+            SnapshotStatus.OK,
+            last_stage="persist",
+            elapsed_ms=1_234,
+        )
+    )
+
+    await scheduler._tick()
+
+    latest_attempt = store.get_latest_snapshot_attempt()
+    assert latest_attempt is not None
+    assert latest_attempt["outcome"] == "succeeded"
+    assert latest_attempt["last_stage"] == "persist"
+    assert latest_attempt["elapsed_ms"] == 1_234
+
+
+@pytest.mark.asyncio
+async def test_scheduler_preserves_result_diagnostics_when_result_is_rejected(
+    daemon_settings_for_test: Any,
+) -> None:
+    """A parent validation error retains the child facts it was handed."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(
+        return_value=_FakeResult(
+            SnapshotStatus.OK,
+            snapshot_id=0,
+            last_stage="persist",
+            elapsed_ms=1_234,
+        )
+    )
+
+    await scheduler._tick()
+
+    latest_attempt = store.get_latest_snapshot_attempt()
+    assert latest_attempt is not None
+    assert latest_attempt["failure_kind"] == "snapshot-subprocess-missing-snapshot-id"
+    assert latest_attempt["last_stage"] == "persist"
+    assert latest_attempt["elapsed_ms"] == 1_234
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "is_valid", "returncode"),
+    (
+        ("ok", True, 0),
+        ("degraded", True, 0),
+        ("failed", False, 1),
+    ),
+)
+async def test_snapshot_pipeline_runs_in_isolated_subprocess(
+    status: str,
+    is_valid: bool,
+    returncode: int,
+) -> None:
+    from polyarb.daemon.scheduler import run_snapshot_in_subprocess
+
+    process = _FakeProcess(
+        {
+            "status": status,
+            "is_valid": is_valid,
+            "snapshot_id": 746,
+            "market_count": 81959,
+            "issue_count": 3,
+        },
+        returncode=returncode,
+    )
+    calls = []
+
+    async def spawn(*args, **kwargs):
+        calls.append((args, kwargs))
+        return process
+
+    result = await run_snapshot_in_subprocess(spawn=spawn)
+
+    assert result.status == SnapshotStatus(status)
+    assert result.snapshot_id == 746
+    assert result.market_count == 81959
+    assert result.issue_count == 3
+    args, kwargs = calls[0]
+    assert args[1:] == (
+        "-m",
+        "polyarb.snapshot",
+        "snapshot",
+        "--product",
+        "structure",
+        "--json",
+        "--low-priority",
+    )
+    assert kwargs["stdout"] == asyncio.subprocess.PIPE
+    assert kwargs["stderr"] == asyncio.subprocess.PIPE
+
+
+def test_snapshot_stage_parser_keeps_only_final_allowlisted_marker() -> None:
+    """Arbitrary child stderr never becomes a scheduler diagnostic."""
+    from polyarb.daemon.scheduler import _parse_last_snapshot_stage
+
+    stderr = b"\n".join(
+        (
+            b"network error: upstream sent a secret-looking message",
+            b"snapshot-stage stage=gamma-events state=complete elapsed_ms=12",
+            b"snapshot-stage stage=not-allowed state=start elapsed_ms=13",
+            b"snapshot-stage stage=gamma-markets state=unexpected elapsed_ms=14",
+            b"snapshot-stage stage=gamma-markets state=start elapsed_ms=-1",
+            b"snapshot-stage stage=gamma-markets state=start elapsed_ms=15",
+        )
+    )
+
+    assert _parse_last_snapshot_stage(stderr) == "gamma-markets"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_result_has_parent_elapsed_and_final_stage() -> None:
+    """The parent returns bounded diagnostics, never the child's stderr payload."""
+    from polyarb.daemon.scheduler import run_snapshot_in_subprocess
+
+    process = _FakeProcess(
+        {
+            "status": "ok",
+            "is_valid": True,
+            "snapshot_id": 746,
+            "market_count": 81959,
+            "issue_count": 3,
+        },
+        returncode=0,
+        stderr=(
+            b"snapshot-stage stage=gamma-events state=complete elapsed_ms=91\n"
+            b"snapshot-stage stage=gamma-markets state=start elapsed_ms=999999"
+        ),
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    result = await run_snapshot_in_subprocess(spawn=spawn)
+
+    assert result.last_stage == "gamma-markets"
+    assert 0 <= result.elapsed_ms < 999999
+    assert not hasattr(result, "stderr")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> None:
+    """Timeout data arrives only from the child communicate result after reaping."""
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    process = _FakeProcess(
+        {},
+        returncode=0,
+        block=True,
+        stderr=(
+            b"arbitrary child error\n"
+            b"snapshot-stage stage=gamma-markets state=start elapsed_ms=17"
+        ),
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-timeout") as raised:
+        await run_snapshot_in_subprocess(
+            spawn=spawn,
+            timeout_s=0.01,
+            terminate_timeout_s=0.01,
+        )
+
+    error = raised.value
+    assert process.terminated is True
+    assert process.killed is True
+    assert error.last_stage == "gamma-markets"
+    assert error.elapsed_ms >= 0
+    assert not hasattr(error, "stderr")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_rejects_mismatched_exit_contract() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return _FakeProcess(
+            {
+                "status": "ok",
+                "is_valid": True,
+                "snapshot_id": 746,
+                "market_count": 81959,
+                "issue_count": 3,
+            },
+            returncode=1,
+        )
+
+    with pytest.raises(
+        SnapshotSubprocessError,
+        match="snapshot-subprocess-invalid-json",
+    ):
+        await run_snapshot_in_subprocess(spawn=spawn)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_classifies_sigkill_as_possible_oom() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return _FakeProcess(b"", returncode=-9)
+
+    with pytest.raises(
+        SnapshotSubprocessError,
+        match="snapshot-subprocess-signal-sigkill-possible-oom",
+    ):
+        await run_snapshot_in_subprocess(spawn=spawn)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_cancellation_terminates_then_kills() -> None:
+    from polyarb.daemon.scheduler import run_snapshot_in_subprocess
+
+    process = _FakeProcess({}, returncode=0, block=True)
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    task = asyncio.create_task(
+        run_snapshot_in_subprocess(
+            spawn=spawn,
+            terminate_timeout_s=0.01,
+        )
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.terminated is True
+    assert process.killed is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_timeout_terminates_then_kills() -> None:
+    """A CPU-bound child cannot hold the 5-minute production cadence forever."""
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    process = _FakeProcess({}, returncode=0, block=True)
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-timeout"):
+        await run_snapshot_in_subprocess(
+            spawn=spawn,
+            timeout_s=0.01,
+            terminate_timeout_s=0.01,
+        )
+
+    assert process.terminated is True
+    assert process.killed is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_timeout_keeps_one_reap_task_until_child_exit() -> None:
+    """Timeout cleanup must not abandon a child after cancelling its pipe reader."""
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    class Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.calls = 0
+            self.released = asyncio.Event()
+            self.terminated = False
+            self.killed = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            self.calls += 1
+            if self.calls != 1:
+                raise AssertionError("communicate must not be re-entered after timeout")
+            await self.released.wait()
+            return b"", b""
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+            self.released.set()
+
+    process = Process()
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-timeout"):
+        await run_snapshot_in_subprocess(
+            spawn=spawn,
+            timeout_s=0.01,
+            terminate_timeout_s=0.01,
+        )
+
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.calls == 1
 
 
 # ---------------------------------------------------------------------------

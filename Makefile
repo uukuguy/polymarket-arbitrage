@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-opportunities perception-groups perception-incidents perception-resources queue-discovery queue-reconciliation
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -25,6 +25,117 @@ help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed -E 's/^## /  /' | sort
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M1 opportunity watcher cloud controls — no local SQLite, wallet, or orders.
+# ─────────────────────────────────────────────────────────────────────────────
+
+## build-market-map: Cloud HMAC control: queue one normal Structure map cycle; no order or scheduler bypass.
+build-market-map:
+	@uv run python -m polyarb.cli_perception build-market-map
+
+## inspect-market-map: Cloud read-only GET of the current Structure map; no local SQLite or order activity. Optional event_id=.
+inspect-market-map:
+	@curl --disable --request GET -fsS "https://polyarb-l1.fly.dev/market-map$(if $(strip $(event_id)),?event_id=$(event_id),)" | python -m json.tool
+
+## scan-neg-risk-map: Cloud HMAC control: queue one normal global Quote scan; no order activity.
+scan-neg-risk-map:
+	@uv run python -m polyarb.cli_perception scan-neg-risk-map
+
+## watch-opportunities-status: Cloud read-only watcher state; no local SQLite or order activity.
+watch-opportunities-status:
+	@curl --disable --request GET -fsS "https://polyarb-l1.fly.dev/opportunity-watch/status" | python -m json.tool
+
+## watch-opportunities: Cloud read-only observer opportunities (gross only, no order). Optional min_edge_bps= and limit=.
+watch-opportunities:
+	@curl --disable --request GET -fsS "https://polyarb-l1.fly.dev/arbitrage/opportunities?min_edge_bps=$(or $(min_edge_bps),0)$(if $(strip $(limit)),\&limit=$(limit),)" | python -m json.tool
+
+## watch-opportunity-history: Cloud read-only observer replay; requires opportunity_id= and never places an order.
+watch-opportunity-history:
+	@test -n "$(opportunity_id)" || (echo "usage: make watch-opportunity-history opportunity_id=<id>" >&2; exit 2)
+	@curl --disable --request GET -fsS "https://polyarb-l1.fly.dev/arbitrage/opportunities/$(opportunity_id)/history" | python -m json.tool
+
+## perception-discovery-status: Read bounded local Discovery cursor/queue/15-30-60m coverage; usage db_path=/path/state.db.
+perception-discovery-status:
+	@test -n "$(db_path)" || (echo "usage: make perception-discovery-status db_path=/path/to/state.db" >&2; exit 2)
+	@uv run python -m polyarb.cli_discovery --db-path "$(db_path)"
+
+## reconcile-market-map: Advance exactly one bounded Full Reconciliation page.
+reconcile-market-map:
+	@uv run python -m polyarb.cli_reconciliation run $(if $(db_path),--db-path "$(db_path)",)
+
+## reconciliation-status: Read the durable Full Reconciliation checkpoint; usage db_path=/path/state.db.
+reconciliation-status:
+	@test -n "$(db_path)" || (echo "usage: make reconciliation-status db_path=/path/to/state.db" >&2; exit 2)
+	@uv run python -m polyarb.cli_reconciliation status --db-path "$(db_path)"
+
+## run-perception-worker: Run one isolated supervised producer; usage component=candidate|discovery|reconciliation.
+run-perception-worker:
+	@case "$(component)" in candidate|discovery|reconciliation) ;; *) echo "usage: make run-perception-worker component=candidate|discovery|reconciliation" >&2; exit 2;; esac
+	@uv run python -m polyarb.perception.worker_cli "$(component)"
+
+POLYARB_PERCEPTION_URL ?= https://polyarb-l1.fly.dev
+PERCEPTION_CURL = curl --disable --connect-timeout 3 --max-time 10 --retry 0 -fsS
+
+## perception-status: Cloud read-only opportunity-first status; valid zero is distinct from unavailable.
+perception-status:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/status" | python -m json.tool
+
+## perception-opportunities: Cloud read-only authenticated current opportunities; optional limit=1..500 and after_group_id=.
+perception-opportunities:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/opportunities?limit=$(or $(limit),100)&after_group_id=$(after_group_id)" | python -m json.tool
+
+## perception-groups: Cloud read-only certified group list; optional limit=1..500.
+perception-groups:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/groups?limit=$(or $(limit),100)" | python -m json.tool
+
+## perception-incidents: Cloud read-only open incident page; optional limit=1..500 and opaque before cursor.
+perception-incidents:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/incidents?limit=$(or $(limit),100)$(if $(before),&before=$(before),)" | python -m json.tool
+
+## perception-resources: Cloud read-only resource decision history; optional limit=1..500 and before_sequence=.
+perception-resources:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/resources?limit=$(or $(limit),100)$(if $(before_sequence),&before_sequence=$(before_sequence),)" | python -m json.tool
+
+## queue-discovery: HMAC-authenticated cloud wake-up for the enabled bounded Discovery loop.
+queue-discovery:
+	@test -n "$$POLYARB_SCAN_SHARED_SECRET" || (echo "POLYARB_SCAN_SHARED_SECRET is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_perception queue-discovery --base-url "$(POLYARB_PERCEPTION_URL)"
+
+## queue-reconciliation: HMAC-authenticated cloud wake-up for the enabled bounded Reconciliation loop.
+queue-reconciliation:
+	@test -n "$$POLYARB_SCAN_SHARED_SECRET" || (echo "POLYARB_SCAN_SHARED_SECRET is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_perception queue-reconciliation --base-url "$(POLYARB_PERCEPTION_URL)"
+
+## fault-runtime-status: Read the exact current producer runtime identity; component=candidate|discovery|reconciliation|notification.
+fault-runtime-status:
+	@case "$(component)" in candidate|discovery|reconciliation|notification) ;; *) echo "usage: make fault-runtime-status component=candidate|discovery|reconciliation|notification" >&2; exit 2;; esac
+	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" runtime --component "$(component)"
+
+## arm-upstream-fault: Arm one exact scoped intent file; usage: make arm-upstream-fault intent="$$INTENT_FILE".
+arm-upstream-fault:
+	@test -n "$(intent)" || (echo 'usage: make arm-upstream-fault intent="$$INTENT_FILE"' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" arm --intent "$(intent)"
+
+## cleanup-upstream-fault: Request exact-ID producer-owned cleanup; usage: make cleanup-upstream-fault fault_id="$$FAULT_ID".
+cleanup-upstream-fault:
+	@test -n "$(fault_id)" || (echo 'usage: make cleanup-upstream-fault fault_id="$$FAULT_ID"' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" cleanup --fault-id "$(fault_id)"
+
+## finalize-upstream-fault: Submit one evaluator-signed candidate; requires explicit disabled-by-default finalizer authority.
+finalize-upstream-fault:
+	@test -n "$(fault_id)" -a -n "$(artifact)" -a -n "$(expected_release)" || (echo 'usage: make finalize-upstream-fault fault_id="$$FAULT_ID" artifact="$$VERDICT_FILE" expected_release="$$RELEASE_SHA"' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" || (echo "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" finalize --fault-id "$(fault_id)" --artifact "$(artifact)" --expected-release "$(expected_release)"
+
+## upstream-fault-status: Read one bounded redacted fault projection; usage fault_id="$$FAULT_ID".
+upstream-fault-status:
+	@test -n "$(fault_id)" || (echo 'usage: make upstream-fault-status fault_id="$$FAULT_ID"' >&2; exit 2)
+	@uv run python -m polyarb.cli_perception_faults --base-url "$(POLYARB_PERCEPTION_URL)" status --fault-id "$(fault_id)"
+
+.PHONY: fault-runtime-status arm-upstream-fault cleanup-upstream-fault finalize-upstream-fault upstream-fault-status
 
 .PHONY: docs-m1-check
 
@@ -91,7 +202,7 @@ patch-gsd-worktree-cleanup:
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v snapshot-status snapshot-fresh snapshots-purge snapshot-cache-purge
+.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v sync-structure-local archive-markets-local snapshot-status snapshot-attempt-status snapshot-fresh snapshots-purge snapshot-cache-purge
 
 ## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly. Auto-loads .env for Supabase+R2 mirror.
 snapshot-markets:
@@ -123,9 +234,25 @@ snapshot-markets-full-v:
 	echo ""; \
 	uv run python -m polyarb.snapshot snapshot --full --verbose
 
+## sync-structure-local: Gamma-only full market structure revision for the local M1→M2 contract; no CLOB, Parquet, R2, or price mirror.
+sync-structure-local:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo ">> sync-structure-local — Gamma-only Structure revision (local mutation)"; \
+	uv run python -m polyarb.snapshot snapshot --product structure --verbose
+
+## archive-markets-local: Explicit full CLOB/Parquet research archive; never replaces the online Structure market view or schedules production work.
+archive-markets-local:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo ">> archive-markets-local — research archive (local mutation; may be long-running)"; \
+	uv run python -m polyarb.snapshot snapshot --product archive --verbose
+
 ## snapshot-status: One-glance status — running process, recent SQLite rows, latest parquet (local time)
 snapshot-status:
 	@uv run python scripts/snapshot_status.py
+
+## snapshot-attempt-status: Show the latest L1 scheduler snapshot attempt. Read-only.
+snapshot-attempt-status:
+	@uv run python scripts/snapshot_attempt_status.py
 
 ## snapshot-fresh: Force full refetch (purge all caches, then run verbose)
 snapshot-fresh:
@@ -274,7 +401,7 @@ watchlist-alerts:
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: test test-m1 test-observation test-slippage
+.PHONY: test test-m1 test-m1-perception test-observation test-slippage
 
 ## test: Run all tests
 test:
@@ -283,6 +410,10 @@ test:
 ## test-m1: Run all M1 market perception tests
 test-m1:
 	@uv run pytest -v tests/m1-perception/
+
+## test-m1-perception: Run the complete M1 opportunity-first gate across perception unit and integration tests
+test-m1-perception:
+	@uv run pytest -v tests/perception/ tests/m1-perception/
 
 ## test-observation: Run observation module tests (scanner / diff / tracker / show / watchlist / recipes / formatter)
 test-observation:
@@ -312,7 +443,7 @@ triple-check:
 # tail-logs-local     — stream daemon stdout (for a separately launched daemon)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: daemon-run-local smoke-health-local smoke-health-prod smoke-healthz tail-logs-local
+.PHONY: daemon-run-local smoke-health-local smoke-health-prod smoke-market-truth-prod smoke-healthz tail-logs-local
 
 ## daemon-run-local: Start the polyarb daemon locally on :19080 (HMAC-authenticated /scan + /health). Ctrl-C to stop. Override port via POLYARB_HTTP_PORT.
 daemon-run-local:
@@ -341,6 +472,16 @@ smoke-health-prod:
 	echo "HTTP $$HTTP_STATUS"; \
 	python3 -m json.tool < "$$BODY" || cat "$$BODY"; \
 	if [ "$$HTTP_STATUS" = "200" ]; then echo "PASS: L1 strict /health returned 200"; else echo "FAIL: L1 strict /health returned $$HTTP_STATUS" >&2; exit 1; fi
+
+## smoke-market-truth-prod: Read-only production proof that the latest L1 snapshot attempt published complete market truth
+smoke-market-truth-prod:
+	@BODY=$$(mktemp); trap 'rm -f "$$BODY"' EXIT; \
+	URL="https://polyarb-l1.fly.dev/health"; \
+	echo ">> smoke-market-truth-prod — GET $$URL"; \
+	curl --disable --request GET -fsS -o "$$BODY" "$$URL"; \
+	jq -e '.checks["market_truth:coverage"][0] | select(.status == "pass" and .observedValue == "complete")' "$$BODY" >/dev/null; \
+	jq '{releaseId, market_truth_coverage: .checks["market_truth:coverage"][0], market_truth_last_complete: .checks["market_truth:last_complete_age_seconds"][0]}' "$$BODY"; \
+	echo "PASS: latest L1 snapshot attempt published complete market truth"
 
 ## smoke-healthz: Verify prod /healthz always returns 200 (Fly probe target — D-05). No auth required.
 smoke-healthz:
@@ -508,10 +649,12 @@ docker-smoke:
 
 ## deploy: Deploy to Fly.io prod (requires flyctl + keychain auth — see GAP-4 banner above)
 deploy:
-	@echo ">> deploy — flyctl deploy --remote-only"
-	FLY_API_TOKEN= flyctl deploy --remote-only --wait-timeout 600
+	@RELEASE_ID="$$(git rev-parse HEAD)"; \
+		echo ">> deploy — flyctl deploy --remote-only (release=$$RELEASE_ID)"; \
+		FLY_API_TOKEN= flyctl deploy --remote-only --wait-timeout 600 \
+			--env POLYARB_RELEASE_ID="$$RELEASE_ID"
 	@echo ">> ensuring process scale: app=1 cron=1 (W8 Supercronic)"
-	FLY_API_TOKEN= flyctl scale count app=1 cron=1 -a polyarb-l1 || true
+	FLY_API_TOKEN= flyctl scale count app=1 cron=1 -a polyarb-l1 --yes || true
 	@echo ">> running post-deploy /health smoke probe"
 	bash scripts/deploy_smoke.sh
 
@@ -609,12 +752,21 @@ logs-tail-axiom:
 # Dashboard (Phase 02 Plan 02-06 — Vercel Next.js)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: dashboard-dev dashboard-build dashboard-typecheck dashboard-deploy smoke-l2-dashboard
+.PHONY: dashboard-dev dashboard-fixture-api dashboard-build dashboard-typecheck dashboard-deploy smoke-l2-dashboard
+.PHONY: smoke-perception-dashboard qualify-perception-local qualify-perception-prod-readonly
 
 ## dashboard-dev: 本地起 dashboard (next dev :3000)
 dashboard-dev:
 	@echo ">> dashboard-dev — pnpm run dev"
 	cd dashboard && pnpm run dev
+
+## dashboard-fixture-api: Serve deterministic local M1 observer data for Dashboard visual acceptance
+## Usage: make dashboard-fixture-api db=output/playwright/perception-fixture.db port=8765
+## Local-only SQLite mutation; refuses to overwrite an existing fixture DB.
+dashboard-fixture-api:
+	@test -n "$(db)" || { echo "ERROR: db=<new-local-path> is required" >&2; exit 2; }
+	@echo ">> dashboard-fixture-api — local observer fixture on :$${port:-8765}"
+	uv run python scripts/perception_dashboard_fixture.py --db "$(db)" --port "$${port:-8765}"
 
 ## dashboard-build: Build dashboard production bundle (verify locally before Vercel deploy)
 dashboard-build:
@@ -659,6 +811,168 @@ smoke-l2-dashboard:
 	  fi; \
 	done; \
 	exit $$rc
+
+## smoke-perception-dashboard: Read-only HTTP reachability for the Dashboard /perception route
+## Usage: make smoke-perception-dashboard
+##        DASHBOARD_URL=http://localhost:3000 make smoke-perception-dashboard
+## Accepts the application page (200) or the canonical Vercel Auth redirects
+## (302/307). It does not follow redirects and does not claim data freshness.
+smoke-perception-dashboard:
+	@DASHBOARD_URL="$${DASHBOARD_URL:-https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app}"; \
+	URL="$${DASHBOARD_URL%/}/perception"; \
+	echo ">> smoke-perception-dashboard — GET $$URL"; \
+	code=$$(curl --disable --connect-timeout 3 --max-time 10 --retry 0 -sS -o /dev/null -w "%{http_code}" "$$URL") || { \
+	  echo "  /perception: transport FAIL"; \
+	  exit 1; \
+	}; \
+	case "$$code" in \
+	  200|302|307) echo "  /perception: $$code reachable" ;; \
+	  *) echo "  /perception: $$code FAIL"; exit 1 ;; \
+	esac
+
+## qualify-perception-local: Deterministic observer-only conformance gate for the M1 qualification evaluator
+## Uses committed synthetic evidence; PASS does not claim production readiness.
+qualify-perception-local:
+	@set -eu; \
+	qualification_tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$qualification_tmp"' EXIT; \
+	echo ">> qualify-perception-local — evaluator tests"; \
+	uv run pytest tests/m1-perception/test_perception_fault_acceptance.py -q; \
+	echo ">> qualify-perception-local — canonical PASS fixture"; \
+	uv run python scripts/perception_fault_acceptance.py \
+	  --evidence tests/fixtures/perception-fault-acceptance-pass.json \
+	  --output "$$qualification_tmp/verdict.json" \
+	  --require-scope local-conformance; \
+	cat "$$qualification_tmp/verdict.json"
+
+## evaluate-upstream-fault-candidate: Read-only signed candidate verdict from one immutable RECOVERED envelope.
+evaluate-upstream-fault-candidate:
+	@test -n "$(evidence)" -a -n "$(output)" -a -n "$(expected_release)" || (echo 'usage: make evaluate-upstream-fault-candidate evidence=... output=... expected_release=...' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY" || (echo "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY is required" >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY" || (echo "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY is required" >&2; exit 2)
+	@test -z "$$POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY" || (echo "candidate evaluator must not hold POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY" >&2; exit 2)
+	@test -z "$$POLYARB_SCAN_SHARED_SECRET" || (echo "candidate evaluator must not hold POLYARB_SCAN_SHARED_SECRET" >&2; exit 2)
+	@test -z "$$POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" || (echo "candidate evaluator must not hold POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" >&2; exit 2)
+	@uv run python scripts/perception_fault_acceptance.py --evidence "$(evidence)" --output "$(output)" --require-scope production-fault --expected-release "$(expected_release)" --fault-mode candidate
+
+## evaluate-upstream-fault-final: Read-only final verdict after source authority appended exact VERIFIED.
+evaluate-upstream-fault-final:
+	@test -n "$(evidence)" -a -n "$(candidate)" -a -n "$(output)" -a -n "$(expected_release)" || (echo 'usage: make evaluate-upstream-fault-final evidence=... candidate=... output=... expected_release=...' >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY" || (echo "POLYARB_UPSTREAM_FAULT_SOURCE_PUBLIC_KEY is required" >&2; exit 2)
+	@test -n "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY" || (echo "POLYARB_UPSTREAM_FAULT_EVALUATOR_PUBLIC_KEY is required" >&2; exit 2)
+	@test -z "$$POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY" || (echo "final evaluator must not hold POLYARB_UPSTREAM_FAULT_SOURCE_PRIVATE_KEY" >&2; exit 2)
+	@test -z "$$POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY" || (echo "final evaluator must not hold POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY" >&2; exit 2)
+	@test -z "$$POLYARB_SCAN_SHARED_SECRET" || (echo "final evaluator must not hold POLYARB_SCAN_SHARED_SECRET" >&2; exit 2)
+	@test -z "$$POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" || (echo "final evaluator must not hold POLYARB_UPSTREAM_FAULT_CONTROL_SECRET" >&2; exit 2)
+	@uv run python scripts/perception_fault_acceptance.py --evidence "$(evidence)" --candidate-artifact "$(candidate)" --output "$(output)" --require-scope production-fault --expected-release "$(expected_release)" --fault-mode final
+
+## qualify-perception-prod-readonly: Preserve a bounded GET-only production evidence window and fail-closed verdict
+## Optional: expected_release=<40-char-sha> samples=5 interval_s=1 output_dir=<new-path>
+qualify-perception-prod-readonly:
+	@set -eu; \
+	qualification_release="$(or $(expected_release),$(shell git rev-parse HEAD))"; \
+	qualification_root="$(output_dir)"; \
+	if [ -z "$$qualification_root" ]; then \
+	  mkdir -p output/perception-qualification; \
+	  qualification_root="output/perception-qualification/prod-readonly-$$(date -u +%Y%m%dT%H%M%SZ)"; \
+	fi; \
+	mkdir "$$qualification_root"; \
+	echo ">> qualify-perception-prod-readonly — GET-only evidence for $$qualification_release"; \
+	uv run python scripts/perception_fault_readonly.py \
+	  --base-url "$(POLYARB_PERCEPTION_URL)" \
+	  --expected-release "$$qualification_release" \
+	  --output "$$qualification_root/evidence.json" \
+	  --samples "$(or $(samples),5)" \
+	  --interval-s "$(or $(interval_s),1)"; \
+	set +e; \
+	uv run python scripts/perception_fault_acceptance.py \
+	  --evidence "$$qualification_root/evidence.json" \
+	  --output "$$qualification_root/verdict.json" \
+	  --require-scope production-readonly \
+	  --expected-release "$$qualification_release"; \
+	qualification_rc=$$?; \
+	set -e; \
+	cat "$$qualification_root/verdict.json"; \
+	echo "evidence_dir=$$qualification_root"; \
+	exit $$qualification_rc
+
+PERCEPTION_CHAOS_FAULTS := gamma-timeout gamma-partial gamma-malformed gamma-cursor \
+	clob-missing-leg clob-429 clob-latency candidate-exit discovery-exit \
+	reconciliation-stall sqlite-busy disk-pressure telegram-failure \
+	daemon-restart deploy-interrupt contention
+PERCEPTION_CHAOS_TARGETS := $(addprefix chaos-perception-,$(PERCEPTION_CHAOS_FAULTS))
+.PHONY: $(PERCEPTION_CHAOS_TARGETS) verify-perception-recovery
+
+chaos-perception-gamma-timeout:
+chaos-perception-gamma-partial:
+chaos-perception-gamma-malformed:
+chaos-perception-gamma-cursor:
+chaos-perception-clob-missing-leg:
+chaos-perception-clob-429:
+chaos-perception-clob-latency:
+chaos-perception-candidate-exit:
+chaos-perception-discovery-exit:
+chaos-perception-reconciliation-stall:
+chaos-perception-sqlite-busy:
+chaos-perception-disk-pressure:
+chaos-perception-telegram-failure:
+chaos-perception-daemon-restart:
+chaos-perception-deploy-interrupt:
+chaos-perception-contention:
+
+## chaos-perception-gamma-timeout: Plan Gamma timeout; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-gamma-partial: Plan Gamma partial page; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-gamma-malformed: Plan malformed Gamma response; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-gamma-cursor: Plan Gamma cursor loop; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-clob-missing-leg: Plan missing CLOB leg; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-clob-429: Plan CLOB rate limit; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-clob-latency: Plan CLOB latency; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-candidate-exit: Plan-only Candidate exit contract; execution is disabled.
+## chaos-perception-discovery-exit: Plan-only Discovery exit contract; execution is disabled.
+## chaos-perception-reconciliation-stall: Plan-only Reconciliation stall contract; execution is disabled.
+## chaos-perception-sqlite-busy: Plan-only bounded SQLite lock contract; execution is disabled.
+## chaos-perception-disk-pressure: Plan-only bounded disk-pressure contract; execution is disabled.
+## chaos-perception-telegram-failure: Plan Telegram failure; typed execute uses exact runtime plus environment HMAC authorities.
+## chaos-perception-daemon-restart: Plan-only daemon restart contract; execution is disabled.
+## chaos-perception-deploy-interrupt: Plan-only deploy interruption contract; execution is disabled.
+## chaos-perception-contention: Plan-only bounded contention contract; execution is disabled.
+## Upstream execution reads both HMAC authorities only from the environment and requires machine_id, boot_id, call_class, target_key, and parameters_json.
+## Typed usage: make chaos-perception-<typed-upstream> mode=execute expected_release=<sha> machine_id=<id> boot_id=<uuid> call_class=<class> target_key=<key> parameters_json=<json> evidence_dir=<new-path>
+$(PERCEPTION_CHAOS_TARGETS): chaos-perception-%:
+	@set -eu; \
+	qualification_mode="$(or $(mode),plan)"; \
+	if [ "$$qualification_mode" = "plan" ]; then \
+	  exec uv run python scripts/perception_chaos.py plan --fault "$*"; \
+	fi; \
+	if [ "$$qualification_mode" != "execute" ]; then \
+	  echo "invalid-mode: $$qualification_mode" >&2; \
+	  exit 2; \
+	fi; \
+	set -- uv run python scripts/perception_chaos.py execute \
+	  --fault "$*" \
+	  --expected-release "$(expected_release)" \
+	  --machine-id "$(machine_id)" \
+	  --boot-id "$(boot_id)" \
+	  --call-class "$(call_class)" \
+	  --target-key "$(target_key)" \
+	  --parameters-json "$(parameters_json)" \
+	  --evidence-dir "$(evidence_dir)" \
+	  --base-url "$(POLYARB_PERCEPTION_URL)" \
+	  --timeout-s "$(or $(timeout_s),120)"; \
+	exec "$$@"
+
+## verify-perception-recovery: Evaluate immutable production-fault evidence against exact release and all SLA/writer gates.
+## Usage: make verify-perception-recovery evidence=<json> output=<new-verdict-json> expected_release=<40-char-sha>
+verify-perception-recovery:
+	@set -eu; \
+	test -n "$(evidence)" || { echo "missing evidence=<json>" >&2; exit 2; }; \
+	test -n "$(output)" || { echo "missing output=<new-verdict-json>" >&2; exit 2; }; \
+	test -n "$(expected_release)" || { echo "missing expected_release=<40-char-sha>" >&2; exit 2; }; \
+	uv run python scripts/perception_fault_acceptance.py \
+	  --evidence "$(evidence)" \
+	  --output "$(output)" \
+	  --require-scope production-fault \
+	  --expected-release "$(expected_release)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 02 Plan 07 — 7-day production soak monitoring (Better Stack driven)
@@ -900,16 +1214,21 @@ chaos-l2-cleanup:
 ## requires local `docker` daemon + flyctl auth. If docker is unavailable
 ## the target still surfaces "ERROR: docker missing" without breaking CI.
 chaos-l2-fly-image-check:
-	@if ! command -v docker >/dev/null 2>&1; then \
-		echo "ERROR: docker not on PATH — this is a developer-local target."; \
-		echo "Install docker desktop or run from a host with the daemon."; \
-		exit 2; \
-	fi
 	@IMAGE=$$(FLY_API_TOKEN= flyctl status -a polyarb-l2 --json 2>/dev/null | jq -r '(.Machines[0].config.image // empty) as $$configured | if $$configured != "" then $$configured else (.ImageRef // .Machines[0].image_ref) as $$ref | (($$ref.Registry // $$ref.registry) + "/" + ($$ref.Repository // $$ref.repository) + (if ($$ref.Digest // $$ref.digest // "") != "" then "@" + ($$ref.Digest // $$ref.digest) else ":" + ($$ref.Tag // $$ref.tag) end)) end' 2>/dev/null); \
 	if [ -z "$$IMAGE" ] || [ "$$IMAGE" = "null/:null" ] || [ "$$IMAGE" = "/:" ]; then \
 		echo "ERROR: cannot resolve current polyarb-l2 image (flyctl auth?)"; exit 1; \
 	fi; \
 	echo "Checking primitives in $$IMAGE…"; \
+	INSPECT_MODE="ssh"; \
+	if command -v docker >/dev/null 2>&1 && \
+	   docker run --rm --entrypoint /bin/sh "$$IMAGE" -c "true" >/dev/null 2>&1; then \
+		INSPECT_MODE="docker"; \
+	else \
+		echo "Docker cannot read the private image; falling back to the live started machine (read-only)."; \
+		if ! FLY_API_TOKEN= flyctl ssh console -a polyarb-l2 -s -C "/bin/sh -c 'true'" >/dev/null 2>&1; then \
+			echo "ERROR: cannot inspect deployed image or live machine"; exit 2; \
+		fi; \
+	fi; \
 	OBSERVED_TOOLS="pkill ps kill which dig ping curl python"; \
 	REQUIRED_TOOLS="$(if $(strip $(required)),$(strip $(required)),python)"; \
 	for tool in $$REQUIRED_TOOLS; do \
@@ -919,7 +1238,15 @@ chaos-l2-fly-image-check:
 	done; \
 	MISSING_TOOLS=""; \
 	for tool in $$OBSERVED_TOOLS; do \
-		if docker run --rm --entrypoint /bin/sh "$$IMAGE" -c "command -v $$tool >/dev/null 2>&1"; then \
+		if [ "$$INSPECT_MODE" = "docker" ]; then \
+			docker run --rm --entrypoint /bin/sh "$$IMAGE" -c "command -v $$tool >/dev/null 2>&1"; \
+			tool_rc=$$?; \
+		else \
+			FLY_API_TOKEN= flyctl ssh console -a polyarb-l2 -s \
+			  -C "/bin/sh -c 'command -v $$tool >/dev/null 2>&1'" >/dev/null 2>&1; \
+			tool_rc=$$?; \
+		fi; \
+		if [ "$$tool_rc" -eq 0 ]; then \
 			echo "  OK    $$tool"; \
 		else \
 			echo "  MISS  $$tool"; \

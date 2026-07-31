@@ -41,8 +41,11 @@ Sync vs async (per RESEARCH Pitfall 4):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import sqlite3
+import time
 from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -50,6 +53,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from polyarb.daemon.scheduler import SchedulerState
+
+_PERCEPTION_CONTROL_BODY_MAX_BYTES = 65_536
 
 
 async def control_auth_middleware(request: Request, call_next: Any, *, secret: str) -> Any:
@@ -80,12 +85,119 @@ async def control_auth_middleware(request: Request, call_next: Any, *, secret: s
     if received_sig.startswith("sha256="):
         received_sig = received_sig[len("sha256=") :]
 
-    body = await request.body()
-    expected_sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    if request.url.path.startswith("/control/perception/"):
+        request.state.perception_control_deadline = time.monotonic() + 0.9
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                return JSONResponse({"error": "invalid content length"}, status_code=400)
+            if (
+                declared_length < 0
+                or declared_length > _PERCEPTION_CONTROL_BODY_MAX_BYTES
+            ):
+                return JSONResponse({"error": "request body too large"}, status_code=413)
+        chunks: list[bytes] = []
+        body_size = 0
+        try:
+            async with asyncio.timeout_at(
+                request.state.perception_control_deadline
+            ):
+                async for chunk in request.stream():
+                    body_size += len(chunk)
+                    if body_size > _PERCEPTION_CONTROL_BODY_MAX_BYTES:
+                        return JSONResponse(
+                            {"error": "request body too large"},
+                            status_code=413,
+                        )
+                    chunks.append(chunk)
+        except TimeoutError:
+            return JSONResponse({"error": "request body timeout"}, status_code=408)
+        body = b"".join(chunks)
+        request.state.perception_control_body = body
+    else:
+        body = await request.body()
+    if request.url.path.startswith("/control/perception/"):
+        timestamp = request.headers.get("X-Perception-Timestamp", "")
+        nonce = request.headers.get("X-Perception-Nonce", "")
+        try:
+            timestamp_s = int(timestamp)
+        except ValueError:
+            return JSONResponse({"error": "invalid control authentication"}, status_code=401)
+        if (
+            str(timestamp_s) != timestamp
+            or abs(int(time.time()) - timestamp_s) > 300
+            or not 16 <= len(nonce) <= 128
+            or not nonce.isalnum()
+        ):
+            return JSONResponse({"error": "invalid control authentication"}, status_code=401)
+        canonical = b"\n".join(
+            (
+                timestamp.encode(),
+                nonce.encode(),
+                request.method.encode(),
+                request.url.path.encode(),
+                body,
+            )
+        )
+        expected_sig = hmac.new(
+            secret.encode("utf-8"), canonical, hashlib.sha256
+        ).hexdigest()
+    else:
+        expected_sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
 
     # Constant-time compare — T-02.1-8-01 / T-02.1-8-03 mitigation.
     if not hmac.compare_digest(received_sig, expected_sig):
         return JSONResponse({"error": "invalid X-Signature"}, status_code=401)
+
+    if request.url.path.startswith("/control/perception/"):
+        try:
+            db_path = request.app.state.sqlite_store.db_path
+            from polyarb.perception.store import OpportunityPerceptionStore
+
+            auth_store = OpportunityPerceptionStore(
+                db_path,
+                busy_timeout_ms=250,
+            )
+            accepted_at_ms = int(time.time() * 1_000)
+            deadline = request.state.perception_control_deadline
+            auth_task = asyncio.create_task(
+                asyncio.to_thread(
+                    auth_store.accept_operator_auth,
+                    nonce=nonce,
+                    request_method=request.method,
+                    request_path=request.url.path,
+                    request_timestamp_s=timestamp_s,
+                    body_hash=hashlib.sha256(body).hexdigest(),
+                    accepted_at_ms=accepted_at_ms,
+                    deadline_monotonic=deadline,
+                )
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(auth_task),
+                    timeout=max(0.001, deadline - time.monotonic() + 0.05),
+                )
+            except TimeoutError:
+                try:
+                    await asyncio.wait_for(asyncio.shield(auth_task), timeout=0.05)
+                except (TimeoutError, sqlite3.Error, ValueError):
+                    pass
+                return JSONResponse(
+                    {
+                        "status": "unavailable",
+                        "reason": "control-auth-store-unavailable",
+                    },
+                    status_code=409,
+                )
+        except sqlite3.IntegrityError:
+            return JSONResponse({"error": "invalid control authentication"}, status_code=401)
+        except (sqlite3.Error, ValueError):
+            return JSONResponse(
+                {"status": "unavailable", "reason": "control-auth-store-unavailable"},
+                status_code=409,
+            )
 
     # Re-inject body for downstream handler (handlers may or may not read it,
     # but ASGI semantics require the consumed body to be re-presented).
@@ -152,6 +264,108 @@ async def unpause(request: Request) -> JSONResponse:
             "failure_counter": scheduler._failure_counter,
         },
         status_code=200,
+    )
+
+
+async def build_market_map(request: Request) -> JSONResponse:
+    """Queue one normal Structure cycle without reviving a PAUSED scheduler."""
+    scheduler = getattr(request.app.state, "scheduler", None)
+    state = getattr(scheduler, "state", None)
+    state_value = getattr(state, "value", state)
+    if scheduler is None or state_value == SchedulerState.PAUSED.value:
+        return JSONResponse({"error": "unavailable"}, status_code=409)
+    queued = scheduler.request_now()
+    return JSONResponse(
+        {"status": "queued" if queued else "already_queued"},
+        status_code=202 if queued else 200,
+    )
+
+
+async def scan_neg_risk_map(request: Request) -> JSONResponse:
+    """Queue one normal global Quote cycle; disabled workers remain unavailable."""
+    worker = getattr(request.app.state, "quote_worker", None)
+    if worker is None:
+        return JSONResponse({"error": "unavailable"}, status_code=409)
+    queued = worker.request_now()
+    return JSONResponse(
+        {"status": "queued" if queued else "already_queued"},
+        status_code=202 if queued else 200,
+    )
+
+
+async def queue_perception_discovery(request: Request) -> JSONResponse:
+    return await _queue_perception_component(request, "discovery")
+
+
+async def queue_perception_reconciliation(request: Request) -> JSONResponse:
+    return await _queue_perception_component(request, "reconciliation")
+
+
+async def _queue_perception_component(request: Request, component: str) -> JSONResponse:
+    """Persist one coalescing wake-up; never invoke or revive a producer."""
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    enabled_flag = (
+        "opportunity_discovery_enabled"
+        if component == "discovery"
+        else "opportunity_reconciliation_enabled"
+    )
+    if not bool(getattr(request.app.state.settings, enabled_flag, False)):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "component-disabled"},
+            status_code=409,
+        )
+    nonce = request.headers["X-Perception-Nonce"]
+    store = OpportunityPerceptionStore(
+        request.app.state.sqlite_store.db_path,
+        busy_timeout_ms=250,
+    )
+    deadline = request.state.perception_control_deadline
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            store.queue_operator_wakeup,
+            component,
+            request_nonce=nonce,
+            occurred_at_ms=int(time.time() * 1_000),
+            deadline_monotonic=deadline,
+            require_resource_decision=bool(
+                getattr(
+                    request.app.state.settings,
+                    "opportunity_resource_controller_enabled",
+                    False,
+                )
+            ),
+        )
+    )
+    try:
+        queued = await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=max(0.001, deadline - time.monotonic() + 0.05),
+        )
+    except RuntimeError as error:
+        reason = (
+            "component-incident-active"
+            if str(error) == "component-incident-active"
+            else "component-unavailable"
+        )
+        return JSONResponse({"status": "unavailable", "reason": reason}, status_code=409)
+    except TimeoutError:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.05)
+        except (TimeoutError, sqlite3.Error, ValueError):
+            pass
+        return JSONResponse(
+            {"status": "unavailable", "reason": "component-unavailable"},
+            status_code=409,
+        )
+    except (sqlite3.Error, ValueError):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "component-unavailable"},
+            status_code=409,
+        )
+    return JSONResponse(
+        {"status": "queued" if queued else "already_queued"},
+        status_code=202 if queued else 200,
     )
 
 

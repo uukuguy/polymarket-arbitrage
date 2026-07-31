@@ -8,9 +8,14 @@ correctness.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -138,3 +143,85 @@ async def test_propagates_sdk_exceptions() -> None:
     with patch.object(client._client, "get_order_books", side_effect=RuntimeError("boom")):
         with pytest.raises(RuntimeError, match="boom"):
             await client.get_books(["t1"])
+
+
+async def test_injected_executor_owns_sync_sdk_call() -> None:
+    executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="candidate-dedicated-clob",
+    )
+    try:
+        client = ClobReaderClient(Settings(), executor=executor)
+        thread_names: list[str] = []
+
+        def fetch(_params):
+            thread_names.append(threading.current_thread().name)
+            return []
+
+        with patch.object(client._client, "get_order_books", side_effect=fetch):
+            await client.get_books(["t1"])
+
+        assert thread_names
+        assert thread_names[0].startswith("candidate-dedicated-clob")
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+async def test_get_books_top_projection_discards_full_depth_per_chunk() -> None:
+    """Snapshot callers retain the true top levels from worst-first CLOB rows."""
+    client = ClobReaderClient(Settings(clob_batch_size=2))
+    token_ids = [f"tok_{i}" for i in range(5)]
+
+    def full_depth(params):
+        return [
+            SimpleNamespace(
+                asset_id=param.token_id,
+                asks=[
+                    SimpleNamespace(price="0.99", size="1"),
+                    SimpleNamespace(price="0.70", size="2"),
+                    SimpleNamespace(price="0.51", size="3"),
+                ],
+                bids=[
+                    SimpleNamespace(price="0.01", size="4"),
+                    SimpleNamespace(price="0.30", size="5"),
+                    SimpleNamespace(price="0.49", size="6"),
+                ],
+                hash="raw-book-field-must-not-be-retained",
+            )
+            for param in params
+        ]
+
+    with patch.object(client._client, "get_order_books", side_effect=full_depth) as mocked:
+        out = await client.get_books(token_ids, projection="top")
+
+    assert mocked.call_count == 3
+    assert len(out) == len(token_ids)
+    assert all(set(book) == {"asset_id", "asks", "bids"} for book in out)
+    assert all(len(book["asks"]) == 1 and len(book["bids"]) == 1 for book in out)
+    assert out[0]["asks"] == [{"price": "0.51", "size": "3"}]
+    assert out[0]["bids"] == [{"price": "0.49", "size": "6"}]
+
+
+async def test_get_books_top_projection_does_not_block_event_loop_during_compaction() -> None:
+    client = ClobReaderClient(Settings(clob_batch_size=4))
+    books = [{"asset_id": f"t{i}", "asks": [], "bids": []} for i in range(4)]
+
+    def slow_compaction(book):
+        time.sleep(0.05)
+        return book
+
+    ticker = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.02, ticker.set)
+    with (
+        patch.object(client._client, "get_order_books", return_value=books),
+        patch(
+            "polyarb.clients.clob_client._compact_book_top",
+            side_effect=slow_compaction,
+        ),
+    ):
+        task = asyncio.create_task(
+            client.get_books(["t0", "t1", "t2", "t3"], projection="top")
+        )
+        await asyncio.wait_for(ticker.wait(), timeout=0.1)
+        assert not task.done()
+        await task

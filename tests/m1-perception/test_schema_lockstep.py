@@ -44,6 +44,38 @@ from polyarb.storage.sqlite_store import SQLiteStore
 PARQUET_ONLY_FIELDS = {"snapshot_taken_at_ms"}
 
 
+MARKET_TRUTH_COLUMNS = {
+    "snapshot_source_coverage": (
+        "snapshot_id",
+        "completed",
+        "market_items",
+        "event_items",
+        "failure_source",
+        "failure_reason",
+    ),
+    "event_market_memberships": (
+        "snapshot_id",
+        "event_id",
+        "neg_risk_market_id",
+        "market_id",
+        "member_kind",
+        "active",
+        "closed",
+    ),
+    "neg_risk_group_truth": (
+        "snapshot_id",
+        "event_id",
+        "neg_risk_market_id",
+        "neg_risk_type",
+        "expected_member_count",
+        "active_named_count",
+        "membership_hash",
+        "quality",
+        "reason",
+    ),
+}
+
+
 def _ddl_table_columns(table_name: str) -> list[str]:
     """Extract column names from CREATE TABLE <table_name> (...) block in DDL."""
     m = re.search(
@@ -62,10 +94,36 @@ def _ddl_table_columns(table_name: str) -> list[str]:
             continue
         first = line.split()[0]
         # Skip table-level constraints like PRIMARY KEY (a, b), CHECK(...), etc.
-        if first.upper() in {"CHECK", "FOREIGN", "PRIMARY", "UNIQUE", "CONSTRAINT"}:
+        if (
+            first.upper() in {"CHECK", "FOREIGN", "PRIMARY", "UNIQUE", "CONSTRAINT"}
+            or first.startswith(("'", '"', ")"))
+        ):
             continue
         cols.append(first)
     return cols
+
+
+@pytest.mark.parametrize(("table_name", "expected"), MARKET_TRUTH_COLUMNS.items())
+def test_market_truth_table_columns_match_contract(
+    table_name: str,
+    expected: tuple[str, ...],
+) -> None:
+    assert tuple(_ddl_table_columns(table_name)) == expected
+
+
+def test_market_truth_tables_are_created_by_init_schema(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "truth.db")
+    store.init_schema()
+
+    with sqlite3.connect(store.db_path) as con:
+        tables = {
+            row[0]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+    assert set(MARKET_TRUTH_COLUMNS) <= tables
 
 
 def _ddl_markets_columns() -> list[str]:
@@ -562,6 +620,15 @@ def test_parquet_r2_url_in_snapshots_three_sync_points() -> None:
     assert "parquet_r2_url" in SNAPSHOTS_INSERT_SQL, (
         "parquet_r2_url missing from SNAPSHOTS_INSERT_SQL"
     )
+
+
+def test_market_view_published_in_snapshots_three_sync_points() -> None:
+    from polyarb.storage.schemas import SNAPSHOTS_COLUMN_ORDER, SNAPSHOTS_DDL, SNAPSHOTS_INSERT_SQL
+
+    assert "market_view_published" in SNAPSHOTS_DDL
+    assert "market_view_published" in SNAPSHOTS_COLUMN_ORDER
+    assert "market_view_published" in SNAPSHOTS_INSERT_SQL
+    assert SNAPSHOTS_INSERT_SQL.count("?") == len(SNAPSHOTS_COLUMN_ORDER) - 1
 
 
 def test_scheduler_state_table_present_in_schema_and_executable() -> None:

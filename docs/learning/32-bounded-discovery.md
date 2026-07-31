@@ -1,0 +1,175 @@
+# Bounded Discovery：覆盖是一段时间的证据
+
+## 30 秒心智模型
+
+Discovery 不再尝试一次抓完“全市场时刻”。每轮只读取一个有上限的 Gamma keyset
+页面，并把以下事实放进同一个 SQLite 事务：
+
+```text
+opaque cursor
+  + complete-supported group revision
+  + priority inputs/output
+  + promotion
+  + per-group coverage sample
+  -> COMMIT
+```
+
+事务失败时 cursor 不动；进程重启后重读 cursor。页面结束只代表一轮扫描到尾，下一轮
+从头开始。15/30/60 分钟覆盖度描述滚动时间窗，不承诺任何新组都不漏。
+
+反向变化也是 authority：曾经 certified 的组若新页面变成 incomplete/unsupported，
+同一事务会追加单调 `invalidated` revision 并 supersede 旧 Quote。新身份不可知时，
+revision 保留上次诚实 legs/hash 作为“被撤销对象”；schedule 保存本次新
+quality/hash/reason。保留旧身份证据不等于继续授权。
+
+## 代码地图
+
+| 文件 | 责任 |
+|---|---|
+| `src/polyarb/clients/gamma_client.py` | 读取一个有界事件页，保留 opaque next cursor |
+| `src/polyarb/perception/discovery.py` | 复用事件/市场 normalizer，认证完整组并执行一个 batch |
+| `src/polyarb/perception/priority.py` | Decimal 权重、原始输入和无上限 age anti-starvation |
+| `src/polyarb/perception/store.py` | 同事务写 revision、schedule、promotion、coverage、cursor |
+| `src/polyarb/perception/candidate_watcher.py` | 首次盯盘前消费 Discovery 的持久化 score/class |
+| `src/polyarb/cli_discovery.py` | 只读输出 cursor、队列和 15/30/60 分钟覆盖 |
+
+## 关键数据契约
+
+事件页的 `next_cursor` 是远端 opaque token。代码只保存、回传和检查“没有原样重复”，
+不解析、不排序，也不猜测下一页。`completed=true` 时持久化空 cursor；下个 batch
+重新从第一页开始一轮新的滚动采样。
+
+Gamma event membership 可以证明 market ID 和组边界，但 Candidate Watcher 还需要
+condition ID、Yes token 和标题。Discovery 因此对每个 `complete-supported` 成员复用
+`normalize_market()`，只有所有 active named legs 都有完整身份时才构造
+`GroupRevision.certified()`。缺任何身份都会留下 `incomplete-source` schedule 和有界
+原因，但不会 promotion，更不会用空字符串伪造可运行候选。
+
+优先级公式是显式证据：
+
+```python
+score = (
+    edge_bps * Decimal("0.35")
+    + activity_rank * Decimal("0.20")
+    + liquidity_rank * Decimal("0.15")
+    + change_rank * Decimal("0.15")
+    + age_rank * Decimal("0.15")
+)
+```
+
+五个输入、输出和 reason 都以 Decimal 文本持久化。rank 限于 0..100，`age_rank`
+封顶为可比较的 200。真正的 starvation 保证来自配置的 durable maximum-wait：
+第一次 Candidate 采集前，scheduler 每轮用 `first_discovered_at_ms` 与当前时间重算
+overdue。factless/overdue promotion 永远走 normal/explore reserved capacity：每轮先
+服务真正有 Candidate fact 的 high burst，再给有限 overdue 槽，剩余 high 不被探索
+backlog 挤掉；同为 overdue 按 deadline 排序。重启只重读相同 anchors，结果确定；
+第一次终态后由 Candidate durable due time 接管。
+
+## 原子性和取消
+
+一个 batch 内先认证 revision，再更新 schedule/promotion、写 coverage sample，最后
+更新 cursor。任一步抛错都会 `ROLLBACK`，所以数据库不存在“cursor 已到下一页，但本页
+候选或覆盖事实消失”的状态。
+
+同步 SQLite commit 放在线程中。外层 task 在 commit 开始后被取消时，会持续 shield
+同一个 writer，等它明确 COMMIT 或 ROLLBACK 后才重新抛出第一次取消。结果可能是
+“整页已提交”或“整页未提交”，不会是 cursor 单独前进。
+
+## 覆盖度怎么读
+
+`make perception-discovery-status db_path=/path/to/state.db` 只读同一组 Discovery 表：
+
+- cursor 与最近 batch；
+- high/normal/explore promotion 数；
+- 最老 visit 年龄；
+- 15/30/60 分钟 distinct group raw coverage；
+- 同一窗口的 liquidity-weighted coverage。
+
+分母是当前已知 schedule，不是不可知的真实全市场；所以它是
+`active-known coverage`。覆盖低仍返回 0，因为这是业务事实，不是命令故障；数据库
+不存在、不可读或 schema 无效才返回非零。
+
+status 在一个 SQLite read transaction 中一起读取 cursor、全部 batch receipt、
+schedule、promotion admission、current revision、load-control modulus 和 coverage。
+它验证每个 `requested_cursor → next_cursor`、terminal 后新 sweep、时间、计数、
+Decimal/rank、枚举、promotion→current certified membership，以及
+`probe iff streak % modulus == 0`。并发 writer 不能让一份报告混合提交前后的事实，
+直接改坏数据库也不会被渲染成正常状态。
+
+每个页面还写 immutable batch receipt 与逐组 sample/promotion proof。status 将 latest
+state 的 page/groups/promotions/cursor/timestamps 与 receipt 逐字段比对，并从持久化
+inputs/anchors 用同一 Decimal 函数重算 score/reason。`group_id` 从 schedule 首次出现
+就绑定 `event_id`，不必等到 certified authority；同 group/hash 却换 event 会整页
+回滚。
+
+持续运行时，status 不会永远重扫从第一轮开始的所有 receipt。batch 超过 8,000 行后，
+writer 先在同一事务重放并验证完整 authority chain，再选择一个已完成 batch 边界，
+把前缀替换为版本化 checkpoint，并保留约 1,000 行实时后缀。checkpoint 绑定最后一个
+已完成 batch、对应 samples/schedule evidence、最近覆盖 visit seed、累计压缩计数和
+链式 prefix digest；status 随后只查询 `batch_id > through_batch_id` 的后缀并与 anchor
+一起验证。checkpoint/hash/anchor 被改、被删除前缀重新注入，或 prune 中途失败都会
+fail closed；checkpoint upsert 与 prefix delete 是一个事务，不能留下“证明已写但历史
+未删”或反向状态。旧库只在完整历史可证明时原子迁移，重复初始化幂等。
+
+Group revision、admission、attempt-start 和 Candidate fact 是另一组会持续增长的
+lifecycle。热 `discovery_status` 不再全表重放它们：owner writer 在同一事务刷新一个
+hash-bound current projection；SQLite triggers 对 admission/attempt 的
+insert/update/delete 推进 raw-authority sequence 和 attempt/breach counters。status
+只点读 projection、raw guard 与上面的有界 Discovery suffix。直接修改原始审计行会让
+sequence 漂移，修改 projection 会破坏 digest/hash，projection 写失败则整笔 owner
+事务回滚。这样 fail-close 不依赖每次 status 扫描全部历史。
+
+## 设计取舍
+
+- Candidate freshness 是“已有 durable Candidate fact 的 current certified groups
+  + capacity-admitted promotions”与 matching complete Quote 的一次 durable snapshot。
+  已认证但从未 watch、仍在 promotion queue 的组不在分母中，不能提前制造
+  missing-Quote 降级；已有 fact 的组不会因 rediscovery 时 `promoted_at=NULL` 被丢掉。
+  unavailable fact 也不会刷新 Quote age。任一真实 Candidate 缺 Quote 或
+  p95 接近 hard-stale 时，Discovery 在 Gamma 前 yield。
+- degraded 不会永久锁死 Discovery。每次 yield/probe 相位写入 durable load state；
+  N-1 个 degraded cycle 后只放行一个仍然有界的页面，其余容量继续留给 Candidate。
+  modulus 与 decision 一起持久化并接受 status 校验；重启不能重置或加速相位，
+  fresh recovery 明确把 streak 归零。
+- complete-supported 先认证并进入 durable promotion queue，不等于立即 promotion。
+  admission capacity 由 `poll + bounded selection + capacity × attempt-start SQLite write +
+  (high burst + prior admitted slots) × (group timeout + terminal-write budget) ≤ 60s`
+  证明；所有毫秒预算向上取整，默认有效上界 47 秒、只允许一个 factless promotion。
+  source 枚举和 facts/schedules 使用一个专用单线程 executor 与一次 bulk SQLite
+  snapshot。Candidate 终态事实与 admit-next 在同一事务完成。
+- admitted group 进入 watcher 后的第一条 durable operation 原子校验 admission identity
+  并写 attempt-start receipt。晚于持久化 deadline
+  时不再静默执行，而是写 `candidate-start-deadline-breached/unavailable`，status
+  保持 non-ready。进程级强杀/隔离仍属于 Task 5，本层证明的是线程、SQLite busy 和
+  每组 timeout 的数学上界。
+- 每次 admission 还会在同一事务追加 immutable audit，保存
+  group/event/membership/promotion/deadline 与完整 capacity proof。attempt receipt
+  必须 exact join 这条 audit，并证明对应 certified revision 在 promotion 时已存在；
+  receipt 不能靠自己内部的 `deadline=promotion+60s` 冒充真实 admission。
+- historical sample 按语义校验：`complete-supported` 必须有 batch 完成前的精确
+  certified revision；合法 `incomplete-source` / `complete-unsupported` 首次发现
+  本来就没有 revision，但仍必须 non-promoted、身份字段非空、reason 合法且计数闭合。
+  每个 sample 还会在同一 batch 事务追加 schedule evidence（batch/time/identity/
+  quality/reason/promotion）；无 revision 的历史拒绝样本必须 exact join 这条 evidence，
+  因而篡改非最新 sample 为 ghost 也会 fail closed。
+- promotion source 和 freshness 共享 current certified +（独立 bootstrap authority、
+  Candidate fact 或 admitted promotion）权威谓词；legacy seed 只保序，不能绕过或
+  复活失效 authority。
+- feature flag 默认关闭；本 slice 只完成生产代码路径，不等于已经完成部署和切换。
+- 这里仍是 observer-only，不含钱包、签名、余额、下单或资金执行。
+
+## 自检题
+
+1. 为什么 coverage=100% 仍不能说“全市场零遗漏”？
+2. cursor 为什么必须和 schedule/promotion/coverage 在一个事务？
+3. event membership 已 complete-supported，为什么仍可能拒绝 promotion？
+4. age rank 为什么不能被固定上限永久压住？
+5. Candidate Quote 已接近 stale 时，Discovery 应该继续追覆盖还是 yield？
+
+## FAQ 增量
+
+### 一页里某个组身份不完整，为什么仍可提交 cursor？
+
+“身份不完整”是该组的有界 source rejection，不等于整页传输/normalization 失败。它会
+作为 `incomplete-source` 事实参与覆盖，但不会 promotion。只有页面形状、cursor、
+结构 normalizer 或事务本身失败时，整页才回滚且 cursor 不动。

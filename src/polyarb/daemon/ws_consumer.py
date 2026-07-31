@@ -26,7 +26,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -42,6 +42,7 @@ from polyarb.clients.ws_market_client import (
 from polyarb.daemon.ws_watchdog import WsWatchdog
 from polyarb.observation.l3_evidence import (
     FrameDispatchResult,
+    PreparedL3Target,
     RuntimeEventKind,
     RuntimeEventSeverity,
     WsMembershipSnapshot,
@@ -64,6 +65,7 @@ class _BookEvidenceWaiter:
 
     future: asyncio.Future[bool]
     missing: set[str] = field(default_factory=set)
+    observed_at: dict[str, datetime] = field(default_factory=dict)
 
 
 # ── Phase 03.1-06 D-04 / Phase 04.1 G-03: POLYARB_WS_TEST_KILL chaos primitive ─
@@ -513,6 +515,21 @@ class WsConsumer:
         )
         return retry_after_s
 
+    async def compensate_current_generation(self, *, reason_code: str) -> None:
+        """Compensate the current socket without exposing its identity to callers."""
+        if not reason_code or len(reason_code) > 96:
+            raise ValueError("reason_code must contain 1..96 characters")
+        ws = self._current_ws
+        generation = self._connection_generation
+        if ws is None:
+            return
+        logger.warning(
+            "ws current generation compensation requested reason={} generation={}",
+            reason_code,
+            generation,
+        )
+        await self._compensate_generation(ws, generation)
+
     def requires_book_levels(self, asset_id: str) -> bool:
         """Return current-generation depth-write eligibility for one token.
 
@@ -564,6 +581,9 @@ class WsConsumer:
             if not self._last_quiet_refresh_missing_assets:
                 self._last_quiet_refresh_missing_generation = None
         for waiter in tuple(self._book_evidence_waiters.get(generation, ())):
+            previous = waiter.observed_at.get(asset_id)
+            if previous is None or observed_at >= previous:
+                waiter.observed_at[asset_id] = observed_at
             waiter.missing.discard(asset_id)
             if not waiter.missing and not waiter.future.done():
                 waiter.future.set_result(True)
@@ -688,6 +708,60 @@ class WsConsumer:
         *,
         required_asset_ids: frozenset[str] | None = None,
     ) -> bool:
+        """Refresh book evidence while preserving the legacy boolean API."""
+        result = await self._request_book_evidence(
+            required_asset_ids=required_asset_ids,
+            operation="book_refresh",
+        )
+        return result is not None
+
+    async def prepare_l3_target(
+        self,
+        asset_ids: frozenset[str],
+    ) -> PreparedL3Target | None:
+        """Collect exact durable evidence without publishing new L3 membership."""
+        target = frozenset(asset_ids)
+        async with self._subscription_control_lock:
+            generation = self._connection_generation
+            if (
+                self._current_ws is not None
+                and target
+                and target == self._l3_desired_set == self._l3_committed_set
+            ):
+                evidenced_at = {
+                    asset_id: observed_at
+                    for asset_id, (evidence_generation, observed_at) in (
+                        self._l3_business_evidence.items()
+                    )
+                    if evidence_generation == generation and asset_id in target
+                }
+                if set(evidenced_at) == set(target):
+                    return PreparedL3Target(
+                        generation=generation,
+                        asset_ids=target,
+                        evidenced_at=evidenced_at,
+                    )
+        result = await self._request_book_evidence(
+            required_asset_ids=target,
+            operation="promotion_stage",
+        )
+        if result is None:
+            return None
+        generation, evidenced_at = result
+        if generation != self._connection_generation or set(evidenced_at) != set(target):
+            return None
+        return PreparedL3Target(
+            generation=generation,
+            asset_ids=target,
+            evidenced_at=evidenced_at,
+        )
+
+    async def _request_book_evidence(
+        self,
+        *,
+        required_asset_ids: frozenset[str] | None = None,
+        operation: Literal["book_refresh", "promotion_stage"],
+    ) -> tuple[int, dict[str, datetime]] | None:
         """Request an initial book dump for the required asset scope.
 
         Sending a request is transport activity, not business-data freshness:
@@ -730,7 +804,7 @@ class WsConsumer:
                         RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
                         reason_code="no_active_connection",
                         detail={
-                            "operation": "book_refresh",
+                            "operation": operation,
                             "error_type": "NoActiveConnection",
                         },
                         severity=RuntimeEventSeverity.WARNING,
@@ -822,7 +896,7 @@ class WsConsumer:
             logger.info(f"ws quiet refresh: evidenced assets={len(required_assets)}")
             self._last_quiet_refresh_missing_assets = frozenset()
             self._last_quiet_refresh_missing_generation = None
-            return True
+            return generation, dict(waiter.observed_at)
         except asyncio.CancelledError:
             if ws is not None:
                 await self._compensate_generation(ws, generation)
@@ -841,14 +915,79 @@ class WsConsumer:
                 len(required_assets),
                 len(missing_assets),
             )
-            if failure_reason == "evidence_timeout" and final_subscribe_confirmed:
-                return False
+            if failure_reason == "evidence_timeout":
+                self._record_runtime_event(
+                    RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED,
+                    reason_code="evidence_timeout",
+                    detail={
+                        "operation": operation,
+                        "error_type": "TimeoutError",
+                        "required_count": len(required_assets),
+                        "missing_count": len(missing_assets),
+                    },
+                    severity=RuntimeEventSeverity.WARNING,
+                    generation=generation,
+                )
+                if final_subscribe_confirmed:
+                    return None
             if ws is not None:
                 await self._compensate_generation(ws, generation)
-            return False
+            return None
         finally:
             if waiter is not None:
                 self._discard_book_evidence_waiter(generation, waiter)
+
+    async def commit_l3_target(self, prepared: PreparedL3Target) -> bool:
+        """Publish one exact evidenced target after make-before-break controls."""
+        if not isinstance(prepared, PreparedL3Target):
+            raise TypeError("prepared must be a PreparedL3Target")
+        ws: Any = None
+        generation = prepared.generation
+        try:
+            async with self._subscription_control_lock:
+                ws = self._current_ws
+                if ws is None or generation != self._connection_generation:
+                    return False
+                current = frozenset(self._l3_committed_set)
+                added = sorted(prepared.asset_ids - current)
+                removed = sorted(current - prepared.asset_ids)
+                if added and not await self._send_control(
+                    ws,
+                    {
+                        "operation": "subscribe",
+                        "assets_ids": added,
+                        "initial_dump": True,
+                    },
+                ):
+                    raise RuntimeError("target subscribe failed")
+                if removed and not await self._send_control(
+                    ws,
+                    {"operation": "unsubscribe", "assets_ids": removed},
+                ):
+                    raise RuntimeError("target unsubscribe failed")
+                if ws is not self._current_ws or generation != self._connection_generation:
+                    raise RuntimeError("target generation changed")
+                self._l3_desired_set = set(prepared.asset_ids)
+                self._l3_committed_set = set(prepared.asset_ids)
+                self._l3_business_evidence = {
+                    asset_id: (generation, observed_at)
+                    for asset_id, observed_at in prepared.evidenced_at.items()
+                }
+                self._publish_l3_membership_locked()
+                return True
+        except asyncio.CancelledError:
+            if ws is not None:
+                await self._compensate_generation(ws, generation)
+            raise
+        except Exception as exc:  # noqa: BLE001 - ambiguity closes captured generation
+            logger.warning(
+                "l3 target commit failed error_type={} generation={}",
+                type(exc).__name__,
+                generation,
+            )
+            if ws is not None:
+                await self._compensate_generation(ws, generation)
+            return False
 
     async def refresh_if_quiet(
         self,

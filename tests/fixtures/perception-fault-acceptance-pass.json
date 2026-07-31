@@ -1,0 +1,32 @@
+{
+  "app_id": "polyarb-l1",
+  "candidate_quote_p95_s": 15,
+  "candidate_stale_before_s": 60,
+  "containment_s": 20,
+  "coverage_window_s": 900,
+  "cross_membership_quote_batches": 0,
+  "evidence_schema_version": 1,
+  "http_p95_s": 1.0,
+  "incidents": [
+    {
+      "component": "candidate",
+      "incident_id": 7,
+      "recovery_writer_receipt": {
+        "component": "candidate",
+        "receipt_row_id": 41
+      },
+      "state": "verified"
+    }
+  ],
+  "liquidity_weighted_active_known_coverage": 0.95,
+  "mttd_s": 10,
+  "scope": "local-conformance",
+  "normal_quote_stale_before_s": 100,
+  "oldest_known_group_visit_s": 3600,
+  "orphan_collecting_runs": 0,
+  "open_incident_count": 0,
+  "promotion_to_watch_s": 30,
+  "reconciliation_advancing": false,
+  "reconciliation_closure_s": 3600,
+  "reconciliation_complete": true
+}

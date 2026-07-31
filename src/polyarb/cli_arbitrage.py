@@ -45,15 +45,19 @@ from polyarb.routing.config import ExecutionConfig, PositionConfig, RoutingConfi
 from polyarb.routing.engine import RoutingEngine
 from polyarb.routing.money import Money
 from polyarb.routing.neg_risk_quote_collector import collect_neg_risk_quotes
-from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
+from polyarb.routing.neg_risk_quote_store import (
+    NegRiskQuoteStore,
+    QuoteUniverseUnavailableError,
+)
 from polyarb.routing.opportunity_diagnosis import diagnose_opportunity_feed
 from polyarb.routing.opportunity_scanner import (
+    QUOTE_SLA_SECONDS,
     QuoteRunUnavailableError,
     StaleQuoteRunError,
     StaleSnapshotError,
     StaleUniverseError,
     scan_neg_risk_buy_all,
-    scan_neg_risk_quote_run,
+    scan_verified_neg_risk_quote_run,
 )
 from polyarb.routing.position_repository import (
     RepositoryStateError,
@@ -122,6 +126,7 @@ def collect_neg_risk_quotes_command(
                 "status": result.status,
                 "successful_response_count": result.successful_response_count,
                 "universe_snapshot_id": result.universe_snapshot_id,
+                "universe_hash": result.universe_hash,
             },
             sort_keys=True,
         )
@@ -361,13 +366,17 @@ def scan(
 def scan_quotes(
     db_path: Path = typer.Option(Path("data/state.db"), "--db-path"),
     min_edge_bps: float = typer.Option(0.0, "--min-edge-bps"),
-    max_quote_age_s: float = typer.Option(300.0, "--max-quote-age-s"),
+    max_quote_age_s: int = typer.Option(300, "--max-quote-age-s", min=0),
     max_universe_age_s: float = typer.Option(50_400.0, "--max-universe-age-s"),
     limit: int = typer.Option(20, "--limit"),
 ) -> None:
-    """Scan exactly one complete known-universe quote run, never a snapshot fallback."""
+    """Scan exactly one verified quote run, never a snapshot fallback."""
     try:
-        found = scan_neg_risk_quote_run(
+        if max_quote_age_s != QUOTE_SLA_SECONDS:
+            raise ValueError(
+                "max_quote_age_s must equal the canonical 300-second SLA"
+            )
+        result = scan_verified_neg_risk_quote_run(
             db_path,
             min_edge_bps=min_edge_bps,
             max_quote_age_s=max_quote_age_s,
@@ -376,6 +385,7 @@ def scan_quotes(
         )
     except (
         sqlite3.Error,
+        QuoteUniverseUnavailableError,
         QuoteRunUnavailableError,
         StaleQuoteRunError,
         StaleUniverseError,
@@ -388,8 +398,16 @@ def scan_quotes(
             {
                 "strategy": "neg-risk-buy-all",
                 "profit_basis": "gross-before-fees",
-                "count": len(found),
-                "opportunities": [item.to_dict() for item in found],
+                "coverage": "verified-standard-neg-risk",
+                "source_snapshot_id": result.source_snapshot_id,
+                "universe_hash": result.universe_hash,
+                "quote_run_id": result.quote_run_id,
+                "quote_sla_seconds": QUOTE_SLA_SECONDS,
+                "count": len(result.opportunities),
+                "rejections": dict(result.rejections),
+                "opportunities": [
+                    item.to_dict() for item in result.opportunities
+                ],
             },
             indent=2,
         )

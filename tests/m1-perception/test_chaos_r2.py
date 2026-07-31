@@ -67,19 +67,30 @@ def _make_settings_with_r2(tmp_path: Path) -> Settings:
 
 
 def _make_fake_gamma(markets: list[dict]) -> object:
+    events = [
+        {
+            "id": f"EV-{market['id']}",
+            "slug": f"event-{market['id']}",
+            "active": True,
+            "closed": False,
+            "markets": [{"id": market["id"]}],
+        }
+        for market in markets
+    ]
     fake = AsyncMock()
     fake.fetch_all_active_markets.return_value = markets
-    fake.fetch_all_active_events.return_value = []
+    fake.fetch_all_active_events.return_value = events
 
     def _make_iter(items):
-        async def _iter():
+        async def _iter(coverage):
             for item in items:
                 yield item
+            coverage.result = type(coverage.result)(len(items), 1, True, None)
 
         return _iter
 
     fake.iter_active_markets = _make_iter(markets)
-    fake.iter_active_events = _make_iter([])
+    fake.iter_active_events = _make_iter(events)
     fake.aclose = AsyncMock()
     fake.__aenter__.return_value = fake
     fake.__aexit__.return_value = None

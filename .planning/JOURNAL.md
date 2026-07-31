@@ -5281,3 +5281,515 @@ At/after `2026-07-27T03:54:09.630Z`, start with
 require every run complete and maximum gap `<=180s`, recheck resident state and
 immutable app identity, then create `05-06-SUMMARY.md`, sign Phase 05
 validation/ROADMAP/STATE, extract learnings, and run final verification.
+
+## SESSION 105 — 2026-07-26 (L3 continuity repair ready to deploy)
+
+- [ROOT CAUSE] Production run 450 published a rotated target before all ten
+  durable book identities converged; a separate quiet-refresh interval allowed
+  per-market evidence to cross 120 seconds without invalidating the socket.
+- [FIX] Book-evidence timeout now persists bounded failure truth and closes
+  only its captured generation. New L3 targets are generation-scoped,
+  evidence-complete before publication, and committed make-before-break in one
+  membership snapshot.
+- [ATOMICITY] Promoter success requires exact 5 markets / 10 tokens and
+  desired=committed=evidenced. Promoter publication and evidence sampling share
+  one transition lock, so no durable sample can observe an 8/10 or 9/10 new
+  mapping.
+- [FAIL-CLOSED] Mirror/control/ledger failures retain the previous durable
+  mapping. A post-commit ledger failure restores old reconnect intent,
+  compensates the current generation, and rolls back the mirror before the
+  sampler gate opens.
+- [MONITOR MERGE] Recovered and committed the already-tested resident
+  two-minute Fly monitor, Telegram dedup/recovery, and
+  `make polywatch-resident-status` work that had remained uncommitted in the
+  main worktree; merged it into the repair branch.
+- [QUALITY] Full pytest exited 0 with one xfail/one skip; all changed Python
+  files pass Ruff; M1 manual contract and planning status pass. Full-tree Ruff
+  still exposes 36 unrelated historical findings and is not misreported as
+  green.
+- [DOCS] Added `docs/learning/24-L3-连续性事务.md` and explicit manual meanings
+  for membership convergence and worst-market freshness failures.
+- [BOUNDARY] No production claim yet. The next mutation is an L2-only deploy;
+  L1 app/machine/image and quote run-78 interval must remain unchanged.
+
+### [NEXT — CURRENT]
+
+From the tested repair worktree, capture L1/L2 pre-deploy identities and the
+current quote anchor, deploy only `polyarb-l2`, verify the exact release and
+strict health, observe one promoter plus quiet-refresh boundary, then open a
+new immutable 24-hour L3 evidence interval without resetting L1.
+
+## SESSION 106 — 2026-07-26 (release 73 rejected; corrected repair green)
+
+- [PRODUCTION REJECTION] Exact L2 release 73/source `90d72aa…`, instance
+  `01KYEPW…`, boot `60c3b70b…` started at 10/10/10 but failed its first real
+  promoter boundary. Run 1 timed out after 25.750s with four missing books,
+  compensated generation 1, and durable samples 11/12 persisted 10/10/8.
+- [SECOND PROOF] Ordinary quiet refresh at `08:08:01Z` missed two identities
+  and compensated generation 2. Runtime events, promoter rows, and sample rows
+  agree exactly; no T0 was opened and release 73 is permanently rejected.
+- [ROOT CAUSE] The promoter destructively refreshed an unchanged target every
+  five minutes. The sampler lock covered atomic promoter commit but did not
+  cover a genuine reconnect's incremental initial dump. Missing business
+  frames were incorrectly classified as control ambiguity.
+- [TDD REPAIR] Three new/changed tests all failed on release-73 source:
+  preserve a healthy socket on evidence timeout, reuse exact unchanged-target
+  evidence with zero controls, and block an 8/10 reconnect sample. Corrected
+  commit `92797cc` makes all three pass.
+- [CONTRACT] Live strict health remains fail-fast during reconnect; durable
+  sampling waits for exact desired=committed=evidenced. If convergence exceeds
+  75 seconds, sample-age health fails, so waiting does not create an
+  unmonitored gap. Control-send failure, cancellation, and generation drift
+  still compensate only the captured socket.
+- [QUALITY] 232 focused L2/L3 tests and changed-file Ruff passed. Full pytest
+  reached 100% with the established one xfail and one skip.
+
+### [NEXT — CURRENT]
+
+From clean exact corrected SHA, deploy only `polyarb-l2`; verify release,
+machine/image/boot identity and 10/10/10, then observe at least one real
+unchanged promoter tick plus quiet-refresh boundary with no compensation or
+partial durable sample. Preserve the L1 machine and quote-run-78 anchor. Only
+then create the new L3 T0 manifest.
+
+## SESSION 107 — 2026-07-26 (release 75 live; corrected T0 PASS)
+
+- [DEPLOY] Corrected executable release
+  `9f385cacc104fa54dd444151a8c4ecb423e94dde` is live as Fly release 75,
+  machine `85e647c4eed598`, instance `01KYES89KD9WA8VV9V2B3PJV7R`, boot
+  `d029c2ea-e357-4ce2-8f7c-6c4e11867254`, digest
+  `sha256:f0d39892207577bb024995d76e91f5c0b8c0a88fd8e2839e182d25125da16ad5`.
+- [PRODUCTION PROOF] Two real promoter ticks passed 5/10/10/10 on generation
+  1, a real quiet refresh completed without compensation, and every inspected
+  durable sample remained 10/10/10.
+- [REJECTED PREFLIGHT] The first release-75 manifest declared `/tmp` report
+  paths. It is retained and rejected; no T0 report exists.
+- [SELECTED ATTEMPT] Corrected manifest `3ad69a90…`, soak `ac32e70a…`, was
+  bound before exact T0 `2026-07-26T08:51:13.206077Z`. Canonical T0 is PASS:
+  1 health, 5 market, 0 promoter, 0 event rows; maximum freshness 36.893
+  seconds; exact 10/10/10 membership.
+- [ACTIVE MONITORING] Fly Polywatch continues every two minutes and sends
+  Telegram on failures/recovery. Checkpoint artifact generation is assigned
+  to a macOS `launchd` job every five minutes, so no foreground terminal or
+  empty 24-hour wait is required.
+- [SCHEDULER PREFLIGHT] LaunchAgent
+  `com.polyarb.l3-soak-autocheckpoint` passed exact repository/Fly/L3
+  health/Keychain/Git checks and exited 0 with
+  `idle next=T+6@2026-07-26T14:51:13.206077Z`. The T6 file does not exist
+  early. A redundant background push wait and stale-lock recovery were fixed
+  before any checkpoint boundary; neither affected production or evidence.
+
+### [NEXT — CURRENT]
+
+The scheduler creates T+6/T+12/T+18/T+24 reports at their immutable
+not-before boundaries and runs final verification at/after
+`2026-07-27T08:51:13.206077Z`. Do not restart L2, alter the manifest, or sign
+Plan 05 closure before the final verifier and the independent quote T+24 gate.
+
+## SESSION 108 — 2026-07-26 (Telegram alert/recovery diagnosed; attempt rejected)
+
+- [CURRENT HEALTH] Release 75 is not continuously down. The resident watcher
+  state is empty, its recent two-minute ticks are green, and 24 exact dry probes
+  over about two minutes all returned no L2 notification. A current
+  `WAITING_FOR_EVENT` warning with WS age zero is an intentional no-alert state.
+- [DURABLE EVIDENCE] Since T0, 215/215 health samples and 1,075/1,075 market
+  samples pass; desired/committed/evidenced membership stayed at least
+  10/10/10 and maximum health-sample gap was 60.948 seconds.
+- [REAL FAULT] Runtime evidence contains disallowed
+  `subscription_control_failed / evidence_timeout` events at
+  `09:28:32.793437Z`, `09:51:14.697072Z`, and `10:36:26.013847Z`. The last
+  missed two of ten quiet-refresh identities, then the retry recovered them.
+- [ROOT CAUSE] Fly logs show PostgreSQL `23505` on
+  `uq_l2_book_levels_asset_ts_side_level`. A quiet-refresh initial dump can
+  replay a depth snapshot already durably stored with the same venue timestamp;
+  plain insert reports failure, so the evidence chain discards a durable replay
+  and times out until a later-timestamp retry arrives.
+- [VERDICT] The bound release-75 interval is permanently NOT-CLOSED under its
+  zero-disallowed-event contract. T0 remains valid evidence, but waiting longer
+  cannot rehabilitate this attempt. The service is usable now; continuous
+  qualification is not.
+- [OBSERVABILITY GAP] The exact reason line of the user's older Telegram
+  messages is no longer reconstructible from the watcher state or retained Fly
+  logs. The watcher stores only `active_keys`, not the alert reason/timestamp.
+
+### [NEXT — CURRENT]
+
+Start with `/gsd-resume-work --ws m1-perception`; implement and test
+replay-idempotent `l2_book_levels` persistence while preserving fail-closed
+behavior for conflicting payloads. Then deploy only L2 and create a fresh boot,
+manifest, and 24-hour T0. Also persist Polywatch alert reason/timestamp.
+
+## SESSION 109 — 2026-07-27 (snapshot capacity decision deferred to holistic repair)
+
+- [DECISION] Treat the 1 GB snapshot OOM as a system capacity/topology problem,
+  not a new isolated defect. Production evidence shows the HTTP parent,
+  snapshot child, and quote child can collectively exhaust the current cgroup.
+- [DIRECTION] Use a reliability-first staged design: measured headroom for M1
+  initial operation; snapshot/feed isolation plus atomic publication for M2
+  integration; separate perception/strategy/execution failure domains before
+  live trading.
+- [BOUNDARY] Record the direction now but do not independently resize or
+  re-architect yet. Exact resources, cadence, storage boundary, and migration
+  order will be decided from the complete observation evidence and executed as
+  part of the consolidated repair.
+
+## SESSION 110 — 2026-07-27 (M1 continuity truth first wave)
+
+- [LEARNING] Published market truth and the latest scheduler attempt are separate
+  operational facts. A current published revision may remain readable, but a
+  newly failed attempt is immediately visible and independently alertable.
+- [DECISION] Persist every scheduler-created snapshot attempt append-only, expose
+  latest attempt plus consecutive-failure count in L1 strict health, and keep
+  `never-started` compatibility-neutral rather than pretending it is success.
+- [DECISION] Polywatch incidents are now component-scoped: L1, opportunity, L2,
+  and Dashboard recover independently. A continuing L2 incident cannot conceal
+  an L1 recovery; failed Telegram delivery retains only the affected incident.
+- [OPERATOR] `make snapshot-attempt-status` is a read-only local JSON diagnostic.
+  It does not connect to Fly, create schema, or start a new qualification run.
+
+## SESSION 111 — 2026-07-27 (Structure/Archive execution split, local green)
+
+- [IMPLEMENTED] The L1 in-app scheduler now starts only `snapshot --product structure`.
+  Structure is full Gamma plus final member reconciliation; it never creates a CLOB
+  client, writes Parquet/R2, or mirrors price data.
+- [IMPLEMENTED] Archive is an explicit full CLOB/Parquet product with
+  `market_view_published=0`. Its CLOB failure records `data_product=archive`,
+  `archive_status=failed` and leaves the prior Structure `markets` view intact.
+- [HEALTH] strict health reads only Structure for its online status. New
+  `archive:last_attempt` / `archive:last_success_age_seconds` are visible but
+  deliberately non-blocking warning evidence.
+- [OPERATOR] Added `make sync-structure-local` and `make archive-markets-local`.
+  The former is Gamma-only local mutation; the latter is deliberate research
+  archive work, not production scheduling.
+- [CONFIG] Removed the volume-less cron's direct snapshot and purge jobs. The
+  256MB cron process now runs only independent Polywatch; only the mounted app
+  scheduler may publish Structure.
+- [CORRECTION] Production Structure 753 proved the old `notes` heuristic could
+  mislabel a valid `DEGRADED` result as `snapshot:last_status=OK`. Persist
+  `snapshot_status` atomically and have health read it before the next cadence
+  decision; this is a truthfulness repair, not a data-product change.
+- [DEPLOY] Release 162 deployed `51a34f8`. The migration backfilled Structure
+  753 as `DEGRADED`; strict health now reports that truth without blocking a
+  complete Structure, fresh Quote, or verified M2 evaluation feed.
+- [EVIDENCE] Structure 753 and 754 both completed and published full Gamma
+  coverage; scheduler attempts are 2/2 succeeded with failure counter 0. The
+  754-bound Quote run produced a verified-standard-neg-risk opportunity feed.
+- [CAPACITY] Full Structure children completed in roughly 100–116 seconds;
+  current app cgroup usage was about 716MB with zero kernel memory fail count.
+  The host does not expose a trustworthy cgroup peak here, so this is current
+  occupancy evidence, not a claimed peak headroom measurement.
+- [CONFIG] Release 163 deployed `e9f3cbd` to the app process only. Production
+  scheduler logs prove `tick interval=300s`; Structure 755 completed in about
+  108 seconds and Quote 741 bound to it before M2 feed publication.
+- [BUG] Polywatch's recurring Quote alerts were not market failures: a newly
+  published Structure correctly invalidated the previous Quote, while the
+  matching Quote child was still collecting for seconds. Mark that exact,
+  bounded `source-snapshot-refreshing` state as warn and suppress only its
+  paired opportunity 503; a timeout, failed collector, or stopped worker still
+  alerts fail-closed.
+
+### [NEXT — CURRENT]
+
+Deploy the tested bounded Structure→Quote transition repair, then verify a
+full automatic 5-minute Structure cycle produces no Telegram alert while a
+true Quote failure would still surface. Do not label the next long-running
+production window closed until its evidence is evaluated; Polywatch remains
+the active two-minute fault detector throughout.
+
+## SESSION 112 — 2026-07-27 (M1 child lifecycle continuity repair)
+
+- [REAL FAULT] A rolling L1 deploy could cancel the Quote worker parent while
+  leaving its isolated CLOB child and durable `collecting` quote lease alive.
+  The replacement then safely waited for expiry, creating an avoidable M2
+  availability gap. The original child-reap path also cancelled its pipe reader
+  and attempted a second `communicate()`, which cannot reliably reap that child.
+- [IMPLEMENTED] Release 173 (`f9e5ff9`) gives Quote collection one shielded
+  reap task for its entire lifetime: TERM, bounded wait, KILL if needed, then
+  atomically fail only durable `collecting` runs as `collector-cancelled`.
+  Complete Quote runs remain immutable.
+- [PRODUCTION EVIDENCE] A controlled restart interrupted Quote run 797. SQLite
+  records `797=failed/collector-cancelled`; the replacement created and completed
+  run 798 on the same Structure revision, and `make diagnose-arb-feed-prod
+  min_edge_bps=0` returned a verified opportunity feed.
+- [FOLLOW-UP FAULT] The bounded Structure timeout path had the same cancelled
+  pipe-reader / second-communicate defect. A timeout could be recorded while
+  child reaping was not mechanically proven.
+- [IMPLEMENTED] Release 174 (`a960f32`) applies the same one-reap-task contract
+  to Structure. New RED tests require one communicator, TERM, KILL fallback,
+  and terminal reaping for Quote cancellation and Structure timeout.
+- [PRODUCTION EVIDENCE] Under release 174, Structure attempt 22 completed in
+  235.8 seconds and atomically published Structure 764; Quote run 802 bound to
+  that exact revision and produced 14 verified gross-before-fees candidates.
+  Strict L1 health returned 200, latest attempt succeeded, failure counter 0.
+- [OPEN] Structure runtime remains variable (about 113–236 seconds with some
+  pre-repair 240-second timeouts). The new boundary guarantees bounded, visible,
+  non-orphaned failure; it does not yet explain or eliminate upstream Gamma
+  latency. Archive remains intentionally unscheduled and non-blocking.
+
+### [NEXT — CURRENT]
+
+Start with `make smoke-health-prod`, then inspect the latest three
+`snapshot_attempts` on the mounted L1 app machine and correlate any timeout
+with bounded child-reap logs. Instrument/diagnose the variable Gamma Structure
+runtime before changing the 240-second production deadline; keep Quote/M2
+gating strict and Archive non-blocking.
+
+## SESSION 113 — 2026-07-27 (M1 neg-risk opportunity watcher implementation)
+
+- [DECISION] The user approved the cloud-first neg-risk watcher design: 30-minute
+  Structure map, 2-minute global verified Quote discovery, 15-second focused
+  top-of-book follow-up only after a >=100 gross-bps observation, observer-only
+  Telegram cards, and bounded evidence retention. The approved design and
+  implementation plan are committed as `48a2b6e` and `829644f`.
+- [IMPLEMENTED] `8fd425b` adds complete per-group Quote assessment. A valid
+  group below threshold is now explicitly `no-edge`; a missing/non-executable
+  leg is `unavailable`, never a false zero-price opportunity.
+- [IMPLEMENTED] `b623e31`, `916c55f`, and `00a2537` add the local durable
+  opportunity ledger: atomic master + append-only global observation + outbox;
+  close on a complete below-threshold observation; 25bps material-edge
+  notification intent; and delivery/failure audit mutations that do not alter
+  market facts. All focused ledger/scanner regressions and Ruff pass.
+- [NOT DEPLOYED] The new watcher is not wired into the L1 daemon yet and no
+  Fly configuration, scheduler cadence, or production data has been changed.
+
+### [NEXT — CURRENT]
+
+Start with `uv run pytest tests/routing/test_opportunity_ledger.py -q`, then
+implement `OpportunityWatcher` to reconcile only successfully certified global
+Quote projections into the durable ledger and deliver its notification outbox.
+
+## SESSION 114 — 2026-07-27 (M1 observer-only neg-risk watcher, local closure)
+
+- [IMPLEMENTED] `7632844` and `c2fda53` add `OpportunityWatcher` global
+  reconciliation after complete Quote certification, durable Telegram delivery
+  evidence, and full observer-only card provenance. A missing Telegram
+  credential is retryable rather than falsely delivered; every attempt is
+  append-only.
+- [IMPLEMENTED] `8fd7eb1` and `8b9200b` add a 15-second focused top-of-book
+  tracker. It reads only active masters, requires exact membership from the
+  newest published Structure revision before CLOB I/O, retains the opening
+  Quote run as immutable provenance, and drops expected global-refresh races
+  without stopping later polls.
+- [VERIFIED] Task 3 and Task 4 passed focused pytest/Ruff gates and independent
+  spec-plus-quality review. The Task 4 closing suite passed 44 tests. No
+  wallet, signing, order, balance, Fly deployment, cadence, or configuration
+  change was made.
+- [PRODUCTION] Strict L1 `/health` is currently 503: latest Structure attempt
+  is `snapshot-subprocess-timeout`, consecutive failure counter is 5, and the
+  scheduler is paused. Quote children still complete roughly every 2–2.5
+  minutes, but that cannot certify a current Structure map or enable the new
+  watcher.
+- [DECISION] Do not execute the watcher plan's stale Task 5 instruction to
+  stretch Structure cadence to 1,800 seconds. Production already proves the
+  child itself exceeds the 240-second boundary; the next work is bounded,
+  stage-level Structure/Gamma runtime diagnosis before any deadline or cadence
+  decision. Keep Quote/M2 gates strict and Archive non-blocking.
+
+### [NEXT — CURRENT]
+
+Start with `make smoke-health-prod`, inspect mounted-L1 `snapshot_attempts`
+and bounded child-reap logs, then plan a TDD stage-timing diagnostic for the
+variable Gamma-only Structure subprocess. Do not deploy, change cadence, or
+claim cloud watcher operation until a new Structure revision and strict health
+are green.
+
+## SESSION 115 — 2026-07-28 (Structure stage diagnostics, pre-deployment)
+
+- [IMPLEMENTED] Commit `3e0c604` persists a bounded, parent-observed
+  `last_stage` and monotonic `elapsed_ms` on every terminal Structure scheduler
+  attempt. Only the fixed stage vocabulary is accepted from child stderr;
+  timeout first reaps the child, then records the final marker and elapsed time.
+- [CHAIN-TRUTH] The scheduler creates and closes the append-only
+  `snapshot_attempts` row; strict `/health` and `make snapshot-attempt-status`
+  read that exact row. This keeps child timeout evidence visible without
+  mutating published Structure truth.
+- [OPERATOR] Added learning note 29: a `gamma-markets` timeout is a bounded
+  diagnostic hypothesis, while a terminal `persist` success supplies a timing
+  baseline. Neither result authorizes automatic changes to the 240-second
+  timeout, cadence, VM/resource limits, retry behavior, or scheduler state.
+- [NEXT] Run the scoped local gates, push only the verified repair commit, then
+  deploy and manually unpause once only if the locally configured shared secret
+  is present. Observe exactly one scheduler attempt through the read-only
+  status and strict-health targets; record either terminal stage/duration
+  evidence or a non-sensitive blocker. No automatic recovery loop.
+- [BLOCKED — NO DEPLOYMENT] `make planning-status` was clean and the prescribed
+  targeted suite passed (49 tests), but the third required local gate failed:
+  `make: *** No rule to make target 'smoke-health'.  Stop.` The Makefile exposes
+  `smoke-health-local` and `smoke-health-prod`, not the mandated target. Do not
+  substitute either target or perform push/deploy/unpause until the task owner
+  explicitly resolves the gate contract; no production request was made and no
+  secret was inspected or exposed.
+
+## SESSION 116 — 2026-07-28 (corrected gate, deployment evidence blocked)
+
+- [RESOLVED] Commit `109ce48` replaced the unavailable `make smoke-health`
+  gate with `make docs-m1-check`. The corrected full local gate was green:
+  planning status reported no drift, the stage diagnostic suite passed 49 tests,
+  and the M1 manual contract reported `OK`. The verified repair branch was
+  pushed to `origin/fix/l3-continuity-repair` at `109ce48`.
+- [DEPLOYMENT EVIDENCE BLOCKED] `make deploy` began a remote build for
+  `109ce484d9b939c83188236570c26b2a698094f8`, but its captured output stopped
+  during Dockerfile transfer and did not establish a completed release.
+  A subsequent read-only `flyctl releases -a polyarb-l1` query still listed
+  `v174` (about 13 hours old) as newest; no new release number/SHA can be
+  truthfully recorded. Do not retry within this task.
+- [AUTHORITY BLOCKED] `POLYARB_SCAN_SHARED_SECRET` was absent from the local
+  environment. No secret was printed or read, `make unpause-prod` did not run,
+  and no attempt/strict-health sample was fabricated. No timeout, cadence,
+  resource, wallet, signing, balance, or execution setting changed.
+
+### [NEXT — CURRENT]
+
+Resolve why the authorized Fly deploy did not yield a new release, then run the
+deployment from the verified `109ce48` branch once. Only with a locally
+configured shared secret issue one signed unpause, then collect one terminal
+attempt's persisted outcome/stage/elapsed and strict-health evidence. Keep the
+prior no-deploy entry as historical evidence; do not auto-unpause or tune
+Structure performance from this diagnostic alone.
+
+## SESSION 117 — 2026-07-28 (deployment evidence correction)
+
+- [CORRECTION — DEPLOYMENT CONFIRMED] Preserve Session 116's early
+  read-only query as its time-bounded evidence: it did not yet list a new
+  release. A later read-only `flyctl releases -a polyarb-l1` query lists
+  `v175` as `complete`, and `flyctl status -a polyarb-l1` shows both `app` and
+  `cron` started at version 175. Production logs also confirm
+  `sentry initialized — release=109ce484...` and the additive
+  `snapshot_attempts.last_stage` / `snapshot_attempts.elapsed_ms` migrations.
+  The verified `109ce484d9b939c83188236570c26b2a698094f8` deployment is
+  therefore established; no rollout parameter was changed.
+- [REMAINING BLOCKER] The locally exported `POLYARB_SCAN_SHARED_SECRET` remains
+  absent. Do not retrieve it remotely, do not unpause, and do not manufacture a
+  scheduler/health sample. The next authorized operator with that local secret
+  may issue exactly one signed `make unpause-prod`, then capture the named
+  read-only attempt and strict-health evidence.
+
+## SESSION 118 — 2026-07-29 (M1 opportunity operations Dashboard accepted)
+
+- [IMPLEMENTED] Task 7 remediation Tasks 1–5 now expose authenticated
+  Discovery/Reconciliation progress, current Candidate opportunity authority,
+  bounded Incident lifecycle, bounded Resource decisions, and a four-class
+  group operations timeline. Candidate, Incident, and Resource compaction paths
+  fail closed and preserve explicit history floors.
+- [DASHBOARD] Commit `472d8e2` adds direct opportunity-to-timeline navigation,
+  server-authority Resource age/TTL, unconditional Reconciliation history
+  limitation copy, structured Incident evidence, deterministic real-store
+  visual fixtures, and mobile containment. Six final desktop/375 px captures
+  include available, unavailable, and long-identity states.
+- [REVIEW] The formal six-pillar re-review scored 24/24 with 0 Critical,
+  0 Important, and 0 Minor findings. The prior two Important and two Minor
+  findings were fixed rather than waived.
+- [VERIFIED] Perception/M1 tests and the full repository test suite completed at
+  100%; Dashboard typecheck/build and local fixture-backed HTTP smoke passed.
+  M1 manual, diff, and planning gates passed; 82 plans report no drift.
+- [BOUNDARY] No cloud release, feature flag, production database, fault
+  injection, wallet, balance, signing, order, or trade state changed. Task 7 is
+  locally complete; Task 8 production qualification and cutover remain pending.
+
+### [NEXT — CURRENT]
+
+Start Task 8 with RED tests for the deterministic qualification evaluator and
+the local/read-only Make targets. Run `make chaos-l2-fly-image-check` before
+designing any image-dependent fault primitive. Do not deploy, enable flags,
+inject production faults, or cut over the global gate until the preceding
+local/read-only qualification passes and the specific production mutation is
+authorized.
+
+## SESSION 119 — 2026-07-29 (Task 8 runtime fault chains closed)
+
+- [IMPLEMENTED] Commits `a820e97` through `1147379` added early
+  Reconciliation stall detection, exact Candidate/Discovery exit recovery,
+  Gamma batch incidents, Candidate CLOB and SQLite-busy group incidents,
+  authenticated disk/load Resource incidents, and exact-outbox Telegram
+  delivery incidents.
+- [CONTINUITY] Candidate incident writes flush after reserved-lane service;
+  normal/explore slots start as a bounded concurrent batch and use per-group
+  attempt accounting. The starvation regression passed five consecutive runs.
+- [CHAIN TRUTH] All 16 fault plans now name real runtime incident/coverage
+  evidence; `not-wired` is absent. Recovery still requires component-specific
+  Candidate receipt, Discovery batch, Reconciliation checkpoint, healthy
+  Resource decision, exact notification delivered attempt, or HTTP probe.
+- [VERIFIED] `tests/perception + tests/m1-perception` passed 100% after the
+  Discovery fixture repair (`379495e`), followed by proportional
+  Candidate/Resource/Notification/HTTP regressions, Ruff, M1 manual, diff, and
+  82-plan no-drift gates.
+- [BOUNDARY] No deployment, feature flag, cloud config, production database,
+  fault injection, wallet, signing, order, or trade state changed. Runtime
+  evidence support does not authorize the 13 still-disabled production fault
+  adapters.
+
+### [NEXT — CURRENT]
+
+Continue Task 8 from `1147379`: design one scoped, authenticated, finally-cleaned
+up upstream fault proxy contract for Gamma/CLOB/Telegram before enabling any of
+those adapters. Keep disk filler, host load, daemon restart, and deploy
+interrupt as separate primitives because their cleanup and identity contracts
+differ. First command: `make planning-status`.
+
+## SESSION 120 — 2026-07-30 (production-grade upstream fault control approved)
+
+- [PRODUCTION STANDARD] Future work now defaults to the final production
+  platform. Observer, paper, qualification, canary, and eventual real-money
+  modes exercise the same architecture with different authority; the project
+  has not yet claimed real-money production operation.
+- [DESIGN] Commit `1c2d849` approves a permanent, dormant-by-default,
+  in-process typed fault boundary for Gamma, Candidate CLOB, and Telegram.
+  Invalid control state is data-plane pass-through; missing qualification
+  evidence is FAIL. Faults require exact release/machine/boot/call-class/target,
+  single-use nonce, bounded TTL, one-active admission, cleanup-before-receipt,
+  append-only evidence, and an independent evaluator.
+- [PLAN] Commit `54b748f` adds the eight-task TDD implementation plan. It
+  accounts for isolated producer processes via append-only intent plus
+  safe-boundary child claim, gives Telegram its own notification runtime,
+  prevents partial Gamma pages from publishing, preserves existing Incident
+  authorities, and keeps disk/load/process/restart/deploy primitives separate.
+- [VERIFIED] `make planning-status` remains green with 82 plans and no drift.
+  User-owned `findings.md`, `progress.md`, and `task_plan.md` were not modified
+  or staged. No runtime code, deployment, feature flag, secret, production DB,
+  or fault mutation changed.
+
+### [NEXT — CURRENT]
+
+Execute
+`docs/superpowers/plans/2026-07-30-scoped-upstream-fault-control.md`
+from Task 1 with RED tests for the pure controller and append-only authority.
+First command:
+`uv run pytest tests/perception/test_fault_control.py -q`.
+Implementation remains local/read-only until a later exact production mutation
+is separately authorized.
+
+## SESSION 121 — 2026-07-30 (scoped upstream fault control locally complete)
+
+- [IMPLEMENTED] Commits `b6b794d` through `0196b17` complete all eight tasks
+  in the scoped upstream fault-control plan: append-only authority, runtime
+  ownership, HTTP/CLI control, Gamma/CLOB/Telegram adapters, typed local fault
+  dispatch, SOURCE/VERDICT qualification, finalization, runbook, teaching
+  material, and the plan SUMMARY.
+- [FINAL REVIEW] Whole-plan review exposed and closed cleanup-request
+  consumption, never-claimed TTL materialization, immutable rejected intent
+  envelopes, cleanup-truth fail-open behavior, monotonic terminal timestamps,
+  and rejected-evidence isolation. Two independent remediation reviews report
+  no remaining Critical, High, or Medium findings; the final documentation-only
+  correction was also approved.
+- [VERIFIED] From final HEAD `0196b17`, repository pytest collected 3,695 tests
+  and exited zero with one expected xfail and one skip. Changed-file Ruff,
+  `make qualify-perception-local`, `make docs-m1-check`, committed-range
+  `git diff --check`, and `make planning-status` all passed; planning reports
+  82 plans across three workstreams with no drift.
+- [PRODUCTION BOUNDARY] Production qualification remains **NOT RUN** because
+  no exact deployed release or fresh evidence directory was authorized. One
+  image-check target accidentally began read-only Fly status/SSH command
+  discovery before being terminated; no deploy, config/secret change, fault
+  mutation, wallet, order, or trade action occurred. The SUMMARY preserves the
+  exact disclosure and does not record that gate as PASS.
+- [WORKTREE] Branch `fix/l3-continuity-repair` remains in its owned worktree.
+  User-owned `findings.md`, `progress.md`, and `task_plan.md`, plus ignored SDD
+  coordination files, remain unstaged and uncommitted.
+
+### [NEXT — CURRENT]
+
+Choose the branch disposition: merge locally, push/create a PR, or keep the
+branch for later. Until that choice is made, preserve the worktree and do not
+deploy or run production qualification. Next session starts with
+`/gsd-resume-work --ws m1-perception`; first repository check:
+`make planning-status`.

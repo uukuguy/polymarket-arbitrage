@@ -70,12 +70,21 @@ def _valid_manual() -> str:
 <!-- m1-contract: route=/candidates file=dashboard/app/candidates/page.tsx -->
 <!-- m1-contract: route=/signals file=dashboard/app/signals/page.tsx -->
 <!-- m1-contract: route=/l3/[asset_id] file=dashboard/app/l3/[asset_id]/page.tsx -->
+<!-- m1-contract: route=/perception file=dashboard/app/perception/page.tsx -->
+<!-- m1-contract: route=/perception/[group_id] file=dashboard/app/perception/[group_id]/page.tsx -->
 """
 
 
 def _repo(tmp_path: Path) -> Path:
     (tmp_path / "src/polyarb/http").mkdir(parents=True)
-    for path in ("status", "candidates", "signals", "l3/[asset_id]"):
+    for path in (
+        "status",
+        "candidates",
+        "signals",
+        "l3/[asset_id]",
+        "perception",
+        "perception/[group_id]",
+    ):
         (tmp_path / "dashboard/app" / path).mkdir(parents=True)
     (tmp_path / "docs").mkdir()
     (tmp_path / ".planning").mkdir()
@@ -97,7 +106,14 @@ def _repo(tmp_path: Path) -> Path:
         'checks["mirror:l2_tob_age_seconds"] = []\n'
         'checks["l3:active_count"] = []\n'
     )
-    for path in ("status", "candidates", "signals", "l3/[asset_id]"):
+    for path in (
+        "status",
+        "candidates",
+        "signals",
+        "l3/[asset_id]",
+        "perception",
+        "perception/[group_id]",
+    ):
         (tmp_path / "dashboard/app" / path / "page.tsx").write_text("export default 1\n")
     return tmp_path
 
@@ -598,6 +614,13 @@ def test_manual_exposes_polywatch_alert_destination_and_local_checks() -> None:
     assert "@polyarb_l1_bot" in text
     assert "make polywatch-healthz-dry\nmake polywatch-resident-status" in text
     assert "不会发送 Telegram" in text
+
+
+def test_manual_exposes_latest_snapshot_attempt_diagnostic() -> None:
+    text = (ROOT / "docs/M1-市场感知平台使用手册.md").read_text()
+
+    assert "make snapshot-attempt-status" in text
+    assert "最新一次快照尝试" in text
     assert "`active_keys`" in text
     assert "每 2 分钟" in text
 

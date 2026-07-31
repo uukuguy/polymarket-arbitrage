@@ -1,8 +1,8 @@
 """Async wrapper around py-clob-client v0.34.6 (sync SDK).
 
 Pattern: ``asyncio.to_thread`` + manual chunking at ``settings.clob_batch_size``
-(default 500, the CLOB max-per-call). Returns RAW responses verbatim from the
-SDK; normalization is owned by Plan 4.
+(default 500, the CLOB max-per-call). Full mode returns SDK responses verbatim;
+snapshot callers use the bounded top-of-book projection.
 
 Why two methods (``get_books`` + ``get_prices_buy_sell``):
 - The CLOB ``order_book.bids[]`` is the canonical liquidity source (sizes).
@@ -32,7 +32,9 @@ Empirical shapes (from fixtures/clob_sample.json, recorded T1 against live API):
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import math
+from concurrent.futures import Executor
+from typing import Any, Literal
 
 from aiolimiter import AsyncLimiter
 from loguru import logger
@@ -47,6 +49,57 @@ def _chunked(seq: list[str], size: int) -> list[list[str]]:
     return [seq[i : i + size] for i in range(0, len(seq), size)]
 
 
+def _field(value: Any, name: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _compact_level(level: Any) -> dict[str, Any]:
+    return {
+        "price": _field(level, "price"),
+        "size": _field(level, "size"),
+    }
+
+
+def _compact_best_level(levels: Any, *, ask: bool) -> list[dict[str, Any]]:
+    """Select the executable top level without trusting CLOB list order."""
+    if not isinstance(levels, (list, tuple)) or not levels:
+        return []
+
+    ranked: list[tuple[float, Any]] = []
+    for level in levels:
+        try:
+            price = float(_field(level, "price"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price):
+            ranked.append((price, level))
+
+    if not ranked:
+        # Preserve one malformed level so downstream validation records the
+        # external-input defect instead of silently treating the book as empty.
+        return [_compact_level(levels[0])]
+    _, best = (
+        min(ranked, key=lambda item: item[0]) if ask else max(ranked, key=lambda item: item[0])
+    )
+    return [_compact_level(best)]
+
+
+def _compact_book_top(book: Any) -> dict[str, Any]:
+    """Drop full depth while retaining exactly what snapshot validation reads."""
+    asks = _field(book, "asks")
+    bids = _field(book, "bids")
+    asset_id = _field(book, "asset_id") or _field(book, "market") or _field(book, "token_id")
+    return {
+        "asset_id": asset_id,
+        # Polymarket production books are commonly worst-first (asks
+        # descending, bids ascending). Rank prices before discarding depth.
+        "asks": _compact_best_level(asks, ask=True),
+        "bids": _compact_best_level(bids, ask=False),
+    }
+
+
 class ClobReaderClient:
     """Async wrapper over py-clob-client's sync read-only API.
 
@@ -55,23 +108,40 @@ class ClobReaderClient:
     No network I/O happens until a method is called.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        executor: Executor | None = None,
+    ) -> None:
         self._settings = settings
         # L0 read-only: only host needed. NO key/creds/chain_id (tested in T5).
         self._client = ClobClient(settings.clob_url)
         self._limiter = AsyncLimiter(settings.clob_batch_rate_per_10s, 10)
+        self._executor = executor
+
+    async def _run_sync(self, function: Any, *args: Any) -> Any:
+        if self._executor is None:
+            return await asyncio.to_thread(function, *args)
+        return await asyncio.get_running_loop().run_in_executor(
+            self._executor,
+            function,
+            *args,
+        )
 
     async def get_books(
         self,
         token_ids: list[str],
         *,
         cache: Any | None = None,
+        projection: Literal["full", "top"] = "full",
     ) -> list[Any]:
         """Fetch order books for ``token_ids`` (chunked at ``clob_batch_size``).
 
-        Returns a list of ``OrderBookSummary`` objects (dataclass-like; key
-        attrs: ``market``, ``asset_id``, ``bids``, ``asks``, ``timestamp``).
-        Plan 4 normalizes; this layer returns raw SDK output.
+        ``projection="full"`` returns raw ``OrderBookSummary`` objects.
+        ``projection="top"`` projects every fetched/cache chunk immediately
+        to asset identity plus the best ask and bid. This keeps snapshot RSS bounded
+        when the verified universe contains tens of thousands of tokens.
 
         Empty input returns ``[]`` without making any network call.
 
@@ -83,6 +153,8 @@ class ClobReaderClient:
         already accepts.
         """
         out: list[Any] = []
+        if projection not in ("full", "top"):
+            raise ValueError(f"unsupported book projection: {projection!r}")
         if not token_ids:
             return out
 
@@ -91,15 +163,28 @@ class ClobReaderClient:
         for i, chunk in enumerate(chunks, start=1):
             if cache is not None and cache.has_books_chunk(i):
                 cached = cache.load_books_chunk(i)
-                out.extend(cached)
+                if projection == "top":
+                    out.extend(_compact_book_top(book) for book in cached)
+                else:
+                    out.extend(cached)
                 logger.info(f"CLOB books chunk {i}/{n_chunks}: cached ({len(cached)} books)")
                 continue
             params = [BookParams(token_id=t) for t in chunk]
+
+            def fetch_chunk() -> tuple[list[Any] | None, list[Any]]:
+                raw_books = self._client.get_order_books(params)
+                projected = (
+                    [_compact_book_top(book) for book in raw_books]
+                    if projection == "top"
+                    else raw_books
+                )
+                return (raw_books if cache is not None else None), projected
+
             async with self._limiter:
-                books = await asyncio.to_thread(self._client.get_order_books, params)
+                raw_books, books = await self._run_sync(fetch_chunk)
+            if cache is not None and raw_books is not None:
+                cache.save_books_chunk(i, raw_books)
             out.extend(books)
-            if cache is not None:
-                cache.save_books_chunk(i, books)
             logger.info(f"CLOB books chunk {i}/{n_chunks}: fetched ({len(chunk)} tokens)")
         return out
 
@@ -144,7 +229,7 @@ class ClobReaderClient:
                     continue
                 params = [BookParams(token_id=t, side=side) for t in chunk]
                 async with self._limiter:
-                    page = await asyncio.to_thread(self._client.get_prices, params)
+                    page = await self._run_sync(self._client.get_prices, params)
                 # CLOB get_prices returns dict-of-token-id; merge via update.
                 # If a future SDK version returns a list, callers see TypeError
                 # immediately rather than silent data loss.

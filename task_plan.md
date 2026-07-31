@@ -9,7 +9,7 @@ the strict 24-hour Phase 05 soak.
 
 ## Current Phase
 
-Phase 6 — Production neg-risk opportunity feed
+Phase 7 — Consolidated M1 production repair
 
 ## Phases
 
@@ -66,6 +66,20 @@ Phase 6 — Production neg-risk opportunity feed
 - [x] Update the M1 manual, learning docs, JOURNAL, and project state
 - **Status:** complete
 
+### Phase 7: Consolidated M1 production repair
+
+- [x] Stop treating the old 24-hour observation as an open-ended wait
+- [x] Record the repeated 1 GB snapshot OOM as a capacity/topology defect
+- [x] Build a single incident inventory across snapshot, quote freshness, health, and notifications
+- [x] Produce a staged M1→M2→live-arbitrage design before implementation
+- [x] Self-review the staged design for ambiguity and scope drift
+- [x] Obtain written-spec review before implementation planning
+- [x] Create the executable first-wave repair plan for attempt/incident truth
+- [ ] Create the Structure/Archive contract migration plan after first-wave interfaces are verified
+- [ ] Implement and verify the repair in dependency order
+- [ ] Obtain a new clean production baseline and start a meaningful 24-hour observation
+- **Status:** in progress
+
 ## Key Questions
 
 1. What evidence is required to prove every 5-minute promoter cycle rather than
@@ -95,6 +109,7 @@ Phase 6 — Production neg-risk opportunity feed
 | Temporary shell probe used zsh's read-only `status` name | 1 | Renamed the variable to `http_code` |
 | First Fly SSH command requested interactive VM selection | 1 | Addressed the L1 app machine explicitly with `--machine` |
 | First remote SQL probe lost shell-quoted empty strings | 1 | Replaced empty-string predicates with `length(column) > 0` |
+| Initial long plan patch omitted add-file markers on embedded lines | 1 | Recreated the patch with every new line programmatically marked as an addition |
 
 ## Notes
 
@@ -106,3 +121,6 @@ Phase 6 — Production neg-risk opportunity feed
   HTTP 503 remains the fail-closed meaning for missing/stale quote truth.
 - The latest production universe has 1,278 eligible YES tokens across 254
   neg-risk groups, requiring three configured CLOB batches.
+- The current repair must not reduce the scope to snapshot OOM: direct
+  snapshot-failure visibility, quote freshness under snapshot load, and
+  component-level recovery notifications are separate chain-truth gaps.

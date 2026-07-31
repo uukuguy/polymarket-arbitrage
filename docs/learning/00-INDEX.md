@@ -36,6 +36,24 @@
 | 21 | [L3 候选与双 Token](21-L3-候选与双Token.md) | observation seed vs promotion gate / L2 asset_id=Yes token / durable Yes+No identity / fail-closed 5→10 expansion / mutation-free dry-run |
 | 22 | [L3 连续浸泡证据](22-L3连续浸泡证据.md) | truthful membership / server append-only evidence / AcceptanceConfig / manifest+五报告+raw-row hashes / event-kind fail-closed / retention privilege boundary |
 | 23 | [生产机会流](23-生产机会流.md) | app 内 quote worker / 120-240-300 秒三层时钟 / durable success anchor / 503 为什么不是零机会 / 日常实战诊断 |
+| 24 | [L3 连续性事务](24-L3-连续性事务.md) | prepare evidence → atomic commit → strict sample / generation-scoped evidence / 10/10/10 成功门 / 超时补偿而非 grace period |
+| 25 | [市场全集不是请求成功](25-市场全集不是请求成功.md) | 2,100 行截断为何制造假套利 / keyset completion proof / exact event membership / standard 与 augmented / M1→M2 provenance 门 |
+| 26 | [M1 数据层与失败事实](26-M1数据层与失败事实.md) | 为什么“旧快照仍新鲜”不能掩盖新 OOM / published truth 与 scheduler attempt 的边界 / 为什么 L2 不应阻塞 L1 recovery |
+| 27 | [Structure 与 Archive：把市场成员关系从历史归档中救出来](27-Structure与Archive分层.md) | 为什么 Gamma 结构、可交易报价和历史文件不能绑成同一项作业 / Archive 失败为何不能拖垮 M2 |
+| 29 | [Structure Snapshot 阶段诊断：超时先定位，再决定实验](29-structure-snapshot-stage-diagnostics.md) | 如何把 `gamma-markets` timeout 与健康完成区分开 / stage、elapsed 的证据链 / 为什么诊断不能自动触发调参 |
+| 30 | [Structure 动态时钟](30-structure-adaptive-schedule.md) | 成功时长 p95 如何控制 timeout/cadence / timeout 立即退避与普通冷却 / 重启幂等 / health chain-truth |
+| 31 | [Opportunity-first 按组盯盘](31-opportunity-first-group-watch.md) | 为什么在线正确性边界是一个完整组 / before→books→after 如何阻止混腿 / 候选失败为何不降级优先级 / durable due time 如何跨重启 |
+| 32 | [Bounded Discovery](32-bounded-discovery.md) | opaque cursor 与页面事务 / promotion 前的真实组认证 / Decimal priority 与 age anti-starvation / 15-30-60 分钟统计覆盖 |
+| 33 | [Checkpointed Full Reconciliation](33-checkpointed-reconciliation.md) | 慢地图如何分页续跑 / terminal completion proof / 原子 diff / 并发 Discovery 与 closure authority |
+| 34 | [M1 异常恢复](34-M1异常恢复.md) | append-only incident / writer-side recovery proof / resource shedding 与 cooldown / shell-free producer isolation |
+| 35 | [认证当前机会读模型](35-认证当前机会读模型.md) | current-authority 行绑定 / O(1) candidate 状态计数 / bounded keyset 机会页 / v2→v3 原子迁移 |
+| 36 | [有界 Incident 权威](36-有界Incident权威.md) | prefix checkpoint / open authority / replay anchor / failure breadcrumb |
+| 37 | [有界资源决策权威](37-有界资源决策权威.md) | deterministic policy replay / 512→256 compaction / suffix tail binding / resource evidence health |
+| 38 | [四类证据时间线](38-四类证据时间线.md) | 单事务四源合并 / canonical group 游标 / opportunity 转换 / per-group checkpoint seed / 保守与精确 history floor |
+| 39 | [机会运维读模型](39-opportunity-operations-read-models.md) | 认证机会入口 / zero 与 unavailable / server-time TTL / 真实 fixture / incident 分层证据 |
+| 40 | [生产资格证据](40-production-qualification-evidence.md) | local vs production scope / release-machine-boot 窗口 / missing 不等于零 / immutable verdict |
+| 41 | [故障资格矩阵](41-fault-qualification-matrix.md) | plan-only / fault-specific 授权 / durable incident / recovery writer / cleanup 串行门 |
+| 42 | [生产故障控制边界](42-生产故障控制边界.md) | 四角色 SOURCE/VERDICT 能力矩阵 / fail-open control 与 fail-closed evidence / immutable source facts 与独立 stale 门 / group ID 与 outbox ID / cleanup→recovery→VERIFIED |
 
 ## Phase 02.1 教学增量（2026-05）
 

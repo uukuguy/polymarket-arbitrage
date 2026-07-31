@@ -142,6 +142,72 @@ class _SampleStore:
         return self.append_results.pop(0)
 
 
+async def test_atomic_promotion_never_persists_new_mapping_with_partial_evidence():
+    now = datetime.now(UTC)
+    runtime = _runtime_at(now)
+    old_states = _market_states(now)
+    _publish_membership(runtime, old_states, at=now)
+    new_states = tuple(
+        SamplingMarketState(
+            market_id=f"new-market-{index}",
+            yes_token_id=f"new-yes-{index}",
+            no_token_id=f"new-no-{index}",
+            yes_book_at=now,
+            no_book_at=now,
+            yes_ohlc_at=now,
+        )
+        for index in range(5)
+    )
+    new_tokens = _tokens(new_states)
+    store = _SampleStore(new_states)
+
+    await runtime.transition_lock.acquire()
+    sample = asyncio.create_task(
+        l3_sampler.sample_once(
+            scheduled_at=now,
+            sample_seq=0,
+            settings=_sampler_settings(),
+            ws_consumer=SimpleNamespace(last_event_at_s=now.timestamp()),
+            reconciliation_state=_reconciliation_state(now),
+            runtime=runtime,
+            store=store,
+        )
+    )
+    partial = frozenset(sorted(new_tokens)[:9])
+    runtime.update_membership(
+        WsMembershipSnapshot(
+            generation=2,
+            desired=new_tokens,
+            committed=new_tokens,
+            evidenced=partial,
+            evidenced_at={token: now for token in partial},
+        )
+    )
+    await asyncio.sleep(0)
+    assert store.batches == []
+
+    runtime.update_membership(
+        WsMembershipSnapshot(
+            generation=2,
+            desired=new_tokens,
+            committed=new_tokens,
+            evidenced=new_tokens,
+            evidenced_at={token: now for token in new_tokens},
+        )
+    )
+    runtime.transition_lock.release()
+
+    assert await asyncio.wait_for(sample, timeout=0.2) is True
+    assert len(store.batches) == 1
+    health = store.batches[0].health
+    assert health.status is HealthStatus.PASS
+    assert (health.desired_count, health.committed_count, health.evidenced_count) == (
+        10,
+        10,
+        10,
+    )
+
+
 def _assert_strict_failure(runtime: L3EvidenceRuntime, failed_key: str, ws_consumer=None):
     from pydantic import SecretStr
     from starlette.testclient import TestClient
@@ -1085,15 +1151,30 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
     await consumer._initialize_connection(ws_v2)
     generation_two = runtime.snapshot().ws_generation
     assert generation_two > generation_one
-    for token in tokens:
+    ordered_tokens = sorted(tokens)
+    for token in ordered_tokens[:-2]:
         consumer.record_book_evidence(
             asset_id=token,
             generation=generation_two,
             book_levels_succeeded=True,
             observed_at=book_at_v2[token],
         )
-    current = runtime.snapshot()
-    assert current.desired == current.committed == current.evidenced
+    assert runtime.snapshot().evidenced == frozenset(ordered_tokens[:-2])
+    store_v2 = _SampleStore(states_v2)
+    sample_v2 = asyncio.create_task(
+        l3_sampler.sample_once(
+            scheduled_at=sampled_v2_at,
+            sample_seq=1,
+            settings=_sampler_settings(),
+            ws_consumer=consumer,
+            reconciliation_state=_reconciliation_state(sampled_v2_at),
+            runtime=runtime,
+            store=store_v2,
+        )
+    )
+    await asyncio.sleep(0)
+    assert sample_v2.done() is False
+    assert store_v2.batches == []
 
     app = create_l2_app(
         sqlite_store=SimpleNamespace(),
@@ -1114,15 +1195,18 @@ async def test_reconnect_requires_current_generation_sample_before_health_recove
     assert before_probe.status_code == 200
     assert before_strict.json()["checks"]["l3:membership_convergence"][0]["status"] == "fail"
 
-    assert await l3_sampler.sample_once(
-        scheduled_at=sampled_v2_at,
-        sample_seq=1,
-        settings=_sampler_settings(),
-        ws_consumer=consumer,
-        reconciliation_state=_reconciliation_state(sampled_v2_at),
-        runtime=runtime,
-        store=_SampleStore(states_v2),
-    )
+    for token in ordered_tokens[-2:]:
+        consumer.record_book_evidence(
+            asset_id=token,
+            generation=generation_two,
+            book_levels_succeeded=True,
+            observed_at=book_at_v2[token],
+        )
+    assert await asyncio.wait_for(sample_v2, timeout=0.2)
+    assert len(store_v2.batches) == 1
+    assert store_v2.batches[0].health.evidenced_count == 10
+    current = runtime.snapshot()
+    assert current.desired == current.committed == current.evidenced
 
     with TestClient(app) as client:
         after_strict = client.get("/health")

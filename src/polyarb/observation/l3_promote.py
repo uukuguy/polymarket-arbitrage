@@ -781,7 +781,7 @@ async def _promote_run_impl(
     # ready.  In particular, do not copy an oversized legacy cache merely to
     # terminalize a fail-closed cleanup tick.
     staged_market_token_map = _last_known_market_token_map
-    staged_active_set = frozenset(_l3_active_set)
+    staged_active_set = initial.committed
     staged_mirrored_market_ids = _last_mirrored_market_ids
 
     runtime_hash = runtime_status.acceptance_config_hash if runtime_status is not None else "0" * 64
@@ -993,64 +993,6 @@ async def _promote_run_impl(
             )
         )
 
-    desired_set_succeeded = True
-    try:
-        ws_consumer.set_l3_desired(desired)
-    except Exception as exc:  # noqa: BLE001 - terminal row still required
-        logger.warning("l3-promote: desired update failed type={}", type(exc).__name__)
-        desired_set_succeeded = False
-    add_succeeded: bool | None = None
-    remove_succeeded: bool | None = None
-    control_identity_ok = desired_set_succeeded
-    if removed and desired_set_succeeded:
-        try:
-            remove_succeeded = bool(await ws_consumer.remove_subscriptions(sorted(removed)))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("l3-promote: remove failed type={}", type(exc).__name__)
-            remove_succeeded = False
-
-    # Removal is the capacity gate.  Publish desired truth immediately, but
-    # never grow committed membership until every required removal succeeds
-    # and the consumer generation still matches the transaction snapshot.
-    if desired_set_succeeded:
-        try:
-            control_snapshot = ws_consumer.l3_membership_snapshot()
-            control_identity_ok = (
-                isinstance(control_snapshot, WsMembershipSnapshot)
-                and control_snapshot.generation == initial.generation
-            )
-        except Exception as exc:  # noqa: BLE001 - terminal row still required
-            logger.warning("l3-promote: control snapshot failed type={}", type(exc).__name__)
-            control_identity_ok = False
-    if (
-        added
-        and desired_set_succeeded
-        and control_identity_ok
-        and (not removed or remove_succeeded is True)
-    ):
-        try:
-            add_succeeded = bool(await ws_consumer.add_subscriptions(sorted(added)))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("l3-promote: add failed type={}", type(exc).__name__)
-            add_succeeded = False
-
-    try:
-        current = ws_consumer.l3_membership_snapshot()
-    except Exception as exc:  # noqa: BLE001 - terminal row still required
-        logger.warning("l3-promote: terminal snapshot failed type={}", type(exc).__name__)
-        current = initial
-        desired_set_succeeded = False
-    if not isinstance(current, WsMembershipSnapshot):
-        current = initial
-        desired_set_succeeded = False
-    if not desired_set_succeeded:
-        add_succeeded = False if added else add_succeeded
-        remove_succeeded = False if removed else remove_succeeded
-
     def token_pair(market_id: str) -> _TokenIdentity | None:
         return token_map.get(market_id) or prior_market_token_map.get(market_id)
 
@@ -1066,75 +1008,195 @@ async def _promote_run_impl(
                     markets.add(market_id)
         return markets
 
+    combined_token_map = {**prior_market_token_map, **token_map}
     prior_markets = committed_markets(initial.committed)
-    current_markets = committed_markets(current.committed)
-    added_markets = frozenset(current_markets - prior_markets)
-    removed_markets = frozenset(prior_markets - current_markets)
+    target_markets = committed_markets(desired)
+    prior_mapping = (
+        _mapping_rows(prior_markets, combined_token_map) if prior_markets else ()
+    )
+    added_markets = frozenset(target_markets - prior_markets)
+    removed_markets = frozenset(prior_markets - target_markets)
 
-    # The complete post-control committed target is mirrored every tick.  Stale
-    # badges are discovered from bounded database pages inside the mirror
-    # helper; process memory is never a cleanup source of truth.
-    identity_limit_exceeded = len(current_markets) > _MIRROR_RECONCILE_BATCH_SIZE
-    mirror_succeeded = False
-    mirror_cleanup_pending = False
-    if not identity_limit_exceeded:
-        raw_mirror_result = await asyncio.to_thread(
-            _mirror_l3_promoted_at_ts,
-            client,
-            sorted(current_markets),
+    try:
+        prepared = await ws_consumer.prepare_l3_target(desired)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - terminal row still required
+        logger.warning("l3-promote: target evidence failed type={}", type(exc).__name__)
+        prepared = None
+    if prepared is None:
+        return await finish(
+            _PromoteTerminalDraft(
+                status=PromoteStatus.FAILED,
+                reason_code="target_evidence_failed",
+                selected_count=len(accepted_markets),
+                desired=initial.desired,
+                committed=initial.committed,
+                evidenced=initial.evidenced,
+                mapping=prior_mapping,
+                ws_generation=initial.generation,
+                added=added,
+                removed=removed,
+                added_markets=added_markets,
+                removed_markets=removed_markets,
+            )
         )
-        if isinstance(raw_mirror_result, _MirrorReconcileResult):
-            mirror_succeeded = raw_mirror_result.succeeded
-            mirror_cleanup_pending = raw_mirror_result.cleanup_pending
-        else:
-            # Preserve compatibility with focused tests and injected fail-soft
-            # mirrors that predate the richer bounded-reconciliation result.
-            mirror_succeeded = bool(raw_mirror_result)
 
-        # A successful bounded DB reconciliation (complete or pending) makes
-        # legacy cleanup memory disposable.  Publish the pruned cache only
-        # after this tick's terminal evidence row is durable.
-        essential_market_ids = set(current_markets)
+    async def restore_prior_mirror() -> None:
+        try:
+            await asyncio.to_thread(
+                _mirror_l3_promoted_at_ts,
+                client,
+                sorted(prior_markets),
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort external rollback
+            logger.warning(
+                "l3-promote: prior mirror restore failed type={}",
+                type(exc).__name__,
+            )
+
+    assert evidence_runtime is not None  # apply_mutations guard above
+    async with evidence_runtime.transition_lock:
+        identity_limit_exceeded = len(target_markets) > _MIRROR_RECONCILE_BATCH_SIZE
+        mirror_succeeded = False
+        mirror_cleanup_pending = False
+        if not identity_limit_exceeded:
+            raw_mirror_result = await asyncio.to_thread(
+                _mirror_l3_promoted_at_ts,
+                client,
+                sorted(target_markets),
+            )
+            if isinstance(raw_mirror_result, _MirrorReconcileResult):
+                mirror_succeeded = raw_mirror_result.succeeded
+                mirror_cleanup_pending = raw_mirror_result.cleanup_pending
+            else:
+                mirror_succeeded = bool(raw_mirror_result)
+
+        if (
+            identity_limit_exceeded
+            or not mirror_succeeded
+            or mirror_cleanup_pending
+        ):
+            if mirror_succeeded and not mirror_cleanup_pending:
+                await restore_prior_mirror()
+            reason = (
+                "identity_limit_exceeded"
+                if identity_limit_exceeded
+                else (
+                    "mirror_cleanup_pending"
+                    if mirror_cleanup_pending
+                    else "mirror_failed"
+                )
+            )
+            return await finish(
+                _PromoteTerminalDraft(
+                    status=PromoteStatus.FAILED,
+                    reason_code=reason,
+                    selected_count=len(accepted_markets),
+                    desired=initial.desired,
+                    committed=initial.committed,
+                    evidenced=initial.evidenced,
+                    mapping=prior_mapping,
+                    ws_generation=initial.generation,
+                    added=added,
+                    removed=removed,
+                    added_markets=added_markets,
+                    removed_markets=removed_markets,
+                    mirror_succeeded=mirror_succeeded,
+                )
+            )
+
+        try:
+            commit_succeeded = bool(await ws_consumer.commit_l3_target(prepared))
+        except asyncio.CancelledError:
+            await restore_prior_mirror()
+            raise
+        except Exception as exc:  # noqa: BLE001 - terminal row still required
+            logger.warning("l3-promote: target commit failed type={}", type(exc).__name__)
+            commit_succeeded = False
+        if not commit_succeeded:
+            await restore_prior_mirror()
+            return await finish(
+                _PromoteTerminalDraft(
+                    status=PromoteStatus.FAILED,
+                    reason_code="target_commit_failed",
+                    selected_count=len(accepted_markets),
+                    desired=initial.desired,
+                    committed=initial.committed,
+                    evidenced=initial.evidenced,
+                    mapping=prior_mapping,
+                    ws_generation=initial.generation,
+                    added=added,
+                    removed=removed,
+                    added_markets=added_markets,
+                    removed_markets=removed_markets,
+                    add_succeeded=False if added else None,
+                    remove_succeeded=False if removed else None,
+                    mirror_succeeded=True,
+                )
+            )
+
+        try:
+            current = ws_consumer.l3_membership_snapshot()
+        except Exception as exc:  # noqa: BLE001 - convergence must fail closed
+            logger.warning("l3-promote: terminal snapshot failed type={}", type(exc).__name__)
+            current = initial
+        exact_target = (
+            isinstance(current, WsMembershipSnapshot)
+            and current.generation == prepared.generation
+            and current.desired == desired
+            and current.committed == desired
+            and current.evidenced == desired
+            and len(desired) == 10
+        )
+        if not exact_target:
+            await restore_prior_mirror()
+            try:
+                ws_consumer.set_l3_desired(initial.desired)
+            except Exception as exc:  # noqa: BLE001 - compensation remains mandatory
+                logger.warning(
+                    "l3-promote: desired restore failed type={}",
+                    type(exc).__name__,
+                )
+            await ws_consumer.compensate_current_generation(
+                reason_code="target_convergence_failed"
+            )
+            return await finish(
+                _PromoteTerminalDraft(
+                    status=PromoteStatus.FAILED,
+                    reason_code="target_convergence_failed",
+                    selected_count=len(accepted_markets),
+                    desired=initial.desired,
+                    committed=initial.committed,
+                    evidenced=initial.evidenced,
+                    mapping=prior_mapping,
+                    ws_generation=initial.generation,
+                    added=added,
+                    removed=removed,
+                    added_markets=added_markets,
+                    removed_markets=removed_markets,
+                    add_succeeded=False if added else None,
+                    remove_succeeded=False if removed else None,
+                    mirror_succeeded=True,
+                )
+            )
+
+        essential_market_ids = set(target_markets)
         cache_market_ids = set(token_map) | essential_market_ids
         if len(cache_market_ids) > _MAX_TOKEN_MAP_CACHE:
             optional = sorted(set(token_map) - essential_market_ids)
             available = _MAX_TOKEN_MAP_CACHE - len(essential_market_ids)
             cache_market_ids = essential_market_ids | set(optional[:available])
-        if mirror_succeeded:
-            staged_market_token_map = {
-                market_id: pair
-                for market_id in sorted(cache_market_ids)
-                if (pair := token_pair(market_id)) is not None
-            }
-    staged_active_set = current.committed
-    if mirror_succeeded and not identity_limit_exceeded:
-        staged_mirrored_market_ids = frozenset(current_markets)
-    controls_ok = (not added or add_succeeded is True) and (not removed or remove_succeeded is True)
-    if not desired_set_succeeded:
-        status, reason = PromoteStatus.FAILED, "desired_update_failed"
-    elif not control_identity_ok or current.generation != initial.generation:
-        status, reason = PromoteStatus.FAILED, "generation_changed"
-    elif removed and remove_succeeded is not True:
-        status, reason = PromoteStatus.FAILED, "remove_failed"
-    elif added and add_succeeded is not True:
-        status, reason = PromoteStatus.FAILED, "add_failed"
-    elif current.desired != desired or current.committed != desired:
-        status, reason = PromoteStatus.FAILED, "membership_mismatch"
-    elif identity_limit_exceeded:
-        status, reason = PromoteStatus.FAILED, "identity_limit_exceeded"
-    elif not mirror_succeeded:
-        status, reason = PromoteStatus.FAILED, "mirror_failed"
-    elif mirror_cleanup_pending:
-        status, reason = PromoteStatus.FAILED, "mirror_cleanup_pending"
-    elif not controls_ok:
-        status, reason = PromoteStatus.FAILED, "control_failed"
-    else:
-        status, reason = PromoteStatus.SUCCESS, "ok"
-
-    return await finish(
-        _PromoteTerminalDraft(
-            status=status,
-            reason_code=reason,
+        staged_market_token_map = {
+            market_id: pair
+            for market_id in sorted(cache_market_ids)
+            if (pair := token_pair(market_id)) is not None
+        }
+        staged_active_set = current.committed
+        staged_mirrored_market_ids = frozenset(target_markets)
+        draft = _PromoteTerminalDraft(
+            status=PromoteStatus.SUCCESS,
+            reason_code="ok",
             selected_count=len(accepted_markets),
             desired=current.desired,
             committed=current.committed,
@@ -1145,11 +1207,30 @@ async def _promote_run_impl(
             removed=removed,
             added_markets=added_markets,
             removed_markets=removed_markets,
-            add_succeeded=add_succeeded,
-            remove_succeeded=remove_succeeded,
-            mirror_succeeded=mirror_succeeded,
+            add_succeeded=True if added else None,
+            remove_succeeded=True if removed else None,
+            mirror_succeeded=True,
         )
-    )
+        try:
+            result = await finish(draft)
+        except BaseException:
+            try:
+                ws_consumer.set_l3_desired(initial.desired)
+            finally:
+                await ws_consumer.compensate_current_generation(
+                    reason_code="promote_append_failed"
+                )
+                await restore_prior_mirror()
+            raise
+        if not result.persisted:
+            try:
+                ws_consumer.set_l3_desired(initial.desired)
+            finally:
+                await ws_consumer.compensate_current_generation(
+                    reason_code="promote_append_failed"
+                )
+                await restore_prior_mirror()
+        return result
 
 
 async def promote_run(

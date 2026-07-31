@@ -84,6 +84,9 @@ def test_legacy_db_adds_supabase_mirror_at_ms_column(tmp_path: Path) -> None:
     cols = _column_names(db, "snapshots")
     assert "supabase_mirror_at_ms" in cols
     assert "parquet_r2_url" in cols
+    assert "market_view_published" in cols
+    assert "data_product" in cols
+    assert "archive_status" in cols
 
 
 def test_legacy_db_preserves_existing_rows(tmp_path: Path) -> None:
@@ -97,7 +100,8 @@ def test_legacy_db_preserves_existing_rows(tmp_path: Path) -> None:
     con = sqlite3.connect(db)
     try:
         row = con.execute(
-            "SELECT mode, market_count, supabase_mirror_at_ms, parquet_r2_url "
+            "SELECT mode, market_count, supabase_mirror_at_ms, parquet_r2_url, "
+            "data_product, archive_status "
             "FROM snapshots WHERE id = 1"
         ).fetchone()
     finally:
@@ -108,6 +112,9 @@ def test_legacy_db_preserves_existing_rows(tmp_path: Path) -> None:
     assert row[1] == 42
     assert row[2] is None  # new column NULL for pre-migration row
     assert row[3] is None
+    assert row[4] == "legacy_combined"
+    assert row[5] == "legacy"
+    assert _read_market_view_published(db) == 0
 
 
 def test_migration_is_idempotent(tmp_path: Path) -> None:
@@ -121,6 +128,30 @@ def test_migration_is_idempotent(tmp_path: Path) -> None:
     cols = _column_names(db, "snapshots")
     assert "supabase_mirror_at_ms" in cols
     assert "parquet_r2_url" in cols
+    assert "data_product" in cols
+    assert "archive_status" in cols
+
+
+def test_legacy_db_adds_market_truth_tables(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.db"
+    _create_legacy_snapshots_table(db)
+
+    store = SQLiteStore(db)
+    store.init_schema()
+
+    with sqlite3.connect(db) as con:
+        tables = {
+            row[0]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+    assert {
+        "snapshot_source_coverage",
+        "event_market_memberships",
+        "neg_risk_group_truth",
+    } <= tables
 
 
 def test_migration_idempotent_after_legacy_migration(tmp_path: Path) -> None:
@@ -159,3 +190,69 @@ def test_new_columns_usable_after_migration(tmp_path: Path) -> None:
         con.close()
 
     assert row == (1_715_500_000_000, "https://r2.example/snap.parquet")
+
+
+def test_legacy_structure_snapshot_backfills_degraded_status(tmp_path: Path) -> None:
+    """A pre-status Structure revision keeps its recorded Layer-1 truth after upgrade."""
+    db = tmp_path / "legacy-structure.db"
+    con = sqlite3.connect(db, isolation_level=None)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE snapshots (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              taken_at_ms INTEGER NOT NULL,
+              finished_at_ms INTEGER NOT NULL,
+              mode TEXT NOT NULL,
+              market_count INTEGER NOT NULL,
+              market_view_published INTEGER NOT NULL DEFAULT 0,
+              data_product TEXT NOT NULL DEFAULT 'legacy_combined',
+              archive_status TEXT NOT NULL DEFAULT 'legacy',
+              is_valid INTEGER NOT NULL,
+              parquet_path TEXT NOT NULL,
+              notes TEXT
+            );
+            CREATE TABLE validation_issues (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              snapshot_id INTEGER NOT NULL,
+              layer INTEGER NOT NULL,
+              category TEXT NOT NULL,
+              market_id TEXT,
+              detail TEXT,
+              raw_payload TEXT
+            );
+            """
+        )
+        con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+            "data_product,archive_status,is_valid,parquet_path"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            (1_700_000_000_000, 1_700_000_060_000, "full", 75_611, 1,
+             "structure", "not_requested", 1, "structure://snapshot"),
+        )
+        con.execute(
+            "INSERT INTO validation_issues(snapshot_id,layer,category,detail) "
+            "VALUES (1,1,'api_jitter',?)",
+            ("Gamma reported 75793 active markets, fetched 75611",),
+        )
+    finally:
+        con.close()
+
+    store = SQLiteStore(db)
+    store.init_schema()
+
+    with sqlite3.connect(db) as read_con:
+        status = read_con.execute(
+            "SELECT snapshot_status FROM snapshots WHERE id=1"
+        ).fetchone()[0]
+    assert status == "degraded"
+
+
+def _read_market_view_published(db: Path) -> int:
+    with sqlite3.connect(db) as con:
+        return int(
+            con.execute(
+                "SELECT market_view_published FROM snapshots WHERE id=1"
+            ).fetchone()[0]
+        )

@@ -119,3 +119,52 @@
 - Repository CI still fails before pytest on 229 pre-existing full-tree Ruff
   findings outside this phase. Changed files and all local tests are clean;
   no unrelated 229-file cleanup or weakening of the CI contract was made.
+
+## Consolidated production-repair findings — 2026-07-27
+
+- The current L1 full-market snapshot has not established a successful
+  production baseline. The current large universe and co-located HTTP parent,
+  snapshot child, and two-minute quote child exceed the 1 GB cgroup during a
+  real snapshot; the kernel OOM-killed the snapshot after about 31 minutes.
+- This is not the only observation finding. The public health result remained
+  based on the last successful snapshot and did not surface the newest OOM;
+  quote freshness briefly crossed its 300-second fail-closed boundary after
+  the OOM; and a persistent L2 alert prevented a separate L1 recovery notice.
+- The next work is therefore a consolidated repair design, not another
+  open-ended soak nor a sequence of one-defect restarts. It must define
+  workload placement, resource headroom, failure truth, notification
+  granularity, deployment gates, and the later clean qualification interval.
+- `fly.toml` still documents 1 GB as sufficient for an older ~6,700-market /
+  13,400-token snapshot shape and explicitly defers multi-process placement.
+  The current production scope and concurrent quote worker invalidate that
+  sizing rationale; the new design must replace rather than merely amend it.
+- The current scheduler does classify a SIGKILL child as a possible cgroup OOM
+  and persists a failure counter, but `/health` only derives snapshot status
+  from the last successfully written snapshot. Consequently a new failed
+  attempt is invisible while the old snapshot remains recent.
+- The quote worker is deliberately in the L1 app process because its SQLite
+  store is volume-local. This was correct for the initial producer proof but
+  makes the snapshot, HTTP, and quote working sets share one cgroup.
+- Polywatch currently stores one global active-failure set and sends recovery
+  only when it becomes empty. A continuing L2 incident therefore suppresses a
+  distinct L1 recovery event; per-component incident state is required.
+- The existing SQLite model already has atomic snapshot publication plus
+  `snapshot_source_coverage`, group-membership truth, and quote-run binding to
+  a completed `universe_snapshot_id`. The repair should extend this contract
+  to an explicit Structure revision rather than create a second competing
+  truth model.
+- The scheduler currently knows a child was SIGKILLed but records only a
+  scalar failure counter. The first repair plan can add append-only attempt
+  rows and expose them without changing the successful snapshot transaction.
+- The current snapshot CLI has no purpose switch: every online scheduler run
+  executes the Gamma catalogue, full CLOB top-of-book fetch, CLOB-era final
+  reconciliation, validation, and archive write as one unit. A future
+  Structure path must retain the bounded final Gamma membership reconciliation;
+  merely skipping the CLOB block would change correctness semantics.
+- The volume-less cron machine runs direct snapshot commands while the mounted
+  app scheduler runs the online truth path. The refactor must name these as
+  separate products and must never infer online publication success from a
+  cron-side archive command.
+- Commit `9bf026a` is present on the active branch. It binds quote runs to the
+  existing verified source truth hash; the new Structure revision should extend
+  that already-shipped identity chain rather than duplicate it.

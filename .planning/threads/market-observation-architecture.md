@@ -13,6 +13,28 @@ updated: 2026-05-10
 >
 > 跨能力线永久存活。任何观察 / 抓取 / 数据落库相关讨论应预读本文。
 
+## 0.3 失败事实与已发布事实必须分离（2026-07-27）
+
+`snapshots` / `market_view_published` 说明最近一版可读市场事实；`snapshot_attempts` 说明
+调度器刚刚做了什么。两者不能互相覆盖：旧完整 revision 可能仍适合解释 M2 的已知结构，
+同时新的采集已因 OOM 失败。严格健康检查必须同时暴露 published truth age、latest attempt
+和连续失败计数；Polywatch 也必须按 L1、机会 feed、L2、Dashboard 各自管理 incident/recovery。
+这一层只解决可观测性，不能被误写成 all-in-one snapshot 已满足 Structure production SLO，
+也不等同启动下一轮 24 小时资格验证。
+
+---
+
+## 0.4 Structure、Quote、Archive 是三个产品（2026-07-27）
+
+生产上的 **Structure** 是 Gamma 的完整市场/事件/member truth，必须可以原子发布给 Quote 和
+M2；它不读取 CLOB、不写 Parquet/R2。**Quote** 才是可交易价格事实，绑定一个 Structure
+revision 并有独立时钟。**Archive** 是按需的 CLOB/Parquet/R2 研究证据：可以慢、可以失败、
+必须有自己的状态，但 `market_view_published=0`，不得替换 Structure。
+
+这不是“给 all-in-one snapshot 加更多内存”的变体。第一阶段只在线调度 Structure；Archive
+要等独立容量、成本预算和结果通道后才可进入生产日程。strict health 的 `archive:*` 项只作
+非阻断证据，Archive warning 不能把 Structure→Quote→M2 健康误判为中断。
+
 ---
 
 ## 0. 起点 — 用户洞察（2026-05-10）
@@ -1302,3 +1324,90 @@ transport activity and an orderbook resnapshot:
   exact source but left `/health.releaseId=dev`; release 131 now injects the
   workflow `GITHUB_SHA`, so the public health body can be matched to the
   deployed commit without relying only on external release history.
+
+### §2.15 Durable replay must count as evidence, not failure (2026-07-26)
+
+- A WebSocket initial dump is at-least-once input. Quiet refresh can replay the
+  same asset, venue timestamp, side, and level after that row is already
+  durable.
+- A uniqueness violation is therefore ambiguous: an exact same-key/same-value
+  replay is successful idempotence, while a same-key/different-value row is a
+  data-integrity conflict. Treating both as generic write failure converts
+  durable truth into a false missing-evidence timeout.
+- The evidence acknowledgement must describe the postcondition—this exact
+  observation is durably present—not merely whether the current INSERT created
+  a new row. Replay equivalence must be proven before advancing the chain-truth
+  anchor; conflicts remain fail-closed and observable.
+- Alert/recovery state also needs durable reason context. Persisting only an
+  active component key supports deduplication but cannot explain a recovered
+  incident after short runtime logs expire.
+
+### §2.16 1 GB OOM is a capacity-model problem, not a one-off defect (2026-07-27)
+
+- [PRODUCTION EVIDENCE] In the expanded production universe, the L1 HTTP
+  parent, isolated snapshot child, and quote child can overlap in the same
+  1 GB cgroup. One observed overlap reached about 306 MB + 403 MB + 134 MB
+  RSS before the kernel OOM-killed the snapshot process. The exact values are
+  samples rather than allocation ceilings, but they prove that 1 GB has no
+  defensible production safety margin for the current co-located topology.
+- [HISTORICAL CONTINUITY] This is the same capacity class first exposed on
+  256/512 MB during Phase 02, now amplified by a much larger market universe,
+  an always-on HTTP process, and the two-minute M2 quote producer. Individual
+  retention, streaming, subprocess, compact-projection, GC, and allocator-trim
+  fixes reduce waste; they do not turn the remaining aggregate working set into
+  a transient bug.
+- [STAGED DESIGN ITEM] Resource sizing and snapshot policy must be designed as
+  one staged production contract:
+  1. M1 initial operation separates slow structural-market discovery from the
+     fast quote truth path and gives both measured memory headroom.
+  2. M1→M2 integration isolates snapshot work from the online feed, defines an
+     atomic publication boundary, and removes shared SQLite concurrency from
+     the cross-machine design before adding workers.
+  3. Formal arbitrage isolates perception, strategy, and execution failure
+     domains; live decisions never wait for a full-market snapshot and fail
+     closed when their source identity/freshness contract is not met.
+- [DEFERRED DECISION] Do not independently resize the VM or redesign the
+  pipeline from this note. During the consolidated repair, use the accumulated
+  long-run evidence to decide exact memory/CPU, process placement, snapshot
+  cadence, storage migration, retry policy, and promotion gates for each stage.
+  The user has accepted reliability-first staged separation as the design
+  direction, while asking that the final choice be considered and implemented
+  together with the holistic repair.
+## 2026-07-29 — Task 8 fault chain closure
+
+Production qualification now separates runtime detection from mutation
+capability. Gamma, Candidate CLOB/SQLite, Resource disk/load, notification
+delivery, producer exit/stall, and HTTP faults all have durable expected
+Incident or coverage facts plus component-specific recovery writers. This does
+not make every injection executable: upstream API faults still require a
+scoped proxy with exact release/fault authorization and finally-protected
+cleanup; host/store/runtime faults retain distinct primitives.
+
+Resource history remains backward-readable: additive `disk_free_bytes` and
+`load_per_cpu` fields default to unknown for older v1 sample JSON, while each
+new decision persists the thresholds used for deterministic replay. Telegram
+recovery is keyed to the exact durable opportunity outbox ID; API delivery
+success is not user receipt/read evidence.
+
+### §2.17 Control-plane projection cannot substitute for write-side truth (2026-07-30)
+
+- A virtual read-side `EXPIRED` state is not enough when the write-side
+  one-active query still sees the original `AUTHORIZED` intent. Time-based
+  terminal facts that release admission capacity must be materialized inside
+  the same authority transaction used by claim or admission.
+- Cleanup is a command until the owning runtime consumes it. Before claim, the
+  authority must make the request terminal and non-claimable; after claim, the
+  owner must clear memory before recording the terminal receipt. An API action
+  row alone is not cleanup evidence.
+- Unknown cleanup truth is not equivalent to “no cleanup requested.” A store
+  read error or invalid history while a fault is active must make injection
+  pass-through and freeze/degrade local control, without inventing a durable
+  terminal fact from an untrusted source.
+- Accepted and rejected envelopes share an audit table but not capabilities.
+  Every claim, active-chain, or business-evidence writer must prove
+  `status=accepted` plus the complete immutable hash/auth/runtime binding.
+  Shape-only validation lets rejected control input contaminate source
+  evidence.
+- Authority timestamps must be monotonic against the verified event/action
+  tail. Reconciliation uses `max(boundary_now, tail_time)` so clock regression
+  cannot corrupt an otherwise append-only history.

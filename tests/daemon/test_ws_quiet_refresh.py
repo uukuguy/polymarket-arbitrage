@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -13,6 +15,7 @@ from loguru import logger
 from polyarb.daemon import ws_consumer as ws_consumer_module
 from polyarb.daemon.ws_consumer import WsConsumer
 from polyarb.daemon.ws_watchdog import WsWatchdog
+from polyarb.observation.l3_evidence import RuntimeEventKind
 
 BASE_S = 1_000.0
 
@@ -27,7 +30,10 @@ async def _wait_until(predicate, *, timeout: float = 0.2) -> None:
             await asyncio.sleep(0)
 
 
-def _make_consumer() -> tuple[WsConsumer, WsWatchdog, MagicMock]:
+def _make_consumer(
+    *,
+    event_recorder: Callable[..., Any] | None = None,
+) -> tuple[WsConsumer, WsWatchdog, MagicMock]:
     """Build real consumer/watchdog state and mock only the live transport."""
     watchdog = WsWatchdog(stale_s=30.0)
     consumer = WsConsumer(
@@ -35,6 +41,7 @@ def _make_consumer() -> tuple[WsConsumer, WsWatchdog, MagicMock]:
         watchdog=watchdog,
         on_event=lambda event: None,
         initial_assets=None,
+        event_recorder=event_recorder,
     )
     consumer._candidate_set = {"candidate-b", "candidate-a"}
     consumer.set_l3_desired(["candidate-b", "l3-c"])
@@ -200,10 +207,13 @@ async def test_no_l3_desired_falls_back_to_every_active_candidate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evidence_timeout_keeps_missing_identities_in_state_not_logs(
+async def test_evidence_timeout_records_failure_without_closing_healthy_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    consumer, _watchdog, ws = _make_consumer()
+    events: list[tuple[RuntimeEventKind, dict[str, object]]] = []
+    consumer, _watchdog, ws = _make_consumer(
+        event_recorder=lambda kind, **kwargs: events.append((kind, kwargs))
+    )
     consumer.set_l3_desired(["l3-a", "l3-b"])
     consumer._l3_committed_set = {"l3-a", "l3-b"}
     ws.send.side_effect = None
@@ -229,6 +239,17 @@ async def test_evidence_timeout_keeps_missing_identities_in_state_not_logs(
     assert consumer._book_evidence_waiters == {}
     assert consumer.last_quiet_refresh_missing_assets == frozenset({"l3-b"})
     assert consumer._last_quiet_refresh_missing_generation == 0
+    _kind, event = next(
+        (kind, values)
+        for kind, values in events
+        if kind is RuntimeEventKind.SUBSCRIPTION_CONTROL_FAILED
+        and values["reason_code"] == "evidence_timeout"
+    )
+    assert event["detail"]["operation"] == "book_refresh"
+    assert event["detail"]["required_count"] == 2
+    assert event["detail"]["missing_count"] == 1
+    assert "l3-a" not in str(event["detail"])
+    assert "l3-b" not in str(event["detail"])
     warning = next(message for message in messages if "ws quiet refresh failed" in message)
     assert "reason=evidence_timeout" in warning
     assert "error_type=TimeoutError" in warning

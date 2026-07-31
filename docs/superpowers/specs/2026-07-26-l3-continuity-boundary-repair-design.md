@@ -16,8 +16,9 @@ five-market/two-token evidence surface at every strict health sample:
    sampler.
 3. A quiet committed token must receive a durable book refresh before its age
    reaches the locked 120-second failure boundary.
-4. A refresh that cannot collect all required evidence must be persisted as a
-   runtime failure and force recovery of the captured WebSocket generation.
+4. A refresh that cannot collect all required evidence must persist bounded
+   failure truth without closing a socket whose control sends completed
+   unambiguously.
 5. `/health`, durable evidence, Polywatch, and the promoter ledger must describe
    the same identities and failure reason.
 
@@ -48,12 +49,13 @@ contracts remain too weak for continuous strict health.
 
 ## Approaches Considered
 
-### A. Transactional transition plus deadline recovery
+### A. Transactional transition plus non-destructive evidence recovery
 
 Stage the next mapping, obtain durable evidence before publication, then expose
-the new mapping and membership at one commit boundary. Treat incomplete quiet
-refresh as a failed WebSocket generation and reconnect before the 120-second
-deadline.
+the new mapping and membership at one commit boundary. Record incomplete quiet
+refresh as missing business evidence, retain the healthy generation, and retry
+only missing identities before the 120-second deadline. Close a generation
+only when a control send or connection identity is ambiguous.
 
 - Advantage: preserves the existing strict definition and removes both known
   gaps at their source.
@@ -124,19 +126,29 @@ not transport frames or outbound control messages.
 - Normal refresh begins when the oldest committed L3 evidence reaches 60
   seconds.
 - The existing bounded first attempt and missing-token retry remain.
-- If the evidence barrier is still incomplete, the failure is no longer
-  returned as a harmless `False` on the same socket. The captured generation is
-  marked failed, its socket is closed, and the normal consumer reconnect path
-  requests a complete initial dump.
-- Only the captured socket may be closed; a replacement generation must never
-  be affected by an old timeout.
+- If the evidence barrier is still incomplete after a confirmed final
+  subscribe, persist `evidence_timeout`, retain the exact missing set, and keep
+  the current socket. Missing business frames do not make a completed control
+  transaction ambiguous.
+- A control-send failure, cancellation, or connection-generation drift still
+  closes only the captured socket; a replacement generation must never be
+  affected by an old operation.
 - Recovery must either restore all 10 identities before 120 seconds or leave
   strict health failed with a persisted reason. It must never forge freshness.
 
-The reconnect policy is a recovery action on an already ambiguous market-data
-generation. It does not restart the Fly machine or L2 process.
+An unchanged promoter target reuses its current-generation durable evidence
+instead of cycling all ten subscriptions every five minutes.
 
-### 3. Chain-truth observability
+### 3. Reconnect convergence sampling gate
+
+On a genuine reconnect, runtime membership becomes incomplete while the initial
+book dump arrives. Strict `/health` continues to expose that mismatch
+immediately, but the durable sampler waits for
+`desired == committed == evidenced` before writing its next row. If convergence
+does not complete, the existing `<75s` durable-sample-age check fails; no 8/10
+or 9/10 intermediate sample is persisted.
+
+### 4. Chain-truth observability
 
 Every failed staging or quiet-refresh barrier emits a bounded
 `subscription_control_failed` runtime event containing:
@@ -148,8 +160,9 @@ Every failed staging or quiet-refresh barrier emits a bounded
 - no token IDs, credentials, or raw exception text.
 
 The same failure updates the process-local evidence state consumed by strict
-health. The durable sampler then records the exact failed count/reason, and
-Polywatch alerts from that strict check. This preserves the chain:
+health. Polywatch alerts from that strict check while the sampler either writes
+an exact converged row or ages past its unchanged cadence threshold. This
+preserves the chain:
 
 `receive/write result → generation evidence → durable sample → /health → Telegram`.
 
@@ -160,8 +173,9 @@ No separate log-only success or failure source is introduced.
 - Selection underfill, staging timeout, durable-write failure, generation
   change, mirror failure, or atomic-commit mismatch leaves the previous
   converged mapping active.
-- A quiet-refresh evidence timeout closes only its captured socket and lets the
-  existing supervisor reconnect.
+- A quiet-refresh business-evidence timeout records failure and preserves a
+  control-consistent socket; control ambiguity still compensates only the
+  captured generation.
 - A failed reconnect remains visible through existing WebSocket and L3 strict
   checks; no loop marks data fresh merely because it sent a subscription.
 - Repeated failures remain subject to Polywatch's existing duplicate
@@ -178,10 +192,10 @@ Implementation follows test-first red/green/refactor cycles.
 2. A successful staged rotation proves the old mapping remains readable until
    all target book writes succeed, then changes atomically with 10/10 evidence.
 3. A generation change during staging proves old evidence is discarded.
-4. A quiet-refresh timeout test proves the captured socket is closed, a runtime
-   failure event is recorded, and a replacement socket is never closed.
-5. A recovery test proves a complete reconnect initial dump restores 10/10
-   without modifying timestamps in the send path.
+4. A quiet-refresh timeout test proves the healthy socket remains open while a
+   bounded runtime failure event and exact missing set are recorded.
+5. A reconnect test proves an 8/10 intermediate state blocks durable sampling
+   until the complete initial dump restores 10/10.
 6. Health-chain tests prove incomplete staging and stale markets return 503,
    while the recovered state passes with the locked 120-second threshold.
 7. Existing WebSocket transaction, evidence, sampler, health, promoter,

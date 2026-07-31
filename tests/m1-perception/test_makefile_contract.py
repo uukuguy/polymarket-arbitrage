@@ -81,6 +81,28 @@ def test_make_snapshot_markets_full_dry_run_recipe() -> None:
     assert "uv run python -m polyarb.snapshot snapshot --full" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("target", "product"),
+    [
+        ("sync-structure-local", "structure"),
+        ("archive-markets-local", "archive"),
+    ],
+)
+def test_make_explicit_data_product_targets_are_wired(
+    target: str, product: str
+) -> None:
+    """Operators must not need to reconstruct product-selection flags by hand."""
+    result = subprocess.run(
+        ["make", "-n", target],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n {target} failed: {result.stderr}"
+    assert f"--product {product}" in result.stdout
+
+
 def test_makefile_phony_declaration_present() -> None:
     """Core snapshot recipe names must be declared .PHONY so a file by that name
     in the project root can't shadow the recipe.
@@ -95,7 +117,12 @@ def test_makefile_phony_declaration_present() -> None:
         stripped = line.strip()
         if stripped.startswith(".PHONY:"):
             phony_targets.update(stripped[len(".PHONY:") :].split())
-    required = {"snapshot-markets", "snapshot-markets-full"}
+    required = {
+        "snapshot-markets",
+        "snapshot-markets-full",
+        "sync-structure-local",
+        "archive-markets-local",
+    }
     missing = required - phony_targets
     assert not missing, f"missing .PHONY declarations for: {missing}"
 
@@ -949,3 +976,46 @@ def test_makefile_exposes_safe_worktree_lifecycle_targets() -> None:
     makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
     assert "--apply" in makefile
     assert "--discard-unmerged" in makefile
+
+
+def test_make_help_exposes_market_truth_production_smoke() -> None:
+    result = subprocess.run(
+        ["make", "help"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "smoke-market-truth-prod:" in result.stdout
+
+
+def test_market_truth_production_smoke_is_read_only() -> None:
+    result = subprocess.run(
+        ["make", "-n", "smoke-market-truth-prod"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "https://polyarb-l1.fly.dev/health" in result.stdout
+    assert "market_truth:coverage" in result.stdout
+    assert "POST" not in result.stdout
+
+
+def test_l1_deploy_binds_exact_source_sha_and_scales_noninteractively() -> None:
+    result = subprocess.run(
+        ["make", "-n", "deploy"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "git rev-parse HEAD" in result.stdout
+    assert '--env POLYARB_RELEASE_ID="$RELEASE_ID"' in result.stdout
+    assert "flyctl scale count app=1 cron=1 -a polyarb-l1 --yes" in result.stdout

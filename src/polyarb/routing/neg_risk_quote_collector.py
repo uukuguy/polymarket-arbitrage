@@ -10,20 +10,19 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from loguru import logger
+
 from polyarb.routing.neg_risk_quote_store import (
     QUOTE_RUN_LEASE_MS,
     NegRiskQuoteStore,
     PersistedQuote,
+    QuoteRun,
     QuoteRunLeaseLostError,
     UniverseLeg,
 )
-
-
-class QuoteUniverseUnavailableError(RuntimeError):
-    """The latest snapshot cannot provide an eligible quote universe."""
-
-    def __init__(self) -> None:
-        super().__init__("quote-universe-unavailable")
+from polyarb.routing.neg_risk_quote_store import (
+    QuoteUniverseUnavailableError as QuoteUniverseUnavailableError,
+)
 
 
 class QuoteCollectionIntegrityError(RuntimeError):
@@ -36,7 +35,12 @@ class QuoteCollectionIntegrityError(RuntimeError):
 class BooksReader(Protocol):
     """The read-only slice of ``ClobReaderClient`` required by collection."""
 
-    async def get_books(self, token_ids: list[str]) -> Sequence[Any]: ...
+    async def get_books(
+        self,
+        token_ids: list[str],
+        *,
+        projection: str = "full",
+    ) -> Sequence[Any]: ...
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,20 @@ class QuoteCollectionResult:
     successful_response_count: int
     quote_taken_at_ms: int
     elapsed_ms: int
+    universe_hash: str = ""
+
+    @classmethod
+    def from_run(cls, run: QuoteRun, *, elapsed_ms: int) -> QuoteCollectionResult:
+        return cls(
+            run_id=run.run_id,
+            status=run.status,
+            universe_snapshot_id=run.universe_snapshot_id,
+            requested_token_count=run.requested_token_count,
+            successful_response_count=run.successful_response_count,
+            quote_taken_at_ms=run.quoted_at_ms,
+            elapsed_ms=elapsed_ms,
+            universe_hash=run.universe_hash,
+        )
 
 
 _MISSING = object()
@@ -71,21 +89,33 @@ async def collect_neg_risk_quotes(
     so the collector can never finish alongside a replacement run.
     """
     clock = now_ms or quote_store.current_time_ms
-    universe = quote_store.latest_universe()
-    if universe is None or not universe[2]:
-        raise QuoteUniverseUnavailableError()
-    universe_snapshot_id, universe_taken_at_ms, legs = universe
-    token_ids = list({leg.yes_token_id: None for leg in legs})
+    stage_started = time.perf_counter()
+    universe = await asyncio.to_thread(
+        quote_store.latest_verified_universe
+    )
+    universe_ms = int((time.perf_counter() - stage_started) * 1000)
+    legs = universe.legs
     quote_taken_at_ms = clock()
-    run_id = quote_store.begin_run(
-        universe_snapshot_id=universe_snapshot_id,
-        universe_taken_at_ms=universe_taken_at_ms,
-        legs=legs,
+    stage_started = time.perf_counter()
+    run_id = await asyncio.to_thread(
+        quote_store.begin_verified_run,
+        universe,
         quoted_at_ms=quote_taken_at_ms,
     )
+    begin_ms = int((time.perf_counter() - stage_started) * 1000)
     failure_reason = "collector-error"
     try:
+        if not legs:
+            completed = await asyncio.to_thread(
+                quote_store.complete_run,
+                run_id,
+                completed_at_ms=clock(),
+                successful_response_count=0,
+            )
+            return QuoteCollectionResult.from_run(completed, elapsed_ms=0)
+        token_ids = list({leg.yes_token_id: None for leg in legs})
         try:
+            stage_started = time.perf_counter()
             books = await _get_books_with_lease(
                 quote_store=quote_store,
                 reader=reader,
@@ -94,41 +124,71 @@ async def collect_neg_risk_quotes(
                 clock=clock,
                 lease_sleep=lease_sleep,
             )
+            fetch_ms = int((time.perf_counter() - stage_started) * 1000)
         except QuoteRunLeaseLostError:
             raise
         except Exception:
             failure_reason = "clob-fetch-failed"
             raise
-        indexed_books = _index_books_by_token(books, token_ids)
-        terminal_quotes = tuple(
-            _terminal_quote_for_leg(leg, indexed_books.get(leg.yes_token_id))
-            for leg in _deduplicated_legs(legs)
+        stage_started = time.perf_counter()
+        indexed_count, terminal_quotes = await asyncio.to_thread(
+            _build_terminal_quotes,
+            books,
+            token_ids,
+            legs,
         )
-        quote_store.record_terminal_quotes(run_id, terminal_quotes)
+        transform_ms = int((time.perf_counter() - stage_started) * 1000)
+        stage_started = time.perf_counter()
+        await asyncio.to_thread(
+            quote_store.record_terminal_quotes,
+            run_id,
+            terminal_quotes,
+        )
         completed_at_ms = clock()
-        completed = quote_store.complete_run(
+        completed = await asyncio.to_thread(
+            quote_store.complete_run,
             run_id,
             completed_at_ms=completed_at_ms,
-            successful_response_count=len(indexed_books),
+            successful_response_count=indexed_count,
         )
+        persist_ms = int((time.perf_counter() - stage_started) * 1000)
     except QuoteRunLeaseLostError:
         failure_reason = "collector-lease-lost"
-        _best_effort_fail(quote_store, run_id, failure_reason)
+        await asyncio.to_thread(
+            _best_effort_fail,
+            quote_store,
+            run_id,
+            failure_reason,
+        )
         raise
     except QuoteCollectionIntegrityError:
         failure_reason = "clob-response-integrity-failed"
-        _best_effort_fail(quote_store, run_id, failure_reason)
+        await asyncio.to_thread(
+            _best_effort_fail,
+            quote_store,
+            run_id,
+            failure_reason,
+        )
         raise
     except Exception:
-        _best_effort_fail(quote_store, run_id, failure_reason)
+        await asyncio.to_thread(
+            _best_effort_fail,
+            quote_store,
+            run_id,
+            failure_reason,
+        )
         raise
-    return QuoteCollectionResult(
-        run_id=completed.run_id,
-        status=completed.status,
-        universe_snapshot_id=completed.universe_snapshot_id,
-        requested_token_count=completed.requested_token_count,
-        successful_response_count=completed.successful_response_count,
-        quote_taken_at_ms=completed.quoted_at_ms,
+    logger.info(
+        "neg-risk quote collection stages "
+        f"run_id={run_id} "
+        f"universe_ms={universe_ms} "
+        f"begin_ms={begin_ms} "
+        f"fetch_ms={fetch_ms} "
+        f"transform_ms={transform_ms} "
+        f"persist_ms={persist_ms}"
+    )
+    return QuoteCollectionResult.from_run(
+        completed,
         elapsed_ms=completed_at_ms - quote_taken_at_ms,
     )
 
@@ -147,7 +207,9 @@ async def _get_books_with_lease(
     lease_sleep: Callable[[float], Awaitable[None]],
 ) -> Sequence[Any]:
     """Await CLOB while proving that this task still owns its durable lease."""
-    reader_task = asyncio.create_task(reader.get_books(token_ids))
+    reader_task = asyncio.create_task(
+        reader.get_books(token_ids, projection="top")
+    )
     renewal_task = asyncio.create_task(
         _renew_lease_until_cancelled(
             quote_store=quote_store,
@@ -171,7 +233,10 @@ async def _get_books_with_lease(
 
         books = reader_task.result()
         try:
-            quote_store.renew_run_lease(run_id)
+            await asyncio.to_thread(
+                quote_store.renew_run_lease,
+                run_id,
+            )
         except Exception as error:
             raise QuoteRunLeaseLostError() from error
         return books
@@ -189,7 +254,10 @@ async def _renew_lease_until_cancelled(
 ) -> None:
     while True:
         await lease_sleep(_QUOTE_RUN_LEASE_RENEWAL_S)
-        quote_store.renew_run_lease(run_id)
+        await asyncio.to_thread(
+            quote_store.renew_run_lease,
+            run_id,
+        )
 
 
 async def _cancel_task(task: asyncio.Task[object], *, suppress_errors: bool = False) -> None:
@@ -234,6 +302,20 @@ def _index_books_by_token(books: Sequence[Any], token_ids: list[str]) -> dict[st
     return indexed
 
 
+def _build_terminal_quotes(
+    books: Sequence[Any],
+    token_ids: list[str],
+    legs: tuple[UniverseLeg, ...],
+) -> tuple[int, tuple[PersistedQuote, ...]]:
+    """Build the bounded top-of-book terminal set outside the event loop."""
+    indexed_books = _index_books_by_token(books, token_ids)
+    terminal_quotes = tuple(
+        _terminal_quote_for_leg(leg, indexed_books.get(leg.yes_token_id))
+        for leg in _deduplicated_legs(legs)
+    )
+    return len(indexed_books), terminal_quotes
+
+
 def _terminal_quote_for_leg(leg: UniverseLeg, book: Any | None) -> PersistedQuote:
     if book is None:
         return _non_executable(leg, "missing-book")
@@ -264,6 +346,8 @@ def _terminal_quote_for_leg(leg: UniverseLeg, book: Any | None) -> PersistedQuot
             "executable",
             best[0],
             best[1],
+            event_id=leg.event_id,
+            membership_hash=leg.membership_hash,
         )
     return _non_executable(leg, "invalid-ask-price" if saw_invalid_price else "invalid-ask-size")
 
@@ -278,6 +362,8 @@ def _non_executable(leg: UniverseLeg, terminal_state: str) -> PersistedQuote:
         terminal_state,
         None,
         None,
+        event_id=leg.event_id,
+        membership_hash=leg.membership_hash,
     )
 
 

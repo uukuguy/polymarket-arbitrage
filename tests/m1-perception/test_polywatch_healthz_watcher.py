@@ -41,8 +41,20 @@ def _health(*, status: str = "pass", checks: dict[str, Any]) -> dict[str, Any]:
     return {"status": status, "checks": checks}
 
 
-def _check(value: Any, *, status: str = "pass") -> list[dict[str, Any]]:
-    return [{"componentId": "test", "observedValue": value, "status": status}]
+def _check(
+    value: Any,
+    *,
+    status: str = "pass",
+    output: str | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "componentId": "test",
+            "observedValue": value,
+            "status": status,
+            "output": output,
+        }
+    ]
 
 
 def _healthy_l2_checks() -> dict[str, Any]:
@@ -61,6 +73,7 @@ def test_l1_quote_age_failure_pushes() -> None:
     health = _health(
         checks={
             "snapshot:last_success_age_seconds": _check(60.0),
+            "market_truth:coverage": _check("complete"),
             "quote_feed:last_complete_age_seconds": _check(301.0, status="fail"),
             "quote_feed:collector_state": _check("running"),
         }
@@ -72,11 +85,52 @@ def test_l1_quote_age_failure_pushes() -> None:
     assert "quote" in reason.lower()
 
 
+def test_l1_quote_refresh_transition_does_not_alert() -> None:
+    health = _health(
+        status="warn",
+        checks={
+            "snapshot:last_success_age_seconds": _check(20.0),
+            "market_truth:coverage": _check("complete"),
+            "quote_feed:last_complete_age_seconds": _check(
+                None,
+                status="warn",
+                output="source-snapshot-refreshing",
+            ),
+            "quote_feed:collector_state": _check("collecting"),
+        },
+    )
+
+    assert WATCHER.decide_l1(health) == (
+        "noop",
+        "L1 quote refresh in progress for current Structure",
+    )
+
+
+def test_opportunity_transition_waits_for_current_quote_without_alert() -> None:
+    health = _health(
+        status="warn",
+        checks={
+            "quote_feed:last_complete_age_seconds": _check(
+                None,
+                status="warn",
+                output="source-snapshot-refreshing",
+            ),
+            "quote_feed:collector_state": _check("collecting"),
+        },
+    )
+
+    assert WATCHER.decide_opportunity(None, l1_health=health) == (
+        "noop",
+        "Opportunity refresh waits for current Structure Quote",
+    )
+
+
 @pytest.mark.parametrize("collector_state", ["error", "stopped"])
 def test_l1_bad_collector_state_pushes(collector_state: str) -> None:
     health = _health(
         checks={
             "snapshot:last_success_age_seconds": _check(60.0),
+            "market_truth:coverage": _check("complete"),
             "quote_feed:last_complete_age_seconds": _check(20.0),
             "quote_feed:collector_state": _check(collector_state),
         }
@@ -88,11 +142,61 @@ def test_l1_bad_collector_state_pushes(collector_state: str) -> None:
     assert collector_state in reason
 
 
+def test_polywatch_alerts_on_market_truth_coverage_failure() -> None:
+    health = _health(
+        checks={
+            "snapshot:last_success_age_seconds": _check(60.0),
+            "market_truth:coverage": _check("incomplete-source", status="fail"),
+            "quote_feed:last_complete_age_seconds": _check(20.0),
+            "quote_feed:collector_state": _check("running"),
+        }
+    )
+
+    assert WATCHER.decide_l1(health) == (
+        "push",
+        "L1 market truth coverage failed",
+    )
+
+
+def test_polywatch_alerts_when_market_truth_coverage_is_missing() -> None:
+    health = _health(
+        checks={
+            "snapshot:last_success_age_seconds": _check(60.0),
+            "quote_feed:last_complete_age_seconds": _check(20.0),
+            "quote_feed:collector_state": _check("running"),
+        }
+    )
+
+    assert WATCHER.decide_l1(health) == (
+        "push",
+        "L1 market truth coverage failed",
+    )
+
+
+def test_failed_snapshot_attempt_pushes_even_when_last_success_is_fresh() -> None:
+    health = _health(
+        checks={
+            "snapshot:last_success_age_seconds": _check(60.0),
+            "snapshot:latest_attempt": _check("failed", status="warn"),
+            "snapshot:failure_counter": _check(1, status="warn"),
+            "market_truth:coverage": _check("complete"),
+            "quote_feed:last_complete_age_seconds": _check(20.0),
+            "quote_feed:collector_state": _check("running"),
+        }
+    )
+
+    action, reason = WATCHER.decide_l1(health)
+
+    assert action == "push"
+    assert "latest snapshot attempt failed" in reason.lower()
+
+
 def test_empty_opportunity_list_is_healthy() -> None:
     action, reason = _decision("decide_opportunity")(
         {
             "strategy": "neg-risk-buy-all",
             "profit_basis": "gross-before-fees",
+            "coverage": "verified-standard-neg-risk",
             "count": 0,
             "opportunities": [],
         }
@@ -109,16 +213,25 @@ def test_empty_opportunity_list_is_healthy() -> None:
         {
             "strategy": "wrong",
             "profit_basis": "gross-before-fees",
+            "coverage": "verified-standard-neg-risk",
             "opportunities": [],
         },
         {
             "strategy": "neg-risk-buy-all",
             "profit_basis": "net-after-fees",
+            "coverage": "verified-standard-neg-risk",
             "opportunities": [],
         },
         {
             "strategy": "neg-risk-buy-all",
             "profit_basis": "gross-before-fees",
+            "coverage": "verified-standard-neg-risk",
+        },
+        {
+            "strategy": "neg-risk-buy-all",
+            "profit_basis": "gross-before-fees",
+            "coverage": "legacy-snapshot",
+            "opportunities": [],
         },
     ],
 )
@@ -272,12 +385,61 @@ def test_successful_recovery_clears_resident_state() -> None:
     }
 
 
-def test_cron_machine_runs_polywatch_every_two_minutes() -> None:
+def test_l1_recovery_is_sent_while_l2_remains_active() -> None:
+    decisions = WATCHER.component_notification_decisions(
+        {"l1": False, "l2": True},
+        {
+            "incidents": {
+                "l1": {"active": True, "last_alert_at_s": 1_000.0},
+                "l2": {"active": True, "last_alert_at_s": 1_000.0},
+            }
+        },
+        now_s=1_100.0,
+        reminder_s=1_800,
+    )
+
+    assert decisions == {"l1": "recovery", "l2": "suppress"}
+
+
+def test_legacy_active_keys_become_independent_incidents() -> None:
+    normalized = WATCHER.normalize_notification_state(
+        {"active_keys": ["l1", "l2"], "last_alert_at_s": 1_000.0}
+    )
+
+    assert normalized["incidents"] == {
+        "l1": {"active": True, "last_alert_at_s": 1_000.0},
+        "l2": {"active": True, "last_alert_at_s": 1_000.0},
+    }
+
+
+def test_failed_l1_recovery_delivery_keeps_only_l1_incident() -> None:
+    updated = WATCHER.updated_component_notification_state(
+        {"l1": False, "l2": True},
+        {
+            "incidents": {
+                "l1": {"active": True, "last_alert_at_s": 1_000.0},
+                "l2": {"active": True, "last_alert_at_s": 1_000.0},
+            }
+        },
+        {"l1": "recovery", "l2": "suppress"},
+        now_s=1_100.0,
+        delivery_ok_by_component={"l1": False, "l2": True},
+    )
+
+    assert updated["incidents"] == {
+        "l1": {"active": True, "last_alert_at_s": 1_000.0},
+        "l2": {"active": True, "last_alert_at_s": 1_000.0},
+    }
+
+
+def test_cron_machine_runs_only_polywatch_every_two_minutes() -> None:
     crontab = (PROJECT_ROOT / "crontab").read_text()
 
     assert "*/2 * * * *" in crontab
     assert "POLYWATCH_STATE_FILE=/tmp/polywatch-healthz-state.json" in crontab
     assert "python /app/scripts/polywatch/healthz_watcher.py" in crontab
+    assert "polyarb.snapshot" not in crontab
+    assert "snapshots-purge" not in crontab
 
 
 def test_runtime_image_contains_polywatch_script() -> None:

@@ -19,6 +19,13 @@ from pathlib import Path
 
 from loguru import logger
 
+from polyarb.perception.market_truth import (
+    EventMember,
+    GroupTruth,
+    SourceCoverage,
+    market_truth_mismatch_reason,
+    membership_hash,
+)
 from polyarb.storage.schemas import (
     DDL,
     EVENT_TAGS_COLUMN_ORDER,
@@ -29,8 +36,13 @@ from polyarb.storage.schemas import (
     MARKETS_COLUMN_ORDER,
     MARKETS_INSERT_SQL,
     SCHEDULER_STATE_DDL,
+    SNAPSHOT_ATTEMPTS_DDL,
+    STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL,
+    migrate_fault_auth_finalize,
+    migrate_fault_intent_status,
 )
-from polyarb.validator.category import Issue
+from polyarb.validator.category import Category, Issue, SnapshotStatus
+from polyarb.validator.layers import determine_snapshot_status
 
 _VALID_MODES = ("subset", "full")
 
@@ -38,6 +50,174 @@ _VALID_MODES = ("subset", "full")
 _BOOL_COLUMNS = ("active", "closed", "neg_risk", "incomplete")
 # events table also has bool fields stored as INTEGER 0/1.
 _EVENT_BOOL_COLUMNS = ("active", "closed")
+
+
+def _backfill_structure_snapshot_statuses(con: sqlite3.Connection) -> None:
+    """Derive persisted status for Structure rows created before that column existed.
+
+    The source of truth is the same Layer-1 issue policy used by the
+    orchestrator.  Re-running this is safe: Structure status is a deterministic
+    projection of its immutable validation issues and ``is_valid`` result.
+    Archive and legacy-combined rows intentionally remain outside this contract.
+    """
+    rows = con.execute(
+        "SELECT s.id,s.is_valid,vi.layer,vi.category,vi.market_id,vi.detail,"
+        "vi.raw_payload "
+        "FROM snapshots s "
+        "LEFT JOIN validation_issues vi ON vi.snapshot_id=s.id "
+        "WHERE s.data_product='structure' "
+        "ORDER BY s.id,vi.id"
+    ).fetchall()
+    if not rows:
+        return
+
+    snapshots: dict[int, tuple[bool, list[Issue]]] = {}
+    for snapshot_id, is_valid, layer, category, market_id, detail, raw_payload in rows:
+        if snapshot_id not in snapshots:
+            snapshots[snapshot_id] = (bool(is_valid), [])
+        if layer is None:
+            continue
+        try:
+            parsed_category = Category(category)
+        except ValueError:
+            parsed_category = Category.UNKNOWN
+        snapshots[snapshot_id][1].append(
+            Issue(
+                layer=int(layer),
+                category=parsed_category,
+                market_id=market_id,
+                detail=detail or "",
+                raw_payload=raw_payload,
+            )
+        )
+
+    for snapshot_id, (is_valid, issues) in snapshots.items():
+        status = (
+            SnapshotStatus.FAILED
+            if not is_valid
+            else determine_snapshot_status(issues)
+        )
+        con.execute(
+            "UPDATE snapshots SET snapshot_status=? WHERE id=?",
+            (status.value, snapshot_id),
+        )
+
+
+def _truth_error(prefix: str, reason: str) -> ValueError:
+    """Return a stable, bounded publication-boundary error."""
+    return ValueError(f"{prefix}:{reason}"[:200])
+
+
+def _validate_market_truth(
+    event_members: list[EventMember],
+    group_truths: list[GroupTruth],
+) -> None:
+    """Reject projections that cannot be authoritative before touching SQLite."""
+    truths_by_key: dict[tuple[str, str], GroupTruth] = {}
+    seen_group_ids: set[str] = set()
+    for truth in group_truths:
+        key = (truth.event_id, truth.group_id)
+        if key in truths_by_key or truth.group_id in seen_group_ids:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"duplicate-group-identity:{truth.event_id}/{truth.group_id}",
+            )
+        truths_by_key[key] = truth
+        seen_group_ids.add(truth.group_id)
+
+    members_by_key: dict[tuple[str, str], list[EventMember]] = {}
+    seen_member_ids: set[str] = set()
+    seen_member_keys: set[tuple[str, str, str]] = set()
+    for member in event_members:
+        key = (member.event_id, member.group_id)
+        identity = (*key, member.market_id)
+        if identity in seen_member_keys or member.market_id in seen_member_ids:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"duplicate-member-identity:{member.market_id}",
+            )
+        if key not in truths_by_key:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"member-without-group-truth:{member.market_id}",
+            )
+        seen_member_keys.add(identity)
+        seen_member_ids.add(member.market_id)
+        members_by_key.setdefault(key, []).append(member)
+
+    for key, truth in truths_by_key.items():
+        members = members_by_key.get(key, [])
+        member_count = len(members)
+        if truth.expected_member_count != member_count:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"expected-member-count:{truth.group_id}:"
+                f"{truth.expected_member_count}!={member_count}",
+            )
+        active_named_count = sum(
+            member.member_kind == "named" and member.active for member in members
+        )
+        if truth.active_named_count != active_named_count:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"active-named-count:{truth.group_id}:"
+                f"{truth.active_named_count}!={active_named_count}",
+            )
+        expected_hash = membership_hash(truth.event_id, truth.group_id, members)
+        if truth.membership_hash != expected_hash:
+            raise _truth_error(
+                "market-truth-invalid",
+                f"membership-hash:{truth.group_id}",
+            )
+        if truth.quality in ("complete-supported", "complete-unsupported"):
+            if member_count == 0:
+                raise _truth_error(
+                    "market-truth-invalid",
+                    f"expected_member_count-zero:{truth.group_id}",
+                )
+
+
+def _validate_publication_boundary(
+    *,
+    is_valid: bool,
+    issues: list[Issue],
+    source_coverage: SourceCoverage,
+    group_truths: list[GroupTruth],
+    publish_markets: bool,
+) -> None:
+    if not publish_markets:
+        return
+    if not source_coverage.completed:
+        raise _truth_error(
+            "market-truth-publication-rejected",
+            f"source-incomplete:{source_coverage.failure_source}",
+        )
+    if not is_valid:
+        raise _truth_error("market-truth-publication-rejected", "snapshot-invalid")
+    if any(issue.category == Category.API_UNREACHABLE for issue in issues):
+        raise _truth_error(
+            "market-truth-publication-rejected",
+            "blocking-source-issue:api-unreachable",
+        )
+    incomplete = next(
+        (truth for truth in group_truths if truth.quality == "incomplete-source"),
+        None,
+    )
+    if incomplete is not None:
+        raise _truth_error(
+            "market-truth-publication-rejected",
+            f"incomplete-source:{incomplete.group_id}",
+        )
+
+
+def _validate_published_market_truth(
+    event_members: list[EventMember],
+    group_truths: list[GroupTruth],
+    market_rows: list[dict],
+) -> None:
+    reason = market_truth_mismatch_reason(event_members, group_truths, market_rows)
+    if reason is not None:
+        raise _truth_error("market-truth-invalid", reason)
 
 
 def _rollback_without_masking(con: object) -> None:
@@ -57,13 +237,32 @@ def _row_to_tuple(row: dict, snapshot_id: int) -> tuple:
     pass 0 as a placeholder before the snapshot_id is known).
     """
     out: list = []
+    market_id = row.get("market_id")
     for col in MARKETS_COLUMN_ORDER:
         if col == "snapshot_id":
             out.append(snapshot_id)
             continue
         v = row.get(col)
+        if col in ("market_id", "event_id", "neg_risk_market_id") and v is not None:
+            if type(v) is not str or not v.strip() or v != v.strip():
+                field = {
+                    "market_id": "market-id",
+                    "event_id": "event-id",
+                    "neg_risk_market_id": "group-id",
+                }[col]
+                raise _truth_error(
+                    "market-truth-invalid",
+                    f"published-market-truth-mismatch:{field}:{market_id}",
+                )
         if col in _BOOL_COLUMNS and v is not None:
-            v = int(bool(v))
+            if type(v) is bool:
+                v = int(v)
+            elif type(v) is not int or v not in (0, 1):
+                field = col.replace("_", "-")
+                raise _truth_error(
+                    "market-truth-invalid",
+                    f"published-market-truth-mismatch:{field}-invalid:{market_id}",
+                )
         out.append(v)
     return tuple(out)
 
@@ -91,6 +290,81 @@ def _event_tag_row_to_tuple(row: dict, snapshot_id: int) -> tuple:
             continue
         out.append(row.get(col))
     return tuple(out)
+
+
+def _source_coverage_to_tuple(
+    source_coverage: SourceCoverage,
+    snapshot_id: int,
+) -> tuple:
+    return (
+        snapshot_id,
+        int(source_coverage.completed),
+        source_coverage.market_items,
+        source_coverage.event_items,
+        source_coverage.failure_source,
+        source_coverage.failure_reason,
+    )
+
+
+def _event_member_to_tuple(member: EventMember, snapshot_id: int) -> tuple:
+    return (
+        snapshot_id,
+        member.event_id,
+        member.group_id,
+        member.market_id,
+        member.member_kind,
+        int(member.active),
+        int(member.closed),
+    )
+
+
+def _group_truth_to_tuple(truth: GroupTruth, snapshot_id: int) -> tuple:
+    if truth.expected_member_count == 0 and truth.quality != "incomplete-source":
+        raise ValueError(
+            "expected_member_count=0 is valid only for quality='incomplete-source'"
+        )
+    return (
+        snapshot_id,
+        truth.event_id,
+        truth.group_id,
+        truth.neg_risk_type,
+        truth.expected_member_count,
+        truth.active_named_count,
+        truth.membership_hash,
+        truth.quality,
+        truth.reason,
+    )
+
+
+def _insert_market_truth(
+    con: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    source_coverage: SourceCoverage,
+    event_members: list[EventMember],
+    group_truths: list[GroupTruth],
+) -> None:
+    con.execute(
+        "INSERT INTO snapshot_source_coverage("
+        "snapshot_id,completed,market_items,event_items,failure_source,failure_reason"
+        ") VALUES (?,?,?,?,?,?)",
+        _source_coverage_to_tuple(source_coverage, snapshot_id),
+    )
+    if event_members:
+        con.executemany(
+            "INSERT INTO event_market_memberships("
+            "snapshot_id,event_id,neg_risk_market_id,market_id,member_kind,active,closed"
+            ") VALUES (?,?,?,?,?,?,?)",
+            [_event_member_to_tuple(member, snapshot_id) for member in event_members],
+        )
+    if group_truths:
+        con.executemany(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            [_group_truth_to_tuple(truth, snapshot_id) for truth in group_truths],
+        )
 
 
 class SQLiteStore:
@@ -128,13 +402,20 @@ class SQLiteStore:
         con = sqlite3.connect(self._db_path, isolation_level=None)
         try:
             con.executescript(DDL)
+            if migrate_fault_auth_finalize(con):
+                con.executescript(DDL)
+            if migrate_fault_intent_status(con):
+                con.executescript(DDL)
             # Phase 02 Plan 02: scheduler_state singleton table
             con.executescript(SCHEDULER_STATE_DDL)
+            # Parent-observed outcomes for isolated scheduler snapshot children.
+            con.executescript(SNAPSHOT_ATTEMPTS_DDL)
+            con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)
             # Phase 03.1 Plan 01: l2_mirror_state singleton (GAP-2 + GAP-3)
             con.executescript(L2_MIRROR_STATE_DDL)
 
             # Phase 02 Plan 02-08 (F-01): idempotent ADD COLUMN for legacy DBs.
-            # Targets: snapshots.supabase_mirror_at_ms, snapshots.parquet_r2_url.
+            # Targets include snapshot archival metadata and scheduler evidence.
             # Note: SQLite ALTER TABLE ADD COLUMN cannot add NOT NULL columns
             # without a default — both targets are nullable, which is correct
             # (NULL = "never mirrored / not yet uploaded").
@@ -149,6 +430,29 @@ class SQLiteStore:
 
             _ensure_column("snapshots", "supabase_mirror_at_ms", "INTEGER")
             _ensure_column("snapshots", "parquet_r2_url", "TEXT")
+            _ensure_column(
+                "snapshots",
+                "market_view_published",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            _ensure_column(
+                "snapshots",
+                "data_product",
+                "TEXT NOT NULL DEFAULT 'legacy_combined'",
+            )
+            _ensure_column(
+                "snapshots",
+                "archive_status",
+                "TEXT NOT NULL DEFAULT 'legacy'",
+            )
+            _ensure_column(
+                "snapshots",
+                "snapshot_status",
+                "TEXT NOT NULL DEFAULT 'ok'",
+            )
+            _ensure_column("snapshot_attempts", "last_stage", "TEXT")
+            _ensure_column("snapshot_attempts", "elapsed_ms", "INTEGER")
+            _backfill_structure_snapshot_statuses(con)
             # H-009: quote collectors lease their collecting run.  A default
             # of zero makes any legacy collecting row immediately recoverable
             # rather than leaving the single-run gate permanently wedged.
@@ -157,8 +461,27 @@ class SQLiteStore:
                 "lease_expires_at_ms",
                 "INTEGER NOT NULL DEFAULT 0",
             )
+            _ensure_column(
+                "neg_risk_quote_runs",
+                "universe_hash",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            _ensure_column(
+                "neg_risk_quote_runs",
+                "source_truth_hash",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            for table in ("neg_risk_quote_run_legs", "neg_risk_quotes"):
+                _ensure_column(table, "event_id", "TEXT NOT NULL DEFAULT ''")
+                _ensure_column(table, "membership_hash", "TEXT NOT NULL DEFAULT ''")
         finally:
             con.close()
+        # The base snapshot schema also contains the opportunity owner tables.
+        # Finish their canonical guard/singleton bootstrap through the same
+        # migration path used by opportunity-first producers.
+        from polyarb.perception.store import OpportunityPerceptionStore
+
+        OpportunityPerceptionStore(self._db_path).init_schema()
 
     def write_snapshot(
         self,
@@ -170,16 +493,23 @@ class SQLiteStore:
         is_valid: bool,
         market_rows: list[dict],
         issues: list[Issue],
+        source_coverage: SourceCoverage,
+        event_members: list[EventMember],
+        group_truths: list[GroupTruth],
+        publish_markets: bool,
         notes: str | None = None,
         event_rows: list[dict] | None = None,
         event_tag_rows: list[dict] | None = None,
+        data_product: str = "legacy_combined",
+        archive_status: str = "legacy",
+        snapshot_status: str = "ok",
     ) -> int:
         """Persist one snapshot atomically.
 
-        Wraps DELETE FROM markets + INSERT snapshot meta + executemany events +
-        executemany event_tags + executemany markets + executemany issues in a
-        single BEGIN IMMEDIATE transaction. Any exception triggers ROLLBACK and
-        re-raises (we never swallow).
+        Inserts snapshot metadata, source coverage, events, memberships, group
+        truth, optional current markets, and issues in one BEGIN IMMEDIATE
+        transaction. ``markets`` is replaced only when ``publish_markets`` is
+        true. Any exception triggers ROLLBACK and re-raises (we never swallow).
 
         FK ordering matters: snapshots → events → event_tags → markets. A market
         that references an event_id which is NOT in events for this snapshot is
@@ -197,6 +527,20 @@ class SQLiteStore:
 
         event_rows = event_rows or []
         event_tag_rows = event_tag_rows or []
+        _validate_market_truth(event_members, group_truths)
+        _validate_publication_boundary(
+            is_valid=is_valid,
+            issues=issues,
+            source_coverage=source_coverage,
+            group_truths=group_truths,
+            publish_markets=publish_markets,
+        )
+        if publish_markets:
+            _validate_published_market_truth(
+                event_members,
+                group_truths,
+                market_rows,
+            )
 
         con = sqlite3.connect(self._db_path, isolation_level=None)
         # Per-connection PRAGMAs (some are persistent like journal_mode=WAL after
@@ -205,17 +549,23 @@ class SQLiteStore:
         con.execute("PRAGMA synchronous=NORMAL")
         con.execute("BEGIN IMMEDIATE")
         try:
-            con.execute("DELETE FROM markets")  # full overwrite (D-C1)
+            if publish_markets:
+                con.execute("DELETE FROM markets")  # full overwrite (D-C1)
             cur = con.execute(
                 "INSERT INTO snapshots("
-                "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes,"
+                "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+                "data_product,archive_status,snapshot_status,is_valid,parquet_path,notes,"
                 "supabase_mirror_at_ms,parquet_r2_url"
-                ") VALUES (?,?,?,?,?,?,?,?,?)",
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     taken_at_ms,
                     finished_at_ms,
                     mode,
                     len(market_rows),
+                    int(publish_markets),
+                    data_product,
+                    archive_status,
+                    snapshot_status,
                     int(is_valid),
                     parquet_path,
                     notes,
@@ -225,6 +575,14 @@ class SQLiteStore:
             )
             snapshot_id = cur.lastrowid
             assert snapshot_id is not None  # AUTOINCREMENT guarantees this
+
+            _insert_market_truth(
+                con,
+                snapshot_id=snapshot_id,
+                source_coverage=source_coverage,
+                event_members=event_members,
+                group_truths=group_truths,
+            )
 
             # ── Amendment 01: events first (FK target for markets.event_id) ─
             event_tuples = [_event_row_to_tuple(r, snapshot_id) for r in event_rows]
@@ -237,7 +595,11 @@ class SQLiteStore:
                 con.executemany(EVENT_TAGS_INSERT_SQL, event_tag_tuples)
 
             # ── markets (references events.id via event_id, FK not enforced) ─
-            market_tuples = [_row_to_tuple(r, snapshot_id) for r in market_rows]
+            market_tuples = (
+                [_row_to_tuple(r, snapshot_id) for r in market_rows]
+                if publish_markets
+                else []
+            )
             if market_tuples:
                 con.executemany(MARKETS_INSERT_SQL, market_tuples)
 
@@ -292,17 +654,24 @@ class SQLiteStore:
         is_valid: bool,
         market_rows: Iterable[dict],
         issues: list[Issue],
+        source_coverage: SourceCoverage,
+        event_members: list[EventMember],
+        group_truths: list[GroupTruth],
+        publish_markets: bool,
         notes: str | None = None,
         event_rows: list[dict] | None = None,
         event_tag_rows: list[dict] | None = None,
         batch_size: int = 500,
+        data_product: str = "legacy_combined",
+        archive_status: str = "legacy",
+        snapshot_status: str = "ok",
     ) -> tuple[int, int]:
         """Streaming variant of write_snapshot.
 
-        Identical semantics to write_snapshot, but `market_rows` can be any
-        iterable (list, generator). Inserts run in batches of `batch_size`
-        inside ONE BEGIN IMMEDIATE → COMMIT transaction, so per-snapshot
-        atomicity is preserved exactly as the legacy path.
+        Identical publication semantics to write_snapshot, but `market_rows`
+        can be any iterable (list, generator). Published inserts run in batches
+        of `batch_size` inside ONE BEGIN IMMEDIATE → COMMIT transaction, so
+        per-snapshot atomicity is preserved exactly as the legacy path.
 
         Because the iterator length is unknown up front, we insert the
         snapshots row with market_count=0 as a placeholder and UPDATE it to
@@ -319,6 +688,14 @@ class SQLiteStore:
 
         event_rows = event_rows or []
         event_tag_rows = event_tag_rows or []
+        _validate_market_truth(event_members, group_truths)
+        _validate_publication_boundary(
+            is_valid=is_valid,
+            issues=issues,
+            source_coverage=source_coverage,
+            group_truths=group_truths,
+            publish_markets=publish_markets,
+        )
 
         con = sqlite3.connect(self._db_path, isolation_level=None)
         con.execute("PRAGMA journal_mode=WAL")
@@ -326,17 +703,23 @@ class SQLiteStore:
         con.execute("BEGIN IMMEDIATE")
         market_count = 0
         try:
-            con.execute("DELETE FROM markets")  # full overwrite (D-C1)
+            if publish_markets:
+                con.execute("DELETE FROM markets")  # full overwrite (D-C1)
             cur = con.execute(
                 "INSERT INTO snapshots("
-                "taken_at_ms,finished_at_ms,mode,market_count,is_valid,parquet_path,notes,"
+                "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+                "data_product,archive_status,snapshot_status,is_valid,parquet_path,notes,"
                 "supabase_mirror_at_ms,parquet_r2_url"
-                ") VALUES (?,?,?,?,?,?,?,?,?)",
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     taken_at_ms,
                     finished_at_ms,
                     mode,
                     0,  # placeholder; UPDATEd after stream consumed
+                    int(publish_markets),
+                    data_product,
+                    archive_status,
+                    snapshot_status,
                     int(is_valid),
                     parquet_path,
                     notes,
@@ -346,6 +729,14 @@ class SQLiteStore:
             )
             snapshot_id = cur.lastrowid
             assert snapshot_id is not None
+
+            _insert_market_truth(
+                con,
+                snapshot_id=snapshot_id,
+                source_coverage=source_coverage,
+                event_members=event_members,
+                group_truths=group_truths,
+            )
 
             # ── events first (FK target for markets.event_id) ──────────────
             if event_rows:
@@ -360,15 +751,37 @@ class SQLiteStore:
             # ── markets streamed in batches ────────────────────────────────
             batch: list[tuple] = []
             for row in market_rows:
-                batch.append(_row_to_tuple(row, snapshot_id))
-                if len(batch) >= batch_size:
-                    con.executemany(MARKETS_INSERT_SQL, batch)
-                    market_count += len(batch)
-                    batch.clear()
+                market_count += 1
+                if publish_markets:
+                    batch.append(_row_to_tuple(row, snapshot_id))
+                    if len(batch) >= batch_size:
+                        con.executemany(MARKETS_INSERT_SQL, batch)
+                        batch.clear()
             if batch:
                 con.executemany(MARKETS_INSERT_SQL, batch)
-                market_count += len(batch)
                 batch.clear()
+
+            if publish_markets:
+                published_market_rows = [
+                    {
+                        "market_id": row[0],
+                        "event_id": row[1],
+                        "neg_risk_market_id": row[2],
+                        "neg_risk": row[3],
+                        "active": row[4],
+                        "closed": row[5],
+                    }
+                    for row in con.execute(
+                        "SELECT market_id,event_id,neg_risk_market_id,"
+                        "neg_risk,active,closed FROM markets WHERE snapshot_id=?",
+                        (snapshot_id,),
+                    ).fetchall()
+                ]
+                _validate_published_market_truth(
+                    event_members,
+                    group_truths,
+                    published_market_rows,
+                )
 
             # Patch market_count to the real value (still inside same tx)
             con.execute(
@@ -547,6 +960,191 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def begin_snapshot_attempt(self, *, started_at_ms: int) -> int:
+        """Append one running scheduler attempt before spawning its child."""
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            cur = con.execute(
+                "INSERT INTO snapshot_attempts(started_at_ms,outcome) "
+                "VALUES (?, 'running')",
+                (started_at_ms,),
+            )
+            assert cur.lastrowid is not None
+            return int(cur.lastrowid)
+        finally:
+            con.close()
+
+    def finish_snapshot_attempt(
+        self,
+        *,
+        attempt_id: int,
+        outcome: str,
+        finished_at_ms: int,
+        snapshot_id: int | None,
+        failure_kind: str | None,
+        last_stage: str | None = None,
+        elapsed_ms: int | None = None,
+    ) -> None:
+        """Close one running attempt exactly once with a bounded outcome."""
+        if outcome not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError(f"invalid terminal snapshot attempt outcome: {outcome}")
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            cur = con.execute(
+                "UPDATE snapshot_attempts "
+                "SET finished_at_ms=?, outcome=?, snapshot_id=?, failure_kind=?, "
+                "last_stage=?, elapsed_ms=? "
+                "WHERE id=? AND outcome='running'",
+                (
+                    finished_at_ms,
+                    outcome,
+                    snapshot_id,
+                    failure_kind,
+                    last_stage,
+                    elapsed_ms,
+                    attempt_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                raise ValueError(f"snapshot attempt {attempt_id} is not running")
+        finally:
+            con.close()
+
+    def get_latest_snapshot_attempt(self) -> dict[str, object] | None:
+        """Read one newest scheduler attempt without mutating operational truth."""
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            return None
+        try:
+            row = con.execute(
+                "SELECT id,started_at_ms,finished_at_ms,outcome,snapshot_id,failure_kind,"
+                "last_stage,elapsed_ms "
+                "FROM snapshot_attempts ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "started_at_ms": row[1],
+                "finished_at_ms": row[2],
+                "outcome": row[3],
+                "snapshot_id": row[4],
+                "failure_kind": row[5],
+                "last_stage": row[6],
+                "elapsed_ms": row[7],
+            }
+        finally:
+            con.close()
+
+    def get_snapshot_attempts(self, *, limit: int = 30) -> list[dict[str, object]]:
+        """Read bounded newest scheduler attempt evidence for timing policy."""
+        bounded_limit = max(1, min(int(limit), 100))
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            return []
+        try:
+            rows = con.execute(
+                "SELECT id,started_at_ms,finished_at_ms,outcome,snapshot_id,"
+                "failure_kind,last_stage,elapsed_ms "
+                "FROM snapshot_attempts ORDER BY id DESC LIMIT ?",
+                (bounded_limit,),
+            ).fetchall()
+            keys = (
+                "id",
+                "started_at_ms",
+                "finished_at_ms",
+                "outcome",
+                "snapshot_id",
+                "failure_kind",
+                "last_stage",
+                "elapsed_ms",
+            )
+            return [dict(zip(keys, row, strict=True)) for row in rows]
+        finally:
+            con.close()
+
+    def append_structure_schedule_adjustment(
+        self,
+        *,
+        source_attempt_id: int,
+        decided_at_ms: int,
+        success_sample_count: int,
+        success_p95_s: int | None,
+        previous_timeout_s: int,
+        previous_cadence_s: int,
+        timeout_s: int,
+        cadence_s: int,
+        reason: str,
+    ) -> None:
+        """Append one auditable effective-schedule change exactly once."""
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.execute(
+                "INSERT INTO structure_schedule_adjustments("
+                "source_attempt_id,decided_at_ms,success_sample_count,success_p95_s,"
+                "previous_timeout_s,previous_cadence_s,timeout_s,cadence_s,reason"
+                ") VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    source_attempt_id,
+                    decided_at_ms,
+                    success_sample_count,
+                    success_p95_s,
+                    previous_timeout_s,
+                    previous_cadence_s,
+                    timeout_s,
+                    cadence_s,
+                    reason,
+                ),
+            )
+        finally:
+            con.close()
+
+    def get_latest_structure_schedule_adjustment(
+        self,
+    ) -> dict[str, object] | None:
+        """Read the newest persisted effective Structure schedule."""
+        uri = f"file:{self._db_path}?mode=ro"
+        try:
+            con = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError:
+            return None
+        try:
+            row = con.execute(
+                "SELECT source_attempt_id,success_sample_count,success_p95_s,"
+                "previous_timeout_s,previous_cadence_s,timeout_s,cadence_s,reason "
+                "FROM structure_schedule_adjustments ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            keys = (
+                "source_attempt_id",
+                "success_sample_count",
+                "success_p95_s",
+                "previous_timeout_s",
+                "previous_cadence_s",
+                "timeout_s",
+                "cadence_s",
+                "reason",
+            )
+            return dict(zip(keys, row, strict=True))
+        finally:
+            con.close()
+
+    def count_structure_schedule_adjustments(self) -> int:
+        """Return the append-only adjustment count for invariant checks."""
+        con = sqlite3.connect(self._db_path)
+        try:
+            row = con.execute(
+                "SELECT COUNT(*) FROM structure_schedule_adjustments"
+            ).fetchone()
+            return int(row[0]) if row is not None else 0
+        finally:
+            con.close()
+
     # ── Phase 03.1 Plan 01: l2_mirror_state singleton (GAP-2 + GAP-3) ──────
     #
     # Freshness anchor for /health l2_tob_age_seconds sub-check. Mirror's
@@ -598,15 +1196,17 @@ class SQLiteStore:
         finally:
             con.close()
 
-    def get_latest_snapshot(self) -> dict | None:
+    def get_latest_snapshot(self, *, data_product: str | None = None) -> dict | None:
         """Read the most-recent snapshot row for /health endpoint.
 
         Phase 02 Plan 02 — used by /health handler to determine pass/warn/fail.
         Uses read-only mode=ro URI (P3.8: HTTP server NEVER writes SQLite).
         Returns None if no snapshots exist (first deploy edge case).
 
-        Columns returned: id, taken_at_ms, finished_at_ms, mode, status (notes field),
-        market_count, is_valid.
+        ``data_product`` narrows the result to one explicit product when a
+        consumer has a production contract (for example health reads only
+        Structure).  ``None`` retains the legacy all-snapshot behavior for
+        historical reconciliation tooling.
         """
         uri = f"file:{self._db_path}?mode=ro"
         try:
@@ -615,13 +1215,17 @@ class SQLiteStore:
             # DB file doesn't exist yet → no snapshot
             return None
         try:
+            where = "WHERE data_product = ?" if data_product is not None else ""
+            params = (data_product,) if data_product is not None else ()
             # Try to read the new Plan 03 columns; fall back gracefully for old DBs
             # that haven't been migrated (supabase_mirror_at_ms + parquet_r2_url).
             try:
                 row = con.execute(
                     "SELECT id, taken_at_ms, finished_at_ms, mode, is_valid, market_count, notes, "
+                    "snapshot_status, "
                     "supabase_mirror_at_ms, parquet_r2_url "
-                    "FROM snapshots ORDER BY id DESC LIMIT 1"
+                    f"FROM snapshots {where} ORDER BY id DESC LIMIT 1",
+                    params,
                 ).fetchone()
                 if not row:
                     return None
@@ -633,8 +1237,9 @@ class SQLiteStore:
                     "is_valid": bool(row[4]),
                     "market_count": row[5],
                     "notes": row[6],
-                    "supabase_mirror_at_ms": row[7],  # Phase 02 Plan 03: nullable
-                    "parquet_r2_url": row[8],  # Phase 02 Plan 03: nullable
+                    "snapshot_status": row[7],
+                    "supabase_mirror_at_ms": row[8],  # Phase 02 Plan 03: nullable
+                    "parquet_r2_url": row[9],  # Phase 02 Plan 03: nullable
                 }
             except sqlite3.OperationalError:
                 # Old DB schema without Plan 03 columns — fall back to 7-column query
@@ -652,6 +1257,7 @@ class SQLiteStore:
                     "is_valid": bool(row[4]),
                     "market_count": row[5],
                     "notes": row[6],
+                    "snapshot_status": None,
                     "supabase_mirror_at_ms": None,
                     "parquet_r2_url": None,
                 }
@@ -702,15 +1308,19 @@ class SQLiteStore:
                     [cutoff_ms, *keep_ids, max_snapshots_per_run],
                 ).fetchall()
             ]
-            # Also fetch parquet paths for cleanup
+            # Archive ownership is explicit.  A Structure snapshot carries the
+            # no-archive marker in parquet_path for compatibility with the old
+            # non-null column contract; that marker is not a file to unlink.
+            # Never infer deletion ownership from a path-shaped string alone.
             parquet_paths = (
                 [
                     r[0]
                     for r in con.execute(
-                        f"SELECT parquet_path FROM snapshots "
+                        f"SELECT parquet_path, archive_status FROM snapshots "
                         f"WHERE id IN ({','.join('?' for _ in to_delete)})",
                         to_delete,
                     ).fetchall()
+                    if r[1] != "not_requested"
                 ]
                 if parquet_root is not None and to_delete
                 else []
@@ -738,6 +1348,21 @@ class SQLiteStore:
                 id_placeholders = ",".join("?" for _ in to_delete)
                 con.execute(
                     f"DELETE FROM validation_issues WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    "DELETE FROM snapshot_source_coverage "
+                    f"WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    "DELETE FROM event_market_memberships "
+                    f"WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    "DELETE FROM neg_risk_group_truth "
+                    f"WHERE snapshot_id IN ({id_placeholders})",
                     to_delete,
                 )
                 con.execute(
