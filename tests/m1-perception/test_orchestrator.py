@@ -33,11 +33,13 @@ import pytest
 os.environ["POLYARB_ALLOW_EXTERNAL_PATHS"] = "1"
 
 from polyarb.config import Settings  # noqa: E402
+from polyarb.perception.structure_sync import finalize_structure_window  # noqa: E402
 from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore  # noqa: E402
 from polyarb.snapshot.orchestrator import (  # noqa: E402
     _include_in_snapshot,
     run_snapshot,
 )
+from polyarb.storage.sqlite_store import SQLiteStore  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -255,6 +257,52 @@ async def test_structure_product_publishes_gamma_truth_without_clob_or_archive(
     ).fetchone()
     con.close()
     assert (product, archive_status, published) == ("structure", "not_requested", 1)
+
+
+@pytest.mark.asyncio
+async def test_structure_product_accepts_a_complete_staged_gamma_source(tmp_path: Path) -> None:
+    """Finalization reuses the production validator without opening live Gamma."""
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    staged_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
+
+    with patch("polyarb.snapshot.orchestrator.GammaClient") as live_gamma:
+        result = await run_snapshot(
+            settings,
+            mode="full",
+            product="structure",
+            now_ms=1_777_448_000_000,
+            gamma_client=staged_gamma,
+        )
+
+    assert result.is_valid is True
+    assert result.market_count == len(gamma_data)
+    live_gamma.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_complete_structure_window_finalizes_through_certified_publication(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=_events_for_markets(gamma_data), finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=gamma_data, finished_at_ms=300,
+    )
+
+    result = await finalize_structure_window(settings, str(window["id"]), now_ms=400)
+
+    assert result.is_valid is True
+    assert result.market_count == len(gamma_data)
+    assert store.get_latest_structure_sync()["status"] == "published"
 
 
 @pytest.mark.asyncio

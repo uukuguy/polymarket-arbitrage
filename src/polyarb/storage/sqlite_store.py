@@ -973,7 +973,7 @@ class SQLiteStore:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
                 "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
-                "checkpoint_at_ms,event_pages,market_pages,failure_reason "
+                "checkpoint_at_ms,event_pages,market_pages,failure_reason,published_snapshot_id "
                 "FROM structure_sync_windows WHERE status IN ('open','events_complete') "
                 "ORDER BY started_at_ms LIMIT 1"
             ).fetchone()
@@ -986,7 +986,8 @@ class SQLiteStore:
                 )
                 row = con.execute(
                     "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
-                    "checkpoint_at_ms,event_pages,market_pages,failure_reason "
+                    "checkpoint_at_ms,event_pages,market_pages,failure_reason,"
+                    "published_snapshot_id "
                     "FROM structure_sync_windows WHERE id=?",
                     (window_id,),
                 ).fetchone()
@@ -1006,10 +1007,27 @@ class SQLiteStore:
         try:
             row = con.execute(
                 "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
-                "checkpoint_at_ms,event_pages,market_pages,failure_reason "
+                "checkpoint_at_ms,event_pages,market_pages,failure_reason,published_snapshot_id "
                 "FROM structure_sync_windows ORDER BY checkpoint_at_ms DESC LIMIT 1"
             ).fetchone()
             return None if row is None else self._structure_sync_window_row(row)
+        finally:
+            con.close()
+
+    def mark_structure_sync_published(
+        self, *, window_id: str, snapshot_id: int, published_at_ms: int
+    ) -> None:
+        """Bind a complete window to its certified snapshot exactly once."""
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            cur = con.execute(
+                "UPDATE structure_sync_windows SET status='published',"
+                "published_snapshot_id=?,checkpoint_at_ms=? "
+                "WHERE id=? AND status='complete'",
+                (snapshot_id, published_at_ms, window_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("structure-sync-window-not-complete")
         finally:
             con.close()
 
@@ -1047,6 +1065,7 @@ class SQLiteStore:
         keys = (
             "id", "status", "event_cursor", "market_cursor", "started_at_ms",
             "checkpoint_at_ms", "event_pages", "market_pages", "failure_reason",
+            "published_snapshot_id",
         )
         return dict(zip(keys, row, strict=True))
 

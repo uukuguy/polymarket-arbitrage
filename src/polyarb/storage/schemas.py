@@ -2317,13 +2317,16 @@ ON structure_schedule_adjustments(decided_at_ms DESC);
 STRUCTURE_SYNC_WINDOWS_DDL = """
 CREATE TABLE IF NOT EXISTS structure_sync_windows (
     id TEXT PRIMARY KEY,
-    status TEXT NOT NULL CHECK(status IN ('open','events_complete','complete','failed')),
+    status TEXT NOT NULL CHECK(status IN (
+        'open','events_complete','complete','published','failed'
+    )),
     event_cursor TEXT,
     market_cursor TEXT,
     started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
     event_pages INTEGER NOT NULL DEFAULT 0 CHECK(event_pages >= 0),
     market_pages INTEGER NOT NULL DEFAULT 0 CHECK(market_pages >= 0),
+    published_snapshot_id INTEGER REFERENCES snapshots(id),
     failure_reason TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_structure_sync_one_open_window

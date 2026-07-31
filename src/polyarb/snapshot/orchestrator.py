@@ -463,6 +463,7 @@ async def run_snapshot(
     product: str = "legacy_combined",
     now_ms: int | None = None,
     use_cache: bool = True,
+    gamma_client: object | None = None,
 ) -> SnapshotResult:
     """Run one Polymarket snapshot end-to-end.
 
@@ -540,7 +541,8 @@ async def run_snapshot(
     # ── Phases 1+2 combined: one GammaClient session, events materialized,
     # then markets STREAMED (D-23). Single `async with` so HTTP/2 keepalive
     # is shared across /events + /markets and shutdown is clean.
-    async with GammaClient(settings) as gamma:
+    gamma_source = GammaClient(settings) if gamma_client is None else gamma_client
+    async with gamma_source as gamma:
         # ── Phase 1: events (fully materialized — Decision A) ─────────────
         with _phase(
             "1/7: Gamma /events fetch + normalize",
