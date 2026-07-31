@@ -1,4 +1,4 @@
-"""Alerts: scheduler-paused notifications + Better Stack heartbeat + Telegram fallback.
+"""Alerts: scheduler-recovery notifications + Better Stack heartbeat + Telegram fallback.
 
 Plan 02-05 — D-16 (Better Stack heartbeat) + D-17 (Telegram via Better Stack with
 direct fallback for outage scenarios).
@@ -13,7 +13,7 @@ Fallback path (Better Stack itself unreachable):
     Better Stack returns 5xx OR network error
     → POST api.telegram.org/bot<token>/sendMessage directly
 
-Dedup: a paused-alert fired twice within ``alert_dedupe_window_seconds`` counts
+Dedup: a recovery alert fired twice within ``alert_dedupe_window_seconds`` counts
 as one. Prevents alert storm when a flaky network keeps tripping the 5-failure
 threshold every few minutes.
 
@@ -62,8 +62,8 @@ def _is_deduped(key: str, window_seconds: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def send_paused_alert(settings: Settings, *, reason: str) -> None:
-    """Fire a scheduler-paused alert across all configured channels.
+async def send_recovering_alert(settings: Settings, *, reason: str) -> None:
+    """Fire an active scheduler-recovery alert across all configured channels.
 
     Channels (all fire unconditionally — 2026-05-19 fix after chaos Inj 1
     revealed that Better Stack `/fail` returning 200 does NOT guarantee the
@@ -81,12 +81,12 @@ async def send_paused_alert(settings: Settings, *, reason: str) -> None:
     Deduplication: a second call within ``settings.alert_dedupe_window_seconds``
     is a no-op.
     """
-    key = "scheduler-paused"
+    key = "scheduler-recovering"
     if _is_deduped(key, settings.alert_dedupe_window_seconds):
         logger.debug(f"alert {key} within dedup window; suppressing")
         return
 
-    text = f"scheduler paused: {reason}"
+    text = f"scheduler recovering with bounded retries: {reason}"
     logger.error(f"ALERT: {text}")
 
     # (1) Sentry — audit trail + Sentry-side Slack/email routes
@@ -100,7 +100,12 @@ async def send_paused_alert(settings: Settings, *, reason: str) -> None:
 
     # (3) Telegram direct — unconditional primary path
     if settings.telegram_bot_token.get_secret_value():
-        await _telegram_direct(settings, text=f"polyarb-l1 scheduler PAUSED: {reason}")
+        await _telegram_direct(settings, text=f"polyarb-l1 scheduler RECOVERING: {reason}")
+
+
+async def send_paused_alert(settings: Settings, *, reason: str) -> None:
+    """Backward-compatible alias for pre-H-011 callers."""
+    await send_recovering_alert(settings, reason=reason)
 
 
 async def send_heartbeat_ok(settings: Settings) -> None:

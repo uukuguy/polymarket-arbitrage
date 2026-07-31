@@ -19,7 +19,7 @@ Design decisions:
 - Counter persists to SQLite (scheduler_state table, singleton row) so a
   restart after 2 failures still knows it's at counter=2.
 - _run_snapshot is async and injectable (tests replace it with AsyncMock).
-- _on_paused() is a stub alert hook — Plan 05 wires it to Sentry/Telegram.
+- _on_recovering() alerts Sentry/Better Stack/Telegram without stopping retries.
 - run() is a placeholder loop for local testing; Plan 04 uses Fly scheduled
   machines for real prod cron (not this loop).
 
@@ -438,9 +438,9 @@ class SnapshotScheduler:
         """Alert once when repeated failures require active recovery.
 
         Plan 02: stub (logs only).
-        Plan 05: wires to alerts.send_paused_alert (Sentry + Better Stack +
+        Plan 05: wires to alerts.send_recovering_alert (Sentry + Better Stack +
             Telegram fallback). We reference via the module attribute
-            ``alerts.send_paused_alert`` (not a from-import) so tests can
+            ``alerts.send_recovering_alert`` (not a from-import) so tests can
             monkeypatch the function on the module.
         """
         logger.error(
@@ -450,7 +450,7 @@ class SnapshotScheduler:
         try:
             from polyarb.daemon import alerts as _alerts
 
-            await _alerts.send_paused_alert(
+            await _alerts.send_recovering_alert(
                 self._settings,
                 reason=f"{self._failure_counter} consecutive FAILED snapshots",
             )
@@ -458,7 +458,7 @@ class SnapshotScheduler:
             # Alerts are fail-soft: if every channel is unreachable, the
             # daemon should still retain recovery state — losing the notification
             # is bad, losing the recovery path is worse.
-            logger.warning(f"send_paused_alert failed: {e!r}")
+            logger.warning(f"send_recovering_alert failed: {e!r}")
 
     async def _finish_attempt(
         self,

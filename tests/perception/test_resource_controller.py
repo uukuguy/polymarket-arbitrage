@@ -145,7 +145,10 @@ def test_cooldown_prevents_flapping_but_allows_more_shedding(tmp_path) -> None:
     assert recovered.mode == "normal"
 
 
-def test_default_controller_rejects_forged_candidate_authority(tmp_path) -> None:
+def test_default_controller_rejects_forged_candidate_authority(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(resource_module.os, "getloadavg", lambda: (0.0, 0.0, 0.0))
     store = OpportunityPerceptionStore(tmp_path / "state.db")
     store.init_schema()
     controller = ResourceController(store, clock_ms=lambda: 2_000)
@@ -208,7 +211,10 @@ def test_repeated_samples_do_not_extend_hysteresis_transition_anchor(tmp_path) -
     )
 
 
-def test_discovery_incident_does_not_slow_normal_candidate(tmp_path) -> None:
+def test_discovery_incident_does_not_slow_normal_candidate(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(resource_module.os, "getloadavg", lambda: (0.0, 0.0, 0.0))
     store = OpportunityPerceptionStore(tmp_path / "state.db")
     store.init_schema()
     manager = IncidentManager(store, clock_ms=lambda: 2_000)

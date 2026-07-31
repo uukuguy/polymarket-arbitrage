@@ -82,14 +82,14 @@ def test_make_snapshot_markets_full_dry_run_recipe() -> None:
 
 
 @pytest.mark.parametrize(
-    ("target", "product"),
+    ("target", "expected"),
     [
-        ("sync-structure-local", "structure"),
-        ("archive-markets-local", "archive"),
+        ("sync-structure-local", "polyarb.snapshot structure-sync"),
+        ("archive-markets-local", "--product archive"),
     ],
 )
 def test_make_explicit_data_product_targets_are_wired(
-    target: str, product: str
+    target: str, expected: str
 ) -> None:
     """Operators must not need to reconstruct product-selection flags by hand."""
     result = subprocess.run(
@@ -100,7 +100,7 @@ def test_make_explicit_data_product_targets_are_wired(
         timeout=5,
     )
     assert result.returncode == 0, f"make -n {target} failed: {result.stderr}"
-    assert f"--product {product}" in result.stdout
+    assert expected in result.stdout
 
 
 def test_makefile_phony_declaration_present() -> None:

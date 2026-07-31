@@ -1,14 +1,14 @@
-"""Tests for polyarb.daemon.alerts — paused alert + heartbeat + dedup + Telegram fallback.
+"""Tests for recovery alerts, heartbeat, dedup, and Telegram fallback.
 
 Plan 02-05 — D-16 (Better Stack heartbeat) + D-17 (Telegram via Better Stack with direct fallback).
 
 Coverage:
-- send_paused_alert posts to Better Stack /fail endpoint
-- send_paused_alert also calls sentry_sdk.capture_message(level="error")
+- send_recovering_alert posts to Better Stack /fail endpoint
+- send_recovering_alert also calls sentry_sdk.capture_message(level="error")
 - Better Stack 503 → direct Telegram fallback
 - send_heartbeat_ok posts to Better Stack heartbeat OK endpoint
 - alert dedup window suppresses repeat within window
-- scheduler PAUSED transition invokes alerts.send_paused_alert
+- scheduler RECOVERING transition invokes alerts.send_recovering_alert
 """
 
 from __future__ import annotations
@@ -19,23 +19,23 @@ from unittest.mock import AsyncMock
 import pytest
 
 # ---------------------------------------------------------------------------
-# send_paused_alert
+# send_recovering_alert
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_send_paused_alert_calls_better_stack_heartbeat_fail(
+async def test_send_recovering_alert_calls_better_stack_heartbeat_fail(
     daemon_settings_with_observability: Any,
     mocked_better_stack: Any,
     mocked_sentry: Any,
 ) -> None:
-    """send_paused_alert posts to settings.better_stack_heartbeat_url + '/fail'."""
+    """Recovery alerts post to settings.better_stack_heartbeat_url + '/fail'."""
     from polyarb.daemon import alerts
 
     # Reset module-level dedup state so concurrent tests do not bleed
     alerts._LAST_ALERT_TIME_MS.clear()
 
-    await alerts.send_paused_alert(
+    await alerts.send_recovering_alert(
         daemon_settings_with_observability,
         reason="3 consecutive FAILED snapshots",
     )
@@ -43,22 +43,22 @@ async def test_send_paused_alert_calls_better_stack_heartbeat_fail(
     # Better Stack /fail endpoint received a POST
     fail_calls = [c for c in mocked_better_stack.calls if c[0] == "POST" and "/fail" in c[1]]
     assert fail_calls, (
-        f"send_paused_alert did not POST to Better Stack /fail: calls={mocked_better_stack.calls}"
+        f"recovery alert did not POST to Better Stack /fail: calls={mocked_better_stack.calls}"
     )
 
 
 @pytest.mark.asyncio
-async def test_send_paused_alert_also_captures_to_sentry(
+async def test_send_recovering_alert_also_captures_to_sentry(
     daemon_settings_with_observability: Any,
     mocked_better_stack: Any,
     mocked_sentry: Any,
 ) -> None:
-    """send_paused_alert also calls sentry_sdk.capture_message(level='error')."""
+    """Recovery alerts also call sentry_sdk.capture_message(level='error')."""
     from polyarb.daemon import alerts
 
     alerts._LAST_ALERT_TIME_MS.clear()
 
-    await alerts.send_paused_alert(
+    await alerts.send_recovering_alert(
         daemon_settings_with_observability,
         reason="3 consecutive FAILED snapshots",
     )
@@ -72,7 +72,7 @@ async def test_send_paused_alert_also_captures_to_sentry(
 
 
 @pytest.mark.asyncio
-async def test_send_paused_alert_calls_telegram_direct_when_better_stack_503(
+async def test_send_recovering_alert_calls_telegram_direct_when_better_stack_503(
     daemon_settings_with_observability: Any,
     mocked_better_stack: Any,
     mocked_sentry: Any,
@@ -85,7 +85,7 @@ async def test_send_paused_alert_calls_telegram_direct_when_better_stack_503(
     # Override Better Stack /fail to return 503
     mocked_better_stack.set_response("POST", "betterstack.com", 503)
 
-    await alerts.send_paused_alert(
+    await alerts.send_recovering_alert(
         daemon_settings_with_observability,
         reason="testing with BS 503",
     )
@@ -99,7 +99,7 @@ async def test_send_paused_alert_calls_telegram_direct_when_better_stack_503(
 
 
 @pytest.mark.asyncio
-async def test_send_paused_alert_calls_telegram_direct_when_better_stack_200(
+async def test_send_recovering_alert_calls_telegram_direct_when_better_stack_200(
     daemon_settings_with_observability: Any,
     mocked_better_stack: Any,
     mocked_sentry: Any,
@@ -118,7 +118,7 @@ async def test_send_paused_alert_calls_telegram_direct_when_better_stack_200(
     # Better Stack /fail returns 200 (the SAD path before this fix: TG was skipped)
     mocked_better_stack.set_response("POST", "betterstack.com", 200)
 
-    await alerts.send_paused_alert(
+    await alerts.send_recovering_alert(
         daemon_settings_with_observability,
         reason="testing with BS 200",
     )
@@ -158,7 +158,7 @@ async def test_alert_deduplication(
     mocked_better_stack: Any,
     mocked_sentry: Any,
 ) -> None:
-    """send_paused_alert called twice within the dedup window → second call is no-op.
+    """Recovery alert called twice within the dedup window → second call is no-op.
 
     First call posts to Better Stack + Sentry. Second call within window does nothing.
     """
@@ -167,7 +167,7 @@ async def test_alert_deduplication(
     alerts._LAST_ALERT_TIME_MS.clear()
 
     # First call: should reach both Better Stack and Sentry
-    await alerts.send_paused_alert(
+    await alerts.send_recovering_alert(
         daemon_settings_with_observability,
         reason="first call",
     )
@@ -175,7 +175,7 @@ async def test_alert_deduplication(
     first_bs_count = len([c for c in mocked_better_stack.calls if "/fail" in c[1]])
 
     # Second call within window: should be deduped
-    await alerts.send_paused_alert(
+    await alerts.send_recovering_alert(
         daemon_settings_with_observability,
         reason="second call (within 5min)",
     )
@@ -190,16 +190,16 @@ async def test_alert_deduplication(
 
 
 # ---------------------------------------------------------------------------
-# Integration: scheduler._on_paused → alerts.send_paused_alert
+# Integration: scheduler._on_recovering → alerts.send_recovering_alert
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_scheduler_paused_invokes_alerts(
+async def test_scheduler_recovering_invokes_alerts(
     daemon_settings_with_observability: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify FAILURE_THRESHOLD consecutive failures call the paused alert.
+    """Verify FAILURE_THRESHOLD consecutive failures call the recovery alert.
 
     Phase 03.1-04 D-02: threshold is 5 (was 3). Drive the loop off the class
     attribute so future tuning doesn't drift this assertion.
@@ -215,19 +215,19 @@ async def test_scheduler_paused_invokes_alerts(
 
     scheduler = SnapshotScheduler(settings=daemon_settings_with_observability, sqlite_store=store)
 
-    # Replace alerts.send_paused_alert with a counting AsyncMock
+    # Replace alerts.send_recovering_alert with a counting AsyncMock
     send_mock = AsyncMock()
-    monkeypatch.setattr(alerts, "send_paused_alert", send_mock)
+    monkeypatch.setattr(alerts, "send_recovering_alert", send_mock)
 
     scheduler._run_snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
 
     for _ in range(SnapshotScheduler.FAILURE_THRESHOLD):
         await scheduler._tick()
 
-    assert scheduler.state == SchedulerState.PAUSED
+    assert scheduler.state == SchedulerState.RECOVERING
     send_mock.assert_called()
     # Verify the call signature passes settings + reason kwarg
     call_kwargs = send_mock.call_args.kwargs
     assert "reason" in call_kwargs, (
-        f"_on_paused should pass reason=, got call: {send_mock.call_args}"
+        f"_on_recovering should pass reason=, got call: {send_mock.call_args}"
     )

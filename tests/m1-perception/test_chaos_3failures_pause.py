@@ -105,10 +105,10 @@ async def test_failures_start_recovery(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_paused_alert_called_once_on_pause(tmp_path: Path) -> None:
-    """send_paused_alert called exactly once when scheduler enters recovery.
+async def test_recovering_alert_called_once_on_threshold(tmp_path: Path) -> None:
+    """send_recovering_alert is called once when scheduler enters recovery.
 
-    After the 3rd failure, _on_paused() fires → alerts.send_paused_alert called.
+    At the threshold, _on_recovering() fires once.
     On later recovery failures — no extra first-incident alert.
     """
     settings = _make_settings(tmp_path)
@@ -121,14 +121,14 @@ async def test_paused_alert_called_once_on_pause(tmp_path: Path) -> None:
     _alerts_mod._LAST_ALERT_TIME_MS.clear()  # reset dedup state
 
     with patch.object(
-        _alerts_mod, "send_paused_alert", new=AsyncMock(return_value=None)
+        _alerts_mod, "send_recovering_alert", new=AsyncMock(return_value=None)
     ) as mock_alert:
-        # N ticks → transitions to RECOVERING, calls send_paused_alert once
+        # N ticks → transitions to RECOVERING, calls recovery alert once
         for _ in range(SnapshotScheduler.FAILURE_THRESHOLD):
             await scheduler._tick()
 
         assert mock_alert.call_count == 1, (
-            f"Expected send_paused_alert to be called once, got {mock_alert.call_count}"
+            f"Expected recovery alert once, got {mock_alert.call_count}"
         )
 
         # Next tick: scheduler is already RECOVERING → retries without a duplicate alert
