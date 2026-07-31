@@ -513,19 +513,6 @@ class QuoteWorker:
                         certified_projection = await self._certify_projection(result)
                         if certified_projection.run_id != result.run_id:
                             raise QuoteProjectionIntegrityError()
-                        if self._reconcile_global_projection is not None:
-                            try:
-                                await self._reconcile_global_projection(
-                                    certified_projection
-                                )
-                            except Exception as error:
-                                # A durable observer/Telegram failure must not
-                                # invalidate the independently certified quote
-                                # feed or turn a successful collection false.
-                                logger.exception(
-                                    "neg-risk opportunity watcher failed "
-                                    f"kind={type(error).__name__}"
-                                )
                         if self._prepare_opportunities is not None:
                             certified_opportunities = await self._prepare_opportunities(
                                 certified_projection
@@ -539,6 +526,33 @@ class QuoteWorker:
                                 != certified_projection.universe_hash
                             ):
                                 raise QuoteProjectionIntegrityError()
+                        # Publish the independently certified M2 feed before
+                        # durable opportunity reconciliation.  A large
+                        # Structure universe can make observer-ledger and
+                        # Telegram work slow; that side effect must not hold
+                        # the fresh public feed in COLLECTING.
+                        if certified_opportunities is None:
+                            self.runtime.publish_certified_projection(
+                                certified_projection
+                            )
+                        else:
+                            self.runtime.publish_certified_feed(
+                                certified_projection,
+                                certified_opportunities,
+                            )
+                        if self._reconcile_global_projection is not None:
+                            try:
+                                await self._reconcile_global_projection(
+                                    certified_projection
+                                )
+                            except Exception as error:
+                                # A durable observer/Telegram failure must not
+                                # invalidate the independently certified quote
+                                # feed or turn a successful collection false.
+                                logger.exception(
+                                    "neg-risk opportunity watcher failed "
+                                    f"kind={type(error).__name__}"
+                                )
                 except asyncio.CancelledError:
                     await cleanup_after_cancellation()
                     raise
@@ -561,16 +575,6 @@ class QuoteWorker:
                         f"consecutive={self.runtime.consecutive_failures}"
                     )
                 else:
-                    if certified_projection is not None:
-                        if certified_opportunities is None:
-                            self.runtime.publish_certified_projection(
-                                certified_projection
-                            )
-                        else:
-                            self.runtime.publish_certified_feed(
-                                certified_projection,
-                                certified_opportunities,
-                            )
                     self.runtime.mark_success(result)
                     logger.info(
                         "neg-risk quote collection complete "

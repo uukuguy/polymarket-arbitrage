@@ -270,7 +270,7 @@ async def test_watcher_failure_keeps_certified_feed_publishable() -> None:
         source_snapshot_id=70,
         universe_hash="hash-7",
     )
-    observed_before_publish: list[object | None] = []
+    observed_before_watcher: list[object | None] = []
 
     async def collect_once() -> QuoteCollectionResult:
         return _result(7)
@@ -282,7 +282,7 @@ async def test_watcher_failure_keeps_certified_feed_publishable() -> None:
         return opportunity_scan
 
     async def reconcile_global(_projection) -> None:
-        observed_before_publish.append(worker.runtime.certified_feed())
+        observed_before_watcher.append(worker.runtime.certified_feed())
         raise OSError("telegram unavailable")
 
     async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
@@ -299,7 +299,7 @@ async def test_watcher_failure_keeps_certified_feed_publishable() -> None:
 
     await worker.run(asyncio.Event())
 
-    assert observed_before_publish == [None]
+    assert observed_before_watcher == [worker.runtime.certified_feed()]
     feed = worker.runtime.certified_feed()
     assert feed is not None
     assert feed.projection.run_id == 7
