@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from polyarb.clients.gamma_client import EventPage, MarketPage
+from polyarb.perception.structure_sync import StructureSyncWorker
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -60,3 +62,22 @@ def test_structure_window_stages_markets_only_after_event_coverage_completes(tmp
     )
     assert resumed["market_cursor"] == "opaque-market-2"
     assert resumed["market_pages"] == 1
+
+
+async def test_structure_worker_advances_one_event_then_one_market_page(tmp_path) -> None:
+    class Gamma:
+        async def fetch_active_event_page(self, cursor, limit):
+            assert (cursor, limit) == (None, 100)
+            return EventPage(({"id": "event-1"},), None, None, True, 10, 20)
+
+        async def fetch_active_market_page(self, cursor, limit):
+            assert (cursor, limit) == (None, 100)
+            return MarketPage(({"id": "market-1"},), None, None, True, 30, 40)
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    worker = StructureSyncWorker(gamma=Gamma(), store=store)
+
+    assert (await worker.run_batch()).stage == "events"
+    assert (await worker.run_batch()).stage == "markets"
+    assert store.get_latest_structure_sync()["status"] == "complete"

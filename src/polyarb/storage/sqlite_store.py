@@ -1000,6 +1000,19 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def get_latest_structure_sync(self) -> dict[str, object] | None:
+        """Read latest window progress without starting another collection window."""
+        con = sqlite3.connect(self._db_path)
+        try:
+            row = con.execute(
+                "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
+                "checkpoint_at_ms,event_pages,market_pages,failure_reason "
+                "FROM structure_sync_windows ORDER BY checkpoint_at_ms DESC LIMIT 1"
+            ).fetchone()
+            return None if row is None else self._structure_sync_window_row(row)
+        finally:
+            con.close()
+
     @staticmethod
     def _structure_sync_window_row(row: tuple[object, ...]) -> dict[str, object]:
         keys = (
