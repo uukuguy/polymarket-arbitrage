@@ -1,8 +1,7 @@
 """Polywatch — unified M1 production watcher.
 
 Polls L1 health, the opportunity contract, L2/L3 health, and the canonical
-Dashboard deployment. Escalation remains one Telegram message per tick, with
-optional L1 snapshot auto-unpause.
+Dashboard deployment. Escalation remains one Telegram message per tick.
 
 Run modes
 ---------
@@ -19,8 +18,8 @@ Exit codes
 Decision rules
 --------------
 - L1 /healthz status == "fail" AND snapshot.last_success_age_seconds > 1800
-    → attempt POST /control/unpause (HMAC signed, empty body)
-    → push Telegram with Sentry link
+    → push Telegram with durable Structure recovery progress
+    → never blindly unpause: the scheduler remains in RECOVERING and retries
 - L1 /healthz status == "warn"
     → log only (do not push; warn is expected during snapshot in progress)
 - L1 quote feed fail/error/stopped OR invalid opportunity response → push
@@ -34,7 +33,8 @@ Safety
 ------
 - All HTTP calls timeout=10s
 - Telegram failures are logged but do not raise (alert chain best-effort)
-- Auto-unpause is idempotent (already_running response is OK)
+- Legacy unpause transport remains available for explicit operator workflows;
+  the watcher never invokes it automatically
 - No retry loops (cron will re-fire in 15 min)
 """
 
@@ -425,10 +425,14 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
     age = snap.get("observedValue") if snap else None
 
     if snap_status == "fail" and isinstance(age, (int, float)) and age > L1_SNAPSHOT_FAIL_AGE_S:
+        structure = _extract_check(healthz, "snapshot:structure_sync", {})
+        structure_state = structure.get("observedValue") if structure else None
+        structure_output = structure.get("output") if structure else None
         return (
-            "unpause+push",
+            "push",
             f"L1 snapshot stale {int(age)}s > "
-            f"{L1_SNAPSHOT_FAIL_AGE_S}s (likely PAUSED)",
+            f"{L1_SNAPSHOT_FAIL_AGE_S}s; scheduler RECOVERING "
+            f"(structure={structure_state}, progress={structure_output})",
         )
 
     if snap_status == "fail":

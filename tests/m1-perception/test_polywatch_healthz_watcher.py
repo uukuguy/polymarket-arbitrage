@@ -191,6 +191,31 @@ def test_failed_snapshot_attempt_pushes_even_when_last_success_is_fresh() -> Non
     assert "latest snapshot attempt failed" in reason.lower()
 
 
+def test_stale_snapshot_in_recovering_mode_never_blindly_unpauses() -> None:
+    health = _health(
+        status="fail",
+        checks={
+            "snapshot:last_success_age_seconds": _check(3_601.0, status="fail"),
+            "snapshot:latest_attempt": _check("running"),
+            "snapshot:failure_counter": _check(5, status="fail"),
+            "snapshot:structure_sync": _check(
+                "events_complete",
+                status="warn",
+                output="stage=markets event_pages=161 market_pages=1106",
+            ),
+            "market_truth:coverage": _check("complete"),
+            "quote_feed:last_complete_age_seconds": _check(20.0),
+            "quote_feed:collector_state": _check("running"),
+        },
+    )
+
+    action, reason = WATCHER.decide_l1(health)
+
+    assert action == "push"
+    assert "RECOVERING" in reason
+    assert "unpause" not in reason.lower()
+
+
 def test_empty_opportunity_list_is_healthy() -> None:
     action, reason = _decision("decide_opportunity")(
         {
