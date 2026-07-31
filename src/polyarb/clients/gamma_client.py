@@ -113,9 +113,12 @@ class GammaClient:
     """
 
     PAGE_LIMIT = 100
-    # Point lookups only reconcile a small race window between the active event
-    # and market streams. A large disagreement is not safe to fan out.
-    MAX_MARKET_STATE_LOOKUPS = 100
+    # Point lookups reconcile the race window between durable event and market
+    # traversals. Large sets use bounded exact-id batches rather than one HTTP
+    # request per identity.
+    MAX_MARKET_STATE_LOOKUPS = 500
+    MARKET_STATE_POINT_LOOKUP_LIMIT = 100
+    MARKET_STATE_LOOKUP_BATCH_SIZE = 25
     # Gamma can leave a larger stale tail in the active market keyset than the
     # active event keyset. Batch exact-id enrichment bounds both fan-out and
     # individual request size.
@@ -315,11 +318,60 @@ class GammaClient:
                 "market state lookup limit exceeded: "
                 f"{len(unique_ids)}>{self.MAX_MARKET_STATE_LOOKUPS}"
             )
+        if any(type(market_id) is not str or not market_id.strip() for market_id in unique_ids):
+            raise PaginationIntegrityError("market state lookup has invalid identity")
+
+        if len(unique_ids) > self.MARKET_STATE_POINT_LOOKUP_LIMIT:
+            async def fetch_batch(batch: list[str]) -> dict[str, dict[str, bool]]:
+                payload = await self._get(
+                    "/markets",
+                    [("id", market_id) for market_id in batch]
+                    + [("limit", str(len(batch)))],
+                )
+                if not isinstance(payload, list) or not all(
+                    isinstance(market, dict) for market in payload
+                ):
+                    raise PaginationIntegrityError(
+                        "/markets exact-id state response has invalid shape"
+                    )
+                response_ids = [market.get("id") for market in payload]
+                if (
+                    any(type(market_id) is not str for market_id in response_ids)
+                    or len(response_ids) != len(set(response_ids))
+                    or set(response_ids) != set(batch)
+                ):
+                    raise PaginationIntegrityError(
+                        "/markets exact-id state response identity set mismatch"
+                    )
+                batch_states: dict[str, dict[str, bool]] = {}
+                for market in payload:
+                    active = market.get("active")
+                    closed = market.get("closed")
+                    if type(active) is not bool or type(closed) is not bool:
+                        raise PaginationIntegrityError(
+                            f"/markets?id={market.get('id')} state response has invalid state"
+                        )
+                    batch_states[market["id"]] = {
+                        "active": active,
+                        "closed": closed,
+                    }
+                return batch_states
+
+            batches = [
+                unique_ids[start : start + self.MARKET_STATE_LOOKUP_BATCH_SIZE]
+                for start in range(0, len(unique_ids), self.MARKET_STATE_LOOKUP_BATCH_SIZE)
+            ]
+            states: dict[str, dict[str, bool]] = {}
+            for start in range(0, len(batches), self.MAX_CONCURRENT_PARENT_LOOKUPS):
+                wave = batches[start : start + self.MAX_CONCURRENT_PARENT_LOOKUPS]
+                for batch_states in await asyncio.gather(
+                    *(fetch_batch(batch) for batch in wave)
+                ):
+                    states.update(batch_states)
+            return states
 
         states: dict[str, dict[str, bool]] = {}
         for market_id in unique_ids:
-            if type(market_id) is not str or not market_id.strip():
-                raise PaginationIntegrityError("market state lookup has invalid identity")
             used_fallback = False
             try:
                 payload = await self._get(f"/markets/{quote(market_id, safe='')}", {})

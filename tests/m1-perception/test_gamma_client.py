@@ -333,6 +333,32 @@ async def test_fetch_market_states_rejects_unbounded_lookup_set() -> None:
             )
 
 
+async def test_fetch_market_states_batches_large_exact_id_set() -> None:
+    settings = _fast_settings()
+    market_ids = [f"market-{index:03d}" for index in range(211)]
+    chunks = [market_ids[start : start + 25] for start in range(0, len(market_ids), 25)]
+
+    def payload(ids: list[str]) -> list[dict]:
+        return [
+            {"id": market_id, "active": False, "closed": True}
+            for market_id in reversed(ids)
+        ]
+
+    async with GammaClient(settings) as client:
+        client._get = AsyncMock(side_effect=[payload(ids) for ids in chunks])
+        states = await client.fetch_market_states(market_ids)
+
+    assert set(states) == set(market_ids)
+    assert all(state == {"active": False, "closed": True} for state in states.values())
+    assert client._get.await_args_list == [
+        mock_call(
+            "/markets",
+            [("id", market_id) for market_id in ids] + [("limit", str(len(ids)))],
+        )
+        for ids in chunks
+    ]
+
+
 async def test_fetch_market_parent_states_returns_inactive_parent_truth() -> None:
     settings = _fast_settings()
     payload = {
