@@ -1,8 +1,8 @@
 # M1 Opportunity-First Market Perception Design
 
-**Date:** 2026-07-28  
-**Status:** Approved in discussion; pending written-spec review  
-**Scope:** Observer-only M1 market perception and arbitrage-opportunity watching  
+**Date:** 2026-07-28
+**Status:** Approved in discussion; pending written-spec review
+**Scope:** Observer-only M1 market perception and arbitrage-opportunity watching
 **Safety boundary:** No wallet, signing, balance, order placement, or real-money execution
 
 ## 1. Decision

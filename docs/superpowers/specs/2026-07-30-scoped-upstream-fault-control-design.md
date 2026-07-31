@@ -1,8 +1,8 @@
 # Scoped Upstream Fault Control for Production Qualification
 
-**Status:** approved design  
-**Date:** 2026-07-30  
-**Scope:** M1 opportunity-first Task 8, Gamma/CLOB/Telegram upstream faults  
+**Status:** approved design
+**Date:** 2026-07-30
+**Scope:** M1 opportunity-first Task 8, Gamma/CLOB/Telegram upstream faults
 **Boundary:** observer-only; no wallet, signing, balance, order, or trade path
 
 ## 1. Decision
