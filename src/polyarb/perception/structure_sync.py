@@ -151,7 +151,7 @@ async def finalize_structure_window(
     from polyarb.snapshot.orchestrator import run_snapshot
 
     store = SQLiteStore(settings.db_path)
-    store.init_schema()
+    store.init_structure_sync_schema()
     events, markets = await asyncio.to_thread(
         store.read_complete_structure_sync,
         window_id,
@@ -162,6 +162,7 @@ async def finalize_structure_window(
         product="structure",
         now_ms=now_ms,
         gamma_client=StagedGammaSource(events, markets, point_client=point_client),
+        schema_ready=True,
     )
     if result.is_valid:
         await asyncio.to_thread(
@@ -176,7 +177,7 @@ async def finalize_structure_window(
 async def run_structure_sync_until_published(settings: Settings):
     """Continuously checkpoint bounded pages until one certified revision publishes."""
     store = SQLiteStore(settings.db_path)
-    store.init_schema()
+    store.init_structure_sync_schema()
     latest = store.get_latest_structure_sync()
     async with GammaClient(settings) as gamma:
         if latest is not None and latest["status"] == "complete":

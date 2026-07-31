@@ -487,6 +487,30 @@ class SQLiteStore:
 
         OpportunityPerceptionStore(self._db_path).init_schema()
 
+    def init_structure_sync_schema(self) -> None:
+        """Prepare only the resumable Structure staging tables.
+
+        The daemon performs the canonical full migration before it starts the
+        scheduler.  Snapshot retry children must not repeat that whole scan on
+        a multi-gigabyte production database.  A standalone invocation against
+        a fresh database still falls back to the full bootstrap.
+        """
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            has_snapshot_schema = (
+                con.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='snapshots'"
+                ).fetchone()
+                is not None
+            )
+            if has_snapshot_schema:
+                con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
+                return
+        finally:
+            con.close()
+        self.init_schema()
+
     def write_snapshot(
         self,
         *,

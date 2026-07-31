@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from polyarb.clients.gamma_client import EventPage, MarketPage
-from polyarb.perception.structure_sync import StructureSyncWorker
+from polyarb.perception.structure_sync import (
+    StructureSyncWorker,
+    finalize_structure_window,
+    run_structure_sync_until_published,
+)
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -112,3 +119,87 @@ def test_incomplete_structure_window_cannot_be_read_for_publication(tmp_path) ->
     window = store.begin_or_resume_structure_sync(started_at_ms=1)
     with pytest.raises(ValueError, match="not-complete"):
         store.read_complete_structure_sync(window["id"])
+
+
+async def test_structure_retry_skips_full_database_schema_migration(
+    settings_for_test,
+) -> None:
+    """A scheduler retry must not rescan the whole production database."""
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+
+    class Gamma:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def fetch_active_event_page(self, cursor, limit):
+            return EventPage((), None, None, True, 10, 20)
+
+        async def fetch_active_market_page(self, cursor, limit):
+            return MarketPage((), None, None, True, 30, 40)
+
+    result = SimpleNamespace(is_valid=False)
+    with (
+        patch.object(
+            SQLiteStore,
+            "init_schema",
+            side_effect=AssertionError("full schema migration on retry"),
+        ),
+        patch(
+            "polyarb.perception.structure_sync.GammaClient",
+            return_value=Gamma(),
+        ),
+        patch(
+            "polyarb.perception.structure_sync.finalize_structure_window",
+            new=AsyncMock(return_value=result),
+        ),
+    ):
+        assert await run_structure_sync_until_published(settings_for_test) is result
+
+
+async def test_structure_finalizer_reuses_daemon_initialized_schema(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[],
+        finished_at_ms=300,
+    )
+    result = SimpleNamespace(is_valid=False)
+    run_snapshot = AsyncMock(return_value=result)
+
+    with (
+        patch.object(
+            SQLiteStore,
+            "init_schema",
+            side_effect=AssertionError("full schema migration in finalizer"),
+        ),
+        patch("polyarb.snapshot.orchestrator.run_snapshot", new=run_snapshot),
+    ):
+        assert (
+            await finalize_structure_window(
+                settings_for_test,
+                window["id"],
+                now_ms=400,
+            )
+            is result
+        )
+
+    assert run_snapshot.await_args.kwargs["schema_ready"] is True

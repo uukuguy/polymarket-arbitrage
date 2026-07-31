@@ -464,6 +464,7 @@ async def run_snapshot(
     now_ms: int | None = None,
     use_cache: bool = True,
     gamma_client: object | None = None,
+    schema_ready: bool = False,
 ) -> SnapshotResult:
     """Run one Polymarket snapshot end-to-end.
 
@@ -477,6 +478,8 @@ async def run_snapshot(
                  preserves the pre-separation behavior for historical tooling.
         now_ms: Override for the snapshot's ``taken_at_ms`` timestamp (test hook).
                 Defaults to ``int(time.time() * 1000)`` at function entry.
+        schema_ready: Skip the full migration pass when the daemon already
+                initialized the database before launching this child.
 
     Returns:
         SnapshotResult — never raises for transport failures (those become
@@ -1419,7 +1422,8 @@ async def run_snapshot(
                 ev["fetched_at_ms"] = finished_at_ms
 
         store = SQLiteStore(settings.db_path)
-        store.init_schema()
+        if not schema_ready:
+            store.init_schema()
         if source_complete:
             source_coverage = SourceCoverage.complete(
                 markets_coverage.result.items_yielded,
