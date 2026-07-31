@@ -52,13 +52,14 @@ primary_region = "ams"
 # Capacity baseline — production evidence on 2026-07-31 showed the single
 # shared vCPU could starve /healthz and even the parent's subprocess timeout
 # while Structure finalized 118k markets. Two shared vCPUs keep HTTP/timeout
-# control runnable alongside the low-priority child; memory remains at the
-# measured 1GB cgroup because the streaming finalizer removed the OOM peak.
+# control runnable alongside the low-priority child. The app needs 2GB because
+# the 1GB cgroup still SIGKILLed the streaming finalizer when it overlapped the
+# live 34k-token Quote feed; this is measured combined-process headroom.
 #
 # Cron stays 256MB because it only runs Polywatch and has no /data volume.
 [[vm]]
   size = "shared-cpu-2x"
-  memory = "1024mb"
+  memory = "2048mb"
   processes = ["app"]
 
 [[vm]]
