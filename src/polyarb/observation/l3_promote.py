@@ -95,11 +95,32 @@ _POSTGREST_TIMEOUT_S: float = 5.0
 _MAX_TOKEN_MAP_CACHE = 1010  # 1000 fetched rows + exact current L3 identities
 _MIRROR_RECONCILE_BATCH_SIZE = 100
 _STARTUP_CONNECTION_POLL_S = 0.1
+_POSTGREST_READ_ATTEMPTS = 3
+_POSTGREST_READ_RETRY_S = 1.0
 
 
 def _utc_now() -> datetime:
     """Return the scheduler clock in UTC through one testable boundary."""
     return datetime.now(UTC)
+
+
+async def _postgrest_read_with_retry(operation: Any, *args: Any) -> Any:
+    """Keep one transient PostgREST timeout from freezing L3 for five minutes."""
+    for attempt in range(1, _POSTGREST_READ_ATTEMPTS + 1):
+        try:
+            return await asyncio.to_thread(operation, *args)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if attempt == _POSTGREST_READ_ATTEMPTS:
+                raise
+            logger.warning(
+                "l3-promote: PostgREST read retry attempt={}/{}",
+                attempt,
+                _POSTGREST_READ_ATTEMPTS,
+            )
+            await asyncio.sleep(_POSTGREST_READ_RETRY_S)
+    raise AssertionError("unreachable")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -885,7 +906,7 @@ async def _promote_run_impl(
         token_map = prior_market_token_map
     else:
         try:
-            tob_rows = await asyncio.to_thread(
+            tob_rows = await _postgrest_read_with_retry(
                 _fetch_latest_tob_rows_from_supabase,
                 client,
             )
@@ -904,7 +925,7 @@ async def _promote_run_impl(
             }
         )
         try:
-            token_map = await asyncio.to_thread(
+            token_map = await _postgrest_read_with_retry(
                 _fetch_market_token_map,
                 client,
                 recent_asset_ids,

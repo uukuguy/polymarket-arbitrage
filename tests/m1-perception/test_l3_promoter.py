@@ -1530,6 +1530,40 @@ async def test_promoter_supabase_fetch_does_not_block_event_loop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_promoter_retries_transient_cold_start_tob_fetch() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    consumer = _truthful_consumer()
+    tob_rows, token_rows = _five_market_inputs("cold-retry")
+    client = _make_supabase_client_mock(tob_rows, token_rows)
+
+    with (
+        patch.object(l3_promote, "create_client", return_value=client),
+        patch.object(
+            l3_promote,
+            "_fetch_latest_tob_rows_from_supabase",
+            side_effect=[TimeoutError, tob_rows],
+        ) as fetch,
+        patch.object(l3_promote.asyncio, "sleep", new=AsyncMock()) as sleep,
+    ):
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            run_seq=21,
+        )
+
+    assert result.status.value == "success"
+    assert fetch.call_count == 2
+    sleep.assert_awaited_once_with(1.0)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case", "expected_status", "expected_reason"),
     [
