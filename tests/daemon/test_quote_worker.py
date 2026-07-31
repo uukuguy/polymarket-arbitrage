@@ -117,6 +117,37 @@ async def test_worker_never_overlaps_collections() -> None:
     assert maximum_active == 1
 
 
+async def test_worker_waits_for_shared_producer_slot() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    producer_lock = asyncio.Lock()
+    await producer_lock.acquire()
+    calls = 0
+
+    async def collect_once() -> QuoteCollectionResult:
+        nonlocal calls
+        calls += 1
+        return _result(1)
+
+    async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        producer_lock=producer_lock,
+        interval_s=120,
+        wait_for_stop=stop_after_once,
+    )
+    running = asyncio.create_task(worker.run(asyncio.Event()))
+    await asyncio.sleep(0)
+    assert calls == 0
+
+    producer_lock.release()
+    await running
+
+    assert calls == 1
+
+
 @pytest.mark.parametrize(
     ("finished_at", "expected_delay"),
     ((175.0, 45.0), (250.0, 0.0)),

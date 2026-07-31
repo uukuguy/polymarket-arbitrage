@@ -297,9 +297,16 @@ class SnapshotScheduler:
     # (15-min) auto-unpauses well within human-response cadence.
     FAILURE_THRESHOLD = 5
 
-    def __init__(self, settings: object, sqlite_store: object) -> None:
+    def __init__(
+        self,
+        settings: object,
+        sqlite_store: object,
+        *,
+        producer_lock: asyncio.Lock | None = None,
+    ) -> None:
         self._settings = settings
         self._sqlite_store = sqlite_store
+        self._producer_lock = producer_lock
 
         # Restore state from DB (test_counter_persists_across_restart)
         self._failure_counter = 0
@@ -448,7 +455,14 @@ class SnapshotScheduler:
         This method is injectable — tests replace it with AsyncMock.
         Real prod wires it to the orchestrator in Plan 04.
         """
-        return await run_snapshot_in_subprocess(timeout_s=self._effective_timeout_s)
+        if self._producer_lock is None:
+            return await run_snapshot_in_subprocess(
+                timeout_s=self._effective_timeout_s
+            )
+        async with self._producer_lock:
+            return await run_snapshot_in_subprocess(
+                timeout_s=self._effective_timeout_s
+            )
 
     async def _on_recovering(self) -> None:
         """Alert once when repeated failures require active recovery.

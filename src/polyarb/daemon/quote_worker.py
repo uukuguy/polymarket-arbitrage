@@ -430,6 +430,7 @@ class QuoteWorker:
         restore_feed: RestoreFeed | None = None,
         cleanup_collecting_runs: CleanupCollectingRuns | None = None,
         cleanup_old_runs: CleanupOldRuns | None = None,
+        producer_lock: asyncio.Lock | None = None,
         interval_s: float,
         runtime: QuoteWorkerRuntime | None = None,
         wait_for_stop: WaitForStop = _wait_for_stop,
@@ -447,6 +448,7 @@ class QuoteWorker:
         self._restore_feed = restore_feed
         self._cleanup_collecting_runs = cleanup_collecting_runs
         self._cleanup_old_runs = cleanup_old_runs
+        self._producer_lock = producer_lock
         self._interval_s = interval_s
         self._wait_for_stop = wait_for_stop
         self._monotonic = monotonic
@@ -531,7 +533,11 @@ class QuoteWorker:
                 retry_immediately = False
                 self.runtime.mark_started()
                 try:
-                    result = await self._collect_once()
+                    if self._producer_lock is None:
+                        result = await self._collect_once()
+                    else:
+                        async with self._producer_lock:
+                            result = await self._collect_once()
                     certified_projection = None
                     certified_opportunities = None
                     if self._certify_projection is not None:
@@ -641,6 +647,7 @@ def build_production_quote_worker(
     settings: Settings,
     *,
     opportunity_watcher: OpportunityWatcher | None = None,
+    producer_lock: asyncio.Lock | None = None,
 ) -> QuoteWorker | None:
     """Build the public-read-only production worker when explicitly enabled."""
     if not settings.neg_risk_quote_worker_enabled:
@@ -720,5 +727,6 @@ def build_production_quote_worker(
         restore_feed=restore_feed,
         cleanup_collecting_runs=cleanup_collecting_runs,
         cleanup_old_runs=cleanup_old_runs,
+        producer_lock=producer_lock,
         interval_s=settings.neg_risk_quote_interval_s,
     )

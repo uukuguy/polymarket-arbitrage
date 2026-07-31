@@ -66,6 +66,11 @@ Telegram outbox 也采用同一原则：每轮最多投递 20 条，生产发送
 失败事实保留并按原有指数退避重试，积压会逐轮排空，但不会瞬间发送 100 条再次触发
 限流。这里的“有界”不是降级后放弃，而是让恢复工作本身不会制造第二次故障。
 
+Structure 与全市场 Quote 的隔离子进程共享一个进程内 producer slot。当前 Quote
+结束后，已经排队的 Structure 先取得 slot，避免 Quote 因单轮超过 120 秒而无缝重启、
+持续饿死 Structure；Structure 发布后 Quote 立即取得 slot 并绑定新 snapshot。锁等待
+不计入子进程 timeout，HTTP 与 Polywatch 仍由父进程响应。
+
 ## 自检题
 
 1. 子进程在 market page 37 超时，为什么下一次不能从 market page 1 开始？

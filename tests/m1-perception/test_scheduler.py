@@ -18,6 +18,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -414,6 +415,41 @@ async def test_snapshot_subprocess_result_has_parent_elapsed_and_final_stage() -
 
 
 @pytest.mark.asyncio
+async def test_snapshot_waits_for_shared_producer_slot(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+
+    producer_lock = asyncio.Lock()
+    await producer_lock.acquire()
+    calls = 0
+
+    async def run_snapshot(*, timeout_s: float):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(status=SnapshotStatus.OK)
+
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_snapshot_in_subprocess",
+        run_snapshot,
+    )
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=MagicMock(),
+        producer_lock=producer_lock,
+    )
+    running = asyncio.create_task(scheduler._run_snapshot())
+    await asyncio.sleep(0)
+    assert calls == 0
+
+    producer_lock.release()
+    await running
+
+    assert calls == 1
+
+
 async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> None:
     """Timeout data arrives only from the child communicate result after reaping."""
     from polyarb.daemon.scheduler import (

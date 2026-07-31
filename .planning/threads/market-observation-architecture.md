@@ -1411,3 +1411,36 @@ success is not user receipt/read evidence.
 - Authority timestamps must be monotonic against the verified event/action
   tail. Reconciliation uses `max(boundary_now, tail_time)` so clock regression
   cannot corrupt an otherwise append-only history.
+
+### §2.18 Recovery work needs bounded retention and its own alert chain (2026-07-31)
+
+- A resumable Structure producer fixed timeout/restart continuity but exposed a
+  different capacity leak: about 1,370 full-universe Quote runs retained roughly
+  70,000 child rows each and grew `state.db` to 18 GB on a 20 GB volume.
+- Producer recovery and storage retention are one availability contract.
+  Structure staging, snapshots, and Quote history each need bounded cleanup;
+  fixing only the currently failing table merely moves the next outage.
+- Quote cleanup runs only after a new feed is certified and published. It
+  protects the newest complete and failed history independently, never selects
+  collecting rows, deletes a bounded batch in foreign-key order, and retries
+  on the next successful Quote cycle.
+- SQLite capacity truth is reusable pages, not immediate file shrinkage.
+  Online `VACUUM` would require dangerous extra space and a long exclusive
+  rewrite; steady-state writers instead reuse freelist pages produced by
+  bounded deletion.
+- Cleanup fail-soft must not mean cleanup silent. Consecutive retention
+  failures have a dedicated health check (warn at 1–2, fail at 3), Polywatch
+  creates a component alert, and the next successful cleanup resets the chain
+  so recovery is delivered once.
+- A durable notification outbox also needs bounded service. Production drains
+  at most 20 cards per pass with 1.1-second spacing while preserving per-card
+  exponential retry facts; this converts a 91-card burst from repeated HTTP
+  failure into a finite backlog without discarding observations.
+- Two independently bounded producers can still starve one another. When a
+  full-universe Quote run exceeds its nominal 120-second cadence, start-to-start
+  scheduling immediately launches another run; an overlapping lower-priority
+  Structure child then repeatedly times out despite durable cursor progress.
+  A fair process-local producer slot now serializes only the heavy child
+  processes: an already-waiting Structure runs after the current Quote, then
+  Quote rebinds to the newly published snapshot. Lock wait is outside the
+  child's timeout and never blocks the HTTP parent.
