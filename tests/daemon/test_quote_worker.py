@@ -493,6 +493,8 @@ async def test_worker_purges_old_runs_after_feed_publication() -> None:
 
     async def cleanup_old_runs() -> int:
         assert worker.runtime.certified_projection() is not None
+        assert worker.runtime.snapshot().state == "pass"
+        assert worker.runtime.snapshot().last_run_id == 7
         events.append("cleanup")
         return 20
 

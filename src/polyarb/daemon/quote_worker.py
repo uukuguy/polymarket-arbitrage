@@ -571,6 +571,18 @@ class QuoteWorker:
                                 certified_projection,
                                 certified_opportunities,
                             )
+                        # The certified feed is the user-facing success
+                        # boundary.  Publish that truth to /health before
+                        # bounded housekeeping so a slow SQLite delete cannot
+                        # falsely leave a usable feed in COLLECTING.
+                        self.runtime.mark_success(result)
+                        logger.info(
+                            "neg-risk quote collection complete "
+                            f"run_id={result.run_id} "
+                            f"responses={result.successful_response_count}/"
+                            f"{result.requested_token_count} "
+                            f"elapsed_ms={result.elapsed_ms}"
+                        )
                         if self._cleanup_old_runs is not None:
                             try:
                                 deleted_runs = await self._cleanup_old_runs()
@@ -620,14 +632,17 @@ class QuoteWorker:
                         f"consecutive={self.runtime.consecutive_failures}"
                     )
                 else:
-                    self.runtime.mark_success(result)
-                    logger.info(
-                        "neg-risk quote collection complete "
-                        f"run_id={result.run_id} "
-                        f"responses={result.successful_response_count}/"
-                        f"{result.requested_token_count} "
-                        f"elapsed_ms={result.elapsed_ms}"
-                    )
+                    # Collection-only test workers have no certification
+                    # boundary, so their successful result is published here.
+                    if self._certify_projection is None:
+                        self.runtime.mark_success(result)
+                        logger.info(
+                            "neg-risk quote collection complete "
+                            f"run_id={result.run_id} "
+                            f"responses={result.successful_response_count}/"
+                            f"{result.requested_token_count} "
+                            f"elapsed_ms={result.elapsed_ms}"
+                        )
                 finally:
                     # Certification needs the full run legs, quotes, and source
                     # universe, but steady-state health/opportunity reads do not.
@@ -711,7 +726,10 @@ def build_production_quote_worker(
         return await asyncio.to_thread(
             quote_store.purge_old_runs,
             keep_last_per_status=10,
-            max_runs=20,
+            # One produced run per cycle means one deletion is enough for
+            # steady-state boundedness.  Large batches caused 12-129 second
+            # SQLite writer stalls on the production history database.
+            max_runs=1,
         )
 
     async def reconcile_global_projection(
