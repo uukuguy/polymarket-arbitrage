@@ -16,7 +16,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from polyarb.storage.sqlite_store import _rollback_without_masking
+from polyarb.storage.sqlite_store import (
+    SQLITE_BUSY_TIMEOUT_S,
+    _rollback_without_masking,
+)
 
 _TERMINAL_STATES = frozenset(
     {
@@ -150,7 +153,11 @@ class NegRiskQuoteStore:
         return self._now_ms()
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = sqlite3.connect(
+            self._db_path,
+            isolation_level=None,
+            timeout=SQLITE_BUSY_TIMEOUT_S,
+        )
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA foreign_keys=ON")
         return con

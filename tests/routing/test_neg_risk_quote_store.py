@@ -18,7 +18,7 @@ from polyarb.routing.neg_risk_quote_store import (
     QuoteRunStateError,
     UniverseLeg,
 )
-from polyarb.storage.sqlite_store import SQLiteStore
+from polyarb.storage.sqlite_store import SQLITE_BUSY_TIMEOUT_S, SQLiteStore
 
 NOW_MS = 1_700_000_000_000
 EVENT_ID = "event-a"
@@ -112,6 +112,24 @@ def _legs() -> tuple[UniverseLeg, ...]:
             MEMBERSHIP_HASH,
         ),
     )
+
+
+def test_quote_writer_uses_shared_production_busy_timeout(
+    quote_db, monkeypatch
+) -> None:
+    """Quote and Structure writers must share one bounded contention policy."""
+    real_connect = sqlite3.connect
+    observed_timeouts: list[float | None] = []
+
+    def recording_connect(*args, **kwargs):
+        observed_timeouts.append(kwargs.get("timeout"))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    con = NegRiskQuoteStore(quote_db)._connect()
+    con.close()
+
+    assert observed_timeouts[-1] == SQLITE_BUSY_TIMEOUT_S
 
 
 def _quote(token_id: str, *, terminal_state: str = "executable") -> PersistedQuote:

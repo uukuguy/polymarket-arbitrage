@@ -14,7 +14,7 @@ from polyarb.perception.structure_sync import (
     finalize_structure_window,
     run_structure_sync_until_published,
 )
-from polyarb.storage.sqlite_store import SQLiteStore
+from polyarb.storage.sqlite_store import SQLITE_BUSY_TIMEOUT_S, SQLiteStore
 
 
 def test_structure_window_commits_page_and_resumes_exact_successor_cursor(tmp_path) -> None:
@@ -45,6 +45,24 @@ def test_structure_window_commits_page_and_resumes_exact_successor_cursor(tmp_pa
     assert restarted.list_staged_structure_events(window["id"]) == [
         {"id": "event-1", "active": True, "closed": False}
     ]
+
+
+def test_structure_writer_uses_production_busy_timeout(tmp_path, monkeypatch) -> None:
+    """Concurrent Quote writes must not trip SQLite's five-second default."""
+    db_path = tmp_path / "state.db"
+    store = SQLiteStore(db_path)
+    store.init_schema()
+    real_connect = sqlite3.connect
+    observed_timeouts: list[float | None] = []
+
+    def recording_connect(*args, **kwargs):
+        observed_timeouts.append(kwargs.get("timeout"))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    store.begin_or_resume_structure_sync(started_at_ms=100)
+
+    assert observed_timeouts[-1] == SQLITE_BUSY_TIMEOUT_S
 
 
 def test_structure_window_stages_markets_only_after_event_coverage_completes(tmp_path) -> None:

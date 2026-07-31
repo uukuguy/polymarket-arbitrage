@@ -71,6 +71,16 @@ class SnapshotSubprocessError(RuntimeError):
 
 SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
 RECOVERY_RETRY_DELAY_S = 5.0
+MAX_RECOVERY_RETRY_DELAY_S = 60.0
+
+
+def recovery_retry_delay_s(failure_counter: int) -> float:
+    """Back off repeated recovery collisions without ever disabling retries."""
+    exponent = max(0, min(failure_counter - 1, 4))
+    return min(
+        MAX_RECOVERY_RETRY_DELAY_S,
+        RECOVERY_RETRY_DELAY_S * (2**exponent),
+    )
 
 _SNAPSHOT_STAGE_MARKER_RE = re.compile(
     rb"^snapshot-stage stage="
@@ -201,12 +211,18 @@ async def run_snapshot_in_subprocess(
     try:
         payload = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        reason = (
+            "sqlite-busy"
+            if b"database is locked" in stderr.lower()
+            else "invalid-json"
+        )
         logger.warning(
             "isolated snapshot returned invalid output "
-            f"returncode={process.returncode} stderr_bytes={len(stderr)}"
+            f"returncode={process.returncode} failure_kind={reason} "
+            f"stderr_bytes={len(stderr)}"
         )
         raise SnapshotSubprocessError(
-            "invalid-json",
+            reason,
             last_stage=last_stage,
             elapsed_ms=process_elapsed_ms,
         ) from error
@@ -717,7 +733,7 @@ class SnapshotScheduler:
                 if await self._wait_for_next_tick(
                     stop_event,
                     (
-                        RECOVERY_RETRY_DELAY_S
+                        recovery_retry_delay_s(self._failure_counter)
                         if self._failure_counter > 0
                         else self._effective_cadence_s
                     ),

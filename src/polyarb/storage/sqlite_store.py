@@ -48,6 +48,10 @@ from polyarb.validator.category import Category, Issue, SnapshotStatus
 from polyarb.validator.layers import determine_snapshot_status
 
 _VALID_MODES = ("subset", "full")
+# Structure publication and Quote collection share one WAL database. Their
+# bounded bulk transactions can legitimately overlap for tens of seconds on
+# the production volume, so SQLite's five-second default is too short.
+SQLITE_BUSY_TIMEOUT_S = 120.0
 
 # Booleans that are stored as INTEGER 0/1 in SQLite — convert before insert.
 _BOOL_COLUMNS = ("active", "closed", "neg_risk", "incomplete")
@@ -383,6 +387,13 @@ class SQLiteStore:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _connect_writer(self) -> sqlite3.Connection:
+        return sqlite3.connect(
+            self._db_path,
+            isolation_level=None,
+            timeout=SQLITE_BUSY_TIMEOUT_S,
+        )
+
     @property
     def db_path(self) -> Path:
         return self._db_path
@@ -402,7 +413,7 @@ class SQLiteStore:
         the ALTER runs only if absent. Re-running init_schema after migration
         is a no-op (no duplicate-column error).
         """
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             con.executescript(DDL)
             if migrate_fault_auth_finalize(con):
@@ -495,7 +506,7 @@ class SQLiteStore:
         a multi-gigabyte production database.  A standalone invocation against
         a fresh database still falls back to the full bootstrap.
         """
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             has_snapshot_schema = (
                 con.execute(
@@ -570,7 +581,7 @@ class SQLiteStore:
                 market_rows,
             )
 
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         # Per-connection PRAGMAs (some are persistent like journal_mode=WAL after
         # init_schema, but setting again is cheap and safe).
         con.execute("PRAGMA journal_mode=WAL")
@@ -725,7 +736,7 @@ class SQLiteStore:
             publish_markets=publish_markets,
         )
 
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA synchronous=NORMAL")
         con.execute("BEGIN IMMEDIATE")
@@ -975,7 +986,7 @@ class SQLiteStore:
         import time as _time
 
         updated_at_ms = int(_time.time() * 1000)
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             con.execute(
                 "INSERT INTO scheduler_state(id, state, failure_counter, updated_at_ms) "
@@ -992,7 +1003,7 @@ class SQLiteStore:
         """Return the sole resumable Structure window, creating it atomically."""
         if started_at_ms < 0:
             raise ValueError("invalid-structure-sync-start")
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
@@ -1042,7 +1053,7 @@ class SQLiteStore:
         self, *, window_id: str, snapshot_id: int, published_at_ms: int
     ) -> None:
         """Bind a complete window to its certified snapshot exactly once."""
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             cur = con.execute(
                 "UPDATE structure_sync_windows SET status='published',"
@@ -1067,7 +1078,7 @@ class SQLiteStore:
         if max_windows_per_run < 1:
             raise ValueError("max_windows_per_run must be positive")
 
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
             keep_ids = [
@@ -1254,7 +1265,7 @@ class SQLiteStore:
             if not isinstance(event_id, str) or not event_id:
                 raise ValueError("invalid-structure-event")
             serialized.append((event_id, json.dumps(event, sort_keys=True), requested_cursor))
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
@@ -1324,7 +1335,7 @@ class SQLiteStore:
             if not isinstance(market_id, str) or not market_id:
                 raise ValueError("invalid-structure-market")
             serialized.append((market_id, json.dumps(market, sort_keys=True), requested_cursor))
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
@@ -1360,7 +1371,7 @@ class SQLiteStore:
 
     def begin_snapshot_attempt(self, *, started_at_ms: int) -> int:
         """Append one running scheduler attempt before spawning its child."""
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             cur = con.execute(
                 "INSERT INTO snapshot_attempts(started_at_ms,outcome) "
@@ -1386,7 +1397,7 @@ class SQLiteStore:
         """Close one running attempt exactly once with a bounded outcome."""
         if outcome not in {"succeeded", "failed", "cancelled"}:
             raise ValueError(f"invalid terminal snapshot attempt outcome: {outcome}")
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             cur = con.execute(
                 "UPDATE snapshot_attempts "
@@ -1479,7 +1490,7 @@ class SQLiteStore:
         reason: str,
     ) -> None:
         """Append one auditable effective-schedule change exactly once."""
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             con.execute(
                 "INSERT INTO structure_schedule_adjustments("
@@ -1582,7 +1593,7 @@ class SQLiteStore:
         Idempotent — uses ON CONFLICT(id) DO UPDATE so repeated calls overwrite
         the single row enforced by CHECK(id=1).
         """
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             con.execute(
                 "INSERT INTO l2_mirror_state(id, last_mirror_at_s) "
@@ -1738,7 +1749,7 @@ class SQLiteStore:
             return (0, to_delete)
 
         # Delete in FK-safe order
-        con = sqlite3.connect(self._db_path, isolation_level=None)
+        con = self._connect_writer()
         try:
             con.execute("PRAGMA journal_mode=WAL")
             con.execute("BEGIN IMMEDIATE")

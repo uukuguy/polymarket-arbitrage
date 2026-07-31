@@ -66,6 +66,19 @@ def test_structure_sync_enablement_reads_production_env(
     assert scheduler.structure_sync_enabled is True
 
 
+def test_recovery_retry_delay_is_exponential_and_bounded() -> None:
+    from polyarb.daemon.scheduler import recovery_retry_delay_s
+
+    assert [recovery_retry_delay_s(counter) for counter in (1, 2, 3, 4, 5, 20)] == [
+        5.0,
+        10.0,
+        20.0,
+        40.0,
+        60.0,
+        60.0,
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Helper result types
 # ---------------------------------------------------------------------------
@@ -458,6 +471,27 @@ async def test_snapshot_subprocess_rejects_mismatched_exit_contract() -> None:
     with pytest.raises(
         SnapshotSubprocessError,
         match="snapshot-subprocess-invalid-json",
+    ):
+        await run_snapshot_in_subprocess(spawn=spawn)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_classifies_sqlite_writer_contention() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return _FakeProcess(
+            b"",
+            returncode=1,
+            stderr=b"OperationalError: database is locked",
+        )
+
+    with pytest.raises(
+        SnapshotSubprocessError,
+        match="snapshot-subprocess-sqlite-busy",
     ):
         await run_snapshot_in_subprocess(spawn=spawn)
 
