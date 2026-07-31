@@ -647,11 +647,15 @@ docker-smoke:
 # apps (Phase 03 Inj L2-2 cleanup precedent; memory
 # `feedback_fly-api-token-shadowing-2026-05.md`). Do not remove the prefix.
 
-## deploy: Deploy to Fly.io prod (requires flyctl + keychain auth — see GAP-4 banner above)
+# Override with FLY_BUILD_MODE=--local-only when the Depot upload path is
+# unavailable; the release identity and post-deploy gates remain identical.
+FLY_BUILD_MODE ?= --remote-only
+
+## deploy: Deploy to Fly.io prod; set FLY_BUILD_MODE=--local-only for Depot outages
 deploy:
 	@RELEASE_ID="$$(git rev-parse HEAD)"; \
-		echo ">> deploy — flyctl deploy --remote-only (release=$$RELEASE_ID)"; \
-		FLY_API_TOKEN= flyctl deploy --remote-only --wait-timeout 600 \
+		echo ">> deploy — flyctl deploy $(FLY_BUILD_MODE) (release=$$RELEASE_ID)"; \
+		FLY_API_TOKEN= flyctl deploy $(FLY_BUILD_MODE) --wait-timeout 600 \
 			--env POLYARB_RELEASE_ID="$$RELEASE_ID"
 	@echo ">> ensuring process scale: app=1 cron=1 (W8 Supercronic)"
 	FLY_API_TOKEN= flyctl scale count app=1 cron=1 -a polyarb-l1 --yes || true
