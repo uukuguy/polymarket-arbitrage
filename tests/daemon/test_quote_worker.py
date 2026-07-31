@@ -508,7 +508,11 @@ async def test_quote_history_cleanup_failure_does_not_unpublish_fresh_feed() -> 
     await worker.run(asyncio.Event())
 
     assert worker.runtime.certified_projection() is not None
-    assert worker.runtime.snapshot().success_count == 1
+    snapshot = worker.runtime.snapshot()
+    assert snapshot.success_count == 1
+    assert snapshot.cleanup_failure_count == 1
+    assert snapshot.cleanup_consecutive_failures == 1
+    assert snapshot.last_cleanup_error_kind == "OSError"
 
 
 def test_projection_memory_release_runs_gc_then_linux_malloc_trim(

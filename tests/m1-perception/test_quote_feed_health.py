@@ -191,6 +191,40 @@ def test_worker_error_warns_while_complete_run_is_fresh(tmp_path) -> None:
     assert overall == "warn"
 
 
+def test_quote_retention_failure_is_health_visible(tmp_path) -> None:
+    settings = _settings(tmp_path, enabled=True)
+    _complete_run(settings, age_s=10)
+    runtime = QuoteWorkerRuntime()
+    projection = NegRiskQuoteStore(settings.db_path).latest_complete_projection()
+    assert projection is not None
+    runtime.publish_certified_projection(projection)
+    runtime.mark_cleanup_failure(OSError("disk cleanup failed"))
+
+    checks, overall = _quote_check(settings, runtime=runtime)
+
+    retention = checks["quote_feed:retention"][0]
+    assert retention["observedValue"] == 1
+    assert retention["status"] == "warn"
+    assert retention["output"] == "OSError"
+    assert overall == "warn"
+
+
+def test_repeated_quote_retention_failure_fails_health(tmp_path) -> None:
+    settings = _settings(tmp_path, enabled=True)
+    _complete_run(settings, age_s=10)
+    runtime = QuoteWorkerRuntime()
+    projection = NegRiskQuoteStore(settings.db_path).latest_complete_projection()
+    assert projection is not None
+    runtime.publish_certified_projection(projection)
+    for _ in range(3):
+        runtime.mark_cleanup_failure(OSError("disk cleanup failed"))
+
+    checks, overall = _quote_check(settings, runtime=runtime)
+
+    assert checks["quote_feed:retention"][0]["status"] == "fail"
+    assert overall == "fail"
+
+
 def test_new_quote_attempt_does_not_report_a_previous_error_as_current() -> None:
     """A current re-quote is collecting; its old failure stays only in counters."""
     runtime = QuoteWorkerRuntime()

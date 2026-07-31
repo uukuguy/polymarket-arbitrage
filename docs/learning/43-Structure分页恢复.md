@@ -51,6 +51,21 @@ staged source 因此只对这类有界点查委托 live Gamma；全集仍来自 
 `market_truth:last_complete_age_seconds`。旧真相可读、恢复窗口在推进、最新尝试失败，
 三件事可以同时成立。
 
+## 恢复不能挤爆同一块磁盘
+
+Structure 窗口恢复后，全市场 Quote 每两分钟仍会产生约 3.5 万条 legs 和 quotes。
+如果只清 Structure staging、不清 Quote history，producer 虽然逻辑恢复，SQLite
+仍会持续长大，最终再次因磁盘耗尽停产。
+
+现在每次新 Quote 已认证并发布后，会有界删除最多 20 个旧终态 run；最近 10 个
+complete 与最近 10 个 failed 分别受保护，collecting 永不删除。删除失败只报警，
+不撤销刚发布的 feed；下一轮继续清理。SQLite 文件不必在线 `VACUUM`，删除产生的
+freelist 会被后续 Structure/Quote 写入复用，避免用高风险收缩操作换取表面文件变小。
+
+Telegram outbox 也采用同一原则：每轮最多投递 20 条，生产发送间隔 1.1 秒。
+失败事实保留并按原有指数退避重试，积压会逐轮排空，但不会瞬间发送 100 条再次触发
+限流。这里的“有界”不是降级后放弃，而是让恢复工作本身不会制造第二次故障。
+
 ## 自检题
 
 1. 子进程在 market page 37 超时，为什么下一次不能从 market page 1 开始？
@@ -58,7 +73,12 @@ staged source 因此只对这类有界点查委托 live Gamma；全集仍来自 
 3. 为什么连续失败要报警，但不能再次永久 PAUSED？
 4. point lookup 为什么不破坏 staged window 的全集权威？
 5. 哪三类生产证据齐全后，才能说机会 feed 已恢复？
+6. 为什么 quote retention 应产生 freelist，而不在生产主循环中执行 `VACUUM`？
 
 ## FAQ 增量
 
-暂无。
+### `state.db` 文件仍是 18 GB，清理是不是没生效？
+
+不一定。SQLite 删除行后优先形成内部 freelist，文件大小通常不立即缩小；后续写入
+会复用这些页。生产判断看旧 run 数是否持续下降、`freelist_count` 是否在空闲时上升、
+文件 `page_count` 是否停止按历史速度增长，而不是要求在线文件立刻变小。

@@ -487,6 +487,16 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
             f"{collector_state or 'missing'} (check={collector_status or 'missing'})",
         )
 
+    retention = _extract_check(healthz, "quote_feed:retention", {})
+    if retention and retention.get("status") != "pass":
+        return (
+            "push",
+            "L1 quote retention "
+            f"{retention.get('status')} "
+            f"(consecutive={retention.get('observedValue')}, "
+            f"error={retention.get('output')})",
+        )
+
     return (
         "noop",
         "L1 ok "

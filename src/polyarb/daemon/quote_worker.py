@@ -72,6 +72,10 @@ class QuoteWorkerSnapshot:
     last_successful_response_count: int | None
     last_elapsed_ms: int | None
     last_error_kind: str | None
+    cleanup_success_count: int
+    cleanup_failure_count: int
+    cleanup_consecutive_failures: int
+    last_cleanup_error_kind: str | None
 
 
 @dataclass(frozen=True)
@@ -144,6 +148,10 @@ class QuoteWorkerRuntime:
         self.last_successful_response_count: int | None = None
         self.last_elapsed_ms: int | None = None
         self.last_error_kind: str | None = None
+        self.cleanup_success_count = 0
+        self.cleanup_failure_count = 0
+        self.cleanup_consecutive_failures = 0
+        self.last_cleanup_error_kind: str | None = None
         self._certified_feed: CertifiedQuoteFeed | None = None
 
     def mark_started(self) -> None:
@@ -175,6 +183,16 @@ class QuoteWorkerRuntime:
 
     def mark_stopped(self) -> None:
         self.state = "stopped"
+
+    def mark_cleanup_success(self) -> None:
+        self.cleanup_success_count += 1
+        self.cleanup_consecutive_failures = 0
+        self.last_cleanup_error_kind = None
+
+    def mark_cleanup_failure(self, error: Exception) -> None:
+        self.cleanup_failure_count += 1
+        self.cleanup_consecutive_failures += 1
+        self.last_cleanup_error_kind = type(error).__name__
 
     def publish_certified_projection(
         self,
@@ -230,6 +248,10 @@ class QuoteWorkerRuntime:
             last_successful_response_count=self.last_successful_response_count,
             last_elapsed_ms=self.last_elapsed_ms,
             last_error_kind=self.last_error_kind,
+            cleanup_success_count=self.cleanup_success_count,
+            cleanup_failure_count=self.cleanup_failure_count,
+            cleanup_consecutive_failures=self.cleanup_consecutive_failures,
+            last_cleanup_error_kind=self.last_cleanup_error_kind,
         )
 
 
@@ -550,7 +572,9 @@ class QuoteWorker:
                                     "old neg-risk quote runs purged "
                                     f"count={deleted_runs}"
                                 )
+                                self.runtime.mark_cleanup_success()
                             except Exception as error:
+                                self.runtime.mark_cleanup_failure(error)
                                 logger.warning(
                                     "old neg-risk quote run cleanup failed "
                                     f"kind={type(error).__name__}"

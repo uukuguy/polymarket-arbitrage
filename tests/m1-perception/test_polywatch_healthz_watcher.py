@@ -142,6 +142,23 @@ def test_l1_bad_collector_state_pushes(collector_state: str) -> None:
     assert collector_state in reason
 
 
+def test_l1_quote_retention_failure_pushes() -> None:
+    health = _health(
+        checks={
+            "snapshot:last_success_age_seconds": _check(60.0),
+            "market_truth:coverage": _check("complete"),
+            "quote_feed:last_complete_age_seconds": _check(20.0),
+            "quote_feed:collector_state": _check("pass"),
+            "quote_feed:retention": _check(1, status="warn", output="OperationalError"),
+        }
+    )
+
+    assert WATCHER.decide_l1(health) == (
+        "push",
+        "L1 quote retention warn (consecutive=1, error=OperationalError)",
+    )
+
+
 def test_polywatch_alerts_on_market_truth_coverage_failure() -> None:
     health = _health(
         checks={

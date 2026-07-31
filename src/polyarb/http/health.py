@@ -1033,6 +1033,24 @@ def _build_health_checks(
                     "time": _utc_now_iso(),
                 }
             ]
+            cleanup_failures = runtime.cleanup_consecutive_failures
+            if cleanup_failures >= 3:
+                retention_status = "fail"
+            elif cleanup_failures:
+                retention_status = "warn"
+            else:
+                retention_status = "pass"
+            overall = _severity(overall, retention_status)
+            checks["quote_feed:retention"] = [
+                {
+                    "componentId": "neg-risk-quote-retention",
+                    "componentType": "datastore",
+                    "observedValue": cleanup_failures,
+                    "status": retention_status,
+                    "output": runtime.last_cleanup_error_kind,
+                    "time": _utc_now_iso(),
+                }
+            ]
 
     return checks, overall
 
