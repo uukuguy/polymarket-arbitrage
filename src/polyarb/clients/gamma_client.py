@@ -338,7 +338,7 @@ class GammaClient:
                 if (
                     any(type(market_id) is not str for market_id in response_ids)
                     or len(response_ids) != len(set(response_ids))
-                    or set(response_ids) != set(batch)
+                    or not set(response_ids) <= set(batch)
                 ):
                     raise PaginationIntegrityError(
                         "/markets exact-id state response identity set mismatch"
@@ -354,6 +354,12 @@ class GammaClient:
                     batch_states[market["id"]] = {
                         "active": active,
                         "closed": closed,
+                    }
+                for market_id in set(batch) - set(response_ids):
+                    batch_states[market_id] = {
+                        "active": False,
+                        "closed": True,
+                        "source_absent": True,
                     }
                 return batch_states
 

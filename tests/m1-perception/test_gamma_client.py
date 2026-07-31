@@ -359,6 +359,21 @@ async def test_fetch_market_states_batches_large_exact_id_set() -> None:
     ]
 
 
+async def test_fetch_market_states_marks_batch_ids_absent_from_exact_catalog() -> None:
+    settings = _fast_settings()
+    market_ids = [f"market-{index:03d}" for index in range(101)]
+
+    async with GammaClient(settings) as client:
+        client._get = AsyncMock(return_value=[])
+        states = await client.fetch_market_states(market_ids)
+
+    assert set(states) == set(market_ids)
+    assert all(
+        state == {"active": False, "closed": True, "source_absent": True}
+        for state in states.values()
+    )
+
+
 async def test_fetch_market_parent_states_returns_inactive_parent_truth() -> None:
     settings = _fast_settings()
     payload = {

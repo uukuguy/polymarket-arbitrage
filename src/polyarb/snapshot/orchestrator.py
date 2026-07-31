@@ -805,6 +805,11 @@ async def run_snapshot(
                         )[:160]
                         logger.error(f"Gamma missing event-member point lookup failed: {e!r}")
                     else:
+                        source_absent_member_ids = {
+                            market_id
+                            for market_id, state in point_states.items()
+                            if state.get("source_absent") is True
+                        }
                         verified_non_open_member_ids = {
                             market_id
                             for market_id, state in point_states.items()
@@ -828,6 +833,25 @@ async def run_snapshot(
                                     detail=(
                                         "Gamma event/member status disagreement: "
                                         f"point truth non-open for {bounded_ids}"
+                                    )[:200],
+                                )
+                            )
+                        if source_absent_member_ids:
+                            bounded_ids = ",".join(
+                                sorted(source_absent_member_ids)[:10]
+                            )
+                            remainder = len(source_absent_member_ids) - min(
+                                len(source_absent_member_ids), 10
+                            )
+                            suffix = f" (+{remainder} more)" if remainder else ""
+                            issues.append(
+                                Issue(
+                                    layer=1,
+                                    category=Category.API_JITTER,
+                                    market_id=None,
+                                    detail=(
+                                        "Gamma event member absent from both active "
+                                        f"and exact market catalogues: {bounded_ids}{suffix}"
                                     )[:200],
                                 )
                             )
