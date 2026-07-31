@@ -160,6 +160,8 @@ fully valid accepted intent; rejected or status-tampered envelopes cannot
 manufacture business evidence. Tests exercise SQLite read failure, corrupted
 history, both claim and admission clock regression, rejected Gamma source
 writes, and intent-status tampering.
+The final review also aligned `FaultRuntime.sync_before_batch()` documentation
+with the implemented fail-closed cleanup-truth behavior.
 
 The Task 8 independent review removed the superseded
 `docs/learning/42-three-authority-fault-qualification.md`, leaving

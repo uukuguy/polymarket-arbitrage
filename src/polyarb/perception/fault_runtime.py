@@ -198,7 +198,7 @@ class FaultRuntime:
         return None if self._pending_recovery is None else self._pending_recovery.intent.fault_id
 
     async def sync_before_batch(self) -> None:
-        """Claim at most one intent; store failure leaves controller unchanged."""
+        """Sync one intent; unknown cleanup truth clears and freezes active injection."""
         if self._controller.frozen or self._evidence_frozen:
             return
         active = self._controller.active
