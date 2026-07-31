@@ -795,6 +795,34 @@ async def test_successful_tick_purges_expired_snapshots_on_attached_store(
 
 
 @pytest.mark.asyncio
+async def test_success_persists_recovery_before_slow_retention(
+    daemon_settings_for_test: Any,
+) -> None:
+    """Health must see recovery before bounded cleanup starts."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    store.upsert_scheduler_state(state="RECOVERING", failure_counter=7)
+    observed_counters: list[int] = []
+
+    def purge(**_kwargs):
+        state = store.get_scheduler_state()
+        assert state is not None
+        observed_counters.append(int(state["failure_counter"]))
+        return (0, [])
+
+    store.purge_old_snapshots = purge  # type: ignore[method-assign]
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK))
+
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()):
+        await scheduler._tick()
+
+    assert observed_counters == [0]
+
+
+@pytest.mark.asyncio
 async def test_successful_tick_purges_failed_then_old_published_structure_window(
     daemon_settings_for_test: Any,
 ) -> None:

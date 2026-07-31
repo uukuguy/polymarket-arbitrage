@@ -554,6 +554,11 @@ class SnapshotScheduler:
                 logger.info(
                     f"snapshot tick success: status={result_status} failure_counter reset to 0"
                 )
+                # Publish recovery to /health before any bounded retention.
+                # Large staging deletes can take tens of seconds on the
+                # production volume and must not keep stale failure evidence
+                # visible while certified truth is already online.
+                self._persist_counter()
                 # Plan 02-05 fix-up: Better Stack heartbeat OK pulse.
                 # Reference via the module attribute (not from-import) so tests
                 # can monkeypatch alerts.send_heartbeat_ok. Fail-soft already
