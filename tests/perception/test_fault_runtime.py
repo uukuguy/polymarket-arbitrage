@@ -1776,6 +1776,79 @@ async def test_cleanup_requested_after_claim_clears_owner_before_next_injection(
 
 
 @pytest.mark.asyncio
+async def test_cleanup_truth_sqlite_error_clears_and_freezes_without_terminal(
+    tmp_path: Path,
+) -> None:
+    class CleanupReadErrorAuthority(FaultAuthorityStore):
+        def owner_cleanup_requested(self, fault_id, *, ownership):
+            raise sqlite3.OperationalError("forced-cleanup-read-failure")
+
+    _, authority, runtime = _real_runtime(
+        tmp_path,
+        authority_type=CleanupReadErrorAuthority,
+    )
+    _accept(
+        authority,
+        fault_id="fault-cleanup-read-error",
+        target_key="group-cleanup-read-error",
+        accepted_at_ms=1_100,
+    )
+    await runtime.sync_before_batch()
+    before = authority.validate_history("fault-cleanup-read-error")
+
+    await runtime.sync_before_batch()
+
+    assert runtime.active_fault_id is None
+    assert runtime.degraded is True
+    assert runtime.degraded_reason == "cleanup-truth-unavailable"
+    assert runtime._controller.frozen is True
+    assert runtime.consume(
+        FaultCall(
+            FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH,
+            "group-cleanup-read-error",
+        )
+    ).inject is False
+    assert authority.validate_history("fault-cleanup-read-error") == before
+
+
+@pytest.mark.asyncio
+async def test_cleanup_truth_invalid_history_clears_and_freezes_without_terminal(
+    tmp_path: Path,
+) -> None:
+    path, authority, runtime = _real_runtime(tmp_path)
+    _accept(
+        authority,
+        fault_id="fault-cleanup-history-invalid",
+        target_key="group-cleanup-history-invalid",
+        accepted_at_ms=1_100,
+    )
+    await runtime.sync_before_batch()
+    with sqlite3.connect(path) as con:
+        con.execute("DROP TRIGGER trg_neg_risk_fault_events_no_update")
+        con.execute(
+            "UPDATE neg_risk_fault_events SET event_hash=? "
+            "WHERE fault_id=? AND state='armed'",
+            ("0" * 64, "fault-cleanup-history-invalid"),
+        )
+    before = authority.validate_history("fault-cleanup-history-invalid")
+    assert not before.valid
+
+    await runtime.sync_before_batch()
+
+    assert runtime.active_fault_id is None
+    assert runtime.degraded is True
+    assert runtime.degraded_reason == "cleanup-truth-unavailable"
+    assert runtime._controller.frozen is True
+    assert runtime.consume(
+        FaultCall(
+            FaultCallClass.CLOB_CANDIDATE_BOOK_BATCH,
+            "group-cleanup-history-invalid",
+        )
+    ).inject is False
+    assert authority.validate_history("fault-cleanup-history-invalid") == before
+
+
+@pytest.mark.asyncio
 async def test_frozen_controller_performs_zero_future_authority_claim_work(
     tmp_path: Path,
 ) -> None:

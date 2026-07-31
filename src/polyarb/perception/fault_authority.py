@@ -413,6 +413,8 @@ class FaultAuthorityStore:
             ).fetchone()
             if (
                 row is None
+                or row["status"] != "accepted"
+                or not self._intent_row_valid(con, row)
                 or row["kind"] != "gamma-partial"
                 or row["call_class"] != "gamma-discovery-event-page"
                 or row["target_key"] != "discovery"
@@ -646,12 +648,13 @@ class FaultAuthorityStore:
                 is not FaultEventState.AUTHORIZED
             ):
                 continue
+            terminal_at_ms = max(now_ms, history.events[-1].occurred_at_ms)
             if bool(row["cleanup_requested"]):
                 self._append_event_in_transaction(
                     con,
                     row["fault_id"],
                     FaultEventState.ABANDONED,
-                    occurred_at_ms=now_ms,
+                    occurred_at_ms=terminal_at_ms,
                     evidence={"reason": "cleanup-requested-before-claim"},
                 )
             elif now_ms >= int(row["accepted_at_ms"]) + int(row["ttl_ms"]):
@@ -659,7 +662,7 @@ class FaultAuthorityStore:
                     con,
                     row["fault_id"],
                     FaultEventState.EXPIRED,
-                    occurred_at_ms=now_ms,
+                    occurred_at_ms=terminal_at_ms,
                     evidence={"reason": "intent-expired"},
                 )
 
@@ -1110,10 +1113,10 @@ class FaultAuthorityStore:
                 return False
             self._require_ownership(con, intent_row, ownership)
             history = self._validate_history_in_connection(con, fault_id)
+            if not history.valid or not history.events:
+                raise ValueError("fault-history-invalid")
             requested = bool(
-                history.valid
-                and history.events
-                and any(
+                any(
                     event.action is FaultEventAction.CLEANUP_REQUESTED
                     for event in history.events
                 )

@@ -121,9 +121,9 @@ re-export and read-only final evaluation are mandatory.
 ## Local verification
 
 - `make test-m1-perception`:
-  **2803 passed, 1 skipped, 1 xfailed** from 2,805 collected in 482.46 s.
-- Repository-wide `uv run pytest -q`: exit 0 from 3,690 collected
-  (3,688 passed, 1 skipped, 1 xfailed). The project-level `addopts=-q` plus
+  **2808 passed, 1 skipped, 1 xfailed** from 2,810 collected in 498.05 s.
+- Repository-wide `uv run pytest -q`: exit 0 from 3,695 collected
+  (3,693 passed, 1 skipped, 1 xfailed). The project-level `addopts=-q` plus
   command-line `-q` intentionally suppresses pytest's final count line; the
   collected count was confirmed separately with `pytest --collect-only`.
 - `make qualify-perception-local`: 36 evaluator tests passed and the canonical
@@ -150,6 +150,16 @@ cleanup-before-claim, cleanup-after-claim, expiry followed by a new arm,
 same-fault replay correlation, concurrent distinct arms, all rejection
 classes, accepted-only schema migration, and atomic rollback on an external
 child FK violation.
+
+A follow-up review closed three additional fail-closed gaps. Unknown owner
+cleanup truth now clears local memory and freezes/degrades fault control
+without fabricating a durable terminal. Unclaimed reconciliation never
+backdates a terminal before its verified action tail, with explicit
+cleanup-over-TTL precedence. Gamma partial-coverage source writes require a
+fully valid accepted intent; rejected or status-tampered envelopes cannot
+manufacture business evidence. Tests exercise SQLite read failure, corrupted
+history, both claim and admission clock regression, rejected Gamma source
+writes, and intent-status tampering.
 
 The Task 8 independent review removed the superseded
 `docs/learning/42-three-authority-fault-qualification.md`, leaving

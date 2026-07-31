@@ -688,6 +688,133 @@ def test_partial_coverage_source_is_exact_bound_and_append_only(
         )
 
 
+def test_rejected_gamma_intent_cannot_write_partial_coverage_source(
+    store: FaultAuthorityStore,
+    db_path: Path,
+) -> None:
+    assert store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_100,
+    ).accepted
+    runtime = FaultRuntimeIdentity(
+        component="discovery",
+        release_id="a" * 40,
+        machine_id="machine-1",
+        boot_id=UUID("12345678-1234-4678-9234-567812345678"),
+    )
+    store.register_runtime_start(
+        runtime,
+        supervisor_run_id="coverage-rejected-runtime",
+        attempt=1,
+        started_at_ms=1_101,
+    )
+    rejected = store.accept_intent(
+        request(
+            fault_id="fault-gamma-rejected",
+            kind=FaultKind.GAMMA_PARTIAL,
+            call_class=FaultCallClass.GAMMA_DISCOVERY_EVENT_PAGE,
+            target_key="discovery",
+            parameters={"keep_events": 1},
+            runtime=runtime,
+        ),
+        auth=auth("d"),
+        accepted_at_ms=1_102,
+    )
+    assert not rejected.accepted
+    coverage_id = "coverage-" + canonical_digest(
+        {
+            "kept_count": 1,
+            "next_cursor_digest": "3" * 64,
+            "original_count": 2,
+            "requested_cursor_digest": "2" * 64,
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid-partial-coverage-source"):
+        store.record_partial_coverage_rejection(
+            "fault-gamma-rejected",
+            coverage_id=coverage_id,
+            original_count=2,
+            kept_count=1,
+            requested_cursor_digest="2" * 64,
+            next_cursor_digest="3" * 64,
+            recorded_at_ms=1_200,
+        )
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT count(*) FROM neg_risk_fault_coverage_rejections "
+            "WHERE fault_id='fault-gamma-rejected'"
+        ).fetchone() == (0,)
+        con.execute("DROP TRIGGER trg_neg_risk_fault_intents_no_update")
+        con.execute(
+            "UPDATE neg_risk_fault_intents "
+            "SET status='accepted',rejection_reason=NULL "
+            "WHERE fault_id='fault-gamma-rejected'"
+        )
+
+    with pytest.raises(ValueError, match="invalid-partial-coverage-source"):
+        store.record_partial_coverage_rejection(
+            "fault-gamma-rejected",
+            coverage_id=coverage_id,
+            original_count=2,
+            kept_count=1,
+            requested_cursor_digest="2" * 64,
+            next_cursor_digest="3" * 64,
+            recorded_at_ms=1_201,
+        )
+
+
+def test_cleanup_reconcile_never_backdates_terminal_before_action_tail(
+    store: FaultAuthorityStore,
+) -> None:
+    assert store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_100,
+    ).accepted
+    store.request_cleanup(
+        "fault-1",
+        auth=auth("d"),
+        requested_at_ms=1_300,
+    )
+
+    assert store.claim_pending(RUNTIME, claimed_at_ms=1_200) is None
+
+    history = store.validate_history("fault-1")
+    assert history.valid
+    assert history.events[-1].state is FaultEventState.ABANDONED
+    assert history.events[-1].occurred_at_ms >= 1_300
+
+
+def test_admission_reconcile_never_backdates_terminal_before_action_tail(
+    store: FaultAuthorityStore,
+) -> None:
+    assert store.accept_intent(
+        request(),
+        auth=auth(),
+        accepted_at_ms=1_100,
+    ).accepted
+    store.request_cleanup(
+        "fault-1",
+        auth=auth("d"),
+        requested_at_ms=1_300,
+    )
+
+    next_admission = store.accept_intent(
+        request(fault_id="fault-next"),
+        auth=auth("e"),
+        accepted_at_ms=1_200,
+    )
+
+    assert next_admission.accepted
+    history = store.validate_history("fault-1")
+    assert history.valid
+    assert history.events[-1].state is FaultEventState.ABANDONED
+    assert history.events[-1].occurred_at_ms >= 1_300
+
+
 def rehash_auth_row(con: sqlite3.Connection, row_id: int) -> None:
     con.row_factory = sqlite3.Row
     row = con.execute(

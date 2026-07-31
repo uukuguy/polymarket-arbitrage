@@ -260,6 +260,19 @@ transaction before evaluating one-active. Read-side projection and write-side
 admission therefore use the same TTL boundary; an old virtual expiry cannot
 block future arms forever.
 
+If SQLite is unavailable or the owner sees an invalid fault history, cleanup
+truth is unknown—not false. At that safe boundary the producer clears its
+local active fault, freezes fault control, and exposes
+`degraded_reason=cleanup-truth-unavailable`. It does not append a terminal
+event, because an untrusted ledger cannot prove cleanup. Preserve and audit the
+database before any later arm.
+
+Reconciled event time never precedes the verified event/action tail. If a
+boundary clock is behind a persisted cleanup request, the terminal uses the
+tail timestamp. An explicit cleanup action takes precedence when both cleanup
+and TTL predicates are true; without an action, elapsed TTL produces
+`EXPIRED`.
+
 Every syntactically valid arm request has an immutable intent envelope with
 `status=accepted|rejected`. A rejected envelope carries an exact
 `rejection_reason`, its authorization reservation/attempt IDs and request
@@ -269,6 +282,12 @@ create a second envelope: it appends a correlated rejected authentication
 attempt to the existing immutable envelope. Distinct concurrent arms serialize
 at the authority transaction; one may be accepted and the other is retained as
 a non-claimable rejected envelope.
+
+Gamma partial-coverage rows require a hash/auth/runtime-valid
+`status=accepted` intent. A rejected envelope—or a row tampered from rejected
+to accepted without a matching intent hash—cannot create business evidence.
+Other recovery paths validate already-committed component writer rows and also
+require a valid owned lifecycle at `CLEANED`.
 
 `candidate-exit`, `discovery-exit`, `reconciliation-stall`, and the remaining
 host/store/restart/deploy targets are plan-only and reject execution fail-closed.

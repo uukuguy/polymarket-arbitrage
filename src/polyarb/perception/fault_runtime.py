@@ -148,6 +148,7 @@ class FaultRuntime:
             monotonic=self._monotonic,
         )
         self.degraded = False
+        self.degraded_reason: str | None = None
         self._evidence_frozen = False
         self._injected_fault_id: str | None = None
         self._pending_recovery: _PendingRecovery | None = None
@@ -216,7 +217,20 @@ class FaultRuntime:
                         f"component={self.identity.component} "
                         f"kind={type(error).__name__}"
                     )
-                    cleanup_requested = False
+                    try:
+                        self._controller.clear(
+                            active.intent.fault_id,
+                            receipt_writer=lambda _fault_id: (_ for _ in ()).throw(
+                                RuntimeError("cleanup-truth-unavailable")
+                            ),
+                        )
+                    except BaseException:
+                        pass
+                    self._freeze_evidence(
+                        error,
+                        reason="cleanup-truth-unavailable",
+                    )
+                    return
                 if cleanup_requested:
                     await self.cleanup(active.intent.fault_id, "cleanup-requested")
                     if self._controller.frozen:
@@ -701,9 +715,15 @@ class FaultRuntime:
         self._freeze_evidence(RuntimeError("fault-evidence-unavailable"))
         return replace(result, degraded=True)
 
-    def _freeze_evidence(self, error: BaseException) -> None:
+    def _freeze_evidence(
+        self,
+        error: BaseException,
+        *,
+        reason: str = "fault-evidence-unavailable",
+    ) -> None:
         self._evidence_frozen = True
         self.degraded = True
+        self.degraded_reason = reason
         self._injected_fault_id = None
         self._last_injection = None
         self._pending_recovery = None
