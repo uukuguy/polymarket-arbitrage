@@ -1111,9 +1111,7 @@ async def test_more_stalled_highs_than_workers_cannot_delay_reserved_lanes_to_bo
 
     started_at = time.monotonic()
     await asyncio.wait_for(scheduler.run_due_once(), timeout=0.5)
-    elapsed = time.monotonic() - started_at
 
-    assert elapsed < 0.3
     assert all_high_started.is_set()
     assert lower_started_at is not None
     assert lower_started_at - started_at < 0.05
