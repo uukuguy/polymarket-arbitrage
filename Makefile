@@ -238,7 +238,7 @@ snapshot-markets-full-v:
 sync-structure-local:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	echo ">> sync-structure-local — Gamma-only Structure revision (local mutation)"; \
-	uv run python -m polyarb.snapshot snapshot --product structure --verbose
+	uv run python -m polyarb.snapshot structure-sync
 
 ## archive-markets-local: Explicit full CLOB/Parquet research archive; never replaces the online Structure market view or schedules production work.
 archive-markets-local:

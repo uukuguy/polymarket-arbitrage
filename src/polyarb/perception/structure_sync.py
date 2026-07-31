@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
-from polyarb.clients.gamma_client import EventPage, MarketPage, PaginationResult
+from polyarb.clients.gamma_client import EventPage, GammaClient, MarketPage, PaginationResult
 from polyarb.config import Settings
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -15,6 +17,12 @@ class StructureGamma(Protocol):
     async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage: ...
 
     async def fetch_active_market_page(self, cursor: str | None, limit: int) -> MarketPage: ...
+
+
+class ReconciliationGamma(Protocol):
+    async def fetch_market_states(self, market_ids: list[str]): ...
+
+    async def fetch_market_parent_states(self, market_groups: dict[str, str]): ...
 
 
 @dataclass(frozen=True)
@@ -37,10 +45,12 @@ class StructureSyncWorker:
     async def run_batch(self) -> StructureSyncBatch:
         window = await asyncio.to_thread(
             self._store.begin_or_resume_structure_sync,
-            started_at_ms=0,
+            started_at_ms=int(time.time() * 1_000),
         )
         status = str(window["status"])
         if status == "open":
+            started = time.monotonic()
+            _emit_stage("gamma-events", "start", 0)
             page = await self._gamma.fetch_active_event_page(
                 window["event_cursor"], self._page_limit
             )
@@ -52,8 +62,15 @@ class StructureSyncWorker:
                 next_cursor=page.next_cursor, completed=page.completed,
                 events=list(page.events), finished_at_ms=page.finished_at_ms,
             )
+            _emit_stage(
+                "gamma-events",
+                "complete",
+                max(0, int((time.monotonic() - started) * 1_000)),
+            )
             return StructureSyncBatch(str(window["id"]), "events", page.completed)
         if status == "events_complete":
+            started = time.monotonic()
+            _emit_stage("gamma-markets", "start", 0)
             page = await self._gamma.fetch_active_market_page(
                 window["market_cursor"], self._page_limit
             )
@@ -65,16 +82,36 @@ class StructureSyncWorker:
                 next_cursor=page.next_cursor, completed=page.completed,
                 markets=list(page.markets), finished_at_ms=page.finished_at_ms,
             )
+            _emit_stage(
+                "gamma-markets",
+                "complete",
+                max(0, int((time.monotonic() - started) * 1_000)),
+            )
             return StructureSyncBatch(str(window["id"]), "markets", page.completed)
         return StructureSyncBatch(str(window["id"]), "complete", True)
+
+
+def _emit_stage(stage: str, state: str, elapsed_ms: int) -> None:
+    print(
+        f"snapshot-stage stage={stage} state={state} elapsed_ms={elapsed_ms}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 class StagedGammaSource:
     """Present one complete durable window through the existing Gamma interface."""
 
-    def __init__(self, events: list[dict], markets: list[dict]) -> None:
+    def __init__(
+        self,
+        events: list[dict],
+        markets: list[dict],
+        *,
+        point_client: ReconciliationGamma | None = None,
+    ) -> None:
         self._events = events
         self._markets = markets
+        self._point_client = point_client
 
     async def __aenter__(self) -> StagedGammaSource:
         return self
@@ -93,10 +130,14 @@ class StagedGammaSource:
         coverage.result = PaginationResult(len(self._markets), 1, True, None)
 
     async def fetch_market_states(self, market_ids: list[str]):
-        raise RuntimeError(f"staged-structure-member-missing:{len(market_ids)}")
+        if self._point_client is None:
+            raise RuntimeError(f"staged-structure-member-missing:{len(market_ids)}")
+        return await self._point_client.fetch_market_states(market_ids)
 
     async def fetch_market_parent_states(self, market_groups: dict[str, str]):
-        raise RuntimeError(f"staged-structure-parent-missing:{len(market_groups)}")
+        if self._point_client is None:
+            raise RuntimeError(f"staged-structure-parent-missing:{len(market_groups)}")
+        return await self._point_client.fetch_market_parent_states(market_groups)
 
 
 async def finalize_structure_window(
@@ -104,6 +145,7 @@ async def finalize_structure_window(
     window_id: str,
     *,
     now_ms: int,
+    point_client: ReconciliationGamma | None = None,
 ):
     """Validate and atomically publish a completed window as Structure truth."""
     from polyarb.snapshot.orchestrator import run_snapshot
@@ -119,7 +161,7 @@ async def finalize_structure_window(
         mode="full",
         product="structure",
         now_ms=now_ms,
-        gamma_client=StagedGammaSource(events, markets),
+        gamma_client=StagedGammaSource(events, markets, point_client=point_client),
     )
     if result.is_valid:
         await asyncio.to_thread(
@@ -129,3 +171,28 @@ async def finalize_structure_window(
             published_at_ms=now_ms,
         )
     return result
+
+
+async def run_structure_sync_until_published(settings: Settings):
+    """Continuously checkpoint bounded pages until one certified revision publishes."""
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    latest = store.get_latest_structure_sync()
+    async with GammaClient(settings) as gamma:
+        if latest is not None and latest["status"] == "complete":
+            return await finalize_structure_window(
+                settings,
+                str(latest["id"]),
+                now_ms=int(time.time() * 1_000),
+                point_client=gamma,
+            )
+        worker = StructureSyncWorker(gamma=gamma, store=store)
+        while True:
+            batch = await worker.run_batch()
+            if batch.stage == "markets" and batch.completed:
+                return await finalize_structure_window(
+                    settings,
+                    batch.window_id,
+                    now_ms=int(time.time() * 1_000),
+                    point_client=gamma,
+                )

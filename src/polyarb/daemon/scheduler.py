@@ -70,6 +70,7 @@ class SnapshotSubprocessError(RuntimeError):
 
 
 SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
+RECOVERY_RETRY_DELAY_S = 5.0
 
 _SNAPSHOT_STAGE_MARKER_RE = re.compile(
     rb"^snapshot-stage stage="
@@ -110,9 +111,7 @@ async def run_snapshot_in_subprocess(
         sys.executable,
         "-m",
         "polyarb.snapshot",
-        "snapshot",
-        "--product",
-        "structure",
+        "structure-sync",
         "--json",
         "--low-priority",
         stdout=asyncio.subprocess.PIPE,
@@ -314,6 +313,14 @@ class SnapshotScheduler:
                 "legacy_structure_reconciliation_enabled",
                 False,
             )
+        )
+
+    @property
+    def structure_sync_enabled(self) -> bool:
+        """Enable resumable Structure; honor the old flag during migration."""
+        return bool(
+            getattr(self._settings, "structure_sync_enabled", False)
+            or self.legacy_reconciliation_enabled
         )
 
     def _restore_effective_schedule(self) -> None:
@@ -694,7 +701,11 @@ class SnapshotScheduler:
                 await self._tick()
                 if await self._wait_for_next_tick(
                     stop_event,
-                    self._effective_cadence_s,
+                    (
+                        RECOVERY_RETRY_DELAY_S
+                        if self._failure_counter > 0
+                        else self._effective_cadence_s
+                    ),
                 ):
                     break
         except asyncio.CancelledError:

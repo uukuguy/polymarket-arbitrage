@@ -484,12 +484,12 @@ async def _run_http_recovery_probe(
             pass
 
 
-def _start_legacy_structure_scheduler(
+def _start_structure_scheduler(
     scheduler: SnapshotScheduler,
     stop_event: asyncio.Event,
 ) -> asyncio.Task[None] | None:
-    if not scheduler.legacy_reconciliation_enabled:
-        logger.info("legacy Structure reconciliation disabled")
+    if not scheduler.structure_sync_enabled:
+        logger.info("resumable Structure synchronization disabled")
         return None
     return asyncio.create_task(scheduler.run(stop_event))
 
@@ -581,7 +581,7 @@ async def main() -> int:
     logger.info(f"daemon running: http server on :{settings.http_port}, starting scheduler")
 
     scheduler_task = (
-        None if isolated_producers else _start_legacy_structure_scheduler(scheduler, stop_event)
+        None if isolated_producers else _start_structure_scheduler(scheduler, stop_event)
     )
     quote_worker_task = _start_quote_worker(quote_worker, stop_event)
     focused_watcher_task = _start_opportunity_watcher(

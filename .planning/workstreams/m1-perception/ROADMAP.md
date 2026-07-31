@@ -376,6 +376,24 @@ Plans:
 - [x] 05.5-01-PLAN.md — in-process 120-second quote worker, health chain-truth,
   exact deployment, three-run production proof, and operator documentation
 
+### Phase 05.6: Self-Healing Structure Production (INSERTED 2026-07-31)
+
+**Goal:** Replace the monolithic, terminal-pause Structure producer with a
+durable page-window producer that resumes after timeout/restart, remains
+health-visible while recovering, and republishes only complete certified truth.
+**Status:** 🚧 IN PROGRESS — local recovery implementation verified; exact
+production deployment and continuity evidence remain open.
+**Depends on:** Phase 05.5 + H-011 production stale-Structure RCA
+**Plans:** 2 plans
+
+Plans:
+- [x] 05.6-01-PLAN.md — durable event/market page checkpoints, atomic
+  certification, active scheduler recovery, health chain-truth, CLI/Makefile,
+  tests and teaching.
+- [ ] 05.6-02-PLAN.md — exact deploy, fresh Structure/Quote/opportunity
+  convergence, automatic timeout/restart recovery proof, and sustained
+  production observation.
+
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 
 **Goal:** [To be planned]

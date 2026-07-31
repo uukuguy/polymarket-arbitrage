@@ -33,7 +33,10 @@ import pytest
 os.environ["POLYARB_ALLOW_EXTERNAL_PATHS"] = "1"
 
 from polyarb.config import Settings  # noqa: E402
-from polyarb.perception.structure_sync import finalize_structure_window  # noqa: E402
+from polyarb.perception.structure_sync import (  # noqa: E402
+    StagedGammaSource,
+    finalize_structure_window,
+)
 from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore  # noqa: E402
 from polyarb.snapshot.orchestrator import (  # noqa: E402
     _include_in_snapshot,
@@ -303,6 +306,33 @@ async def test_complete_structure_window_finalizes_through_certified_publication
     assert result.is_valid is True
     assert result.market_count == len(gamma_data)
     assert store.get_latest_structure_sync()["status"] == "published"
+
+
+@pytest.mark.asyncio
+async def test_staged_structure_delegates_bounded_reconciliation_lookups() -> None:
+    point_client = AsyncMock()
+    point_client.fetch_market_states.return_value = {
+        "market-1": {"active": True, "closed": False}
+    }
+    point_client.fetch_market_parent_states.return_value = {
+        "market-1": {
+            "event_id": "event-1",
+            "active": True,
+            "closed": False,
+            "archived": False,
+        }
+    }
+    source = StagedGammaSource([], [], point_client=point_client)
+
+    market_states = await source.fetch_market_states(["market-1"])
+    parent_states = await source.fetch_market_parent_states({"market-1": "group-1"})
+
+    assert market_states["market-1"]["active"] is True
+    assert parent_states["market-1"]["event_id"] == "event-1"
+    point_client.fetch_market_states.assert_awaited_once_with(["market-1"])
+    point_client.fetch_market_parent_states.assert_awaited_once_with(
+        {"market-1": "group-1"}
+    )
 
 
 @pytest.mark.asyncio

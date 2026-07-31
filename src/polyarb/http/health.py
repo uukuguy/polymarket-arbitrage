@@ -858,6 +858,42 @@ def _build_health_checks(
         }
     ]
 
+    sync_window = store.get_latest_structure_sync()
+    if sync_window is None:
+        sync_value = "idle"
+        sync_status = "pass"
+        sync_output = None
+    else:
+        sync_value = str(sync_window["status"])
+        if sync_value == "published":
+            sync_status = "pass"
+        elif sync_value == "failed":
+            sync_status = "fail"
+        else:
+            sync_status = "warn"
+        stage = (
+            "events"
+            if sync_value == "open"
+            else "markets"
+            if sync_value == "events_complete"
+            else "publish"
+        )
+        sync_output = (
+            f"stage={stage} event_pages={int(sync_window['event_pages'])} "
+            f"market_pages={int(sync_window['market_pages'])}"
+        )
+    overall = _severity(overall, sync_status)
+    checks["snapshot:structure_sync"] = [
+        {
+            "componentId": "snapshot-scheduler",
+            "componentType": "component",
+            "observedValue": sync_value,
+            "status": sync_status,
+            **({"output": sync_output} if sync_output is not None else {}),
+            "time": _utc_now_iso(),
+        }
+    ]
+
     # ── Check 3: Supabase mirror age (only if mirror enabled) ────────────
     # supabase:mirror_age_seconds — seconds since last successful Supabase push.
     # Uses supabase_mirror_at_ms column added in Plan 03.

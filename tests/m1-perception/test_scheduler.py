@@ -54,6 +54,18 @@ def test_scheduler_interval_reads_env_var(monkeypatch: pytest.MonkeyPatch) -> No
     assert s.scheduler_interval_s == 60
 
 
+def test_structure_sync_enablement_reads_production_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.config import Settings
+
+    monkeypatch.setenv("POLYARB_STRUCTURE_SYNC_ENABLED", "true")
+    settings = Settings(_env_file=None)
+    scheduler = SnapshotScheduler(settings=settings, sqlite_store=MagicMock())
+
+    assert scheduler.structure_sync_enabled is True
+
+
 # ---------------------------------------------------------------------------
 # Helper result types
 # ---------------------------------------------------------------------------
@@ -332,9 +344,7 @@ async def test_snapshot_pipeline_runs_in_isolated_subprocess(
     assert args[1:] == (
         "-m",
         "polyarb.snapshot",
-        "snapshot",
-        "--product",
-        "structure",
+        "structure-sync",
         "--json",
         "--low-priority",
     )

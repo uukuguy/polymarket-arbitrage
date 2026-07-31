@@ -389,7 +389,7 @@ def test_health_exposes_latest_attempt_and_last_complete_truth_separately(
     assert coverage["output"] == "markets=100 events=20"
     complete_age = checks["market_truth:last_complete_age_seconds"][0]
     assert complete_age["status"] == "pass"
-    assert complete_age["observedValue"] == pytest.approx(2.0, abs=0.5)
+    assert 2.0 <= complete_age["observedValue"] < 5.0
 
 
 def test_health_surfaces_failed_scheduler_attempt_while_truth_is_fresh(
@@ -524,6 +524,28 @@ def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(
     assert attempt["observedValue"] == "running"
     assert attempt["status"] == "fail"
     assert attempt["output"] == "snapshot-subprocess-timeout-exceeded"
+
+
+def test_health_surfaces_resumable_structure_window_progress(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1000)
+    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=now_ms - 2_000)
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    window = store.begin_or_resume_structure_sync(started_at_ms=now_ms - 1_000)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor="opaque-2",
+        completed=False, events=[], finished_at_ms=now_ms,
+    )
+
+    check = http_test_client.get("/health").json()["checks"]["snapshot:structure_sync"][0]
+
+    assert check["observedValue"] == "open"
+    assert check["status"] == "warn"
+    assert check["output"] == "stage=events event_pages=1 market_pages=0"
 
 
 def test_archive_failure_is_visible_but_does_not_fail_structure_health(

@@ -227,6 +227,27 @@ async def test_scheduler_waits_with_effective_cadence(
     assert scheduler._wait_for_next_tick.await_args_list[1].args[1] == 348
 
 
+@pytest.mark.asyncio
+async def test_failed_structure_step_retries_without_normal_cadence_delay(
+    daemon_settings_for_test: Any,
+) -> None:
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(daemon_settings_for_test, store)
+
+    async def failed_tick() -> None:
+        scheduler._failure_counter = 1
+
+    scheduler._tick = failed_tick  # type: ignore[method-assign]
+    scheduler._wait_for_next_tick = AsyncMock(  # type: ignore[method-assign]
+        side_effect=(False, True)
+    )
+
+    await scheduler.run(asyncio.Event())
+
+    assert scheduler._wait_for_next_tick.await_args_list[1].args[1] == 5
+
+
 def test_scheduler_restart_does_not_repeat_timeout_backoff(
     daemon_settings_for_test: Any,
 ) -> None:

@@ -81,8 +81,29 @@ async def test_structure_worker_advances_one_event_then_one_market_page(tmp_path
     worker = StructureSyncWorker(gamma=Gamma(), store=store)
 
     assert (await worker.run_batch()).stage == "events"
+    assert store.get_latest_structure_sync()["started_at_ms"] > 0
     assert (await worker.run_batch()).stage == "markets"
     assert store.get_latest_structure_sync()["status"] == "complete"
+
+
+async def test_structure_worker_emits_scheduler_stage_before_remote_page_fetch(
+    tmp_path, capsys
+) -> None:
+    class Gamma:
+        async def fetch_active_event_page(self, cursor, limit):
+            return EventPage((), cursor, None, True, 10, 20)
+
+        async def fetch_active_market_page(self, cursor, limit):
+            raise AssertionError("market page is not part of this batch")
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+
+    await StructureSyncWorker(gamma=Gamma(), store=store).run_batch()
+
+    stderr = capsys.readouterr().err
+    assert "snapshot-stage stage=gamma-events state=start elapsed_ms=0" in stderr
+    assert "snapshot-stage stage=gamma-events state=complete elapsed_ms=" in stderr
 
 
 def test_incomplete_structure_window_cannot_be_read_for_publication(tmp_path) -> None:

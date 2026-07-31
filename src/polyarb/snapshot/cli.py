@@ -21,9 +21,42 @@ import typer
 from loguru import logger
 
 from polyarb.config import load_settings
+from polyarb.perception.structure_sync import run_structure_sync_until_published
 from polyarb.snapshot.orchestrator import run_snapshot
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
+
+
+@app.command(name="structure-sync")
+def structure_sync(
+    json_output: bool = typer.Option(False, "--json"),
+    low_priority: bool = typer.Option(False, "--low-priority", hidden=True),
+) -> None:
+    """Resume bounded Gamma pages and publish one certified Structure revision."""
+    if low_priority:
+        os.nice(10)
+    settings = load_settings()
+    result = asyncio.run(run_structure_sync_until_published(settings))
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "is_valid": result.is_valid,
+                    "issue_count": result.issue_count,
+                    "market_count": result.market_count,
+                    "mode": result.mode,
+                    "snapshot_id": result.snapshot_id,
+                    "status": result.status,
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        print(
+            f"{result.status.upper()} | {result.market_count} markets | "
+            f"snapshot_id={result.snapshot_id}"
+        )
+    raise typer.Exit(code=0 if result.is_valid else 1)
 
 
 @app.command()

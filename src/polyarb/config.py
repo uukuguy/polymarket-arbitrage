@@ -154,6 +154,7 @@ class Settings(BaseSettings):
         default=15.0, gt=0, allow_inf_nan=False
     )
     legacy_structure_reconciliation_enabled: bool = False
+    structure_sync_enabled: bool = False
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 
