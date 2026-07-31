@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Release 75 continuity attempt rejected after three post-T0 subscription_control_failed events; duplicate depth replay is not idempotent
-last_updated: "2026-07-26T10:45:31Z"
+stopped_at: Exact L1/L2 releases are healthy; awaiting approval for bounded Structure-to-Quote double-buffer availability before final closure
+last_updated: "2026-07-31T13:46:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -17,6 +17,20 @@ progress:
 # M1 Perception — Current State
 
 ## Current Position
+
+Phase: 05.6 (self-healing Structure production) — Plan 02 in progress
+
+- **Exact L1:** release `f662b2cc9aff2e4702a365c8385c746639cc7338`,
+  machine `6830939c0070d8`, digest `sha256:1bb7117f…`, Quote trigger 60 seconds.
+- **Exact L2:** release `a9a282586c3f1e1a452aa96dee99fc9af1f47be0`,
+  machine `85e647c4eed598`, digest `sha256:60dd2631…`; strict 5/5 and
+  10/10/10 convergence passes.
+- **Current production:** L1/L2 strict health HTTP 200, snapshot 781 complete,
+  opportunity runs advancing, resident Polywatch alert/recovery chain proven.
+- **Open gate:** Structure publication creates a measured 93-second
+  opportunity 503 window while the matching Quote is produced. Recommended
+  bounded double-buffer design awaits explicit user approval; do not mark
+  Plan 05.6-02 complete before that policy is implemented and verified.
 
 Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in progress
 

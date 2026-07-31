@@ -55,6 +55,7 @@
 | 41 | [故障资格矩阵](41-fault-qualification-matrix.md) | plan-only / fault-specific 授权 / durable incident / recovery writer / cleanup 串行门 |
 | 42 | [生产故障控制边界](42-生产故障控制边界.md) | 四角色 SOURCE/VERDICT 能力矩阵 / fail-open control 与 fail-closed evidence / immutable source facts 与独立 stale 门 / group ID 与 outbox ID / cleanup→recovery→VERIFIED |
 | 43 | [Structure 分页恢复](43-Structure分页恢复.md) | opaque cursor 页面事务 / 超时续跑 / RECOVERING 不停产 / complete-window 原子发布 / point reconciliation |
+| 44 | [M1 生产恢复边界](44-M1生产恢复边界.md) | Quote 成功与 housekeeping 分界 / PostgreSQL→SQLite 类型适配 / L2 depth 继承 / 60-240-300 时钟 / 双缓冲政策门 |
 
 ## Phase 02.1 教学增量（2026-05）
 

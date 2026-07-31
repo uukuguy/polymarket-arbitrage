@@ -381,8 +381,8 @@ Plans:
 **Goal:** Replace the monolithic, terminal-pause Structure producer with a
 durable page-window producer that resumes after timeout/restart, remains
 health-visible while recovering, and republishes only complete certified truth.
-**Status:** 🚧 IN PROGRESS — local recovery implementation verified; exact
-production deployment and continuity evidence remain open.
+**Status:** 🚧 IN PROGRESS — exact L1/L2 production releases are strict-health
+passing; bounded Structure→Quote refresh availability is the remaining gate.
 **Depends on:** Phase 05.5 + H-011 production stale-Structure RCA
 **Plans:** 2 plans
 
@@ -391,8 +391,9 @@ Plans:
   certification, active scheduler recovery, health chain-truth, CLI/Makefile,
   tests and teaching.
 - [ ] 05.6-02-PLAN.md — exact deploy, fresh Structure/Quote/opportunity
-  convergence, automatic timeout/restart recovery proof, and sustained
-  production observation.
+  convergence, automatic timeout/restart recovery proof, sustained production
+  observation, and bounded Structure→Quote refresh availability. Exact L1/L2
+  deployment and health evidence pass; double-buffer policy awaits approval.
 
 ### Phase 6: 04.1 d01-restart-robustness-chaos-redesign
 

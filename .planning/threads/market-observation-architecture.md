@@ -1450,3 +1450,29 @@ success is not user receipt/read evidence.
   single-worker loop; health treats the tiny publish-visible/task-wake race as
   the same bounded refresh warning, while the opportunity endpoint remains
   fail-closed until the matching Quote commits.
+
+### §2.19 Runtime type boundaries and publication handoff are production contracts (2026-07-31)
+
+- PostgreSQL `NUMERIC` and `TIMESTAMPTZ` arrive as `Decimal` and timezone-aware
+  `datetime`. A temporary SQLite projection that only normalizes numbers or
+  ISO strings can silently turn valid rows into `NULL` timestamps and make a
+  healthy L3 universe look underfilled. Adapter tests must assert every field
+  used by the recipe, not merely that insertion succeeds.
+- A price-only WebSocket frame must not erase the last real book depth. The
+  latest-row projection is authoritative for promotion, so coalescing needs
+  per-asset depth memory and price updates must inherit that evidence until a
+  new book replaces it.
+- A successful public feed and its housekeeping have different critical
+  paths. Publish certified immutable truth and mark runtime success before
+  retention, observer reconciliation, or notification work; those paths retain
+  their own bounded failure counters and alerts.
+- Production calibration kept the hard Quote SLA at 300 seconds and shortened
+  the attempt trigger from 120 to 60 seconds. Over 32 live samples strict L1
+  health stayed HTTP 200 while steady runs advanced, showing that recovery
+  should improve cadence rather than rename old data as fresh.
+- A complete new Structure creates a second atomicity question: whether the
+  previous complete Quote remains readable during recomputation. The measured
+  fail-closed handoff was 93 seconds. The proposed contract is a one-version
+  double buffer bounded by the unchanged 300-second Quote SLA; partial or
+  mixed revisions remain forbidden. This is an explicit product policy gate,
+  not an implementation detail to change silently.

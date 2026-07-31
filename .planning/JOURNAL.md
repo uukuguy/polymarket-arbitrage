@@ -5826,3 +5826,35 @@ Resume directly on local `main`; no L3 continuity-repair worktree remains.
 Start the next session with `/gsd-resume-work --ws m1-perception`, then run
 `make planning-status`. Do not run production qualification or any fault
 mutation without the separately authorized release/evidence scope.
+
+## SESSION 123 — 2026-07-31 (M1 production recovery, final availability gate open)
+
+- [PRODUCTION RECOVERED] Exact L1 release `f662b2cc9aff2e4702a365c8385c746639cc7338`
+  and exact L2 release `a9a282586c3f1e1a452aa96dee99fc9af1f47be0`
+  both return strict-health HTTP 200. L2 is converged at 5/5 markets and
+  10/10 desired/committed/evidenced tokens; L1 snapshot 781 is complete and
+  the real opportunity command returned 14 verified opportunities.
+- [ROOT CAUSES CLOSED] Quote success now precedes bounded retention; the
+  production Quote trigger is 60 seconds without changing the 300-second hard
+  SLA. L2 uses bounded runtime-database reads, coalesced mirror writes,
+  depth-preserving price updates, `Decimal`/`datetime` adapters, and a real
+  candidate startup gate.
+- [CONTINUITY EVIDENCE] Thirty-two L1 samples remained HTTP 200 across several
+  Quote runs. Two independent L2 evidence samples passed. Resident Polywatch
+  detected a real deployment interruption, sent an alert, then sent one
+  recovery and cleared its incident state.
+- [VERIFIED] Final repository pytest passed with one expected xfail and one
+  skip. The one discovered wall-clock test flake was reproduced, corrected to
+  retain its actual 50ms lane invariant, and passed 20/20 repeated runs.
+- [OPEN PRODUCT GATE] A new Structure invalidated the prior opportunity feed
+  for a measured 93 seconds until matching Quote certification. Recommended
+  design A is a one-version atomic double buffer bounded by the unchanged
+  300-second Quote SLA. The mandatory brainstorming approval has been requested;
+  no implementation or completion claim is made before approval.
+
+### [NEXT — CURRENT]
+
+After the user approves design A, write and commit the concise double-buffer
+spec, self-review it, obtain the required spec review confirmation, then run
+the writing-plans/TDD implementation path. First repository command:
+`make planning-status`.
