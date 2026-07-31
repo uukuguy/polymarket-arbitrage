@@ -1,18 +1,17 @@
-"""SnapshotScheduler — 5-failure-pause state machine.
+"""SnapshotScheduler — bounded retry and self-recovery state machine.
 
 Phase 02 Plan 02 — D-13 / T-02-04.
 Phase 03.1-04 — D-02: threshold raised 3 → 5 to give tenacity DNS retry (D-01 A)
-room to absorb transient EAI_NODATA without prematurely flipping to PAUSED.
+room to absorb transient EAI_NODATA without prematurely entering recovery.
 At ~37s snapshot cadence, 5 consecutive failures = ~3min observation window;
-healthz-watcher (15-min cron) will auto-unpause before manual intervention
-is required.
+the producer enters RECOVERING rather than permanently disabling itself.
 
 State machine:
   RUNNING → tick OK/DEGRADED → reset counter, stay RUNNING
   RUNNING → tick FAILED/exception → counter += 1
-  RUNNING + counter >= FAILURE_THRESHOLD → transition to PAUSED
-  PAUSED → tick → skip (no run_snapshot call)
-  PAUSED → manual unpause (via /scan resume or SSH) → RUNNING, counter = 0
+  RUNNING + counter >= FAILURE_THRESHOLD → transition to RECOVERING
+  RECOVERING → bounded tick → retain retry evidence and continue
+  RECOVERING + successful certified snapshot → RUNNING, counter = 0
 
 Design decisions:
 - DEGRADED is NOT a failure (D-12 amendment): 3x DEGRADED does NOT pause.
@@ -46,9 +45,12 @@ from polyarb.validator.category import SnapshotStatus
 
 
 class SchedulerState(StrEnum):
-    """Scheduler state: RUNNING (normal) or PAUSED (5x consecutive failures)."""
+    """Producer lifecycle; RECOVERING remains active but is health-visible."""
 
     RUNNING = "RUNNING"
+    RECOVERING = "RECOVERING"
+    # Kept only to read historical state written before H-011.  New code must
+    # migrate it to RECOVERING rather than preserve a terminal producer stop.
     PAUSED = "PAUSED"
 
 
@@ -267,7 +269,7 @@ async def run_snapshot_in_subprocess(
 
 
 class SnapshotScheduler:
-    """Manages snapshot scheduling with 5-failure pause protection.
+    """Manages snapshot scheduling with 5-failure self-recovery protection.
 
     Usage:
         scheduler = SnapshotScheduler(settings=settings, sqlite_store=store)
@@ -395,6 +397,11 @@ class SnapshotScheduler:
                     if state_str in SchedulerState.__members__
                     else SchedulerState.RUNNING
                 )
+                if self.state == SchedulerState.PAUSED:
+                    # A persisted pre-H-011 pause must not leave production
+                    # unable to make a recovery attempt after a restart.
+                    self.state = SchedulerState.RECOVERING
+                    self._persist_counter()
                 logger.debug(
                     f"scheduler state restored: state={self.state} "
                     f"failure_counter={self._failure_counter}"
@@ -420,8 +427,8 @@ class SnapshotScheduler:
         """
         return await run_snapshot_in_subprocess(timeout_s=self._effective_timeout_s)
 
-    async def _on_paused(self) -> None:
-        """Alert hook called when scheduler transitions to PAUSED state.
+    async def _on_recovering(self) -> None:
+        """Alert once when repeated failures require active recovery.
 
         Plan 02: stub (logs only).
         Plan 05: wires to alerts.send_paused_alert (Sentry + Better Stack +
@@ -430,9 +437,8 @@ class SnapshotScheduler:
             monkeypatch the function on the module.
         """
         logger.error(
-            "SCHEDULER_PAUSED: consecutive failure threshold reached "
-            f"(counter={self._failure_counter}). Manual restart required. "
-            "Run /scan or SSH to unpause."
+            "SCHEDULER_RECOVERING: consecutive failure threshold reached "
+            f"(counter={self._failure_counter}). Bounded retries remain active."
         )
         try:
             from polyarb.daemon import alerts as _alerts
@@ -443,8 +449,8 @@ class SnapshotScheduler:
             )
         except Exception as e:  # noqa: BLE001
             # Alerts are fail-soft: if every channel is unreachable, the
-            # daemon should still pause cleanly — losing the notification
-            # is bad, losing the pause-state is worse.
+            # daemon should still retain recovery state — losing the notification
+            # is bad, losing the recovery path is worse.
             logger.warning(f"send_paused_alert failed: {e!r}")
 
     async def _finish_attempt(
@@ -478,16 +484,17 @@ class SnapshotScheduler:
     async def _tick(self) -> None:
         """Execute one scheduler tick.
 
-        If PAUSED: skip (no-op).
-        If RUNNING: run snapshot, update counter, check threshold.
+        If RECOVERING: run the same bounded producer step, update evidence, and
+        return to RUNNING only after a certified successful result.
 
         F-04 (Plan 02-08): cancellation propagates. asyncio.CancelledError
         is NOT caught by the generic Exception handler — we re-raise so
         run() can unwind. Wave 5 chaos test gates on this.
         """
         if self.state == SchedulerState.PAUSED:
-            logger.info("scheduler is PAUSED, skipping tick")
-            return
+            # Defensive compatibility for an in-memory legacy caller.  The
+            # durable restore path already migrates this value.
+            self.state = SchedulerState.RECOVERING
 
         attempt_id = await asyncio.to_thread(
             self._sqlite_store.begin_snapshot_attempt,
@@ -518,6 +525,9 @@ class SnapshotScheduler:
                 )
                 # DEGRADED is NOT a failure (D-12 amendment)
                 self._failure_counter = 0
+                if self.state == SchedulerState.RECOVERING:
+                    logger.info("structure recovery confirmed by certified snapshot")
+                self.state = SchedulerState.RUNNING
                 logger.info(
                     f"snapshot tick success: status={result_status} failure_counter reset to 0"
                 )
@@ -588,15 +598,19 @@ class SnapshotScheduler:
                 f"failure_counter={self._failure_counter}/{self.FAILURE_THRESHOLD}"
             )
 
-        # Persist counter before pause check
+        # Persist counter before recovery-state check
         self._persist_counter()
         self._restore_effective_schedule()
 
-        # Transition to PAUSED if threshold reached
-        if self._failure_counter >= self.FAILURE_THRESHOLD:
-            self.state = SchedulerState.PAUSED
-            self._persist_counter()  # persist PAUSED state
-            await self._on_paused()
+        # Transition once; later failed recovery ticks keep trying and do not
+        # repeatedly emit the first-incident alert.
+        if (
+            self._failure_counter >= self.FAILURE_THRESHOLD
+            and self.state != SchedulerState.RECOVERING
+        ):
+            self.state = SchedulerState.RECOVERING
+            self._persist_counter()
+            await self._on_recovering()
 
     def unpause(self) -> None:
         """Manually unpause the scheduler (called via /scan or SSH).

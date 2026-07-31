@@ -265,3 +265,14 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-011
+  description: A durable, bounded Structure synchronization window that checkpoints
+    Gamma cursors and stages verified pages can recover across timeout and restart
+    without publishing a partial market universe or permanently pausing collection.
+  parent_paradigm: checkpointed-structure-recovery
+  expected_lift: Restore continuous certified Structure publication within the 30-minute SLA
+  cost_h: 8.0
+  ranking: 1.0
+  status: in-flight
+  created_at: '2026-07-31T00:00:00+08:00'
+  results: []

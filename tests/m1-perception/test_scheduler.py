@@ -571,14 +571,14 @@ async def test_snapshot_timeout_keeps_one_reap_task_until_child_exit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pause_after_3_failures(
+async def test_recovery_after_failure_threshold(
     daemon_settings_for_test: Any,
     tmp_path: Path,
 ) -> None:
-    """FAILURE_THRESHOLD consecutive FAILED results → scheduler.state == PAUSED.
+    """FAILURE_THRESHOLD consecutive FAILED results → RECOVERING.
 
     Phase 03.1-04 D-02: threshold is 5. Loop drives the class attribute so the
-    invariant ("after N failures we pause") survives future tuning.
+    invariant ("after N failures recovery is visible") survives future tuning.
     """
     from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -593,15 +593,15 @@ async def test_pause_after_3_failures(
     for _ in range(SnapshotScheduler.FAILURE_THRESHOLD):
         await scheduler._tick()
 
-    assert scheduler.state == SchedulerState.PAUSED
+    assert scheduler.state == SchedulerState.RECOVERING
     assert scheduler._failure_counter >= SnapshotScheduler.FAILURE_THRESHOLD
 
 
 @pytest.mark.asyncio
-async def test_pause_after_5_failures_not_3(
+async def test_recovery_after_5_failures_not_3(
     daemon_settings_for_test: Any,
 ) -> None:
-    """Phase 03.1-04 D-02 explicit guard: 4 failures keep RUNNING; the 5th pauses.
+    """Four failures keep RUNNING; the fifth starts recovery.
 
     Pinned to literal 5 (not the class attribute) because this test's purpose
     is to catch silent threshold regressions back to 3. If someone bumps
@@ -623,10 +623,10 @@ async def test_pause_after_5_failures_not_3(
             "Threshold may have regressed below 5."
         )
 
-    # 5th failure: counter = 5 → PAUSED
+    # 5th failure: counter = 5 → RECOVERING
     await scheduler._tick()
-    assert scheduler.state == SchedulerState.PAUSED, (
-        f"After 5 failures, expected PAUSED; got {scheduler.state}. "
+    assert scheduler.state == SchedulerState.RECOVERING, (
+        f"After 5 failures, expected RECOVERING; got {scheduler.state}. "
         "Threshold may have increased above 5."
     )
     assert scheduler._failure_counter == 5
@@ -658,10 +658,10 @@ async def test_no_pause_after_degraded_then_ok(
 
 
 @pytest.mark.asyncio
-async def test_paused_skips_tick(
+async def test_legacy_paused_state_is_migrated_to_recovering(
     daemon_settings_for_test: Any,
 ) -> None:
-    """When scheduler is PAUSED, _tick() does nothing — run_snapshot NOT called."""
+    """An in-memory legacy PAUSED state cannot disable the producer forever."""
     from polyarb.storage.sqlite_store import SQLiteStore
 
     store = SQLiteStore(daemon_settings_for_test.db_path)
@@ -670,12 +670,13 @@ async def test_paused_skips_tick(
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
     scheduler.state = SchedulerState.PAUSED
 
-    run_mock = AsyncMock()
+    run_mock = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK))
     scheduler._run_snapshot = run_mock
 
     await scheduler._tick()
 
-    run_mock.assert_not_called()
+    run_mock.assert_called_once()
+    assert scheduler.state == SchedulerState.RUNNING
 
 
 @pytest.mark.asyncio
@@ -798,7 +799,7 @@ async def test_failed_tick_does_not_call_heartbeat_ok(
 async def test_counter_persists_across_restart(
     daemon_settings_for_test: Any,
 ) -> None:
-    """Counter=N-1 from prior shutdown → one more failure on restart → PAUSED at N.
+    """Counter=N-1 from prior shutdown → one more failure starts recovery at N.
 
     Phase 03.1-04 D-02: threshold is 5. We drive both halves from the class
     attribute so the persistence invariant survives future tuning.
@@ -829,8 +830,39 @@ async def test_counter_persists_across_restart(
         f"got {scheduler2._failure_counter}. Scheduler must persist counter to SQLite."
     )
 
-    # One more failure → PAUSED
+    # One more failure → RECOVERING
     scheduler2._run_snapshot = AsyncMock(side_effect=RuntimeError("failed again"))
     await scheduler2._tick()
 
-    assert scheduler2.state == SchedulerState.PAUSED
+    assert scheduler2.state == SchedulerState.RECOVERING
+
+
+@pytest.mark.asyncio
+async def test_failure_threshold_enters_recovering_and_a_later_success_self_heals(
+    daemon_settings_for_test: Any,
+) -> None:
+    """A repeated failure must not disable the only Structure producer forever."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(
+        side_effect=[
+            RuntimeError("upstream unavailable")
+            for _ in range(SnapshotScheduler.FAILURE_THRESHOLD)
+        ]
+        + [_FakeResult(SnapshotStatus.OK, snapshot_id=99)]
+    )
+
+    for _ in range(SnapshotScheduler.FAILURE_THRESHOLD):
+        await scheduler._tick()
+
+    assert scheduler.state == SchedulerState.RECOVERING
+    assert scheduler._failure_counter == SnapshotScheduler.FAILURE_THRESHOLD
+
+    await scheduler._tick()
+
+    assert scheduler.state == SchedulerState.RUNNING
+    assert scheduler._failure_counter == 0
+    assert scheduler._run_snapshot.await_count == SnapshotScheduler.FAILURE_THRESHOLD + 1
