@@ -332,6 +332,28 @@ async def test_sampling_market_state_uses_one_aggregate_query_and_closes(
     assert connection.closed
 
 
+async def test_candidate_market_fallback_reads_runtime_authorized_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [{"market_id": "market-1", "yes_token_id": "yes-1"}]
+    connection = _FakeConnection()
+    connection.fetch = AsyncMock(return_value=rows)
+    monkeypatch.setattr(
+        store_module.asyncpg,
+        "connect",
+        AsyncMock(return_value=connection),
+    )
+
+    result = await L3EvidenceStore(
+        "postgresql://runtime-secret"
+    ).fetch_candidate_markets_latest()
+
+    assert result == rows
+    connection.fetch.assert_awaited_once()
+    assert "SELECT * FROM markets_latest" in connection.fetch.await_args.args[0]
+    assert connection.closed
+
+
 def _soak_lock_row(
     boot_id: UUID,
     *,

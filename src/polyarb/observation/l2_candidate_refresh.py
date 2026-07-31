@@ -48,6 +48,7 @@ from supabase import ClientOptions, create_client
 from polyarb.observation.l2_temp_db import build_temp_db, warn_null_filled_recipe_columns
 from polyarb.observation.scanner import list_all_recipes, run_recipe
 from polyarb.observation.watchlist import load_watchlist
+from polyarb.storage.l3_evidence_store import L3EvidenceStore
 
 # ── Module constants (locked) ─────────────────────────────────────────────
 MAX_CANDIDATES: int = 500  # R9 hard cap
@@ -423,12 +424,36 @@ async def on_snapshot_complete(
                 f"candidate refresh: supabase fetch failed: {e!r} — "
                 f"using last known rows (count={len(_last_known_markets_rows or [])})"
             )
-            if maintenance:
+            runtime_dsn = ""
+            try:
+                runtime_dsn = settings.l2_runtime_db_dsn.get_secret_value()
+            except AttributeError:
+                pass
+            if runtime_dsn:
+                try:
+                    direct_rows = await L3EvidenceStore(
+                        runtime_dsn
+                    ).fetch_candidate_markets_latest()
+                    if direct_rows:
+                        markets_rows = direct_rows
+                        _last_known_markets_rows = direct_rows
+                        _record_fetch_success()
+                        logger.info(
+                            "candidate refresh: recovered through runtime database "
+                            f"rows={len(direct_rows)}"
+                        )
+                except Exception as direct_error:  # noqa: BLE001 - retain fail-soft cache
+                    logger.error(
+                        "candidate refresh: runtime database fallback failed "
+                        f"type={type(direct_error).__name__}"
+                    )
+            if not markets_rows and maintenance:
                 # A caught-up maintenance pass exists specifically to prove
                 # the live source is fresh. Cached rows cannot provide that
                 # evidence and must not advance reconciliation freshness.
                 return False
-            markets_rows = _last_known_markets_rows
+            if not markets_rows:
+                markets_rows = _last_known_markets_rows
     # else: Supabase not configured (D-04 cold-start) — fall through with
     #       markets_rows=None so compute_candidates uses settings.db_path.
 

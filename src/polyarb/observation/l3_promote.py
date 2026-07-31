@@ -181,7 +181,10 @@ def is_book_levels_write_overdue(now_s: float, warn_s: float = 120.0) -> bool:
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def _fetch_latest_tob_rows_from_supabase(client: Any) -> list[dict]:
+def _fetch_latest_tob_rows_from_supabase(
+    client: Any,
+    asset_ids: list[str] | None = None,
+) -> list[dict]:
     """Pull the newest recent ``l2_top_of_book`` row per asset.
 
     Bounded to first 1000 rows (PostgREST page-cap per Phase 04 D-01
@@ -190,14 +193,14 @@ def _fetch_latest_tob_rows_from_supabase(client: Any) -> list[dict]:
     """
     cutoff_ms = int(time.time() * 1000) - 3600 * 1000
     cutoff_iso = datetime.fromtimestamp(cutoff_ms / 1000, tz=UTC).isoformat().replace("+00:00", "Z")
-    resp = (
+    query = (
         client.table("l2_top_of_book")
         .select("asset_id, ts, best_bid, best_ask, spread, mid_price, depth_yes_usd, depth_no_usd")
         .gte("ts", cutoff_iso)
-        .order("ts", desc=True)
-        .limit(1000)
-        .execute()
     )
+    if asset_ids:
+        query = query.in_("asset_id", sorted(set(asset_ids)))
+    resp = query.order("ts", desc=True).limit(1000).execute()
     latest: list[dict] = []
     seen_assets: set[str] = set()
     for row in resp.data or []:
@@ -913,9 +916,36 @@ async def _promote_run_impl(
             staged_tob_rows = tob_rows
         except Exception as exc:  # noqa: BLE001
             logger.warning("l3-promote: tob fetch failed type={}", type(exc).__name__)
-            if _last_known_tob_rows is None:
+            candidate_snapshot = getattr(
+                ws_consumer,
+                "candidate_assets_snapshot",
+                None,
+            )
+            candidate_assets = (
+                sorted(candidate_snapshot())
+                if callable(candidate_snapshot)
+                else []
+            )
+            if candidate_assets:
+                try:
+                    tob_rows = await _postgrest_read_with_retry(
+                        _fetch_latest_tob_rows_from_supabase,
+                        client,
+                        candidate_assets,
+                    )
+                    staged_tob_rows = tob_rows
+                    logger.info(
+                        "l3-promote: recovered through candidate-scoped TOB read "
+                        f"assets={len(candidate_assets)} rows={len(tob_rows)}"
+                    )
+                except Exception as scoped_exc:  # noqa: BLE001 - use durable freeze below
+                    logger.warning(
+                        "l3-promote: candidate-scoped tob fetch failed "
+                        f"type={type(scoped_exc).__name__}"
+                    )
+            if staged_tob_rows is None:
                 return await finish(early(PromoteStatus.FROZEN, "tob_fetch_failed"))
-            tob_rows = _last_known_tob_rows
+            tob_rows = staged_tob_rows
 
         recent_asset_ids = sorted(
             {

@@ -878,6 +878,29 @@ class L3EvidenceStore:
                     _report_failure("fetch_sampling_market_state_close", error)
                     raise L3EvidenceReadError("l3 sampling market state read failed") from None
 
+    async def fetch_candidate_markets_latest(self) -> list[dict[str, Any]]:
+        """Read the L2 candidate source through the isolated runtime role."""
+        connection: asyncpg.Connection | None = None
+        try:
+            connection = await asyncpg.connect(dsn=self._dsn)
+            await _require_evidence_daemon(connection)
+            rows = await connection.fetch("SELECT * FROM markets_latest")
+            return [dict(row) for row in rows]
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - typed, bounded read boundary
+            _report_failure("fetch_candidate_markets_latest", error)
+            raise L3EvidenceReadError("candidate markets_latest read failed") from None
+        finally:
+            if connection is not None:
+                try:
+                    await connection.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001
+                    _report_failure("fetch_candidate_markets_latest_close", error)
+                    raise L3EvidenceReadError("candidate markets_latest read failed") from None
+
     async def fetch_active_soak_mapping_lock(
         self,
         *,

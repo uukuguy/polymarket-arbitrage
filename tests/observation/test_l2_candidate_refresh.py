@@ -1220,6 +1220,40 @@ async def test_supabase_fetch_fail_uses_last_known(tmp_path):
     assert ok is True, "refresh should still run (fail-soft) on fetch failure"
 
 
+@pytest.mark.asyncio
+async def test_supabase_fetch_fail_cold_start_uses_runtime_database(tmp_path):
+    """A REST outage must not strand a fresh L2 process on bootstrap assets."""
+    from pydantic import SecretStr
+
+    import polyarb.observation.l2_candidate_refresh as mod
+
+    settings = _supabase_settings(tmp_path / "state.db")
+    settings.l2_runtime_db_dsn = SecretStr("postgresql://runtime-secret")
+    rows = [_narrow_for_near_end("m1")]
+    fake_ws = MagicMock()
+    fake_ws._candidate_set = set()
+    fake_ws._l3_active_set = set()
+
+    with (
+        patch.object(mod, "create_client", side_effect=RuntimeError("REST down")),
+        patch.object(
+            mod.L3EvidenceStore,
+            "fetch_candidate_markets_latest",
+            new=AsyncMock(return_value=rows),
+        ) as direct_fetch,
+    ):
+        ok = await mod.on_snapshot_complete(
+            {"snapshot_id": 99, "taken_at_ms": 1},
+            ws_consumer=fake_ws,
+            settings=settings,
+        )
+
+    assert ok is True
+    direct_fetch.assert_awaited_once()
+    assert mod._last_known_markets_rows == rows
+    assert mod._last_fetch_success_at_s is not None
+
+
 def test_cap_500_with_supabase_rows(tmp_path):
     """600 narrow rows from Supabase → candidate set capped at 500 (D-03)."""
     from polyarb.observation.l2_candidate_refresh import MAX_CANDIDATES, compute_candidates

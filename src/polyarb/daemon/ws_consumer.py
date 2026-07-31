@@ -1092,6 +1092,10 @@ class WsConsumer:
         """
         self._candidate_set = set(asset_ids)
 
+    def candidate_assets_snapshot(self) -> frozenset[str]:
+        """Return one immutable cut of the independently owned L2 candidates."""
+        return frozenset(self._candidate_set)
+
     async def replace_candidate_set(self, asset_ids: Iterable[str]) -> bool:
         """Atomically send the candidate diff and commit desired state."""
         desired = set(asset_ids)

@@ -1564,6 +1564,49 @@ async def test_promoter_retries_transient_cold_start_tob_fetch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_promoter_recovers_with_candidate_scoped_tob_read() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    consumer = _truthful_consumer()
+    tob_rows, token_rows = _five_market_inputs("scoped-retry")
+    consumer.candidate_assets_snapshot = MagicMock(
+        return_value=frozenset(row["asset_id"] for row in tob_rows)
+    )
+    client = _make_supabase_client_mock(tob_rows, token_rows)
+
+    def _fetch(_client, asset_ids=None):
+        if asset_ids is None:
+            raise TimeoutError
+        return tob_rows
+
+    with (
+        patch.object(l3_promote, "create_client", return_value=client),
+        patch.object(
+            l3_promote,
+            "_fetch_latest_tob_rows_from_supabase",
+            side_effect=_fetch,
+        ) as fetch,
+        patch.object(l3_promote.asyncio, "sleep", new=AsyncMock()) as sleep,
+    ):
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            run_seq=22,
+        )
+
+    assert result.status.value == "success"
+    assert fetch.call_count == 4
+    assert fetch.call_args.args[1] == sorted(consumer.candidate_assets_snapshot())
+    assert sleep.await_count == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case", "expected_status", "expected_reason"),
     [
