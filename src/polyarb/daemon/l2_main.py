@@ -662,7 +662,48 @@ def make_l2_event_handler(
     *,
     book_levels_required: Callable[[str], bool] | None = None,
 ) -> Callable[[dict], Awaitable[FrameDispatchResult]]:
-    """Build a non-blocking production WS dispatcher with mirror-write truth."""
+    """Build a non-blocking production WS dispatcher with mirror-write truth.
+
+    Top-of-book traffic is coalesced by asset and drained in bulk.  Awaiting one
+    PostgREST request per frame made an initial 110-asset dump occupy the receive
+    loop for minutes, which in turn made subscription control miss its live
+    socket.  Depth writes remain awaited because they are the durable evidence
+    boundary for L3 promotion.
+    """
+
+    pending_tob: dict[str, dict] = {}
+    tob_drain_task: asyncio.Task[None] | None = None
+
+    async def drain_top_of_book() -> None:
+        while pending_tob:
+            rows = list(pending_tob.values())
+            pending_tob.clear()
+            await asyncio.to_thread(l2_mirror.push_top_of_book, rows)
+
+    def enqueue_top_of_book(row: dict) -> None:
+        nonlocal tob_drain_task
+        asset_id = str(row.get("asset_id") or "")
+        if not asset_id:
+            return
+        pending_tob[asset_id] = row
+        if tob_drain_task is None or tob_drain_task.done():
+            tob_drain_task = asyncio.create_task(
+                drain_top_of_book(),
+                name="l2-tob-mirror-drain",
+            )
+
+            def consume_failure(task: asyncio.Task[None]) -> None:
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:  # pragma: no cover - mirror is fail-soft
+                    logger.warning(
+                        "l2 top-of-book drain failed type={}",
+                        type(exc).__name__,
+                    )
+
+            tob_drain_task.add_done_callback(consume_failure)
 
     async def _on_event(frame: dict) -> FrameDispatchResult:
         event_type = frame.get("event_type", "unknown")
@@ -682,7 +723,7 @@ def make_l2_event_handler(
             tob_written = False
             book_levels_written = False
             if row is not None:
-                tob_written = (await asyncio.to_thread(l2_mirror.push_top_of_book, [row])) is True
+                enqueue_top_of_book(row)
             if event_type == "book":
                 if (
                     asset_id_raw

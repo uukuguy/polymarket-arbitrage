@@ -22,6 +22,7 @@ Contract (mirrored from `_trade_row_from_frame`):
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
@@ -335,7 +336,7 @@ async def test_production_dispatch_reports_tob_and_depth_outcomes_separately() -
         )
 
         assert result == FrameDispatchResult(
-            tob_written=True,
+            tob_written=False,
             book_levels_written=False,
             observed_at=datetime(2026, 7, 23, 1, 2, 3, tzinfo=UTC),
         )
@@ -362,10 +363,11 @@ async def test_non_book_dispatch_has_explicit_false_depth_outcome() -> None:
     )
 
     assert result == FrameDispatchResult(
-        tob_written=True,
+        tob_written=False,
         book_levels_written=False,
         observed_at=datetime(2026, 7, 23, 1, 2, 3, tzinfo=UTC),
     )
+    await asyncio.sleep(0.01)
     mirror.push_top_of_book.assert_called_once()
     mirror.push_book_levels.assert_not_called()
 

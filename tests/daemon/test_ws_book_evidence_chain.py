@@ -22,7 +22,7 @@ async def _wait_until(predicate, *, timeout: float = 0.2) -> None:
 
 
 @pytest.mark.asyncio
-async def test_production_mirror_call_does_not_block_event_loop() -> None:
+async def test_production_mirror_call_does_not_block_receive_loop() -> None:
     mirror = MagicMock()
     started = threading.Event()
     release = threading.Event()
@@ -48,11 +48,51 @@ async def test_production_mirror_call_does_not_block_event_loop() -> None:
     try:
         await asyncio.wait_for(asyncio.to_thread(started.wait, 0.2), timeout=0.3)
         await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.05)
-        assert dispatch.done() is False
+        assert dispatch.done() is True
+        assert (await dispatch).tob_written is False
     finally:
         release.set()
 
-    assert (await asyncio.wait_for(dispatch, timeout=0.2)).tob_written is True
+    await _wait_until(lambda: mirror.push_top_of_book.call_count == 1)
+
+
+@pytest.mark.asyncio
+async def test_production_mirror_coalesces_pending_rows_by_asset() -> None:
+    mirror = MagicMock()
+    started = threading.Event()
+    release = threading.Event()
+
+    def _write(rows) -> bool:
+        if mirror.push_top_of_book.call_count == 1:
+            started.set()
+            release.wait(timeout=1)
+        return True
+
+    mirror.push_top_of_book.side_effect = _write
+    handler = make_l2_event_handler(mirror)
+
+    def frame(asset_id: str, bid: str) -> dict:
+        return {
+            "event_type": "best_bid_ask",
+            "asset_id": asset_id,
+            "best_bid": bid,
+            "best_ask": "0.6",
+            "timestamp": "2026-07-24T06:00:00Z",
+        }
+
+    await handler(frame("asset-a", "0.4"))
+    await asyncio.wait_for(asyncio.to_thread(started.wait, 0.2), timeout=0.3)
+    await handler(frame("asset-b", "0.3"))
+    await handler(frame("asset-b", "0.35"))
+    await handler(frame("asset-c", "0.2"))
+    release.set()
+    await _wait_until(lambda: mirror.push_top_of_book.call_count == 2)
+
+    second_batch = mirror.push_top_of_book.call_args_list[1].args[0]
+    assert {row["asset_id"] for row in second_batch} == {"asset-b", "asset-c"}
+    assert next(row for row in second_batch if row["asset_id"] == "asset-b")[
+        "best_bid"
+    ] == 0.35
 
 
 def _consumer(
