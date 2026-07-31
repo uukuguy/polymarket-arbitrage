@@ -511,11 +511,6 @@ async def main() -> int:
     sqlite_store.init_schema()
 
     producer_lock = asyncio.Lock()
-    scheduler = SnapshotScheduler(
-        settings=settings,
-        sqlite_store=sqlite_store,
-        producer_lock=producer_lock,
-    )
     perception_store = OpportunityPerceptionStore(settings.db_path)
     perception_store.init_schema()
     isolated_producers = settings.opportunity_producer_supervisor_enabled
@@ -536,6 +531,14 @@ async def main() -> int:
             opportunity_watcher=focused_watcher,
             producer_lock=producer_lock,
         )
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=sqlite_store,
+        producer_lock=producer_lock,
+        on_snapshot_published=(
+            quote_worker.request_now if quote_worker is not None else None
+        ),
     )
     app = create_app(
         scheduler=scheduler,

@@ -985,16 +985,15 @@ def _build_health_checks(
                 else None
             )
             if (
-                runtime_snapshot is not None
-                and runtime_snapshot.state == "collecting"
-                and refresh_age_s is not None
+                refresh_age_s is not None
                 and refresh_age_s <= QUOTE_SLA_SECONDS
             ):
                 # A newly published Structure invalidates the previous Quote by
-                # design.  Keep M2 unavailable until the matching run commits,
-                # but represent the bounded re-quote as warn rather than an
-                # operational failure.  Once this SLA-bound window expires the
-                # same mismatch fails closed.
+                # design. Publication wakes the Quote loop, but health can read
+                # the new revision before that task marks itself collecting.
+                # Keep M2 unavailable until the matching run commits while
+                # representing this bounded handoff as warn. Once the SLA-bound
+                # window expires the same mismatch fails closed.
                 quote_status = "warn"
                 quote_output = "source-snapshot-refreshing"
             else:

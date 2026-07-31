@@ -252,7 +252,7 @@ def test_enabled_health_fails_when_source_truth_drifts(tmp_path) -> None:
             "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
             "data_product,archive_status,is_valid,parquet_path"
             ") VALUES (?,?,'subset',1,1,'structure','not_requested',1,'new.parquet')",
-            (NOW_MS, NOW_MS),
+            (NOW_MS - 301_000, NOW_MS - 301_000),
         )
         snapshot_id = int(
             con.execute("SELECT id FROM snapshots ORDER BY id DESC LIMIT 1").fetchone()[0]
@@ -279,6 +279,40 @@ def test_enabled_health_fails_when_source_truth_drifts(tmp_path) -> None:
     assert entry["status"] == "fail"
     assert entry["output"] == "source-snapshot-mismatch"
     assert overall == "fail"
+
+
+def test_fresh_structure_publish_warns_before_quote_worker_wakes(tmp_path) -> None:
+    """Publication-to-request scheduling is part of the bounded refresh window."""
+    settings = _settings(tmp_path, enabled=True)
+    _complete_run(settings, age_s=10)
+    runtime = QuoteWorkerRuntime()
+    projection = NegRiskQuoteStore(settings.db_path).latest_complete_projection()
+    assert projection is not None
+    runtime.publish_certified_projection(projection)
+    with sqlite3.connect(settings.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+            "data_product,archive_status,is_valid,parquet_path"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            (NOW_MS, NOW_MS, "subset", 1, 1, "structure", "not_requested", 1, "new.parquet"),
+        )
+        snapshot_id = int(
+            con.execute("SELECT id FROM snapshots ORDER BY id DESC LIMIT 1").fetchone()[0]
+        )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage("
+            "snapshot_id,completed,market_items,event_items"
+            ") VALUES (?,1,1,1)",
+            (snapshot_id,),
+        )
+
+    checks, overall = _quote_check(settings, runtime=runtime)
+
+    entry = checks["quote_feed:last_complete_age_seconds"][0]
+    assert entry["status"] == "warn"
+    assert entry["output"] == "source-snapshot-refreshing"
+    assert overall == "warn"
 
 
 def test_collecting_worker_warns_while_current_structure_requotes(tmp_path) -> None:

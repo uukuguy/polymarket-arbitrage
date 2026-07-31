@@ -72,6 +72,9 @@ Structure 与全市场 Quote 的隔离子进程共享一个进程内 producer sl
 切片边界插入刷新，Structure 随后从 durable cursor 续排。`checkpointed/pass` 不增加
 failure counter，也不触发故障告警；真正超时、异常退出和 cursor 拒绝仍保留原有
 恢复/报警链。锁等待不计入子进程 timeout，HTTP 与 Polywatch 仍由父进程响应。
+认证发布还会直接唤醒 Quote worker，不等待它原来的 120 秒周期；health 在发布可见
+但 worker 尚未来得及标记 `collecting` 的短竞态中仍报告
+`source-snapshot-refreshing/warn`，匹配 Quote 完成后自动回到 pass。
 
 ## 自检题
 

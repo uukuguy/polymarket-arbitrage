@@ -869,6 +869,28 @@ async def test_successful_tick_calls_heartbeat_ok(
 
 
 @pytest.mark.asyncio
+async def test_successful_structure_publish_wakes_quote_worker(
+    daemon_settings_for_test: Any,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    request_quote = MagicMock(return_value=True)
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        on_snapshot_published=request_quote,
+    )
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK))
+
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()):
+        await scheduler._tick()
+
+    request_quote.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 async def test_successful_tick_purges_expired_snapshots_on_attached_store(
     daemon_settings_for_test: Any,
 ) -> None:

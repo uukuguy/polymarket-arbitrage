@@ -1446,4 +1446,7 @@ success is not user receipt/read evidence.
   Structure progress. A cooperative checkpoint is healthy progress, not a
   failure-counter increment; real timeout/exit still uses the recovery and
   alert chain. Lock wait is outside the child's timeout and never blocks the
-  HTTP parent.
+  HTTP parent. A certified Structure publication directly wakes the Quote
+  single-worker loop; health treats the tiny publish-visible/task-wake race as
+  the same bounded refresh warning, while the opportunity endpoint remains
+  fail-closed until the matching Quote commits.

@@ -344,10 +344,12 @@ class SnapshotScheduler:
         sqlite_store: object,
         *,
         producer_lock: asyncio.Lock | None = None,
+        on_snapshot_published: Callable[[], object] | None = None,
     ) -> None:
         self._settings = settings
         self._sqlite_store = sqlite_store
         self._producer_lock = producer_lock
+        self._on_snapshot_published = on_snapshot_published
         self._checkpoint_pending = False
 
         # Restore state from DB (test_counter_persists_across_restart)
@@ -638,6 +640,14 @@ class SnapshotScheduler:
                 # production volume and must not keep stale failure evidence
                 # visible while certified truth is already online.
                 self._persist_counter()
+                if self._on_snapshot_published is not None:
+                    try:
+                        self._on_snapshot_published()
+                    except Exception as error:  # quote wake-up is retried periodically
+                        logger.warning(
+                            "could not request Quote after Structure publication "
+                            f"kind={type(error).__name__}"
+                        )
                 # Plan 02-05 fix-up: Better Stack heartbeat OK pulse.
                 # Reference via the module attribute (not from-import) so tests
                 # can monkeypatch alerts.send_heartbeat_ok. Fail-soft already
