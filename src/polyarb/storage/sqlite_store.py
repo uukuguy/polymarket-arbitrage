@@ -13,7 +13,9 @@ Design notes (anti-patterns avoided):
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import uuid
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -38,6 +40,7 @@ from polyarb.storage.schemas import (
     SCHEDULER_STATE_DDL,
     SNAPSHOT_ATTEMPTS_DDL,
     STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL,
+    STRUCTURE_SYNC_WINDOWS_DDL,
     migrate_fault_auth_finalize,
     migrate_fault_intent_status,
 )
@@ -411,6 +414,7 @@ class SQLiteStore:
             # Parent-observed outcomes for isolated scheduler snapshot children.
             con.executescript(SNAPSHOT_ATTEMPTS_DDL)
             con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)
+            con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
             # Phase 03.1 Plan 01: l2_mirror_state singleton (GAP-2 + GAP-3)
             con.executescript(L2_MIRROR_STATE_DDL)
 
@@ -957,6 +961,175 @@ class SQLiteStore:
                 "updated_at_ms=excluded.updated_at_ms",
                 (state, failure_counter, updated_at_ms),
             )
+        finally:
+            con.close()
+
+    def begin_or_resume_structure_sync(self, *, started_at_ms: int) -> dict[str, object]:
+        """Return the sole resumable Structure window, creating it atomically."""
+        if started_at_ms < 0:
+            raise ValueError("invalid-structure-sync-start")
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
+                "checkpoint_at_ms,event_pages,market_pages,failure_reason "
+                "FROM structure_sync_windows WHERE status IN ('open','events_complete') "
+                "ORDER BY started_at_ms LIMIT 1"
+            ).fetchone()
+            if row is None:
+                window_id = uuid.uuid4().hex
+                con.execute(
+                    "INSERT INTO structure_sync_windows("
+                    "id,status,started_at_ms,checkpoint_at_ms) VALUES (?,'open',?,?)",
+                    (window_id, started_at_ms, started_at_ms),
+                )
+                row = con.execute(
+                    "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
+                    "checkpoint_at_ms,event_pages,market_pages,failure_reason "
+                    "FROM structure_sync_windows WHERE id=?",
+                    (window_id,),
+                ).fetchone()
+            con.execute("COMMIT")
+            assert row is not None
+            return self._structure_sync_window_row(row)
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    @staticmethod
+    def _structure_sync_window_row(row: tuple[object, ...]) -> dict[str, object]:
+        keys = (
+            "id", "status", "event_cursor", "market_cursor", "started_at_ms",
+            "checkpoint_at_ms", "event_pages", "market_pages", "failure_reason",
+        )
+        return dict(zip(keys, row, strict=True))
+
+    def commit_structure_event_page(
+        self,
+        *,
+        window_id: object,
+        requested_cursor: str | None,
+        next_cursor: str | None,
+        completed: bool,
+        events: list[dict],
+        finished_at_ms: int,
+    ) -> None:
+        """Stage one validated event page and advance its opaque cursor together."""
+        if not isinstance(window_id, str) or not window_id:
+            raise ValueError("invalid-structure-sync-window")
+        if finished_at_ms < 0 or completed != (next_cursor is None):
+            raise ValueError("invalid-structure-event-page")
+        serialized: list[tuple[str, str, str | None]] = []
+        for event in events:
+            event_id = event.get("id") if isinstance(event, dict) else None
+            if not isinstance(event_id, str) or not event_id:
+                raise ValueError("invalid-structure-event")
+            serialized.append((event_id, json.dumps(event, sort_keys=True), requested_cursor))
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT status,event_cursor FROM structure_sync_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            if row is None or row[0] != "open" or row[1] != requested_cursor:
+                raise ValueError("structure-event-page-cursor-mismatch")
+            con.executemany(
+                "INSERT INTO structure_sync_event_staging("
+                "window_id,event_id,payload_json,source_cursor) "
+                "VALUES (?,?,?,?) ON CONFLICT(window_id,event_id) DO UPDATE SET "
+                "payload_json=excluded.payload_json,source_cursor=excluded.source_cursor",
+                [(window_id, *item) for item in serialized],
+            )
+            con.execute(
+                "UPDATE structure_sync_windows SET status=?,event_cursor=?,"
+                "checkpoint_at_ms=?,event_pages=event_pages+1 WHERE id=?",
+                (
+                    "events_complete" if completed else "open",
+                    next_cursor,
+                    finished_at_ms,
+                    window_id,
+                ),
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def list_staged_structure_events(self, window_id: object) -> list[dict]:
+        """Read staging only for finalizer tests; it is never online truth."""
+        if not isinstance(window_id, str) or not window_id:
+            raise ValueError("invalid-structure-sync-window")
+        con = sqlite3.connect(self._db_path)
+        try:
+            rows = con.execute(
+                "SELECT payload_json FROM structure_sync_event_staging "
+                "WHERE window_id=? ORDER BY event_id",
+                (window_id,),
+            ).fetchall()
+            return [json.loads(str(row[0])) for row in rows]
+        finally:
+            con.close()
+
+    def commit_structure_market_page(
+        self,
+        *,
+        window_id: object,
+        requested_cursor: str | None,
+        next_cursor: str | None,
+        completed: bool,
+        markets: list[dict],
+        finished_at_ms: int,
+    ) -> None:
+        """Stage one market page only after complete event coverage is durable."""
+        if not isinstance(window_id, str) or not window_id:
+            raise ValueError("invalid-structure-sync-window")
+        if finished_at_ms < 0 or completed != (next_cursor is None):
+            raise ValueError("invalid-structure-market-page")
+        serialized: list[tuple[str, str, str | None]] = []
+        for market in markets:
+            market_id = market.get("id") if isinstance(market, dict) else None
+            if not isinstance(market_id, str) or not market_id:
+                raise ValueError("invalid-structure-market")
+            serialized.append((market_id, json.dumps(market, sort_keys=True), requested_cursor))
+        con = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT status,market_cursor FROM structure_sync_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            if row is None or row[0] != "events_complete" or row[1] != requested_cursor:
+                raise ValueError("structure-market-page-cursor-mismatch")
+            con.executemany(
+                "INSERT INTO structure_sync_market_staging("
+                "window_id,market_id,payload_json,source_cursor) "
+                "VALUES (?,?,?,?) ON CONFLICT(window_id,market_id) DO UPDATE SET "
+                "payload_json=excluded.payload_json,source_cursor=excluded.source_cursor",
+                [(window_id, *item) for item in serialized],
+            )
+            con.execute(
+                "UPDATE structure_sync_windows SET status=?,market_cursor=?,"
+                "checkpoint_at_ms=?,market_pages=market_pages+1 WHERE id=?",
+                (
+                    "complete" if completed else "events_complete",
+                    next_cursor,
+                    finished_at_ms,
+                    window_id,
+                ),
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
         finally:
             con.close()
 

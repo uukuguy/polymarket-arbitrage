@@ -50,6 +50,43 @@ async def test_fetch_event_page_returns_durable_opaque_next_cursor(
 
 
 @pytest.mark.asyncio
+async def test_fetch_market_page_returns_one_bounded_durable_page(
+    respx_mock,
+) -> None:
+    route = respx_mock.get("https://gamma-api.polymarket.com/markets/keyset").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "markets": [
+                    {
+                        "id": "m-1",
+                        "conditionId": "condition-1",
+                        "active": True,
+                        "closed": False,
+                    }
+                ],
+                "next_cursor": "opaque/m-2?x=1",
+            },
+        )
+    )
+    gamma = _gamma()
+    try:
+        page = await gamma.fetch_active_market_page(
+            cursor="opaque/m-1?x=1",
+            limit=37,
+        )
+    finally:
+        await gamma.aclose()
+
+    assert tuple(market["id"] for market in page.markets) == ("m-1",)
+    assert page.requested_cursor == "opaque/m-1?x=1"
+    assert page.next_cursor == "opaque/m-2?x=1"
+    assert page.completed is False
+    assert route.calls[0].request.url.params["after_cursor"] == "opaque/m-1?x=1"
+    assert route.calls[0].request.url.params["limit"] == "37"
+
+
+@pytest.mark.asyncio
 async def test_fetch_event_page_rejects_repeated_cursor(
     respx_mock,
 ) -> None:

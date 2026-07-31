@@ -83,6 +83,18 @@ class EventPage:
         return tuple(str(event["id"]) for event in self.events)
 
 
+@dataclass(frozen=True)
+class MarketPage:
+    """One bounded Gamma market page with its opaque durable continuation."""
+
+    markets: tuple[dict, ...]
+    requested_cursor: str | None
+    next_cursor: str | None
+    completed: bool
+    started_at_ms: int
+    finished_at_ms: int
+
+
 @dataclass
 class PaginationCoverage:
     source: str
@@ -259,6 +271,34 @@ class GammaClient:
         """
         coverage = PaginationCoverage(source="markets")
         return [m async for m in self.iter_active_markets(coverage)]
+
+    async def fetch_active_market_page(
+        self,
+        cursor: str | None,
+        limit: int,
+    ) -> MarketPage:
+        """Fetch exactly one validated market page for durable Structure sync."""
+        if type(limit) is not int or not 1 <= limit <= self.PAGE_LIMIT:
+            raise PaginationIntegrityError(
+                "/markets/keyset page limit must be within 1..100"
+            )
+        started_at_ms = int(time.time() * 1_000)
+        markets, next_cursor, completed, finished_at_ms = await self._fetch_keyset_page(
+            path="/markets/keyset",
+            array_key="markets",
+            params={"active": "true", "closed": "false", "archived": "false"},
+            keep_fields=self._MARKET_KEEP,
+            cursor=cursor,
+            limit=limit,
+        )
+        return MarketPage(
+            markets=markets,
+            requested_cursor=cursor,
+            next_cursor=next_cursor,
+            completed=completed,
+            started_at_ms=started_at_ms,
+            finished_at_ms=finished_at_ms,
+        )
 
     async def fetch_market_states(
         self,

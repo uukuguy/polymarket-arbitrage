@@ -2311,6 +2311,40 @@ CREATE INDEX IF NOT EXISTS idx_structure_schedule_adjustments_decided_at
 ON structure_schedule_adjustments(decided_at_ms DESC);
 """
 
+# H-011: online Structure is assembled from bounded Gamma pages.  These rows
+# are deliberately separate from snapshots/markets: incomplete staging is not
+# certified market truth and must never leak through an online reader.
+STRUCTURE_SYNC_WINDOWS_DDL = """
+CREATE TABLE IF NOT EXISTS structure_sync_windows (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK(status IN ('open','events_complete','complete','failed')),
+    event_cursor TEXT,
+    market_cursor TEXT,
+    started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+    event_pages INTEGER NOT NULL DEFAULT 0 CHECK(event_pages >= 0),
+    market_pages INTEGER NOT NULL DEFAULT 0 CHECK(market_pages >= 0),
+    failure_reason TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_structure_sync_one_open_window
+ON structure_sync_windows(status) WHERE status IN ('open','events_complete');
+
+CREATE TABLE IF NOT EXISTS structure_sync_event_staging (
+    window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
+    event_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    source_cursor TEXT,
+    PRIMARY KEY(window_id,event_id)
+);
+CREATE TABLE IF NOT EXISTS structure_sync_market_staging (
+    window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
+    market_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    source_cursor TEXT,
+    PRIMARY KEY(window_id,market_id)
+);
+"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 03.1 Plan 01: l2_mirror_state singleton table (GAP-2 + GAP-3)
 #
