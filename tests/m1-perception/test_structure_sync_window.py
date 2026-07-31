@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from polyarb.clients.gamma_client import EventPage, MarketPage
+from polyarb.clients.gamma_client import (
+    EventPage,
+    MarketPage,
+    PaginationCursorRejectedError,
+)
 from polyarb.perception import structure_sync as structure_sync_module
 from polyarb.perception.structure_sync import (
     StagedGammaSource,
@@ -195,6 +199,50 @@ def test_incomplete_structure_window_cannot_be_read_for_publication(tmp_path) ->
         store.read_complete_structure_sync(window["id"])
 
 
+def test_rejected_cursor_rotates_window_and_preserves_failure_evidence(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    old = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=old["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[{"id": "event-old"}],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=old["id"],
+        requested_cursor=None,
+        next_cursor="expired-cursor",
+        completed=False,
+        markets=[{"id": "market-old"}],
+        finished_at_ms=300,
+    )
+
+    new = store.restart_structure_sync_window(
+        window_id=str(old["id"]),
+        restarted_at_ms=400,
+        failure_reason="cursor-rejected:markets:403",
+    )
+
+    with sqlite3.connect(store.db_path) as con:
+        failed = con.execute(
+            "SELECT status,failure_reason,event_pages,market_pages "
+            "FROM structure_sync_windows WHERE id=?",
+            (old["id"],),
+        ).fetchone()
+        assert failed == ("failed", "cursor-rejected:markets:403", 1, 1)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_market_staging WHERE window_id=?",
+            (old["id"],),
+        ).fetchone()[0] == 1
+    assert new["id"] != old["id"]
+    assert new["status"] == "open"
+    assert new["event_cursor"] is None
+    assert new["market_cursor"] is None
+
+
 def test_published_structure_retention_is_bounded_and_keeps_latest_window(
     tmp_path,
 ) -> None:
@@ -266,6 +314,114 @@ def test_published_structure_retention_is_bounded_and_keeps_latest_window(
         max_windows_per_run=1,
     ) == (1, [window_ids[1]])
     assert store.get_latest_structure_sync()["id"] == window_ids[2]
+
+
+def test_failed_structure_retention_reclaims_staging_and_window(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    old = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=old["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[{"id": "event-old"}],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=old["id"],
+        requested_cursor=None,
+        next_cursor="expired",
+        completed=False,
+        markets=[{"id": "market-old"}],
+        finished_at_ms=300,
+    )
+    store.restart_structure_sync_window(
+        window_id=str(old["id"]),
+        restarted_at_ms=400,
+        failure_reason="cursor-rejected:markets:403",
+    )
+
+    assert store.purge_failed_structure_sync_windows(
+        max_windows_per_run=1
+    ) == (1, [old["id"]])
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_windows WHERE id=?",
+            (old["id"],),
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_staging WHERE window_id=?",
+            (old["id"],),
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_market_staging WHERE window_id=?",
+            (old["id"],),
+        ).fetchone()[0] == 0
+
+
+async def test_rejected_cursor_restarts_once_then_rebuilds_from_first_page(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    old = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=old["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=old["id"],
+        requested_cursor=None,
+        next_cursor="expired",
+        completed=False,
+        markets=[],
+        finished_at_ms=300,
+    )
+
+    class Gamma:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def fetch_active_event_page(self, cursor, limit):
+            assert cursor is None
+            return EventPage((), None, None, True, 410, 420)
+
+        async def fetch_active_market_page(self, cursor, limit):
+            if cursor == "expired":
+                raise PaginationCursorRejectedError("markets", 403)
+            assert cursor is None
+            return MarketPage((), None, None, True, 430, 440)
+
+    result = SimpleNamespace(is_valid=False)
+    with (
+        patch(
+            "polyarb.perception.structure_sync.GammaClient",
+            return_value=Gamma(),
+        ),
+        patch(
+            "polyarb.perception.structure_sync.finalize_structure_window",
+            new=AsyncMock(return_value=result),
+        ),
+    ):
+        assert await run_structure_sync_until_published(settings_for_test) is result
+
+    with sqlite3.connect(store.db_path) as con:
+        failed = con.execute(
+            "SELECT status,failure_reason FROM structure_sync_windows WHERE id=?",
+            (old["id"],),
+        ).fetchone()
+        assert failed == ("failed", "cursor-rejected:markets:403")
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_windows WHERE status='complete'"
+        ).fetchone()[0] == 1
 
 
 async def test_structure_retry_skips_full_database_schema_migration(

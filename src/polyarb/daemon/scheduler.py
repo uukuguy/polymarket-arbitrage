@@ -579,6 +579,18 @@ class SnapshotScheduler:
                     # but its failure remains visible in production logs.
                     logger.warning(f"snapshot retention failed: {e!r}")
                 try:
+                    deleted_failed, _ = await asyncio.to_thread(
+                        self._sqlite_store.purge_failed_structure_sync_windows,
+                        max_windows_per_run=1,
+                    )
+                    if deleted_failed:
+                        logger.info(
+                            "structure staging retention deleted "
+                            f"{deleted_failed} failed window"
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"failed structure staging retention failed: {e!r}")
+                try:
                     deleted_windows, _ = await asyncio.to_thread(
                         self._sqlite_store.purge_published_structure_sync_windows,
                         keep_last=1,

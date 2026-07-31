@@ -19,6 +19,7 @@ import respx
 from polyarb.clients.gamma_client import (
     GammaClient,
     PaginationCoverage,
+    PaginationCursorRejectedError,
     PaginationIntegrityError,
     PaginationResult,
     _NonRetryableHTTPError,
@@ -88,6 +89,21 @@ async def test_keyset_http_error_never_becomes_successful_short_page() -> None:
             with pytest.raises(_NonRetryableHTTPError):
                 _ = [row async for row in client.iter_active_markets(coverage)]
     assert coverage.result.completed is False
+
+
+async def test_bounded_page_classifies_rejected_continuation_cursor() -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        route = router.get("/markets/keyset").mock(
+            return_value=httpx.Response(403, json={"error": "cursor expired"})
+        )
+        async with GammaClient(settings) as client:
+            with pytest.raises(PaginationCursorRejectedError) as raised:
+                await client.fetch_active_market_page("expired-cursor", 100)
+
+    assert raised.value.source == "markets"
+    assert raised.value.status_code == 403
+    assert route.call_count == 1
 
 
 @pytest.fixture

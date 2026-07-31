@@ -1049,6 +1049,51 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def restart_structure_sync_window(
+        self,
+        *,
+        window_id: str,
+        restarted_at_ms: int,
+        failure_reason: str,
+    ) -> dict[str, object]:
+        """Fail one rejected-cursor window and atomically open its successor."""
+        if not window_id or restarted_at_ms < 0:
+            raise ValueError("invalid-structure-sync-restart")
+        if not failure_reason or len(failure_reason) > 200:
+            raise ValueError("invalid-structure-sync-failure-reason")
+        successor_id = uuid.uuid4().hex
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            cur = con.execute(
+                "UPDATE structure_sync_windows SET status='failed',"
+                "failure_reason=?,checkpoint_at_ms=? "
+                "WHERE id=? AND status IN ('open','events_complete')",
+                (failure_reason, restarted_at_ms, window_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("structure-sync-window-not-restartable")
+            con.execute(
+                "INSERT INTO structure_sync_windows("
+                "id,status,started_at_ms,checkpoint_at_ms"
+                ") VALUES (?,'open',?,?)",
+                (successor_id, restarted_at_ms, restarted_at_ms + 1),
+            )
+            row = con.execute(
+                "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
+                "checkpoint_at_ms,event_pages,market_pages,failure_reason,"
+                "published_snapshot_id FROM structure_sync_windows WHERE id=?",
+                (successor_id,),
+            ).fetchone()
+            con.execute("COMMIT")
+            return self._structure_sync_window_row(row)
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
     def mark_structure_sync_published(
         self, *, window_id: str, snapshot_id: int, published_at_ms: int
     ) -> None:
@@ -1131,6 +1176,51 @@ class SQLiteStore:
                 "structure staging retention deleted "
                 f"{len(to_delete)} published windows ids={to_delete}"
             )
+        return len(to_delete), to_delete
+
+    def purge_failed_structure_sync_windows(
+        self,
+        *,
+        max_windows_per_run: int = 1,
+    ) -> tuple[int, list[str]]:
+        """Reclaim staging from failed windows after fresh truth is certified."""
+        if max_windows_per_run < 1:
+            raise ValueError("max_windows_per_run must be positive")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            to_delete = [
+                str(row[0])
+                for row in con.execute(
+                    "SELECT id FROM structure_sync_windows WHERE status='failed' "
+                    "ORDER BY checkpoint_at_ms,id LIMIT ?",
+                    (max_windows_per_run,),
+                )
+            ]
+            if to_delete:
+                placeholders = ",".join("?" for _ in to_delete)
+                con.execute(
+                    "DELETE FROM structure_sync_event_staging "
+                    f"WHERE window_id IN ({placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    "DELETE FROM structure_sync_market_staging "
+                    f"WHERE window_id IN ({placeholders})",
+                    to_delete,
+                )
+                con.execute(
+                    "DELETE FROM structure_sync_windows "
+                    f"WHERE id IN ({placeholders}) AND status='failed'",
+                    to_delete,
+                )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
         return len(to_delete), to_delete
 
     def read_complete_structure_sync(self, window_id: object) -> tuple[list[dict], list[dict]]:

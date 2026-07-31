@@ -105,6 +105,15 @@ class PaginationIntegrityError(RuntimeError):
     """Raised when Gamma cannot prove that keyset pagination completed."""
 
 
+class PaginationCursorRejectedError(RuntimeError):
+    """Gamma rejected a non-empty durable keyset continuation."""
+
+    def __init__(self, source: str, status_code: int) -> None:
+        self.source = source
+        self.status_code = status_code
+        super().__init__(f"{source}-cursor-rejected-{status_code}")
+
+
 class GammaClient:
     """Async client for Polymarket's Gamma metadata REST API.
 
@@ -660,7 +669,21 @@ class GammaClient:
         request_params = {**params, "limit": str(limit)}
         if cursor is not None:
             request_params["after_cursor"] = cursor
-        payload = await self._get(path, request_params)
+        try:
+            payload = await self._get(path, request_params)
+        except _NonRetryableHTTPError as error:
+            cause = error.__cause__
+            status_code = (
+                cause.response.status_code
+                if isinstance(cause, httpx.HTTPStatusError)
+                else None
+            )
+            if cursor is not None and status_code in {400, 403}:
+                raise PaginationCursorRejectedError(
+                    array_key,
+                    status_code,
+                ) from error
+            raise
         if not isinstance(payload, dict) or not isinstance(payload.get(array_key), list):
             raise PaginationIntegrityError(f"{path} keyset response has invalid shape")
         page_fetched_at_ms = int(time.time() * 1_000)

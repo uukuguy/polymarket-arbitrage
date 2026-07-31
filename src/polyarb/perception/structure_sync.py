@@ -9,7 +9,15 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Protocol
 
-from polyarb.clients.gamma_client import EventPage, GammaClient, MarketPage, PaginationResult
+from loguru import logger
+
+from polyarb.clients.gamma_client import (
+    EventPage,
+    GammaClient,
+    MarketPage,
+    PaginationCursorRejectedError,
+    PaginationResult,
+)
 from polyarb.config import Settings
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -237,8 +245,36 @@ async def run_structure_sync_until_published(settings: Settings):
                 point_client=gamma,
             )
         worker = StructureSyncWorker(gamma=gamma, store=store)
+        cursor_restarts = 0
         while True:
-            batch = await worker.run_batch()
+            try:
+                batch = await worker.run_batch()
+            except PaginationCursorRejectedError as error:
+                if cursor_restarts >= 1:
+                    raise
+                active = store.get_latest_structure_sync()
+                if (
+                    active is None
+                    or active["status"] not in {"open", "events_complete"}
+                ):
+                    raise
+                restarted_at_ms = int(time.time() * 1_000)
+                successor = await asyncio.to_thread(
+                    store.restart_structure_sync_window,
+                    window_id=str(active["id"]),
+                    restarted_at_ms=restarted_at_ms,
+                    failure_reason=(
+                        f"cursor-rejected:{error.source}:{error.status_code}"
+                    ),
+                )
+                cursor_restarts += 1
+                logger.warning(
+                    "structure cursor rejected; rotated durable window "
+                    f"source={error.source} status_code={error.status_code} "
+                    f"failed_window_id={active['id']} "
+                    f"successor_window_id={successor['id']}"
+                )
+                continue
             if batch.stage == "markets" and batch.completed:
                 return await finalize_structure_window(
                     settings,
