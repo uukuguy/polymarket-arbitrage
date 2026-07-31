@@ -223,12 +223,12 @@ def test_candidate_controller_accepts_strictly_sub_boundary_high_burst() -> None
     )
 
 
-def test_fly_enables_worker_at_120_seconds() -> None:
+def test_fly_enables_worker_at_60_seconds() -> None:
     config = tomllib.loads(Path("fly.toml").read_text())
     env = config["env"]
 
     assert env["POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED"] == "true"
-    assert env["POLYARB_NEG_RISK_QUOTE_INTERVAL_S"] == "120"
+    assert env["POLYARB_NEG_RISK_QUOTE_INTERVAL_S"] == "60"
 
 
 def test_fly_refreshes_structure_within_the_quote_freshness_window() -> None:

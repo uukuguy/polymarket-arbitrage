@@ -1087,7 +1087,10 @@ def _build_health_body(
             "producerStallDetectionS": settings.producer_stall_detection_s,
         },
         "serviceId": "polyarb-l1",
-        "description": "Polymarket L1 observation daemon — Structure 5m + Quote 2m",
+        "description": (
+            "Polymarket L1 observation daemon — "
+            f"Structure 5m + Quote {settings.neg_risk_quote_interval_s}s"
+        ),
         "checks": checks,
     }
 
