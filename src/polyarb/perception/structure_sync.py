@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -109,8 +110,12 @@ class StagedGammaSource:
         *,
         point_client: ReconciliationGamma | None = None,
     ) -> None:
-        self._events = events
-        self._markets = markets
+        self._events = deque(events)
+        self._markets = deque(markets)
+        self._event_count = len(self._events)
+        self._market_count = len(self._markets)
+        events.clear()
+        markets.clear()
         self._point_client = point_client
 
     async def __aenter__(self) -> StagedGammaSource:
@@ -120,14 +125,14 @@ class StagedGammaSource:
         return None
 
     async def iter_active_events(self, coverage):
-        for event in self._events:
-            yield event
-        coverage.result = PaginationResult(len(self._events), 1, True, None)
+        while self._events:
+            yield self._events.popleft()
+        coverage.result = PaginationResult(self._event_count, 1, True, None)
 
     async def iter_active_markets(self, coverage):
-        for market in self._markets:
-            yield market
-        coverage.result = PaginationResult(len(self._markets), 1, True, None)
+        while self._markets:
+            yield self._markets.popleft()
+        coverage.result = PaginationResult(self._market_count, 1, True, None)
 
     async def fetch_market_states(self, market_ids: list[str]):
         if self._point_client is None:

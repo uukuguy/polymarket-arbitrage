@@ -7,6 +7,7 @@ import pytest
 
 from polyarb.clients.gamma_client import EventPage, MarketPage
 from polyarb.perception.structure_sync import (
+    StagedGammaSource,
     StructureSyncWorker,
     finalize_structure_window,
     run_structure_sync_until_published,
@@ -111,6 +112,24 @@ async def test_structure_worker_emits_scheduler_stage_before_remote_page_fetch(
     stderr = capsys.readouterr().err
     assert "snapshot-stage stage=gamma-events state=start elapsed_ms=0" in stderr
     assert "snapshot-stage stage=gamma-events state=complete elapsed_ms=" in stderr
+
+
+async def test_staged_source_releases_raw_rows_as_stream_consumes_them() -> None:
+    events = [{"id": "event-1"}, {"id": "event-2"}]
+    markets = [{"id": "market-1"}, {"id": "market-2"}]
+    source = StagedGammaSource(events, markets)
+
+    assert events == []
+    assert markets == []
+    assert len(source._events) == 2
+    assert len(source._markets) == 2
+
+    event_stream = source.iter_active_events(SimpleNamespace(result=None))
+    market_stream = source.iter_active_markets(SimpleNamespace(result=None))
+    assert await anext(event_stream) == {"id": "event-1"}
+    assert await anext(market_stream) == {"id": "market-1"}
+    assert len(source._events) == 1
+    assert len(source._markets) == 1
 
 
 def test_incomplete_structure_window_cannot_be_read_for_publication(tmp_path) -> None:
