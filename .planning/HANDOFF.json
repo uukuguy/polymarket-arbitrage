@@ -1,98 +1,74 @@
 {
   "version": "1.0",
-  "timestamp": "2026-07-29T13:12:22.670Z",
-  "phase": "m1-perception-task-8",
-  "phase_name": "production fault qualification and cutover",
-  "phase_dir": "docs/superpowers/plans/2026-07-28-m1-opportunity-first-rollout.md",
-  "plan": 1,
-  "task": 5,
-  "total_tasks": 7,
+  "timestamp": "2026-07-31T03:03:25.210Z",
+  "phase": "m1-perception-scoped-upstream-fault-control",
+  "phase_name": "local implementation integrated; production qualification awaits authorization",
+  "phase_dir": "docs/superpowers/plans/2026-07-30-scoped-upstream-fault-control.md",
+  "plan": 8,
+  "task": 8,
+  "total_tasks": 8,
   "status": "paused",
   "completed_tasks": [
     {
       "id": 1,
-      "name": "deterministic local and read-only production qualification",
+      "name": "scoped upstream fault-control implementation and local qualification",
       "status": "done",
-      "commit": "073abd2"
+      "commit": "6305ff9"
     },
     {
       "id": 2,
-      "name": "fault matrix and image-aware producer primitives",
+      "name": "whole-plan remediation and dual review",
       "status": "done",
-      "commit": "43a0087"
+      "commit": "5baccf2"
     },
     {
       "id": 3,
-      "name": "Candidate, Discovery, and Reconciliation producer recovery adapters",
+      "name": "local main integration, merge verification, and worktree closure",
       "status": "done",
-      "commit": "a820e97"
-    },
-    {
-      "id": 4,
-      "name": "all 16 runtime fault evidence chains",
-      "status": "done",
-      "commit": "1147379"
-    },
-    {
-      "id": 5,
-      "name": "remaining production fault adapters",
-      "status": "in_progress",
-      "progress": "Adapter families audited; scoped upstream proxy contract is next. Thirteen adapters remain disabled and fail closed."
+      "commit": "d245919"
     }
   ],
   "remaining_tasks": [
     {
-      "id": 5,
-      "name": "implement scoped Gamma/CLOB/Telegram, host/store, and runtime/deploy adapters with atomic cleanup",
-      "status": "in_progress"
-    },
-    {
-      "id": 6,
-      "name": "run full local and read-only qualification and write Task 8 handoff evidence",
-      "status": "not_started"
-    },
-    {
-      "id": 7,
-      "name": "after exact authorization deploy, inject one production fault at a time, and collect the continuous window",
-      "status": "not_started"
+      "id": 4,
+      "name": "separately authorized production qualification for one exact deployed release and fresh evidence directory",
+      "status": "blocked"
     }
   ],
   "blockers": [
     {
-      "description": "Production deployment, feature flags, fault injection, and cutover require separate exact-SHA and fault-specific authorization.",
+      "description": "Production qualification requires an exact deployed release, a fresh authorized evidence directory, and separate authorization for any fault mutation.",
       "type": "human_action",
-      "workaround": "Continue all local adapter implementation and observer-only verification without production mutation."
+      "workaround": "Continue local/read-only planning only; do not invoke cloud or production qualification targets."
     }
   ],
   "human_actions_pending": [
     {
-      "action": "Authorize each exact production deployment/fault only after its local adapter, cleanup, and evidence contract passes.",
-      "context": "Runtime evidence support does not authorize cloud mutation.",
+      "action": "Provide exact production qualification scope: deployed release identity, new evidence directory, and whether read-only collection is authorized.",
+      "context": "The project has no authorized production qualification evidence in this handoff.",
       "blocking": true
     }
   ],
   "decisions": [
     {
-      "decision": "Keep upstream API faults behind one scoped authenticated proxy contract, but keep disk filler, host load, daemon restart, and deploy interrupt as separate primitives.",
-      "rationale": "Their cleanup and runtime identity effects differ, so one generic mutation function would make evidence non-attributable.",
-      "phase": "m1-perception-task-8"
+      "decision": "The feature branch was locally merged into main and its owned worktree removed.",
+      "rationale": "A worktree is not complete until implementation, review, merged-result verification, user-state preservation, and cleanup form one closed loop.",
+      "phase": "m1-perception-scoped-upstream-fault-control"
     },
     {
-      "decision": "Use exact component recovery writers rather than logs or process liveness.",
-      "rationale": "Qualification requires business recovery: Candidate receipt, Discovery batch, Reconciliation checkpoint, healthy Resource decision, exact outbox delivery, or release-bound HTTP probe.",
-      "phase": "m1-perception-task-8"
-    },
-    {
-      "decision": "Preserve legacy Resource v1 history with additive optional host sensor fields and decision-persisted thresholds.",
-      "rationale": "Existing authenticated history must replay without rewriting hashes.",
-      "phase": "m1-perception-task-8"
+      "decision": "Local qualification is evidence of local consistency only, never production qualification.",
+      "rationale": "No exact deployed release or fresh production evidence scope has been authorized.",
+      "phase": "m1-perception-scoped-upstream-fault-control"
     }
   ],
   "uncommitted_files": [
+    ".superpowers/sdd/progress.md",
+    ".superpowers/sdd/task-2-report.md",
+    ".superpowers/sdd/task-7-brief.md",
     "findings.md",
     "progress.md",
     "task_plan.md"
   ],
-  "next_action": "Run `make planning-status`, read SESSION 119 and the Task 8 runbook, then write the scoped upstream fault proxy design critique before any adapter code.",
-  "context_notes": "Worktree: /Users/sujiangwen/sandbox/hacker2026/PolyMarket/polymarket-arbitrage/.worktrees/l3-continuity-repair; branch: fix/l3-continuity-repair; HEAD before handoff: a5aa19e. No server or background process is running. Production and all trading state were untouched. Report every task completion/failure promptly and do not silently run long gates."
+  "next_action": "Run /gsd-resume-work --ws m1-perception, read JOURNAL Sessions 121-122, then run make planning-status before selecting the next local work item. Do not run production qualification without exact authorization.",
+  "context_notes": "Current branch is main at d245919 before this handoff commit. The l3-continuity-repair worktree and branch no longer exist. No server, watcher, or cloud operation is running."
 }
