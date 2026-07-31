@@ -49,15 +49,15 @@ primary_region = "ams"
     path = "/healthz"
     timeout = "10s"
 
-# Capacity baseline — retain the currently provisioned 1GB app VM while the
-# Structure-only release is measured in production. The prior all-in-one CLOB
-# snapshot repeatedly exhausted this cgroup; Archive is no longer a reason to
-# resize the online path. Any future 4/8GB choice must be based on measured
-# Structure+Quote headroom, not on making Archive fit here.
+# Capacity baseline — production evidence on 2026-07-31 showed the single
+# shared vCPU could starve /healthz and even the parent's subprocess timeout
+# while Structure finalized 118k markets. Two shared vCPUs keep HTTP/timeout
+# control runnable alongside the low-priority child; memory remains at the
+# measured 1GB cgroup because the streaming finalizer removed the OOM peak.
 #
 # Cron stays 256MB because it only runs Polywatch and has no /data volume.
 [[vm]]
-  size = "shared-cpu-1x"
+  size = "shared-cpu-2x"
   memory = "1024mb"
   processes = ["app"]
 
