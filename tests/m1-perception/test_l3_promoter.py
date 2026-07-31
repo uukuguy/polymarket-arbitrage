@@ -323,11 +323,12 @@ def test_runtime_database_numeric_rows_are_sqlite_compatible() -> None:
 
     from polyarb.observation import l3_promote
 
+    observed_at = datetime.now(UTC)
     db_path = l3_promote._build_tob_temp_db(
         [
             {
                 "asset_id": "decimal-asset",
-                "ts": datetime.now(UTC),
+                "ts": observed_at,
                 "best_bid": Decimal("0.50"),
                 "best_ask": Decimal("0.51"),
                 "spread": Decimal("0.01"),
@@ -340,9 +341,9 @@ def test_runtime_database_numeric_rows_are_sqlite_compatible() -> None:
     try:
         with sqlite3.connect(db_path) as connection:
             row = connection.execute(
-                "SELECT best_bid,depth_yes_usd FROM markets"
+                "SELECT ts,best_bid,depth_yes_usd FROM markets"
             ).fetchone()
-        assert row == (0.5, 1000.0)
+        assert row == (int(observed_at.timestamp() * 1000), 0.5, 1000.0)
     finally:
         os.unlink(db_path)
 

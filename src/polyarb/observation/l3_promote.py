@@ -254,6 +254,9 @@ def _iso_to_epoch_ms(ts_val: Any) -> int | None:
         return None
     if isinstance(ts_val, bool):  # bool is subclass of int — reject
         return None
+    if isinstance(ts_val, datetime):
+        dt = ts_val if ts_val.tzinfo is not None else ts_val.replace(tzinfo=UTC)
+        return int(dt.timestamp() * 1000)
     if isinstance(ts_val, (int, float)):
         return int(ts_val) if ts_val > 1e12 else int(ts_val * 1000)
     if isinstance(ts_val, str):
