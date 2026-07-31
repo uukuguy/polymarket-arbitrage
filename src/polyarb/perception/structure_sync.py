@@ -145,6 +145,50 @@ class StagedGammaSource:
         return await self._point_client.fetch_market_parent_states(market_groups)
 
 
+class SQLiteStagedGammaSource:
+    """Stream one completed Structure window directly from durable staging."""
+
+    def __init__(
+        self,
+        store: SQLiteStore,
+        window_id: str,
+        *,
+        point_client: ReconciliationGamma | None = None,
+    ) -> None:
+        self._store = store
+        self._window_id = window_id
+        self._event_count, self._market_count = (
+            store.get_complete_structure_sync_counts(window_id)
+        )
+        self._point_client = point_client
+
+    async def __aenter__(self) -> SQLiteStagedGammaSource:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def iter_active_events(self, coverage):
+        for event in self._store.iter_complete_structure_events(self._window_id):
+            yield event
+        coverage.result = PaginationResult(self._event_count, 1, True, None)
+
+    async def iter_active_markets(self, coverage):
+        for market in self._store.iter_complete_structure_markets(self._window_id):
+            yield market
+        coverage.result = PaginationResult(self._market_count, 1, True, None)
+
+    async def fetch_market_states(self, market_ids: list[str]):
+        if self._point_client is None:
+            raise RuntimeError(f"staged-structure-member-missing:{len(market_ids)}")
+        return await self._point_client.fetch_market_states(market_ids)
+
+    async def fetch_market_parent_states(self, market_groups: dict[str, str]):
+        if self._point_client is None:
+            raise RuntimeError(f"staged-structure-parent-missing:{len(market_groups)}")
+        return await self._point_client.fetch_market_parent_states(market_groups)
+
+
 async def finalize_structure_window(
     settings: Settings,
     window_id: str,
@@ -157,16 +201,16 @@ async def finalize_structure_window(
 
     store = SQLiteStore(settings.db_path)
     store.init_structure_sync_schema()
-    events, markets = await asyncio.to_thread(
-        store.read_complete_structure_sync,
-        window_id,
-    )
     result = await run_snapshot(
         settings,
         mode="full",
         product="structure",
         now_ms=now_ms,
-        gamma_client=StagedGammaSource(events, markets, point_client=point_client),
+        gamma_client=SQLiteStagedGammaSource(
+            store,
+            window_id,
+            point_client=point_client,
+        ),
         schema_ready=True,
     )
     if result.is_valid:

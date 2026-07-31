@@ -1084,6 +1084,79 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def get_complete_structure_sync_counts(
+        self, window_id: object
+    ) -> tuple[int, int]:
+        """Validate a completed window and return its staged row counts."""
+        if not isinstance(window_id, str) or not window_id:
+            raise ValueError("invalid-structure-sync-window")
+        con = sqlite3.connect(self._db_path)
+        try:
+            row = con.execute(
+                "SELECT status FROM structure_sync_windows WHERE id=?", (window_id,)
+            ).fetchone()
+            if row is None or row[0] != "complete":
+                raise ValueError("structure-sync-window-not-complete")
+            event_count = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM structure_sync_event_staging "
+                    "WHERE window_id=?",
+                    (window_id,),
+                ).fetchone()[0]
+            )
+            market_count = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM structure_sync_market_staging "
+                    "WHERE window_id=?",
+                    (window_id,),
+                ).fetchone()[0]
+            )
+            return event_count, market_count
+        finally:
+            con.close()
+
+    def iter_complete_structure_events(self, window_id: str):
+        """Stream completed event payloads without materializing the window."""
+        yield from self._iter_complete_structure_payloads(
+            window_id,
+            table="structure_sync_event_staging",
+            id_column="event_id",
+        )
+
+    def iter_complete_structure_markets(self, window_id: str):
+        """Stream completed market payloads without materializing the window."""
+        yield from self._iter_complete_structure_payloads(
+            window_id,
+            table="structure_sync_market_staging",
+            id_column="market_id",
+        )
+
+    def _iter_complete_structure_payloads(
+        self,
+        window_id: object,
+        *,
+        table: str,
+        id_column: str,
+    ):
+        if not isinstance(window_id, str) or not window_id:
+            raise ValueError("invalid-structure-sync-window")
+        con = sqlite3.connect(self._db_path)
+        try:
+            row = con.execute(
+                "SELECT status FROM structure_sync_windows WHERE id=?", (window_id,)
+            ).fetchone()
+            if row is None or row[0] != "complete":
+                raise ValueError("structure-sync-window-not-complete")
+            cursor = con.execute(
+                f"SELECT payload_json FROM {table} "  # noqa: S608 - internal constants
+                f"WHERE window_id=? ORDER BY {id_column}",
+                (window_id,),
+            )
+            for payload_row in cursor:
+                yield json.loads(str(payload_row[0]))
+        finally:
+            con.close()
+
     @staticmethod
     def _structure_sync_window_row(row: tuple[object, ...]) -> dict[str, object]:
         keys = (

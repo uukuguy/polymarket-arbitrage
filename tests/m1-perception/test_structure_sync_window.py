@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from polyarb.clients.gamma_client import EventPage, MarketPage
+from polyarb.perception import structure_sync as structure_sync_module
 from polyarb.perception.structure_sync import (
     StagedGammaSource,
     StructureSyncWorker,
@@ -132,6 +133,41 @@ async def test_staged_source_releases_raw_rows_as_stream_consumes_them() -> None
     assert len(source._markets) == 1
 
 
+async def test_completed_window_can_stream_rows_directly_from_sqlite(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[{"id": "event-1"}, {"id": "event-2"}],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[{"id": "market-1"}, {"id": "market-2"}],
+        finished_at_ms=300,
+    )
+    source_type = getattr(structure_sync_module, "SQLiteStagedGammaSource", None)
+    assert source_type is not None, "SQLite-backed staged source is missing"
+    source = source_type(store, window["id"])
+    event_coverage = SimpleNamespace(result=None)
+    market_coverage = SimpleNamespace(result=None)
+
+    events = [row async for row in source.iter_active_events(event_coverage)]
+    markets = [row async for row in source.iter_active_markets(market_coverage)]
+
+    assert events == [{"id": "event-1"}, {"id": "event-2"}]
+    assert markets == [{"id": "market-1"}, {"id": "market-2"}]
+    assert event_coverage.result.items_yielded == 2
+    assert market_coverage.result.items_yielded == 2
+
+
 def test_incomplete_structure_window_cannot_be_read_for_publication(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()
@@ -209,6 +245,11 @@ async def test_structure_finalizer_reuses_daemon_initialized_schema(
             SQLiteStore,
             "init_schema",
             side_effect=AssertionError("full schema migration in finalizer"),
+        ),
+        patch.object(
+            SQLiteStore,
+            "read_complete_structure_sync",
+            side_effect=AssertionError("completed window materialized in memory"),
         ),
         patch("polyarb.snapshot.orchestrator.run_snapshot", new=run_snapshot),
     ):
