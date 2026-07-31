@@ -354,6 +354,51 @@ async def test_candidate_market_fallback_reads_runtime_authorized_projection(
     assert connection.closed
 
 
+async def test_promoter_fallback_reads_latest_rows_and_token_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    at = datetime.now(UTC)
+    tob_rows = [
+        {
+            "asset_id": "yes-1",
+            "ts": at,
+            "best_bid": 0.4,
+            "best_ask": 0.5,
+            "spread": 0.1,
+            "mid_price": 0.45,
+            "depth_yes_usd": 1000,
+            "depth_no_usd": 900,
+        }
+    ]
+    mapping_rows = [
+        {
+            "market_id": "market-1",
+            "yes_token_id": "yes-1",
+            "no_token_id": "no-1",
+        }
+    ]
+    connection = _FakeConnection()
+    connection.fetch = AsyncMock(side_effect=[tob_rows, mapping_rows])
+    monkeypatch.setattr(
+        store_module.asyncpg,
+        "connect",
+        AsyncMock(return_value=connection),
+    )
+
+    rows, mapping = await L3EvidenceStore(
+        "postgresql://runtime-secret"
+    ).fetch_promoter_inputs(["yes-1"])
+
+    assert rows == tob_rows
+    assert mapping == {"yes-1": ("market-1", "yes-1", "no-1")}
+    assert connection.fetch.await_count == 2
+    tob_sql = connection.fetch.await_args_list[0].args[0]
+    assert "LEFT JOIN LATERAL" in tob_sql
+    assert "ORDER BY ts DESC" in tob_sql
+    assert "LIMIT 1" in tob_sql
+    assert connection.closed
+
+
 def _soak_lock_row(
     boot_id: UUID,
     *,

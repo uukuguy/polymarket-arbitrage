@@ -904,6 +904,7 @@ async def _promote_run_impl(
         return await finish(early(PromoteStatus.FROZEN, "create_client_failed"))
 
     prior_market_token_map = staged_market_token_map or {}
+    direct_token_map: dict[str, _TokenIdentity] = {}
     if locked_proposal is not None:
         accepted_markets, desired, mapping = locked_proposal
         token_map = prior_market_token_map
@@ -926,7 +927,22 @@ async def _promote_run_impl(
                 if callable(candidate_snapshot)
                 else []
             )
-            if candidate_assets:
+            if candidate_assets and evidence_store is not None:
+                try:
+                    tob_rows, direct_token_map = await evidence_store.fetch_promoter_inputs(
+                        candidate_assets,
+                    )
+                    staged_tob_rows = tob_rows
+                    logger.info(
+                        "l3-promote: recovered through runtime database "
+                        f"assets={len(candidate_assets)} rows={len(tob_rows)}"
+                    )
+                except Exception as direct_exc:  # noqa: BLE001 - try REST scope below
+                    logger.warning(
+                        "l3-promote: runtime database fallback failed "
+                        f"type={type(direct_exc).__name__}"
+                    )
+            if candidate_assets and not staged_tob_rows:
                 try:
                     tob_rows = await _postgrest_read_with_retry(
                         _fetch_latest_tob_rows_from_supabase,
@@ -955,10 +971,8 @@ async def _promote_run_impl(
             }
         )
         try:
-            token_map = await _postgrest_read_with_retry(
-                _fetch_market_token_map,
-                client,
-                recent_asset_ids,
+            token_map = direct_token_map or await _postgrest_read_with_retry(
+                _fetch_market_token_map, client, recent_asset_ids
             )
             if not token_map:
                 return await finish(early(PromoteStatus.FROZEN, "empty_token_map"))

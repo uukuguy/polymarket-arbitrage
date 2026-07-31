@@ -901,6 +901,73 @@ class L3EvidenceStore:
                     _report_failure("fetch_candidate_markets_latest_close", error)
                     raise L3EvidenceReadError("candidate markets_latest read failed") from None
 
+    async def fetch_promoter_inputs(
+        self,
+        asset_ids: list[str],
+    ) -> tuple[list[dict[str, Any]], dict[str, tuple[str, str, str]]]:
+        """Read latest candidate books and Yes/No identity with bounded probes."""
+        normalized = sorted(set(asset_ids))
+        if not normalized:
+            return [], {}
+        connection: asyncpg.Connection | None = None
+        try:
+            connection = await asyncpg.connect(dsn=self._dsn)
+            await _require_evidence_daemon(connection)
+            tob_rows = await connection.fetch(
+                """
+                WITH requested AS (
+                    SELECT unnest($1::text[]) AS asset_id
+                )
+                SELECT latest.asset_id, latest.ts, latest.best_bid,
+                       latest.best_ask, latest.spread, latest.mid_price,
+                       latest.depth_yes_usd, latest.depth_no_usd
+                FROM requested
+                LEFT JOIN LATERAL (
+                    SELECT asset_id, ts, best_bid, best_ask, spread,
+                           mid_price, depth_yes_usd, depth_no_usd
+                    FROM l2_top_of_book
+                    WHERE asset_id=requested.asset_id
+                    ORDER BY ts DESC
+                    LIMIT 1
+                ) AS latest ON true
+                WHERE latest.ts >= now() - interval '1 hour'
+                ORDER BY latest.ts DESC
+                """,
+                normalized,
+            )
+            mapping_rows = await connection.fetch(
+                """
+                SELECT market_id, yes_token_id, no_token_id
+                FROM markets_latest
+                WHERE yes_token_id=ANY($1::text[])
+                """,
+                normalized,
+            )
+            mapping = {
+                str(row["yes_token_id"]): (
+                    str(row["market_id"]),
+                    str(row["yes_token_id"]),
+                    str(row["no_token_id"]),
+                )
+                for row in mapping_rows
+                if row["market_id"] and row["yes_token_id"] and row["no_token_id"]
+            }
+            return [dict(row) for row in tob_rows], mapping
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - typed, bounded read boundary
+            _report_failure("fetch_promoter_inputs", error)
+            raise L3EvidenceReadError("l3 promoter input read failed") from None
+        finally:
+            if connection is not None:
+                try:
+                    await connection.close()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001
+                    _report_failure("fetch_promoter_inputs_close", error)
+                    raise L3EvidenceReadError("l3 promoter input read failed") from None
+
     async def fetch_active_soak_mapping_lock(
         self,
         *,

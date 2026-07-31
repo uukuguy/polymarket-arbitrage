@@ -1607,6 +1607,52 @@ async def test_promoter_recovers_with_candidate_scoped_tob_read() -> None:
 
 
 @pytest.mark.asyncio
+async def test_promoter_recovers_with_runtime_database_inputs() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    consumer = _truthful_consumer()
+    tob_rows, token_rows = _five_market_inputs("direct-retry")
+    token_map = {
+        row["yes_token_id"]: (
+            f"market-direct-retry-{index}",
+            row["yes_token_id"],
+            row["no_token_id"],
+        )
+        for index, row in enumerate(token_rows)
+    }
+    store.fetch_promoter_inputs = AsyncMock(return_value=(tob_rows, token_map))
+    consumer.candidate_assets_snapshot = MagicMock(
+        return_value=frozenset(row["asset_id"] for row in tob_rows)
+    )
+    client = _make_supabase_client_mock(tob_rows, token_rows)
+
+    with (
+        patch.object(l3_promote, "create_client", return_value=client),
+        patch.object(
+            l3_promote,
+            "_fetch_latest_tob_rows_from_supabase",
+            side_effect=TimeoutError,
+        ) as fetch,
+        patch.object(l3_promote.asyncio, "sleep", new=AsyncMock()),
+    ):
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            run_seq=23,
+        )
+
+    assert result.status.value == "success"
+    assert fetch.call_count == 3
+    store.fetch_promoter_inputs.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case", "expected_status", "expected_reason"),
     [
