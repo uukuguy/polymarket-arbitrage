@@ -46,6 +46,7 @@ from polyarb.routing.opportunity_scanner import (
 SendTelegram = Callable[[Settings, str], Awaitable[None]]
 ClockMs = Callable[[], int]
 WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
+DeliverySleep = Callable[[float], Awaitable[None]]
 
 _OBSERVER_WARNING = "仅观察，未扣手续费、滑点和多腿成交风险"
 _TELEGRAM_CARD_LIMIT = 4_000
@@ -77,7 +78,17 @@ class OpportunityWatcher:
         wait_for_stop: WaitForStop | None = None,
         focused_interval_s: float = 15.0,
         fault_runtime: FaultRuntimeProtocol | None = None,
+        notification_batch_limit: int = 100,
+        notification_min_interval_s: float = 0.0,
+        delivery_sleep: DeliverySleep = asyncio.sleep,
     ) -> None:
+        if (
+            isinstance(notification_batch_limit, bool)
+            or notification_batch_limit <= 0
+        ):
+            raise ValueError("notification_batch_limit must be positive")
+        if notification_min_interval_s < 0:
+            raise ValueError("notification_min_interval_s must be non-negative")
         self._settings = settings
         self._ledger = ledger or OpportunityLedger(settings.db_path)
         self._send_telegram = send_telegram
@@ -87,6 +98,9 @@ class OpportunityWatcher:
         self._wait_for_stop = wait_for_stop or _wait_for_stop
         self._focused_interval_s = focused_interval_s
         self._fault_runtime = fault_runtime or PassThroughFaultRuntime()
+        self._notification_batch_limit = notification_batch_limit
+        self._notification_min_interval_s = notification_min_interval_s
+        self._delivery_sleep = delivery_sleep
         self._telegram_fault = TelegramDeliveryFault(runtime=self._fault_runtime)
         self._reconciliation_count = 0
         self._last_reconciled_at_ms: int | None = None
@@ -111,6 +125,9 @@ class OpportunityWatcher:
         wait_for_stop: WaitForStop | None = None,
         focused_interval_s: float = 15.0,
         fault_runtime: FaultRuntimeProtocol | None = None,
+        notification_batch_limit: int = 100,
+        notification_min_interval_s: float = 0.0,
+        delivery_sleep: DeliverySleep = asyncio.sleep,
     ) -> OpportunityWatcher:
         """Construct with explicit durable and transport seams for unit tests."""
         return cls(
@@ -123,6 +140,9 @@ class OpportunityWatcher:
             wait_for_stop=wait_for_stop,
             focused_interval_s=focused_interval_s,
             fault_runtime=fault_runtime,
+            notification_batch_limit=notification_batch_limit,
+            notification_min_interval_s=notification_min_interval_s,
+            delivery_sleep=delivery_sleep,
         )
 
     async def run(self, stop_event: asyncio.Event) -> None:
@@ -224,8 +244,11 @@ class OpportunityWatcher:
         notifications = await asyncio.to_thread(
             self._ledger.pending_notifications,
             now_ms=self._clock_ms(),
+            limit=self._notification_batch_limit,
         )
-        for notification in notifications:
+        for index, notification in enumerate(notifications):
+            if index and self._notification_min_interval_s:
+                await self._delivery_sleep(self._notification_min_interval_s)
             try:
                 await self._telegram_fault.before_send(notification.id)
                 await self._send_telegram(
@@ -540,4 +563,6 @@ def build_focused_opportunity_watcher(
         membership_reader=SqliteStructureMembershipReader(settings.db_path),
         focused_interval_s=settings.neg_risk_focused_interval_s,
         fault_runtime=fault_runtime,
+        notification_batch_limit=20,
+        notification_min_interval_s=1.1,
     )

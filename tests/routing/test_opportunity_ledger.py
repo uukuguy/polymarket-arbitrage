@@ -112,6 +112,34 @@ def test_material_edge_change_enqueues_one_follow_up_notification(tmp_path) -> N
     ]
 
 
+def test_pending_notifications_respects_delivery_batch_limit(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    ledger = OpportunityLedger(db_path)
+    ledger.reconcile_global(_observe_assessment(), observed_at_ms=NOW_MS)
+    ledger.reconcile_global(
+        replace(_observe_assessment(), gross_edge_bps=325.0, quote_run_id=43),
+        observed_at_ms=NOW_MS + 1,
+    )
+    ledger.reconcile_global(
+        replace(
+            _observe_assessment(),
+            status="no-edge",
+            gross_edge_bps=-100.0,
+            bundle_cost=1.01,
+            quote_run_id=44,
+        ),
+        observed_at_ms=NOW_MS + 2,
+    )
+
+    pending = ledger.pending_notifications(now_ms=NOW_MS + 2, limit=2)
+
+    assert [item.reason for item in pending] == [
+        "entered-gross-edge-threshold",
+        "edge-changed",
+    ]
+
+
 def test_notification_delivery_is_audited_without_changing_market_fact(tmp_path) -> None:
     db_path = tmp_path / "state.db"
     SQLiteStore(db_path).init_schema()

@@ -36,6 +36,7 @@ PrepareOpportunities = Callable[
     Awaitable[OpportunityScanResult],
 ]
 ReconcileGlobalProjection = Callable[[CompleteQuoteProjection], Awaitable[None]]
+CleanupOldRuns = Callable[[], Awaitable[int]]
 WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
 ReleaseProjectionMemory = Callable[[], None]
 
@@ -406,6 +407,7 @@ class QuoteWorker:
         reconcile_global_projection: ReconcileGlobalProjection | None = None,
         restore_feed: RestoreFeed | None = None,
         cleanup_collecting_runs: CleanupCollectingRuns | None = None,
+        cleanup_old_runs: CleanupOldRuns | None = None,
         interval_s: float,
         runtime: QuoteWorkerRuntime | None = None,
         wait_for_stop: WaitForStop = _wait_for_stop,
@@ -422,6 +424,7 @@ class QuoteWorker:
         self._reconcile_global_projection = reconcile_global_projection
         self._restore_feed = restore_feed
         self._cleanup_collecting_runs = cleanup_collecting_runs
+        self._cleanup_old_runs = cleanup_old_runs
         self._interval_s = interval_s
         self._wait_for_stop = wait_for_stop
         self._monotonic = monotonic
@@ -540,6 +543,18 @@ class QuoteWorker:
                                 certified_projection,
                                 certified_opportunities,
                             )
+                        if self._cleanup_old_runs is not None:
+                            try:
+                                deleted_runs = await self._cleanup_old_runs()
+                                logger.info(
+                                    "old neg-risk quote runs purged "
+                                    f"count={deleted_runs}"
+                                )
+                            except Exception as error:
+                                logger.warning(
+                                    "old neg-risk quote run cleanup failed "
+                                    f"kind={type(error).__name__}"
+                                )
                         if self._reconcile_global_projection is not None:
                             try:
                                 await self._reconcile_global_projection(
@@ -661,6 +676,13 @@ def build_production_quote_worker(
             failure_reason="collector-cancelled",
         )
 
+    async def cleanup_old_runs() -> int:
+        return await asyncio.to_thread(
+            quote_store.purge_old_runs,
+            keep_last_per_status=10,
+            max_runs=20,
+        )
+
     async def reconcile_global_projection(
         projection: CompleteQuoteProjection,
     ) -> None:
@@ -673,5 +695,6 @@ def build_production_quote_worker(
         reconcile_global_projection=reconcile_global_projection,
         restore_feed=restore_feed,
         cleanup_collecting_runs=cleanup_collecting_runs,
+        cleanup_old_runs=cleanup_old_runs,
         interval_s=settings.neg_risk_quote_interval_s,
     )

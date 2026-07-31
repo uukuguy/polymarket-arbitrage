@@ -448,6 +448,69 @@ async def test_worker_releases_full_projection_before_interval_wait() -> None:
     assert release_calls == 1
 
 
+async def test_worker_purges_old_runs_after_feed_publication() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    projection = _ProjectionFixture(run_id=7)
+    events: list[str] = []
+
+    async def collect_once() -> QuoteCollectionResult:
+        return _result(7)
+
+    async def certify_projection(_result: QuoteCollectionResult):
+        return projection
+
+    async def cleanup_old_runs() -> int:
+        assert worker.runtime.certified_projection() is not None
+        events.append("cleanup")
+        return 20
+
+    async def reconcile_global_projection(_projection) -> None:
+        events.append("reconcile")
+
+    async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        certify_projection=certify_projection,
+        cleanup_old_runs=cleanup_old_runs,
+        reconcile_global_projection=reconcile_global_projection,
+        interval_s=120,
+        wait_for_stop=stop_after_once,
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert events == ["cleanup", "reconcile"]
+    assert worker.runtime.snapshot().success_count == 1
+
+
+async def test_quote_history_cleanup_failure_does_not_unpublish_fresh_feed() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    projection = _ProjectionFixture(run_id=7)
+
+    async def cleanup_old_runs() -> int:
+        raise OSError("cleanup unavailable")
+
+    async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=lambda: asyncio.sleep(0, result=_result(7)),
+        certify_projection=lambda _result: asyncio.sleep(0, result=projection),
+        cleanup_old_runs=cleanup_old_runs,
+        interval_s=120,
+        wait_for_stop=stop_after_once,
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert worker.runtime.certified_projection() is not None
+    assert worker.runtime.snapshot().success_count == 1
+
+
 def test_projection_memory_release_runs_gc_then_linux_malloc_trim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

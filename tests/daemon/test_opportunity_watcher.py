@@ -24,6 +24,7 @@ from polyarb.routing.neg_risk_quote_store import (
     VerifiedQuoteUniverse,
 )
 from polyarb.routing.opportunity_ledger import OpportunityLedger
+from polyarb.routing.opportunity_scanner import GroupAssessment, OpportunityLeg
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -72,6 +73,26 @@ def _projection(*, run_id: int = 1, first_ask: float = 0.45) -> CompleteQuotePro
         ),
         universe_hash="universe-1",
         source_truth_hash="truth-1",
+    )
+
+
+def _observe_assessment_fixture() -> GroupAssessment:
+    return GroupAssessment(
+        group_id="group-1",
+        event_id="event-1",
+        membership_hash="membership-1",
+        status="observe",
+        reason=None,
+        bundle_cost=0.97,
+        gross_edge_bps=300.0,
+        max_bundle_size=42.0,
+        legs=(
+            OpportunityLeg("market-1", "condition-1", "alpha", "token-1", 0.45, 42.0),
+            OpportunityLeg("market-2", "condition-2", "beta", "token-2", 0.52, 40.0),
+        ),
+        structure_revision=10,
+        quote_run_id=42,
+        quoted_at_ms=int(time.time() * 1000),
     )
 
 
@@ -177,6 +198,54 @@ async def test_telegram_retry_closes_exact_notification_incident(
         "delivered",
     ]
     assert OpportunityPerceptionStore(settings.db_path).open_incidents() == ()
+
+
+async def test_delivery_batch_is_bounded_and_paced(
+    settings: Settings,
+    ledger: OpportunityLedger,
+) -> None:
+    from polyarb.daemon.opportunity_watcher import OpportunityWatcher
+
+    now_ms = int(time.time() * 1000)
+    ledger.reconcile_global(
+        _observe_assessment_fixture(),
+        observed_at_ms=now_ms,
+    )
+    ledger.reconcile_global(
+        replace(_observe_assessment_fixture(), gross_edge_bps=325.0, quote_run_id=43),
+        observed_at_ms=now_ms + 1,
+    )
+    ledger.reconcile_global(
+        replace(
+            _observe_assessment_fixture(),
+            status="no-edge",
+            bundle_cost=1.01,
+            gross_edge_bps=-100.0,
+            quote_run_id=44,
+        ),
+        observed_at_ms=now_ms + 2,
+    )
+    delays: list[float] = []
+
+    async def delivery_sleep(delay_s: float) -> None:
+        delays.append(delay_s)
+
+    send_telegram = AsyncMock()
+    watcher = OpportunityWatcher.for_test(
+        settings,
+        ledger=ledger,
+        send_telegram=send_telegram,
+        clock_ms=lambda: now_ms + 2,
+        notification_batch_limit=2,
+        notification_min_interval_s=1.1,
+        delivery_sleep=delivery_sleep,
+    )
+
+    await watcher.deliver_pending_notifications()
+
+    assert send_telegram.await_count == 2
+    assert delays == [1.1]
+    assert len(ledger.pending_notifications(now_ms=now_ms + 2)) == 1
 
 
 async def test_opportunity_alert_without_telegram_configuration_stays_retryable(
@@ -490,7 +559,12 @@ async def test_focused_loop_drops_stale_master_and_runs_the_next_poll(
                 raise FocusedObservationStaleError()
             self.committed.append(observation)
 
-        def pending_notifications(self, *, now_ms: int) -> tuple[object, ...]:
+        def pending_notifications(
+            self,
+            *,
+            now_ms: int,
+            limit: int = 100,
+        ) -> tuple[object, ...]:
             return ()
 
     class Reader:

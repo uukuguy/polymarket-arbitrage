@@ -587,6 +587,71 @@ class NegRiskQuoteStore:
         finally:
             con.close()
 
+    def purge_old_runs(
+        self,
+        *,
+        keep_last_per_status: int = 10,
+        max_runs: int = 20,
+    ) -> int:
+        """Delete a bounded batch of old terminal runs and their heavy rows.
+
+        The newest complete runs are independently protected from recent
+        failures so feed restoration can never lose its last known-good input.
+        Collecting runs are never eligible.
+        """
+        for name, value, allow_zero in (
+            ("keep_last_per_status", keep_last_per_status, True),
+            ("max_runs", max_runs, False),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < (0 if allow_zero else 1)
+            ):
+                raise ValueError(f"{name} must be {'non-negative' if allow_zero else 'positive'}")
+        con = self._connect()
+        try:
+            self._begin_immediate(con)
+            try:
+                rows = con.execute(
+                    "WITH protected AS ("
+                    "SELECT id FROM neg_risk_quote_runs WHERE status='complete' "
+                    "ORDER BY quoted_at_ms DESC,id DESC LIMIT ?"
+                    ") SELECT id FROM neg_risk_quote_runs "
+                    "WHERE status IN ('complete','failed') "
+                    "AND id NOT IN (SELECT id FROM protected) "
+                    "AND id NOT IN ("
+                    "SELECT id FROM neg_risk_quote_runs WHERE status='failed' "
+                    "ORDER BY quoted_at_ms DESC,id DESC LIMIT ?"
+                    ") ORDER BY quoted_at_ms,id LIMIT ?",
+                    (keep_last_per_status, keep_last_per_status, max_runs),
+                ).fetchall()
+                run_ids = tuple(int(row[0]) for row in rows)
+                if not run_ids:
+                    con.execute("COMMIT")
+                    return 0
+                placeholders = ",".join("?" for _ in run_ids)
+                con.execute(
+                    f"DELETE FROM neg_risk_quotes WHERE quote_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                con.execute(
+                    "DELETE FROM neg_risk_quote_run_legs "
+                    f"WHERE quote_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                con.execute(
+                    f"DELETE FROM neg_risk_quote_runs WHERE id IN ({placeholders})",
+                    run_ids,
+                )
+                con.execute("COMMIT")
+                return len(run_ids)
+            except Exception:
+                _rollback_without_masking(con)
+                raise
+        finally:
+            con.close()
+
     def latest_complete_run(self) -> QuoteRun | None:
         """Return the newest complete run's metadata, without its terminal rows."""
         con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)

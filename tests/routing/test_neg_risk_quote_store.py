@@ -181,6 +181,77 @@ def _complete(store: NegRiskQuoteStore) -> int:
     return run_id
 
 
+def test_purge_old_runs_keeps_recent_complete_and_failed_history(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    complete_ids = [_complete(store) for _ in range(4)]
+    failed_ids: list[int] = []
+    for index in range(3):
+        failed_id = _begin(store)
+        store.fail_run(failed_id, failure_reason=f"failure-{index}")
+        failed_ids.append(failed_id)
+
+    deleted = store.purge_old_runs(keep_last_per_status=2, max_runs=10)
+
+    assert deleted == 3
+    with sqlite3.connect(quote_db) as con:
+        remaining = con.execute(
+            "SELECT id,status FROM neg_risk_quote_runs ORDER BY id"
+        ).fetchall()
+        remaining_legs = {
+            int(row[0])
+            for row in con.execute(
+                "SELECT DISTINCT quote_run_id FROM neg_risk_quote_run_legs"
+            )
+        }
+        remaining_quotes = {
+            int(row[0])
+            for row in con.execute(
+                "SELECT DISTINCT quote_run_id FROM neg_risk_quotes"
+            )
+        }
+
+    assert remaining == [
+        (complete_ids[-2], "complete"),
+        (complete_ids[-1], "complete"),
+        (failed_ids[-2], "failed"),
+        (failed_ids[-1], "failed"),
+    ]
+    assert remaining_legs == set(complete_ids[-2:] + failed_ids[-2:])
+    assert remaining_quotes == set(complete_ids[-2:])
+
+
+def test_purge_old_runs_is_bounded_and_never_deletes_collecting(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    complete_ids = [_complete(store) for _ in range(4)]
+    collecting_id = _begin(store)
+
+    assert store.purge_old_runs(keep_last_per_status=1, max_runs=2) == 2
+
+    with sqlite3.connect(quote_db) as con:
+        remaining = con.execute(
+            "SELECT id,status FROM neg_risk_quote_runs ORDER BY id"
+        ).fetchall()
+    assert remaining == [
+        (complete_ids[2], "complete"),
+        (complete_ids[3], "complete"),
+        (collecting_id, "collecting"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("keep_last_per_status", "max_runs"),
+    [(-1, 1), (1, 0), (True, 1), (1, True)],
+)
+def test_purge_old_runs_rejects_invalid_bounds(
+    quote_db, keep_last_per_status: int, max_runs: int
+) -> None:
+    with pytest.raises(ValueError):
+        NegRiskQuoteStore(quote_db).purge_old_runs(
+            keep_last_per_status=keep_last_per_status,
+            max_runs=max_runs,
+        )
+
+
 class BeginGate:
     def __init__(self) -> None:
         self.enabled = False

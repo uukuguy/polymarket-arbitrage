@@ -484,7 +484,14 @@ class OpportunityLedger:
         finally:
             con.close()
 
-    def pending_notifications(self, *, now_ms: int) -> tuple[PendingNotification, ...]:
+    def pending_notifications(
+        self,
+        *,
+        now_ms: int,
+        limit: int = 100,
+    ) -> tuple[PendingNotification, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
         con = self._connect()
         try:
             rows = con.execute(
@@ -516,8 +523,8 @@ class OpportunityLedger:
                 "WHEN a.attempt_count=5 THEN 80000 "
                 "WHEN a.attempt_count=6 THEN 160000 "
                 "ELSE 300000 END) "
-                "ORDER BY n.created_at_ms,n.id LIMIT 100",
-                (now_ms,),
+                "ORDER BY n.created_at_ms,n.id LIMIT ?",
+                (now_ms, limit),
             ).fetchall()
         finally:
             con.close()
