@@ -1388,3 +1388,26 @@ Resource history remains backward-readable: additive `disk_free_bytes` and
 new decision persists the thresholds used for deterministic replay. Telegram
 recovery is keyed to the exact durable opportunity outbox ID; API delivery
 success is not user receipt/read evidence.
+
+### §2.17 Control-plane projection cannot substitute for write-side truth (2026-07-30)
+
+- A virtual read-side `EXPIRED` state is not enough when the write-side
+  one-active query still sees the original `AUTHORIZED` intent. Time-based
+  terminal facts that release admission capacity must be materialized inside
+  the same authority transaction used by claim or admission.
+- Cleanup is a command until the owning runtime consumes it. Before claim, the
+  authority must make the request terminal and non-claimable; after claim, the
+  owner must clear memory before recording the terminal receipt. An API action
+  row alone is not cleanup evidence.
+- Unknown cleanup truth is not equivalent to “no cleanup requested.” A store
+  read error or invalid history while a fault is active must make injection
+  pass-through and freeze/degrade local control, without inventing a durable
+  terminal fact from an untrusted source.
+- Accepted and rejected envelopes share an audit table but not capabilities.
+  Every claim, active-chain, or business-evidence writer must prove
+  `status=accepted` plus the complete immutable hash/auth/runtime binding.
+  Shape-only validation lets rejected control input contaminate source
+  evidence.
+- Authority timestamps must be monotonic against the verified event/action
+  tail. Reconciliation uses `max(boundary_now, tail_time)` so clock regression
+  cannot corrupt an otherwise append-only history.

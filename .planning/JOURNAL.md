@@ -5757,3 +5757,39 @@ First command:
 `uv run pytest tests/perception/test_fault_control.py -q`.
 Implementation remains local/read-only until a later exact production mutation
 is separately authorized.
+
+## SESSION 121 — 2026-07-30 (scoped upstream fault control locally complete)
+
+- [IMPLEMENTED] Commits `b6b794d` through `0196b17` complete all eight tasks
+  in the scoped upstream fault-control plan: append-only authority, runtime
+  ownership, HTTP/CLI control, Gamma/CLOB/Telegram adapters, typed local fault
+  dispatch, SOURCE/VERDICT qualification, finalization, runbook, teaching
+  material, and the plan SUMMARY.
+- [FINAL REVIEW] Whole-plan review exposed and closed cleanup-request
+  consumption, never-claimed TTL materialization, immutable rejected intent
+  envelopes, cleanup-truth fail-open behavior, monotonic terminal timestamps,
+  and rejected-evidence isolation. Two independent remediation reviews report
+  no remaining Critical, High, or Medium findings; the final documentation-only
+  correction was also approved.
+- [VERIFIED] From final HEAD `0196b17`, repository pytest collected 3,695 tests
+  and exited zero with one expected xfail and one skip. Changed-file Ruff,
+  `make qualify-perception-local`, `make docs-m1-check`, committed-range
+  `git diff --check`, and `make planning-status` all passed; planning reports
+  82 plans across three workstreams with no drift.
+- [PRODUCTION BOUNDARY] Production qualification remains **NOT RUN** because
+  no exact deployed release or fresh evidence directory was authorized. One
+  image-check target accidentally began read-only Fly status/SSH command
+  discovery before being terminated; no deploy, config/secret change, fault
+  mutation, wallet, order, or trade action occurred. The SUMMARY preserves the
+  exact disclosure and does not record that gate as PASS.
+- [WORKTREE] Branch `fix/l3-continuity-repair` remains in its owned worktree.
+  User-owned `findings.md`, `progress.md`, and `task_plan.md`, plus ignored SDD
+  coordination files, remain unstaged and uncommitted.
+
+### [NEXT — CURRENT]
+
+Choose the branch disposition: merge locally, push/create a PR, or keep the
+branch for later. Until that choice is made, preserve the worktree and do not
+deploy or run production qualification. Next session starts with
+`/gsd-resume-work --ws m1-perception`; first repository check:
+`make planning-status`.
