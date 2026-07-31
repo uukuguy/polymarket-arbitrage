@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import sqlite3
 import threading
 import time
 from collections.abc import Mapping
@@ -315,6 +316,35 @@ def test_recipe_ts_predicate_filters_synthetic_rows_correctly() -> None:
     # Row B must be filtered out (90min > 1h window)
     asset_ids = sorted(str(x) for x in df["asset_id"].tolist())
     assert asset_ids == ["a"], f"expected only 'a' (recent), got {asset_ids}"
+
+
+def test_runtime_database_numeric_rows_are_sqlite_compatible() -> None:
+    from decimal import Decimal
+
+    from polyarb.observation import l3_promote
+
+    db_path = l3_promote._build_tob_temp_db(
+        [
+            {
+                "asset_id": "decimal-asset",
+                "ts": datetime.now(UTC),
+                "best_bid": Decimal("0.50"),
+                "best_ask": Decimal("0.51"),
+                "spread": Decimal("0.01"),
+                "mid_price": Decimal("0.505"),
+                "depth_yes_usd": Decimal("1000"),
+                "depth_no_usd": Decimal("900"),
+            }
+        ]
+    )
+    try:
+        with sqlite3.connect(db_path) as connection:
+            row = connection.execute(
+                "SELECT best_bid,depth_yes_usd FROM markets"
+            ).fetchone()
+        assert row == (0.5, 1000.0)
+    finally:
+        os.unlink(db_path)
 
 
 def test_fetch_latest_tob_rows_keeps_one_newest_row_per_asset() -> None:
@@ -1648,8 +1678,41 @@ async def test_promoter_recovers_with_runtime_database_inputs() -> None:
         )
 
     assert result.status.value == "success"
-    assert fetch.call_count == 3
+    assert fetch.call_count == 0
     store.fetch_promoter_inputs.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_empty_runtime_inputs_do_not_trigger_global_rest_sort() -> None:
+    from polyarb.observation import l3_promote
+
+    settings = _make_settings()
+    runtime = _make_runtime(settings)
+    store = _RecordingEvidenceStore()
+    store.fetch_promoter_inputs = AsyncMock(return_value=([], {}))
+    consumer = _truthful_consumer()
+    consumer.candidate_assets_snapshot = MagicMock(
+        return_value=frozenset({"bootstrap-only"})
+    )
+
+    with (
+        patch.object(l3_promote, "create_client", return_value=MagicMock()),
+        patch.object(
+            l3_promote,
+            "_fetch_latest_tob_rows_from_supabase",
+        ) as rest_fetch,
+    ):
+        result = await l3_promote.promote_run(
+            settings=settings,
+            ws_consumer=consumer,
+            recipe_yaml_path=RECIPE_PATH,
+            evidence_store=store,
+            evidence_runtime=runtime,
+            run_seq=24,
+        )
+
+    assert result.reason_code in {"empty_token_map", "underfilled"}
+    rest_fetch.assert_not_called()
 
 
 @pytest.mark.asyncio

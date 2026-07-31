@@ -55,6 +55,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -343,6 +344,10 @@ def _build_tob_temp_db(rows: list[dict]) -> Path:
                 v = r.get(c)
                 if c == "ts":
                     v = _iso_to_epoch_ms(v)
+                elif isinstance(v, Decimal):
+                    # asyncpg decodes PostgreSQL NUMERIC as Decimal while
+                    # sqlite3 accepts only its native scalar types.
+                    v = float(v)
                 vals.append(v)
             # Append NULL `question` — LEFT JOIN remains a no-op.
             vals.append(None)
@@ -905,43 +910,47 @@ async def _promote_run_impl(
 
     prior_market_token_map = staged_market_token_map or {}
     direct_token_map: dict[str, _TokenIdentity] = {}
+    runtime_read_completed = False
     if locked_proposal is not None:
         accepted_markets, desired, mapping = locked_proposal
         token_map = prior_market_token_map
     else:
-        try:
-            tob_rows = await _postgrest_read_with_retry(
-                _fetch_latest_tob_rows_from_supabase,
-                client,
-            )
-            staged_tob_rows = tob_rows
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("l3-promote: tob fetch failed type={}", type(exc).__name__)
-            candidate_snapshot = getattr(
-                ws_consumer,
-                "candidate_assets_snapshot",
-                None,
-            )
-            candidate_assets = (
-                sorted(candidate_snapshot())
-                if callable(candidate_snapshot)
-                else []
-            )
-            if candidate_assets and evidence_store is not None:
-                try:
-                    tob_rows, direct_token_map = await evidence_store.fetch_promoter_inputs(
-                        candidate_assets,
-                    )
+        candidate_snapshot = getattr(
+            ws_consumer,
+            "candidate_assets_snapshot",
+            None,
+        )
+        candidate_assets = (
+            sorted(candidate_snapshot())
+            if callable(candidate_snapshot)
+            else []
+        )
+        if candidate_assets and evidence_store is not None:
+            try:
+                tob_rows, direct_token_map = await evidence_store.fetch_promoter_inputs(
+                    candidate_assets,
+                )
+                runtime_read_completed = True
+                if tob_rows and direct_token_map:
                     staged_tob_rows = tob_rows
                     logger.info(
-                        "l3-promote: recovered through runtime database "
+                        "l3-promote: fetched through runtime database "
                         f"assets={len(candidate_assets)} rows={len(tob_rows)}"
                     )
-                except Exception as direct_exc:  # noqa: BLE001 - try REST scope below
-                    logger.warning(
-                        "l3-promote: runtime database fallback failed "
-                        f"type={type(direct_exc).__name__}"
-                    )
+            except Exception as direct_exc:  # noqa: BLE001 - REST remains available
+                logger.warning(
+                    "l3-promote: runtime database read failed "
+                    f"type={type(direct_exc).__name__}"
+                )
+        if not runtime_read_completed:
+            try:
+                tob_rows = await _postgrest_read_with_retry(
+                    _fetch_latest_tob_rows_from_supabase,
+                    client,
+                )
+                staged_tob_rows = tob_rows
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("l3-promote: tob fetch failed type={}", type(exc).__name__)
             if candidate_assets and not staged_tob_rows:
                 try:
                     tob_rows = await _postgrest_read_with_retry(
@@ -961,7 +970,9 @@ async def _promote_run_impl(
                     )
             if staged_tob_rows is None:
                 return await finish(early(PromoteStatus.FROZEN, "tob_fetch_failed"))
-            tob_rows = staged_tob_rows
+        tob_rows = staged_tob_rows
+        if runtime_read_completed and not tob_rows:
+            return await finish(early(PromoteStatus.UNDERFILLED, "underfilled"))
 
         recent_asset_ids = sorted(
             {

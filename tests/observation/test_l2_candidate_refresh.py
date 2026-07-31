@@ -1235,7 +1235,7 @@ async def test_supabase_fetch_fail_cold_start_uses_runtime_database(tmp_path):
     fake_ws._l3_active_set = set()
 
     with (
-        patch.object(mod, "create_client", side_effect=RuntimeError("REST down")),
+        patch.object(mod, "create_client") as create,
         patch.object(
             mod.L3EvidenceStore,
             "fetch_candidate_markets_latest",
@@ -1249,6 +1249,7 @@ async def test_supabase_fetch_fail_cold_start_uses_runtime_database(tmp_path):
         )
 
     assert ok is True
+    create.assert_not_called()
     direct_fetch.assert_awaited_once()
     assert mod._last_known_markets_rows == rows
     assert mod._last_fetch_success_at_s is not None
