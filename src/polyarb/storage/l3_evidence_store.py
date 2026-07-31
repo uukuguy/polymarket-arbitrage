@@ -143,36 +143,39 @@ ORDER BY event_id
 """
 
 _SAMPLING_MARKET_STATE = """
-WITH requested AS (
-    SELECT unnest($1::text[]) AS token_id
-), mapping AS (
+WITH mapping AS (
     SELECT market_id, yes_token_id, no_token_id
     FROM markets_latest
     WHERE yes_token_id = ANY($1::text[])
       AND no_token_id = ANY($1::text[])
-), latest_books AS (
-    SELECT asset_id, max(ts) AS book_at
-    FROM l2_book_levels
-    WHERE asset_id = ANY($1::text[])
-    GROUP BY asset_id
-), latest_yes_ohlc_source AS (
-    SELECT asset_id, max(ts) AS ohlc_at
-    FROM l2_top_of_book
-    WHERE asset_id = ANY($1::text[])
-      AND mid_price IS NOT NULL
-    GROUP BY asset_id
 )
 SELECT mapping.market_id, mapping.yes_token_id, mapping.no_token_id,
        yes_book.book_at AS yes_book_at,
        no_book.book_at AS no_book_at,
        yes_ohlc.ohlc_at AS yes_ohlc_at
 FROM mapping
-JOIN requested AS requested_yes ON requested_yes.token_id=mapping.yes_token_id
-JOIN requested AS requested_no ON requested_no.token_id=mapping.no_token_id
-LEFT JOIN latest_books AS yes_book ON yes_book.asset_id=mapping.yes_token_id
-LEFT JOIN latest_books AS no_book ON no_book.asset_id=mapping.no_token_id
-LEFT JOIN latest_yes_ohlc_source AS yes_ohlc
-  ON yes_ohlc.asset_id=mapping.yes_token_id
+LEFT JOIN LATERAL (
+    SELECT ts AS book_at
+    FROM l2_book_levels
+    WHERE asset_id=mapping.yes_token_id
+    ORDER BY ts DESC
+    LIMIT 1
+) AS yes_book ON true
+LEFT JOIN LATERAL (
+    SELECT ts AS book_at
+    FROM l2_book_levels
+    WHERE asset_id=mapping.no_token_id
+    ORDER BY ts DESC
+    LIMIT 1
+) AS no_book ON true
+LEFT JOIN LATERAL (
+    SELECT ts AS ohlc_at
+    FROM l2_top_of_book
+    WHERE asset_id=mapping.yes_token_id
+      AND mid_price IS NOT NULL
+    ORDER BY ts DESC
+    LIMIT 1
+) AS yes_ohlc ON true
 ORDER BY mapping.market_id, mapping.yes_token_id, mapping.no_token_id
 """
 

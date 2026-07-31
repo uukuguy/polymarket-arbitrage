@@ -321,7 +321,11 @@ async def test_sampling_market_state_uses_one_aggregate_query_and_closes(
     assert "l2_book_levels" in sql
     assert "l2_top_of_book" in sql
     assert "mid_price IS NOT NULL" in sql
-    assert "max(ts) AS ohlc_at" in sql
+    assert sql.count("LEFT JOIN LATERAL") == 3
+    assert sql.count("ORDER BY ts DESC") == 3
+    assert sql.count("LIMIT 1") == 3
+    assert "max(ts)" not in sql
+    assert "GROUP BY asset_id" not in sql
     assert "l2_ohlc_1m" not in sql
     assert "markets_latest" in sql
     assert supplied_tokens == token_ids
