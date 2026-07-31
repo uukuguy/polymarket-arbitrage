@@ -200,6 +200,14 @@ async def _telegram_direct(
             if raise_on_failure:
                 response.raise_for_status()
         except Exception as e:  # noqa: BLE001
-            logger.error(f"Telegram direct send failed: {e!r}")
+            status_code = (
+                e.response.status_code
+                if isinstance(e, httpx.HTTPStatusError)
+                else None
+            )
+            logger.error(
+                "Telegram direct send failed "
+                f"kind={type(e).__name__} status_code={status_code}"
+            )
             if raise_on_failure:
                 raise

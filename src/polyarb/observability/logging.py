@@ -119,3 +119,7 @@ def init_logging() -> None:
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "starlette", "httpx"):
         logging.getLogger(name).handlers = [InterceptHandler()]
         logging.getLogger(name).propagate = False
+    # httpx INFO includes complete request URLs.  Some provider APIs (notably
+    # Telegram) require credentials in the path, so suppress the redundant
+    # library request line and keep our own sanitized transport outcome logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)

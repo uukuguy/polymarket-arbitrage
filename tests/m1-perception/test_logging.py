@@ -184,6 +184,17 @@ def test_redact_token_param() -> None:
     assert "[REDACTED]" in output
 
 
+def test_redact_telegram_bot_token_embedded_in_url_path() -> None:
+    token = "123456789:AAExampleTelegramSecretToken"
+    output = _capture_with_redact(
+        "INFO",
+        f'HTTP Request: POST https://api.telegram.org/bot{token}/sendMessage "HTTP/1.1 400"',
+    )
+
+    assert token not in output
+    assert "bot[REDACTED]/sendMessage" in output
+
+
 def test_redact_authorization_header() -> None:
     """Authorization-style values are redacted."""
     output = _capture_with_redact(

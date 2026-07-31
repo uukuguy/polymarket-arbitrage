@@ -246,6 +246,50 @@ async def test_close_sends_one_card_with_observer_only_warning(
     assert "unknown" not in send_telegram.await_args_list[-1].args[1]
 
 
+def test_large_opportunity_card_fits_telegram_limit_without_losing_identity() -> None:
+    from polyarb.daemon.opportunity_watcher import _format_card
+    from polyarb.routing.opportunity_ledger import PendingNotification
+
+    legs = [
+        {
+            "market_id": f"market-{index}-" + ("m" * 80),
+            "condition_id": f"condition-{index}-" + ("c" * 80),
+            "slug": f"slug-{index}-" + ("s" * 80),
+            "token_id": f"token-{index}-" + ("t" * 80),
+            "ask": 0.5,
+            "ask_size": 10,
+        }
+        for index in range(40)
+    ]
+    card = _format_card(
+        PendingNotification(
+            id=1,
+            opportunity_id="opportunity-1",
+            reason="entered-gross-edge-threshold",
+            payload={
+                "status": "observe",
+                "strategy": "neg-risk-buy-all",
+                "event_id": "event-1",
+                "group_id": "group-1",
+                "membership_hash": "membership-exact",
+                "legs": legs,
+                "bundle_cost": 0.9,
+                "gross_edge_bps": 1000,
+                "max_bundle_size": 10,
+                "structure_revision": 767,
+                "quote_run_id": 1328,
+                "quoted_at_ms": 1_800_000_000_000,
+            },
+            attempt_count=0,
+        )
+    )
+
+    assert len(card) <= 4_000
+    assert "membership_hash=membership-exact" in card
+    assert "legs_count=40" in card
+    assert "legs_truncated=" in card
+
+
 async def test_focused_loop_persists_one_top_of_book_observation(
     settings: Settings,
     ledger: OpportunityLedger,

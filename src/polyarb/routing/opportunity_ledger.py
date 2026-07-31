@@ -485,19 +485,39 @@ class OpportunityLedger:
             con.close()
 
     def pending_notifications(self, *, now_ms: int) -> tuple[PendingNotification, ...]:
-        del now_ms  # The first version has no backoff window; delivery owns retry policy.
         con = self._connect()
         try:
             rows = con.execute(
-                "SELECT n.id,n.opportunity_id,n.reason,n.payload_json,"
-                "n.attempt_count+(SELECT COUNT(*) "
-                "FROM neg_risk_opportunity_notification_attempts a "
-                "WHERE a.notification_id=n.id) "
+                "WITH attempt_state AS ("
+                "SELECT notification_id,COUNT(*) AS attempt_count,"
+                "MAX(attempted_at_ms) AS last_attempted_at_ms,"
+                "MAX(CASE WHEN outcome='delivered' THEN 1 ELSE 0 END) AS delivered,"
+                "(SELECT latest.error_kind "
+                "FROM neg_risk_opportunity_notification_attempts latest "
+                "WHERE latest.notification_id="
+                "neg_risk_opportunity_notification_attempts.notification_id "
+                "ORDER BY latest.attempted_at_ms DESC,latest.id DESC LIMIT 1"
+                ") AS latest_error_kind "
+                "FROM neg_risk_opportunity_notification_attempts GROUP BY notification_id"
+                ") SELECT n.id,n.opportunity_id,n.reason,n.payload_json,"
+                "n.attempt_count+COALESCE(a.attempt_count,0) "
                 "FROM neg_risk_opportunity_notifications n "
-                "WHERE n.status != 'delivered' AND NOT EXISTS("
-                "SELECT 1 FROM neg_risk_opportunity_notification_attempts a "
-                "WHERE a.notification_id=n.id AND a.outcome='delivered'"
-                ") ORDER BY n.created_at_ms,n.id"
+                "LEFT JOIN attempt_state a ON a.notification_id=n.id "
+                "WHERE n.status != 'delivered' AND COALESCE(a.delivered,0)=0 "
+                "AND (a.latest_error_kind IS NULL "
+                "OR a.latest_error_kind!='HTTPStatusError' "
+                "OR a.last_attempted_at_ms <= ? - "
+                "CASE "
+                "WHEN COALESCE(a.attempt_count,0)<=0 THEN 0 "
+                "WHEN a.attempt_count=1 THEN 5000 "
+                "WHEN a.attempt_count=2 THEN 10000 "
+                "WHEN a.attempt_count=3 THEN 20000 "
+                "WHEN a.attempt_count=4 THEN 40000 "
+                "WHEN a.attempt_count=5 THEN 80000 "
+                "WHEN a.attempt_count=6 THEN 160000 "
+                "ELSE 300000 END) "
+                "ORDER BY n.created_at_ms,n.id LIMIT 100",
+                (now_ms,),
             ).fetchall()
         finally:
             con.close()

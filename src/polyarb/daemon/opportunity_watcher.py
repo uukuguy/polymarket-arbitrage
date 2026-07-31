@@ -48,6 +48,7 @@ ClockMs = Callable[[], int]
 WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
 
 _OBSERVER_WARNING = "仅观察，未扣手续费、滑点和多腿成交风险"
+_TELEGRAM_CARD_LIMIT = 4_000
 
 
 @dataclass(frozen=True)
@@ -449,17 +450,13 @@ class OpportunityWatcher:
 
 def _format_card(notification: PendingNotification) -> str:
     payload = notification.payload
-    fields = (
+    fields_without_legs = (
         ("reason", notification.reason),
         ("status", payload.get("status", "unknown")),
         ("strategy", payload.get("strategy", "neg-risk-buy-all")),
         ("event_id", payload.get("event_id", "unknown")),
         ("group_id", payload.get("group_id", "unknown")),
         ("membership_hash", payload.get("membership_hash", "unknown")),
-        (
-            "legs",
-            json.dumps(payload.get("legs", "unknown"), separators=(",", ":"), sort_keys=True),
-        ),
         ("bundle_cost", payload.get("bundle_cost", "unknown")),
         ("gross_edge_bps", payload.get("gross_edge_bps", "unknown")),
         ("max_bundle_size", payload.get("max_bundle_size", "unknown")),
@@ -469,11 +466,54 @@ def _format_card(notification: PendingNotification) -> str:
         ("transition_reason", payload.get("transition_reason", notification.reason)),
         ("execution_status", "not-verified"),
     )
-    return "\n".join(
+    raw_legs = payload.get("legs", "unknown")
+    full_fields = fields_without_legs[:6] + (
+        ("legs", json.dumps(raw_legs, separators=(",", ":"), sort_keys=True)),
+    ) + fields_without_legs[6:]
+    full_card = "\n".join(
         ["Polymarket neg-risk observation"]
-        + [f"{key}={value}" for key, value in fields]
+        + [f"{key}={value}" for key, value in full_fields]
         + [_OBSERVER_WARNING]
     )
+    if len(full_card) <= _TELEGRAM_CARD_LIMIT:
+        return full_card
+
+    legs = raw_legs if isinstance(raw_legs, list) else []
+    preview: list[object] = []
+    bounded_card = ""
+    for leg in legs:
+        candidate = preview + [leg]
+        truncated = len(legs) - len(candidate)
+        preview_fields = fields_without_legs[:6] + (
+            ("legs_count", len(legs)),
+            ("legs_preview", json.dumps(candidate, separators=(",", ":"), sort_keys=True)),
+            ("legs_truncated", truncated),
+        ) + fields_without_legs[6:]
+        candidate_card = "\n".join(
+            ["Polymarket neg-risk observation"]
+            + [f"{key}={value}" for key, value in preview_fields]
+            + [_OBSERVER_WARNING]
+        )
+        if len(candidate_card) > _TELEGRAM_CARD_LIMIT:
+            break
+        preview = candidate
+        bounded_card = candidate_card
+
+    if not bounded_card:
+        preview_fields = fields_without_legs[:6] + (
+            ("legs_count", len(legs)),
+            ("legs_preview", "[]"),
+            ("legs_truncated", len(legs)),
+        ) + fields_without_legs[6:]
+        bounded_card = "\n".join(
+            ["Polymarket neg-risk observation"]
+            + [f"{key}={value}" for key, value in preview_fields]
+            + [_OBSERVER_WARNING]
+        )
+    if len(bounded_card) > _TELEGRAM_CARD_LIMIT:
+        suffix = "\ncard_truncated=true\n" + _OBSERVER_WARNING
+        bounded_card = bounded_card[: _TELEGRAM_CARD_LIMIT - len(suffix)] + suffix
+    return bounded_card
 
 
 def _wall_clock_ms() -> int:

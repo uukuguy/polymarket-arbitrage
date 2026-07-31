@@ -49,6 +49,12 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Stripe-style sk-... openai-style keys.
     re.compile(r"(sk-)([A-Za-z0-9]{16,})"),
 )
+_TELEGRAM_BOT_PATH = re.compile(
+    r"(?P<prefix>api\.telegram\.org/bot)"
+    r"(?P<secret>[0-9]{5,}:[A-Za-z0-9_-]{10,})"
+    r"(?P<suffix>/)",
+    re.IGNORECASE,
+)
 
 REDACTED = "[REDACTED]"
 
@@ -72,6 +78,13 @@ def _redact_string(value: str) -> str:
     result = _SECRET_PATTERNS[2].sub(REDACTED, result)
     # Pattern 3 (sk-*): keep `sk-` prefix, redact body
     result = _SECRET_PATTERNS[3].sub(lambda m: m.group(1) + REDACTED, result)
+    # Telegram requires its bot token in the URL path rather than a header.
+    # Redact that provider-specific shape before httpx request logs leave the
+    # process.
+    result = _TELEGRAM_BOT_PATH.sub(
+        lambda m: m.group("prefix") + REDACTED + m.group("suffix"),
+        result,
+    )
     return result
 
 

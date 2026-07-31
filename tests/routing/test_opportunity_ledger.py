@@ -149,6 +149,23 @@ def test_notification_attempts_are_append_only_and_retry_state_is_derived(tmp_pa
     ]
 
 
+def test_permanent_telegram_http_failure_uses_bounded_retry_backoff(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    ledger = OpportunityLedger(db_path)
+    ledger.reconcile_global(_observe_assessment(), observed_at_ms=NOW_MS)
+    notification = ledger.pending_notifications(now_ms=NOW_MS)[0]
+
+    ledger.mark_notification_failed(
+        notification.id,
+        attempted_at_ms=NOW_MS + 1,
+        error_kind="HTTPStatusError",
+    )
+
+    assert ledger.pending_notifications(now_ms=NOW_MS + 5_000) == ()
+    assert ledger.pending_notifications(now_ms=NOW_MS + 5_001)[0].attempt_count == 1
+
+
 def test_active_masters_rebuild_the_original_all_leg_identity(tmp_path) -> None:
     db_path = tmp_path / "state.db"
     SQLiteStore(db_path).init_schema()
