@@ -244,7 +244,7 @@ sync-structure-local:
 structure-generation-status:
 	@uv run python -m polyarb.snapshot structure-generation-status
 
-## structure-generation-backfill: Advance one bounded generation backfill/certification chunk; optional max_rows=500.
+## structure-generation-backfill: Advance one max_rows=500 bounded chunk; writer busy defers immediately with exit 0 JSON.
 structure-generation-backfill:
 	@uv run python -m polyarb.snapshot structure-generation-backfill --max-rows "$(or $(max_rows),500)"
 

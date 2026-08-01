@@ -33,11 +33,19 @@ from polyarb.snapshot.orchestrator import run_snapshot
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 
-def _generation_store(*, initialize: bool = True):
+def _generation_store(
+    *,
+    initialize: bool = True,
+    writer_timeout_s: float | None = None,
+):
     from polyarb.storage.sqlite_store import SQLiteStore
 
     settings = load_settings()
-    store = SQLiteStore(settings.db_path)
+    store = (
+        SQLiteStore(settings.db_path)
+        if writer_timeout_s is None
+        else SQLiteStore(settings.db_path, writer_timeout_s=writer_timeout_s)
+    )
     if initialize:
         store.init_structure_sync_schema()
     return settings, store
@@ -75,58 +83,83 @@ def structure_generation_backfill(
     max_rows: int = typer.Option(500, "--max-rows", min=1, max=5_000),
 ) -> None:
     """Advance exactly one bounded legacy-to-generation backfill chunk."""
-    _settings, store = _generation_store()
-    latest = store.get_latest_structure_sync()
-    if (
-        latest is not None
-        and latest["status"] == "complete"
-        and store.get_structure_publication_progress(str(latest["id"])) is None
-    ):
-        migration = store.advance_structure_event_market_backfill(
-            window_id=str(latest["id"]),
-            max_events=max_rows,
-            max_relationships=max_rows,
-            now_ms=int(time.time() * 1_000),
+    try:
+        _settings, store = _generation_store(
+            initialize=False,
+            writer_timeout_s=0.25,
         )
+        store.init_structure_sync_schema()
+        latest = store.get_latest_structure_sync()
         if (
-            int(migration["events_processed"]) > 0
-            or int(migration["relationships_processed"]) > 0
-            or not migration["completed"]
+            latest is not None
+            and latest["status"] == "complete"
+            and store.get_structure_publication_progress(str(latest["id"])) is None
         ):
-            rotated_to = None
-            if migration["blocked"]:
-                successor = store.rotate_blocked_structure_sync_window(
-                    window_id=str(latest["id"]),
-                    rotated_at_ms=int(time.time() * 1_000),
-                )
-                rotated_to = successor["id"]
-            print(
-                json.dumps(
-                    {
-                        "event_cursor": migration["event_cursor"],
-                        "member_offset": migration["member_offset"],
-                        "blocked": migration["blocked"],
-                        "blocked_reason": migration["blocked_reason"],
-                        "complete": migration["completed"],
-                        "copied_rows": migration["relationships_processed"],
-                        "events_processed": migration["events_processed"],
-                        "phase": "event-market-bootstrap",
-                        "rotated_to_window_id": rotated_to,
-                        "window_id": str(latest["id"]),
-                    },
-                    sort_keys=True,
-                )
+            migration = store.advance_structure_event_market_backfill(
+                window_id=str(latest["id"]),
+                max_events=max_rows,
+                max_relationships=max_rows,
+                now_ms=int(time.time() * 1_000),
             )
-            if migration["blocked"]:
-                raise typer.Exit(code=1)
-            return
-    result = store.backfill_current_structure_generation(max_rows=max_rows)
+            if (
+                int(migration["events_processed"]) > 0
+                or int(migration["relationships_processed"]) > 0
+                or not migration["completed"]
+            ):
+                rotated_to = None
+                if migration["blocked"]:
+                    successor = store.rotate_blocked_structure_sync_window(
+                        window_id=str(latest["id"]),
+                        rotated_at_ms=int(time.time() * 1_000),
+                    )
+                    rotated_to = successor["id"]
+                print(
+                    json.dumps(
+                        {
+                            "event_cursor": migration["event_cursor"],
+                            "member_offset": migration["member_offset"],
+                            "blocked": migration["blocked"],
+                            "blocked_reason": migration["blocked_reason"],
+                            "complete": migration["completed"],
+                            "copied_rows": migration["relationships_processed"],
+                            "defer_reason": None,
+                            "deferred": False,
+                            "events_processed": migration["events_processed"],
+                            "phase": "event-market-bootstrap",
+                            "rotated_to_window_id": rotated_to,
+                            "window_id": str(latest["id"]),
+                        },
+                        sort_keys=True,
+                    )
+                )
+                if migration["blocked"]:
+                    raise typer.Exit(code=1)
+                return
+        result = store.backfill_current_structure_generation(max_rows=max_rows)
+    except sqlite3.OperationalError as error:
+        if not any(token in str(error).lower() for token in ("locked", "busy")):
+            raise
+        print(
+            json.dumps(
+                {
+                    "complete": False,
+                    "copied_rows": 0,
+                    "defer_reason": "writer-busy",
+                    "deferred": True,
+                    "phase": "operator-admission",
+                },
+                sort_keys=True,
+            )
+        )
+        return
     print(
         json.dumps(
             {
                 "complete": result.complete,
                 "copied_rows": result.copied_rows,
                 "cursor": result.cursor,
+                "defer_reason": None,
+                "deferred": False,
                 "snapshot_id": result.snapshot_id,
             },
             sort_keys=True,

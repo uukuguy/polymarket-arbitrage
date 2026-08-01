@@ -1641,15 +1641,23 @@ class SQLiteStore:
         store.write_snapshot(taken_at_ms=..., finished_at_ms=..., mode="subset", ...)
     """
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        writer_timeout_s: float = SQLITE_BUSY_TIMEOUT_S,
+    ) -> None:
+        if writer_timeout_s <= 0:
+            raise ValueError("writer_timeout_s must be positive")
         self._db_path = Path(db_path)
+        self._writer_timeout_s = float(writer_timeout_s)
 
     def _connect_writer(self) -> sqlite3.Connection:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(
             self._db_path,
             isolation_level=None,
-            timeout=SQLITE_BUSY_TIMEOUT_S,
+            timeout=self._writer_timeout_s,
         )
         con.execute("PRAGMA foreign_keys=ON")
         return con

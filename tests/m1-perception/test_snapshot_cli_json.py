@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -115,6 +116,9 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
     monkeypatch, tmp_path
 ) -> None:
     from polyarb.snapshot import cli as cli_module
+    from polyarb.storage import sqlite_store as sqlite_store_module
+
+    monkeypatch.setattr(sqlite_store_module, "SQLITE_BUSY_TIMEOUT_S", 0.05)
 
     db_path = tmp_path / "state.db"
     store = SQLiteStore(db_path)
@@ -151,6 +155,39 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
         lambda: SimpleNamespace(db_path=db_path),
     )
 
+    with sqlite3.connect(db_path, isolation_level=None) as locker:
+        locker.execute("BEGIN IMMEDIATE")
+        started = time.monotonic()
+        deferred = CliRunner().invoke(
+            app, ["structure-generation-backfill", "--max-rows", "2"]
+        )
+        elapsed = time.monotonic() - started
+        locker.execute("ROLLBACK")
+
+    assert elapsed < 1.0
+    assert deferred.exit_code == 0, deferred.output
+    assert json.loads(deferred.stdout) == {
+        "complete": False,
+        "copied_rows": 0,
+        "defer_reason": "writer-busy",
+        "deferred": True,
+        "phase": "operator-admission",
+    }
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_market_backfill_progress "
+            "WHERE window_id=?", (window["id"],),
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_market_staging WHERE window_id=?",
+            (window["id"],),
+        ).fetchone() == (0,)
+        assert con.execute("SELECT COUNT(*) FROM snapshot_attempts").fetchone() == (0,)
+        assert con.execute(
+            "SELECT status,failure_reason FROM structure_sync_windows WHERE id=?",
+            (window["id"],),
+        ).fetchone() == ("complete", None)
+
     result = CliRunner().invoke(
         app, ["structure-generation-backfill", "--max-rows", "2"]
     )
@@ -161,12 +198,49 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
         "blocked_reason": None,
         "complete": False,
         "copied_rows": 2,
+        "defer_reason": None,
+        "deferred": False,
         "event_cursor": "event-1",
         "events_processed": 2,
         "member_offset": 0,
         "phase": "event-market-bootstrap",
         "rotated_to_window_id": None,
         "window_id": window["id"],
+    }
+
+
+def test_generation_backfill_cli_defers_writer_busy_from_later_phase(
+    monkeypatch,
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    class BusyStore:
+        def init_structure_sync_schema(self):
+            return None
+
+        def get_latest_structure_sync(self):
+            return None
+
+        def backfill_current_structure_generation(self, *, max_rows):
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        cli_module,
+        "_generation_store",
+        lambda **_kwargs: (SimpleNamespace(), BusyStore()),
+    )
+
+    result = CliRunner().invoke(
+        app, ["structure-generation-backfill", "--max-rows", "500"]
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "complete": False,
+        "copied_rows": 0,
+        "defer_reason": "writer-busy",
+        "deferred": True,
+        "phase": "operator-admission",
     }
 
 

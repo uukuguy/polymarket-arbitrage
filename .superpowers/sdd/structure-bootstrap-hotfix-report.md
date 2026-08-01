@@ -40,6 +40,10 @@ zero and incremented the failure counter.
   rotation observations and same-transaction append-only recovery receipts are
   independent of purgeable staging windows, so retention cannot resurrect a
   resolved historical failure.
+- The operator backfill command uses a 250ms writer timeout across schema,
+  bootstrap, copy, certification, and comparison phases. Writer contention
+  returns retryable exit-0 JSON (`deferred=true`, `writer-busy`, zero copied
+  rows) instead of waiting behind the production writer and consuming Quote SLA.
 - The parent now strictly parses normalization/certification publication
   checkpoint JSON instead of reclassifying a committed child chunk as
   `snapshot-subprocess-invalid-json`.
@@ -51,11 +55,11 @@ switch, database mutation, or production restart was performed by this task.
 ## TDD and verification
 
 Initial RED: 3 failures for the absent durable migration API/schema and absent
-publication-checkpoint result type. The reviewer-remediated focused
-authority/bootstrap gate covered 224 tests.
+publication-checkpoint result type. The final focused gate, including
+nonblocking operator admission, covered 361 tests.
 
-- Focused authority/bootstrap: `224 passed in 29.09s`.
-- Full M1: `3060 passed, 1 skipped, 1 xfailed in 516.74s`.
+- Focused authority/bootstrap/operator admission: `361 passed in 34.20s`.
+- Full M1: `3061 passed, 1 skipped, 1 xfailed in 518.81s`.
 - Changed-file Ruff: PASS.
 - `git diff --check`: PASS.
 - Documentation, planning status, and pre-commit gate are recorded after the
