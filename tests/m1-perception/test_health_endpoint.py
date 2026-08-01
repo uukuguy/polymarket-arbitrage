@@ -650,6 +650,30 @@ def test_health_surfaces_bounded_generation_publication_budgets(
     assert "finalizer_slot_budget_s" not in schedule["output"]
 
 
+def test_health_surfaces_restart_visible_quote_priority_defer(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1000)
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.record_structure_defer(
+        reason="quote-pipeline-active",
+        queued_at_ms=now_ms - 5_000,
+        observed_at_ms=now_ms - 1_000,
+    )
+
+    defer = http_test_client.get("/health").json()["checks"][
+        "snapshot:producer_defer"
+    ][0]
+
+    assert defer["observedValue"] == "quote-pipeline-active"
+    assert defer["status"] == "warn"
+    assert "queued_age_seconds=" in defer["output"]
+    assert "observed_age_seconds=" in defer["output"]
+
+
 def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(
     daemon_settings_for_test: Any,
     http_test_client: TestClient,

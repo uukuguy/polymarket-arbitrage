@@ -61,6 +61,7 @@ def _release_projection_memory() -> None:
 @dataclass(frozen=True)
 class QuoteWorkerSnapshot:
     state: str
+    pipeline_active: bool
     attempt_count: int
     success_count: int
     failure_count: int
@@ -153,6 +154,27 @@ class QuoteWorkerRuntime:
         self.cleanup_consecutive_failures = 0
         self.last_cleanup_error_kind: str | None = None
         self._certified_feed: CertifiedQuoteFeed | None = None
+        self._pipeline_active = False
+
+    def mark_pipeline_started(self) -> None:
+        self._pipeline_active = True
+
+    def mark_pipeline_finished(self) -> None:
+        self._pipeline_active = False
+
+    def pipeline_active(self) -> bool:
+        return self._pipeline_active
+
+    def pipeline_due(self, interval_s: float, *, now_s: float | None = None) -> bool:
+        """Return whether start-to-start cadence gives Quote admission priority."""
+        if self._pipeline_active:
+            return True
+        if self.state == "stopped":
+            return False
+        if self.last_attempt_started_at_s is None:
+            return True
+        observed_at_s = time.time() if now_s is None else now_s
+        return observed_at_s >= self.last_attempt_started_at_s + interval_s
 
     def mark_started(self) -> None:
         self.state = "collecting"
@@ -182,6 +204,7 @@ class QuoteWorkerRuntime:
         self.last_error_kind = type(error).__name__
 
     def mark_stopped(self) -> None:
+        self._pipeline_active = False
         self.state = "stopped"
 
     def mark_cleanup_success(self) -> None:
@@ -237,6 +260,7 @@ class QuoteWorkerRuntime:
     def snapshot(self) -> QuoteWorkerSnapshot:
         return QuoteWorkerSnapshot(
             state=self.state,
+            pipeline_active=self._pipeline_active,
             attempt_count=self.attempt_count,
             success_count=self.success_count,
             failure_count=self.failure_count,
@@ -531,8 +555,9 @@ class QuoteWorker:
             while not stop_event.is_set():
                 attempt_started = self._monotonic()
                 retry_immediately = False
-                self.runtime.mark_started()
+                self.runtime.mark_pipeline_started()
                 try:
+                    self.runtime.mark_started()
                     if self._producer_lock is None:
                         result = await self._collect_once()
                     else:
@@ -648,8 +673,11 @@ class QuoteWorker:
                     # universe, but steady-state health/opportunity reads do not.
                     # Drop the local owner before the interval wait so the next
                     # snapshot has the memory headroom certification consumed.
-                    certified_projection = None
-                    self._release_projection_memory()
+                    try:
+                        certified_projection = None
+                        self._release_projection_memory()
+                    finally:
+                        self.runtime.mark_pipeline_finished()
                 elapsed_s = max(0.0, self._monotonic() - attempt_started)
                 delay_s = 0.0 if retry_immediately else max(0.0, self._interval_s - elapsed_s)
                 if await self._wait_for_next_attempt(stop_event, delay_s):

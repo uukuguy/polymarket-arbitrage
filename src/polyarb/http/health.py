@@ -789,7 +789,8 @@ def _build_health_checks(
     # ── Check 2.5: parent-observed scheduler attempt truth ───────────────
     from polyarb.daemon.scheduler import (
         SNAPSHOT_SUBPROCESS_TIMEOUT_S,
-        STRUCTURE_PRODUCER_SLOT_BUDGET_S,
+        STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
+        STRUCTURE_POINTER_SWITCH_HARD_DEADLINE_S,
         STRUCTURE_SLICE_MAX_ELAPSED_S,
         structure_attempt_slot_budget_s,
     )
@@ -812,9 +813,10 @@ def _build_health_checks(
         success_p95_s = schedule_adjustment["success_p95_s"]
         schedule_reason = str(schedule_adjustment["reason"])
     sync_window = store.get_latest_structure_sync()
-    sync_window_status = sync_window["status"] if sync_window is not None else None
+    publication = store.get_latest_structure_publication()
+    publication_status = publication.status if publication is not None else None
     producer_slot_budget_s = int(
-        structure_attempt_slot_budget_s(sync_window_status)
+        structure_attempt_slot_budget_s(publication_status)
     )
     attempt_timeout_s = min(effective_timeout_s, producer_slot_budget_s)
 
@@ -829,8 +831,11 @@ def _build_health_checks(
                 f"effective_timeout_s={effective_timeout_s} "
                 f"producer_slot_budget_s={producer_slot_budget_s} "
                 f"attempt_timeout_s={attempt_timeout_s} "
-                f"slice_elapsed_budget_s={int(STRUCTURE_SLICE_MAX_ELAPSED_S)} "
-                f"finalizer_slot_budget_s={int(STRUCTURE_PRODUCER_SLOT_BUDGET_S)} "
+                f"generation_checkpoint_budget_s={int(STRUCTURE_SLICE_MAX_ELAPSED_S)} "
+                f"generation_child_hard_limit_s="
+                f"{int(STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S)} "
+                f"pointer_switch_hard_deadline_s="
+                f"{int(STRUCTURE_POINTER_SWITCH_HARD_DEADLINE_S)} "
                 f"configured_cadence_s={configured_cadence_s} "
                 f"effective_cadence_s={effective_cadence_s} "
                 f"success_samples={success_sample_count} "
@@ -841,6 +846,35 @@ def _build_health_checks(
     ]
 
     latest_attempt = store.get_latest_snapshot_attempt()
+    latest_defer = store.get_latest_structure_defer()
+    defer_is_current = latest_defer is not None and (
+        latest_attempt is None
+        or int(latest_defer["observed_at_ms"]) > int(latest_attempt["started_at_ms"])
+    )
+    if defer_is_current:
+        assert latest_defer is not None
+        queued_age_s = max(
+            0.0,
+            now_s - int(latest_defer["queued_at_ms"]) / 1_000,
+        )
+        observed_age_s = max(
+            0.0,
+            now_s - int(latest_defer["observed_at_ms"]) / 1_000,
+        )
+        checks["snapshot:producer_defer"] = [
+            {
+                "componentId": "snapshot-scheduler",
+                "componentType": "component",
+                "observedValue": latest_defer["reason"],
+                "status": "warn",
+                "output": (
+                    f"queued_age_seconds={round(queued_age_s, 1)} "
+                    f"observed_age_seconds={round(observed_age_s, 1)}"
+                ),
+                "time": _utc_now_iso(),
+            }
+        ]
+        overall = _severity(overall, "warn")
     if latest_attempt is None:
         attempt_value = "never-started"
         # Existing installations can have valid published truth from before

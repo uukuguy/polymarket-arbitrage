@@ -539,6 +539,9 @@ async def main() -> int:
         on_snapshot_published=(
             quote_worker.request_now if quote_worker is not None else None
         ),
+        quote_worker_runtime=(
+            quote_worker.runtime if quote_worker is not None else None
+        ),
     )
     app = create_app(
         scheduler=scheduler,

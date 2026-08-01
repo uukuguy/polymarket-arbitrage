@@ -136,6 +136,16 @@ class _FakeProcess:
         self._reaped.set()
 
 
+def _seed_snapshot(store: Any, snapshot_id: int) -> None:
+    """Model the child-owned snapshot row required by a successful attempt."""
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "is_valid,parquet_path) VALUES (?,?,?,'subset',0,1,'fixture.parquet')",
+            (snapshot_id, 1, 2),
+        )
+
+
 def test_snapshot_attempt_lifecycle_is_append_only(daemon_settings_for_test: Any) -> None:
     """A terminal scheduler attempt keeps its original OOM classification."""
     from polyarb.storage.sqlite_store import SQLiteStore
@@ -208,6 +218,7 @@ def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
 
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
+    _seed_snapshot(store, 746)
 
     attempt_id = store.begin_snapshot_attempt(started_at_ms=1_000)
     store.finish_snapshot_attempt(
@@ -270,6 +281,7 @@ async def test_scheduler_persists_successful_attempt_diagnostics(
 
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
+    _seed_snapshot(store, 1)
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
     scheduler._run_snapshot = AsyncMock(
         return_value=_FakeResult(
@@ -485,7 +497,7 @@ async def test_snapshot_waits_for_shared_producer_slot(
     await running
 
     assert calls == 1
-    assert observed_timeout_s == 180
+    assert observed_timeout_s == 75
 
 
 @pytest.mark.asyncio
@@ -499,6 +511,7 @@ async def test_snapshot_attempt_starts_after_shared_producer_slot_is_acquired(
 
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
+    _seed_snapshot(store, 10)
     lock_wait_started = asyncio.Event()
 
     class ObservedLock(asyncio.Lock):
@@ -589,6 +602,149 @@ async def test_incomplete_structure_slice_has_shorter_producer_slot_budget(
     await scheduler._run_snapshot()
 
     assert observed_timeout_s == 75
+
+
+@pytest.mark.asyncio
+async def test_ready_structure_publication_uses_pointer_switch_hard_budget(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+
+    observed_timeout_s = None
+
+    async def run_snapshot(*, timeout_s: float):
+        nonlocal observed_timeout_s
+        observed_timeout_s = timeout_s
+        return SimpleNamespace(status=SnapshotStatus.OK)
+
+    monkeypatch.setattr(scheduler_module, "run_snapshot_in_subprocess", run_snapshot)
+    store = MagicMock()
+    store.get_latest_structure_publication.return_value = SimpleNamespace(status="ready")
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._effective_timeout_s = 240
+
+    await scheduler._run_snapshot()
+
+    assert observed_timeout_s == 15
+
+
+def test_structure_defer_receipts_are_restart_visible_and_bounded(
+    daemon_settings_for_test,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    for index in range(105):
+        receipt_id = store.record_structure_defer(
+            reason="quote-pipeline-active",
+            queued_at_ms=1_000,
+            observed_at_ms=1_000 + index,
+        )
+
+    restarted = SQLiteStore(daemon_settings_for_test.db_path)
+    latest = restarted.get_latest_structure_defer()
+    with sqlite3.connect(store.db_path) as con:
+        retained_count = con.execute(
+            "SELECT COUNT(*) FROM structure_defer_receipts"
+        ).fetchone()[0]
+
+    assert latest == {
+        "id": receipt_id,
+        "reason": "quote-pipeline-active",
+        "queued_at_ms": 1_000,
+        "observed_at_ms": 1_104,
+    }
+    assert retained_count == 100
+
+
+@pytest.mark.asyncio
+async def test_structure_rechecks_quote_priority_after_lock_acquisition(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    """A Quote transition between initial check and lock acquisition still wins."""
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import IsolatedStructureCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    active_checks = iter((False, True, False, False))
+    quote_runtime = MagicMock()
+    quote_runtime.pipeline_active.side_effect = lambda: next(active_checks)
+    quote_runtime.pipeline_due.return_value = False
+    child_calls = 0
+
+    async def run_snapshot(*, timeout_s: float):
+        nonlocal child_calls
+        child_calls += 1
+        assert timeout_s == 75
+        return IsolatedStructureCheckpoint(
+            window_id="window-1",
+            stage="markets",
+            pages_processed=1,
+            elapsed_ms=10,
+        )
+
+    sleep = AsyncMock()
+    monkeypatch.setattr(scheduler_module, "run_snapshot_in_subprocess", run_snapshot)
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", sleep)
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+        quote_worker_runtime=quote_runtime,
+    )
+
+    await scheduler._tick()
+
+    receipt = store.get_latest_structure_defer()
+    attempts = store.get_snapshot_attempts(limit=10)
+    assert receipt is not None
+    assert receipt["reason"] == "quote-pipeline-active"
+    assert receipt["observed_at_ms"] >= receipt["queued_at_ms"]
+    assert len(attempts) == 1
+    assert attempts[0]["outcome"] == "cancelled"
+    assert attempts[0]["failure_kind"] == "structure-checkpoint"
+    assert child_calls == 1
+    assert scheduler._failure_counter == 0
+    sleep.assert_awaited_once_with(5.0)
+
+
+@pytest.mark.asyncio
+async def test_structure_child_failure_closes_attempt_and_releases_slot(
+    daemon_settings_for_test,
+) -> None:
+    from polyarb.daemon.scheduler import SnapshotSubprocessError
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    producer_lock = asyncio.Lock()
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        producer_lock=producer_lock,
+    )
+    scheduler._run_snapshot = AsyncMock(
+        side_effect=SnapshotSubprocessError(
+            "timeout",
+            last_stage="gamma-markets",
+            elapsed_ms=75_001,
+        )
+    )
+
+    await scheduler._tick()
+
+    attempt = store.get_latest_snapshot_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "failed"
+    assert attempt["last_stage"] == "gamma-markets"
+    assert attempt["elapsed_ms"] == 75_001
+    assert producer_lock.locked() is False
 
 
 async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> None:

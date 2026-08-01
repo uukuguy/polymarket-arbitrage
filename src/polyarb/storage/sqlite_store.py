@@ -41,6 +41,7 @@ from polyarb.storage.schemas import (
     MARKETS_INSERT_SQL,
     SCHEDULER_STATE_DDL,
     SNAPSHOT_ATTEMPTS_DDL,
+    STRUCTURE_DEFER_RECEIPTS_DDL,
     STRUCTURE_GENERATIONS_DDL,
     STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL,
     STRUCTURE_SYNC_WINDOWS_DDL,
@@ -502,6 +503,7 @@ class SQLiteStore:
             con.executescript(SCHEDULER_STATE_DDL)
             # Parent-observed outcomes for isolated scheduler snapshot children.
             con.executescript(SNAPSHOT_ATTEMPTS_DDL)
+            con.executescript(STRUCTURE_DEFER_RECEIPTS_DDL)
             con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)
             con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
@@ -1212,6 +1214,17 @@ class SQLiteStore:
             None if row[6] is None else str(row[6]),
             None if row[7] is None else str(row[7]),
         )
+
+    def get_latest_structure_publication(self) -> StructurePublicationState | None:
+        """Return the newest unfinished generation publication, if any."""
+        with sqlite3.connect(self._db_path) as con:
+            row = con.execute(
+                "SELECT publication_id,snapshot_id,window_id,status,"
+                "committed_counts_json FROM structure_publications "
+                "WHERE status IN ('writing','ready') "
+                "ORDER BY checkpoint_at_ms DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+        return None if row is None else self._publication_state(row)
 
     def fetch_structure_staging_chunk(
         self,
@@ -3131,6 +3144,63 @@ class SQLiteStore:
             return int(cur.lastrowid)
         finally:
             con.close()
+
+    def record_structure_defer(
+        self,
+        reason: str,
+        queued_at_ms: int,
+        observed_at_ms: int,
+    ) -> int:
+        """Persist bounded Quote-priority admission evidence across restarts."""
+        if (
+            not reason
+            or len(reason) > 64
+            or queued_at_ms < 0
+            or observed_at_ms < queued_at_ms
+        ):
+            raise ValueError("invalid-structure-defer")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            cur = con.execute(
+                "INSERT INTO structure_defer_receipts(reason,queued_at_ms,observed_at_ms) "
+                "VALUES (?,?,?)",
+                (reason, queued_at_ms, observed_at_ms),
+            )
+            assert cur.lastrowid is not None
+            receipt_id = int(cur.lastrowid)
+            con.execute(
+                "DELETE FROM structure_defer_receipts WHERE id <= ("
+                "SELECT COALESCE(MAX(id),0)-100 FROM structure_defer_receipts)"
+            )
+            con.execute("COMMIT")
+            return receipt_id
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def get_latest_structure_defer(self) -> dict[str, object] | None:
+        """Read the latest persisted admission receipt without mutating it."""
+        try:
+            with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as con:
+                row = con.execute(
+                    "SELECT id,reason,queued_at_ms,observed_at_ms "
+                    "FROM structure_defer_receipts ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        return dict(
+            zip(
+                ("id", "reason", "queued_at_ms", "observed_at_ms"),
+                row,
+                strict=True,
+            )
+        )
 
     def finish_snapshot_attempt(
         self,

@@ -29,6 +29,15 @@ def test_create_app_exposes_quote_worker_runtime(tmp_path) -> None:
     assert app.state.quote_worker_runtime is runtime
 
 
+def test_quote_runtime_snapshot_exposes_pipeline_activity() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorkerRuntime
+
+    runtime = QuoteWorkerRuntime()
+
+    assert runtime.pipeline_active() is False
+    assert runtime.snapshot().pipeline_active is False
+
+
 def test_create_app_exposes_candidate_watcher_runtime(tmp_path) -> None:
     settings = Settings(db_path=tmp_path / "state.db")
     store = SQLiteStore(settings.db_path)
@@ -375,6 +384,140 @@ async def test_quote_worker_immediately_retries_superseded_structure_revision() 
     assert waits[0] == 0
     assert runtime.failure_count == 0
     assert runtime.success_count == 1
+
+
+@pytest.mark.asyncio
+async def test_quote_pipeline_stays_active_through_post_publication_and_release() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker, QuoteWorkerRuntime
+    from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
+
+    runtime = QuoteWorkerRuntime()
+    stop_event = asyncio.Event()
+    result = QuoteCollectionResult(
+        run_id=11,
+        status="complete",
+        universe_snapshot_id=22,
+        requested_token_count=4,
+        successful_response_count=4,
+        quote_taken_at_ms=1_000,
+        elapsed_ms=20,
+        universe_hash="a" * 64,
+    )
+    projection = MagicMock(
+        run_id=11,
+        universe_snapshot_id=22,
+        universe_taken_at_ms=900,
+        quoted_at_ms=1_000,
+        requested_token_count=4,
+        successful_response_count=4,
+        universe_hash="a" * 64,
+        source_truth_hash="b" * 64,
+    )
+
+    async def collect_once():
+        assert runtime.pipeline_active() is True
+        return result
+
+    async def certify_projection(_result):
+        assert runtime.pipeline_active() is True
+        return projection
+
+    async def cleanup_old_runs() -> int:
+        assert runtime.pipeline_active() is True
+        return 0
+
+    async def reconcile_global_projection(_projection) -> None:
+        assert runtime.pipeline_active() is True
+
+    def release_projection_memory() -> None:
+        assert runtime.pipeline_active() is True
+
+    async def wait_for_stop(_stop_event: asyncio.Event, _delay_s: float) -> bool:
+        assert runtime.pipeline_active() is False
+        stop_event.set()
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        certify_projection=certify_projection,
+        cleanup_old_runs=cleanup_old_runs,
+        reconcile_global_projection=reconcile_global_projection,
+        interval_s=120,
+        runtime=runtime,
+        wait_for_stop=wait_for_stop,
+        release_projection_memory=release_projection_memory,
+    )
+
+    await worker.run(stop_event)
+
+    assert runtime.pipeline_active() is False
+    assert runtime.snapshot().pipeline_active is False
+
+
+@pytest.mark.asyncio
+async def test_quote_pipeline_activity_clears_when_worker_is_cancelled() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker, QuoteWorkerRuntime
+
+    runtime = QuoteWorkerRuntime()
+    entered = asyncio.Event()
+
+    async def collect_once():
+        entered.set()
+        await asyncio.Event().wait()
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        interval_s=120,
+        runtime=runtime,
+    )
+    task = asyncio.create_task(worker.run(asyncio.Event()))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert runtime.pipeline_active() is True
+
+    task.cancel()
+    result = await asyncio.gather(task, return_exceptions=True)
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert runtime.pipeline_active() is False
+    assert runtime.snapshot().pipeline_active is False
+
+
+@pytest.mark.asyncio
+async def test_quote_pipeline_activity_clears_after_failed_attempt() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker, QuoteWorkerRuntime
+
+    runtime = QuoteWorkerRuntime()
+    stop_event = asyncio.Event()
+
+    async def collect_once():
+        assert runtime.pipeline_active() is True
+        raise RuntimeError("upstream unavailable")
+
+    async def wait_for_stop(_stop_event: asyncio.Event, _delay_s: float) -> bool:
+        assert runtime.pipeline_active() is False
+        stop_event.set()
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        interval_s=120,
+        runtime=runtime,
+        wait_for_stop=wait_for_stop,
+    )
+
+    await worker.run(stop_event)
+
+    assert runtime.failure_count == 1
+    assert runtime.pipeline_active() is False
+
+
+def test_daemon_passes_exact_quote_runtime_to_structure_scheduler() -> None:
+    from polyarb.daemon import main as main_module
+
+    source = inspect.getsource(main_module.main)
+
+    assert "quote_worker_runtime=(" in source
+    assert "quote_worker.runtime if quote_worker is not None else None" in source
 
 
 @pytest.mark.asyncio

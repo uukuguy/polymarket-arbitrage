@@ -74,10 +74,11 @@ SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
 # A longer adaptive snapshot timeout may improve completion probability, but
 # it must never let one Structure child monopolize that lane past the amount
 # production can absorb without violating the 300-second Quote hard SLA.
-STRUCTURE_PRODUCER_SLOT_BUDGET_S = 180.0
-STRUCTURE_SLICE_SLOT_BUDGET_S = 75.0
+STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S = 75.0
+STRUCTURE_POINTER_SWITCH_HARD_DEADLINE_S = 15.0
 STRUCTURE_SLICE_MAX_PAGES = 40
 STRUCTURE_SLICE_MAX_ELAPSED_S = 45.0
+STRUCTURE_DEFER_RETRY_DELAY_S = 5.0
 RECOVERY_RETRY_DELAY_S = 5.0
 MAX_RECOVERY_RETRY_DELAY_S = 60.0
 
@@ -91,12 +92,12 @@ def recovery_retry_delay_s(failure_counter: int) -> float:
     )
 
 
-def structure_attempt_slot_budget_s(window_status: object) -> float:
-    """Reserve the long slot only for a fully staged publish transaction."""
+def structure_attempt_slot_budget_s(publication_status: object) -> float:
+    """Select one hard child budget without crossing publication stages."""
     return (
-        STRUCTURE_PRODUCER_SLOT_BUDGET_S
-        if window_status == "complete"
-        else STRUCTURE_SLICE_SLOT_BUDGET_S
+        STRUCTURE_POINTER_SWITCH_HARD_DEADLINE_S
+        if publication_status == "ready"
+        else STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S
     )
 
 _SNAPSHOT_STAGE_MARKER_RE = re.compile(
@@ -363,12 +364,16 @@ class SnapshotScheduler:
         *,
         producer_lock: asyncio.Lock | None = None,
         on_snapshot_published: Callable[[], object] | None = None,
+        quote_worker_runtime: object | None = None,
     ) -> None:
         self._settings = settings
         self._sqlite_store = sqlite_store
         self._producer_lock = producer_lock
         self._on_snapshot_published = on_snapshot_published
+        self._quote_worker_runtime = quote_worker_runtime
         self._checkpoint_pending = False
+        self._producer_slot_owned = False
+        self._active_attempt_id: int | None = None
 
         # Restore state from DB (test_counter_persists_across_restart)
         self._failure_counter = 0
@@ -518,23 +523,92 @@ class SnapshotScheduler:
         Real prod wires it to the orchestrator in Plan 04.
         """
         async def run_in_slot() -> object:
-            latest = await asyncio.to_thread(
-                self._sqlite_store.get_latest_structure_sync
+            publication = await asyncio.to_thread(
+                self._sqlite_store.get_latest_structure_publication
             )
             try:
-                window_status = latest["status"] if latest is not None else None
-            except (KeyError, TypeError):
-                window_status = None
+                publication_status = (
+                    publication.status if publication is not None else None
+                )
+            except AttributeError:
+                publication_status = None
             attempt_timeout_s = min(
                 self._effective_timeout_s,
-                structure_attempt_slot_budget_s(window_status),
+                structure_attempt_slot_budget_s(publication_status),
             )
             return await run_snapshot_in_subprocess(timeout_s=attempt_timeout_s)
 
-        if self._producer_lock is None:
+        if self._producer_lock is None or self._producer_slot_owned:
             return await run_in_slot()
         async with self._producer_lock:
             return await run_in_slot()
+
+    def _quote_priority_reason(self) -> str | None:
+        runtime = self._quote_worker_runtime
+        if runtime is None:
+            return None
+        if runtime.pipeline_active():
+            return "quote-pipeline-active"
+        interval_s = float(
+            getattr(self._settings, "neg_risk_quote_interval_s", 120.0)
+        )
+        if runtime.pipeline_due(interval_s):
+            return "quote-pipeline-due"
+        return None
+
+    async def _record_structure_defer(
+        self,
+        *,
+        reason: str,
+        queued_at_ms: int,
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self._sqlite_store.record_structure_defer,
+                reason,
+                queued_at_ms,
+                int(time.time() * 1_000),
+            )
+        except Exception as error:  # noqa: BLE001 - admission still stays fail-safe
+            logger.warning(
+                "could not persist Structure defer receipt "
+                f"kind={type(error).__name__} reason={reason}"
+            )
+
+    async def _admit_and_run_snapshot(self, *, queued_at_ms: int) -> tuple[int, object]:
+        """Give Quote priority, then start attempt truth inside the acquired slot."""
+        while True:
+            reason = self._quote_priority_reason()
+            if reason is not None:
+                await self._record_structure_defer(
+                    reason=reason,
+                    queued_at_ms=queued_at_ms,
+                )
+                await asyncio.sleep(STRUCTURE_DEFER_RETRY_DELAY_S)
+                continue
+
+            if self._producer_lock is not None:
+                await self._producer_lock.acquire()
+                self._producer_slot_owned = True
+            try:
+                reason = self._quote_priority_reason()
+                if reason is not None:
+                    await self._record_structure_defer(
+                        reason=reason,
+                        queued_at_ms=queued_at_ms,
+                    )
+                else:
+                    attempt_id = await asyncio.to_thread(
+                        self._sqlite_store.begin_snapshot_attempt,
+                        started_at_ms=int(time.time() * 1_000),
+                    )
+                    self._active_attempt_id = attempt_id
+                    return attempt_id, await self._run_snapshot()
+            finally:
+                self._producer_slot_owned = False
+                if self._producer_lock is not None and self._producer_lock.locked():
+                    self._producer_lock.release()
+            await asyncio.sleep(STRUCTURE_DEFER_RETRY_DELAY_S)
 
     async def _on_recovering(self) -> None:
         """Alert once when repeated failures require active recovery.
@@ -606,13 +680,14 @@ class SnapshotScheduler:
             self.state = SchedulerState.RECOVERING
 
         self._checkpoint_pending = False
-        attempt_id = await asyncio.to_thread(
-            self._sqlite_store.begin_snapshot_attempt,
-            started_at_ms=int(time.time() * 1000),
-        )
+        self._active_attempt_id = None
+        attempt_id: int | None = None
+        queued_at_ms = int(time.time() * 1_000)
 
         try:
-            result = await self._run_snapshot()
+            attempt_id, result = await self._admit_and_run_snapshot(
+                queued_at_ms=queued_at_ms
+            )
             if isinstance(result, IsolatedStructureCheckpoint):
                 last_stage = (
                     "gamma-events"
@@ -747,28 +822,34 @@ class SnapshotScheduler:
         except asyncio.CancelledError:
             # F-04: cancellation must propagate so run() can stop in <1s.
             # Do NOT count as a failure — this is a graceful shutdown signal.
-            await self._finish_attempt(
-                attempt_id=attempt_id,
-                outcome="cancelled",
-                snapshot_id=None,
-                failure_kind="scheduler-cancelled",
-            )
+            attempt_id = attempt_id or self._active_attempt_id
+            if attempt_id is not None:
+                await self._finish_attempt(
+                    attempt_id=attempt_id,
+                    outcome="cancelled",
+                    snapshot_id=None,
+                    failure_kind="scheduler-cancelled",
+                )
             logger.info("scheduler tick cancelled mid-flight; propagating CancelledError")
             raise
         except Exception as error:
-            await self._finish_attempt(
-                attempt_id=attempt_id,
-                outcome="failed",
-                snapshot_id=None,
-                failure_kind=str(error),
-                last_stage=getattr(error, "last_stage", None),
-                elapsed_ms=getattr(error, "elapsed_ms", None),
-            )
+            attempt_id = attempt_id or self._active_attempt_id
+            if attempt_id is not None:
+                await self._finish_attempt(
+                    attempt_id=attempt_id,
+                    outcome="failed",
+                    snapshot_id=None,
+                    failure_kind=str(error),
+                    last_stage=getattr(error, "last_stage", None),
+                    elapsed_ms=getattr(error, "elapsed_ms", None),
+                )
             self._failure_counter += 1
             logger.exception(
                 f"snapshot tick raised exception "
                 f"failure_counter={self._failure_counter}/{self.FAILURE_THRESHOLD}"
             )
+
+        self._active_attempt_id = None
 
         # Persist counter before recovery-state check
         self._persist_counter()
