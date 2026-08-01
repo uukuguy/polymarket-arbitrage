@@ -46,6 +46,21 @@ WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
 ReleaseProjectionMemory = Callable[[], None]
 CompleteAttempt = Callable[[QuoteCollectionResult], Awaitable[None]]
 FailAttempt = Callable[[QuoteCollectionResult, str], Awaitable[None]]
+_BACKGROUND_REAP_TASKS: set[asyncio.Task[object]] = set()
+
+
+def _retain_background_reap(task: asyncio.Task[object]) -> None:
+    """Retain deadline-exhausted reap work and consume its final exception."""
+    _BACKGROUND_REAP_TASKS.add(task)
+
+    def consume(completed: asyncio.Task[object]) -> None:
+        _BACKGROUND_REAP_TASKS.discard(completed)
+        try:
+            completed.result()
+        except BaseException:
+            pass
+
+    task.add_done_callback(consume)
 
 
 def _release_projection_memory() -> None:
@@ -349,6 +364,11 @@ async def _terminate_quote_child(
     *,
     terminate_timeout_s: float,
 ) -> None:
+    shutdown_deadline = time.monotonic() + (2 * terminate_timeout_s)
+
+    def remaining_s() -> float:
+        return max(0.0, shutdown_deadline - time.monotonic())
+
     try:
         process.terminate()
     except ProcessLookupError:
@@ -356,7 +376,7 @@ async def _terminate_quote_child(
     try:
         await asyncio.wait_for(
             asyncio.shield(communicate_task),
-            timeout=terminate_timeout_s,
+            timeout=min(terminate_timeout_s, remaining_s()),
         )
         return
     except TimeoutError:
@@ -365,18 +385,27 @@ async def _terminate_quote_child(
         process.kill()
     except ProcessLookupError:
         pass
-    try:
-        await asyncio.wait_for(
-            asyncio.shield(communicate_task),
-            timeout=terminate_timeout_s,
-        )
-    except TimeoutError:
-        communicate_task.cancel()
-        await asyncio.gather(communicate_task, return_exceptions=True)
-        # communicate() normally includes wait()/reap. If its pipe readers
-        # wedge even after SIGKILL, wait on the process explicitly so the
-        # parent never leaves a zombie behind.
-        await asyncio.wait_for(process.wait(), timeout=terminate_timeout_s)
+    wait_task: asyncio.Task[object] = asyncio.create_task(process.wait())
+    done, _pending = await asyncio.wait(
+        {communicate_task, wait_task},
+        timeout=remaining_s(),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if wait_task in done:
+        wait_task.result()
+        if not communicate_task.done():
+            communicate_task.cancel()
+            _retain_background_reap(communicate_task)
+        return
+    if communicate_task in done:
+        communicate_task.result()
+        if not wait_task.done():
+            _retain_background_reap(wait_task)
+        return
+    communicate_task.cancel()
+    _retain_background_reap(communicate_task)
+    _retain_background_reap(wait_task)
+    raise TimeoutError("quote child reap exceeded shutdown deadline")
 
 
 async def collect_quotes_in_subprocess(
@@ -473,11 +502,28 @@ async def collect_quotes_in_subprocess(
         )
         raise QuoteCollectionSubprocessError("timeout") from error
     except asyncio.CancelledError:
-        await _terminate_quote_child(
-            process,
-            communicate_task,
-            terminate_timeout_s=terminate_timeout_s,
-        )
+        try:
+            await _terminate_quote_child(
+                process,
+                communicate_task,
+                terminate_timeout_s=terminate_timeout_s,
+            )
+        except BaseException as cleanup_error:
+            logger.error(
+                "quote cancellation child cleanup failed "
+                f"attempt_id={attempt_id} pid={getattr(process, 'pid', None)} "
+                f"kind={type(cleanup_error).__name__}"
+            )
+        try:
+            await asyncio.to_thread(
+                attempt_store.fail_collecting_runs,
+                failure_reason="collector-cancelled",
+            )
+        except BaseException as cleanup_error:
+            logger.error(
+                "quote cancellation run cleanup failed "
+                f"attempt_id={attempt_id} kind={type(cleanup_error).__name__}"
+            )
         await _terminalize_quote_attempt(attempt_store, attempt_id, "parent-cancelled")
         raise
 

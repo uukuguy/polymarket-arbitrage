@@ -701,6 +701,7 @@ class _FakeProcess:
         self.terminated = False
         self.killed = False
         self.wait_called = False
+        self.terminated_at: float | None = None
 
     async def communicate(self):
         if self.block and not self.killed:
@@ -709,6 +710,7 @@ class _FakeProcess:
 
     def terminate(self) -> None:
         self.terminated = True
+        self.terminated_at = time.monotonic()
 
     def kill(self) -> None:
         self.killed = True
@@ -866,6 +868,12 @@ async def test_isolated_collection_hard_timeout_kills_child_and_releases_run(tmp
             self.exited = True
             return self.stdout, self.stderr
 
+        async def wait(self) -> int:
+            self.wait_called = True
+            while not self.exited:
+                await asyncio.sleep(0)
+            return self.returncode
+
     process = RenewingHungProcess()
 
     async def spawn(*_args, **_kwargs):
@@ -986,11 +994,17 @@ async def test_hard_timeout_explicitly_waits_if_killed_child_pipes_never_close(
         async def communicate(self):
             await asyncio.Event().wait()
 
+        async def wait(self) -> int:
+            self.wait_called = True
+            await asyncio.sleep(0.04)
+            return self.returncode
+
     process = WedgedPipesProcess(block=True)
 
     async def spawn(*_args, **_kwargs):
         return process
 
+    started = time.monotonic()
     with pytest.raises(QuoteCollectionSubprocessError, match="subprocess-timeout"):
         await collect_quotes_in_subprocess(
             Settings(
@@ -1003,11 +1017,15 @@ async def test_hard_timeout_explicitly_waits_if_killed_child_pipes_never_close(
             terminate_timeout_s=0.01,
         )
 
+    assert time.monotonic() - started < 0.25
+    assert process.terminated_at is not None
+    assert time.monotonic() - process.terminated_at < 0.08
     assert process.killed is True
     assert process.wait_called is True
     attempt = NegRiskQuoteStore(tmp_path / "state.db").latest_collection_attempt()
     assert attempt is not None
     assert attempt["outcome"] == "failed"
+    await asyncio.sleep(0.05)
 
 
 async def test_hard_timeout_terminalizes_attempt_when_run_cleanup_fails(
@@ -1093,3 +1111,56 @@ async def test_isolated_collection_cancellation_terminates_then_kills_child(
 
     assert process.terminated is True
     assert process.killed is True
+
+
+async def test_cancellation_preserves_cancelled_error_when_reap_and_run_cleanup_fail(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon.quote_worker import collect_quotes_in_subprocess
+
+    class NeverReapedProcess(_FakeProcess):
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+        async def wait(self) -> int:
+            self.wait_called = True
+            await asyncio.sleep(0.04)
+            return self.returncode
+
+    process = NeverReapedProcess(block=True)
+    spawned = asyncio.Event()
+
+    async def spawn(*_args, **_kwargs):
+        spawned.set()
+        return process
+
+    def fail_run_cleanup(*_args, **_kwargs):
+        raise sqlite3.OperationalError("run cleanup unavailable")
+
+    monkeypatch.setattr(NegRiskQuoteStore, "fail_collecting_runs", fail_run_cleanup)
+    task = asyncio.create_task(
+        collect_quotes_in_subprocess(
+            Settings(db_path=tmp_path / "state.db"),
+            spawn=spawn,
+            terminate_timeout_s=0.01,
+        )
+    )
+    await asyncio.wait_for(spawned.wait(), timeout=1)
+    started = time.monotonic()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert time.monotonic() - started < 0.08
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.wait_called is True
+    attempt = NegRiskQuoteStore(tmp_path / "state.db").latest_collection_attempt()
+    assert attempt is not None
+    assert (attempt["outcome"], attempt["failure_kind"]) == (
+        "failed",
+        "parent-cancelled",
+    )
+    await asyncio.sleep(0.05)
