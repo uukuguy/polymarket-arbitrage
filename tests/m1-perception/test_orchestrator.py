@@ -2589,6 +2589,55 @@ async def test_missing_member_point_lookup_failure_blocks_publication(
 
 
 @pytest.mark.asyncio
+async def test_non_open_event_members_do_not_consume_point_lookup_budget(
+    tmp_path: Path,
+) -> None:
+    """Closed/inactive event truth is not an active-keyset race candidate."""
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    all_markets = _load_gamma_fixture()[:2]
+    active_market = {
+        **all_markets[0],
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "negRiskMarketID": "group-neg-risk",
+    }
+    non_open_member = {
+        **all_markets[1],
+        "active": False,
+        "closed": False,
+        "negRisk": True,
+        "negRiskMarketID": "group-neg-risk",
+    }
+    event = _standard_neg_risk_event([active_market, non_open_member])
+    event["markets"][1]["active"] = False
+    event["markets"][1]["closed"] = False
+    fake_gamma = _make_fake_gamma([active_market], [event])
+    clob_data = _load_clob_fixture()
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+
+    assert result.is_valid is True
+    fake_gamma.fetch_market_states.assert_not_awaited()
+    assert publish_mock.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_market_group_semantic_mismatch_blocks_publication(tmp_path: Path) -> None:
     settings = _make_settings(tmp_path)
     settings.event_bus_enabled = True

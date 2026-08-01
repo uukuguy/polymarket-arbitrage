@@ -789,13 +789,12 @@ async def run_snapshot(
                 and event_failure_reason is None
                 and market_failure_reason is None
             ):
-                # Reconcile every event→market identity, not only neg-risk
-                # group members. Ordinary event markets can also disappear
-                # from the active market keyset while their event payload still
-                # carries the mapping (typically as they transition closed).
-                missing_event_members = sorted(
-                    (authoritative_member_ids | set(market_to_event_map)) - seen_ids
-                )
+                # Only active/open event members can represent a race against
+                # the active/open market keyset.  Gamma legitimately keeps a
+                # large historical tail of inactive or closed members embedded
+                # in active events; point-checking that tail exhausts the
+                # bounded reconciliation budget without adding source truth.
+                missing_event_members = sorted(authoritative_member_ids - seen_ids)
                 if missing_event_members:
                     try:
                         point_states = await gamma.fetch_market_states(missing_event_members)

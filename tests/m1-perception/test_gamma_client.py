@@ -351,7 +351,10 @@ async def test_fetch_market_states_rejects_unbounded_lookup_set() -> None:
 
 async def test_fetch_market_states_batches_large_exact_id_set() -> None:
     settings = _fast_settings()
-    market_ids = [f"market-{index:03d}" for index in range(211)]
+    # Production 2026-08-01 exposed 545 active/open event members that were
+    # absent from the active-market keyset.  That is still one bounded race
+    # window and must fit below the client's hard fan-out ceiling.
+    market_ids = [f"market-{index:03d}" for index in range(545)]
     chunks = [market_ids[start : start + 25] for start in range(0, len(market_ids), 25)]
 
     def payload(ids: list[str]) -> list[dict]:

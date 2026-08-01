@@ -125,7 +125,7 @@ class GammaClient:
     # Point lookups reconcile the race window between durable event and market
     # traversals. Large sets use bounded exact-id batches rather than one HTTP
     # request per identity.
-    MAX_MARKET_STATE_LOOKUPS = 500
+    MAX_MARKET_STATE_LOOKUPS = 1_000
     MARKET_STATE_POINT_LOOKUP_LIMIT = 100
     MARKET_STATE_LOOKUP_BATCH_SIZE = 25
     # Gamma can leave a larger stale tail in the active market keyset than the
