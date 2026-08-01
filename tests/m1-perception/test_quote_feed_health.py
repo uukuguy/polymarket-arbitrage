@@ -190,6 +190,23 @@ def test_collecting_quote_phase_checkpoint_fails_after_120_seconds(tmp_path) -> 
     assert overall == "fail"
 
 
+def test_quote_attempt_database_error_fails_closed(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path, enabled=True)
+    _complete_run(settings, age_s=10)
+
+    def unavailable(_self):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(NegRiskQuoteStore, "latest_collection_attempt", unavailable)
+
+    checks, overall = _quote_check(settings)
+
+    phase = checks["quote_feed:collection_phase"][0]
+    assert phase["status"] == "fail"
+    assert phase["output"] == "attempt-evidence-unavailable:DatabaseError"
+    assert overall == "fail"
+
+
 def test_worker_error_warns_while_complete_run_is_fresh(tmp_path) -> None:
     settings = _settings(tmp_path, enabled=True)
     _complete_run(settings, age_s=10)

@@ -8,7 +8,6 @@ import pytest
 from polyarb.routing.neg_risk_quote_store import (
     NegRiskQuoteStore,
     PersistedQuote,
-    QuoteProjectionIntegrityError,
     QuoteUniverseUnavailableError,
 )
 from polyarb.routing.opportunity_scanner import (
@@ -141,6 +140,9 @@ def _seed_quote_universe(path, *, taken_at_ms: int = 9_900_000) -> int:
                 (snapshot_id, "e2", "g2", "hash-g2"),
             ],
         )
+        # Direct fixture publication boundary; production writers clear this
+        # only after all source rows are ready to commit.
+        con.execute("DELETE FROM legacy_structure_revision_dirty WHERE id=1")
     return snapshot_id
 
 
@@ -161,17 +163,8 @@ def _complete_quote_run(
 ) -> int:
     store = NegRiskQuoteStore(path)
     universe = store.latest_verified_universe()
-    snapshot_id, taken_at_ms, legs = (
-        universe.snapshot_id,
-        universe.taken_at_ms,
-        universe.legs,
-    )
-    run_id = store.begin_run(
-        universe_snapshot_id=snapshot_id,
-        universe_taken_at_ms=taken_at_ms,
-        legs=legs,
-        quoted_at_ms=quoted_at_ms,
-    )
+    legs = universe.legs
+    run_id = store.begin_verified_run(universe, quoted_at_ms=quoted_at_ms)
     terminal_states = terminal_states or {}
     asks = asks or {
         "yes-1": (0.40, 12.0),
@@ -276,6 +269,7 @@ def test_verified_scan_exposes_exact_identity_and_bounded_rejections(quote_db) -
             ") VALUES (1,'e3','g3','augmented',1,1,'hash-g3',"
             "'complete-unsupported','augmented-neg-risk-not-supported')"
         )
+        con.execute("DELETE FROM legacy_structure_revision_dirty WHERE id=1")
     run_id = _complete_quote_run(
         quote_db,
         terminal_states={"yes-2": "missing-ask"},
@@ -327,6 +321,7 @@ def test_verified_scan_recomputes_invalid_group_rejections_for_exact_source(
 ) -> None:
     with sqlite3.connect(quote_db) as con:
         con.execute("DELETE FROM markets WHERE market_id='m2'")
+        con.execute("DELETE FROM legacy_structure_revision_dirty WHERE id=1")
     _complete_quote_run(quote_db)
 
     result = scan_verified_neg_risk_quote_run(
@@ -346,6 +341,7 @@ def test_verified_scan_fails_closed_on_incomplete_source_truth(quote_db) -> None
             ") VALUES (1,'e3','g3','standard',0,0,'',"
             "'incomplete-source','source-membership-missing')"
         )
+        con.execute("DELETE FROM legacy_structure_revision_dirty WHERE id=1")
     _complete_quote_run(quote_db)
 
     with pytest.raises(QuoteUniverseUnavailableError):
@@ -355,7 +351,7 @@ def test_verified_scan_fails_closed_on_incomplete_source_truth(quote_db) -> None
         )
 
 
-def test_verified_scan_fails_closed_when_source_identity_drifts_after_run(
+def test_verified_scan_keeps_certified_run_when_new_source_is_still_dirty(
     quote_db,
 ) -> None:
     _complete_quote_run(quote_db)
@@ -365,11 +361,12 @@ def test_verified_scan_fails_closed_when_source_identity_drifts_after_run(
             "WHERE neg_risk_market_id='g1'"
         )
 
-    with pytest.raises(QuoteUniverseUnavailableError):
-        scan_verified_neg_risk_quote_run(
-            quote_db,
-            now_s=lambda: QUOTE_NOW_S,
-        )
+    result = scan_verified_neg_risk_quote_run(
+        quote_db,
+        now_s=lambda: QUOTE_NOW_S,
+    )
+
+    assert result.quote_run_id == 1
 
 
 @pytest.mark.parametrize(
@@ -388,18 +385,19 @@ def test_verified_scan_fails_closed_on_unusable_executable_numeric_truth(
     value: object,
 ) -> None:
     _complete_quote_run(quote_db)
-    with sqlite3.connect(quote_db) as con:
+    with sqlite3.connect(quote_db) as con, pytest.raises(
+        sqlite3.IntegrityError, match="complete quotes are immutable"
+    ):
         con.execute("PRAGMA ignore_check_constraints=ON")
         con.execute(
             f"UPDATE neg_risk_quotes SET {column}=? WHERE yes_token_id='yes-1'",
             (value,),
         )
 
-    with pytest.raises(QuoteProjectionIntegrityError):
-        scan_verified_neg_risk_quote_run(
-            quote_db,
-            now_s=lambda: QUOTE_NOW_S,
-        )
+    assert scan_verified_neg_risk_quote_run(
+        quote_db,
+        now_s=lambda: QUOTE_NOW_S,
+    ).quote_run_id == 1
 
 
 def test_quote_run_scan_ignores_newer_failed_and_collecting_runs(quote_db) -> None:
@@ -441,14 +439,11 @@ def test_quote_run_scan_quote_sla_boundary_and_exact_error(quote_db) -> None:
         scan_neg_risk_quote_run(quote_db, now_s=lambda: 10_000.1)
 
 
-def test_quote_run_scan_universe_sla_boundary_and_exact_error(quote_db) -> None:
+def test_quote_run_scan_universe_sla_boundary_and_exact_error(tmp_path) -> None:
+    quote_db = tmp_path / "stale-universe.db"
+    SQLiteStore(quote_db).init_schema()
+    _seed_quote_universe(quote_db, taken_at_ms=-40_400_000)
     _complete_quote_run(quote_db, quoted_at_ms=QUOTE_NOW_S * 1000)
-    with sqlite3.connect(quote_db) as con:
-        con.execute("UPDATE snapshots SET taken_at_ms = ? WHERE id = 1", (-40_400_000,))
-        con.execute(
-            "UPDATE neg_risk_quote_runs SET universe_taken_at_ms = ? WHERE id = 1",
-            (-40_400_000,),
-        )
 
     assert scan_neg_risk_quote_run(quote_db, now_s=lambda: QUOTE_NOW_S)
     with pytest.raises(
@@ -474,8 +469,8 @@ def test_quote_run_scan_ignores_legacy_unverified_complete_run(
             "universe_snapshot_id,universe_taken_at_ms,universe_hash,quoted_at_ms,"
             "requested_token_count,successful_response_count,lease_expires_at_ms,"
             "status,completed_at_ms"
-            ") VALUES (1,?,?,?,1,0,0,'complete',?)",
-            (9_900_000, legacy_hash, 9_990_000, 9_990_001),
+            ") VALUES (1,?,?,?,1,0,?,'collecting',NULL)",
+            (9_900_000, legacy_hash, 9_990_000, 10_000_000),
         )
         legacy_id = int(cursor.lastrowid)
         con.execute(
@@ -494,6 +489,10 @@ def test_quote_run_scan_ignores_legacy_unverified_complete_run(
             ") VALUES (?,'g1','','','legacy-market','legacy-condition',"
             "'legacy','legacy-token','missing-book',NULL,NULL)",
             (legacy_id,),
+        )
+        con.execute(
+            "UPDATE neg_risk_quote_runs SET status='complete',completed_at_ms=? WHERE id=?",
+            (9_990_001, legacy_id),
         )
 
     with pytest.raises(QuoteRunUnavailableError, match=r"^quote run unavailable$"):

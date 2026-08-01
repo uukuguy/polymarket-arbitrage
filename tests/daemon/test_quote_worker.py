@@ -4,6 +4,8 @@ import asyncio
 import importlib.util
 import json
 import os
+import sqlite3
+import time
 import weakref
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -15,6 +17,7 @@ os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 
 from polyarb.config import Settings
 from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
+from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
 
 
 @dataclass
@@ -260,6 +263,7 @@ async def test_worker_atomically_publishes_projection_and_precomputed_scan() -> 
         universe_hash="hash-7",
     )
     observed_during_prepare: list[object | None] = []
+    completed_after_publish: list[int] = []
 
     async def collect_once() -> QuoteCollectionResult:
         return _result(7)
@@ -274,10 +278,15 @@ async def test_worker_atomically_publishes_projection_and_precomputed_scan() -> 
     async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
         return True
 
+    async def complete_attempt(result: QuoteCollectionResult) -> None:
+        assert worker.runtime.certified_feed() is not None
+        completed_after_publish.append(result.run_id)
+
     worker = QuoteWorker(
         collect_once=collect_once,
         certify_projection=certify_projection,
         prepare_opportunities=prepare_opportunities,
+        complete_attempt=complete_attempt,
         interval_s=120,
         wait_for_stop=stop_after_once,
     )
@@ -290,6 +299,7 @@ async def test_worker_atomically_publishes_projection_and_precomputed_scan() -> 
     assert feed.projection is not projection
     assert feed.projection.run_id == projection.run_id
     assert feed.opportunity_scan is opportunity_scan
+    assert completed_after_publish == [7]
 
 
 async def test_watcher_failure_keeps_certified_feed_publishable() -> None:
@@ -396,6 +406,7 @@ async def test_failed_certification_preserves_previous_projection() -> None:
 
     previous = _ProjectionFixture(run_id=6)
     wrong_run = _ProjectionFixture(run_id=999)
+    failed_attempts: list[tuple[int, str]] = []
 
     async def collect_once() -> QuoteCollectionResult:
         return _result(7)
@@ -406,9 +417,13 @@ async def test_failed_certification_preserves_previous_projection() -> None:
     async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
         return True
 
+    async def fail_attempt(result: QuoteCollectionResult, reason: str) -> None:
+        failed_attempts.append((result.run_id, reason))
+
     worker = QuoteWorker(
         collect_once=collect_once,
         certify_projection=certify_projection,
+        fail_attempt=fail_attempt,
         interval_s=120,
         wait_for_stop=stop_after_once,
     )
@@ -424,6 +439,7 @@ async def test_failed_certification_preserves_previous_projection() -> None:
     assert snapshot.success_count == 0
     assert snapshot.failure_count == 1
     assert snapshot.last_error_kind == "QuoteProjectionIntegrityError"
+    assert failed_attempts == [(7, "QuoteProjectionIntegrityError")]
 
 
 async def test_worker_releases_full_projection_before_interval_wait() -> None:
@@ -757,6 +773,97 @@ async def test_isolated_collection_fails_closed_on_invalid_child_result(
             Settings(db_path=tmp_path / "state.db"),
             spawn=spawn,
         )
+    attempt = NegRiskQuoteStore(tmp_path / "state.db").latest_collection_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "failed"
+
+
+async def test_isolated_collection_hard_timeout_kills_child_and_releases_run(tmp_path) -> None:
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSubprocessError,
+        collect_quotes_in_subprocess,
+    )
+
+    db_path = tmp_path / "state.db"
+
+    class RenewingHungProcess(_FakeProcess):
+        def __init__(self) -> None:
+            super().__init__(block=True)
+            self.renewals = 0
+            self.exited = False
+
+        async def communicate(self):
+            with sqlite3.connect(db_path) as con:
+                con.execute(
+                    "INSERT INTO neg_risk_quote_runs("
+                    "universe_snapshot_id,universe_taken_at_ms,quoted_at_ms,"
+                    "requested_token_count,successful_response_count,lease_expires_at_ms,status"
+                    ") VALUES (999,0,0,0,0,9999999999999,'collecting')"
+                )
+            while not self.killed:
+                with sqlite3.connect(db_path) as con:
+                    con.execute(
+                        "UPDATE neg_risk_quote_runs SET lease_expires_at_ms="
+                        "lease_expires_at_ms+1 WHERE status='collecting'"
+                    )
+                self.renewals += 1
+                await asyncio.sleep(0.002)
+            self.exited = True
+            return self.stdout, self.stderr
+
+    process = RenewingHungProcess()
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    started = time.monotonic()
+    with pytest.raises(QuoteCollectionSubprocessError, match="subprocess-timeout"):
+        await collect_quotes_in_subprocess(
+            Settings(
+                db_path=tmp_path / "state.db",
+                neg_risk_quote_child_hard_limit_s=0.08,
+                neg_risk_quote_fetch_timeout_s=0.05,
+            ),
+            spawn=spawn,
+            terminate_timeout_s=0.01,
+        )
+
+    assert time.monotonic() - started < 0.2
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.exited is True
+    assert process.renewals > 0
+    attempt = NegRiskQuoteStore(db_path).latest_collection_attempt()
+    assert attempt is not None
+    assert (attempt["phase"], attempt["outcome"], attempt["failure_kind"]) == (
+        "failed",
+        "failed",
+        "child-hard-timeout",
+    )
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quote_runs WHERE status='collecting'"
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT failure_reason FROM neg_risk_quote_runs"
+        ).fetchone() == ("collector-hard-timeout",)
+
+
+async def test_isolated_collection_spawn_failure_terminalizes_attempt(tmp_path) -> None:
+    from polyarb.daemon.quote_worker import collect_quotes_in_subprocess
+
+    async def spawn(*_args, **_kwargs):
+        raise OSError("spawn unavailable")
+
+    with pytest.raises(OSError, match="spawn unavailable"):
+        await collect_quotes_in_subprocess(
+            Settings(db_path=tmp_path / "state.db"),
+            spawn=spawn,
+        )
+
+    attempt = NegRiskQuoteStore(tmp_path / "state.db").latest_collection_attempt()
+    assert attempt is not None
+    assert (attempt["outcome"], attempt["failure_kind"]) == ("failed", "spawn-failed")
 
 
 async def test_isolated_collection_cancellation_terminates_then_kills_child(

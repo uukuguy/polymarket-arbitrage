@@ -790,7 +790,7 @@ def test_qualification_endpoint_counts_mismatch_and_expired_collecting_lease(
             "universe_snapshot_id,universe_taken_at_ms,universe_hash,"
             "source_truth_hash,quoted_at_ms,requested_token_count,"
             "successful_response_count,lease_expires_at_ms,status,completed_at_ms"
-            ") VALUES(1,1,'u','s',1,1,1,1,'complete',2)"
+            ") VALUES(1,1,'u','s',1,1,1,3,'collecting',NULL)"
         ).lastrowid
         con.execute(
             "INSERT INTO neg_risk_quote_run_legs("
@@ -818,6 +818,11 @@ def test_qualification_endpoint_counts_mismatch_and_expired_collecting_lease(
                 0.4,
                 10,
             ),
+        )
+        con.execute(
+            "UPDATE neg_risk_quote_runs SET status='complete',completed_at_ms=2 "
+            "WHERE id=?",
+            (complete,),
         )
         con.execute(
             "INSERT INTO neg_risk_quote_runs("

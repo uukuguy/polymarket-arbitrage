@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # opts in; production cadence stays below the hard 300-second feed SLA.
     neg_risk_quote_worker_enabled: bool = False
     neg_risk_quote_interval_s: int = Field(default=120, gt=0, le=240)
+    neg_risk_quote_child_hard_limit_s: float = Field(
+        default=120.0, gt=0, le=120, allow_inf_nan=False
+    )
+    neg_risk_quote_fetch_timeout_s: float = Field(
+        default=100.0, gt=0, le=100, allow_inf_nan=False
+    )
     neg_risk_observe_min_edge_bps: float = Field(default=100.0, ge=0)
     neg_risk_focused_interval_s: float = Field(default=15.0, gt=0)
     # Opportunity-first Slice B is additive and remains opt-in until its

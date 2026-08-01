@@ -1444,11 +1444,17 @@ def _build_health_checks(
 
         from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
 
+        quote_attempt_error: Exception | None = None
         try:
             quote_attempt = NegRiskQuoteStore(store.db_path).latest_collection_attempt()
-        except sqlite3.Error:
+        except Exception as error:  # fail closed on lock/I/O/corruption/invalid evidence
             quote_attempt = None
-        if quote_attempt is None:
+            quote_attempt_error = error
+        if quote_attempt_error is not None:
+            attempt_status = "fail"
+            attempt_age_s = None
+            attempt_output = f"attempt-evidence-unavailable:{type(quote_attempt_error).__name__}"
+        elif quote_attempt is None:
             attempt_status = "pass"
             attempt_age_s = None
             attempt_output = "status=never-attempted"

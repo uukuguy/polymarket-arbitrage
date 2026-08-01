@@ -1684,6 +1684,12 @@ class SQLiteStore:
         con = self._connect_writer()
         try:
             con.executescript(DDL)
+            # This pre-hotfix trigger was too broad: generation publication
+            # could clear an unrelated dirty legacy mutation. Legacy writers
+            # now clear only at their explicit atomic COMMIT boundary.
+            con.execute(
+                "DROP TRIGGER IF EXISTS trg_structure_publication_clears_revision_dirty"
+            )
             if migrate_fault_auth_finalize(con):
                 con.executescript(DDL)
             if migrate_fault_intent_status(con):
@@ -1723,6 +1729,16 @@ class SQLiteStore:
 
             _ensure_column("snapshots", "supabase_mirror_at_ms", "INTEGER")
             _ensure_column("snapshots", "parquet_r2_url", "TEXT")
+            _ensure_column(
+                "neg_risk_quote_attempts",
+                "quote_run_identity",
+                "INTEGER",
+            )
+            _ensure_column(
+                "neg_risk_quote_source_receipts",
+                "leg_quote_digest",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             _ensure_column(
                 "snapshots",
                 "market_view_published",

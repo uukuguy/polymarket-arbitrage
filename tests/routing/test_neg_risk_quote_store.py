@@ -241,6 +241,30 @@ def test_purge_old_runs_is_bounded_and_never_deletes_collecting(quote_db) -> Non
     ]
 
 
+def test_purge_detaches_attempt_fk_but_retains_durable_run_identity(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    attempt_id = store.start_collection_attempt(started_at_ms=NOW_MS)
+    universe = store.latest_verified_universe()
+    run_id = store.begin_verified_run(universe, quoted_at_ms=NOW_MS)
+    store.checkpoint_collection_attempt(attempt_id, phase="fetch", quote_run_id=run_id)
+    store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
+    store.complete_run(run_id, completed_at_ms=NOW_MS + 1, successful_response_count=2)
+    store.checkpoint_collection_attempt(attempt_id, phase="complete")
+
+    assert store.purge_old_runs(keep_last_per_status=0, max_runs=1) == 1
+
+    attempt = store.latest_collection_attempt()
+    assert attempt is not None
+    assert attempt["quote_run_id"] == run_id
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quote_runs WHERE id=?", (run_id,)
+        ).fetchone() == (0,)
+        assert con.execute("SELECT COUNT(*) FROM neg_risk_quote_purge_authority").fetchone() == (
+            0,
+        )
+
+
 @pytest.mark.parametrize(
     ("keep_last_per_status", "max_runs"),
     [(-1, 1), (1, 0), (True, 1), (1, True)],
@@ -1028,6 +1052,42 @@ def test_legacy_complete_run_materializes_target_projection_once(quote_db, monke
     assert projection_calls == 1
 
 
+def test_completed_receipt_seals_snapshot_and_full_leg_quote_identity(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    universe = store.latest_verified_universe()
+    run_id = store.begin_verified_run(universe, quoted_at_ms=NOW_MS)
+    store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
+    store.complete_run(run_id, completed_at_ms=NOW_MS + 1, successful_response_count=2)
+
+    with sqlite3.connect(quote_db) as con:
+        receipt = con.execute(
+            "SELECT leg_quote_digest FROM neg_risk_quote_source_receipts WHERE quote_run_id=?",
+            (run_id,),
+        ).fetchone()
+        assert receipt is not None and len(str(receipt[0])) == 64
+        with pytest.raises(sqlite3.IntegrityError, match="complete quote legs are immutable"):
+            con.execute(
+                "UPDATE neg_risk_quote_run_legs SET event_id='forged',"
+                "condition_id='forged-c' WHERE quote_run_id=?",
+                (run_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="complete quote run is immutable"):
+            con.execute(
+                "UPDATE neg_risk_quote_runs SET universe_snapshot_id=2,"
+                "universe_taken_at_ms=123 WHERE id=?",
+                (run_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="complete quote receipt is immutable"):
+            con.execute(
+                "UPDATE neg_risk_quote_source_receipts SET leg_quote_digest=? "
+                "WHERE quote_run_id=?",
+                ("f" * 64, run_id),
+            )
+
+    projection = store.latest_complete_projection()
+    assert projection is not None and projection.run_id == run_id
+
+
 def test_legacy_projection_receipt_rejects_source_mutation_before_admission(quote_db) -> None:
     store = NegRiskQuoteStore(quote_db)
     universe = store.latest_verified_universe()
@@ -1327,11 +1387,13 @@ def test_complete_projection_rejects_source_rejection_truth_drift(
 def test_complete_projection_excludes_legacy_blank_source_truth_hash(quote_db) -> None:
     store = NegRiskQuoteStore(quote_db)
     _complete(store)
-    with sqlite3.connect(quote_db) as con:
+    with sqlite3.connect(quote_db) as con, pytest.raises(
+        sqlite3.IntegrityError, match="complete quote run is immutable"
+    ):
         con.execute("UPDATE neg_risk_quote_runs SET source_truth_hash=''")
 
-    assert store.latest_complete_run() is None
-    assert store.latest_complete_projection() is None
+    assert store.latest_complete_run() is not None
+    assert store.latest_complete_projection() is not None
 
 
 def test_complete_projection_uses_one_read_connection(
@@ -1375,23 +1437,23 @@ def test_complete_projection_uses_one_read_connection(
             ") VALUES (1,'group-a',?,?, 'extra-market','extra-condition','extra',"
             "'extra-token','missing-book',NULL,NULL)"
         ),
-        ("UPDATE markets SET condition_id='source-condition-drift' WHERE market_id='market-a'"),
     ],
 )
-def test_complete_projection_rejects_any_cross_chain_identity_or_count_drift(
+def test_complete_projection_blocks_any_cross_chain_identity_or_count_drift(
     quote_db,
     corruption_sql: str,
 ) -> None:
     store = NegRiskQuoteStore(quote_db)
     _complete(store)
-    with sqlite3.connect(quote_db) as con:
+    with sqlite3.connect(quote_db) as con, pytest.raises(
+        sqlite3.IntegrityError, match="complete quote"
+    ):
         if "VALUES (1,'group-a',?" in corruption_sql:
             con.execute(corruption_sql, (EVENT_ID, MEMBERSHIP_HASH))
         else:
             con.execute(corruption_sql)
 
-    with pytest.raises(QuoteProjectionIntegrityError):
-        store.latest_complete_projection()
+    assert store.latest_complete_projection() is not None
 
 
 @pytest.mark.parametrize(
@@ -1411,15 +1473,16 @@ def test_complete_projection_rejects_nonfinite_or_nonnumeric_executable_quotes(
 ) -> None:
     store = NegRiskQuoteStore(quote_db)
     _complete(store)
-    with sqlite3.connect(quote_db) as con:
+    with sqlite3.connect(quote_db) as con, pytest.raises(
+        sqlite3.IntegrityError, match="complete quotes are immutable"
+    ):
         con.execute("PRAGMA ignore_check_constraints=ON")
         con.execute(
             f"UPDATE neg_risk_quotes SET {column}=? WHERE yes_token_id='token-a'",
             (value,),
         )
 
-    with pytest.raises(QuoteProjectionIntegrityError):
-        store.latest_complete_projection()
+    assert store.latest_complete_projection() is not None
 
 
 @pytest.mark.parametrize("legacy_hash", ["", "a" * 64])
@@ -1435,8 +1498,8 @@ def test_latest_complete_run_ignores_newer_legacy_unverified_identity(
             "universe_snapshot_id,universe_taken_at_ms,universe_hash,quoted_at_ms,"
             "requested_token_count,successful_response_count,lease_expires_at_ms,"
             "status,completed_at_ms"
-            ") VALUES (1,?,?,?,1,0,0,'complete',?)",
-            (NOW_MS - 1_000, legacy_hash, NOW_MS + 10, NOW_MS + 11),
+            ") VALUES (1,?,?,?,1,0,?,'collecting',NULL)",
+            (NOW_MS - 1_000, legacy_hash, NOW_MS + 10, NOW_MS + 20),
         )
         legacy_id = int(cursor.lastrowid)
         con.execute(
@@ -1455,6 +1518,10 @@ def test_latest_complete_run_ignores_newer_legacy_unverified_identity(
             ") VALUES (?,'group-a','','','legacy-market','legacy-condition',"
             "'legacy','legacy-token','missing-book',NULL,NULL)",
             (legacy_id,),
+        )
+        con.execute(
+            "UPDATE neg_risk_quote_runs SET status='complete',completed_at_ms=? WHERE id=?",
+            (NOW_MS + 11, legacy_id),
         )
 
     latest = store.latest_complete_run()

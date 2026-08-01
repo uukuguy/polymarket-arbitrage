@@ -61,4 +61,6 @@ clean 动作必须紧邻 COMMIT，而不能由 metadata INSERT 触发。
 ### Q：阶段 checkpoint 能不能代替 child timeout？
 
 不能。checkpoint 提供“卡在哪里、卡了多久”的证据，timeout 提供强制资源边界；两者分别
-解决可诊断性和有界执行问题。
+解决可诊断性和有界执行问题。当前 fetch stage 是 100 秒，从 attempt start 起的
+child absolute hard limit 是 120 秒；父进程会在硬线内 terminate/kill/reap，不依赖
+卡住的同步 SDK thread 自己返回。

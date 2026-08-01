@@ -770,13 +770,6 @@ BEGIN
   UPDATE legacy_structure_revision SET revision=revision+1 WHERE id=1;
   INSERT INTO legacy_structure_revision_dirty(id) VALUES (1);
 END;
-CREATE TRIGGER IF NOT EXISTS trg_structure_publication_clears_revision_dirty
-AFTER UPDATE OF market_view_published ON snapshots
-WHEN NEW.market_view_published=1 AND OLD.market_view_published=0
-BEGIN
-  DELETE FROM legacy_structure_revision_dirty WHERE id=1;
-END;
-
 -- Opportunity-first read model. Group revisions are immutable membership
 -- evidence; quote batches are published only against the certified membership
 -- re-read inside the same SQLite write transaction.
@@ -1889,7 +1882,9 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_attempts (
     'complete','failed'
   )),
   outcome TEXT NOT NULL CHECK(outcome IN ('collecting','complete','failed')),
-  quote_run_id INTEGER REFERENCES neg_risk_quote_runs(id),
+  -- No FK: attempts are durable operational evidence and outlive purged runs.
+  quote_run_id INTEGER,
+  quote_run_identity INTEGER,
   target_count INTEGER CHECK(target_count IS NULL OR target_count >= 0),
   structure_receipt_digest TEXT,
   phase_timings_json TEXT NOT NULL DEFAULT '{}',
@@ -1918,8 +1913,77 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_source_receipts (
   source_revision INTEGER NOT NULL CHECK(source_revision >= 0),
   projection_receipt_digest TEXT NOT NULL CHECK(length(projection_receipt_digest)=64),
   source_rejections_json TEXT NOT NULL,
+  leg_quote_digest TEXT NOT NULL DEFAULT '',
   receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64)
 );
+
+-- Completed quote evidence is immutable except during the store's explicit,
+-- bounded purge transaction.  This prevents a coordinated row rewrite from
+-- turning the run into its own source of truth.
+CREATE TABLE IF NOT EXISTS neg_risk_quote_purge_authority (
+  quote_run_id INTEGER PRIMARY KEY
+);
+CREATE TRIGGER IF NOT EXISTS trg_complete_quote_run_immutable_update
+BEFORE UPDATE ON neg_risk_quote_runs WHEN OLD.status='complete'
+BEGIN
+  SELECT RAISE(ABORT,'complete quote run is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_complete_quote_run_guarded_delete
+BEFORE DELETE ON neg_risk_quote_runs
+WHEN OLD.status='complete' AND NOT EXISTS (
+  SELECT 1 FROM neg_risk_quote_purge_authority WHERE quote_run_id=OLD.id
+)
+BEGIN
+  SELECT RAISE(ABORT,'complete quote run delete requires purge authority');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_complete_quote_legs_immutable_update
+BEFORE UPDATE ON neg_risk_quote_run_legs WHEN EXISTS (
+  SELECT 1 FROM neg_risk_quote_runs r WHERE r.id=OLD.quote_run_id AND r.status='complete'
+)
+BEGIN
+  SELECT RAISE(ABORT,'complete quote legs are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_complete_quote_legs_immutable_insert
+BEFORE INSERT ON neg_risk_quote_run_legs WHEN EXISTS (
+  SELECT 1 FROM neg_risk_quote_runs r WHERE r.id=NEW.quote_run_id AND r.status='complete'
+)
+BEGIN
+  SELECT RAISE(ABORT,'complete quote legs are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_complete_quote_legs_guarded_delete
+BEFORE DELETE ON neg_risk_quote_run_legs
+WHEN EXISTS (
+  SELECT 1 FROM neg_risk_quote_runs r WHERE r.id=OLD.quote_run_id AND r.status='complete'
+) AND NOT EXISTS (
+  SELECT 1 FROM neg_risk_quote_purge_authority WHERE quote_run_id=OLD.quote_run_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'complete quote legs delete requires purge authority');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_complete_quote_receipt_immutable_update
+BEFORE UPDATE ON neg_risk_quote_source_receipts WHEN EXISTS (
+  SELECT 1 FROM neg_risk_quote_runs r WHERE r.id=OLD.quote_run_id AND r.status='complete'
+)
+BEGIN
+  SELECT RAISE(ABORT,'complete quote receipt is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_complete_quote_receipt_immutable_insert
+BEFORE INSERT ON neg_risk_quote_source_receipts WHEN EXISTS (
+  SELECT 1 FROM neg_risk_quote_runs r WHERE r.id=NEW.quote_run_id AND r.status='complete'
+)
+BEGIN
+  SELECT RAISE(ABORT,'complete quote receipt is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_complete_quote_receipt_guarded_delete
+BEFORE DELETE ON neg_risk_quote_source_receipts
+WHEN EXISTS (
+  SELECT 1 FROM neg_risk_quote_runs r WHERE r.id=OLD.quote_run_id AND r.status='complete'
+) AND NOT EXISTS (
+  SELECT 1 FROM neg_risk_quote_purge_authority WHERE quote_run_id=OLD.quote_run_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'complete quote receipt delete requires purge authority');
+END;
 
 CREATE TABLE IF NOT EXISTS neg_risk_quotes (
   quote_run_id INTEGER NOT NULL REFERENCES neg_risk_quote_runs(id),
@@ -1944,6 +2008,30 @@ CREATE TABLE IF NOT EXISTS neg_risk_quotes (
 );
 CREATE INDEX IF NOT EXISTS idx_neg_risk_quotes_run_group
   ON neg_risk_quotes(quote_run_id, neg_risk_market_id, market_id);
+CREATE TRIGGER IF NOT EXISTS trg_complete_quotes_immutable_update
+BEFORE UPDATE ON neg_risk_quotes WHEN EXISTS (
+  SELECT 1 FROM neg_risk_quote_runs r WHERE r.id=OLD.quote_run_id AND r.status='complete'
+)
+BEGIN
+  SELECT RAISE(ABORT,'complete quotes are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_complete_quotes_immutable_insert
+BEFORE INSERT ON neg_risk_quotes WHEN EXISTS (
+  SELECT 1 FROM neg_risk_quote_runs r WHERE r.id=NEW.quote_run_id AND r.status='complete'
+)
+BEGIN
+  SELECT RAISE(ABORT,'complete quotes are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_complete_quotes_guarded_delete
+BEFORE DELETE ON neg_risk_quotes
+WHEN EXISTS (
+  SELECT 1 FROM neg_risk_quote_runs r WHERE r.id=OLD.quote_run_id AND r.status='complete'
+) AND NOT EXISTS (
+  SELECT 1 FROM neg_risk_quote_purge_authority WHERE quote_run_id=OLD.quote_run_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'complete quotes delete requires purge authority');
+END;
 
 -- Observer-only lifecycle ledger. A master represents one continuously
 -- observed Structure membership; observations and notification attempts are

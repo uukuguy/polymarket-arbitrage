@@ -28,6 +28,9 @@ task.
   checkpoints, phase timings, target count, Structure receipt, failure, and outcome. Parent and child
   exchange a strict attempt identity; cancel/nonzero exits record failure. Strict health warns after a
   phase is stalled for 45 seconds and fails after 120 seconds.
+- CLOB fetch has a 100-second stage budget and the child has a 120-second absolute budget measured
+  from attempt start. The parent reserves shutdown time, terminate/kill/reaps, stops lease renewal,
+  fails the collecting run and attempt, and lets the worker retry without clearing the old feed.
 - The previous certified opportunity feed remains the serving authority while a new attempt collects;
   it is replaced only after certification/projection, while its existing freshness limits remain in
   force.
@@ -49,10 +52,23 @@ task.
 
 ## Final verification
 
-- Full M1 (`tests/perception/ tests/m1-perception/`): `3064 passed, 1 skipped, 1 xfailed`
+- Full M1 (`tests/perception/ tests/m1-perception/`): `3065 passed, 1 skipped, 1 xfailed`
   (exit 0).
 - Focused publication-boundary regressions: 4 passed.
 - Core Quote store/collector exact gate: 182 passed.
 - Worker/collector/health expanded gate: 95 passed.
 - CLI and Make contract tests: pass.
 - Changed-file Ruff, `git diff --check`, and `make planning-status`: pass.
+
+## Independent review remediation
+
+The first independent review requested changes and found five missing closure paths. The follow-up
+adds a retention-safe no-FK attempt identity (including legacy-FK detachment), a canonical digest over
+snapshot identity plus every leg/quote identity, BUY side, terminal outcome, price and size, and DB
+immutability guards for completed runs with an explicit bounded purge authority. Spawn, child protocol,
+timeout, certification and projection failures now terminalize their attempt; `complete` occurs only
+after the certified feed is published. Attempt evidence read failures make strict health fail rather
+than masquerading as `never-attempted`. The broad snapshot publication trigger that could clear an
+unrelated legacy dirty fence is removed and migrated away.
+
+The final frozen-source exact gate and the final full M1 gate both pass after these remediations.

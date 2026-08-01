@@ -105,6 +105,7 @@ async def collect_neg_risk_quotes(
     now_ms: Callable[[], int] | None = None,
     lease_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     attempt_id: int = 0,
+    fetch_timeout_s: float = 100.0,
 ) -> QuoteCollectionResult:
     """Collect every latest-universe YES quote into one complete-or-failed run.
 
@@ -116,6 +117,8 @@ async def collect_neg_risk_quotes(
     so the collector can never finish alongside a replacement run.
     """
     clock = now_ms or quote_store.current_time_ms
+    if isinstance(fetch_timeout_s, bool) or fetch_timeout_s <= 0:
+        raise ValueError("fetch_timeout_s must be positive")
     stage_started = time.perf_counter()
     logger.info("neg-risk quote projection phase started phase=source-projection")
     universe = await asyncio.to_thread(quote_store.latest_verified_universe)
@@ -185,14 +188,15 @@ async def collect_neg_risk_quotes(
         token_ids = list({leg.yes_token_id: None for leg in legs})
         try:
             stage_started = time.perf_counter()
-            books = await _get_books_with_lease(
-                quote_store=quote_store,
-                reader=reader,
-                token_ids=token_ids,
-                run_id=run_id,
-                clock=clock,
-                lease_sleep=lease_sleep,
-            )
+            async with asyncio.timeout(fetch_timeout_s):
+                books = await _get_books_with_lease(
+                    quote_store=quote_store,
+                    reader=reader,
+                    token_ids=token_ids,
+                    run_id=run_id,
+                    clock=clock,
+                    lease_sleep=lease_sleep,
+                )
             fetch_ms = int((time.perf_counter() - stage_started) * 1000)
             if attempt_id:
                 await asyncio.to_thread(
@@ -207,8 +211,10 @@ async def collect_neg_risk_quotes(
                 )
         except QuoteRunLeaseLostError:
             raise
-        except Exception:
-            failure_reason = "clob-fetch-failed"
+        except Exception as error:
+            failure_reason = (
+                "clob-fetch-timeout" if isinstance(error, TimeoutError) else "clob-fetch-failed"
+            )
             raise
         stage_started = time.perf_counter()
         indexed_count, terminal_quotes = await asyncio.to_thread(

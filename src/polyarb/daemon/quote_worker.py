@@ -41,6 +41,8 @@ ReconcileGlobalProjection = Callable[[CompleteQuoteProjection], Awaitable[None]]
 CleanupOldRuns = Callable[[], Awaitable[int]]
 WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
 ReleaseProjectionMemory = Callable[[], None]
+CompleteAttempt = Callable[[QuoteCollectionResult], Awaitable[None]]
+FailAttempt = Callable[[QuoteCollectionResult, str], Awaitable[None]]
 
 
 def _release_projection_memory() -> None:
@@ -317,15 +319,68 @@ def _required_json_int(payload: object, key: str) -> int:
     return value
 
 
+async def _terminalize_quote_attempt(
+    store: NegRiskQuoteStore,
+    attempt_id: int,
+    failure_kind: str,
+) -> None:
+    """Best-effort terminal evidence; never mask the producer's root error."""
+    try:
+        await asyncio.to_thread(
+            store.checkpoint_collection_attempt,
+            attempt_id,
+            phase="failed",
+            failure_kind=failure_kind,
+        )
+    except Exception as error:  # noqa: BLE001 - preserve root failure
+        logger.warning(
+            "quote attempt terminal checkpoint failed "
+            f"attempt_id={attempt_id} kind={type(error).__name__}"
+        )
+
+
+async def _terminate_quote_child(
+    process: asyncio.subprocess.Process,
+    communicate_task: asyncio.Task[tuple[bytes, bytes]],
+    *,
+    terminate_timeout_s: float,
+) -> None:
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        pass
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=terminate_timeout_s,
+        )
+        return
+    except TimeoutError:
+        pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=terminate_timeout_s,
+        )
+    except TimeoutError:
+        communicate_task.cancel()
+        await asyncio.gather(communicate_task, return_exceptions=True)
+
+
 async def collect_quotes_in_subprocess(
     settings: Settings,
     *,
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (
         asyncio.create_subprocess_exec
     ),
-    terminate_timeout_s: float = 3.0,
+    terminate_timeout_s: float = 1.0,
 ) -> QuoteCollectionResult:
     """Run all SDK fetch/decode/SQLite collection work outside the HTTP process."""
+    attempt_started = time.monotonic()
     attempt_store = NegRiskQuoteStore(settings.db_path)
     try:
         attempt_id = await asyncio.to_thread(attempt_store.start_collection_attempt)
@@ -334,18 +389,22 @@ async def collect_quotes_in_subprocess(
             raise
         await asyncio.to_thread(SQLiteStore(settings.db_path).init_schema)
         attempt_id = await asyncio.to_thread(attempt_store.start_collection_attempt)
-    process = await spawn(
-        sys.executable,
-        "-m",
-        "polyarb.cli_arbitrage",
-        "collect-neg-risk-quotes",
-        "--db-path",
-        str(settings.db_path),
-        "--attempt-id",
-        str(attempt_id),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        process = await spawn(
+            sys.executable,
+            "-m",
+            "polyarb.cli_arbitrage",
+            "collect-neg-risk-quotes",
+            "--db-path",
+            str(settings.db_path),
+            "--attempt-id",
+            str(attempt_id),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except BaseException:
+        await _terminalize_quote_attempt(attempt_store, attempt_id, "spawn-failed")
+        raise
     started = time.perf_counter()
     logger.info(
         "isolated quote collection started "
@@ -357,48 +416,41 @@ async def collect_quotes_in_subprocess(
     # child.  The shutdown path must prove the child exited before the durable
     # collecting lease can be released.
     communicate_task = asyncio.create_task(process.communicate())
+    shutdown_reserve_s = 2 * terminate_timeout_s
+    communicate_budget_s = max(
+        0.0,
+        settings.neg_risk_quote_child_hard_limit_s
+        - (time.monotonic() - attempt_started)
+        - shutdown_reserve_s,
+    )
     try:
-        stdout, stderr = await asyncio.shield(communicate_task)
-    except asyncio.CancelledError:
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            pass
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(communicate_task),
-                timeout=terminate_timeout_s,
-            )
-        except TimeoutError:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(communicate_task),
-                    timeout=terminate_timeout_s,
-                )
-            except TimeoutError:
-                # ``kill`` is authoritative for a real child, but never let a
-                # wedged pipe reader prevent daemon cancellation forever.
-                communicate_task.cancel()
-                await asyncio.gather(communicate_task, return_exceptions=True)
-        await asyncio.to_thread(
-            attempt_store.checkpoint_collection_attempt,
-            attempt_id,
-            phase="failed",
-            failure_kind="parent-cancelled",
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=communicate_budget_s,
         )
+    except TimeoutError as error:
+        await _terminate_quote_child(
+            process,
+            communicate_task,
+            terminate_timeout_s=terminate_timeout_s,
+        )
+        await asyncio.to_thread(
+            attempt_store.fail_collecting_runs,
+            failure_reason="collector-hard-timeout",
+        )
+        await _terminalize_quote_attempt(attempt_store, attempt_id, "child-hard-timeout")
+        raise QuoteCollectionSubprocessError("timeout") from error
+    except asyncio.CancelledError:
+        await _terminate_quote_child(
+            process,
+            communicate_task,
+            terminate_timeout_s=terminate_timeout_s,
+        )
+        await _terminalize_quote_attempt(attempt_store, attempt_id, "parent-cancelled")
         raise
 
     if process.returncode != 0:
-        await asyncio.to_thread(
-            attempt_store.checkpoint_collection_attempt,
-            attempt_id,
-            phase="failed",
-            failure_kind="child-failed",
-        )
+        await _terminalize_quote_attempt(attempt_store, attempt_id, "child-failed")
         diagnostic = stderr.decode("utf-8", errors="replace")
         if "verified universe snapshot is no longer the latest published truth" in diagnostic:
             logger.info(
@@ -415,11 +467,34 @@ async def collect_quotes_in_subprocess(
     try:
         payload = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        await _terminalize_quote_attempt(attempt_store, attempt_id, "invalid-json")
         raise QuoteCollectionSubprocessError("invalid-json") from error
     if not isinstance(payload, dict) or payload.get("status") != "complete":
+        await _terminalize_quote_attempt(attempt_store, attempt_id, "invalid-json")
         raise QuoteCollectionSubprocessError("invalid-json")
     universe_hash = payload.get("universe_hash")
     if not isinstance(universe_hash, str) or len(universe_hash) != 64:
+        await _terminalize_quote_attempt(attempt_store, attempt_id, "invalid-json")
+        raise QuoteCollectionSubprocessError("invalid-json")
+    required_int_fields = (
+        "run_id",
+        "universe_snapshot_id",
+        "requested_token_count",
+        "successful_response_count",
+        "quote_taken_at_ms",
+        "elapsed_ms",
+        "attempt_id",
+        "universe_ms",
+        "admission_ms",
+        "fetch_ms",
+        "transform_ms",
+        "persist_ms",
+    )
+    if any(
+        isinstance(payload.get(key), bool) or not isinstance(payload.get(key), int)
+        for key in required_int_fields
+    ):
+        await _terminalize_quote_attempt(attempt_store, attempt_id, "invalid-json")
         raise QuoteCollectionSubprocessError("invalid-json")
     result = QuoteCollectionResult(
         run_id=_required_json_int(payload, "run_id"),
@@ -471,6 +546,7 @@ async def collect_quotes_in_subprocess(
         )
         or len(result.structure_receipt_digest) != 64
     ):
+        await _terminalize_quote_attempt(attempt_store, attempt_id, "invalid-json")
         raise QuoteCollectionSubprocessError("invalid-json")
     logger.info(
         "isolated quote collection complete "
@@ -500,6 +576,8 @@ class QuoteWorker:
         restore_feed: RestoreFeed | None = None,
         cleanup_collecting_runs: CleanupCollectingRuns | None = None,
         cleanup_old_runs: CleanupOldRuns | None = None,
+        complete_attempt: CompleteAttempt | None = None,
+        fail_attempt: FailAttempt | None = None,
         producer_lock: asyncio.Lock | None = None,
         interval_s: float,
         runtime: QuoteWorkerRuntime | None = None,
@@ -518,6 +596,8 @@ class QuoteWorker:
         self._restore_feed = restore_feed
         self._cleanup_collecting_runs = cleanup_collecting_runs
         self._cleanup_old_runs = cleanup_old_runs
+        self._complete_attempt = complete_attempt
+        self._fail_attempt = fail_attempt
         self._producer_lock = producer_lock
         self._interval_s = interval_s
         self._wait_for_stop = wait_for_stop
@@ -601,6 +681,7 @@ class QuoteWorker:
             while not stop_event.is_set():
                 attempt_started = self._monotonic()
                 retry_immediately = False
+                result = None
                 self.runtime.mark_pipeline_started()
                 try:
                     self.runtime.mark_started()
@@ -642,6 +723,8 @@ class QuoteWorker:
                                 certified_projection,
                                 certified_opportunities,
                             )
+                        if self._complete_attempt is not None:
+                            await self._complete_attempt(result)
                         # The certified feed is the user-facing success
                         # boundary.  Publish that truth to /health before
                         # bounded housekeeping so a slow SQLite delete cannot
@@ -696,6 +779,8 @@ class QuoteWorker:
                         "retrying immediately"
                     )
                 except Exception as error:  # fail-soft producer boundary
+                    if result is not None and self._fail_attempt is not None:
+                        await self._fail_attempt(result, type(error).__name__)
                     self.runtime.mark_failure(error)
                     logger.exception(
                         "neg-risk quote collection failed "
@@ -791,21 +876,36 @@ def build_production_quote_worker(
             f"count={len(result.opportunities)} "
             f"elapsed_ms={int((time.perf_counter() - started) * 1000)}"
         )
-        attempt = await asyncio.to_thread(quote_store.latest_collection_attempt)
-        if (
-            attempt is not None
-            and attempt["outcome"] == "collecting"
-            and attempt["quote_run_id"] == projection.run_id
-        ):
+        return result
+
+    async def complete_attempt(result: QuoteCollectionResult) -> None:
+        try:
+            attempt = await asyncio.to_thread(quote_store.latest_collection_attempt)
+            if (
+                attempt is None
+                or attempt["outcome"] != "collecting"
+                or attempt["id"] != result.attempt_id
+            ):
+                return
             timings = dict(attempt["phase_timings"])
-            timings["projection_ms"] = int((time.perf_counter() - started) * 1000)
             await asyncio.to_thread(
                 quote_store.checkpoint_collection_attempt,
-                int(attempt["id"]),
+                result.attempt_id,
                 phase="complete",
                 phase_timings=timings,
             )
-        return result
+        except Exception as error:  # feed is already certified and published
+            logger.warning(
+                "quote attempt completion checkpoint failed "
+                f"attempt_id={result.attempt_id} kind={type(error).__name__}"
+            )
+
+    async def fail_attempt(result: QuoteCollectionResult, failure_kind: str) -> None:
+        await _terminalize_quote_attempt(
+            quote_store,
+            result.attempt_id,
+            f"parent-{failure_kind}",
+        )
 
     async def restore_feed() -> CertifiedQuoteFeed | None:
         """Rebuild the compact M2 feed from a durable, already-certified run."""
@@ -853,6 +953,8 @@ def build_production_quote_worker(
         restore_feed=restore_feed,
         cleanup_collecting_runs=cleanup_collecting_runs,
         cleanup_old_runs=cleanup_old_runs,
+        complete_attempt=complete_attempt,
+        fail_attempt=fail_attempt,
         producer_lock=producer_lock,
         interval_s=settings.neg_risk_quote_interval_s,
     )

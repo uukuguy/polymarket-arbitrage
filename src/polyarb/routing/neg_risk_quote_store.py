@@ -207,6 +207,7 @@ class NegRiskQuoteStore:
             cur = con.execute(
                 "UPDATE neg_risk_quote_attempts SET checkpoint_at_ms=?,phase=?,outcome=?,"
                 "quote_run_id=COALESCE(?,quote_run_id),"
+                "quote_run_identity=COALESCE(?,quote_run_identity),"
                 "target_count=COALESCE(?,target_count),"
                 "structure_receipt_digest=COALESCE(?,structure_receipt_digest),"
                 "phase_timings_json=COALESCE(?,phase_timings_json),"
@@ -215,6 +216,7 @@ class NegRiskQuoteStore:
                     checkpoint,
                     phase,
                     outcome,
+                    quote_run_id,
                     quote_run_id,
                     target_count,
                     structure_receipt_digest,
@@ -235,7 +237,8 @@ class NegRiskQuoteStore:
     def latest_collection_attempt(self) -> dict[str, object] | None:
         with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as con:
             row = con.execute(
-                "SELECT id,started_at_ms,checkpoint_at_ms,phase,outcome,quote_run_id,"
+                "SELECT id,started_at_ms,checkpoint_at_ms,phase,outcome,"
+                "COALESCE(quote_run_identity,quote_run_id),"
                 "target_count,structure_receipt_digest,phase_timings_json,failure_kind "
                 "FROM neg_risk_quote_attempts ORDER BY started_at_ms DESC,id DESC LIMIT 1"
             ).fetchone()
@@ -538,24 +541,28 @@ class NegRiskQuoteStore:
                     rejections_json = _rejections_json(expected_rejections)
                     receipt_digest = _quote_source_receipt_digest(
                         quote_run_id=run_id,
+                        universe_snapshot_id=universe_snapshot_id,
+                        universe_taken_at_ms=universe_taken_at_ms,
                         source_mode=expected_structure_mode,
                         source_revision=expected_structure_revision,
                         projection_receipt_digest=expected_structure_receipt_digest,
                         source_rejections_json=rejections_json,
                         universe_hash=universe_hash,
                         source_truth_hash=source_truth_hash,
+                        leg_quote_digest="",
                     )
                     con.execute(
                         "INSERT INTO neg_risk_quote_source_receipts("
                         "quote_run_id,source_mode,source_revision,"
-                        "projection_receipt_digest,source_rejections_json,receipt_digest) "
-                        "VALUES (?,?,?,?,?,?)",
+                        "projection_receipt_digest,source_rejections_json,"
+                        "leg_quote_digest,receipt_digest) VALUES (?,?,?,?,?,?,?)",
                         (
                             run_id,
                             expected_structure_mode,
                             expected_structure_revision,
                             expected_structure_receipt_digest,
                             rejections_json,
+                            "",
                             receipt_digest,
                         ),
                     )
@@ -695,6 +702,66 @@ class NegRiskQuoteStore:
                     raise ValueError(
                         "successful_response_count must be between 0 and requested_token_count"
                     )
+                source_receipt = con.execute(
+                    "SELECT source_mode,source_revision,projection_receipt_digest,"
+                    "source_rejections_json FROM neg_risk_quote_source_receipts "
+                    "WHERE quote_run_id=?",
+                    (run_id,),
+                ).fetchone()
+                if source_receipt is not None:
+                    leg_rows = con.execute(
+                        "SELECT neg_risk_market_id,market_id,condition_id,slug,yes_token_id,"
+                        "event_id,membership_hash FROM neg_risk_quote_run_legs "
+                        "WHERE quote_run_id=? ORDER BY yes_token_id",
+                        (run_id,),
+                    ).fetchall()
+                    quote_rows = con.execute(
+                        "SELECT neg_risk_market_id,market_id,condition_id,slug,yes_token_id,"
+                        "terminal_state,best_ask_price,best_ask_size,event_id,membership_hash "
+                        "FROM neg_risk_quotes WHERE quote_run_id=? ORDER BY yes_token_id",
+                        (run_id,),
+                    ).fetchall()
+                    leg_quote_digest = _leg_quote_digest(
+                        tuple(UniverseLeg(*row) for row in leg_rows),
+                        tuple(PersistedQuote(*row) for row in quote_rows),
+                    )
+                    receipt_digest = _quote_source_receipt_digest(
+                        quote_run_id=run_id,
+                        universe_snapshot_id=int(
+                            con.execute(
+                                "SELECT universe_snapshot_id FROM neg_risk_quote_runs WHERE id=?",
+                                (run_id,),
+                            ).fetchone()[0]
+                        ),
+                        universe_taken_at_ms=int(
+                            con.execute(
+                                "SELECT universe_taken_at_ms FROM neg_risk_quote_runs WHERE id=?",
+                                (run_id,),
+                            ).fetchone()[0]
+                        ),
+                        source_mode=str(source_receipt[0]),
+                        source_revision=int(source_receipt[1]),
+                        projection_receipt_digest=str(source_receipt[2]),
+                        source_rejections_json=str(source_receipt[3]),
+                        universe_hash=str(
+                            con.execute(
+                                "SELECT universe_hash FROM neg_risk_quote_runs WHERE id=?",
+                                (run_id,),
+                            ).fetchone()[0]
+                        ),
+                        source_truth_hash=str(
+                            con.execute(
+                                "SELECT source_truth_hash FROM neg_risk_quote_runs WHERE id=?",
+                                (run_id,),
+                            ).fetchone()[0]
+                        ),
+                        leg_quote_digest=leg_quote_digest,
+                    )
+                    con.execute(
+                        "UPDATE neg_risk_quote_source_receipts SET leg_quote_digest=?,"
+                        "receipt_digest=? WHERE quote_run_id=? AND leg_quote_digest=''",
+                        (leg_quote_digest, receipt_digest, run_id),
+                    )
                 con.execute(
                     "UPDATE neg_risk_quote_runs SET status = 'complete', "
                     "successful_response_count = ?, completed_at_ms = ? WHERE id = ?",
@@ -797,6 +864,15 @@ class NegRiskQuoteStore:
             con.execute("PRAGMA secure_delete=OFF")
             self._begin_immediate(con)
             try:
+                # Spawn/protocol failures can have no run row. Retain the
+                # newest 1,000 terminal attempts and trim at most 20 per call.
+                con.execute(
+                    "DELETE FROM neg_risk_quote_attempts WHERE id IN ("
+                    "SELECT id FROM neg_risk_quote_attempts WHERE outcome IN ('complete','failed') "
+                    "AND id NOT IN (SELECT id FROM neg_risk_quote_attempts "
+                    "ORDER BY started_at_ms DESC,id DESC LIMIT 1000) "
+                    "ORDER BY started_at_ms,id LIMIT 20)"
+                )
                 rows = con.execute(
                     "WITH protected AS ("
                     "SELECT id FROM neg_risk_quote_runs WHERE status='complete' "
@@ -815,8 +891,22 @@ class NegRiskQuoteStore:
                     con.execute("COMMIT")
                     return 0
                 placeholders = ",".join("?" for _ in run_ids)
+                con.executemany(
+                    "INSERT INTO neg_risk_quote_purge_authority(quote_run_id) VALUES (?)",
+                    ((run_id,) for run_id in run_ids),
+                )
                 con.execute(
                     f"DELETE FROM neg_risk_quotes WHERE quote_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                # Attempts are durable operational receipts and outlive the
+                # heavy run rows.  Legacy schemas retain an FK on quote_run_id;
+                # copy its identity before detaching it for bounded purge.
+                con.execute(
+                    "UPDATE neg_risk_quote_attempts SET "
+                    "quote_run_identity=COALESCE(quote_run_identity,quote_run_id),"
+                    "quote_run_id=NULL WHERE quote_run_id IN ("
+                    f"{placeholders})",
                     run_ids,
                 )
                 con.execute(
@@ -830,6 +920,11 @@ class NegRiskQuoteStore:
                 )
                 con.execute(
                     f"DELETE FROM neg_risk_quote_runs WHERE id IN ({placeholders})",
+                    run_ids,
+                )
+                con.execute(
+                    "DELETE FROM neg_risk_quote_purge_authority "
+                    f"WHERE quote_run_id IN ({placeholders})",
                     run_ids,
                 )
                 con.execute("COMMIT")
@@ -918,7 +1013,7 @@ class NegRiskQuoteStore:
                 quotes = tuple(PersistedQuote(*row) for row in quote_rows)
                 source_receipt = con.execute(
                     "SELECT source_mode,source_revision,projection_receipt_digest,"
-                    "source_rejections_json,receipt_digest FROM "
+                    "source_rejections_json,leg_quote_digest,receipt_digest FROM "
                     "neg_risk_quote_source_receipts WHERE quote_run_id=?",
                     (run.run_id,),
                 ).fetchone()
@@ -952,14 +1047,21 @@ class NegRiskQuoteStore:
                         raise QuoteProjectionIntegrityError() from error
                     expected_receipt = _quote_source_receipt_digest(
                         quote_run_id=run.run_id,
+                        universe_snapshot_id=run.universe_snapshot_id,
+                        universe_taken_at_ms=run.universe_taken_at_ms,
                         source_mode=str(source_receipt[0]),
                         source_revision=int(source_receipt[1]),
                         projection_receipt_digest=str(source_receipt[2]),
                         source_rejections_json=str(source_receipt[3]),
                         universe_hash=run.universe_hash,
                         source_truth_hash=run.source_truth_hash,
+                        leg_quote_digest=str(source_receipt[4]),
                     )
-                    if source_receipt[4] != expected_receipt:
+                    if (
+                        len(str(source_receipt[4])) != 64
+                        or source_receipt[4] != _leg_quote_digest(run_legs, quotes)
+                        or source_receipt[5] != expected_receipt
+                    ):
                         raise QuoteProjectionIntegrityError()
                     source_universe = VerifiedQuoteUniverse(
                         snapshot_id=run.universe_snapshot_id,
@@ -1343,6 +1445,46 @@ def _projection_receipt_digest(
     ).hexdigest()
 
 
+def _leg_quote_digest(
+    legs: tuple[UniverseLeg, ...],
+    quotes: tuple[PersistedQuote, ...],
+) -> str:
+    """Seal every identity and executable input consumed by opportunity scan."""
+    legs_by_token = {leg.yes_token_id: leg for leg in legs}
+    quotes_by_token = {quote.yes_token_id: quote for quote in quotes}
+    if len(legs_by_token) != len(legs) or set(legs_by_token) != set(quotes_by_token):
+        raise QuoteProjectionIntegrityError()
+    canonical = []
+    for token_id in sorted(legs_by_token):
+        leg = legs_by_token[token_id]
+        quote = quotes_by_token[token_id]
+        canonical.append(
+            [
+                "BUY",
+                leg.neg_risk_market_id,
+                leg.event_id,
+                leg.membership_hash,
+                leg.market_id,
+                leg.condition_id,
+                leg.slug,
+                leg.yes_token_id,
+                quote.neg_risk_market_id,
+                quote.event_id,
+                quote.membership_hash,
+                quote.market_id,
+                quote.condition_id,
+                quote.slug,
+                quote.yes_token_id,
+                quote.terminal_state,
+                quote.best_ask_price,
+                quote.best_ask_size,
+            ]
+        )
+    return hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def _bind_legacy_projection_receipt(
     con: sqlite3.Connection,
     universe: VerifiedQuoteUniverse,
@@ -1411,21 +1553,27 @@ def _rejections_json(rejections: tuple[GroupRejection, ...]) -> str:
 def _quote_source_receipt_digest(
     *,
     quote_run_id: int,
+    universe_snapshot_id: int,
+    universe_taken_at_ms: int,
     source_mode: str,
     source_revision: int,
     projection_receipt_digest: str,
     source_rejections_json: str,
     universe_hash: str,
     source_truth_hash: str,
+    leg_quote_digest: str,
 ) -> str:
     payload = [
         quote_run_id,
+        universe_snapshot_id,
+        universe_taken_at_ms,
         source_mode,
         source_revision,
         projection_receipt_digest,
         source_rejections_json,
         universe_hash,
         source_truth_hash,
+        leg_quote_digest,
     ]
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()

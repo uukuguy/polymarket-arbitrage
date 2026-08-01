@@ -119,6 +119,7 @@ def collect_neg_risk_quotes_command(
                 ),
                 reader=ClobReaderClient(settings),
                 attempt_id=attempt_id,
+                fetch_timeout_s=settings.neg_risk_quote_fetch_timeout_s,
             )
         )
     except Exception as error:
