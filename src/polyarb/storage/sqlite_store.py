@@ -467,10 +467,23 @@ def _initialize_structure_comparison_progress(
     return phase is not None and phase[0] != "sealed"
 
 
-def _structure_comparison_progress_is_resumable(progress: tuple[object, ...]) -> bool:
+def _structure_comparison_progress_is_resumable(
+    progress: tuple[object, ...],
+    current_legacy_identity: tuple[int, int, int, int] | None,
+) -> bool:
     """Validate the bounded state needed to resume an authenticated comparison."""
     phase = str(progress[0])
     expected_cursor_size = 4 if phase.endswith("universe") else 3
+    if type(progress[3]) is not int or progress[3] < 0:
+        return False
+    pinned_legacy = progress[8:12]
+    if (
+        current_legacy_identity is None
+        or len(pinned_legacy) != 4
+        or any(type(value) is not int for value in pinned_legacy)
+        or tuple(pinned_legacy) != current_legacy_identity
+    ):
+        return False
     try:
         cursor = None if progress[1] is None else json.loads(str(progress[1]))
         SerializableSHA256.from_json(str(progress[2]))
@@ -3824,6 +3837,7 @@ class SQLiteStore:
             uri=True,
         ) as con:
             con.execute("PRAGMA query_only=ON")
+            con.execute("BEGIN")
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
             pointer = con.execute(
@@ -3900,11 +3914,16 @@ class SQLiteStore:
                 pointer_repair_progress = con.execute(
                     "SELECT phase,row_cursor_json,digest_state_json,phase_row_count,"
                     "checkpoint_at_ms,legacy_universe_hash,generation_universe_hash,"
-                    "legacy_source_truth_hash FROM "
+                    "legacy_source_truth_hash,legacy_snapshot_id,legacy_taken_at_ms,"
+                    "legacy_finished_at_ms,legacy_market_count FROM "
                     "structure_generation_comparison_progress WHERE "
                     "generation_snapshot_id=? AND publication_id=? AND phase!='sealed'",
                     (int(pointer[0]), str(pointer[1])),
                 ).fetchone()
+            try:
+                current_legacy_identity = self._comparison_legacy_identity(con)
+            except (TypeError, ValueError):
+                current_legacy_identity = None
         count_agrees = hash_agrees = False
         comparison_authenticated = pointer is None
         comparison_recoverable_missing_receipt = False
@@ -3926,7 +3945,8 @@ class SQLiteStore:
                     and hash_agrees
                     and pointer_repair_progress is not None
                     and _structure_comparison_progress_is_resumable(
-                        pointer_repair_progress
+                        pointer_repair_progress,
+                        current_legacy_identity,
                     )
                 )
                 if comparison_recoverable_missing_receipt:
@@ -4047,7 +4067,8 @@ class SQLiteStore:
             "pointer_repair": (
                 "SELECT phase,row_cursor_json,digest_state_json,phase_row_count,"
                 "checkpoint_at_ms,legacy_universe_hash,generation_universe_hash,"
-                "legacy_source_truth_hash FROM "
+                "legacy_source_truth_hash,legacy_snapshot_id,legacy_taken_at_ms,"
+                "legacy_finished_at_ms,legacy_market_count FROM "
                 "structure_generation_comparison_progress WHERE "
                 "generation_snapshot_id=? AND publication_id=? AND phase!='sealed'",
                 (-1, "planner-probe"),

@@ -154,3 +154,25 @@ Final-review verification:
 - Focused and expanded generation/health/migration/schema suites passed.
 - Full M1 gate: **3006 passed, 1 skipped, 1 xfailed** in 507.89 seconds.
 - Ruff, docs contract, planning no-drift, and diff checks passed.
+
+## Final resumability-field review
+
+The remaining two persisted field families are now part of the same fail-closed
+repair authority. `phase_row_count` must be an actual non-negative Python
+integer as returned by SQLite integer storage; booleans, floats, strings, and
+negative integers are rejected. The indexed pointer-repair query also reads its
+pinned legacy snapshot id, taken/finished timestamps, and market count. Inside
+one explicit read-only transaction, that tuple must exactly equal the current
+eligible legacy identity. Parse failure or drift disables the recoverable
+missing-receipt exception, so health fails while the next backfill still exposes
+the underlying error instead of being masked by a warning.
+
+Resumability-field verification:
+
+- Exact `phase_row_count='oops'` and `legacy_taken_at_ms=9999` tampers reproduced
+  RED, then passed GREEN while their next backfill attempts still raised.
+- Bool/float/string/negative count variants fail the resumability predicate.
+- Valid repair, SLA warn/fail behavior, and indexed SEARCH/no-temp-sort query
+  plan remain green.
+- Focused and expanded generation/health/migration/schema suites passed.
+- Full M1 gate: **3013 passed, 1 skipped, 1 xfailed** in 510.64 seconds.
