@@ -39,12 +39,15 @@ Phase 1 simplifications (documented for Phase 2 cleanup):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 
 import httpx
 import sentry_sdk
@@ -211,6 +214,29 @@ class SnapshotResult:
     parquet_path: Path
     taken_at_ms: int
     finished_at_ms: int
+
+
+@dataclass(frozen=True)
+class SnapshotProjection:
+    """Immutable output of phases 1–6, before any publication write."""
+
+    taken_at_ms: int
+    status: str
+    is_valid: bool
+    source_coverage: SourceCoverage
+    events: tuple[Mapping[str, object], ...]
+    event_tags: tuple[Mapping[str, object], ...]
+    event_members: tuple[EventMember, ...]
+    group_truths: tuple[GroupTruth, ...]
+    markets: tuple[Mapping[str, object], ...]
+    issues: tuple[Issue, ...]
+    notes: str | None
+    mode: str
+    product: str
+    publish_markets: bool
+    clob_done_ms: int
+    cache_dir: Path | None
+    started_monotonic: float
 
 
 def _index_books_by_token(books: list) -> dict[str, dict]:
@@ -456,7 +482,7 @@ def _reconcile_market_truth(
     return None
 
 
-async def run_snapshot(
+async def build_snapshot_projection(
     settings: Settings,
     *,
     mode: str = "subset",
@@ -465,8 +491,8 @@ async def run_snapshot(
     use_cache: bool = True,
     gamma_client: object | None = None,
     schema_ready: bool = False,
-) -> SnapshotResult:
-    """Run one Polymarket snapshot end-to-end.
+) -> SnapshotProjection:
+    """Run phases 1–6 and return immutable inputs for publication.
 
     Args:
         settings: Plan-1 ``Settings`` (URLs, rate caps, retry knobs, paths).
@@ -478,14 +504,13 @@ async def run_snapshot(
                  preserves the pre-separation behavior for historical tooling.
         now_ms: Override for the snapshot's ``taken_at_ms`` timestamp (test hook).
                 Defaults to ``int(time.time() * 1000)`` at function entry.
-        schema_ready: Skip the full migration pass when the daemon already
-                initialized the database before launching this child.
+        schema_ready: Accepted for composition compatibility; phase 6 performs
+                no schema work.
 
     Returns:
-        SnapshotResult — never raises for transport failures (those become
-        Issues). Re-raises only for unexpected internal errors (e.g. SQLite
-        rollback, Parquet schema mismatch — these should never happen with
-        the normalizer's contract).
+        SnapshotProjection — immutable inputs for the phase-7 persistence
+        boundary. Transport failures become Issues; no snapshot publication
+        write has occurred when this function returns.
 
     use_cache:
         When True (default) the CLOB chunk cache (``settings.cache_root``)
@@ -1423,72 +1448,104 @@ async def run_snapshot(
             f"{sum(1 for i in issues if i.layer == 4)} L4)"
         )
 
-    # ── 7. Persist (Parquet atomic FIRST, then SQLite single-tx) ──────────────
+    if source_complete:
+        source_coverage = SourceCoverage.complete(
+            markets_coverage.result.items_yielded,
+            events_coverage.result.items_yielded,
+        )
+    elif reconciliation_reason is not None:
+        source_coverage = SourceCoverage.incomplete(
+            "events",
+            markets_coverage.result.items_yielded,
+            events_coverage.result.items_yielded,
+            reconciliation_reason,
+        )
+    elif event_failure_reason is not None or not events_coverage.result.completed:
+        source_coverage = SourceCoverage.incomplete(
+            "events",
+            markets_coverage.result.items_yielded,
+            events_coverage.result.items_yielded,
+            event_failure_reason or "event-pagination-incomplete",
+        )
+    else:
+        source_coverage = SourceCoverage.incomplete(
+            "markets",
+            markets_coverage.result.items_yielded,
+            events_coverage.result.items_yielded,
+            market_failure_reason or "market-pagination-incomplete",
+        )
+
+    def _freeze_rows(rows: list[dict]) -> tuple[Mapping[str, object], ...]:
+        return tuple(MappingProxyType(dict(row)) for row in rows)
+
+    return SnapshotProjection(
+        taken_at_ms=taken_at_ms,
+        status=status.value,
+        is_valid=is_valid,
+        source_coverage=source_coverage,
+        events=_freeze_rows(event_rows),
+        event_tags=_freeze_rows(event_tag_rows),
+        event_members=tuple(event_members),
+        group_truths=tuple(group_truths),
+        markets=_freeze_rows(target_markets),
+        issues=tuple(issues),
+        notes=_derive_notes_from_issues(issues),
+        mode=mode,
+        product=product,
+        publish_markets=publish_markets,
+        clob_done_ms=clob_done_ms,
+        cache_dir=None if cache is None else cache.dir,
+        started_monotonic=overall_t0,
+    )
+
+
+def persist_snapshot_projection(
+    settings: Settings,
+    projection: SnapshotProjection,
+    *,
+    schema_ready: bool = False,
+) -> SnapshotResult:
+    """Run phases 7–7.6 synchronously from one immutable projection."""
+    taken_at_ms = projection.taken_at_ms
+    product = projection.product
+    mode = projection.mode
+    status = SnapshotStatus(projection.status)
+    is_valid = projection.is_valid
+    publish_markets = projection.publish_markets
+    target_markets = [dict(row) for row in projection.markets]
+    event_rows = [dict(row) for row in projection.events]
+    event_tag_rows = [dict(row) for row in projection.event_tags]
+    issues = list(projection.issues)
     finished_at_ms = int(time.time() * 1000)
     parquet_path = (
         compute_snapshot_path(settings.parquet_root, taken_at_ms)
         if product != "structure"
         else Path("not-requested")
     )
+
     with _phase(
         "7/7: Persist (Parquet then SQLite)",
         stage="persist" if product == "structure" else None,
     ):
-        # Plan 02-09 (D-23): streaming writes. Parquet via ParquetWriter chunked
-        # write; SQLite via batched executemany in a single BEGIN IMMEDIATE
-        # transaction. Both consume `target_markets`. Complete neg-risk
-        # membership can make this much larger than the historical ≤8k liquid
-        # subset, so Phase 4 retains only compact top-of-book projections.
-        # The raw Gamma list and full-depth CLOB books never materialize here.
 
         def _parquet_row_iter():
-            """Generator: stamp snapshot metadata on each target market dict."""
-            for m in target_markets:
-                row = dict(m)
+            for market in target_markets:
+                row = dict(market)
                 row["snapshot_taken_at_ms"] = taken_at_ms
-                row["snapshot_id"] = 0  # SQLite assigns the real id
-                row.setdefault("fetched_at_ms", clob_done_ms)
+                row["snapshot_id"] = 0
+                row.setdefault("fetched_at_ms", projection.clob_done_ms)
                 yield row
 
         if product != "structure":
             write_parquet_streaming(_parquet_row_iter(), parquet_path, batch_size=500)
-
-        # Phase 1.1 Amendment 01: stamp events with finished_at_ms (NOT
-        # clob_done_ms — events are fetched by Gamma in phase 1, not CLOB).
-        for ev in event_rows:
-            if ev.get("fetched_at_ms") is None:
-                ev["fetched_at_ms"] = finished_at_ms
+        for event in event_rows:
+            if event.get("fetched_at_ms") is None:
+                event["fetched_at_ms"] = finished_at_ms
 
         store = SQLiteStore(settings.db_path)
         if not schema_ready:
             store.init_schema()
-        if source_complete:
-            source_coverage = SourceCoverage.complete(
-                markets_coverage.result.items_yielded,
-                events_coverage.result.items_yielded,
-            )
-        elif reconciliation_reason is not None:
-            source_coverage = SourceCoverage.incomplete(
-                "events",
-                markets_coverage.result.items_yielded,
-                events_coverage.result.items_yielded,
-                reconciliation_reason,
-            )
-        elif event_failure_reason is not None or not events_coverage.result.completed:
-            source_coverage = SourceCoverage.incomplete(
-                "events",
-                markets_coverage.result.items_yielded,
-                events_coverage.result.items_yielded,
-                event_failure_reason or "event-pagination-incomplete",
-            )
-        else:
-            source_coverage = SourceCoverage.incomplete(
-                "markets",
-                markets_coverage.result.items_yielded,
-                events_coverage.result.items_yielded,
-                market_failure_reason or "market-pagination-incomplete",
-            )
-        snapshot_id, market_count = store.write_snapshot_streaming(
+        snapshot_id, _market_count = store.write_snapshot_streaming(
             taken_at_ms=taken_at_ms,
             finished_at_ms=finished_at_ms,
             mode=mode,
@@ -1496,11 +1553,11 @@ async def run_snapshot(
             is_valid=is_valid,
             market_rows=target_markets,
             issues=issues,
-            source_coverage=source_coverage,
-            event_members=event_members,
-            group_truths=group_truths,
+            source_coverage=projection.source_coverage,
+            event_members=list(projection.event_members),
+            group_truths=list(projection.group_truths),
             publish_markets=publish_markets,
-            notes=_derive_notes_from_issues(issues),  # Plan 03.1-02 GAP-103
+            notes=projection.notes,
             event_rows=event_rows,
             event_tag_rows=event_tag_rows,
             batch_size=500,
@@ -1517,27 +1574,17 @@ async def run_snapshot(
             ),
         )
 
-    # ── 7.5. Supabase mirror (D-02 dashboard) — fail-soft post-write ─────────
-    # SQLite + Parquet are the source of truth (D-12 amendment). Mirror failure
-    # → DEGRADED (not FAILED). Does NOT increment scheduler's failure_counter.
-    #
-    # F-05 (Plan 02-08): pre-empt the whole mirror block when the snapshot
-    # is invalid (e.g. 0-market case caused by an API_UNREACHABLE on /markets).
-    # The validator marks is_valid=False there; mirroring such a degenerate
-    # row would land a status="failed" / market_count=0 row in Supabase that
-    # is_valid_overall already says we shouldn't trust. Fail-soft policy says
-    # "skip, don't corrupt".
-    mirror = None  # type: ignore[assignment]
+    mirror = None
     if product == "structure":
         logger.info(f"step 7.5: mirror skipped for Structure snapshot_id={snapshot_id}")
     elif settings.supabase_mirror_enabled and not publish_markets:
         logger.info(
-            f"step 7.5: skip Supabase mirror — market truth was not published "
+            "step 7.5: skip Supabase mirror — market truth was not published "
             f"(snapshot_id={snapshot_id}, status={status.value})"
         )
     elif settings.supabase_mirror_enabled and not is_valid:
         logger.info(
-            f"step 7.5: skip Supabase mirror — snapshot is_valid=False "
+            "step 7.5: skip Supabase mirror — snapshot is_valid=False "
             f"(snapshot_id={snapshot_id}, status={status.value}); F-05 guard"
         )
     elif settings.supabase_mirror_enabled:
@@ -1548,7 +1595,7 @@ async def run_snapshot(
                 settings.supabase_url,
                 settings.supabase_service_key.get_secret_value(),
             )
-            narrow_rows = [narrow_market_row(m, snapshot_id) for m in target_markets]
+            narrow_rows = [narrow_market_row(row, snapshot_id) for row in target_markets]
             snapshot_meta = {
                 "id": snapshot_id,
                 "taken_at_ms": taken_at_ms,
@@ -1556,11 +1603,9 @@ async def run_snapshot(
                 "mode": mode,
                 "status": status.value,
                 "market_count": len(target_markets),
-                "parquet_url": None,  # Updated in step 7.6 if R2 upload succeeds
+                "parquet_url": None,
             }
-            ok = mirror.push_snapshot(snapshot_id, snapshot_meta, narrow_rows)
-            if ok:
-                # Record successful mirror timestamp in SQLite (non-critical; ignore failure)
+            if mirror.push_snapshot(snapshot_id, snapshot_meta, narrow_rows):
                 try:
                     store.update_snapshot_mirror_fields(
                         snapshot_id,
@@ -1580,36 +1625,26 @@ async def run_snapshot(
                         ),
                     )
                 )
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"Supabase mirror init failed: {e!r}")
-            # Plan 05: Sentry breadcrumb (warning level) — adds context to
-            # the NEXT real Sentry event without opening a new issue. Mirror
-            # failures are fail-soft; we don't want them spamming Sentry.
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"Supabase mirror init failed: {error!r}")
             sentry_sdk.add_breadcrumb(
                 category="storage",
                 message=f"supabase_mirror_failed snapshot_id={snapshot_id}",
                 level="warning",
-                data={"error": str(e)[:200]},
+                data={"error": str(error)[:200]},
             )
             issues.append(
                 Issue(
                     layer=4,
                     category=Category.UNKNOWN,
                     market_id=None,
-                    detail=f"Supabase mirror init failed: {str(e)[:200]}",
+                    detail=f"Supabase mirror init failed: {str(error)[:200]}",
                 )
             )
-            mirror = None  # type: ignore[assignment]
+            mirror = None
     else:
-        # D-01 (Phase 02.1, BUG-7): audit log + breadcrumb for config-disabled skip.
-        # Previously this branch was completely silent — daemon log had nothing,
-        # Sentry events had no breadcrumb context. The 2026-05 chaos Inj 3
-        # (撤 POLYARB_SUPABASE_SERVICE_KEY → pydantic flips mirror_enabled=False)
-        # surfaced this as Bug #7: fail-soft path collapsed to a black hole.
-        #
-        # D-12 invariant: fail-soft contract unchanged — snapshot still completes.
         logger.info(
-            f"step 7.5: mirror disabled — reason=config-disabled "
+            "step 7.5: mirror disabled — reason=config-disabled "
             f"(snapshot_id={snapshot_id}). "
             "Supabase dashboard will not update until mirror is re-enabled."
         )
@@ -1620,49 +1655,43 @@ async def run_snapshot(
             data={"supabase_mirror_enabled": False, "snapshot_id": snapshot_id},
         )
 
-    # ── 7.6. R2 parquet archive (D-03) — fail-soft post-write ────────────────
-    # Upload the already-written parquet to Cloudflare R2. Failure → DEGRADED.
     if settings.r2_enabled and product != "structure":
-        from polyarb.storage.r2_sync import R2UploadError, compute_r2_key, upload_parquet_to_r2
+        from polyarb.storage.r2_sync import (
+            R2UploadError,
+            compute_r2_key,
+            upload_parquet_to_r2,
+        )
 
         r2_url: str | None = None
         try:
-            r2_key = compute_r2_key(taken_at_ms)
             r2_url = upload_parquet_to_r2(
                 parquet_path=parquet_path,
                 bucket=settings.r2_bucket,
-                key=r2_key,
+                key=compute_r2_key(taken_at_ms),
                 endpoint=settings.r2_endpoint,
                 access_key=settings.r2_access_key_id.get_secret_value(),
                 secret_key=settings.r2_secret_access_key.get_secret_value(),
             )
-            # Record R2 URL in SQLite (non-critical; ignore failure)
             try:
                 store.update_snapshot_mirror_fields(snapshot_id, parquet_r2_url=r2_url)
             except Exception:  # noqa: BLE001
                 pass
-        except R2UploadError as e:
-            logger.error(f"R2 upload failed: {e!r}")
-            # Plan 05: Sentry breadcrumb (warning level) — captures storage
-            # failure context for the next real Sentry event without
-            # opening a separate issue (fail-soft path, don't pollute Sentry).
+        except R2UploadError as error:
+            logger.error(f"R2 upload failed: {error!r}")
             sentry_sdk.add_breadcrumb(
                 category="storage",
                 message=f"r2_upload_failed snapshot_id={snapshot_id}",
                 level="warning",
-                data={"error": str(e)[:200]},
+                data={"error": str(error)[:200]},
             )
             issues.append(
                 Issue(
                     layer=4,
                     category=Category.UNKNOWN,
                     market_id=None,
-                    detail=f"R2 upload failed: {str(e)[:200]}",
+                    detail=f"R2 upload failed: {str(error)[:200]}",
                 )
             )
-            r2_url = None
-
-        # Update Supabase snapshots.parquet_url if both mirror and R2 succeeded
         if r2_url is not None and mirror is not None and settings.supabase_mirror_enabled:
             try:
                 mirror.update_parquet_url(snapshot_id, r2_url)
@@ -1671,50 +1700,12 @@ async def run_snapshot(
                     "update_parquet_url post-r2 failed; snapshots.parquet_url stays NULL"
                 )
 
-    # ── 7.7. Event bus fan-out (Plan 03-05, D-05) — fail-soft post-write ─────
-    # L1 → L2 cross-process NOTIFY so the L2 daemon can refresh its
-    # candidate WS subscription set. Feature-flag `event_bus_enabled`
-    # default FALSE per B1 spawn constraint — opt-in via Fly secret
-    # `POLYARB_EVENT_BUS_ENABLED=1` ONLY after Plan 07 chaos PASS for
-    # Inj L2-3. Wrapped in try/except so a NOTIFY failure NEVER blocks
-    # snapshot completion (D-12 invariant). publish_snapshot_complete
-    # itself is fail-soft, but we belt-and-suspender the import call too.
-    if getattr(settings, "event_bus_enabled", False) and publish_markets:
-        try:
-            await publish_snapshot_complete(
-                settings,
-                snapshot_id=snapshot_id,
-                taken_at_ms=taken_at_ms,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"event bus publish failed (fail-soft): {e!r}")
-            sentry_sdk.add_breadcrumb(
-                category="event-bus",
-                level="warning",
-                message=f"orchestrator step 7.7 publish failed: {snapshot_id}",
-                data={"error": str(e)[:200]},
-            )
-
-    # ── Cache cleanup — MUST run unconditionally (after step 7.5 + 7.6) ──────
-    # Even if mirror/R2 failed, the local write succeeded — clean up cache.
-    # Cache cleanup happens ONLY after a successful SQLite commit. If step 7
-    # failed mid-way, the cache is left intact so the next run can resume.
-    if cache is not None:
-        cache.cleanup()
-
-    logger.info(
-        f"Snapshot complete in {_format_elapsed(time.monotonic() - overall_t0)} "
-        f"(snapshot_id={snapshot_id})"
-    )
-
-    # Aggregate issues by category for the summary line.
     cat_counts: dict[str, int] = {}
-    for i in issues:
-        cat_counts[i.category.value] = cat_counts.get(i.category.value, 0) + 1
-
+    for issue in issues:
+        cat_counts[issue.category.value] = cat_counts.get(issue.category.value, 0) + 1
     return SnapshotResult(
         snapshot_id=snapshot_id,
-        market_count=len(target_markets),  # what got persisted, not full normalize count
+        market_count=len(target_markets),
         is_valid=is_valid,
         status=status.value,
         mode=mode,
@@ -1724,3 +1715,54 @@ async def run_snapshot(
         taken_at_ms=taken_at_ms,
         finished_at_ms=finished_at_ms,
     )
+
+
+async def run_snapshot(
+    settings: Settings,
+    *,
+    mode: str = "subset",
+    product: str = "legacy_combined",
+    now_ms: int | None = None,
+    use_cache: bool = True,
+    gamma_client: object | None = None,
+    schema_ready: bool = False,
+) -> SnapshotResult:
+    """Compose immutable projection, sync persistence, async fan-out, cleanup."""
+    projection = await build_snapshot_projection(
+        settings,
+        mode=mode,
+        product=product,
+        now_ms=now_ms,
+        use_cache=use_cache,
+        gamma_client=gamma_client,
+        schema_ready=schema_ready,
+    )
+    result = await asyncio.to_thread(
+        persist_snapshot_projection,
+        settings,
+        projection,
+        schema_ready=schema_ready,
+    )
+    if getattr(settings, "event_bus_enabled", False) and projection.publish_markets:
+        try:
+            await publish_snapshot_complete(
+                settings,
+                snapshot_id=result.snapshot_id,
+                taken_at_ms=projection.taken_at_ms,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"event bus publish failed (fail-soft): {error!r}")
+            sentry_sdk.add_breadcrumb(
+                category="event-bus",
+                level="warning",
+                message=f"orchestrator step 7.7 publish failed: {result.snapshot_id}",
+                data={"error": str(error)[:200]},
+            )
+    if projection.cache_dir is not None:
+        ChunkCache.cleanup_dir(projection.cache_dir)
+    logger.info(
+        f"Snapshot complete in "
+        f"{_format_elapsed(time.monotonic() - projection.started_monotonic)} "
+        f"(snapshot_id={result.snapshot_id})"
+    )
+    return result

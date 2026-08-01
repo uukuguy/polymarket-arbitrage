@@ -256,8 +256,16 @@ class ChunkCache:
 
     def cleanup(self) -> None:
         """Remove this cache directory. Called after a successful snapshot."""
-        self._safe_rmtree(self._dir)
-        logger.info(f"cache: cleaned up {self._dir.name}")
+        self.cleanup_dir(self._dir)
+
+    @classmethod
+    def cleanup_dir(cls, cache_dir: Path) -> None:
+        """Safely remove one immutable snapshot-cache path after publication."""
+        path = Path(cache_dir)
+        if not path.name.startswith("snapshot-") or path.name in {"snapshot-", ".", ".."}:
+            raise ValueError("invalid-snapshot-cache-dir")
+        cls._safe_rmtree(path)
+        logger.info(f"cache: cleaned up {path.name}")
 
     @classmethod
     def purge_all(cls, cache_root: Path) -> int:

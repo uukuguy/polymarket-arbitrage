@@ -8,6 +8,11 @@ from pathlib import Path
 import pytest
 
 from polyarb.perception.market_truth import EventMember, membership_hash
+from polyarb.perception.structure_publication import (
+    StructurePublicationCheckpoint,
+    normalize_structure_component_chunk,
+    run_structure_publication_step,
+)
 from polyarb.storage.sqlite_store import SQLiteStore, StructurePublicationCursorError
 
 COMPONENT_COUNTS = {
@@ -18,6 +23,65 @@ COMPONENT_COUNTS = {
     "markets": 1,
     "issues": 0,
 }
+
+
+def test_normalization_chunk_never_fetches_more_than_raw_row_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window_id = _complete_window(store, "market-1", now_ms=100)
+    publication = store.begin_structure_publication(
+        window_id=window_id,
+        snapshot_metadata={
+            "snapshot_id": 1,
+            "taken_at_ms": 100,
+            "mode": "full",
+            "data_product": "structure",
+            "expected_counts": {key: 0 for key in COMPONENT_COUNTS},
+        },
+        now_ms=103,
+    )
+    observed: list[int] = []
+    original = store.fetch_structure_staging_chunk
+
+    def instrumented(*args, **kwargs):
+        observed.append(kwargs["limit"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "fetch_structure_staging_chunk", instrumented)
+    chunk = normalize_structure_component_chunk(
+        store, publication, "events", None, 1
+    )
+
+    assert chunk.source_rows == 1
+    assert observed == [1]
+    assert max(observed) <= 1
+
+
+def test_ready_publication_requires_a_later_invocation_to_switch(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    window_id = _complete_window(store, "market-1", now_ms=100)
+
+    result: StructurePublicationCheckpoint | object
+    for _ in range(40):
+        result = run_structure_publication_step(
+            settings_for_test, window_id, max_rows=1, max_elapsed_s=60
+        )
+        if isinstance(result, StructurePublicationCheckpoint) and result.stage == "ready":
+            break
+    else:
+        raise AssertionError("publication never reached ready")
+
+    assert store.current_structure_generation() is None
+    published = run_structure_publication_step(
+        settings_for_test, window_id, max_rows=1, max_elapsed_s=60
+    )
+    assert not isinstance(published, StructurePublicationCheckpoint)
+    assert store.current_structure_generation()["snapshot_id"] == published.snapshot_id
 
 
 def _event(snapshot_id: int) -> dict[str, object]:
@@ -96,7 +160,25 @@ def _complete_window(store: SQLiteStore, market_id: str, *, now_ms: int) -> str:
         requested_cursor=None,
         next_cursor=None,
         completed=True,
-        events=[{"id": "event-1", "active": True, "closed": False}],
+        events=[
+            {
+                "id": "event-1",
+                "active": True,
+                "closed": False,
+                "negRisk": True,
+                "enableNegRisk": True,
+                "negRiskAugmented": False,
+                "negRiskMarketID": "group-1",
+                "markets": [
+                    {
+                        "id": market_id,
+                        "active": True,
+                        "closed": False,
+                        "negRiskOther": False,
+                    }
+                ],
+            }
+        ],
         finished_at_ms=now_ms + 1,
     )
     store.commit_structure_market_page(
@@ -256,6 +338,88 @@ def _publish_generation(
         == snapshot_id
     )
     return publication
+
+
+def test_bounded_certification_resumes_every_primary_key_checkpoint(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = SQLiteStore(db_path)
+    store.init_schema()
+    publication = _begin_generation(
+        store,
+        snapshot_id=1,
+        market_id="market-1",
+        now_ms=1_000,
+    )
+    _append_generation_truth(
+        store,
+        publication,
+        snapshot_id=1,
+        market_id="market-1",
+        now_ms=1_004,
+    )
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
+
+    checkpoints: list[tuple[str | None, str | None, int]] = []
+    for offset in range(30):
+        restarted = SQLiteStore(db_path)
+        chunk = restarted.advance_structure_certification_chunk(
+            publication.publication_id,
+            max_rows=1,
+            now_ms=1_011 + offset,
+        )
+        checkpoints.append((chunk.component, chunk.cursor, chunk.rows_processed))
+        if chunk.ready:
+            break
+    else:
+        raise AssertionError("bounded certification never reached ready")
+
+    assert any(component == "memberships" and cursor for component, cursor, _ in checkpoints)
+    assert any(component == "group_truth" and cursor for component, cursor, _ in checkpoints)
+    assert store.current_structure_generation() is None
+    with sqlite3.connect(db_path) as con:
+        status, validation_hash, certification_component = con.execute(
+            "SELECT status,validation_hash,certification_component "
+            "FROM structure_publications WHERE publication_id=?",
+            (publication.publication_id,),
+        ).fetchone()
+    assert status == "ready"
+    assert len(validation_hash) == 64
+    assert certification_component == "bounded-complete"
+
+
+def test_bounded_certification_rejects_stale_membership_hash(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store,
+        snapshot_id=1,
+        market_id="market-1",
+        now_ms=1_000,
+    )
+    _append_generation_truth(
+        store,
+        publication,
+        snapshot_id=1,
+        market_id="market-1",
+        now_ms=1_004,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_generation_group_truth SET membership_hash=? "
+            "WHERE snapshot_id=1",
+            ("b" * 64,),
+        )
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
+
+    with pytest.raises(ValueError, match="membership-invalid"):
+        for offset in range(20):
+            store.advance_structure_certification_chunk(
+                publication.publication_id,
+                max_rows=1,
+                now_ms=1_011 + offset,
+            )
 
 
 def test_generation_publication_attempt_is_invisible_until_pointer_switch(

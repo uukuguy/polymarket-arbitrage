@@ -247,17 +247,32 @@ async def run_structure_sync_until_published(
     *,
     max_pages: int | None = None,
     max_elapsed_s: float | None = None,
+    max_publication_rows: int = 500,
 ):
     """Checkpoint pages until publication or one cooperative slice ends."""
     if max_pages is not None and max_pages < 1:
         raise ValueError("structure-sync-max-pages-must-be-positive")
     if max_elapsed_s is not None and max_elapsed_s <= 0:
         raise ValueError("structure-sync-max-elapsed-must-be-positive")
+    if max_publication_rows < 1:
+        raise ValueError("structure-publication-max-rows-must-be-positive")
     store = SQLiteStore(settings.db_path)
     store.init_structure_sync_schema()
     latest = store.get_latest_structure_sync()
     async with GammaClient(settings) as gamma:
         if latest is not None and latest["status"] == "complete":
+            if max_pages is not None or max_elapsed_s is not None:
+                from polyarb.perception.structure_publication import (
+                    run_structure_publication_step,
+                )
+
+                return await asyncio.to_thread(
+                    run_structure_publication_step,
+                    settings,
+                    str(latest["id"]),
+                    max_publication_rows,
+                    max_elapsed_s if max_elapsed_s is not None else 60.0,
+                )
             return await finalize_structure_window(
                 settings,
                 str(latest["id"]),
@@ -302,9 +317,14 @@ async def run_structure_sync_until_published(
                 max_elapsed_s is not None
                 and _monotonic() - slice_started >= max_elapsed_s
             )
+            finalizer_requires_next_slot = (
+                max_elapsed_s is not None
+                and batch.stage == "markets"
+                and batch.completed
+            )
             if (
                 max_pages is not None and pages_processed >= max_pages
-            ) or elapsed_budget_reached:
+            ) or elapsed_budget_reached or finalizer_requires_next_slot:
                 return StructureSyncCheckpoint(
                     window_id=batch.window_id,
                     stage=batch.stage,

@@ -21,6 +21,7 @@ import typer
 from loguru import logger
 
 from polyarb.config import load_settings
+from polyarb.perception.structure_publication import StructurePublicationCheckpoint
 from polyarb.perception.structure_sync import (
     StructureSyncCheckpoint,
     run_structure_sync_until_published,
@@ -46,6 +47,12 @@ def structure_sync(
         min=1.0,
         hidden=True,
     ),
+    max_publication_rows: int = typer.Option(
+        500,
+        "--max-publication-rows",
+        min=1,
+        hidden=True,
+    ),
 ) -> None:
     """Resume bounded Gamma pages and publish one certified Structure revision."""
     if low_priority:
@@ -56,8 +63,32 @@ def structure_sync(
             settings,
             max_pages=max_pages,
             max_elapsed_s=max_elapsed_seconds,
+            max_publication_rows=max_publication_rows,
         )
     )
+    if isinstance(result, StructurePublicationCheckpoint):
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "checkpointed": True,
+                        "stage": result.stage,
+                        "component": result.component,
+                        "rows_processed": result.rows_processed,
+                        "cursor": result.cursor,
+                        "publication_id": result.publication_id,
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(
+                "CHECKPOINTED | "
+                f"stage={result.stage} component={result.component} "
+                f"rows={result.rows_processed} cursor={result.cursor} "
+                f"publication_id={result.publication_id}"
+            )
+        return
     if isinstance(result, StructureSyncCheckpoint):
         if json_output:
             print(

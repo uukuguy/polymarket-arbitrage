@@ -2369,6 +2369,11 @@ CREATE TABLE IF NOT EXISTS structure_publications (
     validation_hash TEXT CHECK(
         validation_hash IS NULL OR length(validation_hash)=64
     ),
+    certification_component TEXT,
+    certification_row_cursor TEXT,
+    certification_hash TEXT CHECK(
+        certification_hash IS NULL OR length(certification_hash)=64
+    ),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
     certified_at_ms INTEGER,

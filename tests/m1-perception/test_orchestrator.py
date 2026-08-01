@@ -39,7 +39,10 @@ from polyarb.perception.structure_sync import (  # noqa: E402
 )
 from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore  # noqa: E402
 from polyarb.snapshot.orchestrator import (  # noqa: E402
+    SnapshotProjection,
     _include_in_snapshot,
+    build_snapshot_projection,
+    persist_snapshot_projection,
     run_snapshot,
 )
 from polyarb.storage.sqlite_store import SQLiteStore  # noqa: E402
@@ -225,6 +228,81 @@ async def test_full_pipeline_writes_sqlite_and_parquet(tmp_path: Path) -> None:
     con.close()
     assert snapshot_count == 1
     assert market_count == 5  # all 5 fixture markets persisted (mark-don't-drop)
+
+
+@pytest.mark.asyncio
+async def test_projection_build_has_no_publication_write_until_persist(
+    tmp_path: Path,
+) -> None:
+    settings = _make_settings(tmp_path)
+    settings.supabase_mirror_enabled = True
+    settings.r2_enabled = True
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+    fake_gamma = _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch("polyarb.storage.supabase_mirror.SupabaseMirror") as mirror,
+        patch("polyarb.storage.r2_sync.upload_parquet_to_r2") as r2_upload,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+        projection = await build_snapshot_projection(
+            settings,
+            mode="subset",
+            product="legacy_combined",
+            now_ms=1_777_448_000_000,
+            gamma_client=None,
+        )
+        mirror.assert_not_called()
+        r2_upload.assert_not_called()
+
+    assert isinstance(projection, SnapshotProjection)
+    assert SnapshotProjection.__dataclass_params__.frozen is True
+    assert not settings.db_path.exists()
+    assert not list(settings.parquet_root.rglob("*.parquet"))
+
+    settings.supabase_mirror_enabled = False
+    settings.r2_enabled = False
+    result = persist_snapshot_projection(settings, projection)
+
+    assert result.snapshot_id >= 1
+    assert result.market_count == len(projection.markets)
+    assert result.parquet_path.exists()
+    assert not hasattr(projection, "_persisted_result")
+
+
+@pytest.mark.asyncio
+async def test_cache_cleanup_runs_only_after_successful_persistence(tmp_path: Path) -> None:
+    settings = _make_settings(tmp_path)
+    gamma_data = _load_gamma_fixture()
+    clob_data = _load_clob_fixture()
+
+    def gamma():
+        return _make_fake_gamma(gamma_data, _events_for_markets(gamma_data))
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=gamma()),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.persist_snapshot_projection",
+            side_effect=RuntimeError("injected-persist-failure"),
+        ),
+        patch("polyarb.snapshot.orchestrator.ChunkCache.cleanup_dir") as cleanup,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+        with pytest.raises(RuntimeError, match="injected-persist-failure"):
+            await run_snapshot(settings, mode="subset", now_ms=1_777_448_000_000)
+        cleanup.assert_not_called()
 
 
 @pytest.mark.asyncio

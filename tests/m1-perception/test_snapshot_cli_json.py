@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from typer.testing import CliRunner
 
+from polyarb.perception.structure_publication import StructurePublicationCheckpoint
 from polyarb.perception.structure_sync import StructureSyncCheckpoint
 from polyarb.snapshot.cli import app
 
@@ -66,6 +67,46 @@ def test_structure_sync_cli_returns_cooperative_checkpoint_json(monkeypatch) -> 
     }
     assert run.await_args.kwargs["max_pages"] == 80
     assert run.await_args.kwargs["max_elapsed_s"] == 45.0
+
+
+def test_structure_sync_cli_reports_publication_checkpoint_and_row_budget(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+    checkpoint = StructurePublicationCheckpoint(
+        stage="normalizing",
+        component="memberships",
+        rows_processed=17,
+        cursor="event-17",
+        publication_id="publication-1",
+    )
+    with patch(
+        "polyarb.snapshot.cli.run_structure_sync_until_published",
+        new=AsyncMock(return_value=checkpoint),
+    ) as run:
+        result = CliRunner().invoke(
+            app,
+            [
+                "structure-sync",
+                "--json",
+                "--max-publication-rows",
+                "17",
+                "--max-elapsed-seconds",
+                "45",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "checkpointed": True,
+        "stage": "normalizing",
+        "component": "memberships",
+        "rows_processed": 17,
+        "cursor": "event-17",
+        "publication_id": "publication-1",
+    }
+    assert run.await_args.kwargs["max_publication_rows"] == 17
 
 
 def test_snapshot_cli_json_contract(monkeypatch) -> None:
