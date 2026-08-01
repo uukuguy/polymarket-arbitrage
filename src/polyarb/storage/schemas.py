@@ -2362,6 +2362,7 @@ CREATE TABLE IF NOT EXISTS structure_publications (
     normalization_component TEXT,
     normalization_source_cursor TEXT,
     write_component TEXT,
+    write_prior_cursor TEXT,
     write_row_cursor TEXT,
     expected_counts_json TEXT NOT NULL,
     committed_counts_json TEXT NOT NULL,
