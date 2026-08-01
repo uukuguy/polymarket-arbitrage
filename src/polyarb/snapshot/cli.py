@@ -90,7 +90,7 @@ def structure_generation_status() -> None:
 @app.command(name="structure-generation-backfill")
 def structure_generation_backfill(
     max_rows: int = typer.Option(500, "--max-rows", min=1, max=500),
-    max_chunks: int = typer.Option(1, "--max-chunks", min=1, max=10),
+    max_chunks: int = typer.Option(1, "--max-chunks", min=1, max=100),
     max_elapsed_seconds: float = typer.Option(
         30.0,
         "--max-elapsed-seconds",
@@ -117,6 +117,10 @@ def structure_generation_backfill(
         store.init_structure_sync_schema()
         started_at = time.monotonic()
         for _chunk_index in range(max_chunks):
+            elapsed_seconds = time.monotonic() - started_at
+            if elapsed_seconds >= max_elapsed_seconds:
+                stop_reason = "max-elapsed-seconds"
+                break
             chunks_attempted += 1
             try:
                 final_progress, chunk_exit_code = (

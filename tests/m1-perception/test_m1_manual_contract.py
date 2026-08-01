@@ -168,6 +168,8 @@ def test_manual_documents_generation_rollout_rollback_and_bounded_cleanup() -> N
     assert "max_rows" in manual
     assert "max_chunks" in manual
     assert "max_elapsed_seconds" in manual
+    assert "max_chunks=100" in manual
+    assert "50,000" in manual
 
     read_only = manual.split("### 日常只读", 1)[1].split("### 本地 mutation", 1)[0]
     local_mutation = manual.split("### 本地 mutation", 1)[1].split(

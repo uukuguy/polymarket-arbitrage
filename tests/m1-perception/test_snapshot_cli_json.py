@@ -261,7 +261,7 @@ def test_generation_backfill_cli_rejects_unsafe_batch_bounds() -> None:
         app, ["structure-generation-backfill", "--max-rows", "501"]
     ).exit_code == 2
     assert runner.invoke(
-        app, ["structure-generation-backfill", "--max-chunks", "11"]
+        app, ["structure-generation-backfill", "--max-chunks", "101"]
     ).exit_code == 2
     assert runner.invoke(
         app,
@@ -397,7 +397,7 @@ def test_generation_backfill_cli_never_defers_after_blocked_progress_commit(
     }
 
 
-def test_generation_backfill_cli_batches_ten_chunks_with_one_store_init(
+def test_generation_backfill_cli_batches_one_hundred_chunks_with_one_store_init(
     monkeypatch,
 ) -> None:
     from polyarb.snapshot import cli as cli_module
@@ -439,7 +439,7 @@ def test_generation_backfill_cli_batches_ten_chunks_with_one_store_init(
             "--max-rows",
             "500",
             "--max-chunks",
-            "10",
+            "100",
             "--max-elapsed-seconds",
             "60",
         ],
@@ -448,18 +448,18 @@ def test_generation_backfill_cli_batches_ten_chunks_with_one_store_init(
     assert result.exit_code == 0, result.output
     assert generation_store_calls == 1
     assert store.init_calls == 1
-    assert store.backfill_calls == [500] * 10
+    assert store.backfill_calls == [500] * 100
     payload = json.loads(result.stdout)
     assert payload == {
-        "chunks_attempted": 10,
+        "chunks_attempted": 100,
         "chunks_deferred": 0,
-        "chunks_succeeded": 10,
-        "copied_rows": 5_000,
+        "chunks_succeeded": 100,
+        "copied_rows": 50_000,
         "elapsed_seconds": payload["elapsed_seconds"],
         "final_progress": {
             "complete": False,
             "copied_rows": 500,
-            "cursor": "cursor-10",
+            "cursor": "cursor-100",
             "defer_reason": None,
             "deferred": False,
             "snapshot_id": 42,
@@ -467,6 +467,71 @@ def test_generation_backfill_cli_batches_ten_chunks_with_one_store_init(
         "stop_reason": "max-chunks",
     }
     assert 0 <= payload["elapsed_seconds"] <= 60
+    assert len(result.stdout) < 1_024
+
+
+def test_generation_backfill_cli_yields_to_quote_writer_between_chunks(
+    monkeypatch, tmp_path
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    db_path = tmp_path / "writer-boundary.db"
+    with sqlite3.connect(db_path) as con:
+        con.execute("CREATE TABLE progress (chunk INTEGER NOT NULL)")
+
+    class QuoteInterleavingStore:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.quote_writer = sqlite3.connect(
+                db_path,
+                isolation_level=None,
+                timeout=0.25,
+            )
+
+        def init_structure_sync_schema(self) -> None:
+            return None
+
+        def get_latest_structure_sync(self):
+            return None
+
+        def backfill_current_structure_generation(self, *, max_rows):
+            self.calls += 1
+            with sqlite3.connect(db_path, timeout=0.25) as con:
+                con.execute("INSERT INTO progress(chunk) VALUES (?)", (self.calls,))
+            if self.calls == 1:
+                self.quote_writer.execute("BEGIN IMMEDIATE")
+            return SimpleNamespace(
+                complete=False,
+                copied_rows=max_rows,
+                cursor=f"cursor-{self.calls}",
+                snapshot_id=42,
+            )
+
+    store = QuoteInterleavingStore()
+    monkeypatch.setattr(
+        cli_module,
+        "_generation_store",
+        lambda **_kwargs: (SimpleNamespace(), store),
+    )
+    try:
+        result = CliRunner().invoke(
+            app,
+            ["structure-generation-backfill", "--max-chunks", "100"],
+        )
+    finally:
+        store.quote_writer.execute("ROLLBACK")
+        store.quote_writer.close()
+
+    assert result.exit_code == 0, result.output
+    assert store.calls == 2
+    payload = json.loads(result.stdout)
+    assert payload["chunks_attempted"] == 2
+    assert payload["chunks_succeeded"] == 1
+    assert payload["chunks_deferred"] == 1
+    assert payload["copied_rows"] == 500
+    assert payload["stop_reason"] == "writer-busy"
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT chunk FROM progress").fetchall() == [(1,)]
 
 
 def test_generation_backfill_cli_stops_immediately_after_writer_defer(
@@ -549,7 +614,7 @@ def test_generation_backfill_cli_stops_at_elapsed_deadline(monkeypatch) -> None:
             )
 
     store = TimedStore()
-    ticks = iter((100.0, 131.0, 131.0))
+    ticks = iter((100.0, 100.0, 110.0, 131.0))
     monkeypatch.setattr(cli_module.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(
         cli_module,
@@ -570,6 +635,57 @@ def test_generation_backfill_cli_stops_at_elapsed_deadline(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert store.calls == 1
+    payload = json.loads(result.stdout)
+    assert payload["chunks_attempted"] == 1
+    assert payload["chunks_succeeded"] == 1
+    assert payload["copied_rows"] == 500
+    assert payload["stop_reason"] == "max-elapsed-seconds"
+    assert payload["elapsed_seconds"] == 31.0
+
+
+def test_generation_backfill_cli_checks_deadline_after_each_chunk(monkeypatch) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    class InitStore:
+        def init_structure_sync_schema(self) -> None:
+            return None
+
+    store = InitStore()
+    ticks = iter((100.0, 100.0, 131.0))
+    monkeypatch.setattr(cli_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        cli_module,
+        "_generation_store",
+        lambda **_kwargs: (SimpleNamespace(), store),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_advance_structure_generation_backfill_chunk",
+        lambda *_args, **_kwargs: (
+            {
+                "complete": False,
+                "copied_rows": 500,
+                "cursor": "cursor-1",
+                "defer_reason": None,
+                "deferred": False,
+                "snapshot_id": 42,
+            },
+            0,
+        ),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "structure-generation-backfill",
+            "--max-chunks",
+            "100",
+            "--max-elapsed-seconds",
+            "30",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["chunks_attempted"] == 1
     assert payload["chunks_succeeded"] == 1

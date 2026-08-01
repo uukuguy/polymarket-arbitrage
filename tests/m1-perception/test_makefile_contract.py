@@ -135,7 +135,7 @@ def test_make_structure_generation_backfill_exposes_bounded_batch_controls() -> 
             "-n",
             "structure-generation-backfill",
             "max_rows=500",
-            "max_chunks=10",
+            "max_chunks=100",
             "max_elapsed_seconds=60",
         ],
         capture_output=True,
@@ -146,7 +146,7 @@ def test_make_structure_generation_backfill_exposes_bounded_batch_controls() -> 
 
     assert result.returncode == 0, result.stderr
     assert '--max-rows "500"' in result.stdout
-    assert '--max-chunks "10"' in result.stdout
+    assert '--max-chunks "100"' in result.stdout
     assert '--max-elapsed-seconds "60"' in result.stdout
 
 
