@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import pytest
 
 from polyarb.daemon.quote_worker import QuoteWorkerRuntime
+from polyarb.http.opportunity_read_health import (
+    BoundedReadLane,
+    ReadLaneSaturatedError,
+)
 from polyarb.routing.neg_risk_quote_store import (
     QuoteProjectionIntegrityError,
     QuoteUniverseUnavailableError,
@@ -33,6 +39,8 @@ class _Opportunity:
 
 
 NOW_S = 1_800_000_000.0
+UNIVERSE_HASH = "a" * 64
+SOURCE_TRUTH_HASH = "b" * 64
 
 
 def _publish_feed(
@@ -49,14 +57,14 @@ def _publish_feed(
         universe_taken_at_ms=int(NOW_S * 1000),
         requested_token_count=1,
         successful_response_count=1,
-        universe_hash="u1",
-        source_truth_hash="truth-1",
+        universe_hash=UNIVERSE_HASH,
+        source_truth_hash=SOURCE_TRUTH_HASH,
     )
     result = OpportunityScanResult(
         opportunities=opportunities,
         rejections={"augmented-neg-risk-not-supported": 4},
         source_snapshot_id=snapshot_id,
-        universe_hash="u1",
+        universe_hash=UNIVERSE_HASH,
         quote_run_id=run_id,
     )
     runtime.publish_certified_feed(projection, result)
@@ -87,18 +95,27 @@ def test_opportunity_endpoint_returns_explicit_gross_basis(http_test_client, mon
         "profit_basis": "gross-before-fees",
         "coverage": "verified-standard-neg-risk",
         "refreshing": False,
+        "source_truth_status": "live",
+        "source_truth_live_available": True,
         "latest_structure_snapshot_id": 10,
         "source_snapshot_id": 10,
-        "universe_hash": "u1",
+        "universe_hash": UNIVERSE_HASH,
         "quote_run_id": 20,
         "quote_sla_seconds": 300,
         "count": 1,
         "rejections": {"augmented-neg-risk-not-supported": 4},
+        "read_diagnostics": {
+            "source_truth_status": "live",
+            "source_truth_error_kind": None,
+            "lifecycle_status": "pending",
+            "lifecycle_error_kind": None,
+        },
         "opportunities": [
             {
                 "group_id": "group-1",
                 "gross_edge_bps": 250.0,
                 "opportunity_id": None,
+                "lifecycle_status": "pending",
                 "execution_status": "not-verified",
                 "snapshot_age_seconds": 0.0,
                 "quote_age_seconds": 0.0,
@@ -285,7 +302,7 @@ def test_opportunity_endpoint_serves_previous_feed_when_market_truth_advances(
 
 @pytest.mark.parametrize(
     ("latest_id", "handoff_age"),
-    ((9, 1.0), (11, 300.1), (None, 0.0)),
+    ((9, 1.0), (11, 300.1)),
 )
 def test_opportunity_endpoint_rejects_unavailable_revision_handoffs(
     http_test_client,
@@ -356,8 +373,253 @@ def test_opportunity_endpoint_bounds_source_truth_read_latency(
 
     response = http_test_client.get("/arbitrage/opportunities")
 
+    assert response.status_code == 200
+    assert response.json()["source_truth_status"] == "last-known-authenticated"
+
+
+def test_opportunity_endpoint_survives_shared_default_executor_starvation(
+    http_test_client, monkeypatch
+) -> None:
+    """A 116k-row sibling read cannot queue authority work behind its executor."""
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(10),
+    )
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+
+    async def saturated_default_executor(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage.asyncio.to_thread",
+        saturated_default_executor,
+    )
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._SOURCE_TRUTH_READ_TIMEOUT_S",
+        0.01,
+    )
+
+    started = time.monotonic()
+    response = http_test_client.get("/arbitrage/opportunities")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 3.0
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
+    assert response.json()["opportunities"][0]["group_id"] == "group-1"
+
+
+def test_lifecycle_timeout_keeps_every_candidate_and_exposes_diagnostic_truth(
+    http_test_client, monkeypatch
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(
+        runtime,
+        opportunities=(
+            _Opportunity("group-1", 250.0),
+            _Opportunity("group-2", 200.0),
+        ),
+    )
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(10),
+    )
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._LIFECYCLE_READ_TIMEOUT_S",
+        0.01,
+        raising=False,
+    )
+    release = threading.Event()
+
+    def blocked_lifecycle_read(*_args, **_kwargs):
+        release.wait(timeout=1.0)
+        return {}
+
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage.durable_opportunity_ids",
+        blocked_lifecycle_read,
+    )
+    try:
+        response = http_test_client.get("/arbitrage/opportunities")
+    finally:
+        release.set()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 2
+    assert [item["group_id"] for item in payload["opportunities"]] == [
+        "group-1",
+        "group-2",
+    ]
+    assert all(item["opportunity_id"] is None for item in payload["opportunities"])
+    assert all(item["lifecycle_status"] == "unavailable" for item in payload["opportunities"])
+    assert payload["read_diagnostics"]["lifecycle_status"] == "unavailable"
+    health = http_test_client.app.state.opportunity_read_health.snapshot()
+    assert health["lifecycle_consecutive_failures"] == 1
+    assert health["lifecycle_last_error_kind"] == "timeout"
+
+
+def test_source_truth_timeout_uses_only_matching_authenticated_feed_binding(
+    http_test_client, monkeypatch
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._SOURCE_TRUTH_READ_TIMEOUT_S",
+        0.01,
+    )
+    release = threading.Event()
+
+    def blocked_truth_read(*_args, **_kwargs):
+        release.wait(timeout=1.0)
+        return _truth(10)
+
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        blocked_truth_read,
+    )
+    try:
+        response = http_test_client.get("/arbitrage/opportunities")
+    finally:
+        release.set()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["source_truth_status"] == "last-known-authenticated"
+    assert payload["source_truth_live_available"] is False
+    assert payload["latest_structure_snapshot_id"] == 10
+    assert payload["read_diagnostics"]["source_truth_error_kind"] == "timeout"
+    health = http_test_client.app.state.opportunity_read_health.snapshot()
+    assert health["source_truth_consecutive_failures"] == 1
+    assert health["source_truth_last_error_kind"] == "timeout"
+
+
+def test_source_truth_fallback_rejects_mixed_feed_identity(http_test_client, monkeypatch) -> None:
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    feed = runtime.certified_feed()
+    assert feed is not None and feed.opportunity_scan is not None
+    runtime._certified_feed = replace(  # noqa: SLF001 - construct corrupted input
+        feed,
+        opportunity_scan=replace(feed.opportunity_scan, universe_hash="other-universe"),
+    )
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._SOURCE_TRUTH_READ_TIMEOUT_S",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda *_args: (_ for _ in ()).throw(sqlite3.OperationalError("busy")),
+    )
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
     assert response.status_code == 503
     assert response.json() == {"error": "verified market universe unavailable"}
+
+
+def test_source_truth_fallback_rejects_feed_without_authenticated_hash(
+    http_test_client, monkeypatch
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    feed = runtime.certified_feed()
+    assert feed is not None
+    runtime._certified_feed = replace(  # noqa: SLF001 - construct corrupted input
+        feed,
+        projection=replace(feed.projection, source_truth_hash=""),
+    )
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda *_args: (_ for _ in ()).throw(sqlite3.OperationalError("busy")),
+    )
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "verified market universe unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_bounded_read_lane_rejects_zombie_queueing_and_recovers() -> None:
+    lane = BoundedReadLane("test-opportunity-read", capacity=1)
+    release = threading.Event()
+
+    def blocked() -> str:
+        release.wait(timeout=1.0)
+        return "released"
+
+    with pytest.raises(TimeoutError):
+        await lane.run(blocked, timeout_s=0.01)
+    started = time.monotonic()
+    with pytest.raises(ReadLaneSaturatedError):
+        await lane.run(lambda: "must-not-queue", timeout_s=0.5)
+    assert time.monotonic() - started < 0.1
+
+    release.set()
+    for _ in range(100):
+        try:
+            result = await lane.run(lambda: "recovered", timeout_s=0.5)
+        except ReadLaneSaturatedError:
+            await asyncio.sleep(0)
+            continue
+        assert result == "recovered"
+        break
+    else:
+        pytest.fail("read lane did not recover after timed-out worker completed")
+
+
+def test_opportunity_read_diagnostics_recover_after_transient_failures(
+    http_test_client, monkeypatch
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda *_args: (_ for _ in ()).throw(sqlite3.OperationalError("busy")),
+    )
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage.durable_opportunity_ids",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("busy")),
+    )
+
+    degraded = http_test_client.get("/arbitrage/opportunities")
+    assert degraded.status_code == 200
+    assert degraded.json()["source_truth_status"] == "last-known-authenticated"
+    assert degraded.json()["opportunities"][0]["lifecycle_status"] == "unavailable"
+
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(10),
+    )
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage.durable_opportunity_ids",
+        lambda *_args, **_kwargs: {"group-1": "opportunity-1"},
+    )
+    recovered = http_test_client.get("/arbitrage/opportunities")
+
+    assert recovered.status_code == 200
+    payload = recovered.json()
+    assert payload["source_truth_status"] == "live"
+    assert payload["opportunities"][0]["lifecycle_status"] == "available"
+    assert payload["opportunities"][0]["opportunity_id"] == "opportunity-1"
+    health = http_test_client.app.state.opportunity_read_health.snapshot()
+    assert health["source_truth_consecutive_failures"] == 0
+    assert health["lifecycle_consecutive_failures"] == 0
 
 
 def test_opportunity_endpoint_filters_precomputed_feed_without_rescan(

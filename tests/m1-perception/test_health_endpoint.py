@@ -19,12 +19,68 @@ import pytest
 from starlette.testclient import TestClient
 
 from polyarb.http import health as health_module
+from polyarb.http.opportunity_read_health import OpportunityReadHealth
 
 
 def _read_market_truth_health(path: Path, *, now_s: float):
     reader = getattr(health_module, "read_market_truth_health", None)
     assert callable(reader), "read_market_truth_health is not implemented"
     return reader(path, now_s)
+
+
+def test_opportunity_authority_read_health_warns_then_fails_and_recovers() -> None:
+    registry = OpportunityReadHealth()
+    registry.mark_source_fallback(100.0, "timeout")
+    registry.mark_lifecycle(100.0, "unavailable", "timeout")
+
+    transient = health_module._opportunity_read_health_checks(
+        registry,
+        now_s=101.0,
+    )
+    assert transient["quote_feed:source_truth_read"][0]["status"] == "warn"
+    assert transient["quote_feed:lifecycle_read"][0]["status"] == "warn"
+    assert "error_kind=timeout" in transient["quote_feed:source_truth_read"][0]["output"]
+
+    registry.mark_source_fallback(101.0, "timeout")
+    registry.mark_source_fallback(101.0, "timeout")
+    repeated = health_module._opportunity_read_health_checks(
+        registry,
+        now_s=101.0,
+    )
+    assert repeated["quote_feed:source_truth_read"][0]["status"] == "fail"
+
+    persistent = health_module._opportunity_read_health_checks(
+        registry,
+        now_s=401.0,
+    )
+    assert persistent["quote_feed:source_truth_read"][0]["status"] == "fail"
+    assert persistent["quote_feed:lifecycle_read"][0]["status"] == "fail"
+    assert persistent["quote_feed:source_truth_read"][0]["observedValue"] == 301.0
+
+    registry.mark_source_live(402.0)
+    registry.mark_lifecycle(402.0, "available", None)
+    recovered = health_module._opportunity_read_health_checks(
+        registry,
+        now_s=403.0,
+    )
+    assert recovered["quote_feed:source_truth_read"][0]["status"] == "pass"
+    assert recovered["quote_feed:lifecycle_read"][0]["status"] == "pass"
+
+
+def test_health_endpoint_exposes_opportunity_authority_read_fallback(
+    http_test_client: TestClient,
+) -> None:
+    registry = OpportunityReadHealth()
+    registry.mark_source_fallback(time.time(), "timeout")
+    registry.mark_lifecycle(time.time(), "unavailable", "saturated")
+    http_test_client.app.state.opportunity_read_health = registry
+
+    checks = http_test_client.get("/healthz").json()["checks"]
+
+    assert checks["quote_feed:source_truth_read"][0]["status"] == "warn"
+    assert checks["quote_feed:lifecycle_read"][0]["status"] == "warn"
+    assert "status=last-known-authenticated" in checks["quote_feed:source_truth_read"][0]["output"]
+    assert "error_kind=saturated" in checks["quote_feed:lifecycle_read"][0]["output"]
 
 
 def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pressure() -> None:

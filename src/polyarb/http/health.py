@@ -69,6 +69,8 @@ _WARN_AGE_S = 25 * 3600  # 14-25h → warn; > 25h → fail
 # Supabase mirror thresholds
 _MIRROR_WARN_S = 25 * 3600
 _MIRROR_FAIL_S = 48 * 3600
+_OPPORTUNITY_READ_FAILURE_FAIL_COUNT = 3
+_OPPORTUNITY_READ_FAILURE_SLA_S = 300.0
 
 
 @dataclass(frozen=True)
@@ -606,11 +608,77 @@ def _structure_generation_health_checks(
     }
 
 
+def _opportunity_read_health_checks(
+    registry: Any,
+    *,
+    now_s: float,
+) -> dict[str, list[dict[str, Any]]]:
+    """Expose transient fallback separately from persistent authority failure."""
+    snapshot = registry.snapshot()
+    timestamp = _utc_now_iso()
+
+    def read_check(stage: str) -> dict[str, object]:
+        if stage == "source_truth":
+            status = str(snapshot["source_truth_status"])
+            failures = int(snapshot["source_truth_consecutive_failures"])
+            error_kind = snapshot["source_truth_last_error_kind"]
+            failure_started_at_s = snapshot["source_truth_failure_started_at_s"]
+            healthy = status in {"live", "never-attempted"}
+            unavailable = status == "unavailable"
+        else:
+            status = str(snapshot["lifecycle_status"])
+            failures = int(snapshot["lifecycle_consecutive_failures"])
+            error_kind = snapshot["lifecycle_last_error_kind"]
+            failure_started_at_s = snapshot["lifecycle_failure_started_at_s"]
+            healthy = status in {"available", "never-attempted"}
+            unavailable = False
+        failure_age_s = (
+            max(0.0, now_s - float(failure_started_at_s))
+            if failure_started_at_s is not None
+            else None
+        )
+        if healthy:
+            health_status = "pass"
+        elif (
+            unavailable
+            or failures >= _OPPORTUNITY_READ_FAILURE_FAIL_COUNT
+            or (
+                failure_age_s is not None
+                and failure_age_s > _OPPORTUNITY_READ_FAILURE_SLA_S
+            )
+        ):
+            health_status = "fail"
+        else:
+            health_status = "warn"
+        return {
+            "componentId": f"opportunity-{stage.replace('_', '-')}-read",
+            "componentType": "component",
+            "observedValue": (
+                round(failure_age_s, 1)
+                if failure_age_s is not None
+                else None
+            ),
+            "observedUnit": "s",
+            "status": health_status,
+            "output": (
+                f"status={status} consecutive_failures={failures} "
+                f"error_kind={error_kind}"
+            ),
+            "time": timestamp,
+        }
+
+    return {
+        "quote_feed:source_truth_read": [read_check("source_truth")],
+        "quote_feed:lifecycle_read": [read_check("lifecycle")],
+    }
+
+
 def _build_health_checks(
     store: Any,
     settings: Any,
     now_s: float,
     quote_worker_runtime: Any | None = None,
+    opportunity_read_health: Any | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], str]:
     """Compute all health sub-checks and the overall status.
 
@@ -1374,6 +1442,15 @@ def _build_health_checks(
                 }
             ]
 
+    if opportunity_read_health is not None:
+        read_checks = _opportunity_read_health_checks(
+            opportunity_read_health,
+            now_s=now_s,
+        )
+        for key, entries in read_checks.items():
+            checks[key] = entries
+            overall = _severity(overall, str(entries[0]["status"]))
+
     return checks, overall
 
 
@@ -1432,6 +1509,7 @@ async def health(request: Request) -> JSONResponse:
         settings,
         time.time(),
         getattr(request.app.state, "quote_worker_runtime", None),
+        getattr(request.app.state, "opportunity_read_health", None),
     )
     body = _build_health_body(
         overall,
@@ -1473,6 +1551,7 @@ async def healthz(request: Request) -> JSONResponse:
         settings,
         time.time(),
         getattr(request.app.state, "quote_worker_runtime", None),
+        getattr(request.app.state, "opportunity_read_health", None),
     )
     body = _build_health_body(
         overall,
