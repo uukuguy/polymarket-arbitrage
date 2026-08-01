@@ -397,6 +397,47 @@ def test_generation_publication_attempt_rejects_incomplete_source_coverage(
     assert store.current_generation_market_ids() == ("old-market",)
 
 
+def test_generation_publication_attempt_recomputes_durable_completeness(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    _publish_generation(
+        store,
+        snapshot_id=10,
+        market_id="old-market",
+        now_ms=10_000,
+    )
+    publication = _begin_generation(
+        store,
+        snapshot_id=11,
+        market_id="new-market",
+        now_ms=11_000,
+    )
+    _append_market(
+        store,
+        publication,
+        snapshot_id=11,
+        market_id="new-market",
+        now_ms=11_004,
+    )
+
+    # The default receipt falsely claims complete 1/1 event, membership,
+    # group-truth, and market components plus completed source coverage. Only
+    # the market component exists durably, so certification must recompute and
+    # reject the generation instead of trusting the terminal receipt.
+    with pytest.raises(ValueError, match="generation-incomplete"):
+        _certify(store, publication, now_ms=11_005)
+    with pytest.raises(ValueError, match="not-ready"):
+        store.publish_structure_generation(
+            publication_id=publication.publication_id,
+            now_ms=11_006,
+        )
+
+    assert store.current_structure_generation()["snapshot_id"] == 10
+    assert store.current_generation_market_ids() == ("old-market",)
+
+
 def test_generation_publication_attempt_rejects_invalid_membership_truth(
     tmp_path: Path,
 ) -> None:
