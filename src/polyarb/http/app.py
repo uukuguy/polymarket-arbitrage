@@ -23,6 +23,7 @@ Source: starlette.io (RESEARCH.md §9 lines 1372-1398)
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import uuid4
 
@@ -47,6 +48,10 @@ from polyarb.http.market_map import (
     market_map,
     opportunity_history,
     opportunity_watch_status,
+)
+from polyarb.http.opportunity_read_health import (
+    BoundedReadLane,
+    OpportunityReadHealth,
 )
 from polyarb.http.perception import (
     perception_discovery,
@@ -197,7 +202,22 @@ def create_app(
         Route("/control/status", control_status, methods=["GET"]),  # stub 501, Phase 03+ 填实现
     ]
 
-    app = Starlette(routes=routes, middleware=middleware)
+    source_truth_lane = BoundedReadLane("opportunity-source-truth")
+    lifecycle_lane = BoundedReadLane("opportunity-lifecycle")
+
+    @asynccontextmanager
+    async def opportunity_read_lifespan(_app: Starlette):
+        try:
+            yield
+        finally:
+            source_truth_lane.shutdown()
+            lifecycle_lane.shutdown()
+
+    app = Starlette(
+        routes=routes,
+        middleware=middleware,
+        lifespan=opportunity_read_lifespan,
+    )
 
     # Stash dependencies on app.state for handlers to access
     app.state.scheduler = scheduler
@@ -208,6 +228,9 @@ def create_app(
     app.state.quote_worker_runtime = quote_worker_runtime
     app.state.quote_worker = quote_worker
     app.state.opportunity_watcher = opportunity_watcher
+    app.state.opportunity_read_health = OpportunityReadHealth()
+    app.state.opportunity_source_truth_lane = source_truth_lane
+    app.state.opportunity_lifecycle_lane = lifecycle_lane
     # Slice B stores the exact runtime object mutated by Candidate Watcher.
     # Public HTTP exposure belongs to Task 6; keeping it on app.state now
     # preserves chain-truth without adding a premature route.

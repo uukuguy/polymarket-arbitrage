@@ -14,7 +14,6 @@ from starlette.responses import JSONResponse
 from polyarb.http.health import MarketTruthHealth, read_market_truth_health
 from polyarb.http.market_map import durable_opportunity_ids
 from polyarb.http.opportunity_read_health import (
-    BoundedReadLane,
     OpportunityReadHealth,
     ReadLaneSaturatedError,
 )
@@ -34,8 +33,6 @@ from polyarb.routing.opportunity_scanner import (
 _SOURCE_TRUTH_READ_TIMEOUT_S = 1.0
 _LIFECYCLE_READ_TIMEOUT_S = 1.0
 _ENDPOINT_TIMEOUT_S = 3.0
-_SOURCE_TRUTH_LANE = BoundedReadLane("opportunity-source-truth")
-_LIFECYCLE_LANE = BoundedReadLane("opportunity-lifecycle")
 
 
 def _is_sha256(value: object) -> bool:
@@ -51,11 +48,7 @@ def _market_truth(db_path: Path, now_s: float) -> MarketTruthHealth:
 
 
 def _read_health(request: Request) -> OpportunityReadHealth:
-    health = getattr(request.app.state, "opportunity_read_health", None)
-    if health is None:
-        health = OpportunityReadHealth()
-        request.app.state.opportunity_read_health = health
-    return health
+    return request.app.state.opportunity_read_health
 
 
 def _error_kind(error: BaseException) -> str:
@@ -174,8 +167,20 @@ async def _opportunities(request: Request) -> JSONResponse:
         source_truth_status = "live"
         source_truth_live_available = True
         source_truth_error_kind: str | None = None
+        _require_available_feed(
+            decide_feed_availability(
+                source_snapshot_id=feed.projection.universe_snapshot_id,
+                latest_structure_snapshot_id=feed.projection.universe_snapshot_id,
+                quote_age_seconds=quote_age_seconds,
+                universe_age_seconds=universe_age_seconds,
+                handoff_age_seconds=0.0,
+            ),
+            quote_age_seconds=quote_age_seconds,
+            universe_age_seconds=universe_age_seconds,
+        )
+        source_token = health.begin_source_attempt(now_s)
         try:
-            market_truth = await _SOURCE_TRUTH_LANE.run(
+            market_truth = await request.app.state.opportunity_source_truth_lane.run(
                 _market_truth,
                 request.app.state.sqlite_store.db_path,
                 now_s,
@@ -183,7 +188,7 @@ async def _opportunities(request: Request) -> JSONResponse:
             )
             if market_truth.last_complete_snapshot_id is None:
                 raise QuoteUniverseUnavailableError("source-truth-unavailable")
-            health.mark_source_live(now_s)
+            health.mark_source_live(source_token, time.time())
         except Exception as error:  # noqa: BLE001 - certified fallback is fail-soft
             source_truth_status = "last-known-authenticated"
             source_truth_live_available = False
@@ -195,9 +200,18 @@ async def _opportunities(request: Request) -> JSONResponse:
                 universe_age_seconds=universe_age_seconds,
             )
             if market_truth is None:
-                health.mark_source_unavailable(now_s, source_truth_error_kind)
+                health.mark_source_unavailable(
+                    source_token,
+                    time.time(),
+                    source_truth_error_kind,
+                    authentication_invalid=True,
+                )
                 raise QuoteUniverseUnavailableError("source-truth-unavailable") from error
-            health.mark_source_fallback(now_s, source_truth_error_kind)
+            health.mark_source_fallback(
+                source_token,
+                time.time(),
+                source_truth_error_kind,
+            )
         availability = decide_feed_availability(
             source_snapshot_id=feed.projection.universe_snapshot_id,
             latest_structure_snapshot_id=market_truth.last_complete_snapshot_id,
@@ -214,8 +228,9 @@ async def _opportunities(request: Request) -> JSONResponse:
         )
         lifecycle_status = "pending"
         lifecycle_error_kind: str | None = None
+        lifecycle_token = health.begin_lifecycle_attempt(time.time())
         try:
-            durable_ids = await _LIFECYCLE_LANE.run(
+            durable_ids = await request.app.state.opportunity_lifecycle_lane.run(
                 durable_opportunity_ids,
                 request.app.state.sqlite_store.db_path,
                 {item.group_id for item in selected},
@@ -230,12 +245,22 @@ async def _opportunities(request: Request) -> JSONResponse:
                     request.app.state.settings.structure_generation_read_mode
                 ),
             )
-            health.mark_lifecycle(now_s, "available", None)
+            health.mark_lifecycle(
+                lifecycle_token,
+                time.time(),
+                "available",
+                None,
+            )
         except Exception as error:  # noqa: BLE001 - lifecycle IDs are an attachment
             durable_ids = {}
             lifecycle_status = "unavailable"
             lifecycle_error_kind = _error_kind(error)
-            health.mark_lifecycle(now_s, lifecycle_status, lifecycle_error_kind)
+            health.mark_lifecycle(
+                lifecycle_token,
+                time.time(),
+                lifecycle_status,
+                lifecycle_error_kind,
+            )
     except (QuoteUniverseUnavailableError, QuoteRunUnavailableError):
         return JSONResponse(
             {"error": "verified market universe unavailable"},

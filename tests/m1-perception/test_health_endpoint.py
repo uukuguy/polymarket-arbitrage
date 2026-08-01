@@ -30,8 +30,15 @@ def _read_market_truth_health(path: Path, *, now_s: float):
 
 def test_opportunity_authority_read_health_warns_then_fails_and_recovers() -> None:
     registry = OpportunityReadHealth()
-    registry.mark_source_fallback(100.0, "timeout")
-    registry.mark_lifecycle(100.0, "unavailable", "timeout")
+    source_token = registry.begin_source_attempt(100.0)
+    lifecycle_token = registry.begin_lifecycle_attempt(100.0)
+    registry.mark_source_fallback(source_token, 100.0, "timeout")
+    registry.mark_lifecycle(
+        lifecycle_token,
+        100.0,
+        "unavailable",
+        "timeout",
+    )
 
     transient = health_module._opportunity_read_health_checks(
         registry,
@@ -41,13 +48,30 @@ def test_opportunity_authority_read_health_warns_then_fails_and_recovers() -> No
     assert transient["quote_feed:lifecycle_read"][0]["status"] == "warn"
     assert "error_kind=timeout" in transient["quote_feed:source_truth_read"][0]["output"]
 
-    registry.mark_source_fallback(101.0, "timeout")
-    registry.mark_source_fallback(101.0, "timeout")
+    source_token = registry.begin_source_attempt(101.0)
+    registry.mark_source_fallback(source_token, 101.0, "timeout")
+    source_token = registry.begin_source_attempt(101.0)
+    registry.mark_source_fallback(source_token, 101.0, "timeout")
+    lifecycle_token = registry.begin_lifecycle_attempt(101.0)
+    registry.mark_lifecycle(
+        lifecycle_token,
+        101.0,
+        "unavailable",
+        "timeout",
+    )
+    lifecycle_token = registry.begin_lifecycle_attempt(101.0)
+    registry.mark_lifecycle(
+        lifecycle_token,
+        101.0,
+        "unavailable",
+        "timeout",
+    )
     repeated = health_module._opportunity_read_health_checks(
         registry,
         now_s=101.0,
     )
     assert repeated["quote_feed:source_truth_read"][0]["status"] == "fail"
+    assert repeated["quote_feed:lifecycle_read"][0]["status"] == "fail"
 
     persistent = health_module._opportunity_read_health_checks(
         registry,
@@ -57,8 +81,10 @@ def test_opportunity_authority_read_health_warns_then_fails_and_recovers() -> No
     assert persistent["quote_feed:lifecycle_read"][0]["status"] == "fail"
     assert persistent["quote_feed:source_truth_read"][0]["observedValue"] == 301.0
 
-    registry.mark_source_live(402.0)
-    registry.mark_lifecycle(402.0, "available", None)
+    source_token = registry.begin_source_attempt(402.0)
+    lifecycle_token = registry.begin_lifecycle_attempt(402.0)
+    registry.mark_source_live(source_token, 402.0)
+    registry.mark_lifecycle(lifecycle_token, 402.0, "available", None)
     recovered = health_module._opportunity_read_health_checks(
         registry,
         now_s=403.0,
@@ -71,8 +97,16 @@ def test_health_endpoint_exposes_opportunity_authority_read_fallback(
     http_test_client: TestClient,
 ) -> None:
     registry = OpportunityReadHealth()
-    registry.mark_source_fallback(time.time(), "timeout")
-    registry.mark_lifecycle(time.time(), "unavailable", "saturated")
+    now_s = time.time()
+    source_token = registry.begin_source_attempt(now_s)
+    lifecycle_token = registry.begin_lifecycle_attempt(now_s)
+    registry.mark_source_fallback(source_token, now_s, "timeout")
+    registry.mark_lifecycle(
+        lifecycle_token,
+        now_s,
+        "unavailable",
+        "saturated",
+    )
     http_test_client.app.state.opportunity_read_health = registry
 
     checks = http_test_client.get("/healthz").json()["checks"]
@@ -81,6 +115,68 @@ def test_health_endpoint_exposes_opportunity_authority_read_fallback(
     assert checks["quote_feed:lifecycle_read"][0]["status"] == "warn"
     assert "status=last-known-authenticated" in checks["quote_feed:source_truth_read"][0]["output"]
     assert "error_kind=saturated" in checks["quote_feed:lifecycle_read"][0]["output"]
+
+
+@pytest.mark.parametrize(
+    ("attempts", "age_s", "expected"),
+    (
+        (1, 300.0, "warn"),
+        (2, 300.0, "warn"),
+        (3, 0.0, "fail"),
+        (1, 300.001, "fail"),
+    ),
+)
+def test_source_unavailable_health_uses_count_and_strict_age_boundary(
+    attempts: int,
+    age_s: float,
+    expected: str,
+) -> None:
+    registry = OpportunityReadHealth()
+    for sequence in range(attempts):
+        token = registry.begin_source_attempt(100.0 + sequence)
+        registry.mark_source_unavailable(
+            token,
+            100.0 + sequence,
+            "source-truth-unavailable",
+        )
+
+    check = health_module._opportunity_read_health_checks(
+        registry,
+        now_s=100.0 + age_s,
+    )["quote_feed:source_truth_read"][0]
+
+    assert check["status"] == expected
+
+
+def test_invalid_source_authentication_fails_health_immediately() -> None:
+    registry = OpportunityReadHealth()
+    token = registry.begin_source_attempt(100.0)
+    registry.mark_source_unavailable(
+        token,
+        100.0,
+        "source-binding-invalid",
+        authentication_invalid=True,
+    )
+
+    check = health_module._opportunity_read_health_checks(
+        registry,
+        now_s=100.0,
+    )["quote_feed:source_truth_read"][0]
+
+    assert check["status"] == "fail"
+    assert "status=authentication-invalid" in check["output"]
+
+
+def test_cold_start_health_registers_opportunity_read_checks(
+    http_test_client: TestClient,
+) -> None:
+    checks = http_test_client.get("/healthz").json()["checks"]
+
+    assert checks["quote_feed:source_truth_read"][0]["status"] == "pass"
+    assert checks["quote_feed:lifecycle_read"][0]["status"] == "pass"
+    assert "status=never-attempted" in checks["quote_feed:source_truth_read"][0][
+        "output"
+    ]
 
 
 def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pressure() -> None:

@@ -624,14 +624,14 @@ def _opportunity_read_health_checks(
             error_kind = snapshot["source_truth_last_error_kind"]
             failure_started_at_s = snapshot["source_truth_failure_started_at_s"]
             healthy = status in {"live", "never-attempted"}
-            unavailable = status == "unavailable"
+            authentication_invalid = status == "authentication-invalid"
         else:
             status = str(snapshot["lifecycle_status"])
             failures = int(snapshot["lifecycle_consecutive_failures"])
             error_kind = snapshot["lifecycle_last_error_kind"]
             failure_started_at_s = snapshot["lifecycle_failure_started_at_s"]
             healthy = status in {"available", "never-attempted"}
-            unavailable = False
+            authentication_invalid = False
         failure_age_s = (
             max(0.0, now_s - float(failure_started_at_s))
             if failure_started_at_s is not None
@@ -640,7 +640,7 @@ def _opportunity_read_health_checks(
         if healthy:
             health_status = "pass"
         elif (
-            unavailable
+            authentication_invalid
             or failures >= _OPPORTUNITY_READ_FAILURE_FAIL_COUNT
             or (
                 failure_age_s is not None

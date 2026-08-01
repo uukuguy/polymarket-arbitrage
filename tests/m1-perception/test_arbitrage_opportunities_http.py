@@ -12,6 +12,8 @@ import pytest
 from polyarb.daemon.quote_worker import QuoteWorkerRuntime
 from polyarb.http.opportunity_read_health import (
     BoundedReadLane,
+    OpportunityReadHealth,
+    ReadLaneClosedError,
     ReadLaneSaturatedError,
 )
 from polyarb.routing.neg_risk_quote_store import (
@@ -550,6 +552,12 @@ def test_source_truth_fallback_rejects_feed_without_authenticated_hash(
 
     assert response.status_code == 503
     assert response.json() == {"error": "verified market universe unavailable"}
+    assert (
+        http_test_client.app.state.opportunity_read_health.snapshot()[
+            "source_truth_status"
+        ]
+        == "authentication-invalid"
+    )
 
 
 @pytest.mark.asyncio
@@ -579,6 +587,190 @@ async def test_bounded_read_lane_rejects_zombie_queueing_and_recovers() -> None:
         break
     else:
         pytest.fail("read lane did not recover after timed-out worker completed")
+
+
+def test_read_health_rejects_stale_completion_in_both_orderings() -> None:
+    registry = OpportunityReadHealth()
+
+    old = registry.begin_source_attempt(100.0)
+    latest = registry.begin_source_attempt(101.0)
+    assert registry.mark_source_live(latest, 102.0) is True
+    assert registry.mark_source_fallback(old, 103.0, "timeout") is False
+    snapshot = registry.snapshot()
+    assert snapshot["source_truth_status"] == "live"
+    assert snapshot["source_truth_last_attempt_at_s"] == 101.0
+
+    old = registry.begin_source_attempt(104.0)
+    latest = registry.begin_source_attempt(105.0)
+    assert registry.mark_source_fallback(latest, 106.0, "timeout") is True
+    assert registry.mark_source_live(old, 107.0) is False
+    snapshot = registry.snapshot()
+    assert snapshot["source_truth_status"] == "last-known-authenticated"
+    assert snapshot["source_truth_last_attempt_at_s"] == 105.0
+
+    old = registry.begin_lifecycle_attempt(106.0)
+    latest = registry.begin_lifecycle_attempt(107.0)
+    assert registry.mark_lifecycle(latest, 108.0, "available", None) is True
+    assert registry.mark_lifecycle(old, 109.0, "unavailable", "timeout") is False
+    snapshot = registry.snapshot()
+    assert snapshot["lifecycle_status"] == "available"
+    assert snapshot["lifecycle_last_attempt_at_s"] == 107.0
+
+
+@pytest.mark.parametrize("newer_outcome", ["live", "fallback"])
+def test_concurrent_source_completions_cannot_overwrite_newer_request(
+    http_test_client,
+    monkeypatch,
+    newer_outcome: str,
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._SOURCE_TRUTH_READ_TIMEOUT_S",
+        0.05 if newer_outcome == "live" else 0.5,
+    )
+    first_started = threading.Event()
+    release_first = threading.Event()
+    call_lock = threading.Lock()
+    call_count = 0
+
+    def ordered_truth(*_args):
+        nonlocal call_count
+        with call_lock:
+            call_count += 1
+            call_number = call_count
+        if call_number == 1:
+            first_started.set()
+            release_first.wait(timeout=1.0)
+            return _truth(10)
+        if newer_outcome == "fallback":
+            raise sqlite3.OperationalError("busy")
+        return _truth(10)
+
+    monkeypatch.setattr("polyarb.http.arbitrage._market_truth", ordered_truth)
+    first_response: list[object] = []
+    first_thread = threading.Thread(
+        target=lambda: first_response.append(
+            http_test_client.get("/arbitrage/opportunities")
+        )
+    )
+    first_thread.start()
+    assert first_started.wait(timeout=1.0)
+    second = http_test_client.get("/arbitrage/opportunities")
+    if newer_outcome == "fallback":
+        release_first.set()
+    first_thread.join(timeout=1.0)
+    release_first.set()
+
+    assert not first_thread.is_alive()
+    assert second.status_code == 200
+    assert first_response and first_response[0].status_code == 200
+    snapshot = http_test_client.app.state.opportunity_read_health.snapshot()
+    assert snapshot["source_truth_status"] == (
+        "live" if newer_outcome == "live" else "last-known-authenticated"
+    )
+    assert snapshot["source_truth_latest_token"] >= 2
+
+
+@pytest.mark.parametrize("newer_outcome", ["available", "unavailable"])
+def test_concurrent_lifecycle_completions_cannot_overwrite_newer_request(
+    http_test_client,
+    monkeypatch,
+    newer_outcome: str,
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(10),
+    )
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._LIFECYCLE_READ_TIMEOUT_S",
+        0.05 if newer_outcome == "available" else 0.5,
+    )
+    first_started = threading.Event()
+    release_first = threading.Event()
+    call_lock = threading.Lock()
+    call_count = 0
+
+    def ordered_lifecycle(*_args, **_kwargs):
+        nonlocal call_count
+        with call_lock:
+            call_count += 1
+            call_number = call_count
+        if call_number == 1:
+            first_started.set()
+            release_first.wait(timeout=1.0)
+            return {"group-1": "opportunity-old"}
+        if newer_outcome == "unavailable":
+            raise sqlite3.OperationalError("busy")
+        return {"group-1": "opportunity-new"}
+
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage.durable_opportunity_ids",
+        ordered_lifecycle,
+    )
+    first_response: list[object] = []
+    first_thread = threading.Thread(
+        target=lambda: first_response.append(
+            http_test_client.get("/arbitrage/opportunities")
+        )
+    )
+    first_thread.start()
+    assert first_started.wait(timeout=1.0)
+    second = http_test_client.get("/arbitrage/opportunities")
+    if newer_outcome == "unavailable":
+        release_first.set()
+    first_thread.join(timeout=1.0)
+    release_first.set()
+
+    assert not first_thread.is_alive()
+    assert second.status_code == 200
+    assert first_response and first_response[0].status_code == 200
+    snapshot = http_test_client.app.state.opportunity_read_health.snapshot()
+    assert snapshot["lifecycle_status"] == newer_outcome
+    assert snapshot["lifecycle_latest_token"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_app_shutdown_abandons_zombie_lane_and_recreate_is_clean(
+    http_test_client,
+) -> None:
+    from polyarb.http.app import create_app
+
+    app = http_test_client.app
+    old_lane = app.state.opportunity_source_truth_lane
+    release = threading.Event()
+
+    def zombie() -> None:
+        release.wait(timeout=1.0)
+
+    lifespan = app.router.lifespan_context(app)
+    await lifespan.__aenter__()
+    with pytest.raises(TimeoutError):
+        await old_lane.run(zombie, timeout_s=0.01)
+    started = time.monotonic()
+    await lifespan.__aexit__(None, None, None)
+    assert time.monotonic() - started < 0.1
+    old_lane.shutdown()
+    old_lane.shutdown()
+    with pytest.raises(ReadLaneClosedError):
+        await old_lane.run(lambda: None, timeout_s=0.1)
+
+    replacement = create_app(
+        scheduler=app.state.scheduler,
+        sqlite_store=app.state.sqlite_store,
+        settings=app.state.settings,
+    )
+    new_lane = replacement.state.opportunity_source_truth_lane
+    assert new_lane is not old_lane
+    async with replacement.router.lifespan_context(replacement):
+        assert await new_lane.run(lambda: "ok", timeout_s=0.1) == "ok"
+    release.set()
 
 
 def test_opportunity_read_diagnostics_recover_after_transient_failures(
