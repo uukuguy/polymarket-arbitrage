@@ -106,11 +106,17 @@ def collect_neg_risk_quotes_command(
     """Collect one local read-only CLOB quote run; not a scheduler or order command."""
     _setup_logger(verbose)
     try:
+        settings = Settings()
         SQLiteStore(db_path).init_schema()
         result = asyncio.run(
             collect_neg_risk_quotes(
-                quote_store=NegRiskQuoteStore(db_path),
-                reader=ClobReaderClient(Settings()),
+                quote_store=NegRiskQuoteStore(
+                    db_path,
+                    structure_generation_read_mode=(
+                        settings.structure_generation_read_mode
+                    ),
+                ),
+                reader=ClobReaderClient(settings),
             )
         )
     except Exception as error:
@@ -373,11 +379,13 @@ def scan(
 ) -> None:
     """Discover executable neg-risk buy-all bundles from an M1 database."""
     try:
+        settings = Settings()
         found = scan_neg_risk_buy_all(
             db_path,
             min_edge_bps=min_edge_bps,
             max_snapshot_age_s=max_snapshot_age_s,
             limit=limit,
+            structure_generation_read_mode=settings.structure_generation_read_mode,
         )
     except (sqlite3.Error, StaleSnapshotError, ValueError) as error:
         typer.secho(f"opportunity scan failed: {error}", err=True)

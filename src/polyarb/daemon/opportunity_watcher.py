@@ -560,7 +560,10 @@ def build_focused_opportunity_watcher(
     return OpportunityWatcher(
         settings,
         focused_reader=ClobReaderClient(settings),
-        membership_reader=SqliteStructureMembershipReader(settings.db_path),
+        membership_reader=SqliteStructureMembershipReader(
+            settings.db_path,
+            structure_generation_read_mode=settings.structure_generation_read_mode,
+        ),
         focused_interval_s=settings.neg_risk_focused_interval_s,
         fault_runtime=fault_runtime,
         notification_batch_limit=20,

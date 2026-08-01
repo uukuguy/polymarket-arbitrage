@@ -18,6 +18,7 @@ Design decisions:
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
@@ -202,7 +203,12 @@ class SupabaseMirror:
             logger.warning(f"get_latest_remote_snapshot_id failed: {str(e)[:200]}")
             return None
 
-    def reconcile(self, sqlite_store: SQLiteStore) -> list[int]:
+    def reconcile(
+        self,
+        sqlite_store: SQLiteStore,
+        *,
+        structure_generation_read_mode: str = "legacy",
+    ) -> list[int]:
         """Find local snapshot_ids missing on Supabase and push them.
 
         Compares latest SQLite snapshot_id vs latest Supabase snapshot_id.
@@ -235,12 +241,14 @@ class SupabaseMirror:
 
         pushed: list[int] = []
         for sid in gap_ids:
-            snapshot = sqlite_store.get_snapshot(sid)
-            if snapshot is None:
+            try:
+                snapshot, market_rows = sqlite_store.read_structure_mirror_projection(
+                    structure_generation_read_mode=structure_generation_read_mode,
+                    snapshot_id=sid,
+                )
+            except (RuntimeError, sqlite3.Error):
                 logger.warning(f"reconcile: snapshot_id={sid} not found in SQLite, skipping")
                 continue
-
-            market_rows = sqlite_store.get_markets_for_snapshot(sid)
             narrow_rows = [narrow_market_row(m, sid) for m in market_rows]
 
             # Build snapshot_meta from SQLite row

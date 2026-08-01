@@ -290,6 +290,10 @@ def test_reconcile_finds_supabase_gap() -> None:
 
     # Markets for a snapshot (small set for reconcile)
     mock_store.get_markets_for_snapshot.return_value = _make_market_rows(2, 9)
+    mock_store.read_structure_mirror_projection.side_effect = lambda snapshot_id, **_: (
+        _get_snapshot(snapshot_id),
+        _make_market_rows(2, snapshot_id),
+    )
 
     with patch("polyarb.storage.supabase_mirror.create_client", return_value=mock_client):
         mirror = SupabaseMirror(url="http://localhost:0", service_key="dummy")

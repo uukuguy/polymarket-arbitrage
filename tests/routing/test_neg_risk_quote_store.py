@@ -16,6 +16,7 @@ from polyarb.routing.neg_risk_quote_store import (
     QuoteProjectionIntegrityError,
     QuoteRunBusyError,
     QuoteRunStateError,
+    QuoteUniverseUnavailableError,
     UniverseLeg,
 )
 from polyarb.storage.sqlite_store import SQLITE_BUSY_TIMEOUT_S, SQLiteStore
@@ -910,6 +911,31 @@ def test_latest_verified_universe_excludes_augmented_and_reports_reason(quote_db
             "augmented-neg-risk-not-supported",
         )
     ]
+
+
+def test_latest_verified_universe_reads_published_generation(quote_db) -> None:
+    store = SQLiteStore(quote_db)
+    for _ in range(6):
+        checkpoint = store.backfill_current_structure_generation(max_rows=100)
+        if checkpoint.complete:
+            break
+    assert checkpoint.complete is True
+
+    universe = NegRiskQuoteStore(
+        quote_db,
+        structure_generation_read_mode="generation",
+    ).latest_verified_universe()
+
+    assert universe.snapshot_id == 1
+    assert [leg.market_id for leg in universe.legs] == ["market-a", "market-b"]
+
+
+def test_generation_quote_reader_fails_closed_without_pointer(quote_db) -> None:
+    with pytest.raises(QuoteUniverseUnavailableError):
+        NegRiskQuoteStore(
+            quote_db,
+            structure_generation_read_mode="generation",
+        ).latest_verified_universe()
 
 
 def test_latest_verified_universe_ignores_complete_but_unpublished_snapshot(quote_db) -> None:

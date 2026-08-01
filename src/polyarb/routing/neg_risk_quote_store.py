@@ -18,7 +18,10 @@ from pathlib import Path
 
 from polyarb.storage.sqlite_store import (
     SQLITE_BUSY_TIMEOUT_S,
+    StructureGenerationReadError,
     _rollback_without_masking,
+    resolve_structure_read_context,
+    structure_read_transaction,
 )
 
 _TERMINAL_STATES = frozenset(
@@ -144,9 +147,16 @@ class CompleteQuoteProjection:
 class NegRiskQuoteStore:
     """SQLite API for one complete-or-failed neg-risk quote collection."""
 
-    def __init__(self, db_path: Path | str, *, now_ms: Callable[[], int] | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path | str,
+        *,
+        now_ms: Callable[[], int] | None = None,
+        structure_generation_read_mode: str = "legacy",
+    ) -> None:
         self._db_path = Path(db_path)
         self._now_ms = now_ms or _wall_clock_ms
+        self._structure_generation_read_mode = structure_generation_read_mode
 
     def current_time_ms(self) -> int:
         """Return this store's authoritative, injectable lease clock."""
@@ -168,74 +178,73 @@ class NegRiskQuoteStore:
 
     def latest_universe(self) -> tuple[int, int, tuple[UniverseLeg, ...]] | None:
         """Return membership from exactly the newest snapshot, if one exists."""
-        con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         try:
-            snapshot = con.execute(
-                "SELECT id, taken_at_ms FROM snapshots WHERE id = (SELECT MAX(id) FROM snapshots)"
-            ).fetchone()
-            if snapshot is None:
-                return None
-            rows = con.execute(
+            with structure_read_transaction(
+                self._db_path,
+                mode=self._structure_generation_read_mode,
+                legacy_latest_snapshot=True,
+            ) as read:
+                rows = read.connection.execute(
                 "SELECT m.neg_risk_market_id,m.market_id,m.condition_id,m.slug,"
                 "m.yes_token_id,COALESCE(t.event_id,''),COALESCE(t.membership_hash,'') "
-                "FROM markets m LEFT JOIN neg_risk_group_truth t "
+                f"FROM {read.table('markets')} m LEFT JOIN {read.table('group_truth')} t "
                 "ON t.snapshot_id=m.snapshot_id "
                 "AND t.neg_risk_market_id=m.neg_risk_market_id "
                 "WHERE m.snapshot_id = ? AND m.active = 1 AND m.closed = 0 "
                 "AND m.neg_risk_market_id IS NOT NULL AND m.neg_risk_market_id != '' "
                 "AND m.yes_token_id IS NOT NULL AND m.yes_token_id != '' "
                 "ORDER BY m.neg_risk_market_id,m.market_id",
-                (snapshot[0],),
-            ).fetchall()
-        finally:
-            con.close()
+                    (read.snapshot_id,),
+                ).fetchall()
+                snapshot_id = read.snapshot_id
+                taken_at_ms = read.taken_at_ms
+        except StructureGenerationReadError:
+            return None
         return (
-            int(snapshot[0]),
-            int(snapshot[1]),
+            snapshot_id,
+            taken_at_ms,
             tuple(UniverseLeg(*row) for row in rows),
         )
 
     def latest_verified_universe(self) -> VerifiedQuoteUniverse:
         """Select only standard groups backed by complete published source truth."""
-        con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         try:
-            con.execute("BEGIN")
-            snapshot = _latest_completed_published_snapshot(con)
-            if snapshot is None:
-                raise QuoteUniverseUnavailableError()
-            return _verified_universe_for_snapshot(
-                con,
-                snapshot_id=int(snapshot[0]),
-                taken_at_ms=int(snapshot[1]),
-            )
-        finally:
-            con.close()
+            with structure_read_transaction(
+                self._db_path,
+                mode=self._structure_generation_read_mode,
+            ) as read:
+                return _verified_universe_for_snapshot(
+                    read.connection,
+                    snapshot_id=read.snapshot_id,
+                    taken_at_ms=read.taken_at_ms,
+                    truth_table=read.table("group_truth"),
+                    market_table=read.table("markets"),
+                    membership_table=read.table("memberships"),
+                )
+        except StructureGenerationReadError as error:
+            raise QuoteUniverseUnavailableError(str(error)) from error
 
     def verified_universe_for_snapshot(
         self,
         snapshot_id: int,
     ) -> VerifiedQuoteUniverse:
         """Rebuild verified truth for one exact complete published snapshot."""
-        con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         try:
-            con.execute("BEGIN")
-            snapshot = con.execute(
-                "SELECT s.id,s.taken_at_ms FROM snapshots s "
-                "JOIN snapshot_source_coverage c "
-                "ON c.snapshot_id=s.id AND c.completed=1 "
-                "WHERE s.id=? AND s.data_product='structure' "
-                "AND s.market_view_published=1",
-                (snapshot_id,),
-            ).fetchone()
-            if snapshot is None:
-                raise QuoteUniverseUnavailableError()
-            return _verified_universe_for_snapshot(
-                con,
-                snapshot_id=int(snapshot[0]),
-                taken_at_ms=int(snapshot[1]),
-            )
-        finally:
-            con.close()
+            with structure_read_transaction(
+                self._db_path,
+                mode=self._structure_generation_read_mode,
+                snapshot_id=snapshot_id,
+            ) as read:
+                return _verified_universe_for_snapshot(
+                    read.connection,
+                    snapshot_id=read.snapshot_id,
+                    taken_at_ms=read.taken_at_ms,
+                    truth_table=read.table("group_truth"),
+                    market_table=read.table("markets"),
+                    membership_table=read.table("memberships"),
+                )
+        except StructureGenerationReadError as error:
+            raise QuoteUniverseUnavailableError(str(error)) from error
 
     def begin_verified_run(
         self,
@@ -317,8 +326,14 @@ class NegRiskQuoteStore:
                     raise QuoteRunStateError(
                         "universe_taken_at_ms does not match the stored snapshot"
                     )
-                latest = _latest_completed_published_snapshot(con)
-                if latest is None or int(latest[0]) != universe_snapshot_id:
+                try:
+                    structure = resolve_structure_read_context(
+                        con,
+                        mode=self._structure_generation_read_mode,
+                    )
+                except StructureGenerationReadError as error:
+                    raise QuoteRunStateError(str(error)) from error
+                if structure.snapshot_id != universe_snapshot_id:
                     raise QuoteRunStateError(
                         "verified universe snapshot is no longer the latest published truth"
                     )
@@ -326,6 +341,9 @@ class NegRiskQuoteStore:
                     con,
                     snapshot_id=universe_snapshot_id,
                     taken_at_ms=universe_taken_at_ms,
+                    truth_table=structure.table("group_truth"),
+                    market_table=structure.table("markets"),
+                    membership_table=structure.table("memberships"),
                 )
                 snapshot_legs = verified.legs
                 if verified.universe_hash != universe_hash:
@@ -733,19 +751,21 @@ class NegRiskQuoteStore:
                     raise QuoteProjectionIntegrityError()
                 run_legs = tuple(UniverseLeg(*row) for row in leg_rows)
                 quotes = tuple(PersistedQuote(*row) for row in quote_rows)
-                source_row = con.execute(
-                    "SELECT s.id,s.taken_at_ms FROM snapshots s "
-                    "JOIN snapshot_source_coverage c "
-                    "ON c.snapshot_id=s.id AND c.completed=1 "
-                    "WHERE s.id=? AND s.market_view_published=1",
-                    (run.universe_snapshot_id,),
-                ).fetchone()
-                if source_row is None:
+                try:
+                    source = resolve_structure_read_context(
+                        con,
+                        mode=self._structure_generation_read_mode,
+                        snapshot_id=run.universe_snapshot_id,
+                    )
+                except StructureGenerationReadError:
                     raise QuoteProjectionIntegrityError()
                 source_universe = _verified_universe_for_snapshot(
                     con,
-                    snapshot_id=int(source_row[0]),
-                    taken_at_ms=int(source_row[1]),
+                    snapshot_id=source.snapshot_id,
+                    taken_at_ms=source.taken_at_ms,
+                    truth_table=source.table("group_truth"),
+                    market_table=source.table("markets"),
+                    membership_table=source.table("memberships"),
                 )
                 if all_provenance_blank:
                     raise QuoteProjectionIntegrityError()
@@ -908,40 +928,32 @@ def _projection_quote_identity_by_token(
     return identities
 
 
-def _latest_completed_published_snapshot(
-    con: sqlite3.Connection,
-) -> tuple[object, object] | None:
-    return con.execute(
-        "SELECT s.id,s.taken_at_ms FROM snapshots s "
-        "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id AND c.completed=1 "
-        "WHERE s.data_product='structure' AND s.market_view_published=1 "
-        "ORDER BY s.id DESC LIMIT 1"
-    ).fetchone()
-
-
 def _verified_universe_for_snapshot(
     con: sqlite3.Connection,
     *,
     snapshot_id: int,
     taken_at_ms: int,
+    truth_table: str = "neg_risk_group_truth",
+    market_table: str = "markets",
+    membership_table: str = "event_market_memberships",
 ) -> VerifiedQuoteUniverse:
     truth_rows = con.execute(
         "SELECT event_id,neg_risk_market_id,neg_risk_type,expected_member_count,"
         "active_named_count,membership_hash,quality,reason "
-        "FROM neg_risk_group_truth WHERE snapshot_id=? "
+        f"FROM {truth_table} WHERE snapshot_id=? "
         "ORDER BY neg_risk_market_id",
         (snapshot_id,),
     ).fetchall()
     market_rows = con.execute(
         "SELECT event_id,neg_risk_market_id,market_id,condition_id,slug,yes_token_id,"
-        "active,closed,incomplete FROM markets "
+        f"active,closed,incomplete FROM {market_table} "
         "WHERE snapshot_id=? AND neg_risk_market_id IS NOT NULL "
         "AND neg_risk_market_id!='' ORDER BY neg_risk_market_id,market_id",
         (snapshot_id,),
     ).fetchall()
     membership_rows = con.execute(
         "SELECT event_id,neg_risk_market_id,market_id,member_kind,active,closed "
-        "FROM event_market_memberships WHERE snapshot_id=? "
+        f"FROM {membership_table} WHERE snapshot_id=? "
         "ORDER BY neg_risk_market_id,market_id",
         (snapshot_id,),
     ).fetchall()

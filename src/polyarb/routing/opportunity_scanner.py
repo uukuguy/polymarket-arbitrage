@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -16,6 +15,10 @@ from typing import Literal
 from polyarb.routing.neg_risk_quote_store import (
     CompleteQuoteProjection,
     NegRiskQuoteStore,
+)
+from polyarb.storage.sqlite_store import (
+    StructureGenerationReadError,
+    structure_read_transaction,
 )
 
 QUOTE_SLA_SECONDS = 300
@@ -142,6 +145,7 @@ def scan_neg_risk_buy_all(
     min_edge_bps: float = 0,
     max_snapshot_age_s: float | None = None,
     limit: int = 50,
+    structure_generation_read_mode: str = "legacy",
 ) -> list[NegRiskOpportunity]:
     """Return executable buy-all bundles ordered by gross edge."""
     if not isfinite(min_edge_bps):
@@ -150,29 +154,30 @@ def scan_neg_risk_buy_all(
         not isfinite(max_snapshot_age_s) or max_snapshot_age_s < 0
     ):
         raise ValueError("max_snapshot_age_s must be finite and non-negative")
-    connection = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True)
     try:
-        snapshot = connection.execute(
-            "SELECT id, taken_at_ms FROM snapshots ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        if snapshot is None:
-            return []
-        snapshot_id, taken_at_ms = int(snapshot[0]), int(snapshot[1])
-        age_seconds = max(0.0, time.time() - taken_at_ms / 1000)
-        if max_snapshot_age_s is not None and age_seconds > max_snapshot_age_s:
-            raise StaleSnapshotError(
-                f"snapshot age {age_seconds:.1f}s exceeds {max_snapshot_age_s:.1f}s"
-            )
-        rows = connection.execute(
-            "SELECT neg_risk_market_id, market_id, condition_id, slug, "
-            "yes_token_id, best_ask_price, best_ask_size, active, closed, incomplete "
-            "FROM markets WHERE snapshot_id = ? "
-            "AND neg_risk_market_id IS NOT NULL "
-            "ORDER BY neg_risk_market_id, market_id",
-            (snapshot_id,),
-        ).fetchall()
-    finally:
-        connection.close()
+        with structure_read_transaction(
+            db_path,
+            mode=structure_generation_read_mode,
+            legacy_latest_snapshot=True,
+        ) as read:
+            snapshot_id, taken_at_ms = read.snapshot_id, read.taken_at_ms
+            age_seconds = max(0.0, time.time() - taken_at_ms / 1000)
+            if max_snapshot_age_s is not None and age_seconds > max_snapshot_age_s:
+                raise StaleSnapshotError(
+                    f"snapshot age {age_seconds:.1f}s exceeds {max_snapshot_age_s:.1f}s"
+                )
+            rows = read.connection.execute(
+                "SELECT neg_risk_market_id, market_id, condition_id, slug, "
+                "yes_token_id, best_ask_price, best_ask_size, active, closed, incomplete "
+                f"FROM {read.table('markets')} WHERE snapshot_id = ? "
+                "AND neg_risk_market_id IS NOT NULL "
+                "ORDER BY neg_risk_market_id, market_id",
+                (snapshot_id,),
+            ).fetchall()
+    except StructureGenerationReadError:
+        if structure_generation_read_mode == "generation":
+            raise
+        return []
 
     groups: dict[str, list[tuple]] = {}
     for row in rows:

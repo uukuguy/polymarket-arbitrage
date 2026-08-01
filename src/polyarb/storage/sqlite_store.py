@@ -17,7 +17,8 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -101,6 +102,385 @@ def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> No
 
 class StructurePublicationCursorError(ValueError):
     """A bounded write did not continue the publication's durable cursor."""
+
+
+class StructureGenerationReadError(RuntimeError):
+    """A generation reader could not prove one complete immutable identity."""
+
+
+@dataclass(frozen=True)
+class StructureReadComparison:
+    legacy_snapshot_id: int | None
+    generation_snapshot_id: int | None
+    legacy_market_count: int | None
+    generation_market_count: int | None
+    legacy_universe_hash: str | None
+    generation_universe_hash: str | None
+    legacy_source_truth_hash: str | None
+    generation_source_truth_hash: str | None
+    mismatch_reasons: tuple[str, ...]
+
+    @property
+    def matches(self) -> bool:
+        return not self.mismatch_reasons
+
+
+@dataclass(frozen=True)
+class StructureReadContext:
+    """One resolved Structure identity held by one SQLite read transaction."""
+
+    connection: sqlite3.Connection
+    mode: str
+    snapshot_id: int
+    taken_at_ms: int
+    finished_at_ms: int
+    comparison: StructureReadComparison | None = None
+
+    def table(self, component: str) -> str:
+        tables = (
+            {
+                "events": "structure_generation_events",
+                "event_tags": "structure_generation_event_tags",
+                "memberships": "structure_generation_memberships",
+                "group_truth": "structure_generation_group_truth",
+                "markets": "structure_generation_markets",
+                "issues": "structure_generation_issues",
+            }
+            if self.mode == "generation"
+            else {
+                "events": "events",
+                "event_tags": "event_tags",
+                "memberships": "event_market_memberships",
+                "group_truth": "neg_risk_group_truth",
+                "markets": "markets",
+                "issues": "validation_issues",
+            }
+        )
+        try:
+            return tables[component]
+        except KeyError as error:
+            raise ValueError(f"unknown-structure-component:{component}") from error
+
+
+@dataclass(frozen=True)
+class _StructureIdentity:
+    snapshot_id: int
+    taken_at_ms: int
+    finished_at_ms: int
+    market_count: int
+    universe_hash: str
+    source_truth_hash: str
+
+
+def _structure_universe_hash(
+    con: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    generation: bool,
+) -> tuple[str, str]:
+    prefix = "structure_generation_" if generation else ""
+    truth_table = f"{prefix}group_truth" if generation else "neg_risk_group_truth"
+    membership_table = (
+        f"{prefix}memberships" if generation else "event_market_memberships"
+    )
+    market_table = f"{prefix}markets"
+    truths = con.execute(
+        "SELECT event_id,neg_risk_market_id,neg_risk_type,expected_member_count,"
+        "active_named_count,membership_hash,quality,reason "
+        f"FROM {truth_table} WHERE snapshot_id=? ORDER BY neg_risk_market_id",
+        (snapshot_id,),
+    ).fetchall()
+    memberships = con.execute(
+        "SELECT event_id,neg_risk_market_id,market_id,member_kind,active,closed "
+        f"FROM {membership_table} WHERE snapshot_id=? "
+        "ORDER BY neg_risk_market_id,market_id",
+        (snapshot_id,),
+    ).fetchall()
+    markets = con.execute(
+        "SELECT event_id,neg_risk_market_id,market_id,yes_token_id,active,closed,"
+        f"incomplete FROM {market_table} WHERE snapshot_id=? "
+        "AND neg_risk_market_id IS NOT NULL AND neg_risk_market_id!='' "
+        "ORDER BY neg_risk_market_id,market_id",
+        (snapshot_id,),
+    ).fetchall()
+    membership_by_group: dict[str, list[tuple[object, ...]]] = {}
+    market_by_group: dict[str, list[tuple[object, ...]]] = {}
+    for row in memberships:
+        membership_by_group.setdefault(str(row[1]), []).append(row)
+    for row in markets:
+        market_by_group.setdefault(str(row[1]), []).append(row)
+    identity: list[tuple[str, str, str, str]] = []
+    rejections: list[tuple[str, str, str]] = []
+    for truth in truths:
+        event_id, group_id = str(truth[0]), str(truth[1])
+        quality = str(truth[6])
+        reason = str(truth[7]) if truth[7] is not None else "neg-risk-group-not-supported"
+        group_memberships = membership_by_group.get(group_id, [])
+        group_markets = market_by_group.get(group_id, [])
+        expected = int(truth[3])
+        supported = (
+            truth[2] == "standard"
+            and quality == "complete-supported"
+            and bool(event_id.strip())
+            and isinstance(truth[5], str)
+            and bool(str(truth[5]).strip())
+            and expected == int(truth[4])
+            and len(group_memberships) == expected
+            and len(group_markets) == expected
+            and {str(row[2]) for row in group_memberships}
+            == {str(row[2]) for row in group_markets}
+            and all(
+                str(row[0]) == event_id
+                and row[3] == "named"
+                and int(row[4]) == 1
+                and int(row[5]) == 0
+                for row in group_memberships
+            )
+            and all(
+                str(row[0]) == event_id
+                and isinstance(row[3], str)
+                and bool(row[3].strip())
+                and int(row[4]) == 1
+                and int(row[5]) == 0
+                and int(row[6]) == 0
+                for row in group_markets
+            )
+        )
+        if not supported:
+            rejections.append(
+                (
+                    group_id,
+                    quality,
+                    reason
+                    if truth[2] != "standard" or quality != "complete-supported"
+                    else "membership-market-mismatch",
+                )
+            )
+            continue
+        identity.extend(
+            (group_id, str(truth[5]), str(row[2]), str(row[3]))
+            for row in group_markets
+        )
+    canonical = json.dumps(sorted(identity), ensure_ascii=False, separators=(",", ":"))
+    universe_hash = hashlib.sha256(canonical.encode()).hexdigest()
+    source_canonical = json.dumps(
+        [universe_hash, sorted(rejections)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return universe_hash, hashlib.sha256(source_canonical.encode()).hexdigest()
+
+
+def _resolve_legacy_structure(
+    con: sqlite3.Connection,
+    snapshot_id: int | None,
+    *,
+    latest_snapshot: bool = False,
+) -> _StructureIdentity:
+    where = "AND s.id=?" if snapshot_id is not None else ""
+    order = "" if snapshot_id is not None else "ORDER BY s.id DESC LIMIT 1"
+    params = (snapshot_id,) if snapshot_id is not None else ()
+    row = con.execute(
+        (
+            "SELECT s.id,s.taken_at_ms,s.finished_at_ms,s.market_count FROM snapshots s "
+            f"WHERE 1=1 {where} {order}"
+            if latest_snapshot
+            else "SELECT s.id,s.taken_at_ms,s.finished_at_ms,s.market_count "
+            "FROM snapshots s JOIN snapshot_source_coverage c "
+            "ON c.snapshot_id=s.id AND c.completed=1 WHERE s.data_product='structure' "
+            "AND s.market_view_published=1 AND s.is_valid=1 "
+            f"{where} {order}"
+        ),
+        params,
+    ).fetchone()
+    if row is None:
+        raise StructureGenerationReadError("legacy-structure-unavailable")
+    resolved_id = int(row[0])
+    actual_count = int(
+        con.execute(
+            "SELECT COUNT(*) FROM markets WHERE snapshot_id=?", (resolved_id,)
+        ).fetchone()[0]
+    )
+    universe_hash, source_truth_hash = _structure_universe_hash(
+        con, snapshot_id=resolved_id, generation=False
+    )
+    return _StructureIdentity(
+        resolved_id,
+        int(row[1]),
+        int(row[2]),
+        actual_count,
+        universe_hash,
+        source_truth_hash,
+    )
+
+
+def _resolve_generation_structure(
+    con: sqlite3.Connection,
+    snapshot_id: int | None,
+) -> _StructureIdentity:
+    if snapshot_id is None:
+        pointer = con.execute(
+            "SELECT snapshot_id,publication_id FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+        if pointer is None:
+            raise StructureGenerationReadError("generation-pointer-missing")
+        resolved_id, publication_id = int(pointer[0]), str(pointer[1])
+    else:
+        resolved_id = snapshot_id
+        publication = con.execute(
+            "SELECT publication_id FROM structure_publications WHERE snapshot_id=? "
+            "AND status='published' ORDER BY published_at_ms DESC LIMIT 1",
+            (resolved_id,),
+        ).fetchone()
+        if publication is None:
+            raise StructureGenerationReadError("generation-identity-missing")
+        publication_id = str(publication[0])
+    row = con.execute(
+        "SELECT s.taken_at_ms,s.finished_at_ms,s.market_count,p.expected_counts_json,"
+        "p.committed_counts_json,p.validation_hash,p.certification_counts_json "
+        "FROM structure_publications p JOIN snapshots s ON s.id=p.snapshot_id "
+        "WHERE p.publication_id=? AND p.snapshot_id=? AND p.status='published' "
+        "AND s.data_product='structure' AND s.market_view_published=1 AND s.is_valid=1",
+        (publication_id, resolved_id),
+    ).fetchone()
+    if row is None:
+        raise StructureGenerationReadError("generation-identity-mismatch")
+    expected = json.loads(str(row[3]))
+    committed = json.loads(str(row[4]))
+    actual = SQLiteStore._generation_counts(con, resolved_id)
+    certified = json.loads(str(row[6])) if row[6] is not None else actual
+    if expected != committed or actual != expected or certified != actual:
+        raise StructureGenerationReadError("generation-count-mismatch")
+    if row[2] is None or int(row[2]) != actual["markets"]:
+        raise StructureGenerationReadError("generation-market-count-mismatch")
+    if not isinstance(row[5], str) or row[5] != SQLiteStore._generation_hash(
+        con, resolved_id
+    ):
+        raise StructureGenerationReadError("generation-hash-mismatch")
+    universe_hash, source_truth_hash = _structure_universe_hash(
+        con, snapshot_id=resolved_id, generation=True
+    )
+    return _StructureIdentity(
+        resolved_id,
+        int(row[0]),
+        int(row[1]),
+        actual["markets"],
+        universe_hash,
+        source_truth_hash,
+    )
+
+
+def _compare_structure_identities(
+    legacy: _StructureIdentity,
+    generation: _StructureIdentity | None,
+    generation_error: str | None,
+) -> StructureReadComparison:
+    reasons: list[str] = []
+    if generation is None:
+        reasons.append(generation_error or "generation-unavailable")
+    else:
+        if legacy.snapshot_id != generation.snapshot_id:
+            reasons.append("snapshot-identity-mismatch")
+        if legacy.market_count != generation.market_count:
+            reasons.append("market-count-mismatch")
+        if legacy.universe_hash != generation.universe_hash:
+            reasons.append("universe-hash-mismatch")
+        if legacy.source_truth_hash != generation.source_truth_hash:
+            reasons.append("source-truth-hash-mismatch")
+    return StructureReadComparison(
+        legacy.snapshot_id,
+        generation.snapshot_id if generation is not None else None,
+        legacy.market_count,
+        generation.market_count if generation is not None else None,
+        legacy.universe_hash,
+        generation.universe_hash if generation is not None else None,
+        legacy.source_truth_hash,
+        generation.source_truth_hash if generation is not None else None,
+        tuple(reasons),
+    )
+
+
+@contextmanager
+def structure_read_transaction(
+    db_path: Path | str,
+    *,
+    mode: str = "legacy",
+    snapshot_id: int | None = None,
+    legacy_latest_snapshot: bool = False,
+) -> Iterator[StructureReadContext]:
+    """Resolve and hold one Structure identity for a complete consumer operation."""
+    if mode not in {"legacy", "compare", "generation"}:
+        raise ValueError("invalid-structure-generation-read-mode")
+    con = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True)
+    con.execute("PRAGMA query_only=ON")
+    try:
+        con.execute("BEGIN")
+        context = resolve_structure_read_context(
+            con,
+            mode=mode,
+            snapshot_id=snapshot_id,
+            legacy_latest_snapshot=legacy_latest_snapshot,
+        )
+        yield context
+        con.execute("COMMIT")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+
+
+def resolve_structure_read_context(
+    con: sqlite3.Connection,
+    *,
+    mode: str = "legacy",
+    snapshot_id: int | None = None,
+    legacy_latest_snapshot: bool = False,
+) -> StructureReadContext:
+    """Resolve Structure on a caller-owned transaction without opening another read."""
+    if mode not in {"legacy", "compare", "generation"}:
+        raise ValueError("invalid-structure-generation-read-mode")
+    if mode == "generation":
+        identity = _resolve_generation_structure(con, snapshot_id)
+        return StructureReadContext(
+            con,
+            "generation",
+            identity.snapshot_id,
+            identity.taken_at_ms,
+            identity.finished_at_ms,
+        )
+    identity = _resolve_legacy_structure(
+        con,
+        snapshot_id,
+        latest_snapshot=legacy_latest_snapshot,
+    )
+    comparison = None
+    if mode == "compare":
+        generation = None
+        error = None
+        try:
+            generation = _resolve_generation_structure(con, snapshot_id)
+        except StructureGenerationReadError as exc:
+            error = str(exc)
+        comparison = _compare_structure_identities(identity, generation, error)
+    return StructureReadContext(
+        con,
+        "legacy",
+        identity.snapshot_id,
+        identity.taken_at_ms,
+        identity.finished_at_ms,
+        comparison,
+    )
+
+
+def compare_current_structure_generation(
+    db_path: Path | str,
+) -> StructureReadComparison:
+    """Return the deterministic dual-read result consumed by strict health."""
+    with structure_read_transaction(db_path, mode="compare") as read:
+        assert read.comparison is not None
+        return read.comparison
 
 
 @dataclass(frozen=True)
@@ -507,6 +887,12 @@ class SQLiteStore:
             con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)
             con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
+            con.execute(
+                "CREATE VIEW IF NOT EXISTS current_structure_markets AS "
+                "SELECT markets.* FROM structure_generation_markets markets "
+                "JOIN current_structure_generation current "
+                "ON current.snapshot_id=markets.snapshot_id WHERE current.id=1"
+            )
             # Phase 03.1 Plan 01: l2_mirror_state singleton (GAP-2 + GAP-3)
             con.executescript(L2_MIRROR_STATE_DDL)
 
@@ -607,6 +993,12 @@ class SQLiteStore:
             if has_snapshot_schema:
                 con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
                 con.executescript(STRUCTURE_GENERATIONS_DDL)
+                con.execute(
+                    "CREATE VIEW IF NOT EXISTS current_structure_markets AS "
+                    "SELECT markets.* FROM structure_generation_markets markets "
+                    "JOIN current_structure_generation current "
+                    "ON current.snapshot_id=markets.snapshot_id WHERE current.id=1"
+                )
                 existing = {
                     str(row[1])
                     for row in con.execute("PRAGMA table_info(structure_publications)")
@@ -1090,6 +1482,58 @@ class SQLiteStore:
             ]
         finally:
             con.close()
+
+    def read_structure_mirror_projection(
+        self,
+        *,
+        structure_generation_read_mode: str = "legacy",
+        snapshot_id: int | None = None,
+    ) -> tuple[dict[str, object], list[dict[str, object]]]:
+        """Read mirror metadata and rows from one exact Structure transaction."""
+        with structure_read_transaction(
+            self._db_path,
+            mode=structure_generation_read_mode,
+            snapshot_id=snapshot_id,
+        ) as read:
+            snapshot = read.connection.execute(
+                "SELECT id,taken_at_ms,finished_at_ms,mode,is_valid,market_count,"
+                "parquet_r2_url FROM snapshots WHERE id=?",
+                (read.snapshot_id,),
+            ).fetchone()
+            if snapshot is None:
+                raise StructureGenerationReadError("structure-snapshot-missing")
+            rows = read.connection.execute(
+                "SELECT market_id,question,slug,event_id,mid_price,liquidity_usd,"
+                "volume_usd,end_time_ms,yes_token_id,no_token_id "
+                f"FROM {read.table('markets')} WHERE snapshot_id=? ORDER BY market_id",
+                (read.snapshot_id,),
+            ).fetchall()
+            return (
+                {
+                    "id": int(snapshot[0]),
+                    "taken_at_ms": int(snapshot[1]),
+                    "finished_at_ms": int(snapshot[2]),
+                    "mode": str(snapshot[3]),
+                    "is_valid": bool(snapshot[4]),
+                    "market_count": int(snapshot[5]),
+                    "parquet_r2_url": snapshot[6],
+                },
+                [
+                    {
+                        "market_id": row[0],
+                        "question": row[1],
+                        "slug": row[2],
+                        "event_slug": row[3],
+                        "mid_price": row[4],
+                        "liquidity_usd": row[5],
+                        "volume_usd": row[6],
+                        "end_time_ms": row[7],
+                        "yes_token_id": row[8],
+                        "no_token_id": row[9],
+                    }
+                    for row in rows
+                ],
+            )
 
     def get_scheduler_state(self) -> dict | None:
         """Read the scheduler singleton row. Returns None if not yet written."""

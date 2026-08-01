@@ -695,7 +695,10 @@ def build_production_quote_worker(
     """Build the public-read-only production worker when explicitly enabled."""
     if not settings.neg_risk_quote_worker_enabled:
         return None
-    quote_store = NegRiskQuoteStore(settings.db_path)
+    quote_store = NegRiskQuoteStore(
+        settings.db_path,
+        structure_generation_read_mode=settings.structure_generation_read_mode,
+    )
     opportunity_watcher = opportunity_watcher or OpportunityWatcher(settings)
 
     async def collect_once() -> QuoteCollectionResult:

@@ -216,3 +216,54 @@ def test_sqlite_membership_reader_does_not_fall_back_from_newest_structure(tmp_p
         )
 
     assert SqliteStructureMembershipReader(db_path).current_group("event-1", "group-1") is None
+
+
+def test_sqlite_membership_reader_reads_one_published_generation(tmp_path) -> None:
+    db_path = tmp_path / "generation-membership.db"
+    store = SQLiteStore(db_path)
+    store.init_schema()
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "market_view_published,data_product,is_valid,parquet_path) "
+            "VALUES (1,1,2,'full',2,1,'structure',1,'')"
+        )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage(snapshot_id,completed,market_items,"
+            "event_items) VALUES (1,1,2,1)"
+        )
+        con.executemany(
+            "INSERT INTO event_market_memberships(snapshot_id,event_id,"
+            "neg_risk_market_id,market_id,member_kind,active,closed) "
+            "VALUES (1,'event-1','group-1',?,'named',1,0)",
+            [("market-1",), ("market-2",)],
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_truth(snapshot_id,event_id,neg_risk_market_id,"
+            "neg_risk_type,expected_member_count,active_named_count,membership_hash,quality) "
+            "VALUES (1,'event-1','group-1','standard',2,2,'membership-1',"
+            "'complete-supported')"
+        )
+        con.executemany(
+            "INSERT INTO markets(market_id,condition_id,slug,yes_token_id,active,closed,"
+            "neg_risk_market_id,fetched_at_ms,snapshot_id,incomplete,event_id) "
+            "VALUES (?,?,'slug',?,1,0,'group-1',1,1,0,'event-1')",
+            [
+                ("market-1", "condition-1", "token-1"),
+                ("market-2", "condition-2", "token-2"),
+            ],
+        )
+    for _ in range(6):
+        checkpoint = store.backfill_current_structure_generation(max_rows=100)
+        if checkpoint.complete:
+            break
+    assert checkpoint.complete is True
+
+    group = SqliteStructureMembershipReader(
+        db_path,
+        structure_generation_read_mode="generation",
+    ).current_group("event-1", "group-1")
+
+    assert group is not None
+    assert group.structure_revision == 1
+    assert [leg.market_id for leg in group.legs] == ["market-1", "market-2"]

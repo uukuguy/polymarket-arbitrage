@@ -139,6 +139,9 @@ async def opportunities(request: Request) -> JSONResponse:
                 quote_max_age_s=float(
                     request.app.state.settings.neg_risk_quote_interval_s
                 ),
+                structure_generation_read_mode=(
+                    request.app.state.settings.structure_generation_read_mode
+                ),
             ),
             timeout=_SOURCE_TRUTH_READ_TIMEOUT_S,
         )

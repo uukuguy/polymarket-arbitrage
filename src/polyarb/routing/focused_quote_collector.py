@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -23,6 +22,10 @@ from polyarb.routing.neg_risk_quote_collector import (
 )
 from polyarb.routing.neg_risk_quote_store import UniverseLeg
 from polyarb.routing.opportunity_scanner import OpportunityLeg
+from polyarb.storage.sqlite_store import (
+    StructureGenerationReadError,
+    structure_read_transaction,
+)
 
 FocusedStatus = Literal["observe", "no-edge", "unavailable", "invalidated"]
 
@@ -103,54 +106,52 @@ class MembershipReader(Protocol):
 class SqliteStructureMembershipReader:
     """Read exactly the newest published Structure revision, never Quote history."""
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(
+        self,
+        db_path: Path | str,
+        *,
+        structure_generation_read_mode: str = "legacy",
+    ) -> None:
         self._db_path = Path(db_path)
+        self._structure_generation_read_mode = structure_generation_read_mode
 
     def current_group(self, event_id: str, group_id: str) -> StructureGroup | None:
-        con = sqlite3.connect(self._db_path)
         try:
-            snapshot = con.execute(
-                "SELECT id FROM snapshots WHERE data_product='structure' "
-                "AND market_view_published=1 ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if snapshot is None:
-                return None
-            snapshot_id = int(snapshot[0])
-            coverage = con.execute(
-                "SELECT completed FROM snapshot_source_coverage WHERE snapshot_id=?",
-                (snapshot_id,),
-            ).fetchone()
-            if coverage is None or int(coverage[0]) != 1:
-                return None
-            truth = con.execute(
+            with structure_read_transaction(
+                self._db_path,
+                mode=self._structure_generation_read_mode,
+            ) as read:
+                snapshot_id = read.snapshot_id
+                truth = read.connection.execute(
                 "SELECT neg_risk_type,expected_member_count,active_named_count,"
-                "membership_hash,quality FROM neg_risk_group_truth "
+                f"membership_hash,quality FROM {read.table('group_truth')} "
                 "WHERE snapshot_id=? AND event_id=? AND neg_risk_market_id=?",
                 (snapshot_id, event_id, group_id),
-            ).fetchone()
-            if (
-                truth is None
-                or truth[0] != "standard"
-                or truth[4] != "complete-supported"
-                or int(truth[1]) != int(truth[2])
-                or not isinstance(truth[3], str)
-                or not truth[3].strip()
-            ):
-                return None
-            membership_rows = con.execute(
-                "SELECT market_id,member_kind,active,closed FROM event_market_memberships "
-                "WHERE snapshot_id=? AND event_id=? AND neg_risk_market_id=? "
-                "ORDER BY market_id",
-                (snapshot_id, event_id, group_id),
-            ).fetchall()
-            market_rows = con.execute(
+                ).fetchone()
+                if (
+                    truth is None
+                    or truth[0] != "standard"
+                    or truth[4] != "complete-supported"
+                    or int(truth[1]) != int(truth[2])
+                    or not isinstance(truth[3], str)
+                    or not truth[3].strip()
+                ):
+                    return None
+                membership_rows = read.connection.execute(
+                    "SELECT market_id,member_kind,active,closed "
+                    f"FROM {read.table('memberships')} WHERE snapshot_id=? "
+                    "AND event_id=? AND neg_risk_market_id=? ORDER BY market_id",
+                    (snapshot_id, event_id, group_id),
+                ).fetchall()
+                market_rows = read.connection.execute(
                 "SELECT market_id,condition_id,slug,yes_token_id,active,closed,incomplete,event_id "
-                "FROM markets WHERE snapshot_id=? AND event_id=? AND neg_risk_market_id=? "
+                f"FROM {read.table('markets')} WHERE snapshot_id=? AND event_id=? "
+                "AND neg_risk_market_id=? "
                 "ORDER BY market_id",
                 (snapshot_id, event_id, group_id),
-            ).fetchall()
-        finally:
-            con.close()
+                ).fetchall()
+        except StructureGenerationReadError:
+            return None
         expected_count = int(truth[1])
         membership_ids = {str(row[0]) for row in membership_rows}
         market_ids = {str(row[0]) for row in market_rows}

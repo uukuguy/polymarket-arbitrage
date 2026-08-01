@@ -12,6 +12,11 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from polyarb.storage.sqlite_store import (
+    StructureGenerationReadError,
+    structure_read_transaction,
+)
+
 _READ_TIMEOUT_S = 1.0
 _GROUP_LIMIT = 500
 _HISTORY_LIMIT = 500
@@ -35,18 +40,14 @@ def _read_market_map(
     now_ms: int,
     max_age_s: float,
     quote_max_age_s: float,
+    structure_generation_read_mode: str = "legacy",
 ) -> dict[str, object]:
-    con = _connect_read_only(db_path)
-    try:
-        revision = con.execute(
-            "SELECT s.id,s.finished_at_ms FROM snapshots s "
-            "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id AND c.completed=1 "
-            "WHERE s.data_product='structure' AND s.market_view_published=1 "
-            "AND s.is_valid=1 ORDER BY s.id DESC LIMIT 1"
-        ).fetchone()
-        if revision is None:
-            raise MarketMapUnavailableError()
-        revision_id, finished_at_ms = int(revision[0]), int(revision[1])
+    with structure_read_transaction(
+        db_path,
+        mode=structure_generation_read_mode,
+    ) as read:
+        con = read.connection
+        revision_id, finished_at_ms = read.snapshot_id, read.finished_at_ms
         age_s = max(0.0, (now_ms - finished_at_ms) / 1000)
         if age_s > max_age_s:
             raise MarketMapUnavailableError()
@@ -57,7 +58,7 @@ def _read_market_map(
             params.append(event_id)
         rows = con.execute(
             "SELECT event_id,neg_risk_market_id,quality,reason,expected_member_count,"
-            "active_named_count,membership_hash FROM neg_risk_group_truth "
+            f"active_named_count,membership_hash FROM {read.table('group_truth')} "
             f"{where} ORDER BY event_id,neg_risk_market_id LIMIT ?",
             (*params, _GROUP_LIMIT),
         ).fetchall()
@@ -65,7 +66,7 @@ def _read_market_map(
             "SELECT o.id,o.event_id,o.group_id,o.status,o.bundle_cost,o.gross_edge_bps,"
             "o.max_bundle_size,o.structure_revision,o.quote_run_id,o.updated_at_ms "
             "FROM neg_risk_opportunities o "
-            "JOIN neg_risk_group_truth t ON t.snapshot_id=? AND t.event_id=o.event_id "
+            f"JOIN {read.table('group_truth')} t ON t.snapshot_id=? AND t.event_id=o.event_id "
             "AND t.neg_risk_market_id=o.group_id AND t.membership_hash=o.membership_hash "
             "AND t.quality='complete-supported' "
             "JOIN neg_risk_quote_runs q ON q.id=o.quote_run_id AND q.status='complete' "
@@ -82,8 +83,6 @@ def _read_market_map(
                 _GROUP_LIMIT,
             ),
         ).fetchall()
-    finally:
-        con.close()
     scannable: list[dict[str, object]] = []
     rejected: list[dict[str, object]] = []
     for row in rows:
@@ -183,39 +182,42 @@ def durable_opportunity_ids(
     quote_run_id: int,
     now_ms: int,
     quote_max_age_s: float,
+    structure_generation_read_mode: str = "legacy",
 ) -> dict[str, str]:
     """Return IDs only when observer, current Structure, and Quote truth match."""
     if not group_ids:
         return {}
     placeholders = ",".join("?" for _ in group_ids)
-    con = _connect_read_only(db_path)
     try:
-        rows = con.execute(
+        with structure_read_transaction(
+            db_path,
+            mode=structure_generation_read_mode,
+        ) as read:
+            rows = read.connection.execute(
             "SELECT o.group_id,o.id FROM neg_risk_opportunities o "
             "JOIN snapshots s ON s.id=o.structure_revision "
-            "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id AND c.completed=1 "
-            "JOIN neg_risk_group_truth t ON t.snapshot_id=s.id AND t.event_id=o.event_id "
+            f"JOIN {read.table('group_truth')} t ON t.snapshot_id=s.id "
+            "AND t.event_id=o.event_id "
             "AND t.neg_risk_market_id=o.group_id AND t.membership_hash=o.membership_hash "
             "AND t.quality='complete-supported' "
             "JOIN neg_risk_quote_runs q ON q.id=o.quote_run_id AND q.status='complete' "
             "AND q.universe_snapshot_id=s.id AND q.quoted_at_ms>=? "
             "WHERE o.status='observe' AND o.structure_revision=? AND o.quote_run_id=? "
             "AND s.data_product='structure' AND s.market_view_published=1 AND s.is_valid=1 "
-            "AND s.id=(SELECT current.id FROM snapshots current "
-            "JOIN snapshot_source_coverage current_coverage "
-            "ON current_coverage.snapshot_id=current.id AND current_coverage.completed=1 "
-            "WHERE current.data_product='structure' AND current.market_view_published=1 "
-            "AND current.is_valid=1 ORDER BY current.id DESC LIMIT 1) "
+            "AND s.id=? "
             f"AND o.group_id IN ({placeholders})",
             (
                 now_ms - int(quote_max_age_s * 1000),
                 structure_revision,
                 quote_run_id,
+                read.snapshot_id,
                 *sorted(group_ids),
             ),
-        ).fetchall()
-    finally:
-        con.close()
+            ).fetchall()
+    except StructureGenerationReadError:
+        if structure_generation_read_mode == "generation":
+            raise
+        return {}
     return {str(group_id): str(opportunity_id) for group_id, opportunity_id in rows}
 
 
@@ -229,10 +231,19 @@ async def market_map(request: Request) -> JSONResponse:
                 now_ms=int(time.time() * 1000),
                 max_age_s=float(request.app.state.settings.market_map_max_age_s),
                 quote_max_age_s=float(request.app.state.settings.neg_risk_quote_interval_s),
+                structure_generation_read_mode=(
+                    request.app.state.settings.structure_generation_read_mode
+                ),
             ),
             timeout=_READ_TIMEOUT_S,
         )
-    except (MarketMapUnavailableError, sqlite3.Error, TimeoutError, ValueError):
+    except (
+        MarketMapUnavailableError,
+        StructureGenerationReadError,
+        sqlite3.Error,
+        TimeoutError,
+        ValueError,
+    ):
         return JSONResponse({"error": "market map unavailable"}, status_code=503)
     return JSONResponse(payload)
 
