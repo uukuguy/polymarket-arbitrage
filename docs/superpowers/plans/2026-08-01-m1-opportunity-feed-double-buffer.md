@@ -395,7 +395,7 @@ git commit -m "feat(m1): serve bounded feed during structure refresh"
 - Consumes: `decide_feed_availability(...)` and `MarketTruthHealth.last_complete_finished_age_seconds`.
 - Produces: `warn/source-snapshot-refreshing-serving-previous` while the exact endpoint feed is serveable; `fail` after either hard bound.
 
-- [ ] **Step 1: Write health RED tests**
+- [x] **Step 1: Write health RED tests**
 
 Update both fresh mismatch tests:
 
@@ -463,7 +463,7 @@ def test_opportunity_rejects_incoherent_version_state(payload) -> None:
     assert WATCHER.decide_opportunity(payload)[0] == "push"
 ```
 
-- [ ] **Step 2: Run health tests and prove RED**
+- [x] **Step 2: Run health tests and prove RED**
 
 ```bash
 uv run pytest tests/m1-perception/test_quote_feed_health.py tests/m1-perception/test_polywatch_healthz_watcher.py -q
@@ -471,7 +471,7 @@ uv run pytest tests/m1-perception/test_quote_feed_health.py tests/m1-perception/
 
 Expected: old warning text, missing serving age, and new boundaries fail.
 
-- [ ] **Step 3: Use the shared policy in health**
+- [x] **Step 3: Use the shared policy in health**
 
 Whenever a projection exists, compute:
 
@@ -522,7 +522,7 @@ if refreshing != (source_id < latest_id):
     return "push", "Opportunity response version state is incoherent"
 ```
 
-- [ ] **Step 4: Run focused cross-surface verification**
+- [x] **Step 4: Run focused cross-surface verification**
 
 ```bash
 uv run pytest tests/m1-perception/test_feed_handoff.py tests/m1-perception/test_arbitrage_opportunities_http.py tests/m1-perception/test_quote_feed_health.py tests/m1-perception/test_polywatch_healthz_watcher.py -q
@@ -531,7 +531,7 @@ uv run ruff check src/polyarb/routing/feed_handoff.py src/polyarb/http/arbitrage
 
 Expected: all focused tests pass and Ruff exits zero.
 
-- [ ] **Step 5: Commit health semantics**
+- [x] **Step 5: Commit health semantics**
 
 ```bash
 git add src/polyarb/http/health.py scripts/polywatch/healthz_watcher.py tests/m1-perception/test_quote_feed_health.py tests/m1-perception/test_polywatch_healthz_watcher.py

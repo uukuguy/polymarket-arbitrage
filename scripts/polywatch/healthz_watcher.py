@@ -469,7 +469,8 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
     collector_state = collector.get("observedValue") if collector else None
     if (
         quote_status == "warn"
-        and quote_age.get("output") == "source-snapshot-refreshing"
+        and quote_age.get("output")
+        == "source-snapshot-refreshing-serving-previous"
         and collector_status == "pass"
         and collector_state == "collecting"
     ):
@@ -512,19 +513,6 @@ def decide_opportunity(
 ) -> tuple[str, str]:
     """Validate the read-only opportunity response contract, not signal count."""
     if payload is None:
-        quote_age = _extract_check(
-            l1_health or {}, "quote_feed:last_complete_age_seconds", {}
-        )
-        collector = _extract_check(
-            l1_health or {}, "quote_feed:collector_state", {}
-        )
-        if (
-            quote_age.get("status") == "warn"
-            and quote_age.get("output") == "source-snapshot-refreshing"
-            and collector.get("status") == "pass"
-            and collector.get("observedValue") == "collecting"
-        ):
-            return "noop", "Opportunity refresh waits for current Structure Quote"
         return "push", "Opportunity endpoint unreachable or returned invalid JSON"
     if not isinstance(payload, dict):
         return "push", "Opportunity response is not an object"
@@ -537,6 +525,17 @@ def decide_opportunity(
         )
     if payload.get("coverage") != "verified-standard-neg-risk":
         return "push", "Opportunity coverage is not verified-standard-neg-risk"
+    refreshing = payload.get("refreshing")
+    latest_id = payload.get("latest_structure_snapshot_id")
+    source_id = payload.get("source_snapshot_id")
+    if (
+        type(refreshing) is not bool
+        or type(latest_id) is not int
+        or type(source_id) is not int
+    ):
+        return "push", "Opportunity response version state is invalid"
+    if source_id > latest_id or refreshing != (source_id < latest_id):
+        return "push", "Opportunity response version state is incoherent"
     opportunities = payload.get("opportunities")
     if not isinstance(opportunities, list):
         return "push", "Opportunity response missing opportunities list"

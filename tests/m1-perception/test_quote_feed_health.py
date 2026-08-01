@@ -275,7 +275,7 @@ def test_enabled_health_fails_when_source_truth_drifts(tmp_path) -> None:
     checks, overall = _quote_check(settings, runtime=runtime)
 
     entry = checks["quote_feed:last_complete_age_seconds"][0]
-    assert entry["observedValue"] is None
+    assert entry["observedValue"] == 10.0
     assert entry["status"] == "fail"
     assert entry["output"] == "source-snapshot-mismatch"
     assert overall == "fail"
@@ -310,8 +310,9 @@ def test_fresh_structure_publish_warns_before_quote_worker_wakes(tmp_path) -> No
     checks, overall = _quote_check(settings, runtime=runtime)
 
     entry = checks["quote_feed:last_complete_age_seconds"][0]
+    assert entry["observedValue"] == 10.0
     assert entry["status"] == "warn"
-    assert entry["output"] == "source-snapshot-refreshing"
+    assert entry["output"] == "source-snapshot-refreshing-serving-previous"
     assert overall == "warn"
 
 
@@ -353,9 +354,9 @@ def test_collecting_worker_warns_while_current_structure_requotes(tmp_path) -> N
     checks, overall = _quote_check(settings, runtime=runtime)
 
     entry = checks["quote_feed:last_complete_age_seconds"][0]
-    assert entry["observedValue"] is None
+    assert entry["observedValue"] == 10.0
     assert entry["status"] == "warn"
-    assert entry["output"] == "source-snapshot-refreshing"
+    assert entry["output"] == "source-snapshot-refreshing-serving-previous"
     assert overall == "warn"
 
 

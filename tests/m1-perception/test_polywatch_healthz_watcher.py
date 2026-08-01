@@ -92,9 +92,9 @@ def test_l1_quote_refresh_transition_does_not_alert() -> None:
             "snapshot:last_success_age_seconds": _check(20.0),
             "market_truth:coverage": _check("complete"),
             "quote_feed:last_complete_age_seconds": _check(
-                None,
+                10.0,
                 status="warn",
-                output="source-snapshot-refreshing",
+                output="source-snapshot-refreshing-serving-previous",
             ),
             "quote_feed:collector_state": _check("collecting"),
         },
@@ -106,23 +106,23 @@ def test_l1_quote_refresh_transition_does_not_alert() -> None:
     )
 
 
-def test_opportunity_transition_waits_for_current_quote_without_alert() -> None:
+def test_opportunity_endpoint_failure_during_refresh_alerts() -> None:
     health = _health(
         status="warn",
         checks={
             "quote_feed:last_complete_age_seconds": _check(
-                None,
+                10.0,
                 status="warn",
-                output="source-snapshot-refreshing",
+                output="source-snapshot-refreshing-serving-previous",
             ),
             "quote_feed:collector_state": _check("collecting"),
         },
     )
 
-    assert WATCHER.decide_opportunity(None, l1_health=health) == (
-        "noop",
-        "Opportunity refresh waits for current Structure Quote",
-    )
+    action, reason = WATCHER.decide_opportunity(None, l1_health=health)
+
+    assert action == "push"
+    assert "unreachable" in reason.lower()
 
 
 @pytest.mark.parametrize("collector_state", ["error", "stopped"])
@@ -239,6 +239,9 @@ def test_empty_opportunity_list_is_healthy() -> None:
             "strategy": "neg-risk-buy-all",
             "profit_basis": "gross-before-fees",
             "coverage": "verified-standard-neg-risk",
+            "refreshing": False,
+            "latest_structure_snapshot_id": 10,
+            "source_snapshot_id": 10,
             "count": 0,
             "opportunities": [],
         }
@@ -280,6 +283,38 @@ def test_empty_opportunity_list_is_healthy() -> None:
 def test_invalid_opportunity_contract_pushes(payload: dict[str, Any]) -> None:
     action, _ = _decision("decide_opportunity")(payload)
     assert action == "push"
+
+
+@pytest.mark.parametrize(
+    "version_state",
+    (
+        {
+            "refreshing": True,
+            "latest_structure_snapshot_id": 10,
+            "source_snapshot_id": 10,
+        },
+        {
+            "refreshing": False,
+            "latest_structure_snapshot_id": 11,
+            "source_snapshot_id": 10,
+        },
+    ),
+)
+def test_opportunity_rejects_incoherent_version_state(
+    version_state: dict[str, Any],
+) -> None:
+    payload = {
+        "strategy": "neg-risk-buy-all",
+        "profit_basis": "gross-before-fees",
+        "coverage": "verified-standard-neg-risk",
+        "opportunities": [],
+        **version_state,
+    }
+
+    action, reason = WATCHER.decide_opportunity(payload)
+
+    assert action == "push"
+    assert "version" in reason.lower()
 
 
 def test_unreachable_opportunity_endpoint_pushes() -> None:

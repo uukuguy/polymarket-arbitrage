@@ -57,6 +57,8 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from polyarb.routing.feed_handoff import decide_feed_availability
+
 HEALTH_CONTENT_TYPE = "application/health+json"
 
 # Age thresholds in seconds
@@ -967,7 +969,6 @@ def _build_health_checks(
     # ── Check 5: production opportunity quote freshness ──────────────────
     if settings.neg_risk_quote_worker_enabled:
         from polyarb.routing.opportunity_scanner import (
-            QUOTE_SLA_SECONDS,
             QUOTE_WARN_SECONDS,
         )
 
@@ -984,37 +985,37 @@ def _build_health_checks(
             quote_age_s: float | None = None
             quote_status = "fail"
             quote_output = "certified-projection-unavailable"
-        elif quote_run.universe_snapshot_id != market_truth.last_complete_snapshot_id:
-            quote_age_s = None
-            snapshot_finished_at_ms = last_snapshot.get("finished_at_ms")
-            refresh_age_s = (
-                max(0.0, now_s - float(snapshot_finished_at_ms) / 1000.0)
-                if isinstance(snapshot_finished_at_ms, (int, float))
-                else None
-            )
-            if (
-                refresh_age_s is not None
-                and refresh_age_s <= QUOTE_SLA_SECONDS
-            ):
-                # A newly published Structure invalidates the previous Quote by
-                # design. Publication wakes the Quote loop, but health can read
-                # the new revision before that task marks itself collecting.
-                # Keep M2 unavailable until the matching run commits while
-                # representing this bounded handoff as warn. Once the SLA-bound
-                # window expires the same mismatch fails closed.
-                quote_status = "warn"
-                quote_output = "source-snapshot-refreshing"
-            else:
-                quote_status = "fail"
-                quote_output = "source-snapshot-mismatch"
         else:
             quote_age_s = max(0.0, now_s - quote_run.quoted_at_ms / 1000.0)
-            if quote_age_s < QUOTE_WARN_SECONDS:
-                quote_status = "pass"
-            elif quote_age_s <= QUOTE_SLA_SECONDS:
-                quote_status = "warn"
-            else:
+            universe_age_s = max(
+                0.0,
+                now_s - quote_run.universe_taken_at_ms / 1000.0,
+            )
+            availability = decide_feed_availability(
+                source_snapshot_id=quote_run.universe_snapshot_id,
+                latest_structure_snapshot_id=(
+                    market_truth.last_complete_snapshot_id
+                ),
+                quote_age_seconds=quote_age_s,
+                universe_age_seconds=universe_age_s,
+                handoff_age_seconds=(
+                    market_truth.last_complete_finished_age_seconds
+                ),
+            )
+            if not availability.available:
                 quote_status = "fail"
+                quote_output = (
+                    None
+                    if availability.reason == "stale-quote"
+                    else availability.reason
+                )
+            elif availability.refreshing:
+                quote_status = "warn"
+                quote_output = availability.reason
+            elif quote_age_s < QUOTE_WARN_SECONDS:
+                quote_status = "pass"
+            else:
+                quote_status = "warn"
         overall = _severity(overall, quote_status)
         checks["quote_feed:last_complete_age_seconds"] = [
             {
