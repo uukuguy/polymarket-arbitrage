@@ -36,6 +36,11 @@ from pydantic import AliasChoices, Field, SecretStr, field_validator, model_vali
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from polyarb.perception.evaluator_signing import load_private_key, load_public_key
+from polyarb.routing.quote_timing import (
+    QUOTE_AGE_SLA_SECONDS,
+    QUOTE_CHILD_SHUTDOWN_RESERVE_SECONDS,
+    QUOTE_PUBLISH_RESERVE_SECONDS,
+)
 
 
 class Settings(BaseSettings):
@@ -61,6 +66,12 @@ class Settings(BaseSettings):
     )
     neg_risk_quote_fetch_timeout_s: float = Field(
         default=100.0, gt=0, le=100, allow_inf_nan=False
+    )
+    neg_risk_quote_shutdown_reserve_s: float = Field(
+        default=QUOTE_CHILD_SHUTDOWN_RESERVE_SECONDS,
+        gt=0,
+        le=10,
+        allow_inf_nan=False,
     )
     neg_risk_observe_min_edge_bps: float = Field(default=100.0, ge=0)
     neg_risk_focused_interval_s: float = Field(default=15.0, gt=0)
@@ -523,6 +534,25 @@ class Settings(BaseSettings):
         if self.resource_decision_ttl_s <= self.resource_sample_interval_s:
             raise ValueError(
                 "resource_decision_ttl_s must exceed resource_sample_interval_s"
+            )
+        if (
+            self.neg_risk_quote_interval_s
+            + self.neg_risk_quote_child_hard_limit_s
+            + QUOTE_PUBLISH_RESERVE_SECONDS
+            >= QUOTE_AGE_SLA_SECONDS
+        ):
+            raise ValueError(
+                "neg-risk Quote interval + child hard limit + publish reserve "
+                "must stay strictly below the Quote age SLA"
+            )
+        if (
+            self.neg_risk_quote_fetch_timeout_s
+            + self.neg_risk_quote_shutdown_reserve_s
+            >= self.neg_risk_quote_child_hard_limit_s
+        ):
+            raise ValueError(
+                "neg-risk Quote fetch timeout + shutdown reserve must stay "
+                "strictly below the child hard limit"
             )
         # Auto-enable Supabase mirror if both URL + service key are set
         # Phase 03.1-02: same secrets gate l2_mirror_enabled (L2 daemon uses the

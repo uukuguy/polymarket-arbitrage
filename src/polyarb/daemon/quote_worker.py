@@ -385,10 +385,12 @@ async def collect_quotes_in_subprocess(
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (
         asyncio.create_subprocess_exec
     ),
-    terminate_timeout_s: float = 1.0,
+    terminate_timeout_s: float | None = None,
 ) -> QuoteCollectionResult:
     """Run all SDK fetch/decode/SQLite collection work outside the HTTP process."""
     attempt_started = time.monotonic()
+    if terminate_timeout_s is None:
+        terminate_timeout_s = settings.neg_risk_quote_shutdown_reserve_s / 2
     attempt_store = NegRiskQuoteStore(settings.db_path)
     try:
         attempt_id = await asyncio.to_thread(attempt_store.start_collection_attempt)

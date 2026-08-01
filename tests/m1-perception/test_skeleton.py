@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 import polyarb
 from polyarb.config import Settings, load_settings
 
@@ -47,3 +50,68 @@ def test_env_var_overrides_yaml(tmp_path, monkeypatch):
     # pydantic-settings v2 by default (init args have priority over env).
     # If this asserts wrong, document the precedence in config.py docstring.
     assert s.gamma_url in ("https://from-env.test", "https://from-yaml.test")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "valid"),
+    [
+        (
+            {
+                "neg_risk_quote_interval_s": 149,
+                "neg_risk_quote_child_hard_limit_s": 120,
+            },
+            True,
+        ),
+        (
+            {
+                "neg_risk_quote_interval_s": 150,
+                "neg_risk_quote_child_hard_limit_s": 120,
+            },
+            False,
+        ),
+        (
+            {
+                "neg_risk_quote_interval_s": 151,
+                "neg_risk_quote_child_hard_limit_s": 119.1,
+            },
+            False,
+        ),
+        (
+            {
+                "neg_risk_quote_fetch_timeout_s": 100,
+                "neg_risk_quote_shutdown_reserve_s": 2,
+                "neg_risk_quote_child_hard_limit_s": 102.1,
+            },
+            True,
+        ),
+        (
+            {
+                "neg_risk_quote_fetch_timeout_s": 100,
+                "neg_risk_quote_shutdown_reserve_s": 2,
+                "neg_risk_quote_child_hard_limit_s": 102,
+            },
+            False,
+        ),
+        (
+            {
+                "neg_risk_quote_fetch_timeout_s": 100,
+                "neg_risk_quote_shutdown_reserve_s": 2,
+                "neg_risk_quote_child_hard_limit_s": 101.9,
+            },
+            False,
+        ),
+    ],
+)
+def test_quote_timing_budget_is_strict(overrides, valid) -> None:
+    if valid:
+        Settings(**overrides)
+        return
+    with pytest.raises(ValidationError, match="strictly below"):
+        Settings(**overrides)
+
+
+def test_quote_timing_budget_rejects_unsafe_environment(monkeypatch) -> None:
+    monkeypatch.setenv("POLYARB_NEG_RISK_QUOTE_INTERVAL_S", "240")
+
+    with pytest.raises(ValidationError, match="Quote age SLA"):
+        Settings()

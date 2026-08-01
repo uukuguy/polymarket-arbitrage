@@ -16,12 +16,13 @@ from polyarb.routing.neg_risk_quote_store import (
     CompleteQuoteProjection,
     NegRiskQuoteStore,
 )
+from polyarb.routing.quote_timing import QUOTE_AGE_SLA_SECONDS
 from polyarb.storage.sqlite_store import (
     StructureGenerationReadError,
     structure_read_transaction,
 )
 
-QUOTE_SLA_SECONDS = 300
+QUOTE_SLA_SECONDS = int(QUOTE_AGE_SLA_SECONDS)
 QUOTE_WARN_SECONDS = 240
 UNIVERSE_SLA_SECONDS = 50_400
 BOUNDED_REJECTION_REASONS = frozenset(
